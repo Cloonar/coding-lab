@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>lab</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <style>
+    /* Palette as custom properties so the dark theme is a single override block
+       driven by the OS via prefers-color-scheme — no toggle, no persisted state. */
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --text: #1b1f24;
+      --muted: #697586;
+      --border: #e4e7eb;
+      --hover: #f0f2f5;
+      --accent: #2563eb;
+      --accent-text: #ffffff;
+      --danger: #c0362c;
+      --danger-border: #e6b8b3;
+      --ok: #19a463;
+      --run-bg: #e6f6ec;
+      --run-text: #14693e;
+      --idle-bg: #eceff2;
+      --idle-text: #5b6573;
+      --chip-bg: #eef1f5;
+      --chip-text: #3b4452;
+      --banner-bg: #fff8e1;
+      --banner-border: #f3d99a;
+      --banner-text: #5b4b16;
+      --err-bg: #fdeceb;
+      --err-border: #f3c2bd;
+      --err-text: #9c2820;
+      --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .04);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e1217;
+        --card: #161b22;
+        --text: #e4e8ee;
+        --muted: #97a1b0;
+        --border: #262d36;
+        --hover: #1e242c;
+        --accent: #3b82f6;
+        --accent-text: #ffffff;
+        --danger: #f0736a;
+        --danger-border: #5c2b27;
+        --ok: #34d399;
+        --run-bg: #11331f;
+        --run-text: #5fd99a;
+        --idle-bg: #232a32;
+        --idle-text: #97a1b0;
+        --chip-bg: #232a32;
+        --chip-text: #c3ccd6;
+        --banner-bg: #2a2510;
+        --banner-border: #574c1c;
+        --banner-text: #e3d7a3;
+        --err-bg: #2a1513;
+        --err-border: #5c2b27;
+        --err-text: #f3a9a2;
+        --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 0; background: var(--bg); color: var(--text);
+      -webkit-text-size-adjust: 100%;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 0 1rem 2.5rem; }
+
+    /* Topbar: brand + filter. Sticky so the filter is always reachable on a long
+       list. Holds the filter OUTSIDE #live so a background poll never disturbs
+       what you're typing. */
+    .topbar {
+      position: sticky; top: 0; z-index: 5;
+      background: var(--bg); /* fallback where color-mix is unsupported */
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar-inner {
+      max-width: 760px; margin: 0 auto; padding: .7rem 1rem;
+      display: flex; align-items: center; gap: .75rem;
+    }
+    .brand { font-weight: 700; font-size: 1.15rem; letter-spacing: -.01em; }
+    .brand .dot { color: var(--accent); }
+    input.filter {
+      flex: 1; min-width: 0; font: inherit; font-size: 16px; /* 16px: no iOS zoom */
+      padding: .5rem .75rem; border: 1px solid var(--border); border-radius: 9px;
+      background: var(--card); color: var(--text);
+    }
+    input.filter:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+
+    /* Page-level error banner: shown by JS after a failed fetch (with the real
+       message), or server-rendered for the no-JS ?error=action flash. Outside
+       #live so a background refresh can't wipe an unread error. */
+    .errbar {
+      display: flex; align-items: flex-start; gap: .6rem; margin: 1rem 0 0;
+      background: var(--err-bg); border: 1px solid var(--err-border);
+      color: var(--err-text); border-radius: 10px; padding: .7rem .85rem; font-size: .9rem;
+    }
+    .errbar[hidden] { display: none; }
+    .errbar #errmsg { flex: 1; }
+    .errbar-x {
+      border: none; background: none; color: inherit; cursor: pointer;
+      font-size: 1.2rem; line-height: 1; padding: 0 .2rem; opacity: .7;
+    }
+    .errbar-x:hover { opacity: 1; }
+
+    /* Global spawn-config control: model + effort for new sessions. Mobile-first —
+       stacks single-column with 44px-tall native selects (16px font so iOS doesn't
+       zoom) — and goes to a row at the wider breakpoint. Outside #live, like the
+       filter, so a poll never disturbs a selection. */
+    .spawn-config { display: flex; flex-direction: column; gap: .55rem; margin: 1rem 0 0; }
+    .spawn-field { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
+    .spawn-label { font-size: .8rem; color: var(--muted); }
+    .spawn-config select {
+      width: 100%; min-width: 0; font: inherit; font-size: 16px; /* 16px: no iOS zoom */
+      min-height: 44px; padding: .5rem .65rem; border: 1px solid var(--border);
+      border-radius: 9px; background: var(--card); color: var(--text);
+    }
+    .spawn-config select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+    .spawn-save { width: 100%; }
+    /* JS sets [hidden] on the Save button (no-JS fallback); .btn's display:inline-flex
+       would otherwise beat the UA [hidden] rule, so force it (mirrors .errbar[hidden]). */
+    .spawn-save[hidden] { display: none; }
+
+    .statusline { display: flex; align-items: center; gap: .45rem; color: var(--muted); font-size: .85rem; margin: 1.1rem 0 .25rem; }
+    .statusline .dot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; }
+    .statusline .dot.on { background: var(--ok); }
+    .statusline .dot.off { background: var(--muted); }
+    .statusline .slots.full { color: var(--danger); font-weight: 600; }
+    .hint { color: var(--muted); font-size: .85rem; margin: 0 0 1.1rem; }
+    .hint code { background: var(--chip-bg); color: var(--chip-text); padding: .05rem .3rem; border-radius: 4px; font-size: .9em; }
+
+    /* Login banner. */
+    .banner { background: var(--banner-bg); border: 1px solid var(--banner-border); color: var(--banner-text); border-radius: 12px; padding: 1rem; margin: 1.1rem 0; }
+    .banner p { margin: 0 0 .65rem; }
+    .banner p:last-child { margin-bottom: 0; }
+    .banner-error { color: var(--err-text); font-weight: 600; }
+    .login-url { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; word-break: break-all; }
+    .banner .login-code { display: flex; gap: .5rem; margin-bottom: .65rem; }
+    .banner .login-code input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: .55rem .65rem; border: 1px solid var(--border); border-radius: 9px; background: var(--card); color: var(--text); }
+    .banner form { display: inline-block; margin: 0; }
+
+    /* Project cards. */
+    .projects { display: flex; flex-direction: column; gap: .7rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: .9rem 1rem; box-shadow: var(--shadow); }
+    .card.running { border-left: 3px solid var(--ok); }
+    .card-title { display: flex; align-items: center; gap: .5rem; }
+    .name { font-weight: 650; font-size: 1.02rem; word-break: break-word; }
+    .badge { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: .12rem .5rem; border-radius: 999px; white-space: nowrap; margin-left: auto; }
+    .badge.running { background: var(--run-bg); color: var(--run-text); }
+    .badge.idle { background: var(--idle-bg); color: var(--idle-text); }
+    .path { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; margin-top: .2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Instances: each its own full-width row with thumb-sized Open + Stop. */
+    ul.instances { list-style: none; margin: .75rem 0 .15rem; padding: 0; display: flex; flex-direction: column; }
+    li.instance { padding: .5rem 0; border-top: 1px solid var(--border); }
+    .instance-row { display: flex; align-items: center; gap: .6rem; }
+    .instance-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; color: var(--chip-text); background: var(--chip-bg); padding: .18rem .5rem; border-radius: 6px; white-space: nowrap; }
+    .instance-actions { margin-left: auto; display: flex; align-items: center; gap: .45rem; }
+    .connecting { color: var(--muted); font-size: .85rem; display: inline-flex; align-items: center; gap: .4rem; }
+    .instance-note { color: var(--muted); font-size: .76rem; margin-top: .35rem; }
+    /* AFK-run rows carry an accent "AFK #N" chip in place of a manual instance's
+       "<label> · 15:30" identifier, so an unattended run stands out at a glance. */
+    .instance-id.afk { background: var(--accent); color: var(--accent-text); }
+
+    /* Per-project ⋯ menu: a native <details>/<summary> so it works with JS
+       disabled. The list is an absolutely-positioned dropdown anchored to the
+       card's top-right; on a narrow screen it stays capped to the card width.
+       Open state is client-owned — the morph's attribute patcher skips `open`,
+       so a background refresh never snaps it shut. */
+    .menu { position: relative; }
+    .menu > summary {
+      list-style: none; cursor: pointer; user-select: none;
+      min-width: 44px; min-height: 44px; padding: 0 .5rem;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 9px; color: var(--muted); font-size: 1.25rem; line-height: 1;
+    }
+    .menu > summary::-webkit-details-marker { display: none; }
+    .menu > summary:hover { background: var(--hover); color: var(--text); }
+    .menu > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .menu-list {
+      position: absolute; right: 0; top: calc(100% + .35rem); z-index: 10;
+      min-width: 12rem; max-width: min(16rem, 80vw);
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+      box-shadow: var(--shadow); padding: .35rem;
+      display: flex; flex-direction: column; gap: .15rem;
+    }
+    .menu-list form { margin: 0; }
+    .menu-item {
+      display: flex; align-items: center; width: 100%; min-height: 44px;
+      padding: .55rem .65rem; border-radius: 7px; font: inherit; font-size: .9rem;
+      text-align: left; background: none; border: none; color: var(--text);
+      cursor: pointer; white-space: normal;
+    }
+    button.menu-item:hover, a.menu-item:hover { background: var(--hover); }
+    /* The Repository ↗ row is an <a>, so its text-decoration must be reset to read
+       like the form-button items above it. */
+    a.menu-item { text-decoration: none; }
+    .menu-item.disabled { color: var(--muted); font-size: .85rem; cursor: default; }
+    /* 1px divider between the AFK controls and the Repository ↗ row; inset slightly
+       so it clears the dropdown's rounded corners. */
+    .menu-sep { height: 1px; background: var(--border); margin: .2rem .3rem; }
+    /* A cached-zero "Start AFK run (0 ready)" is greyed as a hint that the queue
+       looks empty — but stays a real, clickable submit button (cursor/hover
+       unchanged), so a stale zero never blocks the authoritative click. */
+    button.menu-item.greyed { color: var(--muted); }
+    .menu-item.busy { pointer-events: none; opacity: .7; }
+
+    /* Buttons. */
+    .btn {
+      font: inherit; font-size: .9rem; font-weight: 600; line-height: 1;
+      min-height: 40px; padding: .5rem .9rem; border-radius: 9px;
+      border: 1px solid var(--border); background: var(--card); color: var(--text);
+      cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: .35rem;
+      text-decoration: none; white-space: nowrap;
+    }
+    .btn:hover { background: var(--hover); }
+    .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    .btn.primary:hover { background: var(--accent); filter: brightness(1.07); }
+    .btn.open { color: var(--accent); border-color: var(--border); }
+    .btn.open.generic { color: var(--muted); }
+    .btn.stop { color: var(--danger); }
+    .btn.danger { color: var(--danger); border-color: var(--danger-border); }
+    .btn.confirm { background: var(--danger); color: #fff; border-color: var(--danger); }
+    .btn:disabled, .btn.start-disabled { opacity: .5; cursor: not-allowed; }
+    .btn:disabled:hover, .btn.start-disabled:hover { background: var(--card); }
+    .btn.busy { pointer-events: none; opacity: .8; }
+    .btn.busy::before {
+      content: ''; width: .85em; height: .85em; border: 2px solid currentColor;
+      border-top-color: transparent; border-radius: 50%; display: inline-block;
+      animation: spin .7s linear infinite;
+    }
+    .spinner { width: .85em; height: .85em; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Card actions: stack full-width on mobile, row on wider screens. */
+    .card-actions { display: flex; flex-direction: column; gap: .5rem; margin-top: .75rem; }
+    .card-actions:empty { display: none; }
+    .new-instance { display: flex; gap: .5rem; margin: 0; }
+    .new-instance input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); color: var(--text); }
+    .card-actions form { margin: 0; }
+    .card-actions > form, .card-actions > .btn { width: 100%; }
+    .card-actions .btn { width: 100%; }
+    .new-instance .btn { width: auto; }
+
+    .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
+    .empty code { background: var(--chip-bg); color: var(--chip-text); padding: .05rem .3rem; border-radius: 4px; }
+
+    /* Parked strip: a full-width <details> at the foot of a card listing parked
+       lab//afk/ branches (ADR-0017 slice 3). Mobile-first — the summary is a 44px
+       tap target like the ⋯ menu's, and entries stack single-column. */
+    details.parked { margin-top: .7rem; border-top: 1px solid var(--border); padding-top: .15rem; }
+    .parked > summary {
+      list-style: none; cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: .45rem; min-height: 44px;
+      color: var(--muted); font-size: .85rem;
+    }
+    .parked > summary::-webkit-details-marker { display: none; }
+    .parked > summary::before { content: '▸'; font-size: .8em; transition: transform .15s; }
+    .parked[open] > summary::before { transform: rotate(90deg); }
+    .parked > summary:hover { color: var(--text); }
+    .parked > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+    .parked-count { background: var(--chip-bg); color: var(--chip-text); font-weight: 700; font-size: .72rem; padding: .05rem .45rem; border-radius: 999px; }
+    .parked-body { padding: .1rem 0 .35rem; }
+    .parked-loading, .parked-empty { color: var(--muted); font-size: .85rem; padding: .4rem 0; display: flex; align-items: center; gap: .4rem; }
+    .parked-error { color: var(--err-text); background: var(--err-bg); border: 1px solid var(--err-border); border-radius: 8px; padding: .5rem .65rem; font-size: .85rem; margin: .3rem 0; }
+    ul.parked-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .5rem; }
+    li.parked-item { border: 1px solid var(--border); border-radius: 10px; padding: .6rem .7rem; display: flex; flex-direction: column; gap: .4rem; background: var(--bg); }
+    .parked-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+    .parked-branch { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; color: var(--chip-text); background: var(--chip-bg); padding: .18rem .5rem; border-radius: 6px; word-break: break-all; }
+    .parked-branch.afk { background: var(--accent); color: var(--accent-text); }
+    .parked-state { font-size: .76rem; white-space: nowrap; margin-left: auto; }
+    .parked-state.dirty { color: var(--danger); font-weight: 600; }
+    .parked-state.clean { color: var(--muted); }
+    .parked-meta { display: flex; align-items: center; gap: .4rem .65rem; flex-wrap: wrap; font-size: .76rem; color: var(--muted); }
+    .parked-ahead { font-variant-numeric: tabular-nums; }
+    .parked-pr { font-weight: 700; text-transform: uppercase; letter-spacing: .03em; font-size: .66rem; padding: .12rem .45rem; border-radius: 999px; }
+    .parked-pr.pr-open { background: var(--run-bg); color: var(--run-text); }
+    .parked-pr.pr-merged { background: var(--accent); color: var(--accent-text); }
+    .parked-pr.pr-closed { background: var(--idle-bg); color: var(--idle-text); }
+    .parked-unpushed { color: var(--danger); font-weight: 600; }
+    .parked-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; color: var(--muted); background: var(--chip-bg); padding: .3rem .45rem; border-radius: 6px; word-break: break-all; cursor: pointer; }
+    .parked-path:hover { color: var(--text); }
+    .parked-discard { margin: 0; }
+    .parked-discard .btn, .parked-item .confirm-cancel { width: 100%; }
+    .parked-item .confirm-cancel { margin-top: .4rem; }
+
+    @media (min-width: 640px) {
+      .card-actions { flex-direction: row; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+      .card-actions > form, .card-actions > .btn, .card-actions .btn { width: auto; }
+      .new-instance input { width: 11rem; flex: none; }
+      .spawn-config { flex-direction: row; align-items: flex-end; }
+      .spawn-field { flex: 1; }
+      .spawn-save { width: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">lab<span class="dot">.</span></div>
+      <input class="filter" id="filter" type="search" placeholder="Filter projects…" autocomplete="off" spellcheck="false"{{if .LoggedIn}} autofocus{{end}}>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div id="errbar" class="errbar" role="alert"{{if and (not .ActionError) (not .Notice)}} hidden{{end}}>
+      <span id="errmsg">{{if .Notice}}{{.Notice}}{{else}}Something went wrong — please try again.{{end}}</span>
+      <button type="button" class="errbar-x" data-err-dismiss aria-label="Dismiss">&times;</button>
+    </div>
+
+    {{/* Global spawn-config (#156): the model + effort every NEW session spawns
+         with (manual Start, New instance, and AFK runs). Two native <select>s so
+         it works on a phone and with JS off. Sits OUTSIDE #live — like the filter
+         input — so a background poll never resets a half-made choice; its value is
+         client-owned. With JS it auto-saves on change through the same intercepted
+         fetch path as every data-action form; the Save button is the no-JS
+         fallback, hidden once JS runs. The chosen value is fixed into each
+         session at spawn, so a change governs only future spawns, never running
+         ones. */}}
+    <form id="spawn-config" class="spawn-config" method="post" action="/spawn-config" data-action>
+      <label class="spawn-field">
+        <span class="spawn-label">Model</span>
+        <select name="model" aria-label="Model for new sessions">
+          {{range .ModelOptions}}<option value="{{.Value}}"{{if eq .Value $.SpawnModel}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </label>
+      <label class="spawn-field">
+        <span class="spawn-label">Effort</span>
+        <select name="effort" aria-label="Effort for new sessions">
+          {{range .EffortOptions}}<option value="{{.}}"{{if eq . $.SpawnEffort}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </label>
+      <button type="submit" class="btn spawn-save" data-spawn-save>Save</button>
+    </form>
+
+    <main id="live">{{template "live" .}}</main>
+  </div>
+
+  <script>
+  (function () {
+    var live = document.getElementById('live');
+    var errbar = document.getElementById('errbar');
+    var errmsg = document.getElementById('errmsg');
+    var filter = document.getElementById('filter');
+    var armed = null, armTimer = null, pollTimer = null, pending = 0, lastHTML = null;
+
+    // --- filter (cards live inside #live, so re-query after every morph) ---
+    function applyFilter() {
+      var q = (filter.value || '').toLowerCase();
+      var cards = live.querySelectorAll('[data-name]');
+      for (var i = 0; i < cards.length; i++) {
+        cards[i].style.display = cards[i].dataset.name.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+      }
+    }
+    filter.addEventListener('input', applyFilter);
+
+    // --- spawn-config: the model/effort selector lives OUTSIDE #live (so a poll
+    //     never resets a half-made choice). With JS we auto-save on change through
+    //     the same intercepted-fetch submit path every data-action form uses
+    //     (requestSubmit fires the submit event the document listener catches), and
+    //     hide the Save button — the explicit no-JS fallback. ---
+    var spawnForm = document.getElementById('spawn-config');
+    if (spawnForm) {
+      var spawnSave = spawnForm.querySelector('[data-spawn-save]');
+      if (spawnSave) spawnSave.hidden = true;
+      spawnForm.addEventListener('change', function () {
+        if (typeof spawnForm.requestSubmit === 'function') spawnForm.requestSubmit();
+        else spawnForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      });
+    }
+
+    // --- error banner ---
+    function showError(msg) { errmsg.textContent = msg || errmsg.textContent; errbar.hidden = false; }
+    function clearError() { errbar.hidden = true; }
+    errbar.addEventListener('click', function (e) {
+      if (e.target.closest('[data-err-dismiss]')) { clearError(); schedulePoll(true); }
+    });
+
+    // --- two-step confirm for forms tagged data-confirm (e.g. Stop all) ---
+    function disarm() {
+      if (!armed) return;
+      var f = armed; armed = null; clearTimeout(armTimer);
+      var btn = f.querySelector('[type=submit]');
+      if (btn && btn.dataset.idleLabel != null) { btn.textContent = btn.dataset.idleLabel; delete btn.dataset.idleLabel; btn.classList.remove('confirm'); }
+      var cancel = f.parentNode && f.parentNode.querySelector('.confirm-cancel');
+      if (cancel) cancel.remove();
+    }
+    function arm(form) {
+      disarm(); armed = form;
+      var btn = form.querySelector('[type=submit]');
+      btn.dataset.idleLabel = btn.textContent;
+      btn.textContent = 'Confirm';
+      btn.classList.add('confirm');
+      var cancel = document.createElement('button');
+      cancel.type = 'button'; cancel.className = 'btn confirm-cancel'; cancel.textContent = 'Cancel';
+      cancel.addEventListener('click', disarm);
+      form.insertAdjacentElement('afterend', cancel);
+      armTimer = setTimeout(disarm, 5000);
+    }
+
+    // --- keyed DOM morph: patch #live in place instead of rebuilding it, so a
+    //     background refresh never wipes typed text, the caret, focus, scroll, or
+    //     a mid-flight spinner. Every event handler is delegated on document, so
+    //     moving or replacing a node in here never detaches a listener. ---
+    // keyOf is a node's stable identity for keyed matching, or null for the nodes
+    // matched positionally. The server stamps the three keys the morph leans on:
+    // data-instance (instance rows), data-name (project cards), and data-key — the
+    // four top-level live blocks, plus the per-card Parked strip (data-key="parked",
+    // so a poll that shifts a card's other children patches it in place instead of
+    // rebuilding it and dropping its open state + fetched body). Keys need only be
+    // unique among siblings, so the Parked strip reusing "parked" per card is safe.
+    // A Go test guards their presence.
+    function keyOf(node) {
+      if (node.nodeType !== 1) return null;
+      var d = node.dataset;
+      return d.instance || d.name || d.key || null;
+    }
+    function sameType(a, b) {
+      return a.nodeType === b.nodeType && (a.nodeType !== 1 || a.tagName === b.tagName);
+    }
+    // patchAttrs copies incoming attributes onto an existing node, removals
+    // included so toggles clear (the cap-disabled button, the running/idle badge,
+    // .slots.full). It never writes value/checked/selected/open: those are
+    // client-owned, which is exactly what lets typing — and an opened ⋯ menu —
+    // survive. The server renders inputs empty and <details> closed, so a field's
+    // .value and a menu's open state are never touched by a morph.
+    function patchAttrs(node, incoming) {
+      var i, a;
+      for (i = 0; i < incoming.attributes.length; i++) {
+        a = incoming.attributes[i];
+        if (a.name === 'value' || a.name === 'checked' || a.name === 'selected' || a.name === 'open') continue;
+        if (node.getAttribute(a.name) !== a.value) node.setAttribute(a.name, a.value);
+      }
+      for (i = node.attributes.length - 1; i >= 0; i--) {
+        a = node.attributes[i];
+        if (a.name === 'value' || a.name === 'checked' || a.name === 'selected' || a.name === 'open') continue;
+        if (!incoming.hasAttribute(a.name)) node.removeAttribute(a.name);
+      }
+    }
+    // patchNode reconciles one already-matched node in place (caller guarantees
+    // sameType): a text node by value, an element by attributes then children.
+    // data-static extends "client-owned" from single attributes to whole subtrees:
+    // the node's own attributes are still patched, but its children are left
+    // untouched. The Parked strip's body carries it — the client fetches that body
+    // lazily and a poll must not wipe the fetched content (the keyed-DOM morph would
+    // otherwise recurse in and remove it, since the server renders the body empty).
+    function patchNode(node, incoming) {
+      if (node.nodeType === 3) { if (node.nodeValue !== incoming.nodeValue) node.nodeValue = incoming.nodeValue; return; }
+      if (node.nodeType !== 1) return;
+      patchAttrs(node, incoming);
+      if (node.hasAttribute('data-static')) return; // client-owned subtree: keep children
+      morphChildren(node, incoming);
+    }
+    // morphChildren reconciles a parent's children to match newParent's. Keyed
+    // children are reused and moved into the new order by key (created or removed
+    // as needed); unkeyed children are matched positionally, where a same-position
+    // type mismatch replaces in place — so a "connecting…" span becoming an "Open"
+    // link swaps just that child while its keyed instance row is preserved, and a
+    // just-started project floats up as a moved card, not a rebuilt one. Incoming
+    // nodes are disposable, so an unmatched one is adopted straight in.
+    function morphChildren(parent, newParent) {
+      var incoming = [], c, k;
+      for (c = newParent.firstChild; c; c = c.nextSibling) incoming.push(c);
+      var keyed = {};
+      for (c = parent.firstChild; c; c = c.nextSibling) { k = keyOf(c); if (k != null) keyed[k] = c; }
+
+      var cursor = parent.firstChild;
+      for (var i = 0; i < incoming.length; i++) {
+        var want = incoming[i], wk = keyOf(want), hit;
+        if (wk != null && (hit = keyed[wk]) && sameType(hit, want)) {
+          delete keyed[wk];
+          patchNode(hit, want);
+          if (hit === cursor) cursor = cursor.nextSibling;
+          else parent.insertBefore(hit, cursor); // move the kept node into order
+        } else if (wk != null) {
+          parent.insertBefore(want, cursor); // brand-new (or tag-changed) keyed node
+        } else if (cursor && keyOf(cursor) == null && sameType(cursor, want)) {
+          patchNode(cursor, want);
+          cursor = cursor.nextSibling;
+        } else if (cursor && keyOf(cursor) == null) {
+          var dead = cursor; cursor = cursor.nextSibling; parent.replaceChild(want, dead);
+        } else {
+          parent.insertBefore(want, cursor); // unkeyed node before a keyed cursor, or at the end
+        }
+      }
+      while (cursor) { var nx = cursor.nextSibling; parent.removeChild(cursor); cursor = nx; }
+    }
+
+    // apply morphs a freshly-fetched #live fragment in place. A byte-identical
+    // fetch is skipped outright; otherwise the morph runs, then the filter is
+    // re-applied synchronously (the morph drops the inline display it sets) so the
+    // filtered view never flashes.
+    function apply(html) {
+      if (html === lastHTML) return;
+      lastHTML = html;
+      var incoming = document.createElement('main');
+      incoming.innerHTML = html;
+      morphChildren(live, incoming);
+      applyFilter();
+    }
+
+    function refresh() {
+      return fetch('/fragment', { headers: { 'X-Lab-Fragment': '1' } })
+        .then(function (res) { if (res.ok) return res.text().then(apply); })
+        .catch(function () {});
+    }
+
+    // --- intercept tagged forms: POST via fetch, morph the fragment back in ---
+    function submitForm(form) {
+      var btn = form.querySelector('[type=submit]');
+      if (btn) {
+        btn.disabled = true; btn.classList.add('busy');
+        if (btn.dataset.busy) { btn.dataset.idle = btn.textContent; btn.textContent = btn.dataset.busy; }
+      }
+      function restore() {
+        if (!btn) return;
+        btn.disabled = false; btn.classList.remove('busy');
+        if (btn.dataset.idle != null) { btn.textContent = btn.dataset.idle; delete btn.dataset.idle; }
+      }
+      // pending pauses the poll loop while a fetch is in flight, so a background
+      // refresh can't morph the form out from under the request (notably the
+      // ~20s login verify) and clobber the busy button.
+      pending++;
+      return fetch(form.action, { method: 'POST', headers: { 'X-Lab-Fragment': '1' }, body: new FormData(form) })
+        .then(function (res) {
+          return res.text().then(function (text) {
+            if (res.ok) { clearError(); apply(text); }
+            else { showError(text.trim() || ('Request failed (' + res.status + ')')); refresh(); }
+          });
+        })
+        .catch(function () { showError('Network error — is lab still running?'); })
+        .then(function () { pending--; restore(); schedulePoll(true); });
+    }
+
+    // --- Parked strip: lazy body load + per-entry Discard. The body is data-static
+    //     (the morph leaves its children alone), so the client owns it: fetch
+    //     /parked/<project> into it on expand, and after a Discard swap in the
+    //     refreshed body the action returns. The collapsed count stays
+    //     server-rendered and resyncs via the normal morph. ---
+    function parkedError(body, msg) {
+      body.textContent = '';
+      var p = document.createElement('p');
+      p.className = 'parked-error'; p.setAttribute('role', 'alert');
+      p.textContent = msg; // server text → textContent, never innerHTML
+      body.appendChild(p);
+    }
+    function loadParked(details) {
+      var body = details.querySelector('.parked-body');
+      var project = details.getAttribute('data-parked');
+      if (!body || !project) return;
+      body.innerHTML = '<p class="parked-loading"><span class="spinner"></span> loading…</p>';
+      fetch('/parked/' + encodeURIComponent(project), { headers: { 'X-Lab-Fragment': '1' } })
+        .then(function (res) { return res.text().then(function (text) {
+          if (res.ok) { body.innerHTML = text; return; } // trusted server-rendered fragment
+          parkedError(body, text.trim() || ('Failed to load (' + res.status + ')'));
+        }); })
+        .catch(function () { parkedError(body, 'Network error — is lab still running?'); });
+    }
+    // submitDiscard POSTs a Discard and swaps the refreshed parked body back into the
+    // SAME strip — distinct from submitForm's #live morph, since Discard returns the
+    // parked fragment. pending pauses the poll so a background refresh can't fight it.
+    function submitDiscard(form) {
+      var body = form.closest('.parked-body');
+      var btn = form.querySelector('[type=submit]');
+      if (btn) { btn.disabled = true; btn.classList.add('busy'); if (btn.dataset.busy) { btn.dataset.idle = btn.textContent; btn.textContent = btn.dataset.busy; } }
+      function restore() { if (!btn) return; btn.disabled = false; btn.classList.remove('busy'); if (btn.dataset.idle != null) { btn.textContent = btn.dataset.idle; delete btn.dataset.idle; } }
+      pending++;
+      fetch(form.action, { method: 'POST', headers: { 'X-Lab-Fragment': '1' }, body: new FormData(form) })
+        .then(function (res) { return res.text().then(function (text) {
+          // Success replaces the whole body (the button goes with it); an error keeps
+          // the body so the user can retry, so restore the button only on failure.
+          if (res.ok) { clearError(); if (body) body.innerHTML = text; }
+          else { showError(text.trim() || ('Request failed (' + res.status + ')')); restore(); }
+        }); })
+        .catch(function () { showError('Network error — is lab still running?'); restore(); })
+        .then(function () { pending--; schedulePoll(true); });
+    }
+
+    document.addEventListener('submit', function (e) {
+      var form = e.target.closest('form[data-action]');
+      if (!form) return;
+      e.preventDefault();
+      if (form.dataset.confirm && armed !== form) { arm(form); return; }
+      disarm();
+      // A parked Discard returns the refreshed parked body (not the #live fragment),
+      // so it swaps into its own strip instead of morphing #live.
+      if (form.dataset.parkedDiscard != null) { submitDiscard(form); return; }
+      submitForm(form);
+    });
+    // --- ⋯ menu auto-close. Native <details> opens on a summary tap but never
+    //     closes itself, and the morph deliberately preserves `open` across a poll
+    //     (patchAttrs skips it). So close it explicitly: a click outside any menu,
+    //     a click of any item inside one, or Escape. We only ever *remove* open
+    //     (never add it), so this can't fight the native summary toggle or a later
+    //     morph — opening stays native, closing is ours, and a morph that skips
+    //     open keeps whatever we left. Closing every menu EXCEPT the one whose own
+    //     summary was just clicked (its native toggle owns it) gives accordion
+    //     behavior — opening one closes the rest — for free. ---
+    function closeMenus(keepSummary) {
+      var menus = document.querySelectorAll('details.menu[open]');
+      for (var i = 0; i < menus.length; i++) {
+        if (keepSummary && menus[i].contains(keepSummary)) continue;
+        menus[i].removeAttribute('open');
+      }
+    }
+    document.addEventListener('click', function (e) {
+      if (armed && !e.target.closest('form[data-confirm]') && !e.target.closest('.confirm-cancel')) disarm();
+      // A summary click keeps its own menu (native toggle handles it) and closes
+      // the rest; a click on an item or anywhere else (closest('summary') is null)
+      // closes them all, including the menu the click landed in.
+      closeMenus(e.target.closest('summary'));
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeMenus(null);
+    });
+
+    // --- Parked strip: fetch the lazy body when expanded. `toggle` doesn't bubble,
+    //     so listen in the capture phase on #live (capture reaches a descendant's
+    //     non-bubbling event). Re-fetch on every open, per design — the body is
+    //     frozen while open, so a re-open is how it refreshes. ---
+    live.addEventListener('toggle', function (e) {
+      var d = e.target;
+      if (d && d.nodeType === 1 && d.classList.contains('parked') && d.open) loadParked(d);
+    }, true);
+    // --- tap-to-copy for the worktree-path chip (mobile-friendly; selecting tiny
+    //     monospace text by hand is fiddly on a phone). Best-effort: no clipboard
+    //     API (insecure context / unsupported) just leaves the text selectable. ---
+    document.addEventListener('click', function (e) {
+      var c = e.target.closest('[data-copy]');
+      if (!c || c.dataset.copied || !navigator.clipboard || !navigator.clipboard.writeText) return;
+      navigator.clipboard.writeText(c.getAttribute('data-copy')).then(function () {
+        var prev = c.textContent; c.dataset.copied = '1'; c.textContent = 'copied ✓';
+        setTimeout(function () { c.textContent = prev; delete c.dataset.copied; }, 1200);
+      }, function () {});
+    });
+
+    // --- poll loop: ~4s, ~1s while connecting or just after an action. Paused
+    //     only for what the morph genuinely can't cover: a fetch in flight, the
+    //     armed Stop-all confirm, an unread error, or a hidden tab. Typing and
+    //     filtering no longer pause it — the morph preserves both. ---
+    function anyConnecting() { return !!live.querySelector('.connecting'); }
+    function paused() { return document.hidden || pending > 0 || !!armed || !errbar.hidden; }
+    function schedulePoll(fast) {
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(tick, (fast || anyConnecting()) ? 1000 : 4000);
+    }
+    function tick() {
+      (paused() ? Promise.resolve() : refresh()).then(function () { schedulePoll(false); });
+    }
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) schedulePoll(true); });
+
+    applyFilter();
+    schedulePoll(false);
+  })();
+  </script>
+</body>
+</html>
+
+{{define "live"}}
+{{if not .LoggedIn}}
+<div class="banner" data-key="banner">
+  {{if .LoginError}}<p class="banner-error">That didn't work — try again.</p>{{end}}
+  {{if .LoginActive}}
+    {{if .LoginURL}}
+      <p><strong>Log in to Claude:</strong> open the link, approve, then paste the code below.</p>
+      <p class="login-url"><a href="{{.LoginURL}}" target="_blank" rel="noopener">{{.LoginURL}}</a></p>
+      <form method="post" action="/login/code" class="login-code" data-action>
+        <input name="code" placeholder="paste code here" autocomplete="off" spellcheck="false" autofocus>
+        <button class="btn primary" type="submit" data-busy="Verifying…">Submit</button>
+      </form>
+      <form method="post" action="/login/start" data-action><button class="btn" type="submit">Restart login</button></form>
+    {{else}}
+      <p><strong>Starting login…</strong> the authorize link should appear shortly.</p>
+      <form method="post" action="/login/start" data-action><button class="btn" type="submit">Restart login</button></form>
+    {{end}}
+  {{else}}
+    <p><strong>Not logged in to Claude.</strong> Start is disabled until you log in.</p>
+    <form method="post" action="/login/start" data-action><button class="btn primary" type="submit">Log in</button></form>
+  {{end}}
+</div>
+{{end}}
+
+<div class="statusline" data-key="status">
+  {{if .LoggedIn}}
+    <span class="dot on"></span> logged in
+    <span>·</span>
+    <span class="slots{{if .AtCap}} full{{end}}">{{.LiveCount}}/{{.MaxInstances}} instances</span>
+  {{else}}
+    <span class="dot off"></span> not logged in
+  {{end}}
+</div>
+<p class="hint" data-key="hint">Projects under <code>~/projects/</code>. Start launches <code>claude --remote-control</code> in a detached tmux session; add instances to run several against the same checkout (up to {{.MaxInstances}}).</p>
+
+{{if .Groups}}
+<div class="projects" id="projects" data-key="projects">
+  {{range .Groups}}
+  <section class="card{{if .Instances}} running{{end}}" data-name="{{.Name}}">
+    <div class="card-title">
+      <span class="name">{{.Name}}</span>
+      {{if .Instances}}<span class="badge running">{{len .Instances}} running</span>{{else}}<span class="badge idle">idle</span>{{end}}
+      <details class="menu">
+        <summary class="menu-btn" aria-label="Project actions" title="Project actions">⋯</summary>
+        <div class="menu-list">
+          {{if .Forgejo}}
+            {{/* "(N ready)" hint + greyed-at-zero come from the scheduler's
+                 in-memory count cache via AFKStart (a pure, tested helper), as
+                 server-rendered text/class the morph syncs — like the On/Off
+                 toggle below. A cached zero is greyed as a hint but stays a real
+                 submit button (NOT the HTML disabled attribute / .disabled span):
+                 the click re-checks live, so a stale zero never blocks it. */}}
+            {{$afk := .AFKStart}}
+            <form method="post" action="/afk/start/{{.Name}}" data-action>
+              <button class="menu-item{{if $afk.Greyed}} greyed{{end}}" type="submit" data-busy="Starting…">Start AFK run{{$afk.Suffix}}</button>
+            </form>
+            {{/* Stateful form-button, NOT a checkbox: the morph treats checked as
+                 client-owned and never repaints it, but it syncs server-rendered
+                 text — so the On/Off label always reflects the persisted flag. */}}
+            <form method="post" action="/afk/auto/{{.Name}}" data-action>
+              <button class="menu-item" type="submit" data-busy="Saving…">Auto AFK runs: {{if .AutoEnabled}}On{{else}}Off{{end}}</button>
+            </form>
+            {{/* Three-strikes auto-pause (#65): when the project has stalled on N
+                 consecutive failures the auto loop is paused; a Reset zeroes the
+                 counter and re-arms it. Indicator + button are server-rendered
+                 text/forms the morph syncs, like the toggle above — never
+                 client-owned state. Rendered only when paused. */}}
+            {{if .Paused}}
+              <span class="menu-item disabled" title="Auto runs paused after repeated failures — Reset to re-arm">Auto paused · {{.ConsecutiveFailures}} fails</span>
+              <form method="post" action="/afk/reset/{{.Name}}" data-action>
+                <button class="menu-item" type="submit" data-busy="Resetting…">Reset</button>
+              </form>
+            {{end}}
+            {{/* Repository link: jump to the project's Forgejo repo home in a new
+                 tab. Navigation, not an AFK action, so it renders regardless of
+                 login state — Forgejo projects only (a non-Forgejo card has no
+                 git.cloonar.com URL to offer). Sits at the bottom under a divider,
+                 below the AFK controls. A plain <a> with no client-owned state, so
+                 the morph patches it in place and leaves it alone. */}}
+            <div class="menu-sep" role="separator"></div>
+            <a class="menu-item" href="{{.RepoURL}}" target="_blank" rel="noopener">Repository ↗</a>
+          {{else}}
+            <span class="menu-item disabled" title="AFK runs need a tea-reachable git.cloonar.com origin">needs a git.cloonar.com repo</span>
+          {{end}}
+        </div>
+      </details>
+    </div>
+    <div class="path">{{.Path}}</div>
+
+    {{if .Instances}}
+    <ul class="instances">
+      {{range .Instances}}
+      <li class="instance" data-instance="{{.Name}}">
+        <div class="instance-row">
+          <span class="instance-id{{if .AFK}} afk{{end}}">{{if .AFK}}AFK #{{.Issue}}{{else}}{{.Ident}}{{end}}</span>
+          <span class="instance-actions">
+            {{if .Connecting}}
+              <span class="connecting"><span class="spinner"></span>connecting…</span>
+            {{else if .URL}}
+              <a class="btn open" href="{{.URL}}" target="_blank" rel="noopener">Open ↗</a>
+            {{else}}
+              <a class="btn open generic" href="https://claude.ai/code" target="_blank" rel="noopener" title="Opens the claude.ai session picker — the exact deep link wasn't captured">Open ↗</a>
+            {{end}}
+            <form method="post" action="/stop/{{.Name}}" data-action><button class="btn stop" type="submit">Stop</button></form>
+          </span>
+        </div>
+        {{if and (not .Connecting) (not .URL)}}<div class="instance-note">Session picker — exact deep link wasn't captured.</div>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+
+    <div class="card-actions">
+      {{if .Instances}}
+        {{if $.LoggedIn}}
+          {{if $.AtCap}}
+            <button type="button" class="btn start-disabled" disabled title="Instance cap reached ({{$.MaxInstances}}) — stop one to start another">+ New instance</button>
+          {{else}}
+            <form method="post" action="/start/{{.Name}}" class="new-instance" data-action>
+              <input name="label" placeholder="label (optional)" autocomplete="off" spellcheck="false" maxlength="32">
+              <button class="btn" type="submit">+ New instance</button>
+            </form>
+          {{end}}
+        {{end}}
+        <form method="post" action="/stop-all/{{.Name}}" data-action data-confirm="1"><button class="btn danger" type="submit">Stop all</button></form>
+      {{else if $.LoggedIn}}
+        {{if $.AtCap}}
+          <button type="button" class="btn primary start-disabled" disabled title="Instance cap reached ({{$.MaxInstances}}) — stop one to start another">Start</button>
+        {{else}}
+          <form method="post" action="/start/{{.Name}}" data-action><button class="btn primary" type="submit">Start</button></form>
+        {{end}}
+      {{else}}
+        <button type="button" class="btn primary start-disabled" disabled title="Log in to Claude first (see the banner above)">Start</button>
+      {{end}}
+    </div>
+
+    {{/* Parked strip (ADR-0017 slice 3): a native <details> — same idiom as the ⋯
+         menu, so it works with JS off — listing this project's parked lab//afk/
+         branches. Rendered only when there is parked work. The summary's count is
+         server-rendered and live (the morph syncs it each poll); the body is
+         data-static (client-owned subtree, see patchNode) and EMPTY here — the
+         client fetches /parked/<name> into it on expand and re-fetches on each
+         re-open, so a background poll never wipes it or snaps it shut. Keyed
+         (data-key) so a poll that shifts the card's other children patches this
+         node in place rather than rebuilding it (which would drop the open state +
+         fetched body). */}}
+    {{if gt .ParkedCount 0}}
+    <details class="parked" data-key="parked" data-parked="{{.Name}}">
+      <summary class="parked-summary"><span>Parked</span> <span class="parked-count">{{.ParkedCount}}</span></summary>
+      <div class="parked-body" data-static></div>
+    </details>
+    {{end}}
+  </section>
+  {{end}}
+</div>
+{{else}}
+<p class="empty" data-key="projects">No git projects found under <code>~/projects/</code>.</p>
+{{end}}
+{{end}}
+
+{{/* parkedBody is the lazy Parked detail (ADR-0017 slice 3): the client fetches it
+     from /parked/<name> on expand and injects it into the strip's data-static body,
+     and /parked/discard/<name> returns it refreshed after a Discard. Not part of the
+     #live poll fragment — it carries the expensive per-entry stats (git + one tea PR
+     listing). A failing endpoint renders its error here (fail loud), never a silent
+     empty list. */}}
+{{define "parkedBody"}}
+{{if .Err}}
+<p class="parked-error" role="alert">Couldn't load parked work: {{.Err}}</p>
+{{else if .Items}}
+<ul class="parked-list">
+  {{range .Items}}
+  <li class="parked-item">
+    <div class="parked-head">
+      <span class="parked-branch{{if .AFK}} afk{{end}}">{{if .AFK}}AFK #{{.Issue}}{{else}}{{.Branch}}{{end}}</span>
+      {{if .HasWorktree}}<span class="parked-state {{if .Dirty}}dirty{{else}}clean{{end}}" title="{{if .Dirty}}worktree has uncommitted changes{{else}}clean worktree{{end}}">{{if .Dirty}}● dirty{{else}}○ clean{{end}}</span>{{end}}
+    </div>
+    <div class="parked-meta">
+      <span class="parked-ahead" title="commits ahead of the default branch">↑{{.Ahead}}</span>
+      {{if .Age}}<span class="parked-age" title="last commit">{{.Age}}</span>{{end}}
+      {{if .PRState}}<span class="parked-pr pr-{{.PRState}}" title="pull request on this branch">PR {{.PRState}}</span>{{end}}
+      {{if gt .Unpushed 0}}<span class="parked-unpushed" title="commits not pushed to origin — Discard destroys them">⚠ {{.Unpushed}} unpushed</span>{{end}}
+    </div>
+    {{if .HasWorktree}}<code class="parked-path" data-copy="{{.Worktree}}" title="Tap to copy the worktree path">{{.Worktree}}</code>{{end}}
+    <form method="post" action="/parked/discard/{{$.Project}}" class="parked-discard" data-action data-confirm="1" data-parked-discard>
+      <input type="hidden" name="branch" value="{{.Branch}}">
+      <button class="btn danger" type="submit" data-busy="Discarding…">Discard</button>
+    </form>
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<p class="parked-empty">Nothing parked.</p>
+{{end}}
+{{end}}
