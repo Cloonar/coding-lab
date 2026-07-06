@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -117,4 +118,34 @@ func (e *Engine) run(ctx context.Context, dir string, extraEnv []string, args ..
 		return out, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return out, nil
+}
+
+// PinHooksPath sets the bare repo's LOCAL core.hooksPath to the absolute
+// <bareDir>/hooks directory. Local scope out-precedences a global/system
+// core.hooksPath (husky and friends set one in ~/.gitconfig), which would
+// otherwise silently route past the incogni guard; the path must be absolute
+// because a relative "hooks" resolves against the worktree the pre-push runs
+// in, not the git dir. Idempotent.
+func (e *Engine) PinHooksPath(ctx context.Context, bareDir string, extraEnv []string) error {
+	abs, err := filepath.Abs(filepath.Join(bareDir, "hooks"))
+	if err != nil {
+		return fmt.Errorf("hooks path: %w", err)
+	}
+	if _, err := e.run(ctx, bareDir, extraEnv, "config", "--local", "core.hooksPath", abs); err != nil {
+		return err
+	}
+	return nil
+}
+
+// UnpinHooksPath clears the local core.hooksPath the incogni guard set, so a
+// non-incogni repo falls back to git's default hook resolution. A missing key
+// (exit 5) is not an error.
+func (e *Engine) UnpinHooksPath(ctx context.Context, bareDir string, extraEnv []string) error {
+	if _, err := e.run(ctx, bareDir, extraEnv, "config", "--local", "--unset", "core.hooksPath"); err != nil {
+		if strings.Contains(err.Error(), "exit status 5") {
+			return nil // key was not set
+		}
+		return err
+	}
+	return nil
 }

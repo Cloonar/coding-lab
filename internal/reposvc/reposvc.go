@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
@@ -406,10 +408,54 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		return store.Repo{}, badRequestf("max_instances_override: must be at least 1 (null clears the override)")
 	}
 
+	// Incogni pre-push guard, toggle-on (D15 §9 measure 7): install BEFORE
+	// the row update, so a failed install never leaves an incogni row
+	// without its guard — the PATCH fails and the flag stays off. A repo
+	// whose bare dir does not exist yet (clone in flight or failed) is
+	// skipped: the clone-completion path re-reads the row and installs.
+	// Idempotent over an already-guarded repo.
+	bareExists := true
+	if u.Incogni.Set && u.Incogni.Value {
+		if _, err := os.Stat(s.bareDir(id)); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return store.Repo{}, fmt.Errorf("stat bare repo: %w", err)
+			}
+			bareExists = false // clone in flight/failed — clone completion installs
+		}
+		if bareExists {
+			if err := s.installIncogniHook(ctx, id); err != nil {
+				return store.Repo{}, fmt.Errorf("installing incogni pre-push hook: %w", err)
+			}
+		}
+	}
+
 	repo, err := s.store.UpdateRepoSettings(ctx, id, u)
 	if err != nil {
 		return store.Repo{}, err
 	}
+
+	// Close the toggle-on race: the row now says incogni; if the bare dir has
+	// since appeared (clone finished between our stat and here, and its
+	// completion re-read the not-yet-committed incogni=false row), install
+	// now so whichever writer acted second still lands the guard.
+	if u.Incogni.Set && u.Incogni.Value && !bareExists {
+		if _, err := os.Stat(s.bareDir(id)); err == nil {
+			if err := s.installIncogniHook(ctx, id); err != nil {
+				s.log.Warn("installing incogni pre-push hook after clone race", "component", "reposvc", "repo", id, "err", err)
+			}
+		}
+	}
+
+	// Toggle-off: remove AFTER the row update — the guard is lab's, not the
+	// user's policy, and it must be gone once incogni is off. Ordered this
+	// way a removal failure leaves the repo over-protected, never leaky;
+	// the leftover is logged, not fatal.
+	if u.Incogni.Set && !u.Incogni.Value {
+		if err := s.removeIncogniHook(ctx, id); err != nil {
+			s.log.Warn("removing incogni pre-push hook", "component", "reposvc", "repo", id, "err", err)
+		}
+	}
+
 	s.publishRepoChanged(id)
 	return repo, nil
 }
@@ -544,10 +590,61 @@ func (s *Service) StartupHeal(ctx context.Context) error {
 		s.log.Info("healed interrupted clone", "component", "reposvc", "repo", id, "clone_status", store.CloneStatusError)
 		s.publishRepoChanged(id)
 	}
+
+	// Reconcile the incogni guard against the incogni flag on EVERY ready
+	// repo (D15 §9 measure 7): a crash between an incogni toggle and its hook
+	// install/remove, or the healed-clone case above, leaves the guard out of
+	// sync with the flag. Install-when-incogni / remove-when-not are both
+	// idempotent and safe on foreign hooks, so this converges every restart.
+	s.reconcileIncogniHooks(ctx)
 	if err := s.mat.CleanupAll(s.credentialKeep); err != nil {
 		s.log.Warn("sweeping runtime dir", "component", "reposvc", "err", err)
 	}
 	return nil
+}
+
+// installIncogniHook writes the pre-push guard AND pins the bare repo's local
+// core.hooksPath to the absolute hooks dir, so a global/system core.hooksPath
+// (husky &c.) cannot route agent pushes past the guard (D15 §9 measure 7).
+func (s *Service) installIncogniHook(ctx context.Context, id string) error {
+	bareDir := s.bareDir(id)
+	if err := seeder.InstallPrePushHook(bareDir); err != nil {
+		return err
+	}
+	return s.git.PinHooksPath(ctx, bareDir, s.gitEnv)
+}
+
+// removeIncogniHook removes lab's guard and unpins core.hooksPath, restoring
+// git's default hook resolution for a now-non-incogni repo.
+func (s *Service) removeIncogniHook(ctx context.Context, id string) error {
+	bareDir := s.bareDir(id)
+	if err := s.git.UnpinHooksPath(ctx, bareDir, s.gitEnv); err != nil {
+		return err
+	}
+	return seeder.RemovePrePushHook(bareDir)
+}
+
+// reconcileIncogniHooks converges every ready repo's guard with its incogni
+// flag (called at startup). Best-effort per repo — a failure is logged and
+// the others still reconcile.
+func (s *Service) reconcileIncogniHooks(ctx context.Context) {
+	repos, err := s.store.Repos(ctx)
+	if err != nil {
+		s.log.Warn("reconciling incogni hooks: list repos", "component", "reposvc", "err", err)
+		return
+	}
+	for _, repo := range repos {
+		if repo.CloneStatus != store.CloneStatusReady {
+			continue
+		}
+		if repo.Incogni {
+			if err := s.installIncogniHook(ctx, repo.ID); err != nil {
+				s.log.Warn("reconciling incogni hook: install", "component", "reposvc", "repo", repo.ID, "err", err)
+			}
+		} else if err := s.removeIncogniHook(ctx, repo.ID); err != nil {
+			s.log.Warn("reconciling incogni hook: remove", "component", "reposvc", "repo", repo.ID, "err", err)
+		}
+	}
 }
 
 // probeBareRepo implements the design §3a healing probe for one repo id.
