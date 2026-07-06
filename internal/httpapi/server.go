@@ -18,7 +18,9 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 	"git.cloonar.com/Cloonar/coding-lab/internal/webui"
 )
 
@@ -33,6 +35,13 @@ type Options struct {
 	Logger *slog.Logger
 
 	Metrics *metrics.Metrics // default: a fresh registry
+
+	// Vault seals credential payloads (M2). Nil leaves the credentials
+	// routes unmounted (they 404) — some test servers run without one.
+	Vault *vault.Vault
+	// Repos is the repository lifecycle service (M2). Nil leaves the repo
+	// routes unmounted.
+	Repos *reposvc.Service
 
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
@@ -60,6 +69,8 @@ type Server struct {
 	bus     *events.Bus
 	log     *slog.Logger
 	metrics *metrics.Metrics
+	vault   *vault.Vault
+	repos   *reposvc.Service
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -126,6 +137,8 @@ func New(o Options) (*Server, error) {
 		bus:         o.Bus,
 		log:         logger,
 		metrics:     m,
+		vault:       o.Vault,
+		repos:       o.Repos,
 		proxyAuth:   o.ProxyAuth,
 		proxyHeader: o.ProxyAuthHeader,
 		trusted:     o.TrustedProxies,
@@ -175,6 +188,23 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/auth/state", s.handleAuthState)
 	api.HandleFunc("GET /api/v1/me", s.requireAuth(s.handleMe))
 	api.HandleFunc("GET /api/v1/events", s.requireAuth(s.handleEvents))
+
+	// M2 surfaces (operator auth; CSRF guards the mutations). Mounted only
+	// when their dependencies were provided.
+	if s.vault != nil {
+		api.HandleFunc("POST /api/v1/credentials", s.requireAuth(s.handleCredentialCreate))
+		api.HandleFunc("GET /api/v1/credentials", s.requireAuth(s.handleCredentialList))
+		api.HandleFunc("PATCH /api/v1/credentials/{id}", s.requireAuth(s.handleCredentialUpdate))
+		api.HandleFunc("DELETE /api/v1/credentials/{id}", s.requireAuth(s.handleCredentialDelete))
+	}
+	if s.repos != nil {
+		api.HandleFunc("POST /api/v1/repos", s.requireAuth(s.handleRepoCreate))
+		api.HandleFunc("GET /api/v1/repos", s.requireAuth(s.handleRepoList))
+		api.HandleFunc("GET /api/v1/repos/{id}", s.requireAuth(s.handleRepoGet))
+		api.HandleFunc("PATCH /api/v1/repos/{id}", s.requireAuth(s.handleRepoUpdate))
+		api.HandleFunc("DELETE /api/v1/repos/{id}", s.requireAuth(s.handleRepoDelete))
+		api.HandleFunc("POST /api/v1/repos/{id}/clone/retry", s.requireAuth(s.handleRepoCloneRetry))
+	}
 
 	// Unknown API paths get JSON 404s, not the SPA shell.
 	api.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {

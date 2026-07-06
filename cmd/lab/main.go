@@ -8,9 +8,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,10 +21,13 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
 // version is stamped via -ldflags "-X main.version=…".
@@ -91,11 +97,51 @@ func run() int {
 	m := metrics.New()
 	agent := agentapi.New(st, logger, time.Now)
 
+	// Vault (design §6): load-or-generate the master key, refuse loose
+	// perms/malformed content, and prepare the runtime materialization dir.
+	masterKey, err := loadOrGenerateMasterKey(cfg.MasterKeyFile, logger)
+	if err != nil {
+		logger.Error("master key", "component", "main", "err", err)
+		return 1
+	}
+	vlt, err := vault.New(masterKey)
+	if err != nil {
+		logger.Error("opening vault", "component", "main", "err", err)
+		return 1
+	}
+	mat, err := vault.NewMaterializer(filepath.Join(cfg.StateDir, "runtime"))
+	if err != nil {
+		logger.Error("preparing runtime dir", "component", "main", "err", err)
+		return 1
+	}
+
+	repoSvc, err := reposvc.New(reposvc.Options{
+		Store:        st,
+		Vault:        vlt,
+		Materializer: mat,
+		Git:          gitx.New(cfg.GitBin),
+		Bus:          bus,
+		Logger:       logger,
+		ReposDir:     filepath.Join(cfg.StateDir, "repos"),
+	})
+	if err != nil {
+		logger.Error("building repo service", "component", "main", "err", err)
+		return 1
+	}
+	// Heal interrupted clones and sweep orphaned runtime credential files
+	// BEFORE serving (design §3a/§6).
+	if err := repoSvc.StartupHeal(ctx); err != nil {
+		logger.Error("startup heal", "component", "main", "err", err)
+		return 1
+	}
+
 	api, err := httpapi.New(httpapi.Options{
 		Store:           st,
 		Bus:             bus,
 		Logger:          logger,
 		Metrics:         m,
+		Vault:           vlt,
+		Repos:           repoSvc,
 		BaseURL:         cfg.BaseURL,
 		ProxyAuth:       cfg.ProxyAuth,
 		ProxyAuthHeader: cfg.ProxyAuthHeader,
@@ -139,8 +185,25 @@ func run() int {
 			logger.Error("graceful shutdown failed", "component", "main", "err", err)
 			return 1
 		}
+		// Cancel running clone jobs; interrupted repos heal on next start.
+		repoSvc.Close()
 		return 0
 	}
+}
+
+// loadOrGenerateMasterKey implements the design §6 first-start bootstrap:
+// stat-then-Generate — Generate itself refuses to overwrite an existing key
+// file, so a lost race can never clobber one.
+func loadOrGenerateMasterKey(path string, logger *slog.Logger) ([]byte, error) {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		key, genErr := vault.Generate(path)
+		if genErr != nil {
+			return nil, genErr
+		}
+		logger.Info("generated vault master key", "component", "main", "path", path)
+		return key, nil
+	}
+	return vault.Load(path)
 }
 
 // dbBackend names the backend for the startup line without ever echoing the
