@@ -1,0 +1,50 @@
+# Definition of done (brief §15) — verification map
+
+The MVP checklist from [`agent-brief.md`](agent-brief.md) §15 as a living document: for each item, **how** it is verified in this codebase — which automated test or check covers it, and exactly what residue requires a real host. A box is checked only when the automated portion runs green in `nix flake check` / `go test ./...`; manual residue is listed even for checked items.
+
+Legend — *Automated*: runs in the standard suites. *Manual residue*: authored and testable in principle, but requires a real host/forge/phone; not exercised by CI.
+
+## 1. Fresh NixOS host: enable module (sops-provided master key), set admin password, log in from a phone
+
+- [ ] **Automated**: the `nixos-module` flake check evaluates a full `nixosSystem` with the module enabled (postgres DSN, environmentFile, proxy auth, firewall) and asserts the load-bearing unit text: `KillMode=process`, `Restart=on-failure`, openssh/util-linux on PATH, systemd-correct `ExecStart` escaping (`flake.nix` → `checks.nixos-module`). First-run setup → login → CSRF/session behavior: `internal/httpapi/auth_test.go`, `csrf_test.go`, `server_test.go`; SPA setup/login flows: `web/src/routes/Setup.tsx`, `Login.tsx` with vitest coverage of the api/auth layer (`web/src/api.test.ts`). The sops/LoadCredential wiring is documented (module header + `docs/ops.md`) and the key-file contract (0600, refuse loose perms, refuse overwrite) is tested in `internal/vault/masterkey_test.go`.
+- **Manual residue**: an actual `nixos-rebuild switch` on a fresh host with a real sops secret and a phone login. There is no NixOS VM test in the flake (the module is eval-proven, not boot-proven).
+
+## 2. Add credentials and repos (SSH + HTTPS) entirely via UI; clone progress visible live
+
+- [x] **Automated**: vault encrypt/decrypt/payload validation (`internal/vault/*_test.go`); credentials CRUD, no secret readback, delete-409-while-referenced (`internal/httpapi/credentials_test.go`, `internal/store/credentials_test.go`); add-repo → async bare clone lifecycle with `clone.progress` SSE, forge-kind + default-branch detection, failure recorded without secret leakage, retry single-flight, startup heal (`internal/reposvc/reposvc_test.go`, `internal/gitx/clone_test.go`); SSH/HTTPS git auth env construction — `GIT_SSH_COMMAND` with materialized key, `GIT_ASKPASS` helper, passphrase askpass (`internal/vault/materialize_test.go`, `internal/gitx/integration_test.go`).
+- **Manual residue**: the git-auth integration tests run against **local file fixtures**, not a network forge; one real SSH-cloned private repo and one HTTPS+token repo added from the phone UI is a host step (done as the M2 acceptance; repeat on new deployments).
+
+## 3. Claude login via UI; manual instance → claude.ai deep link on the phone; Stop honors the guarded rule; Parked works
+
+- [x] **Automated**: login flow (OAuth URL regex, 20s code timeout, status parsing/cache) against captured fixtures (`internal/provider/claudecode/login_test.go`, `auth_test.go`); deep-link capture with registry cwd-match, `cse_`→`session_` normalization, generic fallback (`deeplink_test.go`); spawn argv + trust/attribution seeding pinned in `internal/compat/compat_test.go`; guarded teardown decision table ported verbatim (`internal/gitx/teardown_test.go`); stop-clean-removes / stop-dirty-parks and the Parked matrix + unguarded Discard (`internal/reconcile/reconcile_test.go`: `TestParked_matrix`, `TestDiscard_*`); instance lifecycle end to end over real git worktrees with a recording fake `SessionRunner` — spawn argv, rollback paths, git identity in the session env (`internal/instance/instance_test.go`); real tmux on a private socket is exercised by `internal/tmuxx/integration_test.go` and the AFK cycle integration tests.
+- **Manual residue**: none structural — the fragile couplings (§11) were verified **live** against Claude Code 2.1.198 with a real `--remote-control` session, real registry capture (no fallback), and effective trust seeding; recorded with provenance in [`internal/compat/compat.md`](../internal/compat/compat.md). Re-verify on Claude Code upgrades (the compat doc is the checklist).
+
+## 4. AFK: Forgejo-tracked and builtin-tracked repos each complete the full issue→PR/CR→reap cycle; three-strikes + Reset verified
+
+- [x] **Automated**: `internal/afk/cycle_integration_test.go` runs the full cycle over the real seams — real engine, real sqlite store, real git fixtures, real tmux, real tracker registry (credential decrypt → real Forgejo REST client), real agent API over httptest, the real `labctl` binary driven by a fake claude script inside the tmux session. `TestAFKCycleIntegration` (forge-bound: claim → seed prompt → labctl → push → PR → reaped success → tokens 401; three timeouts pause the repo, manual start 409s, Reset re-arms; neutral Stop parks and is never reclassified). `TestAFKCycleBuiltinIntegration` (same cycle with a change request as the done-signal, merged through the real operator API). Unit coverage: classification/scheduling/claims/budgets in `internal/afk/decide_test.go` + `engine_test.go` (incl. `TestThreeStrikes_pauseSchedulerAndManualUntilReset`, claim races, zombie drain, mid-launch guard).
+- **Manual residue**: the "Forgejo" in the integration test is a **stateful canned-JSON httptest fake**, not a real instance (the registry's https-only pin is bypassed at the injected factory seam — everything else is production wiring). A cycle against a live Forgejo with a real `ready-for-agent` issue is a host step. The forge read path against the same fake also runs in `internal/httpapi/forgelive_test.go`.
+
+## 5. CR review + merge from the phone
+
+- [x] **Automated**: CR list/detail with live diff, fast-forward merge end to end, merge-commit path with repo identity, push-rejection → 409, `Closes #N` closing built-in issues (`internal/httpapi/crs_test.go` over real git; `internal/gitx/crmerge_test.go`; `internal/store/crs_test.go`); the agent-side create loop (`TestAgentBuiltinPRCreateFullLoop`); phone-first UI logic (`web/src/routes/CRDetail.test.tsx`, `RepoCRs.test.tsx`).
+- **Manual residue**: the literal phone interaction (tap-through on a small screen) — UI logic is vitest-covered, rendering on a device is eyeballed.
+
+## 6. Incogni repo leaks nothing (automated test + manual `git log` inspection)
+
+- [x] **Automated**: `TestAFKCycleIncogniBuiltinIntegration` (`internal/afk/cycle_integration_test.go`) completes an AFK cycle on an incogni repo and asserts the remote shows a neutral branch, clean commits, and a sanitized body; the pre-push guard rejects poisoned commits and cannot be routed around (`internal/seeder/hook_test.go`, `internal/reposvc/incognihook_test.go`); body sanitization (`internal/agentapi/sanitize_test.go`); attribution-off settings keys verified by schema extraction from the 2.1.198 CLI bundle (`internal/compat/compat_test.go: TestCompat_AttributionKeys_seed`); seeded files excluded from `git status` (`internal/seeder/seeder_test.go`); forge tokens are excluded from git-credential resolution and the session env by construction — a repo's `forge_token` never authenticates git and is resolved server-side only (`internal/instance/credential.go`, design §3a).
+- **Manual residue**: the brief explicitly pairs the automated test with a **manual `git log`/diff inspection of a real completed run's remote** — do this once per deployment and after Claude Code upgrades (attribution keys are the moving part).
+
+## 7. Service restart mid-run: sessions survive, runs re-adopted, budgets intact
+
+- [x] **Automated**: re-adoption — live session stays active, dead one marked `death` with the pinned reason, `consecutive_failures` untouched, NULL deep link re-arms capture, existing deep link left alone (`internal/reconcile/reconcile_test.go: TestReadopt_*`); live runs' credential files survive the startup sweep, orphans removed (`TestStartupReconcile_credentialKeepSet`); the budget clock is **persisted** on the run row at launch and never rewritten by re-adoption (D12b; asserted in `TestAFKCycleIntegration` and `internal/afk/engine_test.go` budget rows); sessions surviving the process is the `KillMode=process` invariant, asserted on the generated unit by `checks.nixos-module`.
+- **Manual residue**: a literal `systemctl restart lab` mid-run on a real host — the automated tests simulate a restart by rebuilding the services over the same store/tmux state, not by killing a systemd unit.
+
+## 8. SQLite and Postgres both pass the integration suite
+
+- [x] **Automated**: the store suite runs on sqlite always and repeats against real Postgres whenever `LAB_TEST_POSTGRES_DSN` is set (`internal/store/store_test.go`); migration trees are parity-tested on every `go test` (`TestMigrationParity`); placeholder rebinding and BLOB/BYTEA mapping live in the store layer only.
+- **Manual residue / honesty**: CI's `store-postgres` job exists as a **commented template** in `.forgejo/workflows/ci.yml` (service container + DSN) pending runner support for service containers on the Forgejo instance — until it is uncommented, the Postgres leg runs green locally/on demand via `LAB_TEST_POSTGRES_DSN`, not on every CI run.
+
+## 9. CI green; `nix flake check` green; metrics visible; docs complete
+
+- [x] **Automated**: CI is exactly `nix flake check` (`.forgejo/workflows/ci.yml`) = package builds carrying the Go suite (real git/tmux/prlimit in the sandbox) + SPA vitest, golangci-lint, and the NixOS module eval check. `/metrics` is mounted outside auth (`internal/httpapi/server.go`) with the HTTP request/duration collectors live since M1 (`internal/metrics/metrics_test.go`); the full metric catalog lands in `docs/ops.md` § Metrics.
+- **Docs**: `README.md` (status, architecture, quickstart, surfaces), `CONTEXT.md` (glossary incl. every brief §6 term and the M1–M8 coinages), `docs/adr/0001`–`0013`, `docs/ops.md` (deployment, configuration reference, state dir, backup/restore, CI runners, observability, incogni honesty note), and this file.

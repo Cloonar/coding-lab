@@ -16,6 +16,10 @@ _Avoid_: job, task, workspace, slot
 An unattended instance that takes one `ready-for-agent` issue from the repo's tracker, resolves it, and opens a PR (or change request).
 _Avoid_: background job, batch run, bot run
 
+**Deep link**:
+The captured `https://claude.ai/code/<id>` URL of an instance — read from claude's session registry by worktree-cwd match shortly after spawn — through which the operator drives the session from any device. Capture failure degrades to the generic `https://claude.ai/code` link with a loud log; it never blocks Start.
+_Avoid_: attach URL, share link, session URL
+
 **Reference repo**:
 The lab-owned bare clone at `<state>/repos/<id>.git` — the worktree parent and host for all fetch/branch/worktree git ops, never an instance's cwd. (v0 meant the human's main checkout; bare means structurally never dirty.)
 _Avoid_: main checkout, scan root, mirror
@@ -41,6 +45,18 @@ _Avoid_: `in-progress` label, lock, assignment, claim row/flag in the DB
 **Done-signal**:
 A PR or change request whose head branch equals the run's branch (state open or merged) — session exit is never the done-signal, because `--remote-control` idles after finishing.
 _Avoid_: session exit, exit code, completion event
+
+**Ready queue**:
+A repo's open issues carrying the `ready-for-agent` label, exactly as its tracker reports them (`Tracker.ReadyIssues`) — the only pool AFK selection draws from.
+_Avoid_: backlog, todo list, queue table
+
+**Claimable**:
+The ready queue minus already-branched issues; the auto-loop's `(N ready)` hint and its launch predicate both count the *claimable* set, so a repo whose only ready issues are all parked reads zero and does not loop (reference ADR-0013).
+_Avoid_: available, unassigned, free
+
+**Budget clock**:
+An AFK run's wall-clock budget — `afk_budget_minutes` (default 120, per-repo override), persisted as `budget_deadline` on the run row at launch (D12b) so a restart re-adopts the run with its deadline intact. Expiry without a done-signal classifies the run as timeout.
+_Avoid_: idle timeout, deadline extension, reset-on-restart
 
 **Three-strikes pause**:
 Three consecutive AFK failures (death or timeout) pause a repo's auto runs until an explicit human Reset from the UI.
@@ -88,6 +104,8 @@ _Avoid_: password, keyring, vault key file synonyms
 
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
 - An **AFK run**'s **claim** is its branch and nothing else; selection skips issues whose branch exists and never consults the PR list — the PR/CR list is the reaper's **done-signal** only.
+- The scheduler counts the **claimable** set (**ready queue** minus existing claims); an AFK run that outlives its **budget clock** without a done-signal is a timeout, and timeouts (like deaths) feed the **three-strikes pause**.
+- A manual **instance**'s **deep link** is the operator's handle to it; the deep link is captured best-effort and survives restarts on the run row.
 - **Guarded teardown** runs at all four teardown sites (manual Stop, AFK reaper, startup reconciliation, merged-sweep) and produces **parked work**; the **unguarded Discard** is the only way to destroy it and the only requeue.
 - A **neutral Stop** parks the claim and never feeds the **three-strikes pause** counter.
 - Each repo has exactly one **tracker binding** and one **provider**, and may enable **incogni mode**.
