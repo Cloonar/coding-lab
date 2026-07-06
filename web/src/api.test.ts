@@ -11,14 +11,18 @@ import {
   createIssueComment,
   createLabel,
   createRepo,
+  createToken,
   deleteCredential,
   deleteLabel,
   deleteRepo,
+  deleteToken,
   discardParked,
   errorMessage,
   extractSpawnDefaults,
   getIssue,
+  getSettings,
   getSpawnDefaults,
+  listClaimableIssues,
   listCredentials,
   listInstances,
   listIssues,
@@ -28,12 +32,17 @@ import {
   listReadyIssues,
   listRepos,
   listRuns,
+  listTokens,
   login,
   logout,
   me,
+  normalizeSettings,
+  resetAFK,
   retryClone,
+  setAFKAuto,
   setIssueLabels,
   setUnauthorizedHandler,
+  startAFK,
   startInstance,
   stopAll,
   stopInstance,
@@ -41,6 +50,7 @@ import {
   updateIssue,
   updateLabel,
   updateRepo,
+  updateSettings,
 } from './api';
 
 interface FakeResponse {
@@ -725,6 +735,178 @@ describe('label endpoints', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(409);
     expect((err as ApiError).message).toBe('label name already exists in this repository');
+  });
+});
+
+describe('AFK endpoints', () => {
+  const run = {
+    id: 'run_1',
+    repo_id: 'repo_1',
+    kind: 'afk_manual',
+    issue_number: 7,
+    branch: 'afk/7',
+    outcome: 'active',
+  };
+
+  it('POST /repos/{id}/afk/start unwraps the {run} envelope with the CSRF header', async () => {
+    const mock = stubFetch(jsonResponse(202, { run }));
+
+    const result = await startAFK('repo_1');
+
+    expect(result).toEqual(run);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/afk/start');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(init.body).toBeUndefined();
+  });
+
+  it('POST afk/start tolerates a bare run body (envelope is the contract)', async () => {
+    stubFetch(jsonResponse(202, run));
+
+    await expect(startAFK('repo_1')).resolves.toEqual(run);
+  });
+
+  it('POST afk/start surfaces the no-ready / paused 409s verbatim', async () => {
+    stubFetch(jsonResponse(409, { error: 'no ready-for-agent issues to start' }));
+
+    const err = await startAFK('repo_1').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe('no ready-for-agent issues to start');
+  });
+
+  it('PUT /repos/{id}/afk/auto sends {enabled} and parses the repo', async () => {
+    const mock = stubFetch(jsonResponse(200, { id: 'repo_1', afk_auto_enabled: true }));
+
+    const result = await setAFKAuto('repo_1', true);
+
+    expect(result).toEqual({ id: 'repo_1', afk_auto_enabled: true });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/afk/auto');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PUT');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({ enabled: true });
+  });
+
+  it('POST /repos/{id}/afk/reset parses the repo with the zeroed counter', async () => {
+    const mock = stubFetch(jsonResponse(200, { id: 'repo_1', consecutive_failures: 0 }));
+
+    const result = await resetAFK('repo_1');
+
+    expect(result).toEqual({ id: 'repo_1', consecutive_failures: 0 });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/afk/reset');
+    expect(requestInit(mock).method).toBe('POST');
+  });
+
+  it('GET /repos/{id}/ready?claimable=1 unwraps the {issues} envelope', async () => {
+    const mock = stubFetch(jsonResponse(200, { issues: [{ number: 8, title: 'b' }] }));
+
+    const result = await listClaimableIssues('repo_1');
+
+    expect(result).toEqual([{ number: 8, title: 'b' }]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/ready?claimable=1');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+});
+
+describe('token endpoints', () => {
+  it('GET /tokens unwraps the {tokens} envelope (metadata only, no secret)', async () => {
+    const token = {
+      id: 'tok_1',
+      name: 'ci-deploy',
+      created_at: '2026-07-06T00:00:00.000Z',
+      last_used_at: null,
+    };
+    const mock = stubFetch(jsonResponse(200, { tokens: [token] }));
+
+    await expect(listTokens()).resolves.toEqual([token]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/tokens');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('POST /tokens sends {name} and parses the once-only secret', async () => {
+    const created = { id: 'tok_1', name: 'ci-deploy', token: 'lab_pat_abc' };
+    const mock = stubFetch(jsonResponse(201, created));
+
+    await expect(createToken('ci-deploy')).resolves.toEqual(created);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/tokens');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'ci-deploy' });
+  });
+
+  it('DELETE /tokens/{id} tolerates 204', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    await expect(deleteToken('tok_1')).resolves.toBeUndefined();
+    expect(fetchCall(mock)[0]).toBe('/api/v1/tokens/tok_1');
+    expect(requestInit(mock).method).toBe('DELETE');
+  });
+});
+
+describe('settings endpoints', () => {
+  it('normalizeSettings keeps typed values, coerces numeric strings, drops garbage', () => {
+    expect(
+      normalizeSettings({
+        spawn_model_default: 'opus[1m]',
+        spawn_effort_default: 'max',
+        max_instances: 6,
+        afk_budget_minutes: '120', // TEXT column tolerance
+        afk_tick_seconds: 'thirty', // garbage → dropped
+        sweep_interval_minutes: 2.5, // non-integer → dropped
+        unknown_key: 'x',
+      }),
+    ).toEqual({
+      spawn_model_default: 'opus[1m]',
+      spawn_effort_default: 'max',
+      max_instances: 6,
+      afk_budget_minutes: 120,
+    });
+  });
+
+  it('normalizeSettings tolerates the {settings} envelope and non-objects', () => {
+    expect(normalizeSettings({ settings: { max_instances: 4 } })).toEqual({ max_instances: 4 });
+    expect(normalizeSettings(null)).toEqual({});
+    expect(normalizeSettings('nope')).toEqual({});
+  });
+
+  it('GET /settings normalizes the payload', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, { settings: { max_instances: '6', git_author_name: 'lab' } }),
+    );
+
+    await expect(getSettings()).resolves.toEqual({ max_instances: 6, git_author_name: 'lab' });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/settings');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('PATCH /settings sends ints as JSON numbers and only the given keys', async () => {
+    const mock = stubFetch(jsonResponse(200, { max_instances: 4 }));
+
+    const result = await updateSettings({ max_instances: 4, spawn_effort_default: 'high' });
+
+    expect(result).toEqual({ max_instances: 4 });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/settings');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PATCH');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      max_instances: 4,
+      spawn_effort_default: 'high',
+    });
+  });
+
+  it('PATCH /settings surfaces the validation 400 verbatim', async () => {
+    stubFetch(jsonResponse(400, { error: 'afk_tick_seconds must be a positive integer' }));
+
+    const err = await updateSettings({ afk_tick_seconds: -1 }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+    expect((err as ApiError).message).toBe('afk_tick_seconds must be a positive integer');
   });
 });
 

@@ -1087,6 +1087,67 @@ button.small {
   opacity: 0.55;
 }
 
+/* AFK ---------------------------------------------------------------------------- */
+
+.afk-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+
+.afk-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+/* Zero-ready hint: still a real, enabled button, just visibly greyed. */
+.afk-start.greyed {
+  opacity: 0.6;
+}
+
+.afk-paused {
+  margin: 0;
+}
+
+.afk-paused button {
+  flex-shrink: 0;
+}
+
+.budget-left {
+  font-size: 0.82rem;
+}
+
+.budget-left.over {
+  color: var(--err-text);
+}
+
+.chip.afk-kind {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+/* Settings ------------------------------------------------------------------------ */
+
+.field .field-error {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 400;
+  color: var(--danger);
+  margin-top: 0.3rem;
+}
+
+/* API tokens ---------------------------------------------------------------------- */
+
+.token-reveal .banner {
+  margin-bottom: 0.8rem;
+}
+
+.token-reveal input[readonly] {
+  background: var(--hover);
+}
+
 /* Toast -------------------------------------------------------------------------- */
 
 .toast {

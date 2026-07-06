@@ -1,0 +1,303 @@
+// Global settings (/settings): spawn defaults (model/effort from the
+// provider catalog), the global instance cap, AFK budget minutes, reaper and
+// scheduler ticks, sweep interval and git author identity. Saved as a
+// dirty-fields-only PATCH; int fields validate per field client-side and the
+// server's 400 {"error"} lands in the banner. Runtime loops re-read settings
+// each tick, so saves apply without a restart.
+
+import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
+import {
+  errorMessage,
+  getSettings,
+  listProviders,
+  updateSettings,
+  type IntSettingKey,
+  type ProviderOption,
+  type Settings as SettingsPayload,
+  type TextSettingKey,
+} from '../api';
+import ErrorBanner from '../components/ErrorBanner';
+import RequireAuth from '../components/RequireAuth';
+import TopBar from '../components/TopBar';
+import { providerFor } from '../lib/spawn';
+
+interface IntField {
+  key: IntSettingKey;
+  label: string;
+  hint: string;
+}
+
+const INT_FIELDS: IntField[] = [
+  {
+    key: 'max_instances',
+    label: 'Max instances',
+    hint: 'Global cap on live sessions across all repos (login session exempt).',
+  },
+  {
+    key: 'afk_budget_minutes',
+    label: 'AFK budget (minutes)',
+    hint: 'Wall-clock budget per AFK run before the reaper times it out.',
+  },
+  {
+    key: 'afk_tick_seconds',
+    label: 'Reaper tick (seconds)',
+    hint: 'How often AFK runs are classified (success / death / timeout).',
+  },
+  {
+    key: 'afk_schedule_seconds',
+    label: 'Scheduler tick (seconds)',
+    hint: 'How often auto-enabled repos are considered for a new AFK run.',
+  },
+  {
+    key: 'sweep_interval_minutes',
+    label: 'Sweep interval (minutes)',
+    hint: 'Throttle for the merged-worktree/branch GC sweep.',
+  },
+];
+
+export default function Settings() {
+  return (
+    <RequireAuth>
+      <SettingsView />
+    </RequireAuth>
+  );
+}
+
+function SettingsView() {
+  const [settings, { refetch }] = createResource(() => getSettings());
+  const [providers] = createResource(() => listProviders());
+
+  return (
+    <main class="page">
+      <TopBar />
+      <div class="section-head">
+        <h2>Settings</h2>
+      </div>
+      <Switch>
+        <Match when={settings.error !== undefined}>
+          <div class="banner error" role="alert">
+            <span class="banner-text">{errorMessage(settings.error)}</span>
+          </div>
+        </Match>
+        <Match when={settings()}>
+          {(current) => (
+            <SettingsForm
+              initial={current()}
+              provider={providerFor(providers() ?? [], 'claude-code')}
+              onSaved={() => void refetch()}
+            />
+          )}
+        </Match>
+      </Switch>
+    </main>
+  );
+}
+
+/** String draft of one settings value ('' for an absent key). */
+function seedDraft(initial: SettingsPayload, key: IntSettingKey | TextSettingKey): string {
+  const value = initial[key];
+  return value === undefined ? '' : String(value);
+}
+
+function SettingsForm(props: {
+  initial: SettingsPayload;
+  provider: ReturnType<typeof providerFor>;
+  onSaved: () => void;
+}) {
+  // Drafts seed from the settings snapshot the form mounted with; buildPatch
+  // diffs against that snapshot so only edited fields enter the PATCH
+  // (settings have no SSE event, so no resync is needed).
+  const initial = props.initial;
+  const [drafts, setDrafts] = createSignal<Record<string, string>>({
+    spawn_model_default: seedDraft(initial, 'spawn_model_default'),
+    spawn_effort_default: seedDraft(initial, 'spawn_effort_default'),
+    git_author_name: seedDraft(initial, 'git_author_name'),
+    git_author_email: seedDraft(initial, 'git_author_email'),
+    ...Object.fromEntries(INT_FIELDS.map((f) => [f.key, seedDraft(initial, f.key)])),
+  });
+  const draft = (key: string) => drafts()[key] ?? '';
+  const setDraft = (key: string, value: string) => setDrafts({ ...drafts(), [key]: value });
+
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [note, setNote] = createSignal<string | null>(null);
+
+  const intDirty = (key: IntSettingKey) => draft(key).trim() !== seedDraft(initial, key);
+
+  /** Per-field validation: only dirty int fields can be in error. */
+  const intError = (key: IntSettingKey): string | null => {
+    if (!intDirty(key)) return null;
+    const trimmed = draft(key).trim();
+    if (!/^\d+$/.test(trimmed)) return 'Enter a whole number.';
+    if (Number(trimmed) < 1) return 'Must be at least 1.';
+    return null;
+  };
+
+  const textDirty = (key: TextSettingKey) => draft(key).trim() !== seedDraft(initial, key).trim();
+
+  const buildPatch = (): SettingsPayload | null => {
+    const patch: SettingsPayload = {};
+    for (const key of [
+      'spawn_model_default',
+      'spawn_effort_default',
+      'git_author_name',
+      'git_author_email',
+    ] as TextSettingKey[]) {
+      if (textDirty(key)) patch[key] = draft(key).trim();
+    }
+    for (const field of INT_FIELDS) {
+      if (!intDirty(field.key)) continue;
+      if (intError(field.key) !== null) return null; // blocked by a field error
+      patch[field.key] = Number(draft(field.key).trim());
+    }
+    return patch;
+  };
+
+  const save = async (event: SubmitEvent) => {
+    event.preventDefault();
+    setError(null);
+    setNote(null);
+    const patch = buildPatch();
+    if (patch === null) {
+      setError('Fix the highlighted fields first.');
+      return;
+    }
+    if (Object.keys(patch).length === 0) {
+      setNote('Nothing to save.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateSettings(patch);
+      setNote('Saved.');
+      props.onSaved();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={(e) => void save(e)} class="stack">
+      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Show when={note()}>
+        <div class="banner success" role="status">
+          <span class="banner-text">{note()}</span>
+        </div>
+      </Show>
+
+      <section class="card">
+        <h2>Spawn defaults</h2>
+        <CatalogSelect
+          label="Model"
+          name="spawn_model_default"
+          value={draft('spawn_model_default')}
+          options={props.provider?.models ?? []}
+          onChange={(value) => setDraft('spawn_model_default', value)}
+        />
+        <CatalogSelect
+          label="Effort"
+          name="spawn_effort_default"
+          value={draft('spawn_effort_default')}
+          options={props.provider?.efforts ?? []}
+          onChange={(value) => setDraft('spawn_effort_default', value)}
+        />
+        <Show when={props.provider === null}>
+          <small class="hint hint-block">
+            Provider catalog unavailable — only the stored values are offered.
+          </small>
+        </Show>
+      </section>
+
+      <section class="card">
+        <h2>Capacity & AFK</h2>
+        <For each={INT_FIELDS}>
+          {(field) => (
+            <label class="field">
+              <span>{field.label}</span>
+              <input
+                type="text"
+                inputmode="numeric"
+                name={field.key}
+                autocomplete="off"
+                value={draft(field.key)}
+                onInput={(e) => setDraft(field.key, e.currentTarget.value)}
+                aria-invalid={intError(field.key) !== null}
+              />
+              <Show when={intError(field.key)} fallback={<small class="hint">{field.hint}</small>}>
+                <small class="field-error" role="alert">
+                  {intError(field.key)}
+                </small>
+              </Show>
+            </label>
+          )}
+        </For>
+      </section>
+
+      <section class="card">
+        <h2>Git author</h2>
+        <label class="field">
+          <span>Author name</span>
+          <input
+            type="text"
+            name="git_author_name"
+            autocomplete="off"
+            value={draft('git_author_name')}
+            onInput={(e) => setDraft('git_author_name', e.currentTarget.value)}
+          />
+          <small class="hint">Used for commits unless a repo overrides it.</small>
+        </label>
+        <label class="field">
+          <span>Author email</span>
+          <input
+            type="text"
+            name="git_author_email"
+            autocomplete="off"
+            spellcheck={false}
+            value={draft('git_author_email')}
+            onInput={(e) => setDraft('git_author_email', e.currentTarget.value)}
+          />
+        </label>
+      </section>
+
+      <button type="submit" class="primary wide" disabled={busy()}>
+        {busy() ? 'Saving…' : 'Save settings'}
+      </button>
+    </form>
+  );
+}
+
+/**
+ * Model/effort select over the provider catalog. A stored value missing from
+ * the catalog stays selectable as-is (marked), so an untouched field never
+ * silently changes on save.
+ */
+function CatalogSelect(props: {
+  label: string;
+  name: string;
+  value: string;
+  options: ProviderOption[];
+  onChange: (value: string) => void;
+}) {
+  const known = () => props.options.some((option) => option.value === props.value);
+  return (
+    <label class="field">
+      <span>{props.label}</span>
+      <select
+        name={props.name}
+        value={props.value}
+        onChange={(e) => props.onChange(e.currentTarget.value)}
+      >
+        <Show when={!known()}>
+          <option value={props.value}>
+            {props.value === '' ? '(unset)' : `${props.value} (not in catalog)`}
+          </option>
+        </Show>
+        <For each={props.options}>
+          {(option) => <option value={option.value}>{option.label}</option>}
+        </For>
+      </select>
+    </label>
+  );
+}

@@ -1,5 +1,5 @@
 // App header shared by all authenticated pages: brand, section nav
-// (Repos · Credentials · Runs · Settings placeholder), SSE live dot, logout.
+// (Repos · Credentials · Runs · Tokens · Settings), SSE live dot, logout.
 
 import { A } from '@solidjs/router';
 import { createSignal } from 'solid-js';
@@ -43,9 +43,12 @@ export default function TopBar() {
           <A href="/runs" activeClass="active" class="nav-link">
             Runs
           </A>
-          <span class="nav-link disabled" title="Coming in a later milestone" aria-disabled="true">
+          <A href="/tokens" activeClass="active" class="nav-link">
+            Tokens
+          </A>
+          <A href="/settings" activeClass="active" class="nav-link">
             Settings
-          </span>
+          </A>
         </nav>
         <span class="spacer" />
         <span

@@ -1,8 +1,10 @@
 // Dashboard: Claude auth card, then repo cards (name, remote host, chips,
 // clone status with live SSE progress) each carrying its start-instance form,
-// live instance list, stop-all and parked strip — or the add-repo empty
-// state. repo.changed → refetch repos; run.changed → refetch instances;
-// clone.progress → per-card signal only; parked.changed lives in the strip.
+// the AFK section (start/auto/paused), live instance list, stop-all and
+// parked strip — or the add-repo empty state. repo.changed → refetch repos
+// (paused banner + auto toggle follow the repo row); run.changed → refetch
+// instances; clone.progress → per-card signal only; parked.changed lives in
+// the strip.
 
 import { A } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
@@ -16,7 +18,9 @@ import {
   stopAll,
   type Instance,
   type Repo,
+  type Run,
 } from '../api';
+import AFKSection from '../components/AFKSection';
 import ClaudeAuthCard from '../components/ClaudeAuthCard';
 import ErrorBanner from '../components/ErrorBanner';
 import InstanceList from '../components/InstanceList';
@@ -78,6 +82,13 @@ function DashboardView() {
     }
   };
 
+  const afkStarted = (run: Run) => {
+    toast.show(
+      run.issue_number === null ? 'AFK run started' : `AFK run started on #${run.issue_number}`,
+    );
+    void refetchInstances();
+  };
+
   return (
     <main class="page">
       <TopBar />
@@ -109,6 +120,8 @@ function DashboardView() {
                   onRetry={() => void retry(repo)}
                   onStopAll={() => void stopAllIn(repo)}
                   onInstancesChanged={() => void refetchInstances()}
+                  onRepoChanged={() => void refetch()}
+                  onAFKStarted={afkStarted}
                   onStopped={(outcome) => toast.show(outcome)}
                   onError={setError}
                 />
@@ -136,6 +149,8 @@ function RepoCard(props: {
   onRetry: () => void;
   onStopAll: () => void;
   onInstancesChanged: () => void;
+  onRepoChanged: () => void;
+  onAFKStarted: (run: Run) => void;
   onStopped: (outcome: 'removed' | 'parked') => void;
   onError: (message: string) => void;
 }) {
@@ -193,6 +208,12 @@ function RepoCard(props: {
         />
       </Show>
       <Show when={props.repo.clone_status === 'ready'}>
+        <AFKSection
+          repo={props.repo}
+          onRepoChanged={props.onRepoChanged}
+          onStarted={props.onAFKStarted}
+          onError={props.onError}
+        />
         <StartInstanceForm
           repo={props.repo}
           provider={props.provider}

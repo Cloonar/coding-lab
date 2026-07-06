@@ -1,10 +1,13 @@
-// Live instance rows under a repo card: v0-style title ('label · 15:30'),
-// a subtle connecting pulse until the deep link lands, Open as a deep-link
-// anchor (generic claude.ai picker fallback on a missed capture), and Stop
-// with the guarded outcome ("removed" vs "parked") surfaced as a toast.
+// Live instance rows under a repo card: v0-style title ('label · 15:30',
+// AFK runs as 'AFK #N'), a subtle connecting pulse until the deep link
+// lands, Open as a deep-link anchor (generic claude.ai picker fallback on a
+// missed capture), and Stop with the guarded outcome ("removed" vs "parked")
+// surfaced as a toast. AFK rows add the auto chip and the budget countdown
+// derived from runs.budget_deadline (30s display tick).
 
-import { For, Show, createSignal } from 'solid-js';
+import { For, Show, createSignal, onCleanup } from 'solid-js';
 import { errorMessage, stopInstance, type Instance } from '../api';
+import { budgetRemaining, parseAFKLabel } from '../lib/afk';
 import { openState } from '../lib/deepLink';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
 
@@ -15,6 +18,11 @@ export default function InstanceList(props: {
   onError: (message: string) => void;
 }) {
   const [stopping, setStopping] = createSignal<string | null>(null);
+
+  // Display-only countdown tick for AFK budget hints.
+  const [now, setNow] = createSignal(Date.now());
+  const ticker = setInterval(() => setNow(Date.now()), 30_000);
+  onCleanup(() => clearInterval(ticker));
 
   const stop = async (instance: Instance) => {
     setStopping(instance.session_name);
@@ -32,7 +40,9 @@ export default function InstanceList(props: {
   return (
     <ul class="instance-list">
       <For each={props.instances}>
-        {(instance) => <InstanceRow instance={instance} stopping={stopping()} onStop={stop} />}
+        {(instance) => (
+          <InstanceRow instance={instance} stopping={stopping()} now={now()} onStop={stop} />
+        )}
       </For>
     </ul>
   );
@@ -41,6 +51,7 @@ export default function InstanceList(props: {
 function InstanceRow(props: {
   instance: Instance;
   stopping: string | null;
+  now: number;
   onStop: (instance: Instance) => Promise<void>;
 }) {
   const state = () => openState(props.instance);
@@ -53,15 +64,29 @@ function InstanceRow(props: {
     return s.kind === 'link' && !s.exact ? s.title : undefined;
   };
   const isStopping = () => props.stopping === props.instance.session_name;
+  const afk = () => parseAFKLabel(sessionLabel(props.instance.session_name));
+  const budget = () =>
+    afk() === null ? null : budgetRemaining(props.instance.budget_deadline, props.now);
 
   return (
-    <li class="instance-row">
+    <li classList={{ 'instance-row': true, afk: afk() !== null }}>
       <div class="instance-main">
         <span class="instance-title">
           {instanceTitle(sessionLabel(props.instance.session_name))}
         </span>
         <span class="muted mono instance-branch">{props.instance.branch}</span>
+        <Show when={budget()}>
+          <span
+            classList={{ muted: true, 'budget-left': true, over: budget() === 'over budget' }}
+            title="Time left on this AFK run's budget"
+          >
+            {budget()}
+          </span>
+        </Show>
       </div>
+      <Show when={afk()?.auto}>
+        <span class="chip afk-kind">auto</span>
+      </Show>
       <Show when={!props.instance.live}>
         <span class="chip idle">not running</span>
       </Show>

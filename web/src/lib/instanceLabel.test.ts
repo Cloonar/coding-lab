@@ -46,7 +46,9 @@ describe("instanceTitle ('label · 15:30' rendering like v0)", () => {
     ['debug-20260608-1530', 'debug · 15:30'],
     ['my-feature-20260608-0905', 'my-feature · 09:05'],
     ['debug', 'debug'], // hand-made/legacy label renders verbatim
-    ['afk-7', 'afk-7'], // AFK '#N' rendering arrives with M5
+    ['afk-7', 'AFK #7'], // v0 badge string 'AFK #<N>'
+    ['afk-auto-7', 'AFK #7'], // auto runs render the same title (kind chip differs)
+    ['afk-feature', 'afk-feature'], // not an AFK label — verbatim like v0
     ['', ''],
   ];
 

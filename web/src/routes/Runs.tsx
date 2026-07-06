@@ -1,11 +1,13 @@
-// Runs history (/runs, per-repo filter via ?repo=): phone-first cards with
-// kind, label/branch, model/effort, started time, duration and the outcome
-// badge (active/success/death/timeout/stopped) plus failure_reason. Newest
-// first, straight from GET /runs; run.changed refetches.
+// Runs history (/runs, per-repo filter via ?repo=, outcome filter via
+// ?outcome=): phone-first cards with kind, label/branch, model/effort,
+// started time, duration and the outcome badge (active/success/death/
+// timeout/stopped) plus failure_reason. AFK kinds title as 'AFK #N' from the
+// run's issue number. Newest first, straight from GET /runs; the outcome
+// filter narrows client-side; run.changed refetches.
 
 import { useSearchParams } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, onCleanup } from 'solid-js';
-import { errorMessage, listRuns, listRepos, type Run, type RunKind } from '../api';
+import { errorMessage, listRuns, listRepos, type Run, type RunKind, type RunOutcome } from '../api';
 import RequireAuth from '../components/RequireAuth';
 import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
@@ -19,6 +21,8 @@ const KIND_LABELS: Record<RunKind, string> = {
   afk_auto: 'AFK auto',
 };
 
+const OUTCOMES: RunOutcome[] = ['active', 'success', 'death', 'timeout', 'stopped'];
+
 export default function Runs() {
   return (
     <RequireAuth>
@@ -29,8 +33,14 @@ export default function Runs() {
 
 function RunsView() {
   const events = useEvents();
-  const [params, setParams] = useSearchParams<{ repo?: string }>();
+  const [params, setParams] = useSearchParams<{ repo?: string; outcome?: string }>();
   const repoFilter = () => (typeof params.repo === 'string' ? params.repo : '');
+  const outcomeFilter = (): RunOutcome | '' => {
+    const outcome = params.outcome;
+    return typeof outcome === 'string' && (OUTCOMES as string[]).includes(outcome)
+      ? (outcome as RunOutcome)
+      : '';
+  };
 
   const [repos] = createResource(() => listRepos());
   const [runs, { refetch }] = createResource(repoFilter, (repo) =>
@@ -42,11 +52,29 @@ function RunsView() {
     }),
   );
 
+  // The outcome filter narrows the already-fetched page client-side.
+  const visible = () => {
+    const all = runs() ?? [];
+    const outcome = outcomeFilter();
+    return outcome === '' ? all : all.filter((run) => run.outcome === outcome);
+  };
+
   return (
     <main class="page">
       <TopBar />
       <div class="section-head">
         <h2>Runs</h2>
+        <label class="field runs-filter">
+          <select
+            name="outcome-filter"
+            value={outcomeFilter()}
+            onInput={(e) => setParams({ outcome: e.currentTarget.value || undefined })}
+            aria-label="Filter by outcome"
+          >
+            <option value="">All outcomes</option>
+            <For each={OUTCOMES}>{(outcome) => <option value={outcome}>{outcome}</option>}</For>
+          </select>
+        </label>
         <label class="field runs-filter">
           <select
             name="repo-filter"
@@ -68,9 +96,12 @@ function RunsView() {
         <Match when={runs()?.length === 0}>
           <p class="empty">No runs yet.</p>
         </Match>
+        <Match when={runs() !== undefined && visible().length === 0}>
+          <p class="empty">No {outcomeFilter()} runs.</p>
+        </Match>
         <Match when={runs()}>
           <div class="card-list">
-            <For each={runs()}>{(run) => <RunCard run={run} />}</For>
+            <For each={visible()}>{(run) => <RunCard run={run} />}</For>
           </div>
         </Match>
       </Switch>
@@ -80,6 +111,11 @@ function RunsView() {
 
 function RunCard(props: { run: Run }) {
   const title = () => {
+    // AFK runs title from the persisted issue number (restart-proof); the
+    // session label is the fallback for both AFK and manual runs.
+    if (props.run.kind !== 'manual' && props.run.issue_number !== null) {
+      return `AFK #${props.run.issue_number}`;
+    }
     const label = instanceTitle(sessionLabel(props.run.session_name));
     return label === '' ? props.run.branch : label;
   };

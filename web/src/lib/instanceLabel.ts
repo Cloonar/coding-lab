@@ -2,9 +2,11 @@
 // port spec §2.7). A session name is `<repoName>~<label>` — the sanitizers
 // only ever emit [A-Za-z0-9_-], so the FIRST `~` is always the boundary.
 // Manual labels are `<user>-YYYYMMDD-HHMM` or a bare stamp; the row title
-// renders as 'label · 15:30' / '15:30' exactly like v0. AFK labels ('#N')
-// arrive with the AFK engine in M5; until then a non-timestamp label renders
-// verbatim.
+// renders as 'label · 15:30' / '15:30' exactly like v0. AFK labels
+// ('afk-<N>' / 'afk-auto-<N>') render as 'AFK #N' (v0 badge string, both
+// kinds); any other non-timestamp label renders verbatim.
+
+import { parseAFKLabel } from './afk';
 
 /**
  * The label part of a session name: everything after the first `~`.
@@ -34,8 +36,10 @@ export function parseManualLabel(label: string): ManualLabelParts {
   return { user: m[1] ?? '', hhmm: `${m[3] ?? ''}:${m[4] ?? ''}` };
 }
 
-/** Row title: 'debug · 15:30', bare '15:30', or the label verbatim. */
+/** Row title: 'AFK #7', 'debug · 15:30', bare '15:30', or the label verbatim. */
 export function instanceTitle(label: string): string {
+  const afk = parseAFKLabel(label);
+  if (afk !== null) return `AFK #${afk.issue}`;
   const { user, hhmm } = parseManualLabel(label);
   if (hhmm === '') return label;
   return user === '' ? hhmm : `${user} · ${hhmm}`;

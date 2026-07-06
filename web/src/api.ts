@@ -629,3 +629,147 @@ export function deleteLabel(repoID: string, labelID: string): Promise<void> {
     `/repos/${encodeURIComponent(repoID)}/labels/${encodeURIComponent(labelID)}`,
   );
 }
+
+// --- M5: AFK engine ---
+
+/**
+ * POST /repos/{id}/afk/start: claim + launch the lowest claimable
+ * ready-for-agent issue right now (manual AFK run). 202 {run}; 409 when the
+ * repo is paused, over the cap, the provider is logged out, or
+ * {"error":"no ready-for-agent issues to start"}. The documented contract is
+ * the {run} envelope; a bare run body is tolerated (same tolerance precedent
+ * as extractSpawnDefaults).
+ */
+export async function startAFK(repoID: string): Promise<Run> {
+  const res = await request<{ run?: Run }>(
+    'POST',
+    `/repos/${encodeURIComponent(repoID)}/afk/start`,
+  );
+  return res.run ?? (res as unknown as Run);
+}
+
+/** PUT /repos/{id}/afk/auto {enabled}: persists afk_auto_enabled → 200 repo. */
+export function setAFKAuto(repoID: string, enabled: boolean): Promise<Repo> {
+  return request<Repo>('PUT', `/repos/${encodeURIComponent(repoID)}/afk/auto`, { enabled });
+}
+
+/**
+ * POST /repos/{id}/afk/reset: consecutive_failures → 0 (the ONLY un-pause;
+ * never touches the auto toggle) → 200 repo.
+ */
+export function resetAFK(repoID: string): Promise<Repo> {
+  return request<Repo>('POST', `/repos/${encodeURIComponent(repoID)}/afk/reset`);
+}
+
+/**
+ * The CLAIMABLE ready queue: ready-for-agent issues minus those whose claim
+ * branch already exists (parked / in flight). GET /repos/{id}/ready with
+ * ?claimable=1 — same {issues} envelope as the plain ready list, filtered
+ * server-side; the SPA's '(N ready)' hint is this list's length.
+ */
+export async function listClaimableIssues(repoID: string): Promise<IssueSummary[]> {
+  const res = await request<{ issues: IssueSummary[] }>(
+    'GET',
+    `/repos/${encodeURIComponent(repoID)}/ready?claimable=1`,
+  );
+  return res.issues;
+}
+
+// --- M5: API tokens (D7 PATs) ---
+
+/** Token metadata — the secret is only ever present in the create response. */
+export interface ApiToken {
+  id: string;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** POST /tokens response: `token` (lab_pat_…) appears here ONCE, never again. */
+export interface CreatedApiToken {
+  id: string;
+  name: string;
+  token: string;
+}
+
+export async function listTokens(): Promise<ApiToken[]> {
+  const res = await request<{ tokens: ApiToken[] }>('GET', '/tokens');
+  return res.tokens;
+}
+
+export function createToken(name: string): Promise<CreatedApiToken> {
+  return request<CreatedApiToken>('POST', '/tokens', { name });
+}
+
+export function deleteToken(id: string): Promise<void> {
+  return request<void>('DELETE', `/tokens/${encodeURIComponent(id)}`);
+}
+
+// --- M5: settings ---
+
+export const INT_SETTING_KEYS = [
+  'max_instances',
+  'afk_budget_minutes',
+  'afk_tick_seconds',
+  'afk_schedule_seconds',
+  'sweep_interval_minutes',
+] as const;
+
+export const TEXT_SETTING_KEYS = [
+  'spawn_model_default',
+  'spawn_effort_default',
+  'git_author_name',
+  'git_author_email',
+] as const;
+
+export type IntSettingKey = (typeof INT_SETTING_KEYS)[number];
+export type TextSettingKey = (typeof TEXT_SETTING_KEYS)[number];
+
+/**
+ * The runtime-mutable settings (§3a keys). All fields optional: GET returns
+ * whatever is stored, PATCH sends only the fields being changed.
+ */
+export type Settings = Partial<Record<IntSettingKey, number> & Record<TextSettingKey, string>>;
+
+/**
+ * Normalizes a settings payload: tolerates both a flat {key: value} object
+ * and a {settings: {key: value}} envelope (like extractSpawnDefaults), and
+ * coerces int keys that arrive as numeric strings (the settings table stores
+ * TEXT). Unknown keys and garbage values are dropped.
+ */
+export function normalizeSettings(raw: unknown): Settings {
+  if (typeof raw !== 'object' || raw === null) return {};
+  let map = raw as Record<string, unknown>;
+  const nested = map['settings'];
+  if (typeof nested === 'object' && nested !== null) map = nested as Record<string, unknown>;
+  const out: Settings = {};
+  for (const key of TEXT_SETTING_KEYS) {
+    const value = map[key];
+    if (typeof value === 'string') out[key] = value;
+  }
+  for (const key of INT_SETTING_KEYS) {
+    const value = map[key];
+    const n =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim() !== ''
+          ? Number(value)
+          : NaN;
+    if (Number.isInteger(n)) out[key] = n;
+  }
+  return out;
+}
+
+export async function getSettings(): Promise<Settings> {
+  return normalizeSettings(await request<unknown>('GET', '/settings'));
+}
+
+/**
+ * PATCH /settings {key: value, …} → 200 with the updated settings. Ints go
+ * as JSON numbers; the server validates (ints parse, model/effort against
+ * the provider catalogs) and 400s {"error"} on a bad value. Runtime loops
+ * re-read settings every tick, so saves apply without a restart.
+ */
+export async function updateSettings(patch: Settings): Promise<Settings> {
+  return normalizeSettings(await request<unknown>('PATCH', '/settings', patch));
+}
