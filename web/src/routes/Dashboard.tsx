@@ -1,15 +1,33 @@
-// Dashboard: repo cards (name, remote host, binding/forge/incogni chips,
-// clone status with live SSE progress) or the add-repo empty state.
-// repo.changed → refetch the list; clone.progress → per-card signal only.
+// Dashboard: Claude auth card, then repo cards (name, remote host, chips,
+// clone status with live SSE progress) each carrying its start-instance form,
+// live instance list, stop-all and parked strip — or the add-repo empty
+// state. repo.changed → refetch repos; run.changed → refetch instances;
+// clone.progress → per-card signal only; parked.changed lives in the strip.
 
 import { A } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
-import { errorMessage, listRepos, retryClone, type Repo } from '../api';
+import {
+  errorMessage,
+  getSpawnDefaults,
+  listInstances,
+  listProviders,
+  listRepos,
+  retryClone,
+  stopAll,
+  type Instance,
+  type Repo,
+} from '../api';
+import ClaudeAuthCard from '../components/ClaudeAuthCard';
 import ErrorBanner from '../components/ErrorBanner';
+import InstanceList from '../components/InstanceList';
+import ParkedSection from '../components/ParkedSection';
 import RequireAuth from '../components/RequireAuth';
+import StartInstanceForm from '../components/StartInstanceForm';
+import { createToast } from '../components/Toast';
 import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { remoteHost } from '../lib/repoName';
+import { providerFor } from '../lib/spawn';
 import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
 
 export default function Dashboard() {
@@ -23,11 +41,19 @@ export default function Dashboard() {
 function DashboardView() {
   const events = useEvents();
   const [repos, { refetch }] = createResource(() => listRepos());
+  const [instances, { refetch: refetchInstances }] = createResource(() => listInstances());
+  const [providers] = createResource(() => listProviders());
+  const [spawnDefaults] = createResource(() => getSpawnDefaults());
   const progress = createCloneProgressStore(events);
+  const toast = createToast();
   onCleanup(progress.dispose);
   onCleanup(events.subscribe('repo.changed', () => void refetch()));
+  onCleanup(events.subscribe('run.changed', () => void refetchInstances()));
 
   const [error, setError] = createSignal<string | null>(null);
+
+  const instancesOf = (repoID: string): Instance[] =>
+    (instances() ?? []).filter((instance) => instance.repo_id === repoID);
 
   const retry = async (repo: Repo) => {
     setError(null);
@@ -40,10 +66,25 @@ function DashboardView() {
     }
   };
 
+  const stopAllIn = async (repo: Repo) => {
+    setError(null);
+    try {
+      const res = await stopAll(repo.id);
+      toast.show(`Stopped ${res.stopped} instance${res.stopped === 1 ? '' : 's'}`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      void refetchInstances();
+    }
+  };
+
   return (
     <main class="page">
       <TopBar />
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <div class="stack">
+        <ClaudeAuthCard />
+      </div>
       <Switch>
         <Match when={repos.error !== undefined}>
           <div class="banner error" role="alert">
@@ -61,8 +102,15 @@ function DashboardView() {
               {(repo) => (
                 <RepoCard
                   repo={repo}
+                  instances={instancesOf(repo.id)}
+                  provider={providerFor(providers() ?? [], repo.provider)}
+                  defaults={spawnDefaults() ?? {}}
                   progress={progress.progress(repo.id)}
                   onRetry={() => void retry(repo)}
+                  onStopAll={() => void stopAllIn(repo)}
+                  onInstancesChanged={() => void refetchInstances()}
+                  onStopped={(outcome) => toast.show(outcome)}
+                  onError={setError}
                 />
               )}
             </For>
@@ -74,16 +122,33 @@ function DashboardView() {
           + Add repository
         </A>
       </Show>
+      {toast.Toast()}
     </main>
   );
 }
 
-function RepoCard(props: { repo: Repo; progress: CloneProgress | null; onRetry: () => void }) {
+function RepoCard(props: {
+  repo: Repo;
+  instances: Instance[];
+  provider: ReturnType<typeof providerFor>;
+  defaults: { model?: string; effort?: string };
+  progress: CloneProgress | null;
+  onRetry: () => void;
+  onStopAll: () => void;
+  onInstancesChanged: () => void;
+  onStopped: (outcome: 'removed' | 'parked') => void;
+  onError: (message: string) => void;
+}) {
   return (
     <article class="card repo-card">
       <div class="card-head">
         <span class="card-title">{props.repo.name}</span>
         <span class="spacer" />
+        <Show when={props.instances.length > 1}>
+          <button type="button" class="danger stop-all" onClick={() => props.onStopAll()}>
+            Stop all
+          </button>
+        </Show>
         <A href={`/repos/${props.repo.id}/settings`} class="card-link">
           Settings
         </A>
@@ -115,6 +180,23 @@ function RepoCard(props: { repo: Repo; progress: CloneProgress | null; onRetry: 
             Retry
           </button>
         </div>
+      </Show>
+      <Show when={props.instances.length > 0}>
+        <InstanceList
+          instances={props.instances}
+          onStopped={props.onStopped}
+          onChanged={props.onInstancesChanged}
+          onError={props.onError}
+        />
+      </Show>
+      <Show when={props.repo.clone_status === 'ready'}>
+        <StartInstanceForm
+          repo={props.repo}
+          provider={props.provider}
+          defaults={props.defaults}
+          onStarted={props.onInstancesChanged}
+        />
+        <ParkedSection repoID={props.repo.id} />
       </Show>
     </article>
   );

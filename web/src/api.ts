@@ -275,3 +275,181 @@ export function deleteRepo(id: string, force = false): Promise<void> {
 export function retryClone(id: string): Promise<void> {
   return request<void>('POST', `/repos/${encodeURIComponent(id)}/clone/retry`);
 }
+
+// --- M3: providers ---
+
+/** One dropdown option of a provider-owned model/effort catalog (D14). */
+export interface ProviderOption {
+  value: string;
+  label: string;
+}
+
+export interface Provider {
+  id: string;
+  models: ProviderOption[];
+  efforts: ProviderOption[];
+}
+
+export async function listProviders(): Promise<Provider[]> {
+  const res = await request<{ providers: Provider[] }>('GET', '/providers');
+  return res.providers;
+}
+
+// --- M3: Claude auth ---
+
+export interface ClaudeAuthStatus {
+  logged_in: boolean;
+  email: string;
+  method: string;
+  checked_at: string;
+}
+
+/** force=true bypasses the server's 30s status cache. */
+export function claudeAuthStatus(force = false): Promise<ClaudeAuthStatus> {
+  return request<ClaudeAuthStatus>(
+    'GET',
+    '/providers/claude/auth/status' + (force ? '?force=1' : ''),
+  );
+}
+
+/** 409s when already logged in — the caller refetches status instead. */
+export function claudeLoginStart(): Promise<{ oauth_url: string }> {
+  return request<{ oauth_url: string }>('POST', '/providers/claude/auth/login/start');
+}
+
+/** 202: the code was delivered; completion arrives via claude.auth.changed. */
+export function claudeLoginCode(code: string): Promise<void> {
+  return request<void>('POST', '/providers/claude/auth/login/code', { code });
+}
+
+// --- M3: instances & runs ---
+
+export type RunKind = 'manual' | 'afk_manual' | 'afk_auto';
+export type RunOutcome = 'active' | 'success' | 'death' | 'timeout' | 'stopped';
+
+/** One row of the runs table, as the API serializes it. */
+export interface Run {
+  id: string;
+  repo_id: string;
+  kind: RunKind;
+  provider: string;
+  issue_number: number | null;
+  branch: string;
+  worktree_path: string;
+  session_name: string;
+  model: string;
+  effort: string;
+  deep_link_url: string | null;
+  started_at: string;
+  budget_deadline: string | null;
+  ended_at: string | null;
+  outcome: RunOutcome;
+  failure_reason: string | null;
+}
+
+/** Run JSON + liveness derived from tmux + the in-flight deep-link capture. */
+export interface Instance extends Run {
+  repo_name: string;
+  live: boolean;
+  connecting: boolean;
+}
+
+export interface StartInstanceRequest {
+  label?: string;
+  model?: string;
+  effort?: string;
+}
+
+/** 201 run JSON | 409 (cap / claude logged out / repo not ready) | 400. */
+export function startInstance(repoID: string, req: StartInstanceRequest): Promise<Run> {
+  return request<Run>('POST', `/repos/${encodeURIComponent(repoID)}/instances`, req);
+}
+
+export async function listInstances(): Promise<Instance[]> {
+  const res = await request<{ instances: Instance[] }>('GET', '/instances');
+  return res.instances;
+}
+
+/** Guarded teardown: "removed" (clean+merged) or "parked" (work preserved). */
+export function stopInstance(session: string): Promise<{ outcome: 'removed' | 'parked' }> {
+  return request<{ outcome: 'removed' | 'parked' }>(
+    'DELETE',
+    `/instances/${encodeURIComponent(session)}`,
+  );
+}
+
+export function stopAll(repoID: string): Promise<{ stopped: number }> {
+  return request<{ stopped: number }>('POST', `/repos/${encodeURIComponent(repoID)}/stop-all`);
+}
+
+export async function listRuns(opts: { repo?: string; limit?: number } = {}): Promise<Run[]> {
+  const params = new URLSearchParams();
+  if (opts.repo !== undefined && opts.repo !== '') params.set('repo', opts.repo);
+  if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+  const query = params.toString();
+  const res = await request<{ runs: Run[] }>('GET', '/runs' + (query === '' ? '' : `?${query}`));
+  return res.runs;
+}
+
+// --- M3: parked ---
+
+/** Work the guarded teardown preserved: a managed branch no session owns. */
+export interface ParkedEntry {
+  branch: string;
+  /** "" for a bare branch without a worktree. */
+  worktree_path: string;
+  dirty: boolean;
+  commits_ahead: number;
+  unpushed: number;
+}
+
+export async function listParked(repoID: string): Promise<ParkedEntry[]> {
+  const res = await request<{ parked: ParkedEntry[] }>(
+    'GET',
+    `/repos/${encodeURIComponent(repoID)}/parked`,
+  );
+  return res.parked;
+}
+
+/**
+ * UNGUARDED destruction: kills the session if any, force-removes the
+ * worktree, force-deletes the branch — dirty or not, merged or not. The UI
+ * gates this behind the typed-confirm dialog. Answers 204.
+ */
+export function discardParked(repoID: string, branch: string): Promise<void> {
+  return request<void>('POST', `/repos/${encodeURIComponent(repoID)}/parked/discard`, { branch });
+}
+
+// --- M3: spawn defaults from settings ---
+
+export interface SpawnDefaults {
+  model?: string;
+  effort?: string;
+}
+
+/**
+ * Pulls the two spawn-default keys out of a GET /settings payload, tolerating
+ * both a flat {key: value} object and a {settings: {key: value}} envelope —
+ * the settings surface is an M4 contract, M3 only peeks at it.
+ */
+export function extractSpawnDefaults(raw: unknown): SpawnDefaults {
+  if (typeof raw !== 'object' || raw === null) return {};
+  let map = raw as Record<string, unknown>;
+  const nested = map['settings'];
+  if (typeof nested === 'object' && nested !== null) map = nested as Record<string, unknown>;
+  const out: SpawnDefaults = {};
+  const model = map['spawn_model_default'];
+  if (typeof model === 'string' && model !== '') out.model = model;
+  const effort = map['spawn_effort_default'];
+  if (typeof effort === 'string' && effort !== '') out.effort = effort;
+  return out;
+}
+
+/** Best-effort: an absent or failing settings endpoint yields no defaults. */
+export async function getSpawnDefaults(): Promise<SpawnDefaults> {
+  try {
+    return extractSpawnDefaults(await request<unknown>('GET', '/settings'));
+  } catch {
+    return {};
+  }
+}

@@ -617,3 +617,261 @@ button.danger:hover {
   border: 1px dashed var(--border);
   border-radius: var(--radius-card);
 }
+
+/* Instances ------------------------------------------------------------------ */
+
+.instance-list {
+  list-style: none;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+.instance-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.instance-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.instance-title {
+  font-weight: 600;
+}
+
+.instance-branch {
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.instance-stop {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+.chip.connecting {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+
+.chip.idle {
+  background: var(--idle-bg);
+  color: var(--idle-text);
+}
+
+.pulse {
+  animation: pulse-fade 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse-fade {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+}
+
+button.stop-all {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+/* Start-instance form / collapsibles ------------------------------------------ */
+
+details.start-instance,
+details.parked {
+  margin-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.35rem;
+}
+
+details.start-instance summary,
+details.parked summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  font-weight: 550;
+  color: var(--accent);
+  list-style: none;
+}
+
+details.start-instance summary::before,
+details.parked summary::before {
+  content: '▸';
+  margin-right: 0.4rem;
+  transition: transform 0.15s ease;
+}
+
+details.start-instance[open] summary::before,
+details.parked[open] summary::before {
+  transform: rotate(90deg);
+}
+
+details.start-instance form {
+  padding: 0.35rem 0 0.2rem;
+}
+
+.field-row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.field-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Claude auth card ------------------------------------------------------------- */
+
+.auth-status-card .card-head button {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+.login-flow {
+  margin-top: 0.5rem;
+}
+
+.oauth-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Parked ----------------------------------------------------------------------- */
+
+details.parked summary {
+  color: var(--text);
+}
+
+.parked-count {
+  margin-left: 0.25rem;
+  font-weight: 650;
+}
+
+.parked-list {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+
+.parked-entry {
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.parked-entry:last-child {
+  border-bottom: none;
+}
+
+.parked-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.parked-branch {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.parked-path {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.parked-discard {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+.discard-confirm {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-control);
+  background: var(--err-bg);
+}
+
+.discard-warning {
+  margin: 0 0 0.75rem;
+  color: var(--err-text);
+}
+
+/* Runs ------------------------------------------------------------------------- */
+
+.runs-filter {
+  margin-bottom: 0;
+  min-width: 180px;
+}
+
+.run-times {
+  font-size: 0.82rem;
+}
+
+.run-failure {
+  margin: 0.55rem 0 0;
+  font-size: 0.85rem;
+  color: var(--err-text);
+  overflow-wrap: anywhere;
+}
+
+.chip.outcome-active {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.chip.outcome-success {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.chip.outcome-death,
+.chip.outcome-timeout {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+.chip.outcome-stopped {
+  background: var(--idle-bg);
+  color: var(--idle-text);
+}
+
+/* Toast -------------------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  z-index: 20;
+  background: var(--text);
+  color: var(--bg);
+  padding: 0.55rem 1rem;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow);
+  font-weight: 600;
+  max-width: min(90vw, 480px);
+  overflow-wrap: anywhere;
+}

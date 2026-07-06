@@ -3,18 +3,31 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiError,
   authState,
+  claudeAuthStatus,
+  claudeLoginCode,
+  claudeLoginStart,
   createCredential,
   createRepo,
   deleteCredential,
   deleteRepo,
+  discardParked,
   errorMessage,
+  extractSpawnDefaults,
+  getSpawnDefaults,
   listCredentials,
+  listInstances,
+  listParked,
+  listProviders,
   listRepos,
+  listRuns,
   login,
   logout,
   me,
   retryClone,
   setUnauthorizedHandler,
+  startInstance,
+  stopAll,
+  stopInstance,
   updateCredential,
   updateRepo,
 } from './api';
@@ -341,6 +354,189 @@ describe('repo endpoints', () => {
     await expect(retryClone('repo_1')).resolves.toBeUndefined();
     expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/clone/retry');
     expect(requestInit(mock).method).toBe('POST');
+  });
+});
+
+describe('provider endpoints', () => {
+  it('GET /providers unwraps the {providers} envelope', async () => {
+    const provider = {
+      id: 'claude-code',
+      models: [{ value: 'opus[1m]', label: 'Opus (1M)' }],
+      efforts: [{ value: 'max', label: 'max' }],
+    };
+    const mock = stubFetch(jsonResponse(200, { providers: [provider] }));
+
+    const result = await listProviders();
+
+    expect(result).toEqual([provider]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET auth status appends ?force=1 only when forcing (cache bypass)', async () => {
+    const status = {
+      logged_in: true,
+      email: 'x@y.z',
+      method: 'claude.ai',
+      checked_at: '2026-07-06T00:00:00.000Z',
+    };
+    let mock = stubFetch(jsonResponse(200, status));
+    await expect(claudeAuthStatus()).resolves.toEqual(status);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/status');
+
+    mock = stubFetch(jsonResponse(200, status));
+    await claudeAuthStatus(true);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/status?force=1');
+  });
+
+  it('POST login/start returns the oauth_url and surfaces the 409 already-logged-in message', async () => {
+    let mock = stubFetch(jsonResponse(200, { oauth_url: 'https://claude.com/cai/oauth/x' }));
+    await expect(claudeLoginStart()).resolves.toEqual({
+      oauth_url: 'https://claude.com/cai/oauth/x',
+    });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/login/start');
+    expect(requestInit(mock).method).toBe('POST');
+    expect(requestInit(mock).headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+
+    mock = stubFetch(jsonResponse(409, { error: 'already logged in' }));
+    const err = await claudeLoginStart().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe('already logged in');
+  });
+
+  it('POST login/code sends {code} and tolerates the empty 202 body', async () => {
+    const mock = stubFetch({
+      ok: true,
+      status: 202,
+      json: () => Promise.reject(new SyntaxError('empty body')),
+      text: () => Promise.resolve(''),
+    });
+
+    await expect(claudeLoginCode('aB3-_x#state=Zm9v-_')).resolves.toBeUndefined();
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/login/code');
+    expect(JSON.parse(requestInit(mock).body as string)).toEqual({ code: 'aB3-_x#state=Zm9v-_' });
+  });
+});
+
+describe('instance endpoints', () => {
+  it('POST /repos/{id}/instances sends only the given spawn fields', async () => {
+    const mock = stubFetch(jsonResponse(201, { id: 'run_1', outcome: 'active' }));
+
+    await startInstance('repo_1', { label: 'debug', model: 'opus[1m]', effort: 'max' });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/instances');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      label: 'debug',
+      model: 'opus[1m]',
+      effort: 'max',
+    });
+  });
+
+  it('POST /repos/{id}/instances surfaces the 409 cap message verbatim', async () => {
+    stubFetch(jsonResponse(409, { error: 'instance cap reached (6)' }));
+
+    const err = await startInstance('repo_1', {}).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe('instance cap reached (6)');
+  });
+
+  it('GET /instances unwraps the {instances} envelope', async () => {
+    const mock = stubFetch(jsonResponse(200, { instances: [{ id: 'run_1' }] }));
+
+    const result = await listInstances();
+
+    expect(result).toEqual([{ id: 'run_1' }]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/instances');
+  });
+
+  it('DELETE /instances/{session} keeps the ~ separator in the path and parses the outcome', async () => {
+    const mock = stubFetch(jsonResponse(200, { outcome: 'parked' }));
+
+    const result = await stopInstance('coding-lab~debug-20260608-1530');
+
+    expect(result).toEqual({ outcome: 'parked' });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/instances/coding-lab~debug-20260608-1530');
+    expect(requestInit(mock).method).toBe('DELETE');
+  });
+
+  it('POST /repos/{id}/stop-all parses the stopped count', async () => {
+    const mock = stubFetch(jsonResponse(200, { stopped: 3 }));
+
+    await expect(stopAll('repo_1')).resolves.toEqual({ stopped: 3 });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/stop-all');
+    expect(requestInit(mock).method).toBe('POST');
+  });
+
+  it('GET /runs builds the repo/limit query and unwraps {runs}', async () => {
+    let mock = stubFetch(jsonResponse(200, { runs: [] }));
+    await listRuns();
+    expect(fetchCall(mock)[0]).toBe('/api/v1/runs');
+
+    mock = stubFetch(jsonResponse(200, { runs: [{ id: 'run_1' }] }));
+    const result = await listRuns({ repo: 'repo_1', limit: 50 });
+    expect(result).toEqual([{ id: 'run_1' }]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/runs?repo=repo_1&limit=50');
+  });
+});
+
+describe('parked endpoints', () => {
+  it('GET /repos/{id}/parked unwraps the {parked} envelope', async () => {
+    const entry = {
+      branch: 'lab/foo-20260608-1530',
+      worktree_path: '',
+      dirty: false,
+      commits_ahead: 2,
+      unpushed: 0,
+    };
+    const mock = stubFetch(jsonResponse(200, { parked: [entry] }));
+
+    const result = await listParked('repo_1');
+
+    expect(result).toEqual([entry]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/parked');
+  });
+
+  it('POST /repos/{id}/parked/discard sends {branch} and tolerates 204', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    await expect(discardParked('repo_1', 'afk/7')).resolves.toBeUndefined();
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/parked/discard');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ branch: 'afk/7' });
+  });
+});
+
+describe('spawn defaults from settings', () => {
+  it('extracts the two spawn keys from a flat settings object', () => {
+    expect(
+      extractSpawnDefaults({ spawn_model_default: 'opus[1m]', spawn_effort_default: 'max' }),
+    ).toEqual({ model: 'opus[1m]', effort: 'max' });
+  });
+
+  it('extracts from a {settings: {...}} envelope', () => {
+    expect(extractSpawnDefaults({ settings: { spawn_model_default: 'sonnet' } })).toEqual({
+      model: 'sonnet',
+    });
+  });
+
+  it('ignores missing, empty and non-string values', () => {
+    expect(extractSpawnDefaults({})).toEqual({});
+    expect(extractSpawnDefaults(null)).toEqual({});
+    expect(extractSpawnDefaults('nope')).toEqual({});
+    expect(extractSpawnDefaults({ spawn_model_default: '', spawn_effort_default: 7 })).toEqual({});
+  });
+
+  it('getSpawnDefaults yields no defaults when the endpoint is absent', async () => {
+    stubFetch(jsonResponse(404, { error: 'not found' }));
+
+    await expect(getSpawnDefaults()).resolves.toEqual({});
   });
 });
 
