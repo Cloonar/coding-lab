@@ -24,6 +24,14 @@ import (
 // check both.
 var ErrNotFound = errors.New("tracker: not found")
 
+// ErrDuplicateOpenPull marks a CreatePull whose head branch already carries
+// an OPEN pull/change request. The builtin tracker refuses the duplicate for
+// forge parity -- Forgejo answers 409 "pull request already exists" for the
+// same retry -- so an agent whose first create timed out client-side gets a
+// clean conflict instead of a second identical CR. The wrapping error names
+// the existing number.
+var ErrDuplicateOpenPull = errors.New("an open pull request for this head branch already exists")
+
 // Issue/PR state vocabulary. A merged PR is distinct from a closed-unmerged
 // one (v0 pin): the reaper treats open|merged as a done-signal but a
 // closed-unmerged head-matching PR as "no PR", so the run fails on

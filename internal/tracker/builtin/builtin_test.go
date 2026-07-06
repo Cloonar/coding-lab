@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,22 +260,116 @@ func TestBuiltin_CloseIssue(t *testing.T) {
 	}
 }
 
-func TestBuiltin_PullsEmpty_CreatePullUnavailable(t *testing.T) {
+// TestBuiltin_Pulls_stateMappingAndPRPresent pins the builtin done-signal
+// (M6): Pulls returns every CR across ALL states mapped onto the tracker's PR
+// vocabulary, and tracker.PRPresent over that result treats open|merged as
+// done and closed-unmerged (or absent) as no PR — identical to a forge repo.
+func TestBuiltin_Pulls_stateMappingAndPRPresent(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 	repo := seedRepo(t, s)
 	tr := newTracker(s, repo.ID)
 
+	// #1 stays open, #2 is merged, #3 is closed-unmerged.
+	if _, err := s.CreateCR(ctx, repo.ID, "open one", "", "afk/1", "main", nil, fixedNow); err != nil {
+		t.Fatalf("CreateCR #1: %v", err)
+	}
+	if _, err := s.CreateCR(ctx, repo.ID, "merged one", "", "afk/2", "main", nil, fixedNow); err != nil {
+		t.Fatalf("CreateCR #2: %v", err)
+	}
+	if _, err := s.CreateCR(ctx, repo.ID, "closed one", "", "afk/3", "main", nil, fixedNow); err != nil {
+		t.Fatalf("CreateCR #3: %v", err)
+	}
+	if _, err := s.MergeCR(ctx, repo.ID, 2, "abc1234", fixedNow); err != nil {
+		t.Fatalf("MergeCR #2: %v", err)
+	}
+	if _, err := s.CloseCR(ctx, repo.ID, 3, fixedNow); err != nil {
+		t.Fatalf("CloseCR #3: %v", err)
+	}
+
 	pulls, err := tr.Pulls(ctx)
 	if err != nil {
 		t.Fatalf("Pulls: %v", err)
 	}
-	if pulls == nil || len(pulls) != 0 {
-		t.Errorf("Pulls = %v, want empty non-nil slice (M4: CRs land M6)", pulls)
+	if len(pulls) != 3 {
+		t.Fatalf("Pulls = %d refs, want 3 (all states)", len(pulls))
+	}
+	byNumber := map[int]tracker.PullRef{}
+	for _, p := range pulls {
+		byNumber[p.Number] = p
+	}
+	wantStates := map[int]string{1: tracker.PullOpen, 2: tracker.PullMerged, 3: tracker.PullClosed}
+	for n, wantState := range wantStates {
+		p, ok := byNumber[n]
+		if !ok {
+			t.Fatalf("Pulls missing CR #%d", n)
+		}
+		if p.State != wantState {
+			t.Errorf("CR #%d state = %q, want %q", n, p.State, wantState)
+		}
+		if wantHead := "afk/" + strconv.Itoa(n); p.HeadBranch != wantHead {
+			t.Errorf("CR #%d head = %q, want %q", n, p.HeadBranch, wantHead)
+		}
+		if wantURL := "/repos/" + repo.ID + "/crs/" + strconv.Itoa(n); p.URL != wantURL {
+			t.Errorf("CR #%d url = %q, want %q", n, p.URL, wantURL)
+		}
 	}
 
-	if _, err := tr.CreatePull(ctx, "afk/1", "main", "t", "b"); !errors.Is(err, ErrChangeRequestsUnavailable) {
-		t.Errorf("CreatePull err = %v, want ErrChangeRequestsUnavailable", err)
+	// PRPresent interplay: open and merged CRs are the done-signal, a
+	// closed-unmerged CR (or no CR at all) is not.
+	for head, want := range map[string]bool{
+		"afk/1": true, "afk/2": true, "afk/3": false, "afk/9": false,
+	} {
+		if got := tracker.PRPresent(pulls, head); got != want {
+			t.Errorf("PRPresent(%q) = %v, want %v", head, got, want)
+		}
+	}
+}
+
+// TestBuiltin_CreatePull pins the builtin PR create (M6): a CR is persisted
+// with head/base/title/body, its closes parsed from the body with the shared
+// grammar, and the returned PullRef is the open CR.
+func TestBuiltin_CreatePull(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	body := "Does the thing.\n\nFixes #2\nCloses #1\ncloses #2 (dup) — but discloses #9 is not a directive."
+	pr, err := tr.CreatePull(ctx, "afk/1", "main", "do the thing", body)
+	if err != nil {
+		t.Fatalf("CreatePull: %v", err)
+	}
+	if pr.Number != 1 || pr.HeadBranch != "afk/1" || pr.State != tracker.PullOpen {
+		t.Errorf("PullRef = %+v, want #1 afk/1 open", pr)
+	}
+	if wantURL := "/repos/" + repo.ID + "/crs/1"; pr.URL != wantURL {
+		t.Errorf("PullRef url = %q, want %q", pr.URL, wantURL)
+	}
+
+	cr, err := s.CRByRepoNumber(ctx, repo.ID, pr.Number)
+	if err != nil {
+		t.Fatalf("CRByRepoNumber: %v", err)
+	}
+	if cr.Title != "do the thing" || cr.Body != body || cr.HeadBranch != "afk/1" || cr.BaseBranch != "main" {
+		t.Errorf("stored CR = %+v", cr)
+	}
+	if cr.State != store.CRStateOpen {
+		t.Errorf("stored CR state = %q, want open", cr.State)
+	}
+	// Closes parsed from the body: deduplicated, sorted, boundary-aware
+	// ("discloses #9" is no directive).
+	if len(cr.Closes) != 2 || cr.Closes[0] != 1 || cr.Closes[1] != 2 {
+		t.Errorf("stored CR closes = %v, want [1 2]", cr.Closes)
+	}
+
+	// The new CR is immediately the run's done-signal.
+	pulls, err := tr.Pulls(ctx)
+	if err != nil {
+		t.Fatalf("Pulls: %v", err)
+	}
+	if !tracker.PRPresent(pulls, "afk/1") {
+		t.Errorf("PRPresent(afk/1) = false after CreatePull, want true")
 	}
 }
 
@@ -284,4 +380,42 @@ func contains(xs []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Regression (review): a duplicate CreatePull on a head that already carries
+// an OPEN CR is refused with tracker.ErrDuplicateOpenPull naming the existing
+// number (forge parity — Forgejo 409s the same agent retry). Once the CR
+// leaves the open state, the head is free for a new CR.
+func TestBuiltin_CreatePullRefusesDuplicateOpenHead(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	first, err := tr.CreatePull(ctx, "afk/3", "main", "first", "Closes #3")
+	if err != nil {
+		t.Fatalf("first CreatePull: %v", err)
+	}
+	_, err = tr.CreatePull(ctx, "afk/3", "main", "retry", "Closes #3")
+	if !errors.Is(err, tracker.ErrDuplicateOpenPull) {
+		t.Fatalf("duplicate CreatePull err = %v, want ErrDuplicateOpenPull", err)
+	}
+	if !strings.Contains(err.Error(), "#1") {
+		t.Errorf("duplicate error does not name the existing CR: %v", err)
+	}
+	// Only one CR exists.
+	crs, err := s.CRsByRepo(ctx, repo.ID, store.CRStateAll)
+	if err != nil {
+		t.Fatalf("CRsByRepo: %v", err)
+	}
+	if len(crs) != 1 {
+		t.Fatalf("CR count after refused duplicate = %d, want 1", len(crs))
+	}
+	// A closed CR releases the head.
+	if _, err := s.CloseCR(ctx, repo.ID, first.Number, time.Now()); err != nil {
+		t.Fatalf("CloseCR: %v", err)
+	}
+	if _, err := tr.CreatePull(ctx, "afk/3", "main", "after close", "Closes #3"); err != nil {
+		t.Errorf("CreatePull after close: %v", err)
+	}
 }

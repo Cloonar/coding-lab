@@ -2,8 +2,8 @@
 // seam (design §4d, D11). It answers the same vocabulary as the Forgejo REST
 // client from lab's own database, so a repo with tracker_binding=builtin gets
 // the identical issue/comment/PR contract without any forge. Change requests
-// stand in for pull requests, but they land in M6 — in M4 Pulls is empty and
-// CreatePull is not yet available.
+// (M6) stand in for pull requests: Pulls lists them across all states — the
+// reaper's done-signal for builtin repos — and CreatePull opens one.
 package builtin
 
 import (
@@ -15,11 +15,6 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
-
-// ErrChangeRequestsUnavailable is returned by CreatePull in M4: the built-in
-// change-request surface (the PR analogue) lands in M6. It is a clear, typed
-// signal rather than a silent stub so a premature caller fails loudly.
-var ErrChangeRequestsUnavailable = errors.New("builtin tracker: change requests are not available until M6")
 
 // Tracker is a store-backed tracker.Tracker bound to one repo. It carries the
 // comment-author identity CreateComment writes with: New defaults to the
@@ -123,15 +118,45 @@ func (t *Tracker) CreateComment(ctx context.Context, number int, body string) er
 	return nil
 }
 
-// Pulls is empty in M4: built-in change requests (the PR analogue) land in M6.
-// The reaper's done-signal over these arrives with them.
+// Pulls lists ALL of the repo's change requests, across all three states —
+// THE reaper done-signal for builtin repos: a CR's state maps 1:1 onto the
+// tracker's PR vocabulary (open|merged|closed are the same strings), so
+// tracker.PRPresent treats an open or merged CR whose head matches a run's
+// branch as done, and a closed-unmerged one as "no PR", exactly like a forge.
 func (t *Tracker) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
-	return []tracker.PullRef{}, nil
+	crs, err := t.store.CRsByRepo(ctx, t.repoID, store.CRStateAll)
+	if err != nil {
+		return nil, fmt.Errorf("builtin pulls: %w", err)
+	}
+	out := make([]tracker.PullRef, 0, len(crs))
+	for _, cr := range crs {
+		out = append(out, toPullRef(cr))
+	}
+	return out, nil
 }
 
-// CreatePull is not available until M6 (built-in change requests).
+// CreatePull opens a change request from head onto base — the builtin answer
+// to a forge PR create (the agent API's POST /prs routes here for
+// builtin-bound repos). The issues the body closes are parsed with the shared
+// closing-keyword grammar (tracker.ParseCloses) and persisted as cr_closes
+// rows, so the operator's later merge knows which built-in issues to close.
 func (t *Tracker) CreatePull(ctx context.Context, head, base, title, body string) (tracker.PullRef, error) {
-	return tracker.PullRef{}, ErrChangeRequestsUnavailable
+	// Forge parity: one OPEN CR per head branch. An agent whose first create
+	// timed out client-side retries the identical call; without this guard the
+	// retry files a duplicate CR (Forgejo answers 409 for the same sequence).
+	// Check-then-insert is race-adequate here: builtin CRs are created only
+	// through this path and the agent API serializes per run.
+	if existing, err := t.store.OpenCRByHead(ctx, t.repoID, head); err == nil {
+		return toPullRef(existing), fmt.Errorf("builtin create pull: change request #%d: %w",
+			existing.Number, tracker.ErrDuplicateOpenPull)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return tracker.PullRef{}, fmt.Errorf("builtin create pull: duplicate check: %w", err)
+	}
+	cr, err := t.store.CreateCR(ctx, t.repoID, title, body, head, base, tracker.ParseCloses(body), t.now())
+	if err != nil {
+		return tracker.PullRef{}, fmt.Errorf("builtin create pull: %w", err)
+	}
+	return toPullRef(cr), nil
 }
 
 // CloseIssue transitions an issue to closed (stamping closed_at).
@@ -141,6 +166,19 @@ func (t *Tracker) CloseIssue(ctx context.Context, number int) error {
 		return fmt.Errorf("builtin close issue %d: %w", number, err)
 	}
 	return nil
+}
+
+// toPullRef reduces a store CR to the tracker's PullRef vocabulary. The URL
+// is the lab-relative SPA route of the CR's detail view (there is no forge
+// web URL for a lab-internal CR); the state strings are shared, so State
+// carries over verbatim.
+func toPullRef(cr store.CR) tracker.PullRef {
+	return tracker.PullRef{
+		Number:     cr.Number,
+		HeadBranch: cr.HeadBranch,
+		State:      cr.State,
+		URL:        fmt.Sprintf("/repos/%s/crs/%d", cr.RepoID, cr.Number),
+	}
 }
 
 // toTrackerIssue maps a store issue onto the tracker vocabulary, leaving
