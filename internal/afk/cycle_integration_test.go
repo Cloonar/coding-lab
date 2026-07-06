@@ -65,6 +65,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
@@ -928,8 +929,9 @@ func TestAFKCycleIntegration(t *testing.T) {
 // (the "someone else pushed" actor of the merge-commit variant), and the lab
 // bare reference clone. The repo row carries the git author identity the merge
 // commit must be authored with (D15 measure 5); CreateRepo seeds the triage
-// labels, among them tracker.ReadyLabel.
-func (w *cycleWorld) addBuiltinRepo(name, script string) (repo store.Repo, origin, work string) {
+// labels, among them tracker.ReadyLabel. mut (optional) adjusts the row before
+// CreateRepo — the M7 incogni variant flips the flag and the branch patterns.
+func (w *cycleWorld) addBuiltinRepo(name, script string, mut func(*store.Repo)) (repo store.Repo, origin, work string) {
 	w.t.Helper()
 	work = makeOrigin(w.t, w.home) // c0 on main
 	origin = filepath.Join(w.t.TempDir(), name+"-origin.git")
@@ -945,7 +947,7 @@ func (w *cycleWorld) addBuiltinRepo(name, script string) (repo store.Repo, origi
 		w.t.Fatalf("CloneBare: %v", err)
 	}
 	author, email := "Cycle Human", "human@lab.test"
-	repo, err := w.st.CreateRepo(w.ctx, store.Repo{
+	r := store.Repo{
 		ID: repoID, Name: name,
 		RemoteURL:      "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
@@ -953,7 +955,11 @@ func (w *cycleWorld) addBuiltinRepo(name, script string) (repo store.Repo, origi
 		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		GitAuthorName: &author, GitAuthorEmail: &email,
 		CloneStatus: store.CloneStatusReady, CreatedAt: clockTime,
-	})
+	}
+	if mut != nil {
+		mut(&r)
+	}
+	repo, err := w.st.CreateRepo(w.ctx, r)
 	if err != nil {
 		w.t.Fatalf("CreateRepo: %v", err)
 	}
@@ -1174,7 +1180,7 @@ func TestAFKCycleBuiltinIntegration(t *testing.T) {
 
 	out1 := t.TempDir()
 	script1 := writeCycleScript(t, "claude-builtin-1.sh", successScript(out1, w.labctlDir, "work-1.txt"))
-	repo, origin, work := w.addBuiltinRepo("bolt", script1)
+	repo, origin, work := w.addBuiltinRepo("bolt", script1, nil)
 	w.readyIssue(repo, "Wire the flux capacitor", "make it hum")
 	crBase := "/api/v1/repos/" + repo.ID + "/crs"
 
@@ -1278,6 +1284,281 @@ func TestAFKCycleBuiltinIntegration(t *testing.T) {
 		w.recon.RuntimeSweep(w.ctx)
 		if cycleBranchExists(w.env, w.bare(repo), "afk/2") {
 			t.Error("runtime sweep kept the merged branch afk/2")
+		}
+	})
+}
+
+// --- the M7 incogni variant ----------------------------------------------------
+
+// incogniSuccessScript is the fake claude of the incogni happy path: capture
+// the FULL seed prompt and the worktree's git status at spawn and again after
+// the clean commit (both must be empty — every lab-seeded file is excluded,
+// D15 §9 measure 6), commit with a NEUTRAL message, push through the bare
+// clone's pre-push guard, then open the PR with a POISONED body — the
+// attribution stripping (measure 3) is the agent API's job, not the script's.
+func incogniSuccessScript(out, bin string) string {
+	return `#!/bin/sh
+OUT=` + shq(out) + `
+BIN=` + shq(bin) + `
+printf '%s' "$1" > "$OUT/seed.txt"
+git status --porcelain > "$OUT/status-spawn.txt"
+PATH="$BIN:$PATH"; export PATH
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+(
+  set -ex
+  labctl issue view > "$OUT/issue.txt"
+  printf 'done\n' > work.txt
+  git add work.txt
+  git commit -q -m 'feat: neutral work'
+  git status --porcelain > "$OUT/status-prepush.txt"
+  git push -q origin HEAD
+  labctl pr create --title 'neutral work' --body 'work is done
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude Opus <noreply@anthropic.com>' > "$OUT/pr.txt"
+) >> "$OUT/log.txt" 2>&1
+printf '%s\n' "$?" > "$OUT/status"
+exec sleep 600
+`
+}
+
+// incogniPoisonedScript is the fake claude of the guard variant: it commits a
+// Co-Authored-By: Claude trailer and tries to push — the pre-push hook in the
+// bare reference repo (measure 7) must reject it. The push result and output
+// are captured for the test; no PR ever exists, so the run times out.
+func incogniPoisonedScript(out string) string {
+	return `#!/bin/sh
+OUT=` + shq(out) + `
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+(
+  set -ex
+  printf 'sneaky\n' > sneak.txt
+  git add sneak.txt
+  git commit -q -m 'feat: sneak work' -m 'Co-Authored-By: Claude Opus <noreply@anthropic.com>'
+  git rev-parse HEAD > "$OUT/head.txt"
+) >> "$OUT/log.txt" 2>&1
+if git push origin HEAD > "$OUT/push-out.txt" 2>&1; then
+  printf 'pushed\n' > "$OUT/push-result.txt"
+else
+  printf 'rejected\n' > "$OUT/push-result.txt"
+fi
+exec sleep 600
+`
+}
+
+// TestAFKCycleIncogniBuiltinIntegration is the M7 acceptance, local form: the
+// full AFK circle on an INCOGNI builtin repo, all seven D15 §9 measures in one
+// flow over the same real seams as the other cycles (engine, store, tmux,
+// labctl-driven fake claude, agent API over httptest, real git + the real
+// pre-push guard in the bare reference clone):
+//
+//  1. clean cycle: neutral claim branch issue-1 (the repo's pattern — NEVER
+//     afk/1), the incogni seed prompt sentence, a spawn-clean and pre-push-
+//     clean worktree (seeded skills + CLAUDE.local.md all excluded), a clean
+//     push THROUGH the installed guard, a poisoned PR body sanitized
+//     server-side (the CR row carries zero markers), reap success — then
+//     remote-side proof: neutral branch name, marker-free commit messages,
+//     the repo's configured REAL author identity.
+//  2. guard variant: a run that commits a Co-Authored-By: Claude trailer gets
+//     its push REJECTED by the hook (the failure text names the offending
+//     commit), nothing reaches origin, and the PR-less run reaps as timeout.
+func TestAFKCycleIncogniBuiltinIntegration(t *testing.T) {
+	w := newCycleWorld(t)
+
+	out1 := t.TempDir()
+	script1 := writeCycleScript(t, "claude-incogni-1.sh", incogniSuccessScript(out1, w.labctlDir))
+	incBudget := 1
+	neutralName, neutralEmail := "Neutral Human", "neutral@lab.test"
+	repo, origin, _ := w.addBuiltinRepo("inc", script1, func(r *store.Repo) {
+		r.Incogni = true
+		// The incogni create-time defaults (D15 measure 4, reposvc.Add).
+		r.AFKBranchPattern = "issue-<N>"
+		r.ManualBranchPrefix = "wip/"
+		r.GitAuthorName, r.GitAuthorEmail = &neutralName, &neutralEmail
+		r.BudgetMinutes = &incBudget // phase 2's timeout is one clock tick away
+	})
+	// The fixture mirrors reposvc's clone-completion install for incogni
+	// repos: the guard lives in the BARE reference clone, shared by every
+	// worktree via the common git dir (D15 measure 7).
+	if err := seeder.InstallPrePushHook(w.bare(repo)); err != nil {
+		t.Fatalf("InstallPrePushHook: %v", err)
+	}
+	w.readyIssue(repo, "Wire the flux capacitor", "make it hum")
+
+	ok := t.Run("clean cycle sanitizes and stays neutral", func(t *testing.T) {
+		// The M7 gate's hook-file assertion: installed in the bare hooks dir
+		// and executable — the clean push below then proves it non-obstructive.
+		hookPath := seeder.PrePushHookPath(w.bare(repo))
+		st, err := os.Stat(hookPath)
+		if err != nil {
+			t.Fatalf("pre-push hook missing from the bare hooks dir: %v", err)
+		}
+		if st.Mode()&0o111 == 0 {
+			t.Fatalf("pre-push hook %s is not executable (mode %v)", hookPath, st.Mode())
+		}
+		if !seeder.PrePushHookInstalled(w.bare(repo)) {
+			t.Fatal("bare clone does not carry lab's incogni guard marker")
+		}
+
+		run, err := w.svc.StartManualAFK(w.ctx, repo.ID)
+		if err != nil {
+			t.Fatalf("StartManualAFK: %v", err)
+		}
+		// The claim branch is the repo's PATTERN rendered — never a literal
+		// afk/ prefix on an incogni repo (D15 measure 4).
+		if run.Branch != "issue-1" || run.SessionName != "inc~afk-1" {
+			t.Fatalf("run identity = %s/%s, want issue-1/inc~afk-1", run.Branch, run.SessionName)
+		}
+		if !cycleBranchExists(w.env, w.bare(repo), "issue-1") {
+			t.Fatal("claim branch issue-1 missing from the bare clone")
+		}
+		if cycleBranchExists(w.env, w.bare(repo), "afk/1") {
+			t.Fatal("literal afk/1 branch appeared on an incogni repo")
+		}
+		// The launch passed the incogni flag to the provider's seeding
+		// (measure 1's wiring; the fake provider records SeedOpts).
+		if opts := w.prov.SeededOpts(); len(opts) == 0 || !opts[len(opts)-1].Incogni {
+			t.Errorf("provider SeedOpts = %+v, want Incogni=true on the launch", opts)
+		}
+
+		status := waitForCycleFile(t, filepath.Join(out1, "status"), filepath.Join(out1, "log.txt"), 90*time.Second)
+		if strings.TrimSpace(status) != "0" {
+			log, _ := os.ReadFile(filepath.Join(out1, "log.txt"))
+			t.Fatalf("fake claude exited %s; log:\n%s", strings.TrimSpace(status), log)
+		}
+
+		// The FULL seed prompt is the incogni rendering (measure 2): branch
+		// issue-1 and the no-attribution sentence on the commit step.
+		seed, _ := os.ReadFile(filepath.Join(out1, "seed.txt"))
+		if got, want := string(seed), afk.SeedPrompt(1, "issue-1", true); got != want {
+			t.Errorf("seed prompt = %q, want %q", got, want)
+		}
+		if !strings.Contains(string(seed), "No AI attribution, no Co-Authored-By, no generated-with footers anywhere.") {
+			t.Error("seed prompt lacks the incogni sentence")
+		}
+		// The seeded worktree was clean at spawn AND pre-push: skills bundle,
+		// CLAUDE.local.md and .claude/ are all excluded (measure 6).
+		for _, f := range []string{"status-spawn.txt", "status-prepush.txt"} {
+			if b, err := os.ReadFile(filepath.Join(out1, f)); err != nil || len(strings.TrimSpace(string(b))) != 0 {
+				t.Errorf("worktree git status (%s) = %q, err %v; want empty", f, b, err)
+			}
+		}
+		// The lab seeding itself landed (D13 — every spawn): the skills bundle
+		// and the generated CLAUDE.local.md are in the (still live) worktree.
+		if _, err := os.Stat(filepath.Join(run.WorktreePath, "CLAUDE.local.md")); err != nil {
+			t.Errorf("CLAUDE.local.md not seeded: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(run.WorktreePath, ".claude", "skills", "tdd", "SKILL.md")); err != nil {
+			t.Errorf("skills bundle not seeded: %v", err)
+		}
+
+		// The CR row: the poisoned body was sanitized SERVER-SIDE (measure 3)
+		// — the injected Closes #1 survived, every marker line is gone.
+		cr, err := w.st.CRByRepoNumber(w.ctx, repo.ID, 1)
+		if err != nil {
+			t.Fatalf("CRByRepoNumber(1): %v", err)
+		}
+		if cr.State != store.CRStateOpen || cr.HeadBranch != "issue-1" || cr.BaseBranch != "main" {
+			t.Fatalf("CR = %s %s→%s, want open issue-1→main", cr.State, cr.HeadBranch, cr.BaseBranch)
+		}
+		if len(cr.Closes) != 1 || cr.Closes[0] != 1 {
+			t.Fatalf("CR closes = %v, want [1]", cr.Closes)
+		}
+		if cr.Body != "work is done\n\nCloses #1" {
+			t.Errorf("CR body = %q, want the sanitized body with the injected Closes #1", cr.Body)
+		}
+		for _, marker := range []string{"claude", "generated with", "co-authored-by"} {
+			if strings.Contains(strings.ToLower(cr.Body), marker) {
+				t.Errorf("CR body still carries %q: %q", marker, cr.Body)
+			}
+		}
+
+		// Remote-side proof on the origin fixture: the branch name is neutral,
+		// the pushed commit messages carry zero markers, and the author is the
+		// repo's configured REAL identity (measure 5).
+		if !cycleBranchExists(w.env, origin, "issue-1") {
+			t.Fatal("origin lacks the pushed branch issue-1")
+		}
+		if cycleBranchExists(w.env, origin, "afk/1") {
+			t.Fatal("origin grew a literal afk/1 branch")
+		}
+		msgs := gitCmd(t, w.home, origin, "log", "--format=%B", "main..issue-1")
+		for _, marker := range []string{"claude", "generated with", "co-authored-by"} {
+			if strings.Contains(strings.ToLower(msgs), marker) {
+				t.Errorf("pushed commit messages carry %q:\n%s", marker, msgs)
+			}
+		}
+		if id := gitCmd(t, w.home, origin, "log", "-1", "--format=%an <%ae>", "issue-1"); id != "Neutral Human <neutral@lab.test>" {
+			t.Errorf("pushed commit author = %q, want the repo's configured identity", id)
+		}
+
+		// Reap: the open CR is the done-signal → success; teardown keeps the
+		// unmerged claim branch.
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		got := w.run(repo, run.ID)
+		if got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("outcome = %s, want success", got.Outcome)
+		}
+		if w.alive("inc~afk-1") {
+			t.Error("session still live after the success reap")
+		}
+		if !cycleBranchExists(w.env, w.bare(repo), "issue-1") {
+			t.Error("unmerged claim branch issue-1 was deleted by the success teardown")
+		}
+	})
+	if !ok {
+		t.Fatal("clean incogni cycle failed; skipping the guard variant")
+	}
+
+	// Phase 2 world: a second ready issue (issue-1's surviving claim branch
+	// keeps #1 out of selection) and a fake claude that commits attribution.
+	out2 := t.TempDir()
+	script2 := writeCycleScript(t, "claude-incogni-2.sh", incogniPoisonedScript(out2))
+	w.prov.setScript(repo.Name, script2)
+	w.readyIssue(repo, "Polish the flux capacitor", "make it shine")
+
+	t.Run("pre-push guard rejects attribution", func(t *testing.T) {
+		run, err := w.svc.StartManualAFK(w.ctx, repo.ID)
+		if err != nil {
+			t.Fatalf("StartManualAFK: %v", err)
+		}
+		if run.Branch != "issue-2" || run.SessionName != "inc~afk-2" {
+			t.Fatalf("run identity = %s/%s, want issue-2/inc~afk-2", run.Branch, run.SessionName)
+		}
+
+		// The push must come back REJECTED by lab's guard, naming the commit.
+		result := waitForCycleFile(t, filepath.Join(out2, "push-result.txt"), filepath.Join(out2, "log.txt"), 90*time.Second)
+		if strings.TrimSpace(result) != "rejected" {
+			t.Fatalf("push result = %q, want rejected", strings.TrimSpace(result))
+		}
+		pushOut, _ := os.ReadFile(filepath.Join(out2, "push-out.txt"))
+		if !strings.Contains(string(pushOut), "lab incogni guard: commit") ||
+			!strings.Contains(string(pushOut), "carries AI attribution") {
+			t.Errorf("push failure text lacks the guard's message:\n%s", pushOut)
+		}
+		sha, _ := os.ReadFile(filepath.Join(out2, "head.txt"))
+		if s := strings.TrimSpace(string(sha)); s == "" || !strings.Contains(string(pushOut), s) {
+			t.Errorf("push failure text does not name the offending commit %q:\n%s", s, pushOut)
+		}
+		// Nothing reached the remote.
+		if cycleBranchExists(w.env, origin, "issue-2") {
+			t.Fatal("poisoned branch issue-2 reached origin despite the guard")
+		}
+
+		// No PR can exist → the run times out at its budget deadline and the
+		// unpushed claim branch survives as the parked claim.
+		w.clock.Advance(time.Duration(incBudget) * time.Minute)
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		got := w.run(repo, run.ID)
+		if got.Outcome != store.RunOutcomeTimeout {
+			t.Fatalf("outcome = %s, want timeout (push rejected → no done-signal)", got.Outcome)
+		}
+		if f := w.failures(repo); f != 1 {
+			t.Errorf("consecutive_failures = %d, want 1 after the timeout", f)
+		}
+		if !cycleBranchExists(w.env, w.bare(repo), "issue-2") {
+			t.Error("unmerged claim branch issue-2 was deleted by the timeout teardown")
 		}
 	})
 }
