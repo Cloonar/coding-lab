@@ -34,6 +34,12 @@ type Config struct {
 	GitBin     string
 	PrlimitBin string
 
+	// ClaudeConfig is claude's global config file (~/.claude.json), the
+	// target of folder-trust seeding (port-spec claude-integration §2.10).
+	// Empty only when HOME is unset and neither flag nor env supplied it;
+	// the provider wiring refuses an empty path.
+	ClaudeConfig string
+
 	MaxInstances  int // seeds the max_instances settings row on first start
 	SessionNofile int // RLIMIT_NOFILE for spawned sessions; 0 disables
 
@@ -46,7 +52,8 @@ type Config struct {
 
 // Parse resolves args (flags without the program name) and environment into
 // a Config. Env overrides defaults, flags override env. Recognized env vars:
-// LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_BASE_URL.
+// LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_CLAUDE_CONFIG,
+// LAB_BASE_URL.
 func Parse(args []string, getenv func(string) string) (Config, error) {
 	fs := flag.NewFlagSet("lab", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -57,10 +64,11 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 		db            = fs.String("db", "", "database DSN: sqlite:<path> or postgres://… (default sqlite:<state-dir>/lab.db; env LAB_DB)")
 		masterKeyFile = fs.String("master-key-file", "", "vault master key file (default <state-dir>/master.key; env LAB_MASTER_KEY_FILE)")
 
-		claudeBin  = fs.String("claude", "claude", "claude binary (PATH lookup by default)")
-		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
-		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
-		prlimitBin = fs.String("prlimit", "prlimit", "prlimit binary (PATH lookup by default)")
+		claudeBin    = fs.String("claude", "claude", "claude binary (PATH lookup by default)")
+		claudeConfig = fs.String("claude-config", "", "claude's global config file (default ~/.claude.json; env LAB_CLAUDE_CONFIG)")
+		tmuxBin      = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
+		gitBin       = fs.String("git", "git", "git binary (PATH lookup by default)")
+		prlimitBin   = fs.String("prlimit", "prlimit", "prlimit binary (PATH lookup by default)")
 
 		maxInstances  = fs.Int("max-instances", DefaultMaxInstances, "global live-instance cap; seeds the settings row on first start")
 		sessionNofile = fs.Int("session-nofile", DefaultSessionNofile, "RLIMIT_NOFILE (soft+hard) for spawned sessions; 0 disables")
@@ -117,6 +125,16 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("--db must not be empty")
 	}
 	cfg.MasterKeyFile = pick("master-key-file", *masterKeyFile, "LAB_MASTER_KEY_FILE", filepath.Join(sd, "master.key"))
+
+	// ~/.claude.json is tied to the service user's HOME (it is claude's own
+	// file), not to --state-dir; with no HOME and no explicit value it stays
+	// empty rather than guessing.
+	defaultClaudeConfig := ""
+	if home := getenv("HOME"); home != "" {
+		defaultClaudeConfig = filepath.Join(home, ".claude.json")
+	}
+	cfg.ClaudeConfig = pick("claude-config", *claudeConfig, "LAB_CLAUDE_CONFIG", defaultClaudeConfig)
+
 	cfg.BaseURL = pick("base-url", *baseURL, "LAB_BASE_URL", "")
 
 	if cfg.BaseURL != "" {
@@ -130,6 +148,7 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	}
 
 	cfg.ClaudeBin = *claudeBin
+
 	cfg.TmuxBin = *tmuxBin
 	cfg.GitBin = *gitBin
 	cfg.PrlimitBin = *prlimitBin

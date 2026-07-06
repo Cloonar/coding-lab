@@ -23,6 +23,7 @@ func TestParse(t *testing.T) {
 		DB:              "sqlite:/home/u/.local/state/lab/lab.db",
 		MasterKeyFile:   "/home/u/.local/state/lab/master.key",
 		ClaudeBin:       "claude",
+		ClaudeConfig:    "/home/u/.claude.json",
 		TmuxBin:         "tmux",
 		GitBin:          "git",
 		PrlimitBin:      "prlimit",
@@ -191,7 +192,19 @@ func TestParse(t *testing.T) {
 				c.StateDir = "/srv/lab"
 				c.DB = "sqlite:/srv/lab/lab.db"
 				c.MasterKeyFile = "/srv/lab/master.key"
+				c.ClaudeConfig = "" // no HOME → nothing to derive it from
 			}),
+		},
+		{
+			name: "claude config env and flag precedence",
+			args: []string{"--claude-config", "/etc/lab/claude.json"},
+			env:  map[string]string{"LAB_CLAUDE_CONFIG": "/elsewhere/claude.json"},
+			want: with(func(c *Config) { c.ClaudeConfig = "/etc/lab/claude.json" }),
+		},
+		{
+			name: "claude config env beats the HOME-derived default",
+			env:  map[string]string{"LAB_CLAUDE_CONFIG": "/elsewhere/claude.json"},
+			want: with(func(c *Config) { c.ClaudeConfig = "/elsewhere/claude.json" }),
 		},
 	}
 
