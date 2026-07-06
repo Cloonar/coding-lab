@@ -96,6 +96,8 @@ func (s *Server) writeRepoError(w http.ResponseWriter, doing string, err error) 
 		writeError(w, http.StatusConflict, reposvc.ErrCloneInProgress.Error())
 	case errors.Is(err, reposvc.ErrCloneNotFailed):
 		writeError(w, http.StatusConflict, reposvc.ErrCloneNotFailed.Error())
+	case errors.Is(err, reposvc.ErrHasLiveInstances):
+		writeError(w, http.StatusConflict, reposvc.ErrHasLiveInstances.Error())
 	default:
 		s.internalError(w, doing, err)
 	}

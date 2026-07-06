@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,10 +24,16 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
+	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
+	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
@@ -44,6 +51,7 @@ Flags (env overrides in parentheses; flag > env > default):
   -master-key-file string  vault master key file (LAB_MASTER_KEY_FILE; default <state-dir>/master.key)
   -claude, -tmux, -git, -prlimit string
                            binary paths (PATH lookup by default)
+  -claude-config string    claude's global config file (LAB_CLAUDE_CONFIG; default ~/.claude.json)
   -max-instances int       global live-instance cap; seeds the settings row on first start (default 6)
   -session-nofile int      RLIMIT_NOFILE for spawned sessions; 0 disables (default 16384)
   -proxy-auth              accept the proxy auth header from trusted proxies
@@ -115,24 +123,114 @@ func run() int {
 		return 1
 	}
 
-	repoSvc, err := reposvc.New(reposvc.Options{
+	gitEngine := gitx.New(cfg.GitBin)
+	reposDir := filepath.Join(cfg.StateDir, "repos")
+	worktreeRoot := filepath.Join(cfg.StateDir, "worktrees")
+
+	// M3 instance/AFK stack. It needs claude's global config path (resolved
+	// from HOME); with none, the instance/parked/provider routes stay unmounted
+	// and lab still serves the M2 surface.
+	var (
+		instanceSvc  *instance.Service
+		reconcileSvc *reconcile.Service
+		providerReg  *provider.Registry
+	)
+	if cfg.ClaudeConfig == "" {
+		logger.Warn("claude config path unresolved (HOME unset and no --claude-config); instance features disabled",
+			"component", "main")
+	} else {
+		home := os.Getenv("HOME")
+		runner := tmuxx.New(cfg.TmuxBin, tmuxx.WithNofileCap(cfg.PrlimitBin, cfg.SessionNofile))
+		claudeProvider, perr := claudecode.New(claudecode.Options{
+			ClaudeBin:   cfg.ClaudeBin,
+			ConfigPath:  cfg.ClaudeConfig,
+			RegistryDir: filepath.Join(home, ".claude", "sessions"),
+			LoginDir:    home,
+			Runner:      runner,
+			Bus:         bus,
+			Logger:      logger,
+		})
+		if perr != nil {
+			logger.Error("building claude provider", "component", "main", "err", perr)
+			return 1
+		}
+		providerReg, err = provider.NewRegistry(claudeProvider)
+		if err != nil {
+			logger.Error("building provider registry", "component", "main", "err", err)
+			return 1
+		}
+		guard := startguard.New()
+		instanceSvc, err = instance.New(instance.Options{
+			Store:        st,
+			Git:          gitEngine,
+			Runner:       runner,
+			Providers:    providerReg,
+			Vault:        vlt,
+			Materializer: mat,
+			Guard:        guard,
+			Bus:          bus,
+			Logger:       logger,
+			ReposDir:     reposDir,
+			WorktreeRoot: worktreeRoot,
+			LabURL:       labURL(cfg),
+			CaptureCtx:   ctx,
+		})
+		if err != nil {
+			logger.Error("building instance service", "component", "main", "err", err)
+			return 1
+		}
+		reconcileSvc, err = reconcile.New(reconcile.Options{
+			Store:        st,
+			Git:          gitEngine,
+			Runner:       runner,
+			Guard:        guard,
+			Materializer: mat,
+			Bus:          bus,
+			Logger:       logger,
+			ReposDir:     reposDir,
+			ArmCapture:   instanceSvc.ArmCapture,
+		})
+		if err != nil {
+			logger.Error("building reconcile service", "component", "main", "err", err)
+			return 1
+		}
+	}
+
+	repoOpts := reposvc.Options{
 		Store:        st,
 		Vault:        vlt,
 		Materializer: mat,
-		Git:          gitx.New(cfg.GitBin),
+		Git:          gitEngine,
 		Bus:          bus,
 		Logger:       logger,
-		ReposDir:     filepath.Join(cfg.StateDir, "repos"),
-	})
+		ReposDir:     reposDir,
+	}
+	if instanceSvc != nil {
+		// Preserve live-session credential files across the restart heal — the
+		// authoritative keep-set sweep runs in reconcile.StartupReconcile below,
+		// after re-adoption. And wire the delete guard to live instances.
+		repoOpts.CredentialKeep = func(string) bool { return true }
+		repoOpts.LiveInstances = instanceSvc.LiveInstances
+		repoOpts.StopInstances = instanceSvc.StopAll
+	}
+	repoSvc, err := reposvc.New(repoOpts)
 	if err != nil {
 		logger.Error("building repo service", "component", "main", "err", err)
 		return 1
 	}
-	// Heal interrupted clones and sweep orphaned runtime credential files
-	// BEFORE serving (design §3a/§6).
+
+	// Heal interrupted clones BEFORE serving (design §3a/§6), then run startup
+	// reconciliation (re-adoption + orphan teardown + the keep-set credential
+	// sweep) synchronously before any scheduler — no Start can race it.
 	if err := repoSvc.StartupHeal(ctx); err != nil {
 		logger.Error("startup heal", "component", "main", "err", err)
 		return 1
+	}
+	if reconcileSvc != nil {
+		if err := reconcileSvc.StartupReconcile(ctx); err != nil {
+			logger.Error("startup reconcile", "component", "main", "err", err)
+			return 1
+		}
 	}
 
 	api, err := httpapi.New(httpapi.Options{
@@ -142,6 +240,9 @@ func run() int {
 		Metrics:         m,
 		Vault:           vlt,
 		Repos:           repoSvc,
+		Instances:       instanceSvc,
+		Reconcile:       reconcileSvc,
+		Providers:       providerReg,
 		BaseURL:         cfg.BaseURL,
 		ProxyAuth:       cfg.ProxyAuth,
 		ProxyAuthHeader: cfg.ProxyAuthHeader,
@@ -151,6 +252,12 @@ func run() int {
 	if err != nil {
 		logger.Error("building http api", "component", "main", "err", err)
 		return 1
+	}
+
+	// The throttled runtime sweep (a plain ticker now; the M5 reaper loop
+	// absorbs it). Stops when ctx is cancelled at shutdown.
+	if reconcileSvc != nil {
+		go reconcileSvc.SweepLoop(ctx)
 	}
 
 	srv := &http.Server{
@@ -204,6 +311,19 @@ func loadOrGenerateMasterKey(path string, logger *slog.Logger) ([]byte, error) {
 		return key, nil
 	}
 	return vault.Load(path)
+}
+
+// labURL is the LAB_URL handed to spawned sessions: the external base URL when
+// set, else http://127.0.0.1:<listen-port> (labctl runs on the same host).
+func labURL(cfg config.Config) string {
+	if cfg.BaseURL != "" {
+		return cfg.BaseURL
+	}
+	_, port, err := net.SplitHostPort(cfg.Addr)
+	if err != nil || port == "" {
+		port = "8080"
+	}
+	return "http://127.0.0.1:" + port
 }
 
 // dbBackend names the backend for the startup line without ever echoing the

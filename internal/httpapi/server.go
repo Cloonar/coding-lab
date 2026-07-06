@@ -17,7 +17,10 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
@@ -43,6 +46,16 @@ type Options struct {
 	// routes unmounted.
 	Repos *reposvc.Service
 
+	// Instances is the manual instance lifecycle service (M3). Nil leaves the
+	// instance + stop-all routes unmounted.
+	Instances *instance.Service
+	// Reconcile owns the parked view + unguarded discard (M3). Nil leaves the
+	// parked routes unmounted.
+	Reconcile *reconcile.Service
+	// Providers is the agent-provider registry (M3): the providers catalog and
+	// the claude auth/login endpoints. Nil leaves those routes unmounted.
+	Providers *provider.Registry
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -65,12 +78,15 @@ type Options struct {
 
 // Server carries the operator API's dependencies and configuration.
 type Server struct {
-	store   *store.Store
-	bus     *events.Bus
-	log     *slog.Logger
-	metrics *metrics.Metrics
-	vault   *vault.Vault
-	repos   *reposvc.Service
+	store     *store.Store
+	bus       *events.Bus
+	log       *slog.Logger
+	metrics   *metrics.Metrics
+	vault     *vault.Vault
+	repos     *reposvc.Service
+	instances *instance.Service
+	reconcile *reconcile.Service
+	providers *provider.Registry
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -139,6 +155,9 @@ func New(o Options) (*Server, error) {
 		metrics:     m,
 		vault:       o.Vault,
 		repos:       o.Repos,
+		instances:   o.Instances,
+		reconcile:   o.Reconcile,
+		providers:   o.Providers,
 		proxyAuth:   o.ProxyAuth,
 		proxyHeader: o.ProxyAuthHeader,
 		trusted:     o.TrustedProxies,
@@ -204,6 +223,25 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("PATCH /api/v1/repos/{id}", s.requireAuth(s.handleRepoUpdate))
 		api.HandleFunc("DELETE /api/v1/repos/{id}", s.requireAuth(s.handleRepoDelete))
 		api.HandleFunc("POST /api/v1/repos/{id}/clone/retry", s.requireAuth(s.handleRepoCloneRetry))
+	}
+
+	// M3 instance lifecycle (operator auth; CSRF guards the mutations).
+	if s.instances != nil {
+		api.HandleFunc("POST /api/v1/repos/{id}/instances", s.requireAuth(s.handleInstanceCreate))
+		api.HandleFunc("GET /api/v1/instances", s.requireAuth(s.handleInstanceList))
+		api.HandleFunc("DELETE /api/v1/instances/{session}", s.requireAuth(s.handleInstanceDelete))
+		api.HandleFunc("POST /api/v1/repos/{id}/stop-all", s.requireAuth(s.handleStopAll))
+		api.HandleFunc("GET /api/v1/runs", s.requireAuth(s.handleRunsList))
+	}
+	if s.reconcile != nil {
+		api.HandleFunc("GET /api/v1/repos/{id}/parked", s.requireAuth(s.handleParkedList))
+		api.HandleFunc("POST /api/v1/repos/{id}/parked/discard", s.requireAuth(s.handleParkedDiscard))
+	}
+	if s.providers != nil {
+		api.HandleFunc("GET /api/v1/providers", s.requireAuth(s.handleProvidersList))
+		api.HandleFunc("GET /api/v1/providers/claude/auth/status", s.requireAuth(s.handleClaudeAuthStatus))
+		api.HandleFunc("POST /api/v1/providers/claude/auth/login/start", s.requireAuth(s.handleClaudeLoginStart))
+		api.HandleFunc("POST /api/v1/providers/claude/auth/login/code", s.requireAuth(s.handleClaudeLoginCode))
 	}
 
 	// Unknown API paths get JSON 404s, not the SPA shell.

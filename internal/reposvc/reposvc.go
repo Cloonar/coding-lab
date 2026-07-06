@@ -70,6 +70,11 @@ var ErrCloneInProgress = errors.New("clone in progress")
 // clone_status 'error' (pinned M2 contract). The API answers 409.
 var ErrCloneNotFailed = errors.New("clone is not in error state")
 
+// ErrHasLiveInstances refuses an unforced delete while the repo has live
+// instances/worktrees (design §3a; M3 guard). The API answers 409; a forced
+// delete tears the instances down first.
+var ErrHasLiveInstances = errors.New("repository has live instances")
+
 // BadRequestError marks invalid operator input; the API answers 400 with
 // the message. Messages name fields and credential ids, never secrets.
 type BadRequestError struct{ msg string }
@@ -97,6 +102,22 @@ type Options struct {
 	// testutil.HermeticGitEnv so service-driven clones never read the
 	// developer's git config.
 	GitEnv []string
+	// CredentialKeep is the keep predicate StartupHeal hands to the runtime-dir
+	// credential sweep (design §6). nil → keep nothing (M2/tests: no live runs,
+	// every materialized file is an orphan). In M3 cmd/lab passes a keep-all
+	// predicate so a restart's live-session credential files survive here — the
+	// authoritative keep-set sweep runs later in reconcile.StartupReconcile,
+	// after re-adoption has computed which runs are still live.
+	CredentialKeep func(filename string) bool
+	// LiveInstances reports the number of live instances (worktrees) of a repo
+	// — the M3 delete guard (design §3a: a repo with live worktrees is refused
+	// deletion unless forced). nil → no guard (M2 behavior). Injected from
+	// cmd/lab (the instance service) to avoid an import cycle.
+	LiveInstances func(ctx context.Context, repoID string) (int, error)
+	// StopInstances tears down every instance of a repo — run on a force delete
+	// before the row/bare-dir removal so no session outlives its repo. nil → no
+	// teardown (M2 behavior).
+	StopInstances func(ctx context.Context, repoID string) (int, error)
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -112,6 +133,10 @@ type Service struct {
 	reposDir string
 	gitEnv   []string
 	now      func() time.Time
+
+	credentialKeep func(filename string) bool
+	liveInstances  func(ctx context.Context, repoID string) (int, error)
+	stopInstances  func(ctx context.Context, repoID string) (int, error)
 
 	// mu guards jobs: the single-flight registry of running clone jobs,
 	// keyed by repo id.
@@ -147,16 +172,19 @@ func New(o Options) (*Service, error) {
 		return nil, fmt.Errorf("reposvc: repos dir: %w", err)
 	}
 	return &Service{
-		store:    o.Store,
-		vault:    o.Vault,
-		mat:      o.Materializer,
-		git:      o.Git,
-		bus:      o.Bus,
-		log:      logger,
-		reposDir: o.ReposDir,
-		gitEnv:   o.GitEnv,
-		now:      now,
-		jobs:     make(map[string]*cloneJob),
+		store:          o.Store,
+		vault:          o.Vault,
+		mat:            o.Materializer,
+		git:            o.Git,
+		bus:            o.Bus,
+		log:            logger,
+		reposDir:       o.ReposDir,
+		gitEnv:         o.GitEnv,
+		now:            now,
+		credentialKeep: o.CredentialKeep,
+		liveInstances:  o.LiveInstances,
+		stopInstances:  o.StopInstances,
+		jobs:           make(map[string]*cloneJob),
 	}, nil
 }
 
@@ -412,11 +440,26 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) error {
 		<-job.done
 	}
 
-	// TODO(M3) worktree guard seam: once worktrees exist, Delete must refuse
-	// (409) while the repo has live worktrees or instances unless forced,
-	// and forced deletion must tear them down first (design §3a note on
-	// DeleteRepo; brief M3). M2 has no worktrees, so the row+bare-dir removal
-	// below is complete.
+	// M3 worktree guard (design §3a): refuse (409) while the repo has live
+	// instances unless forced; a forced delete tears them down first so no
+	// session outlives its repo. The seam is injected from cmd/lab (the
+	// instance service) to avoid an import cycle.
+	if s.liveInstances != nil {
+		n, err := s.liveInstances(ctx, id)
+		if err != nil {
+			return fmt.Errorf("checking live instances: %w", err)
+		}
+		if n > 0 {
+			if !force {
+				return ErrHasLiveInstances
+			}
+			if s.stopInstances != nil {
+				if _, err := s.stopInstances(context.WithoutCancel(ctx), id); err != nil {
+					s.log.Warn("tearing down instances before force delete", "component", "reposvc", "repo", id, "err", err)
+				}
+			}
+		}
+	}
 
 	if err := s.store.DeleteRepo(context.WithoutCancel(ctx), id); err != nil {
 		return err
@@ -501,7 +544,7 @@ func (s *Service) StartupHeal(ctx context.Context) error {
 		s.log.Info("healed interrupted clone", "component", "reposvc", "repo", id, "clone_status", store.CloneStatusError)
 		s.publishRepoChanged(id)
 	}
-	if err := s.mat.CleanupAll(nil); err != nil {
+	if err := s.mat.CleanupAll(s.credentialKeep); err != nil {
 		s.log.Warn("sweeping runtime dir", "component", "reposvc", "err", err)
 	}
 	return nil

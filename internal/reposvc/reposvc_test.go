@@ -519,6 +519,14 @@ func TestStartupHeal(t *testing.T) {
 			t.Fatalf("write %s: %v", f, err)
 		}
 	}
+	// Pre-restart orphans are old; backdate them past the vault's in-flight
+	// age guard (>5min) so heal's keep-set actually reaps them.
+	old := time.Now().Add(-10 * time.Minute)
+	for _, f := range []string{orphanKey, orphanAskpass} {
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", f, err)
+		}
+	}
 
 	if err := e.svc.StartupHeal(t.Context()); err != nil {
 		t.Fatalf("StartupHeal: %v", err)
