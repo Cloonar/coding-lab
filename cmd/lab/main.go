@@ -34,6 +34,9 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/forgejo"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
@@ -122,6 +125,17 @@ func run() int {
 		logger.Error("preparing runtime dir", "component", "main", "err", err)
 		return 1
 	}
+
+	// Tracker registry (M4): resolves a repo-scoped Tracker per binding. The
+	// backend constructors are injected here — cmd/lab is the one place that
+	// imports tracker + builtin + forgejo, so no import cycle forms. The
+	// forgejo factory is a one-line adapter (forgejo.New returns the concrete
+	// client); the HTTP client is explicit with the pinned 30s timeout.
+	trackerReg := tracker.NewRegistry(st, vlt, &http.Client{Timeout: 30 * time.Second},
+		builtin.New,
+		func(c tracker.ForgejoConfig) tracker.Tracker {
+			return forgejo.New(c.HTTPClient, c.BaseURL, c.Token, c.Owner, c.Repo)
+		})
 
 	gitEngine := gitx.New(cfg.GitBin)
 	reposDir := filepath.Join(cfg.StateDir, "repos")
@@ -243,6 +257,7 @@ func run() int {
 		Instances:       instanceSvc,
 		Reconcile:       reconcileSvc,
 		Providers:       providerReg,
+		Tracker:         trackerReg,
 		BaseURL:         cfg.BaseURL,
 		ProxyAuth:       cfg.ProxyAuth,
 		ProxyAuthHeader: cfg.ProxyAuthHeader,

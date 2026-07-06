@@ -23,6 +23,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 	"git.cloonar.com/Cloonar/coding-lab/internal/webui"
 )
@@ -56,6 +57,12 @@ type Options struct {
 	// the claude auth/login endpoints. Nil leaves those routes unmounted.
 	Providers *provider.Registry
 
+	// Tracker resolves a per-repo issue/PR Tracker for the operator issue and
+	// label surface (M4): the built-in store-backed tracker for builtin repos,
+	// the Forgejo REST client for forge-bound ones. Nil leaves the issue +
+	// label routes unmounted.
+	Tracker *tracker.Registry
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -87,6 +94,7 @@ type Server struct {
 	instances *instance.Service
 	reconcile *reconcile.Service
 	providers *provider.Registry
+	tracker   *tracker.Registry
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -158,6 +166,7 @@ func New(o Options) (*Server, error) {
 		instances:   o.Instances,
 		reconcile:   o.Reconcile,
 		providers:   o.Providers,
+		tracker:     o.Tracker,
 		proxyAuth:   o.ProxyAuth,
 		proxyHeader: o.ProxyAuthHeader,
 		trusted:     o.TrustedProxies,
@@ -242,6 +251,24 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/v1/providers/claude/auth/status", s.requireAuth(s.handleClaudeAuthStatus))
 		api.HandleFunc("POST /api/v1/providers/claude/auth/login/start", s.requireAuth(s.handleClaudeLoginStart))
 		api.HandleFunc("POST /api/v1/providers/claude/auth/login/code", s.requireAuth(s.handleClaudeLoginCode))
+	}
+
+	// M4 tracker surface: the operator's issue and label read/mutate views
+	// (operator auth; CSRF guards the mutations). Read views serve both
+	// bindings via the Tracker; the mutations are built-in only and 409 on a
+	// forge-bound repo.
+	if s.tracker != nil {
+		api.HandleFunc("GET /api/v1/repos/{id}/issues", s.requireAuth(s.handleIssueList))
+		api.HandleFunc("POST /api/v1/repos/{id}/issues", s.requireAuth(s.handleIssueCreate))
+		api.HandleFunc("GET /api/v1/repos/{id}/ready", s.requireAuth(s.handleReadyList))
+		api.HandleFunc("GET /api/v1/repos/{id}/issues/{n}", s.requireAuth(s.handleIssueGet))
+		api.HandleFunc("PATCH /api/v1/repos/{id}/issues/{n}", s.requireAuth(s.handleIssueUpdate))
+		api.HandleFunc("POST /api/v1/repos/{id}/issues/{n}/comments", s.requireAuth(s.handleIssueComment))
+		api.HandleFunc("PUT /api/v1/repos/{id}/issues/{n}/labels", s.requireAuth(s.handleIssueLabels))
+		api.HandleFunc("GET /api/v1/repos/{id}/labels", s.requireAuth(s.handleLabelList))
+		api.HandleFunc("POST /api/v1/repos/{id}/labels", s.requireAuth(s.handleLabelCreate))
+		api.HandleFunc("PATCH /api/v1/repos/{id}/labels/{lid}", s.requireAuth(s.handleLabelUpdate))
+		api.HandleFunc("DELETE /api/v1/repos/{id}/labels/{lid}", s.requireAuth(s.handleLabelDelete))
 	}
 
 	// Unknown API paths get JSON 404s, not the SPA shell.
