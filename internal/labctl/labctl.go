@@ -1,19 +1,19 @@
-// Package labctl implements the agent-side CLI (brief §8.3). M1 ships the
-// full command-line surface — parsing, env handling, exit codes — over a
-// stub transport; M5 fills in the HTTP client against /agent/v1.
+// Package labctl implements the agent-side CLI (brief §8.3): a thin, plain,
+// parseable client for lab's /agent/v1 API. Sessions get LAB_URL and
+// LAB_TOKEN in their environment; labctl is the run's ONLY tracker surface
+// (D10 — it supersedes tea/gh entirely).
+//
+// Exit codes (pinned): 0 success · 1 API/HTTP error (message on stderr) ·
+// 2 usage/configuration error. No color, no spinner — output is for agents.
 package labctl
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 )
-
-// ErrNotImplemented is returned by every Client method until the agent API
-// lands in M5.
-var ErrNotImplemented = errors.New("agent API lands in M5")
 
 const usage = `labctl — agent-side CLI for lab
 
@@ -37,28 +37,8 @@ type Env struct {
 	Version string
 }
 
-// Client is the transport to /agent/v1. M1: every method is a stub so the
-// command layer (and its exit-code contract) is final before M5 fills in
-// HTTP.
-type Client struct {
-	BaseURL string
-	Token   string
-}
-
-// IssueView fetches the run's claimed issue, or issue *n when n is non-nil.
-func (c *Client) IssueView(n *int) error { return ErrNotImplemented }
-
-// IssueList lists open issues.
-func (c *Client) IssueList() error { return ErrNotImplemented }
-
-// IssueComment posts a comment on issue n.
-func (c *Client) IssueComment(n int, body string) error { return ErrNotImplemented }
-
-// PRCreate opens a PR/CR.
-func (c *Client) PRCreate(title, body string) error { return ErrNotImplemented }
-
 // Run executes one labctl invocation and returns the process exit code:
-// 0 success, 2 usage/configuration/unimplemented errors.
+// 0 success, 1 API/HTTP error, 2 usage/configuration errors.
 func Run(args []string, env Env) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(env.Stderr, usage)
@@ -103,15 +83,34 @@ func runIssue(args []string, env Env) int {
 			_, _ = fmt.Fprintln(env.Stderr, "labctl issue view: too many arguments")
 			return 2
 		}
-		return withClient(env, "issue view", func(c *Client) error { return c.IssueView(n) })
+		return withClient(env, "issue view", func(c *Client) error {
+			is, err := c.IssueView(n)
+			if err != nil {
+				return err
+			}
+			printIssue(env.Stdout, is)
+			return nil
+		})
 	case "list":
 		if len(args) > 1 {
 			_, _ = fmt.Fprintln(env.Stderr, "labctl issue list: too many arguments")
 			return 2
 		}
-		return withClient(env, "issue list", func(c *Client) error { return c.IssueList() })
+		return withClient(env, "issue list", func(c *Client) error {
+			issues, err := c.IssueList()
+			if err != nil {
+				return err
+			}
+			for _, is := range issues {
+				_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\t%s\n", is.Number, is.State, is.Title)
+			}
+			return nil
+		})
 	case "comment":
-		if len(args) != 3 {
+		// Join the trailing args as the body so an unquoted multi-word comment
+		// ("labctl issue comment 7 tests are green") posts as-is; a quoted
+		// single-arg body is unchanged (join over one element is a no-op).
+		if len(args) < 3 {
 			_, _ = fmt.Fprintln(env.Stderr, "labctl issue comment: want <n> <body>")
 			return 2
 		}
@@ -120,7 +119,7 @@ func runIssue(args []string, env Env) int {
 			_, _ = fmt.Fprintf(env.Stderr, "labctl issue comment: issue number %q is not an integer\n", args[1])
 			return 2
 		}
-		body := args[2]
+		body := strings.Join(args[2:], " ")
 		if body == "" {
 			_, _ = fmt.Fprintln(env.Stderr, "labctl issue comment: body must not be empty")
 			return 2
@@ -156,21 +155,42 @@ func runPR(args []string, env Env) int {
 		_, _ = fmt.Fprintln(env.Stderr, "labctl pr create: --body is required")
 		return 2
 	}
-	return withClient(env, "pr create", func(c *Client) error { return c.PRCreate(*title, *body) })
+	return withClient(env, "pr create", func(c *Client) error {
+		pr, err := c.PRCreate(*title, *body)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(env.Stdout, "%d\t%s\n", pr.Number, pr.URL)
+		return nil
+	})
 }
 
-// withClient builds the Client from LAB_URL/LAB_TOKEN and runs fn, mapping
-// errors to stderr + exit 2.
+// printIssue renders the pinned plain-text issue view: number, title, state,
+// labels, body, then each comment under a "--- comment by <author> (<time>)"
+// separator.
+func printIssue(w io.Writer, is Issue) {
+	_, _ = fmt.Fprintf(w, "#%d %s\n", is.Number, is.Title)
+	_, _ = fmt.Fprintf(w, "state: %s\n", is.State)
+	_, _ = fmt.Fprintf(w, "labels: %s\n", strings.Join(is.Labels, ", "))
+	_, _ = fmt.Fprintf(w, "\n%s\n", is.Body)
+	for _, c := range is.Comments {
+		_, _ = fmt.Fprintf(w, "\n--- comment by %s (%s)\n%s\n", c.Author, c.CreatedAt, c.Body)
+	}
+}
+
+// withClient builds the Client from LAB_URL/LAB_TOKEN and runs fn. Missing
+// environment is a configuration error (exit 2, with usage); an fn error is
+// an API/HTTP failure (message to stderr, exit 1).
 func withClient(env Env, cmd string, fn func(*Client) error) int {
 	baseURL := env.Getenv("LAB_URL")
 	token := env.Getenv("LAB_TOKEN")
 	if baseURL == "" || token == "" {
-		_, _ = fmt.Fprintf(env.Stderr, "labctl %s: LAB_URL and LAB_TOKEN must be set\n", cmd)
+		_, _ = fmt.Fprintf(env.Stderr, "labctl %s: LAB_URL and LAB_TOKEN must be set\n\n%s", cmd, usage)
 		return 2
 	}
 	if err := fn(&Client{BaseURL: baseURL, Token: token}); err != nil {
 		_, _ = fmt.Fprintf(env.Stderr, "labctl %s: %v\n", cmd, err)
-		return 2
+		return 1
 	}
 	return 0
 }

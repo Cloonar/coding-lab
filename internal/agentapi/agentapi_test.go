@@ -15,13 +15,14 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
 )
 
 const timeFormat = "2006-01-02T15:04:05.000Z07:00"
 
 // testFixture is a migrated sqlite store plus a raw connection to the same
-// file for seeding repos/runs/run_tokens (no store accessors exist for
-// those yet — they land with the M3/M5 services).
+// file for seeding repos/runs/run_tokens/issues at exact column values.
 type testFixture struct {
 	st  *store.Store
 	db  *sql.DB
@@ -58,17 +59,40 @@ func (f *testFixture) exec(t *testing.T, query string, args ...any) {
 }
 
 func (f *testFixture) seedRepo(t *testing.T, id string) {
-	f.exec(t, `INSERT INTO repos
-		(id, name, remote_url, tracker_binding, forge_kind, afk_branch_pattern, manual_branch_prefix, created_at)
-		VALUES (?, ?, ?, 'builtin', 'none', 'afk/<N>', 'lab/', ?)`,
-		id, "repo-"+id, "https://example.invalid/r.git", f.now.Format(timeFormat))
+	f.seedRepoBinding(t, id, "builtin", "none")
 }
 
+func (f *testFixture) seedRepoBinding(t *testing.T, id, binding, forgeKind string) {
+	t.Helper()
+	f.exec(t, `INSERT INTO repos
+		(id, name, remote_url, tracker_binding, forge_kind, default_branch, afk_branch_pattern, manual_branch_prefix, created_at)
+		VALUES (?, ?, ?, ?, ?, 'main', 'afk/<N>', 'lab/', ?)`,
+		id, "repo-"+id, "https://example.invalid/r.git", binding, forgeKind, f.now.Format(timeFormat))
+}
+
+// seedRun inserts the canonical AFK run: kind afk_auto, issue 7, branch afk/7.
 func (f *testFixture) seedRun(t *testing.T, id, repoID, outcome string) {
+	f.seedRunKind(t, id, repoID, "afk_auto", outcome, intp(7), "afk/7")
+}
+
+func (f *testFixture) seedRunKind(t *testing.T, id, repoID, kind, outcome string, issue *int, branch string) {
+	t.Helper()
+	var issueVal any
+	if issue != nil {
+		issueVal = *issue
+	}
 	f.exec(t, `INSERT INTO runs
 		(id, repo_id, kind, provider, issue_number, branch, worktree_path, session_name, model, effort, started_at, outcome)
-		VALUES (?, ?, 'afk_auto', 'claude-code', 7, 'afk/7', '/tmp/wt', ?, 'opus[1m]', 'max', ?, ?)`,
-		id, repoID, "sess-"+id, f.now.Format(timeFormat), outcome)
+		VALUES (?, ?, ?, 'claude-code', ?, ?, '/tmp/wt', ?, 'opus[1m]', 'max', ?, ?)`,
+		id, repoID, kind, issueVal, branch, "sess-"+id, f.now.Format(timeFormat), outcome)
+}
+
+// seedIssue inserts a builtin-tracker issue with an explicit number.
+func (f *testFixture) seedIssue(t *testing.T, id, repoID string, number int, title, body string) {
+	t.Helper()
+	f.exec(t, `INSERT INTO issues (id, repo_id, number, title, body, state, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`,
+		id, repoID, number, title, body, f.now.Format(timeFormat), f.now.Format(timeFormat))
 }
 
 // seedToken inserts a run token and returns its plaintext.
@@ -84,11 +108,33 @@ func (f *testFixture) seedToken(t *testing.T, runID string, expiresAt *time.Time
 	return token
 }
 
+func intp(n int) *int { return &n }
+
 func discard() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
+
+// resolverFunc adapts a function to TrackerResolver.
+type resolverFunc func(ctx context.Context, repo store.Repo) (tracker.Tracker, error)
+
+func (f resolverFunc) TrackerFor(ctx context.Context, repo store.Repo) (tracker.Tracker, error) {
+	return f(ctx, repo)
+}
+
+// builtinResolver mirrors what *tracker.Registry does for builtin-bound
+// repos: a store-backed tracker scoped to the repo.
+func builtinResolver(st *store.Store) TrackerResolver {
+	return resolverFunc(func(_ context.Context, repo store.Repo) (tracker.Tracker, error) {
+		return builtin.New(tracker.BuiltinConfig{Store: st, RepoID: repo.ID}), nil
+	})
+}
+
+func (f *testFixture) server() *Server {
+	return New(f.st, builtinResolver(f.st), discard(), func() time.Time { return f.now })
+}
 
 func TestRunTokenAuthMatrix(t *testing.T) {
 	f := newFixture(t)
 	f.seedRepo(t, "repo_a")
+	f.seedIssue(t, "iss7", "repo_a", 7, "Fix the frobnicator", "It wobbles.")
 	f.seedRun(t, "run_active", "repo_a", "active")
 	f.seedRun(t, "run_stopped", "repo_a", "stopped")
 	f.seedRun(t, "run_dead", "repo_a", "death")
@@ -103,16 +149,16 @@ func TestRunTokenAuthMatrix(t *testing.T) {
 	deadToken := f.seedToken(t, "run_dead", &future)
 	unknownToken, _ := ids.NewToken("run")
 
-	handler := New(f.st, discard(), func() time.Time { return f.now }).Handler()
+	handler := f.server().Handler()
 
 	tests := []struct {
 		name       string
 		authz      string
 		wantStatus int
-		wantError  string
+		wantBody   string
 	}{
-		{"active run, no expiry", "Bearer " + activeNoExpiry, http.StatusNotImplemented, "agent API lands in M5"},
-		{"active run, future expiry", "Bearer " + activeFuture, http.StatusNotImplemented, "agent API lands in M5"},
+		{"active run, no expiry", "Bearer " + activeNoExpiry, http.StatusOK, `"number":7`},
+		{"active run, future expiry", "Bearer " + activeFuture, http.StatusOK, `"number":7`},
 		{"active run, expired token", "Bearer " + activeExpired, http.StatusUnauthorized, "invalid run token"},
 		{"stopped run", "Bearer " + stoppedToken, http.StatusUnauthorized, "invalid run token"},
 		{"dead run, unexpired token", "Bearer " + deadToken, http.StatusUnauthorized, "invalid run token"},
@@ -136,8 +182,8 @@ func TestRunTokenAuthMatrix(t *testing.T) {
 			if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 				t.Fatalf("content-type = %q, want JSON", ct)
 			}
-			if !strings.Contains(rr.Body.String(), tt.wantError) {
-				t.Fatalf("body = %q, want it to contain %q", rr.Body.String(), tt.wantError)
+			if !strings.Contains(rr.Body.String(), tt.wantBody) {
+				t.Fatalf("body = %q, want it to contain %q", rr.Body.String(), tt.wantBody)
 			}
 		})
 	}
@@ -146,34 +192,49 @@ func TestRunTokenAuthMatrix(t *testing.T) {
 func TestAllRoutesAreMountedBehindAuth(t *testing.T) {
 	f := newFixture(t)
 	f.seedRepo(t, "repo_a")
+	f.seedIssue(t, "iss7", "repo_a", 7, "Fix it", "body")
 	f.seedRun(t, "run_active", "repo_a", "active")
 	token := f.seedToken(t, "run_active", nil)
+	past := f.now.Add(-time.Second)
+	expired := f.seedToken(t, "run_active", &past)
 
-	handler := New(f.st, discard(), func() time.Time { return f.now }).Handler()
+	handler := f.server().Handler()
 
-	routes := []struct{ method, path string }{
-		{"GET", "/agent/v1/issue"},
-		{"GET", "/agent/v1/issues"},
-		{"GET", "/agent/v1/issues/7"},
-		{"POST", "/agent/v1/issues/7/comments"},
-		{"POST", "/agent/v1/prs"},
+	routes := []struct {
+		method, path, body string
+		wantStatus         int
+	}{
+		{"GET", "/agent/v1/issue", "", http.StatusOK},
+		{"GET", "/agent/v1/issues", "", http.StatusOK},
+		{"GET", "/agent/v1/issues/7", "", http.StatusOK},
+		{"POST", "/agent/v1/issues/7/comments", `{"body":"hi"}`, http.StatusCreated},
+		{"POST", "/agent/v1/prs", `{"title":"t","body":"b"}`, http.StatusNotImplemented}, // builtin CR seam (M6)
 	}
 	for _, rt := range routes {
 		// Without a token: 401.
-		req := httptest.NewRequest(rt.method, rt.path, nil)
+		req := httptest.NewRequest(rt.method, rt.path, strings.NewReader(rt.body))
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		if rr.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s without token: status = %d, want 401", rt.method, rt.path, rr.Code)
 		}
 
-		// With a valid token: the M5 stub.
-		req = httptest.NewRequest(rt.method, rt.path, nil)
+		// With an expired token: the same opaque 401 (§3a rule on every route).
+		req = httptest.NewRequest(rt.method, rt.path, strings.NewReader(rt.body))
+		req.Header.Set("Authorization", "Bearer "+expired)
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s with expired token: status = %d, want 401", rt.method, rt.path, rr.Code)
+		}
+
+		// With a valid token: the real handler.
+		req = httptest.NewRequest(rt.method, rt.path, strings.NewReader(rt.body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		rr = httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
-		if rr.Code != http.StatusNotImplemented {
-			t.Fatalf("%s %s with token: status = %d, want 501 (body %s)", rt.method, rt.path, rr.Code, rr.Body.String())
+		if rr.Code != rt.wantStatus {
+			t.Fatalf("%s %s with token: status = %d, want %d (body %s)", rt.method, rt.path, rr.Code, rt.wantStatus, rr.Body.String())
 		}
 	}
 
@@ -193,7 +254,7 @@ func TestRunTokenContextCarriesRunScope(t *testing.T) {
 	f.seedRun(t, "run_active", "repo_a", "active")
 	token := f.seedToken(t, "run_active", nil)
 
-	s := New(f.st, discard(), func() time.Time { return f.now })
+	s := f.server()
 	var got store.RunTokenInfo
 	var ok bool
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -211,5 +272,8 @@ func TestRunTokenContextCarriesRunScope(t *testing.T) {
 	}
 	if got.IssueNumber == nil || *got.IssueNumber != 7 {
 		t.Fatalf("issue number = %v, want 7", got.IssueNumber)
+	}
+	if got.Kind != "afk_auto" || got.Branch != "afk/7" {
+		t.Fatalf("kind/branch = %q/%q, want afk_auto/afk/7", got.Kind, got.Branch)
 	}
 }

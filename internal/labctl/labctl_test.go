@@ -1,8 +1,20 @@
 package labctl
 
 import (
+	"context"
+	"io"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
+	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
 )
 
 func run(t *testing.T, args []string, env map[string]string) (code int, stdout, stderr string) {
@@ -22,6 +34,8 @@ var agentEnv = map[string]string{
 	"LAB_TOKEN": "lab_run_x",
 }
 
+// TestRunCommandSurface pins the argument parsing and the usage exit code (2)
+// with no server in play.
 func TestRunCommandSurface(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -38,25 +52,18 @@ func TestRunCommandSurface(t *testing.T) {
 		{"issue no sub", []string{"issue"}, nil, 2, "", "Usage"},
 		{"issue unknown sub", []string{"issue", "bogus"}, nil, 2, "", `unknown subcommand "bogus"`},
 
-		{"issue view stub", []string{"issue", "view"}, agentEnv, 2, "", "labctl issue view: agent API lands in M5"},
-		{"issue view n stub", []string{"issue", "view", "12"}, agentEnv, 2, "", "labctl issue view: agent API lands in M5"},
 		{"issue view bad n", []string{"issue", "view", "twelve"}, agentEnv, 2, "", "not an integer"},
 		{"issue view too many", []string{"issue", "view", "1", "2"}, agentEnv, 2, "", "too many arguments"},
-
-		{"issue list stub", []string{"issue", "list"}, agentEnv, 2, "", "labctl issue list: agent API lands in M5"},
 		{"issue list too many", []string{"issue", "list", "x"}, agentEnv, 2, "", "too many arguments"},
-
-		{"issue comment stub", []string{"issue", "comment", "5", "hello"}, agentEnv, 2, "", "labctl issue comment: agent API lands in M5"},
 		{"issue comment missing body", []string{"issue", "comment", "5"}, agentEnv, 2, "", "want <n> <body>"},
 		{"issue comment bad n", []string{"issue", "comment", "five", "hi"}, agentEnv, 2, "", "not an integer"},
 		{"issue comment empty body", []string{"issue", "comment", "5", ""}, agentEnv, 2, "", "body must not be empty"},
-
-		{"pr create stub", []string{"pr", "create", "--title", "t", "--body", "Closes #5"}, agentEnv, 2, "", "labctl pr create: agent API lands in M5"},
 		{"pr create missing title", []string{"pr", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
 		{"pr create missing body", []string{"pr", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
 		{"pr without create", []string{"pr"}, agentEnv, 2, "", "Usage"},
 
 		{"missing env", []string{"issue", "view"}, nil, 2, "", "LAB_URL and LAB_TOKEN must be set"},
+		{"missing env shows usage", []string{"issue", "view"}, nil, 2, "", "Usage"},
 		{"missing token only", []string{"issue", "list"}, map[string]string{"LAB_URL": "http://x"}, 2, "", "LAB_URL and LAB_TOKEN must be set"},
 	}
 	for _, tt := range tests {
@@ -75,5 +82,333 @@ func TestRunCommandSurface(t *testing.T) {
 				t.Fatalf("unexpected stderr output: %q", stderr)
 			}
 		})
+	}
+}
+
+// --- transport tests against a real agentapi over httptest ------------------
+
+var fixedNow = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+// agentFixture is a real store + real agent API served over httptest; labctl
+// talks to it exactly like a session would (LAB_URL/LAB_TOKEN + Bearer).
+type agentFixture struct {
+	st    *store.Store
+	url   string
+	token string
+	runID string
+}
+
+type resolverFunc func(ctx context.Context, repo store.Repo) (tracker.Tracker, error)
+
+func (f resolverFunc) TrackerFor(ctx context.Context, repo store.Repo) (tracker.Tracker, error) {
+	return f(ctx, repo)
+}
+
+// fakeForge is a minimal recording tracker for the forge-bound PR path.
+type fakeForge struct {
+	pullRef     tracker.PullRef
+	createdPull *[4]string // head, base, title, body
+}
+
+func (f *fakeForge) ReadyIssues(context.Context) ([]tracker.Issue, error) {
+	return []tracker.Issue{}, nil
+}
+func (f *fakeForge) Issues(context.Context, string) ([]tracker.Issue, error) {
+	return []tracker.Issue{}, nil
+}
+func (f *fakeForge) Issue(context.Context, int) (tracker.Issue, error) {
+	return tracker.Issue{}, tracker.ErrNotFound
+}
+func (f *fakeForge) CreateComment(context.Context, int, string) error { return nil }
+func (f *fakeForge) Pulls(context.Context) ([]tracker.PullRef, error) {
+	return []tracker.PullRef{}, nil
+}
+func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
+	f.createdPull = &[4]string{head, base, title, body}
+	return f.pullRef, nil
+}
+func (f *fakeForge) CloseIssue(context.Context, int) error { return nil }
+
+// newAgentFixture seeds one repo (binding + resolver as given), one issue
+// (#1, with an operator comment and the ready-for-agent label), one active
+// AFK run claiming it, and that run's token.
+func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerResolver) *agentFixture {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "lab.db")
+	st, err := store.Open(ctx, "sqlite:"+path, logx.New(io.Discard))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	forgeKind := "none"
+	if binding == store.TrackerBindingForge {
+		forgeKind = "forgejo"
+	}
+	repo, err := st.CreateRepo(ctx, store.Repo{
+		ID:                 ids.NewID("repo"),
+		Name:               "proj",
+		RemoteURL:          "https://example.invalid/r.git",
+		TrackerBinding:     binding,
+		ForgeKind:          forgeKind,
+		DefaultBranch:      "main",
+		Provider:           "claude-code",
+		AFKBranchPattern:   "afk/<N>",
+		ManualBranchPrefix: "lab/",
+		CloneStatus:        store.CloneStatusReady,
+		CreatedAt:          fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("CreateRepo: %v", err)
+	}
+
+	labels, err := st.LabelsByRepo(ctx, repo.ID)
+	if err != nil {
+		t.Fatalf("LabelsByRepo: %v", err)
+	}
+	var readyID string
+	for _, l := range labels {
+		if l.Name == tracker.ReadyLabel {
+			readyID = l.ID
+		}
+	}
+	is, err := st.CreateIssueWithLabels(ctx, repo.ID, "Fix the frobnicator", "It wobbles.", []string{readyID}, fixedNow)
+	if err != nil {
+		t.Fatalf("CreateIssueWithLabels: %v", err)
+	}
+	if _, err := st.CreateIssueComment(ctx, is.ID, store.CommentAuthorOperator, nil, "please fix", fixedNow); err != nil {
+		t.Fatalf("CreateIssueComment: %v", err)
+	}
+
+	runID := ids.NewID("run")
+	n := is.Number
+	if _, err := st.CreateRun(ctx, store.Run{
+		ID:           runID,
+		RepoID:       repo.ID,
+		Kind:         store.RunKindAFKManual,
+		Provider:     "claude-code",
+		IssueNumber:  &n,
+		Branch:       "afk/1",
+		WorktreePath: "/tmp/wt",
+		SessionName:  "proj~afk-1",
+		Model:        "opus[1m]",
+		Effort:       "max",
+		StartedAt:    fixedNow,
+		Outcome:      store.RunOutcomeActive,
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	token, hash := ids.NewToken("run")
+	if err := st.CreateRunToken(ctx, runID, hash, nil, fixedNow); err != nil {
+		t.Fatalf("CreateRunToken: %v", err)
+	}
+
+	handler := agentapi.New(st, resolver, nil, func() time.Time { return fixedNow }).Handler()
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return &agentFixture{st: st, url: ts.URL, token: token, runID: runID}
+}
+
+func builtinResolver(st **store.Store) agentapi.TrackerResolver {
+	return resolverFunc(func(_ context.Context, repo store.Repo) (tracker.Tracker, error) {
+		return builtin.New(tracker.BuiltinConfig{Store: *st, RepoID: repo.ID}), nil
+	})
+}
+
+func newBuiltinFixture(t *testing.T) *agentFixture {
+	var st *store.Store
+	f := newAgentFixture(t, store.TrackerBindingBuiltin, builtinResolver(&st))
+	st = f.st
+	return f
+}
+
+func (f *agentFixture) env() map[string]string {
+	return map[string]string{"LAB_URL": f.url, "LAB_TOKEN": f.token}
+}
+
+const wantIssueView = `#1 Fix the frobnicator
+state: open
+labels: ready-for-agent
+
+It wobbles.
+
+--- comment by operator (2026-07-06T12:00:00.000Z)
+please fix
+`
+
+func TestIssueViewClaimed(t *testing.T) {
+	f := newBuiltinFixture(t)
+	code, stdout, stderr := run(t, []string{"issue", "view"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != wantIssueView {
+		t.Errorf("stdout =\n%q\nwant\n%q", stdout, wantIssueView)
+	}
+}
+
+func TestIssueViewByNumber(t *testing.T) {
+	f := newBuiltinFixture(t)
+	code, stdout, stderr := run(t, []string{"issue", "view", "1"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != wantIssueView {
+		t.Errorf("stdout =\n%q\nwant\n%q", stdout, wantIssueView)
+	}
+
+	// A number that names no issue: exit 1 with the API's message.
+	code, stdout, stderr = run(t, []string{"issue", "view", "99"}, f.env())
+	if code != 1 || stdout != "" {
+		t.Fatalf("exit = %d, stdout %q, want 1 with empty stdout", code, stdout)
+	}
+	if !strings.Contains(stderr, "labctl issue view: not found") {
+		t.Errorf("stderr = %q, want the not-found message", stderr)
+	}
+}
+
+func TestIssueListOutput(t *testing.T) {
+	f := newBuiltinFixture(t)
+	// A second open issue; the list is number-DESC (store contract).
+	repo := f.repoID(t)
+	if _, err := f.st.CreateIssue(context.Background(), repo, "Add the sprocket", "", fixedNow); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	code, stdout, stderr := run(t, []string{"issue", "list"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	want := "#2\topen\tAdd the sprocket\n#1\topen\tFix the frobnicator\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func (f *agentFixture) repoID(t *testing.T) string {
+	t.Helper()
+	repos, err := f.st.Repos(context.Background())
+	if err != nil || len(repos) != 1 {
+		t.Fatalf("Repos: %v (%d)", err, len(repos))
+	}
+	return repos[0].ID
+}
+
+func TestIssueCommentPostsAsRun(t *testing.T) {
+	f := newBuiltinFixture(t)
+	code, stdout, stderr := run(t, []string{"issue", "comment", "1", "looks good"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty (parseable silence on success)", stdout)
+	}
+
+	is, err := f.st.IssueByRepoNumber(context.Background(), f.repoID(t), 1)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	var runComment *store.IssueComment
+	for i := range is.Comments {
+		if is.Comments[i].AuthorKind == store.CommentAuthorRun {
+			runComment = &is.Comments[i]
+		}
+	}
+	if runComment == nil {
+		t.Fatalf("no run-authored comment landed; comments = %+v", is.Comments)
+	}
+	if runComment.RunID == nil || *runComment.RunID != f.runID {
+		t.Errorf("run comment RunID = %v, want %s", runComment.RunID, f.runID)
+	}
+	if runComment.Body != "looks good" {
+		t.Errorf("comment body = %q", runComment.Body)
+	}
+}
+
+// TestIssueCommentJoinsMultiWordBody pins that an unquoted multi-word body is
+// joined with spaces and posted verbatim (an agent typing natural phrasing,
+// not a single quoted argument).
+func TestIssueCommentJoinsMultiWordBody(t *testing.T) {
+	f := newBuiltinFixture(t)
+	code, _, stderr := run(t, []string{"issue", "comment", "1", "tests", "are", "green"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	is, err := f.st.IssueByRepoNumber(context.Background(), f.repoID(t), 1)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	var runComment *store.IssueComment
+	for i := range is.Comments {
+		if is.Comments[i].AuthorKind == store.CommentAuthorRun {
+			runComment = &is.Comments[i]
+		}
+	}
+	if runComment == nil {
+		t.Fatalf("no run-authored comment landed; comments = %+v", is.Comments)
+	}
+	if runComment.Body != "tests are green" {
+		t.Errorf("comment body = %q, want %q", runComment.Body, "tests are green")
+	}
+}
+
+func TestPRCreateOutput(t *testing.T) {
+	fk := &fakeForge{pullRef: tracker.PullRef{Number: 12, URL: "https://forge.example/pr/12"}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "create", "--title", "feat: fix", "--body", "Did it."}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "12\thttps://forge.example/pr/12\n" {
+		t.Errorf("stdout = %q, want number<TAB>url", stdout)
+	}
+	if fk.createdPull == nil {
+		t.Fatal("CreatePull not called")
+	}
+	if fk.createdPull[0] != "afk/1" || fk.createdPull[1] != "main" {
+		t.Errorf("head/base = %q/%q, want afk/1/main", fk.createdPull[0], fk.createdPull[1])
+	}
+	// The server injects the pinned Closes trailer for AFK runs.
+	if fk.createdPull[3] != "Did it.\n\nCloses #1" {
+		t.Errorf("PR body = %q, want the injected Closes #1", fk.createdPull[3])
+	}
+}
+
+func TestPRCreateBuiltinSeamExitsOne(t *testing.T) {
+	f := newBuiltinFixture(t)
+	code, stdout, stderr := run(t, []string{"pr", "create", "--title", "t", "--body", "b"}, f.env())
+	if code != 1 || stdout != "" {
+		t.Fatalf("exit = %d, stdout %q, want 1 with empty stdout", code, stdout)
+	}
+	if !strings.Contains(stderr, "change requests land in M6") {
+		t.Errorf("stderr = %q, want the M6 seam message", stderr)
+	}
+}
+
+func TestAPIErrorsExitOne(t *testing.T) {
+	f := newBuiltinFixture(t)
+
+	// Bad token → the API's opaque 401 → exit 1.
+	env := map[string]string{"LAB_URL": f.url, "LAB_TOKEN": "lab_run_bogusbogusbogus"}
+	code, stdout, stderr := run(t, []string{"issue", "list"}, env)
+	if code != 1 || stdout != "" {
+		t.Fatalf("exit = %d, stdout %q, want 1", code, stdout)
+	}
+	if !strings.Contains(stderr, "invalid run token") {
+		t.Errorf("stderr = %q, want the 401 message", stderr)
+	}
+
+	// Unreachable server → exit 1 (transport error, not usage).
+	env = map[string]string{"LAB_URL": "http://127.0.0.1:1", "LAB_TOKEN": "lab_run_x"}
+	code, _, stderr = run(t, []string{"issue", "list"}, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if stderr == "" {
+		t.Error("stderr empty, want a transport error message")
 	}
 }

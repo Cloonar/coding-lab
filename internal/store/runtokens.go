@@ -45,12 +45,16 @@ func (s *Store) DeleteRunTokens(ctx context.Context, runID string) error {
 }
 
 // RunTokenInfo is a run token joined with the columns of its run that the
-// §3a validity rule and run-scoped authorization need.
+// §3a validity rule and run-scoped authorization need. Kind and Branch feed
+// the agent API's PR-create contract: an AFK run's PR body must carry
+// `Closes #<N>` and its head is always the run's own branch.
 type RunTokenInfo struct {
 	TokenID     string
 	RunID       string
 	RepoID      string
 	IssueNumber *int
+	Kind        string // manual|afk_manual|afk_auto
+	Branch      string
 	Outcome     string
 	ExpiresAt   *time.Time
 }
@@ -60,7 +64,7 @@ type RunTokenInfo struct {
 // (outcome='active' AND unexpired) is the caller's, with an injected clock.
 func (s *Store) RunTokenByHash(ctx context.Context, tokenHash string) (RunTokenInfo, error) {
 	row := s.db.QueryRowContext(ctx, s.rebind(
-		`SELECT rt.id, r.id, r.repo_id, r.issue_number, r.outcome, rt.expires_at
+		`SELECT rt.id, r.id, r.repo_id, r.issue_number, r.kind, r.branch, r.outcome, rt.expires_at
 		 FROM run_tokens rt JOIN runs r ON r.id = rt.run_id
 		 WHERE rt.token_hash = ?`), tokenHash)
 	var (
@@ -68,7 +72,7 @@ func (s *Store) RunTokenByHash(ctx context.Context, tokenHash string) (RunTokenI
 		issueN  sql.NullInt64
 		expires sql.NullString
 	)
-	if err := row.Scan(&info.TokenID, &info.RunID, &info.RepoID, &issueN, &info.Outcome, &expires); err != nil {
+	if err := row.Scan(&info.TokenID, &info.RunID, &info.RepoID, &issueN, &info.Kind, &info.Branch, &info.Outcome, &expires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return RunTokenInfo{}, fmt.Errorf("run token by hash: %w", ErrNotFound)
 		}

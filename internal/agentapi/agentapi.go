@@ -1,6 +1,8 @@
 // Package agentapi is lab's agent-facing API (/agent/v1). Authentication is
-// the run token only — no cookies, no CSRF (design §5). M1 ships the auth
-// middleware and a stub router; the real handlers land with the M5 engine.
+// the run token only — no cookies, no CSRF (design §5). Every request is
+// scoped to the authenticated run's repo: the repo id comes from the run row
+// the token joins to, never from the URL, so a run can only ever reach its
+// own repo's tracker surface (brief §8.2, D10).
 package agentapi
 
 import (
@@ -14,52 +16,55 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
 
 // runTokenPrefix is the wire prefix of run tokens (ids.NewToken("run")).
 const runTokenPrefix = "lab_run_"
 
-// Server carries the agent API's dependencies.
-type Server struct {
-	store *store.Store
-	log   *slog.Logger
-	now   func() time.Time
+// TrackerResolver resolves a repo-scoped Tracker — the seam the handlers go
+// through so tests can inject fakes. *tracker.Registry satisfies it.
+type TrackerResolver interface {
+	TrackerFor(ctx context.Context, repo store.Repo) (tracker.Tracker, error)
 }
 
-// New builds an agent API server. now is the injected clock for the token
+// Server carries the agent API's dependencies.
+type Server struct {
+	store    *store.Store
+	trackers TrackerResolver
+	log      *slog.Logger
+	now      func() time.Time
+}
+
+// New builds an agent API server. trackers resolves each repo's Tracker
+// (production: *tracker.Registry); now is the injected clock for the token
 // validity rule (nil → time.Now).
-func New(st *store.Store, logger *slog.Logger, now func() time.Time) *Server {
+func New(st *store.Store, trackers TrackerResolver, logger *slog.Logger, now func() time.Time) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &Server{store: st, log: logger, now: now}
+	return &Server{store: st, trackers: trackers, log: logger, now: now}
 }
 
 // Handler returns the /agent/v1 tree wrapped in run-token auth.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Brief §8.2 routes plus GET /agent/v1/issues (design §5). All are M5
-	// stubs behind real auth so the surface and its security are testable
-	// now and labctl's transport has a stable contract to land against.
-	stub := s.handleNotImplemented
-	mux.HandleFunc("GET /agent/v1/issue", stub)
-	mux.HandleFunc("GET /agent/v1/issues", stub)
-	mux.HandleFunc("GET /agent/v1/issues/{n}", stub)
-	mux.HandleFunc("POST /agent/v1/issues/{n}/comments", stub)
-	mux.HandleFunc("POST /agent/v1/prs", stub)
+	// Brief §8.2 routes plus GET /agent/v1/issues (design §5 — the gap the
+	// brief itself creates via `labctl issue list`).
+	mux.HandleFunc("GET /agent/v1/issue", s.handleClaimedIssue)
+	mux.HandleFunc("GET /agent/v1/issues", s.handleIssueList)
+	mux.HandleFunc("GET /agent/v1/issues/{n}", s.handleIssueGet)
+	mux.HandleFunc("POST /agent/v1/issues/{n}/comments", s.handleCommentCreate)
+	mux.HandleFunc("POST /agent/v1/prs", s.handlePRCreate)
 	mux.HandleFunc("/agent/v1/", func(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "not found")
 	})
 
 	return s.AuthMiddleware(mux)
-}
-
-func (s *Server) handleNotImplemented(w http.ResponseWriter, _ *http.Request) {
-	jsonError(w, http.StatusNotImplemented, "agent API lands in M5")
 }
 
 type runCtxKey struct{}
