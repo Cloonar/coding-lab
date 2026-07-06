@@ -86,6 +86,13 @@ type Options struct {
 	// re-arm (tests without a provider).
 	ArmCapture func(store.Run)
 
+	// AFKRunEnded reports an AFK run the DISCARD kill terminated — the third
+	// terminal-outcome writer besides the reaper/Stop chokepoints, which
+	// report their own. Injected by cmd/lab (metrics.Metrics.AFKRunEnded) so
+	// reconcile need not import the metrics package; lab_afk_runs_total
+	// under-counts 'stopped' without it. Nil → no report (degraded wiring).
+	AFKRunEnded func(kind, outcome string, duration time.Duration)
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -100,10 +107,11 @@ type Service struct {
 	bus    *events.Bus
 	log    *slog.Logger
 
-	reposDir   string
-	gitEnv     []string
-	armCapture func(store.Run)
-	now        func() time.Time
+	reposDir    string
+	gitEnv      []string
+	armCapture  func(store.Run)
+	afkRunEnded func(kind, outcome string, duration time.Duration)
+	now         func() time.Time
 }
 
 // New validates o and returns a Service.
@@ -133,17 +141,18 @@ func New(o Options) (*Service, error) {
 		now = time.Now
 	}
 	return &Service{
-		store:      o.Store,
-		git:        o.Git,
-		runner:     o.Runner,
-		guard:      o.Guard,
-		mat:        o.Materializer,
-		bus:        o.Bus,
-		log:        logger,
-		reposDir:   o.ReposDir,
-		gitEnv:     o.GitEnv,
-		armCapture: o.ArmCapture,
-		now:        now,
+		store:       o.Store,
+		git:         o.Git,
+		runner:      o.Runner,
+		guard:       o.Guard,
+		mat:         o.Materializer,
+		bus:         o.Bus,
+		log:         logger,
+		reposDir:    o.ReposDir,
+		gitEnv:      o.GitEnv,
+		armCapture:  o.ArmCapture,
+		afkRunEnded: o.AFKRunEnded,
+		now:         now,
 	}, nil
 }
 

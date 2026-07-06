@@ -89,6 +89,7 @@ type Registry struct {
 	httpClient *http.Client
 	newBuiltin BuiltinFactory
 	newForgejo ForgejoFactory
+	observe    Observer // optional metrics seam (instrument.go); nil → unwrapped
 }
 
 // NewRegistry builds a Registry. st and v back forge-credential decryption and
@@ -115,13 +116,18 @@ func NewRegistry(st *store.Store, v *vault.Vault, httpClient *http.Client, built
 // #1). An unknown binding, an unsupported or absent forge kind, a missing or
 // wrong-kind forge credential, a credential that fails to decrypt, or a remote
 // with no owner/repo pair are all errors — the caller never gets a half-built
-// tracker.
+// tracker. With an observer set (SetObserver), the returned tracker is
+// wrapped so every call reports (binding, op, ok) — the metrics seam.
 func (r *Registry) TrackerFor(ctx context.Context, repo store.Repo) (Tracker, error) {
 	switch repo.TrackerBinding {
 	case store.TrackerBindingBuiltin:
-		return r.newBuiltin(BuiltinConfig{Store: r.store, RepoID: repo.ID}), nil
+		return r.instrument(r.newBuiltin(BuiltinConfig{Store: r.store, RepoID: repo.ID}), store.TrackerBindingBuiltin), nil
 	case store.TrackerBindingForge:
-		return r.forgeTracker(ctx, repo)
+		trk, err := r.forgeTracker(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return r.instrument(trk, store.TrackerBindingForge), nil
 	default:
 		return nil, fmt.Errorf("tracker for repo %q: %w (%q)", repo.ID, ErrUnknownBinding, repo.TrackerBinding)
 	}

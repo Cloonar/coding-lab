@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -53,4 +54,43 @@ func (s *Service) List(ctx context.Context) ([]InstanceView, error) {
 		})
 	}
 	return views, nil
+}
+
+// LiveCounts is the scrape-time source of the lab_instances_active gauge
+// (M8): the active runs whose tmux session is live right now, bucketed by
+// run kind. Like List, liveness comes from tmux, never the DB — an active
+// row whose session died (not yet reaped) does not count, and the value is
+// re-derived on every scrape so it cannot drift from the truth the reaper
+// and Stop act on. cmd/lab registers this via metrics.RegisterInstances.
+func (s *Service) LiveCounts(ctx context.Context) (metrics.InstanceCounts, error) {
+	var counts metrics.InstanceCounts
+	active, err := s.store.ActiveRuns(ctx)
+	if err != nil {
+		return counts, err
+	}
+	if len(active) == 0 {
+		return counts, nil
+	}
+	live, err := s.runner.List(ctx)
+	if err != nil {
+		return counts, err
+	}
+	liveSet := make(map[string]bool, len(live))
+	for _, n := range live {
+		liveSet[n] = true
+	}
+	for _, run := range active {
+		if !liveSet[run.SessionName] {
+			continue
+		}
+		switch run.Kind {
+		case store.RunKindManual:
+			counts.Manual++
+		case store.RunKindAFKManual:
+			counts.AFKManual++
+		case store.RunKindAFKAuto:
+			counts.AFKAuto++
+		}
+	}
+	return counts, nil
 }

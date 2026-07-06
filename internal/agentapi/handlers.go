@@ -21,7 +21,6 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
-	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
 )
 
 // EventCRChanged is the SSE event name a builtin PR create publishes: the
@@ -320,8 +319,12 @@ func (s *Server) handleCommentCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if repo.TrackerBinding == store.TrackerBindingBuiltin {
-		if bt, isBuiltin := tk.(*builtin.Tracker); isBuiltin {
-			tk = bt.ForRun(info.RunID)
+		// Rescope through the RunScoper seam, never a concrete type assertion:
+		// the registry wraps trackers (metrics observer) and a concrete
+		// assertion against the wrapper would silently skip ForRun,
+		// misattributing the comment to the operator.
+		if rs, ok := tk.(tracker.RunScoper); ok {
+			tk = rs.ForRun(info.RunID)
 		}
 	}
 	if err := tk.CreateComment(r.Context(), n, req.Body); err != nil {

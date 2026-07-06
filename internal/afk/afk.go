@@ -37,6 +37,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -108,6 +109,11 @@ type Options struct {
 	// lab keeps one janitorial goroutine. Nil → no sweep (tests).
 	Sweep func(context.Context)
 
+	// Metrics receives the terminal-outcome reports (lab_afk_runs_total,
+	// lab_afk_run_duration_seconds) at the reaper/stop chokepoints. Nil is a
+	// no-op (the report methods are nil-safe).
+	Metrics *metrics.Metrics
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -129,6 +135,7 @@ type Service struct {
 	worktreeRoot string
 	gitEnv       []string
 	sweep        func(context.Context)
+	metrics      *metrics.Metrics // nil-safe report methods
 	now          func() time.Time
 
 	// mu single-flights the entire select→claim→spawn in launch — the ONE
@@ -192,6 +199,7 @@ func New(o Options) (*Service, error) {
 		worktreeRoot: o.WorktreeRoot,
 		gitEnv:       o.GitEnv,
 		sweep:        o.Sweep,
+		metrics:      o.Metrics,
 		now:          now,
 	}, nil
 }

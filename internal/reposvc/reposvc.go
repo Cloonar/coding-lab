@@ -26,6 +26,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
@@ -120,6 +121,10 @@ type Options struct {
 	// before the row/bare-dir removal so no session outlives its repo. nil → no
 	// teardown (M2 behavior).
 	StopInstances func(ctx context.Context, repoID string) (int, error)
+	// Metrics receives the clone-job reports (lab_clone_jobs_total,
+	// lab_clones_in_flight). Nil is a no-op (the report methods are
+	// nil-safe).
+	Metrics *metrics.Metrics
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -139,6 +144,7 @@ type Service struct {
 	credentialKeep func(filename string) bool
 	liveInstances  func(ctx context.Context, repoID string) (int, error)
 	stopInstances  func(ctx context.Context, repoID string) (int, error)
+	metrics        *metrics.Metrics // nil-safe report methods
 
 	// mu guards jobs: the single-flight registry of running clone jobs,
 	// keyed by repo id.
@@ -186,6 +192,7 @@ func New(o Options) (*Service, error) {
 		credentialKeep: o.CredentialKeep,
 		liveInstances:  o.LiveInstances,
 		stopInstances:  o.StopInstances,
+		metrics:        o.Metrics,
 		jobs:           make(map[string]*cloneJob),
 	}, nil
 }

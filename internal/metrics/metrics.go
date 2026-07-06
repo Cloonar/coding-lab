@@ -15,11 +15,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Metrics bundles the registry with lab's HTTP collectors.
+// Metrics bundles the registry with lab's HTTP collectors and the
+// lab-domain collectors (lab.go): AFK run outcomes/durations, tracker
+// requests, clone jobs.
 type Metrics struct {
 	reg      *prometheus.Registry
 	requests *prometheus.CounterVec
 	duration *prometheus.HistogramVec
+
+	// Lab-domain collectors, registered by registerLab (lab.go).
+	afkRuns         *prometheus.CounterVec
+	afkRunDuration  *prometheus.HistogramVec
+	trackerRequests *prometheus.CounterVec
+	cloneJobs       *prometheus.CounterVec
+	clonesInFlight  prometheus.Gauge
 }
 
 // New builds a fresh registry with the Go/process collectors and lab's HTTP
@@ -44,16 +53,30 @@ func New() *Metrics {
 		}, []string{"route", "method"}),
 	}
 	reg.MustRegister(m.requests, m.duration)
+	m.registerLab()
 	return m
 }
 
-// Registry exposes the underlying registry for additional collectors
-// (instances gauge, AFK outcomes, … in later milestones).
+// Registry exposes the underlying registry for additional collectors and
+// for test assertions (Gather).
 func (m *Metrics) Registry() *prometheus.Registry { return m.reg }
+
+// /metrics is unauthenticated (probes and scrapers hit it) and the
+// instances collector does real work per scrape — a runs query and a tmux
+// fork (lab.go). The cap turns a scrape flood into immediate 503s instead
+// of unbounded concurrent forks; the timeout cuts off a scrape wedged on a
+// hung Gather. Both are far above what one Prometheus needs.
+const (
+	maxScrapesInFlight = 3
+	scrapeTimeout      = 10 * time.Second
+)
 
 // Handler serves the /metrics endpoint for this registry.
 func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
+	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{
+		MaxRequestsInFlight: maxScrapesInFlight,
+		Timeout:             scrapeTimeout,
+	})
 }
 
 // routeHolder carries the innermost ServeMux pattern from RecordPattern

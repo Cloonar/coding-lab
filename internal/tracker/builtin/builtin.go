@@ -46,8 +46,11 @@ func New(cfg tracker.BuiltinConfig) tracker.Tracker {
 
 // ForRun returns a copy of t whose CreateComment authors comments as the given
 // run (author_kind=run, run_id set). M5 uses it to attribute an AFK run's
-// comments; the operator path keeps the default from New.
-func (t *Tracker) ForRun(runID string) *Tracker {
+// comments; the operator path keeps the default from New. It returns the
+// interface (tracker.RunScoper's signature) so callers rescope through the
+// seam without ever naming this concrete type — the registry may hand them
+// a decorated tracker, not a *Tracker.
+func (t *Tracker) ForRun(runID string) tracker.Tracker {
 	c := *t
 	c.author = author{kind: store.CommentAuthorRun, runID: &runID}
 	return &c
@@ -55,6 +58,7 @@ func (t *Tracker) ForRun(runID string) *Tracker {
 
 var (
 	_ tracker.Tracker        = (*Tracker)(nil)
+	_ tracker.RunScoper      = (*Tracker)(nil)
 	_ tracker.BuiltinFactory = New // the registry injects New as its builtin factory
 )
 

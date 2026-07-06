@@ -34,6 +34,13 @@ type recFixture struct {
 	env                                   []string
 	repo                                  store.Repo
 	armed                                 *[]store.Run
+	afkEnded                              *[]afkEndedCall
+}
+
+// afkEndedCall records one AFKRunEnded report (the lab_afk_runs_total seam).
+type afkEndedCall struct {
+	kind, outcome string
+	duration      time.Duration
 }
 
 func newRecFixture(t *testing.T) *recFixture {
@@ -75,10 +82,14 @@ func newRecFixture(t *testing.T) *recFixture {
 	runner := tmuxx.NewFake()
 	guard := startguard.New()
 	var armed []store.Run
+	var afkEnded []afkEndedCall
 	svc, err := New(Options{
 		Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Bus: events.NewBus(),
 		ReposDir: reposDir, GitEnv: env, Now: func() time.Time { return recClock },
 		ArmCapture: func(r store.Run) { armed = append(armed, r) },
+		AFKRunEnded: func(kind, outcome string, d time.Duration) {
+			afkEnded = append(afkEnded, afkEndedCall{kind, outcome, d})
+		},
 	})
 	if err != nil {
 		t.Fatalf("reconcile.New: %v", err)
@@ -86,7 +97,7 @@ func newRecFixture(t *testing.T) *recFixture {
 	return &recFixture{
 		t: t, svc: svc, st: st, runner: runner, guard: guard, mat: mat, git: git,
 		home: home, reposDir: reposDir, worktreeRoot: worktreeRoot, runtime: runtime,
-		env: env, repo: repo, armed: &armed,
+		env: env, repo: repo, armed: &armed, afkEnded: &afkEnded,
 	}
 }
 
@@ -297,9 +308,13 @@ func TestSweepProject_skipsStartingInstance(t *testing.T) {
 // --- re-adoption (§3b) ---------------------------------------------------
 
 func (f *recFixture) activeRun(session, branch string, deepLink *string) store.Run {
+	return f.activeRunKind(session, branch, store.RunKindManual, deepLink)
+}
+
+func (f *recFixture) activeRunKind(session, branch, kind string, deepLink *string) store.Run {
 	f.t.Helper()
 	r, err := f.st.CreateRun(f.t.Context(), store.Run{
-		ID: ids.NewID("run"), RepoID: f.repo.ID, Kind: store.RunKindManual, Provider: "claude-code",
+		ID: ids.NewID("run"), RepoID: f.repo.ID, Kind: kind, Provider: "claude-code",
 		Branch: branch, WorktreePath: "/wt/" + branch, SessionName: session, Model: "opus[1m]", Effort: "max",
 		DeepLinkURL: deepLink, StartedAt: recClock, Outcome: store.RunOutcomeActive,
 	})
@@ -497,6 +512,43 @@ func TestDiscard_killsLiveSessionAndTerminatesRun(t *testing.T) {
 		t.Error("discard left the worktree/branch behind")
 	}
 	_ = run
+}
+
+// TestDiscard_reportsAFKRunEnded pins the discard kill as a terminal-outcome
+// metrics writer (regression: lab_afk_runs_total under-counted 'stopped'
+// because only the reaper/Stop chokepoints reported): an AFK run killed by
+// Discard reports (kind, stopped, started_at→now) through AFKRunEnded, and a
+// manual-kind run killed the same way reports nothing — manual runs are
+// outside the metric's label vocabulary.
+func TestDiscard_reportsAFKRunEnded(t *testing.T) {
+	f := newRecFixture(t)
+
+	f.addWorktree("afk/7")
+	afkSession := "proj~afk-auto-7"
+	f.runner.AddLive(afkSession)
+	f.activeRunKind(afkSession, "afk/7", store.RunKindAFKAuto, nil)
+	if err := f.svc.Discard(t.Context(), f.repo.ID, "afk/7"); err != nil {
+		t.Fatalf("Discard(afk/7): %v", err)
+	}
+	if got := *f.afkEnded; len(got) != 1 ||
+		got[0].kind != store.RunKindAFKAuto || got[0].outcome != store.RunOutcomeStopped {
+		t.Fatalf("afkEnded after AFK discard = %+v, want one {afk_auto stopped}", got)
+	}
+
+	// Manual-kind run on a managed branch: killed and terminated, not counted.
+	f.addWorktree("lab/x-20260608-1530")
+	manSession := "proj~x-20260608-1530"
+	f.runner.AddLive(manSession)
+	f.activeRun(manSession, "lab/x-20260608-1530", nil)
+	if err := f.svc.Discard(t.Context(), f.repo.ID, "lab/x-20260608-1530"); err != nil {
+		t.Fatalf("Discard(lab/x): %v", err)
+	}
+	if got := *f.afkEnded; len(got) != 1 {
+		t.Errorf("afkEnded after manual discard = %+v, want still exactly the AFK entry", got)
+	}
+	if _, err := f.st.RunBySession(t.Context(), manSession); err == nil {
+		t.Error("manual run not terminated by discard")
+	}
 }
 
 func TestDiscard_rejectsNonManagedBranch(t *testing.T) {

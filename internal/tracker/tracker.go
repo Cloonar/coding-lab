@@ -135,3 +135,14 @@ type Tracker interface {
 	// CloseIssue transitions an issue to closed.
 	CloseIssue(ctx context.Context, number int) error
 }
+
+// RunScoper is the optional identity-rescoping seam on a Tracker: a backend
+// whose CreateComment identity can be re-bound to a specific run implements
+// it (the builtin tracker today), and every decorator the registry may wrap
+// around a backend forwards it. Callers assert THIS interface — never the
+// concrete backend type, which a decorator (the metrics observer) would
+// mask, silently dropping the run identity.
+type RunScoper interface {
+	// ForRun returns a Tracker whose comments are authored as the given run.
+	ForRun(runID string) Tracker
+}

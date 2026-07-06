@@ -54,6 +54,7 @@ func (s *Service) startCloneJobLocked(repo store.Repo) {
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &cloneJob{cancel: cancel, done: make(chan struct{})}
 	s.jobs[repo.ID] = job
+	s.metrics.CloneStarted() // paired with the CloneFinished defer in runClone
 	go s.runClone(ctx, job, repo)
 }
 
@@ -70,14 +71,20 @@ func (s *Service) runClone(ctx context.Context, job *cloneJob, repo store.Repo) 
 		s.mu.Unlock()
 	}()
 	defer job.cancel()
+	defer s.metrics.CloneFinished() // in-flight gauge: one Dec per started job
 
 	err := s.clone(ctx, repo)
-	if err == nil {
+	result, counted := cloneOutcome(err, ctx.Err())
+	if !counted {
+		// Cancelled by a force-delete — checked BEFORE the success branch,
+		// because the cancel can land after the clone already succeeded and
+		// that job must not count as ready for a repo that is going away.
+		// The row is gone (or about to be) and CloneBare removed any
+		// partial dir: write nothing, count no lab_clone_jobs_total result.
 		return
 	}
-	if ctx.Err() != nil {
-		// Cancelled by a force-delete: the row is going away (or already
-		// gone) and CloneBare removed the partial dir — write nothing.
+	s.metrics.CloneJob(result)
+	if err == nil {
 		return
 	}
 
@@ -91,6 +98,22 @@ func (s *Service) runClone(ctx context.Context, job *cloneJob, repo store.Repo) 
 		return
 	}
 	s.publishRepoChanged(repo.ID)
+}
+
+// cloneOutcome classifies a finished clone job for lab_clone_jobs_total.
+// Cancellation (force-delete) counts neither result WHATEVER err says — a
+// cancel can land after the clone already succeeded, and a job for a repo
+// that is being deleted must not count as ready (the metric Help pins
+// "cancelled jobs count neither").
+func cloneOutcome(err, ctxErr error) (result string, counted bool) {
+	switch {
+	case ctxErr != nil:
+		return "", false
+	case err == nil:
+		return store.CloneStatusReady, true
+	default:
+		return store.CloneStatusError, true
+	}
 }
 
 // clone materializes the credential, runs the bare clone with progress

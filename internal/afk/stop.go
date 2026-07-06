@@ -40,9 +40,14 @@ func (s *Service) StopAFK(ctx context.Context, session string) error {
 	// the row is terminal) recovers. The reaper's zombie drain (drainZombies)
 	// does: it retries the kill next tick for any live, known-repo session
 	// with no active run row that is not mid-Launch.
-	if err := s.store.EndRun(ctx, run.ID, store.RunOutcomeStopped, s.now(), ""); err != nil {
+	now := s.now()
+	if err := s.store.EndRun(ctx, run.ID, store.RunOutcomeStopped, now, ""); err != nil {
 		return err
 	}
+	// The Stop half of the M8 terminal-outcome metrics (reapRun is the
+	// reaper half): the outcome write above succeeded, so the run is
+	// terminally 'stopped' exactly once.
+	s.metrics.AFKRunEnded(run.Kind, store.RunOutcomeStopped, now.Sub(run.StartedAt))
 	if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 		s.log.Warn("afk stop: delete run tokens", "component", "afk", "run", run.ID, "err", err)
 	}

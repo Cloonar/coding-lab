@@ -177,8 +177,14 @@ func (s *Service) killSessionOnBranch(ctx context.Context, repo store.Repo, bran
 		if err != nil {
 			continue // no active run for this session (already reaped)
 		}
-		if err := s.store.EndRun(ctx, run.ID, store.RunOutcomeStopped, s.now(), "discarded"); err != nil {
+		now := s.now()
+		if err := s.store.EndRun(ctx, run.ID, store.RunOutcomeStopped, now, "discarded"); err != nil {
 			s.log.Warn("discard: end run", "component", "reconcile", "run", run.ID, "err", err)
+		} else if s.afkRunEnded != nil && (run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto) {
+			// This kill is a terminal-outcome writer like the reaper/Stop
+			// chokepoints, so it reports to lab_afk_runs_total the same way.
+			// Manual-kind runs stay outside the metric's label vocabulary.
+			s.afkRunEnded(run.Kind, store.RunOutcomeStopped, now.Sub(run.StartedAt))
 		}
 		if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 			s.log.Warn("discard: delete run tokens", "component", "reconcile", "run", run.ID, "err", err)

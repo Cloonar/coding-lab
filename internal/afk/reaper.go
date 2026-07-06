@@ -101,7 +101,7 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			// listing.
 			outcome, alive, claimed := s.classifyAndClaim(ctx, run, tracker.PRPresent(pulls, run.Branch), now)
 			if claimed {
-				s.reapRun(ctx, repo, run, outcome, alive)
+				s.reapRun(ctx, repo, run, outcome, alive, now)
 			}
 		}
 	}
@@ -246,8 +246,15 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, prPresent
 // timeout increments it; at PauseThreshold the auto scheduler stops
 // launching and manual starts 409 until reset. The counter is kind-agnostic
 // — manual and auto AFK runs both feed it. A neutral Stop never reaches
-// here (classifyAndClaim refuses a stopped run under runsMu).
-func (s *Service) reapRun(ctx context.Context, repo store.Repo, run store.Run, outcome Outcome, alive bool) {
+// here (classifyAndClaim refuses a stopped run under runsMu). now is the
+// tick time the claim stamped as ended_at, so the metrics duration below is
+// exactly started_at→ended_at.
+func (s *Service) reapRun(ctx context.Context, repo store.Repo, run store.Run, outcome Outcome, alive bool, now time.Time) {
+	// The reaper half of the M8 terminal-outcome metrics (the neutral Stop
+	// is the other half — StopAFK). The outcome row is already written, so
+	// this reports exactly once per terminal reap.
+	s.metrics.AFKRunEnded(run.Kind, outcome.RunOutcome(), now.Sub(run.StartedAt))
+
 	if alive {
 		if err := s.runner.Stop(ctx, run.SessionName); err != nil {
 			s.log.Warn("afk reap: stop session", "component", "afk", "session", run.SessionName, "err", err)

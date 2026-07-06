@@ -136,6 +136,9 @@ func run() int {
 		func(c tracker.ForgejoConfig) tracker.Tracker {
 			return forgejo.New(c.HTTPClient, c.BaseURL, c.Token, c.Owner, c.Repo)
 		})
+	// lab_tracker_requests_total (M8): every tracker resolved through the
+	// registry reports (binding, op, ok) — never error text or token bytes.
+	trackerReg.SetObserver(m.TrackerRequest)
 
 	// Agent API (M5/M6): run-token-authenticated tracker surface, repo-scoped
 	// by the run row; resolves trackers through the same registry and
@@ -209,6 +212,7 @@ func run() int {
 			Logger:       logger,
 			ReposDir:     reposDir,
 			ArmCapture:   instanceSvc.ArmCapture,
+			AFKRunEnded:  m.AFKRunEnded,
 		})
 		if err != nil {
 			logger.Error("building reconcile service", "component", "main", "err", err)
@@ -232,12 +236,18 @@ func run() int {
 			ReposDir:     reposDir,
 			WorktreeRoot: worktreeRoot,
 			Sweep:        reconcileSvc.RuntimeSweep,
+			Metrics:      m,
 		})
 		if err != nil {
 			logger.Error("building afk engine", "component", "main", "err", err)
 			return 1
 		}
 		instanceSvc.SetAFKStopper(afkSvc)
+
+		// lab_instances_active (M8): a scrape-time gauge over the live
+		// tmux+active-runs view — registered only with the instance stack up
+		// (without it no runner exists; the absent series says so).
+		m.RegisterInstances(instanceSvc.LiveCounts)
 	}
 
 	repoOpts := reposvc.Options{
@@ -248,6 +258,7 @@ func run() int {
 		Bus:          bus,
 		Logger:       logger,
 		ReposDir:     reposDir,
+		Metrics:      m,
 	}
 	if instanceSvc != nil {
 		// Preserve live-session credential files across the restart heal — the
