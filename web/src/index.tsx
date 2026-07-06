@@ -3,11 +3,13 @@ import { render } from 'solid-js/web';
 import { Navigate, Route, Router } from '@solidjs/router';
 import App from './App';
 import AddRepo from './routes/AddRepo';
+import CRDetail from './routes/CRDetail';
 import Credentials from './routes/Credentials';
 import Dashboard from './routes/Dashboard';
 import IssueDetail from './routes/IssueDetail';
 import Login from './routes/Login';
 import NewIssue from './routes/NewIssue';
+import RepoCRs from './routes/RepoCRs';
 import RepoIssues from './routes/RepoIssues';
 import RepoLabels from './routes/RepoLabels';
 import RepoSettings from './routes/RepoSettings';
@@ -35,6 +37,8 @@ render(
       <Route path="/repos/:id/issues" component={RepoIssues} />
       <Route path="/repos/:id/issues/new" component={NewIssue} />
       <Route path="/repos/:id/issues/:number" component={IssueDetail} />
+      <Route path="/repos/:id/crs" component={RepoCRs} />
+      <Route path="/repos/:id/crs/:number" component={CRDetail} />
       <Route path="/repos/:id/labels" component={RepoLabels} />
       <Route path="*" component={() => <Navigate href="/" />} />
     </Router>

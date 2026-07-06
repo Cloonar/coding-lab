@@ -6,6 +6,7 @@ import {
   claudeAuthStatus,
   claudeLoginCode,
   claudeLoginStart,
+  closeCR,
   createCredential,
   createIssue,
   createIssueComment,
@@ -19,11 +20,13 @@ import {
   discardParked,
   errorMessage,
   extractSpawnDefaults,
+  getCR,
   getIssue,
   getSettings,
   getSpawnDefaults,
   listClaimableIssues,
   listCredentials,
+  listCRs,
   listInstances,
   listIssues,
   listLabels,
@@ -36,6 +39,7 @@ import {
   login,
   logout,
   me,
+  mergeCR,
   normalizeSettings,
   resetAFK,
   retryClone,
@@ -907,6 +911,89 @@ describe('settings endpoints', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(400);
     expect((err as ApiError).message).toBe('afk_tick_seconds must be a positive integer');
+  });
+});
+
+describe('change request endpoints', () => {
+  const summary = {
+    number: 3,
+    title: 'Add retry loop',
+    state: 'open',
+    head_branch: 'afk/7',
+    base_branch: 'main',
+    closes: [7],
+    created_at: '2026-07-06T00:00:00.000Z',
+    merged_at: null,
+    merge_commit: null,
+  };
+
+  it('GET /repos/{id}/crs defaults to state=open and unwraps the {crs} envelope', async () => {
+    const mock = stubFetch(jsonResponse(200, { crs: [summary] }));
+
+    await expect(listCRs('repo_1')).resolves.toEqual([summary]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/crs?state=open');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET /repos/{id}/crs passes merged, closed and all through as-is', async () => {
+    for (const state of ['merged', 'closed', 'all'] as const) {
+      const mock = stubFetch(jsonResponse(200, { crs: [] }));
+      await listCRs('repo_1', state);
+      expect(fetchCall(mock)[0]).toBe(`/api/v1/repos/repo_1/crs?state=${state}`);
+    }
+  });
+
+  it('GET /repos/{id}/crs/{n} fetches the detail with diff and truncation flag', async () => {
+    const detail = { ...summary, body: 'Closes #7', diff: '+x', diff_truncated: false };
+    const mock = stubFetch(jsonResponse(200, detail));
+
+    await expect(getCR('repo_1', 3)).resolves.toEqual(detail);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/crs/3');
+  });
+
+  it('POST /repos/{id}/crs/{n}/merge carries the CSRF header and unwraps {cr}', async () => {
+    const merged = {
+      ...summary,
+      state: 'merged',
+      merged_at: '2026-07-06T02:00:00.000Z',
+      merge_commit: 'abc123',
+    };
+    const mock = stubFetch(jsonResponse(200, { cr: merged }));
+
+    await expect(mergeCR('repo_1', 3)).resolves.toEqual(merged);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/crs/3/merge');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+  });
+
+  it('POST .../merge surfaces the push-rejection 409 body verbatim', async () => {
+    stubFetch(
+      jsonResponse(409, {
+        error: 'push rejected: remote: GH006: Protected branch update failed for refs/heads/main',
+      }),
+    );
+
+    const err = await mergeCR('repo_1', 3).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe(
+      'push rejected: remote: GH006: Protected branch update failed for refs/heads/main',
+    );
+  });
+
+  it('POST /repos/{id}/crs/{n}/close unwraps {cr} and surfaces the forge 409', async () => {
+    const closed = { ...summary, state: 'closed' };
+    const mock = stubFetch(jsonResponse(200, { cr: closed }));
+    await expect(closeCR('repo_1', 3)).resolves.toEqual(closed);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/crs/3/close');
+    expect(requestInit(mock).method).toBe('POST');
+
+    stubFetch(jsonResponse(409, { error: 'repository uses a forge tracker' }));
+    const err = await closeCR('repo_1', 3).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).message).toBe('repository uses a forge tracker');
   });
 });
 

@@ -11,6 +11,7 @@ import { For, Match, Show, Switch, createResource, createSignal, onCleanup } fro
 import {
   errorMessage,
   getSpawnDefaults,
+  listCRs,
   listInstances,
   listProviders,
   listRepos,
@@ -31,6 +32,7 @@ import { createToast } from '../components/Toast';
 import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { remoteHost } from '../lib/repoName';
+import { resourceValue } from '../lib/resource';
 import { providerFor } from '../lib/spawn';
 import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
 
@@ -167,6 +169,11 @@ function RepoCard(props: {
         <A href={`/repos/${props.repo.id}/issues`} class="card-link">
           Issues
         </A>
+        <Show when={props.repo.tracker_binding === 'builtin'}>
+          <A href={`/repos/${props.repo.id}/crs`} class="card-link">
+            CRs
+          </A>
+        </Show>
         <A href={`/repos/${props.repo.id}/settings`} class="card-link">
           Settings
         </A>
@@ -180,6 +187,9 @@ function RepoCard(props: {
         </span>
         <Show when={props.repo.incogni}>
           <span class="chip incogni">incogni</span>
+        </Show>
+        <Show when={props.repo.tracker_binding === 'builtin'}>
+          <OpenCRChip repoID={props.repo.id} />
         </Show>
         <Show when={props.repo.clone_status === 'cloning'}>
           <span class="chip status-cloning">cloning</span>
@@ -223,6 +233,34 @@ function RepoCard(props: {
         <ParkedSection repoID={props.repo.id} />
       </Show>
     </article>
+  );
+}
+
+/**
+ * Open-CR count chip (builtin-bound repos only — the caller gates): the CR
+ * entry point on the repo card. Self-fetching with a scoped cr.changed
+ * refetch; a failing CR endpoint hides the chip instead of breaking the
+ * dashboard (non-throwing resource read).
+ */
+function OpenCRChip(props: { repoID: string }) {
+  const events = useEvents();
+  const [crs, { refetch }] = createResource(
+    () => props.repoID,
+    (repoID) => listCRs(repoID, 'open'),
+  );
+  onCleanup(
+    // eslint-disable-next-line solid/reactivity -- the handler re-reads props.repoID fresh on every SSE event
+    events.subscribe('cr.changed', (event) => {
+      if (event.repoID === props.repoID) void refetch();
+    }),
+  );
+  const count = () => resourceValue(crs)?.length ?? 0;
+  return (
+    <Show when={count() > 0}>
+      <A href={`/repos/${props.repoID}/crs`} class="chip cr-count">
+        {count()} open CR{count() === 1 ? '' : 's'}
+      </A>
+    </Show>
   );
 }
 

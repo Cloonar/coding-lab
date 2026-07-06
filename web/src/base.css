@@ -1087,6 +1087,141 @@ button.small {
   opacity: 0.55;
 }
 
+/* Change requests ------------------------------------------------------------ */
+
+.chip.state-merged {
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  color: var(--accent);
+}
+
+a.chip.closes-chip {
+  text-decoration: none;
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  color: var(--accent);
+}
+
+a.chip.closes-chip:hover {
+  text-decoration: underline;
+}
+
+a.chip.cr-count {
+  text-decoration: none;
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+a.chip.cr-count:hover {
+  text-decoration: underline;
+}
+
+.cr-card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.cr-card:hover {
+  background: var(--hover);
+}
+
+.cr-branches {
+  font-size: 0.85rem;
+}
+
+.merge-confirm {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--accent) 6%, var(--card));
+}
+
+.merge-question {
+  margin: 0 0 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* Diff view — phone-first. The page NEVER scrolls horizontally: long lines
+   scroll inside each file's .diff-scroll container instead. */
+
+.diff-truncated {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--banner-border);
+  border-radius: var(--radius-control);
+  background: var(--banner-bg);
+  color: var(--banner-text);
+  font-size: 0.85rem;
+}
+
+.diff-note {
+  margin: 0;
+}
+
+.diff-file-section {
+  margin-bottom: 0.9rem;
+}
+
+.diff-file-section:last-child {
+  margin-bottom: 0;
+}
+
+/* Visually distinct file header; sticky-ish: it pins just below the sticky
+   topbar (~3.35rem tall at the root font size) while its rows scroll by. */
+.diff-file-head {
+  position: sticky;
+  top: 3.35rem;
+  z-index: 1;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control) var(--radius-control) 0 0;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.diff-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-control) var(--radius-control);
+  background: var(--card);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 0.25rem 0;
+}
+
+.diff-row {
+  white-space: pre;
+  min-height: 1.5em;
+  width: max-content;
+  min-width: 100%;
+  padding: 0 0.6rem;
+}
+
+.diff-row.diff-add {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.diff-row.diff-remove {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+.diff-row.diff-hunk {
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+  color: var(--accent);
+}
+
+.diff-row.diff-meta {
+  color: var(--muted);
+}
+
 /* AFK ---------------------------------------------------------------------------- */
 
 .afk-section {
@@ -1164,4 +1299,19 @@ button.small {
   font-weight: 600;
   max-width: min(90vw, 480px);
   overflow-wrap: anywhere;
+}
+
+/* Diff render cap: large files collapse behind an explicit expand tap so a
+   ~1MiB diff never materializes tens of thousands of rows on a phone. */
+.diff-expand {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.6rem;
+  min-height: 44px;
+  font-size: 0.85rem;
+  color: var(--accent);
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
 }
