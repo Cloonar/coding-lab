@@ -54,6 +54,20 @@ func (g *Guard) Clear(name string) {
 	delete(g.starting, name)
 }
 
+// Has reports whether name is currently in the starting set — its
+// worktree + branch exist but its tmux session is not yet live (or its
+// Start is mid-rollback). The afk reaper consults this under its runsMu
+// before classifying a run: a mid-Launch session (row active, session
+// not yet spawned) must not be misread as a death and torn down. Clear
+// fires only once the session is live or the rollback is complete, so a
+// name that leaves the set is thereafter either genuinely reap-able or
+// no longer a candidate.
+func (g *Guard) Has(name string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.starting[name]
+}
+
 // Snapshot returns the current starting set as a sorted slice. The
 // result is an isolated copy: later Mark/Clear calls, and mutation of
 // the returned slice, leave each other untouched. Callers union it with

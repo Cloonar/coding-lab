@@ -8,10 +8,10 @@ import (
 // stubProvider is the minimal AgentProvider for registry tests.
 type stubProvider struct{ id string }
 
-func (s stubProvider) ID() string                        { return s.id }
-func (s stubProvider) Models() []Option                  { return nil }
-func (s stubProvider) Efforts() []Option                 { return nil }
-func (s stubProvider) SpawnArgv(_, _, _ string) []string { return nil }
+func (s stubProvider) ID() string                           { return s.id }
+func (s stubProvider) Models() []Option                     { return nil }
+func (s stubProvider) Efforts() []Option                    { return nil }
+func (s stubProvider) SpawnArgv(_, _, _, _ string) []string { return nil }
 func (s stubProvider) AuthStatus(context.Context, bool) (AuthStatus, error) {
 	return AuthStatus{}, nil
 }

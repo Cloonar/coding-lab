@@ -75,12 +75,24 @@ func TestCompat_AuthStatusFixture_parses(t *testing.T) {
 	}
 }
 
-// Spawn argv snapshot (compat.md §1, pinned M3 constant).
+// Spawn argv snapshot (compat.md §1, pinned M3 constant). Manual spawn: no
+// seed prompt, so no trailing positional.
 func TestCompat_SpawnArgvSnapshot(t *testing.T) {
-	got := strings.Join(claudecode.SpawnArgv("claude", "repo~dom-20260706-0910", "opus[1m]", "max"), " ")
+	got := strings.Join(claudecode.SpawnArgv("claude", "repo~dom-20260706-0910", "opus[1m]", "max", ""), " ")
 	want := "claude --remote-control repo~dom-20260706-0910 --permission-mode auto --model opus[1m] --effort max"
 	if got != want {
 		t.Errorf("spawn argv drifted:\n got  %q\n want %q", got, want)
+	}
+}
+
+// AFK spawn argv: the seed prompt is the trailing positional AFTER the
+// model/effort flags (pinned v0 mechanism, claude CLI `[options] [prompt]`) —
+// carried at spawn, never injected post-spawn.
+func TestCompat_SpawnArgvSeedPromptSnapshot(t *testing.T) {
+	got := strings.Join(claudecode.SpawnArgv("claude", "repo~afk-7", "opus[1m]", "max", "resolve #7"), " ")
+	want := "claude --remote-control repo~afk-7 --permission-mode auto --model opus[1m] --effort max resolve #7"
+	if got != want {
+		t.Errorf("seeded spawn argv drifted:\n got  %q\n want %q", got, want)
 	}
 }
 

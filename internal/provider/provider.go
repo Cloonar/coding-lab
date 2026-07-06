@@ -47,8 +47,12 @@ type AgentProvider interface {
 	Models() []Option
 	Efforts() []Option
 	// SpawnArgv builds the full command an instance session runs. Empty
-	// model/effort omit the respective flag.
-	SpawnArgv(sessionName, model, effort string) []string
+	// model/effort omit the respective flag. A non-empty initialPrompt is
+	// carried as the agent's trailing positional argument (the AFK seed
+	// prompt) — the pinned v0 mechanism, so the prompt exists before the
+	// process and is never raced by a post-spawn keystroke injection; manual
+	// spawns pass "" and get no trailing argument.
+	SpawnArgv(sessionName, model, effort, initialPrompt string) []string
 	// AuthStatus reports the machine-level login state. Results are cached
 	// briefly inside the provider; force bypasses the cache — spawn
 	// decisions MUST force (never trust the cache before a spawn). An error

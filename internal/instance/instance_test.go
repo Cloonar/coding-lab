@@ -216,10 +216,23 @@ func TestStart_happyPath(t *testing.T) {
 	if sess.Dir != wt {
 		t.Errorf("spawn cwd = %q, want the worktree %q", sess.Dir, wt)
 	}
-	// Spawn argv is the provider's (recorded verbatim by the fake runner).
-	wantArgv := f.prov.SpawnArgv(name, "opus[1m]", "max")
+	// Spawn argv is the provider's (recorded verbatim by the fake runner). A
+	// manual run carries NO seed prompt, so SpawnArgv is called with "" and the
+	// argv has no trailing prompt positional.
+	wantArgv := f.prov.SpawnArgv(name, "opus[1m]", "max", "")
 	if strings.Join(sess.Argv, " ") != strings.Join(wantArgv, " ") {
 		t.Errorf("spawn argv = %v, want %v", sess.Argv, wantArgv)
+	}
+	// Regression (finding: seed-via-argv): the last argv element is the effort
+	// value, not a stray/empty trailing prompt — a manual spawn never appends
+	// one.
+	if last := sess.Argv[len(sess.Argv)-1]; last != "max" {
+		t.Errorf("manual spawn last argv = %q, want %q (no trailing seed prompt)", last, "max")
+	}
+	// And no seed was injected post-spawn via keystrokes (the mechanism moved
+	// into the spawn argv; SendKeys is the login-code path only).
+	if sent := f.runner.Sent(name); len(sent) != 0 {
+		t.Errorf("manual spawn sent %d keystroke batches, want 0 (no post-spawn seeding)", len(sent))
 	}
 	// Session env carries LAB_URL + a minted LAB_TOKEN.
 	if v := envValue(sess.ExtraEnv, "LAB_URL"); v != "http://127.0.0.1:8080" {
@@ -242,6 +255,51 @@ func TestStart_happyPath(t *testing.T) {
 		r, err := f.st.RunBySession(t.Context(), name)
 		return err == nil && r.DeepLinkURL != nil && *r.DeepLinkURL == "https://claude.ai/code/session_real"
 	})
+}
+
+// Regression (finding: AFK seed prompt raced the cold-start TUI when delivered
+// via post-spawn SendKeys). Launch must carry the seed prompt into the spawn
+// argv as claude's trailing positional — one element even when multi-line —
+// present BEFORE the process, with no post-spawn keystroke injection.
+func TestLaunch_seedPromptIsTrailingSpawnPositional(t *testing.T) {
+	f := newFixture(t)
+	const seed = "You are an autonomous AFK run.\nResolve issue #42 and open a PR."
+	n := 42
+	name := "proj~afk-42"
+	run, err := f.svc.Launch(t.Context(), LaunchSpec{
+		Repo:         f.repo,
+		Provider:     f.prov,
+		Kind:         store.RunKindAFKManual,
+		IssueNumber:  &n,
+		SessionName:  name,
+		Branch:       "afk/42",
+		WorktreePath: filepath.Join(f.worktreeRoot, "proj-42"),
+		Model:        "opus[1m]",
+		Effort:       "max",
+		SeedPrompt:   seed,
+	})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if run.Kind != store.RunKindAFKManual {
+		t.Fatalf("kind = %q, want afk_manual", run.Kind)
+	}
+	sess, live := f.runner.Session(name)
+	if !live {
+		t.Fatal("session not live after Launch")
+	}
+	// The seed prompt is the single trailing argv positional (never split on
+	// its newline, never fragmented across pty reads) and follows the flags.
+	if last := sess.Argv[len(sess.Argv)-1]; last != seed {
+		t.Errorf("last spawn argv = %q, want the seed prompt %q as one trailing positional", last, seed)
+	}
+	if strings.Join(sess.Argv, " ") != strings.Join(f.prov.SpawnArgv(name, "opus[1m]", "max", seed), " ") {
+		t.Errorf("spawn argv = %v", sess.Argv)
+	}
+	// The prompt existed before the process — nothing was typed in afterward.
+	if sent := f.runner.Sent(name); len(sent) != 0 {
+		t.Errorf("seeded via SendKeys (%d batches), want the argv-only mechanism", len(sent))
+	}
 }
 
 func TestStart_rollbackOnSpawnFailure(t *testing.T) {
@@ -504,6 +562,99 @@ func TestStopAll_skipsLoginAndCountsManual(t *testing.T) {
 		if _, live := f.runner.Session(run.SessionName); live {
 			t.Errorf("session %s still live after StopAll", run.SessionName)
 		}
+	}
+}
+
+// fakeAFKStopper stands in for the AFK engine's neutral Stop: it records the
+// delegated session and kills it in the runner, as the real StopAFK does under
+// the stop-vs-reap lock.
+type fakeAFKStopper struct {
+	runner  *tmuxx.Fake
+	stopped []string
+	err     error
+}
+
+func (s *fakeAFKStopper) StopAFK(_ context.Context, session string) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.stopped = append(s.stopped, session)
+	s.runner.Kill(session)
+	return nil
+}
+
+// Regression (finding: StopAll skipped AFK runs, so a forced repo delete
+// stranded a live AFK agent working against a deleted repo). StopAll now
+// delegates AFK sessions to the engine's neutral Stop so no session outlives
+// its repo.
+func TestStopAll_stopsAFKViaDelegation(t *testing.T) {
+	f := newFixture(t)
+	stopper := &fakeAFKStopper{runner: f.runner}
+	f.svc.SetAFKStopper(stopper)
+
+	m, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID, Label: "m"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	afkName := "proj~afk-9"
+	f.runner.AddLive(afkName)
+	n9 := 9
+	if _, err := f.st.CreateRun(t.Context(), store.Run{
+		ID: ids.NewID("run"), RepoID: f.repo.ID, Kind: store.RunKindAFKManual, Provider: "claude-code",
+		IssueNumber: &n9, Branch: "afk/9", WorktreePath: "/wt/proj-9", SessionName: afkName,
+		Model: "opus[1m]", Effort: "max", StartedAt: clockTime, Outcome: store.RunOutcomeActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped, err := f.svc.StopAll(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
+	if stopped != 2 {
+		t.Errorf("stopped = %d, want 2 (manual + AFK; no session left behind)", stopped)
+	}
+	if len(stopper.stopped) != 1 || stopper.stopped[0] != afkName {
+		t.Errorf("AFK delegation = %v, want [%q]", stopper.stopped, afkName)
+	}
+	if _, live := f.runner.Session(afkName); live {
+		t.Error("AFK session survived StopAll — a forced repo delete would strand it")
+	}
+	if _, live := f.runner.Session(m.SessionName); live {
+		t.Error("manual session survived StopAll")
+	}
+}
+
+// A best-effort AFK stop hiccup (missing stopper or delegation error) never
+// aborts the rest of StopAll — the manual runs are still torn down.
+func TestStopAll_afkStopHiccupDoesNotAbort(t *testing.T) {
+	f := newFixture(t)
+	f.svc.SetAFKStopper(&fakeAFKStopper{runner: f.runner, err: errors.New("engine busy")})
+
+	m, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID, Label: "m"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	afkName := "proj~afk-9"
+	f.runner.AddLive(afkName)
+	n9 := 9
+	if _, err := f.st.CreateRun(t.Context(), store.Run{
+		ID: ids.NewID("run"), RepoID: f.repo.ID, Kind: store.RunKindAFKAuto, Provider: "claude-code",
+		IssueNumber: &n9, Branch: "afk/9", WorktreePath: "/wt/proj-9", SessionName: afkName,
+		Model: "opus[1m]", Effort: "max", StartedAt: clockTime, Outcome: store.RunOutcomeActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped, err := f.svc.StopAll(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
+	if stopped != 1 {
+		t.Errorf("stopped = %d, want 1 (manual torn down; failed AFK delegation not counted)", stopped)
+	}
+	if _, live := f.runner.Session(m.SessionName); live {
+		t.Error("manual session survived a StopAll where the AFK delegation errored")
 	}
 }
 

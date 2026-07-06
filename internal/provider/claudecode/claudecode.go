@@ -190,23 +190,33 @@ func (p *Provider) Efforts() []provider.Option { return slices.Clone(efforts) }
 
 // SpawnArgv builds the pinned instance spawn command:
 //
-//	{claude} --remote-control <session> --permission-mode auto [--model M] [--effort E]
+//	{claude} --remote-control <session> --permission-mode auto [--model M] [--effort E] [prompt]
 //
 // Empty model/effort omit the flag (defaults resolve from settings before
-// the call, so production always passes both).
-func (p *Provider) SpawnArgv(sessionName, model, effort string) []string {
-	return SpawnArgv(p.claudeBin, sessionName, model, effort)
+// the call, so production always passes both). A non-empty initialPrompt is
+// appended as claude's trailing positional argument — the AFK seed prompt,
+// pinned to the v0 mechanism (v0 afk.go: append(baseStartArgv(),
+// afkSeedPrompt(n))) so it is present before the process starts and cannot be
+// lost to the cold-start TUI race; manual spawns pass "" and get no trailing
+// argument.
+func (p *Provider) SpawnArgv(sessionName, model, effort, initialPrompt string) []string {
+	return SpawnArgv(p.claudeBin, sessionName, model, effort, initialPrompt)
 }
 
 // SpawnArgv is the pure spawn-argv builder behind Provider.SpawnArgv,
 // exported for the compat snapshot test.
-func SpawnArgv(claudeBin, sessionName, model, effort string) []string {
+func SpawnArgv(claudeBin, sessionName, model, effort, initialPrompt string) []string {
 	argv := []string{claudeBin, "--remote-control", sessionName, "--permission-mode", "auto"}
 	if model != "" {
 		argv = append(argv, "--model", model)
 	}
 	if effort != "" {
 		argv = append(argv, "--effort", effort)
+	}
+	// Trailing positional AFTER the flags (claude CLI: `claude [options]
+	// [prompt]`). Omitted when empty so a manual spawn carries no stray arg.
+	if initialPrompt != "" {
+		argv = append(argv, initialPrompt)
 	}
 	return argv
 }

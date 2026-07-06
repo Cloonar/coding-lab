@@ -10,9 +10,9 @@ import (
 
 func TestSpawnArgv(t *testing.T) {
 	for _, tc := range []struct {
-		name                string
-		session, model, eff string
-		want                string
+		name                        string
+		session, model, eff, prompt string
+		want                        string
 	}{
 		{
 			// Pinned M3 constant: {claude} --remote-control <session>
@@ -28,11 +28,28 @@ func TestSpawnArgv(t *testing.T) {
 			name: "empty effort omitted", session: "r~x", model: "sonnet", eff: "",
 			want: "claude --remote-control r~x --permission-mode auto --model sonnet",
 		},
+		{
+			// AFK seed prompt: pinned v0 mechanism — trailing positional AFTER
+			// the --model/--effort flags, present before the process starts (no
+			// post-spawn keystroke race). One argv element even with spaces.
+			name: "seed prompt is the trailing positional", session: "r~afk-7", model: "sonnet", eff: "high", prompt: "resolve issue 7 and open a PR",
+			want: "claude --remote-control r~afk-7 --permission-mode auto --model sonnet --effort high resolve issue 7 and open a PR",
+		},
+		{
+			// Manual spawns pass "" — no trailing argument at all.
+			name: "empty prompt omitted", session: "r~x", model: "sonnet", eff: "high",
+			want: "claude --remote-control r~x --permission-mode auto --model sonnet --effort high",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := strings.Join(SpawnArgv("claude", tc.session, tc.model, tc.eff), " ")
-			if got != tc.want {
+			argv := SpawnArgv("claude", tc.session, tc.model, tc.eff, tc.prompt)
+			if got := strings.Join(argv, " "); got != tc.want {
 				t.Errorf("SpawnArgv = %q; want %q", got, tc.want)
+			}
+			// The seed prompt is exactly one trailing argv element even with
+			// spaces — never split, never fragmented across the pty.
+			if tc.prompt != "" && argv[len(argv)-1] != tc.prompt {
+				t.Errorf("last argv element = %q; want the seed prompt %q as one positional", argv[len(argv)-1], tc.prompt)
 			}
 		})
 	}

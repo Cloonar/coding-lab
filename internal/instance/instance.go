@@ -103,6 +103,10 @@ type Service struct {
 	gitEnv       []string
 	captureCtx   context.Context
 	now          func() time.Time
+
+	// afkStop is the M5 AFK engine's neutral-Stop delegation (design §4c),
+	// wired once at startup via SetAFKStopper; nil refuses AFK stops.
+	afkStop AFKStopper
 }
 
 // New validates o and returns a Service.
@@ -179,10 +183,11 @@ func (s *Service) publishParkedChanged(repoID string) {
 	s.bus.Publish(events.Event{Type: EventParkedChanged, Payload: repoScopedPayload{Type: EventParkedChanged, RepoID: repoID}})
 }
 
-// liveInstanceCount counts live sessions against the instance cap, excluding
+// LiveInstanceCount counts live sessions against the instance cap, excluding
 // the provider login session (design §4d — the one symbol every exclusion keys
-// on).
-func liveInstanceCount(live []string) int {
+// on). Exported for the M5 AFK engine's locked cap check — one counting rule,
+// never two.
+func LiveInstanceCount(live []string) int {
 	n := 0
 	for _, name := range live {
 		if name != tmuxx.LoginSession {

@@ -78,11 +78,12 @@ func (s *Service) cleanupCredential(repo store.Repo, runID string) {
 	}
 }
 
-// resolveModelEffort layers the spawn model/effort per D12d: an explicit
+// ResolveModelEffort layers the spawn model/effort per D12d: an explicit
 // per-spawn value wins, then the repo default, then the global settings
 // default; the resolved pair is validated against the provider's catalogs
-// (closed allowlists — an unknown value is a 400, never spawned).
-func (s *Service) resolveModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, reqModel, reqEffort string) (model, effort string, err error) {
+// (closed allowlists — an unknown value is a 400, never spawned). Exported
+// for the M5 AFK engine, whose spawns resolve through the same rule.
+func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, reqModel, reqEffort string) (model, effort string, err error) {
 	model = reqModel
 	if model == "" && repo.ModelDefault != nil {
 		model = *repo.ModelDefault

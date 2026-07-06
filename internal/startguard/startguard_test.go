@@ -38,6 +38,28 @@ func TestGuard_markClearSnapshot(t *testing.T) {
 	}
 }
 
+// Has is the per-name reader the afk reaper uses to skip a mid-Launch
+// session: true exactly while the name is marked, false before Mark and
+// after Clear.
+func TestGuard_has(t *testing.T) {
+	g := New()
+
+	if g.Has("repo~afk-7") {
+		t.Errorf("Has on unmarked name = true; want false")
+	}
+	g.Mark("repo~afk-7")
+	if !g.Has("repo~afk-7") {
+		t.Errorf("Has after Mark = false; want true")
+	}
+	if g.Has("repo~afk-8") {
+		t.Errorf("Has on a different, unmarked name = true; want false")
+	}
+	g.Clear("repo~afk-7")
+	if g.Has("repo~afk-7") {
+		t.Errorf("Has after Clear = true; want false")
+	}
+}
+
 // Snapshot must be an isolated copy in both directions: later Mark/Clear
 // calls don't mutate an already-taken snapshot, and writing into the
 // returned slice doesn't corrupt the guard. The sweep holds its snapshot

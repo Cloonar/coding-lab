@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
-	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
@@ -19,10 +18,12 @@ type StartParams struct {
 }
 
 // Start spawns a manual instance following the v0-pinned sequence with full
-// rollback (package doc). It returns the created run on success, or a typed
-// error the API maps to a status code: ErrRepoNotReady/ErrOverCap/ErrLoggedOut
-// → 409, BadRequestError → 400, StartFailedError (git/spawn cause verbatim) →
-// 500, store.ErrNotFound (unknown repo) → 404.
+// rollback (package doc): the manual preflight (repo ready, provider, cap,
+// forced auth refresh, label derivation) followed by the shared Launch core.
+// It returns the created run on success, or a typed error the API maps to a
+// status code: ErrRepoNotReady/ErrOverCap/ErrLoggedOut → 409,
+// BadRequestError → 400, StartFailedError (git/spawn cause verbatim) → 500,
+// store.ErrNotFound (unknown repo) → 404.
 func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 	repo, err := s.store.RepoByID(ctx, p.RepoID)
 	if err != nil {
@@ -36,7 +37,7 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 		return store.Run{}, badRequestf("repository provider %q is not registered", repo.Provider)
 	}
 
-	model, effort, err := s.resolveModelEffort(ctx, prov, repo, p.Model, p.Effort)
+	model, effort, err := s.ResolveModelEffort(ctx, prov, repo, p.Model, p.Effort)
 	if err != nil {
 		return store.Run{}, err // BadRequestError → 400 (or a store error)
 	}
@@ -48,7 +49,7 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 	if err != nil {
 		return store.Run{}, err
 	}
-	if liveInstanceCount(live) >= s.effectiveCap(ctx, repo) {
+	if LiveInstanceCount(live) >= s.EffectiveCap(ctx, repo) {
 		return store.Run{}, ErrOverCap
 	}
 
@@ -63,124 +64,25 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 		taken[name] = true
 	}
 	label := gitx.UniqueManualLabel(repo.Name, gitx.SanitizeLabel(p.Label), s.now(), taken)
-	name := gitx.ComposeSessionName(repo.Name, label)
-	branch := repo.ManualBranchPrefix + label
-	wtPath := s.worktreePath(repo.Name, label)
-	bareDir := s.bareDir(repo.ID)
-	runID := ids.NewID("run")
 
-	// Sweep guard spans worktree-creation → session-live (§4b). Cleared on
-	// every return via defer (success or rollback), matching v0's
-	// markStarting/defer clearStarting.
-	s.guard.Mark(name)
-	defer s.guard.Clear(name)
-
-	// Materialize the repo's GIT credential (opID = run id) for the worktree
-	// fetch AND the spawned session's git env. Kept alive for the session on
-	// success; cleaned only on rollback here / at Stop.
-	credEnv, credCleanup, err := s.credentialEnv(ctx, repo, runID)
-	if err != nil {
-		return store.Run{}, &StartFailedError{cause: err}
-	}
-	gitEnv := append(append([]string{}, s.gitEnv...), credEnv...)
-
-	// AddWorktree: fail-loud fetch → fork from origin/<default>, NO fallback
-	// base. A failure here created nothing — roll back only the credential
-	// files (the run row/token do not exist yet).
-	if err := s.git.AddWorktree(ctx, bareDir, wtPath, branch, repo.DefaultBranch, gitEnv); err != nil {
-		credCleanup()
-		return store.Run{}, &StartFailedError{cause: err}
-	}
-
-	// rollback restores the exact pre-Start state after the worktree exists:
-	// RemoveWorktree + force DeleteBranch (both attempted, each logged) + the
-	// run row/token (when created) + the credential files. Runs on a detached
-	// context so a client disconnect can't strand a half-built instance.
-	rollback := func(rowCreated bool) {
-		rctx := context.WithoutCancel(ctx)
-		// Kill the session first. runner.Start can return an error while the
-		// tmux session is already live — the daemonized session survives the
-		// request context being cancelled during tmuxx's post-spawn recheck.
-		// Stop is idempotent (no-op when nothing is live), so it is harmless on
-		// the pre-spawn rollback paths and reaps the orphan on the spawn-error
-		// path (sessions-spawn: "full rollback, nothing left behind").
-		if err := s.runner.Stop(rctx, name); err != nil {
-			s.log.Warn("start rollback: stop session", "component", "instance", "session", name, "err", err)
-		}
-		if err := s.git.RemoveWorktree(rctx, bareDir, wtPath, gitEnv); err != nil {
-			s.log.Warn("start rollback: remove worktree", "component", "instance", "session", name, "worktree", wtPath, "err", err)
-		}
-		if err := s.git.DeleteBranch(rctx, bareDir, branch, gitEnv); err != nil {
-			s.log.Warn("start rollback: delete branch", "component", "instance", "session", name, "branch", branch, "err", err)
-		}
-		if rowCreated {
-			if err := s.store.DeleteRun(rctx, runID); err != nil {
-				s.log.Warn("start rollback: delete run row", "component", "instance", "run", runID, "err", err)
-			}
-		}
-		credCleanup()
-	}
-
-	// Seed the worktree (trust/MCP grants, .git/info/exclude). A failure aborts
-	// the Start — nothing stranded.
-	if err := prov.SeedWorkspace(wtPath, seedOpts()); err != nil {
-		rollback(false)
-		return store.Run{}, &StartFailedError{cause: err}
-	}
-
-	run := store.Run{
-		ID:           runID,
-		RepoID:       repo.ID,
+	return s.Launch(ctx, LaunchSpec{
+		Repo:         repo,
+		Provider:     prov,
 		Kind:         store.RunKindManual,
-		Provider:     prov.ID(),
-		Branch:       branch,
-		WorktreePath: wtPath,
-		SessionName:  name,
+		SessionName:  gitx.ComposeSessionName(repo.Name, label),
+		Branch:       repo.ManualBranchPrefix + label,
+		WorktreePath: s.worktreePath(repo.Name, label),
 		Model:        model,
 		Effort:       effort,
-		StartedAt:    s.now(),
-		Outcome:      store.RunOutcomeActive,
-	}
-	created, err := s.store.CreateRun(ctx, run)
-	if err != nil {
-		rollback(false)
-		return store.Run{}, err
-	}
-
-	// Mint the run token — manual runs have NO wall-clock expiry (§3a).
-	token, tokenHash := ids.NewToken("run")
-	if err := s.store.CreateRunToken(ctx, runID, tokenHash, nil, s.now()); err != nil {
-		rollback(true)
-		return store.Run{}, err
-	}
-
-	extraEnv, err := s.spawnEnv(ctx, repo, credEnv, token)
-	if err != nil {
-		rollback(true)
-		return store.Run{}, err
-	}
-
-	// Spawn in the worktree (never the reference repo), prlimit-wrapped by the
-	// runner. A spawn failure rolls the whole Start back.
-	if err := s.runner.Start(ctx, name, wtPath, prov.SpawnArgv(name, model, effort), extraEnv); err != nil {
-		rollback(true)
-		return store.Run{}, &StartFailedError{cause: err}
-	}
-
-	// Recency is keyed by repo and stamped BEFORE the capture so the sort is
-	// right even if the deep link never lands (error only logged).
-	if err := s.store.TouchRepoOpened(ctx, repo.ID, s.now()); err != nil {
-		s.log.Warn("stamping repo opened", "component", "instance", "repo", repo.ID, "err", err)
-	}
-	go s.runCapture(created)
-	s.publishRunChanged(repo.ID)
-	return created, nil
+	})
 }
 
-// effectiveCap is the live-instance cap for a start on repo: the repo's
+// EffectiveCap is the live-instance cap for a start on repo: the repo's
 // max_instances_override when set, else the global settings max_instances.
 // A missing/blank/garbled setting falls back to the config default (6).
-func (s *Service) effectiveCap(ctx context.Context, repo store.Repo) int {
+// Exported for the M5 AFK engine, whose locked claim path re-checks the same
+// cap on fresh liveness.
+func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 	if repo.MaxInstancesOverride != nil {
 		return *repo.MaxInstancesOverride
 	}

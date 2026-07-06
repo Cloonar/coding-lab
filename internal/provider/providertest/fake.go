@@ -75,14 +75,18 @@ func (f *Fake) Models() []provider.Option  { return f.models }
 func (f *Fake) Efforts() []provider.Option { return f.efforts }
 
 // SpawnArgv mirrors the pinned claude argv shape so tests can assert the
-// recorded tmux argv.
-func (f *Fake) SpawnArgv(session, model, effort string) []string {
+// recorded tmux argv, including the seed prompt carried as the trailing
+// positional (non-empty initialPrompt) — manual spawns pass "" and get none.
+func (f *Fake) SpawnArgv(session, model, effort, initialPrompt string) []string {
 	argv := []string{"claude", "--remote-control", session, "--permission-mode", "auto"}
 	if model != "" {
 		argv = append(argv, "--model", model)
 	}
 	if effort != "" {
 		argv = append(argv, "--effort", effort)
+	}
+	if initialPrompt != "" {
+		argv = append(argv, initialPrompt)
 	}
 	return argv
 }

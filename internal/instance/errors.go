@@ -19,7 +19,9 @@ var (
 	// ready), so there is no bare reference to fork a worktree from. API → 409.
 	ErrRepoNotReady = errors.New("repository is not ready")
 	// ErrAFKStopUnsupported: Stop of a session whose run is an AFK kind is the
-	// AFK engine's job (M5). In M3 it is refused. API → 501.
+	// AFK engine's job; it is refused only when no engine is wired
+	// (SetAFKStopper never called — a build without the instance stack).
+	// API → 501.
 	ErrAFKStopUnsupported = errors.New("stopping AFK instances is not supported yet")
 )
 
