@@ -66,17 +66,19 @@ let
     "--base-url"
     cfg.baseUrl
   ]
-  ++ lib.optionals cfg.proxyAuth.enable (
-    [
-      "--proxy-auth"
-      "--proxy-auth-header"
-      cfg.proxyAuth.header
-    ]
-    ++ lib.optionals (cfg.proxyAuth.trustedProxies != [ ]) [
-      "--trusted-proxies"
-      (lib.concatStringsSep "," cfg.proxyAuth.trustedProxies)
-    ]
-  )
+  ++ lib.optionals cfg.proxyAuth.enable [
+    "--proxy-auth"
+    "--proxy-auth-header"
+    cfg.proxyAuth.header
+  ]
+  # trustedProxies is deliberately NOT gated on proxyAuth.enable: the server
+  # also uses --trusted-proxies without proxy auth (X-Forwarded-Proto trust
+  # for Secure-cookie detection behind a TLS-terminating proxy with lab's
+  # own login).
+  ++ lib.optionals (cfg.proxyAuth.trustedProxies != [ ]) [
+    "--trusted-proxies"
+    (lib.concatStringsSep "," cfg.proxyAuth.trustedProxies)
+  ]
   ++ cfg.extraFlags;
 
   # HOME for the unit (and thus every spawned session): claude and git both
@@ -224,7 +226,12 @@ in
         type = lib.types.listOf lib.types.str;
         default = [ ];
         example = [ "10.0.0.0/8" ];
-        description = "CIDRs of trusted reverse proxies (--trusted-proxies).";
+        description = ''
+          CIDRs of trusted reverse proxies (--trusted-proxies). Passed
+          whenever non-empty, independent of {option}`enable`: without proxy
+          auth the list still gates X-Forwarded-Proto trust (Secure-cookie
+          detection behind a TLS-terminating proxy with lab's own login).
+        '';
       };
     };
 
