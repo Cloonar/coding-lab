@@ -1,0 +1,19 @@
+# The AFK engine ports v0's model with four deltas, and the row-as-candidate inversion needs the start guard
+
+An AFK run resolves one `ready-for-agent` issue unattended: claim the issue by creating its run branch, spawn a seeded session in a fresh worktree, and reap it when a PR whose head is that branch appears (done-signal), when the session dies, or when the persisted budget clock expires. The decision logic is v0's, transcribed table-for-table (reference ADR-0007/0013): selection is open ready issues minus issues whose branch already exists — rendered from the repo's `afk_branch_pattern`, never a literal `afk/` — picking the lowest number; classification priority is PR > death > timeout with the inclusive budget boundary; three consecutive failures pause the repo until a human Reset, with no auto-retry ever; a user Stop is neutral — outcome `stopped`, no failure counted, no teardown, worktree and branch parked. Selection, claim, and launch run under one engine mutex, and Stop and reap serialize on another with the outcome written before the kill (design §4c), so a stop can never be double-classified as a death.
+
+The four D12 deltas are the only intended changes: every run (manual and AFK) gets a history row; the budget clock is persisted on the run row and survives restarts (v0 reset it — a reboot mid-run silently doubled budgets); caps, budgets, and the three loop intervals are settings with per-repo overrides, re-read each tick; model/effort defaults are per-repo with per-spawn override. The seed prompt is the §8.4 template with `labctl` as the agent's only tracker vocabulary, delivered as the **trailing positional of the spawn argv** — the prompt exists before the process does, so it structurally cannot race the agent's cold-start TUI. It is never injected by keystroke.
+
+The inversion that needed care: v0 discovered reap candidates from live tmux sessions, so a run that had not spawned yet could not be classified. D12a's runs table flips that — candidates come from `outcome='active'` rows, which exist *before* the session does. Unguarded, a reaper tick in the create-row→spawn window reads the session as dead, classifies death, tears down the fresh fork (a zero-commit branch reads merged, so the claim branch is deleted too), and records a spurious three-strikes failure. The start guard that already protected mid-Start worktrees from the sweep is therefore also a reaper-side check: a guard-marked session is skipped outright. The mirror-image leak — a failed tmux kill after the terminal outcome is written, leaving a live session with no active row that nothing would ever re-enumerate — is drained by the reaper each tick (any live lab session with no active run row and no guard mark gets a retried kill), restoring v0's lazy-restamp self-healing.
+
+One deliberate tightening over v0: starting a manual AFK run on a paused repo is refused (409) rather than bypassing the pause — the pause is a human-attention signal, and the human's lever is Reset.
+
+## Status
+
+Accepted. Implements D12 (§9 port, §8.2–8.4 surfaces); shipped in M5. The built-in tracker's change requests complete the done-signal's builtin half in M6.
+
+## Considered options
+
+- **Reap candidates from live tmux (v0 verbatim).** Rejected: run history (D12a) and persisted budgets (D12b) need the row to be the durable record; the guard check reconciles the inversion instead.
+- **Deliver the seed prompt via send-keys after spawn.** Rejected after review: no readiness signal exists; a swallowed prompt idles the run to a timeout and feeds three-strikes with zero evidence. Argv delivery is the v0-pinned mechanism and verified against Claude Code 2.1.198.
+- **Propagate a failed reap-kill as an error and retry inline.** Rejected in favor of the tick janitor: the reap already committed the outcome; retrying inside the same tick couples two failure domains, while the drain converges within one tick and also heals operator-stop leaks.
