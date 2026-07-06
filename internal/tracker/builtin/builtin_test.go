@@ -326,6 +326,44 @@ func TestBuiltin_Pulls_stateMappingAndPRPresent(t *testing.T) {
 	}
 }
 
+// TestBuiltin_Pull pins the single-CR detail read (labctl pr view): the full
+// title/body come back with the shared state vocabulary and the CR's
+// lab-relative URL; an unknown number surfaces store.ErrNotFound.
+func TestBuiltin_Pull(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	body := "card: |\n  kind: capture\n  target: nixos\n\nCloses #1"
+	if _, err := tr.CreatePull(ctx, "afk/1", "main", "feat: capture card", body); err != nil {
+		t.Fatalf("CreatePull: %v", err)
+	}
+	if _, err := s.MergeCR(ctx, repo.ID, 1, "abc1234", fixedNow); err != nil {
+		t.Fatalf("MergeCR: %v", err)
+	}
+
+	pd, err := tr.Pull(ctx, 1)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	want := tracker.PullDetail{
+		Number:     1,
+		Title:      "feat: capture card",
+		Body:       body,
+		State:      tracker.PullMerged,
+		HeadBranch: "afk/1",
+		URL:        "/repos/" + repo.ID + "/crs/1",
+	}
+	if pd != want {
+		t.Errorf("PullDetail = %+v, want %+v", pd, want)
+	}
+
+	if _, err := tr.Pull(ctx, 999); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("Pull(999) err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestBuiltin_CreatePull pins the builtin PR create (M6): a CR is persisted
 // with head/base/title/body, its closes parsed from the body with the shared
 // grammar, and the returned PullRef is the open CR.

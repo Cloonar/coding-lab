@@ -139,6 +139,17 @@ func (t *Tracker) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
 	return out, nil
 }
 
+// Pull returns one change request in full detail, body included — the read
+// behind labctl pr view. An unknown number surfaces store.ErrNotFound (the
+// builtin not-found sentinel, like Issue).
+func (t *Tracker) Pull(ctx context.Context, number int) (tracker.PullDetail, error) {
+	cr, err := t.store.CRByRepoNumber(ctx, t.repoID, number)
+	if err != nil {
+		return tracker.PullDetail{}, fmt.Errorf("builtin pull %d: %w", number, err)
+	}
+	return toPullDetail(cr), nil
+}
+
 // CreatePull opens a change request from head onto base — the builtin answer
 // to a forge PR create (the agent API's POST /prs routes here for
 // builtin-bound repos). The issues the body closes are parsed with the shared
@@ -312,6 +323,19 @@ func toPullRef(cr store.CR) tracker.PullRef {
 		Number:     cr.Number,
 		HeadBranch: cr.HeadBranch,
 		State:      cr.State,
+		URL:        fmt.Sprintf("/repos/%s/crs/%d", cr.RepoID, cr.Number),
+	}
+}
+
+// toPullDetail maps a store CR onto the tracker's full-detail PR vocabulary,
+// under the same URL convention as toPullRef (the CR's lab-relative SPA route).
+func toPullDetail(cr store.CR) tracker.PullDetail {
+	return tracker.PullDetail{
+		Number:     cr.Number,
+		Title:      cr.Title,
+		Body:       cr.Body,
+		State:      cr.State,
+		HeadBranch: cr.HeadBranch,
 		URL:        fmt.Sprintf("/repos/%s/crs/%d", cr.RepoID, cr.Number),
 	}
 }

@@ -72,6 +72,9 @@ func (f *fakeTracker) Pulls(context.Context) ([]tracker.PullRef, error) {
 	}
 	return append([]tracker.PullRef(nil), f.pulls...), nil
 }
+func (f *fakeTracker) Pull(context.Context, int) (tracker.PullDetail, error) {
+	return tracker.PullDetail{}, tracker.ErrNotFound
+}
 func (f *fakeTracker) CreatePull(context.Context, string, string, string, string) (tracker.PullRef, error) {
 	return tracker.PullRef{}, errors.New("not implemented")
 }

@@ -124,6 +124,21 @@ type PullRef struct {
 	URL        string
 }
 
+// PullDetail is one pull request / change request in full: what PullRef
+// deliberately drops (title, BODY) plus the same number/state/head/URL. It
+// exists because PullRef is pinned to the reaper's hot path — Pulls() stays a
+// cheap fan-out — while the agent read surface (labctl pr view) needs the
+// body, e.g. a captured card YAML living in a PR body on the forge. State is
+// the same three-valued PullOpen|PullMerged|PullClosed vocabulary.
+type PullDetail struct {
+	Number     int
+	Title      string
+	Body       string
+	State      string
+	HeadBranch string
+	URL        string
+}
+
 // Label is one repo label in lab's vocabulary. Callers speak label NAMES
 // only — the forge client's name-to-ID resolution and the builtin tracker's
 // label ids stay behind the seam. Color is a #rrggbb swatch; both bindings
@@ -162,6 +177,12 @@ type Tracker interface {
 	// only open PRs silently breaks the M5 done-signal (a merged afk/<N> PR is
 	// no longer open) — all states is required.
 	Pulls(ctx context.Context) ([]PullRef, error)
+
+	// Pull returns one pull request / change request in full detail,
+	// including its body — the agent read surface behind labctl pr view. An
+	// unknown number wraps ErrNotFound (the builtin backend surfaces
+	// store.ErrNotFound, like Issue).
+	Pull(ctx context.Context, number int) (PullDetail, error)
 
 	// CreatePull opens a pull request / change request from head onto base.
 	// Exercised in M5/M6; implemented now for symmetry.

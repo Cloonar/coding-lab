@@ -29,6 +29,8 @@ type fakeTracker struct {
 
 	createdPull  *pullArgs
 	pullRef      tracker.PullRef
+	pulls        []tracker.PullRef
+	pullDetails  []tracker.PullDetail
 	comments     []commentArgs
 	createdIssue *issueArgs
 	labelAdds    []labelsArgs
@@ -76,7 +78,24 @@ func (f *fakeTracker) CreateComment(_ context.Context, number int, body string) 
 	return nil
 }
 func (f *fakeTracker) Pulls(context.Context) ([]tracker.PullRef, error) {
-	return []tracker.PullRef{}, f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.pulls == nil {
+		return []tracker.PullRef{}, nil
+	}
+	return f.pulls, nil
+}
+func (f *fakeTracker) Pull(_ context.Context, number int) (tracker.PullDetail, error) {
+	if f.err != nil {
+		return tracker.PullDetail{}, f.err
+	}
+	for _, pd := range f.pullDetails {
+		if pd.Number == number {
+			return pd, nil
+		}
+	}
+	return tracker.PullDetail{}, fmt.Errorf("pull %d: %w", number, tracker.ErrNotFound)
 }
 func (f *fakeTracker) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	if f.err != nil {
@@ -706,6 +725,133 @@ func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 		}
 	default:
 		t.Error("no cr.changed published on builtin PR create")
+	}
+}
+
+// TestPRViewAndList_forge pins the agent PR read surface (issue #8) on a
+// forge-bound repo: GET /prs/{n} answers the full detail including the BODY —
+// the captured-card-YAML retrieval path — GET /prs lists the repo's PRs
+// across states, and an unknown number is the canonical 404 envelope.
+func TestPRViewAndList_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{
+		pullDetails: []tracker.PullDetail{{
+			Number: 12, Title: "feat: capture card", Body: "card: |\n  kind: capture",
+			State: tracker.PullOpen, HeadBranch: "afk/7",
+			URL: "https://git.example.com/o/r/pulls/12",
+		}},
+		pulls: []tracker.PullRef{
+			{Number: 12, HeadBranch: "afk/7", State: tracker.PullOpen, URL: "https://git.example.com/o/r/pulls/12"},
+			{Number: 3, HeadBranch: "afk/2", State: tracker.PullMerged, URL: "https://git.example.com/o/r/pulls/3"},
+		},
+	}
+	handler := f.forgeServer(fk).Handler()
+
+	rr := doJSON(t, handler, "GET", "/agent/v1/prs/12", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /prs/12: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got prDetailResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := prDetailResponse{
+		Number: 12, Title: "feat: capture card", Body: "card: |\n  kind: capture",
+		State: "open", Head: "afk/7", URL: "https://git.example.com/o/r/pulls/12",
+	}
+	if got != want {
+		t.Errorf("PR detail = %+v, want %+v", got, want)
+	}
+
+	rr = doJSON(t, handler, "GET", "/agent/v1/prs", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /prs: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var list struct {
+		PRs []prListItem `json:"prs"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	wantList := []prListItem{
+		{Number: 12, State: "open", Head: "afk/7", URL: "https://git.example.com/o/r/pulls/12"},
+		{Number: 3, State: "merged", Head: "afk/2", URL: "https://git.example.com/o/r/pulls/3"},
+	}
+	if len(list.PRs) != len(wantList) {
+		t.Fatalf("PR list = %+v, want %+v", list.PRs, wantList)
+	}
+	for i := range wantList {
+		if list.PRs[i] != wantList[i] {
+			t.Errorf("PR list[%d] = %+v, want %+v", i, list.PRs[i], wantList[i])
+		}
+	}
+
+	// Unknown number → the canonical 404 envelope (the fake wraps ErrNotFound
+	// like the real client's upstream 404); a non-numeric segment names no PR.
+	for _, path := range []string{"/agent/v1/prs/999", "/agent/v1/prs/abc"} {
+		rr = doJSON(t, handler, "GET", path, token, "")
+		if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), `"error"`) {
+			t.Errorf("GET %s: status = %d, body %q, want 404 envelope", path, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// TestPRViewAndList_builtin runs the same read surface end-to-end on a
+// builtin-bound repo: the CR a run created comes back in full through
+// GET /prs/{n} — injected Closes and all — and through the list.
+func TestPRViewAndList_builtin(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedIssue(t, "iss7", "repo_a", 7, "Fix it", "")
+	f.seedRun(t, "run_afk", "repo_a", "active") // afk_auto, issue 7, branch afk/7
+	token := f.seedToken(t, "run_afk", nil)
+
+	s := New(f.st, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now })
+	handler := s.Handler()
+
+	rr := doJSON(t, handler, "POST", "/agent/v1/prs", token, `{"title":"feat: capture card","body":"card: |\n  kind: capture"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("POST /prs: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+
+	rr = doJSON(t, handler, "GET", "/agent/v1/prs/1", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /prs/1: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got prDetailResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Number != 1 || got.Title != "feat: capture card" || got.State != "open" ||
+		got.Head != "afk/7" || got.URL != "/repos/repo_a/crs/1" {
+		t.Errorf("CR detail = %+v", got)
+	}
+	if !strings.Contains(got.Body, "card: |\n  kind: capture") || !strings.Contains(got.Body, "Closes #7") {
+		t.Errorf("CR body = %q, want the card YAML and the injected Closes #7", got.Body)
+	}
+
+	rr = doJSON(t, handler, "GET", "/agent/v1/prs", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /prs: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var list struct {
+		PRs []prListItem `json:"prs"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list.PRs) != 1 || list.PRs[0].Number != 1 || list.PRs[0].Head != "afk/7" {
+		t.Errorf("PR list = %+v, want the one created CR", list.PRs)
+	}
+
+	// Unknown number → 404 (builtin surfaces store.ErrNotFound).
+	rr = doJSON(t, handler, "GET", "/agent/v1/prs/999", token, "")
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("GET /prs/999: status = %d, want 404", rr.Code)
 	}
 }
 

@@ -602,6 +602,85 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// prDetailResponse is the GET /agent/v1/prs/{n} shape: PR metadata plus the
+// full BODY — the read labctl pr view renders, so an agent can retrieve
+// PR-carried content (e.g. a captured card YAML) without any raw forge
+// fallback (D10). head is the bare branch name, state the three-valued
+// open|merged|closed vocabulary.
+type prDetailResponse struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	State  string `json:"state"`
+	Head   string `json:"head"`
+	URL    string `json:"url"`
+}
+
+// prListItem is one row of GET /agent/v1/prs — the PullRef vocabulary (no
+// title/body; the list is the reader counterpart of the reaper's Pulls()
+// fan-out, and PullRef deliberately stays that cheap).
+type prListItem struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
+	Head   string `json:"head"`
+	URL    string `json:"url"`
+}
+
+// handlePRGet is GET /agent/v1/prs/{n}: one PR/CR of the run's repo in full,
+// body included. An unknown number is the canonical 404 envelope (either
+// binding's typed not-found), never a panic.
+func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	pd, err := tk.Pull(r.Context(), n)
+	if err != nil {
+		s.writeTrackerError(w, "loading pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, prDetailResponse{
+		Number: pd.Number,
+		Title:  pd.Title,
+		Body:   pd.Body,
+		State:  pd.State,
+		Head:   pd.HeadBranch,
+		URL:    pd.URL,
+	})
+}
+
+// handlePRList is GET /agent/v1/prs: the repo's PRs/CRs across ALL states —
+// what `labctl pr list` renders (the reader counterpart to POST /prs).
+func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	pulls, err := tk.Pulls(r.Context())
+	if err != nil {
+		s.writeTrackerError(w, "listing pull requests", repo, err)
+		return
+	}
+	items := make([]prListItem, 0, len(pulls))
+	for _, p := range pulls {
+		items = append(items, prListItem{Number: p.Number, State: p.State, Head: p.HeadBranch, URL: p.URL})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"prs": items})
+}
+
 // publishCRChanged emits cr.changed for repoID — the same {type, repoID}
 // envelope every repo-scoped event carries. A nil bus (unit tests) is a no-op.
 func (s *Server) publishCRChanged(repoID string) {

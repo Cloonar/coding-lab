@@ -428,6 +428,61 @@ func TestDerivePullState(t *testing.T) {
 	}
 }
 
+// --- Pull ------------------------------------------------------------------
+
+// TestPull pins the single-PR detail read (labctl pr view): one GET
+// /pulls/{n}, the full body carried through verbatim (the captured-card-YAML
+// case), and the same state+merged → three-valued derivation as Pulls.
+func TestPull(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"number":72,"title":"feat: capture card",
+		  "body":"card: |\n  kind: capture\n  target: nixos",
+		  "state":"closed","merged":true,"head":{"ref":"afk/63"},
+		  "html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/72"}`)
+	})
+
+	pd, err := c.Pull(context.Background(), 72)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != apiPrefix+"/pulls/72" {
+		t.Errorf("request = %s %s; want GET %s/pulls/72", gotMethod, gotPath, apiPrefix)
+	}
+	if gotAuth != "token "+testToken {
+		t.Errorf("Authorization = %q; want %q", gotAuth, "token "+testToken)
+	}
+	want := tracker.PullDetail{
+		Number:     72,
+		Title:      "feat: capture card",
+		Body:       "card: |\n  kind: capture\n  target: nixos",
+		State:      tracker.PullMerged, // state=closed + merged=true → merged
+		HeadBranch: "afk/63",
+		URL:        "https://git.cloonar.com/Cloonar/nixos/pulls/72",
+	}
+	if pd != want {
+		t.Errorf("PullDetail = %+v; want %+v", pd, want)
+	}
+}
+
+// TestPull_notFound pins the unknown-number path: Forgejo's 404 unwraps to
+// tracker.ErrNotFound (the labctl error-envelope path), never leaking the token.
+func TestPull_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"pull request does not exist"}`)
+	})
+
+	_, err := c.Pull(context.Background(), 999)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
 // --- CreatePull ------------------------------------------------------------
 
 func TestCreatePull(t *testing.T) {

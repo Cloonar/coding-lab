@@ -30,6 +30,8 @@ Usage:
   labctl label create --name N [--color C --description D]
                                         create the label if missing (idempotent)
   labctl pr create --title T --body B   open a PR/CR for the current branch
+  labctl pr view <n>                    show PR n (number, title, state, head, url, body)
+  labctl pr list                        list the repo's PRs across all states (number, state, head, url)
   labctl --version                      print version
 
 Environment:
@@ -286,8 +288,51 @@ func splitLabels(s string) []string {
 }
 
 func runPR(args []string, env Env) int {
-	if len(args) == 0 || args[0] != "create" {
+	if len(args) == 0 {
 		_, _ = fmt.Fprint(env.Stderr, usage)
+		return 2
+	}
+	switch args[0] {
+	case "view":
+		if len(args) != 2 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr view: want <n>")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr view: PR number %q is not an integer\n", args[1])
+			return 2
+		}
+		return withClient(env, "pr view", func(c *Client) error {
+			pd, err := c.PRView(n)
+			if err != nil {
+				return err
+			}
+			printPR(env.Stdout, pd)
+			return nil
+		})
+	case "list":
+		if len(args) > 1 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr list: too many arguments")
+			return 2
+		}
+		return withClient(env, "pr list", func(c *Client) error {
+			prs, err := c.PRList()
+			if err != nil {
+				return err
+			}
+			// One row per PR: number, state, head branch, URL — the same
+			// columns the reaper matches on, readable in one call.
+			for _, pr := range prs {
+				_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\t%s\t%s\n",
+					pr.Number, pr.State, pr.Head, pr.URL)
+			}
+			return nil
+		})
+	case "create":
+		// handled below
+	default:
+		_, _ = fmt.Fprintf(env.Stderr, "labctl pr: unknown subcommand %q\n\n%s", args[0], usage)
 		return 2
 	}
 	fs := flag.NewFlagSet("labctl pr create", flag.ContinueOnError)
@@ -330,6 +375,16 @@ func printIssue(w io.Writer, is Issue) {
 	for _, c := range is.Comments {
 		_, _ = fmt.Fprintf(w, "\n--- comment by %s (%s)\n%s\n", c.Author, c.CreatedAt, c.Body)
 	}
+}
+
+// printPR renders the plain-text PR view, mirroring printIssue: number,
+// title, then one metadata line each for state, head, and url, then the body.
+func printPR(w io.Writer, pd PRDetail) {
+	_, _ = fmt.Fprintf(w, "#%d %s\n", pd.Number, pd.Title)
+	_, _ = fmt.Fprintf(w, "state: %s\n", pd.State)
+	_, _ = fmt.Fprintf(w, "head: %s\n", pd.Head)
+	_, _ = fmt.Fprintf(w, "url: %s\n", pd.URL)
+	_, _ = fmt.Fprintf(w, "\n%s\n", pd.Body)
 }
 
 // withClient builds the Client from LAB_URL/LAB_TOKEN and runs fn. Missing
