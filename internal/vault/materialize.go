@@ -31,6 +31,21 @@ const (
 // in-flight write.
 const staleTempMaxAge = 5 * time.Minute
 
+// credFileMinAge is how old a materialized credential file must be before
+// CleanupAll's keep-set is allowed to reap it. It guards the mid-op window
+// a keep-set cannot see: a credential is materialized at the start of a
+// clone or instance Start (opID = repo/run id) but its run only enters the
+// live keep-set once the tmux session is up — after the AddWorktree fetch
+// (up to gitTimeout, 60s) plus seeding and spawn. Without this guard a
+// throttled sweep firing in that window would unlink the key out from
+// under an in-flight fetch or a just-spawned live agent, stranding it with
+// a dangling GIT_SSH_COMMAND/GIT_ASKPASS. 5 minutes is comfortably above
+// that window; a genuine orphan (its op ended without calling Cleanup) is
+// still reaped on the next sweep once it ages out. Normal op-end cleanup
+// is immediate via Cleanup(credID, opID) — this only bounds the belt-and-
+// suspenders GC.
+const credFileMinAge = 5 * time.Minute
+
 // Materializer writes decrypted GIT credentials under the runtime dir
 // (<state>/runtime, 0700 — design §6/§7) so git subprocesses can
 // authenticate without secrets in argv, and removes them again per the
@@ -197,6 +212,12 @@ func (m *Materializer) Cleanup(credID, opID string) error {
 // CredIDFromFile and OpIDFromFile to recover the parts. A nil keep
 // removes all materialized credential files.
 //
+// A not-kept credential file younger than credFileMinAge is left in
+// place: it may belong to an in-flight clone/Start whose run has not yet
+// entered the keep-set (its opID cannot be a live run id until the
+// session is up). It is reaped by a later sweep once it ages out; normal
+// op-end removal is immediate via Cleanup(credID, opID).
+//
 // It also reaps stale atomic-write temp files (".<name>.tmp-…" older
 // than staleTempMaxAge): a kill between temp write and rename orphans a
 // temp file holding secret bytes that no Cleanup path would otherwise
@@ -227,6 +248,10 @@ func (m *Materializer) CleanupAll(keep func(filename string) bool) error {
 		}
 		if keep != nil && keep(name) {
 			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil || time.Since(info.ModTime()) < credFileMinAge {
+			continue // in-flight op: materialized, but its run isn't in the keep-set yet
 		}
 		if err := os.Remove(filepath.Join(m.dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			errs = append(errs, err)

@@ -482,6 +482,9 @@ func TestCleanupAllKeepsOnlyReferencedAndNeverTouchesKnownHosts(t *testing.T) {
 	if err := os.WriteFile(m.KnownHostsPath(), []byte("git.cloonar.com ssh-ed25519 AAAA\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Age the files past credFileMinAge so the in-flight guard does not spare
+	// them — this test asserts the keep-set semantics, not the age guard.
+	ageCredFiles(t, m.Dir())
 
 	// The design §6 restart rule: keep exactly the files referenced by
 	// re-adopted live runs — per (credID, opID).
@@ -525,6 +528,7 @@ func TestCleanupAllNilKeepRemovesAllCredentialFiles(t *testing.T) {
 	if _, err := m.MaterializeAskpass("cred_b", "op_2", HTTPSTokenPayload{Username: "u", Token: "t"}); err != nil {
 		t.Fatal(err)
 	}
+	ageCredFiles(t, m.Dir())
 	if err := m.CleanupAll(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -534,6 +538,59 @@ func TestCleanupAllNilKeepRemovesAllCredentialFiles(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("runtime dir not empty after CleanupAll(nil): %v", entries)
+	}
+}
+
+// ageCredFiles backdates every runtime file except known_hosts well past
+// credFileMinAge, so CleanupAll's in-flight guard does not treat them as
+// possibly-mid-op. Used by cleanup tests that assert immediate reaping.
+func ageCredFiles(t *testing.T, dir string) {
+	t.Helper()
+	old := time.Now().Add(-2 * credFileMinAge)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == "known_hosts" {
+			continue
+		}
+		if err := os.Chtimes(filepath.Join(dir, e.Name()), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Regression (in-flight op race): a credential is materialized at the start
+// of a clone/instance Start (opID = repo/run id) but its run only enters the
+// keep-set once the tmux session is live — after the AddWorktree fetch, seed,
+// and spawn. A throttled sweep firing in that window must NOT unlink the file,
+// or it strands the in-flight fetch / just-spawned live agent with a dangling
+// GIT_SSH_COMMAND. CleanupAll therefore spares a not-kept file younger than
+// credFileMinAge, and reaps it once it ages out.
+func TestCleanupAllSparesFreshNotKeptFiles(t *testing.T) {
+	m := newTestMaterializer(t)
+	key, _, err := m.MaterializeSSHKey("cred_x", "op_inflight", SSHKeyPayload{PrivateKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// keep=false for everything (the in-flight run isn't live yet).
+	if err := m.CleanupAll(func(string) bool { return false }); err != nil {
+		t.Fatalf("CleanupAll: %v", err)
+	}
+	if _, err := os.Stat(key); err != nil {
+		t.Fatalf("fresh not-kept file was reaped, stranding the in-flight op: %v", err)
+	}
+	// Once it ages past the window it is a genuine orphan and gets reaped.
+	old := time.Now().Add(-2 * credFileMinAge)
+	if err := os.Chtimes(key, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CleanupAll(func(string) bool { return false }); err != nil {
+		t.Fatalf("CleanupAll: %v", err)
+	}
+	if _, err := os.Stat(key); !os.IsNotExist(err) {
+		t.Errorf("aged-out orphan survived CleanupAll: %v", err)
 	}
 }
 
