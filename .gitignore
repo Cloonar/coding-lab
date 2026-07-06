@@ -1,0 +1,15 @@
+# build outputs
+/bin/
+web/dist/
+internal/webui/dist/
+web/node_modules/
+
+# nix
+result
+result-*
+.direnv/
+
+# local databases
+*.db
+*.db-wal
+*.db-shm

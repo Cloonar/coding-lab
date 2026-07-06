@@ -1,0 +1,26 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - misspell
+  exclusions:
+    paths:
+      # npm dependency that happens to ship a Go package; not our code.
+      - web/node_modules
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - web/node_modules
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
