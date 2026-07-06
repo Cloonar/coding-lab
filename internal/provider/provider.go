@@ -32,10 +32,14 @@ type AuthStatus struct {
 	CheckedAt time.Time `json:"checked_at"`
 }
 
-// SeedOpts parametrizes SeedWorkspace. Empty in M3: the trust + MCP grants
-// and the .git/info/exclude entries are unconditional. M7 adds the incogni
-// attribution-disabling keys here.
-type SeedOpts struct{}
+// SeedOpts parametrizes SeedWorkspace. The trust + MCP grants and the
+// .git/info/exclude entries are unconditional; Incogni (the repo's flag,
+// D15 §9 measure 1) additionally makes the provider disable its own
+// attribution output in the worktree's local settings, so commits and PRs
+// from the session carry no AI markers at the source.
+type SeedOpts struct {
+	Incogni bool
+}
 
 // AgentProvider is everything lab needs from a coding agent (design §4d).
 // Implementations own their fragile CLI couplings; callers never shell out

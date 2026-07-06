@@ -33,6 +33,10 @@ Provenance legend:
 - **fixture** — pinned by a captured fixture/spec from an earlier version
   (or from v0 behavior) and asserted by tests; re-verify live when a
   Claude Code upgrade misbehaves.
+- **schema extraction** — read out of the installed 2.1.198 CLI bundle's
+  embedded settings schema (key names, types, and descriptions verbatim);
+  stronger than a fixture (it is the shipped binary's own contract) but
+  not observed end to end in a live flow.
 
 ## 1. Spawn argv (`--remote-control`) — live (2.1.198)
 
@@ -98,7 +102,7 @@ Provenance legend:
   20s, loginPoll 1s, authTTL 30s, bridgeTimeout 30s, poll cadence 200ms,
   login code cap 4096.
 
-## 4. Trust / attribution keys — folder trust live (2.1.198), MCP fixture (v0)
+## 4. Trust / attribution keys — folder trust live (2.1.198), MCP fixture (v0), attribution schema-extracted (2.1.198)
 
 - Folder trust: `~/.claude.json` → `projects.<absolute worktree dir>.
   hasTrustDialogAccepted: true`. **live (2.1.198)** — the M3 acceptance
@@ -116,8 +120,50 @@ Provenance legend:
   (tmpfile + fsync + rename); already-granted files are not rewritten. The
   smoke confirmed the write is additive and non-destructive against a real
   `~/.claude.json` carrying dozens of pre-existing project entries.
-- Attribution/Co-Authored-By keys: **M7** (incogni); intentionally not
-  pinned here yet.
+- Attribution/Co-Authored-By keys — **schema extraction (2.1.198)**,
+  probed 2026-07-06 on this host's installed bundle
+  (`claude-code-2.1.198` nix store path; `claude config list` no longer
+  exists as a subcommand on 2.1.198, and the docs site was unreachable, so
+  the pins come from the settings zod schema embedded in the CLI bundle —
+  descriptions quoted verbatim below). Lab's incogni measure 1
+  (`claudecode.SeedAttributionOff`) seeds all four keys into the worktree's
+  `.claude/settings.local.json` (project-local settings override the user's
+  `~/.claude/settings.json`):
+  - `attribution.commit` (string): "Attribution text for git commits,
+    including any trailers. Empty string hides attribution." Default:
+    `Co-Authored-By: <model> <noreply@anthropic.com>`. Seeded `""`.
+  - `attribution.pr` (string): "Attribution text for pull request
+    descriptions. Empty string hides attribution." Default:
+    `🤖 Generated with [Claude Code](…)`. Seeded `""`.
+  - `attribution.sessionUrl` (bool): "Whether to append the claude.ai
+    session link to commits and PRs created from web or Remote Control
+    sessions (default: true). Set to false to omit the Claude-Session
+    trailer and PR-body link." **Load-bearing for lab**: every lab session
+    is a `--remote-control` session, so without this the `Claude-Session`
+    trailer leaks a claude.ai link into every commit even with commit/pr
+    blanked. Seeded `false`.
+  - `includeCoAuthoredBy` (bool): the schema marks it "Deprecated: Use
+    attribution instead", but the resolution logic in the bundle still
+    honors it — attribution.commit/pr win when either is set; else
+    `includeCoAuthoredBy === false` blanks both; else defaults apply.
+    Seeded `false` as defense in depth (and for older claudes that predate
+    the `attribution` object).
+  Pinned by `TestCompat_AttributionKeys_seed`; the merge/idempotence
+  contract by the `claudecode` attribution tests. Provenance:
+  binary-schema extraction, not observed in a live commit flow — when a
+  Claude Code upgrade misbehaves, verify by committing from an incogni
+  worktree and inspecting `git log`.
+
+  **Defense-in-depth matchers (measures 3+7) key on the EMAIL, not the
+  model name.** The trailer default is `Co-Authored-By: <model>
+  <noreply@anthropic.com>` — the model display name is variable (a rename
+  from "Claude" to "Fable" already happened in this family), so both the
+  agent-API body sanitizer (`internal/agentapi` `attributionLine`) and the
+  pre-push guard (`internal/seeder` `hookMessagePatterns`) match a
+  `<…@anthropic.com>` email in addition to a "Claude" display prefix. A
+  measure-1 regression (Claude Code stops honoring the attribution keys)
+  therefore still cannot leak an Anthropic-authored trailer through the
+  other two layers.
 
 ## Live re-verification
 

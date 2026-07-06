@@ -63,11 +63,15 @@ func (f *testFixture) seedRepo(t *testing.T, id string) {
 }
 
 func (f *testFixture) seedRepoBinding(t *testing.T, id, binding, forgeKind string) {
+	f.seedRepoIncogni(t, id, binding, forgeKind, false)
+}
+
+func (f *testFixture) seedRepoIncogni(t *testing.T, id, binding, forgeKind string, incogni bool) {
 	t.Helper()
 	f.exec(t, `INSERT INTO repos
-		(id, name, remote_url, tracker_binding, forge_kind, default_branch, afk_branch_pattern, manual_branch_prefix, created_at)
-		VALUES (?, ?, ?, ?, ?, 'main', 'afk/<N>', 'lab/', ?)`,
-		id, "repo-"+id, "https://example.invalid/r.git", binding, forgeKind, f.now.Format(timeFormat))
+		(id, name, remote_url, tracker_binding, forge_kind, default_branch, afk_branch_pattern, manual_branch_prefix, incogni, created_at)
+		VALUES (?, ?, ?, ?, ?, 'main', 'afk/<N>', 'lab/', ?, ?)`,
+		id, "repo-"+id, "https://example.invalid/r.git", binding, forgeKind, incogni, f.now.Format(timeFormat))
 }
 
 // seedRun inserts the canonical AFK run: kind afk_auto, issue 7, branch afk/7.

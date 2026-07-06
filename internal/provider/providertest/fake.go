@@ -31,7 +31,8 @@ type Fake struct {
 
 	deepLink  string // returned by CaptureDeepLink (a real hit); "" → GenericDeepLink miss
 	seedErr   error
-	seeded    []string // worktrees passed to SeedWorkspace, in order
+	seeded    []string            // worktrees passed to SeedWorkspace, in order
+	seedOpts  []provider.SeedOpts // the SeedOpts of each SeedWorkspace call, in order
 	connect   map[string]bool
 	oauthURL  string
 	loginErr  error
@@ -131,13 +132,14 @@ func (f *Fake) CaptureDeepLink(_ context.Context, session, _ string) (string, er
 	return link, nil
 }
 
-func (f *Fake) SeedWorkspace(worktree string, _ provider.SeedOpts) error {
+func (f *Fake) SeedWorkspace(worktree string, opts provider.SeedOpts) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.seedErr != nil {
 		return f.seedErr
 	}
 	f.seeded = append(f.seeded, worktree)
+	f.seedOpts = append(f.seedOpts, opts)
 	return nil
 }
 
@@ -186,6 +188,14 @@ func (f *Fake) Seeded() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.seeded...)
+}
+
+// SeededOpts returns the SeedOpts of each SeedWorkspace call, in order
+// (the incogni-flag wiring assertion, D15 §9 measure 1).
+func (f *Fake) SeededOpts() []provider.SeedOpts {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]provider.SeedOpts(nil), f.seedOpts...)
 }
 
 // CaptureCount reports how many times CaptureDeepLink ran.

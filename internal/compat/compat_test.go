@@ -146,6 +146,40 @@ func TestCompat_TrustKeys_roundtrip(t *testing.T) {
 	}
 }
 
+// Attribution-key pin (compat.md §4, M7 incogni measure 1): the exact key
+// strings the 2.1.198 settings schema reads, written to the exact file
+// claude reads them from. attribution{commit:"",pr:"",sessionUrl:false} is
+// the current mechanism; includeCoAuthoredBy:false is the deprecated-but-
+// honored fallback seeded alongside it.
+func TestCompat_AttributionKeys_seed(t *testing.T) {
+	dir := t.TempDir()
+	if err := claudecode.SeedAttributionOff(dir); err != nil {
+		t.Fatalf("SeedAttributionOff: %v", err)
+	}
+
+	local, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.local.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"includeCoAuthoredBy": false`,
+		`"commit": ""`,
+		`"pr": ""`,
+		`"sessionUrl": false`,
+	} {
+		if !strings.Contains(string(local), want) {
+			t.Errorf("worktree settings lack %s:\n%s", want, local)
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(local, &parsed); err != nil {
+		t.Fatalf("settings.local.json not valid JSON: %v", err)
+	}
+	if _, ok := parsed["attribution"].(map[string]any); !ok {
+		t.Errorf("attribution is not a JSON object: %s", local)
+	}
+}
+
 // Live re-verification hook: parses the installed claude's actual status
 // output. Opt-in via LAB_COMPAT_LIVE=1 so CI stays hermetic.
 func TestCompat_Live_authStatusParses(t *testing.T) {

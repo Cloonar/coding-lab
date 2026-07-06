@@ -209,8 +209,8 @@ func ParseLabel(label string) (n int, auto, ok bool) {
 // commit, push, open a PR with `Closes #N`, then stop). The tracker surface
 // is labctl ONLY (D10 — tea/gh are gone); branch is the repo's rendered
 // claim branch, never a literal prefix. The incogni sentence is appended to
-// the commit step only for incogni repos (M7 refines the wording; the
-// conditional exists now).
+// the commit step only for incogni repos (D15 §9 measure 2; the wording is
+// M7-final).
 func SeedPrompt(n int, branch string, incogni bool) string {
 	num := strconv.Itoa(n)
 	commit := "5. Commit in Conventional Commits style."

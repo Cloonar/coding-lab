@@ -340,7 +340,7 @@ type prCreateRequest struct {
 // Head is always the RUN's branch, base the repo's default branch — the
 // caller names neither. For AFK runs the server validates the pinned
 // `Closes #<N>` (injecting "\n\nCloses #<N>" when missing; N = the run's
-// claimed issue); sanitizeBody is the M7 incogni hook, a no-op today.
+// claimed issue); sanitizeBody then strips AI attribution on incogni repos.
 // On a builtin-bound repo the tracker is the store-backed builtin tracker,
 // so CreatePull opens a change request (M6): the injected/validated Closes
 // directives flow through tracker.ParseCloses into cr_closes rows — the
@@ -413,11 +413,84 @@ func ensureCloses(body string, n int) string {
 	return body + "\n\n" + closes
 }
 
-// sanitizeBody is the M7 incogni sanitization seam (design §5: "applies
-// incogni sanitization server-side before forwarding to tracker"; D15
-// measure 3). M5 ships it as a documented no-op; M7 strips known attribution
-// footers/trailers here when repo.Incogni is set.
+// sanitizeBody is the incogni sanitization seam (design §5: "applies
+// incogni sanitization server-side before forwarding to tracker"; D15 §9
+// measure 3, defense in depth behind the seeded attribution-off settings):
+// for incogni repos, known attribution footers/trailers are stripped from
+// the PR/CR body before it reaches the tracker. Non-incogni bodies pass
+// through byte-identical. It runs AFTER ensureCloses, so an injected
+// `Closes #N` is never touched.
 func sanitizeBody(repo store.Repo, body string) string {
-	_ = repo // M7: repo.Incogni gates the stripping
-	return body
+	if !repo.Incogni {
+		return body
+	}
+	return stripAttribution(body)
+}
+
+// stripAttribution removes every line that is a known AI-attribution marker
+// (attributionLine) and repairs ONLY the seam each removal leaves — the blank
+// line immediately before a removed line is swallowed so a "text\n\nfooter"
+// seam does not leave a doubled blank, and dangling trailing blanks (footers
+// live at the end) are trimmed. Blank runs elsewhere — a deliberate gap
+// inside a fenced code block, paragraph spacing far from the footer — are
+// left byte-identical; the old whole-body collapse corrupted them. A body
+// with no attribution lines is returned unchanged.
+func stripAttribution(body string) string {
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	stripped := false
+	for _, line := range lines {
+		if attributionLine(line) {
+			stripped = true
+			// Collapse the seam: drop a blank immediately preceding the
+			// removed line so the removal doesn't widen a paragraph gap.
+			if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+				out = out[:len(out)-1]
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	if !stripped {
+		return body
+	}
+	// Edge trims are harmless (a body's leading/trailing blank lines carry no
+	// meaning) and clean up blanks a leading/trailing footer removal left. The
+	// interior is only touched at seams (above), so blank runs inside a fenced
+	// code block survive byte-identical.
+	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
+		out = out[1:]
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
+// attributionLine reports whether a body line is a known AI-attribution
+// marker (D15 §9 measure 3; key/footer shapes verified against Claude Code
+// 2.1.198 — compat.md §4):
+//
+//   - a `Co-Authored-By: Claude…` trailer, any case;
+//   - a generated-with footer mentioning claude — covers
+//     `🤖 Generated with [Claude Code](…)` and the plain
+//     `Generated with Claude Code` variants;
+//   - a `Claude-Session:` trailer (the remote-control session link claude
+//     appends when attribution.sessionUrl is on).
+func attributionLine(line string) bool {
+	l := strings.ToLower(strings.TrimSpace(line))
+	if rest, ok := strings.CutPrefix(l, "co-authored-by:"); ok {
+		// Match a "Claude" display name OR an @anthropic.com email — the
+		// email is the stable discriminator across a model rename (compat.md
+		// §4 pins the trailer as "Co-Authored-By: <model> <noreply@anthropic.com>").
+		rest = strings.TrimSpace(rest)
+		return strings.HasPrefix(rest, "claude") || strings.Contains(rest, "anthropic.com")
+	}
+	if strings.HasPrefix(l, "claude-session:") {
+		return true
+	}
+	if i := strings.Index(l, "generated with"); i >= 0 {
+		return strings.Contains(l[i:], "claude")
+	}
+	return false
 }
