@@ -87,3 +87,40 @@ func TestAnswerDialog_refusesUnanswerable(t *testing.T) {
 		t.Errorf("AnswerDialog(plan) err = %v; want ErrDialogNotAnswerable", err)
 	}
 }
+
+func TestReply_normalizesCRLF(t *testing.T) {
+	p, f := armedRunner(t)
+	if err := p.Reply(context.Background(), chatSession, "line one\r\nline two\rline three"); err != nil {
+		t.Fatalf("Reply(CRLF): %v", err)
+	}
+	log := f.KeyLog(chatSession)
+	if len(log) == 0 || log[0].Text != "line one\nline two\nline three" {
+		t.Errorf("pasted text = %+v; want CR/CRLF normalized to LF", log)
+	}
+}
+
+func TestAnswerDialog_multiSelectValidation(t *testing.T) {
+	p, f := armedRunner(t)
+	d := provider.Dialog{Answerable: true, Multi: true, Options: []provider.DialogOption{
+		{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true},
+	}}
+	cases := map[string]struct {
+		sel  []int
+		want error
+	}{
+		// A zero-selection Enter would confirm nothing as if it answered.
+		"empty": {nil, ErrInvalidReply},
+		// A dropped index would confirm a selection the operator never made.
+		"out of range": {[]int{0, 7}, ErrInvalidReply},
+		// Space on the free-text Other row is an uncaptured TUI path.
+		"other row": {[]int{0, 2}, ErrDialogNotAnswerable},
+	}
+	for name, c := range cases {
+		if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Selected: c.sel}); !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v; want %v", name, err, c.want)
+		}
+	}
+	if n := len(f.KeyLog(chatSession)); n != 0 {
+		t.Errorf("rejected answers still sent %d keystrokes; want 0", n)
+	}
+}

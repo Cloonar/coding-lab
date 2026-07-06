@@ -145,7 +145,7 @@ func (f *Fake) SendKeys(_ context.Context, name, text string, enter bool) error 
 		return err
 	}
 	if _, ok := f.sessions[name]; !ok {
-		return fmt.Errorf("tmux send-keys (literal): no such session %q", name)
+		return fmt.Errorf("tmux send-keys (literal): %w: %q", ErrSessionNotFound, name)
 	}
 	f.sent[name] = append(f.sent[name], SentKey{Text: text, Enter: enter})
 	f.keyLog[name] = append(f.keyLog[name], KeyEvent{Kind: "text", Text: text, Enter: enter})
@@ -161,7 +161,7 @@ func (f *Fake) SendNamedKeys(_ context.Context, name string, keys ...string) err
 		return err
 	}
 	if _, ok := f.sessions[name]; !ok {
-		return fmt.Errorf("tmux send-keys (named): no such session %q", name)
+		return fmt.Errorf("tmux send-keys (named): %w: %q", ErrSessionNotFound, name)
 	}
 	if len(keys) == 0 {
 		return nil
@@ -179,7 +179,7 @@ func (f *Fake) PasteText(_ context.Context, name, text string) error {
 		return err
 	}
 	if _, ok := f.sessions[name]; !ok {
-		return fmt.Errorf("tmux paste-buffer: no such session %q", name)
+		return fmt.Errorf("tmux paste-buffer: %w: %q", ErrSessionNotFound, name)
 	}
 	f.keyLog[name] = append(f.keyLog[name], KeyEvent{Kind: "paste", Text: text})
 	return nil

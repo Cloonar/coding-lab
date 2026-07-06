@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"testing"
@@ -79,7 +80,14 @@ func TestRead_persistsLocatedPath(t *testing.T) {
 func TestRead_endedRunOverridesState(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeStopped)
-	fake.SetTranscriptPath("/transcript.jsonl")
+	// The path was persisted while the run was live (tailer/first read).
+	if err := st.UpdateRunTranscriptPath(context.Background(), run.ID, "/transcript.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.RunByID(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fake.SetChat(provider.Chat{State: provider.StateWorking})
 
 	chat, err := svc.Read(context.Background(), run)
@@ -88,6 +96,76 @@ func TestRead_endedRunOverridesState(t *testing.T) {
 	}
 	if chat.State != provider.StateEnded {
 		t.Errorf("ended run state = %q; want ended", chat.State)
+	}
+}
+
+func TestRead_endedRunNeverLocates(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeStopped)
+	// A live claude in the reused worktree would be locatable — but it belongs
+	// to a newer run, so an ended run must neither read nor persist it.
+	fake.SetTranscriptPath("/successor-run.jsonl")
+
+	if _, err := svc.Read(context.Background(), run); !errors.Is(err, provider.ErrTranscriptGone) {
+		t.Fatalf("Read ended run without a transcript = %v; want ErrTranscriptGone", err)
+	}
+	if n := fake.LocateCount(); n != 0 {
+		t.Errorf("LocateTranscript ran %d times for an ended run; want 0", n)
+	}
+	got, err := st.RunByID(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TranscriptPath != nil {
+		t.Errorf("transcript_path = %q; want unset (nothing may be persisted)", *got.TranscriptPath)
+	}
+}
+
+func TestPendingDialog_requiresQuestionTail(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+
+	// An abandoned dialog mid-transcript (conversation moved on) is history,
+	// not a keystroke target.
+	fake.SetChat(provider.Chat{State: provider.StateWorking, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{ToolID: "t_old"}},
+		{Seq: 2, Kind: provider.MessageTool, Tool: &provider.ToolInfo{Name: "Bash", Status: "running"}},
+	}})
+	if _, ok := svc.PendingDialog(context.Background(), run); ok {
+		t.Error("PendingDialog = true for an abandoned mid-transcript dialog; want false")
+	}
+
+	fake.SetChat(provider.Chat{State: provider.StateQuestion, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{ToolID: "t_live"}},
+	}})
+	d, ok := svc.PendingDialog(context.Background(), run)
+	if !ok || d.ToolID != "t_live" {
+		t.Errorf("PendingDialog = %+v, %v; want the tail dialog t_live", d, ok)
+	}
+}
+
+func TestAnswerDialog_toolIDGuard(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateQuestion, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{ToolID: "t1", Answerable: true}},
+	}})
+
+	if err := svc.AnswerDialog(context.Background(), run, "t_stale", provider.DialogAnswer{Index: 0}); !errors.Is(err, ErrDialogChanged) {
+		t.Errorf("stale tool_id = %v; want ErrDialogChanged", err)
+	}
+	if err := svc.AnswerDialog(context.Background(), run, "t1", provider.DialogAnswer{Index: 0}); err != nil {
+		t.Errorf("matching tool_id = %v; want nil", err)
+	}
+	if got := fake.Answers(); len(got) != 1 {
+		t.Errorf("answers recorded = %d; want exactly the matching one", len(got))
+	}
+
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+	if err := svc.AnswerDialog(context.Background(), run, "t1", provider.DialogAnswer{Index: 0}); !errors.Is(err, ErrNoDialog) {
+		t.Errorf("no pending dialog = %v; want ErrNoDialog", err)
 	}
 }
 
@@ -140,6 +218,30 @@ func TestTailer_derivesStateAndPublishes(t *testing.T) {
 
 	if !drainFor(sub, EventMessagesChanged, 2*time.Second) {
 		t.Error("no run.messages.changed published")
+	}
+}
+
+func TestTailerSet_removeIsGenerationAware(t *testing.T) {
+	ts := newTailerSet()
+	h1 := &tailerHandle{cancel: func() {}}
+	h2 := &tailerHandle{cancel: func() {}}
+	ts.add("s", h1)
+	// The session name is reused (stop→start in the same minute): the
+	// successor registers before the predecessor goroutine finishes exiting.
+	ts.add("s", h2)
+	ts.setState("s", provider.StateWorking)
+
+	ts.remove("s", h1) // late-exiting predecessor
+	if ts.handles["s"] != h2 {
+		t.Error("stale remove deleted the successor's registration")
+	}
+	if _, ok := ts.state("s"); !ok {
+		t.Error("stale remove deleted the successor's state")
+	}
+
+	ts.remove("s", h2)
+	if _, ok := ts.handles["s"]; ok {
+		t.Error("own remove left the registration behind")
 	}
 }
 

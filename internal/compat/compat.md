@@ -190,12 +190,16 @@ transcript. Four coupled facts, all in `internal/provider/claudecode`
 - **JSONL event grammar**: one event per line; the fields lab maps are a
   small subset (`type`, `subtype`, `content`, `timestamp`, `isMeta`,
   `isApiErrorMessage`, and `message.{role,content}` where content is a
-  string or a `[]block` of `text|thinking|tool_use|tool_result`). Every
-  other key is ignored. Captured shape: `testdata/transcript-2.1.198.jsonl`
-  (ids/paths anonymized, field names + value shapes verbatim). Mapped to
-  the universal schema (`text|tool|dialog|lifecycle`) by `ParseTranscript`.
-  fixture (assembled from real 2.1.198 line shapes; re-verify live when an
-  upgrade misbehaves).
+  string or a `[]block` of `text|thinking|tool_use|tool_result`). A failed
+  tool is flagged by `is_error` **on the `tool_result` block itself** (its
+  `content` is most often a plain string) — verified against live 2.x
+  transcripts; an `is_error` on an inner content item is tolerated as a
+  secondary signal. Every other key is ignored. Captured shape:
+  `testdata/transcript-2.1.198.jsonl` (ids/paths anonymized, field names +
+  value shapes verbatim). Mapped to the universal schema
+  (`text|tool|dialog|lifecycle`) by `ParseTranscript`. fixture (assembled
+  from real 2.1.198 line shapes; re-verify live when an upgrade
+  misbehaves).
 - **Read-through only**: the transcript file is the source of truth; lab
   persists only `runs.transcript_path` (captured async by cwd-match, the
   `deep_link_url` pattern) so ended runs stay readable while claude retains

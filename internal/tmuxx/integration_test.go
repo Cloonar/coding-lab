@@ -361,8 +361,10 @@ func TestTmux_sendNamedKeysSubmitsLine(t *testing.T) {
 	}
 }
 
-// PasteText delivers multi-line text in one bracketed paste; both lines reach
-// the pane intact (the chat's multi-line reply mechanism).
+// PasteText delivers multi-line text in one bracketed paste. The pane enables
+// bracketed-paste mode (as claude's TUI does), so the §6 property under test
+// is the real one: tmux frames the text in ESC[200~/ESC[201~, which is what
+// makes embedded newlines insert lines instead of submitting turn-by-turn.
 func TestTmux_pasteTextDeliversMultiline(t *testing.T) {
 	ctx := t.Context()
 	tm := testTmux(t)
@@ -370,7 +372,9 @@ func TestTmux_pasteTextDeliversMultiline(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "got.txt")
 
-	if err := tm.Start(ctx, name, dir, []string{"sh", "-c", "cat > '" + out + "'"}, nil); err != nil {
+	// printf enables mode 2004 on the pane tty; cat then records raw stdin —
+	// paste framing included — to the file.
+	if err := tm.Start(ctx, name, dir, []string{"sh", "-c", `printf '\033[?2004h'; cat > '` + out + `'`}, nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := tm.PasteText(ctx, name, "line one\nline two"); err != nil {
@@ -380,7 +384,7 @@ func TestTmux_pasteTextDeliversMultiline(t *testing.T) {
 		t.Fatalf("SendNamedKeys(Enter): %v", err)
 	}
 	got := waitForFile(t, out)
-	if !strings.Contains(got, "line one") || !strings.Contains(got, "line two") {
-		t.Errorf("pasted multi-line text missing from pane: %q", got)
+	if !strings.Contains(got, "\x1b[200~line one\nline two\x1b[201~") {
+		t.Errorf("paste not bracketed: %q; want ESC[200~line one\\nline two ESC[201~", got)
 	}
 }

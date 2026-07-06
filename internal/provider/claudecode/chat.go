@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -107,19 +108,22 @@ func (p *Provider) ReadTranscript(path string) (provider.Chat, error) {
 		return provider.Chat{}, err
 	}
 	defer func() { _ = f.Close() }()
-	return ParseTranscript(f), nil
+	return ParseTranscript(f)
 }
 
 // ParseTranscript folds the JSONL lines of r into the universal schema. It is
 // a pure function of the byte stream — exported so the compat test drives it
 // from a captured fixture. See the transcript grammar pinned in compat.md §5.
-func ParseTranscript(r io.Reader) provider.Chat {
+// A scan error (a line beyond the buffer cap, an I/O failure) is returned
+// rather than swallowed: silently stopping mid-file would serve a truncated
+// chat — and a cursor that moves backwards — forever.
+func ParseTranscript(r io.Reader) (provider.Chat, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcripts run to a few MB
 	return foldTranscript(sc)
 }
 
-func foldTranscript(sc *bufio.Scanner) provider.Chat {
+func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 	// First pass: which tool_use ids have a matching tool_result (i.e. are
 	// answered). A dialog tool with no result is a pending dialog.
 	var lines [][]byte
@@ -136,6 +140,9 @@ func foldTranscript(sc *bufio.Scanner) provider.Chat {
 				answered[blk.ToolUseID] = true
 			}
 		}
+	}
+	if err := sc.Err(); err != nil {
+		return provider.Chat{}, fmt.Errorf("scanning transcript: %w", err)
 	}
 
 	var (
@@ -211,7 +218,7 @@ func foldTranscript(sc *bufio.Scanner) provider.Chat {
 		}
 	}
 
-	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey), Cursor: seq}
+	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey), Cursor: seq}, nil
 }
 
 // deriveState reduces the transcript tail to one conversational state

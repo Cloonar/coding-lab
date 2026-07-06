@@ -23,10 +23,15 @@ const eventRunChanged = "run.changed"
 
 // Run drives the tailer set until ctx (or the service ctx) is done. It syncs
 // once immediately, then on every run.changed — the same envelope a launch or
-// stop already publishes. Blocking; cmd/lab runs it in a goroutine.
+// stop already publishes — and on a periodic resync tick: the bus drops events
+// for a slow subscriber, and a dropped run.changed must cost one resync
+// interval, never a permanently desynced tailer set. Blocking; cmd/lab runs it
+// in a goroutine.
 func (s *Service) Run(ctx context.Context) {
 	sub, cancel := s.bus.Subscribe(ctx)
 	defer cancel()
+	resync := time.NewTicker(resyncFactor * s.poll)
+	defer resync.Stop()
 	s.sync(ctx)
 	for {
 		select {
@@ -36,6 +41,8 @@ func (s *Service) Run(ctx context.Context) {
 		case <-s.ctx.Done():
 			s.tailers.stopAll()
 			return
+		case <-resync.C:
+			s.sync(ctx)
 		case e, ok := <-sub:
 			if !ok {
 				s.tailers.stopAll()
@@ -47,6 +54,11 @@ func (s *Service) Run(ctx context.Context) {
 		}
 	}
 }
+
+// resyncFactor × poll is the periodic-resync cadence (30 s at the default
+// 1 s poll) — the bound on how long a dropped run.changed can leave the
+// tailer set stale.
+const resyncFactor = 30
 
 // sync arms a tailer for every active run not yet tailed and disarms tailers
 // whose run is no longer active.
@@ -66,15 +78,20 @@ func (s *Service) sync(ctx context.Context) {
 // arm starts a tailer goroutine for run under a child of the service ctx.
 func (s *Service) arm(run store.Run) {
 	ctx, cancel := context.WithCancel(s.ctx)
-	s.tailers.add(run.SessionName, cancel)
-	go s.tail(ctx, run)
+	h := &tailerHandle{cancel: cancel}
+	s.tailers.add(run.SessionName, h)
+	go s.tail(ctx, run, h)
 }
 
 // tail is one run's poll loop: resolve the transcript path, then on each tick
 // re-stat it and, when it changed, re-read → derive state → publish. The state
 // is cached for the instance list even between changes.
-func (s *Service) tail(ctx context.Context, run store.Run) {
-	defer s.tailers.remove(run.SessionName)
+func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
+	// Remove by handle identity, not bare session name: a disarmed goroutine
+	// can outlive its cancel by up to one tick, and session names are reused
+	// (stop→start in the same minute) — an unconditional delete here could
+	// tear down the successor tailer's registration and leave it unmanaged.
+	defer s.tailers.remove(run.SessionName, h)
 	prov, ok := s.providers.Get(run.Provider)
 	if !ok {
 		return
@@ -118,16 +135,23 @@ func (s *Service) publishMessagesChanged(run store.Run) {
 	})
 }
 
+// tailerHandle identifies one tailer goroutine's registration. remove
+// compares handle identity so a late-exiting predecessor can never delete a
+// successor that reused its session name.
+type tailerHandle struct {
+	cancel context.CancelFunc
+}
+
 // tailerSet is the concurrency-safe registry of live tailers and their last
 // derived states.
 type tailerSet struct {
 	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	handles map[string]*tailerHandle
 	states  map[string]string
 }
 
 func newTailerSet() *tailerSet {
-	return &tailerSet{cancels: map[string]context.CancelFunc{}, states: map[string]string{}}
+	return &tailerSet{handles: map[string]*tailerHandle{}, states: map[string]string{}}
 }
 
 // retain disarms tailers whose session is not in active, and calls arm for
@@ -135,16 +159,16 @@ func newTailerSet() *tailerSet {
 func (ts *tailerSet) retain(active map[string]store.Run, arm func(store.Run)) {
 	ts.mu.Lock()
 	var toStop []context.CancelFunc
-	for session, cancel := range ts.cancels {
+	for session, h := range ts.handles {
 		if _, ok := active[session]; !ok {
-			toStop = append(toStop, cancel)
-			delete(ts.cancels, session)
+			toStop = append(toStop, h.cancel)
+			delete(ts.handles, session)
 			delete(ts.states, session)
 		}
 	}
 	var toArm []store.Run
 	for session, run := range active {
-		if _, ok := ts.cancels[session]; !ok {
+		if _, ok := ts.handles[session]; !ok {
 			toArm = append(toArm, run)
 		}
 	}
@@ -158,18 +182,22 @@ func (ts *tailerSet) retain(active map[string]store.Run, arm func(store.Run)) {
 	}
 }
 
-func (ts *tailerSet) add(session string, cancel context.CancelFunc) {
+func (ts *tailerSet) add(session string, h *tailerHandle) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.cancels[session] = cancel
+	ts.handles[session] = h
 }
 
-// remove clears a tailer's cancel/state on goroutine exit. It does not call
-// cancel (the goroutine is already returning).
-func (ts *tailerSet) remove(session string) {
+// remove clears a tailer's cancel/state on goroutine exit — but only when the
+// session still maps to this goroutine's own handle. It does not call cancel
+// (the goroutine is already returning).
+func (ts *tailerSet) remove(session string, h *tailerHandle) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	delete(ts.cancels, session)
+	if ts.handles[session] != h {
+		return
+	}
+	delete(ts.handles, session)
 	delete(ts.states, session)
 }
 
@@ -188,10 +216,10 @@ func (ts *tailerSet) state(session string) (string, bool) {
 
 func (ts *tailerSet) stopAll() {
 	ts.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(ts.cancels))
-	for session, cancel := range ts.cancels {
-		cancels = append(cancels, cancel)
-		delete(ts.cancels, session)
+	cancels := make([]context.CancelFunc, 0, len(ts.handles))
+	for session, h := range ts.handles {
+		cancels = append(cancels, h.cancel)
+		delete(ts.handles, session)
 		delete(ts.states, session)
 	}
 	ts.mu.Unlock()

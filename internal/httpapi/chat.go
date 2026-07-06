@@ -16,6 +16,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
 // defaultMessagesLimit / maxMessagesLimit bound one messages window.
@@ -162,8 +163,9 @@ type answerRequest struct {
 }
 
 // handleRunAnswer is POST /api/v1/runs/{id}/answer — answer the pending dialog.
-// The server re-reads the live dialog and requires the client's tool_id to
-// match it, so a stale client never answers a dialog that already moved on.
+// tool_id is required: the service re-reads the live dialog under the session
+// lock and refuses a mismatch, so a stale client never answers a dialog that
+// already moved on.
 func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -174,21 +176,12 @@ func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &req) != nil {
 		return
 	}
-	if run.Outcome != store.RunOutcomeActive {
-		writeError(w, http.StatusConflict, chat.ErrRunEnded.Error())
-		return
-	}
-	dialog, ok := s.chat.PendingDialog(r.Context(), run)
-	if !ok {
-		writeError(w, http.StatusConflict, "no dialog is pending")
-		return
-	}
-	if req.ToolID != "" && req.ToolID != dialog.ToolID {
-		writeError(w, http.StatusConflict, "the pending dialog has changed; reload the chat")
+	if req.ToolID == "" {
+		writeError(w, http.StatusBadRequest, "tool_id is required")
 		return
 	}
 	answer := provider.DialogAnswer{Index: req.Index, Selected: req.Selected, OtherText: req.OtherText}
-	if err := s.chat.AnswerDialog(r.Context(), run, dialog, answer); err != nil {
+	if err := s.chat.AnswerDialog(r.Context(), run, req.ToolID, answer); err != nil {
 		s.writeChatActionError(w, "answering", err)
 		return
 	}
@@ -223,8 +216,13 @@ func (s *Server) writeRunError(w http.ResponseWriter, doing string, err error) {
 func (s *Server) writeChatActionError(w http.ResponseWriter, doing string, err error) {
 	switch {
 	case errors.Is(err, chat.ErrRunEnded), errors.Is(err, chat.ErrDialogPending),
+		errors.Is(err, chat.ErrNoDialog), errors.Is(err, chat.ErrDialogChanged),
 		errors.Is(err, claudecode.ErrDialogNotAnswerable):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, tmuxx.ErrSessionNotFound):
+		// The run row says active but the tmux session is gone (killed
+		// externally; the reaper hasn't flipped the outcome yet).
+		writeError(w, http.StatusConflict, "the instance's session is gone; it will be marked ended shortly")
 	case errors.Is(err, claudecode.ErrInvalidReply):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:

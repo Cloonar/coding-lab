@@ -106,8 +106,12 @@ func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp,
 	}
 
 	if d.Multi {
+		sel, err := normSelected(d, answer.Selected)
+		if err != nil {
+			return nil, err
+		}
 		cur := 0
-		for _, idx := range normSelected(answer.Selected, rows) {
+		for _, idx := range sel {
 			if down := repeat("Down", idx-cur); len(down) > 0 {
 				ops = append(ops, KeyOp{Named: down})
 			}
@@ -135,13 +139,26 @@ func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp,
 	return ops, nil
 }
 
-// normSelected returns the in-range selected indices, ascending and
-// de-duplicated, so the multi-select walk only ever moves down.
-func normSelected(sel []int, rows int) []int {
+// normSelected validates and normalizes a multi-select answer: every index
+// must be a real, non-Other option (a silently dropped index would confirm a
+// selection the operator never made, and Space on the free-text Other row is
+// an uncaptured TUI path — degrade that to the deep link). The result is
+// ascending and de-duplicated so the walk only ever moves down.
+func normSelected(d provider.Dialog, sel []int) ([]int, error) {
+	if len(sel) == 0 {
+		return nil, fmt.Errorf("%w: no options selected", ErrInvalidReply)
+	}
+	rows := len(d.Options)
 	seen := map[int]bool{}
 	var out []int
 	for _, i := range sel {
-		if i >= 0 && i < rows && !seen[i] {
+		if i < 0 || i >= rows {
+			return nil, fmt.Errorf("%w: option index %d out of range [0,%d)", ErrInvalidReply, i, rows)
+		}
+		if d.Options[i].IsOther {
+			return nil, fmt.Errorf("%w: the Other option cannot be toggled in a multi-select", ErrDialogNotAnswerable)
+		}
+		if !seen[i] {
 			seen[i] = true
 			out = append(out, i)
 		}
@@ -152,7 +169,7 @@ func normSelected(sel []int, rows int) []int {
 			out[j], out[j-1] = out[j-1], out[j]
 		}
 	}
-	return out
+	return out, nil
 }
 
 func repeat(key string, n int) []string {
@@ -167,10 +184,14 @@ func repeat(key string, n int) []string {
 }
 
 // validateReply trims and sanity-checks free text before it reaches the paste
-// buffer. Newlines and tabs are legitimate message content (bracketed paste
-// inserts them literally); other control characters are rejected so a stray
-// escape can't break out of the composer.
+// buffer. CRLF (and stray CR) normalize to LF first — an API client sending
+// Windows line endings means newlines, not control characters. Newlines and
+// tabs are legitimate message content (bracketed paste inserts them
+// literally); other control characters are rejected so a stray escape can't
+// break out of the composer.
 func validateReply(raw string) (string, error) {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	raw = strings.ReplaceAll(raw, "\r", "\n")
 	text := strings.TrimSpace(raw)
 	if text == "" {
 		return "", errors.New("empty reply")

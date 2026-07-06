@@ -70,7 +70,8 @@ type tBlock struct {
 	ID        string          `json:"id"`    // tool_use id
 	Input     json.RawMessage `json:"input"` // tool_use input (object, or a partial string mid-stream)
 	ToolUseID string          `json:"tool_use_id"`
-	Result    json.RawMessage `json:"content"` // tool_result content: string | []block
+	Result    json.RawMessage `json:"content"`  // tool_result content: string | []block
+	IsError   bool            `json:"is_error"` // tool_result: block-level failure flag
 }
 
 func (b tBlock) textField() string { return b.Text }
@@ -88,13 +89,15 @@ func toolInfo(b tBlock) *provider.ToolInfo {
 }
 
 // patchToolResult back-patches a tool chip when its tool_result lands: the
-// truncated output text and a terminal status. Claude marks errors via an
-// is_error flag on the result content; absent that, a result is "ok".
+// truncated output text and a terminal status. Claude marks errors via the
+// is_error flag on the tool_result block itself (content is most often a plain
+// string); absent that, a result is "ok".
 func patchToolResult(t *provider.ToolInfo, b tBlock) {
 	if t == nil {
 		return
 	}
 	out, isErr := decodeToolResult(b.Result)
+	isErr = isErr || b.IsError
 	t.Output = truncate(out, truncateLimit)
 	if isErr {
 		t.Status = "error"
@@ -158,10 +161,11 @@ func decodeToolInput(raw json.RawMessage) map[string]any {
 }
 
 // decodeToolResult flattens a tool_result content (string, or an array of
-// {type:text,text} blocks) to plain text, reporting the error flag when the
-// result carries one.
+// {type:text,text} blocks) to plain text. The authoritative failure flag is
+// block-level (tBlock.IsError, checked by the caller); an is_error on an inner
+// content item is tolerated as a second signal.
 func decodeToolResult(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
+	if len(raw) == 0 || string(raw) == "null" {
 		return "", false
 	}
 	if raw[0] == '"' {
@@ -206,6 +210,10 @@ func firstLine(s string) string {
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// Back up to a rune boundary so the cut never splits a UTF-8 sequence.
+	for n > 0 && s[n]&0xC0 == 0x80 {
+		n--
 	}
 	return s[:n] + "…"
 }

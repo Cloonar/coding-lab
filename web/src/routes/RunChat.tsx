@@ -8,7 +8,17 @@
 // / answers / interrupts POST back. Phone-first, v0 design language.
 
 import { A, useParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  createEffect,
+  createResource,
+  createSignal,
+  on,
+  onCleanup,
+} from 'solid-js';
 import {
   answerRun,
   errorMessage,
@@ -25,8 +35,16 @@ import {
 } from '../api';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
+import {
+  anchoredScrollTop,
+  isNearBottom,
+  maxSeq,
+  mergeMessages,
+  mergeRefetch,
+} from '../lib/chatStream';
 import { stateBadge } from '../lib/conversation';
-import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
+import { GENERIC_DEEP_LINK, GENERIC_LINK_TITLE } from '../lib/deepLink';
+import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
 import { resourceValue } from '../lib/resource';
 import { useEvents } from '../events';
 
@@ -55,54 +73,134 @@ function RunChatView() {
   const [state, setState] = createSignal<ConversationState>('');
   const [transcript, setTranscript] = createSignal<TranscriptStatus>('available');
   const [hasMore, setHasMore] = createSignal(false);
+  // A before-fetch hit the beginning: never resurrect "Load earlier" from a
+  // latest-window has_more, which talks about ITS window, not our accumulated
+  // stream.
+  const [exhausted, setExhausted] = createSignal(false);
   const [showThinking, setShowThinking] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
-  const loadLatest = async () => {
+  // The stream is the scroll container (.chat-page bounds the viewport).
+  let streamEl: HTMLDivElement | undefined;
+  const scrollToBottom = () => {
+    if (streamEl !== undefined) streamEl.scrollTop = streamEl.scrollHeight;
+  };
+
+  // Monotonic fetch token: only the newest in-flight fetch may apply its
+  // result, so a slow stale response can't revert an answered dialog to
+  // pending and re-lock the composer.
+  let fetchToken = 0;
+
+  // Refetch protocol (ADR-0016): after=<cursor> tail batches make appends
+  // gap-free even when >limit messages land between refetches; the latest
+  // window is fetched too for back-patched mutations near the tail (tool
+  // status flips, answered dialogs). Merged by seq, later response wins.
+  // First load (no cursor yet) is just the latest window.
+  const refetchMessages = async () => {
+    const token = ++fetchToken;
+    const cursor = maxSeq(messages());
     try {
-      const res = await getRunMessages(params.id, { limit: MESSAGE_LIMIT });
-      setState(res.state);
-      setTranscript(res.transcript);
-      setHasMore(res.has_more);
-      setMessages((prev) => mergeMessages(prev, res.messages));
+      const tail: ChatMessage[] = [];
+      let after = cursor;
+      while (after > 0) {
+        const res = await getRunMessages(params.id, { after, limit: MESSAGE_LIMIT });
+        if (token !== fetchToken) return;
+        tail.push(...res.messages);
+        const top = maxSeq(res.messages);
+        // A short window is the whole remaining tail; a stuck seq would loop.
+        if (res.messages.length < MESSAGE_LIMIT || top <= after) break;
+        after = top;
+      }
+      const latest = await getRunMessages(params.id, { limit: MESSAGE_LIMIT });
+      if (token !== fetchToken) return;
+      setState(latest.state);
+      setTranscript(latest.transcript);
+      if (!exhausted()) setHasMore(latest.has_more);
+      // A first window that already covers the whole transcript means there
+      // is nothing older to load — ever (messages only append).
+      if (cursor === 0 && !latest.has_more && latest.messages.length > 0) setExhausted(true);
+      // Follow-bottom only when the reader is already at/near the bottom (or
+      // on the initial window), so reading history isn't yanked down.
+      const follow = cursor === 0 || (streamEl !== undefined && isNearBottom(streamEl));
+      setMessages((prev) => mergeRefetch(prev, tail, latest.messages));
+      if (follow) scrollToBottom();
     } catch (err) {
-      setError(errorMessage(err));
+      if (token === fetchToken) setError(errorMessage(err));
     }
   };
 
   const loadEarlier = async () => {
     const first = messages()[0];
     if (first === undefined) return;
+    const token = ++fetchToken;
     try {
       const res = await getRunMessages(params.id, { before: first.seq, limit: MESSAGE_LIMIT });
+      if (token !== fetchToken) return;
       setHasMore(res.has_more);
+      if (!res.has_more || res.messages.length === 0) setExhausted(true);
+      // Prepend anchoring by hand (iOS Safari has no overflow-anchor): capture
+      // the geometry, then restore the visual position after the DOM grows.
+      const before =
+        streamEl === undefined
+          ? undefined
+          : { scrollTop: streamEl.scrollTop, scrollHeight: streamEl.scrollHeight };
       setMessages((prev) => mergeMessages(prev, res.messages));
+      if (streamEl !== undefined && before !== undefined) {
+        streamEl.scrollTop = anchoredScrollTop(before, streamEl.scrollHeight);
+      }
     } catch (err) {
-      setError(errorMessage(err));
+      if (token === fetchToken) setError(errorMessage(err));
     }
   };
 
-  // Initial load once, then refetch on the tailer's envelope (this run only)
-  // and on run.changed (outcome flips → composer state).
-  void loadLatest();
+  // All chat state is keyed to the route param: navigating /runs/A → /runs/B
+  // re-uses this component, so reset the accumulated stream and reload (the
+  // token bump inside refetchMessages orphans any in-flight fetch for A).
+  createEffect(
+    on(
+      () => params.id,
+      () => {
+        setMessages([]);
+        setState('');
+        setTranscript('available');
+        setHasMore(false);
+        setExhausted(false);
+        setError(null);
+        void refetchMessages();
+      },
+    ),
+  );
+
+  // Refetch on the tailer's envelope (this run only) and on run.changed
+  // (outcome flips → composer state). run.changed is repo-scoped on the wire
+  // (no runID), so filter by the run's repo — fleet-quiet, at worst
+  // sibling-run noise.
+  /* eslint-disable solid/reactivity -- handlers re-read params.id / the run fresh per SSE event */
   onCleanup(
     events.subscribe('run.messages.changed', (event) => {
-      if (event.runID === params.id) void loadLatest();
+      if (event.runID === params.id) void refetchMessages();
     }),
   );
   onCleanup(
-    events.subscribe('run.changed', () => {
+    events.subscribe('run.changed', (event) => {
+      const r = resourceValue(run);
+      if (r !== undefined && event.repoID !== undefined && event.repoID !== r.repo_id) return;
       void refetchRun();
-      void loadLatest();
+      void refetchMessages();
     }),
   );
+  /* eslint-enable solid/reactivity */
 
   const runData = () => resourceValue(run);
   const ended = () => {
     const r = runData();
     return r !== undefined && r.outcome !== 'active';
   };
+  // The backend defines "pending" as state === 'question': the array scan
+  // alone could hold onto a dialog answered externally outside the refetch
+  // window and lock the composer forever.
   const pendingDialog = (): Dialog | null => {
+    if (state() !== 'question') return null;
     const msgs = messages();
     for (let i = msgs.length - 1; i >= 0; i--) {
       const d = msgs[i]?.dialog;
@@ -125,7 +223,7 @@ function RunChatView() {
       />
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
 
-      <div class="chat-stream" role="log" aria-live="polite">
+      <div class="chat-stream" role="log" aria-live="polite" ref={streamEl}>
         <Switch>
           <Match when={transcript() === 'locating' && messages().length === 0}>
             <p class="empty">Waiting for the transcript…</p>
@@ -154,7 +252,7 @@ function RunChatView() {
         transcript={transcript()}
         dialog={pendingDialog()}
         onError={setError}
-        onSent={() => void loadLatest()}
+        onSent={() => void refetchMessages()}
       />
     </main>
   );
@@ -170,14 +268,28 @@ function ChatHeader(props: {
 }) {
   const [confirming, setConfirming] = createSignal(false);
   const [stopping, setStopping] = createSignal(false);
+  // "repo · label" — the session name is `<repo>~<label>` and the label alone
+  // is ambiguous across repos.
   const title = () => {
     const r = props.run;
     if (r === undefined) return 'Chat';
+    const repo = sessionRepo(r.session_name);
     const label = instanceTitle(sessionLabel(r.session_name));
-    return label === '' ? r.branch : label;
+    if (label === '') return r.branch;
+    return repo === '' ? label : `${repo} · ${label}`;
   };
   const badge = () => stateBadge(props.state);
   const live = () => props.run !== undefined && props.run.outcome === 'active';
+  // The exact deep link when captured; otherwise the same generic claude.ai
+  // picker fallback InstanceList uses — the "open it in claude.ai" dialog
+  // hint always has somewhere to point.
+  const deepLink = () => {
+    const url = props.run?.deep_link_url;
+    if (url !== undefined && url !== null && url !== '') {
+      return { url, title: 'Open in claude.ai' };
+    }
+    return { url: GENERIC_DEEP_LINK, title: GENERIC_LINK_TITLE };
+  };
 
   const stop = async () => {
     const r = props.run;
@@ -217,18 +329,16 @@ function ChatHeader(props: {
       >
         {props.showThinking ? 'Hide thinking' : 'Show thinking'}
       </button>
-      <Show when={props.run?.deep_link_url}>
-        {(url) => (
-          <a
-            href={url()}
-            target="_blank"
-            rel="noreferrer"
-            class="card-link"
-            title="Open in claude.ai"
-          >
-            Open ↗
-          </a>
-        )}
+      <Show when={props.run}>
+        <a
+          href={deepLink().url}
+          target="_blank"
+          rel="noreferrer"
+          class="card-link"
+          title={deepLink().title}
+        >
+          Open ↗
+        </a>
       </Show>
       <Show when={live()}>
         <Switch>
@@ -330,16 +440,21 @@ function Composer(props: {
   return (
     <div class="chat-composer">
       <Switch>
-        <Match when={props.ended || props.transcript === 'gone'}>
+        <Match when={props.ended}>
           <p class="chat-composer-note">This instance has ended — the chat is read-only.</p>
         </Match>
-        <Match when={props.dialog !== null}>
-          <DialogPanel
-            runID={props.runID}
-            dialog={props.dialog as Dialog}
-            onError={props.onError}
-            onAnswered={props.onSent}
-          />
+        <Match when={props.transcript === 'gone'}>
+          <p class="chat-composer-note">Transcript no longer available — the chat is read-only.</p>
+        </Match>
+        <Match when={props.dialog}>
+          {(d) => (
+            <DialogPanel
+              runID={props.runID}
+              dialog={d()}
+              onError={props.onError}
+              onAnswered={props.onSent}
+            />
+          )}
         </Match>
         <Match when={true}>
           <div class="chat-composer-row">
@@ -378,6 +493,20 @@ function DialogPanel(props: {
   const [busy, setBusy] = createSignal(false);
   const [selected, setSelected] = createSignal<number[]>([]);
   const [otherText, setOtherText] = createSignal('');
+
+  // Selection state is keyed to the dialog's identity: if the pending dialog
+  // changes while the panel is mounted, stale picks must not carry over and
+  // answer the new dialog.
+  createEffect(
+    on(
+      () => props.dialog.tool_id,
+      () => {
+        setSelected([]);
+        setOtherText('');
+      },
+      { defer: true },
+    ),
+  );
 
   const options = () => props.dialog.options ?? [];
   const answer = async (payload: { index?: number; selected?: number[]; other_text?: string }) => {
@@ -534,12 +663,4 @@ function toolStatusMark(status: string | undefined): string {
   if (status === 'ok') return '✓';
   if (status === 'error') return '✕';
   return '…';
-}
-
-/** Merge windows by seq (later window wins per seq → in-place tool updates). */
-function mergeMessages(prev: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
-  const bySeq = new Map<number, ChatMessage>();
-  for (const m of prev) bySeq.set(m.seq, m);
-  for (const m of incoming) bySeq.set(m.seq, m);
-  return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }

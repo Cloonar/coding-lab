@@ -1329,12 +1329,14 @@ a.chip.cr-count:hover {
   color: var(--run-text);
 }
 
-/* The chat page fills the viewport: header, scrolling stream, fixed composer. */
+/* The chat page is a BOUNDED flex column (height, not min-height): the
+   document never scrolls, .chat-stream is the scroll container, and the
+   composer stays pinned at the bottom. */
 .chat-page {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
   padding-bottom: 0;
 }
 
@@ -1353,8 +1355,10 @@ a.chip.cr-count:hover {
 .chat-back {
   font-size: 1.25rem;
   min-height: 44px;
+  min-width: 44px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   padding: 0 0.3rem;
 }
 .chat-title {
@@ -1370,6 +1374,7 @@ a.chip.cr-count:hover {
 
 .chat-stream {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1426,7 +1431,7 @@ a.chip.cr-count:hover {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  min-height: 36px;
+  min-height: 44px;
   padding: 0.3rem 0.6rem;
   cursor: pointer;
   color: var(--chip-text);

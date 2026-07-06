@@ -94,10 +94,23 @@ func TestParseTranscript_stateEdges(t *testing.T) {
 		},
 	}
 	for name, c := range cases {
-		got := ParseTranscript(strings.NewReader(c.lines))
+		got, err := ParseTranscript(strings.NewReader(c.lines))
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", name, err)
+		}
 		if got.State != c.want {
 			t.Errorf("%s: state = %q; want %q", name, got.State, c.want)
 		}
+	}
+}
+
+// A line beyond the scanner cap must surface as an error — silently stopping
+// mid-file would serve a truncated chat (and a backwards-moving cursor) on
+// every subsequent reparse.
+func TestParseTranscript_oversizeLineErrors(t *testing.T) {
+	huge := line(`{"type":"user","message":{"role":"user","content":"` + strings.Repeat("x", 9*1024*1024) + `"}}`)
+	if _, err := ParseTranscript(strings.NewReader(huge)); err == nil {
+		t.Fatal("ParseTranscript(9MB line) = nil error; want a scan error")
 	}
 }
 

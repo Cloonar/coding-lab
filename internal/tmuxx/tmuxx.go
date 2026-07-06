@@ -43,6 +43,24 @@ import (
 // callers, keyed on this one symbol (design §4d).
 const LoginSession = "lab-login"
 
+// ErrSessionNotFound wraps a send/paste against a session that no longer
+// exists (killed externally, or the whole server is gone) — a state callers
+// can surface as "the instance's session is gone" rather than an opaque
+// internal error. Detected from tmux's stderr; errors.Is-matchable through
+// the wrapped returns below.
+var ErrSessionNotFound = errors.New("tmux session not found")
+
+// targetErr wraps a failed targeted tmux call, classifying a missing
+// session/pane (or a dead server) as ErrSessionNotFound. tmux 3.x spells
+// these "can't find session/pane/window …" and "no server running on …".
+func targetErr(op string, err error, out []byte) error {
+	msg := strings.TrimSpace(string(out))
+	if strings.Contains(msg, "can't find") || strings.Contains(msg, "no server running") {
+		return fmt.Errorf("%s: %w: %s", op, ErrSessionNotFound, msg)
+	}
+	return fmt.Errorf("%s: %v: %s", op, err, msg)
+}
+
 // startRecheckDelay is the pause between `new-session` and the
 // exited-immediately re-check in Start (v0-pinned 500 ms): long enough
 // for a command that can't even exec to die, short enough not to matter
@@ -258,13 +276,13 @@ func (t *Tmux) List(ctx context.Context) ([]string, error) {
 // on tmux 3.6a) — uniqueness relies on sanitised session names.
 func (t *Tmux) SendKeys(ctx context.Context, name, text string, enter bool) error {
 	if out, err := t.cmd(ctx, "send-keys", "-t", name, "-l", "--", text).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux send-keys (literal): %v: %s", err, strings.TrimSpace(string(out)))
+		return targetErr("tmux send-keys (literal)", err, out)
 	}
 	if !enter {
 		return nil
 	}
 	if out, err := t.cmd(ctx, "send-keys", "-t", name, "--", "Enter").CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux send-keys (enter): %v: %s", err, strings.TrimSpace(string(out)))
+		return targetErr("tmux send-keys (enter)", err, out)
 	}
 	return nil
 }
@@ -279,7 +297,7 @@ func (t *Tmux) SendNamedKeys(ctx context.Context, name string, keys ...string) e
 	}
 	args := append([]string{"send-keys", "-t", name, "--"}, keys...)
 	if out, err := t.cmd(ctx, args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux send-keys (named): %v: %s", err, strings.TrimSpace(string(out)))
+		return targetErr("tmux send-keys (named)", err, out)
 	}
 	return nil
 }
@@ -298,10 +316,13 @@ func (t *Tmux) PasteText(ctx context.Context, name, text string) error {
 	load := t.cmd(ctx, "load-buffer", "-b", buf, "-")
 	load.Stdin = strings.NewReader(text)
 	if out, err := load.CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux load-buffer: %v: %s", err, strings.TrimSpace(string(out)))
+		return targetErr("tmux load-buffer", err, out)
 	}
 	if out, err := t.cmd(ctx, "paste-buffer", "-p", "-d", "-b", buf, "-t", name).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux paste-buffer: %v: %s", err, strings.TrimSpace(string(out)))
+		// -d deletes only on a successful paste; reap the buffer ourselves so
+		// a dead target doesn't leak it on the shared server.
+		_ = t.cmd(ctx, "delete-buffer", "-b", buf).Run()
+		return targetErr("tmux paste-buffer", err, out)
 	}
 	return nil
 }

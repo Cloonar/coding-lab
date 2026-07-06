@@ -5,10 +5,12 @@ package httpapi
 // dialog), driven through the fake provider's scriptable chat.
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
 // startRun starts an instance and returns its run id + session name.
@@ -139,6 +141,24 @@ func TestAPI_ChatAnswer(t *testing.T) {
 	// Stale tool_id is a 409.
 	resp = x.do("POST", "/api/v1/runs/"+runID+"/answer", map[string]any{"tool_id": "toolu_old", "index": 0}, h)
 	wantStatus(t, resp, http.StatusConflict)
+
+	// Missing tool_id is a 400 — an unidentified answer may not drive a
+	// picker by blind index.
+	resp = x.do("POST", "/api/v1/runs/"+runID+"/answer", map[string]any{"index": 0}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+}
+
+func TestAPI_ChatSessionGone_conflict(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking})
+	// The run row still says active but the tmux session died out from under
+	// lab — the send surfaces the runner's typed error, not an opaque 500.
+	x.prov.SetReplyError(fmt.Errorf("paste reply: %w", tmuxx.ErrSessionNotFound))
+
+	resp := x.do("POST", "/api/v1/runs/"+runID+"/reply", map[string]any{"text": "hello"}, csrfHeaders(x.ts.URL))
+	wantStatus(t, resp, http.StatusConflict)
 }
 
 func TestAPI_ChatEndedRun_readableButNotWritable(t *testing.T) {
@@ -148,20 +168,56 @@ func TestAPI_ChatEndedRun_readableButNotWritable(t *testing.T) {
 	x.prov.SetChat(provider.Chat{State: provider.StateNeedsInput,
 		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "user", Text: "hi"}}})
 
+	// Read once while live so the located path persists — ended runs never
+	// locate (the worktree's live claude would belong to a successor run).
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+
 	// Stop the instance (terminal outcome).
-	resp := x.do("DELETE", "/api/v1/instances/"+session, nil, csrfHeaders(x.ts.URL))
+	resp = x.do("DELETE", "/api/v1/instances/"+session, nil, csrfHeaders(x.ts.URL))
 	wantStatus(t, resp, http.StatusOK)
 
 	// Messages still read (read-through) but state is ended.
 	resp = x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
 	wantStatus(t, resp, http.StatusOK)
-	if body := decodeBody(t, resp); body["state"] != provider.StateEnded {
+	body := decodeBody(t, resp)
+	if body["state"] != provider.StateEnded {
 		t.Errorf("ended run state = %v; want ended", body["state"])
+	}
+	if msgs, ok := body["messages"].([]any); !ok || len(msgs) != 1 {
+		t.Errorf("ended run messages = %v; want the persisted transcript's 1 message", body["messages"])
 	}
 
 	// The composer is closed.
 	resp = x.do("POST", "/api/v1/runs/"+runID+"/reply", map[string]any{"text": "hello"}, csrfHeaders(x.ts.URL))
 	wantStatus(t, resp, http.StatusConflict)
+}
+
+func TestAPI_ChatEndedRun_neverLocatedIsGone(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, session := startRun(t, x)
+	// Locatable the whole time — but nothing read the chat while the run was
+	// live, so no path persisted. After the end, locating would capture a
+	// successor run's transcript; the API must serve "gone" instead.
+	x.prov.SetTranscriptPath("/successor.jsonl")
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "user", Text: "not yours"}}})
+
+	resp := x.do("DELETE", "/api/v1/instances/"+session, nil, csrfHeaders(x.ts.URL))
+	wantStatus(t, resp, http.StatusOK)
+
+	resp = x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body := decodeBody(t, resp)
+	if body["transcript"] != "gone" {
+		t.Errorf("transcript = %v; want gone", body["transcript"])
+	}
+	if body["state"] != provider.StateEnded {
+		t.Errorf("state = %v; want ended", body["state"])
+	}
+	if msgs, ok := body["messages"].([]any); !ok || len(msgs) != 0 {
+		t.Errorf("messages = %v; want none (never this run's transcript)", body["messages"])
+	}
 }
 
 func TestAPI_ChatMessages_unknownRun404(t *testing.T) {

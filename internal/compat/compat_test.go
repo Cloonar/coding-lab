@@ -225,7 +225,10 @@ func TestCompat_TranscriptFixture_maps(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	chat := claudecode.ParseTranscript(f)
+	chat, err := claudecode.ParseTranscript(f)
+	if err != nil {
+		t.Fatalf("ParseTranscript: %v", err)
+	}
 
 	if chat.Cursor != 9 || len(chat.Messages) != 9 {
 		t.Fatalf("mapped %d messages (cursor %d); want 9 (the isMeta line is dropped)", len(chat.Messages), chat.Cursor)

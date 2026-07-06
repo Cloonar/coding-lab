@@ -52,8 +52,17 @@ The decisions, pinned:
   chat view refetches `GET /api/v1/runs/{id}/messages?after=<cursor>` — an
   append-only cursor (the message sequence), latest window first, older on
   scroll-up. SSE payloads stay envelope-small (ADR-0005). The tailer keeps its
-  set in sync with the active runs off the same `run.changed` it already sees,
-  so no wiring into instance/afk/reconcile is needed.
+  set in sync with the active runs off the same `run.changed` it already sees
+  (plus a periodic resync, since the bus may drop events for a slow
+  subscriber), so no wiring into instance/afk/reconcile is needed.
+  A known tension: seq numbers are reparse-stable, but two mutations happen
+  *behind* the cursor — a tool chip's status/output back-patches when its
+  result lands, and an answered dialog re-parses as a tool message at the same
+  seq. An `after=` fetch alone never re-delivers those, so the client pairs the
+  cursor tail with a latest-window refetch and merges by seq; a mutation older
+  than the latest window is only caught by the client's window accumulation.
+  Accepted as inherent to read-through + append-only (revisit with a
+  `changed-since` param if it ever bites in practice).
 - **Signaling comes from the tailer.** It derives a per-instance conversational
   state — *working / needs input / question pending / idle* — served on the
   instance list and shown as live badges on Dashboard rows and the chat header.

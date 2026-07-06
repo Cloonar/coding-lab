@@ -2,7 +2,7 @@
 // are the behavioral contract — do not trim or "improve" them.
 
 import { describe, expect, it } from 'vitest';
-import { instanceTitle, parseManualLabel, sessionLabel } from './instanceLabel';
+import { instanceTitle, parseManualLabel, sessionLabel, sessionRepo } from './instanceLabel';
 
 describe('sessionLabel (parseSessionName label part, first-~ split)', () => {
   const rows: [string, string][] = [
@@ -18,6 +18,22 @@ describe('sessionLabel (parseSessionName label part, first-~ split)', () => {
   for (const [input, want] of rows) {
     it(`${JSON.stringify(input)} → ${JSON.stringify(want)}`, () => {
       expect(sessionLabel(input)).toBe(want);
+    });
+  }
+});
+
+describe('sessionRepo (parseSessionName repo part, first-~ split)', () => {
+  const rows: [string, string][] = [
+    ['foo~20260608-1530', 'foo'],
+    ['foo-bar~20260608-1530', 'foo-bar'],
+    ['foo~a~b', 'foo'], // first ~ only, mirroring sessionLabel
+    ['foo', ''], // no separator = legacy bare name
+    ['~label', ''],
+  ];
+
+  for (const [input, want] of rows) {
+    it(`${JSON.stringify(input)} → ${JSON.stringify(want)}`, () => {
+      expect(sessionRepo(input)).toBe(want);
     });
   }
 });

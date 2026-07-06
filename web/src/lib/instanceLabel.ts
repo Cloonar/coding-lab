@@ -17,6 +17,15 @@ export function sessionLabel(sessionName: string): string {
   return idx === -1 ? '' : sessionName.slice(idx + 1);
 }
 
+/**
+ * The repo part of a session name: everything before the first `~`.
+ * No separator → "" (hand-made or pre-ADR-0017 legacy session).
+ */
+export function sessionRepo(sessionName: string): string {
+  const idx = sessionName.indexOf('~');
+  return idx === -1 ? '' : sessionName.slice(0, idx);
+}
+
 /** v0 manualTimestampRe: leading group greedy so dashed labels keep dashes. */
 const manualTimestampRe = /^(?:(.+)-)?(\d{8})-(\d{2})(\d{2})$/;
 
