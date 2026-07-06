@@ -24,17 +24,31 @@ import (
 // fakeTracker is a recording tracker.Tracker for the forge-bound paths.
 type fakeTracker struct {
 	issues []tracker.Issue
+	labels []tracker.Label
 	err    error // returned by every read/write when set
 
-	createdPull *pullArgs
-	pullRef     tracker.PullRef
-	comments    []commentArgs
+	createdPull  *pullArgs
+	pullRef      tracker.PullRef
+	comments     []commentArgs
+	createdIssue *issueArgs
+	labelAdds    []labelsArgs
+	labelRemoves []labelsArgs
+	ensured      []tracker.Label
+	closed       []int
 }
 
 type pullArgs struct{ head, base, title, body string }
 type commentArgs struct {
 	number int
 	body   string
+}
+type issueArgs struct {
+	title, body string
+	labels      []string
+}
+type labelsArgs struct {
+	number int
+	labels []string
 }
 
 func (f *fakeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -71,7 +85,45 @@ func (f *fakeTracker) CreatePull(_ context.Context, head, base, title, body stri
 	f.createdPull = &pullArgs{head: head, base: base, title: title, body: body}
 	return f.pullRef, nil
 }
-func (f *fakeTracker) CloseIssue(context.Context, int) error { return f.err }
+func (f *fakeTracker) CloseIssue(_ context.Context, number int) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.closed = append(f.closed, number)
+	return nil
+}
+func (f *fakeTracker) CreateIssue(_ context.Context, title, body string, labels []string) (tracker.Issue, error) {
+	if f.err != nil {
+		return tracker.Issue{}, f.err
+	}
+	f.createdIssue = &issueArgs{title: title, body: body, labels: labels}
+	return tracker.Issue{Number: 101, Title: title, Body: body, State: tracker.StateOpen, Labels: labels}, nil
+}
+func (f *fakeTracker) AddIssueLabels(_ context.Context, number int, labels []string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.labelAdds = append(f.labelAdds, labelsArgs{number: number, labels: labels})
+	return nil
+}
+func (f *fakeTracker) RemoveIssueLabels(_ context.Context, number int, labels []string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.labelRemoves = append(f.labelRemoves, labelsArgs{number: number, labels: labels})
+	return nil
+}
+func (f *fakeTracker) Labels(context.Context) ([]tracker.Label, error) {
+	return f.labels, f.err
+}
+func (f *fakeTracker) EnsureLabel(_ context.Context, name, color, description string) (tracker.Label, error) {
+	if f.err != nil {
+		return tracker.Label{}, f.err
+	}
+	l := tracker.Label{Name: name, Color: color, Description: description}
+	f.ensured = append(f.ensured, l)
+	return l, nil
+}
 
 // forgeServer builds a Server whose resolver answers fk for every repo.
 func (f *testFixture) forgeServer(fk tracker.Tracker) *Server {
@@ -234,6 +286,273 @@ func TestForgeCommentPassthrough(t *testing.T) {
 	}
 	if len(fk.comments) != 1 || fk.comments[0] != (commentArgs{number: 7, body: "status update"}) {
 		t.Fatalf("forwarded comments = %+v", fk.comments)
+	}
+}
+
+// TestIssueCreate_builtinAttributionLabelsAndEvent pins the ADR-0014 agent
+// create on a builtin repo: the issue lands author_kind=run with the run's id
+// (the same ForRun seam as comments), labels attach at creation, the response
+// is the list-shape issue, and issue.changed is published for the operator UI.
+func TestIssueCreate_builtinAttributionLabelsAndEvent(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedLabel(t, "lbl_nt", "repo_a", "needs-triage")
+	f.seedRun(t, "run_afk", "repo_a", "active")
+	token := f.seedToken(t, "run_afk", nil)
+
+	bus := events.NewBus()
+	ch, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	s := New(f.st, builtinResolver(f.st), bus, discard(), func() time.Time { return f.now })
+
+	rr := doJSON(t, s.Handler(), "POST", "/agent/v1/issues", token,
+		`{"title":"found: flaky teardown","body":"Discovered mid-run.","labels":["needs-triage"]}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got issueResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Number != 1 || got.State != "open" || got.Title != "found: flaky teardown" {
+		t.Errorf("response = %+v, want #1 open", got)
+	}
+	if len(got.Labels) != 1 || got.Labels[0] != "needs-triage" {
+		t.Errorf("response labels = %v, want [needs-triage]", got.Labels)
+	}
+
+	is, err := f.st.IssueByRepoNumber(context.Background(), "repo_a", 1)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	if is.AuthorKind != store.CommentAuthorRun || is.RunID == nil || *is.RunID != "run_afk" {
+		t.Errorf("stored author = (%q, %v), want (run, run_afk)", is.AuthorKind, is.RunID)
+	}
+	if len(is.Labels) != 1 || is.Labels[0] != "needs-triage" {
+		t.Errorf("stored labels = %v, want [needs-triage]", is.Labels)
+	}
+
+	select {
+	case e := <-ch:
+		if e.Type != EventIssueChanged {
+			t.Errorf("event type = %q, want %q", e.Type, EventIssueChanged)
+		}
+	default:
+		t.Error("no issue.changed published on builtin issue create")
+	}
+}
+
+// TestIssueCreate_validation pins the failure half: a blank title and an
+// unknown label are 400s and nothing is created — the typo never becomes a
+// label or an issue.
+func TestIssueCreate_validation(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedLabel(t, "lbl_nt", "repo_a", "needs-triage")
+	f.seedRun(t, "run_afk", "repo_a", "active")
+	token := f.seedToken(t, "run_afk", nil)
+	handler := f.server().Handler()
+
+	rr := doJSON(t, handler, "POST", "/agent/v1/issues", token, `{"title":"  ","body":"b"}`)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "title is required") {
+		t.Fatalf("blank title: status = %d, body %q", rr.Code, rr.Body.String())
+	}
+
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues", token,
+		`{"title":"t","body":"","labels":["needs-triage","ready-for-agnet"]}`)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "ready-for-agnet") {
+		t.Fatalf("unknown label: status = %d, body %q, want 400 naming the typo", rr.Code, rr.Body.String())
+	}
+
+	issues, err := f.st.IssuesByRepo(context.Background(), "repo_a", store.IssueStateAll)
+	if err != nil {
+		t.Fatalf("IssuesByRepo: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Errorf("issues after rejected creates = %+v, want none", issues)
+	}
+	labels, err := f.st.LabelsByRepo(context.Background(), "repo_a")
+	if err != nil {
+		t.Fatalf("LabelsByRepo: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Errorf("labels after rejected create = %+v — the typo must not become a label", labels)
+	}
+}
+
+// TestIssueLabelsAndClose_builtin drives the triage state machine end-to-end
+// on a builtin repo: label add, role swap via remove, unknown-label 400,
+// empty-set 400, close after the explanation comment.
+func TestIssueLabelsAndClose_builtin(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedIssue(t, "iss7", "repo_a", 7, "Fix it", "")
+	f.seedLabel(t, "lbl_nt", "repo_a", "needs-triage")
+	f.seedLabel(t, "lbl_wf", "repo_a", "wontfix")
+	f.seedRun(t, "run_afk", "repo_a", "active")
+	token := f.seedToken(t, "run_afk", nil)
+	handler := f.server().Handler()
+	ctx := context.Background()
+
+	rr := doJSON(t, handler, "POST", "/agent/v1/issues/7/labels", token, `{"labels":["needs-triage"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("label add: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	is, _ := f.st.IssueByRepoNumber(ctx, "repo_a", 7)
+	if len(is.Labels) != 1 || is.Labels[0] != "needs-triage" {
+		t.Fatalf("labels after add = %v", is.Labels)
+	}
+
+	// The triage-role swap: wontfix on, needs-triage off.
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/labels", token, `{"labels":["wontfix"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("swap add: status = %d", rr.Code)
+	}
+	rr = doJSON(t, handler, "DELETE", "/agent/v1/issues/7/labels", token, `{"labels":["needs-triage"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("swap remove: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, "repo_a", 7)
+	if len(is.Labels) != 1 || is.Labels[0] != "wontfix" {
+		t.Fatalf("labels after swap = %v, want [wontfix]", is.Labels)
+	}
+
+	// Failure shapes: unknown label 400 (both ops), empty set 400, missing
+	// issue 404.
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/labels", token, `{"labels":["nope"]}`)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "nope") {
+		t.Fatalf("unknown add: status = %d, body %q", rr.Code, rr.Body.String())
+	}
+	rr = doJSON(t, handler, "DELETE", "/agent/v1/issues/7/labels", token, `{"labels":["nope"]}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown remove: status = %d", rr.Code)
+	}
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/labels", token, `{"labels":[]}`)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "labels is required") {
+		t.Fatalf("empty labels: status = %d, body %q", rr.Code, rr.Body.String())
+	}
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/999/labels", token, `{"labels":["wontfix"]}`)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing issue label add: status = %d, want 404", rr.Code)
+	}
+
+	// The wontfix path: explanation comment, then close — two calls.
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/comments", token, `{"body":"wontfix: by design"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("explanation comment: status = %d", rr.Code)
+	}
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/close", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("close: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, "repo_a", 7)
+	if is.State != store.IssueStateClosed || is.ClosedAt == nil {
+		t.Errorf("after close = state %q closed_at %v, want closed", is.State, is.ClosedAt)
+	}
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/999/close", token, "")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("close missing: status = %d, want 404", rr.Code)
+	}
+}
+
+// TestLabelListAndEnsure_builtin pins the self-healing label surface: list,
+// create-if-absent, and the idempotent re-ensure a skill runs unconditionally.
+func TestLabelListAndEnsure_builtin(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedLabel(t, "lbl_nt", "repo_a", "needs-triage")
+	f.seedRun(t, "run_afk", "repo_a", "active")
+	token := f.seedToken(t, "run_afk", nil)
+	handler := f.server().Handler()
+
+	rr := doJSON(t, handler, "POST", "/agent/v1/labels", token,
+		`{"name":"ready-for-agent","description":"fully specified"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ensure new: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var created labelResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Name != "ready-for-agent" || created.Color != store.LabelDefaultColor {
+		t.Errorf("created = %+v, want the default color", created)
+	}
+
+	// Idempotent retry: same 200, the existing label untouched.
+	rr = doJSON(t, handler, "POST", "/agent/v1/labels", token, `{"name":"ready-for-agent","color":"#ff0000"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("re-ensure: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var again labelResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &again)
+	if again.Color != store.LabelDefaultColor || again.Description != "fully specified" {
+		t.Errorf("re-ensured = %+v, want the original untouched", again)
+	}
+
+	rr = doJSON(t, handler, "POST", "/agent/v1/labels", token, `{"name":"  "}`)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "name is required") {
+		t.Fatalf("blank name: status = %d, body %q", rr.Code, rr.Body.String())
+	}
+
+	rr = doJSON(t, handler, "GET", "/agent/v1/labels", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("label list: status = %d", rr.Code)
+	}
+	var list struct {
+		Labels []labelResponse `json:"labels"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list.Labels) != 2 || list.Labels[0].Name != "needs-triage" || list.Labels[1].Name != "ready-for-agent" {
+		t.Errorf("labels = %+v, want [needs-triage ready-for-agent] (name order)", list.Labels)
+	}
+}
+
+// TestForgeTriagePassthrough pins binding symmetry (one labctl surface, both
+// bindings): on a forge-bound repo every triage op forwards through the
+// tracker seam with the caller's names — never ids, never rewritten.
+func TestForgeTriagePassthrough(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{labels: []tracker.Label{{Name: "bug", Color: "#ee0701"}}}
+	handler := f.forgeServer(fk).Handler()
+
+	rr := doJSON(t, handler, "POST", "/agent/v1/issues", token,
+		`{"title":"t","body":"b","labels":["bug","kind/feature"]}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("issue create: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if fk.createdIssue == nil || fk.createdIssue.title != "t" ||
+		len(fk.createdIssue.labels) != 2 || fk.createdIssue.labels[1] != "kind/feature" {
+		t.Errorf("forwarded create = %+v", fk.createdIssue)
+	}
+	if !strings.Contains(rr.Body.String(), `"number":101`) {
+		t.Errorf("create response = %s, want the tracker's issue", rr.Body.String())
+	}
+
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/labels", token, `{"labels":["bug"]}`)
+	if rr.Code != http.StatusOK || len(fk.labelAdds) != 1 || fk.labelAdds[0].number != 7 || fk.labelAdds[0].labels[0] != "bug" {
+		t.Fatalf("label add: status = %d, forwarded %+v", rr.Code, fk.labelAdds)
+	}
+	rr = doJSON(t, handler, "DELETE", "/agent/v1/issues/7/labels", token, `{"labels":["bug"]}`)
+	if rr.Code != http.StatusOK || len(fk.labelRemoves) != 1 || fk.labelRemoves[0].number != 7 {
+		t.Fatalf("label remove: status = %d, forwarded %+v", rr.Code, fk.labelRemoves)
+	}
+	rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/close", token, "")
+	if rr.Code != http.StatusOK || len(fk.closed) != 1 || fk.closed[0] != 7 {
+		t.Fatalf("close: status = %d, forwarded %+v", rr.Code, fk.closed)
+	}
+	rr = doJSON(t, handler, "POST", "/agent/v1/labels", token, `{"name":"bug","color":"#ee0701"}`)
+	if rr.Code != http.StatusOK || len(fk.ensured) != 1 || fk.ensured[0].Name != "bug" {
+		t.Fatalf("ensure: status = %d, forwarded %+v", rr.Code, fk.ensured)
+	}
+	rr = doJSON(t, handler, "GET", "/agent/v1/labels", token, "")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"#ee0701"`) {
+		t.Fatalf("label list: status = %d, body %s", rr.Code, rr.Body.String())
 	}
 }
 

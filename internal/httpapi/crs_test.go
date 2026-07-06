@@ -172,7 +172,7 @@ func seedCR(t *testing.T, x *crTestServer, repoID, title, body, head string) sto
 // seedCRIssue creates a builtin issue and returns its number.
 func seedCRIssue(t *testing.T, x *crTestServer, repoID, title string) int {
 	t.Helper()
-	is, err := x.st.CreateIssueWithLabels(context.Background(), repoID, title, "", nil, time.Now())
+	is, err := x.st.CreateIssueWithLabels(context.Background(), repoID, title, "", nil, store.CommentAuthorOperator, nil, time.Now())
 	if err != nil {
 		t.Fatalf("CreateIssueWithLabels: %v", err)
 	}

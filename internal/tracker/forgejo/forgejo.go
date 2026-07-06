@@ -16,10 +16,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -87,7 +89,10 @@ func New(httpClient *http.Client, baseURL, token, owner, repo string) *Client {
 // --- Forgejo JSON shapes ---------------------------------------------------
 
 type fjLabel struct {
-	Name string `json:"name"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Color       string `json:"color"`
+	Description string `json:"description"`
 }
 
 type fjIssue struct {
@@ -250,6 +255,168 @@ func (c *Client) CloseIssue(ctx context.Context, number int) error {
 	return c.do(ctx, http.MethodPatch, c.issuePath(number), nil, req, nil)
 }
 
+// defaultLabelColor is the swatch EnsureLabel supplies when the caller omits
+// one — the same value as the builtin binding's store default
+// (store.LabelDefaultColor), so a label ensured on either binding looks the
+// same. Forgejo requires a color on create, hence the client-side default.
+const defaultLabelColor = "#6b7280"
+
+// CreateIssue opens an issue with the named labels attached at creation.
+// Label names are resolved to Forgejo ids client-side (the labels-are-IDs
+// quirk stays behind this seam); a name the repo does not define is
+// tracker.ErrUnknownLabel before anything is created — Forgejo silently
+// discards unknown entries, which would turn a typo into an unlabelled issue.
+func (c *Client) CreateIssue(ctx context.Context, title, body string, labels []string) (tracker.Issue, error) {
+	ids, err := c.labelIDsByName(ctx, labels)
+	if err != nil {
+		return tracker.Issue{}, err
+	}
+	req := struct {
+		Title  string  `json:"title"`
+		Body   string  `json:"body"`
+		Labels []int64 `json:"labels,omitempty"`
+	}{Title: title, Body: body, Labels: ids}
+	var fj fjIssue
+	if err := c.do(ctx, http.MethodPost, c.issuesPath(), nil, req, &fj); err != nil {
+		return tracker.Issue{}, err
+	}
+	return toIssue(fj, nil), nil
+}
+
+// AddIssueLabels attaches the named labels to an issue in one POST, after the
+// same strict client-side name resolution as CreateIssue.
+func (c *Client) AddIssueLabels(ctx context.Context, number int, labels []string) error {
+	ids, err := c.labelIDsByName(ctx, labels)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	req := struct {
+		Labels []int64 `json:"labels"`
+	}{Labels: ids}
+	return c.do(ctx, http.MethodPost, c.issuePath(number)+"/labels", nil, req, nil)
+}
+
+// RemoveIssueLabels detaches the named labels from an issue — one DELETE per
+// label, the only remove Forgejo's API offers — after strict name resolution
+// of the whole set, so a typo fails before the first detach.
+func (c *Client) RemoveIssueLabels(ctx context.Context, number int, labels []string) error {
+	ids, err := c.labelIDsByName(ctx, labels)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		path := c.issuePath(number) + "/labels/" + strconv.FormatInt(id, 10)
+		if err := c.do(ctx, http.MethodDelete, path, nil, nil, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Labels lists the repo's labels ordered by name (the contract order; the
+// forge's own order is unspecified).
+func (c *Client) Labels(ctx context.Context) ([]tracker.Label, error) {
+	fjs, err := c.repoLabels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tracker.Label, 0, len(fjs))
+	for _, fj := range fjs {
+		out = append(out, toLabel(fj))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// EnsureLabel returns the repo's label of that name, creating it when absent.
+// List-first keeps the op idempotent whatever the forge does with duplicate
+// names; a create that still answers a duplicate conflict (a concurrent
+// ensure won the race) resolves by re-listing. An existing label's
+// color/description are never overwritten.
+func (c *Client) EnsureLabel(ctx context.Context, name, color, description string) (tracker.Label, error) {
+	if l, ok, err := c.labelByName(ctx, name); err != nil {
+		return tracker.Label{}, err
+	} else if ok {
+		return l, nil
+	}
+	if color == "" {
+		color = defaultLabelColor
+	}
+	req := struct {
+		Name        string `json:"name"`
+		Color       string `json:"color"`
+		Description string `json:"description"`
+	}{Name: name, Color: color, Description: description}
+	var created fjLabel
+	err := c.do(ctx, http.MethodPost, c.labelsPath(), nil, req, &created)
+	if err == nil {
+		return toLabel(created), nil
+	}
+	var se *statusError
+	if errors.As(err, &se) && (se.status == http.StatusConflict || se.status == http.StatusUnprocessableEntity) {
+		if l, ok, lerr := c.labelByName(ctx, name); lerr == nil && ok {
+			return l, nil
+		}
+	}
+	return tracker.Label{}, err
+}
+
+// labelByName finds one repo label by exact name; ok=false when the repo does
+// not define it.
+func (c *Client) labelByName(ctx context.Context, name string) (tracker.Label, bool, error) {
+	fjs, err := c.repoLabels(ctx)
+	if err != nil {
+		return tracker.Label{}, false, err
+	}
+	for _, fj := range fjs {
+		if fj.Name == name {
+			return toLabel(fj), true, nil
+		}
+	}
+	return tracker.Label{}, false, nil
+}
+
+// repoLabels fetches the repo's full label set (paginated like every list).
+func (c *Client) repoLabels(ctx context.Context) ([]fjLabel, error) {
+	return fetchPages[fjLabel](ctx, c, c.labelsPath(), nil)
+}
+
+// labelIDsByName resolves label names to Forgejo label ids, deduplicated,
+// failing on the first name the repo does not define (tracker.ErrUnknownLabel,
+// carrying the name) — strict resolution is the seam contract: Forgejo
+// discards unknown label entries instead of erroring, the same quirk that
+// forces the ready queue's client-side verification. Nil in, nil out.
+func (c *Client) labelIDsByName(ctx context.Context, names []string) ([]int64, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	fjs, err := c.repoLabels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]int64, len(fjs))
+	for _, fj := range fjs {
+		byName[fj.Name] = fj.ID
+	}
+	seen := make(map[int64]struct{}, len(names))
+	ids := make([]int64, 0, len(names))
+	for _, name := range names {
+		id, ok := byName[name]
+		if !ok {
+			return nil, fmt.Errorf("%w %q", tracker.ErrUnknownLabel, name)
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // --- path helpers ----------------------------------------------------------
 
 // repoPath builds /repos/{owner}/{repo}{suffix} with the owner and repo
@@ -263,6 +430,7 @@ func (c *Client) repoPath(suffix string) string {
 
 func (c *Client) issuesPath() string     { return c.repoPath("/issues") }
 func (c *Client) pullsPath() string      { return c.repoPath("/pulls") }
+func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
 
 // --- mapping ---------------------------------------------------------------
@@ -305,6 +473,18 @@ func mapIssues(fjs []fjIssue) []tracker.Issue {
 		out = append(out, toIssue(fj, nil))
 	}
 	return out
+}
+
+// toLabel maps a Forgejo label onto the tracker vocabulary. Forgejo stores
+// colors WITHOUT the leading '#' ("6b7280"); lab's vocabulary carries it
+// (store.LabelDefaultColor), so reads are normalized — writes may send either
+// form, Forgejo accepts both.
+func toLabel(fj fjLabel) tracker.Label {
+	color := fj.Color
+	if color != "" && !strings.HasPrefix(color, "#") {
+		color = "#" + color
+	}
+	return tracker.Label{Name: fj.Name, Color: color, Description: fj.Description}
 }
 
 func toComment(fc fjComment) tracker.Comment {
@@ -405,20 +585,37 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == http.StatusNotFound {
-			// A typed sentinel ONLY for 404 — the one upstream status that
-			// means "no such subject" rather than "forge failure" — so callers
-			// can answer not-found instead of bad-gateway. (Forgejo also 404s
-			// repos the token cannot see; that is still "not found" to us.)
-			return fmt.Errorf("forgejo %s %s: unexpected status %d: %s: %w",
-				method, path, resp.StatusCode, bodySnippet(resp.Body), tracker.ErrNotFound)
+		return &statusError{
+			status: resp.StatusCode,
+			message: fmt.Sprintf("forgejo %s %s: unexpected status %d: %s",
+				method, path, resp.StatusCode, bodySnippet(resp.Body)),
 		}
-		return fmt.Errorf("forgejo %s %s: unexpected status %d: %s", method, path, resp.StatusCode, bodySnippet(resp.Body))
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 			return fmt.Errorf("forgejo %s %s: decode response: %w", method, path, err)
 		}
+	}
+	return nil
+}
+
+// statusError is a non-2xx forge answer: the diagnostic line do() always
+// produced (method, path, status, body snippet — never the token) plus the
+// machine-readable status. 404 unwraps to tracker.ErrNotFound — the one
+// upstream status that means "no such subject" rather than "forge failure" —
+// so callers answer not-found instead of bad-gateway (Forgejo also 404s repos
+// the token cannot see; that is still "not found" to us). EnsureLabel reads
+// the status via errors.As to recognize a duplicate-name conflict.
+type statusError struct {
+	status  int
+	message string
+}
+
+func (e *statusError) Error() string { return e.message }
+
+func (e *statusError) Unwrap() error {
+	if e.status == http.StatusNotFound {
+		return tracker.ErrNotFound
 	}
 	return nil
 }

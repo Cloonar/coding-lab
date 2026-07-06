@@ -172,6 +172,137 @@ func (t *Tracker) CloseIssue(ctx context.Context, number int) error {
 	return nil
 }
 
+// CreateIssue opens an issue authored per this tracker's identity (operator
+// by default, the run after ForRun — issues share the comments' author
+// vocabulary since migration 0002). Create and label attach run in ONE store
+// transaction after strict name resolution, so an unknown label leaves no
+// issue behind and releases no issue number.
+func (t *Tracker) CreateIssue(ctx context.Context, title, body string, labels []string) (tracker.Issue, error) {
+	labelIDs, err := t.labelIDsByName(ctx, labels)
+	if err != nil {
+		return tracker.Issue{}, fmt.Errorf("builtin create issue: %w", err)
+	}
+	is, err := t.store.CreateIssueWithLabels(ctx, t.repoID, title, body, labelIDs,
+		t.author.kind, t.author.runID, t.now())
+	if err != nil {
+		return tracker.Issue{}, fmt.Errorf("builtin create issue: %w", err)
+	}
+	return toTrackerIssue(is), nil
+}
+
+// AddIssueLabels attaches the named labels to an issue. All names resolve
+// strictly BEFORE the first attach (tracker.ErrUnknownLabel on a miss — never
+// an implicit create); attaching an already attached label is the store's
+// idempotent no-op.
+func (t *Tracker) AddIssueLabels(ctx context.Context, number int, labels []string) error {
+	labelIDs, err := t.labelIDsByName(ctx, labels)
+	if err != nil {
+		return fmt.Errorf("builtin add labels to issue %d: %w", number, err)
+	}
+	is, err := t.store.IssueByRepoNumber(ctx, t.repoID, number)
+	if err != nil {
+		return fmt.Errorf("builtin add labels to issue %d: %w", number, err)
+	}
+	for _, labelID := range labelIDs {
+		if err := t.store.AddIssueLabel(ctx, is.ID, labelID, t.now()); err != nil {
+			return fmt.Errorf("builtin add labels to issue %d: %w", number, err)
+		}
+	}
+	return nil
+}
+
+// RemoveIssueLabels detaches the named labels from an issue, under the same
+// strict name resolution as AddIssueLabels. Removing a defined-but-unattached
+// label is the store's idempotent no-op.
+func (t *Tracker) RemoveIssueLabels(ctx context.Context, number int, labels []string) error {
+	labelIDs, err := t.labelIDsByName(ctx, labels)
+	if err != nil {
+		return fmt.Errorf("builtin remove labels from issue %d: %w", number, err)
+	}
+	is, err := t.store.IssueByRepoNumber(ctx, t.repoID, number)
+	if err != nil {
+		return fmt.Errorf("builtin remove labels from issue %d: %w", number, err)
+	}
+	for _, labelID := range labelIDs {
+		if err := t.store.RemoveIssueLabel(ctx, is.ID, labelID, t.now()); err != nil {
+			return fmt.Errorf("builtin remove labels from issue %d: %w", number, err)
+		}
+	}
+	return nil
+}
+
+// Labels lists the repo's labels ordered by name.
+func (t *Tracker) Labels(ctx context.Context) ([]tracker.Label, error) {
+	labels, err := t.store.LabelsByRepo(ctx, t.repoID)
+	if err != nil {
+		return nil, fmt.Errorf("builtin labels: %w", err)
+	}
+	out := make([]tracker.Label, 0, len(labels))
+	for _, l := range labels {
+		out = append(out, toTrackerLabel(l))
+	}
+	return out, nil
+}
+
+// EnsureLabel creates the label unless the repo already defines the name, and
+// returns the label that exists afterwards. Create-first keeps it atomic
+// under the per-repo name uniqueness: a lost race (or an existing label)
+// surfaces as ErrNameTaken, which resolves to the existing row — the
+// existing label's color/description are never overwritten.
+func (t *Tracker) EnsureLabel(ctx context.Context, name, color, description string) (tracker.Label, error) {
+	l, err := t.store.CreateLabel(ctx, t.repoID, name, color, description)
+	if err == nil {
+		return toTrackerLabel(l), nil
+	}
+	if !errors.Is(err, store.ErrNameTaken) {
+		return tracker.Label{}, fmt.Errorf("builtin ensure label %q: %w", name, err)
+	}
+	labels, err := t.store.LabelsByRepo(ctx, t.repoID)
+	if err != nil {
+		return tracker.Label{}, fmt.Errorf("builtin ensure label %q: %w", name, err)
+	}
+	for _, l := range labels {
+		if l.Name == name {
+			return toTrackerLabel(l), nil
+		}
+	}
+	// Name taken a moment ago but gone now: a concurrent delete won the race.
+	// Surface it instead of looping — the caller's retry recreates it.
+	return tracker.Label{}, fmt.Errorf("builtin ensure label %q: label vanished after name conflict: %w",
+		name, store.ErrNotFound)
+}
+
+// labelIDsByName resolves label names to store ids within the repo,
+// deduplicated, failing on the first name the repo does not define
+// (tracker.ErrUnknownLabel, carrying the name). Nil in, nil out.
+func (t *Tracker) labelIDsByName(ctx context.Context, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	labels, err := t.store.LabelsByRepo(ctx, t.repoID)
+	if err != nil {
+		return nil, fmt.Errorf("loading labels: %w", err)
+	}
+	byName := make(map[string]string, len(labels))
+	for _, l := range labels {
+		byName[l.Name] = l.ID
+	}
+	seen := make(map[string]struct{}, len(names))
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
+		id, ok := byName[name]
+		if !ok {
+			return nil, fmt.Errorf("%w %q", tracker.ErrUnknownLabel, name)
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // toPullRef reduces a store CR to the tracker's PullRef vocabulary. The URL
 // is the lab-relative SPA route of the CR's detail view (there is no forge
 // web URL for a lab-internal CR); the state strings are shared, so State
@@ -203,6 +334,12 @@ func toTrackerIssue(is store.Issue) tracker.Issue {
 		CreatedAt:     is.CreatedAt,
 		UpdatedAt:     is.UpdatedAt,
 	}
+}
+
+// toTrackerLabel maps a store label onto the tracker vocabulary (ids stay
+// behind the seam — callers speak names).
+func toTrackerLabel(l store.Label) tracker.Label {
+	return tracker.Label{Name: l.Name, Color: l.Color, Description: l.Description}
 }
 
 func hasLabel(labels []string, want string) bool {

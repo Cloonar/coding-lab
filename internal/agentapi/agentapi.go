@@ -57,11 +57,18 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Brief §8.2 routes plus GET /agent/v1/issues (design §5 — the gap the
-	// brief itself creates via `labctl issue list`).
+	// brief itself creates via `labctl issue list`), extended by the ADR-0014
+	// triage surface: issue create, label ops, close.
 	mux.HandleFunc("GET /agent/v1/issue", s.handleClaimedIssue)
 	mux.HandleFunc("GET /agent/v1/issues", s.handleIssueList)
+	mux.HandleFunc("POST /agent/v1/issues", s.handleIssueCreate)
 	mux.HandleFunc("GET /agent/v1/issues/{n}", s.handleIssueGet)
 	mux.HandleFunc("POST /agent/v1/issues/{n}/comments", s.handleCommentCreate)
+	mux.HandleFunc("POST /agent/v1/issues/{n}/labels", s.handleIssueLabelAdd)
+	mux.HandleFunc("DELETE /agent/v1/issues/{n}/labels", s.handleIssueLabelRemove)
+	mux.HandleFunc("POST /agent/v1/issues/{n}/close", s.handleIssueClose)
+	mux.HandleFunc("GET /agent/v1/labels", s.handleLabelList)
+	mux.HandleFunc("POST /agent/v1/labels", s.handleLabelEnsure)
 	mux.HandleFunc("POST /agent/v1/prs", s.handlePRCreate)
 	mux.HandleFunc("/agent/v1/", func(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "not found")

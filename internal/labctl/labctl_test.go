@@ -62,6 +62,21 @@ func TestRunCommandSurface(t *testing.T) {
 		{"pr create missing body", []string{"pr", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
 		{"pr without create", []string{"pr"}, agentEnv, 2, "", "Usage"},
 
+		{"issue create missing title", []string{"issue", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
+		{"issue create missing body", []string{"issue", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
+		{"issue create stray args", []string{"issue", "create", "--title", "t", "--body", "b", "x"}, agentEnv, 2, "", "unexpected arguments"},
+		{"issue label no op", []string{"issue", "label"}, agentEnv, 2, "", "want add|remove"},
+		{"issue label bad op", []string{"issue", "label", "toggle", "1", "bug"}, agentEnv, 2, "", "want add|remove"},
+		{"issue label add missing labels", []string{"issue", "label", "add", "1"}, agentEnv, 2, "", "want <n> <labels>"},
+		{"issue label add bad n", []string{"issue", "label", "add", "one", "bug"}, agentEnv, 2, "", "not an integer"},
+		{"issue label add empty labels", []string{"issue", "label", "add", "1", " , "}, agentEnv, 2, "", "labels must not be empty"},
+		{"issue close missing n", []string{"issue", "close"}, agentEnv, 2, "", "want <n>"},
+		{"issue close bad n", []string{"issue", "close", "seven"}, agentEnv, 2, "", "not an integer"},
+		{"label no sub", []string{"label"}, agentEnv, 2, "", "Usage"},
+		{"label unknown sub", []string{"label", "bogus"}, agentEnv, 2, "", `unknown subcommand "bogus"`},
+		{"label list too many", []string{"label", "list", "x"}, agentEnv, 2, "", "too many arguments"},
+		{"label create missing name", []string{"label", "create", "--color", "#fff"}, agentEnv, 2, "", "--name is required"},
+
 		{"missing env", []string{"issue", "view"}, nil, 2, "", "LAB_URL and LAB_TOKEN must be set"},
 		{"missing env shows usage", []string{"issue", "view"}, nil, 2, "", "Usage"},
 		{"missing token only", []string{"issue", "list"}, map[string]string{"LAB_URL": "http://x"}, 2, "", "LAB_URL and LAB_TOKEN must be set"},
@@ -128,6 +143,15 @@ func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string
 	return f.pullRef, nil
 }
 func (f *fakeForge) CloseIssue(context.Context, int) error { return nil }
+func (f *fakeForge) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
+	return tracker.Issue{}, nil
+}
+func (f *fakeForge) AddIssueLabels(context.Context, int, []string) error    { return nil }
+func (f *fakeForge) RemoveIssueLabels(context.Context, int, []string) error { return nil }
+func (f *fakeForge) Labels(context.Context) ([]tracker.Label, error)        { return nil, nil }
+func (f *fakeForge) EnsureLabel(context.Context, string, string, string) (tracker.Label, error) {
+	return tracker.Label{}, nil
+}
 
 // newAgentFixture seeds one repo (binding + resolver as given), one issue
 // (#1, with an operator comment and the ready-for-agent label), one active
@@ -173,7 +197,7 @@ func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerReso
 			readyID = l.ID
 		}
 	}
-	is, err := st.CreateIssueWithLabels(ctx, repo.ID, "Fix the frobnicator", "It wobbles.", []string{readyID}, fixedNow)
+	is, err := st.CreateIssueWithLabels(ctx, repo.ID, "Fix the frobnicator", "It wobbles.", []string{readyID}, store.CommentAuthorOperator, nil, fixedNow)
 	if err != nil {
 		t.Fatalf("CreateIssueWithLabels: %v", err)
 	}
@@ -281,7 +305,10 @@ func TestIssueListOutput(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr %q", code, stderr)
 	}
-	want := "#2\topen\tAdd the sprocket\n#1\topen\tFix the frobnicator\n"
+	// number, state, created-at, comma-joined labels (empty column when
+	// unlabeled), title — the triage buckets come from this one call.
+	want := "#2\topen\t2026-07-06T12:00:00.000Z\t\tAdd the sprocket\n" +
+		"#1\topen\t2026-07-06T12:00:00.000Z\tready-for-agent\tFix the frobnicator\n"
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
@@ -351,6 +378,115 @@ func TestIssueCommentJoinsMultiWordBody(t *testing.T) {
 	}
 	if runComment.Body != "tests are green" {
 		t.Errorf("comment body = %q, want %q", runComment.Body, "tests are green")
+	}
+}
+
+// TestIssueCreateFilesRunAttributedIssue drives the mid-run follow-up flow:
+// `labctl issue create` files a labelled issue, prints its number, and the
+// builtin store attributes it to the run.
+func TestIssueCreateFilesRunAttributedIssue(t *testing.T) {
+	f := newBuiltinFixture(t)
+	code, stdout, stderr := run(t, []string{"issue", "create",
+		"--title", "found: flaky teardown", "--body", "Discovered mid-run.",
+		"--labels", "needs-triage, wontfix"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "2\n" {
+		t.Errorf("stdout = %q, want the created issue number", stdout)
+	}
+
+	is, err := f.st.IssueByRepoNumber(context.Background(), f.repoID(t), 2)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	if is.Title != "found: flaky teardown" || is.Body != "Discovered mid-run." {
+		t.Errorf("stored issue = %+v", is)
+	}
+	if len(is.Labels) != 2 || is.Labels[0] != "needs-triage" || is.Labels[1] != "wontfix" {
+		t.Errorf("stored labels = %v, want the two comma-split names", is.Labels)
+	}
+	if is.AuthorKind != store.CommentAuthorRun || is.RunID == nil || *is.RunID != f.runID {
+		t.Errorf("author = (%q, %v), want (run, %s)", is.AuthorKind, is.RunID, f.runID)
+	}
+
+	// A typo'd label: the API's 400 → exit 1 naming the label.
+	code, _, stderr = run(t, []string{"issue", "create",
+		"--title", "doomed", "--body", "b", "--labels", "no-such"}, f.env())
+	if code != 1 || !strings.Contains(stderr, "no-such") {
+		t.Fatalf("unknown label: exit = %d, stderr %q, want 1 naming the label", code, stderr)
+	}
+}
+
+// TestIssueLabelAddRemoveAndClose drives the triage moves end-to-end: role
+// labels on, role swap off, close after the explanation comment.
+func TestIssueLabelAddRemoveAndClose(t *testing.T) {
+	f := newBuiltinFixture(t)
+	repo := f.repoID(t)
+	ctx := context.Background()
+
+	code, stdout, stderr := run(t, []string{"issue", "label", "add", "1", "needs-triage"}, f.env())
+	if code != 0 || stdout != "" {
+		t.Fatalf("label add: exit = %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	is, _ := f.st.IssueByRepoNumber(ctx, repo, 1)
+	if len(is.Labels) != 2 || is.Labels[0] != "needs-triage" || is.Labels[1] != "ready-for-agent" {
+		t.Fatalf("labels after add = %v", is.Labels)
+	}
+
+	code, _, stderr = run(t, []string{"issue", "label", "remove", "1", "needs-triage,ready-for-agent"}, f.env())
+	if code != 0 {
+		t.Fatalf("label remove: exit = %d, stderr %q", code, stderr)
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, repo, 1)
+	if len(is.Labels) != 0 {
+		t.Fatalf("labels after remove = %v, want none", is.Labels)
+	}
+
+	code, stdout, stderr = run(t, []string{"issue", "close", "1"}, f.env())
+	if code != 0 || stdout != "" {
+		t.Fatalf("close: exit = %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, repo, 1)
+	if is.State != store.IssueStateClosed {
+		t.Errorf("state after close = %q, want closed", is.State)
+	}
+
+	code, _, stderr = run(t, []string{"issue", "close", "99"}, f.env())
+	if code != 1 || !strings.Contains(stderr, "not found") {
+		t.Fatalf("close missing: exit = %d, stderr %q, want 1 not found", code, stderr)
+	}
+}
+
+// TestLabelListAndCreate pins the label surface: the ensure prints the label
+// that exists afterwards (retry-safe), and list renders name/color/description
+// rows.
+func TestLabelListAndCreate(t *testing.T) {
+	f := newBuiltinFixture(t)
+
+	code, stdout, stderr := run(t, []string{"label", "create", "--name", "bug", "--description", "confirmed defect"}, f.env())
+	if code != 0 {
+		t.Fatalf("label create: exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "bug\t"+store.LabelDefaultColor+"\n" {
+		t.Errorf("stdout = %q, want name<TAB>color", stdout)
+	}
+	// The unconditional re-ensure: same exit 0, the existing label.
+	code, stdout, _ = run(t, []string{"label", "create", "--name", "bug", "--color", "#ff0000"}, f.env())
+	if code != 0 || stdout != "bug\t"+store.LabelDefaultColor+"\n" {
+		t.Fatalf("re-ensure: exit = %d, stdout %q, want the existing label untouched", code, stdout)
+	}
+
+	code, stdout, stderr = run(t, []string{"label", "list"}, f.env())
+	if code != 0 {
+		t.Fatalf("label list: exit = %d, stderr %q", code, stderr)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) != 6 { // five seeded triage labels + bug
+		t.Fatalf("label list = %d lines (%q), want 6", len(lines), stdout)
+	}
+	if lines[0] != "bug\t"+store.LabelDefaultColor+"\tconfirmed defect" {
+		t.Errorf("first row = %q, want the bug label row", lines[0])
 	}
 }
 

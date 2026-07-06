@@ -373,6 +373,175 @@ func TestBuiltin_CreatePull(t *testing.T) {
 	}
 }
 
+// TestBuiltin_CreateIssue_identityAndLabels pins the ADR-0014 agent create:
+// labels attach at creation under strict name resolution, the issue is
+// authored per the tracker's identity (operator by default, the run after
+// ForRun), and an unknown label creates nothing — not even an issue number.
+func TestBuiltin_CreateIssue_identityAndLabels(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	is, err := tr.CreateIssue(ctx, "found a bug", "details", []string{"needs-triage"})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if is.Number != 1 || is.State != tracker.StateOpen || !contains(is.Labels, "needs-triage") {
+		t.Errorf("created issue = %+v, want #1 open with needs-triage", is)
+	}
+	stored, err := s.IssueByRepoNumber(ctx, repo.ID, is.Number)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	if stored.AuthorKind != store.CommentAuthorOperator || stored.RunID != nil {
+		t.Errorf("default author = (%q, %v), want (operator, nil)", stored.AuthorKind, stored.RunID)
+	}
+
+	// ForRun rescopes the create identity, like comments.
+	run, err := s.CreateRun(ctx, store.Run{
+		ID: ids.NewID("run"), RepoID: repo.ID, Kind: store.RunKindManual, Provider: "claude-code",
+		Branch: "lab/z", WorktreePath: "/wt/z", SessionName: "proj~z", Model: "opus[1m]",
+		Effort: "max", StartedAt: fixedNow, Outcome: store.RunOutcomeActive,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	runIs, err := tr.ForRun(run.ID).CreateIssue(ctx, "follow-up", "found mid-run", nil)
+	if err != nil {
+		t.Fatalf("CreateIssue as run: %v", err)
+	}
+	stored, err = s.IssueByRepoNumber(ctx, repo.ID, runIs.Number)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	if stored.AuthorKind != store.CommentAuthorRun || stored.RunID == nil || *stored.RunID != run.ID {
+		t.Errorf("run-created author = (%q, %v), want (run, %q)", stored.AuthorKind, stored.RunID, run.ID)
+	}
+
+	// A typo'd label fails loudly and creates nothing.
+	_, err = tr.CreateIssue(ctx, "doomed", "", []string{"needs-triage", "nope-label"})
+	if !errors.Is(err, tracker.ErrUnknownLabel) || !strings.Contains(err.Error(), "nope-label") {
+		t.Fatalf("CreateIssue with unknown label err = %v, want ErrUnknownLabel naming it", err)
+	}
+	next, err := tr.CreateIssue(ctx, "sequence intact", "", nil)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if next.Number != runIs.Number+1 {
+		t.Errorf("number after refused create = %d, want %d (no number leaked)", next.Number, runIs.Number+1)
+	}
+}
+
+// TestBuiltin_IssueLabelAddRemove pins the label ops: strict resolution
+// before anything is applied, idempotent re-add / unattached-remove, and a
+// missing issue or unknown label surfacing as the typed errors.
+func TestBuiltin_IssueLabelAddRemove(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	is, _ := s.CreateIssue(ctx, repo.ID, "triage me", "", fixedNow)
+
+	if err := tr.AddIssueLabels(ctx, is.Number, []string{"needs-triage", "ready-for-agent"}); err != nil {
+		t.Fatalf("AddIssueLabels: %v", err)
+	}
+	// Idempotent re-add.
+	if err := tr.AddIssueLabels(ctx, is.Number, []string{"needs-triage"}); err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	got, _ := s.IssueByRepoNumber(ctx, repo.ID, is.Number)
+	if !contains(got.Labels, "needs-triage") || !contains(got.Labels, "ready-for-agent") || len(got.Labels) != 2 {
+		t.Errorf("labels after add = %v, want [needs-triage ready-for-agent]", got.Labels)
+	}
+
+	// The strict-resolution failure applies nothing: an unknown name aborts
+	// BEFORE the valid one attaches.
+	err := tr.AddIssueLabels(ctx, is.Number, []string{"wontfix", "no-such-label"})
+	if !errors.Is(err, tracker.ErrUnknownLabel) {
+		t.Fatalf("AddIssueLabels unknown err = %v, want ErrUnknownLabel", err)
+	}
+	got, _ = s.IssueByRepoNumber(ctx, repo.ID, is.Number)
+	if contains(got.Labels, "wontfix") {
+		t.Errorf("labels after refused add = %v — the valid name must not attach", got.Labels)
+	}
+
+	// Remove: triage-role swap (the state-machine move).
+	if err := tr.RemoveIssueLabels(ctx, is.Number, []string{"needs-triage"}); err != nil {
+		t.Fatalf("RemoveIssueLabels: %v", err)
+	}
+	// Unattached-but-defined remove is a no-op; unknown name is an error.
+	if err := tr.RemoveIssueLabels(ctx, is.Number, []string{"needs-info"}); err != nil {
+		t.Fatalf("remove unattached: %v", err)
+	}
+	if err := tr.RemoveIssueLabels(ctx, is.Number, []string{"no-such-label"}); !errors.Is(err, tracker.ErrUnknownLabel) {
+		t.Fatalf("remove unknown err = %v, want ErrUnknownLabel", err)
+	}
+	got, _ = s.IssueByRepoNumber(ctx, repo.ID, is.Number)
+	if len(got.Labels) != 1 || got.Labels[0] != "ready-for-agent" {
+		t.Errorf("labels after remove = %v, want [ready-for-agent]", got.Labels)
+	}
+
+	// Missing issue surfaces ErrNotFound on both ops.
+	if err := tr.AddIssueLabels(ctx, 999, []string{"needs-triage"}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("AddIssueLabels(999) err = %v, want ErrNotFound", err)
+	}
+	if err := tr.RemoveIssueLabels(ctx, 999, []string{"needs-triage"}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("RemoveIssueLabels(999) err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestBuiltin_LabelsAndEnsure pins the label listing (the five seeded triage
+// labels, name-ordered) and the idempotent ensure: absent → created with the
+// store default color; present → returned untouched, retry-safe.
+func TestBuiltin_LabelsAndEnsure(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	labels, err := tr.Labels(ctx)
+	if err != nil {
+		t.Fatalf("Labels: %v", err)
+	}
+	wantSeed := []string{"needs-info", "needs-triage", "ready-for-agent", "ready-for-human", "wontfix"}
+	if len(labels) != len(wantSeed) {
+		t.Fatalf("Labels = %+v, want the five seeded triage labels", labels)
+	}
+	for i, want := range wantSeed {
+		if labels[i].Name != want {
+			t.Errorf("labels[%d] = %q, want %q (name order)", i, labels[i].Name, want)
+		}
+	}
+
+	// Ensure an absent label: created, empty color takes the store default.
+	created, err := tr.EnsureLabel(ctx, "bug", "", "confirmed defect")
+	if err != nil {
+		t.Fatalf("EnsureLabel new: %v", err)
+	}
+	if created.Color != store.LabelDefaultColor || created.Description != "confirmed defect" {
+		t.Errorf("created label = %+v, want default color + description", created)
+	}
+
+	// Ensure again with DIFFERENT color/description: the existing label wins
+	// untouched (ensure never updates).
+	again, err := tr.EnsureLabel(ctx, "bug", "#ff0000", "changed")
+	if err != nil {
+		t.Fatalf("EnsureLabel existing: %v", err)
+	}
+	if again.Color != store.LabelDefaultColor || again.Description != "confirmed defect" {
+		t.Errorf("re-ensured label = %+v, want the original untouched", again)
+	}
+	all, err := s.LabelsByRepo(ctx, repo.ID)
+	if err != nil {
+		t.Fatalf("LabelsByRepo: %v", err)
+	}
+	if len(all) != len(wantSeed)+1 {
+		t.Errorf("label count after double ensure = %d, want %d (no duplicate)", len(all), len(wantSeed)+1)
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {

@@ -6,12 +6,15 @@ package agentapi
 // shapes mirror the operator API's issue JSON byte-for-byte (labctl and the
 // SPA speak one vocabulary); errors are the canonical {"error": …} envelope.
 //
-// Error mapping (pinned): upstream/store miss → 404; tracker configuration
-// conflict (unsupported forge kind, missing/wrong-kind credential, bad
-// remote/host, unknown binding) → 409; any other forge upstream failure →
-// 502; builtin store failures → opaque 500.
+// Error mapping (pinned): upstream/store miss → 404; unknown label name →
+// 400 naming the label (a typo must fail loudly, never create a garbage
+// label); tracker configuration conflict (unsupported forge kind,
+// missing/wrong-kind credential, bad remote/host, unknown binding) → 409;
+// any other forge upstream failure → 502; builtin store failures → opaque
+// 500.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -28,6 +31,13 @@ import (
 // refetch (brief §8.1). The name mirrors httpapi's constant — kept local,
 // like jsonError, so agentapi stays free of an httpapi dependency.
 const EventCRChanged = "cr.changed"
+
+// EventIssueChanged is the SSE event name every builtin issue/label mutation
+// publishes (create, label add/remove, close, label ensure), exactly like
+// the operator API's builtin mutations: the operator UI refetches on event.
+// Forge-bound mutations publish nothing — the forge is the source of truth
+// and the operator UI reads it on navigation.
+const EventIssueChanged = "issue.changed"
 
 // noClaimedIssueMessage answers GET /issue for a run without a claimed issue
 // (manual instances have no issue_number on their run row).
@@ -182,10 +192,16 @@ func (s *Server) trackerFor(w http.ResponseWriter, r *http.Request, repo store.R
 
 // writeTrackerError maps a tracker call failure: a miss is a 404 on either
 // binding (builtin wraps store.ErrNotFound, the forgejo client wraps
-// tracker.ErrNotFound around an upstream 404); any other forge-bound failure
-// is an upstream error → 502 with the diagnostic (the forge client's errors
-// never carry the token); builtin store failures stay an opaque 500.
+// tracker.ErrNotFound around an upstream 404); an unknown label name is a
+// 400 carrying the name (strict resolution on both bindings — the caller's
+// typo, not an upstream failure); any other forge-bound failure is an
+// upstream error → 502 with the diagnostic (the forge client's errors never
+// carry the token); builtin store failures stay an opaque 500.
 func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo store.Repo, err error) {
+	if errors.Is(err, tracker.ErrUnknownLabel) {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, tracker.ErrNotFound) {
 		jsonError(w, http.StatusNotFound, "not found")
 		return
@@ -295,7 +311,8 @@ type commentCreateRequest struct {
 // as the run. On a builtin-bound repo the comment is authored
 // author_kind=run with the run's id (the builtin tracker's ForRun identity
 // seam); on a forge-bound repo it is a plain comment under the repo's forge
-// token identity.
+// token identity. The body passes the incogni sanitizer like every
+// agent-authored body.
 func (s *Server) handleCommentCreate(w http.ResponseWriter, r *http.Request) {
 	info, repo, ok := s.runRepo(w, r)
 	if !ok {
@@ -318,20 +335,218 @@ func (s *Server) handleCommentCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if repo.TrackerBinding == store.TrackerBindingBuiltin {
-		// Rescope through the RunScoper seam, never a concrete type assertion:
-		// the registry wraps trackers (metrics observer) and a concrete
-		// assertion against the wrapper would silently skip ForRun,
-		// misattributing the comment to the operator.
-		if rs, ok := tk.(tracker.RunScoper); ok {
-			tk = rs.ForRun(info.RunID)
-		}
-	}
-	if err := tk.CreateComment(r.Context(), n, req.Body); err != nil {
+	tk = runScoped(tk, repo, info.RunID)
+	if err := tk.CreateComment(r.Context(), n, sanitizeBody(repo, req.Body)); err != nil {
 		s.writeTrackerError(w, "creating comment", repo, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
+}
+
+// runScoped rescopes tk to the run identity on builtin-bound repos, so the
+// mutation is attributed to the run instead of the operator. Always through
+// the RunScoper seam, never a concrete type assertion: the registry wraps
+// trackers (metrics observer) and a concrete assertion against the wrapper
+// would silently skip ForRun, misattributing the write to the operator.
+func runScoped(tk tracker.Tracker, repo store.Repo, runID string) tracker.Tracker {
+	if repo.TrackerBinding != store.TrackerBindingBuiltin {
+		return tk
+	}
+	if rs, ok := tk.(tracker.RunScoper); ok {
+		return rs.ForRun(runID)
+	}
+	return tk
+}
+
+// --- triage surface (ADR-0014) ------------------------------------------------
+
+type issueCreateRequest struct {
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	Labels []string `json:"labels"`
+}
+
+// handleIssueCreate is POST /agent/v1/issues {title, body, labels} → 201 with
+// the created issue (list shape — no comments yet by construction). Labels
+// attach at creation under strict name resolution (unknown → 400, nothing
+// created). On a builtin-bound repo the issue is authored as the run
+// (author_kind=run via the ForRun seam); the body passes the incogni
+// sanitizer like every agent-authored body.
+func (s *Server) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
+	info, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	var req issueCreateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		jsonError(w, http.StatusBadRequest, "title is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	tk = runScoped(tk, repo, info.RunID)
+	is, err := tk.CreateIssue(r.Context(), req.Title, sanitizeBody(repo, req.Body), req.Labels)
+	if err != nil {
+		s.writeTrackerError(w, "creating issue", repo, err)
+		return
+	}
+	s.publishIssueChanged(repo)
+	writeJSON(w, http.StatusCreated, issueListJSON(is))
+}
+
+type issueLabelsRequest struct {
+	Labels []string `json:"labels"`
+}
+
+// handleIssueLabelAdd is POST /agent/v1/issues/{n}/labels {labels: [...]}:
+// attach the named labels to issue n. Strict resolution before anything is
+// applied — an unknown name is a 400 and no label is attached.
+func (s *Server) handleIssueLabelAdd(w http.ResponseWriter, r *http.Request) {
+	s.handleIssueLabels(w, r, "adding issue labels", tracker.Tracker.AddIssueLabels)
+}
+
+// handleIssueLabelRemove is DELETE /agent/v1/issues/{n}/labels {labels: […]}:
+// detach the named labels from issue n. The label set rides in the JSON body
+// (mirroring the add) rather than a path segment, so label names containing
+// path metacharacters ("kind/bug") never fight URL escaping.
+func (s *Server) handleIssueLabelRemove(w http.ResponseWriter, r *http.Request) {
+	s.handleIssueLabels(w, r, "removing issue labels", tracker.Tracker.RemoveIssueLabels)
+}
+
+// handleIssueLabels is the shared add/remove body: both ops take {labels},
+// answer 200 {ok:true}, and differ only in the seam method.
+func (s *Server) handleIssueLabels(w http.ResponseWriter, r *http.Request, doing string,
+	op func(tracker.Tracker, context.Context, int, []string) error,
+) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req issueLabelsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Labels) == 0 {
+		jsonError(w, http.StatusBadRequest, "labels is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	if err := op(tk, r.Context(), n, req.Labels); err != nil {
+		s.writeTrackerError(w, doing, repo, err)
+		return
+	}
+	s.publishIssueChanged(repo)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleIssueClose is POST /agent/v1/issues/{n}/close: transition issue n to
+// closed. No closing-comment sugar — skills post the explanation first, then
+// close (two calls, the existing convention).
+func (s *Server) handleIssueClose(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	if err := tk.CloseIssue(r.Context(), n); err != nil {
+		s.writeTrackerError(w, "closing issue", repo, err)
+		return
+	}
+	s.publishIssueChanged(repo)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+type labelResponse struct {
+	Name        string `json:"name"`
+	Color       string `json:"color"`
+	Description string `json:"description"`
+}
+
+func labelJSON(l tracker.Label) labelResponse {
+	return labelResponse{Name: l.Name, Color: l.Color, Description: l.Description}
+}
+
+// handleLabelList is GET /agent/v1/labels: the repo's labels ordered by name.
+func (s *Server) handleLabelList(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	labels, err := tk.Labels(r.Context())
+	if err != nil {
+		s.writeTrackerError(w, "listing labels", repo, err)
+		return
+	}
+	items := make([]labelResponse, 0, len(labels))
+	for _, l := range labels {
+		items = append(items, labelJSON(l))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"labels": items})
+}
+
+type labelCreateRequest struct {
+	Name        string `json:"name"`
+	Color       string `json:"color"`
+	Description string `json:"description"`
+}
+
+// handleLabelEnsure is POST /agent/v1/labels {name, color?, description?}:
+// idempotent label create — a 200 with the label that exists afterwards,
+// whether this call created it or an earlier one did, so skills ensure the
+// triage set unconditionally and retries after a timed-out call are safe.
+// An existing label is returned untouched (color/description not updated).
+func (s *Server) handleLabelEnsure(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	var req labelCreateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	// Trimmed like the operator's label create: label matching is exact, so
+	// "bug " must not coexist with a distinct "bug".
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		jsonError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	l, err := tk.EnsureLabel(r.Context(), name, req.Color, req.Description)
+	if err != nil {
+		s.writeTrackerError(w, "ensuring label", repo, err)
+		return
+	}
+	s.publishIssueChanged(repo)
+	writeJSON(w, http.StatusOK, labelJSON(l))
 }
 
 type prCreateRequest struct {
@@ -390,13 +605,26 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 // publishCRChanged emits cr.changed for repoID — the same {type, repoID}
 // envelope every repo-scoped event carries. A nil bus (unit tests) is a no-op.
 func (s *Server) publishCRChanged(repoID string) {
+	s.publishRepoEvent(EventCRChanged, repoID)
+}
+
+// publishIssueChanged emits issue.changed for a builtin-bound repo's issue or
+// label mutation; forge-bound mutations publish nothing (see EventIssueChanged).
+func (s *Server) publishIssueChanged(repo store.Repo) {
+	if repo.TrackerBinding != store.TrackerBindingBuiltin {
+		return
+	}
+	s.publishRepoEvent(EventIssueChanged, repo.ID)
+}
+
+func (s *Server) publishRepoEvent(eventType, repoID string) {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Publish(events.Event{Type: EventCRChanged, Payload: struct {
+	s.bus.Publish(events.Event{Type: eventType, Payload: struct {
 		Type   string `json:"type"`
 		RepoID string `json:"repoID"`
-	}{Type: EventCRChanged, RepoID: repoID}})
+	}{Type: eventType, RepoID: repoID}})
 }
 
 // ensureCloses returns body guaranteed to carry a real `Closes #<n>` directive.
@@ -420,9 +648,10 @@ func ensureCloses(body string, n int) string {
 // incogni sanitization server-side before forwarding to tracker"; D15 §9
 // measure 3, defense in depth behind the seeded attribution-off settings):
 // for incogni repos, known attribution footers/trailers are stripped from
-// the PR/CR body before it reaches the tracker. Non-incogni bodies pass
-// through byte-identical. It runs AFTER ensureCloses, so an injected
-// `Closes #N` is never touched.
+// EVERY agent-authored body — PR/CR, issue, and comment create alike
+// (ADR-0014: no unsanitized write path) — before it reaches the tracker.
+// Non-incogni bodies pass through byte-identical. On the PR path it runs
+// AFTER ensureCloses, so an injected `Closes #N` is never touched.
 func sanitizeBody(repo store.Repo, body string) string {
 	if !repo.Incogni {
 		return body

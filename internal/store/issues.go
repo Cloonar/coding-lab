@@ -32,7 +32,9 @@ const (
 // stored value, only "no state predicate".
 const IssueStateAll = "all"
 
-// Comment author kinds (design §3a: issue_comments.author_kind).
+// Author kinds (design §3a: issue_comments.author_kind; since 0002 also
+// issues.author_kind — issues and comments share the one author vocabulary,
+// so the constants keep their original names).
 const (
 	CommentAuthorOperator = "operator"
 	CommentAuthorRun      = "run"
@@ -48,7 +50,9 @@ type Issue struct {
 	Number       int
 	Title        string
 	Body         string
-	State        string // open|closed
+	State        string  // open|closed
+	AuthorKind   string  // operator|run
+	RunID        *string // set only for run-authored issues; NULL otherwise
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	ClosedAt     *time.Time
@@ -69,25 +73,36 @@ type IssueComment struct {
 
 // issueColumns is the one column list every issue SELECT uses, in scanIssue
 // order.
-const issueColumns = `id, repo_id, number, title, body, state,
+const issueColumns = `id, repo_id, number, title, body, state, author_kind, run_id,
 	created_at, updated_at, closed_at`
 
 // CreateIssue allocates the next per-repo issue number and inserts an open
-// issue. The number comes from next_issue_number incremented and returned in
-// the same transaction, so concurrent creates never collide (design §2). The
-// returned Issue is what the database holds (state open, no labels, no
-// comments). A missing repo maps to ErrNotFound.
+// operator-authored issue. The number comes from next_issue_number incremented
+// and returned in the same transaction, so concurrent creates never collide
+// (design §2). The returned Issue is what the database holds (state open, no
+// labels, no comments). A missing repo maps to ErrNotFound.
 func (s *Store) CreateIssue(ctx context.Context, repoID, title, body string, now time.Time) (Issue, error) {
-	return s.CreateIssueWithLabels(ctx, repoID, title, body, nil, now)
+	return s.CreateIssueWithLabels(ctx, repoID, title, body, nil, CommentAuthorOperator, nil, now)
 }
 
 // CreateIssueWithLabels is CreateIssue plus the initial label attach in the
-// SAME transaction (the operator create-with-labels path): if any labelID is
-// missing (e.g. a concurrent label delete) the whole create rolls back with
-// ErrNotFound, so a partial failure never commits a label-less issue whose
-// retry would allocate a duplicate number. The returned Issue carries the
-// attached label names, sorted.
-func (s *Store) CreateIssueWithLabels(ctx context.Context, repoID, title, body string, labelIDs []string, now time.Time) (Issue, error) {
+// SAME transaction (the operator create-with-labels path and the builtin
+// tracker's agent create): if any labelID is missing (e.g. a concurrent label
+// delete) the whole create rolls back with ErrNotFound, so a partial failure
+// never commits a label-less issue whose retry would allocate a duplicate
+// number. The author identity follows the comment rule (0002 shares the
+// vocabulary): a run-authored issue requires runID, any other kind must pass
+// nil. The returned Issue carries the attached label names, sorted.
+func (s *Store) CreateIssueWithLabels(ctx context.Context, repoID, title, body string, labelIDs []string, authorKind string, runID *string, now time.Time) (Issue, error) {
+	if authorKind != CommentAuthorOperator && authorKind != CommentAuthorRun {
+		return Issue{}, fmt.Errorf("create issue: invalid author kind %q", authorKind)
+	}
+	if authorKind == CommentAuthorRun && runID == nil {
+		return Issue{}, fmt.Errorf("create issue: author kind %q requires a run_id", authorKind)
+	}
+	if authorKind != CommentAuthorRun && runID != nil {
+		return Issue{}, fmt.Errorf("create issue: run_id set for author kind %q", authorKind)
+	}
 	now = storedTime(now)
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -110,10 +125,15 @@ func (s *Store) CreateIssueWithLabels(ctx context.Context, repoID, title, body s
 	id := ids.NewID("iss")
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO issues (`+issueColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		id, repoID, number, title, body, IssueStateOpen,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		id, repoID, number, title, body, IssueStateOpen, authorKind, runID,
 		fmtTime(now), fmtTime(now), nil)
 	if err != nil {
+		if isForeignKeyViolation(err) {
+			// The only nullable FK in the insert is run_id: a runID pointing at
+			// no run maps to ErrNotFound, like a run comment's.
+			return Issue{}, fmt.Errorf("create issue: run %q: %w", *runID, ErrNotFound)
+		}
 		return Issue{}, fmt.Errorf("create issue: %w", err)
 	}
 
@@ -157,7 +177,8 @@ func (s *Store) CreateIssueWithLabels(ctx context.Context, repoID, title, body s
 	}
 	return Issue{
 		ID: id, RepoID: repoID, Number: number, Title: title, Body: body,
-		State: IssueStateOpen, CreatedAt: now, UpdatedAt: now,
+		State: IssueStateOpen, AuthorKind: authorKind, RunID: runID,
+		CreatedAt: now, UpdatedAt: now,
 		Labels: labels,
 	}, nil
 }
@@ -440,13 +461,15 @@ func (s *Store) labelNamesByIssue(ctx context.Context, repoID string) (map[strin
 func scanIssue(scan func(dest ...any) error) (Issue, error) {
 	var (
 		is               Issue
+		runID            sql.NullString
 		created, updated string
 		closed           sql.NullString
 	)
 	if err := scan(&is.ID, &is.RepoID, &is.Number, &is.Title, &is.Body, &is.State,
-		&created, &updated, &closed); err != nil {
+		&is.AuthorKind, &runID, &created, &updated, &closed); err != nil {
 		return Issue{}, err
 	}
+	is.RunID = nullStr(runID)
 	var err error
 	if is.CreatedAt, err = parseTime(created); err != nil {
 		return Issue{}, err
@@ -464,14 +487,16 @@ func scanIssue(scan func(dest ...any) error) (Issue, error) {
 func scanIssueWithCount(scan func(dest ...any) error) (Issue, int, error) {
 	var (
 		is               Issue
+		runID            sql.NullString
 		created, updated string
 		closed           sql.NullString
 		count            int
 	)
 	if err := scan(&is.ID, &is.RepoID, &is.Number, &is.Title, &is.Body, &is.State,
-		&created, &updated, &closed, &count); err != nil {
+		&is.AuthorKind, &runID, &created, &updated, &closed, &count); err != nil {
 		return Issue{}, 0, err
 	}
+	is.RunID = nullStr(runID)
 	var err error
 	if is.CreatedAt, err = parseTime(created); err != nil {
 		return Issue{}, 0, err

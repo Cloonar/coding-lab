@@ -3,6 +3,7 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -484,6 +485,240 @@ func TestCloseIssue(t *testing.T) {
 }
 
 // --- Error mapping ---------------------------------------------------------
+
+// --- labels / triage surface (ADR-0014) --------------------------------------
+
+// labelsJSON is the fixture label set: Forgejo emits colors WITHOUT the
+// leading '#', and this deliberately arrives unsorted.
+const labelsJSON = `[
+  {"id":31,"name":"needs-triage","color":"6b7280","description":"triage me"},
+  {"id":7,"name":"bug","color":"ee0701","description":""},
+  {"id":12,"name":"kind/feature","color":"a2eeef","description":"new behavior"}
+]`
+
+// labelFixture answers GET /labels with labelsJSON (page 1, then the empty
+// probe) and delegates everything else to next, recording each non-labels
+// request method+path.
+func labelFixture(t *testing.T, next http.HandlerFunc) (http.HandlerFunc, *[]string) {
+	t.Helper()
+	var calls []string
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == apiPrefix+"/labels" {
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = io.WriteString(w, `[]`)
+				return
+			}
+			_, _ = io.WriteString(w, labelsJSON)
+			return
+		}
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		next(w, r)
+	}, &calls
+}
+
+func TestLabels_paginatedSortedNormalized(t *testing.T) {
+	pages := map[string]string{"1": labelsJSON, "2": `[]`}
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != apiPrefix+"/labels" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, pages[r.URL.Query().Get("page")])
+	})
+
+	labels, err := c.Labels(context.Background())
+	if err != nil {
+		t.Fatalf("Labels: %v", err)
+	}
+	// Name-ordered (contract), colors normalized to lab's #rrggbb vocabulary.
+	want := []tracker.Label{
+		{Name: "bug", Color: "#ee0701"},
+		{Name: "kind/feature", Color: "#a2eeef", Description: "new behavior"},
+		{Name: "needs-triage", Color: "#6b7280", Description: "triage me"},
+	}
+	if len(labels) != len(want) {
+		t.Fatalf("Labels = %+v, want %d entries", labels, len(want))
+	}
+	for i := range want {
+		if labels[i] != want[i] {
+			t.Errorf("labels[%d] = %+v, want %+v", i, labels[i], want[i])
+		}
+	}
+}
+
+// TestCreateIssue_resolvesLabelNamesToIDs pins the labels-are-IDs quirk
+// staying behind the seam: callers pass names, the wire carries Forgejo ids —
+// and an unknown name aborts BEFORE the create reaches the forge (Forgejo
+// silently discards unknown entries, which would swallow a typo).
+func TestCreateIssue_resolvesLabelNamesToIDs(t *testing.T) {
+	var created map[string]any
+	fixture, calls := labelFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		created = decodeBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"number":9,"title":"found a bug","body":"details","state":"open",
+		  "labels":[{"id":7,"name":"bug","color":"ee0701"}],
+		  "created_at":"2026-07-06T00:00:00Z","updated_at":"2026-07-06T00:00:00Z"}`)
+	})
+	c := newTestClient(t, fixture)
+
+	is, err := c.CreateIssue(context.Background(), "found a bug", "details", []string{"bug", "kind/feature"})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if len(*calls) != 1 || (*calls)[0] != "POST "+apiPrefix+"/issues" {
+		t.Fatalf("forge calls = %v, want one POST /issues", *calls)
+	}
+	if created["title"] != "found a bug" || created["body"] != "details" {
+		t.Errorf("create request = %v", created)
+	}
+	if ids, _ := created["labels"].([]any); len(ids) != 2 || ids[0] != float64(7) || ids[1] != float64(12) {
+		t.Errorf("wire labels = %v, want the resolved ids [7 12]", created["labels"])
+	}
+	if is.Number != 9 || is.State != "open" || len(is.Labels) != 1 || is.Labels[0] != "bug" {
+		t.Errorf("created issue = %+v", is)
+	}
+
+	// Unknown name: typed error naming it, and the create never leaves.
+	_, err = c.CreateIssue(context.Background(), "doomed", "", []string{"bug", "nope"})
+	if !errors.Is(err, tracker.ErrUnknownLabel) || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("unknown label err = %v, want ErrUnknownLabel naming it", err)
+	}
+	if len(*calls) != 1 {
+		t.Errorf("forge calls after refused create = %v, want no new POST", *calls)
+	}
+}
+
+func TestAddIssueLabels_onePostWithResolvedIDs(t *testing.T) {
+	var added map[string]any
+	fixture, calls := labelFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		added = decodeBody(t, r)
+		_, _ = io.WriteString(w, `[]`)
+	})
+	c := newTestClient(t, fixture)
+
+	if err := c.AddIssueLabels(context.Background(), 7, []string{"needs-triage", "bug"}); err != nil {
+		t.Fatalf("AddIssueLabels: %v", err)
+	}
+	if len(*calls) != 1 || (*calls)[0] != "POST "+apiPrefix+"/issues/7/labels" {
+		t.Fatalf("forge calls = %v, want one POST /issues/7/labels", *calls)
+	}
+	if ids, _ := added["labels"].([]any); len(ids) != 2 || ids[0] != float64(31) || ids[1] != float64(7) {
+		t.Errorf("wire labels = %v, want [31 7]", added["labels"])
+	}
+
+	if err := c.AddIssueLabels(context.Background(), 7, []string{"ghost"}); !errors.Is(err, tracker.ErrUnknownLabel) {
+		t.Fatalf("unknown label err = %v, want ErrUnknownLabel", err)
+	}
+	if len(*calls) != 1 {
+		t.Errorf("forge calls after refused add = %v, want no new POST", *calls)
+	}
+}
+
+func TestRemoveIssueLabels_oneDeletePerResolvedID(t *testing.T) {
+	fixture, calls := labelFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := newTestClient(t, fixture)
+
+	if err := c.RemoveIssueLabels(context.Background(), 7, []string{"kind/feature", "bug"}); err != nil {
+		t.Fatalf("RemoveIssueLabels: %v", err)
+	}
+	want := []string{
+		"DELETE " + apiPrefix + "/issues/7/labels/12",
+		"DELETE " + apiPrefix + "/issues/7/labels/7",
+	}
+	if len(*calls) != 2 || (*calls)[0] != want[0] || (*calls)[1] != want[1] {
+		t.Fatalf("forge calls = %v, want %v", *calls, want)
+	}
+
+	if err := c.RemoveIssueLabels(context.Background(), 7, []string{"ghost", "bug"}); !errors.Is(err, tracker.ErrUnknownLabel) {
+		t.Fatalf("unknown label err = %v, want ErrUnknownLabel", err)
+	}
+	if len(*calls) != 2 {
+		t.Errorf("forge calls after refused remove = %v — strict resolution must abort before the first DELETE", *calls)
+	}
+}
+
+func TestEnsureLabel_existingIsReturnedWithoutCreate(t *testing.T) {
+	fixture, calls := labelFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected forge call %s %s", r.Method, r.URL.Path)
+	})
+	c := newTestClient(t, fixture)
+
+	l, err := c.EnsureLabel(context.Background(), "bug", "#123456", "ignored — existing wins")
+	if err != nil {
+		t.Fatalf("EnsureLabel: %v", err)
+	}
+	if l.Name != "bug" || l.Color != "#ee0701" || l.Description != "" {
+		t.Errorf("ensured label = %+v, want the existing forge label untouched", l)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("forge calls = %v, want none beyond the list", *calls)
+	}
+}
+
+func TestEnsureLabel_createsAbsentWithDefaultColor(t *testing.T) {
+	var created map[string]any
+	fixture, calls := labelFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		created = decodeBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":99,"name":"triage/ready","color":"6b7280","description":"queued"}`)
+	})
+	c := newTestClient(t, fixture)
+
+	l, err := c.EnsureLabel(context.Background(), "triage/ready", "", "queued")
+	if err != nil {
+		t.Fatalf("EnsureLabel: %v", err)
+	}
+	if len(*calls) != 1 || (*calls)[0] != "POST "+apiPrefix+"/labels" {
+		t.Fatalf("forge calls = %v, want one POST /labels", *calls)
+	}
+	if created["name"] != "triage/ready" || created["color"] != defaultLabelColor || created["description"] != "queued" {
+		t.Errorf("create request = %v, want the builtin-parity default color", created)
+	}
+	if l.Name != "triage/ready" || l.Color != "#6b7280" || l.Description != "queued" {
+		t.Errorf("ensured label = %+v", l)
+	}
+}
+
+// TestEnsureLabel_duplicateAnswerResolvesByRelist pins idempotency against
+// the forge's duplicate answer: a concurrent ensure won the race between our
+// list and create, the create comes back 409, and the client resolves to the
+// now-existing label instead of failing the retry-safe op.
+func TestEnsureLabel_duplicateAnswerResolvesByRelist(t *testing.T) {
+	listCalls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == apiPrefix+"/labels":
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = io.WriteString(w, `[]`)
+				return
+			}
+			listCalls++
+			if listCalls == 1 {
+				_, _ = io.WriteString(w, `[]`) // not there yet…
+				return
+			}
+			// …but the re-list after the conflict sees the winner's label.
+			_, _ = io.WriteString(w, `[{"id":5,"name":"bug","color":"ee0701","description":"raced"}]`)
+		case r.Method == http.MethodPost && r.URL.Path == apiPrefix+"/labels":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"message":"label already exists"}`)
+		default:
+			t.Errorf("unexpected forge call %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	l, err := c.EnsureLabel(context.Background(), "bug", "", "")
+	if err != nil {
+		t.Fatalf("EnsureLabel after duplicate answer: %v", err)
+	}
+	if l.Name != "bug" || l.Color != "#ee0701" || l.Description != "raced" {
+		t.Errorf("ensured label = %+v, want the winner's label", l)
+	}
+	if listCalls != 2 {
+		t.Errorf("list calls = %d, want 2 (initial + conflict re-list)", listCalls)
+	}
+}
 
 func TestErrorMapping_statusAndNoTokenLeak(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusNotFound, http.StatusInternalServerError} {

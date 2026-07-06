@@ -715,8 +715,11 @@ func TestAFKCycleIntegration(t *testing.T) {
 		if !strings.HasPrefix(string(issueOut), "#1 Wire the flux capacitor\n") || !strings.Contains(string(issueOut), "make it hum") {
 			t.Errorf("labctl issue view output:\n%s", issueOut)
 		}
+		// List columns: number, state, created-at, labels, title (ADR-0014 —
+		// the triage buckets come from this one call).
 		listOut, _ := os.ReadFile(filepath.Join(out, "list.txt"))
-		if !strings.Contains(string(listOut), "#1\topen\tWire the flux capacitor") {
+		if !strings.Contains(string(listOut), "#1\topen\t") ||
+			!strings.Contains(string(listOut), "\tready-for-agent\tWire the flux capacitor") {
 			t.Errorf("labctl issue list output:\n%s", listOut)
 		}
 		// The push landed on the local origin.
@@ -984,7 +987,7 @@ func (w *cycleWorld) readyIssue(repo store.Repo, title, body string) store.Issue
 	if readyID == "" {
 		w.t.Fatalf("repo %s has no %q label", repo.Name, tracker.ReadyLabel)
 	}
-	is, err := w.st.CreateIssueWithLabels(w.ctx, repo.ID, title, body, []string{readyID}, w.clock.Now())
+	is, err := w.st.CreateIssueWithLabels(w.ctx, repo.ID, title, body, []string{readyID}, store.CommentAuthorOperator, nil, w.clock.Now())
 	if err != nil {
 		w.t.Fatalf("CreateIssueWithLabels: %v", err)
 	}

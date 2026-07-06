@@ -28,6 +28,15 @@ func (stubTracker) CreatePull(context.Context, string, string, string, string) (
 	return PullRef{}, nil
 }
 func (stubTracker) CloseIssue(context.Context, int) error { return nil }
+func (stubTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
+	return Issue{}, nil
+}
+func (stubTracker) AddIssueLabels(context.Context, int, []string) error    { return nil }
+func (stubTracker) RemoveIssueLabels(context.Context, int, []string) error { return nil }
+func (stubTracker) Labels(context.Context) ([]Label, error)                { return nil, nil }
+func (stubTracker) EnsureLabel(context.Context, string, string, string) (Label, error) {
+	return Label{}, nil
+}
 
 type fakeBuiltin struct {
 	stubTracker

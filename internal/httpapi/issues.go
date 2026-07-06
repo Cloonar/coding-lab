@@ -430,7 +430,8 @@ func (s *Server) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
 	// Create + label attach run in ONE store transaction: a failed label
 	// attach rolls the whole create back (no committed issue without its
 	// issue.changed, no duplicate number on retry).
-	is, err := s.store.CreateIssueWithLabels(r.Context(), repo.ID, req.Title, req.Body, labelIDs, s.now())
+	is, err := s.store.CreateIssueWithLabels(r.Context(), repo.ID, req.Title, req.Body, labelIDs,
+		store.CommentAuthorOperator, nil, s.now())
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound) && len(labelIDs) > 0:

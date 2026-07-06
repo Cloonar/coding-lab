@@ -12,7 +12,7 @@ The built-in tracker (D11) stores issues, comments, and labels in lab's own tabl
 
 ## Status
 
-Accepted. Implements D10's tracker seam and D11's issue half; shipped in M4. Change requests (built-in PRs, diff, merge) complete D11 in M6.
+Accepted. Implements D10's tracker seam and D11's issue half; shipped in M4. Change requests (built-in PRs, diff, merge) complete D11 in M6. The "lab never writes labels or issue state to a forge" sentence is revised by [ADR-0014](0014-agent-triage-surface.md): engine-initiated tracker writes stay dead, but a deliberate agent workflow action (issue create, label ops, close) flows through the seam to the bound tracker.
 
 ## Considered options
 

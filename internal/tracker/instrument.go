@@ -16,13 +16,18 @@ import "context"
 // Operation vocabulary for the observer seam — one constant per Tracker
 // method, bounded by construction (metric label values).
 const (
-	OpReadyIssues   = "ready"
-	OpIssues        = "issues"
-	OpIssue         = "issue"
-	OpCreateComment = "comment"
-	OpPulls         = "pulls"
-	OpCreatePull    = "create_pull"
-	OpCloseIssue    = "close"
+	OpReadyIssues       = "ready"
+	OpIssues            = "issues"
+	OpIssue             = "issue"
+	OpCreateComment     = "comment"
+	OpPulls             = "pulls"
+	OpCreatePull        = "create_pull"
+	OpCloseIssue        = "close"
+	OpCreateIssue       = "create_issue"
+	OpAddIssueLabels    = "label_add"
+	OpRemoveIssueLabels = "label_remove"
+	OpLabels            = "labels"
+	OpEnsureLabel       = "label_ensure"
 )
 
 // Observer receives one report per tracker call resolved through the
@@ -109,4 +114,34 @@ func (o *observed) CloseIssue(ctx context.Context, number int) error {
 	err := o.t.CloseIssue(ctx, number)
 	o.report(OpCloseIssue, err)
 	return err
+}
+
+func (o *observed) CreateIssue(ctx context.Context, title, body string, labels []string) (Issue, error) {
+	issue, err := o.t.CreateIssue(ctx, title, body, labels)
+	o.report(OpCreateIssue, err)
+	return issue, err
+}
+
+func (o *observed) AddIssueLabels(ctx context.Context, number int, labels []string) error {
+	err := o.t.AddIssueLabels(ctx, number, labels)
+	o.report(OpAddIssueLabels, err)
+	return err
+}
+
+func (o *observed) RemoveIssueLabels(ctx context.Context, number int, labels []string) error {
+	err := o.t.RemoveIssueLabels(ctx, number, labels)
+	o.report(OpRemoveIssueLabels, err)
+	return err
+}
+
+func (o *observed) Labels(ctx context.Context) ([]Label, error) {
+	labels, err := o.t.Labels(ctx)
+	o.report(OpLabels, err)
+	return labels, err
+}
+
+func (o *observed) EnsureLabel(ctx context.Context, name, color, description string) (Label, error) {
+	label, err := o.t.EnsureLabel(ctx, name, color, description)
+	o.report(OpEnsureLabel, err)
+	return label, err
 }
