@@ -1,0 +1,17 @@
+{
+  "pid": 1236522,
+  "sessionId": "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+  "cwd": "/home/dominik/projects/cloonar/coding-lab",
+  "startedAt": 1783279526950,
+  "procStart": "20499387",
+  "version": "2.1.198",
+  "peerProtocol": 1,
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "name": "coding-lab-1d",
+  "nameSource": "derived",
+  "status": "busy",
+  "updatedAt": 1783279526951,
+  "statusUpdatedAt": 1783279526951,
+  "bridgeSessionId": "session_01WcC4ywH8xh8jeCA2NpzMDa"
+}

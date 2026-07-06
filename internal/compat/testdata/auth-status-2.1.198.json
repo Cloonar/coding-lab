@@ -1,0 +1,9 @@
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "email": "operator@example.com",
+  "apiProvider": "firstParty",
+  "orgId": "org_00000000000000000000000000",
+  "orgName": "Example Org",
+  "subscriptionType": "max"
+}
