@@ -1,0 +1,312 @@
+/* lab design language — ported from v0's index.html (store-http-ui port spec).
+   Phone-first: 760px single column, 44px touch targets, 16px inputs,
+   OS-driven dark mode (no toggle, no persisted theme state). */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1b1f24;
+  --muted: #697586;
+  --border: #e4e7eb;
+  --hover: #f0f2f5;
+  --accent: #2563eb;
+  --accent-text: #ffffff;
+  --danger: #c0362c;
+  --danger-border: #e6b8b3;
+  --ok: #19a463;
+  --run-bg: #e6f6ec;
+  --run-text: #14693e;
+  --idle-bg: #eceff2;
+  --idle-text: #5b6573;
+  --chip-bg: #eef1f5;
+  --chip-text: #3b4452;
+  --banner-bg: #fff8e1;
+  --banner-border: #f3d99a;
+  --banner-text: #5b4b16;
+  --err-bg: #fdeceb;
+  --err-border: #f3c2bd;
+  --err-text: #9c2820;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.04);
+
+  --radius-card: 14px;
+  --radius-control: 10px;
+  --radius-pill: 999px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1217;
+    --card: #161b22;
+    --text: #e4e8ee;
+    --muted: #97a1b0;
+    --border: #262d36;
+    --hover: #1e242c;
+    --accent: #3b82f6;
+    --danger: #f0736a;
+    --danger-border: #5c2b27;
+    --ok: #34d399;
+    --run-bg: #11331f;
+    --run-text: #5fd99a;
+    --idle-bg: #232a32;
+    --idle-text: #97a1b0;
+    --chip-bg: #232a32;
+    --chip-text: #c3ccd6;
+    --banner-bg: #2a2510;
+    --banner-border: #574c1c;
+    --banner-text: #e3d7a3;
+    --err-bg: #2a1513;
+    --err-border: #5c2b27;
+    --err-text: #f3a9a2;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    15px/1.5 system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+code,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Layout ------------------------------------------------------------------ */
+
+.page {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0.75rem 0.75rem 2rem;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.6rem 0;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.brand {
+  font-weight: 650;
+  font-size: 1.15rem;
+  letter-spacing: 0.01em;
+}
+
+.brand-dot {
+  color: var(--accent);
+}
+
+h1.brand {
+  margin: 0 0 0.25rem;
+}
+
+h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.center-note {
+  color: var(--muted);
+  text-align: center;
+  padding: 3rem 1rem;
+}
+
+/* Live-connection dot ------------------------------------------------------ */
+
+.live-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+  transition: background 0.2s ease;
+}
+
+.live-dot.on {
+  background: var(--ok);
+}
+
+/* Cards -------------------------------------------------------------------- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  padding: 1.1rem;
+}
+
+.auth-card {
+  max-width: 420px;
+  margin: 2.5rem auto 0;
+}
+
+.auth-card p {
+  margin-top: 0;
+}
+
+/* Buttons — 44px touch targets --------------------------------------------- */
+
+button {
+  font: inherit;
+  min-height: 44px;
+  padding: 0 1rem;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--hover);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+button.primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+button.wide {
+  width: 100%;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Forms — 16px inputs (no iOS zoom), 44px targets --------------------------- */
+
+.field {
+  display: block;
+  margin-bottom: 0.9rem;
+}
+
+.field span {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+
+.field input {
+  width: 100%;
+  font-size: 16px;
+  min-height: 44px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 44px;
+  margin-bottom: 0.9rem;
+  cursor: pointer;
+}
+
+.check input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+/* Banners ------------------------------------------------------------------ */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-control);
+  margin-bottom: 0.9rem;
+}
+
+.banner.error {
+  background: var(--err-bg);
+  border: 1px solid var(--err-border);
+  color: var(--err-text);
+}
+
+.banner-text {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.banner-dismiss {
+  min-height: auto;
+  padding: 0 0.35rem;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.banner-dismiss:hover {
+  background: none;
+  opacity: 0.7;
+}
+
+/* Empty state --------------------------------------------------------------- */
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 2.25rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-card);
+}
