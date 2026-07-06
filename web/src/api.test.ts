@@ -3,11 +3,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiError,
   authState,
+  createCredential,
+  createRepo,
+  deleteCredential,
+  deleteRepo,
   errorMessage,
+  listCredentials,
+  listRepos,
   login,
   logout,
   me,
+  retryClone,
   setUnauthorizedHandler,
+  updateCredential,
+  updateRepo,
 } from './api';
 
 interface FakeResponse {
@@ -189,6 +198,149 @@ describe('api client', () => {
 
       dispose();
     });
+  });
+});
+
+describe('credential endpoints', () => {
+  it('POST /credentials sends {name, kind, payload} with the CSRF header', async () => {
+    const created = {
+      id: 'cred_1',
+      name: 'deploy-key',
+      kind: 'ssh_key',
+      created_at: '2026-07-06T00:00:00.000Z',
+      updated_at: '2026-07-06T00:00:00.000Z',
+    };
+    const mock = stubFetch(jsonResponse(201, created));
+
+    const result = await createCredential('deploy-key', 'ssh_key', {
+      private_key: 'PEM',
+      passphrase: 'pw',
+    });
+
+    expect(result).toEqual(created);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/credentials');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      name: 'deploy-key',
+      kind: 'ssh_key',
+      payload: { private_key: 'PEM', passphrase: 'pw' },
+    });
+  });
+
+  it('GET /credentials unwraps the {credentials} envelope', async () => {
+    const item = {
+      id: 'cred_1',
+      name: 'deploy-key',
+      kind: 'ssh_key',
+      created_at: '2026-07-06T00:00:00.000Z',
+      updated_at: '2026-07-06T00:00:00.000Z',
+      referenced: true,
+    };
+    const mock = stubFetch(jsonResponse(200, { credentials: [item] }));
+
+    const result = await listCredentials();
+
+    expect(result).toEqual([item]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/credentials');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('PATCH /credentials/{id} rotates the payload without ever reading it back', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, {
+        id: 'cred_1',
+        name: 'deploy-key',
+        kind: 'https_token',
+        created_at: '2026-07-06T00:00:00.000Z',
+        updated_at: '2026-07-06T01:00:00.000Z',
+      }),
+    );
+
+    await updateCredential('cred_1', { payload: { username: 'dominik', token: 't0k' } });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/credentials/cred_1');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body as string)).toEqual({
+      payload: { username: 'dominik', token: 't0k' },
+    });
+  });
+
+  it('DELETE /credentials/{id} surfaces the referenced-409 message verbatim', async () => {
+    stubFetch(jsonResponse(409, { error: 'credential is referenced by 2 repositories' }));
+
+    const err = await deleteCredential('cred_1').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe('credential is referenced by 2 repositories');
+  });
+});
+
+describe('repo endpoints', () => {
+  it('POST /repos sends the create request as-is (omitted fields stay omitted)', async () => {
+    const mock = stubFetch(jsonResponse(201, { id: 'repo_1', clone_status: 'cloning' }));
+
+    await createRepo({ remote_url: 'git@h:o/r.git', credential_id: 'cred_1', incogni: true });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      remote_url: 'git@h:o/r.git',
+      credential_id: 'cred_1',
+      incogni: true,
+    });
+  });
+
+  it('GET /repos unwraps the {repos} envelope', async () => {
+    const mock = stubFetch(jsonResponse(200, { repos: [{ id: 'repo_1' }] }));
+
+    const result = await listRepos();
+
+    expect(result).toEqual([{ id: 'repo_1' }]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos');
+  });
+
+  it('PATCH /repos/{id} sends only the given fields, null meaning "clear"', async () => {
+    const mock = stubFetch(jsonResponse(200, { id: 'repo_1' }));
+
+    await updateRepo('repo_1', { budget_minutes: null, afk_auto_enabled: true });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body as string)).toEqual({
+      budget_minutes: null,
+      afk_auto_enabled: true,
+    });
+  });
+
+  it('DELETE /repos/{id} appends ?force=true only when forcing', async () => {
+    let mock = stubFetch(jsonResponse(204));
+    await deleteRepo('repo_1');
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1');
+
+    mock = stubFetch(jsonResponse(204));
+    await deleteRepo('repo_1', true);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1?force=true');
+    expect(requestInit(mock).method).toBe('DELETE');
+  });
+
+  it('POST /repos/{id}/clone/retry tolerates an empty 202 body', async () => {
+    const mock = stubFetch({
+      ok: true,
+      status: 202,
+      json: () => Promise.reject(new SyntaxError('empty body')),
+      text: () => Promise.resolve(''),
+    });
+
+    await expect(retryClone('repo_1')).resolves.toBeUndefined();
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/clone/retry');
+    expect(requestInit(mock).method).toBe('POST');
   });
 });
 

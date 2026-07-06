@@ -1,0 +1,556 @@
+// Repo settings: every PATCHable field per the M2 contract, grouped, saved
+// as a dirty-fields-only PATCH; 400 {"error"} surfaces in the banner. Danger
+// zone deletes the repo (confirm; force checkbox appears after a 409).
+
+import { A, useNavigate, useParams } from '@solidjs/router';
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  createEffect,
+  createResource,
+  createSignal,
+  on,
+  onCleanup,
+} from 'solid-js';
+import type { Accessor } from 'solid-js';
+import {
+  ApiError,
+  deleteRepo,
+  errorMessage,
+  getRepo,
+  listCredentials,
+  updateRepo,
+  type CredentialListItem,
+  type Repo,
+  type RepoPatch,
+  type TrackerBinding,
+} from '../api';
+import ErrorBanner from '../components/ErrorBanner';
+import RequireAuth from '../components/RequireAuth';
+import TopBar from '../components/TopBar';
+import { useEvents } from '../events';
+import { remoteHost } from '../lib/repoName';
+
+export default function RepoSettings() {
+  return (
+    <RequireAuth>
+      <RepoSettingsView />
+    </RequireAuth>
+  );
+}
+
+function RepoSettingsView() {
+  const params = useParams<{ id: string }>();
+  const events = useEvents();
+  const [repo, { refetch }] = createResource(() => getRepo(params.id));
+  const [credentials] = createResource(() => listCredentials());
+  onCleanup(
+    events.subscribe('repo.changed', (event) => {
+      if (event.repoID === params.id) void refetch();
+    }),
+  );
+
+  return (
+    <main class="page">
+      <TopBar />
+      <Switch>
+        <Match when={repo.error !== undefined}>
+          <div class="banner error" role="alert">
+            <span class="banner-text">{errorMessage(repo.error)}</span>
+          </div>
+        </Match>
+        <Match when={repo()}>
+          {(r) => (
+            <>
+              <div class="section-head">
+                <h2>{r().name}</h2>
+                <Show when={r().clone_status !== 'ready'}>
+                  <span
+                    classList={{
+                      chip: true,
+                      'status-cloning': r().clone_status === 'cloning',
+                      'status-error': r().clone_status === 'error',
+                    }}
+                  >
+                    {r().clone_status === 'cloning' ? 'cloning' : 'clone failed'}
+                  </span>
+                </Show>
+              </div>
+              <p class="muted card-sub mono">{remoteHost(r().remote_url)}</p>
+              <SettingsForm repo={r} credentials={credentials() ?? []} onSaved={refetch} />
+              <DangerZone repo={r} />
+            </>
+          )}
+        </Match>
+      </Switch>
+    </main>
+  );
+}
+
+/** '' ↔ null for nullable text columns (blank field → global default). */
+function normText(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/** '' ↔ null for nullable integer columns. Returns undefined on garbage. */
+function normInt(value: string): number | null | undefined {
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  const n = Number(trimmed);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+function SettingsForm(props: {
+  repo: Accessor<Repo>;
+  credentials: CredentialListItem[];
+  onSaved: () => void;
+}) {
+  // Drafts seed from a repo SNAPSHOT (`seed`). buildPatch diffs each draft
+  // against that seed — never against the live props.repo() — so only fields
+  // the operator actually edited enter the PATCH and a server-side change to
+  // an untouched field (e.g. default-branch detection finishing mid-edit) is
+  // never silently reverted by an unrelated save. The resync effect below
+  // advances the seed on every SSE-driven refetch.
+  // eslint-disable-next-line solid/reactivity -- snapshot by design; resynced via the effect below
+  let seed = props.repo();
+  const initial = seed;
+  const [name, setName] = createSignal(initial.name);
+  const [credentialId, setCredentialId] = createSignal(initial.credential_id ?? '');
+  const [forgeCredentialId, setForgeCredentialId] = createSignal(initial.forge_credential_id ?? '');
+  const [binding, setBinding] = createSignal<TrackerBinding>(initial.tracker_binding);
+  const [defaultBranch, setDefaultBranch] = createSignal(initial.default_branch);
+  const [afkPattern, setAfkPattern] = createSignal(initial.afk_branch_pattern);
+  const [manualPrefix, setManualPrefix] = createSignal(initial.manual_branch_prefix);
+  const [model, setModel] = createSignal(initial.model_default ?? '');
+  const [effort, setEffort] = createSignal(initial.effort_default ?? '');
+  const [afkAuto, setAfkAuto] = createSignal(initial.afk_auto_enabled);
+  const [budget, setBudget] = createSignal(
+    initial.budget_minutes === null ? '' : String(initial.budget_minutes),
+  );
+  const [maxInstances, setMaxInstances] = createSignal(
+    initial.max_instances_override === null ? '' : String(initial.max_instances_override),
+  );
+  const [authorName, setAuthorName] = createSignal(initial.git_author_name ?? '');
+  const [authorEmail, setAuthorEmail] = createSignal(initial.git_author_email ?? '');
+  const [incogni, setIncogni] = createSignal(initial.incogni);
+
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [note, setNote] = createSignal<string | null>(null);
+
+  // Re-seeds one draft from a refreshed repo. An untouched draft (still equal
+  // to its seeded value) follows the server; a dirty draft keeps the
+  // operator's in-flight edit — unless the server caught up with it (our own
+  // save landing), which makes the field clean again.
+  const resync = <T,>(get: () => T, set: (value: T) => void, read: (r: Repo) => T, fresh: Repo) => {
+    const draft = get();
+    const next = read(fresh);
+    if (draft === read(seed) || draft === next) set(next);
+  };
+
+  // SSE refetch (repo.changed) landed: follow the server for untouched fields
+  // and advance the seed so buildPatch keeps diffing drafts against what they
+  // were seeded from. `on` runs the callback untracked, so operator keystrokes
+  // never re-trigger it.
+  createEffect(
+    on(
+      () => props.repo(),
+      (fresh) => {
+        resync(name, setName, (r) => r.name, fresh);
+        resync(credentialId, setCredentialId, (r) => r.credential_id ?? '', fresh);
+        resync(forgeCredentialId, setForgeCredentialId, (r) => r.forge_credential_id ?? '', fresh);
+        resync(binding, setBinding, (r) => r.tracker_binding, fresh);
+        resync(defaultBranch, setDefaultBranch, (r) => r.default_branch, fresh);
+        resync(afkPattern, setAfkPattern, (r) => r.afk_branch_pattern, fresh);
+        resync(manualPrefix, setManualPrefix, (r) => r.manual_branch_prefix, fresh);
+        resync(model, setModel, (r) => r.model_default ?? '', fresh);
+        resync(effort, setEffort, (r) => r.effort_default ?? '', fresh);
+        resync(afkAuto, setAfkAuto, (r) => r.afk_auto_enabled, fresh);
+        resync(
+          budget,
+          setBudget,
+          (r) => (r.budget_minutes === null ? '' : String(r.budget_minutes)),
+          fresh,
+        );
+        resync(
+          maxInstances,
+          setMaxInstances,
+          (r) => (r.max_instances_override === null ? '' : String(r.max_instances_override)),
+          fresh,
+        );
+        resync(authorName, setAuthorName, (r) => r.git_author_name ?? '', fresh);
+        resync(authorEmail, setAuthorEmail, (r) => r.git_author_email ?? '', fresh);
+        resync(incogni, setIncogni, (r) => r.incogni, fresh);
+        seed = fresh;
+      },
+      { defer: true },
+    ),
+  );
+
+  const gitCredentials = () =>
+    props.credentials.filter((c) => c.kind === 'ssh_key' || c.kind === 'https_token');
+  const forgeCredentials = () => props.credentials.filter((c) => c.kind === 'forge_token');
+
+  const buildPatch = (): RepoPatch | string => {
+    // Diff against the seed the drafts came from — NOT the live props.repo().
+    // Diffing against the live repo would mark a stale draft of a field the
+    // operator never touched as "dirty" and PATCH the old value back.
+    const current = seed;
+    const patch: RepoPatch = {};
+
+    const trimmedName = name().trim();
+    if (trimmedName === '') return 'Name must not be empty.';
+    if (trimmedName !== current.name) patch.name = trimmedName;
+
+    const cred = credentialId() === '' ? null : credentialId();
+    if (cred !== current.credential_id) patch.credential_id = cred;
+    const forgeCred = forgeCredentialId() === '' ? null : forgeCredentialId();
+    if (forgeCred !== current.forge_credential_id) patch.forge_credential_id = forgeCred;
+    if (binding() !== current.tracker_binding) patch.tracker_binding = binding();
+
+    const branch = defaultBranch().trim();
+    if (branch !== current.default_branch) patch.default_branch = branch;
+    const pattern = afkPattern().trim();
+    if (pattern !== current.afk_branch_pattern) patch.afk_branch_pattern = pattern;
+    const prefix = manualPrefix().trim();
+    if (prefix !== current.manual_branch_prefix) patch.manual_branch_prefix = prefix;
+
+    if (normText(model()) !== current.model_default) patch.model_default = normText(model());
+    if (normText(effort()) !== current.effort_default) patch.effort_default = normText(effort());
+
+    if (afkAuto() !== current.afk_auto_enabled) patch.afk_auto_enabled = afkAuto();
+    const budgetMinutes = normInt(budget());
+    if (budgetMinutes === undefined) return 'Budget must be a whole number of minutes.';
+    if (budgetMinutes !== current.budget_minutes) patch.budget_minutes = budgetMinutes;
+    const cap = normInt(maxInstances());
+    if (cap === undefined) return 'Max instances must be a whole number.';
+    if (cap !== current.max_instances_override) patch.max_instances_override = cap;
+
+    if (normText(authorName()) !== current.git_author_name) {
+      patch.git_author_name = normText(authorName());
+    }
+    if (normText(authorEmail()) !== current.git_author_email) {
+      patch.git_author_email = normText(authorEmail());
+    }
+    if (incogni() !== current.incogni) patch.incogni = incogni();
+
+    return patch;
+  };
+
+  const save = async (event: SubmitEvent) => {
+    event.preventDefault();
+    setError(null);
+    setNote(null);
+    const patch = buildPatch();
+    if (typeof patch === 'string') {
+      setError(patch);
+      return;
+    }
+    if (Object.keys(patch).length === 0) {
+      setNote('Nothing to save.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateRepo(props.repo().id, patch);
+      setNote('Saved.');
+      props.onSaved();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={(e) => void save(e)} class="stack">
+      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Show when={note()}>
+        <div class="banner success" role="status">
+          <span class="banner-text">{note()}</span>
+        </div>
+      </Show>
+
+      <section class="card">
+        <h2>Identity</h2>
+        <label class="field">
+          <span>Name</span>
+          <input
+            type="text"
+            name="name"
+            required
+            autocomplete="off"
+            spellcheck={false}
+            value={name()}
+            onInput={(e) => setName(e.currentTarget.value)}
+          />
+        </label>
+        <label class="field">
+          <span>Git author name</span>
+          <input
+            type="text"
+            name="git_author_name"
+            autocomplete="off"
+            value={authorName()}
+            onInput={(e) => setAuthorName(e.currentTarget.value)}
+          />
+          <small class="hint">Blank → global setting.</small>
+        </label>
+        <label class="field">
+          <span>Git author email</span>
+          <input
+            type="text"
+            name="git_author_email"
+            autocomplete="off"
+            spellcheck={false}
+            value={authorEmail()}
+            onInput={(e) => setAuthorEmail(e.currentTarget.value)}
+          />
+          <small class="hint">Blank → global setting.</small>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Credentials & tracker</h2>
+        <label class="field">
+          <span>Git credential</span>
+          <select
+            name="credential_id"
+            value={credentialId()}
+            onChange={(e) => setCredentialId(e.currentTarget.value)}
+          >
+            <option value="">None (public remote)</option>
+            <For each={gitCredentials()}>
+              {(c) => (
+                <option value={c.id}>
+                  {c.name} ({c.kind === 'ssh_key' ? 'SSH key' : 'HTTPS token'})
+                </option>
+              )}
+            </For>
+          </select>
+        </label>
+        <label class="field">
+          <span>Tracker binding</span>
+          <select
+            name="tracker_binding"
+            value={binding()}
+            onChange={(e) => setBinding(e.currentTarget.value as TrackerBinding)}
+          >
+            <option value="forge">Forge (Forgejo / GitHub issues + PRs)</option>
+            <option value="builtin">Builtin (lab's own issues + CRs)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Forge credential</span>
+          <select
+            name="forge_credential_id"
+            value={forgeCredentialId()}
+            onChange={(e) => setForgeCredentialId(e.currentTarget.value)}
+          >
+            <option value="">None</option>
+            <For each={forgeCredentials()}>{(c) => <option value={c.id}>{c.name}</option>}</For>
+          </select>
+          <small class="hint">
+            Forge API token for issues and PRs — required for the forge binding, never given to
+            runs.
+          </small>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Branches</h2>
+        <label class="field">
+          <span>Default branch</span>
+          <input
+            type="text"
+            name="default_branch"
+            required
+            autocomplete="off"
+            spellcheck={false}
+            value={defaultBranch()}
+            onInput={(e) => setDefaultBranch(e.currentTarget.value)}
+          />
+        </label>
+        <label class="field">
+          <span>AFK branch pattern</span>
+          <input
+            type="text"
+            name="afk_branch_pattern"
+            required
+            autocomplete="off"
+            spellcheck={false}
+            class="mono"
+            value={afkPattern()}
+            onInput={(e) => setAfkPattern(e.currentTarget.value)}
+          />
+          <small class="hint">
+            Must contain &lt;N&gt; exactly once (the issue number), e.g. afk/&lt;N&gt; or
+            issue-&lt;N&gt;. Letters, digits, . _ / - only; may not overlap the manual prefix.
+          </small>
+        </label>
+        <label class="field">
+          <span>Manual branch prefix</span>
+          <input
+            type="text"
+            name="manual_branch_prefix"
+            required
+            autocomplete="off"
+            spellcheck={false}
+            class="mono"
+            value={manualPrefix()}
+            onInput={(e) => setManualPrefix(e.currentTarget.value)}
+          />
+          <small class="hint">
+            Literal prefix for manual instance branches, e.g. lab/ or wip/.
+          </small>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Spawn defaults</h2>
+        <label class="field">
+          <span>Model</span>
+          <input
+            type="text"
+            name="model_default"
+            autocomplete="off"
+            spellcheck={false}
+            class="mono"
+            placeholder="global default"
+            value={model()}
+            onInput={(e) => setModel(e.currentTarget.value)}
+          />
+          <small class="hint">Free text for now — provider catalogs arrive in M3.</small>
+        </label>
+        <label class="field">
+          <span>Effort</span>
+          <input
+            type="text"
+            name="effort_default"
+            autocomplete="off"
+            spellcheck={false}
+            class="mono"
+            placeholder="global default"
+            value={effort()}
+            onInput={(e) => setEffort(e.currentTarget.value)}
+          />
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>AFK</h2>
+        <label class="check">
+          <input
+            type="checkbox"
+            name="afk_auto_enabled"
+            checked={afkAuto()}
+            onChange={(e) => setAfkAuto(e.currentTarget.checked)}
+          />
+          <span>Auto-spawn on ready-for-agent issues</span>
+        </label>
+        <label class="field">
+          <span>Budget (minutes)</span>
+          <input
+            type="number"
+            name="budget_minutes"
+            min="1"
+            step="1"
+            autocomplete="off"
+            placeholder="global default"
+            value={budget()}
+            onInput={(e) => setBudget(e.currentTarget.value)}
+          />
+        </label>
+        <label class="field">
+          <span>Max instances override</span>
+          <input
+            type="number"
+            name="max_instances_override"
+            min="1"
+            step="1"
+            autocomplete="off"
+            placeholder="global default"
+            value={maxInstances()}
+            onInput={(e) => setMaxInstances(e.currentTarget.value)}
+          />
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Incogni</h2>
+        <label class="check">
+          <input
+            type="checkbox"
+            name="incogni"
+            checked={incogni()}
+            onChange={(e) => setIncogni(e.currentTarget.checked)}
+          />
+          <span>Incogni</span>
+        </label>
+        <small class="hint hint-block">
+          Strips AI attribution from this repo's output. Toggling it does NOT rewrite the branch
+          pattern or prefix above — adjust those yourself if needed. It cannot hide the forge
+          account of the token used, nor style or timing signals.
+        </small>
+      </section>
+
+      <button type="submit" class="primary wide" disabled={busy()}>
+        {busy() ? 'Saving…' : 'Save changes'}
+      </button>
+    </form>
+  );
+}
+
+function DangerZone(props: { repo: Accessor<Repo> }) {
+  const navigate = useNavigate();
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [needsForce, setNeedsForce] = createSignal(false);
+  const [force, setForce] = createSignal(false);
+
+  const remove = async () => {
+    const target = props.repo();
+    if (!window.confirm(`Delete repository "${target.name}"? This removes lab's clone.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteRepo(target.id, force());
+      navigate('/');
+    } catch (err) {
+      // 409 while the clone runs — reveal the force checkbox and let the
+      // operator escalate deliberately.
+      if (err instanceof ApiError && err.status === 409) setNeedsForce(true);
+      setError(errorMessage(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section class="card danger-zone">
+      <h2>Danger zone</h2>
+      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Show when={needsForce()}>
+        <label class="check">
+          <input
+            type="checkbox"
+            name="force"
+            checked={force()}
+            onChange={(e) => setForce(e.currentTarget.checked)}
+          />
+          <span>Force delete (abandon the running clone)</span>
+        </label>
+      </Show>
+      <div class="card-actions">
+        <button type="button" class="danger" onClick={() => void remove()} disabled={busy()}>
+          {busy() ? 'Deleting…' : 'Delete repository'}
+        </button>
+        <A href="/" class="card-link">
+          Back to repos
+        </A>
+      </div>
+    </section>
+  );
+}

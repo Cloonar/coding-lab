@@ -1,9 +1,11 @@
-// Root layout: provides the auth resource, wires the global 401 handler and
-// gates children on the initial auth-state fetch.
+// Root layout: provides the auth resource, wires the global 401 handler,
+// gates children on the initial auth-state fetch and mounts the shared SSE
+// connection while a session exists.
 
-import { Match, Switch, onCleanup, type ParentProps } from 'solid-js';
+import { Match, Show, Switch, onCleanup, type ParentProps } from 'solid-js';
 import { setUnauthorizedHandler } from './api';
 import { AuthProvider, useAuth } from './auth';
+import { EventsProvider } from './events';
 
 function Shell(props: ParentProps) {
   const { auth, refresh } = useAuth();
@@ -35,7 +37,13 @@ function Shell(props: ParentProps) {
           </button>
         </main>
       </Match>
-      <Match when={auth.state === 'ready' || auth.state === 'refreshing'}>{props.children}</Match>
+      <Match when={auth.state === 'ready' || auth.state === 'refreshing'}>
+        {/* One SSE connection for the whole authenticated app; it survives
+            route changes and closes on logout when the Show flips. */}
+        <Show when={auth()?.authenticated} fallback={props.children}>
+          <EventsProvider>{props.children}</EventsProvider>
+        </Show>
+      </Match>
     </Switch>
   );
 }
