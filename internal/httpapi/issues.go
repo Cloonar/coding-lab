@@ -203,6 +203,7 @@ func isTrackerConfigError(err error) bool {
 	return errors.Is(err, tracker.ErrForgeUnsupported) ||
 		errors.Is(err, tracker.ErrForgeCredentialMissing) ||
 		errors.Is(err, tracker.ErrForgeCredentialKind) ||
+		errors.Is(err, tracker.ErrForgeFlavorMismatch) ||
 		errors.Is(err, tracker.ErrForgeHost) ||
 		errors.Is(err, tracker.ErrRemotePath) ||
 		errors.Is(err, tracker.ErrUnknownBinding)
@@ -217,6 +218,15 @@ func isTrackerConfigError(err error) bool {
 func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo store.Repo, err error) {
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, tracker.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	// A forge rate limit (GitHub) is a transient upstream throttle, not a lab
+	// fault: answer 503 with the reset hint the client's message carries, so an
+	// operator sees "rate limited" rather than a generic bad gateway. The AFK
+	// engine treats it as a log-and-skip tick (ADR-0015).
+	if errors.Is(err, tracker.ErrRateLimited) {
+		s.log.Warn(doing, "component", "httpapi", "repo", repo.ID, "err", err)
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	if repo.TrackerBinding == store.TrackerBindingForge {

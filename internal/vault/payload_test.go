@@ -60,6 +60,9 @@ func TestValidateKindPayload(t *testing.T) {
 		{"https_token unknown field", KindHTTPSToken, `{"username":"u","token":"t","host":"h"}`, "expected fields"},
 
 		{"forge_token valid", KindForgeToken, `{"host":"git.cloonar.com","token":"t"}`, ""},
+		{"forge_token forgejo flavor", KindForgeToken, `{"host":"git.cloonar.com","token":"t","forge":"forgejo"}`, ""},
+		{"forge_token github flavor", KindForgeToken, `{"host":"api.github.com","token":"t","forge":"github"}`, ""},
+		{"forge_token bad flavor", KindForgeToken, `{"host":"h","token":"t","forge":"gitlab"}`, "forge must be"},
 		{"forge_token missing host", KindForgeToken, `{"token":"t"}`, "missing host"},
 		{"forge_token missing token", KindForgeToken, `{"host":"h"}`, "missing token"},
 
@@ -202,6 +205,39 @@ func TestEncryptPayloadRawJSON(t *testing.T) {
 	}
 	if out.Username != "lab" || out.Token != "t" {
 		t.Errorf("raw JSON roundtrip: got %+v", out)
+	}
+}
+
+// TestForgeTokenFlavorDecode pins ADR-0015 decision 3: a stored payload with
+// no `forge` field (every credential created before flavors existed) decodes
+// as forgejo, and an explicit github flavor round-trips.
+func TestForgeTokenFlavorDecode(t *testing.T) {
+	v := testVault(t)
+
+	// A legacy blob: raw JSON with no forge key, sealed as-is.
+	legacy, err := v.EncryptPayload(jsonRaw(`{"host":"git.cloonar.com","token":"t"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lp ForgeTokenPayload
+	if err := v.DecryptPayload(legacy, &lp); err != nil {
+		t.Fatal(err)
+	}
+	if lp.Forge != "" || lp.ForgeFlavor() != ForgeForgejo {
+		t.Errorf("legacy payload flavor = %q (ForgeFlavor %q), want empty defaulting to forgejo", lp.Forge, lp.ForgeFlavor())
+	}
+
+	// An explicit github flavor round-trips through the typed struct.
+	blob, err := v.EncryptPayload(ForgeTokenPayload{Host: "api.github.com", Token: "t", Forge: ForgeGitHub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gp ForgeTokenPayload
+	if err := v.DecryptPayload(blob, &gp); err != nil {
+		t.Fatal(err)
+	}
+	if gp.ForgeFlavor() != ForgeGitHub {
+		t.Errorf("github payload ForgeFlavor() = %q, want %q", gp.ForgeFlavor(), ForgeGitHub)
 	}
 }
 

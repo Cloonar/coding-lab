@@ -1,10 +1,12 @@
 package tracker
 
 // The Tracker seam: lab's single issue/PR vocabulary shared by the Forgejo
-// REST client (internal/tracker/forgejo) and the built-in store-backed
-// tracker (internal/tracker/builtin). Both backends import this package for
-// the types and implement this interface; the registry (registry.go) resolves
-// which one answers for a given repo. GitHub is fast-follow (issue #1).
+// REST client (internal/tracker/forgejo), the GitHub REST client
+// (internal/tracker/github), and the built-in store-backed tracker
+// (internal/tracker/builtin). Every backend imports this package for the
+// types and implements this interface; the registry (registry.go) resolves
+// which one answers for a given repo — routing on the forge credential's
+// flavor for a forge binding (ADR-0015).
 //
 // The Comment/Issue/PullRef types and the Tracker interface below are the
 // pinned M4 contract — the sibling forge/builtin packages compile against
@@ -42,6 +44,18 @@ var ErrDuplicateOpenPull = errors.New("an open pull request for this head branch
 // loud failure instead of a permanent garbage label (ADR-0014). The wrapping
 // error names the offending label.
 var ErrUnknownLabel = errors.New("tracker: unknown label")
+
+// ErrRateLimited marks a forge call throttled by the upstream rate limiter
+// (GitHub answers 403/429 with X-RateLimit-Remaining: 0 or a Retry-After
+// header when the token's hourly budget is spent). The GitHub client wraps it
+// into its diagnostic error — with the reset time in the message — and
+// unwraps to it like ErrNotFound, so a rate limit is a distinct, typed state
+// rather than an opaque bad-gateway. Nothing retries in-client: the AFK
+// scheduler and reaper already log-and-skip per tick, so a throttled repo
+// self-heals on a later tick once the window resets, and a spent budget never
+// counts as a run failure (ADR-0015, decision 6). The Forgejo client never
+// produces it (lab's single Forgejo instance is not rate-limited this way).
+var ErrRateLimited = errors.New("tracker: rate limited by the forge")
 
 // Issue/PR state vocabulary. A merged PR is distinct from a closed-unmerged
 // one (v0 pin): the reaper treats open|merged as a done-signal but a

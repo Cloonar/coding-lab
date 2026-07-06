@@ -133,9 +133,14 @@ export interface HttpsTokenPayload {
   token: string;
 }
 
+/** Which tracker family a forge_token drives (ADR-0015). */
+export type ForgeFlavor = 'forgejo' | 'github';
+
 export interface ForgeTokenPayload {
   host: string;
   token: string;
+  /** Absent → forgejo server-side; the UI always sends it explicitly. */
+  forge: ForgeFlavor;
 }
 
 export type CredentialPayload = SshKeyPayload | HttpsTokenPayload | ForgeTokenPayload;

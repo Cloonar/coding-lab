@@ -164,6 +164,17 @@ Runtime-mutable knobs live in the `settings` table (Settings UI / `PATCH /api/v1
 | `sweep_interval_minutes` | `10` | Throttled merged-sweep + runtime-credential sweep cadence. |
 | `git_author_name` / `git_author_email` | (blank) | Global git identity fallback for sessions and CR merges; per-repo overrides on the repo row. |
 
+## Forge credentials
+
+A repo whose **tracker binding** is `forge` reads and writes issues/PRs through a **forge token** credential — a `forge_token` in the vault, server-side only (never materialized, never in a session's env). The credential carries a **flavor** and an **API host** (ADR-0015):
+
+| Flavor | API host to enter | PAT scopes |
+|---|---|---|
+| **Forgejo** | the instance host, bare (`git.cloonar.com`) — lab appends `/api/v1` | a token with issue + pull-request read/write on the repo |
+| **GitHub** | `api.github.com` for github.com; a GitHub Enterprise instance's real API root verbatim (`ghe.example.com/api/v3`, or `api.ghe.example.com` under subdomain isolation) — no derivation | **fine-grained PAT**: Issues (RW), Pull requests (RW), Metadata (R). **classic PAT**: `repo`. |
+
+The flavor is the routing authority: an unrecognized host (a second Forgejo instance, a GHE host — `forge_kind` detects as `none`) still binds `forge` when the operator selects it, and resolves from the credential alone. A `github.com` (or `git.cloonar.com`) remote whose credential flavor disagrees with the host is refused as a configuration conflict rather than silently 404-ing. Git push auth is a **separate** git credential (SSH key or HTTPS token); the forge token is only ever the tracker's REST auth. GitHub calls count against the account's hourly rate limit (~5000 req/h per user; a polling repo spends ~480/h at 30s ticks) — when a repo is throttled lab logs and skips the tick, and the AFK loop self-heals once the window resets.
+
 ## State directory layout
 
 ```

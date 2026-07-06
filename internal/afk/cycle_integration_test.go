@@ -478,6 +478,8 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	// unreachable https BaseURL is swapped for the fake forge's URL.
 	trackers := tracker.NewRegistry(st, vlt, nil, builtin.New, func(c tracker.ForgejoConfig) tracker.Tracker {
 		return forgejo.New(c.HTTPClient, forgeTS.URL+"/api/v1", c.Token, c.Owner, c.Repo)
+	}, func(tracker.GitHubConfig) tracker.Tracker {
+		panic("github factory invoked in a forgejo integration test")
 	})
 
 	clock := testutil.NewFakeClock(clockTime)

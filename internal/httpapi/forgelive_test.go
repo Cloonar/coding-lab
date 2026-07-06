@@ -101,7 +101,7 @@ func TestForgeLiveReadPath(t *testing.T) {
 	// Real registry, real Forgejo client; only BaseURL redirected to the fake.
 	x, vlt := newTrackerServer(t, func(c tracker.ForgejoConfig) tracker.Tracker {
 		return forgejo.New(c.HTTPClient, fake.URL+"/api/v1", c.Token, c.Owner, c.Repo)
-	})
+	}, nil)
 	blob, err := vlt.EncryptPayload(vault.ForgeTokenPayload{Host: "forge.example.com", Token: liveToken})
 	if err != nil {
 		t.Fatalf("EncryptPayload: %v", err)

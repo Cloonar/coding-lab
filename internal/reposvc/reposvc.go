@@ -283,9 +283,12 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 			binding = store.TrackerBindingBuiltin
 		}
 	case store.TrackerBindingForge:
-		if info.Kind == tracker.ForgeKindNone {
-			return store.Repo{}, badRequestf("tracker_binding: %q requires a detected forge host (forge_kind is none)", store.TrackerBindingForge)
-		}
+		// A forge credential alone suffices (ADR-0015): the credential's flavor
+		// routes the tracker, so a detected forge host is no longer required —
+		// this unlocks arbitrary Forgejo instances (codeberg, a second private
+		// instance) and GitHub Enterprise hosts (forge_kind 'none') the operator
+		// binds explicitly. The cross-field invariant — a forge binding needs a
+		// forge credential — stays.
 		if p.ForgeCredentialID == nil {
 			return store.Repo{}, badRequestf("tracker_binding: %q requires a forge_token credential (set forge_credential_id or use %q)", store.TrackerBindingForge, store.TrackerBindingBuiltin)
 		}
@@ -357,9 +360,9 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		switch u.TrackerBinding.Value {
 		case store.TrackerBindingBuiltin:
 		case store.TrackerBindingForge:
-			if current.ForgeKind == string(tracker.ForgeKindNone) {
-				return store.Repo{}, badRequestf("tracker_binding: %q requires a detected forge host (forge_kind is none)", store.TrackerBindingForge)
-			}
+			// A forge credential alone suffices (ADR-0015): the detected-host
+			// requirement is dropped. The cross-field invariant below still
+			// requires the forge credential.
 		default:
 			return store.Repo{}, badRequestf("tracker_binding: must be %q or %q", store.TrackerBindingForge, store.TrackerBindingBuiltin)
 		}

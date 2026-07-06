@@ -56,10 +56,46 @@ type HTTPSTokenPayload struct {
 	Token    string `json:"token"`
 }
 
-// ForgeTokenPayload is the payload for kind forge_token.
+// Forge flavors (ADR-0015) — the tracker family a forge_token drives. The
+// values match the repos.forge_kind vocabulary (tracker.ForgeKind*), but the
+// credential's flavor — not the repo's detected host — is the routing
+// authority: it decides which REST client the registry builds.
+const (
+	ForgeForgejo = "forgejo"
+	ForgeGitHub  = "github"
+)
+
+// ForgeTokenPayload is the payload for kind forge_token. Forge names the
+// tracker family (ADR-0015): an ABSENT/empty field decodes as forgejo, which
+// is correct by construction for every credential created before flavors
+// existed (they were all Forgejo). Host is the API origin the registry builds
+// the BaseURL from — a bare host[:port] for the forgejo flavor (registry
+// appends /api/v1), or the verbatim API root for github (e.g. api.github.com,
+// or a GHE root like ghe.example.com/api/v3).
 type ForgeTokenPayload struct {
 	Host  string `json:"host"`
 	Token string `json:"token"`
+	Forge string `json:"forge,omitempty"`
+}
+
+// ForgeFlavor returns the payload's flavor, defaulting an absent/empty field
+// to forgejo (the pre-flavor default — every existing credential is Forgejo).
+func (p ForgeTokenPayload) ForgeFlavor() string {
+	if p.Forge == "" {
+		return ForgeForgejo
+	}
+	return p.Forge
+}
+
+// ValidForgeFlavor reports whether flavor is empty (→ forgejo) or one of the
+// known flavors. The credentials API 400s on anything else so a typo never
+// reaches the registry's flavor router.
+func ValidForgeFlavor(flavor string) bool {
+	switch flavor {
+	case "", ForgeForgejo, ForgeGitHub:
+		return true
+	}
+	return false
 }
 
 // ValidateKindPayload checks that kind is known and that payload is a
@@ -110,6 +146,14 @@ func ValidateKindPayload(kind string, payload []byte) error {
 		}
 		if p.Token == "" {
 			return fmt.Errorf("%s payload: missing token", kind)
+		}
+		// The flavor enum is validated here; the flavor-aware host SHAPE
+		// (https-only, path allowed only for github) is validated at the API
+		// layer via tracker.NormalizeForgeHost, the same routine the registry
+		// builds the BaseURL with — one source of truth, no create/resolve
+		// divergence. An absent forge field is valid (→ forgejo).
+		if !ValidForgeFlavor(p.Forge) {
+			return fmt.Errorf("%s payload: forge must be %q or %q", kind, ForgeForgejo, ForgeGitHub)
 		}
 		// Host and token travel in HTTP request lines/headers where
 		// CR/LF is fatal (or worse, header-injecting).

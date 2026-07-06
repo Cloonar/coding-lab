@@ -27,7 +27,8 @@ func TestCommentAttributionThroughObservedRegistry(t *testing.T) {
 	token := f.seedToken(t, "run_afk", nil)
 
 	reg := tracker.NewRegistry(f.st, nil, nil, builtin.New,
-		func(tracker.ForgejoConfig) tracker.Tracker { return nil })
+		func(tracker.ForgejoConfig) tracker.Tracker { return nil },
+		func(tracker.GitHubConfig) tracker.Tracker { return nil })
 	observed := 0
 	reg.SetObserver(func(string, string, bool) { observed++ })
 

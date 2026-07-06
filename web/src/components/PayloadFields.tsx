@@ -3,8 +3,11 @@
 // write-only, never read back or prefilled). Secrets use password inputs;
 // the SSH private key is a textarea (multi-line PEM), also never prefilled.
 
-import { Match, Switch, createSignal, type Accessor } from 'solid-js';
-import type { CredentialKind, CredentialPayload } from '../api';
+import { Match, Show, Switch, createSignal, type Accessor } from 'solid-js';
+import type { CredentialKind, CredentialPayload, ForgeFlavor } from '../api';
+
+// The host GitHub operators want by default; a GHE root is entered by hand.
+const GITHUB_DEFAULT_HOST = 'api.github.com';
 
 export interface PayloadDraft {
   privateKey: Accessor<string>;
@@ -12,11 +15,13 @@ export interface PayloadDraft {
   username: Accessor<string>;
   token: Accessor<string>;
   host: Accessor<string>;
+  forge: Accessor<ForgeFlavor>;
   setPrivateKey: (v: string) => void;
   setPassphrase: (v: string) => void;
   setUsername: (v: string) => void;
   setToken: (v: string) => void;
   setHost: (v: string) => void;
+  setForge: (v: ForgeFlavor) => void;
   /** Assembles the payload for the given kind from the current field values. */
   build(kind: CredentialKind): CredentialPayload;
   reset(): void;
@@ -28,6 +33,7 @@ export function createPayloadDraft(): PayloadDraft {
   const [username, setUsername] = createSignal('');
   const [token, setToken] = createSignal('');
   const [host, setHost] = createSignal('');
+  const [forge, setForge] = createSignal<ForgeFlavor>('forgejo');
 
   return {
     privateKey,
@@ -35,11 +41,13 @@ export function createPayloadDraft(): PayloadDraft {
     username,
     token,
     host,
+    forge,
     setPrivateKey,
     setPassphrase,
     setUsername,
     setToken,
     setHost,
+    setForge,
     build(kind) {
       switch (kind) {
         case 'ssh_key':
@@ -49,7 +57,7 @@ export function createPayloadDraft(): PayloadDraft {
         case 'https_token':
           return { username: username(), token: token() };
         case 'forge_token':
-          return { host: host().trim(), token: token() };
+          return { host: host().trim(), token: token(), forge: forge() };
       }
     },
     reset() {
@@ -58,6 +66,7 @@ export function createPayloadDraft(): PayloadDraft {
       setUsername('');
       setToken('');
       setHost('');
+      setForge('forgejo');
     },
   };
 }
@@ -116,16 +125,39 @@ export default function PayloadFields(props: { kind: CredentialKind; draft: Payl
       </Match>
       <Match when={props.kind === 'forge_token'}>
         <label class="field">
-          <span>Forge host</span>
+          <span>Forge</span>
+          <select
+            name="forge"
+            value={props.draft.forge()}
+            onChange={(e) => {
+              const flavor = e.currentTarget.value as ForgeFlavor;
+              props.draft.setForge(flavor);
+              // Prefill the host that matches the flavor (overridable): GitHub's
+              // API origin, or a blank field for a Forgejo instance.
+              props.draft.setHost(flavor === 'github' ? GITHUB_DEFAULT_HOST : '');
+            }}
+          >
+            <option value="forgejo">Forgejo</option>
+            <option value="github">GitHub</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>{props.draft.forge() === 'github' ? 'API host' : 'Forge host'}</span>
           <input
             type="text"
             name="host"
             required
             autocomplete="off"
-            placeholder="git.example.com"
+            placeholder={props.draft.forge() === 'github' ? 'api.github.com' : 'git.example.com'}
             value={props.draft.host()}
             onInput={(e) => props.draft.setHost(e.currentTarget.value)}
           />
+          <Show when={props.draft.forge() === 'github'}>
+            <small class="hint">
+              github.com → <code>api.github.com</code>. GitHub Enterprise → your API root, e.g.{' '}
+              <code>ghe.example.com/api/v3</code>.
+            </small>
+          </Show>
         </label>
         <label class="field">
           <span>API token</span>
@@ -137,6 +169,12 @@ export default function PayloadFields(props: { kind: CredentialKind; draft: Payl
             value={props.draft.token()}
             onInput={(e) => props.draft.setToken(e.currentTarget.value)}
           />
+          <Show when={props.draft.forge() === 'github'}>
+            <small class="hint">
+              Fine-grained PAT: Issues (RW), Pull requests (RW), Metadata (R). Classic PAT:{' '}
+              <code>repo</code>.
+            </small>
+          </Show>
         </label>
       </Match>
     </Switch>

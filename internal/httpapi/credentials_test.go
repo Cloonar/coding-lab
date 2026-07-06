@@ -143,6 +143,10 @@ func TestCredentialPayloadValidation(t *testing.T) {
 		{"ssh missing private_key", map[string]any{"name": "a", "kind": "ssh_key", "payload": map[string]any{"passphrase": "x"}}},
 		{"https missing token", map[string]any{"name": "a", "kind": "https_token", "payload": map[string]any{"username": "u"}}},
 		{"forge missing host", map[string]any{"name": "a", "kind": "forge_token", "payload": map[string]any{"token": testToken}}},
+		{"forge bad flavor", map[string]any{"name": "a", "kind": "forge_token", "payload": map[string]any{"host": "git.cloonar.com", "token": testToken, "forge": "gitlab"}}},
+		{"forge http host", map[string]any{"name": "a", "kind": "forge_token", "payload": map[string]any{"host": "http://git.cloonar.com", "token": testToken}}},
+		{"forgejo host with a path", map[string]any{"name": "a", "kind": "forge_token", "payload": map[string]any{"host": "git.cloonar.com/api", "token": testToken, "forge": "forgejo"}}},
+		{"forge host with userinfo", map[string]any{"name": "a", "kind": "forge_token", "payload": map[string]any{"host": "user@api.github.com", "token": testToken, "forge": "github"}}},
 		{"wrong-shape payload", map[string]any{"name": "a", "kind": "ssh_key", "payload": map[string]any{"private_key": "k", "bogus": testToken}}},
 		{"missing name", map[string]any{"kind": "ssh_key", "payload": map[string]any{"private_key": "k"}}},
 	}
@@ -156,6 +160,31 @@ func TestCredentialPayloadValidation(t *testing.T) {
 			if err := json.Unmarshal([]byte(body), &e); err != nil || e["error"] == "" {
 				t.Fatalf("400 body not the canonical error shape: %s", body)
 			}
+		})
+	}
+}
+
+// TestCredentialForgeFlavorCreate: the flavor-aware host SHAPES accepted at
+// create time (ADR-0015) — a github API origin (bare or a GHE path root) and a
+// forgejo bare host all 201.
+func TestCredentialForgeFlavorCreate(t *testing.T) {
+	x := newCredTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	for _, tc := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{"github-api-origin", map[string]any{"host": "api.github.com", "token": testToken, "forge": "github"}},
+		{"github-ghe-path-root", map[string]any{"host": "ghe.example.com/api/v3", "token": testToken, "forge": "github"}},
+		{"forgejo-bare-host", map[string]any{"host": "git.cloonar.com", "token": testToken, "forge": "forgejo"}},
+		{"absent-flavor-bare-host", map[string]any{"host": "git.cloonar.com", "token": testToken}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := x.do("POST", "/api/v1/credentials", map[string]any{
+				"name": "cred-" + tc.name, "kind": "forge_token", "payload": tc.payload,
+			}, h)
+			wantStatus(t, resp, http.StatusCreated)
+			_ = readBody(t, resp)
 		})
 	}
 }
