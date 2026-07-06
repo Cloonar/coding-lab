@@ -184,20 +184,28 @@ func (s *Server) loadRepo(w http.ResponseWriter, r *http.Request) (store.Repo, b
 func (s *Server) trackerForRepo(w http.ResponseWriter, r *http.Request, repo store.Repo) (tracker.Tracker, bool) {
 	tk, err := s.tracker.TrackerFor(r.Context(), repo)
 	if err != nil {
-		switch {
-		case errors.Is(err, tracker.ErrForgeUnsupported),
-			errors.Is(err, tracker.ErrForgeCredentialMissing),
-			errors.Is(err, tracker.ErrForgeCredentialKind),
-			errors.Is(err, tracker.ErrForgeHost),
-			errors.Is(err, tracker.ErrRemotePath),
-			errors.Is(err, tracker.ErrUnknownBinding):
+		if isTrackerConfigError(err) {
 			writeError(w, http.StatusConflict, err.Error())
-		default:
+		} else {
 			s.internalError(w, "resolving tracker", err)
 		}
 		return nil, false
 	}
 	return tk, true
+}
+
+// isTrackerConfigError reports whether err is one of the typed tracker
+// resolution sentinels — a repo/credential configuration conflict (unsupported
+// forge kind, missing/wrong-kind forge credential, unparseable remote/host,
+// unknown binding) that maps to a 409 with the diagnostic, never an opaque 500.
+// Shared by the issues, ready, and AFK handlers so they refuse the same way.
+func isTrackerConfigError(err error) bool {
+	return errors.Is(err, tracker.ErrForgeUnsupported) ||
+		errors.Is(err, tracker.ErrForgeCredentialMissing) ||
+		errors.Is(err, tracker.ErrForgeCredentialKind) ||
+		errors.Is(err, tracker.ErrForgeHost) ||
+		errors.Is(err, tracker.ErrRemotePath) ||
+		errors.Is(err, tracker.ErrUnknownBinding)
 }
 
 // writeTrackerError maps a tracker call failure: a miss is a 404 on EITHER
@@ -345,7 +353,15 @@ func (s *Server) handleIssueGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReadyList is GET /api/v1/repos/{id}/ready: the ready-for-agent queue
-// (Tracker.ReadyIssues, either binding).
+// (Tracker.ReadyIssues, either binding) plus claimable_count — the "(N
+// ready)" hint the SPA shows, counting ready issues WITHOUT an existing claim
+// branch (parked/in-flight issues read as zero). With ?claimable=1 the
+// {issues} list itself is filtered to the claimable set (same envelope — the
+// SPA's hint is that list's length). The count/filter is best-effort by
+// design: it is stale the moment it renders, and the authoritative claim
+// check is remade inside the engine's locked claim path on the actual start.
+// Without the AFK engine (or when the claim-branch read fails) both degrade
+// to the raw ready queue.
 func (s *Server) handleReadyList(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -360,11 +376,25 @@ func (s *Server) handleReadyList(w http.ResponseWriter, r *http.Request) {
 		s.writeTrackerError(w, "listing ready issues", repo, err)
 		return
 	}
+	claimable := len(issues)
+	if s.afk != nil {
+		// Filter the ALREADY-FETCHED ready queue by the repo's claim branches —
+		// no second tracker round-trip, and the count/list derive from one
+		// snapshot so they can never disagree.
+		if cs, cerr := s.afk.FilterClaimable(r.Context(), repo, issues); cerr != nil {
+			s.log.Warn("counting claimable issues", "component", "httpapi", "repo", repo.ID, "err", cerr)
+		} else {
+			claimable = len(cs)
+			if r.URL.Query().Get("claimable") == "1" {
+				issues = cs
+			}
+		}
+	}
 	items := make([]issueResponse, 0, len(issues))
 	for _, is := range issues {
 		items = append(items, trackerIssueListJSON(is))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"issues": items})
+	writeJSON(w, http.StatusOK, map[string]any{"issues": items, "claimable_count": claimable})
 }
 
 type issueCreateRequest struct {

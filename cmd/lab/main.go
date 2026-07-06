@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
@@ -106,7 +107,6 @@ func run() int {
 
 	bus := events.NewBus()
 	m := metrics.New()
-	agent := agentapi.New(st, logger, time.Now)
 
 	// Vault (design §6): load-or-generate the master key, refuse loose
 	// perms/malformed content, and prepare the runtime materialization dir.
@@ -137,6 +137,10 @@ func run() int {
 			return forgejo.New(c.HTTPClient, c.BaseURL, c.Token, c.Owner, c.Repo)
 		})
 
+	// Agent API (M5): run-token-authenticated tracker surface, repo-scoped by
+	// the run row; resolves trackers through the same registry.
+	agent := agentapi.New(st, trackerReg, logger, time.Now)
+
 	gitEngine := gitx.New(cfg.GitBin)
 	reposDir := filepath.Join(cfg.StateDir, "repos")
 	worktreeRoot := filepath.Join(cfg.StateDir, "worktrees")
@@ -148,6 +152,7 @@ func run() int {
 		instanceSvc  *instance.Service
 		reconcileSvc *reconcile.Service
 		providerReg  *provider.Registry
+		afkSvc       *afk.Service
 	)
 	if cfg.ClaudeConfig == "" {
 		logger.Warn("claude config path unresolved (HOME unset and no --claude-config); instance features disabled",
@@ -208,6 +213,30 @@ func run() int {
 			logger.Error("building reconcile service", "component", "main", "err", err)
 			return 1
 		}
+		// AFK engine (M5): the scheduler/reaper/claim core. Its neutral Stop
+		// is delegated from the instance service (design §4c), and its reaper
+		// loop carries the throttled runtime sweep (v0's single janitorial
+		// goroutine).
+		afkSvc, err = afk.New(afk.Options{
+			Store:        st,
+			Git:          gitEngine,
+			Runner:       runner,
+			Providers:    providerReg,
+			Trackers:     trackerReg,
+			Instances:    instanceSvc,
+			Materializer: mat,
+			Bus:          bus,
+			Guard:        guard,
+			Logger:       logger,
+			ReposDir:     reposDir,
+			WorktreeRoot: worktreeRoot,
+			Sweep:        reconcileSvc.RuntimeSweep,
+		})
+		if err != nil {
+			logger.Error("building afk engine", "component", "main", "err", err)
+			return 1
+		}
+		instanceSvc.SetAFKStopper(afkSvc)
 	}
 
 	repoOpts := reposvc.Options{
@@ -258,6 +287,7 @@ func run() int {
 		Reconcile:       reconcileSvc,
 		Providers:       providerReg,
 		Tracker:         trackerReg,
+		AFK:             afkSvc,
 		BaseURL:         cfg.BaseURL,
 		ProxyAuth:       cfg.ProxyAuth,
 		ProxyAuthHeader: cfg.ProxyAuthHeader,
@@ -269,10 +299,14 @@ func run() int {
 		return 1
 	}
 
-	// The throttled runtime sweep (a plain ticker now; the M5 reaper loop
-	// absorbs it). Stops when ctx is cancelled at shutdown.
-	if reconcileSvc != nil {
-		go reconcileSvc.SweepLoop(ctx)
+	// The AFK reaper and scheduler loops (M5). The reaper tick also carries
+	// the throttled runtime sweep on its sweep_interval_minutes cadence —
+	// reconcile.SweepLoop is superseded by this wiring. Both loops re-read
+	// their intervals from settings each tick and stop when ctx is cancelled
+	// at shutdown.
+	if afkSvc != nil {
+		go afkSvc.ReaperLoop(ctx)
+		go afkSvc.SchedulerLoop(ctx)
 	}
 
 	srv := &http.Server{

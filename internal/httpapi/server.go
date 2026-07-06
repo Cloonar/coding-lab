@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
@@ -63,6 +64,12 @@ type Options struct {
 	// label routes unmounted.
 	Tracker *tracker.Registry
 
+	// AFK is the unattended-run engine (M5): manual AFK start, the auto
+	// toggle, the failure-counter reset, and the claimable-count hint on the
+	// ready endpoint. Nil leaves the AFK routes unmounted (and the ready
+	// endpoint falls back to the raw ready count).
+	AFK *afk.Service
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -95,6 +102,7 @@ type Server struct {
 	reconcile *reconcile.Service
 	providers *provider.Registry
 	tracker   *tracker.Registry
+	afk       *afk.Service
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -167,6 +175,7 @@ func New(o Options) (*Server, error) {
 		reconcile:   o.Reconcile,
 		providers:   o.Providers,
 		tracker:     o.Tracker,
+		afk:         o.AFK,
 		proxyAuth:   o.ProxyAuth,
 		proxyHeader: o.ProxyAuthHeader,
 		trusted:     o.TrustedProxies,
@@ -270,6 +279,22 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("PATCH /api/v1/repos/{id}/labels/{lid}", s.requireAuth(s.handleLabelUpdate))
 		api.HandleFunc("DELETE /api/v1/repos/{id}/labels/{lid}", s.requireAuth(s.handleLabelDelete))
 	}
+
+	// M5 AFK operator surface (operator auth; CSRF guards the mutations).
+	// Mounted only when the engine was built (like the instance routes, it
+	// needs the full instance stack behind it).
+	if s.afk != nil {
+		api.HandleFunc("POST /api/v1/repos/{id}/afk/start", s.requireAuth(s.handleAFKStart))
+		api.HandleFunc("PUT /api/v1/repos/{id}/afk/auto", s.requireAuth(s.handleAFKAuto))
+		api.HandleFunc("POST /api/v1/repos/{id}/afk/reset", s.requireAuth(s.handleAFKReset))
+	}
+
+	// M5 PAT CRUD (D7) and settings — store-backed, always mounted.
+	api.HandleFunc("GET /api/v1/tokens", s.requireAuth(s.handleTokenList))
+	api.HandleFunc("POST /api/v1/tokens", s.requireAuth(s.handleTokenCreate))
+	api.HandleFunc("DELETE /api/v1/tokens/{id}", s.requireAuth(s.handleTokenDelete))
+	api.HandleFunc("GET /api/v1/settings", s.requireAuth(s.handleSettingsGet))
+	api.HandleFunc("PATCH /api/v1/settings", s.requireAuth(s.handleSettingsPatch))
 
 	// Unknown API paths get JSON 404s, not the SPA shell.
 	api.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
