@@ -149,6 +149,9 @@ function RepoCard(props: {
             Stop all
           </button>
         </Show>
+        <A href={`/repos/${props.repo.id}/issues`} class="card-link">
+          Issues
+        </A>
         <A href={`/repos/${props.repo.id}/settings`} class="card-link">
           Settings
         </A>

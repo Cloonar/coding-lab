@@ -5,7 +5,11 @@ import App from './App';
 import AddRepo from './routes/AddRepo';
 import Credentials from './routes/Credentials';
 import Dashboard from './routes/Dashboard';
+import IssueDetail from './routes/IssueDetail';
 import Login from './routes/Login';
+import NewIssue from './routes/NewIssue';
+import RepoIssues from './routes/RepoIssues';
+import RepoLabels from './routes/RepoLabels';
 import RepoSettings from './routes/RepoSettings';
 import Runs from './routes/Runs';
 import Setup from './routes/Setup';
@@ -24,6 +28,10 @@ render(
       <Route path="/runs" component={Runs} />
       <Route path="/repos/new" component={AddRepo} />
       <Route path="/repos/:id/settings" component={RepoSettings} />
+      <Route path="/repos/:id/issues" component={RepoIssues} />
+      <Route path="/repos/:id/issues/new" component={NewIssue} />
+      <Route path="/repos/:id/issues/:number" component={IssueDetail} />
+      <Route path="/repos/:id/labels" component={RepoLabels} />
       <Route path="*" component={() => <Navigate href="/" />} />
     </Router>
   ),

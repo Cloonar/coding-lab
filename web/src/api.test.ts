@@ -7,28 +7,39 @@ import {
   claudeLoginCode,
   claudeLoginStart,
   createCredential,
+  createIssue,
+  createIssueComment,
+  createLabel,
   createRepo,
   deleteCredential,
+  deleteLabel,
   deleteRepo,
   discardParked,
   errorMessage,
   extractSpawnDefaults,
+  getIssue,
   getSpawnDefaults,
   listCredentials,
   listInstances,
+  listIssues,
+  listLabels,
   listParked,
   listProviders,
+  listReadyIssues,
   listRepos,
   listRuns,
   login,
   logout,
   me,
   retryClone,
+  setIssueLabels,
   setUnauthorizedHandler,
   startInstance,
   stopAll,
   stopInstance,
   updateCredential,
+  updateIssue,
+  updateLabel,
   updateRepo,
 } from './api';
 
@@ -537,6 +548,183 @@ describe('spawn defaults from settings', () => {
     stubFetch(jsonResponse(404, { error: 'not found' }));
 
     await expect(getSpawnDefaults()).resolves.toEqual({});
+  });
+});
+
+describe('issue endpoints', () => {
+  const summary = {
+    number: 7,
+    title: 'Fix login',
+    body: '',
+    state: 'open',
+    labels: ['bug', 'ready-for-agent'],
+    comments_count: 2,
+    created_at: '2026-07-06T00:00:00.000Z',
+    updated_at: '2026-07-06T01:00:00.000Z',
+  };
+
+  it('GET /repos/{id}/issues defaults to state=open and keeps the binding envelope', async () => {
+    const mock = stubFetch(jsonResponse(200, { binding: 'builtin', issues: [summary] }));
+
+    const res = await listIssues('repo_1');
+
+    expect(res.binding).toBe('builtin');
+    expect(res.issues).toEqual([summary]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues?state=open');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET /repos/{id}/issues passes closed and all through as-is', async () => {
+    let mock = stubFetch(jsonResponse(200, { binding: 'forge', issues: [] }));
+    await listIssues('repo_1', 'closed');
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues?state=closed');
+
+    mock = stubFetch(jsonResponse(200, { binding: 'forge', issues: [] }));
+    await listIssues('repo_1', 'all');
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues?state=all');
+  });
+
+  it('GET /repos/{id}/ready unwraps the {issues} envelope', async () => {
+    const mock = stubFetch(jsonResponse(200, { issues: [summary] }));
+
+    await expect(listReadyIssues('repo_1')).resolves.toEqual([summary]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/ready');
+  });
+
+  it('GET /repos/{id}/issues/{n} fetches the full issue with comments', async () => {
+    const detail = {
+      ...summary,
+      comments: [{ author: 'operator', body: 'ping', created_at: '2026-07-06T02:00:00.000Z' }],
+    };
+    const mock = stubFetch(jsonResponse(200, detail));
+
+    await expect(getIssue('repo_1', 7)).resolves.toEqual(detail);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues/7');
+  });
+
+  it('POST /repos/{id}/issues sends {title, body?, labels?} with the CSRF header', async () => {
+    const mock = stubFetch(jsonResponse(201, { number: 8 }));
+
+    await createIssue('repo_1', { title: 'New', body: 'text', labels: ['bug'] });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      title: 'New',
+      body: 'text',
+      labels: ['bug'],
+    });
+  });
+
+  it('POST /repos/{id}/issues surfaces the forge-bound 409 verbatim', async () => {
+    stubFetch(
+      jsonResponse(409, { error: 'repository uses a forge tracker; manage issues on the forge' }),
+    );
+
+    const err = await createIssue('repo_1', { title: 'nope' }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe(
+      'repository uses a forge tracker; manage issues on the forge',
+    );
+  });
+
+  it('PATCH /repos/{id}/issues/{n} sends only the given fields', async () => {
+    const mock = stubFetch(jsonResponse(200, { ...summary, state: 'closed' }));
+
+    await updateIssue('repo_1', 7, { state: 'closed' });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues/7');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body as string)).toEqual({ state: 'closed' });
+  });
+
+  it('POST /repos/{id}/issues/{n}/comments sends {body}', async () => {
+    const mock = stubFetch(
+      jsonResponse(201, {
+        author: 'operator',
+        body: 'looks good',
+        created_at: '2026-07-06T03:00:00.000Z',
+      }),
+    );
+
+    await createIssueComment('repo_1', 7, 'looks good');
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues/7/comments');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({ body: 'looks good' });
+  });
+
+  it('PUT /repos/{id}/issues/{n}/labels replaces the set and 400s on unknown names', async () => {
+    const mock = stubFetch(jsonResponse(200, { ...summary, labels: ['bug'] }));
+    await setIssueLabels('repo_1', 7, ['bug']);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/issues/7/labels');
+    expect(requestInit(mock).method).toBe('PUT');
+    expect(JSON.parse(requestInit(mock).body as string)).toEqual({ labels: ['bug'] });
+
+    stubFetch(jsonResponse(400, { error: 'unknown label: bogus' }));
+    const err = await setIssueLabels('repo_1', 7, ['bogus']).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+    expect((err as ApiError).message).toBe('unknown label: bogus');
+  });
+});
+
+describe('label endpoints', () => {
+  const label = { id: 'lbl_1', name: 'bug', color: '#ff0000', description: 'defects' };
+
+  it('GET /repos/{id}/labels unwraps the {labels} envelope', async () => {
+    const mock = stubFetch(jsonResponse(200, { labels: [label] }));
+
+    await expect(listLabels('repo_1')).resolves.toEqual([label]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/labels');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('POST /repos/{id}/labels sends {name, color?, description?} with the CSRF header', async () => {
+    const mock = stubFetch(jsonResponse(201, label));
+
+    await createLabel('repo_1', { name: 'bug', color: '#ff0000', description: 'defects' });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/labels');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      name: 'bug',
+      color: '#ff0000',
+      description: 'defects',
+    });
+  });
+
+  it('PATCH /repos/{id}/labels/{lid} sends only the given fields', async () => {
+    const mock = stubFetch(jsonResponse(200, { ...label, color: '#00ff00' }));
+
+    await updateLabel('repo_1', 'lbl_1', { color: '#00ff00' });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/labels/lbl_1');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body as string)).toEqual({ color: '#00ff00' });
+  });
+
+  it('DELETE /repos/{id}/labels/{lid} tolerates 204 and surfaces the 409 message', async () => {
+    const mock = stubFetch(jsonResponse(204));
+    await expect(deleteLabel('repo_1', 'lbl_1')).resolves.toBeUndefined();
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/labels/lbl_1');
+    expect(requestInit(mock).method).toBe('DELETE');
+
+    stubFetch(jsonResponse(409, { error: 'label name already exists in this repository' }));
+    const err = await deleteLabel('repo_1', 'lbl_1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe('label name already exists in this repository');
   });
 });
 

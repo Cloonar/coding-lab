@@ -858,6 +858,235 @@ details.parked summary {
   color: var(--idle-text);
 }
 
+/* Issues ------------------------------------------------------------------------ */
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.crumb {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.forge-note {
+  margin: 0 0 0.9rem;
+  font-size: 0.9rem;
+}
+
+.filter-row {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+button.seg {
+  min-height: 36px;
+  padding: 0 0.9rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+button.seg.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.label-filter {
+  margin: 0 0 0.9rem;
+}
+
+button.chip-toggle {
+  min-height: 36px;
+  padding: 0 0.8rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  white-space: nowrap;
+}
+
+button.chip-toggle.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.card.ready-queue {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+
+.ready-list {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+}
+
+.ready-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  text-decoration: none;
+  color: inherit;
+  border-bottom: 1px solid var(--border);
+}
+
+.ready-list li:last-child .ready-row {
+  border-bottom: none;
+}
+
+.ready-row:hover {
+  background: var(--hover);
+}
+
+.ready-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.issue-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.issue-card:hover {
+  background: var(--hover);
+}
+
+.issue-card.ready {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+
+.issue-number {
+  font-size: 0.9rem;
+}
+
+.issue-meta {
+  font-size: 0.8rem;
+}
+
+.chip.state-open {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.chip.state-closed {
+  background: var(--idle-bg);
+  color: var(--idle-text);
+}
+
+.issue-body {
+  margin: 0.25rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.comment-list {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+}
+
+.comment {
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.comment-meta {
+  margin: 0 0 0.25rem;
+  font-size: 0.82rem;
+}
+
+.comment-body {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.comment-form {
+  margin-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.8rem;
+}
+
+button.small {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+/* Labels management --------------------------------------------------------- */
+
+.label-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.label-list > li {
+  border-bottom: 1px solid var(--border);
+}
+
+.label-list > li:last-child {
+  border-bottom: none;
+}
+
+.label-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 0;
+}
+
+.label-desc {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.label-form {
+  padding: 0.55rem 0 0.8rem;
+}
+
+.color-row {
+  align-items: flex-end;
+}
+
+.color-row input[type='color'] {
+  width: 56px;
+  min-height: 44px;
+  margin-bottom: 0.9rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+}
+
+.label-preview {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-bottom: 0.9rem;
+}
+
+.label-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.35rem 0 0.9rem;
+}
+
+.label-picker .chip-toggle:not(.on) {
+  opacity: 0.55;
+}
+
 /* Toast -------------------------------------------------------------------------- */
 
 .toast {
