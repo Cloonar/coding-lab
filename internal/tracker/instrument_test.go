@@ -24,6 +24,15 @@ func (f failingTracker) CreatePull(context.Context, string, string, string, stri
 	return PullRef{}, f.err
 }
 func (f failingTracker) CloseIssue(context.Context, int) error { return f.err }
+func (f failingTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
+	return Issue{}, f.err
+}
+func (f failingTracker) AddIssueLabels(context.Context, int, []string) error    { return f.err }
+func (f failingTracker) RemoveIssueLabels(context.Context, int, []string) error { return f.err }
+func (f failingTracker) Labels(context.Context) ([]Label, error)                { return nil, f.err }
+func (f failingTracker) EnsureLabel(context.Context, string, string, string) (Label, error) {
+	return Label{}, f.err
+}
 
 // observerLog records every (binding, op, ok) the seam reports.
 type observerLog struct {
@@ -68,10 +77,16 @@ func driveAll(t *testing.T, trk Tracker) {
 	_, _ = trk.Pulls(ctx)
 	_, _ = trk.CreatePull(ctx, "afk/1", "main", "t", "b")
 	_ = trk.CloseIssue(ctx, 1)
+	_, _ = trk.CreateIssue(ctx, "t", "b", []string{"bug"})
+	_ = trk.AddIssueLabels(ctx, 1, []string{"bug"})
+	_ = trk.RemoveIssueLabels(ctx, 1, []string{"bug"})
+	_, _ = trk.Labels(ctx)
+	_, _ = trk.EnsureLabel(ctx, "bug", "", "")
 }
 
 // opOrder mirrors driveAll.
-var opOrder = []string{OpReadyIssues, OpIssues, OpIssue, OpCreateComment, OpPulls, OpCreatePull, OpCloseIssue}
+var opOrder = []string{OpReadyIssues, OpIssues, OpIssue, OpCreateComment, OpPulls, OpCreatePull, OpCloseIssue,
+	OpCreateIssue, OpAddIssueLabels, OpRemoveIssueLabels, OpLabels, OpEnsureLabel}
 
 func TestObserverReportsEveryOp(t *testing.T) {
 	f := newRegistryFixture(t)

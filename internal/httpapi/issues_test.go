@@ -329,6 +329,15 @@ func (s *stubForgeTracker) CreatePull(context.Context, string, string, string, s
 }
 
 func (s *stubForgeTracker) CloseIssue(context.Context, int) error { return nil }
+func (s *stubForgeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
+	return tracker.Issue{}, nil
+}
+func (s *stubForgeTracker) AddIssueLabels(context.Context, int, []string) error    { return nil }
+func (s *stubForgeTracker) RemoveIssueLabels(context.Context, int, []string) error { return nil }
+func (s *stubForgeTracker) Labels(context.Context) ([]tracker.Label, error)        { return nil, nil }
+func (s *stubForgeTracker) EnsureLabel(context.Context, string, string, string) (tracker.Label, error) {
+	return tracker.Label{}, nil
+}
 
 func TestForgeBoundRepo(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)

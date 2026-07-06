@@ -165,7 +165,7 @@ func seedReadyIssue(t *testing.T, x *afkTestServer, title string) store.Issue {
 	if readyID == "" {
 		t.Fatalf("repo has no %s label", tracker.ReadyLabel)
 	}
-	is, err := x.st.CreateIssueWithLabels(ctx, x.repo.ID, title, "", []string{readyID}, afkClock)
+	is, err := x.st.CreateIssueWithLabels(ctx, x.repo.ID, title, "", []string{readyID}, store.CommentAuthorOperator, nil, afkClock)
 	if err != nil {
 		t.Fatalf("CreateIssueWithLabels: %v", err)
 	}

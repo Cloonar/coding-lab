@@ -99,6 +99,14 @@ func (f *testFixture) seedIssue(t *testing.T, id, repoID string, number int, tit
 		id, repoID, number, title, body, f.now.Format(timeFormat), f.now.Format(timeFormat))
 }
 
+// seedLabel inserts a repo label (the fixture bypasses repo-create label
+// seeding, so tests define exactly the labels they need).
+func (f *testFixture) seedLabel(t *testing.T, id, repoID, name string) {
+	t.Helper()
+	f.exec(t, `INSERT INTO labels (id, repo_id, name, color, description)
+		VALUES (?, ?, ?, '#6b7280', '')`, id, repoID, name)
+}
+
 // seedToken inserts a run token and returns its plaintext.
 func (f *testFixture) seedToken(t *testing.T, runID string, expiresAt *time.Time) string {
 	token, hash := ids.NewToken("run")
@@ -197,6 +205,7 @@ func TestAllRoutesAreMountedBehindAuth(t *testing.T) {
 	f := newFixture(t)
 	f.seedRepo(t, "repo_a")
 	f.seedIssue(t, "iss7", "repo_a", 7, "Fix it", "body")
+	f.seedLabel(t, "lbl_nt", "repo_a", "needs-triage")
 	f.seedRun(t, "run_active", "repo_a", "active")
 	token := f.seedToken(t, "run_active", nil)
 	past := f.now.Add(-time.Second)
@@ -212,6 +221,12 @@ func TestAllRoutesAreMountedBehindAuth(t *testing.T) {
 		{"GET", "/agent/v1/issues", "", http.StatusOK},
 		{"GET", "/agent/v1/issues/7", "", http.StatusOK},
 		{"POST", "/agent/v1/issues/7/comments", `{"body":"hi"}`, http.StatusCreated},
+		{"POST", "/agent/v1/issues", `{"title":"t","body":"b"}`, http.StatusCreated},
+		{"POST", "/agent/v1/issues/7/labels", `{"labels":["needs-triage"]}`, http.StatusOK},
+		{"DELETE", "/agent/v1/issues/7/labels", `{"labels":["needs-triage"]}`, http.StatusOK},
+		{"POST", "/agent/v1/issues/7/close", "", http.StatusOK},
+		{"GET", "/agent/v1/labels", "", http.StatusOK},
+		{"POST", "/agent/v1/labels", `{"name":"bug"}`, http.StatusOK},
 		{"POST", "/agent/v1/prs", `{"title":"t","body":"b"}`, http.StatusCreated}, // builtin → change request (M6)
 	}
 	for _, rt := range routes {

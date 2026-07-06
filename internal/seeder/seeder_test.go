@@ -123,10 +123,17 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 		// Tracker binding + what it means (builtin → change request, lab UI).
 		"tracker binding is **builtin**",
 		"**change request**",
-		// labctl vocabulary (§8.3) + provided credentials.
+		// labctl vocabulary (§8.3, incl. the ADR-0014 triage set) + provided
+		// credentials.
 		"labctl issue view [n]",
 		"labctl issue list",
+		"labctl issue create --title T --body B [--labels a,b]",
 		"labctl issue comment <n> <body>",
+		"labctl issue label add <n> <a,b>",
+		"labctl issue label remove <n> <a,b>",
+		"labctl issue close <n>",
+		"labctl label list",
+		"labctl label create --name N [--color C --description D]",
 		"labctl pr create --title T --body B",
 		"`LAB_URL` and `LAB_TOKEN` are already provided",
 		"Closes #<n>",

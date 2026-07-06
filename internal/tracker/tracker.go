@@ -7,8 +7,12 @@ package tracker
 // which one answers for a given repo. GitHub is fast-follow (issue #1).
 //
 // The Comment/Issue/PullRef types and the Tracker interface below are the
-// pinned M4 contract byte-for-byte — the sibling forge/builtin packages
-// compile against exactly these definitions.
+// pinned M4 contract — the sibling forge/builtin packages compile against
+// exactly these definitions — extended by the agent triage surface
+// (ADR-0014): issue create, label ops, and the Label type. What stays dead
+// is the ENGINE writing tracker state implicitly; a deliberate agent
+// workflow action flows through this seam to whichever backend the repo's
+// binding names, exactly as agent comments and PR creation always have.
 
 import (
 	"context"
@@ -31,6 +35,13 @@ var ErrNotFound = errors.New("tracker: not found")
 // clean conflict instead of a second identical CR. The wrapping error names
 // the existing number.
 var ErrDuplicateOpenPull = errors.New("an open pull request for this head branch already exists")
+
+// ErrUnknownLabel marks a label-name argument that resolves to no label of
+// the repo. Applying (or creating an issue with) a nonexistent label is an
+// error on BOTH bindings, never an implicit create — a typo must become a
+// loud failure instead of a permanent garbage label (ADR-0014). The wrapping
+// error names the offending label.
+var ErrUnknownLabel = errors.New("tracker: unknown label")
 
 // Issue/PR state vocabulary. A merged PR is distinct from a closed-unmerged
 // one (v0 pin): the reaper treats open|merged as a done-signal but a
@@ -99,6 +110,16 @@ type PullRef struct {
 	URL        string
 }
 
+// Label is one repo label in lab's vocabulary. Callers speak label NAMES
+// only — the forge client's name-to-ID resolution and the builtin tracker's
+// label ids stay behind the seam. Color is a #rrggbb swatch; both bindings
+// supply the same default when a create omits it.
+type Label struct {
+	Name        string
+	Color       string
+	Description string
+}
+
 // Tracker is lab's read-mostly view of a repo's issue tracker — one vocabulary
 // over the Forgejo REST API and the built-in store-backed tracker. Operator
 // read views use it now; the agent API (M5) uses it for the AFK run's
@@ -134,6 +155,33 @@ type Tracker interface {
 
 	// CloseIssue transitions an issue to closed.
 	CloseIssue(ctx context.Context, number int) error
+
+	// CreateIssue opens an issue with the given labels attached at creation
+	// (the to-issues path: a plan becomes labelled tracker issues in one call
+	// each). Labels are names; any name the repo does not define wraps
+	// ErrUnknownLabel and nothing is created.
+	CreateIssue(ctx context.Context, title, body string, labels []string) (Issue, error)
+
+	// AddIssueLabels attaches the named labels to an issue. Names are
+	// resolved strictly BEFORE anything is applied: an unknown name wraps
+	// ErrUnknownLabel, never an implicit label create. Re-adding an already
+	// attached label is not an error (forge behavior).
+	AddIssueLabels(ctx context.Context, number int, labels []string) error
+
+	// RemoveIssueLabels detaches the named labels from an issue, under the
+	// same strict name resolution as AddIssueLabels. Removing a defined label
+	// that is not attached is a no-op, not an error.
+	RemoveIssueLabels(ctx context.Context, number int, labels []string) error
+
+	// Labels lists the repo's labels ordered by name.
+	Labels(ctx context.Context) ([]Label, error)
+
+	// EnsureLabel creates the named label if the repo does not define it and
+	// returns the label that exists afterwards — idempotent by name, so
+	// skills run it unconditionally and a retry after a timed-out call is
+	// safe. Empty color/description take the binding's defaults; an existing
+	// label's color/description are never overwritten.
+	EnsureLabel(ctx context.Context, name, color, description string) (Label, error)
 }
 
 // RunScoper is the optional identity-rescoping seam on a Tracker: a backend

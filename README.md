@@ -72,14 +72,22 @@ cd web && npm run dev   # Vite dev server; proxies /api and /healthz → :8080
 
 **Operator API** (`/api/v1`, session cookie or `lab_pat_…` bearer token, CSRF-guarded for ambient auth): first-run setup + login, PAT CRUD, credentials CRUD (no secret readback; delete 409s while referenced), repos (add → async bare clone with SSE progress, settings PATCH, guarded delete, clone retry), instances (start/stop/stop-all), Parked list + Discard, AFK (start / auto toggle / three-strikes reset), built-in issues + comments + labels + ready queue, change requests (list, detail with live diff, merge, close), run history, provider catalog + Claude auth (status / login start / login code), runtime settings, and `GET /api/v1/events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `clone.progress`, `claude.auth.changed`, `issue.changed`, `cr.changed`, `heartbeat`).
 
-**Agent API** (`/agent/v1`, run-token auth, scoped to the run's repo): issue view (the run's claimed issue) / list / comment, PR create — routes to a forge PR or a built-in change request, injects/validates `Closes #N`, and applies incogni sanitization server-side.
+**Agent API** (`/agent/v1`, run-token auth, scoped to the run's repo): issue view (the run's claimed issue) / list / create / comment / close, label add/remove/list, idempotent label create, PR create — routes everything to the repo's tracker binding (forge or built-in), injects/validates `Closes #N` on PR create, and applies incogni sanitization server-side to every agent-authored body.
 
 **`labctl`** (on every session's PATH; reads `LAB_URL`/`LAB_TOKEN` from the session env):
 
 ```
 labctl issue view [n]                 show the run's claimed issue (or issue n), with comments
-labctl issue list                     list open issues
+labctl issue list                     list open issues (number, state, created, labels, title)
+labctl issue create --title T --body B [--labels a,b]
+                                      file a new issue, labels attached at creation
 labctl issue comment <n> <body>       comment on issue n
+labctl issue label add <n> <a,b>      add labels (comma-separated) to issue n
+labctl issue label remove <n> <a,b>   remove labels from issue n
+labctl issue close <n>                close issue n (comment the reason first)
+labctl label list                     list the repo's labels (name, color, description)
+labctl label create --name N [--color C --description D]
+                                      create the label if missing (idempotent)
 labctl pr create --title T --body B   open a PR/CR for the current branch
 ```
 

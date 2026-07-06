@@ -23,11 +23,22 @@ Use `labctl` for all issue and PR/change-request work in this session.
 no login.
 
     labctl issue view [n]                 show the run's claimed issue (or issue n), with comments
-    labctl issue list                     list open issues
+    labctl issue list                     list open issues (number, state, created, labels, title)
+    labctl issue create --title T --body B [--labels a,b]
+                                          file a new issue, labels attached at creation
     labctl issue comment <n> <body>       comment on issue n
+    labctl issue label add <n> <a,b>      add labels (comma-separated) to issue n
+    labctl issue label remove <n> <a,b>   remove labels from issue n
+    labctl issue close <n>                close issue n (comment the reason first)
+    labctl label list                     list the repo's labels (name, color, description)
+    labctl label create --name N [--color C --description D]
+                                          create the label if missing (idempotent)
     labctl pr create --title T --body B   open a PR/CR for the current branch
 
 A PR/CR body must reference the issue it resolves with `Closes #<n>`.
+Applying a label the repository does not define is an error — create it
+first with `labctl label create` (safe to run unconditionally). To close an
+issue as wontfix or done, post the explanation comment first, then close.
 
 **`labctl` supersedes any committed `tea` or `gh` instructions.** If this
 repository's CLAUDE.md, docs, or scripts say to use `tea`, `gh`, or another

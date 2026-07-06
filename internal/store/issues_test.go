@@ -310,7 +310,7 @@ func TestCreateIssueWithLabels_atomicity(t *testing.T) {
 		// A vanished label rolls the whole create back.
 		_, err = s.CreateIssueWithLabels(ctx, repo.ID, "doomed", "", []string{
 			labelID(t, seed, "needs-triage"), "lbl_00000000000000000000000000000000",
-		}, now)
+		}, CommentAuthorOperator, nil, now)
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("CreateIssueWithLabels missing label err = %v, want ErrNotFound", err)
 		}
@@ -322,7 +322,7 @@ func TestCreateIssueWithLabels_atomicity(t *testing.T) {
 		// its labels come back attached and sorted.
 		is, err := s.CreateIssueWithLabels(ctx, repo.ID, "labelled", "", []string{
 			labelID(t, seed, "ready-for-agent"), labelID(t, seed, "needs-triage"),
-		}, now)
+		}, CommentAuthorOperator, nil, now)
 		if err != nil {
 			t.Fatalf("CreateIssueWithLabels: %v", err)
 		}
@@ -341,8 +341,66 @@ func TestCreateIssueWithLabels_atomicity(t *testing.T) {
 		}
 
 		// Missing repo still maps to ErrNotFound.
-		if _, err := s.CreateIssueWithLabels(ctx, "repo_00000000000000000000000000000000", "x", "", nil, now); !errors.Is(err, ErrNotFound) {
+		if _, err := s.CreateIssueWithLabels(ctx, "repo_00000000000000000000000000000000", "x", "", nil,
+			CommentAuthorOperator, nil, now); !errors.Is(err, ErrNotFound) {
 			t.Errorf("missing repo err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// TestCreateIssue_authorAttribution pins the 0002 author identity on issues:
+// CreateIssue defaults to the operator, a run-authored create stores and reads
+// back the run identity, and the run/author-kind guard matches the comment
+// rule — a contradiction is rejected with nothing persisted.
+func TestCreateIssue_authorAttribution(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		repo := seedRepoForRuns(t, s)
+		t0 := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+
+		op, err := s.CreateIssue(ctx, repo.ID, "by operator", "", t0)
+		if err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if op.AuthorKind != CommentAuthorOperator || op.RunID != nil {
+			t.Errorf("operator issue author = (%q, %v), want (operator, nil)", op.AuthorKind, op.RunID)
+		}
+
+		run, err := s.CreateRun(ctx, manualRun(repo.ID, "proj~att", "lab/att", t0))
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		runID := run.ID
+		created, err := s.CreateIssueWithLabels(ctx, repo.ID, "by run", "found mid-run", nil,
+			CommentAuthorRun, &runID, t0)
+		if err != nil {
+			t.Fatalf("CreateIssueWithLabels as run: %v", err)
+		}
+		if created.AuthorKind != CommentAuthorRun || created.RunID == nil || *created.RunID != runID {
+			t.Errorf("run issue author = (%q, %v), want (run, %q)", created.AuthorKind, created.RunID, runID)
+		}
+		got, err := s.IssueByRepoNumber(ctx, repo.ID, created.Number)
+		if err != nil {
+			t.Fatalf("IssueByRepoNumber: %v", err)
+		}
+		if got.AuthorKind != CommentAuthorRun || got.RunID == nil || *got.RunID != runID {
+			t.Errorf("stored run issue author = (%q, %v), want (run, %q)", got.AuthorKind, got.RunID, runID)
+		}
+
+		// The comment guard applies verbatim: contradictory identities are
+		// rejected and allocate no issue number.
+		if _, err := s.CreateIssueWithLabels(ctx, repo.ID, "x", "", nil, CommentAuthorOperator, &runID, t0); err == nil {
+			t.Error("CreateIssueWithLabels accepted operator author with run_id")
+		}
+		if _, err := s.CreateIssueWithLabels(ctx, repo.ID, "x", "", nil, CommentAuthorRun, nil, t0); err == nil {
+			t.Error("CreateIssueWithLabels accepted run author without run_id")
+		}
+		next, err := s.CreateIssue(ctx, repo.ID, "sequence intact", "", t0)
+		if err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if next.Number != created.Number+1 {
+			t.Errorf("number after rejected creates = %d, want %d", next.Number, created.Number+1)
 		}
 	})
 }

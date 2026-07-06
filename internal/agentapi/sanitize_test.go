@@ -79,6 +79,53 @@ func TestSanitizeBodyGatesOnIncogni(t *testing.T) {
 	}
 }
 
+// TestIssueAndCommentCreateSanitizeIncogniBody pins the ADR-0014 widening:
+// EVERY agent-authored body — issue create and comment create, not just
+// PR/CR — passes the sanitizer on incogni repos, so the defense-in-depth
+// story has no unsanitized write path. Non-incogni bodies pass through
+// byte-identical.
+func TestIssueAndCommentCreateSanitizeIncogniBody(t *testing.T) {
+	poisoned := "Found while testing.\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+
+	tests := []struct {
+		name     string
+		incogni  bool
+		wantBody string
+	}{
+		{"incogni stripped", true, "Found while testing."},
+		{"non-incogni passthrough", false, poisoned},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.seedRepoIncogni(t, "repo_f", "forge", "forgejo", tt.incogni)
+			f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+			token := f.seedToken(t, "run_f", nil)
+
+			fk := &fakeTracker{}
+			handler := f.forgeServer(fk).Handler()
+
+			payload, _ := json.Marshal(map[string]string{"title": "bug: the thing", "body": poisoned})
+			rr := doJSON(t, handler, "POST", "/agent/v1/issues", token, string(payload))
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("issue create status = %d, body %s", rr.Code, rr.Body.String())
+			}
+			if fk.createdIssue == nil || fk.createdIssue.body != tt.wantBody {
+				t.Errorf("tracker received issue body %+v, want %q", fk.createdIssue, tt.wantBody)
+			}
+
+			payload, _ = json.Marshal(map[string]string{"body": poisoned})
+			rr = doJSON(t, handler, "POST", "/agent/v1/issues/7/comments", token, string(payload))
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("comment create status = %d, body %s", rr.Code, rr.Body.String())
+			}
+			if len(fk.comments) != 1 || fk.comments[0].body != tt.wantBody {
+				t.Errorf("tracker received comment %+v, want body %q", fk.comments, tt.wantBody)
+			}
+		})
+	}
+}
+
 // The handler-level contract: on an incogni repo the tracker receives the
 // sanitized body — Closes-injection included (ensureCloses runs first, so
 // the injected directive survives) — and on a non-incogni repo the exact

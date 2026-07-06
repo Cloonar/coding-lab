@@ -32,12 +32,20 @@ type Comment struct {
 
 // Issue is the agent API's issue shape; list responses leave Comments empty.
 type Issue struct {
-	Number   int       `json:"number"`
-	Title    string    `json:"title"`
-	Body     string    `json:"body"`
-	State    string    `json:"state"`
-	Labels   []string  `json:"labels"`
-	Comments []Comment `json:"comments"`
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	State     string    `json:"state"`
+	Labels    []string  `json:"labels"`
+	Comments  []Comment `json:"comments"`
+	CreatedAt string    `json:"created_at"`
+}
+
+// Label is the agent API's label shape.
+type Label struct {
+	Name        string `json:"name"`
+	Color       string `json:"color"`
+	Description string `json:"description"`
 }
 
 // PR is the agent API's POST /prs answer.
@@ -89,6 +97,52 @@ func (c *Client) PRCreate(title, body string) (PR, error) {
 	err := c.do(http.MethodPost, "/agent/v1/prs",
 		map[string]string{"title": title, "body": body}, &pr)
 	return pr, err
+}
+
+// IssueCreate files a new issue with labels attached at creation.
+func (c *Client) IssueCreate(title, body string, labels []string) (Issue, error) {
+	var is Issue
+	err := c.do(http.MethodPost, "/agent/v1/issues",
+		map[string]any{"title": title, "body": body, "labels": labels}, &is)
+	return is, err
+}
+
+// IssueLabelAdd attaches labels to issue n.
+func (c *Client) IssueLabelAdd(n int, labels []string) error {
+	return c.do(http.MethodPost, "/agent/v1/issues/"+strconv.Itoa(n)+"/labels",
+		map[string][]string{"labels": labels}, nil)
+}
+
+// IssueLabelRemove detaches labels from issue n. The label set rides in the
+// request body, mirroring the add (label names may contain '/').
+func (c *Client) IssueLabelRemove(n int, labels []string) error {
+	return c.do(http.MethodDelete, "/agent/v1/issues/"+strconv.Itoa(n)+"/labels",
+		map[string][]string{"labels": labels}, nil)
+}
+
+// IssueClose closes issue n.
+func (c *Client) IssueClose(n int) error {
+	return c.do(http.MethodPost, "/agent/v1/issues/"+strconv.Itoa(n)+"/close", nil, nil)
+}
+
+// LabelList lists the repo's labels.
+func (c *Client) LabelList() ([]Label, error) {
+	var resp struct {
+		Labels []Label `json:"labels"`
+	}
+	if err := c.do(http.MethodGet, "/agent/v1/labels", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Labels, nil
+}
+
+// LabelCreate ensures a label exists (idempotent by name) and returns the
+// label that exists afterwards.
+func (c *Client) LabelCreate(name, color, description string) (Label, error) {
+	var l Label
+	err := c.do(http.MethodPost, "/agent/v1/labels",
+		map[string]string{"name": name, "color": color, "description": description}, &l)
+	return l, err
 }
 
 // do performs one request. Non-2xx answers become errors carrying the
