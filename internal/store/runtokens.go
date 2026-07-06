@@ -1,8 +1,10 @@
 package store
 
-// Minimal run-token accessors needed by the agent-API auth middleware (M1).
-// Token creation at spawn time and the terminal-outcome reap chokepoint land
-// with the M5 engine work; only lookup lives here for now.
+// Run-token accessors. Lookup (RunTokenByHash) backs the agent-API auth
+// middleware; CreateRunToken mints a token at spawn time (§3a: AFK →
+// budget_deadline+30min, manual → NULL expiry) and DeleteRunTokens is the
+// terminal-outcome reap chokepoint (a stopped/reaped run's tokens must 401
+// immediately, so the token delete rides the same step as the outcome write).
 
 import (
 	"context"
@@ -10,7 +12,37 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 )
+
+// CreateRunToken inserts a run token: the caller supplies the run id, the
+// token's sha256 hex (the plaintext is shown once, never stored), and the
+// expiry (nil → NULL, the manual-run rule; AFK runs pass budget_deadline+30min).
+func (s *Store) CreateRunToken(ctx context.Context, runID, tokenHash string, expiresAt *time.Time, createdAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(
+		`INSERT INTO run_tokens (id, run_id, token_hash, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?)`),
+		ids.NewID("rtok"), runID, tokenHash, fmtNullTime(expiresAt), fmtTime(createdAt))
+	if err != nil {
+		if isForeignKeyViolation(err) {
+			return fmt.Errorf("create run token: %w", ErrNotFound)
+		}
+		return fmt.Errorf("create run token: %w", err)
+	}
+	return nil
+}
+
+// DeleteRunTokens removes every token of a run — the reap/stop chokepoint that
+// makes a terminated run's tokens 401 at once (§3a auth rule). Deleting none
+// (a run that minted no token, or was already reaped) is not an error.
+func (s *Store) DeleteRunTokens(ctx context.Context, runID string) error {
+	if _, err := s.db.ExecContext(ctx, s.rebind(
+		`DELETE FROM run_tokens WHERE run_id = ?`), runID); err != nil {
+		return fmt.Errorf("delete run tokens for %q: %w", runID, err)
+	}
+	return nil
+}
 
 // RunTokenInfo is a run token joined with the columns of its run that the
 // §3a validity rule and run-scoped authorization need.
