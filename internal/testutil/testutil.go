@@ -41,6 +41,13 @@ func HermeticGitEnv(dir string) []string {
 		"GIT_AUTHOR_EMAIL=lab-test@example.invalid",
 		"GIT_COMMITTER_NAME=lab-test",
 		"GIT_COMMITTER_EMAIL=lab-test@example.invalid",
+		// No background maintenance: `git fetch`/`gc --auto` can detach a
+		// child that is still writing objects while t.TempDir cleanup runs,
+		// flaking RemoveAll with "directory not empty".
+		"GIT_CONFIG_COUNT=3",
+		"GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false",
+		"GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0",
+		"GIT_CONFIG_KEY_2=gc.autoDetach", "GIT_CONFIG_VALUE_2=false",
 	}
 }
 
