@@ -26,9 +26,10 @@ import (
 )
 
 // newTrackerServer builds a test server with the tracker registry mounted:
-// real store, real vault, real builtin factory. forge stubs the Forgejo REST
-// client; nil panics if ever invoked (builtin-only tests).
-func newTrackerServer(t *testing.T, forge tracker.ForgejoFactory) (*testServer, *vault.Vault) {
+// real store, real vault, real builtin factory. forge/github stub the Forgejo
+// and GitHub REST clients; a nil factory panics if ever invoked (a binding a
+// given test does not exercise).
+func newTrackerServer(t *testing.T, forge tracker.ForgejoFactory, github tracker.GitHubFactory) (*testServer, *vault.Vault) {
 	t.Helper()
 	vlt, err := vault.New(make([]byte, vault.KeySize))
 	if err != nil {
@@ -36,11 +37,16 @@ func newTrackerServer(t *testing.T, forge tracker.ForgejoFactory) (*testServer, 
 	}
 	if forge == nil {
 		forge = func(tracker.ForgejoConfig) tracker.Tracker {
-			panic("forgejo factory invoked in a builtin-only test")
+			panic("forgejo factory invoked in a test that did not expect it")
+		}
+	}
+	if github == nil {
+		github = func(tracker.GitHubConfig) tracker.Tracker {
+			panic("github factory invoked in a test that did not expect it")
 		}
 	}
 	x := newTestServer(t, func(o *Options) {
-		o.Tracker = tracker.NewRegistry(o.Store, vlt, nil, builtin.New, forge)
+		o.Tracker = tracker.NewRegistry(o.Store, vlt, nil, builtin.New, forge, github)
 	})
 	x.setup("op", "password123")
 	return x, vlt
@@ -84,7 +90,7 @@ func issuesOf(t *testing.T, body map[string]any) []map[string]any {
 }
 
 func TestBuiltinIssueLifecycle(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID
@@ -252,7 +258,7 @@ func TestBuiltinIssueLifecycle(t *testing.T) {
 }
 
 func TestBuiltinReadyQueue(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID
@@ -359,7 +365,7 @@ func TestForgeBoundRepo(t *testing.T) {
 	x, vlt := newTrackerServer(t, func(c tracker.ForgejoConfig) tracker.Tracker {
 		gotCfg = c
 		return stub
-	})
+	}, nil)
 
 	// A real forge_token credential, vault-encrypted — the registry decrypts
 	// it on every TrackerFor.
@@ -463,22 +469,37 @@ func TestForgeBoundRepo(t *testing.T) {
 	}
 }
 
-func TestForgeUnsupportedKind(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+// TestForgeFlavorMismatch: a github.com-detected repo (forge_kind 'github')
+// bound to a FORGEJO-flavored credential is a loud configuration conflict
+// (ADR-0015 mismatch tripwire) — a 409 naming the disagreement, not a silent
+// 404 on first use.
+func TestForgeFlavorMismatch(t *testing.T) {
+	x, vlt := newTrackerServer(t, nil, nil)
+	blob, err := vlt.EncryptPayload(vault.ForgeTokenPayload{Host: "git.cloonar.com", Token: "tok", Forge: vault.ForgeForgejo})
+	if err != nil {
+		t.Fatalf("EncryptPayload: %v", err)
+	}
+	credID := ids.NewID("cred")
+	if _, err := x.st.CreateCredential(context.Background(), credID, "forge", store.CredentialKindForgeToken, blob, time.Now()); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
 	repo := seedTrackerRepo(t, x, "hub", func(r *store.Repo) {
 		r.TrackerBinding = store.TrackerBindingForge
 		r.ForgeKind = "github"
+		r.ForgeCredentialID = &credID
+		r.RemoteURL = "git@github.com:Cloonar/hub.git"
 	})
-	// Resolution fails before any credential work: github is fast-follow #1.
+	// Resolution fails on the tripwire before any wire call: the neither
+	// factory the server was built with is ever invoked.
 	resp := x.do("GET", "/api/v1/repos/"+repo.ID+"/issues", nil, nil)
 	wantStatus(t, resp, http.StatusConflict)
-	if got := decodeBody(t, resp); !strings.Contains(got["error"].(string), "forge kind not supported") {
-		t.Fatalf("error = %q", got["error"])
+	if got := decodeBody(t, resp); !strings.Contains(got["error"].(string), "does not match") {
+		t.Fatalf("error = %q, want the flavor-mismatch diagnostic", got["error"])
 	}
 }
 
 func TestForgeBadCredentialHostIs409(t *testing.T) {
-	x, vlt := newTrackerServer(t, nil)
+	x, vlt := newTrackerServer(t, nil, nil)
 	// Plain-http host: normalizeForgeHost rejects it (lab does not send forge
 	// tokens over cleartext) with ErrForgeHost, wrapped with the credential
 	// name. That is a configuration conflict pointing at the credential — a
@@ -506,7 +527,7 @@ func TestForgeBadCredentialHostIs409(t *testing.T) {
 }
 
 func TestIssueChangedSSE(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	h := csrfHeaders(x.ts.URL)
 
@@ -554,7 +575,7 @@ func TestIssueChangedSSE(t *testing.T) {
 }
 
 func TestTrackerMutationsRequireCSRF(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	base := "/api/v1/repos/" + repo.ID
 
@@ -589,7 +610,7 @@ func TestTrackerMutationsRequireCSRF(t *testing.T) {
 // treats a missing "labels" key (or a typoed field) as "clear everything":
 // absent key, unknown key, and null are 400s; an explicit [] still clears.
 func TestIssueLabelsPutBodyValidation(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID
@@ -638,7 +659,7 @@ func TestIssueLabelsPutBodyValidation(t *testing.T) {
 // errUnknownLabel sentinel (→ 400); a store failure does not (→ the handlers'
 // opaque logged 500), so internal diagnostics never ride the error envelope.
 func TestLabelIDsByName_errorClassification(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 
 	// Unknown name → the sentinel, carrying the offending name.
@@ -664,7 +685,7 @@ func TestLabelIDsByName_errorClassification(t *testing.T) {
 }
 
 func TestTrackerUnknownRepo404(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	h := csrfHeaders(x.ts.URL)
 	for _, tt := range []struct {
 		method, path string

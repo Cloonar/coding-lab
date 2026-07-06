@@ -27,7 +27,7 @@ func labelsOf(t *testing.T, body map[string]any) []map[string]any {
 }
 
 func TestLabelCRUD(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID
@@ -115,7 +115,7 @@ func TestLabelCRUD(t *testing.T) {
 // name resolution), so "bug " must collide with "bug" instead of coexisting
 // as an invisible twin.
 func TestLabelNamesTrimmed(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID
@@ -152,7 +152,7 @@ func TestLabelNamesTrimmed(t *testing.T) {
 }
 
 func TestLabelDeleteCascadesToIssues(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repo := seedTrackerRepo(t, x, "proj", nil)
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID
@@ -188,7 +188,7 @@ func TestLabelDeleteCascadesToIssues(t *testing.T) {
 }
 
 func TestLabelRepoScoping(t *testing.T) {
-	x, _ := newTrackerServer(t, nil)
+	x, _ := newTrackerServer(t, nil, nil)
 	repoA := seedTrackerRepo(t, x, "alpha", nil)
 	repoB := seedTrackerRepo(t, x, "beta", nil)
 	h := csrfHeaders(x.ts.URL)

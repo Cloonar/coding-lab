@@ -14,8 +14,28 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
+
+// validateForgeHostShape enforces the flavor-aware host SHAPE of a forge_token
+// payload at create/rotate time (ADR-0015): https-only, no userinfo/query, and
+// a path allowed only for the github flavor. It reuses tracker.NormalizeForgeHost
+// — the very routine the registry builds the BaseURL with — so a host that
+// passes create can never be rejected at resolve time. Non-forge_token kinds
+// pass through; the caller has already run vault.ValidateKindPayload, so the
+// bytes decode cleanly and the flavor enum is already vetted.
+func validateForgeHostShape(kind string, payload []byte) error {
+	if kind != vault.KindForgeToken {
+		return nil
+	}
+	var p vault.ForgeTokenPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil // shape already vetted by ValidateKindPayload; nothing to add
+	}
+	_, err := tracker.NormalizeForgeHost(p.ForgeFlavor(), p.Host)
+	return err
+}
 
 // credentialJSON is the metadata shape create/PATCH answer with — never the
 // payload (design §12: no secret readback).
@@ -47,6 +67,10 @@ func (s *Server) handleCredentialCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := vault.ValidateKindPayload(req.Kind, req.Payload); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateForgeHostShape(req.Kind, req.Payload); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -131,6 +155,10 @@ func (s *Server) handleCredentialUpdate(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := vault.ValidateKindPayload(cred.Kind, req.Payload); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validateForgeHostShape(cred.Kind, req.Payload); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

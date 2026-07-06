@@ -126,6 +126,9 @@ func newAFKServer(t *testing.T, mods ...func(*afkConfig)) *afkTestServer {
 		trackerReg := tracker.NewRegistry(st, vlt, nil, cfg.builtinFactory,
 			func(tracker.ForgejoConfig) tracker.Tracker {
 				panic("forgejo factory invoked in a builtin-only test")
+			},
+			func(tracker.GitHubConfig) tracker.Tracker {
+				panic("github factory invoked in a builtin-only test")
 			})
 		afkSvc, err := afk.New(afk.Options{
 			Store: st, Git: git, Runner: runner, Providers: reg, Trackers: trackerReg,
@@ -361,7 +364,7 @@ func TestAPI_AFKStartTrackerConfigConflict(t *testing.T) {
 
 	resp := x.do("POST", "/api/v1/repos/"+forge.ID+"/afk/start", map[string]any{}, csrfHeaders(x.ts.URL))
 	wantStatus(t, resp, http.StatusConflict)
-	if got := decodeBody(t, resp)["error"].(string); !strings.Contains(got, "forge kind not supported") {
+	if got := decodeBody(t, resp)["error"].(string); !strings.Contains(got, "no forge credential") {
 		t.Errorf("error = %q, want the tracker-config diagnostic", got)
 	}
 }
@@ -375,7 +378,7 @@ func TestAPI_AFKAutoRefusesUndrivableTracker(t *testing.T) {
 
 	resp := x.do("PUT", "/api/v1/repos/"+forge.ID+"/afk/auto", map[string]any{"enabled": true}, h)
 	wantStatus(t, resp, http.StatusConflict)
-	if got := decodeBody(t, resp)["error"].(string); !strings.Contains(got, "forge kind not supported") {
+	if got := decodeBody(t, resp)["error"].(string); !strings.Contains(got, "no forge credential") {
 		t.Errorf("error = %q, want the tracker-config diagnostic", got)
 	}
 	// Not persisted.

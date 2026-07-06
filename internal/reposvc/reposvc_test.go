@@ -252,8 +252,11 @@ func TestAddValidation(t *testing.T) {
 		{"empty remote", AddParams{RemoteURL: "  "}, "remote_url is required"},
 		{"underivable name", AddParams{RemoteURL: "///"}, "cannot derive"},
 		{"bad binding", AddParams{RemoteURL: "/tmp/x", TrackerBinding: "jira"}, "tracker_binding"},
-		{"forge binding without forge", AddParams{RemoteURL: "/tmp/x", TrackerBinding: "forge"}, "requires a detected forge host"},
-		{"forge binding without forge credential", AddParams{RemoteURL: "forgejo@git.cloonar.com:me/proj.git", TrackerBinding: "forge"}, "requires a forge_token credential"},
+		// The relaxed gate (ADR-0015): explicit forge no longer requires a
+		// detected host — a forge credential is the only gate, so both an
+		// undetected and a detected host answer the same credential error.
+		{"forge binding without credential (undetected host)", AddParams{RemoteURL: "/tmp/x", TrackerBinding: "forge"}, "requires a forge_token credential"},
+		{"forge binding without credential (detected host)", AddParams{RemoteURL: "forgejo@git.cloonar.com:me/proj.git", TrackerBinding: "forge"}, "requires a forge_token credential"},
 		{"forge token as git cred", AddParams{RemoteURL: "/tmp/x", CredentialID: &forgeCred.ID}, "want ssh_key or https_token"},
 		{"ssh key as forge cred", AddParams{RemoteURL: "/tmp/x", ForgeCredentialID: &sshCred.ID}, "want forge_token"},
 		{"missing git cred", AddParams{RemoteURL: "/tmp/x", CredentialID: &missing}, "not found"},
@@ -761,6 +764,32 @@ func TestForceDeleteSurvivesClientDisconnect(t *testing.T) {
 	}
 }
 
+// TestAddForgeBindingUndetectedHostWithCredential pins the ADR-0015 unlock: an
+// explicit forge binding on an UNRECOGNIZED host (forge_kind 'none') succeeds
+// with a forge credential alone — the detected-host requirement is gone, so a
+// second Forgejo instance or a GitHub Enterprise host binds without a code
+// change. (The clone job Add starts async will fail against the fake remote;
+// the row is created before that, which is all this asserts.)
+func TestAddForgeBindingUndetectedHostWithCredential(t *testing.T) {
+	e := newTestEnv(t)
+	forgeCred := e.createCredential(t, "ghe", vault.KindForgeToken,
+		vault.ForgeTokenPayload{Host: "ghe.example.com/api/v3", Token: "tk", Forge: vault.ForgeGitHub})
+	repo, err := e.svc.Add(t.Context(), AddParams{
+		RemoteURL:         "git@ghe.example.com:team/proj.git",
+		TrackerBinding:    "forge",
+		ForgeCredentialID: &forgeCred.ID,
+	})
+	if err != nil {
+		t.Fatalf("Add forge binding on undetected host: %v", err)
+	}
+	if repo.TrackerBinding != store.TrackerBindingForge {
+		t.Errorf("tracker_binding = %q, want forge", repo.TrackerBinding)
+	}
+	if repo.ForgeKind != "none" {
+		t.Errorf("forge_kind = %q, want none (the host is unrecognized)", repo.ForgeKind)
+	}
+}
+
 // TestUpdateSettingsForgeBindingRequiresForgeCredential pins the design
 // §3a cross-field invariant on PATCH: a repo can hold tracker_binding
 // 'forge' only while a forge credential is attached.
@@ -837,7 +866,7 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 		{ManualBranchPrefix: store.Set("")},
 		{BudgetMinutes: store.Set(ptr(0))},
 		{MaxInstancesOverride: store.Set(ptr(-1))},
-		{TrackerBinding: store.Set("forge")}, // forge_kind is none
+		{TrackerBinding: store.Set("forge")}, // no forge credential attached (ADR-0015: the detected-host gate is gone; the credential gate remains)
 		{TrackerBinding: store.Set("auto")},  // not a stored binding value
 		{DefaultBranch: store.Set("  ")},
 		{Name: store.Set("   ")}, // whitespace-only sanitizes to ""

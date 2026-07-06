@@ -67,6 +67,9 @@ func newCRServer(t *testing.T) *crTestServer {
 		reg := tracker.NewRegistry(o.Store, vlt, nil, builtin.New,
 			func(tracker.ForgejoConfig) tracker.Tracker {
 				panic("forgejo factory invoked in a builtin-only CR test")
+			},
+			func(tracker.GitHubConfig) tracker.Tracker {
+				panic("github factory invoked in a builtin-only CR test")
 			})
 		o.Tracker = reg
 		o.Vault = vlt

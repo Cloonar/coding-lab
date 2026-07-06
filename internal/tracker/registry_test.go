@@ -48,6 +48,11 @@ type fakeForgejo struct {
 	cfg ForgejoConfig
 }
 
+type fakeGitHub struct {
+	stubTracker
+	cfg GitHubConfig
+}
+
 // registryFixture wires a Registry over a real store + vault with fake backend
 // factories, so a resolved Tracker's captured config can be asserted.
 type registryFixture struct {
@@ -73,16 +78,23 @@ func newRegistryFixture(t *testing.T) registryFixture {
 	reg := NewRegistry(st, v, nil,
 		func(c BuiltinConfig) Tracker { return fakeBuiltin{cfg: c} },
 		func(c ForgejoConfig) Tracker { return fakeForgejo{cfg: c} },
+		func(c GitHubConfig) Tracker { return fakeGitHub{cfg: c} },
 	)
 	return registryFixture{reg: reg, store: st, vault: v}
 }
 
-// forgeCred stores a forge_token credential encrypted under the fixture's
-// vault and returns its id.
+// forgeCred stores a forgejo-flavored forge_token credential (the absent-flavor
+// default) encrypted under the fixture's vault and returns its id.
 func (f registryFixture) forgeCred(t *testing.T, host, token string) string {
+	return f.forgeCredFlavor(t, host, token, "")
+}
+
+// forgeCredFlavor stores a forge_token credential with an explicit flavor
+// (empty → the forgejo default) and returns its id.
+func (f registryFixture) forgeCredFlavor(t *testing.T, host, token, flavor string) string {
 	t.Helper()
 	id := ids.NewID("cred")
-	blob, err := f.vault.EncryptPayload(vault.ForgeTokenPayload{Host: host, Token: token})
+	blob, err := f.vault.EncryptPayload(vault.ForgeTokenPayload{Host: host, Token: token, Forge: flavor})
 	if err != nil {
 		t.Fatalf("encrypt forge payload: %v", err)
 	}
@@ -236,6 +248,200 @@ func TestTrackerForForgejoHostRejected(t *testing.T) {
 	}
 }
 
+// TestTrackerForGitHub: a github-flavored credential routes to the GitHub
+// backend, and the BaseURL is the API origin verbatim (no /api/v1 derivation).
+func TestTrackerForGitHub(t *testing.T) {
+	f := newRegistryFixture(t)
+	credID := f.forgeCredFlavor(t, "api.github.com", "gh-token", vault.ForgeGitHub)
+	repo := store.Repo{
+		ID:                "repo_gh",
+		TrackerBinding:    store.TrackerBindingForge,
+		ForgeKind:         string(ForgeKindGitHub),
+		ForgeCredentialID: &credID,
+		RemoteURL:         "git@github.com:octocat/hello-world.git",
+	}
+	tr, err := f.reg.TrackerFor(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("TrackerFor github: %v", err)
+	}
+	gh, ok := tr.(fakeGitHub)
+	if !ok {
+		t.Fatalf("TrackerFor github returned %T, want the github backend", tr)
+	}
+	if want := "https://api.github.com"; gh.cfg.BaseURL != want {
+		t.Errorf("github cfg.BaseURL = %q, want %q (no /api/v1 derivation)", gh.cfg.BaseURL, want)
+	}
+	if gh.cfg.Token != "gh-token" || gh.cfg.Owner != "octocat" || gh.cfg.Repo != "hello-world" {
+		t.Errorf("github cfg = %+v", gh.cfg)
+	}
+	if gh.cfg.HTTPClient == nil {
+		t.Error("github cfg.HTTPClient is nil; registry must supply a client")
+	}
+}
+
+// TestTrackerForGitHubEnterprise: a GHE credential's host is the real API root
+// (bare host under subdomain isolation, or host+path); the registry uses it
+// verbatim, never guessing a layout. A GHE host is not github.com, so
+// forge_kind is 'none' — exempt from the mismatch tripwire.
+func TestTrackerForGitHubEnterprise(t *testing.T) {
+	f := newRegistryFixture(t)
+	for _, tc := range []struct{ name, host, wantBase string }{
+		{"subdomain-isolated root", "api.ghe.example.com", "https://api.ghe.example.com"},
+		{"path-style API root", "ghe.example.com/api/v3", "https://ghe.example.com/api/v3"},
+		{"https prefix stripped", "https://ghe.example.com/api/v3", "https://ghe.example.com/api/v3"},
+		{"trailing slash trimmed", "ghe.example.com/api/v3/", "https://ghe.example.com/api/v3"},
+		{"port kept", "ghe.example.com:8443/api/v3", "https://ghe.example.com:8443/api/v3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			credID := f.forgeCredFlavor(t, tc.host, "tok", vault.ForgeGitHub)
+			repo := store.Repo{
+				ID:                "repo_ghe",
+				TrackerBinding:    store.TrackerBindingForge,
+				ForgeKind:         string(ForgeKindNone),
+				ForgeCredentialID: &credID,
+				RemoteURL:         "git@ghe.example.com:team/proj.git",
+			}
+			tr, err := f.reg.TrackerFor(context.Background(), repo)
+			if err != nil {
+				t.Fatalf("TrackerFor(host %q): %v", tc.host, err)
+			}
+			gh := tr.(fakeGitHub)
+			if gh.cfg.BaseURL != tc.wantBase {
+				t.Errorf("BaseURL = %q; want %q", gh.cfg.BaseURL, tc.wantBase)
+			}
+		})
+	}
+}
+
+// TestTrackerForGitHubHostRejected: github-flavor hosts that are not a valid
+// https API origin fail with ErrForgeHost naming the credential.
+func TestTrackerForGitHubHostRejected(t *testing.T) {
+	f := newRegistryFixture(t)
+	for _, tc := range []struct{ name, host string }{
+		{"http scheme", "http://api.github.com"},
+		{"other scheme", "ssh://api.github.com"},
+		{"empty", ""},
+		{"whitespace only", "   "},
+		{"bare scheme", "https://"},
+		{"userinfo", "tok@api.github.com"},
+		{"query", "api.github.com?x=1"},
+		{"space inside host", "api github.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			credID := f.forgeCredFlavor(t, tc.host, "tok", vault.ForgeGitHub)
+			repo := store.Repo{
+				ID:                "repo_ghbad",
+				TrackerBinding:    store.TrackerBindingForge,
+				ForgeKind:         string(ForgeKindNone),
+				ForgeCredentialID: &credID,
+				RemoteURL:         "git@ghe.example.com:team/proj.git",
+			}
+			tr, err := f.reg.TrackerFor(context.Background(), repo)
+			if !errors.Is(err, ErrForgeHost) {
+				t.Fatalf("TrackerFor(host %q) err = %v; want ErrForgeHost", tc.host, err)
+			}
+			if tr != nil {
+				t.Errorf("TrackerFor returned a non-nil tracker (%T) alongside the error", tr)
+			}
+			if !strings.Contains(err.Error(), "cred-"+credID) {
+				t.Errorf("error %q does not name the offending credential", err)
+			}
+		})
+	}
+}
+
+// TestTrackerForAbsentFlavorDefaultsForgejo: a credential written before
+// flavors existed (no forge field) decodes as forgejo and routes there —
+// correct by construction for every pre-ADR-0015 credential.
+func TestTrackerForAbsentFlavorDefaultsForgejo(t *testing.T) {
+	f := newRegistryFixture(t)
+	credID := f.forgeCred(t, "git.cloonar.com", "tok") // no explicit flavor
+	repo := store.Repo{
+		ID:                "repo_legacy",
+		TrackerBinding:    store.TrackerBindingForge,
+		ForgeKind:         string(ForgeKindForgejo),
+		ForgeCredentialID: &credID,
+		RemoteURL:         "forgejo@git.cloonar.com:Cloonar/nixos.git",
+	}
+	tr, err := f.reg.TrackerFor(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("TrackerFor: %v", err)
+	}
+	if _, ok := tr.(fakeForgejo); !ok {
+		t.Fatalf("absent-flavor credential routed to %T, want the forgejo backend", tr)
+	}
+}
+
+// TestTrackerForFlavorMismatch: a recognized host that disagrees with the
+// credential's flavor is a loud ErrForgeFlavorMismatch, both directions.
+func TestTrackerForFlavorMismatch(t *testing.T) {
+	f := newRegistryFixture(t)
+	for _, tc := range []struct {
+		name, forgeKind, flavor, remote string
+	}{
+		{"github host, forgejo cred", string(ForgeKindGitHub), vault.ForgeForgejo, "git@github.com:o/r.git"},
+		{"forgejo host, github cred", string(ForgeKindForgejo), vault.ForgeGitHub, "forgejo@git.cloonar.com:o/r.git"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			credID := f.forgeCredFlavor(t, "api.github.com", "tok", tc.flavor)
+			repo := store.Repo{
+				ID:                "repo_mm",
+				TrackerBinding:    store.TrackerBindingForge,
+				ForgeKind:         tc.forgeKind,
+				ForgeCredentialID: &credID,
+				RemoteURL:         tc.remote,
+			}
+			_, err := f.reg.TrackerFor(context.Background(), repo)
+			if !errors.Is(err, ErrForgeFlavorMismatch) {
+				t.Fatalf("err = %v, want ErrForgeFlavorMismatch", err)
+			}
+		})
+	}
+}
+
+// TestTrackerForNoneKindResolvesFromCredential: an unrecognized host
+// (forge_kind 'none') resolves from the credential's flavor alone — the
+// arbitrary-Forgejo-instance and GitHub-Enterprise unlock (ADR-0015).
+func TestTrackerForNoneKindResolvesFromCredential(t *testing.T) {
+	f := newRegistryFixture(t)
+
+	fjCred := f.forgeCredFlavor(t, "codeberg.org", "tok", vault.ForgeForgejo)
+	fjRepo := store.Repo{
+		ID:                "repo_codeberg",
+		TrackerBinding:    store.TrackerBindingForge,
+		ForgeKind:         string(ForgeKindNone),
+		ForgeCredentialID: &fjCred,
+		RemoteURL:         "git@codeberg.org:team/proj.git",
+	}
+	tr, err := f.reg.TrackerFor(context.Background(), fjRepo)
+	if err != nil {
+		t.Fatalf("TrackerFor codeberg: %v", err)
+	}
+	fj, ok := tr.(fakeForgejo)
+	if !ok {
+		t.Fatalf("codeberg routed to %T, want forgejo", tr)
+	}
+	if want := "https://codeberg.org/api/v1"; fj.cfg.BaseURL != want {
+		t.Errorf("codeberg BaseURL = %q, want %q", fj.cfg.BaseURL, want)
+	}
+
+	ghCred := f.forgeCredFlavor(t, "ghe.example.com/api/v3", "tok", vault.ForgeGitHub)
+	ghRepo := store.Repo{
+		ID:                "repo_ghe2",
+		TrackerBinding:    store.TrackerBindingForge,
+		ForgeKind:         string(ForgeKindNone),
+		ForgeCredentialID: &ghCred,
+		RemoteURL:         "git@ghe.example.com:team/proj.git",
+	}
+	tr, err = f.reg.TrackerFor(context.Background(), ghRepo)
+	if err != nil {
+		t.Fatalf("TrackerFor GHE: %v", err)
+	}
+	if _, ok := tr.(fakeGitHub); !ok {
+		t.Fatalf("GHE routed to %T, want github", tr)
+	}
+}
+
 func TestTrackerForForgeErrors(t *testing.T) {
 	f := newRegistryFixture(t)
 	forgeID := f.forgeCred(t, "git.cloonar.com", "tok")
@@ -248,14 +454,11 @@ func TestTrackerForForgeErrors(t *testing.T) {
 		wantErr error
 	}{
 		{
-			"github forge kind is unsupported (issue #1)",
+			// github host + forgejo credential: the mismatch tripwire fires
+			// (ADR-0015) instead of the old "github unsupported" error.
+			"github host with a forgejo credential is a mismatch",
 			store.Repo{ID: "r", TrackerBinding: store.TrackerBindingForge, ForgeKind: string(ForgeKindGitHub), ForgeCredentialID: &forgeID, RemoteURL: "git@github.com:foo/bar.git"},
-			ErrForgeUnsupported,
-		},
-		{
-			"none forge kind is unsupported",
-			store.Repo{ID: "r", TrackerBinding: store.TrackerBindingForge, ForgeKind: string(ForgeKindNone), ForgeCredentialID: &forgeID, RemoteURL: "forgejo@git.cloonar.com:Cloonar/nixos.git"},
-			ErrForgeUnsupported,
+			ErrForgeFlavorMismatch,
 		},
 		{
 			"forge binding without a forge credential",

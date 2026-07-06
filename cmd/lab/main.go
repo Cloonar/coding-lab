@@ -38,6 +38,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/forgejo"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/github"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
@@ -128,13 +129,16 @@ func run() int {
 
 	// Tracker registry (M4): resolves a repo-scoped Tracker per binding. The
 	// backend constructors are injected here — cmd/lab is the one place that
-	// imports tracker + builtin + forgejo, so no import cycle forms. The
-	// forgejo factory is a one-line adapter (forgejo.New returns the concrete
+	// imports tracker + builtin + forgejo + github, so no import cycle forms.
+	// Each forge factory is a one-line adapter (New returns the concrete
 	// client); the HTTP client is explicit with the pinned 30s timeout.
 	trackerReg := tracker.NewRegistry(st, vlt, &http.Client{Timeout: 30 * time.Second},
 		builtin.New,
 		func(c tracker.ForgejoConfig) tracker.Tracker {
 			return forgejo.New(c.HTTPClient, c.BaseURL, c.Token, c.Owner, c.Repo)
+		},
+		func(c tracker.GitHubConfig) tracker.Tracker {
+			return github.New(c.HTTPClient, c.BaseURL, c.Token, c.Owner, c.Repo)
 		})
 	// lab_tracker_requests_total (M8): every tracker resolved through the
 	// registry reports (binding, op, ok) — never error text or token bytes.

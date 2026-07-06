@@ -3,8 +3,10 @@
 // repo-add time (design §3a: repos.forge_kind): the remote-URL parsing is
 // ported verbatim from the v0 reference (docs/reference/lab-v0/forgejo.go),
 // generalized from v0's single is-Forgejo bool to the three-valued
-// forgejo|github|none vocabulary. github detection is recorded now; the
-// GitHub tracker itself is fast-follow (issue #1).
+// forgejo|github|none vocabulary. forge_kind is the auto-binding hint and the
+// registry's mismatch tripwire; the credential's flavor (ADR-0015) is what
+// actually routes, so a 'none' host still resolves to a forge tracker when the
+// operator binds one explicitly.
 package tracker
 
 import "strings"
