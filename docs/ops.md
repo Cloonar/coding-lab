@@ -62,6 +62,22 @@ Explicitly **excluded**: `<state>/runtime/` (materialized key files, known_hosts
 
 Restore procedure, sqlite backup mechanics (WAL), Postgres dump/restore: *(filled in by M8)*
 
+## Incogni mode
+
+*(stub — completed by M8; the measures below are live since M7)*
+
+Per-repo flag; when set, all seven measures of brief D15 §9 apply:
+
+1. **Attribution off at the source** — every spawn seeds the worktree's `.claude/settings.local.json` with `attribution{commit:"",pr:"",sessionUrl:false}` + `includeCoAuthoredBy:false` (keys verified against Claude Code 2.1.198; `internal/compat/compat.md` §4, `claudecode.SeedAttributionOff`).
+2. **Seed prompt** — the AFK seed prompt's commit step appends "No AI attribution, no Co-Authored-By, no generated-with footers anywhere." (`afk.SeedPrompt`).
+3. **Server-side body sanitization** — the agent API strips Co-Authored-By/generated-with/Claude-Session lines from PR/CR bodies before they reach the tracker (`agentapi.sanitizeBody`).
+4. **Neutral branch names** — incogni repos default to `issue-<N>` / `wip/`; claim parsing always uses the repo's configured pattern, never a literal `afk/`.
+5. **Real git identity** — spawned sessions and CR merges author as the repo's configured `git_author_name`/`git_author_email` (falling back to the global settings), never a bot identity.
+6. **Nothing lab seeds is committed** — `.claude/`, `CLAUDE.local.md` (and the seeded settings) are listed in `.git/info/exclude`, never `.gitignore`.
+7. **Pre-push guard** — a pre-push hook in the bare reference repo (shared by all its worktrees) rejects pushes whose outgoing commits carry AI attribution in the message or touch lab-seeded files, naming the offending commit. Installed when incogni turns on, removed when it turns off.
+
+**Honesty note**: incogni cannot hide the forge account identity of the token used (pushes and PRs appear under that account), nor statistical style/timing signals of agent-authored work. It removes explicit AI attribution markers; it does not make the work's origin undetectable.
+
 ## Monitoring
 
 `/healthz`, `/readyz`, `/metrics` (Prometheus). Metric catalog and alerting suggestions: *(filled in by M8)*
