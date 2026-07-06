@@ -2,6 +2,7 @@ package labctl
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"path/filepath"
@@ -61,6 +62,11 @@ func TestRunCommandSurface(t *testing.T) {
 		{"pr create missing title", []string{"pr", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
 		{"pr create missing body", []string{"pr", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
 		{"pr without create", []string{"pr"}, agentEnv, 2, "", "Usage"},
+		{"pr unknown sub", []string{"pr", "bogus"}, agentEnv, 2, "", `unknown subcommand "bogus"`},
+		{"pr view missing n", []string{"pr", "view"}, agentEnv, 2, "", "want <n>"},
+		{"pr view too many", []string{"pr", "view", "1", "2"}, agentEnv, 2, "", "want <n>"},
+		{"pr view bad n", []string{"pr", "view", "twelve"}, agentEnv, 2, "", "not an integer"},
+		{"pr list too many", []string{"pr", "list", "x"}, agentEnv, 2, "", "too many arguments"},
 
 		{"issue create missing title", []string{"issue", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
 		{"issue create missing body", []string{"issue", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
@@ -123,6 +129,8 @@ func (f resolverFunc) TrackerFor(ctx context.Context, repo store.Repo) (tracker.
 type fakeForge struct {
 	pullRef     tracker.PullRef
 	createdPull *[4]string // head, base, title, body
+	pulls       []tracker.PullRef
+	pullDetail  *tracker.PullDetail // served by Pull when the number matches
 }
 
 func (f *fakeForge) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -136,7 +144,17 @@ func (f *fakeForge) Issue(context.Context, int) (tracker.Issue, error) {
 }
 func (f *fakeForge) CreateComment(context.Context, int, string) error { return nil }
 func (f *fakeForge) Pulls(context.Context) ([]tracker.PullRef, error) {
-	return []tracker.PullRef{}, nil
+	if f.pulls == nil {
+		return []tracker.PullRef{}, nil
+	}
+	return f.pulls, nil
+}
+func (f *fakeForge) Pull(_ context.Context, number int) (tracker.PullDetail, error) {
+	if f.pullDetail != nil && f.pullDetail.Number == number {
+		return *f.pullDetail, nil
+	}
+	// Shaped like the real client's upstream-404: wraps the typed sentinel.
+	return tracker.PullDetail{}, fmt.Errorf("forgejo GET /repos/o/r/pulls/%d: unexpected status 404: %w", number, tracker.ErrNotFound)
 }
 func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	f.createdPull = &[4]string{head, base, title, body}
@@ -541,6 +559,93 @@ func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 	}
 	if len(cr.Closes) != 1 || cr.Closes[0] != 1 {
 		t.Errorf("closes = %v, want [1]", cr.Closes)
+	}
+}
+
+// TestPRViewOutput pins the plain-text PR view (issue #8): number+title,
+// state/head/url metadata lines, then the FULL body — the captured-card-YAML
+// retrieval path, no raw forge fallback. An unknown number is the server's
+// 404 envelope → message on stderr, exit 1 (never 2, never a panic).
+func TestPRViewOutput(t *testing.T) {
+	fk := &fakeForge{pullDetail: &tracker.PullDetail{
+		Number: 12, Title: "feat: capture card", Body: "card: |\n  kind: capture",
+		State: tracker.PullOpen, HeadBranch: "afk/7", URL: "https://forge.example/pr/12",
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "view", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	want := "#12 feat: capture card\n" +
+		"state: open\n" +
+		"head: afk/7\n" +
+		"url: https://forge.example/pr/12\n" +
+		"\ncard: |\n  kind: capture\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+
+	code, stdout, stderr = run(t, []string{"pr", "view", "999"}, f.env())
+	if code != 1 || stdout != "" {
+		t.Fatalf("unknown PR: exit = %d, stdout %q, want 1 with empty stdout", code, stdout)
+	}
+	if !strings.Contains(stderr, "not found") {
+		t.Errorf("stderr = %q, want the 404 message", stderr)
+	}
+}
+
+// TestPRListOutput pins the one-row-per-PR list: number, state, head, url —
+// across all states, tab-separated like every labctl list.
+func TestPRListOutput(t *testing.T) {
+	fk := &fakeForge{pulls: []tracker.PullRef{
+		{Number: 12, HeadBranch: "afk/7", State: tracker.PullOpen, URL: "https://forge.example/pr/12"},
+		{Number: 3, HeadBranch: "afk/2", State: tracker.PullMerged, URL: "https://forge.example/pr/3"},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "list"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	want := "#12\topen\tafk/7\thttps://forge.example/pr/12\n" +
+		"#3\tmerged\tafk/2\thttps://forge.example/pr/3\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// TestPRViewBuiltinRoundTrip proves the end-to-end acceptance path on a
+// builtin repo: the body a run filed with `pr create` (a card YAML) comes
+// back verbatim through `pr view` — plus the server-injected Closes — with
+// no forge/tea/gh fallback anywhere.
+func TestPRViewBuiltinRoundTrip(t *testing.T) {
+	f := newBuiltinFixture(t)
+
+	code, _, stderr := run(t, []string{"pr", "create", "--title", "feat: capture card", "--body", "card: |\n  kind: capture"}, f.env())
+	if code != 0 {
+		t.Fatalf("pr create: exit = %d, stderr %q", code, stderr)
+	}
+
+	code, stdout, stderr := run(t, []string{"pr", "view", "1"}, f.env())
+	if code != 0 {
+		t.Fatalf("pr view: exit = %d, stderr %q", code, stderr)
+	}
+	if !strings.HasPrefix(stdout, "#1 feat: capture card\nstate: open\nhead: afk/1\n") {
+		t.Errorf("stdout = %q, want the CR header lines", stdout)
+	}
+	if !strings.Contains(stdout, "card: |\n  kind: capture") || !strings.Contains(stdout, "Closes #1") {
+		t.Errorf("stdout = %q, want the card YAML body and the injected Closes", stdout)
+	}
+
+	code, stdout, stderr = run(t, []string{"pr", "list"}, f.env())
+	if code != 0 {
+		t.Fatalf("pr list: exit = %d, stderr %q", code, stderr)
+	}
+	if !strings.HasPrefix(stdout, "#1\topen\tafk/1\t/repos/") {
+		t.Errorf("stdout = %q, want the CR row", stdout)
 	}
 }
 

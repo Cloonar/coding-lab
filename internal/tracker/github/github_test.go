@@ -371,6 +371,77 @@ func TestDerivePullState(t *testing.T) {
 	}
 }
 
+// --- Pull ------------------------------------------------------------------
+
+// TestPull pins the single-PR detail read (labctl pr view): one GET
+// /pulls/{n}, the full body carried through verbatim, and the same
+// merged_at-derived three-valued state as Pulls.
+func TestPull(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"number":72,"title":"feat: capture card",
+		  "body":"card: |\n  kind: capture\n  target: nixos",
+		  "state":"closed","merged_at":"2026-07-01T10:00:00Z","head":{"ref":"afk/63"},
+		  "html_url":"https://github.com/octocat/hello-world/pull/72"}`)
+	})
+
+	pd, err := c.Pull(context.Background(), 72)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != apiPrefix+"/pulls/72" {
+		t.Errorf("request = %s %s; want GET %s/pulls/72", gotMethod, gotPath, apiPrefix)
+	}
+	if gotAuth != "Bearer "+testToken {
+		t.Errorf("Authorization = %q; want %q", gotAuth, "Bearer "+testToken)
+	}
+	want := tracker.PullDetail{
+		Number:     72,
+		Title:      "feat: capture card",
+		Body:       "card: |\n  kind: capture\n  target: nixos",
+		State:      tracker.PullMerged, // state=closed + merged_at set → merged
+		HeadBranch: "afk/63",
+		URL:        "https://github.com/octocat/hello-world/pull/72",
+	}
+	if pd != want {
+		t.Errorf("PullDetail = %+v; want %+v", pd, want)
+	}
+}
+
+// TestPull_notFound pins the unknown-number path: GitHub's 404 unwraps to
+// tracker.ErrNotFound, never leaking the token.
+func TestPull_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+	})
+
+	_, err := c.Pull(context.Background(), 999)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestPull_rateLimited pins ADR-0015 decision 6 on the new read: a throttled
+// call unwraps to ErrRateLimited like every other GitHub client op.
+func TestPull_rateLimited(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1720000000")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"API rate limit exceeded"}`)
+	})
+
+	_, err := c.Pull(context.Background(), 72)
+	if !errors.Is(err, tracker.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
 // --- CreatePull ------------------------------------------------------------
 
 func TestCreatePull(t *testing.T) {

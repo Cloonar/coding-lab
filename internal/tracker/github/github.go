@@ -141,6 +141,8 @@ type ghPullHead struct {
 
 type ghPull struct {
 	Number   int        `json:"number"`
+	Title    string     `json:"title"`
+	Body     string     `json:"body"`
 	State    string     `json:"state"`
 	MergedAt *time.Time `json:"merged_at"` // non-nil ⇒ merged (the list endpoint has no `merged` bool)
 	Head     ghPullHead `json:"head"`
@@ -247,6 +249,17 @@ func (c *Client) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
 		out = append(out, toPullRef(gh))
 	}
 	return out, nil
+}
+
+// Pull returns one pull request in full detail, body included — the read
+// behind labctl pr view. An unknown number is GitHub's 404 → tracker.ErrNotFound;
+// a throttled call unwraps to tracker.ErrRateLimited like every other read.
+func (c *Client) Pull(ctx context.Context, number int) (tracker.PullDetail, error) {
+	var gh ghPull
+	if _, err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &gh); err != nil {
+		return tracker.PullDetail{}, err
+	}
+	return toPullDetail(gh), nil
 }
 
 // CreatePull opens a pull request from head into base and returns the created
@@ -455,6 +468,7 @@ func (c *Client) issuesPath() string     { return c.repoPath("/issues") }
 func (c *Client) pullsPath() string      { return c.repoPath("/pulls") }
 func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
+func (c *Client) pullPath(n int) string  { return c.repoPath("/pulls/" + strconv.Itoa(n)) }
 
 // --- mapping ---------------------------------------------------------------
 
@@ -514,6 +528,17 @@ func toPullRef(gh ghPull) tracker.PullRef {
 		Number:     gh.Number,
 		HeadBranch: gh.Head.Ref,
 		State:      derivePullState(gh.State, gh.MergedAt != nil),
+		URL:        gh.HTMLURL,
+	}
+}
+
+func toPullDetail(gh ghPull) tracker.PullDetail {
+	return tracker.PullDetail{
+		Number:     gh.Number,
+		Title:      gh.Title,
+		Body:       gh.Body,
+		State:      derivePullState(gh.State, gh.MergedAt != nil),
+		HeadBranch: gh.Head.Ref,
 		URL:        gh.HTMLURL,
 	}
 }

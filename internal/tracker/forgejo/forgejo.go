@@ -123,6 +123,8 @@ type fjPullHead struct {
 
 type fjPull struct {
 	Number  int        `json:"number"`
+	Title   string     `json:"title"`
+	Body    string     `json:"body"`
 	State   string     `json:"state"`
 	Merged  bool       `json:"merged"`
 	Head    fjPullHead `json:"head"`
@@ -228,6 +230,17 @@ func (c *Client) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
 		out = append(out, toPullRef(fj))
 	}
 	return out, nil
+}
+
+// Pull returns one pull request in full detail, body included — the read
+// behind labctl pr view. An unknown number is Forgejo's 404, which the
+// statusError unwraps to tracker.ErrNotFound like every single-subject read.
+func (c *Client) Pull(ctx context.Context, number int) (tracker.PullDetail, error) {
+	var fj fjPull
+	if err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &fj); err != nil {
+		return tracker.PullDetail{}, err
+	}
+	return toPullDetail(fj), nil
 }
 
 // CreatePull opens a pull request from head into base and returns the created
@@ -432,6 +445,7 @@ func (c *Client) issuesPath() string     { return c.repoPath("/issues") }
 func (c *Client) pullsPath() string      { return c.repoPath("/pulls") }
 func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
+func (c *Client) pullPath(n int) string  { return c.repoPath("/pulls/" + strconv.Itoa(n)) }
 
 // --- mapping ---------------------------------------------------------------
 
@@ -504,6 +518,17 @@ func toPullRef(fj fjPull) tracker.PullRef {
 		Number:     fj.Number,
 		HeadBranch: fj.Head.Ref,
 		State:      derivePullState(fj.State, fj.Merged),
+		URL:        fj.HTMLURL,
+	}
+}
+
+func toPullDetail(fj fjPull) tracker.PullDetail {
+	return tracker.PullDetail{
+		Number:     fj.Number,
+		Title:      fj.Title,
+		Body:       fj.Body,
+		State:      derivePullState(fj.State, fj.Merged),
+		HeadBranch: fj.Head.Ref,
 		URL:        fj.HTMLURL,
 	}
 }

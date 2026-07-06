@@ -54,6 +54,24 @@ type PR struct {
 	URL    string `json:"url"`
 }
 
+// PRDetail is the agent API's GET /prs/{n} shape: metadata plus the full body.
+type PRDetail struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	State  string `json:"state"`
+	Head   string `json:"head"`
+	URL    string `json:"url"`
+}
+
+// PRRef is one row of the agent API's GET /prs list (no title/body).
+type PRRef struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
+	Head   string `json:"head"`
+	URL    string `json:"url"`
+}
+
 // Client is the transport to /agent/v1, built from LAB_URL/LAB_TOKEN.
 type Client struct {
 	BaseURL string
@@ -97,6 +115,24 @@ func (c *Client) PRCreate(title, body string) (PR, error) {
 	err := c.do(http.MethodPost, "/agent/v1/prs",
 		map[string]string{"title": title, "body": body}, &pr)
 	return pr, err
+}
+
+// PRView fetches PR n in full detail, body included.
+func (c *Client) PRView(n int) (PRDetail, error) {
+	var pd PRDetail
+	err := c.do(http.MethodGet, "/agent/v1/prs/"+strconv.Itoa(n), nil, &pd)
+	return pd, err
+}
+
+// PRList lists the repo's PRs across all states.
+func (c *Client) PRList() ([]PRRef, error) {
+	var resp struct {
+		PRs []PRRef `json:"prs"`
+	}
+	if err := c.do(http.MethodGet, "/agent/v1/prs", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.PRs, nil
 }
 
 // IssueCreate files a new issue with labels attached at creation.
