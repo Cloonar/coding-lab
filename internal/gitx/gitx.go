@@ -3,9 +3,14 @@
 // (CloneBare), default-branch detection (DefaultBranch), remote-tracking
 // ref refresh (Fetch), repo-name sanitization (SanitizeRepoName /
 // NameFromURL, the v0 scanner rules), and the per-repo branch-pattern
-// grammar (design §4a). The worktree lifecycle — AddWorktree, guarded
-// teardown, sweep queries, decideTeardown — slots into this package in M3
-// and reuses the same Engine plumbing (run, baseEnv, gitTimeout).
+// grammar (design §4a). M3 adds the worktree lifecycle ported from v0
+// git.go (worktree.go: AddWorktree with the fail-loud fetch and no
+// fallback base, the separate RemoveWorktree/DeleteBranch rollback
+// helpers, the dirty/merged/parked queries), the guarded teardown rule
+// (teardown.go: decideTeardown verbatim + TeardownGuarded), and the
+// naming algebra (session.go: <repoName>~<label> sessions, dash-joined
+// worktree dirs, minute-bumped manual labels) — all on the same Engine
+// plumbing (run, baseEnv, gitTimeout).
 //
 // Every git subprocess runs with a minimal base environment, never an
 // os.Environ() passthrough: credentialed operations receive exactly the
