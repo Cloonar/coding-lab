@@ -1,4 +1,4 @@
-package afk
+package afk_test
 
 // The M5 acceptance smoke, local form: the FULL AFK cycle over the real
 // seams. REAL engine + REAL sqlite store + REAL git fixtures + REAL tmux on a
@@ -7,6 +7,11 @@ package afk
 // agent API served over httptest + the REAL labctl binary driven by a fake
 // claude shell script inside the tmux session (LAB_URL/LAB_TOKEN from the
 // session env lab sets, labctl resolved via PATH).
+//
+// External test package on purpose: the M6 builtin variant
+// (TestAFKCycleBuiltinIntegration) merges its change request through the REAL
+// operator API (internal/httpapi), and httpapi imports afk — an in-package
+// test file could never import it back.
 //
 // Registry seam note: the registry pins BaseURL to https://<host>/api/v1,
 // which can never reach a plain-HTTP httptest server, so — like the M4
@@ -36,6 +41,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,9 +55,11 @@ import (
 
 	"path/filepath"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -65,6 +74,37 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/forgejo"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
+
+// clockTime/gitCmd/makeOrigin mirror the in-package helpers of engine_test.go
+// (package afk) — this file lives in the external afk_test package (see the
+// header note) and cannot see them.
+var clockTime = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+func gitCmd(t *testing.T, home, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(), testutil.HermeticGitEnv(home)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func makeOrigin(t *testing.T, home string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "origin")
+	gitCmd(t, home, "", "init", "-q", "-b", "main", dir)
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+	gitCmd(t, home, dir, "add", ".")
+	gitCmd(t, home, dir, "commit", "-q", "-m", "c0")
+	return dir
+}
 
 // --- fake forge (stateful Forgejo REST surface) ------------------------------
 
@@ -370,7 +410,7 @@ func cycleBranchExists(env []string, bareDir, branch string) bool {
 type cycleWorld struct {
 	t     *testing.T
 	ctx   context.Context
-	svc   *Service
+	svc   *afk.Service
 	inst  *instance.Service
 	recon *reconcile.Service
 	st    *store.Store
@@ -379,6 +419,7 @@ type cycleWorld struct {
 	prov  *cycleProvider
 	clock *testutil.FakeClock
 	agent *httptest.Server
+	bus   *events.Bus
 
 	home         string
 	env          []string
@@ -439,9 +480,12 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	})
 
 	clock := testutil.NewFakeClock(clockTime)
+	bus := events.NewBus()
 
 	// The REAL agent API over httptest — LAB_URL for every spawned session.
-	agent := httptest.NewServer(agentapi.New(st, trackers, nil, clock.Now).Handler())
+	// It carries the real bus (production wiring): a builtin PR create
+	// publishes cr.changed.
+	agent := httptest.NewServer(agentapi.New(st, trackers, bus, nil, clock.Now).Handler())
 	t.Cleanup(agent.Close)
 
 	prov := &cycleProvider{Fake: providertest.New(), scripts: map[string]string{}}
@@ -452,7 +496,6 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 
 	git := gitx.New("git")
 	runner := cycleTmux(t)
-	bus := events.NewBus()
 	guard := startguard.New()
 
 	inst, err := instance.New(instance.Options{
@@ -463,7 +506,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	if err != nil {
 		t.Fatalf("instance.New: %v", err)
 	}
-	svc, err := New(Options{
+	svc, err := afk.New(afk.Options{
 		Store: st, Git: git, Runner: runner, Providers: reg, Trackers: trackers,
 		Instances: inst, Materializer: mat, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
@@ -483,7 +526,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 
 	return &cycleWorld{
 		t: t, ctx: ctx, svc: svc, inst: inst, recon: recon, st: st, tmux: runner,
-		forge: forge, prov: prov, clock: clock, agent: agent,
+		forge: forge, prov: prov, clock: clock, agent: agent, bus: bus,
 		home: home, env: env, reposDir: reposDir, labctlDir: filepath.Dir(labctlBin),
 		forgeOwner: "it", forgeToken: forgeToken, forgeCredID: credID,
 		worktreeRoot: worktreeRoot,
@@ -586,10 +629,13 @@ func (w *cycleWorld) agentGet(token, path string) int {
 // successScript is the fake claude of the happy path: capture the seed
 // prompt's first line + LAB_TOKEN, then drive the REAL labctl (via PATH) and
 // git exactly as the seed prompt instructs, and stay alive for the reaper.
-func successScript(out, bin string) string {
+// workFile is the file the "work" touches — two runs in the same repo must
+// touch different files or the second commit would be empty.
+func successScript(out, bin, workFile string) string {
 	return `#!/bin/sh
 OUT=` + shq(out) + `
 BIN=` + shq(bin) + `
+WORK=` + shq(workFile) + `
 printf '%s\n' "$1" | head -n 1 > "$OUT/seed.txt"
 printf '%s\n' "$LAB_TOKEN" > "$OUT/token.txt"
 PATH="$BIN:$PATH"; export PATH
@@ -598,8 +644,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
   set -ex
   labctl issue view > "$OUT/issue.txt"
   labctl issue list > "$OUT/list.txt"
-  printf 'done\n' > work.txt
-  git add work.txt
+  printf 'done\n' > "$WORK"
+  git add "$WORK"
   git commit -q -m 'feat: resolve the flux issue'
   git push -q origin HEAD
   labctl pr create --title 'resolve the flux issue' --body 'work is done' > "$OUT/pr.txt"
@@ -621,7 +667,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 
 	// Phase 1 world: repo "cyc", one ready issue, fake claude does the work.
 	out := t.TempDir()
-	script := writeCycleScript(t, "claude-success.sh", successScript(out, w.labctlDir))
+	script := writeCycleScript(t, "claude-success.sh", successScript(out, w.labctlDir, "work.txt"))
 	cyc, cycOrigin := w.addRepo("cyc", script, nil,
 		cycleForgeIssue{Number: 1, Title: "Wire the flux capacitor", Body: "make it hum", State: "open", Labels: []string{tracker.ReadyLabel}},
 		cycleForgeIssue{Number: 2, Title: "later", Body: "", State: "open", Labels: nil},
@@ -659,7 +705,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 		// Seed prompt arrived as the spawn argv's trailing positional ($1):
 		// its first line matches the pinned SeedPrompt.
 		seed, _ := os.ReadFile(filepath.Join(out, "seed.txt"))
-		if got, want := strings.TrimSpace(string(seed)), strings.SplitN(SeedPrompt(1, "afk/1", false), "\n", 2)[0]; got != want {
+		if got, want := strings.TrimSpace(string(seed)), strings.SplitN(afk.SeedPrompt(1, "afk/1", false), "\n", 2)[0]; got != want {
 			t.Errorf("seed first line = %q, want %q", got, want)
 		}
 		// labctl issue view answered the run's CLAIMED issue with the pinned
@@ -747,7 +793,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 	)
 
 	ok = t.Run("three strikes pause and reset", func(t *testing.T) {
-		for strike := 1; strike <= PauseThreshold; strike++ {
+		for strike := 1; strike <= afk.PauseThreshold; strike++ {
 			run, err := w.svc.StartManualAFK(w.ctx, doom.ID)
 			if err != nil {
 				t.Fatalf("strike %d start: %v", strike, err)
@@ -786,7 +832,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 			t.Fatal("scheduler launched on a paused repo")
 		}
 		// ...and a manual start is refused (the operator API's 409).
-		if _, err := w.svc.StartManualAFK(w.ctx, doom.ID); !errors.Is(err, ErrRepoPaused) {
+		if _, err := w.svc.StartManualAFK(w.ctx, doom.ID); !errors.Is(err, afk.ErrRepoPaused) {
 			t.Fatalf("manual start on paused repo = %v, want ErrRepoPaused", err)
 		}
 
@@ -870,6 +916,368 @@ func TestAFKCycleIntegration(t *testing.T) {
 		}
 		if after := w.forge.pullsListCount(w.forgeOwner, "doom"); after != lists {
 			t.Errorf("sweep listed pulls for a repo with only a stopped run (%d → %d)", lists, after)
+		}
+	})
+}
+
+// --- the M6 builtin variant ---------------------------------------------------
+
+// addBuiltinRepo builds one BUILTIN-bound repo in the production git topology
+// of the M6 merge path: a BARE origin (the repo's REAL remote — CRMerge pushes
+// refs/heads/main straight to it), a work clone that can advance origin's main
+// (the "someone else pushed" actor of the merge-commit variant), and the lab
+// bare reference clone. The repo row carries the git author identity the merge
+// commit must be authored with (D15 measure 5); CreateRepo seeds the triage
+// labels, among them tracker.ReadyLabel.
+func (w *cycleWorld) addBuiltinRepo(name, script string) (repo store.Repo, origin, work string) {
+	w.t.Helper()
+	work = makeOrigin(w.t, w.home) // c0 on main
+	origin = filepath.Join(w.t.TempDir(), name+"-origin.git")
+	gitCmd(w.t, w.home, "", "init", "-q", "--bare", "-b", "main", origin)
+	gitCmd(w.t, w.home, work, "remote", "add", "origin", origin)
+	gitCmd(w.t, w.home, work, "push", "-q", "origin", "main")
+
+	repoID := ids.NewID("repo")
+	if err := os.MkdirAll(w.reposDir, 0o755); err != nil {
+		w.t.Fatalf("mkdir repos: %v", err)
+	}
+	if err := gitx.New("git").CloneBare(w.ctx, "file://"+origin, filepath.Join(w.reposDir, repoID+".git"), w.env, nil); err != nil {
+		w.t.Fatalf("CloneBare: %v", err)
+	}
+	author, email := "Cycle Human", "human@lab.test"
+	repo, err := w.st.CreateRepo(w.ctx, store.Repo{
+		ID: repoID, Name: name,
+		RemoteURL:      "file://" + origin,
+		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
+		DefaultBranch: "main", Provider: "claude-code",
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		GitAuthorName: &author, GitAuthorEmail: &email,
+		CloneStatus: store.CloneStatusReady, CreatedAt: clockTime,
+	})
+	if err != nil {
+		w.t.Fatalf("CreateRepo: %v", err)
+	}
+	w.prov.setScript(name, script)
+	return repo, origin, work
+}
+
+// readyIssue files a built-in issue carrying tracker.ReadyLabel — the builtin
+// ready queue is the store, not a forge.
+func (w *cycleWorld) readyIssue(repo store.Repo, title, body string) store.Issue {
+	w.t.Helper()
+	labels, err := w.st.LabelsByRepo(w.ctx, repo.ID)
+	if err != nil {
+		w.t.Fatalf("LabelsByRepo: %v", err)
+	}
+	readyID := ""
+	for _, l := range labels {
+		if l.Name == tracker.ReadyLabel {
+			readyID = l.ID
+		}
+	}
+	if readyID == "" {
+		w.t.Fatalf("repo %s has no %q label", repo.Name, tracker.ReadyLabel)
+	}
+	is, err := w.st.CreateIssueWithLabels(w.ctx, repo.ID, title, body, []string{readyID}, w.clock.Now())
+	if err != nil {
+		w.t.Fatalf("CreateIssueWithLabels: %v", err)
+	}
+	return is
+}
+
+// operatorAPI is the REAL httpapi server over httptest, authenticated with a
+// PAT (explicit credential — bypasses CSRF, so the test needs no cookie jar).
+// It shares the world's store, bus, git env and repos dir: exactly the
+// production wiring of the CR routes.
+type operatorAPI struct {
+	t   *testing.T
+	ctx context.Context
+	url string
+	pat string
+}
+
+func newOperatorAPI(w *cycleWorld) *operatorAPI {
+	w.t.Helper()
+	srv, err := httpapi.New(httpapi.Options{
+		Store:  w.st,
+		Bus:    w.bus,
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Git:    gitx.New("git"), ReposDir: w.reposDir, GitEnv: w.env,
+		Now: w.clock.Now,
+	})
+	if err != nil {
+		w.t.Fatalf("httpapi.New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	w.t.Cleanup(ts.Close)
+
+	user, err := w.st.CreateUser(w.ctx, "cycle-op", "unused-password-hash")
+	if err != nil {
+		w.t.Fatalf("CreateUser: %v", err)
+	}
+	token, hash := ids.NewToken("pat")
+	if _, err := w.st.CreateAPIToken(w.ctx, user.ID, "cycle", hash); err != nil {
+		w.t.Fatalf("CreateAPIToken: %v", err)
+	}
+	return &operatorAPI{t: w.t, ctx: w.ctx, url: ts.URL, pat: token}
+}
+
+// do sends one PAT-authenticated request and decodes the JSON body.
+func (a *operatorAPI) do(method, path string) (int, map[string]any) {
+	a.t.Helper()
+	req, err := http.NewRequestWithContext(a.ctx, method, a.url+path, nil)
+	if err != nil {
+		a.t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+a.pat)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		a.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		a.t.Fatalf("%s %s: decode body: %v", method, path, err)
+	}
+	return resp.StatusCode, body
+}
+
+// waitForBusEvents drains ch until every wanted event type was seen (other
+// events in between are fine) or fails after a deadline.
+func waitForBusEvents(t *testing.T, ch <-chan events.Event, want ...string) {
+	t.Helper()
+	missing := map[string]bool{}
+	for _, name := range want {
+		missing[name] = true
+	}
+	deadline := time.After(10 * time.Second)
+	for len(missing) > 0 {
+		select {
+		case e, ok := <-ch:
+			if !ok {
+				t.Fatalf("bus subscription closed; still missing %v", missing)
+			}
+			delete(missing, e.Type)
+		case <-deadline:
+			t.Fatalf("bus events never arrived: %v", missing)
+		}
+	}
+}
+
+// crOf pulls the {cr} envelope out of a merge/close response.
+func crOf(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+	cr, ok := body["cr"].(map[string]any)
+	if !ok {
+		t.Fatalf("no cr envelope in %v", body)
+	}
+	return cr
+}
+
+// runBuiltinCycle drives one full agent run on a builtin repo through the real
+// stack — manual start (the claim), fake claude working through labctl against
+// the real agent API (the PR create lands as a change request via
+// builtin.Tracker.CreatePull), then the reap — and asserts the M6 pinned
+// signals: the CR row with its parsed closes, SUCCESS classified off builtin
+// Pulls (the done-signal), and the guarded teardown keeping the unmerged head
+// branch. Returns the run and the head branch's sha.
+func runBuiltinCycle(t *testing.T, w *cycleWorld, repo store.Repo, out string, issueN, crN int) (store.Run, string) {
+	t.Helper()
+	branch := fmt.Sprintf("afk/%d", issueN)
+	session := fmt.Sprintf("%s~afk-%d", repo.Name, issueN)
+
+	run, err := w.svc.StartManualAFK(w.ctx, repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK: %v", err)
+	}
+	if run.Branch != branch || run.SessionName != session {
+		t.Fatalf("run identity = %s/%s, want %s/%s", run.Branch, run.SessionName, branch, session)
+	}
+	if run.IssueNumber == nil || *run.IssueNumber != issueN {
+		t.Fatalf("issue_number = %v, want %d", run.IssueNumber, issueN)
+	}
+
+	status := waitForCycleFile(t, filepath.Join(out, "status"), filepath.Join(out, "log.txt"), 90*time.Second)
+	if strings.TrimSpace(status) != "0" {
+		log, _ := os.ReadFile(filepath.Join(out, "log.txt"))
+		t.Fatalf("fake claude exited %s; log:\n%s", strings.TrimSpace(status), log)
+	}
+
+	// labctl issue view answered the claimed issue from the STORE-backed
+	// builtin tracker (no forge anywhere in this test).
+	issueOut, _ := os.ReadFile(filepath.Join(out, "issue.txt"))
+	if !strings.HasPrefix(string(issueOut), fmt.Sprintf("#%d ", issueN)) {
+		t.Errorf("labctl issue view output:\n%s", issueOut)
+	}
+
+	// labctl pr create landed as a CHANGE REQUEST row: head = the run's
+	// branch, base = the default branch, closes parsed from the server-side
+	// injected `Closes #N`, and the lab-relative URL printed by labctl.
+	cr, err := w.st.CRByRepoNumber(w.ctx, repo.ID, crN)
+	if err != nil {
+		t.Fatalf("CRByRepoNumber(%d): %v", crN, err)
+	}
+	if cr.State != store.CRStateOpen || cr.HeadBranch != branch || cr.BaseBranch != "main" {
+		t.Fatalf("CR = %s %s→%s, want open %s→main", cr.State, cr.HeadBranch, cr.BaseBranch, branch)
+	}
+	if len(cr.Closes) != 1 || cr.Closes[0] != issueN {
+		t.Fatalf("CR closes = %v, want [%d]", cr.Closes, issueN)
+	}
+	if cr.Body != fmt.Sprintf("work is done\n\nCloses #%d", issueN) {
+		t.Errorf("CR body = %q, want the injected Closes #%d", cr.Body, issueN)
+	}
+	prOut, _ := os.ReadFile(filepath.Join(out, "pr.txt"))
+	if got, want := string(prOut), fmt.Sprintf("%d\t/repos/%s/crs/%d\n", crN, repo.ID, crN); got != want {
+		t.Errorf("labctl pr create output = %q, want %q", got, want)
+	}
+
+	// The reap: the OPEN CR from builtin Pulls IS the done-signal → success;
+	// the guarded teardown removes the clean worktree, keeps the unmerged
+	// head branch (the CR's merge source).
+	w.svc.ReapOnce(w.ctx, w.clock.Now())
+	got := w.run(repo, run.ID)
+	if got.Outcome != store.RunOutcomeSuccess {
+		t.Fatalf("outcome = %s, want success off the builtin CR done-signal", got.Outcome)
+	}
+	if w.alive(session) {
+		t.Errorf("session %s still live after the success reap", session)
+	}
+	if _, err := os.Stat(run.WorktreePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("clean worktree not removed: %v", err)
+	}
+	if !cycleBranchExists(w.env, w.bare(repo), branch) {
+		t.Fatalf("unmerged head branch %s was deleted by the success teardown", branch)
+	}
+	return got, gitCmd(t, w.home, w.bare(repo), "rev-parse", "refs/heads/"+branch)
+}
+
+// TestAFKCycleBuiltinIntegration is the M6 acceptance, local form: the FULL
+// circle on a repo with NO forge — claim → work → change request → operator
+// merge → sweep. Same real seams as the forge cycle (engine, store, tmux,
+// labctl-driven fake claude, agent API over httptest), plus the REAL operator
+// API (httpapi over httptest, PAT-authenticated) for the merges:
+//
+//  1. builtin success + ff merge: a ready store issue is claimed, the fake
+//     claude opens a CR through labctl (closes=[1] from the injected
+//     directive), the reaper classifies success off builtin Pulls, the
+//     teardown keeps the unmerged branch; POST /crs/1/merge fast-forwards
+//     origin main to the head sha, auto-closes the built-in issue, publishes
+//     cr.changed + issue.changed; the runtime sweep then GCs the now-merged
+//     branch.
+//  2. merge-commit path: a second cycle, but origin main advances between the
+//     reap and the merge → POST /crs/2/merge builds a real merge commit
+//     (parent1 = origin's advanced tip, parent2 = the head) authored with the
+//     repo's configured REAL identity, and the sweep GCs that branch too.
+func TestAFKCycleBuiltinIntegration(t *testing.T) {
+	w := newCycleWorld(t)
+	api := newOperatorAPI(w)
+
+	out1 := t.TempDir()
+	script1 := writeCycleScript(t, "claude-builtin-1.sh", successScript(out1, w.labctlDir, "work-1.txt"))
+	repo, origin, work := w.addBuiltinRepo("bolt", script1)
+	w.readyIssue(repo, "Wire the flux capacitor", "make it hum")
+	crBase := "/api/v1/repos/" + repo.ID + "/crs"
+
+	ok := t.Run("builtin success cycle and ff merge", func(t *testing.T) {
+		_, headSHA := runBuiltinCycle(t, w, repo, out1, 1, 1)
+
+		// Merge through the REAL operator API: fast-forward path (origin main
+		// never moved), watched on the world's bus.
+		evts, cancel := w.bus.Subscribe(w.ctx)
+		defer cancel()
+		code, body := api.do(http.MethodPost, crBase+"/1/merge")
+		if code != http.StatusOK {
+			t.Fatalf("merge = %d (%v), want 200", code, body)
+		}
+		cr := crOf(t, body)
+		if cr["state"] != "merged" || cr["merge_commit"] != headSHA {
+			t.Fatalf("merged cr = state %v, merge_commit %v; want merged @ head %s (ff)", cr["state"], cr["merge_commit"], headSHA)
+		}
+		if got := gitCmd(t, w.home, origin, "rev-parse", "refs/heads/main"); got != headSHA {
+			t.Errorf("origin main = %s, want the head sha %s (fast-forward)", got, headSHA)
+		}
+		// The CR's built-in issue auto-closed, and both events fired.
+		is, err := w.st.IssueByRepoNumber(w.ctx, repo.ID, 1)
+		if err != nil {
+			t.Fatalf("IssueByRepoNumber: %v", err)
+		}
+		if is.State != store.IssueStateClosed {
+			t.Errorf("issue #1 state = %s, want closed after the merge", is.State)
+		}
+		waitForBusEvents(t, evts, httpapi.EventCRChanged, "issue.changed")
+
+		// The runtime sweep GCs the now-merged branch — the full circle.
+		if !cycleBranchExists(w.env, w.bare(repo), "afk/1") {
+			t.Fatal("merged branch afk/1 gone before the sweep ran")
+		}
+		w.recon.RuntimeSweep(w.ctx)
+		if cycleBranchExists(w.env, w.bare(repo), "afk/1") {
+			t.Error("runtime sweep kept the merged branch afk/1")
+		}
+	})
+	if !ok {
+		t.Fatal("builtin success cycle failed; skipping the merge-commit phase")
+	}
+
+	// Phase 2: same repo, fresh ready issue, and origin main ADVANCES between
+	// the reap and the merge — the merge-commit path.
+	out2 := t.TempDir()
+	script2 := writeCycleScript(t, "claude-builtin-2.sh", successScript(out2, w.labctlDir, "work-2.txt"))
+	w.prov.setScript(repo.Name, script2)
+	w.readyIssue(repo, "Polish the flux capacitor", "make it shine")
+
+	t.Run("merge-commit path after base advance", func(t *testing.T) {
+		_, headSHA := runBuiltinCycle(t, w, repo, out2, 2, 2)
+
+		// Someone else advances origin main (a non-conflicting file).
+		gitCmd(t, w.home, work, "fetch", "-q", "origin")
+		gitCmd(t, w.home, work, "reset", "-q", "--hard", "origin/main")
+		if err := os.WriteFile(filepath.Join(work, "base.txt"), []byte("moved\n"), 0o644); err != nil {
+			t.Fatalf("write base.txt: %v", err)
+		}
+		gitCmd(t, w.home, work, "add", "base.txt")
+		gitCmd(t, w.home, work, "commit", "-q", "-m", "base advances")
+		gitCmd(t, w.home, work, "push", "-q", "origin", "main")
+		baseSHA := gitCmd(t, w.home, origin, "rev-parse", "refs/heads/main")
+
+		evts, cancel := w.bus.Subscribe(w.ctx)
+		defer cancel()
+		code, body := api.do(http.MethodPost, crBase+"/2/merge")
+		if code != http.StatusOK {
+			t.Fatalf("merge = %d (%v), want 200", code, body)
+		}
+		cr := crOf(t, body)
+		mergeSHA, _ := cr["merge_commit"].(string)
+		if cr["state"] != "merged" || mergeSHA == "" || mergeSHA == headSHA {
+			t.Fatalf("merged cr = state %v, merge_commit %v; want merged @ a fresh merge commit", cr["state"], cr["merge_commit"])
+		}
+		// Origin main is the merge commit: parent1 = the advanced base,
+		// parent2 = the CR head, authored with the repo's REAL identity.
+		if got := gitCmd(t, w.home, origin, "rev-parse", "refs/heads/main"); got != mergeSHA {
+			t.Errorf("origin main = %s, want the merge commit %s", got, mergeSHA)
+		}
+		if p1 := gitCmd(t, w.home, origin, "rev-parse", "main^1"); p1 != baseSHA {
+			t.Errorf("merge parent1 = %s, want the advanced base %s", p1, baseSHA)
+		}
+		if p2 := gitCmd(t, w.home, origin, "rev-parse", "main^2"); p2 != headSHA {
+			t.Errorf("merge parent2 = %s, want the CR head %s", p2, headSHA)
+		}
+		if id := gitCmd(t, w.home, origin, "log", "-1", "--format=%an <%ae>", "main"); id != "Cycle Human <human@lab.test>" {
+			t.Errorf("merge commit author = %q, want the repo's configured identity", id)
+		}
+		is, err := w.st.IssueByRepoNumber(w.ctx, repo.ID, 2)
+		if err != nil {
+			t.Fatalf("IssueByRepoNumber: %v", err)
+		}
+		if is.State != store.IssueStateClosed {
+			t.Errorf("issue #2 state = %s, want closed after the merge", is.State)
+		}
+		waitForBusEvents(t, evts, httpapi.EventCRChanged, "issue.changed")
+
+		// And the sweep completes the circle again.
+		w.recon.RuntimeSweep(w.ctx)
+		if cycleBranchExists(w.env, w.bare(repo), "afk/2") {
+			t.Error("runtime sweep kept the merged branch afk/2")
 		}
 	})
 }

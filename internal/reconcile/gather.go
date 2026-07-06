@@ -44,6 +44,24 @@ func (s *Service) gatherRefs(ctx context.Context, repo store.Repo) (refs, bool) 
 	}
 
 	owned := ownedBranches(repo.AFKBranchPattern, repo.ManualBranchPrefix, append(starting, live...), repo.Name)
+
+	// An OPEN change request's head branch is owned too (builtin repos): the
+	// branch is the CR's reviewable substance — the diff view reads it, and
+	// the crash-recovery retry of an unrecorded merge needs it. Without this,
+	// a merged-but-still-open head (merge pushed, MergeCR not yet recorded, or
+	// merged outside lab) would be GC'd by pass B/the sweep and the CR would
+	// be stranded reviewless. Merged/closed CRs release their heads to GC.
+	if repo.TrackerBinding == store.TrackerBindingBuiltin {
+		open, err := s.store.CRsByRepo(ctx, repo.ID, store.CRStateOpen)
+		if err != nil {
+			s.log.Warn("reconcile: list open CRs", "component", "reconcile", "repo", repo.Name, "err", err)
+			return refs{}, false // conservative: no GC without the full owned set
+		}
+		for _, cr := range open {
+			owned[cr.HeadBranch] = true
+		}
+	}
+
 	r := refs{owned: owned, wtByBranch: map[string]string{}}
 	r.branches = branches
 	for _, wt := range wts {

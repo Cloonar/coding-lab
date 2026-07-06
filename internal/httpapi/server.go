@@ -18,6 +18,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -70,6 +71,18 @@ type Options struct {
 	// endpoint falls back to the raw ready count).
 	AFK *afk.Service
 
+	// Git + ReposDir back the change-request surface (M6): the CR detail
+	// diff and the merge run against <ReposDir>/<repoID>.git. Both nil/empty
+	// leaves the /crs routes unmounted. Materializer supplies the per-op
+	// credential files a credentialed merge pushes with (Vault decrypts).
+	Git          *gitx.Engine
+	Materializer *vault.Materializer
+	ReposDir     string
+	// GitEnv is appended to every git subprocess the CR surface runs, before
+	// the per-credential env. Production leaves it nil; tests pass
+	// testutil.HermeticGitEnv (the reposvc convention).
+	GitEnv []string
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -103,6 +116,10 @@ type Server struct {
 	providers *provider.Registry
 	tracker   *tracker.Registry
 	afk       *afk.Service
+	git       *gitx.Engine
+	mat       *vault.Materializer
+	reposDir  string
+	gitEnv    []string
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -116,6 +133,13 @@ type Server struct {
 
 	heartbeat time.Duration
 	now       func() time.Time
+
+	// crMu serializes merge and close per change request: the open-state
+	// check and the (seconds-wide, network-bound) git merge must not race a
+	// concurrent close, or origin ends up merged while the CR row reads
+	// closed-unmerged with no recovery path. Keyed by CR id; entries are
+	// never evicted (a CR id count is bounded by real CRs, bytes are trivial).
+	crMu keyedMutex
 
 	limiter  *loginLimiter
 	argon    argonParams
@@ -176,6 +200,10 @@ func New(o Options) (*Server, error) {
 		providers:   o.Providers,
 		tracker:     o.Tracker,
 		afk:         o.AFK,
+		git:         o.Git,
+		mat:         o.Materializer,
+		reposDir:    o.ReposDir,
+		gitEnv:      o.GitEnv,
 		proxyAuth:   o.ProxyAuth,
 		proxyHeader: o.ProxyAuthHeader,
 		trusted:     o.TrustedProxies,
@@ -278,6 +306,17 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("POST /api/v1/repos/{id}/labels", s.requireAuth(s.handleLabelCreate))
 		api.HandleFunc("PATCH /api/v1/repos/{id}/labels/{lid}", s.requireAuth(s.handleLabelUpdate))
 		api.HandleFunc("DELETE /api/v1/repos/{id}/labels/{lid}", s.requireAuth(s.handleLabelDelete))
+	}
+
+	// M6 change-request surface (operator auth; CSRF guards the mutations).
+	// Builtin-bound repos only — forge repos 409 on every /crs route. Mounted
+	// when the git engine and repos dir were provided (diff and merge read
+	// the bare reference clone).
+	if s.git != nil && s.reposDir != "" {
+		api.HandleFunc("GET /api/v1/repos/{id}/crs", s.requireAuth(s.handleCRList))
+		api.HandleFunc("GET /api/v1/repos/{id}/crs/{n}", s.requireAuth(s.handleCRGet))
+		api.HandleFunc("POST /api/v1/repos/{id}/crs/{n}/merge", s.requireAuth(s.handleCRMerge))
+		api.HandleFunc("POST /api/v1/repos/{id}/crs/{n}/close", s.requireAuth(s.handleCRClose))
 	}
 
 	// M5 AFK operator surface (operator auth; CSRF guards the mutations).

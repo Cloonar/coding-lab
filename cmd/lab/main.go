@@ -137,9 +137,10 @@ func run() int {
 			return forgejo.New(c.HTTPClient, c.BaseURL, c.Token, c.Owner, c.Repo)
 		})
 
-	// Agent API (M5): run-token-authenticated tracker surface, repo-scoped by
-	// the run row; resolves trackers through the same registry.
-	agent := agentapi.New(st, trackerReg, logger, time.Now)
+	// Agent API (M5/M6): run-token-authenticated tracker surface, repo-scoped
+	// by the run row; resolves trackers through the same registry and
+	// publishes cr.changed when a builtin PR create opens a change request.
+	agent := agentapi.New(st, trackerReg, bus, logger, time.Now)
 
 	gitEngine := gitx.New(cfg.GitBin)
 	reposDir := filepath.Join(cfg.StateDir, "repos")
@@ -288,6 +289,9 @@ func run() int {
 		Providers:       providerReg,
 		Tracker:         trackerReg,
 		AFK:             afkSvc,
+		Git:             gitEngine,
+		Materializer:    mat,
+		ReposDir:        reposDir,
 		BaseURL:         cfg.BaseURL,
 		ProxyAuth:       cfg.ProxyAuth,
 		ProxyAuthHeader: cfg.ProxyAuthHeader,

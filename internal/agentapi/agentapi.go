@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
@@ -32,21 +33,23 @@ type TrackerResolver interface {
 type Server struct {
 	store    *store.Store
 	trackers TrackerResolver
+	bus      *events.Bus
 	log      *slog.Logger
 	now      func() time.Time
 }
 
 // New builds an agent API server. trackers resolves each repo's Tracker
-// (production: *tracker.Registry); now is the injected clock for the token
-// validity rule (nil → time.Now).
-func New(st *store.Store, trackers TrackerResolver, logger *slog.Logger, now func() time.Time) *Server {
+// (production: *tracker.Registry); bus carries the cr.changed event a builtin
+// PR create publishes (nil → no events, some unit tests run without a bus);
+// now is the injected clock for the token validity rule (nil → time.Now).
+func New(st *store.Store, trackers TrackerResolver, bus *events.Bus, logger *slog.Logger, now func() time.Time) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &Server{store: st, trackers: trackers, log: logger, now: now}
+	return &Server{store: st, trackers: trackers, bus: bus, log: logger, now: now}
 }
 
 // Handler returns the /agent/v1 tree wrapped in run-token auth.

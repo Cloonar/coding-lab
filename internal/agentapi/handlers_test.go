@@ -1,8 +1,9 @@
 package agentapi
 
-// Handler-contract tests (pinned M5): repo scope comes strictly from the run
-// row, Closes-injection on AFK PR creation, run-authored builtin comments,
-// the builtin 501 CR seam, and the 404/409/502 tracker error mapping.
+// Handler-contract tests (pinned M5/M6): repo scope comes strictly from the
+// run row, Closes-injection on AFK PR creation, run-authored builtin
+// comments, builtin PR create → change request (with the injected Closes
+// flowing into cr_closes), and the 404/409/502 tracker error mapping.
 
 import (
 	"context"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
@@ -75,7 +77,7 @@ func (f *fakeTracker) CloseIssue(context.Context, int) error { return f.err }
 func (f *testFixture) forgeServer(fk tracker.Tracker) *Server {
 	return New(f.st, resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) {
 		return fk, nil
-	}), discard(), func() time.Time { return f.now })
+	}), nil, discard(), func() time.Time { return f.now })
 }
 
 func doJSON(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -324,26 +326,67 @@ func TestPRCreateValidation(t *testing.T) {
 	}
 }
 
-// TestPRCreateBuiltinSeam pins the M6 seam: builtin-bound → 501 with the
-// pinned message, before any tracker is even resolved.
-func TestPRCreateBuiltinSeam(t *testing.T) {
+// TestPRCreateBuiltinChangeRequest pins the M6 seam flip: a builtin-bound PR
+// create opens a change request through the store-backed tracker — the run's
+// branch as head, the repo default branch as base, the AFK-injected
+// `Closes #<N>` persisted as a cr_closes row via the shared parser, the URL
+// the lab-relative CR route — and publishes cr.changed on the bus.
+func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 	f := newFixture(t)
 	f.seedRepo(t, "repo_a")
-	f.seedRun(t, "run_afk", "repo_a", "active")
+	f.seedIssue(t, "iss7", "repo_a", 7, "Fix it", "")
+	f.seedRun(t, "run_afk", "repo_a", "active") // afk_auto, issue 7, branch afk/7
 	token := f.seedToken(t, "run_afk", nil)
 
-	resolved := false
-	s := New(f.st, resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) {
-		resolved = true
-		return nil, errors.New("must not be called")
-	}), discard(), func() time.Time { return f.now })
+	bus := events.NewBus()
+	ch, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	s := New(f.st, builtinResolver(f.st), bus, discard(), func() time.Time { return f.now })
 
-	rr := doJSON(t, s.Handler(), "POST", "/agent/v1/prs", token, `{"title":"t","body":"b"}`)
-	if rr.Code != http.StatusNotImplemented || !strings.Contains(rr.Body.String(), crSeamMessage) {
-		t.Fatalf("status = %d, body %q, want 501 %q", rr.Code, rr.Body.String(), crSeamMessage)
+	// The body carries no Closes — the server injects "Closes #7" (pinned
+	// AFK rule), and THAT injected directive must reach cr_closes.
+	rr := doJSON(t, s.Handler(), "POST", "/agent/v1/prs", token, `{"title":"feat: fix it","body":"Implements the thing."}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
 	}
-	if resolved {
-		t.Fatal("tracker resolved for a builtin PR create (the 501 must answer first)")
+	var resp struct {
+		Number int    `json:"number"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Number != 1 {
+		t.Errorf("number = %d, want 1 (first CR of the repo)", resp.Number)
+	}
+	if resp.URL != "/repos/repo_a/crs/1" {
+		t.Errorf("url = %q, want the lab-relative CR route", resp.URL)
+	}
+
+	cr, err := f.st.CRByRepoNumber(context.Background(), "repo_a", 1)
+	if err != nil {
+		t.Fatalf("CRByRepoNumber: %v", err)
+	}
+	if cr.State != store.CRStateOpen || cr.HeadBranch != "afk/7" || cr.BaseBranch != "main" {
+		t.Errorf("cr = state %q head %q base %q, want open afk/7 main", cr.State, cr.HeadBranch, cr.BaseBranch)
+	}
+	if cr.Title != "feat: fix it" {
+		t.Errorf("title = %q", cr.Title)
+	}
+	if !strings.Contains(cr.Body, "Closes #7") {
+		t.Errorf("body = %q, want the injected Closes #7", cr.Body)
+	}
+	if len(cr.Closes) != 1 || cr.Closes[0] != 7 {
+		t.Errorf("closes = %v, want [7] (injection must flow into cr_closes)", cr.Closes)
+	}
+
+	select {
+	case e := <-ch:
+		if e.Type != EventCRChanged {
+			t.Errorf("event type = %q, want %q", e.Type, EventCRChanged)
+		}
+	default:
+		t.Error("no cr.changed published on builtin PR create")
 	}
 }
 
@@ -372,7 +415,7 @@ func TestTrackerErrorMapping(t *testing.T) {
 	// Tracker configuration conflict → 409.
 	s := New(f.st, resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) {
 		return nil, fmt.Errorf("tracker for repo: %w", tracker.ErrForgeCredentialMissing)
-	}), discard(), func() time.Time { return f.now })
+	}), nil, discard(), func() time.Time { return f.now })
 	rr = doJSON(t, s.Handler(), "GET", "/agent/v1/issues", token, "")
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("config conflict: status = %d, want 409", rr.Code)

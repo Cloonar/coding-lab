@@ -519,3 +519,37 @@ func asBadRequest(err error, target **BadRequestError) bool {
 }
 
 var _ = context.Background
+
+// Regression (M6 review): an OPEN change request's head branch is owned — the
+// sweep and startup pass B must never GC it, even when it reads merged (the
+// branch is the CR's reviewable substance, and the crash-recovery retry of an
+// unrecorded merge needs it). Merging or closing the CR releases the head.
+func TestSweep_sparesOpenCRHeadBranch(t *testing.T) {
+	f := newRecFixture(t)
+	// A bare branch at origin/main reads merged — normally instant GC fodder.
+	f.bareBranch("afk/4")
+	cr, err := f.st.CreateCR(t.Context(), f.repo.ID, "t", "Closes #4", "afk/4", "main", []int{4}, recClock)
+	if err != nil {
+		t.Fatalf("CreateCR: %v", err)
+	}
+
+	f.svc.RuntimeSweep(t.Context())
+	if !f.branchExists("afk/4") {
+		t.Fatal("open CR's head branch was swept")
+	}
+	if err := f.svc.StartupReconcile(t.Context()); err != nil {
+		t.Fatalf("StartupReconcile: %v", err)
+	}
+	if !f.branchExists("afk/4") {
+		t.Fatal("open CR's head branch was GC'd by startup pass B")
+	}
+
+	// A merged CR releases the head to the normal merged-branch GC.
+	if _, err := f.st.MergeCR(t.Context(), f.repo.ID, cr.Number, "deadbeef", recClock); err != nil {
+		t.Fatalf("MergeCR: %v", err)
+	}
+	f.svc.RuntimeSweep(t.Context())
+	if f.branchExists("afk/4") {
+		t.Error("merged CR's head branch survived the sweep")
+	}
+}

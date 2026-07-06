@@ -204,7 +204,7 @@ func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerReso
 		t.Fatalf("CreateRunToken: %v", err)
 	}
 
-	handler := agentapi.New(st, resolver, nil, func() time.Time { return fixedNow }).Handler()
+	handler := agentapi.New(st, resolver, nil, nil, func() time.Time { return fixedNow }).Handler()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -378,14 +378,33 @@ func TestPRCreateOutput(t *testing.T) {
 	}
 }
 
-func TestPRCreateBuiltinSeamExitsOne(t *testing.T) {
+// TestPRCreateBuiltinChangeRequest: since M6 a builtin-bound `labctl pr
+// create` opens a change request — same number<TAB>url output as the forge
+// path, with the lab-relative CR route as the URL, and the server-injected
+// `Closes #<claimed issue>` persisted as a cr_closes row.
+func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 	f := newBuiltinFixture(t)
-	code, stdout, stderr := run(t, []string{"pr", "create", "--title", "t", "--body", "b"}, f.env())
-	if code != 1 || stdout != "" {
-		t.Fatalf("exit = %d, stdout %q, want 1 with empty stdout", code, stdout)
+	code, stdout, stderr := run(t, []string{"pr", "create", "--title", "feat: fix", "--body", "Did it."}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stderr, "change requests land in M6") {
-		t.Errorf("stderr = %q, want the M6 seam message", stderr)
+	if !strings.HasPrefix(stdout, "1\t/repos/") || !strings.HasSuffix(stdout, "/crs/1\n") {
+		t.Fatalf("stdout = %q, want 1<TAB>/repos/<id>/crs/1", stdout)
+	}
+	repoID := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(stdout), "1\t/repos/"), "/crs/1")
+
+	cr, err := f.st.CRByRepoNumber(context.Background(), repoID, 1)
+	if err != nil {
+		t.Fatalf("CRByRepoNumber: %v", err)
+	}
+	if cr.State != store.CRStateOpen || cr.HeadBranch != "afk/1" || cr.BaseBranch != "main" {
+		t.Fatalf("cr = state %q head %q base %q, want open afk/1 main", cr.State, cr.HeadBranch, cr.BaseBranch)
+	}
+	if cr.Body != "Did it.\n\nCloses #1" {
+		t.Errorf("CR body = %q, want the injected Closes #1", cr.Body)
+	}
+	if len(cr.Closes) != 1 || cr.Closes[0] != 1 {
+		t.Errorf("closes = %v, want [1]", cr.Closes)
 	}
 }
 

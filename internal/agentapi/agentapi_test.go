@@ -128,7 +128,7 @@ func builtinResolver(st *store.Store) TrackerResolver {
 }
 
 func (f *testFixture) server() *Server {
-	return New(f.st, builtinResolver(f.st), discard(), func() time.Time { return f.now })
+	return New(f.st, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now })
 }
 
 func TestRunTokenAuthMatrix(t *testing.T) {
@@ -208,7 +208,7 @@ func TestAllRoutesAreMountedBehindAuth(t *testing.T) {
 		{"GET", "/agent/v1/issues", "", http.StatusOK},
 		{"GET", "/agent/v1/issues/7", "", http.StatusOK},
 		{"POST", "/agent/v1/issues/7/comments", `{"body":"hi"}`, http.StatusCreated},
-		{"POST", "/agent/v1/prs", `{"title":"t","body":"b"}`, http.StatusNotImplemented}, // builtin CR seam (M6)
+		{"POST", "/agent/v1/prs", `{"title":"t","body":"b"}`, http.StatusCreated}, // builtin → change request (M6)
 	}
 	for _, rt := range routes {
 		// Without a token: 401.

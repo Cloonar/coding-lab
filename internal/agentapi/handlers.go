@@ -15,20 +15,20 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
 )
 
-// crSeamMessage is the pinned 501 body for POST /prs on a builtin-bound repo:
-// built-in change requests are the M6 slice. When M6 lands, the builtin branch
-// of handlePRCreate replaces this answer with a CreatePull call (the builtin
-// tracker's CreatePull seam already exists and errors until then).
-const crSeamMessage = "change requests land in M6"
+// EventCRChanged is the SSE event name a builtin PR create publishes: the
+// created change request appears in the operator's CR list on the next
+// refetch (brief §8.1). The name mirrors httpapi's constant — kept local,
+// like jsonError, so agentapi stays free of an httpapi dependency.
+const EventCRChanged = "cr.changed"
 
 // noClaimedIssueMessage answers GET /issue for a run without a claimed issue
 // (manual instances have no issue_number on their run row).
@@ -191,6 +191,12 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo sto
 		jsonError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if errors.Is(err, tracker.ErrDuplicateOpenPull) {
+		// Agent-retry after a timed-out create: the CR/PR exists; 409 with the
+		// existing number in the message (forge parity - Forgejo 409s too).
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if repo.TrackerBinding == store.TrackerBindingForge {
 		s.log.Warn(doing, "component", "agentapi", "repo", repo.ID, "err", err)
 		jsonError(w, http.StatusBadGateway, err.Error())
@@ -335,7 +341,11 @@ type prCreateRequest struct {
 // caller names neither. For AFK runs the server validates the pinned
 // `Closes #<N>` (injecting "\n\nCloses #<N>" when missing; N = the run's
 // claimed issue); sanitizeBody is the M7 incogni hook, a no-op today.
-// Builtin-bound repos answer the pinned 501 until M6's change requests.
+// On a builtin-bound repo the tracker is the store-backed builtin tracker,
+// so CreatePull opens a change request (M6): the injected/validated Closes
+// directives flow through tracker.ParseCloses into cr_closes rows — the
+// issues the operator's later merge auto-closes — and cr.changed is
+// published so the operator's CR list refetches.
 func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 	info, repo, ok := s.runRepo(w, r)
 	if !ok {
@@ -356,14 +366,6 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	body = sanitizeBody(repo, body)
 
-	// M6 seam: builtin-bound PR creation becomes a change request. Until the
-	// CR surface exists, answer the pinned 501 — before resolving a tracker,
-	// so the seam swap is a pure handler change.
-	if repo.TrackerBinding == store.TrackerBindingBuiltin {
-		jsonError(w, http.StatusNotImplemented, crSeamMessage)
-		return
-	}
-
 	tk, ok := s.trackerFor(w, r, repo)
 	if !ok {
 		return
@@ -373,20 +375,35 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 		s.writeTrackerError(w, "creating pull request", repo, err)
 		return
 	}
+	if repo.TrackerBinding == store.TrackerBindingBuiltin {
+		s.publishCRChanged(repo.ID)
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"number": pr.Number,
 		"url":    pr.URL,
 	})
 }
 
+// publishCRChanged emits cr.changed for repoID — the same {type, repoID}
+// envelope every repo-scoped event carries. A nil bus (unit tests) is a no-op.
+func (s *Server) publishCRChanged(repoID string) {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Publish(events.Event{Type: EventCRChanged, Payload: struct {
+		Type   string `json:"type"`
+		RepoID string `json:"repoID"`
+	}{Type: EventCRChanged, RepoID: repoID}})
+}
+
 // ensureCloses returns body guaranteed to carry a real `Closes #<n>` directive.
-// The check spans the full GitHub/Forgejo closing-keyword grammar and is
-// case-insensitive and word/number-bounded ("Closes #70", "Closes #7abc" and
-// "discloses #7" do not satisfy issue 7); when a real directive for THIS issue
-// is absent, the pinned "\n\nCloses #<n>" is appended (bare "Closes #<n>" on an
-// empty body).
+// The check is the shared closing-keyword grammar (tracker.ContainsCloses):
+// the full GitHub/Forgejo keyword set, case-insensitive and word/number-
+// bounded ("Closes #70", "Closes #7abc" and "discloses #7" do not satisfy
+// issue 7); when a real directive for THIS issue is absent, the pinned
+// "\n\nCloses #<n>" is appended (bare "Closes #<n>" on an empty body).
 func ensureCloses(body string, n int) string {
-	if containsCloses(body, n) {
+	if tracker.ContainsCloses(body, n) {
 		return body
 	}
 	closes := "Closes #" + strconv.Itoa(n)
@@ -394,30 +411,6 @@ func ensureCloses(body string, n int) string {
 		return closes
 	}
 	return body + "\n\n" + closes
-}
-
-// closesDirectiveRe matches a GitHub/Forgejo issue-closing directive: one of
-// the closing keywords (close/closes/closed, fix/fixes/fixed,
-// resolve/resolves/resolved), case-insensitive and word-bounded on the left,
-// an optional colon, whitespace, then #<number> bounded on the right (so
-// "discloses" is not "closes", and "#7abc"/"#70" are not #7). Capture group 1
-// is the referenced issue number.
-var closesDirectiveRe = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b`)
-
-// containsCloses reports whether body already carries a REAL closing directive
-// for issue n — any of the closing keywords (not just "closes"), word- and
-// number-bounded so a bare substring ("discloses #7"), an adjacent number
-// ("Closes #70"), or a trailing token ("Closes #7abc") never falsely suppress
-// the injected trailer. Forgejo's own closing-keyword matcher is bounded the
-// same way, so an unbounded match here would drop the real auto-close.
-func containsCloses(body string, n int) bool {
-	want := strconv.Itoa(n)
-	for _, m := range closesDirectiveRe.FindAllStringSubmatch(body, -1) {
-		if m[1] == want {
-			return true
-		}
-	}
-	return false
 }
 
 // sanitizeBody is the M7 incogni sanitization seam (design §5: "applies
