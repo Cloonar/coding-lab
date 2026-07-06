@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 )
 
@@ -282,7 +283,7 @@ func TestSeedWorkspace_missingGitFailsLoud(t *testing.T) {
 
 func readExclude(t *testing.T, worktree string) string {
 	t.Helper()
-	path, err := gitExcludePath(worktree)
+	path, err := seeder.GitExcludePath(worktree)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,9 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 )
 
 // gitExcludeEntries are the per-repo ignore lines SeedWorkspace appends to
@@ -17,23 +17,29 @@ import (
 // settings.local.json (and later run-local state), which must never show
 // up as dirt in the run's own git status. info/exclude is shared through
 // the common git dir, so one append covers every worktree of the repo.
+// (The append/dedup mechanics were lifted into internal/seeder in M7 —
+// seeder.EnsureExcludes — which lab's own seeding shares.)
 var gitExcludeEntries = []string{".claude/"}
 
 // SeedWorkspace implements provider.AgentProvider: pre-approve the
 // worktree so neither the workspace-trust dialog nor the project
-// MCP-server prompt blocks an unattended run (SeedTrust), then keep the
-// seeded files out of git status via .git/info/exclude. Called after the
-// worktree exists and before claude spawns; any failure aborts the Start
-// (caller rolls back the worktree + branch).
-//
-// SeedOpts is empty in M3 — the M7 incogni attribution keys will merge
-// into the same settings.local.json through the same
-// preserve-unknown-keys atomic writer.
-func (p *Provider) SeedWorkspace(worktree string, _ provider.SeedOpts) error {
+// MCP-server prompt blocks an unattended run (SeedTrust), for incogni
+// repos additionally disable claude's own attribution output (D15 §9
+// measure 1 — merged into the same settings.local.json through the same
+// preserve-unknown-keys atomic writer), then keep the seeded files out of
+// git status via .git/info/exclude. Called after the worktree exists and
+// before claude spawns; any failure aborts the Start (caller rolls back
+// the worktree + branch).
+func (p *Provider) SeedWorkspace(worktree string, opts provider.SeedOpts) error {
 	if err := SeedTrust(p.configPath, worktree); err != nil {
 		return err
 	}
-	return seedGitExclude(worktree)
+	if opts.Incogni {
+		if err := SeedAttributionOff(worktree); err != nil {
+			return err
+		}
+	}
+	return seeder.EnsureExcludes(worktree, gitExcludeEntries)
 }
 
 // SeedTrust pre-approves dir so neither the workspace-trust dialog nor the
@@ -117,98 +123,6 @@ func seedProjectMcpApproval(dir string) error {
 	}
 	settings["enableAllProjectMcpServers"] = true
 	return marshalAtomic(path, settings)
-}
-
-// seedGitExclude appends the missing gitExcludeEntries to the worktree's
-// git exclude file (create if missing, dedup against existing lines; no
-// rewrite when everything is already present).
-func seedGitExclude(worktree string) error {
-	path, err := gitExcludePath(worktree)
-	if err != nil {
-		return err
-	}
-	existing := map[string]bool{}
-	data, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		for line := range strings.SplitSeq(string(data), "\n") {
-			existing[strings.TrimSpace(line)] = true
-		}
-	case errors.Is(err, fs.ErrNotExist):
-		// no exclude file yet — start from empty
-	default:
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-
-	var missing []string
-	for _, e := range gitExcludeEntries {
-		if !existing[e] {
-			missing = append(missing, e)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
-	}
-	var b strings.Builder
-	if len(data) > 0 && !strings.HasSuffix(string(data), "\n") {
-		b.WriteString("\n") // keep a hand-edited last line intact
-	}
-	for _, e := range missing {
-		b.WriteString(e)
-		b.WriteString("\n")
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	if _, err := f.WriteString(b.String()); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
-	}
-	return nil
-}
-
-// gitExcludePath resolves the exclude file for worktree without shelling
-// out to git. A linked worktree's .git is a file pointing at
-// <bare>/worktrees/<name>/, whose commondir file points back at the shared
-// git dir — git reads info/exclude from there (gitrepository-layout: info/
-// is common). A plain .git directory (tests, main checkouts) resolves to
-// itself.
-func gitExcludePath(worktree string) (string, error) {
-	gitPath := filepath.Join(worktree, ".git")
-	fi, err := os.Stat(gitPath)
-	if err != nil {
-		return "", fmt.Errorf("stat %s: %w", gitPath, err)
-	}
-	gitDir := gitPath
-	if !fi.IsDir() {
-		b, err := os.ReadFile(gitPath)
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", gitPath, err)
-		}
-		rest, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir:")
-		if !ok {
-			return "", fmt.Errorf("parse %s: no gitdir pointer", gitPath)
-		}
-		gitDir = strings.TrimSpace(rest)
-		if !filepath.IsAbs(gitDir) {
-			gitDir = filepath.Join(worktree, gitDir)
-		}
-	}
-	if b, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
-		common := strings.TrimSpace(string(b))
-		if !filepath.IsAbs(common) {
-			common = filepath.Join(gitDir, common)
-		}
-		gitDir = common
-	}
-	return filepath.Join(gitDir, "info", "exclude"), nil
 }
 
 // readJSONObject reads the JSON object at path into a generic map. A

@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/assets"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
@@ -255,6 +258,127 @@ func TestStart_happyPath(t *testing.T) {
 		r, err := f.st.RunBySession(t.Context(), name)
 		return err == nil && r.DeepLinkURL != nil && *r.DeepLinkURL == "https://claude.ai/code/session_real"
 	})
+
+	// Lab-side seeding ran (D13, every spawn): the skills bundle landed under
+	// .claude/skills/ with the embedded content, CLAUDE.local.md carries the
+	// binding line, and NONE of it shows up in the run's own git status.
+	gotSkill, err := os.ReadFile(filepath.Join(wt, ".claude", "skills", "tdd", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("seeded skill missing after Launch: %v", err)
+	}
+	wantSkill, err := assets.Skills.ReadFile("skills/tdd/SKILL.md")
+	if err != nil {
+		t.Fatalf("embedded bundle: %v", err)
+	}
+	if !bytes.Equal(gotSkill, wantSkill) {
+		t.Error("seeded tdd/SKILL.md differs from the embedded bundle")
+	}
+	local, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatalf("CLAUDE.local.md missing after Launch: %v", err)
+	}
+	for _, want := range []string{"tracker binding is **builtin**", "labctl issue view [n]", "`ready-for-agent`"} {
+		if !strings.Contains(string(local), want) {
+			t.Errorf("CLAUDE.local.md missing %q", want)
+		}
+	}
+	if out := gitCmd(t, f.home, wt, "status", "--porcelain"); out != "" {
+		t.Errorf("git status after a seeded Launch = %q; want empty (seeded files excluded)", out)
+	}
+}
+
+// The repo's incogni flag flows into the provider's SeedOpts (D15 §9
+// measure 1): an incogni repo's launch asks the provider to seed
+// attribution-off settings; a plain repo's launch does not.
+func TestStart_incogniFlagReachesProviderSeedOpts(t *testing.T) {
+	f := newFixture(t)
+
+	if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {
+		t.Fatalf("Start (plain): %v", err)
+	}
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		Incogni: store.Set(true),
+	}); err != nil {
+		t.Fatalf("UpdateRepoSettings: %v", err)
+	}
+	if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID, Label: "wip"}); err != nil {
+		t.Fatalf("Start (incogni): %v", err)
+	}
+
+	opts := f.prov.SeededOpts()
+	if len(opts) != 2 {
+		t.Fatalf("SeedWorkspace called %d times, want 2", len(opts))
+	}
+	if opts[0].Incogni {
+		t.Error("plain repo's launch passed Incogni=true to the provider")
+	}
+	if !opts[1].Incogni {
+		t.Error("incogni repo's launch passed Incogni=false to the provider")
+	}
+}
+
+// The repo's configured REAL git identity reaches the spawned session's env
+// (D15 §9 measure 5): GIT_AUTHOR_* and GIT_COMMITTER_* all four, so the
+// agent's commits are authored as the operator, never a bot. The CR-merge
+// half of the measure is pinned in gitx/crmerge_test.go.
+func TestStart_repoGitIdentityReachesSpawnEnv(t *testing.T) {
+	f := newFixture(t)
+	name, email := "Dominik", "dominik@example.invalid"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		GitAuthorName:  store.Set(&name),
+		GitAuthorEmail: store.Set(&email),
+	}); err != nil {
+		t.Fatalf("UpdateRepoSettings: %v", err)
+	}
+
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sess, live := f.runner.Session(run.SessionName)
+	if !live {
+		t.Fatal("session not live")
+	}
+	for key, want := range map[string]string{
+		"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+		"GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email,
+	} {
+		if got := envValue(sess.ExtraEnv, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// failingSeeder drives the lab-side-seeding rollback path.
+type failingSeeder struct{}
+
+func (failingSeeder) SeedWorkspace(string, store.Repo, seeder.Opts) error {
+	return errors.New("skills bundle write failed")
+}
+
+// A lab-side seeding failure aborts the Start through the same full rollback
+// as a provider seed failure — worktree, branch, and guard all restored.
+func TestStart_rollbackOnLabSeedFailure(t *testing.T) {
+	f := newFixture(t)
+	f.svc.seeder = failingSeeder{}
+
+	_, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	var startFailed *StartFailedError
+	if !errors.As(err, &startFailed) {
+		t.Fatalf("Start err = %v, want StartFailedError", err)
+	}
+	if dirExists(filepath.Join(f.worktreeRoot, "proj-20260608-1530")) {
+		t.Error("worktree survived lab-seed-failure rollback")
+	}
+	if f.branchExists("lab/20260608-1530") {
+		t.Error("branch survived lab-seed-failure rollback")
+	}
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Error("run row created despite the lab seed failure")
+	}
+	if snap := f.guard.Snapshot(); len(snap) != 0 {
+		t.Errorf("startguard not cleared after rollback: %v", snap)
+	}
 }
 
 // Regression (finding: AFK seed prompt raced the cold-start TUI when delivered

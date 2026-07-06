@@ -6,6 +6,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -44,7 +45,8 @@ type LaunchSpec struct {
 
 // Launch runs the v0-pinned spawn sequence for a fully-derived spec:
 // startguard.Mark → credential materialization → gitx.AddWorktree (fail-loud
-// fetch, no fallback base) → workspace seeding → runs row + run token → tmux
+// fetch, no fallback base) → workspace seeding (provider trust/MCP, then
+// lab's skills bundle + CLAUDE.local.md) → runs row + run token → tmux
 // spawn (AFK seed prompt carried as the spawn argv's trailing positional) →
 // StampOpened → async deep-link capture → run.changed.
 // Any failure after worktree creation rolls back to the exact pre-launch
@@ -113,9 +115,16 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		credCleanup()
 	}
 
-	// Seed the worktree (trust/MCP grants, .git/info/exclude). A failure
-	// aborts the launch — nothing stranded.
-	if err := spec.Provider.SeedWorkspace(wtPath, seedOpts()); err != nil {
+	// Seed the worktree: the provider's grants first (trust/MCP,
+	// .git/info/exclude), then lab's own seeding (D13, EVERY spawn — the
+	// embedded skills bundle into .claude/skills/, the generated
+	// CLAUDE.local.md, and their exclude entries). Either failure aborts the
+	// launch — nothing stranded.
+	if err := spec.Provider.SeedWorkspace(wtPath, seedOpts(repo)); err != nil {
+		rollback(false)
+		return store.Run{}, &StartFailedError{cause: err}
+	}
+	if err := s.seeder.SeedWorkspace(wtPath, repo, seeder.Opts{}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}

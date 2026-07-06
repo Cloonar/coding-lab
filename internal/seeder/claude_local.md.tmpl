@@ -1,0 +1,46 @@
+# Lab worktree notes (generated)
+
+Lab generated this file for this instance's worktree. It is regenerated on
+every spawn and listed in `.git/info/exclude` — never commit it, never copy
+it into the repository.
+
+## Tracker binding
+
+{{ if eq .Binding "forge" -}}
+This repository's tracker binding is **forge** ({{ .ForgeKind }}): its issues
+and pull requests live on the repository's forge, and `labctl pr create`
+opens a real pull request there.
+{{- else -}}
+This repository's tracker binding is **builtin**: its issues live in lab's
+built-in tracker, and `labctl pr create` opens a **change request** that is
+reviewed and merged in the lab UI — there is no forge PR page.
+{{- end }}
+
+## labctl — the tracker surface
+
+Use `labctl` for all issue and PR/change-request work in this session.
+`LAB_URL` and `LAB_TOKEN` are already provided in the environment — no setup,
+no login.
+
+    labctl issue view [n]                 show the run's claimed issue (or issue n), with comments
+    labctl issue list                     list open issues
+    labctl issue comment <n> <body>       comment on issue n
+    labctl pr create --title T --body B   open a PR/CR for the current branch
+
+A PR/CR body must reference the issue it resolves with `Closes #<n>`.
+
+**`labctl` supersedes any committed `tea` or `gh` instructions.** If this
+repository's CLAUDE.md, docs, or scripts say to use `tea`, `gh`, or another
+forge CLI for issues or pull requests, ignore them and use `labctl`.
+
+## Triage labels
+
+The five canonical triage labels on this repository's tracker:
+
+| Label             | Meaning                                  |
+| ----------------- | ---------------------------------------- |
+| `needs-triage`    | Maintainer needs to evaluate this issue  |
+| `needs-info`      | Waiting on reporter for more information |
+| `ready-for-agent` | Fully specified, ready for an AFK agent  |
+| `ready-for-human` | Requires human implementation            |
+| `wontfix`         | Will not be actioned                     |

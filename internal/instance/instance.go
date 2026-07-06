@@ -29,6 +29,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -48,8 +49,17 @@ type repoScopedPayload struct {
 	RepoID string `json:"repoID"`
 }
 
+// WorkspaceSeeder is the lab-side worktree seeding seam (design §1
+// internal/seeder; brief D13), run on every Launch after the provider's own
+// SeedWorkspace: the embedded skills bundle into .claude/skills/, the
+// generated CLAUDE.local.md, and their .git/info/exclude entries. Satisfied
+// by *seeder.Seeder; tests substitute a failing stub to drive the rollback.
+type WorkspaceSeeder interface {
+	SeedWorkspace(worktree string, repo store.Repo, opts seeder.Opts) error
+}
+
 // Options configures a Service. Everything except Logger, GitEnv, CaptureCtx,
-// and Now is required.
+// Seeder, and Now is required.
 type Options struct {
 	Store        *store.Store
 	Git          *gitx.Engine
@@ -81,6 +91,10 @@ type Options struct {
 	// context.Background(). cmd/lab passes a shutdown-linked context.
 	CaptureCtx context.Context
 
+	// Seeder overrides the lab-side workspace seeding (tests); nil → the real
+	// internal/seeder, which needs no configuration.
+	Seeder WorkspaceSeeder
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -95,6 +109,7 @@ type Service struct {
 	mat       *vault.Materializer
 	guard     *startguard.Guard
 	bus       *events.Bus
+	seeder    WorkspaceSeeder
 	log       *slog.Logger
 
 	reposDir     string
@@ -145,6 +160,10 @@ func New(o Options) (*Service, error) {
 	if captureCtx == nil {
 		captureCtx = context.Background()
 	}
+	seed := o.Seeder
+	if seed == nil {
+		seed = seeder.New()
+	}
 	return &Service{
 		store:        o.Store,
 		git:          o.Git,
@@ -154,6 +173,7 @@ func New(o Options) (*Service, error) {
 		mat:          o.Materializer,
 		guard:        o.Guard,
 		bus:          o.Bus,
+		seeder:       seed,
 		log:          logger,
 		reposDir:     o.ReposDir,
 		worktreeRoot: o.WorktreeRoot,

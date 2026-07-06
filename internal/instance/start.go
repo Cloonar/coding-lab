@@ -113,6 +113,9 @@ func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []strin
 // only if that row is missing or unparseable.
 const defaultMaxInstances = 6
 
-// seedOpts is the M3 (empty) SeedOpts; a named helper so the M7 incogni wiring
-// has one call site to grow.
-func seedOpts() provider.SeedOpts { return provider.SeedOpts{} }
+// seedOpts derives the provider's SeedOpts for a launch on repo: the incogni
+// flag flows through so the provider seeds attribution-off settings into the
+// worktree (D15 §9 measure 1).
+func seedOpts(repo store.Repo) provider.SeedOpts {
+	return provider.SeedOpts{Incogni: repo.Incogni}
+}
