@@ -36,14 +36,18 @@ let
     ]) (lib.fileset.maybeMissing ../internal/webui/dist);
   };
 
-  # SPA source without local build/install artifacts (both gitignored, but
-  # dev trees have them).
+  # SPA source without local build/install artifacts or Playwright e2e
+  # residue (all gitignored, but dev trees have them; test-results and the
+  # HTML report would otherwise change the src hash after every e2e run).
   webSrc = lib.fileset.toSource {
     root = ../web;
     fileset = lib.fileset.difference ../web (
       lib.fileset.unions [
         (lib.fileset.maybeMissing ../web/node_modules)
         (lib.fileset.maybeMissing ../web/dist)
+        (lib.fileset.maybeMissing ../web/e2e/.run)
+        (lib.fileset.maybeMissing ../web/test-results)
+        (lib.fileset.maybeMissing ../web/playwright-report)
       ]
     );
   };

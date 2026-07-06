@@ -1,8 +1,15 @@
 # build outputs
 /bin/
+/lab
+/labctl
 web/dist/
 internal/webui/dist/
 web/node_modules/
+
+# playwright
+web/e2e/.run/
+web/test-results/
+web/playwright-report/
 
 # nix
 result

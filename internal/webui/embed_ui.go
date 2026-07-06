@@ -5,9 +5,20 @@ package webui
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
+	"path"
 	"strings"
 )
+
+func init() {
+	// .webmanifest is not in Go's builtin mime table and /etc/mime.types is
+	// absent on minimal servers (NixOS); without this the PWA manifest would
+	// ship as application/octet-stream.
+	if err := mime.AddExtensionType(".webmanifest", "application/manifest+json"); err != nil {
+		panic("webui: registering .webmanifest mime type: " + err.Error())
+	}
+}
 
 // dist is copied from web/dist by `make build-ui` (and the nix package's
 // preBuild) — go:embed cannot reach outside the package dir. Building with
@@ -35,6 +46,16 @@ func Handler() http.Handler {
 			p = "index.html"
 		}
 		if _, err := fs.Stat(sub, p); err != nil {
+			// Asset-like paths (hashed bundles, anything with an extension)
+			// get a real 404, never the shell: answering HTML for a stale
+			// /assets/index-<hash>.js would be parsed as a module script
+			// (white screen) and cached by the service worker as if it were
+			// the asset. Router paths (/repos/repo_123/issues) carry no
+			// extension and still fall back.
+			if strings.HasPrefix(p, "assets/") || path.Ext(p) != "" {
+				http.NotFound(w, r)
+				return
+			}
 			// SPA fallback: unknown paths get the shell; the router takes over.
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = "/"

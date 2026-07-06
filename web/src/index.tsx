@@ -17,10 +17,13 @@ import Runs from './routes/Runs';
 import Settings from './routes/Settings';
 import Setup from './routes/Setup';
 import Tokens from './routes/Tokens';
+import { registerServiceWorker } from './pwa';
 import './base.css';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('missing #root element');
+
+registerServiceWorker();
 
 render(
   () => (

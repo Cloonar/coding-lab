@@ -1,3 +1,6 @@
 node_modules/
 dist/
 package-lock.json
+e2e/.run/
+test-results/
+playwright-report/

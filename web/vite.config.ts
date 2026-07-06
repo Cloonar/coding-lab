@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import solid from 'vite-plugin-solid';
 
 // The dev server proxies the API and health endpoints to a locally running
@@ -25,5 +25,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // Playwright specs live under e2e/ and run via `npm run test:e2e` only.
+    exclude: [...configDefaults.exclude, 'e2e/**'],
   },
 });
