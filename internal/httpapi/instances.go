@@ -24,6 +24,10 @@ type instanceResponse struct {
 	RepoName   string `json:"repo_name"`
 	Live       bool   `json:"live"`
 	Connecting bool   `json:"connecting"`
+	// State is the chat tailer's conversational state
+	// (working|needs_input|question|idle), "" when unknown — the live badge on
+	// Dashboard rows (issue #7 decision 11).
+	State string `json:"state"`
 }
 
 type instanceCreateRequest struct {
@@ -67,6 +71,7 @@ func (s *Server) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 			RepoName:    v.RepoName,
 			Live:        v.Live,
 			Connecting:  v.Connecting,
+			State:       v.State,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"instances": items})

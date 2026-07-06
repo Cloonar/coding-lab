@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -17,6 +18,18 @@ type FakeSession struct {
 // SentKey is one recorded SendKeys call.
 type SentKey struct {
 	Text  string
+	Enter bool
+}
+
+// KeyEvent is one recorded keystroke delivery of any kind, in call order
+// across SendKeys, SendNamedKeys, and PasteText — the unified log recipe
+// tests assert on. Kind is "text" (literal SendKeys, Text+Enter set),
+// "keys" (SendNamedKeys, Keys = names joined with spaces), or "paste"
+// (PasteText, Text set). Comparable, so slices.Equal works in tests.
+type KeyEvent struct {
+	Kind  string
+	Text  string
+	Keys  string
 	Enter bool
 }
 
@@ -34,6 +47,7 @@ type Fake struct {
 	sessions     map[string]FakeSession
 	panes        map[string]string
 	sent         map[string][]SentKey
+	keyLog       map[string][]KeyEvent
 	startErr     map[string]error
 	startErrLive map[string]error
 	stopErr      map[string]error
@@ -49,6 +63,7 @@ func NewFake() *Fake {
 		sessions:     map[string]FakeSession{},
 		panes:        map[string]string{},
 		sent:         map[string][]SentKey{},
+		keyLog:       map[string][]KeyEvent{},
 		startErr:     map[string]error{},
 		startErrLive: map[string]error{},
 		stopErr:      map[string]error{},
@@ -133,6 +148,40 @@ func (f *Fake) SendKeys(_ context.Context, name, text string, enter bool) error 
 		return fmt.Errorf("tmux send-keys (literal): no such session %q", name)
 	}
 	f.sent[name] = append(f.sent[name], SentKey{Text: text, Enter: enter})
+	f.keyLog[name] = append(f.keyLog[name], KeyEvent{Kind: "text", Text: text, Enter: enter})
+	return nil
+}
+
+// SendNamedKeys records the call. The sendErr injection and the
+// absent-session error apply exactly as for SendKeys.
+func (f *Fake) SendNamedKeys(_ context.Context, name string, keys ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.sendErr[name]; err != nil {
+		return err
+	}
+	if _, ok := f.sessions[name]; !ok {
+		return fmt.Errorf("tmux send-keys (named): no such session %q", name)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	f.keyLog[name] = append(f.keyLog[name], KeyEvent{Kind: "keys", Keys: strings.Join(keys, " ")})
+	return nil
+}
+
+// PasteText records the call. The sendErr injection and the absent-session
+// error apply exactly as for SendKeys.
+func (f *Fake) PasteText(_ context.Context, name, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.sendErr[name]; err != nil {
+		return err
+	}
+	if _, ok := f.sessions[name]; !ok {
+		return fmt.Errorf("tmux paste-buffer: no such session %q", name)
+	}
+	f.keyLog[name] = append(f.keyLog[name], KeyEvent{Kind: "paste", Text: text})
 	return nil
 }
 
@@ -190,6 +239,15 @@ func (f *Fake) Sent(name string) []SentKey {
 	return append([]SentKey(nil), f.sent[name]...)
 }
 
+// KeyLog returns a copy of every keystroke delivery recorded for name —
+// literal text, named keys, and pastes interleaved in call order. Like
+// Sent, the record survives Stop/Kill.
+func (f *Fake) KeyLog(name string) []KeyEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]KeyEvent(nil), f.keyLog[name]...)
+}
+
 // FailStart makes Start(name) return err (nil clears the injection). The
 // session is NOT recorded live — models new-session failing outright.
 func (f *Fake) FailStart(name string, err error) {
@@ -215,8 +273,8 @@ func (f *Fake) FailStop(name string, err error) {
 	f.stopErr[name] = err
 }
 
-// FailSendKeys makes SendKeys(name, …) return err (nil clears the
-// injection).
+// FailSendKeys makes every keystroke delivery to name — SendKeys,
+// SendNamedKeys, PasteText — return err (nil clears the injection).
 func (f *Fake) FailSendKeys(name string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

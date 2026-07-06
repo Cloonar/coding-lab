@@ -13,6 +13,7 @@ import RepoCRs from './routes/RepoCRs';
 import RepoIssues from './routes/RepoIssues';
 import RepoLabels from './routes/RepoLabels';
 import RepoSettings from './routes/RepoSettings';
+import RunChat from './routes/RunChat';
 import Runs from './routes/Runs';
 import Settings from './routes/Settings';
 import Setup from './routes/Setup';
@@ -33,6 +34,7 @@ render(
       <Route path="/" component={Dashboard} />
       <Route path="/credentials" component={Credentials} />
       <Route path="/runs" component={Runs} />
+      <Route path="/runs/:id" component={RunChat} />
       <Route path="/settings" component={Settings} />
       <Route path="/tokens" component={Tokens} />
       <Route path="/repos/new" component={AddRepo} />

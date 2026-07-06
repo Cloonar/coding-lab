@@ -336,3 +336,51 @@ func TestTmux_serverAbsentMeansEmpty(t *testing.T) {
 		t.Errorf("IsRunning with no server = %v, %v; want false, nil", ok, err)
 	}
 }
+
+// SendNamedKeys delivers a named Enter that submits a previously typed
+// (unsubmitted) literal line — the general form of SendKeys' second call,
+// used by the chat's dialog/interrupt recipes.
+func TestTmux_sendNamedKeysSubmitsLine(t *testing.T) {
+	ctx := t.Context()
+	tm := testTmux(t)
+	const name = "lab-test-namedkeys"
+	dir := t.TempDir()
+	out := filepath.Join(dir, "got.txt")
+
+	if err := tm.Start(ctx, name, dir, []string{"sh", "-c", "cat > '" + out + "'"}, nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := tm.SendKeys(ctx, name, "hello", false); err != nil {
+		t.Fatalf("SendKeys (no enter): %v", err)
+	}
+	if err := tm.SendNamedKeys(ctx, name, "Enter"); err != nil {
+		t.Fatalf("SendNamedKeys(Enter): %v", err)
+	}
+	if got := strings.TrimRight(waitForFile(t, out), "\n"); got != "hello" {
+		t.Errorf("named Enter did not submit the line: got %q; want %q", got, "hello")
+	}
+}
+
+// PasteText delivers multi-line text in one bracketed paste; both lines reach
+// the pane intact (the chat's multi-line reply mechanism).
+func TestTmux_pasteTextDeliversMultiline(t *testing.T) {
+	ctx := t.Context()
+	tm := testTmux(t)
+	const name = "lab-test-paste"
+	dir := t.TempDir()
+	out := filepath.Join(dir, "got.txt")
+
+	if err := tm.Start(ctx, name, dir, []string{"sh", "-c", "cat > '" + out + "'"}, nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := tm.PasteText(ctx, name, "line one\nline two"); err != nil {
+		t.Fatalf("PasteText: %v", err)
+	}
+	if err := tm.SendNamedKeys(ctx, name, "Enter"); err != nil {
+		t.Fatalf("SendNamedKeys(Enter): %v", err)
+	}
+	got := waitForFile(t, out)
+	if !strings.Contains(got, "line one") || !strings.Contains(got, "line two") {
+		t.Errorf("pasted multi-line text missing from pane: %q", got)
+	}
+}

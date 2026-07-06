@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
@@ -35,6 +36,7 @@ type instTestServer struct {
 	*testServer
 	runner       *tmuxx.Fake
 	prov         *providertest.Fake
+	chatSvc      *chat.Service
 	repo         store.Repo
 	worktreeRoot string
 }
@@ -62,6 +64,7 @@ func newInstanceServer(t *testing.T) *instTestServer {
 	runner := tmuxx.NewFake()
 	prov := providertest.New()
 	var repo store.Repo
+	var chatSvc *chat.Service
 
 	x := newTestServer(t, func(o *Options) {
 		st := o.Store
@@ -113,13 +116,23 @@ func newInstanceServer(t *testing.T) *instTestServer {
 		if err != nil {
 			t.Fatal(err)
 		}
+		cs, err := chat.New(chat.Options{
+			Store: st, Providers: reg, Bus: o.Bus, Logger: logx.New(io.Discard),
+			Now: func() time.Time { return instClock },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc.SetChatState(cs)
+		chatSvc = cs
 		o.Instances = svc
 		o.Reconcile = rec
 		o.Providers = reg
+		o.Chat = cs
 	})
 	x.setup("op", "password123")
 	return &instTestServer{
-		testServer: x, runner: runner, prov: prov, repo: repo, worktreeRoot: worktreeRoot,
+		testServer: x, runner: runner, prov: prov, chatSvc: chatSvc, repo: repo, worktreeRoot: worktreeRoot,
 	}
 }
 

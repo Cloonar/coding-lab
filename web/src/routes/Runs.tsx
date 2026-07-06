@@ -5,7 +5,7 @@
 // run's issue number. Newest first, straight from GET /runs; the outcome
 // filter narrows client-side; run.changed refetches.
 
-import { useSearchParams } from '@solidjs/router';
+import { A, useSearchParams } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, onCleanup } from 'solid-js';
 import { errorMessage, listRuns, listRepos, type Run, type RunKind, type RunOutcome } from '../api';
 import RequireAuth from '../components/RequireAuth';
@@ -139,6 +139,9 @@ function RunCard(props: { run: Run }) {
       <Show when={props.run.failure_reason}>
         <p class="run-failure">{props.run.failure_reason}</p>
       </Show>
+      <A href={`/runs/${props.run.id}`} class="card-link run-open" title="Open the chat">
+        Open chat →
+      </A>
     </article>
   );
 }

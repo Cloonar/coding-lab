@@ -352,11 +352,15 @@ export interface Run {
   failure_reason: string | null;
 }
 
+/** The chat tailer's per-instance conversational state (issue #7). */
+export type ConversationState = 'idle' | 'working' | 'needs_input' | 'question' | 'ended' | '';
+
 /** Run JSON + liveness derived from tmux + the in-flight deep-link capture. */
 export interface Instance extends Run {
   repo_name: string;
   live: boolean;
   connecting: boolean;
+  state: ConversationState;
 }
 
 export interface StartInstanceRequest {
@@ -394,6 +398,97 @@ export async function listRuns(opts: { repo?: string; limit?: number } = {}): Pr
   const query = params.toString();
   const res = await request<{ runs: Run[] }>('GET', '/runs' + (query === '' ? '' : `?${query}`));
   return res.runs;
+}
+
+export function getRun(id: string): Promise<Run> {
+  return request<Run>('GET', `/runs/${encodeURIComponent(id)}`);
+}
+
+// --- Embedded chat (issue #7 / ADR-0016) ---
+
+export type MessageKind = 'text' | 'tool' | 'dialog' | 'lifecycle';
+
+export interface ToolInfo {
+  name: string;
+  title: string;
+  input?: string;
+  output?: string;
+  status: 'running' | 'ok' | 'error';
+}
+
+export interface DialogOption {
+  label: string;
+  description?: string;
+  is_other?: boolean;
+}
+
+export interface Dialog {
+  tool_id: string;
+  dialog_kind: 'question' | 'plan' | 'unknown';
+  prompt: string;
+  options?: DialogOption[];
+  multi?: boolean;
+  answerable: boolean;
+}
+
+/** One entry of the universal chat schema. */
+export interface ChatMessage {
+  seq: number;
+  kind: MessageKind;
+  role?: 'user' | 'assistant';
+  time?: string;
+  text?: string;
+  thinking?: boolean;
+  error?: boolean;
+  tool?: ToolInfo;
+  dialog?: Dialog;
+}
+
+/** transcript: whether the file is readable yet. */
+export type TranscriptStatus = 'available' | 'locating' | 'gone';
+
+export interface MessagesResponse {
+  messages: ChatMessage[];
+  state: ConversationState;
+  cursor: number;
+  has_more: boolean;
+  transcript: TranscriptStatus;
+}
+
+/** A window of an instance's messages. after=<seq> tails; before=<seq> pages up. */
+export function getRunMessages(
+  id: string,
+  opts: { after?: number; before?: number; limit?: number } = {},
+): Promise<MessagesResponse> {
+  const params = new URLSearchParams();
+  if (opts.after !== undefined) params.set('after', String(opts.after));
+  if (opts.before !== undefined) params.set('before', String(opts.before));
+  if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+  const query = params.toString();
+  return request<MessagesResponse>(
+    'GET',
+    `/runs/${encodeURIComponent(id)}/messages` + (query === '' ? '' : `?${query}`),
+  );
+}
+
+/** Free-text reply. 409 for an ended run or a pending dialog; 400 for empty. */
+export function replyRun(id: string, text: string): Promise<void> {
+  return request<void>('POST', `/runs/${encodeURIComponent(id)}/reply`, { text });
+}
+
+export interface AnswerRequest {
+  tool_id: string;
+  index?: number;
+  selected?: number[];
+  other_text?: string;
+}
+
+export function answerRun(id: string, req: AnswerRequest): Promise<void> {
+  return request<void>('POST', `/runs/${encodeURIComponent(id)}/answer`, req);
+}
+
+export function interruptRun(id: string): Promise<void> {
+  return request<void>('POST', `/runs/${encodeURIComponent(id)}/interrupt`);
 }
 
 // --- M3: parked ---

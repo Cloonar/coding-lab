@@ -1315,3 +1315,239 @@ a.chip.cr-count:hover {
   border: 1px dashed var(--border);
   border-radius: 8px;
 }
+
+/* --- Embedded chat (issue #7): phone-first conversation view ------------- */
+
+/* Conversational-state badges on instance rows and the chat header. */
+.chip.convo.working {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+.chip.convo.needs-input,
+.chip.convo.question {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+/* The chat page fills the viewport: header, scrolling stream, fixed composer. */
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding-bottom: 0;
+}
+
+.chat-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.chat-back {
+  font-size: 1.25rem;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.3rem;
+}
+.chat-title {
+  font-weight: 600;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-header .spacer {
+  flex: 1;
+}
+
+.chat-stream {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+}
+
+/* Messages: assistant left, user right-aligned bubble. */
+.chat-msg {
+  max-width: 88%;
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.chat-msg.role-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+.chat-msg.thinking {
+  align-self: stretch;
+  max-width: 100%;
+  background: var(--idle-bg);
+  color: var(--idle-text);
+  border-style: dashed;
+}
+.chat-msg-tag {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  margin-bottom: 0.2rem;
+}
+.chat-msg-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Tool activity: a one-line chip expanding on tap to truncated in/out. */
+.chat-tool {
+  align-self: flex-start;
+  max-width: 100%;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--chip-bg);
+}
+.tool-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 36px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  color: var(--chip-text);
+}
+.tool-summary .tool-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-summary.tool-error {
+  color: var(--err-text);
+}
+.tool-status {
+  font-weight: 600;
+}
+.tool-body {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: pre;
+  font-size: 0.8rem;
+  max-height: 40vh;
+}
+.tool-output {
+  color: var(--muted);
+}
+
+.chat-lifecycle {
+  align-self: center;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.chat-lifecycle.error {
+  color: var(--err-text);
+}
+
+.chat-dialog-inline {
+  align-self: flex-start;
+  max-width: 100%;
+}
+.chat-dialog-prompt {
+  margin: 0 0 0.4rem;
+  font-weight: 600;
+}
+
+/* Fixed bottom composer; state follows the run. */
+.chat-composer {
+  position: sticky;
+  bottom: 0;
+  padding: 0.5rem 0 0.75rem;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+.chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4rem;
+}
+.chat-input {
+  flex: 1;
+  font-size: 16px;
+  min-height: 44px;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+  resize: vertical;
+}
+.chat-send {
+  min-height: 44px;
+  padding: 0 1rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: var(--radius-control);
+}
+.chat-composer-note {
+  margin: 0;
+  padding: 0.5rem;
+  text-align: center;
+  color: var(--muted);
+}
+.chat-composer-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* Dialog panel: native tappable option buttons from the structured input. */
+.chat-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.dialog-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.dialog-option {
+  width: 100%;
+  text-align: left;
+  min-height: 44px;
+}
+.dialog-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+}
+.dialog-other {
+  display: flex;
+  gap: 0.4rem;
+}
+.chat-earlier {
+  align-self: center;
+}

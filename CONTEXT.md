@@ -20,6 +20,18 @@ _Avoid_: background job, batch run, bot run
 The captured `https://claude.ai/code/<id>` URL of an instance — read from claude's session registry by worktree-cwd match shortly after spawn — through which the operator drives the session from any device. Capture failure degrades to the generic `https://claude.ai/code` link with a loud log; it never blocks Start.
 _Avoid_: attach URL, share link, session URL
 
+**Chat**:
+The rendered conversation of an instance inside lab's UI (the `/runs/:id` view) — user and assistant messages, tool chips, and pending dialogs — where the operator can reply, answer a dialog, or interrupt. It complements the deep link (the escape hatch), never replaces it, and applies to every instance (manual and AFK).
+_Avoid_: terminal, console, session view, thread
+
+**Transcript**:
+The provider-native session file the Chat reads through (Claude Code: the live JSONL under `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`), located by worktree-cwd match and mapped behind the provider seam to the universal message schema (`text | tool | dialog | lifecycle`). Never rendered raw; its path is the only chat state lab persists (`runs.transcript_path`). A retired file degrades to "transcript no longer available".
+_Avoid_: log, history, raw output, session file (in UI copy)
+
+**Conversational state**:
+The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live badge on Dashboard rows and the chat header. Distinct from `live` (tmux liveness) and the run's terminal outcome.
+_Avoid_: status, activity, progress
+
 **Reference repo**:
 The lab-owned bare clone at `<state>/repos/<id>.git` — the worktree parent and host for all fetch/branch/worktree git ops, never an instance's cwd. (v0 meant the human's main checkout; bare means structurally never dirty.)
 _Avoid_: main checkout, scan root, mirror
@@ -106,6 +118,7 @@ _Avoid_: password, keyring, vault key file synonyms
 - An **AFK run**'s **claim** is its branch and nothing else; selection skips issues whose branch exists and never consults the PR list — the PR/CR list is the reaper's **done-signal** only.
 - The scheduler counts the **claimable** set (**ready queue** minus existing claims); an AFK run that outlives its **budget clock** without a done-signal is a timeout, and timeouts (like deaths) feed the **three-strikes pause**.
 - A manual **instance**'s **deep link** is the operator's handle to it; the deep link is captured best-effort and survives restarts on the run row.
+- The **chat** reads an instance's **transcript** through the provider seam and lets the operator reply/answer/interrupt; it complements the deep link and applies to every instance. Replying to or interrupting an **AFK run** is a **neutral** intervention — it never touches the **budget clock**, **claim**, or **three-strikes pause**. The tailer's **conversational state** feeds the instance list's live badges.
 - **Guarded teardown** runs at all four teardown sites (manual Stop, AFK reaper, startup reconciliation, merged-sweep) and produces **parked work**; the **unguarded Discard** is the only way to destroy it and the only requeue.
 - A **neutral Stop** parks the claim and never feeds the **three-strikes pause** counter.
 - Each repo has exactly one **tracker binding** and one **provider**, and may enable **incogni mode**.

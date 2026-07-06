@@ -185,3 +185,49 @@ func TestFake_errorInjection(t *testing.T) {
 		t.Errorf("List after clearing injection: %v", err)
 	}
 }
+
+// TestFake_keyLog covers the unified key-event log across the three delivery
+// kinds (issue #7): literal text, named keys, and pastes interleave in call
+// order, and FailSendKeys gates all three.
+func TestFake_keyLog(t *testing.T) {
+	ctx := t.Context()
+	f := NewFake()
+	const name = "proj~x"
+	f.AddLive(name)
+
+	if err := f.SendKeys(ctx, name, "hi", true); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	if err := f.SendNamedKeys(ctx, name, "Up", "Up", "Enter"); err != nil {
+		t.Fatalf("SendNamedKeys: %v", err)
+	}
+	if err := f.PasteText(ctx, name, "multi\nline"); err != nil {
+		t.Fatalf("PasteText: %v", err)
+	}
+	want := []KeyEvent{
+		{Kind: "text", Text: "hi", Enter: true},
+		{Kind: "keys", Keys: "Up Up Enter"},
+		{Kind: "paste", Text: "multi\nline"},
+	}
+	if got := f.KeyLog(name); !slices.Equal(got, want) {
+		t.Errorf("KeyLog = %+v; want %+v", got, want)
+	}
+
+	// Absent session errors on every delivery kind.
+	if err := f.SendNamedKeys(ctx, "ghost", "Escape"); err == nil {
+		t.Error("SendNamedKeys to missing session: want error")
+	}
+	if err := f.PasteText(ctx, "ghost", "x"); err == nil {
+		t.Error("PasteText to missing session: want error")
+	}
+
+	// FailSendKeys gates named keys and paste too.
+	boom := errors.New("boom")
+	f.FailSendKeys(name, boom)
+	if err := f.SendNamedKeys(ctx, name, "Escape"); !errors.Is(err, boom) {
+		t.Errorf("FailSendKeys(named) = %v; want boom", err)
+	}
+	if err := f.PasteText(ctx, name, "x"); !errors.Is(err, boom) {
+		t.Errorf("FailSendKeys(paste) = %v; want boom", err)
+	}
+}

@@ -1,10 +1,10 @@
 // Package tmuxx is lab's SessionRunner seam — the only interface to agent
-// processes (design §4d; port of lab-v0 sessions.go). It wraps exactly six
+// processes (design §4d; port of lab-v0 sessions.go). It wraps exactly eight
 // tmux behaviours: start a detached session running an arbitrary argv in a
 // working dir, stop it, ask whether it exists, list live names, send
-// keystrokes, and capture the pane (used by the provider's login flow to
-// scrape the OAuth URL). tmux is the source of truth for liveness — no
-// other state is held here.
+// keystrokes (literal text, named keys, or a bracketed paste), and capture
+// the pane (used by the provider's login flow to scrape the OAuth URL).
+// tmux is the source of truth for liveness — no other state is held here.
 //
 // Deltas from v0 (per the sessions-spawn port spec §7): the spawn argv
 // arrives complete from the AgentProvider (no "%s" substitution — the
@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -66,6 +67,15 @@ type SessionRunner interface {
 	// SendKeys delivers text to the session as literal keystrokes, then —
 	// when enter is true — a separate Enter keypress that submits the line.
 	SendKeys(ctx context.Context, name, text string, enter bool) error
+	// SendNamedKeys delivers tmux key names ("Escape", "Down", "Space",
+	// "Enter", …) in one non-literal send-keys call, in order — the chat
+	// surface's dialog/interrupt recipes (ADR-0016).
+	SendNamedKeys(ctx context.Context, name string, keys ...string) error
+	// PasteText delivers text to the session as one bracketed paste (tmux
+	// load-buffer + paste-buffer -p): a TUI in bracketed-paste mode receives
+	// embedded newlines as inserted lines instead of submissions. Submitting
+	// is the caller's separate Enter.
+	PasteText(ctx context.Context, name, text string) error
 	// CapturePane returns the session's pane content, wrapped lines
 	// joined, full scrollback included.
 	CapturePane(ctx context.Context, name string) (string, error)
@@ -255,6 +265,43 @@ func (t *Tmux) SendKeys(ctx context.Context, name, text string, enter bool) erro
 	}
 	if out, err := t.cmd(ctx, "send-keys", "-t", name, "--", "Enter").CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux send-keys (enter): %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// SendNamedKeys delivers key names in one non-literal send-keys call —
+// tmux parses each argument as a key ("Escape", "Down", "Space", "Enter"),
+// exactly the second-call semantics of SendKeys' Enter, generalized. Bare
+// session name for the same target-pane parser reason as SendKeys.
+func (t *Tmux) SendNamedKeys(ctx context.Context, name string, keys ...string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	args := append([]string{"send-keys", "-t", name, "--"}, keys...)
+	if out, err := t.cmd(ctx, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys (named): %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// pasteSeq disambiguates concurrent PasteText buffer names on the shared
+// tmux server; the buffer exists only between load-buffer and the -d
+// deleting paste.
+var pasteSeq atomic.Int64
+
+// PasteText delivers text as one bracketed paste: load-buffer from stdin
+// into a uniquely named buffer, then paste-buffer -p (bracket codes, when
+// the pane's application requested bracketed-paste mode) -d (delete the
+// buffer after). Bare session name, as with SendKeys.
+func (t *Tmux) PasteText(ctx context.Context, name, text string) error {
+	buf := fmt.Sprintf("lab-paste-%d", pasteSeq.Add(1))
+	load := t.cmd(ctx, "load-buffer", "-b", buf, "-")
+	load.Stdin = strings.NewReader(text)
+	if out, err := load.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux load-buffer: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := t.cmd(ctx, "paste-buffer", "-p", "-d", "-b", buf, "-t", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux paste-buffer: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

@@ -21,6 +21,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
+	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
@@ -161,6 +162,7 @@ func run() int {
 		reconcileSvc *reconcile.Service
 		providerReg  *provider.Registry
 		afkSvc       *afk.Service
+		chatSvc      *chat.Service
 	)
 	if cfg.ClaudeConfig == "" {
 		logger.Warn("claude config path unresolved (HOME unset and no --claude-config); instance features disabled",
@@ -172,6 +174,7 @@ func run() int {
 			ClaudeBin:   cfg.ClaudeBin,
 			ConfigPath:  cfg.ClaudeConfig,
 			RegistryDir: filepath.Join(home, ".claude", "sessions"),
+			ProjectsDir: filepath.Join(home, ".claude", "projects"),
 			LoginDir:    home,
 			Runner:      runner,
 			Bus:         bus,
@@ -248,6 +251,22 @@ func run() int {
 		}
 		instanceSvc.SetAFKStopper(afkSvc)
 
+		// Embedded chat (issue #7): the transcript tailer + read/act brain.
+		// It self-syncs its tailer set to the active runs off the event bus,
+		// and feeds the instance list its conversational-state field.
+		chatSvc, err = chat.New(chat.Options{
+			Store:     st,
+			Providers: providerReg,
+			Bus:       bus,
+			Logger:    logger,
+			Ctx:       ctx,
+		})
+		if err != nil {
+			logger.Error("building chat service", "component", "main", "err", err)
+			return 1
+		}
+		instanceSvc.SetChatState(chatSvc)
+
 		// lab_instances_active (M8): a scrape-time gauge over the live
 		// tmux+active-runs view — registered only with the instance stack up
 		// (without it no runner exists; the absent series says so).
@@ -301,6 +320,7 @@ func run() int {
 		Repos:           repoSvc,
 		Instances:       instanceSvc,
 		Reconcile:       reconcileSvc,
+		Chat:            chatSvc,
 		Providers:       providerReg,
 		Tracker:         trackerReg,
 		AFK:             afkSvc,
@@ -326,6 +346,11 @@ func run() int {
 	if afkSvc != nil {
 		go afkSvc.ReaperLoop(ctx)
 		go afkSvc.SchedulerLoop(ctx)
+	}
+	// The chat tailer: one goroutine that keeps a per-live-instance transcript
+	// tailer set in sync with the active runs and publishes run.messages.changed.
+	if chatSvc != nil {
+		go chatSvc.Run(ctx)
 	}
 
 	srv := &http.Server{

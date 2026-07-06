@@ -48,6 +48,7 @@ type Run struct {
 	Model          string
 	Effort         string
 	DeepLinkURL    *string
+	TranscriptPath *string // provider-native transcript file the chat reads through (ADR-0016)
 	StartedAt      time.Time
 	BudgetDeadline *time.Time // persisted budget clock (D12b)
 	EndedAt        *time.Time
@@ -58,8 +59,8 @@ type Run struct {
 // runColumns is the one column list every run SELECT/INSERT uses, in the order
 // scanRun reads.
 const runColumns = `id, repo_id, kind, provider, issue_number, branch,
-	worktree_path, session_name, model, effort, deep_link_url, started_at,
-	budget_deadline, ended_at, outcome, failure_reason`
+	worktree_path, session_name, model, effort, deep_link_url, transcript_path,
+	started_at, budget_deadline, ended_at, outcome, failure_reason`
 
 // CreateRun inserts r exactly as given (the caller has derived every field:
 // session name, branch, worktree path, resolved model/effort). Timestamps are
@@ -79,11 +80,11 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	}
 	_, err := s.db.ExecContext(ctx, s.rebind(
 		`INSERT INTO runs (`+runColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.RepoID, r.Kind, r.Provider, r.IssueNumber, r.Branch,
 		r.WorktreePath, r.SessionName, r.Model, r.Effort, r.DeepLinkURL,
-		fmtTime(r.StartedAt), fmtNullTime(r.BudgetDeadline), fmtNullTime(r.EndedAt),
-		r.Outcome, r.FailureReason)
+		r.TranscriptPath, fmtTime(r.StartedAt), fmtNullTime(r.BudgetDeadline),
+		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return Run{}, fmt.Errorf("create run %q: %w", r.SessionName, ErrNotFound)
@@ -185,6 +186,40 @@ func (s *Store) UpdateRunDeepLink(ctx context.Context, id, url string) error {
 	return nil
 }
 
+// RunByID returns a run by its id — any outcome, unlike RunBySession: the
+// chat surface reads ended runs' transcripts too (ADR-0016).
+func (s *Store) RunByID(ctx context.Context, id string) (Run, error) {
+	row := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT `+runColumns+` FROM runs WHERE id = ?`), id)
+	r, err := scanRun(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, fmt.Errorf("run by id %q: %w", id, ErrNotFound)
+		}
+		return Run{}, fmt.Errorf("run by id %q: %w", id, err)
+	}
+	return r, nil
+}
+
+// UpdateRunTranscriptPath sets a run's located transcript file. Like the deep
+// link, the value is captured async by worktree-cwd match and survives
+// restarts; the store just writes what it is given.
+func (s *Store) UpdateRunTranscriptPath(ctx context.Context, id, path string) error {
+	res, err := s.db.ExecContext(ctx, s.rebind(
+		`UPDATE runs SET transcript_path = ? WHERE id = ?`), path, id)
+	if err != nil {
+		return fmt.Errorf("update run %q transcript path: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update run %q transcript path: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update run %q transcript path: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // DeleteRun removes a run row (its run_tokens cascade). This is the Start
 // rollback path (§3a: a failure after worktree creation deletes the runs
 // row/token), NOT a terminal outcome — a rolled-back start leaves no history.
@@ -215,21 +250,23 @@ func scanRuns(rows *sql.Rows, doing string) ([]Run, error) {
 // scanRun reads one row in runColumns order.
 func scanRun(scan func(dest ...any) error) (Run, error) {
 	var (
-		r        Run
-		issueN   sql.NullInt64
-		deepLink sql.NullString
-		started  string
-		budget   sql.NullString
-		ended    sql.NullString
-		failure  sql.NullString
+		r          Run
+		issueN     sql.NullInt64
+		deepLink   sql.NullString
+		transcript sql.NullString
+		started    string
+		budget     sql.NullString
+		ended      sql.NullString
+		failure    sql.NullString
 	)
 	if err := scan(&r.ID, &r.RepoID, &r.Kind, &r.Provider, &issueN, &r.Branch,
-		&r.WorktreePath, &r.SessionName, &r.Model, &r.Effort, &deepLink, &started,
-		&budget, &ended, &r.Outcome, &failure); err != nil {
+		&r.WorktreePath, &r.SessionName, &r.Model, &r.Effort, &deepLink,
+		&transcript, &started, &budget, &ended, &r.Outcome, &failure); err != nil {
 		return Run{}, err
 	}
 	r.IssueNumber = nullInt(issueN)
 	r.DeepLinkURL = nullStr(deepLink)
+	r.TranscriptPath = nullStr(transcript)
 	r.FailureReason = nullStr(failure)
 
 	var err error

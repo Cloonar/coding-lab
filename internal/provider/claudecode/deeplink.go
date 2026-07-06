@@ -34,6 +34,10 @@ type RegistryEntry struct {
 	Cwd             string `json:"cwd"`
 	StartedAt       int64  `json:"startedAt"` // unix millis
 	BridgeSessionID string `json:"bridgeSessionId"`
+	// SessionID is claude's transcript filename stem: the chat surface reads
+	// <projects>/<cwd-slug>/<SessionID>.jsonl (compat.md §5). Formerly one of
+	// the ignored registry keys; read since ADR-0016.
+	SessionID string `json:"sessionId"`
 }
 
 // BridgeURL renders the claude.ai deep link for a bridge session id. The

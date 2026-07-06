@@ -5,9 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 )
 
@@ -177,6 +179,126 @@ func TestCompat_AttributionKeys_seed(t *testing.T) {
 	}
 	if _, ok := parsed["attribution"].(map[string]any); !ok {
 		t.Errorf("attribution is not a JSON object: %s", local)
+	}
+}
+
+// Registry sessionId (compat.md §5): the transcript filename stem lab reads
+// from the same registry file the deep link comes from.
+func TestCompat_RegistryFixture_hasSessionID(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "registry-2.1.198.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e claudecode.RegistryEntry
+	if err := json.Unmarshal(b, &e); err != nil {
+		t.Fatalf("registry fixture does not parse: %v", err)
+	}
+	if e.SessionID != "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d" {
+		t.Errorf("SessionID = %q; want the transcript-filename stem", e.SessionID)
+	}
+}
+
+// Transcript project-dir slug (compat.md §5): every non-alphanumeric byte of
+// the absolute cwd becomes '-', so a '/.' boundary doubles. Pinned against the
+// dirs claude actually created under ~/.claude/projects on 2.1.198.
+func TestCompat_SlugForDir(t *testing.T) {
+	cases := map[string]string{
+		"/home/dominik/projects/cloonar/coding-lab":                                      "-home-dominik-projects-cloonar-coding-lab",
+		"/home/dominik/.local/state/lab/worktrees/nixos-test-20260706-2315":              "-home-dominik--local-state-lab-worktrees-nixos-test-20260706-2315",
+		"/home/dominik/projects/cloonar/coding-lab/.claude/worktrees/feat-embedded-chat": "-home-dominik-projects-cloonar-coding-lab--claude-worktrees-feat-embedded-chat",
+	}
+	for dir, want := range cases {
+		if got := claudecode.SlugForDir(dir); got != want {
+			t.Errorf("SlugForDir(%q) = %q; want %q", dir, got, want)
+		}
+	}
+}
+
+// Transcript JSONL → universal schema (compat.md §5): the field names and
+// shapes lab folds a real 2.1.198-shaped transcript through. Drives the parser
+// from a captured fixture covering every mapped event: bridge lifecycle, user
+// text, hidden thinking, assistant text, tool chips with ok/error results, an
+// isMeta skip, a surfaced API error, and a pending dialog.
+func TestCompat_TranscriptFixture_maps(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "transcript-2.1.198.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	chat := claudecode.ParseTranscript(f)
+
+	if chat.Cursor != 9 || len(chat.Messages) != 9 {
+		t.Fatalf("mapped %d messages (cursor %d); want 9 (the isMeta line is dropped)", len(chat.Messages), chat.Cursor)
+	}
+	if chat.State != provider.StateQuestion {
+		t.Errorf("State = %q; want %q (tail is a pending dialog)", chat.State, provider.StateQuestion)
+	}
+
+	m := chat.Messages
+	if m[0].Kind != provider.MessageLifecycle || m[0].Error {
+		t.Errorf("msg0 = %+v; want a non-error lifecycle (bridge status)", m[0])
+	}
+	if m[1].Kind != provider.MessageText || m[1].Role != "user" {
+		t.Errorf("msg1 = %+v; want user text", m[1])
+	}
+	if m[2].Kind != provider.MessageText || !m[2].Thinking {
+		t.Errorf("msg2 = %+v; want assistant thinking (hidden)", m[2])
+	}
+	if m[4].Kind != provider.MessageTool || m[4].Tool == nil || m[4].Tool.Status != "ok" {
+		t.Errorf("msg4 = %+v; want an ok tool chip (result landed)", m[4])
+	}
+	if got := m[4].Tool.Title; got != "Ran labctl issue create --title \"Test issue\" --labels needs-triage" {
+		t.Errorf("tool title = %q; want the Bash first-line chip", got)
+	}
+	if m[6].Kind != provider.MessageTool || m[6].Tool == nil || m[6].Tool.Status != "error" {
+		t.Errorf("msg6 = %+v; want an error tool chip (is_error result)", m[6])
+	}
+	if m[7].Kind != provider.MessageLifecycle || !m[7].Error {
+		t.Errorf("msg7 = %+v; want a surfaced API error", m[7])
+	}
+	d := m[8]
+	if d.Kind != provider.MessageDialog || d.Dialog == nil {
+		t.Fatalf("msg8 = %+v; want a dialog", d)
+	}
+	if !d.Dialog.Answerable || d.Dialog.Multi || len(d.Dialog.Options) != 3 {
+		t.Errorf("dialog = %+v; want an answerable single-select with 2 options + Other", d.Dialog)
+	}
+	if !d.Dialog.Options[2].IsOther {
+		t.Errorf("dialog last option = %+v; want the synthesized Other row", d.Dialog.Options[2])
+	}
+}
+
+// Dialog answer keystrokes (compat.md §7): the send-keys recipe for a picker.
+// Normalise to the top (Up × rows−1), navigate down to the choice, Enter;
+// multi-select toggles with Space; Other selects then types.
+func TestCompat_DialogKeystrokes(t *testing.T) {
+	single := provider.Dialog{Answerable: true, Options: []provider.DialogOption{
+		{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true},
+	}}
+	got, err := claudecode.DialogKeystrokes(single, provider.DialogAnswer{Index: 1})
+	if err != nil {
+		t.Fatalf("single-select: %v", err)
+	}
+	want := []claudecode.KeyOp{{Named: []string{"Up", "Up"}}, {Named: []string{"Down"}}, {Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("single-select recipe = %v; want %v", got, want)
+	}
+
+	multi := provider.Dialog{Answerable: true, Multi: true, Options: []provider.DialogOption{
+		{Label: "a"}, {Label: "b"}, {Label: "c"},
+	}}
+	got, _ = claudecode.DialogKeystrokes(multi, provider.DialogAnswer{Selected: []int{0, 2}})
+	want = []claudecode.KeyOp{{Named: []string{"Up", "Up"}}, {Named: []string{"Space"}},
+		{Named: []string{"Down", "Down"}}, {Named: []string{"Space"}}, {Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("multi-select recipe = %v; want %v", got, want)
+	}
+
+	got, _ = claudecode.DialogKeystrokes(single, provider.DialogAnswer{Index: 2, OtherText: "custom"})
+	want = []claudecode.KeyOp{{Named: []string{"Up", "Up"}}, {Named: []string{"Down", "Down"}},
+		{Named: []string{"Enter"}}, {Text: "custom"}, {Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Other recipe = %v; want %v", got, want)
 	}
 }
 

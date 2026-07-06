@@ -106,7 +106,7 @@ Built-in tracker: issues + comments + labels CRUD under `/repos/{id}/issues...`;
 Runs: `GET /runs?repo=...` (history).
 Provider: `GET /providers/claude/auth/status`, `POST /providers/claude/auth/login/start`, `POST /providers/claude/auth/login/code`.
 Settings: `GET|PATCH /settings`.
-Events: `GET /events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `clone.progress`, `claude.auth.changed`, `issue.changed`, `cr.changed`).
+Events: `GET /events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `clone.progress`, `claude.auth.changed`, `issue.changed`, `cr.changed`, `run.messages.changed`).
 
 ### 8.2 Agent API (`/agent/v1`, run-token auth)
 

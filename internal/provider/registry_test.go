@@ -21,6 +21,15 @@ func (s stubProvider) CaptureDeepLink(context.Context, string, string) (string, 
 	return "", nil
 }
 func (s stubProvider) SeedWorkspace(string, SeedOpts) error { return nil }
+func (s stubProvider) LocateTranscript(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (s stubProvider) ReadTranscript(string) (Chat, error)         { return Chat{}, nil }
+func (s stubProvider) Reply(context.Context, string, string) error { return nil }
+func (s stubProvider) AnswerDialog(context.Context, string, Dialog, DialogAnswer) error {
+	return nil
+}
+func (s stubProvider) Interrupt(context.Context, string) error { return nil }
 
 func TestRegistry_GetAndListOrder(t *testing.T) {
 	a, b := stubProvider{id: "claude-code"}, stubProvider{id: "other"}

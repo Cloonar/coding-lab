@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
+	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
@@ -55,6 +56,12 @@ type Options struct {
 	// Reconcile owns the parked view + unguarded discard (M3). Nil leaves the
 	// parked routes unmounted.
 	Reconcile *reconcile.Service
+
+	// Chat is the embedded-chat brain (issue #7): read an instance's
+	// transcript, reply/answer/interrupt, and the tailer's conversational
+	// state. Nil leaves the /runs/{id}/messages + reply/answer/interrupt
+	// routes unmounted.
+	Chat *chat.Service
 	// Providers is the agent-provider registry (M3): the providers catalog and
 	// the claude auth/login endpoints. Nil leaves those routes unmounted.
 	Providers *provider.Registry
@@ -113,6 +120,7 @@ type Server struct {
 	repos     *reposvc.Service
 	instances *instance.Service
 	reconcile *reconcile.Service
+	chat      *chat.Service
 	providers *provider.Registry
 	tracker   *tracker.Registry
 	afk       *afk.Service
@@ -197,6 +205,7 @@ func New(o Options) (*Server, error) {
 		repos:       o.Repos,
 		instances:   o.Instances,
 		reconcile:   o.Reconcile,
+		chat:        o.Chat,
 		providers:   o.Providers,
 		tracker:     o.Tracker,
 		afk:         o.AFK,
@@ -278,6 +287,17 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("DELETE /api/v1/instances/{session}", s.requireAuth(s.handleInstanceDelete))
 		api.HandleFunc("POST /api/v1/repos/{id}/stop-all", s.requireAuth(s.handleStopAll))
 		api.HandleFunc("GET /api/v1/runs", s.requireAuth(s.handleRunsList))
+		api.HandleFunc("GET /api/v1/runs/{id}", s.requireAuth(s.handleRunGet))
+	}
+
+	// Embedded chat (issue #7): the transcript read + reply/answer/interrupt
+	// surface (operator auth; CSRF guards the mutations). Mounted with the
+	// chat brain.
+	if s.chat != nil {
+		api.HandleFunc("GET /api/v1/runs/{id}/messages", s.requireAuth(s.handleRunMessages))
+		api.HandleFunc("POST /api/v1/runs/{id}/reply", s.requireAuth(s.handleRunReply))
+		api.HandleFunc("POST /api/v1/runs/{id}/answer", s.requireAuth(s.handleRunAnswer))
+		api.HandleFunc("POST /api/v1/runs/{id}/interrupt", s.requireAuth(s.handleRunInterrupt))
 	}
 	if s.reconcile != nil {
 		api.HandleFunc("GET /api/v1/repos/{id}/parked", s.requireAuth(s.handleParkedList))
