@@ -1,0 +1,21 @@
+# Instances run in per-instance worktrees under tmux, behind an AgentProvider seam
+
+A manual instance is a `claude --remote-control` session that lab spawns in tmux inside a git worktree forked from the repo's bare reference clone (D4, reference ADR-0017). The v0 session/worktree/AFK core is ported decision-for-decision — its `*_test.go` tables are the behavioral contract, transcribed into this codebase's tests. Three pieces carry the load:
+
+**Naming and the guarded-teardown rule.** A session is `<repoName>~<label>` (split on the first `~`); its worktree directory is dash-joined `<repoName>-<label>` and must never contain `~` — a `name~digit` path component matches the Windows 8.3 short-name pattern that stalls Claude's unattended edits. Teardown is guarded verbatim: a dirty worktree keeps both worktree and branch; clean+unmerged removes the worktree but keeps the branch; clean+merged removes both; and any error reading dirty/merged state keeps everything. This rule runs identically at manual Stop, startup reconciliation, and the throttled sweep. The only unguarded destruction is the operator's explicit Parked → Discard.
+
+**Fail-loud Start with full rollback.** Start is synchronous and pinned in order: cap check (live sessions counted from tmux, never the DB; login session excluded) → force the auth refresh (never the 30s cache — a spawn while logged out strands a doomed session) → derive label/branch/worktree → mark the start guard → add the worktree (fail-loud fetch, fork from `origin/<default>`, no fallback base) → seed trust → create the run row and mint the run token → spawn under prlimit → clear the guard → capture the deep link asynchronously. Any failure after the worktree exists rolls back completely — kill the session (it may already be live), remove the worktree, force-delete the branch, delete the run row and token, clean the credential files — on a detached context so a client disconnect cannot strand a half-built instance. A failure before the worktree exists rolls back nothing. The git cause surfaces verbatim in the API error.
+
+**Source-of-truth layering at runtime.** tmux is the sole witness of "is this session alive"; git refs are the claim and the work; the `runs` table is history. Startup re-adoption reconciles `runs.outcome='active'` against live tmux — survivors keep their budget clock and re-arm deep-link capture; the rest are marked dead without touching the three-strikes counter (downtime deaths are invisible to it, v0 parity). The start guard protects a mid-Start worktree from the sweep: a fresh fork reads clean-and-merged, so ownership — not the merged check — is what keeps the sweep from GC'ing it. The same principle bounds credential-file GC: a not-kept materialized key younger than five minutes is spared, because an in-flight op's run is not yet in the live keep-set.
+
+Everything lab needs from the coding agent sits behind the `AgentProvider` interface (D14): spawn argv, the model/effort catalogs, the machine-level auth/login flow, deep-link capture, and workspace trust seeding. Claude Code is the only implementation; its every fragile coupling — the `--remote-control` argv, the `~/.claude/sessions/<pid>.json` registry shape, `cse_`→`session_` normalization, the OAuth URL regex, `claude auth status --json` parsed regardless of exit code, the trust keys — is pinned in `internal/compat` and was verified live against Claude Code 2.1.198 (a real session captured a genuine `claude.ai/code/session_…` deep link with no fallback). Adding Codex (#2) is one new implementation, zero refactor.
+
+## Status
+
+Accepted. Implements D4/D14 and the §9/§11 port; shipped in M3.
+
+## Considered options
+
+- **One shared checkout, instances as branches.** Rejected (reference ADR-0017): concurrent instances need isolated working trees; per-instance worktrees off a bare clone give that natively and keep the guarded-teardown rule per-instance.
+- **Session exit as the done-signal.** Rejected (reference ADR-0007): `claude --remote-control` idles after finishing, so exit means nothing; liveness is a tmux fact and completion is a tracker fact (M5/M6).
+- **Trust the cached auth status before spawn.** Rejected: the 30s render cache can hide a token that expired seconds ago and strand a doomed remote-control session; Start forces a fresh check.
