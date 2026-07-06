@@ -1,0 +1,40 @@
+# CI = `nix flake check` (design §10): local and CI run the same gate.
+# Runner prerequisites (nix with flakes, egress/mirrors for proxy.golang.org,
+# registry.npmjs.org, cache.nixos.org and the flake inputs) are documented in
+# docs/ops.md. The `nix` runs-on label is a placeholder — adjust it to the
+# labels your Forgejo instance's runners actually advertise.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  flake-check:
+    runs-on: nix
+    steps:
+      - uses: actions/checkout@v4
+      - name: nix flake check
+        run: nix flake check -L
+
+  # M2 stub — postgres-backed store suite. Uncomment when M2 lands: the
+  # sqlite store suite already runs inside `nix flake check`; this job adds
+  # the same suite against a real postgres via LAB_TEST_POSTGRES_DSN
+  # (design §3a migration parity / §11 store bar).
+  #
+  # store-postgres:
+  #   runs-on: nix
+  #   services:
+  #     postgres:
+  #       image: postgres:17
+  #       env:
+  #         POSTGRES_USER: lab
+  #         POSTGRES_PASSWORD: lab
+  #         POSTGRES_DB: lab_test
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: store suite against postgres
+  #       env:
+  #         LAB_TEST_POSTGRES_DSN: postgres://lab:lab@postgres:5432/lab_test?sslmode=disable
+  #       run: nix develop --command go test ./internal/store/...
