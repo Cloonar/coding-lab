@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -61,7 +62,10 @@ func (s *Service) Run(ctx context.Context) {
 const resyncFactor = 30
 
 // sync arms a tailer for every active run not yet tailed and disarms tailers
-// whose run is no longer active.
+// whose run is no longer active, then GCs the dialog spools of runs that are no
+// longer active. Only ever called from Run's select — never on shutdown — so a
+// clean shutdown leaves an active run's spool intact for restart survival
+// (ADR-0020 decision 2).
 func (s *Service) sync(ctx context.Context) {
 	runs, err := s.store.ActiveRuns(ctx)
 	if err != nil {
@@ -69,10 +73,34 @@ func (s *Service) sync(ctx context.Context) {
 		return
 	}
 	active := make(map[string]store.Run, len(runs))
+	activeIDs := make(map[string]bool, len(runs))
 	for _, r := range runs {
 		active[r.SessionName] = r
+		activeIDs[r.ID] = true
 	}
 	s.tailers.retain(active, func(run store.Run) { s.arm(run) })
+	s.sweepSpools(activeIDs)
+}
+
+// sweepSpools removes the dialog spool, blocked marker, and per-run settings
+// file of every run no longer active (ADR-0020: a spool for an ended run is
+// garbage; one for an active run survives a lab restart, so the active set is
+// the keep-set — the same principle as the credential runtime GC). Runs against
+// every provider advertising the DialogHooker capability.
+func (s *Service) sweepSpools(activeIDs map[string]bool) {
+	if s.runtimeDir == "" {
+		return
+	}
+	keep := func(runID string) bool { return activeIDs[runID] }
+	for _, prov := range s.providers.List() {
+		h, ok := prov.(provider.DialogHooker)
+		if !ok {
+			continue
+		}
+		if err := h.SweepSpools(s.runtimeDir, keep); err != nil {
+			s.log.Warn("chat tailer sync: sweeping dialog spools", "component", "chat", "provider", prov.ID(), "err", err)
+		}
+	}
 }
 
 // arm starts a tailer goroutine for run under a child of the service ctx.
@@ -83,9 +111,13 @@ func (s *Service) arm(run store.Run) {
 	go s.tail(ctx, run, h)
 }
 
-// tail is one run's poll loop: resolve the transcript path, then on each tick
-// re-stat it and, when it changed, re-read → derive state → publish. The state
-// is cached for the instance list even between changes.
+// tail is one run's poll loop. Each tick it re-stats the transcript AND the
+// dialog spool (a pending dialog appears while the transcript is byte-frozen —
+// compat §5 — so watching only the file would never notice it). On any change
+// it recomputes the combined state (transcript + spool + marker) and publishes
+// run.messages.changed when the transcript changed OR the derived state changed
+// — the chat view refetches on both. The transcript is re-parsed only when its
+// file changed (cached across ticks); a bare spool change reuses the last parse.
 func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 	// Remove by handle identity, not bare session name: a disarmed goroutine
 	// can outlive its cancel by up to one tick, and session names are reused
@@ -96,29 +128,49 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 	if !ok {
 		return
 	}
+	hooker, _ := prov.(provider.DialogHooker) // nil for a transcript-only provider
 	t := time.NewTicker(s.poll)
 	defer t.Stop()
 
 	var (
-		path    string
-		lastMod time.Time
-		lastSz  int64
-		first   = true
+		path      string
+		lastMod   time.Time
+		lastSz    int64
+		lastSig   string
+		lastState string
+		lastChat  = provider.Chat{State: provider.StateIdle}
+		first     = true
 	)
 	for {
 		if path == "" {
 			path = s.resolvePath(ctx, prov, run)
 		}
+		transcriptChanged := false
 		if path != "" {
-			if fi, err := os.Stat(path); err == nil {
-				if first || fi.ModTime() != lastMod || fi.Size() != lastSz {
-					first, lastMod, lastSz = false, fi.ModTime(), fi.Size()
-					if chat, err := prov.ReadTranscript(path); err == nil {
-						s.tailers.setState(run.SessionName, chat.State)
-						s.publishMessagesChanged(run)
-					}
+			if fi, err := os.Stat(path); err == nil && (fi.ModTime() != lastMod || fi.Size() != lastSz) {
+				transcriptChanged = true
+				lastMod, lastSz = fi.ModTime(), fi.Size()
+			}
+		}
+		var sig string
+		if hooker != nil && s.runtimeDir != "" {
+			sig = hooker.SpoolSig(run.ID, s.runtimeDir)
+		}
+		if first || transcriptChanged || sig != lastSig {
+			if transcriptChanged {
+				if chat, err := prov.ReadTranscript(path); err == nil {
+					lastChat = chat
 				}
 			}
+			// The tailer only ever tails ACTIVE runs, so overlay the spool
+			// signals directly (no ended-state override to apply).
+			view := View{Chat: lastChat}
+			s.applyLiveSignals(&view, run, path)
+			s.tailers.setState(run.SessionName, view.State)
+			if first || transcriptChanged || view.State != lastState {
+				s.publishMessagesChanged(run)
+			}
+			first, lastSig, lastState = false, sig, view.State
 		}
 		select {
 		case <-ctx.Done():
