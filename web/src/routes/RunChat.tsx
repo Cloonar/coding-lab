@@ -8,12 +8,14 @@
 // / answers / interrupts POST back. Phone-first, v0 design language.
 
 import { A, useParams } from '@solidjs/router';
+import { Dynamic } from 'solid-js/web';
 import {
   For,
   Match,
   Show,
   Switch,
   createEffect,
+  createMemo,
   createResource,
   createSignal,
   on,
@@ -48,7 +50,9 @@ import {
 import { stateBadge } from '../lib/conversation';
 import { openState, providerOpen } from '../lib/deepLink';
 import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
+import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { resourceValue } from '../lib/resource';
+import { groupMessages, toolGroupSummary, type ToolGroup } from '../lib/toolGroups';
 import { useEvents } from '../events';
 
 const MESSAGE_LIMIT = 60;
@@ -85,6 +89,18 @@ function RunChatView() {
   const [exhausted, setExhausted] = createSignal(false);
   const [showThinking, setShowThinking] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // Tool-group open state, keyed by the first tool's seq (decision 12): the
+  // group is a derived structure recomputed on every refetch, so native
+  // <details> state alone would slam an expanded live group shut on the next
+  // SSE tick. seq is the immutable cursor, so it survives the recompute.
+  const [openGroups, setOpenGroups] = createSignal<Set<number>>(new Set());
+  const setGroupOpen = (key: number, open: boolean) =>
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(key);
+      else next.delete(key);
+      return next;
+    });
 
   // The stream is the scroll container (.chat-page bounds the viewport).
   let streamEl: HTMLDivElement | undefined;
@@ -172,6 +188,7 @@ function RunChatView() {
         setHasMore(false);
         setExhausted(false);
         setError(null);
+        setOpenGroups(new Set<number>());
         void refetchMessages();
       },
     ),
@@ -214,8 +231,12 @@ function RunChatView() {
     }
     return null;
   };
-  const visibleMessages = () =>
-    messages().filter((m) => showThinking() || !(m.kind === 'text' && m.thinking));
+  // Group consecutive tool runs at render time (decision 7). Grouping runs on
+  // the FULL list — including thinking — so the run boundaries are stable
+  // across the thinking toggle; thinking is filtered out at paint, not here.
+  const renderItems = () => groupMessages(messages());
+  const hiddenThinking = (m: ChatMessage) =>
+    m.kind === 'text' && m.thinking === true && !showThinking();
 
   return (
     <main class="page chat-page">
@@ -247,7 +268,29 @@ function RunChatView() {
                 Load earlier
               </button>
             </Show>
-            <For each={visibleMessages()}>{(m) => <MessageView message={m} />}</For>
+            <For each={renderItems()}>
+              {(item) => (
+                <Switch>
+                  <Match when={item.kind === 'toolGroup' && item}>
+                    {(group) => (
+                      <ToolGroupView
+                        group={group()}
+                        showThinking={showThinking()}
+                        open={openGroups().has(group().key)}
+                        onToggle={(o) => setGroupOpen(group().key, o)}
+                      />
+                    )}
+                  </Match>
+                  <Match when={item.kind === 'message' && item}>
+                    {(msg) => (
+                      <Show when={!hiddenThinking(msg().message)}>
+                        <MessageView message={msg().message} />
+                      </Show>
+                    )}
+                  </Match>
+                </Switch>
+              )}
+            </For>
           </Match>
         </Switch>
       </div>
@@ -367,6 +410,9 @@ function ChatHeader(props: {
 
 function MessageView(props: { message: ChatMessage }) {
   const m = () => props.message;
+  // Copy-raw (decision 14) is assistant-only: user replies are already plain
+  // and selectable, thinking is hidden noise.
+  const copyable = () => m().kind === 'text' && m().role !== 'user' && m().thinking !== true;
   return (
     <Switch>
       <Match when={m().kind === 'text'}>
@@ -380,22 +426,17 @@ function MessageView(props: { message: ChatMessage }) {
           <Show when={m().thinking}>
             <span class="chat-msg-tag">thinking</span>
           </Show>
-          <p class="chat-msg-text">{m().text}</p>
+          {/* Markdown render (decision 3): every text/thinking message, any role. */}
+          <Markdown source={m().text ?? ''} />
+          <Show when={copyable()}>
+            <div class="chat-msg-actions">
+              <CopyButton text={m().text ?? ''} label="Copy" title="Copy the raw markdown" />
+            </div>
+          </Show>
         </div>
       </Match>
       <Match when={m().kind === 'tool'}>
-        <details class="chat-tool">
-          <summary classList={{ 'tool-summary': true, [`tool-${m().tool?.status ?? 'ok'}`]: true }}>
-            <span class="tool-title">{m().tool?.title}</span>
-            <span class="tool-status">{toolStatusMark(m().tool?.status)}</span>
-          </summary>
-          <Show when={m().tool?.input}>
-            <pre class="tool-body mono">{m().tool?.input}</pre>
-          </Show>
-          <Show when={m().tool?.output}>
-            <pre class="tool-body tool-output mono">{m().tool?.output}</pre>
-          </Show>
-        </details>
+        <ToolChip message={m()} />
       </Match>
       <Match when={m().kind === 'dialog'}>
         <div class="chat-dialog-inline">
@@ -406,6 +447,310 @@ function MessageView(props: { message: ChatMessage }) {
         <p classList={{ 'chat-lifecycle': true, error: m().error === true }}>{m().text}</p>
       </Match>
     </Switch>
+  );
+}
+
+// A single tool call: a one-line chip expanding on tap to its input/output.
+// Tool I/O stays literal <pre> — it is command I/O, not markdown (decision 3).
+function ToolChip(props: { message: ChatMessage }) {
+  const t = () => props.message.tool;
+  return (
+    <details class="chat-tool">
+      <summary classList={{ 'tool-summary': true, [`tool-${t()?.status ?? 'ok'}`]: true }}>
+        <span class="tool-title">{t()?.title}</span>
+        <span class="tool-status">{toolStatusMark(t()?.status)}</span>
+      </summary>
+      <Show when={t()?.input}>
+        <pre class="tool-body mono">{t()?.input}</pre>
+      </Show>
+      <Show when={t()?.output}>
+        <pre class="tool-body tool-output mono">{t()?.output}</pre>
+      </Show>
+    </details>
+  );
+}
+
+// A run of 2+ tool calls behind one disclosure (decisions 8–11). The collapsed
+// summary counts tools only and rolls up any failure; the open state is
+// controlled by the parent so it survives SSE refetches (decision 12).
+function ToolGroupView(props: {
+  group: ToolGroup;
+  showThinking: boolean;
+  open: boolean;
+  onToggle: (open: boolean) => void;
+}) {
+  const summary = () => toolGroupSummary(props.group);
+  // Folded-in thinking renders in order inside the expanded group, but only
+  // when the thinking toggle is on (decision 9).
+  const items = () =>
+    props.group.items.filter((m) => props.showThinking || !(m.kind === 'text' && m.thinking));
+  return (
+    <details
+      class="chat-tool-group"
+      open={props.open}
+      onToggle={(e) => props.onToggle(e.currentTarget.open)}
+    >
+      <summary classList={{ 'tool-group-summary': true, 'has-error': props.group.errorCount > 0 }}>
+        <span class="tool-group-count">{summary().label}</span>
+        <Show when={summary().failed}>
+          {(f) => <span class="tool-group-failed"> · {f()}</span>}
+        </Show>
+        <Show when={summary().running}>
+          <span class="tool-group-running"> · running…</span>
+        </Show>
+      </summary>
+      <div class="tool-group-body">
+        <For each={items()}>{(m) => <MessageView message={m} />}</For>
+      </div>
+    </details>
+  );
+}
+
+// --- Markdown rendering (issue #13) --------------------------------------
+// The parser (lib/markdown) emits a plain node tree; the view maps it to Solid
+// JSX nodes directly — never an HTML string, never innerHTML — so rendering is
+// XSS-safe by construction. Only allowed-scheme hrefs reach an <a>.
+
+function Markdown(props: { source: string }) {
+  const blocks = createMemo(() => parseMarkdown(props.source));
+  return (
+    <div class="chat-msg-text md">
+      <For each={blocks()}>{(b) => <BlockView block={b} />}</For>
+    </div>
+  );
+}
+
+function BlockView(props: { block: Block }) {
+  return (
+    <Switch>
+      <Match when={props.block.type === 'heading' && props.block}>
+        {(b) => (
+          <Dynamic component={`h${Math.min(Math.max(b().level, 1), 6)}`} class="md-h">
+            <InlineNodes nodes={b().children} />
+          </Dynamic>
+        )}
+      </Match>
+      <Match when={props.block.type === 'paragraph' && props.block}>
+        {(b) => (
+          <p class="md-p">
+            <InlineNodes nodes={b().children} />
+          </p>
+        )}
+      </Match>
+      <Match when={props.block.type === 'code' && props.block}>
+        {(b) => <CodeBlock lang={b().lang} text={b().text} />}
+      </Match>
+      <Match when={props.block.type === 'list' && props.block}>
+        {(b) => <ListView block={b()} />}
+      </Match>
+      <Match when={props.block.type === 'blockquote' && props.block}>
+        {(b) => (
+          <blockquote class="md-quote">
+            <For each={b().children}>{(c) => <BlockView block={c} />}</For>
+          </blockquote>
+        )}
+      </Match>
+      <Match when={props.block.type === 'table' && props.block}>
+        {(b) => <TableView block={b()} />}
+      </Match>
+      <Match when={props.block.type === 'hr'}>
+        <hr class="md-hr" />
+      </Match>
+    </Switch>
+  );
+}
+
+function ListView(props: { block: Extract<Block, { type: 'list' }> }) {
+  const items = () => props.block.items;
+  return (
+    <Switch>
+      <Match when={props.block.ordered}>
+        <ol class="md-list" start={props.block.start}>
+          <For each={items()}>
+            {(item) => (
+              <li>
+                <For each={item}>{(c) => <BlockView block={c} />}</For>
+              </li>
+            )}
+          </For>
+        </ol>
+      </Match>
+      <Match when={!props.block.ordered}>
+        <ul class="md-list">
+          <For each={items()}>
+            {(item) => (
+              <li>
+                <For each={item}>{(c) => <BlockView block={c} />}</For>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Match>
+    </Switch>
+  );
+}
+
+function TableView(props: { block: Extract<Block, { type: 'table' }> }) {
+  const align = (i: number) => props.block.align[i] ?? 'none';
+  // Own overflow-x scroll container: faithful shape, swipe sideways on mobile
+  // (decision 5) — never forces the message column to scroll horizontally.
+  return (
+    <div class="md-table-wrap">
+      <table class="md-table">
+        <thead>
+          <tr>
+            <For each={props.block.header}>
+              {(cell, i) => (
+                <th classList={{ [`md-align-${align(i())}`]: true }}>
+                  <InlineNodes nodes={cell} />
+                </th>
+              )}
+            </For>
+          </tr>
+        </thead>
+        <tbody>
+          <For each={props.block.rows}>
+            {(row) => (
+              <tr>
+                <For each={row}>
+                  {(cell, i) => (
+                    <td classList={{ [`md-align-${align(i())}`]: true }}>
+                      <InlineNodes nodes={cell} />
+                    </td>
+                  )}
+                </For>
+              </tr>
+            )}
+          </For>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function InlineNodes(props: { nodes: Inline[] }) {
+  return <For each={props.nodes}>{(n) => <InlineNode node={n} />}</For>;
+}
+
+function InlineNode(props: { node: Inline }) {
+  return (
+    <Switch>
+      <Match when={props.node.type === 'text' && props.node}>{(n) => <>{n().value}</>}</Match>
+      <Match when={props.node.type === 'break'}>
+        <br />
+      </Match>
+      <Match when={props.node.type === 'code' && props.node}>
+        {(n) => <code class="md-code">{n().value}</code>}
+      </Match>
+      <Match when={props.node.type === 'strong' && props.node}>
+        {(n) => (
+          <strong>
+            <InlineNodes nodes={n().children} />
+          </strong>
+        )}
+      </Match>
+      <Match when={props.node.type === 'em' && props.node}>
+        {(n) => (
+          <em>
+            <InlineNodes nodes={n().children} />
+          </em>
+        )}
+      </Match>
+      <Match when={props.node.type === 'link' && props.node}>
+        {(n) => (
+          <a class="md-link" href={n().href} target="_blank" rel="noopener noreferrer">
+            <InlineNodes nodes={n().children} />
+          </a>
+        )}
+      </Match>
+    </Switch>
+  );
+}
+
+// A fenced code block with a claude.ai-style header bar: language label left,
+// copy-raw button right, always visible (mobile has no hover). The copy source
+// is the parser-retained literal fence content (decision 13).
+function CodeBlock(props: { lang: string; text: string }) {
+  return (
+    <div class="md-codeblock">
+      <div class="md-codeblock-bar">
+        <span class="md-codeblock-lang">{props.lang || 'text'}</span>
+        <CopyButton text={props.text} title="Copy the code" />
+      </div>
+      <pre class="md-pre mono">{props.text}</pre>
+    </div>
+  );
+}
+
+// Copy-to-clipboard with icon→check feedback (decision 15): inline SVG icons,
+// navigator.clipboard (the embedded server is a secure context). Silent on a
+// missing/blocked clipboard rather than throwing.
+function CopyButton(props: { text: string; label?: string; title?: string }) {
+  const [copied, setCopied] = createSignal(false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(props.text);
+      setCopied(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable or denied — leave the button unchanged */
+    }
+  };
+  onCleanup(() => clearTimeout(timer));
+  return (
+    <button
+      type="button"
+      class="copy-btn"
+      classList={{ copied: copied() }}
+      aria-label={props.label ?? 'Copy'}
+      title={props.title ?? 'Copy'}
+      onClick={() => void copy()}
+    >
+      <Switch>
+        <Match when={copied()}>
+          <CheckIcon />
+          <span class="copy-label">Copied</span>
+        </Match>
+        <Match when={!copied()}>
+          <CopyIcon />
+          <Show when={props.label}>
+            <span class="copy-label">{props.label}</span>
+          </Show>
+        </Match>
+      </Switch>
+    </button>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" class="copy-icon">
+      <rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+      <path
+        d="M5 15V5a2 2 0 0 1 2-2h8"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" class="copy-icon">
+      <path
+        d="M5 13l4 4L19 7"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2.2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
   );
 }
 

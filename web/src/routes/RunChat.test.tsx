@@ -176,6 +176,24 @@ function buttonByText(text: string): HTMLButtonElement | null {
   );
 }
 
+// jsdom has no clipboard — install a spy so copy buttons are exercisable.
+function stubClipboard(): ReturnType<typeof vi.fn> {
+  const writeText = vi.fn(() => Promise.resolve());
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  return writeText;
+}
+
+/** Set the server's messages to a single assistant text message. */
+function withAssistantText(text: string): void {
+  messagesOnServer = {
+    messages: [{ seq: 1, kind: 'text', role: 'assistant', text }],
+    state: 'needs_input',
+    cursor: 1,
+    has_more: false,
+    transcript: 'available',
+  };
+}
+
 function emitMessagesChanged(runID: string = RUN_ID): void {
   FakeEventSource.instances[0]?.emit('run.messages.changed', {
     type: 'run.messages.changed',
@@ -225,6 +243,7 @@ afterEach(() => {
   container.remove();
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
+  Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
 });
 
 describe('RunChat', () => {
@@ -588,5 +607,192 @@ describe('RunChat', () => {
     emitMessagesChanged();
     await settle();
     expect(buttonByText('Load earlier')).toBeNull();
+  });
+
+  // --- Markdown rendering (issue #13) ---
+
+  it('renders assistant markdown: heading, bold, inline code, and a code block', async () => {
+    withAssistantText('# Title\n\nsome **bold** and `inline`\n\n```js\nconst x = 1;\n```');
+    await mountChat();
+
+    expect(container.querySelector('.md .md-h')?.textContent).toBe('Title');
+    expect(container.querySelector('.md strong')?.textContent).toBe('bold');
+    expect(container.querySelector('.md-code')?.textContent).toBe('inline');
+    expect(container.querySelector('.md-codeblock-lang')?.textContent).toBe('js');
+    expect(container.querySelector('.md-pre')?.textContent).toContain('const x = 1;');
+    // No literal asterisks leaked through — markdown was parsed, not shown raw.
+    expect(container.querySelector('.md strong')?.textContent).not.toContain('*');
+  });
+
+  it('renders only allowed-scheme links and never emits a javascript: href', async () => {
+    withAssistantText('[ok](https://ex.com) and [bad](javascript:alert(1))');
+    await mountChat();
+
+    const links = Array.from(container.querySelectorAll('.md a')) as HTMLAnchorElement[];
+    expect(links).toHaveLength(1);
+    expect(links[0]?.getAttribute('href')).toBe('https://ex.com');
+    expect(links[0]?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(links[0]?.getAttribute('target')).toBe('_blank');
+    expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
+    // the rejected link degrades to visible text, not a dropped node
+    expect(container.textContent).toContain('javascript:alert(1)');
+  });
+
+  it('renders markdown for user messages but shows no whole-message copy button', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'user', text: 'do **this**' }],
+      state: 'needs_input',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    expect(container.querySelector('.role-user .md strong')?.textContent).toBe('this');
+    expect(container.querySelector('.role-user .chat-msg-actions')).toBeNull();
+  });
+
+  // --- Tool-call grouping (issue #13) ---
+
+  it('coalesces a run of 2+ tool calls into one disclosure, rolling up errors', async () => {
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'text', role: 'assistant', text: 'on it' },
+        { seq: 2, kind: 'tool', tool: { name: 'Bash', title: 'ls', status: 'ok', output: 'a' } },
+        { seq: 3, kind: 'text', role: 'assistant', thinking: true, text: 'hmm' },
+        { seq: 4, kind: 'tool', tool: { name: 'Read', title: 'read', status: 'error' } },
+        { seq: 5, kind: 'tool', tool: { name: 'Bash', title: 'grep', status: 'ok' } },
+      ],
+      state: 'needs_input',
+      cursor: 5,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    expect(container.querySelector('.chat-tool-group')).not.toBeNull();
+    // Count is tools only — the folded-in thinking is not counted.
+    expect(container.querySelector('.tool-group-count')?.textContent).toBe('3 tool calls');
+    expect(container.querySelector('.tool-group-failed')?.textContent).toContain('1 failed');
+    expect(container.querySelector('.tool-group-summary')?.classList.contains('has-error')).toBe(
+      true,
+    );
+  });
+
+  it('leaves a lone tool call as a plain chip (threshold is 2+)', async () => {
+    // The default fixture has a single tool at seq 3.
+    await mountChat();
+    expect(container.querySelector('.chat-tool')).not.toBeNull();
+    expect(container.querySelector('.chat-tool-group')).toBeNull();
+  });
+
+  it('hides folded-in thinking inside a group until the thinking toggle is on (decision 9)', async () => {
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok' } },
+        { seq: 2, kind: 'text', role: 'assistant', thinking: true, text: 'secret group reasoning' },
+        { seq: 3, kind: 'tool', tool: { name: 'Bash', title: 'b', status: 'ok' } },
+      ],
+      state: 'needs_input',
+      cursor: 3,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    // Thinking folds in (keeps the run together) but is hidden in the body and
+    // never counted while the toggle is off.
+    expect(container.querySelector('.tool-group-body')?.textContent).not.toContain(
+      'secret group reasoning',
+    );
+    expect(container.querySelector('.tool-group-count')?.textContent).toBe('2 tool calls');
+
+    buttonByText('Show thinking')!.click();
+    await settle();
+    expect(container.querySelector('.tool-group-body')?.textContent).toContain(
+      'secret group reasoning',
+    );
+  });
+
+  it('shows a live "running…" summary while a trailing run is still in flight', async () => {
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok' } },
+        { seq: 2, kind: 'tool', tool: { name: 'Bash', title: 'b', status: 'running' } },
+      ],
+      state: 'working',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    expect(container.querySelector('.tool-group-count')?.textContent).toBe('2 tool calls');
+    expect(container.querySelector('.tool-group-running')?.textContent).toContain('running');
+  });
+
+  it('keeps an expanded tool group open across an SSE refetch (decision 12)', async () => {
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok' } },
+        { seq: 2, kind: 'tool', tool: { name: 'Bash', title: 'b', status: 'running' } },
+      ],
+      state: 'working',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    const details = container.querySelector('.chat-tool-group') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    // Expand it as a user tap would.
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    await settle();
+
+    // An SSE tick appends another tool and re-derives the group.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: [
+        ...messagesOnServer.messages,
+        { seq: 3, kind: 'tool', tool: { name: 'Bash', title: 'c', status: 'running' } },
+      ],
+      cursor: 3,
+    };
+    emitMessagesChanged();
+    await settle();
+
+    const after = container.querySelector('.chat-tool-group') as HTMLDetailsElement;
+    expect(after.open).toBe(true); // survived the recompute — keyed by first tool seq
+    expect(container.querySelector('.tool-group-count')?.textContent).toBe('3 tool calls');
+  });
+
+  // --- Copy-raw (issue #13) ---
+
+  it('copies the raw markdown of an assistant message to the clipboard', async () => {
+    const writeText = stubClipboard();
+    withAssistantText('# Title\n\n**raw** markdown');
+    await mountChat();
+
+    const btn = container.querySelector('.chat-msg-actions .copy-btn') as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    btn.click();
+    await settle();
+    expect(writeText).toHaveBeenCalledWith('# Title\n\n**raw** markdown');
+    // Feedback swaps to the copied state.
+    expect(container.querySelector('.copy-btn.copied')).not.toBeNull();
+  });
+
+  it('copies the raw source of a fenced code block from its header bar', async () => {
+    const writeText = stubClipboard();
+    withAssistantText('```py\nprint(1)\nprint(2)\n```');
+    await mountChat();
+
+    const btn = container.querySelector('.md-codeblock-bar .copy-btn') as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    btn.click();
+    await settle();
+    expect(writeText).toHaveBeenCalledWith('print(1)\nprint(2)');
   });
 });
