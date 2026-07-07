@@ -42,6 +42,7 @@ type fixture struct {
 	home                   string
 	env                    []string
 	reposDir, worktreeRoot string
+	runtime                string
 	repo                   store.Repo
 }
 
@@ -136,8 +137,22 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	}
 	return &fixture{
 		t: t, svc: svc, st: st, runner: runner, prov: prov, guard: guard, bus: bus, clock: clock,
-		home: home, env: env, reposDir: reposDir, worktreeRoot: worktreeRoot, repo: repo,
+		home: home, env: env, reposDir: reposDir, worktreeRoot: worktreeRoot, runtime: runtime, repo: repo,
 	}
+}
+
+// wantSpawnArgv is the exact argv the fake runner should record for a run: the
+// provider's flags (built with an empty prompt), then the injected per-run
+// dialog-capture --settings flag (ADR-0020), then the seed prompt as the
+// trailing positional when non-empty. Flags precede the positional so the
+// parser never swallows --settings as prompt text.
+func (f *fixture) wantSpawnArgv(name, model, effort, seed, runID string) []string {
+	argv := f.prov.SpawnArgv(name, model, effort, "")
+	argv = append(argv, "--settings", filepath.Join(f.runtime, "settings."+runID+".json"))
+	if seed != "" {
+		argv = append(argv, seed)
+	}
+	return argv
 }
 
 func gitCmd(t *testing.T, home, dir string, args ...string) string {
@@ -248,16 +263,17 @@ func TestStart_happyPath(t *testing.T) {
 	}
 	// Spawn argv is the provider's (recorded verbatim by the fake runner). A
 	// manual run carries NO seed prompt, so SpawnArgv is called with "" and the
-	// argv has no trailing prompt positional.
-	wantArgv := f.prov.SpawnArgv(name, "opus[1m]", "max", "")
+	// argv has no trailing prompt positional — just the injected per-run
+	// dialog-capture --settings flag (ADR-0020).
+	wantArgv := f.wantSpawnArgv(name, "opus[1m]", "max", "", run.ID)
 	if strings.Join(sess.Argv, " ") != strings.Join(wantArgv, " ") {
 		t.Errorf("spawn argv = %v, want %v", sess.Argv, wantArgv)
 	}
-	// Regression (finding: seed-via-argv): the last argv element is the effort
-	// value, not a stray/empty trailing prompt — a manual spawn never appends
-	// one.
-	if last := sess.Argv[len(sess.Argv)-1]; last != "max" {
-		t.Errorf("manual spawn last argv = %q, want %q (no trailing seed prompt)", last, "max")
+	// Regression (finding: seed-via-argv): the last argv element is the injected
+	// settings path, not a stray/empty trailing prompt — a manual spawn never
+	// appends one.
+	if last := sess.Argv[len(sess.Argv)-1]; last != filepath.Join(f.runtime, "settings."+run.ID+".json") {
+		t.Errorf("manual spawn last argv = %q, want the settings path (no trailing seed prompt)", last)
 	}
 	// And no seed was injected post-spawn via keystrokes (the mechanism moved
 	// into the spawn argv; SendKeys is the login-code path only).
@@ -444,12 +460,41 @@ func TestLaunch_seedPromptIsTrailingSpawnPositional(t *testing.T) {
 	if last := sess.Argv[len(sess.Argv)-1]; last != seed {
 		t.Errorf("last spawn argv = %q, want the seed prompt %q as one trailing positional", last, seed)
 	}
-	if strings.Join(sess.Argv, " ") != strings.Join(f.prov.SpawnArgv(name, "opus[1m]", "max", seed), " ") {
+	if strings.Join(sess.Argv, " ") != strings.Join(f.wantSpawnArgv(name, "opus[1m]", "max", seed, run.ID), " ") {
 		t.Errorf("spawn argv = %v", sess.Argv)
 	}
 	// The prompt existed before the process — nothing was typed in afterward.
 	if sent := f.runner.Sent(name); len(sent) != 0 {
 		t.Errorf("seeded via SendKeys (%d batches), want the argv-only mechanism", len(sent))
+	}
+}
+
+// The per-run dialog-capture settings file (ADR-0020) is written under runtime/
+// before the spawn and survives a successful Start; a spawn-failure rollback
+// unlinks it (no orphan in the runtime dir).
+func TestStart_dialogSettingsFileLifecycle(t *testing.T) {
+	f := newFixture(t)
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	settings := filepath.Join(f.runtime, "settings."+run.ID+".json")
+	if _, err := os.Stat(settings); err != nil {
+		t.Fatalf("settings file missing after Start: %v", err)
+	}
+
+	// A second Start whose spawn fails must roll back its own settings file.
+	f2 := newFixture(t)
+	name := "proj~20260608-1530"
+	f2.runner.FailStart(name, errors.New("boom"))
+	if _, err := f2.svc.Start(t.Context(), StartParams{RepoID: f2.repo.ID}); err == nil {
+		t.Fatal("Start: want spawn failure")
+	}
+	entries, _ := os.ReadDir(f2.runtime)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "settings.") {
+			t.Errorf("settings file %q survived spawn-failure rollback", e.Name())
+		}
 	}
 }
 

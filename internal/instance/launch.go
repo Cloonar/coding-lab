@@ -2,6 +2,9 @@ package instance
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
@@ -86,10 +89,16 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, &StartFailedError{cause: err}
 	}
 
+	// dialogSettingsPath is the per-run dialog-capture settings file (ADR-0020),
+	// written just before the spawn; rollback unlinks it. "" until armed (or
+	// for a provider without the DialogHooker capability).
+	var dialogSettingsPath string
+
 	// rollback restores the exact pre-launch state after the worktree exists:
 	// RemoveWorktree + force DeleteBranch (both attempted, each logged) + the
-	// run row/token (when created) + the credential files. Runs on a detached
-	// context so a client disconnect can't strand a half-built instance.
+	// run row/token (when created) + the credential files + the dialog
+	// settings file. Runs on a detached context so a client disconnect can't
+	// strand a half-built instance.
 	rollback := func(rowCreated bool) {
 		rctx := context.WithoutCancel(ctx)
 		// Kill the session first. runner.Start can return an error while the
@@ -110,6 +119,11 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		if rowCreated {
 			if err := s.store.DeleteRun(rctx, runID); err != nil {
 				s.log.Warn("start rollback: delete run row", "component", "instance", "run", runID, "err", err)
+			}
+		}
+		if dialogSettingsPath != "" {
+			if err := os.Remove(dialogSettingsPath); err != nil && !os.IsNotExist(err) {
+				s.log.Warn("start rollback: remove dialog settings", "component", "instance", "run", runID, "err", err)
 			}
 		}
 		credCleanup()
@@ -164,12 +178,33 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, err
 	}
 
+	// Arm live dialog capture (ADR-0020): write the per-run hook settings file
+	// under runtime/ and inject --settings into the spawn argv, so a pending
+	// AskUserQuestion/ExitPlanMode spools where the chat can read it (Claude
+	// Code never flushes a pending tool_use to the transcript live). Best-
+	// effort — a write failure logs and spawns without capture (the chat keeps
+	// transcript-only behavior); dialog capture must never block a launch. A
+	// provider without the DialogHooker capability contributes nothing.
+	//
+	// The flag must precede the trailing prompt positional (claude CLI:
+	// `claude [options] [prompt]`), so build the argv flags-first with an empty
+	// prompt, inject --settings among the flags, then append the seed prompt
+	// last — never after --settings, where the parser could swallow it.
+	spawnArgv := spec.Provider.SpawnArgv(name, spec.Model, spec.Effort, "")
+	if extra, path := s.armDialogHooks(spec.Provider, runID); path != "" {
+		dialogSettingsPath = path
+		spawnArgv = append(spawnArgv, extra...)
+	}
+	if spec.SeedPrompt != "" {
+		spawnArgv = append(spawnArgv, spec.SeedPrompt)
+	}
+
 	// Spawn in the worktree (never the reference repo), prlimit-wrapped by the
 	// runner. The AFK seed prompt (spec.SeedPrompt) rides the spawn argv as
 	// claude's trailing positional (v0-pinned) — no post-spawn keystroke, so
 	// there is no cold-start TUI race to leave a run unseeded. A spawn failure
 	// rolls the whole launch back, releasing an AFK claim.
-	if err := s.runner.Start(ctx, name, wtPath, spec.Provider.SpawnArgv(name, spec.Model, spec.Effort, spec.SeedPrompt), extraEnv); err != nil {
+	if err := s.runner.Start(ctx, name, wtPath, spawnArgv, extraEnv); err != nil {
 		rollback(true)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -182,4 +217,56 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	s.ArmCapture(created)
 	s.publishRunChanged(repo.ID)
 	return created, nil
+}
+
+// armDialogHooks writes the per-run dialog-capture settings file (ADR-0020) into
+// the runtime dir and returns the spawn args to append (--settings <path>) plus
+// the settings path (for rollback). A provider without the DialogHooker
+// capability contributes nothing. Best-effort: a write failure logs and returns
+// no args — the run still spawns, its chat just keeps transcript-only behavior.
+func (s *Service) armDialogHooks(prov provider.AgentProvider, runID string) (args []string, settingsPath string) {
+	hooker, ok := prov.(provider.DialogHooker)
+	if !ok {
+		return nil, ""
+	}
+	settings, path, extra := hooker.HookSettings(runID, s.mat.Dir())
+	if err := writeFileAtomic0600(path, settings); err != nil {
+		s.log.Warn("arming dialog hooks", "component", "instance", "run", runID, "err", err)
+		return nil, ""
+	}
+	return extra, path
+}
+
+// writeFileAtomic0600 writes data to path via a temp sibling + rename (0600), so
+// a reader never sees a half-written file. The runtime dir already exists (the
+// materializer created it 0700).
+func writeFileAtomic0600(path string, data []byte) error {
+	// The ".settings.tmp-" prefix must match claudecode.settingsTempPrefix so a
+	// crash-orphaned temp is reaped by the provider's SweepSpools GC (the two
+	// live in different packages — instance must not import a concrete provider,
+	// ADR-0017 — so the prefix is a documented coupling, not a shared constant).
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".settings.tmp-*")
+	if err != nil {
+		return fmt.Errorf("tmpfile: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
 }
