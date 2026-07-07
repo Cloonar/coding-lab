@@ -1,0 +1,43 @@
+# Hermetic gate = `nix flake check` (ADR-0002), split off from the fast native
+# gate in ci.yml (ADR-0023). This is the authoritative, sandboxed build — the
+# same command local dev runs — but it realizes the whole closure stone-cold on
+# the ephemeral runner (~10 min), so it runs only when nix or the Go dependency
+# set changes, not on every PR.
+#
+# Path filter rationale (ADR-0023 §2): the only intrinsically-nix check is
+# `nixos-module` (depends on nix/module.nix), but `go.mod`/`go.sum` are the
+# load-bearing entries — nix/package.nix pins `vendorHash` (a fixed-output hash
+# over the vendored Go module set). A dependency bump makes that hash stale so
+# `nix flake check` fails, yet the native gate (live `go mod download`) stays
+# green; without gating this job on go.mod/go.sum a dep bump would merge clean
+# and rot the nix build for the next nix-touching PR and the deploy. web/
+# package-lock.json is deliberately NOT a trigger: `importNpmLock` reads the
+# lockfile directly (no npmDepsHash), so npm deps never rot the nix build, and
+# the SPA's vitest/build coverage already runs in the native gate.
+#
+# Like ci.yml did before the split, this runs on the stock `ubuntu-latest`
+# runner (no nix) and installs it in-job: the Determinate nix-installer,
+# daemonless `--init none`. Runner prerequisites — outbound egress for the
+# installer, proxy.golang.org, registry.npmjs.org, cache.nixos.org and the
+# flake inputs — are documented in docs/ops.md.
+name: ci-nix
+
+on:
+  pull_request:
+    paths:
+      - "**/*.nix"
+      - flake.lock
+      - go.mod
+      - go.sum
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install nix + flake check
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+            | sh -s -- install linux --no-confirm --init none
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+          nix flake check -L

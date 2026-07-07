@@ -220,7 +220,21 @@ Restore procedure:
 
 ## CI runner prerequisites
 
-The Forgejo Actions workflow ([`.forgejo/workflows/ci.yml`](../.forgejo/workflows/ci.yml)) runs one gate on PRs and main: `nix flake check` — identical to the local command, so local green == CI green. It targets the stock `ubuntu-latest` runner, which ships no nix, so the job installs it first (the Determinate nix-installer, daemonless `--init none`) and runs the check in the same step. Runners need:
+Two Forgejo Actions gates run on pull requests (ADR-0023):
+
+- **The native gate** ([`.forgejo/workflows/ci.yml`](../.forgejo/workflows/ci.yml), job `native`) runs on **every** PR and is the **required** status check. It builds and tests directly on the stock `ubuntu-latest` runner — no nix — mirroring the flake's non-nix checks: the SPA's eslint + prettier + vitest + `vite build`, then the `ui`-tagged Go build and `go test -tags ui ./...` against the copied dist, then the untagged `golangci-lint run ./...` (`CGO_ENABLED=0` throughout). Common-path PRs finish in ~2–4 min instead of ~12–13. Its toolchain is version-matched to the flake: Go from `go.mod` (`go 1.26`), Node 24 (`pkgs.nodejs`), golangci-lint 2.12.2 (the version nixpkgs ships at the current `flake.lock`).
+- **The hermetic gate** ([`.forgejo/workflows/ci-nix.yml`](../.forgejo/workflows/ci-nix.yml), job `flake-check`) runs the full `nix flake check` — the authoritative build, identical to the local command — but only when nix or the Go dependency set changes (`paths:` = `**/*.nix`, `flake.lock`, `go.mod`, `go.sum`). It is the same in-job Determinate install as before the split, and the deploy re-runs it as a merge-to-main backstop (`bump-nixos-pin` → `test-configuration` rebuilds `packages.lab`). `go.mod`/`go.sum` are load-bearing triggers: a dependency bump stales `nix/package.nix`'s `vendorHash`, which the native gate (live `go mod download`) cannot catch.
+
+> **Required-check switch (one-time repo setting).** After this split, move branch protection's required status check from **`flake-check`** to **`native`**. The nix gate reports a status only when its paths match, so a rule that still requires `flake-check` would wedge every Go/TS-only PR at "expected". The `native` job id is kept stable for exactly this reason.
+
+**Native gate** (ci.yml) — the runner needs:
+
+- `actions/setup-go@v5` and `actions/setup-node@v4` to resolve — from the same source as the existing `actions/checkout@v4` (Forgejo's `DEFAULT_ACTIONS_URL` mirror, or an admin-set github). Pin actions by **tag** (`@v5`/`@v4`), never by a GitHub commit SHA: the mirror's SHAs differ from github's.
+- The runner's **actions cache backend enabled** (the default — `cache.enabled: true` injects `ACTIONS_CACHE_URL`). `setup-go` caches the Go module + build cache by default and `setup-node` caches `~/.npm` (`cache: npm`); with no cache backend reachable those steps fail rather than silently skip.
+- Outbound egress for `proxy.golang.org` (Go modules), `registry.npmjs.org` (npm), the actions source, and `raw.githubusercontent.com` + `github.com` (the pinned golangci-lint installer and release binary). No nix, no `cache.nixos.org`, no Determinate installer on this gate.
+- `git`, `tmux`, and `prlimit` (util-linux) on PATH for `go test` (real subprocesses, the D17 bar). `git` and `prlimit` ship on the stock image; `tmux` does not, so the job `apt-get install`s it — the runner therefore also needs apt reachable and either runs as root or has `sudo`.
+
+**Hermetic gate** (ci-nix.yml) — same prerequisites as before the split, now only on nix/dep changes:
 
 - Outbound egress (or in-instance mirrors/substituters) for the installer (`install.determinate.systems`), `cache.nixos.org` (binary substitutes for the Go toolchain and nixpkgs, so they are not rebuilt from source), `proxy.golang.org`, `registry.npmjs.org`, and the flake inputs (github.com for nixpkgs).
 - Steps run as root, or with `sudo`, so the installer can create `/nix` — the default for the stock Docker-backed runner.
