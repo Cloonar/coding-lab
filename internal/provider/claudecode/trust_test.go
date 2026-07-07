@@ -128,10 +128,14 @@ func TestSeedTrust_preservesExistingWorktreeSettings(t *testing.T) {
 func TestSeedTrust_idempotentWhenAlreadySeeded(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), ".claude.json")
 	dir := t.TempDir()
-	// Pre-seed both grants in their real locations, then assert neither
+	// Pre-seed all grants in their real locations, then assert neither
 	// file is rewritten — a needless rewrite risks clobbering a
-	// concurrent claude writer.
+	// concurrent claude writer. The global config carries BOTH the
+	// machine-global onboarding flag and the per-dir trust entry, so both
+	// must be present or seedGlobalConfig legitimately rewrites to add the
+	// missing one.
 	writeCfg(t, cfg, map[string]any{
+		"hasCompletedOnboarding": true,
 		"projects": map[string]any{
 			dir: map[string]any{"hasTrustDialogAccepted": true},
 		},
@@ -170,6 +174,47 @@ func TestSeedTrust_malformedWorktreeSettingsReturnsError(t *testing.T) {
 	}
 	if err := SeedTrust(cfg, dir); err == nil {
 		t.Errorf("expected error on malformed settings.local.json; got nil")
+	}
+}
+
+// --- onboarding grant (new; post-dates the transcribed v0 contract) ---
+
+// A fresh install: `claude auth login` performs only the OAuth exchange and
+// does NOT complete onboarding, so SeedTrust must set the machine-global
+// hasCompletedOnboarding flag — otherwise the first --remote-control spawn
+// blocks on the theme picker with no one to answer it (compat §4a; live
+// 2.1.198).
+func TestSeedTrust_completesOnboarding(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), ".claude.json")
+	dir := t.TempDir()
+
+	if err := SeedTrust(cfg, dir); err != nil {
+		t.Fatalf("SeedTrust: %v", err)
+	}
+	if !onboardedOf(readCfg(t, cfg)) {
+		t.Errorf("expected top-level hasCompletedOnboarding=true in %q", cfg)
+	}
+}
+
+// Onboarding is machine-global, not gated on the per-dir trust entry: a
+// worktree already folder-trusted from a prior spawn — on a host whose
+// onboarding flag is still unset (a fresh install, or a claude migration that
+// reset it) — must STILL get onboarding seeded. Guards against ever
+// short-circuiting the onboarding write on an already-trusted dir.
+func TestSeedTrust_completesOnboardingWhenAlreadyFolderTrusted(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), ".claude.json")
+	dir := t.TempDir()
+	writeCfg(t, cfg, map[string]any{
+		"projects": map[string]any{
+			dir: map[string]any{"hasTrustDialogAccepted": true},
+		},
+	})
+
+	if err := SeedTrust(cfg, dir); err != nil {
+		t.Fatalf("SeedTrust: %v", err)
+	}
+	if !onboardedOf(readCfg(t, cfg)) {
+		t.Errorf("onboarding not seeded when the dir was already folder-trusted; got %+v", readCfg(t, cfg))
 	}
 }
 
@@ -336,6 +381,13 @@ func mustModTime(t *testing.T, path string) time.Time {
 		t.Fatal(err)
 	}
 	return info.ModTime()
+}
+
+// onboardedOf reports the machine-global top-level hasCompletedOnboarding
+// flag — the sole gate on claude's first-run onboarding wizard.
+func onboardedOf(cfg map[string]any) bool {
+	v, _ := cfg["hasCompletedOnboarding"].(bool)
+	return v
 }
 
 func trustOf(cfg map[string]any, dir string) bool {
