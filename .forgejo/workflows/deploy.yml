@@ -1,0 +1,44 @@
+# Deploy = bump the coding-lab pin in Cloonar/nixos after a merge to main.
+#
+# Trigger is push:main only, so this never runs on PRs and never re-runs the
+# flake-check gate (that lives in ci.yml on pull_request). CI and this deploy
+# fire on disjoint events, so they can't share a `needs:` — the "green CI"
+# gate is instead enforced two ways: branch protection requires the PR's
+# flake-check status before it can merge to main, and `test-configuration`
+# below rebuilds the full NixOS config with the new pin and fails the deploy
+# if it breaks, before anything is pushed.
+#
+# Like ci.yml, this runs on the stock `ubuntu-latest` runner and installs nix
+# in-job (Determinate installer, daemonless `--init none`), because
+# test-configuration needs nix. Whatever that script needs beyond nix (e.g.
+# KVM for VM tests) must be available on the runner. Same egress
+# prerequisites as ci.yml — see docs/ops.md.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  bump-nixos-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bump the pin in Cloonar/nixos
+        env:
+          NIXOS_TOKEN: ${{ secrets.NIXOS_PIN_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+            | sh -s -- install linux --no-confirm --init none
+          set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
+          git clone "https://oauth2:${NIXOS_TOKEN}@git.cloonar.com/Cloonar/nixos.git" nixos
+          cd nixos
+          sed -i "s|rev = \"[0-9a-f]\{40\}\";|rev = \"${SHA}\";|" \
+            utils/modules/coding-lab/default.nix
+          git diff --quiet && { echo "pin already current"; exit 0; }
+          ./scripts/test-configuration dev-new          # integration gate (needs nix)
+          git config user.name  "coding-lab-bot"
+          git config user.email "bot@cloonar.com"
+          git commit -am "chore(coding-lab): bump nixos pin to ${SHA:0:12}"
+          git push
