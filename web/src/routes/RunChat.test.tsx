@@ -486,6 +486,96 @@ describe('RunChat', () => {
     expect(container.textContent).toContain('Claude needs input');
   });
 
+  it('resets the stream and unlocks the composer when the transcript rotates', async () => {
+    // Pre-clear: two accumulated messages (seq 1–2) and a pending dialog that
+    // locks the composer.
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'text', role: 'assistant', text: 'pre-clear reasoning' },
+        { seq: 2, kind: 'text', role: 'assistant', text: 'stale tail line' },
+      ],
+      state: 'question',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+      transcript_id: 'sess-A',
+      pending_dialog: {
+        tool_id: 'toolu_pre',
+        dialog_kind: 'question',
+        prompt: 'Which fix?',
+        answerable: true,
+        options: [{ label: 'Revert' }, { label: 'Other', is_other: true }],
+      },
+    };
+    await mountChat();
+    expect(container.textContent).toContain('stale tail line');
+    expect(container.querySelector('.chat-composer-row')).toBeNull(); // locked by the dialog
+    expect(container.textContent).toContain('Which fix?');
+
+    // /clear rotates: a brand-new transcript restarts seq at 1 with fresh
+    // content, a new identity, and no dialog. Its lone seq-1 message would
+    // otherwise leave the stale seq-2 tail behind in the seq-keyed merge.
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'user', text: 'fresh start' }],
+      state: 'needs_input',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      transcript_id: 'sess-B',
+      pending_dialog: null,
+    };
+    emitMessagesChanged();
+    await settle();
+    await settle();
+
+    // The whole pre-clear stream is dropped (no stale seq-2 tail, no stale
+    // dialog), only the fresh conversation shows, and the composer is usable.
+    expect(container.textContent).toContain('fresh start');
+    expect(container.textContent).not.toContain('stale tail line');
+    expect(container.textContent).not.toContain('pre-clear reasoning');
+    expect(container.textContent).not.toContain('Which fix?');
+    expect(container.querySelector('.chat-composer-row')).not.toBeNull();
+    expect(container.querySelector('.chat-input')).not.toBeNull();
+  });
+
+  it('does not reset the stream on the first transcript locate (locating -> available)', async () => {
+    // The server always sends transcript_id (no omitempty): "" while locating.
+    // The locating -> available transition ("" -> hash) is NOT a rotation and
+    // must not trigger a spurious reset + refetch.
+    messagesOnServer = {
+      messages: [],
+      state: 'idle',
+      cursor: 0,
+      has_more: false,
+      transcript: 'locating',
+      transcript_id: '',
+    };
+    await mountChat();
+
+    const messagesGets = () =>
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter((c) =>
+        String(c[0]).includes('/messages'),
+      ).length;
+    const before = messagesGets();
+
+    // The transcript is located: a real id and the first messages arrive.
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'located content' }],
+      state: 'needs_input',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      transcript_id: 'sess-A',
+    };
+    emitMessagesChanged();
+    await settle();
+
+    expect(container.textContent).toContain('located content');
+    // Exactly one refetch cycle (the SSE-driven one); a spurious rotation reset
+    // would fire a second refetch (cursor 0 → one more /messages GET).
+    expect(messagesGets() - before).toBe(1);
+  });
+
   it('is read-only for an ended run', async () => {
     runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
     messagesOnServer = { ...messagesOnServer, state: 'ended' };

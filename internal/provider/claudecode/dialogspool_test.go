@@ -102,22 +102,29 @@ func TestPendingDialog_readsAndSuppressesResolved(t *testing.T) {
 		t.Fatalf("dialog = %+v; want answerable A/B/Other with ToolID toolu_ABC", d)
 	}
 
+	// Per compat §5 the transcript is byte-frozen BEFORE a genuine pending dialog
+	// opens, so it is always older than the spool. Write these fixtures older than
+	// the spool to model that (and to isolate the tool-id logic from the mtime
+	// staleness backstop, which only fires on a transcript NEWER than the spool —
+	// a rotation, exercised by TestPendingDialog_staleAfterTranscriptRotation).
+	si, err := os.Stat(dialogSpoolPath(dir, "run_1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := si.ModTime().Add(-time.Minute)
+
 	// A transcript that already contains the tool_use_id (retro-flushed) →
 	// resolved → suppressed.
 	transcript := filepath.Join(dir, "t.jsonl")
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ABC","name":"AskUserQuestion","input":{}}]}}` + "\n"
-	if err := os.WriteFile(transcript, []byte(line), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileWithModTime(t, transcript, line, frozen)
 	if _, ok := p.PendingDialog("run_1", dir, transcript); ok {
 		t.Error("PendingDialog: want suppressed once the tool_use_id is in the transcript")
 	}
 
 	// A different tool_use_id in the transcript does NOT suppress.
 	other := filepath.Join(dir, "other.jsonl")
-	if err := os.WriteFile(other, []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ZZZ","name":"Bash","input":{}}]}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileWithModTime(t, other, `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ZZZ","name":"Bash","input":{}}]}}`+"\n", frozen)
 	if _, ok := p.PendingDialog("run_1", dir, other); !ok {
 		t.Error("PendingDialog: an unrelated tool_use_id must not suppress the dialog")
 	}
@@ -137,6 +144,41 @@ func TestPendingDialog_missAndGarbage(t *testing.T) {
 	writeSpool(t, dir, dialogsSubdir, "run_b", `{"tool_name":"Bash","tool_use_id":"x","tool_input":{}}`)
 	if _, ok := p.PendingDialog("run_b", dir, ""); ok {
 		t.Error("non-dialog tool → want false")
+	}
+}
+
+// After a /clear (or /rewind) re-points the run at a fresh transcript (issue
+// #34), a pre-rotation dialog spool does NOT self-heal via the tool-id check
+// (its tool_use_id is absent from the new file). The mtime staleness backstop
+// suppresses it so it cannot lock the composer against the new session — while a
+// spool newer than the byte-frozen transcript (the genuine pending case) still
+// shows.
+func TestPendingDialog_staleAfterTranscriptRotation(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	spool := dialogSpoolPath(dir, "run_1")
+	if err := os.MkdirAll(filepath.Dir(spool), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now().Add(-time.Hour)
+	writeFileWithModTime(t, spool, prePayload, t0)
+
+	// Genuine pending: the transcript is byte-frozen from BEFORE the dialog (§5),
+	// so it is older than the spool → the dialog still shows. (Its content does
+	// not carry the spool's tool_use_id, so only the mtime rule is in play.)
+	frozen := filepath.Join(dir, "frozen.jsonl")
+	writeFileWithModTime(t, frozen, "{}", t0.Add(-time.Minute))
+	if _, ok := p.PendingDialog("run_1", dir, frozen); !ok {
+		t.Error("a spool newer than the byte-frozen transcript must still show the dialog")
+	}
+
+	// Rotation: /clear created a brand-new transcript AFTER the spool. The old
+	// spool is stale and must be suppressed even though its tool_use_id is not in
+	// the new file.
+	rotated := filepath.Join(dir, "rotated.jsonl")
+	writeFileWithModTime(t, rotated, "{}", t0.Add(time.Minute))
+	if _, ok := p.PendingDialog("run_1", dir, rotated); ok {
+		t.Error("a spool older than the rotated transcript must be suppressed as stale")
 	}
 }
 

@@ -94,6 +94,39 @@ func TestAPI_ChatMessages_pendingDialog(t *testing.T) {
 	}
 }
 
+// The messages response carries a transcript_id, and it changes when the run's
+// transcript rotates (a /clear or /rewind → new sessionId → new file) — the
+// token the SPA keys its stream reset on (issue #34).
+func TestAPI_ChatMessages_transcriptID(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+
+	x.prov.SetTranscriptPath("/a.jsonl")
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "old"}}})
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body := decodeBody(t, resp)
+	idA, _ := body["transcript_id"].(string)
+	if idA == "" {
+		t.Fatalf("transcript_id = %v; want a non-empty id for a located transcript", body["transcript_id"])
+	}
+
+	// A /clear rotates the session's transcript → a new file.
+	x.prov.SetTranscriptPath("/b.jsonl")
+	x.prov.SetChat(provider.Chat{State: provider.StateNeedsInput, Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "new"}}})
+
+	resp = x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body = decodeBody(t, resp)
+	idB, _ := body["transcript_id"].(string)
+	if idB == "" || idB == idA {
+		t.Errorf("transcript_id after rotation = %q; want a new non-empty id (was %q)", idB, idA)
+	}
+}
+
 func TestAPI_ChatMessages_locatingAndGone(t *testing.T) {
 	x := newInstanceServer(t)
 	runID, _ := startRun(t, x)

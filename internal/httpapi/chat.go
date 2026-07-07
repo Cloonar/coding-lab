@@ -46,6 +46,12 @@ type messagesResponse struct {
 	// so seq numbers stay reparse-stable. Present alongside state:"question".
 	PendingDialog *provider.Dialog `json:"pending_dialog"`
 	Transcript    string           `json:"transcript"` // available|locating|gone
+	// TranscriptID is the opaque identity of the located transcript (issue #34):
+	// provider-neutral in the envelope, provider-derived in value. It changes
+	// when the run's transcript rotates (a /clear or /rewind → new sessionId →
+	// new file, compat §5); the SPA keys its stream reset on it. "" while
+	// locating or gone.
+	TranscriptID string `json:"transcript_id"`
 }
 
 // handleRunMessages is GET /api/v1/runs/{id}/messages?after=&before=&limit=.
@@ -86,6 +92,7 @@ func (s *Server) handleRunMessages(w http.ResponseWriter, r *http.Request) {
 	resp.State = chatData.State
 	resp.Cursor = chatData.Cursor
 	resp.PendingDialog = chatData.PendingDialog
+	resp.TranscriptID = chatData.TranscriptID
 	if len(chatData.Messages) == 0 && chatData.PendingDialog == nil && run.Outcome == store.RunOutcomeActive {
 		resp.Transcript = "locating"
 	}

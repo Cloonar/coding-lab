@@ -111,13 +111,17 @@ func (s *Service) arm(run store.Run) {
 	go s.tail(ctx, run, h)
 }
 
-// tail is one run's poll loop. Each tick it re-stats the transcript AND the
-// dialog spool (a pending dialog appears while the transcript is byte-frozen —
-// compat §5 — so watching only the file would never notice it). On any change
-// it recomputes the combined state (transcript + spool + marker) and publishes
-// run.messages.changed when the transcript changed OR the derived state changed
-// — the chat view refetches on both. The transcript is re-parsed only when its
-// file changed (cached across ticks); a bare spool change reuses the last parse.
+// tail is one run's poll loop. Each tick it re-resolves the live transcript path
+// (following a /clear or /rewind rotation — locateActive, issue #34), then
+// re-stats the transcript AND the dialog spool (a pending dialog appears while
+// the transcript is byte-frozen — compat §5 — so watching only the file would
+// never notice it). On any change it recomputes the combined state (transcript +
+// spool + marker) and publishes run.messages.changed when the transcript changed
+// OR the derived state changed — the chat view refetches on both. On a rotation
+// it resets the file-change bookkeeping and forces a re-read + republish so the
+// fresh (cleared) transcript is served and the view resets its stream. The
+// transcript is re-parsed only when its file changed (cached across ticks); a
+// bare spool change reuses the last parse.
 func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 	// Remove by handle identity, not bare session name: a disarmed goroutine
 	// can outlive its cancel by up to one tick, and session names are reused
@@ -141,11 +145,26 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		lastChat  = provider.Chat{State: provider.StateIdle}
 		first     = true
 	)
+	// Seed from the last-known persisted path (a re-adopted run already has one)
+	// so the first tick's locateActive is a no-op when nothing rotated, rather
+	// than a redundant re-persist of the same path.
+	if run.TranscriptPath != nil {
+		path = *run.TranscriptPath
+	}
 	for {
-		if path == "" {
-			path = s.resolvePath(ctx, prov, run)
+		// Re-resolve every tick against the tailer's OWN cached path (not the
+		// stale in-memory run): a different non-empty result is a rotation to
+		// follow (compat §5 / issue #34).
+		prev := path
+		path = s.locateActive(ctx, prov, run, path)
+		rotated := prev != "" && path != prev
+		if rotated {
+			// A fresh file: drop the old file's change bookkeeping and cached
+			// parse so this tick re-reads the new (cleared) transcript from
+			// scratch and republishes, even if the two files' stat coincides.
+			lastMod, lastSz, lastChat = time.Time{}, 0, provider.Chat{State: provider.StateIdle}
 		}
-		transcriptChanged := false
+		transcriptChanged := rotated
 		if path != "" {
 			if fi, err := os.Stat(path); err == nil && (fi.ModTime() != lastMod || fi.Size() != lastSz) {
 				transcriptChanged = true

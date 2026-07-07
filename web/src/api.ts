@@ -497,6 +497,16 @@ export interface MessagesResponse {
    */
   pending_dialog?: Dialog | null;
   transcript: TranscriptStatus;
+  /**
+   * Opaque identity of the located transcript (issue #34). It changes when the
+   * run's transcript rotates — a /clear or /rewind starts a new sessionId →
+   * transcript file and the backend re-points this same run at it. The chat
+   * view keys its stream reset on a change here (the fresh transcript restarts
+   * seq at 1, which would otherwise collide with the accumulated messages).
+   * Empty/absent while locating or gone; older responses omit it → treat as
+   * unchanged.
+   */
+  transcript_id?: string;
 }
 
 /** A window of an instance's messages. after=<seq> tails; before=<seq> pages up. */
