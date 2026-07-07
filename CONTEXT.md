@@ -17,7 +17,7 @@ An unattended instance that takes one `ready-for-agent` issue from the repo's tr
 _Avoid_: background job, batch run, bot run
 
 **Deep link**:
-The captured `https://claude.ai/code/<id>` URL of an instance — read from claude's session registry by worktree-cwd match shortly after spawn — through which the operator drives the session from any device. Capture failure degrades to the generic `https://claude.ai/code` link with a loud log; it never blocks Start.
+The captured `https://claude.ai/code/<id>` URL of an instance — read from claude's session registry by worktree-cwd match shortly after spawn — through which the operator drives the session from any device. It is an **optional provider capability** (`DeepLinker`, ADR-0017): only a provider with a web surface captures one, and a miss degrades to that provider's generic **fallback-open** link with a loud log; it never blocks Start. A provider with no web session captures nothing (`deep_link_url` stays NULL) and its rows offer a copyable `tmux attach` instead.
 _Avoid_: attach URL, share link, session URL
 
 **Chat**:
@@ -95,7 +95,7 @@ _Avoid_: PAT, API token (those are the operator's), personal login
 ### Providers & seeding
 
 **Provider**:
-An `AgentProvider` implementation — spawn argv, auth flow, deep-link capture, worktree seeding, model/effort catalog; `claude-code` is the only MVP implementation.
+An `AgentProvider` implementation — spawn argv, auth flow, worktree seeding, model/effort catalog, chat surface — plus optional capabilities it may advertise by type assertion (`DeepLinker` for deep-link capture + fallback-open metadata, `ConnectingReporter` for the connecting pulse; ADR-0017). `claude-code` is the only MVP implementation and implements both.
 _Avoid_: backend, engine, vendor
 
 **Skills bundle**:
@@ -117,7 +117,7 @@ _Avoid_: password, keyring, vault key file synonyms
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
 - An **AFK run**'s **claim** is its branch and nothing else; selection skips issues whose branch exists and never consults the PR list — the PR/CR list is the reaper's **done-signal** only.
 - The scheduler counts the **claimable** set (**ready queue** minus existing claims); an AFK run that outlives its **budget clock** without a done-signal is a timeout, and timeouts (like deaths) feed the **three-strikes pause**.
-- A manual **instance**'s **deep link** is the operator's handle to it; the deep link is captured best-effort and survives restarts on the run row.
+- A manual **instance**'s **deep link** is the operator's handle to it; the deep link is captured best-effort (only for a provider with the `DeepLinker` capability) and survives restarts on the run row — a link-less provider's rows offer a copyable `tmux attach` instead.
 - The **chat** reads an instance's **transcript** through the provider seam and lets the operator reply/answer/interrupt; it complements the deep link and applies to every instance. Replying to or interrupting an **AFK run** is a **neutral** intervention — it never touches the **budget clock**, **claim**, or **three-strikes pause**. The tailer's **conversational state** feeds the instance list's live badges.
 - **Guarded teardown** runs at all four teardown sites (manual Stop, AFK reaper, startup reconciliation, merged-sweep) and produces **parked work**; the **unguarded Discard** is the only way to destroy it and the only requeue.
 - A **neutral Stop** parks the claim and never feeds the **three-strikes pause** counter.

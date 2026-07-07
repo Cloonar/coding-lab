@@ -289,10 +289,22 @@ export interface ProviderOption {
   label: string;
 }
 
+/**
+ * A provider's generic "open on the web" affordance (ADR-0017): the URL to
+ * open when no exact deep link was captured, plus the tooltip explaining it.
+ * Present only for providers with a web surface (a DeepLinker); absent for
+ * link-less providers, whose rows show a copyable tmux-attach affordance.
+ */
+export interface ProviderFallbackOpen {
+  url: string;
+  title: string;
+}
+
 export interface Provider {
   id: string;
   models: ProviderOption[];
   efforts: ProviderOption[];
+  fallback_open?: ProviderFallbackOpen;
 }
 
 export async function listProviders(): Promise<Provider[]> {

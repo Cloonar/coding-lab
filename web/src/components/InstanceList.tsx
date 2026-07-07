@@ -1,20 +1,23 @@
 // Live instance rows under a repo card: v0-style title ('label · 15:30',
 // AFK runs as 'AFK #N'), a subtle connecting pulse until the deep link
-// lands, Open as a deep-link anchor (generic claude.ai picker fallback on a
-// missed capture), and Stop with the guarded outcome ("removed" vs "parked")
-// surfaced as a toast. AFK rows add the auto chip and the budget countdown
-// derived from runs.budget_deadline (30s display tick).
+// lands, the open affordance (exact deep link, the provider's generic web
+// fallback, or a copyable tmux-attach for a link-less provider — ADR-0017),
+// and Stop with the guarded outcome ("removed" vs "parked") surfaced as a
+// toast. AFK rows add the auto chip and the budget countdown derived from
+// runs.budget_deadline (30s display tick).
 
 import { A } from '@solidjs/router';
 import { For, Show, createSignal, onCleanup } from 'solid-js';
-import { errorMessage, stopInstance, type Instance } from '../api';
+import { errorMessage, stopInstance, type Instance, type Provider } from '../api';
 import { budgetRemaining, parseAFKLabel } from '../lib/afk';
 import { stateBadge } from '../lib/conversation';
-import { openState } from '../lib/deepLink';
+import { openState, providerOpen } from '../lib/deepLink';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
+import OpenAffordance from './OpenAffordance';
 
 export default function InstanceList(props: {
   instances: Instance[];
+  providers: Provider[] | undefined;
   onStopped: (outcome: 'removed' | 'parked') => void;
   onChanged: () => void;
   onError: (message: string) => void;
@@ -43,7 +46,13 @@ export default function InstanceList(props: {
     <ul class="instance-list">
       <For each={props.instances}>
         {(instance) => (
-          <InstanceRow instance={instance} stopping={stopping()} now={now()} onStop={stop} />
+          <InstanceRow
+            instance={instance}
+            providers={props.providers}
+            stopping={stopping()}
+            now={now()}
+            onStop={stop}
+          />
         )}
       </For>
     </ul>
@@ -52,19 +61,13 @@ export default function InstanceList(props: {
 
 function InstanceRow(props: {
   instance: Instance;
+  providers: Provider[] | undefined;
   stopping: string | null;
   now: number;
   onStop: (instance: Instance) => Promise<void>;
 }) {
-  const state = () => openState(props.instance);
-  const linkUrl = () => {
-    const s = state();
-    return s.kind === 'link' ? s.url : '';
-  };
-  const linkTitle = () => {
-    const s = state();
-    return s.kind === 'link' && !s.exact ? s.title : undefined;
-  };
+  const state = () =>
+    openState(props.instance, providerOpen(props.providers, props.instance.provider));
   const isStopping = () => props.stopping === props.instance.session_name;
   const afk = () => parseAFKLabel(sessionLabel(props.instance.session_name));
   const budget = () =>
@@ -103,18 +106,7 @@ function InstanceRow(props: {
       <A href={`/runs/${props.instance.id}`} class="card-link" title="Open the chat">
         Chat
       </A>
-      <Show
-        when={state().kind === 'link'}
-        fallback={
-          <span class="chip connecting pulse" title="Waiting for the deep link">
-            connecting…
-          </span>
-        }
-      >
-        <a href={linkUrl()} target="_blank" rel="noreferrer" class="card-link" title={linkTitle()}>
-          Open ↗
-        </a>
-      </Show>
+      <OpenAffordance state={state()} />
       <button
         type="button"
         class="danger instance-stop"

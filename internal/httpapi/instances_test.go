@@ -368,6 +368,15 @@ func TestAPI_Providers(t *testing.T) {
 	if models, _ := p["models"].([]any); len(models) != 4 {
 		t.Errorf("models = %v, want 4", p["models"])
 	}
+	// A DeepLinker provider (the Fake) exposes fallback-open metadata (ADR-0017)
+	// so the SPA needs no hardcoded provider URL/title.
+	fo, ok := p["fallback_open"].(map[string]any)
+	if !ok {
+		t.Fatalf("fallback_open missing for a DeepLinker provider: %v", p)
+	}
+	if fo["url"] != "https://claude.ai/code" || fo["title"] == "" {
+		t.Errorf("fallback_open = %v, want the claude.ai picker url + a title", fo)
+	}
 }
 
 func TestAPI_ClaudeAuthStatusAndLogin(t *testing.T) {

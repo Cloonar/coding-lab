@@ -29,16 +29,17 @@ type Fake struct {
 	now        func() time.Time
 	authForced int // count of forced AuthStatus calls
 
-	deepLink  string // returned by CaptureDeepLink (a real hit); "" → GenericDeepLink miss
-	seedErr   error
-	seeded    []string            // worktrees passed to SeedWorkspace, in order
-	seedOpts  []provider.SeedOpts // the SeedOpts of each SeedWorkspace call, in order
-	connect   map[string]bool
-	oauthURL  string
-	loginErr  error
-	codeErr   error
-	codes     []string // codes submitted via LoginSubmitCode
-	captureCt int      // CaptureDeepLink call count
+	deepLink     string                  // returned by CaptureDeepLink; "" → a miss (ADR-0017)
+	fallbackOpen provider.OpenAffordance // returned by FallbackOpen (the generic web link + title)
+	seedErr      error
+	seeded       []string            // worktrees passed to SeedWorkspace, in order
+	seedOpts     []provider.SeedOpts // the SeedOpts of each SeedWorkspace call, in order
+	connect      map[string]bool
+	oauthURL     string
+	loginErr     error
+	codeErr      error
+	codes        []string // codes submitted via LoginSubmitCode
+	captureCt    int      // CaptureDeepLink call count
 
 	// Chat surface (issue #7). transcriptPath is what LocateTranscript
 	// returns (""→miss); chat is what ReadTranscript returns; readErr forces
@@ -58,6 +59,7 @@ type Fake struct {
 var (
 	_ provider.AgentProvider      = (*Fake)(nil)
 	_ provider.ConnectingReporter = (*Fake)(nil)
+	_ provider.DeepLinker         = (*Fake)(nil)
 )
 
 // New returns a logged-in fake with the claude-code id and catalogs.
@@ -74,13 +76,14 @@ func New() *Fake {
 			{Value: "low", Label: "low"}, {Value: "medium", Label: "medium"},
 			{Value: "high", Label: "high"}, {Value: "xhigh", Label: "xhigh"}, {Value: "max", Label: "max"},
 		},
-		loggedIn: true,
-		email:    "op@example.invalid",
-		method:   "claude.ai",
-		now:      time.Now,
-		deepLink: "https://claude.ai/code/session_fake",
-		connect:  map[string]bool{},
-		oauthURL: "https://claude.com/cai/oauth/authorize?code=true",
+		loggedIn:     true,
+		email:        "op@example.invalid",
+		method:       "claude.ai",
+		now:          time.Now,
+		deepLink:     "https://claude.ai/code/session_fake",
+		fallbackOpen: provider.OpenAffordance{URL: "https://claude.ai/code", Title: "Opens the claude.ai session picker — the exact deep link wasn't captured"},
+		connect:      map[string]bool{},
+		oauthURL:     "https://claude.com/cai/oauth/authorize?code=true",
 	}
 }
 
@@ -132,18 +135,22 @@ func (f *Fake) LoginSubmitCode(_ context.Context, code string) error {
 	return f.codeErr
 }
 
-// CaptureDeepLink returns the scripted real link, or GenericDeepLink when the
-// deep link was cleared (a miss). It marks the session connecting for the
-// duration of one call.
+// CaptureDeepLink implements provider.DeepLinker: it returns the scripted real
+// link, or "" when the deep link was cleared (a miss — ADR-0017: the generic
+// fallback is FallbackOpen's job, never returned through capture).
 func (f *Fake) CaptureDeepLink(_ context.Context, session, _ string) (string, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.captureCt++
-	link := f.deepLink
-	f.mu.Unlock()
-	if link == "" {
-		return "https://claude.ai/code", nil // GenericDeepLink
-	}
-	return link, nil
+	return f.deepLink, nil
+}
+
+// FallbackOpen implements provider.DeepLinker: the scripted generic web open
+// affordance (URL + title) the SPA renders on a capture miss.
+func (f *Fake) FallbackOpen() provider.OpenAffordance {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fallbackOpen
 }
 
 func (f *Fake) SeedWorkspace(worktree string, opts provider.SeedOpts) error {
@@ -224,11 +231,18 @@ func (f *Fake) SetLoggedIn(v bool) {
 	f.loggedIn = v
 }
 
-// SetDeepLink scripts CaptureDeepLink's real hit ("" → generic miss).
+// SetDeepLink scripts CaptureDeepLink's real hit ("" → a miss).
 func (f *Fake) SetDeepLink(url string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deepLink = url
+}
+
+// SetFallbackOpen scripts FallbackOpen's generic web open affordance.
+func (f *Fake) SetFallbackOpen(fo provider.OpenAffordance) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fallbackOpen = fo
 }
 
 // SetSeedError makes SeedWorkspace fail (the Start-rollback trigger).

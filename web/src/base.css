@@ -306,6 +306,15 @@ a.plain {
   text-decoration: underline;
 }
 
+/* A <button> that reads as a card-link (the copyable tmux-attach affordance). */
+button.attach-copy {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
 .add-row {
   display: flex;
   align-items: center;

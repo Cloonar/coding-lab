@@ -161,9 +161,9 @@ func TestCaptureDeepLink_hit(t *testing.T) {
 	}
 }
 
-// Brief §11.2: a miss must fall back to the generic claude.ai link AND
-// log loudly (v0 was silent).
-func TestCaptureDeepLink_missReturnsGenericAndWarnsLoudly(t *testing.T) {
+// ADR-0017 / brief §11.2: a miss returns "" (the generic fallback is surfaced
+// through FallbackOpen, never capture) AND logs loudly (v0 was silent).
+func TestCaptureDeepLink_missReturnsEmptyAndWarnsLoudly(t *testing.T) {
 	var logBuf bytes.Buffer
 	run := newFakeRunner()
 	p, _ := testProvider(t, run)
@@ -174,11 +174,24 @@ func TestCaptureDeepLink_missReturnsGenericAndWarnsLoudly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CaptureDeepLink: %v", err)
 	}
-	if got != GenericDeepLink {
-		t.Errorf("CaptureDeepLink on miss = %q; want the generic link %q", got, GenericDeepLink)
+	if got != "" {
+		t.Errorf("CaptureDeepLink on miss = %q; want \"\" (fallback is FallbackOpen's job)", got)
 	}
 	if !strings.Contains(logBuf.String(), "deep-link capture missed") {
 		t.Errorf("no loud warning logged on capture miss; log = %q", logBuf.String())
+	}
+}
+
+// FallbackOpen owns the generic claude.ai open affordance (URL + v0 tooltip),
+// the provider-owned metadata the SPA renders when no exact link was captured.
+func TestFallbackOpen(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	fo := p.FallbackOpen()
+	if fo.URL != GenericDeepLink {
+		t.Errorf("FallbackOpen URL = %q; want %q", fo.URL, GenericDeepLink)
+	}
+	if fo.Title != genericLinkTitle {
+		t.Errorf("FallbackOpen Title = %q; want %q", fo.Title, genericLinkTitle)
 	}
 }
 

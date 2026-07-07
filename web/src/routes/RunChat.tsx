@@ -25,15 +25,18 @@ import {
   getRun,
   getRunMessages,
   interruptRun,
+  listProviders,
   replyRun,
   stopInstance,
   type ChatMessage,
   type ConversationState,
   type Dialog,
+  type Provider,
   type Run,
   type TranscriptStatus,
 } from '../api';
 import ErrorBanner from '../components/ErrorBanner';
+import OpenAffordance from '../components/OpenAffordance';
 import RequireAuth from '../components/RequireAuth';
 import {
   anchoredScrollTop,
@@ -43,7 +46,7 @@ import {
   mergeRefetch,
 } from '../lib/chatStream';
 import { stateBadge } from '../lib/conversation';
-import { GENERIC_DEEP_LINK, GENERIC_LINK_TITLE } from '../lib/deepLink';
+import { openState, providerOpen } from '../lib/deepLink';
 import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
 import { resourceValue } from '../lib/resource';
 import { useEvents } from '../events';
@@ -66,6 +69,9 @@ function RunChatView() {
     () => params.id,
     (id) => getRun(id),
   );
+  // Provider-owned open affordance (ADR-0017): the fallback web link + title,
+  // or none for a link-less provider (then the header shows tmux-attach).
+  const [providers] = createResource(() => listProviders());
 
   // The message window is accumulated (merged by seq) so scroll-up history and
   // in-place tool-status updates both survive a refetch.
@@ -215,6 +221,7 @@ function RunChatView() {
     <main class="page chat-page">
       <ChatHeader
         run={runData()}
+        providers={providers()}
         state={state()}
         showThinking={showThinking()}
         onToggleThinking={() => setShowThinking((v) => !v)}
@@ -260,6 +267,7 @@ function RunChatView() {
 
 function ChatHeader(props: {
   run: Run | undefined;
+  providers: Provider[] | undefined;
   state: ConversationState;
   showThinking: boolean;
   onToggleThinking: () => void;
@@ -280,15 +288,16 @@ function ChatHeader(props: {
   };
   const badge = () => stateBadge(props.state);
   const live = () => props.run !== undefined && props.run.outcome === 'active';
-  // The exact deep link when captured; otherwise the same generic claude.ai
-  // picker fallback InstanceList uses — the "open it in claude.ai" dialog
-  // hint always has somewhere to point.
-  const deepLink = () => {
-    const url = props.run?.deep_link_url;
-    if (url !== undefined && url !== null && url !== '') {
-      return { url, title: 'Open in claude.ai' };
-    }
-    return { url: GENERIC_DEEP_LINK, title: GENERIC_LINK_TITLE };
+  // The open affordance (ADR-0017): the exact deep link when captured, else the
+  // provider's generic web fallback, else a tmux-attach for a link-less
+  // provider — same source of truth as the dashboard rows, never hardcoded.
+  const open = () => {
+    const r = props.run;
+    if (r === undefined) return null;
+    return openState(
+      { connecting: false, deep_link_url: r.deep_link_url, session_name: r.session_name },
+      providerOpen(props.providers, r.provider),
+    );
   };
 
   const stop = async () => {
@@ -329,17 +338,7 @@ function ChatHeader(props: {
       >
         {props.showThinking ? 'Hide thinking' : 'Show thinking'}
       </button>
-      <Show when={props.run}>
-        <a
-          href={deepLink().url}
-          target="_blank"
-          rel="noreferrer"
-          class="card-link"
-          title={deepLink().title}
-        >
-          Open ↗
-        </a>
-      </Show>
+      <Show when={open()}>{(s) => <OpenAffordance state={s()} />}</Show>
       <Show when={live()}>
         <Switch>
           <Match when={!confirming()}>

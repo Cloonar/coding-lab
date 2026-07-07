@@ -18,6 +18,7 @@ import {
   retryClone,
   stopAll,
   type Instance,
+  type Provider,
   type Repo,
   type Run,
 } from '../api';
@@ -116,6 +117,7 @@ function DashboardView() {
                 <RepoCard
                   repo={repo}
                   instances={instancesOf(repo.id)}
+                  providers={providers()}
                   provider={providerFor(providers() ?? [], repo.provider)}
                   defaults={spawnDefaults() ?? {}}
                   progress={progress.progress(repo.id)}
@@ -145,6 +147,7 @@ function DashboardView() {
 function RepoCard(props: {
   repo: Repo;
   instances: Instance[];
+  providers: Provider[] | undefined;
   provider: ReturnType<typeof providerFor>;
   defaults: { model?: string; effort?: string };
   progress: CloneProgress | null;
@@ -212,6 +215,7 @@ function RepoCard(props: {
       <Show when={props.instances.length > 0}>
         <InstanceList
           instances={props.instances}
+          providers={props.providers}
           onStopped={props.onStopped}
           onChanged={props.onInstancesChanged}
           onError={props.onError}
