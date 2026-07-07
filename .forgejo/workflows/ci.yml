@@ -1,31 +1,100 @@
-# CI = `nix flake check` (design §10): local and CI run the same gate.
-# The stock `ubuntu-latest` runner has no nix, so the job installs it first
-# (Determinate nix-installer, daemonless `--init none`) and runs the check in
-# the same step. Runner prerequisites — outbound egress for the installer,
-# proxy.golang.org, registry.npmjs.org, cache.nixos.org and the flake inputs —
-# are documented in docs/ops.md.
+# CI = the fast **native** gate (ADR-0023): Go + Node directly on the stock
+# runner, with `setup-*` caching and no nix. Runs on every PR and is the
+# **required** status check — keep the job id `native` stable so the
+# branch-protection required-check string stays deterministic.
+#
+# This mirrors the flake's non-nix checks, version-matched to the flake so the
+# two gates agree on the common path: the SPA's eslint + prettier + vitest and
+# `vite build`, the `ui`-tagged Go build + `go test` (against the built dist,
+# same `go:embed` target as `make build-ui`), and the untagged golangci-lint
+# pass — all with `CGO_ENABLED=0`, and with real git/tmux/prlimit on PATH for
+# `go test` (the D17 subprocess bar). The hermetic `nix flake check` gate lives
+# in ci-nix.yml, path-gated to nix/dependency changes; it stays authoritative
+# (and the deploy re-runs it as a backstop). See ADR-0023 and docs/ops.md.
+#
+# Pins (match nixpkgs at the current flake.lock, rev d407951…): Go from go.mod
+# (`go 1.26`), Node 24 (`pkgs.nodejs`), golangci-lint 2.12.2
+# (`nix eval nixpkgs#golangci-lint.version`). Drift between flake.lock bumps is
+# acceptable — the authoritative untagged lint and full suite re-run in the nix
+# gate whenever flake.lock changes.
 name: ci
 
 on:
   pull_request:
 
 jobs:
-  flake-check:
+  native:
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v4
-      - name: install nix + flake check
+
+      - name: Ensure go test subprocess deps (git, tmux, prlimit)
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
-            | sh -s -- install linux --no-confirm --init none
-          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-          nix flake check -L
+          # go test drives real git, tmux (private sockets), and prlimit
+          # (util-linux) — the flake's nativeCheckInputs, the D17 production
+          # bar. git and util-linux ship on the runner image; tmux may not.
+          set -eux
+          need=""
+          command -v tmux    >/dev/null || need="$need tmux"
+          command -v prlimit >/dev/null || need="$need util-linux"
+          command -v git     >/dev/null || need="$need git"
+          if [ -n "$need" ]; then
+            sudo apt-get update
+            sudo apt-get install -y $need
+          fi
+          tmux -V && git --version && prlimit --version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: SPA — lint, format, test, build
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm run format:check
+          npm test
+          npm run build
+
+      - name: Embed the SPA dist (go:embed target, same as `make build-ui`)
+        run: |
+          rm -rf internal/webui/dist
+          mkdir -p internal/webui
+          cp -r web/dist internal/webui/dist
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # `go 1.26` — the go.mod gate
+          # module + build cache (keyed on go.sum) is on by default.
+
+      - name: Build + test (tags ui — needs the embedded dist above)
+        run: |
+          go build -tags ui ./cmd/...
+          go test -tags ui ./...
+
+      - name: golangci-lint (untagged — matches the flake's golangci-lint check)
+        run: |
+          # Pinned to the version nixpkgs ships at the current flake.lock
+          # (`nix eval nixpkgs#golangci-lint.version` @ d407951 → 2.12.2). Run
+          # untagged, CGO_ENABLED=0 (job env) — the placeholder embed_ui.go
+          # variant, same as the flake's whole-program lint.
+          set -eux
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://raw.githubusercontent.com/golangci/golangci-lint/v2.12.2/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
 
   # M2 stub — postgres-backed store suite. Uncomment when M2 lands: the
   # sqlite store suite already runs inside `nix flake check`; this job adds
   # the same suite against a real postgres via LAB_TEST_POSTGRES_DSN
   # (design §3a migration parity / §11 store bar). Needs the same in-job nix
-  # install as flake-check, plus runner support for service containers.
+  # install as the ci-nix flake-check job, plus runner support for service
+  # containers.
   #
   # store-postgres:
   #   runs-on: ubuntu-latest
