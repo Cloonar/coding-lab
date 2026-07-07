@@ -8,14 +8,17 @@ import (
 )
 
 // InstanceView is one active run annotated for GET /api/v1/instances: the run
-// row plus its repo name and the two derived flags — live (is the tmux session
-// actually running, from tmuxx NOT the DB — the DB row is history) and
-// connecting (the provider's in-flight deep-link capture state).
+// row plus its repo name and the derived fields — live (is the tmux session
+// actually running, from tmuxx NOT the DB — the DB row is history), connecting
+// (the provider's in-flight deep-link capture state), and state (the chat
+// tailer's derived conversational state: working|needs_input|question|idle, ""
+// when no tailer has reported one yet).
 type InstanceView struct {
 	Run        store.Run
 	RepoName   string
 	Live       bool
 	Connecting bool
+	State      string
 }
 
 // List returns every active run joined with live tmux liveness and the
@@ -51,9 +54,21 @@ func (s *Service) List(ctx context.Context) ([]InstanceView, error) {
 			RepoName:   repoName[run.RepoID],
 			Live:       liveSet[run.SessionName],
 			Connecting: s.connecting(run.Provider, run.SessionName),
+			State:      s.conversationState(run.SessionName),
 		})
 	}
 	return views, nil
+}
+
+// conversationState reports the chat tailer's derived state for a session, when
+// a state source is wired (design: the ConversationStater seam, set at startup
+// like the AFK stopper). "" when unset or the tailer has no state yet.
+func (s *Service) conversationState(session string) string {
+	if s.chatState == nil {
+		return ""
+	}
+	st, _ := s.chatState.State(session)
+	return st
 }
 
 // LiveCounts is the scrape-time source of the lab_instances_active gauge

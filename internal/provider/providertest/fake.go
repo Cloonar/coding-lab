@@ -39,6 +39,20 @@ type Fake struct {
 	codeErr   error
 	codes     []string // codes submitted via LoginSubmitCode
 	captureCt int      // CaptureDeepLink call count
+
+	// Chat surface (issue #7). transcriptPath is what LocateTranscript
+	// returns (""→miss); chat is what ReadTranscript returns; readErr forces
+	// a ReadTranscript error (e.g. provider.ErrTranscriptGone). Replies,
+	// answers, and interrupts are recorded for assertions.
+	transcriptPath string
+	chat           provider.Chat
+	readErr        error
+	locateCt       int
+	replies        []string
+	answers        []provider.DialogAnswer
+	interrupts     int
+	replyErr       error
+	interruptErr   error
 }
 
 var (
@@ -149,6 +163,58 @@ func (f *Fake) Connecting(session string) bool {
 	return f.connect[session]
 }
 
+// --- chat surface ---------------------------------------------------------
+
+// LocateTranscript returns the scripted path ("" → not found yet) and counts
+// the call, mirroring CaptureDeepLink's miss-is-not-an-error contract.
+func (f *Fake) LocateTranscript(_ context.Context, _, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.locateCt++
+	return f.transcriptPath, nil
+}
+
+// ReadTranscript returns the scripted chat, or the scripted read error
+// (e.g. provider.ErrTranscriptGone).
+func (f *Fake) ReadTranscript(string) (provider.Chat, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return provider.Chat{}, f.readErr
+	}
+	return f.chat, nil
+}
+
+// Reply records the reply text (or returns the scripted error).
+func (f *Fake) Reply(_ context.Context, _, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.replyErr != nil {
+		return f.replyErr
+	}
+	f.replies = append(f.replies, text)
+	return nil
+}
+
+// AnswerDialog records the answer.
+func (f *Fake) AnswerDialog(_ context.Context, _ string, _ provider.Dialog, answer provider.DialogAnswer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answers = append(f.answers, answer)
+	return nil
+}
+
+// Interrupt records the call (or returns the scripted error).
+func (f *Fake) Interrupt(_ context.Context, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.interruptErr != nil {
+		return f.interruptErr
+	}
+	f.interrupts++
+	return nil
+}
+
 // --- test controls -------------------------------------------------------
 
 // SetLoggedIn scripts the auth state the forced pre-spawn refresh reads.
@@ -177,6 +243,59 @@ func (f *Fake) SetConnecting(session string, v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connect[session] = v
+}
+
+// SetTranscriptPath scripts LocateTranscript's return ("" → miss).
+func (f *Fake) SetTranscriptPath(path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.transcriptPath = path
+}
+
+// SetChat scripts what ReadTranscript returns.
+func (f *Fake) SetChat(c provider.Chat) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chat = c
+}
+
+// SetReadError scripts a ReadTranscript failure (e.g. provider.ErrTranscriptGone).
+func (f *Fake) SetReadError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readErr = err
+}
+
+// SetReplyError / SetInterruptError script the send-keys failures.
+func (f *Fake) SetReplyError(err error)     { f.mu.Lock(); f.replyErr = err; f.mu.Unlock() }
+func (f *Fake) SetInterruptError(err error) { f.mu.Lock(); f.interruptErr = err; f.mu.Unlock() }
+
+// Replies returns the reply texts delivered, in order.
+func (f *Fake) Replies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.replies...)
+}
+
+// Answers returns the dialog answers delivered, in order.
+func (f *Fake) Answers() []provider.DialogAnswer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]provider.DialogAnswer(nil), f.answers...)
+}
+
+// Interrupts reports how many times Interrupt ran.
+func (f *Fake) Interrupts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.interrupts
+}
+
+// LocateCount reports how many times LocateTranscript ran.
+func (f *Fake) LocateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.locateCt
 }
 
 // SetLoginError / SetCodeError script the login flow.

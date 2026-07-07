@@ -122,7 +122,23 @@ type Service struct {
 	// afkStop is the M5 AFK engine's neutral-Stop delegation (design §4c),
 	// wired once at startup via SetAFKStopper; nil refuses AFK stops.
 	afkStop AFKStopper
+
+	// chatState is the embedded-chat tailer's conversational-state source
+	// (issue #7), wired once at startup via SetChatState; nil omits the state
+	// field from the instance list.
+	chatState ConversationStater
 }
+
+// ConversationStater is the chat tailer's derived-state seam (issue #7): the
+// instance list annotates each live run with its conversational state
+// (working|needs_input|question|idle). Satisfied by *chat.Service; nil-safe.
+type ConversationStater interface {
+	State(session string) (string, bool)
+}
+
+// SetChatState wires the conversational-state source (cmd/lab, once at
+// startup). Idempotent-by-construction: called before the service serves.
+func (s *Service) SetChatState(cs ConversationStater) { s.chatState = cs }
 
 // New validates o and returns a Service.
 func New(o Options) (*Service, error) {

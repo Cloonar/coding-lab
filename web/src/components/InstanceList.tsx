@@ -5,9 +5,11 @@
 // surfaced as a toast. AFK rows add the auto chip and the budget countdown
 // derived from runs.budget_deadline (30s display tick).
 
+import { A } from '@solidjs/router';
 import { For, Show, createSignal, onCleanup } from 'solid-js';
 import { errorMessage, stopInstance, type Instance } from '../api';
 import { budgetRemaining, parseAFKLabel } from '../lib/afk';
+import { stateBadge } from '../lib/conversation';
 import { openState } from '../lib/deepLink';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
 
@@ -67,6 +69,7 @@ function InstanceRow(props: {
   const afk = () => parseAFKLabel(sessionLabel(props.instance.session_name));
   const budget = () =>
     afk() === null ? null : budgetRemaining(props.instance.budget_deadline, props.now);
+  const badge = () => stateBadge(props.instance.state);
 
   return (
     <li classList={{ 'instance-row': true, afk: afk() !== null }}>
@@ -90,6 +93,16 @@ function InstanceRow(props: {
       <Show when={!props.instance.live}>
         <span class="chip idle">not running</span>
       </Show>
+      <Show when={badge()}>
+        {(b) => (
+          <span classList={{ chip: true, convo: true, [b().cls]: true }} title={b().title}>
+            {b().label}
+          </span>
+        )}
+      </Show>
+      <A href={`/runs/${props.instance.id}`} class="card-link" title="Open the chat">
+        Chat
+      </A>
       <Show
         when={state().kind === 'link'}
         fallback={

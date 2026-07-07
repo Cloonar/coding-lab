@@ -4,9 +4,12 @@ Pinned version: **Claude Code 2.1.198** — live probe on the dev host,
 2026-07-05, re-confirmed by the M3 acceptance smoke on 2026-07-06. This
 document tracks brief §11 (known-fragile couplings 1–4; item 5 —
 provider-owned model/effort catalogs — is solved structurally in
-`internal/provider`, D14). The implementation of every coupling lives in
-`internal/provider/claudecode`; the probe tests in this package exercise
-the same code paths against captured fixtures in `testdata/`.
+`internal/provider`, D14) plus the four embedded-chat couplings 5–8 added
+by issue #7 / ADR-0016 (transcript location + JSONL schema, the reply,
+dialog, and interrupt send-keys recipes). The implementation of every
+coupling lives in `internal/provider/claudecode`; the probe tests in this
+package exercise the same code paths against captured fixtures in
+`testdata/`.
 
 **M3 live acceptance (2026-07-06, real claude 2.1.198, real registry
 `~/.claude/sessions`).** A single real `--remote-control` instance was
@@ -164,6 +167,98 @@ Provenance legend:
   measure-1 regression (Claude Code stops honoring the attribution keys)
   therefore still cannot leak an Anthropic-authored trailer through the
   other two layers.
+
+## 5. Transcript location + JSONL schema — location live (2.1.198), schema fixture
+
+The embedded chat (issue #7 / ADR-0016) reads claude's live session
+transcript. Four coupled facts, all in `internal/provider/claudecode`
+(`chat.go`, `chat_types.go`), pinned by `TestCompat_SlugForDir`,
+`TestCompat_TranscriptFixture_maps`, and `TestCompat_RegistryFixture_hasSessionID`:
+
+- **Transcript path**: `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`.
+  The `sessionId` is read from the **same** registry file the deep link
+  comes from (`~/.claude/sessions/<pid>.json`, §2) — formerly one of the
+  ignored keys, now a fifth field on `RegistryEntry`. Located by the same
+  newest-live-cwd-match as the deep link (`sessionIDForDir`), so the chat
+  reuses the proven capture pattern. live (2.1.198): the directories claude
+  created under `~/.claude/projects` during the M3 probe matched the slug
+  rule exactly.
+- **cwd slug**: every byte of the absolute worktree path that is not an
+  ASCII letter or digit becomes `-`. A `/.` boundary therefore doubles
+  (`/home/x/.local` → `-home-x--local`). `SlugForDir`; pinned against the
+  real observed directory names. live.
+- **JSONL event grammar**: one event per line; the fields lab maps are a
+  small subset (`type`, `subtype`, `content`, `timestamp`, `isMeta`,
+  `isApiErrorMessage`, and `message.{role,content}` where content is a
+  string or a `[]block` of `text|thinking|tool_use|tool_result`). A failed
+  tool is flagged by `is_error` **on the `tool_result` block itself** (its
+  `content` is most often a plain string) — verified against live 2.x
+  transcripts; an `is_error` on an inner content item is tolerated as a
+  secondary signal. Every other key is ignored. Captured shape:
+  `testdata/transcript-2.1.198.jsonl` (ids/paths anonymized, field names +
+  value shapes verbatim). Mapped to the universal schema
+  (`text|tool|dialog|lifecycle`) by `ParseTranscript`. fixture (assembled
+  from real 2.1.198 line shapes; re-verify live when an upgrade
+  misbehaves).
+- **Read-through only**: the transcript file is the source of truth; lab
+  persists only `runs.transcript_path` (captured async by cwd-match, the
+  `deep_link_url` pattern) so ended runs stay readable while claude retains
+  the file. A vanished file is `provider.ErrTranscriptGone` → the UI's
+  "transcript no longer available" state.
+
+## 6. Reply send-keys — fixture (2.1.198 send path)
+
+A mid-session reply is a **bracketed paste** of the text followed by a
+separate `Enter` (`Provider.Reply`, `internal/tmuxx` `PasteText` +
+`SendNamedKeys`). Bracketed paste (`tmux load-buffer` + `paste-buffer -p`)
+means embedded newlines insert lines in the composer instead of submitting
+turn-by-turn — the argv-only stance (§1) covers the *initial* prompt only;
+mid-session replies are exempt (issue #7 decision 4). A mid-turn agent
+queues the reply in its own TUI. Control characters other than tab/newline
+are rejected before the paste (`validateReply`) so a stray escape cannot
+break out of the composer. fixture — the send mechanism is exercised
+hermetically (`internal/tmuxx/integration_test.go`, real tmux private
+socket); the claude-side "queue while mid-turn" behavior is re-verified
+live on upgrades.
+
+## 7. Dialog keystroke recipes — fixture (2.1.198)
+
+An interactive dialog is an **unanswered** `tool_use` in the transcript for
+a recognised tool. Option buttons are built **only** from the structured
+tool input — never scraped from the TUI widget (issue #7 decision 5):
+
+- **`AskUserQuestion`**: a single question renders its `options` as tappable
+  buttons plus a synthesized free-text **Other** row (the tool always
+  offers Other). The answer recipe (`DialogKeystrokes`, played by
+  `Provider.AnswerDialog`): normalise the cursor to the top option
+  (`Up` × rows−1), `Down` × chosen-index, `Enter`. Multi-select
+  (`multiSelect:true`) toggles each chosen option with `Space` then
+  confirms with `Enter`. **Other** selects the row, pastes the free text,
+  `Enter`. A **multi-question** `AskUserQuestion` is not answerable through
+  a single-picker recipe → degrades to the deep-link hint.
+- **`ExitPlanMode`** (plan approval): the plan text is shown, but the
+  approve/reject choices are **TUI-owned** (not in the tool input), so per
+  the never-scrape rule answering degrades to the "open in claude.ai"
+  deep-link hint; Interrupt and a free-text reply still work. Revisit when
+  the plan-approval option widget is captured live.
+- **Unknown** interactive tools degrade to the deep-link hint. Answers the
+  operator gives in claude.ai flow back through the transcript — no
+  divergence handling is needed.
+
+Recipe snapshot: `TestCompat_DialogKeystrokes`. The `Up/Down/Space/Enter`
+key names are standard tmux `send-keys` arguments; the picker navigation is
+the fragile part — re-verify against a live picker on upgrades. fixture.
+
+## 8. Interrupt keystroke — fixture (2.1.198)
+
+The chat's stop-generating affordance sends a single `Escape`
+(`Provider.Interrupt` → `SendNamedKeys(session, "Escape")`), behind a
+confirm tap in the UI. It is distinct from a run Stop: it never touches the
+session lifecycle, the budget clock, the claim, or the three-strikes
+counter (issue #7 decision 12) — intervention neutrality is structural
+(nothing in the chat path writes a run outcome). fixture — the send is
+tmux-hermetic; the claude-side Escape-interrupts-the-turn behavior is
+re-verified live on upgrades.
 
 ## Live re-verification
 

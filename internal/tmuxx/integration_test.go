@@ -336,3 +336,55 @@ func TestTmux_serverAbsentMeansEmpty(t *testing.T) {
 		t.Errorf("IsRunning with no server = %v, %v; want false, nil", ok, err)
 	}
 }
+
+// SendNamedKeys delivers a named Enter that submits a previously typed
+// (unsubmitted) literal line — the general form of SendKeys' second call,
+// used by the chat's dialog/interrupt recipes.
+func TestTmux_sendNamedKeysSubmitsLine(t *testing.T) {
+	ctx := t.Context()
+	tm := testTmux(t)
+	const name = "lab-test-namedkeys"
+	dir := t.TempDir()
+	out := filepath.Join(dir, "got.txt")
+
+	if err := tm.Start(ctx, name, dir, []string{"sh", "-c", "cat > '" + out + "'"}, nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := tm.SendKeys(ctx, name, "hello", false); err != nil {
+		t.Fatalf("SendKeys (no enter): %v", err)
+	}
+	if err := tm.SendNamedKeys(ctx, name, "Enter"); err != nil {
+		t.Fatalf("SendNamedKeys(Enter): %v", err)
+	}
+	if got := strings.TrimRight(waitForFile(t, out), "\n"); got != "hello" {
+		t.Errorf("named Enter did not submit the line: got %q; want %q", got, "hello")
+	}
+}
+
+// PasteText delivers multi-line text in one bracketed paste. The pane enables
+// bracketed-paste mode (as claude's TUI does), so the §6 property under test
+// is the real one: tmux frames the text in ESC[200~/ESC[201~, which is what
+// makes embedded newlines insert lines instead of submitting turn-by-turn.
+func TestTmux_pasteTextDeliversMultiline(t *testing.T) {
+	ctx := t.Context()
+	tm := testTmux(t)
+	const name = "lab-test-paste"
+	dir := t.TempDir()
+	out := filepath.Join(dir, "got.txt")
+
+	// printf enables mode 2004 on the pane tty; cat then records raw stdin —
+	// paste framing included — to the file.
+	if err := tm.Start(ctx, name, dir, []string{"sh", "-c", `printf '\033[?2004h'; cat > '` + out + `'`}, nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := tm.PasteText(ctx, name, "line one\nline two"); err != nil {
+		t.Fatalf("PasteText: %v", err)
+	}
+	if err := tm.SendNamedKeys(ctx, name, "Enter"); err != nil {
+		t.Fatalf("SendNamedKeys(Enter): %v", err)
+	}
+	got := waitForFile(t, out)
+	if !strings.Contains(got, "\x1b[200~line one\nline two\x1b[201~") {
+		t.Errorf("paste not bracketed: %q; want ESC[200~line one\\nline two ESC[201~", got)
+	}
+}

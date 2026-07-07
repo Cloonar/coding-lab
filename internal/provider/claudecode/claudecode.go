@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -83,6 +84,10 @@ type Options struct {
 	// RegistryDir is claude's per-process session registry
 	// ($HOME/.claude/sessions); injectable for tests.
 	RegistryDir string
+	// ProjectsDir is claude's transcript tree ($HOME/.claude/projects); the
+	// chat surface reads <ProjectsDir>/<cwd-slug>/<sessionId>.jsonl.
+	// Injectable for tests.
+	ProjectsDir string
 	// LoginDir is the working directory of the login session ($HOME —
 	// login is global, one machine-level credential).
 	LoginDir string
@@ -102,6 +107,7 @@ type Provider struct {
 	claudeBin   string
 	configPath  string
 	registryDir string
+	projectsDir string
 	loginDir    string
 	runner      tmuxx.SessionRunner
 	bus         *events.Bus
@@ -161,10 +167,18 @@ func New(o Options) (*Provider, error) {
 	if now == nil {
 		now = time.Now
 	}
+	// ProjectsDir defaults to the sibling of RegistryDir (~/.claude/sessions →
+	// ~/.claude/projects) so existing callers keep working; main.go sets it
+	// explicitly.
+	projectsDir := o.ProjectsDir
+	if projectsDir == "" {
+		projectsDir = filepath.Join(filepath.Dir(o.RegistryDir), "projects")
+	}
 	return &Provider{
 		claudeBin:      o.ClaudeBin,
 		configPath:     o.ConfigPath,
 		registryDir:    o.RegistryDir,
+		projectsDir:    projectsDir,
 		loginDir:       o.LoginDir,
 		runner:         o.Runner,
 		bus:            o.Bus,

@@ -23,6 +23,7 @@ export const EVENT_TYPES = [
   'claude.auth.changed',
   'issue.changed',
   'cr.changed',
+  'run.messages.changed',
   'heartbeat',
 ] as const;
 
