@@ -83,6 +83,10 @@ function RunChatView() {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [state, setState] = createSignal<ConversationState>('');
   const [transcript, setTranscript] = createSignal<TranscriptStatus>('available');
+  // The live pending dialog from the server's top-level pending_dialog field
+  // (ADR-0020) — the authoritative source, since Claude Code never flushes a
+  // pending tool_use to the transcript. null when none is pending.
+  const [pendingDialogField, setPendingDialogField] = createSignal<Dialog | null>(null);
   const [hasMore, setHasMore] = createSignal(false);
   // A before-fetch hit the beginning: never resurrect "Load earlier" from a
   // latest-window has_more, which talks about ITS window, not our accumulated
@@ -137,6 +141,7 @@ function RunChatView() {
       const latest = await getRunMessages(params.id, { limit: MESSAGE_LIMIT });
       if (token !== fetchToken) return;
       setState(latest.state);
+      setPendingDialogField(latest.pending_dialog ?? null);
       setTranscript(latest.transcript);
       if (!exhausted()) setHasMore(latest.has_more);
       // A first window that already covers the whole transcript means there
@@ -185,6 +190,7 @@ function RunChatView() {
       () => {
         setMessages([]);
         setState('');
+        setPendingDialogField(null);
         setTranscript('available');
         setHasMore(false);
         setExhausted(false);
@@ -220,10 +226,14 @@ function RunChatView() {
     const r = runData();
     return r !== undefined && r.outcome !== 'active';
   };
-  // The backend defines "pending" as state === 'question': the array scan
-  // alone could hold onto a dialog answered externally outside the refetch
-  // window and lock the composer forever.
+  // The pending dialog: the server's top-level pending_dialog field is
+  // authoritative (ADR-0020 — the live PreToolUse spool). The messages-scan is
+  // the dormant fallback for a future Claude Code that flushes a pending
+  // tool_use to the transcript; it is gated on state === 'question' so a dialog
+  // answered outside the refetch window can't lock the composer forever.
   const pendingDialog = (): Dialog | null => {
+    const field = pendingDialogField();
+    if (field) return field;
     if (state() !== 'question') return null;
     const msgs = messages();
     for (let i = msgs.length - 1; i >= 0; i--) {
@@ -782,7 +792,25 @@ function Composer(props: {
             />
           )}
         </Match>
+        {/* state 'question' with no structured dialog (a dormant transcript
+            flush, or a shape lab can't render): the composer stays locked — a
+            free-text reply would land in a focused picker — and the operator
+            answers in claude.ai (decision 7). */}
+        <Match when={props.state === 'question'}>
+          <div class="chat-dialog">
+            <p class="chat-composer-note">Claude needs input — open it in claude.ai to respond.</p>
+            <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onSent} />
+          </div>
+        </Match>
         <Match when={true}>
+          {/* Residual blocked state with no structured dialog — e.g. a plain
+              tool-permission prompt or the post-decline "stuck" case (decision
+              7). The composer stays usable (a reply queues), with a hint. */}
+          <Show when={props.state === 'needs_input'}>
+            <p class="chat-composer-note">
+              Claude needs input — reply below, or open it in claude.ai.
+            </p>
+          </Show>
           <div class="chat-composer-row">
             <textarea
               class="chat-input"
