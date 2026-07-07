@@ -1778,12 +1778,18 @@ a.chip.cr-count:hover {
   flex: 1;
   font-size: 16px;
   min-height: 44px;
+  /* Auto-grows one row → content height, capped here with internal scroll
+     (ADR-0022 decision 9b). JS sets the exact height inline; max-height clamps
+     it and overflow takes over. resize:none — the drag handle is gone. */
+  max-height: 9.5rem;
+  overflow-y: auto;
+  line-height: 1.4;
   padding: 0.5rem 0.6rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--card);
   color: var(--text);
-  resize: vertical;
+  resize: none;
 }
 .chat-send {
   min-height: 44px;
@@ -1793,17 +1799,44 @@ a.chip.cr-count:hover {
   border: none;
   border-radius: var(--radius-control);
 }
-/* Composer send: icon-only accent square. The extra .icon-btn is ONLY on the
-   composer button, never on the dialog Submit/Send buttons. */
-.chat-send.icon-btn {
+/* Composer send / interrupt: icon-only accent squares sharing the same slot
+   (ADR-0022). The extra .icon-btn is ONLY on these composer buttons, never on
+   the dialog Submit/Send buttons. */
+.chat-send.icon-btn,
+.chat-interrupt.icon-btn {
   min-width: 44px;
   padding: 0;
   background: var(--accent);
   color: var(--accent-text);
   border: none;
 }
-.chat-send.icon-btn.busy {
+.chat-send.icon-btn.busy,
+.chat-interrupt.icon-btn.busy {
   opacity: 0.6;
+}
+.chat-interrupt-busy {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+/* Working-state cue (decision 9c): a subtle accent ring that breathes so the
+   square reads as "the agent is working — tap to interrupt". Motion only; the
+   button is fully usable without it. */
+.chat-interrupt.icon-btn.pulse {
+  animation: interrupt-pulse 1.8s ease-in-out infinite;
+}
+@keyframes interrupt-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-interrupt.icon-btn.pulse {
+    animation: none;
+  }
 }
 .chat-composer-note {
   margin: 0;

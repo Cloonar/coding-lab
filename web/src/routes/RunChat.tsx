@@ -3,9 +3,10 @@
 // conversation stream (user/assistant text, tool chips, pending dialog,
 // lifecycle/errors; thinking behind a toggle), and a fixed bottom composer
 // whose state follows the run — locked while a dialog is pending, disabled for
-// ended instances, with a "queued" hint while the agent is working. Reads
-// through GET /runs/:id/messages and refetches on run.messages.changed; replies
-// / answers / interrupts POST back. Phone-first, v0 design language.
+// ended instances, and morphing its Send button into a one-tap Interrupt while
+// the agent is working (ADR-0022). Reads through GET /runs/:id/messages and
+// refetches on run.messages.changed; replies / answers / interrupts POST back.
+// Phone-first, v0 design language.
 
 import { A, useParams } from '@solidjs/router';
 import { Dynamic } from 'solid-js/web';
@@ -746,6 +747,27 @@ function CopyButton(props: { text: string; label?: string; title?: string }) {
   );
 }
 
+// Shared one-tap interrupt action (ADR-0022): POST /interrupt (the tmux Escape),
+// no confirm, re-entrancy-guarded. Backs both the working-state morph button and
+// the question/dialog escape-hatch squares, so the "one tap, no confirm" contract
+// lives in exactly one place.
+function createInterrupt(runID: () => string, onError: (m: string) => void, onDone: () => void) {
+  const [busy, setBusy] = createSignal(false);
+  const run = async () => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      await interruptRun(runID());
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setBusy(false);
+      onDone();
+    }
+  };
+  return { busy, run };
+}
+
 function Composer(props: {
   runID: string;
   state: ConversationState;
@@ -757,10 +779,42 @@ function Composer(props: {
 }) {
   const [text, setText] = createSignal('');
   const [sending, setSending] = createSignal(false);
+  const interrupt = createInterrupt(
+    () => props.runID,
+    (m) => props.onError(m),
+    () => props.onSent(),
+  );
+
+  // The morph pivot (ADR-0022): while the agent is working the composer button
+  // is a one-tap Interrupt, never a Send — nothing can be sent mid-turn, so the
+  // "queued" affordance is gone from the UI (the backend Reply is untouched, it
+  // is simply unreachable here until the agent idles). The textarea stays
+  // editable throughout for compose-ahead.
+  const working = () => props.state === 'working';
+  const canSend = () => !sending() && text().trim() !== '';
+
+  // Auto-grow (decision 9b): reset to one row then grow to the content height,
+  // capped by CSS max-height with internal scroll. Driven from two places: the
+  // text-signal effect (typing, and the collapse after a send clears the box)
+  // and the ref callback below (a fresh mount — including a remount after a
+  // mid-turn dialog — that already carries a compose-ahead draft, where the
+  // signal is unchanged so the effect won't refire). In jsdom scrollHeight is 0
+  // (no layout) so this is a harmless no-op there.
+  let inputEl: HTMLTextAreaElement | undefined;
+  const autoGrow = () => {
+    const el = inputEl;
+    if (el === undefined) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  };
+  createEffect(() => {
+    text();
+    autoGrow();
+  });
 
   const send = async () => {
     const body = text().trim();
-    if (body === '') return;
+    if (sending() || body === '') return;
     setSending(true);
     try {
       await replyRun(props.runID, body);
@@ -770,6 +824,16 @@ function Composer(props: {
     } finally {
       setSending(false);
       props.onSent();
+    }
+  };
+
+  // Cmd/Ctrl+Enter sends in the sendable states only (decision 9a). Bare Enter
+  // is never a send — a phone's return key must insert a newline — and while
+  // working there is no keyboard interrupt (the square is the only interrupt).
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !working()) {
+      e.preventDefault();
+      void send();
     }
   };
 
@@ -795,7 +859,7 @@ function Composer(props: {
         {/* state 'question' with no structured dialog (a dormant transcript
             flush, or a shape lab can't render): the composer stays locked — a
             free-text reply would land in a focused picker — and the operator
-            answers in claude.ai (decision 7). */}
+            answers in claude.ai or interrupts (decision 5). */}
         <Match when={props.state === 'question'}>
           <div class="chat-dialog">
             <p class="chat-composer-note">Claude needs input — open it in claude.ai to respond.</p>
@@ -805,7 +869,7 @@ function Composer(props: {
         <Match when={true}>
           {/* Residual blocked state with no structured dialog — e.g. a plain
               tool-permission prompt or the post-decline "stuck" case (decision
-              7). The composer stays usable (a reply queues), with a hint. */}
+              7). The composer stays usable, with a hint. */}
           <Show when={props.state === 'needs_input'}>
             <p class="chat-composer-note">
               Claude needs input — reply below, or open it in claude.ai.
@@ -813,27 +877,53 @@ function Composer(props: {
           </Show>
           <div class="chat-composer-row">
             <textarea
+              ref={(el) => {
+                inputEl = el;
+                // Fit an existing draft the moment the element attaches — a
+                // remount (e.g. after a mid-turn dialog) keeps the compose-ahead
+                // text but resets the height, and the text() effect won't refire
+                // for an unchanged signal. Deferred so the value is applied first.
+                queueMicrotask(autoGrow);
+              }}
               class="chat-input"
               rows={1}
               placeholder="Reply to the agent…"
               value={text()}
               onInput={(e) => setText(e.currentTarget.value)}
+              onKeyDown={onKeyDown}
             />
+            {/* One morphing button (decision 2): the SAME <button> element in
+                both states — glyph, action, accessible name, and enabled/busy
+                swap on working() — so keyboard focus is never dropped across the
+                flip. Send (disabled when empty / in flight) when idle/needs_input;
+                a one-tap Interrupt (always enabled, no confirm, pulsing) while
+                working, showing the busy "…" while /interrupt is in flight. */}
             <button
               type="button"
-              class="chat-send icon-btn"
-              classList={{ busy: sending() }}
-              aria-label="Send"
-              title="Send"
-              disabled={sending() || text().trim() === ''}
-              onClick={() => void send()}
+              classList={{
+                'icon-btn': true,
+                'chat-send': !working(),
+                'chat-interrupt': working(),
+                pulse: working() && !interrupt.busy(),
+                busy: working() ? interrupt.busy() : sending(),
+              }}
+              aria-label={working() ? 'Interrupt' : 'Send'}
+              title={working() ? 'Interrupt the agent (Escape)' : 'Send'}
+              disabled={working() ? false : !canSend()}
+              onClick={() => void (working() ? interrupt.run() : send())}
             >
-              <Icon name="send" />
+              <Show
+                when={working() && interrupt.busy()}
+                fallback={<Icon name={working() ? 'square' : 'send'} />}
+              >
+                <span class="chat-interrupt-busy" aria-hidden="true">
+                  …
+                </span>
+              </Show>
             </button>
-            <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onSent} />
           </div>
-          <Show when={props.state === 'working'}>
-            <p class="chat-composer-hint">The agent is working — your reply will be queued.</p>
+          <Show when={working()}>
+            <p class="chat-composer-hint">The agent is working — tap to interrupt.</p>
           </Show>
         </Match>
       </Switch>
@@ -968,51 +1058,39 @@ function DialogPanel(props: {
   );
 }
 
+// One-tap Interrupt escape hatch (ADR-0022, superseding ADR-0016's confirm tap):
+// a square accent icon-button that fires interruptRun (Escape) immediately, no
+// confirmation — interrupt is non-destructive (the agent survives, idles, and is
+// re-promptable), so a confirm tap is friction. Rendered in the locked
+// question-state and in the DialogPanel (decision 5); it stays inert (no pulse),
+// unlike the working-state morph button in Composer, which shares createInterrupt
+// but draws its own pulsing square. Distinct from the header Stop, which stays
+// danger-red + two-step (destructive teardown, ADR-0019).
 function InterruptButton(props: {
   runID: string;
   onError: (message: string) => void;
   onDone: () => void;
 }) {
-  const [confirming, setConfirming] = createSignal(false);
-  const [busy, setBusy] = createSignal(false);
-  const interrupt = async () => {
-    setBusy(true);
-    try {
-      await interruptRun(props.runID);
-    } catch (err) {
-      props.onError(errorMessage(err));
-    } finally {
-      setBusy(false);
-      setConfirming(false);
-      props.onDone();
-    }
-  };
+  const interrupt = createInterrupt(
+    () => props.runID,
+    (m) => props.onError(m),
+    () => props.onDone(),
+  );
   return (
-    <Switch>
-      <Match when={!confirming()}>
-        <button
-          type="button"
-          class="seg chat-interrupt"
-          onClick={() => setConfirming(true)}
-          title="Interrupt the agent (Escape)"
-        >
-          Interrupt
-        </button>
-      </Match>
-      <Match when={confirming()}>
-        <button
-          type="button"
-          class="danger chat-interrupt-confirm"
-          disabled={busy()}
-          onClick={() => void interrupt()}
-        >
-          {busy() ? '…' : 'Confirm'}
-        </button>
-        <button type="button" class="seg" onClick={() => setConfirming(false)}>
-          Cancel
-        </button>
-      </Match>
-    </Switch>
+    <button
+      type="button"
+      class="chat-interrupt icon-btn"
+      classList={{ busy: interrupt.busy() }}
+      aria-label="Interrupt"
+      title="Interrupt the agent (Escape)"
+      onClick={() => void interrupt.run()}
+    >
+      <Show when={interrupt.busy()} fallback={<Icon name="square" />}>
+        <span class="chat-interrupt-busy" aria-hidden="true">
+          …
+        </span>
+      </Show>
+    </button>
   );
 }
 
