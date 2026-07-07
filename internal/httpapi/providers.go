@@ -19,15 +19,27 @@ type providerResponse struct {
 	ID      string            `json:"id"`
 	Models  []provider.Option `json:"models"`
 	Efforts []provider.Option `json:"efforts"`
+	// FallbackOpen is the provider's generic web open affordance (URL + human
+	// title, ADR-0017), present only when the provider implements DeepLinker
+	// (has a web surface); absent for link-less providers, whose instance rows
+	// render a copyable tmux-attach affordance instead. Additive to the pinned
+	// M3 providers shape.
+	FallbackOpen *provider.OpenAffordance `json:"fallback_open,omitempty"`
 }
 
-// handleProvidersList is GET /api/v1/providers — every provider's id and its
-// model/effort catalogs (provider-owned data, D14), in registration order.
+// handleProvidersList is GET /api/v1/providers — every provider's id, its
+// model/effort catalogs (provider-owned data, D14), and its fallback-open
+// metadata when it has a web surface (ADR-0017), in registration order.
 func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 	provs := s.providers.List()
 	items := make([]providerResponse, 0, len(provs))
 	for _, p := range provs {
-		items = append(items, providerResponse{ID: p.ID(), Models: p.Models(), Efforts: p.Efforts()})
+		resp := providerResponse{ID: p.ID(), Models: p.Models(), Efforts: p.Efforts()}
+		if dl, ok := p.(provider.DeepLinker); ok {
+			fo := dl.FallbackOpen()
+			resp.FallbackOpen = &fo
+		}
+		items = append(items, resp)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": items})
 }

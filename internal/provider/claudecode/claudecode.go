@@ -141,6 +141,7 @@ type Provider struct {
 
 var _ provider.AgentProvider = (*Provider)(nil)
 var _ provider.ConnectingReporter = (*Provider)(nil)
+var _ provider.DeepLinker = (*Provider)(nil)
 
 // New validates o and returns a Provider with the pinned production
 // timeouts.

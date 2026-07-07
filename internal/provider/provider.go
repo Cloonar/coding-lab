@@ -160,11 +160,6 @@ type AgentProvider interface {
 	// LoginSubmitCode delivers the pasted OAuth code to the pending login
 	// flow and waits for the login to land.
 	LoginSubmitCode(ctx context.Context, code string) error
-	// CaptureDeepLink polls for the session's deep link, keyed by its
-	// worktree (the one cwd unique to the session). On a miss it returns
-	// the provider's generic fallback link — callers must never persist
-	// the generic link over a previously captured real one.
-	CaptureDeepLink(ctx context.Context, sessionName, worktree string) (string, error)
 	// SeedWorkspace pre-approves a fresh worktree so the agent launches
 	// unattended (trust/MCP grants, ignore entries). Called after the
 	// worktree exists and before the session spawns; a failure aborts the
@@ -208,6 +203,35 @@ var ErrTranscriptGone = errors.New("provider: transcript no longer available")
 // UI's "connecting…" state (pinned instances API field `connecting`).
 type ConnectingReporter interface {
 	Connecting(sessionName string) bool
+}
+
+// OpenAffordance is a provider's generic "open the session on the web" hint,
+// shown when no exact deep link was captured: the URL to open and the human
+// tooltip that explains where it lands (e.g. the claude.ai session picker).
+// Provider-owned metadata (ADR-0017), exposed through the providers API and
+// rendered by the SPA. A provider with no web surface has no OpenAffordance,
+// and its instance rows show a copyable tmux-attach affordance instead.
+type OpenAffordance struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
+}
+
+// DeepLinker is the optional deep-link capability on the provider seam
+// (ADR-0017), following the ConnectingReporter pattern (a type assertion at
+// the call site). A provider whose sessions have a web surface implements it;
+// a headless CLI with no remote host omits it, and lab arms no capture
+// machinery for its runs (deep_link_url stays NULL) and renders no web open
+// link for them.
+type DeepLinker interface {
+	// CaptureDeepLink polls for the session's deep link, keyed by its
+	// worktree (the one cwd unique to the session). On a miss it returns an
+	// empty string — a generic fallback is NEVER returned through capture, so
+	// the caller's write-only-on-hit rule needs no provider-specific constant.
+	CaptureDeepLink(ctx context.Context, sessionName, worktree string) (string, error)
+	// FallbackOpen is the provider's generic web open affordance, rendered
+	// when no exact link was captured (URL + explanatory tooltip). Owned by
+	// the provider so no core code or SPA hardcodes a provider URL.
+	FallbackOpen() OpenAffordance
 }
 
 // HasOption reports whether a catalog contains value — the validation

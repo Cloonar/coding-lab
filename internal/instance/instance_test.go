@@ -45,7 +45,21 @@ type fixture struct {
 	repo                   store.Repo
 }
 
+// fixtureOpts parametrizes the provider under test. The zero value gives the
+// default claude-code Fake (a DeepLinker); a link-less provider is supplied via
+// prov + providerID + the model/effort defaults its catalog offers.
+type fixtureOpts struct {
+	prov       provider.AgentProvider
+	providerID string
+	modelDef   *string
+	effortDef  *string
+}
+
 func newFixture(t *testing.T) *fixture {
+	return newFixtureWith(t, fixtureOpts{})
+}
+
+func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	t.Helper()
 	testutil.RequireTool(t, "git")
 	home := t.TempDir()
@@ -70,10 +84,15 @@ func newFixture(t *testing.T) *fixture {
 	if err := git.CloneBare(t.Context(), "file://"+origin, bare, env, nil); err != nil {
 		t.Fatalf("CloneBare: %v", err)
 	}
+	providerID := o.providerID
+	if providerID == "" {
+		providerID = "claude-code"
+	}
 	repo, err := st.CreateRepo(t.Context(), store.Repo{
 		ID: repoID, Name: "proj", RemoteURL: "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: "claude-code", AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		Provider: providerID, AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		ModelDefault: o.modelDef, EffortDefault: o.effortDef,
 		CloneStatus: store.CloneStatusReady, CreatedAt: clockTime,
 	})
 	if err != nil {
@@ -88,8 +107,16 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("NewMaterializer: %v", err)
 	}
-	prov := providertest.New()
-	reg, err := provider.NewRegistry(prov)
+	// Default provider is the claude-code Fake (a DeepLinker); a link-less
+	// provider is injected via o.prov. f.prov stays nil in the latter case —
+	// only claude-code tests reach for the scriptable Fake.
+	var prov *providertest.Fake
+	agentProv := o.prov
+	if agentProv == nil {
+		prov = providertest.New()
+		agentProv = prov
+	}
+	reg, err := provider.NewRegistry(agentProv)
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -809,5 +836,68 @@ func TestList_joinsLiveAndConnecting(t *testing.T) {
 	views, _ = f.svc.List(t.Context())
 	if len(views) != 1 || views[0].Live {
 		t.Errorf("dead session still reports live: %+v", views)
+	}
+}
+
+// ADR-0017 / issue #6 AC1: a provider that does NOT implement DeepLinker runs a
+// session end to end with no capture machinery armed and keeps deep_link_url
+// NULL. The AFK path shares the same Launch core (s.ArmCapture(created)), so the
+// manual Start here is representative of both.
+func TestStart_linklessProvider_noCaptureNoDeepLink(t *testing.T) {
+	codexModel, codexEffort := "gpt-5-codex", "medium"
+	nolink := providertest.NewNoLink()
+	f := newFixtureWith(t, fixtureOpts{
+		prov: nolink, providerID: nolink.ID(),
+		modelDef: &codexModel, effortDef: &codexEffort,
+	})
+
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// The session spawned and the run is active — the link-less provider runs
+	// end to end.
+	if _, live := f.runner.Session(run.SessionName); !live {
+		t.Fatal("tmux session not live after Start on a link-less provider")
+	}
+	if len(nolink.Seeded()) != 1 {
+		t.Errorf("SeedWorkspace calls = %d, want 1", len(nolink.Seeded()))
+	}
+	got, err := f.st.RunBySession(t.Context(), run.SessionName)
+	if err != nil {
+		t.Fatalf("RunBySession: %v", err)
+	}
+	if got.Outcome != store.RunOutcomeActive {
+		t.Errorf("outcome = %q, want active", got.Outcome)
+	}
+
+	// No capture goroutine ever armed: deep_link_url stays NULL. Give any
+	// wrongly-armed goroutine a beat to have written before asserting.
+	time.Sleep(50 * time.Millisecond)
+	got, err = f.st.RunBySession(t.Context(), run.SessionName)
+	if err != nil {
+		t.Fatalf("RunBySession: %v", err)
+	}
+	if got.DeepLinkURL != nil {
+		t.Errorf("deep_link_url = %v, want NULL (no capture for a link-less provider)", *got.DeepLinkURL)
+	}
+
+	// Re-adoption re-arms nothing either: ArmCapture is a no-op for a run whose
+	// provider has no DeepLinker capability.
+	f.svc.ArmCapture(got)
+	time.Sleep(50 * time.Millisecond)
+	if again, _ := f.st.RunBySession(t.Context(), run.SessionName); again.DeepLinkURL != nil {
+		t.Errorf("ArmCapture wrote a deep link for a link-less provider: %v", *again.DeepLinkURL)
+	}
+
+	// The row surfaces no connecting pulse (the link-less provider is not a
+	// ConnectingReporter) — the SPA falls through to the tmux-attach affordance.
+	views, err := f.svc.List(t.Context())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(views) != 1 || views[0].Connecting {
+		t.Errorf("view = %+v, want a single non-connecting row", views)
 	}
 }

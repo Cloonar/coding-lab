@@ -19,7 +19,7 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage, MessagesResponse, Run } from '../api';
+import type { ChatMessage, MessagesResponse, Provider, Run } from '../api';
 import App from '../App';
 import RunChat from './RunChat';
 
@@ -69,6 +69,7 @@ function baseRun(): Run {
 
 let runOnServer: Run;
 let messagesOnServer: MessagesResponse;
+let providersOnServer: Provider[];
 let replyPosts: { text: string }[];
 let answerPosts: Record<string, unknown>[];
 let interruptPosts: number;
@@ -119,6 +120,9 @@ function stubApi(): void {
         return Promise.resolve(
           jsonResponse(200, { setup_required: false, authenticated: true, username: 'dominik' }),
         );
+      }
+      if (url === '/api/v1/providers' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { providers: providersOnServer }));
       }
       if (url === `/api/v1/runs/${RUN_ID}` && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { ...runOnServer }));
@@ -182,6 +186,17 @@ function emitMessagesChanged(runID: string = RUN_ID): void {
 
 beforeEach(() => {
   runOnServer = baseRun();
+  providersOnServer = [
+    {
+      id: 'claude-code',
+      models: [],
+      efforts: [],
+      fallback_open: {
+        url: 'https://claude.ai/code',
+        title: "Opens the claude.ai session picker — the exact deep link wasn't captured",
+      },
+    },
+  ];
   messagesOnServer = {
     messages: [
       { seq: 1, kind: 'text', role: 'user', text: 'do the thing' },
@@ -520,15 +535,31 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-input')).toBeNull();
   });
 
-  it('titles the chat with the repo half and falls back to the generic claude.ai link', async () => {
+  it('titles the chat with the repo half and falls back to the provider web link', async () => {
     runOnServer = { ...baseRun(), deep_link_url: null };
     await mountChat();
 
     expect(container.querySelector('.chat-title')?.textContent).toBe('proj · dom · 15:00');
+    // ADR-0017: the fallback URL + tooltip come from the providers API, not a
+    // hardcoded constant.
     const link = Array.from(container.querySelectorAll('a')).find((a) =>
       a.textContent?.includes('Open ↗'),
     );
     expect(link?.getAttribute('href')).toBe('https://claude.ai/code');
+    expect(link?.getAttribute('title')).toContain('claude.ai session picker');
+  });
+
+  it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {
+    runOnServer = { ...baseRun(), provider: 'codex', deep_link_url: null };
+    providersOnServer = [{ id: 'codex', models: [], efforts: [] }];
+    await mountChat();
+
+    expect(
+      Array.from(container.querySelectorAll('a')).some((a) => a.textContent?.includes('Open ↗')),
+    ).toBe(false);
+    const attach = container.querySelector('button.attach-copy');
+    expect(attach?.textContent).toContain('Copy attach');
+    expect(attach?.getAttribute('title')).toContain('tmux attach -t proj~dom-20260706-1500');
   });
 
   it('does not resurrect Load earlier after paging up hit the beginning', async () => {

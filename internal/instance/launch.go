@@ -179,7 +179,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	if err := s.store.TouchRepoOpened(ctx, repo.ID, s.now()); err != nil {
 		s.log.Warn("stamping repo opened", "component", "instance", "repo", repo.ID, "err", err)
 	}
-	go s.runCapture(created)
+	s.ArmCapture(created)
 	s.publishRunChanged(repo.ID)
 	return created, nil
 }

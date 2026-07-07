@@ -28,7 +28,6 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
-	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -254,19 +253,27 @@ func (s *Service) LiveInstances(ctx context.Context, repoID string) (int, error)
 	return n, nil
 }
 
-// runCapture polls for a run's deep link in the background and persists it on a
-// real hit only (write-only-on-hit: the provider returns its generic fallback
-// on a miss, which must never overwrite a stored real link). Idempotent per
-// session inside the provider; the in-flight set drives the "connecting…"
-// render state (Connecting).
-func (s *Service) runCapture(run store.Run) {
-	prov, ok := s.providers.Get(run.Provider)
+// deepLinker resolves a run's provider to its optional DeepLinker capability
+// (ADR-0017). (nil, false) when the provider is unregistered or has no web
+// surface — no deep-link capture machinery ever arms for such a provider.
+func (s *Service) deepLinker(providerID string) (provider.DeepLinker, bool) {
+	prov, ok := s.providers.Get(providerID)
 	if !ok {
-		return
+		return nil, false
 	}
-	url, err := prov.CaptureDeepLink(s.captureCtx, run.SessionName, run.WorktreePath)
-	if err != nil || url == "" || url == claudecode.GenericDeepLink {
-		return // miss (or an in-flight duplicate call) → keep the generic fallback
+	dl, ok := prov.(provider.DeepLinker)
+	return dl, ok
+}
+
+// runCapture polls for a run's deep link in the background and persists it on a
+// real hit only (write-only-on-hit: a miss returns "" — ADR-0017 — which must
+// never overwrite a stored real link). Idempotent per session inside the
+// provider; the in-flight set drives the "connecting…" render state
+// (Connecting).
+func (s *Service) runCapture(run store.Run, dl provider.DeepLinker) {
+	url, err := dl.CaptureDeepLink(s.captureCtx, run.SessionName, run.WorktreePath)
+	if err != nil || url == "" {
+		return // miss (or an in-flight duplicate call) → nothing to persist
 	}
 	if err := s.store.UpdateRunDeepLink(s.captureCtx, run.ID, url); err != nil {
 		s.log.Warn("persisting captured deep link", "component", "instance",
@@ -276,14 +283,20 @@ func (s *Service) runCapture(run store.Run) {
 	s.publishRunChanged(run.RepoID)
 }
 
-// ArmCapture (re-)starts deep-link capture for a re-adopted live run whose
-// deep_link_url is still NULL — the reconcile re-adoption hook (design §3b).
-// Runs is idempotent per session inside the provider.
+// ArmCapture (re-)starts deep-link capture for a live run whose deep_link_url
+// is still NULL — used at Start and by the reconcile re-adoption hook (design
+// §3b). No goroutine ever arms when the run's provider does not implement the
+// optional DeepLinker capability (ADR-0017); capture is idempotent per session
+// inside providers that do.
 func (s *Service) ArmCapture(run store.Run) {
 	if run.DeepLinkURL != nil && *run.DeepLinkURL != "" {
 		return
 	}
-	go s.runCapture(run)
+	dl, ok := s.deepLinker(run.Provider)
+	if !ok {
+		return
+	}
+	go s.runCapture(run, dl)
 }
 
 // connecting reports the provider's "connecting…" state for a session, when

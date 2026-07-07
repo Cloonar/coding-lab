@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // Claude stopped printing the remote-control deep link into the terminal
@@ -21,10 +23,16 @@ import (
 // uses internally. Worktrees are per-instance, so a cwd match identifies
 // exactly one lab session. (v0 registry.go, verified against 2.1.198.)
 
-// GenericDeepLink is the fallback when capture misses: it opens the
-// claude.ai session picker instead of the exact session. Callers must
-// never persist it over a previously captured real link.
+// GenericDeepLink is claude-code's fallback open affordance (ADR-0017): it
+// opens the claude.ai session picker instead of the exact session. It is
+// provider-owned metadata surfaced through FallbackOpen — never returned
+// from CaptureDeepLink, which yields "" on a miss so the write-only-on-hit
+// rule needs no cross-package constant.
 const GenericDeepLink = "https://claude.ai/code"
+
+// genericLinkTitle is the human tooltip on the fallback open link, pinned
+// verbatim from v0 (the SPA rendered this exact text as the anchor title).
+const genericLinkTitle = "Opens the claude.ai session picker — the exact deep link wasn't captured"
 
 // RegistryEntry is the subset lab reads of one ~/.claude/sessions/<pid>.json.
 // Exported for the compat fixture test; unknown registry fields are
@@ -123,11 +131,11 @@ func captureBridgeURL(ctx context.Context, registryDir, dir string, timeout time
 	}
 }
 
-// CaptureDeepLink implements provider.AgentProvider: poll the registry up
-// to bridgeTimeout for the deep link of the session running in worktree.
-// On a miss it logs LOUDLY (brief §11.2 — v0 was silent) and returns
-// GenericDeepLink; the caller must not overwrite a real stored link with
-// it.
+// CaptureDeepLink implements provider.DeepLinker: poll the registry up to
+// bridgeTimeout for the deep link of the session running in worktree. On a
+// miss it logs LOUDLY (brief §11.2 — v0 was silent) and returns "" — the
+// generic fallback is surfaced through FallbackOpen, not capture, so the
+// caller's write-only-on-hit rule needs no cross-package constant.
 //
 // Idempotent per session: while a capture is in flight, a second call is a
 // no-op returning ("", nil), so callers can't stack polls on one session.
@@ -150,10 +158,17 @@ func (p *Provider) CaptureDeepLink(ctx context.Context, sessionName, worktree st
 	if url := captureBridgeURL(ctx, p.registryDir, worktree, p.bridgeTimeout); url != "" {
 		return url, nil
 	}
-	p.log.Warn("deep-link capture missed — falling back to the generic claude.ai link",
+	p.log.Warn("deep-link capture missed — the row will show the generic claude.ai fallback link",
 		"component", "provider.claudecode", "session", sessionName,
 		"worktree", worktree, "registry_dir", p.registryDir, "timeout", p.bridgeTimeout)
-	return GenericDeepLink, nil
+	return "", nil
+}
+
+// FallbackOpen implements provider.DeepLinker: claude-code's generic open
+// affordance (the claude.ai session picker + its v0 tooltip), rendered by the
+// SPA when no exact link was captured.
+func (p *Provider) FallbackOpen() provider.OpenAffordance {
+	return provider.OpenAffordance{URL: GenericDeepLink, Title: genericLinkTitle}
 }
 
 // Connecting reports whether sessionName has a deep-link capture in
