@@ -8,6 +8,7 @@ package providertest
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -54,12 +55,27 @@ type Fake struct {
 	interrupts     int
 	replyErr       error
 	interruptErr   error
+
+	// Dialog-hook capability (issue #17 / ADR-0020). hookArgs/hookSettings
+	// script HookSettings; pendingDialog/blocked/spoolSig script the spool
+	// reads; hookCalls records HookSettings runIDs and sweeps counts
+	// SweepSpools.
+	hookSettings  []byte
+	hookArgs      []string
+	pendingDialog *provider.Dialog
+	blocked       string
+	blockedOK     bool
+	spoolSig      string
+	hookCalls     []string
+	sweeps        int
+	sweepErr      error
 }
 
 var (
 	_ provider.AgentProvider      = (*Fake)(nil)
 	_ provider.ConnectingReporter = (*Fake)(nil)
 	_ provider.DeepLinker         = (*Fake)(nil)
+	_ provider.DialogHooker       = (*Fake)(nil)
 )
 
 // New returns a logged-in fake with the claude-code id and catalogs.
@@ -220,6 +236,101 @@ func (f *Fake) Interrupt(_ context.Context, _ string) error {
 	}
 	f.interrupts++
 	return nil
+}
+
+// --- dialog-hook capability (issue #17 / ADR-0020) -----------------------
+
+// HookSettings records the runID and returns the scripted settings/args (a
+// default --settings <dir>/settings.<runID>.json when unset).
+func (f *Fake) HookSettings(runID, dir string) ([]byte, string, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hookCalls = append(f.hookCalls, runID)
+	path := filepath.Join(dir, "settings."+runID+".json")
+	settings := f.hookSettings
+	if settings == nil {
+		settings = []byte(`{"hooks":{}}`)
+	}
+	args := f.hookArgs
+	if args == nil {
+		args = []string{"--settings", path}
+	}
+	return settings, path, args
+}
+
+// PendingDialog returns the scripted spool dialog (nil → none pending).
+func (f *Fake) PendingDialog(_, _, _ string) (provider.Dialog, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingDialog == nil {
+		return provider.Dialog{}, false
+	}
+	return *f.pendingDialog, true
+}
+
+// BlockedState returns the scripted blocked marker state.
+func (f *Fake) BlockedState(_, _, _ string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.blocked, f.blockedOK
+}
+
+// SpoolSig returns the scripted spool signature.
+func (f *Fake) SpoolSig(_, _ string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spoolSig
+}
+
+// SweepSpools counts the call (and returns the scripted error).
+func (f *Fake) SweepSpools(_ string, _ func(runID string) bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sweeps++
+	return f.sweepErr
+}
+
+// SetPendingDialog scripts the spool pending dialog (nil → none).
+func (f *Fake) SetPendingDialog(d *provider.Dialog) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pendingDialog = d
+}
+
+// SetBlockedState scripts the Notification-marker blocked state.
+func (f *Fake) SetBlockedState(state string, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blocked, f.blockedOK = state, ok
+}
+
+// SetSpoolSig scripts the spool change-detector signature.
+func (f *Fake) SetSpoolSig(sig string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.spoolSig = sig
+}
+
+// SetHookResult scripts HookSettings' returned bytes and args ("" args → the
+// default --settings path).
+func (f *Fake) SetHookResult(settings []byte, args []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hookSettings, f.hookArgs = settings, args
+}
+
+// HookCalls returns the runIDs passed to HookSettings, in order.
+func (f *Fake) HookCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.hookCalls...)
+}
+
+// Sweeps reports how many times SweepSpools ran.
+func (f *Fake) Sweeps() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sweeps
 }
 
 // --- test controls -------------------------------------------------------

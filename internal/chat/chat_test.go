@@ -25,7 +25,8 @@ func newService(t *testing.T) (*Service, *store.Store, *providertest.Fake, *even
 		t.Fatal(err)
 	}
 	bus := events.NewBus()
-	svc, err := New(Options{Store: st, Providers: reg, Bus: bus, Logger: logx.New(io.Discard), Poll: 5 * time.Millisecond})
+	svc, err := New(Options{Store: st, Providers: reg, Bus: bus, Logger: logx.New(io.Discard),
+		Poll: 5 * time.Millisecond, RuntimeDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +192,172 @@ func TestReply_guards(t *testing.T) {
 	}
 	if got := fake.Replies(); len(got) != 1 || got[0] != "go on" {
 		t.Errorf("replies = %v; want [go on]", got)
+	}
+}
+
+// --- live dialog spool (ADR-0020) ----------------------------------------
+
+func TestRead_spoolDialogForcesQuestion(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	// The transcript derives 'working' and carries NO dialog message (Claude
+	// Code never flushes a pending tool_use) — the spool is the only live source.
+	fake.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "…"}}})
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t_spool", DialogKind: "question", Answerable: true,
+		Options: []provider.DialogOption{{Label: "A"}, {Label: "Other", IsOther: true}}})
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.State != provider.StateQuestion {
+		t.Errorf("state = %q; want question (spool overrides transcript working)", v.State)
+	}
+	if v.PendingDialog == nil || v.PendingDialog.ToolID != "t_spool" {
+		t.Errorf("PendingDialog = %+v; want the spool dialog t_spool", v.PendingDialog)
+	}
+	// The message stream stays transcript-derived — the spool dialog is a
+	// side-channel field, never injected as a message (seq stays reparse-stable).
+	if len(v.Messages) != 1 || v.Messages[0].Kind != provider.MessageText {
+		t.Errorf("messages = %+v; want only the transcript's one text message", v.Messages)
+	}
+}
+
+func TestRead_blockedMarkerForcesNeedsInput(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	// A tool is 'running' in the transcript, but a Notification marker says the
+	// agent is actually blocked (e.g. a permission prompt) → needs_input.
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+	fake.SetBlockedState(provider.StateNeedsInput, true)
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.State != provider.StateNeedsInput || v.PendingDialog != nil {
+		t.Errorf("view = {state:%q dialog:%+v}; want needs_input with no dialog", v.State, v.PendingDialog)
+	}
+}
+
+func TestRead_pendingDialogBeatsBlockedMarker(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t1", Answerable: true, Options: []provider.DialogOption{{Label: "A"}}})
+	fake.SetBlockedState(provider.StateNeedsInput, true)
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.State != provider.StateQuestion || v.PendingDialog == nil {
+		t.Errorf("view = {state:%q dialog:%+v}; want the dialog to win over the marker", v.State, v.PendingDialog)
+	}
+}
+
+func TestRead_endedRunIgnoresSpool(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeStopped)
+	if err := st.UpdateRunTranscriptPath(context.Background(), run.ID, "/transcript.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = st.RunByID(context.Background(), run.ID)
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t1", Answerable: true})
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.State != provider.StateEnded || v.PendingDialog != nil {
+		t.Errorf("ended run view = {state:%q dialog:%+v}; want ended with no spool dialog", v.State, v.PendingDialog)
+	}
+}
+
+func TestPendingDialog_prefersSpoolAndGuardsAnswer(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking}) // transcript shows no dialog
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t_spool", Answerable: true,
+		Options: []provider.DialogOption{{Label: "A"}, {Label: "Other", IsOther: true}}})
+
+	d, ok := svc.PendingDialog(context.Background(), run)
+	if !ok || d.ToolID != "t_spool" {
+		t.Fatalf("PendingDialog = %+v,%v; want the spool dialog t_spool", d, ok)
+	}
+	// Stale tool_id is refused; the matching one plays keystrokes.
+	if err := svc.AnswerDialog(context.Background(), run, "t_stale", provider.DialogAnswer{Index: 0}); !errors.Is(err, ErrDialogChanged) {
+		t.Errorf("stale answer = %v; want ErrDialogChanged", err)
+	}
+	if err := svc.AnswerDialog(context.Background(), run, "t_spool", provider.DialogAnswer{Index: 0}); err != nil {
+		t.Errorf("matching answer = %v; want nil", err)
+	}
+	if got := fake.Answers(); len(got) != 1 {
+		t.Errorf("answers recorded = %d; want exactly the matching one", len(got))
+	}
+}
+
+func TestReply_lockedBySpoolDialog(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking}) // transcript alone would NOT lock
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t1", Answerable: true})
+
+	if err := svc.Reply(context.Background(), run, "hi"); err != ErrDialogPending {
+		t.Errorf("reply while a spool dialog is pending = %v; want ErrDialogPending", err)
+	}
+}
+
+func TestSweepSpools_runsPerProvider(t *testing.T) {
+	svc, _, fake, _ := newService(t)
+	svc.sweepSpools(map[string]bool{"run_active": true})
+	if got := fake.Sweeps(); got != 1 {
+		t.Errorf("SweepSpools calls = %d; want 1 (once per DialogHooker provider)", got)
+	}
+}
+
+// The critical ADR-0020 behavior: a pending dialog appears while the transcript
+// is byte-frozen (Claude Code never flushes a pending tool_use), so the tailer
+// must notice the SPOOL change and republish state — watching the file alone
+// would never fire.
+func TestTailer_republishesOnSpoolChangeWhileTranscriptFrozen(t *testing.T) {
+	svc, st, fake, bus := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	path := t.TempDir() + "/t.jsonl"
+	writeFile(t, path, "{}") // written once, never touched again — the frozen transcript
+	fake.SetTranscriptPath(path)
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+
+	sub, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go svc.Run(ctx)
+
+	waitFor(t, func() bool {
+		s, ok := svc.State(run.SessionName)
+		return ok && s == provider.StateWorking
+	}, "tailer to derive initial working state")
+	drainFor(sub, EventMessagesChanged, 2*time.Second) // consume the initial publish
+
+	// The picker opens: a spool appears (the transcript file stays frozen). Only
+	// the spool signature changes.
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t1", Answerable: true, Options: []provider.DialogOption{{Label: "A"}}})
+	fake.SetSpoolSig("dialogs/run1.json:1:200;")
+
+	waitFor(t, func() bool {
+		s, ok := svc.State(run.SessionName)
+		return ok && s == provider.StateQuestion
+	}, "tailer to flip to question on the spool change alone")
+	if !drainFor(sub, EventMessagesChanged, 2*time.Second) {
+		t.Error("no run.messages.changed published on the spool-only change")
 	}
 }
 

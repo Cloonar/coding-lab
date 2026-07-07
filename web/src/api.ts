@@ -464,6 +464,15 @@ export interface MessagesResponse {
   state: ConversationState;
   cursor: number;
   has_more: boolean;
+  /**
+   * The run's live interactive dialog from the PreToolUse spool (ADR-0020),
+   * null when none is pending. Top-level, NOT a message in the stream — Claude
+   * Code never flushes a pending tool_use to the transcript, so this is the only
+   * live source. Present alongside state:"question". Prefer it over the
+   * messages-scan, which stays a dormant fallback for a future flushed tool_use.
+   * Optional on the client (older responses omit it) — treat absent as null.
+   */
+  pending_dialog?: Dialog | null;
   transcript: TranscriptStatus;
 }
 

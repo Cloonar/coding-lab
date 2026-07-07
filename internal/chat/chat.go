@@ -63,6 +63,12 @@ type Options struct {
 	Bus       *events.Bus
 	Logger    *slog.Logger
 
+	// RuntimeDir is lab's runtime dir (<state>/runtime — the materializer dir),
+	// where a DialogHooker provider spools a run's pending dialog + blocked
+	// marker (ADR-0020). Empty disables the spool read/GC (the chat keeps
+	// transcript-only behavior); cmd/lab passes the materializer's Dir().
+	RuntimeDir string
+
 	// Poll is the transcript poll/debounce cadence; nil → defaultPoll.
 	Poll time.Duration
 	// Ctx bounds the tailer goroutines; nil → context.Background(). cmd/lab
@@ -79,13 +85,14 @@ const defaultPoll = 1 * time.Second
 
 // Service is the chat brain. Construct with New; start the tailer with Run.
 type Service struct {
-	store     *store.Store
-	providers *provider.Registry
-	bus       *events.Bus
-	log       *slog.Logger
-	poll      time.Duration
-	ctx       context.Context
-	now       func() time.Time
+	store      *store.Store
+	providers  *provider.Registry
+	bus        *events.Bus
+	log        *slog.Logger
+	poll       time.Duration
+	ctx        context.Context
+	now        func() time.Time
+	runtimeDir string
 
 	tailers *tailerSet
 
@@ -146,15 +153,29 @@ func New(o Options) (*Service, error) {
 		now = time.Now
 	}
 	return &Service{
-		store:     o.Store,
-		providers: o.Providers,
-		bus:       o.Bus,
-		log:       log,
-		poll:      poll,
-		ctx:       ctx,
-		now:       now,
-		tailers:   newTailerSet(),
+		store:      o.Store,
+		providers:  o.Providers,
+		bus:        o.Bus,
+		log:        log,
+		poll:       poll,
+		ctx:        ctx,
+		now:        now,
+		runtimeDir: o.RuntimeDir,
+		tailers:    newTailerSet(),
 	}, nil
+}
+
+// View is the chat service's combined read: the transcript-derived chat plus
+// the live spool signals a DialogHooker provider surfaces (ADR-0020). The
+// message stream (embedded provider.Chat) stays purely transcript-derived —
+// PendingDialog is a side-channel field, never a synthetic message, so seq
+// numbers remain reparse-stable when the real tool_use retro-flushes.
+type View struct {
+	provider.Chat
+	// PendingDialog is the run's live interactive dialog read from the
+	// PreToolUse spool (nil when none is pending). When set, State is
+	// StateQuestion.
+	PendingDialog *provider.Dialog
 }
 
 // Read returns the run's chat: it resolves the transcript path (using the
@@ -165,26 +186,74 @@ func New(o Options) (*Service, error) {
 // in StateIdle (the chat view shows a "waiting for the transcript"
 // placeholder); an ended run that never captured one, like a retired
 // transcript file, returns provider.ErrTranscriptGone.
-func (s *Service) Read(ctx context.Context, run store.Run) (provider.Chat, error) {
+func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	prov, ok := s.providers.Get(run.Provider)
 	if !ok {
-		return provider.Chat{}, fmt.Errorf("chat: unknown provider %q", run.Provider)
+		return View{}, fmt.Errorf("chat: unknown provider %q", run.Provider)
 	}
 	path := s.resolvePath(ctx, prov, run)
 	if path == "" {
 		if run.Outcome != store.RunOutcomeActive {
-			return provider.Chat{}, provider.ErrTranscriptGone
+			return View{}, provider.ErrTranscriptGone
 		}
-		return provider.Chat{State: provider.StateIdle}, nil
+		// Active but no transcript located yet — still consult the spool: a
+		// pending dialog can exist before LocateTranscript first hits.
+		view := View{Chat: provider.Chat{State: provider.StateIdle}}
+		s.applyLiveSignals(&view, run, "")
+		return view, nil
 	}
 	chat, err := prov.ReadTranscript(path)
 	if err != nil {
-		return provider.Chat{}, err
+		return View{}, err
 	}
+	view := View{Chat: chat}
 	if run.Outcome != store.RunOutcomeActive {
-		chat.State = provider.StateEnded
+		view.State = provider.StateEnded // a terminal run's state never comes from the spool
+		return view, nil
 	}
-	return chat, nil
+	s.applyLiveSignals(&view, run, path)
+	return view, nil
+}
+
+// applyLiveSignals overlays a DialogHooker provider's spool signals onto an
+// ACTIVE run's transcript-derived view (ADR-0020). Precedence: a live pending
+// dialog forces StateQuestion and is surfaced as View.PendingDialog (kept out
+// of the message stream — decision 5); else, when the transcript itself does
+// not already show a pending dialog (the dormant flushed-tool_use fallback), a
+// live blocked marker forces StateNeedsInput (decision 7). A provider without
+// the capability, or an empty RuntimeDir, is a no-op — transcript-only.
+func (s *Service) applyLiveSignals(view *View, run store.Run, path string) {
+	hooker, ok := s.hooker(run.Provider)
+	if !ok {
+		return
+	}
+	if d, ok := hooker.PendingDialog(run.ID, s.runtimeDir, path); ok {
+		view.State = provider.StateQuestion
+		dc := d
+		view.PendingDialog = &dc
+		return
+	}
+	if view.State == provider.StateQuestion {
+		return // a transcript-flushed dialog stands on its own (dormant fallback)
+	}
+	if st, ok := hooker.BlockedState(run.ID, s.runtimeDir, path); ok {
+		view.State = st
+	}
+}
+
+// hooker resolves a provider id to its optional DialogHooker capability
+// (ADR-0020). (nil, false) when the provider is unregistered, lacks the
+// capability, or the runtime dir is unset.
+func (s *Service) hooker(providerID string) (provider.DialogHooker, bool) {
+	if s.runtimeDir == "" {
+		return nil, false
+	}
+	prov, ok := s.providers.Get(providerID)
+	if !ok {
+		return nil, false
+	}
+	h, ok := prov.(provider.DialogHooker)
+	return h, ok
 }
 
 // resolvePath returns the transcript path for run: the persisted one if set,
@@ -263,16 +332,23 @@ func (s *Service) Interrupt(ctx context.Context, run store.Run) error {
 	return prov.Interrupt(ctx, run.SessionName)
 }
 
-// PendingDialog returns the run's currently pending dialog, if any. Pending
-// means the transcript tail is an unanswered dialog (StateQuestion) — an
-// abandoned dialog further up the transcript is history, not a target for
-// keystrokes.
+// PendingDialog returns the run's currently pending dialog, if any. The live
+// PreToolUse spool is authoritative (ADR-0020) — Claude Code never flushes a
+// pending tool_use to the transcript, so the spool is the only live source;
+// the transcript-tail scan stays as the dormant fallback for a future provider
+// that does flush pending tool_use.
 func (s *Service) PendingDialog(ctx context.Context, run store.Run) (provider.Dialog, bool) {
-	chat, err := s.Read(ctx, run)
-	if err != nil || chat.State != provider.StateQuestion {
+	view, err := s.Read(ctx, run)
+	if err != nil {
 		return provider.Dialog{}, false
 	}
-	return lastDialog(chat.Messages)
+	if view.PendingDialog != nil {
+		return *view.PendingDialog, true
+	}
+	if view.State != provider.StateQuestion {
+		return provider.Dialog{}, false
+	}
+	return lastDialog(view.Messages)
 }
 
 // State reports the tailer's latest derived conversational state for a live
@@ -292,13 +368,15 @@ func (s *Service) liveProvider(run store.Run) (provider.AgentProvider, error) {
 	return prov, nil
 }
 
-// dialogPending reports whether the run's transcript tail is a pending dialog.
+// dialogPending reports whether a dialog is pending for the run — the composer
+// lock (a free-text reply must not hit a focused picker). Keys off the same
+// server-side StateQuestion the spool drives (ADR-0020 decision 5).
 func (s *Service) dialogPending(ctx context.Context, run store.Run) bool {
-	chat, err := s.Read(ctx, run)
+	view, err := s.Read(ctx, run)
 	if err != nil {
 		return false
 	}
-	return chat.State == provider.StateQuestion
+	return view.State == provider.StateQuestion
 }
 
 // lastDialog returns the last dialog message's Dialog, if the tail is one.

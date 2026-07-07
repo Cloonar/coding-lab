@@ -334,7 +334,8 @@ func (p *cycleProvider) SpawnArgv(session, _, _, initialPrompt string) []string 
 	for prefix, script := range p.scripts {
 		if strings.HasPrefix(session, prefix) {
 			// Seed prompt carried as the trailing positional (pinned v0
-			// mechanism) — the fake claude reads it from $1, not stdin.
+			// mechanism) — the fake claude reads it from the last arg (launch
+			// injects a --settings flag ahead of it), not stdin.
 			if initialPrompt != "" {
 				return []string{script, initialPrompt}
 			}
@@ -639,7 +640,8 @@ func successScript(out, bin, workFile string) string {
 OUT=` + shq(out) + `
 BIN=` + shq(bin) + `
 WORK=` + shq(workFile) + `
-printf '%s\n' "$1" | head -n 1 > "$OUT/seed.txt"
+for seed in "$@"; do :; done  # the seed prompt is the trailing positional (after any --settings flag)
+printf '%s\n' "$seed" | head -n 1 > "$OUT/seed.txt"
 printf '%s\n' "$LAB_TOKEN" > "$OUT/token.txt"
 PATH="$BIN:$PATH"; export PATH
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
@@ -1305,7 +1307,8 @@ func incogniSuccessScript(out, bin string) string {
 	return `#!/bin/sh
 OUT=` + shq(out) + `
 BIN=` + shq(bin) + `
-printf '%s' "$1" > "$OUT/seed.txt"
+for seed in "$@"; do :; done  # the seed prompt is the trailing positional (after any --settings flag)
+printf '%s' "$seed" > "$OUT/seed.txt"
 git status --porcelain > "$OUT/status-spawn.txt"
 PATH="$BIN:$PATH"; export PATH
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null

@@ -37,11 +37,15 @@ func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type messagesResponse struct {
-	Messages   []provider.Message `json:"messages"`
-	State      string             `json:"state"`
-	Cursor     int64              `json:"cursor"`     // highest seq present (append cursor)
-	HasMore    bool               `json:"has_more"`   // older messages exist before this window
-	Transcript string             `json:"transcript"` // available|locating|gone
+	Messages []provider.Message `json:"messages"`
+	State    string             `json:"state"`
+	Cursor   int64              `json:"cursor"`   // highest seq present (append cursor)
+	HasMore  bool               `json:"has_more"` // older messages exist before this window
+	// PendingDialog is the run's live interactive dialog from the PreToolUse
+	// spool (ADR-0020), nullable and top-level — NOT a message in the stream,
+	// so seq numbers stay reparse-stable. Present alongside state:"question".
+	PendingDialog *provider.Dialog `json:"pending_dialog"`
+	Transcript    string           `json:"transcript"` // available|locating|gone
 }
 
 // handleRunMessages is GET /api/v1/runs/{id}/messages?after=&before=&limit=.
@@ -81,7 +85,8 @@ func (s *Server) handleRunMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.State = chatData.State
 	resp.Cursor = chatData.Cursor
-	if len(chatData.Messages) == 0 && run.Outcome == store.RunOutcomeActive {
+	resp.PendingDialog = chatData.PendingDialog
+	if len(chatData.Messages) == 0 && chatData.PendingDialog == nil && run.Outcome == store.RunOutcomeActive {
 		resp.Transcript = "locating"
 	}
 

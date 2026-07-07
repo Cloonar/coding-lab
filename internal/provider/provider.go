@@ -216,6 +216,63 @@ type OpenAffordance struct {
 	Title string `json:"title"`
 }
 
+// DialogHooker is the optional capability (ADR-0020) that makes a *pending*
+// interactive dialog observable while it is still open — working around Claude
+// Code not flushing a pending tool_use to the transcript until it resolves
+// (compat §5). lab owns the runtime spool directory and its lifecycle (it
+// creates the dir, writes the per-run settings file, and GCs spools for ended
+// runs); the provider owns the hook-settings shape and the spool file protocol,
+// a fragile Claude Code coupling pinned in compat §9. Advertised structurally
+// (a type assertion at the call site, exactly like ConnectingReporter and
+// DeepLinker); a provider with no live-hook surface omits it and lab keeps the
+// transcript-only behavior — the messages-scan dialog path stays as a dormant
+// fallback that lights up automatically if a future provider flushes pending
+// tool_use.
+type DialogHooker interface {
+	// HookSettings builds the per-run settings file that wires the agent's
+	// dialog-capture hooks (PreToolUse/PostToolUse/Notification) to spool into
+	// the runtime dir keyed by runID. It returns the file bytes, the path lab
+	// must write them to (the provider owns the runtime layout under dir), and
+	// the spawn args to append (e.g. ["--settings", settingsPath]). lab writes
+	// the bytes at settingsPath and appends the args to the spawn argv. The
+	// hook commands self-create their spool subdirs, so a run whose dialog
+	// opens after a lab restart still spools with no re-arming.
+	HookSettings(runID, dir string) (settings []byte, settingsPath string, args []string)
+
+	// PendingDialog reports the run's live pending interactive dialog, read
+	// from the PreToolUse spool under dir and mapped through the same mapper as
+	// the transcript (one mapper, two sources). ok is false when no spool
+	// exists, it is unreadable, or the spooled dialog's tool_use_id already
+	// appears in transcriptPath — the tool_use is flushed to the transcript
+	// only on resolution, so its presence there means the dialog is answered
+	// (the PostToolUse-hook spool delete is the primary clear; this
+	// resolved-in-transcript scan is the backstop for a missed hook / Esc /
+	// process death). transcriptPath "" skips the resolved check.
+	PendingDialog(runID, dir, transcriptPath string) (Dialog, bool)
+
+	// BlockedState reports a residual blocked conversational state derived from
+	// the Notification spool marker under dir (permission_prompt / idle_prompt /
+	// agent_needs_input → StateNeedsInput) — the badge fix for blocked states
+	// that carry no structured dialog, including a plain tool-permission prompt
+	// and the post-decline "stuck on working" bug. ok is false when no marker
+	// exists or the transcript has advanced past it (transcriptPath written
+	// after the marker → next activity resolved the block). transcriptPath ""
+	// treats any marker as current.
+	BlockedState(runID, dir, transcriptPath string) (state string, ok bool)
+
+	// SpoolSig is a cheap change-detector over the run's spool + marker files
+	// (existence + mtime + size) so the tailer notices a dialog appearing while
+	// the transcript is byte-frozen and republishes state. "" when neither
+	// file exists.
+	SpoolSig(runID, dir string) string
+
+	// SweepSpools removes the spool, marker, and per-run settings file under
+	// dir for every run whose keep(runID) is false — the run-ended GC (a spool
+	// for a non-active run is garbage; one for an active run survives a lab
+	// restart, so keep the active set). A nil keep removes all.
+	SweepSpools(dir string, keep func(runID string) bool) error
+}
+
 // DeepLinker is the optional deep-link capability on the provider seam
 // (ADR-0017), following the ConnectingReporter pattern (a type assertion at
 // the call site). A provider whose sessions have a web surface implements it;

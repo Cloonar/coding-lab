@@ -345,6 +345,51 @@ describe('RunChat', () => {
     expect(answerPosts[0]).toMatchObject({ tool_id: 'toolu_1', index: 1 });
   });
 
+  it('renders and answers a pending dialog from the pending_dialog field (spool)', async () => {
+    // The transcript carries no dialog message (Claude Code never flushes a
+    // pending tool_use); the dialog arrives only via the top-level field.
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'thinking…' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_field',
+        dialog_kind: 'question',
+        prompt: 'Pick a flavor?',
+        answerable: true,
+        options: [{ label: 'Option A' }, { label: 'Option B' }, { label: 'Other', is_other: true }],
+      },
+    };
+    await mountChat();
+
+    // Composer is locked; the dialog panel renders the field's prompt + options.
+    expect(container.querySelector('.chat-composer-row')).toBeNull();
+    expect(container.textContent).toContain('Pick a flavor?');
+
+    buttonByText('Option B')!.click();
+    await settle();
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toMatchObject({ tool_id: 'toolu_field', index: 1 });
+  });
+
+  it('shows a generic needs-input card when blocked with no structured dialog', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'done' }],
+      state: 'needs_input',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: null,
+    };
+    await mountChat();
+
+    // needs_input keeps the composer usable, with a generic "needs input" hint.
+    expect(container.querySelector('.chat-input')).not.toBeNull();
+    expect(container.textContent).toContain('Claude needs input');
+  });
+
   it('is read-only for an ended run', async () => {
     runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
     messagesOnServer = { ...messagesOnServer, state: 'ended' };

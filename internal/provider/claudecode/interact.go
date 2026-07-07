@@ -67,13 +67,22 @@ func (p *Provider) Interrupt(ctx context.Context, sessionName string) error {
 }
 
 // AnswerDialog implements provider.AgentProvider: play the pinned keystroke
-// recipe for the operator's selection into the live session's picker.
+// recipe for the operator's selection into the live session's picker. A pinned
+// gap (p.keyDelay, compat §7) separates each op: over the remote-control bridge
+// a committing Enter sent immediately after a Down navigation intermittently
+// races ahead of it and selects the wrong row (live-verified 2.1.198) — pacing
+// the ops makes the recipe deterministic.
 func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog provider.Dialog, answer provider.DialogAnswer) error {
 	ops, err := DialogKeystrokes(dialog, answer)
 	if err != nil {
 		return err
 	}
-	for _, op := range ops {
+	for i, op := range ops {
+		if i > 0 && p.keyDelay > 0 {
+			if !sleepOrDone(ctx, p.keyDelay) {
+				return ctx.Err()
+			}
+		}
 		if op.Text != "" {
 			if err := p.runner.PasteText(ctx, sessionName, op.Text); err != nil {
 				return fmt.Errorf("answer dialog (paste): %w", err)
@@ -87,10 +96,20 @@ func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog 
 	return nil
 }
 
+// pickerTrailingSynthRows is the number of rows Claude Code synthesizes BELOW
+// the tool's own options that lab does NOT model in d.Options. On 2.1.198 the
+// AskUserQuestion picker appends a "Chat about this" row beneath the "Other"
+// free-text row (d.Options already includes "Other"); the cursor can rest on
+// it, so normalise-to-top must climb past it (compat §7). Down-navigation to a
+// listed option or Other is unaffected — those rows sit above "Chat about
+// this". Over-climbing Up is harmless: the picker clamps at the top row.
+const pickerTrailingSynthRows = 1
+
 // DialogKeystrokes builds the send-keys recipe that answers d with answer
-// (compat.md §7). The picker is normalised to its top row (Up × rows−1) before
-// navigating down, so the cursor's start position never matters. Exported for
-// the compat snapshot test.
+// (compat.md §7). The picker is normalised to its top row before navigating
+// down, so the cursor's start position never matters — the climb covers the
+// modeled options plus the un-modeled trailing synth rows (the picker clamps at
+// the top, so an over-climb is safe). Exported for the compat snapshot test.
 func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp, error) {
 	if !d.Answerable {
 		return nil, ErrDialogNotAnswerable
@@ -101,7 +120,10 @@ func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp,
 	}
 
 	var ops []KeyOp
-	if up := repeat("Up", rows-1); len(up) > 0 {
+	// True picker height = modeled options + synthesized trailing rows; climb
+	// height−1 from the bottom to reach the top (clamps, so a start higher up
+	// just over-climbs harmlessly).
+	if up := repeat("Up", rows-1+pickerTrailingSynthRows); len(up) > 0 {
 		ops = append(ops, KeyOp{Named: up}) // normalise cursor to the top option
 	}
 

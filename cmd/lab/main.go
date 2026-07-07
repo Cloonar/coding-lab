@@ -255,11 +255,12 @@ func run() int {
 		// It self-syncs its tailer set to the active runs off the event bus,
 		// and feeds the instance list its conversational-state field.
 		chatSvc, err = chat.New(chat.Options{
-			Store:     st,
-			Providers: providerReg,
-			Bus:       bus,
-			Logger:    logger,
-			Ctx:       ctx,
+			Store:      st,
+			Providers:  providerReg,
+			Bus:        bus,
+			Logger:     logger,
+			Ctx:        ctx,
+			RuntimeDir: mat.Dir(),
 		})
 		if err != nil {
 			logger.Error("building chat service", "component", "main", "err", err)

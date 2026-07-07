@@ -118,7 +118,7 @@ func newInstanceServer(t *testing.T) *instTestServer {
 		}
 		cs, err := chat.New(chat.Options{
 			Store: st, Providers: reg, Bus: o.Bus, Logger: logx.New(io.Discard),
-			Now: func() time.Time { return instClock },
+			RuntimeDir: mat.Dir(), Now: func() time.Time { return instClock },
 		})
 		if err != nil {
 			t.Fatal(err)

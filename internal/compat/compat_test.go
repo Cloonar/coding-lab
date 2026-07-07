@@ -271,9 +271,43 @@ func TestCompat_TranscriptFixture_maps(t *testing.T) {
 	}
 }
 
+// Hook payload → Dialog (compat.md §9): the live 2.1.198 PreToolUse payload
+// (invisible in the transcript while pending — §5) maps through the SAME mapper
+// as the transcript into an answerable single-question dialog. The fixture is
+// the captured throwaway-session payload.
+func TestCompat_HookPayload_maps(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "hook-pretooluse-2.1.198.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := claudecode.DialogFromHookPayload(b)
+	if !ok {
+		t.Fatal("DialogFromHookPayload: not recognised as a dialog")
+	}
+	if d.ToolID != "toolu_01KU2pbDQNUNFim79s9FKf6i" {
+		t.Errorf("ToolID = %q; want the payload tool_use_id", d.ToolID)
+	}
+	if d.DialogKind != "question" || !d.Answerable || d.Multi {
+		t.Errorf("dialog = %+v; want an answerable single-select question", d)
+	}
+	if d.Prompt != "Which flavor of test question do you prefer?" {
+		t.Errorf("Prompt = %q; want the question text", d.Prompt)
+	}
+	// Three listed options (A/B/C) plus the synthesized Other row.
+	if len(d.Options) != 4 || d.Options[0].Label != "Option A" || !d.Options[3].IsOther {
+		t.Fatalf("options = %+v; want A/B/C + Other", d.Options)
+	}
+	if d.Options[1].Description != "The second test option." {
+		t.Errorf("option B description = %q; want the payload description", d.Options[1].Description)
+	}
+}
+
 // Dialog answer keystrokes (compat.md §7): the send-keys recipe for a picker.
-// Normalise to the top (Up × rows−1), navigate down to the choice, Enter;
-// multi-select toggles with Space; Other selects then types.
+// Normalise to the top, navigate down to the choice, Enter; multi-select
+// toggles with Space; Other selects then types. The normalise climb covers the
+// modeled options PLUS the un-modeled trailing "Chat about this" row Claude Code
+// 2.1.198 synthesizes below Other (ADR-0020) — with 3 modeled options it is
+// Up × 3 (3−1 + 1 trailing synth row), not Up × 2.
 func TestCompat_DialogKeystrokes(t *testing.T) {
 	single := provider.Dialog{Answerable: true, Options: []provider.DialogOption{
 		{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true},
@@ -282,7 +316,7 @@ func TestCompat_DialogKeystrokes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("single-select: %v", err)
 	}
-	want := []claudecode.KeyOp{{Named: []string{"Up", "Up"}}, {Named: []string{"Down"}}, {Named: []string{"Enter"}}}
+	want := []claudecode.KeyOp{{Named: []string{"Up", "Up", "Up"}}, {Named: []string{"Down"}}, {Named: []string{"Enter"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("single-select recipe = %v; want %v", got, want)
 	}
@@ -291,14 +325,14 @@ func TestCompat_DialogKeystrokes(t *testing.T) {
 		{Label: "a"}, {Label: "b"}, {Label: "c"},
 	}}
 	got, _ = claudecode.DialogKeystrokes(multi, provider.DialogAnswer{Selected: []int{0, 2}})
-	want = []claudecode.KeyOp{{Named: []string{"Up", "Up"}}, {Named: []string{"Space"}},
+	want = []claudecode.KeyOp{{Named: []string{"Up", "Up", "Up"}}, {Named: []string{"Space"}},
 		{Named: []string{"Down", "Down"}}, {Named: []string{"Space"}}, {Named: []string{"Enter"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("multi-select recipe = %v; want %v", got, want)
 	}
 
 	got, _ = claudecode.DialogKeystrokes(single, provider.DialogAnswer{Index: 2, OtherText: "custom"})
-	want = []claudecode.KeyOp{{Named: []string{"Up", "Up"}}, {Named: []string{"Down", "Down"}},
+	want = []claudecode.KeyOp{{Named: []string{"Up", "Up", "Up"}}, {Named: []string{"Down", "Down"}},
 		{Named: []string{"Enter"}}, {Text: "custom"}, {Named: []string{"Enter"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Other recipe = %v; want %v", got, want)
