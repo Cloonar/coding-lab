@@ -134,6 +134,16 @@
                 grep -q 'openssh' "$unitPath"
                 grep -q 'util-linux' "$unitPath"
 
+                # Regression (issue #28): the unit must export a real POSIX
+                # $SHELL, not the lab system user's nologin passwd shell. Claude
+                # Code resolves its Bash tool's shell from $SHELL, so a leaked
+                # nologin bricks every spawned agent's first Bash call.
+                grep -q 'Environment="SHELL=[^"]*/bin/bash"' "$unitPath"
+                if grep '^Environment="SHELL=' "$unitPath" | grep -qF nologin; then
+                  echo "unit SHELL leaks a nologin shell (issue #28 regression)" >&2
+                  exit 1
+                fi
+
                 # Regression: ExecStart must use systemd escaping, not shell
                 # quoting — systemd expands '%' specifiers and '$' env vars
                 # regardless of quotes, so escapeSystemdExecArgs must double

@@ -68,17 +68,17 @@ Show counts and a one-line summary per issue. Let the maintainer pick.
 
 4. **Grill (if needed).** If the issue needs fleshing out, run a `/grill-with-docs` session.
 
-5. **Apply the outcome:**
-   - `ready-for-agent` — post an agent brief comment ([AGENT-BRIEF.md](AGENT-BRIEF.md)).
-   - `ready-for-human` — same structure as an agent brief, but note why it can't be delegated (judgment calls, external access, design decisions, manual testing).
-   - `needs-info` — post triage notes (template below).
+5. **Apply the outcome.** Always post the comment (brief / notes / explanation) **before** applying the state label — the label announces that the contract is in place, so it must never precede the comment it points to. An AFK agent polling `ready-for-agent` could otherwise claim an issue whose brief doesn't exist yet. When you're *creating* an issue that is already agent-ready, create it plain (or as `needs-triage`), post the brief, then add `ready-for-agent` last — don't fold the state label into the create call.
+   - `ready-for-agent` — post an agent brief comment ([AGENT-BRIEF.md](AGENT-BRIEF.md)), then apply the label.
+   - `ready-for-human` — post the same structure as an agent brief, noting why it can't be delegated (judgment calls, external access, design decisions, manual testing), then apply the label.
+   - `needs-info` — post triage notes (template below), then apply the label.
    - `wontfix` (bug) — polite explanation, then close.
    - `wontfix` (enhancement) — write to `.out-of-scope/`, link to it from a comment, then close ([OUT-OF-SCOPE.md](OUT-OF-SCOPE.md)).
    - `needs-triage` — apply the role. Optional comment if there's partial progress.
 
 ## Quick state override
 
-If the maintainer says "move #42 to ready-for-agent", trust them and apply the role directly. Confirm what you're about to do (role changes, comment, close), then act. Skip grilling. If moving to `ready-for-agent` without a grilling session, ask whether they want to write an agent brief.
+If the maintainer says "move #42 to ready-for-agent", trust them and apply the role directly. Confirm what you're about to do (role changes, comment, close), then act. Skip grilling. If moving to `ready-for-agent` without a grilling session, ask whether they want to write an agent brief — and if one is written, post it before applying the label (the order rule in step 5).
 
 ## Needs-info template
 
