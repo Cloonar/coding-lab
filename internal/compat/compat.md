@@ -179,6 +179,41 @@ Provenance legend:
   therefore still cannot leak an Anthropic-authored trailer through the
   other two layers.
 
+## 4a. First-run onboarding key — live (2.1.198)
+
+- First-run onboarding: `~/.claude.json` → top-level
+  `hasCompletedOnboarding: true`. **Machine-global**, NOT keyed by dir —
+  seeded into the global config alongside folder trust, in the one atomic
+  pass `claudecode.seedGlobalConfig` already performed each spawn.
+- **Why lab must seed it.** `claude auth login --claudeai` (§3) performs
+  only the OAuth exchange; it does **not** complete onboarding. So on a
+  genuinely fresh install — the one path the auth section notes was never
+  exercised during the port ("2.1.198 not observed logged out") —
+  `hasCompletedOnboarding` stays unset and the first interactive
+  `--remote-control` spawn runs the onboarding wizard. lab drives that pane
+  over the bridge with no human at the TUI, so it blocks forever: the
+  composer never initializes, no session-registry entry / deep link is
+  captured, and "open a project" hangs. Auth appears fine because the login
+  subcommand is a separate non-interactive flow.
+- **live (2.1.198), reproduced 2026-07-07.** A throwaway `HOME` launched
+  through the same tmux/PTY path lab uses showed, as its *first* screen:
+  `Welcome to Claude Code v2.1.198 / Let's get started. / Choose the text
+  style that looks best with your terminal`. Seeding **only**
+  `{"hasCompletedOnboarding": true}` into that HOME's `~/.claude.json`
+  skipped the entire wizard — the next screen was the workspace-trust dialog
+  (§4), which lab already seeds — confirming this single top-level flag is
+  the whole-wizard gate.
+- **`theme` is deliberately NOT seeded.** It reads `null` even on a fully
+  onboarded host (four-digit `numStartups`), so it is not an independent
+  gate; `hasCompletedOnboarding` alone suppresses the theme picker. Seeding
+  a theme would pin a value claude does not require.
+- The write preserves unknown keys and is atomic (tmpfile + fsync + rename);
+  an already-onboarded config is not rewritten. Pinned by
+  `TestCompat_OnboardingKey_seed`. Provenance: live first-screen
+  reproduction — when a Claude Code upgrade regresses this, re-verify by
+  pointing `HOME` at an empty dir and confirming `claude --remote-control`
+  reaches the composer rather than a wizard.
+
 ## 5. Transcript location + JSONL schema — location live (2.1.198), schema fixture
 
 The embedded chat (issue #7 / ADR-0016) reads claude's live session

@@ -174,6 +174,42 @@ func TestCompat_TrustKeys_roundtrip(t *testing.T) {
 	}
 }
 
+// Onboarding-key pin (compat.md §4a): `claude auth login` does not complete
+// first-run onboarding, so SeedTrust must set the exact top-level key claude's
+// wizard gates on, or the first --remote-control spawn on a fresh install
+// blocks on the theme picker. Live-verified 2.1.198 (2026-07-07): a fresh HOME
+// shows "Let's get started — choose the text style…" as its first screen, and
+// seeding this single key drops the spawn through to the (separately seeded)
+// trust dialog. theme is intentionally NOT seeded — it reads null even on a
+// fully onboarded host, so hasCompletedOnboarding is the sole gate.
+func TestCompat_OnboardingKey_seed(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), ".claude.json")
+	dir := t.TempDir()
+	if err := claudecode.SeedTrust(cfg, dir); err != nil {
+		t.Fatalf("SeedTrust: %v", err)
+	}
+
+	global, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(global), `"hasCompletedOnboarding": true`) {
+		t.Errorf("global config lacks the hasCompletedOnboarding grant: %s", global)
+	}
+	// theme must NOT be seeded — hasCompletedOnboarding is the sole gate.
+	if strings.Contains(string(global), `"theme"`) {
+		t.Errorf("theme was seeded; only hasCompletedOnboarding gates onboarding: %s", global)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(global, &parsed); err != nil {
+		t.Fatalf("global config no longer valid JSON: %v", err)
+	}
+	if v, _ := parsed["hasCompletedOnboarding"].(bool); !v {
+		t.Errorf("top-level hasCompletedOnboarding != true")
+	}
+}
+
 // Attribution-key pin (compat.md §4, M7 incogni measure 1): the exact key
 // strings the 2.1.198 settings schema reads, written to the exact file
 // claude reads them from. attribution{commit:"",pr:"",sessionUrl:false} is

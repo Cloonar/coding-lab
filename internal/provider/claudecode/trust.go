@@ -22,8 +22,9 @@ import (
 var gitExcludeEntries = []string{".claude/"}
 
 // SeedWorkspace implements provider.AgentProvider: pre-approve the
-// worktree so neither the workspace-trust dialog nor the project
-// MCP-server prompt blocks an unattended run (SeedTrust), for incogni
+// worktree so neither claude's first-run onboarding, the workspace-trust
+// dialog, nor the project MCP-server prompt blocks an unattended run
+// (SeedTrust), for incogni
 // repos additionally disable claude's own attribution output (D15 §9
 // measure 1 — merged into the same settings.local.json through the same
 // preserve-unknown-keys atomic writer), then keep the seeded files out of
@@ -42,15 +43,23 @@ func (p *Provider) SeedWorkspace(worktree string, opts provider.SeedOpts) error 
 	return seeder.EnsureExcludes(worktree, gitExcludeEntries)
 }
 
-// SeedTrust pre-approves dir so neither the workspace-trust dialog nor the
-// project MCP-server prompt appears when claude launches there unattended.
-// (Verbatim port of v0 trust.go; exported for the compat trust-key test.)
+// SeedTrust pre-approves dir so none of claude's spawn-time prompts — the
+// first-run onboarding wizard, the workspace-trust dialog, or the project
+// MCP-server prompt — appears when claude launches there unattended.
+// (Ported from v0 trust.go; the onboarding grant is new — see compat §4a.
+// Exported for the compat trust-key test.)
 //
-// The two grants go to two different files, because claude reads them from
-// two different places:
+// The grants go to two different files, because claude reads them from two
+// different places:
 //
-//   - Folder trust (hasTrustDialogAccepted) is per-project state in the
-//     global config at configPath (~/.claude.json), keyed by dir.
+//   - The global config at configPath (~/.claude.json) carries two grants,
+//     written together by seedGlobalConfig: hasCompletedOnboarding (top-level,
+//     machine-global) skips the first-run onboarding wizard, and
+//     projects.<dir>.hasTrustDialogAccepted (per-project, keyed by dir) skips
+//     the workspace-trust dialog. `claude auth login` (login.go) authenticates
+//     without completing onboarding, so on a fresh install the first
+//     --remote-control spawn would otherwise block on the theme picker ("Let's
+//     get started — choose the text style…") with no one to answer it.
 //   - MCP approval (enableAllProjectMcpServers) is a *project-local*
 //     setting in dir/.claude/settings.local.json — NOT the global config.
 //     A fresh git worktree inherits the tracked .mcp.json but not that
@@ -70,21 +79,40 @@ func (p *Provider) SeedWorkspace(worktree string, opts provider.SeedOpts) error 
 // case a dialog appears once and re-resolves on next click. Accepted risk
 // for a single-user dev machine (v0 note preserved).
 func SeedTrust(configPath, dir string) error {
-	if err := seedFolderTrust(configPath, dir); err != nil {
+	if err := seedGlobalConfig(configPath, dir); err != nil {
 		return err
 	}
 	return seedProjectMcpApproval(dir)
 }
 
-// seedFolderTrust sets hasTrustDialogAccepted=true on dir's project entry
-// in the global claude config at configPath, so the workspace-trust dialog
-// is skipped. Already-true entries are left untouched without a rewrite —
-// a needless rewrite risks clobbering a concurrent claude writer.
-func seedFolderTrust(configPath, dir string) error {
+// seedGlobalConfig writes the two grants that live in claude's global config
+// (~/.claude.json at configPath) in a single atomic pass:
+//
+//   - hasCompletedOnboarding=true (top-level, machine-global): skips claude's
+//     first-run onboarding wizard. NOT keyed by dir. theme is deliberately not
+//     seeded — it reads null even on a fully onboarded host, so this flag is
+//     the sole onboarding gate (compat §4a; live 2.1.198).
+//   - projects.<dir>.hasTrustDialogAccepted=true (per-project): skips the
+//     workspace-trust dialog for dir (compat §4).
+//
+// The file is read once and rewritten only when a grant is actually missing —
+// an already-satisfied config is left untouched so a needless rewrite can't
+// clobber a concurrent claude writer. Folding onboarding into the trust pass
+// keeps this to the one read+write the trust seed already performed each spawn.
+func seedGlobalConfig(configPath, dir string) error {
 	cfg, err := readJSONObject(configPath)
 	if err != nil {
 		return err
 	}
+	dirty := false
+
+	// Onboarding is machine-global: a top-level flag, not a per-dir entry.
+	if v, _ := cfg["hasCompletedOnboarding"].(bool); !v {
+		cfg["hasCompletedOnboarding"] = true
+		dirty = true
+	}
+
+	// Folder trust is per-project, keyed by the absolute worktree dir.
 	projects, _ := cfg["projects"].(map[string]any)
 	if projects == nil {
 		projects = map[string]any{}
@@ -95,10 +123,14 @@ func seedFolderTrust(configPath, dir string) error {
 		entry = map[string]any{}
 		projects[dir] = entry
 	}
-	if v, _ := entry["hasTrustDialogAccepted"].(bool); v {
-		return nil // already trusted — don't rewrite
+	if v, _ := entry["hasTrustDialogAccepted"].(bool); !v {
+		entry["hasTrustDialogAccepted"] = true
+		dirty = true
 	}
-	entry["hasTrustDialogAccepted"] = true
+
+	if !dirty {
+		return nil // both grants already present — don't rewrite
+	}
 	return marshalAtomic(configPath, cfg)
 }
 
