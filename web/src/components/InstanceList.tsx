@@ -5,6 +5,12 @@
 // and Stop with the guarded outcome ("removed" vs "parked") surfaced as a
 // toast. AFK rows add the auto chip and the budget countdown derived from
 // runs.budget_deadline (30s display tick).
+//
+// Responsive (issue #15, decision 7): below 640px the row stacks into two
+// lines — line 1 (.instance-info) = title + branch (+ AFK budget) full-width
+// with its state chips; line 2 (.instance-actions) = the Chat / Open / Stop
+// controls, icon-only on phones and text on desktop via the shared
+// .action-icon / .action-label swap. The >=640px single line is unchanged.
 
 import { A } from '@solidjs/router';
 import { For, Show, createSignal, onCleanup } from 'solid-js';
@@ -13,6 +19,7 @@ import { budgetRemaining, parseAFKLabel } from '../lib/afk';
 import { stateBadge } from '../lib/conversation';
 import { openState, providerOpen } from '../lib/deepLink';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
+import Icon from './Icon';
 import OpenAffordance from './OpenAffordance';
 
 export default function InstanceList(props: {
@@ -76,45 +83,60 @@ function InstanceRow(props: {
 
   return (
     <li classList={{ 'instance-row': true, afk: afk() !== null }}>
-      <div class="instance-main">
-        <span class="instance-title">
-          {instanceTitle(sessionLabel(props.instance.session_name))}
-        </span>
-        <span class="muted mono instance-branch">{props.instance.branch}</span>
-        <Show when={budget()}>
-          <span
-            classList={{ muted: true, 'budget-left': true, over: budget() === 'over budget' }}
-            title="Time left on this AFK run's budget"
-          >
-            {budget()}
+      {/* Line 1 (mobile): title + branch (+ budget) full-width with state chips. */}
+      <div class="instance-info">
+        <div class="instance-main">
+          <span class="instance-title">
+            {instanceTitle(sessionLabel(props.instance.session_name))}
           </span>
+          <span class="muted mono instance-branch">{props.instance.branch}</span>
+          <Show when={budget()}>
+            <span
+              classList={{ muted: true, 'budget-left': true, over: budget() === 'over budget' }}
+              title="Time left on this AFK run's budget"
+            >
+              {budget()}
+            </span>
+          </Show>
+        </div>
+        <Show when={afk()?.auto}>
+          <span class="chip afk-kind">auto</span>
+        </Show>
+        <Show when={!props.instance.live}>
+          <span class="chip idle">not running</span>
+        </Show>
+        <Show when={badge()}>
+          {(b) => (
+            <span classList={{ chip: true, convo: true, [b().cls]: true }} title={b().title}>
+              {b().label}
+            </span>
+          )}
         </Show>
       </div>
-      <Show when={afk()?.auto}>
-        <span class="chip afk-kind">auto</span>
-      </Show>
-      <Show when={!props.instance.live}>
-        <span class="chip idle">not running</span>
-      </Show>
-      <Show when={badge()}>
-        {(b) => (
-          <span classList={{ chip: true, convo: true, [b().cls]: true }} title={b().title}>
-            {b().label}
-          </span>
-        )}
-      </Show>
-      <A href={`/runs/${props.instance.id}`} class="card-link" title="Open the chat">
-        Chat
-      </A>
-      <OpenAffordance state={state()} />
-      <button
-        type="button"
-        class="danger instance-stop"
-        onClick={() => void props.onStop(props.instance)}
-        disabled={isStopping()}
-      >
-        {isStopping() ? 'Stopping…' : 'Stop'}
-      </button>
+      {/* Line 2 (mobile): actions row. Icon-only on phones, text at >=640px. */}
+      <div class="instance-actions">
+        <A
+          href={`/runs/${props.instance.id}`}
+          class="card-link"
+          aria-label="Open the chat"
+          title="Open the chat"
+        >
+          <Icon name="message-square" class="action-icon" />
+          <span class="action-label">Chat</span>
+        </A>
+        <OpenAffordance state={state()} />
+        <button
+          type="button"
+          class="danger instance-stop"
+          onClick={() => void props.onStop(props.instance)}
+          disabled={isStopping()}
+          aria-label="Stop the instance"
+          title="Stop the instance"
+        >
+          <Icon name="square" class="action-icon" />
+          <span class="action-label">{isStopping() ? 'Stopping…' : 'Stop'}</span>
+        </button>
+      </div>
     </li>
   );
 }

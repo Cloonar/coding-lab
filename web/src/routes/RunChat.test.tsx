@@ -176,6 +176,10 @@ function buttonByText(text: string): HTMLButtonElement | null {
   );
 }
 
+function buttonByLabel(label: string): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+}
+
 // jsdom has no clipboard — install a spy so copy buttons are exercisable.
 function stubClipboard(): ReturnType<typeof vi.fn> {
   const writeText = vi.fn(() => Promise.resolve());
@@ -268,7 +272,7 @@ describe('RunChat', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     await settle();
 
-    buttonByText('Send')!.click();
+    buttonByLabel('Send')!.click();
     await settle();
 
     expect(replyPosts).toHaveLength(1);
@@ -562,7 +566,7 @@ describe('RunChat', () => {
     // ADR-0017: the fallback URL + tooltip come from the providers API, not a
     // hardcoded constant.
     const link = Array.from(container.querySelectorAll('a')).find((a) =>
-      a.textContent?.includes('Open ↗'),
+      a.getAttribute('aria-label')?.includes('Open'),
     );
     expect(link?.getAttribute('href')).toBe('https://claude.ai/code');
     expect(link?.getAttribute('title')).toContain('claude.ai session picker');
@@ -574,7 +578,9 @@ describe('RunChat', () => {
     await mountChat();
 
     expect(
-      Array.from(container.querySelectorAll('a')).some((a) => a.textContent?.includes('Open ↗')),
+      Array.from(container.querySelectorAll('a')).some((a) =>
+        a.getAttribute('aria-label')?.includes('Open'),
+      ),
     ).toBe(false);
     const attach = container.querySelector('button.attach-copy');
     expect(attach?.textContent).toContain('Copy attach');

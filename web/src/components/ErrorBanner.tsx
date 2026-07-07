@@ -2,6 +2,7 @@
 // text content, never HTML) — the v0 sticky-banner property.
 
 import { Show } from 'solid-js';
+import Icon from './Icon';
 
 export default function ErrorBanner(props: { message: string | null; onDismiss: () => void }) {
   return (
@@ -12,9 +13,10 @@ export default function ErrorBanner(props: { message: string | null; onDismiss: 
           type="button"
           class="banner-dismiss"
           aria-label="Dismiss"
+          title="Dismiss"
           onClick={() => props.onDismiss()}
         >
-          ×
+          <Icon name="x" size={18} />
         </button>
       </div>
     </Show>
