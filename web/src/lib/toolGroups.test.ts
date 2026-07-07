@@ -20,7 +20,12 @@ const think = (): ChatMessage => ({
   thinking: true,
   text: '…',
 });
-const text = (t: string): ChatMessage => ({ seq: (seq += 1), kind: 'text', role: 'assistant', text: t });
+const text = (t: string): ChatMessage => ({
+  seq: (seq += 1),
+  kind: 'text',
+  role: 'assistant',
+  text: t,
+});
 const lifecycle = (): ChatMessage => ({ seq: (seq += 1), kind: 'lifecycle', text: 'started' });
 
 beforeEach(() => {
@@ -76,7 +81,11 @@ describe('groupMessages', () => {
     const group = items[0] as ToolGroup;
     expect(group.toolCount).toBe(5);
     expect(group.errorCount).toBe(2);
-    expect(toolGroupSummary(group)).toEqual({ label: '5 tool calls', failed: '2 failed', running: false });
+    expect(toolGroupSummary(group)).toEqual({
+      label: '5 tool calls',
+      failed: '2 failed',
+      running: false,
+    });
   });
 
   it('flags a still-running trailing group as live', () => {

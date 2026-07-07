@@ -73,11 +73,13 @@ function mountList(instances: Instance[], providers: Provider[] = PROVIDERS): vo
   );
 }
 
-/** The "Open ↗" open-link anchor of the first row, if present. */
+// The open-session anchor became icon-only on phones (issue #15), so query it
+// by its stable accessible name instead of the old "Open ↗" text.
 function openLink(): HTMLAnchorElement | null {
   return (
-    Array.from(container.querySelectorAll('a')).find((a) => a.textContent?.includes('Open ↗')) ??
-    null
+    Array.from(container.querySelectorAll('a')).find(
+      (a) => a.getAttribute('aria-label') === 'Open the session',
+    ) ?? null
   );
 }
 

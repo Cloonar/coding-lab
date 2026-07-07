@@ -1,11 +1,17 @@
 // The instance open affordance (ADR-0017), shared by the dashboard rows and the
-// chat header: the exact/fallback web link as an "Open ↗" anchor, a
+// chat header: the exact/fallback web link as an external-link anchor, a
 // "connecting…" pulse while deep-link capture runs, or — for a provider with no
 // web session — a copyable `tmux attach` command, since that session is driven
 // from a terminal on the lab host.
+//
+// Responsive (issue #15): the link renders the shared .action-icon (external
+// link) + .action-label ("Open") pair with a stable accessible name, so it is
+// icon-only on phones and in the chat header, and text on the desktop row —
+// the CSS breakpoints/context decide which of the two is shown.
 
 import { Match, Switch, createSignal, onCleanup } from 'solid-js';
 import type { OpenState } from '../lib/deepLink';
+import Icon from './Icon';
 
 type LinkState = Extract<OpenState, { kind: 'link' }>;
 type AttachState = Extract<OpenState, { kind: 'attach' }>;
@@ -31,9 +37,11 @@ export default function OpenAffordance(props: { state: OpenState }) {
             target="_blank"
             rel="noreferrer"
             class="card-link"
-            title={linkTitle(s())}
+            aria-label="Open the session"
+            title={linkTitle(s()) ?? 'Open the session'}
           >
-            Open ↗
+            <Icon name="external-link" class="action-icon" />
+            <span class="action-label">Open</span>
           </a>
         )}
       </Match>

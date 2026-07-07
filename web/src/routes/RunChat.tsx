@@ -38,6 +38,7 @@ import {
   type TranscriptStatus,
 } from '../api';
 import ErrorBanner from '../components/ErrorBanner';
+import Icon from '../components/Icon';
 import OpenAffordance from '../components/OpenAffordance';
 import RequireAuth from '../components/RequireAuth';
 import {
@@ -360,8 +361,13 @@ function ChatHeader(props: {
 
   return (
     <header class="chat-header">
-      <A href="/" class="crumb chat-back" title="Back to the dashboard">
-        ←
+      <A
+        href="/"
+        class="crumb chat-back icon-btn"
+        aria-label="Back to the dashboard"
+        title="Back to the dashboard"
+      >
+        <Icon name="arrow-left" />
       </A>
       <span class="chat-title">{title()}</span>
       <Show when={badge()}>
@@ -385,8 +391,14 @@ function ChatHeader(props: {
       <Show when={live()}>
         <Switch>
           <Match when={!confirming()}>
-            <button type="button" class="danger chat-stop" onClick={() => setConfirming(true)}>
-              Stop
+            <button
+              type="button"
+              class="icon-btn danger chat-stop"
+              aria-label="Stop the instance"
+              title="Stop the instance"
+              onClick={() => setConfirming(true)}
+            >
+              <Icon name="square" />
             </button>
           </Match>
           <Match when={confirming()}>
@@ -710,47 +722,17 @@ function CopyButton(props: { text: string; label?: string; title?: string }) {
     >
       <Switch>
         <Match when={copied()}>
-          <CheckIcon />
+          <Icon name="check" size={15} class="copy-icon" />
           <span class="copy-label">Copied</span>
         </Match>
         <Match when={!copied()}>
-          <CopyIcon />
+          <Icon name="copy" size={15} class="copy-icon" />
           <Show when={props.label}>
             <span class="copy-label">{props.label}</span>
           </Show>
         </Match>
       </Switch>
     </button>
-  );
-}
-
-function CopyIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" class="copy-icon">
-      <rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
-      <path
-        d="M5 15V5a2 2 0 0 1 2-2h8"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-      />
-    </svg>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" class="copy-icon">
-      <path
-        d="M5 13l4 4L19 7"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2.2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      />
-    </svg>
   );
 }
 
@@ -811,11 +793,14 @@ function Composer(props: {
             />
             <button
               type="button"
-              class="chat-send"
+              class="chat-send icon-btn"
+              classList={{ busy: sending() }}
+              aria-label="Send"
+              title="Send"
               disabled={sending() || text().trim() === ''}
               onClick={() => void send()}
             >
-              {sending() ? '…' : 'Send'}
+              <Icon name="send" />
             </button>
             <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onSent} />
           </div>
