@@ -47,6 +47,17 @@ const (
 	defaultLoginPoll      = 1 * time.Second  // gap between forced refreshes
 	defaultAuthTTL        = 30 * time.Second // login-status cache freshness
 
+	// defaultDialogKeyDelay paces the dialog-answer keystroke recipe: a gap
+	// between each send-keys op so the remote-control TUI processes a picker
+	// navigation before the next key (compat §7). LIVE-VERIFIED on 2.1.198,
+	// 2026-07-07: driving the picker back-to-back with no gap raced the
+	// committing Enter ahead of the Down navigation and *intermittently*
+	// selected the wrong option (index 0 instead of the intended row); 150ms+
+	// was reliable across trials, 0ms was flaky. 250ms carries margin. This is
+	// the "robustify the recipe" the embedded-chat brief called for — it never
+	// ran against a real picker before this issue.
+	defaultDialogKeyDelay = 250 * time.Millisecond
+
 	// pollInterval is the cadence of both the registry poll and the pane
 	// scrape (v0-pinned 200ms).
 	pollInterval = 200 * time.Millisecond
@@ -119,6 +130,7 @@ type Provider struct {
 	loginTimeout   time.Duration
 	loginPoll      time.Duration
 	authTTL        time.Duration
+	keyDelay       time.Duration // inter-op gap in the dialog-answer recipe (compat §7)
 
 	// authMu guards the lazy login-status cache. The ~0.75s status command
 	// runs while holding it; that brief serialisation is accepted for a
@@ -190,6 +202,7 @@ func New(o Options) (*Provider, error) {
 		loginTimeout:   defaultLoginTimeout,
 		loginPoll:      defaultLoginPoll,
 		authTTL:        defaultAuthTTL,
+		keyDelay:       defaultDialogKeyDelay,
 		capturing:      map[string]bool{},
 	}, nil
 }

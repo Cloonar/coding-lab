@@ -6,9 +6,11 @@ document tracks brief §11 (known-fragile couplings 1–4; item 5 —
 provider-owned model/effort catalogs — is solved structurally in
 `internal/provider`, D14) plus the four embedded-chat couplings 5–8 added
 by issue #7 / ADR-0016 (transcript location + JSONL schema, the reply,
-dialog, and interrupt send-keys recipes). The implementation of every
-coupling lives in `internal/provider/claudecode`; the probe tests in this
-package exercise the same code paths against captured fixtures in
+dialog, and interrupt send-keys recipes) and the hook contract §9 added by
+issue #17 / ADR-0020 (the PreToolUse/PostToolUse/Notification hook payloads +
+the spool protocol that captures a pending dialog live). The implementation
+of every coupling lives in `internal/provider/claudecode`; the probe tests
+in this package exercise the same code paths against captured fixtures in
 `testdata/`.
 
 **M3 live acceptance (2026-07-06, real claude 2.1.198, real registry
@@ -205,6 +207,17 @@ transcript. Four coupled facts, all in `internal/provider/claudecode`
   `deep_link_url` pattern) so ended runs stay readable while claude retains
   the file. A vanished file is `provider.ErrTranscriptGone` → the UI's
   "transcript no longer available" state.
+- **Flush-on-resolve (pending dialogs are invisible live)**: a pending
+  `AskUserQuestion` / `ExitPlanMode` `tool_use` is **not** written to the JSONL
+  while it is pending — the transcript file does not change *at all* during the
+  pending window; the `tool_use` **and** its `tool_result` are flushed together,
+  retroactively (original timestamps), only when the dialog resolves. live
+  (2.1.198, 2026-07-07): a question sat pending in the TUI for minutes while the
+  transcript stayed byte-frozen at the user-prompt line. Consequence: the
+  transcript is not a live source for a pending dialog — see §9, which captures
+  it from a PreToolUse hook instead. The transcript-scan dialog path (an
+  unanswered `tool_use` in §5) stays as a dormant fallback for a future Claude
+  Code that flushes pending `tool_use`.
 
 ## 6. Reply send-keys — fixture (2.1.198 send path)
 
@@ -230,24 +243,55 @@ tool input — never scraped from the TUI widget (issue #7 decision 5):
 - **`AskUserQuestion`**: a single question renders its `options` as tappable
   buttons plus a synthesized free-text **Other** row (the tool always
   offers Other). The answer recipe (`DialogKeystrokes`, played by
-  `Provider.AnswerDialog`): normalise the cursor to the top option
-  (`Up` × rows−1), `Down` × chosen-index, `Enter`. Multi-select
-  (`multiSelect:true`) toggles each chosen option with `Space` then
-  confirms with `Enter`. **Other** selects the row, pastes the free text,
-  `Enter`. A **multi-question** `AskUserQuestion` is not answerable through
-  a single-picker recipe → degrades to the deep-link hint.
+  `Provider.AnswerDialog`): normalise the cursor to the top option, `Down` ×
+  chosen-index, `Enter`. Multi-select (`multiSelect:true`) toggles each chosen
+  option with `Space` then confirms with `Enter`. **Other** selects the row,
+  pastes the free text, `Enter`. A **multi-question** `AskUserQuestion` is not
+  answerable through a single-picker recipe → degrades to the deep-link hint.
+  - **Picker geometry (re-verified live, 2.1.198, 2026-07-07).** The picker has
+    **two** synthesized trailing rows below the tool's options: "Type
+    something." (the **Other** row, modelled in `d.Options`) **and** "Chat about
+    this" (**not** modelled), which sits *below* Other:
+
+    ```
+    ❯ 1. Option A / 2. Option B / 3. Option C
+      4. Type something.     ← the "Other" free-text row (modeled)
+      5. Chat about this     ← NOT modeled; sits below Other
+    Enter to select · ↑/↓ to navigate · Esc to cancel
+    ```
+
+    Down-navigation to a listed option or Other is unaffected (both sit above
+    "Chat about this"), but the normalise-to-top climb was one row short of the
+    true picker height. It is now `Up × (len(d.Options) − 1 +
+    pickerTrailingSynthRows)` (`pickerTrailingSynthRows` = 1, the "Chat about
+    this" row). Over-climbing is safe — the picker **clamps** at the top row (the
+    same clamp the pre-existing normalise relied on). When a Claude Code upgrade
+    adds/removes a trailing synth row, bump the constant. live.
 - **`ExitPlanMode`** (plan approval): the plan text is shown, but the
   approve/reject choices are **TUI-owned** (not in the tool input), so per
   the never-scrape rule answering degrades to the "open in claude.ai"
-  deep-link hint; Interrupt and a free-text reply still work. Revisit when
-  the plan-approval option widget is captured live.
+  deep-link hint. It is a pending dialog, so the composer is locked (issue #17
+  dec 5 — stray free text must not land in the focused plan picker); the
+  operator approves in claude.ai or interrupts (Escape). Revisit when the
+  plan-approval option widget is captured live. (ADR-0016 originally described a
+  free-text reply working here; issue #17's uniform composer-lock supersedes it.)
 - **Unknown** interactive tools degrade to the deep-link hint. Answers the
   operator gives in claude.ai flow back through the transcript — no
   divergence handling is needed.
 
 Recipe snapshot: `TestCompat_DialogKeystrokes`. The `Up/Down/Space/Enter`
-key names are standard tmux `send-keys` arguments; the picker navigation is
-the fragile part — re-verify against a live picker on upgrades. fixture.
+key names are standard tmux `send-keys` arguments.
+
+- **Inter-keystroke pacing (live-verified, 2.1.198, 2026-07-07).** The recipe's
+  ops MUST be paced — `Provider.AnswerDialog` sleeps `keyDelay`
+  (`defaultDialogKeyDelay` = 250ms) between each op. Driving the picker
+  back-to-back with no gap over the remote-control bridge **intermittently**
+  raced the committing `Enter` ahead of the `Down` navigation and selected the
+  wrong row (index 0 instead of the intended one). Observed live: 0ms was flaky
+  (wrong option on some trials), 150ms+ reliable across trials. This is the
+  brief's "robustify the recipe" — the answer path never drove a real picker
+  before issue #17. When an upgrade changes picker responsiveness, re-verify the
+  delay is still sufficient. live.
 
 ## 8. Interrupt keystroke — fixture (2.1.198)
 
@@ -259,6 +303,97 @@ counter (issue #7 decision 12) — intervention neutrality is structural
 (nothing in the chat path writes a run outcome). fixture — the send is
 tmux-hermetic; the claude-side Escape-interrupts-the-turn behavior is
 re-verified live on upgrades.
+
+## 9. Dialog-capture hook contract — live end-to-end (2.1.198)
+
+Because a pending dialog is invisible in the transcript live (§5,
+flush-on-resolve), lab captures it from Claude Code **hooks** injected per run.
+This is issue #17 / ADR-0020's fifth pinned coupling. Implementation:
+`internal/provider/claudecode/dialogspool.go`; pinned by
+`TestCompat_HookPayload_maps` against the Appendix fixtures. Verified end-to-end
+live in a throwaway 2.1.198 session on 2026-07-07 (the throwaway session is the
+§9 fixture ground truth).
+
+**Injection.** `claude --settings <file>` accepts a **file path** and merges the
+file's `hooks` block **additively** over the repo-shipped `.claude` settings
+(hooks accumulate across scopes; they do not replace). lab writes a per-run
+settings file under its runtime dir and appends `--settings <path>` to the spawn
+argv **before** the trailing prompt positional (`claude [options] [prompt]`), so
+the flag is never swallowed as prompt text. Hooks fire normally under
+`--remote-control <name> --permission-mode auto`.
+
+**Settings shape** (the block lab generates):
+
+```json
+{
+  "hooks": {
+    "PreToolUse":  [{ "matcher": "AskUserQuestion|ExitPlanMode",
+                      "hooks": [{ "type": "command", "command": "mkdir -p <dir> && cat > <spool>.tmp && mv <spool>.tmp <spool>" }] }],
+    "PostToolUse": [{ "matcher": "AskUserQuestion|ExitPlanMode",
+                      "hooks": [{ "type": "command", "command": "rm -f <spool>" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "mkdir -p <dir> && cat > <marker>.tmp && mv <marker>.tmp <marker>" }] }]
+  }
+}
+```
+
+- The `matcher` is a regex over the **tool name** for Pre/PostToolUse;
+  `AskUserQuestion|ExitPlanMode` is an alternation. The Notification matcher (a
+  filter over `notification_type`) is omitted → matches all notification types.
+- Each `command` runs under `/bin/sh`, receiving the hook event JSON on
+  **stdin**. The Pre/Notification commands atomically write stdin (temp +
+  rename) to a per-run spool; the Post command deletes it.
+- **The PreToolUse hook is purely observational**: it exits 0 with no stdout, so
+  the tool proceeds normally and the local operator's TUI picker still shows.
+  Only a PreToolUse **exit code 2** (or a JSON `permissionDecision:"deny"`)
+  blocks a tool — the spool command never emits either; a write failure exits
+  non-zero-but-not-2, which Claude Code logs and ignores. Default hook timeout is
+  600 s (a timeout is logged and the tool proceeds).
+
+**Spool protocol (lab-owned layout under the runtime dir).**
+
+- Dialog spool: `<runtime>/dialogs/<runID>.json` — the whole PreToolUse payload;
+  overwritten (one dialog pending per session). Fields lab reads: `tool_name`,
+  `tool_use_id`, `tool_input` (the exact structured input `dialogFromToolUse`
+  also reads from a transcript `tool_use` block — one mapper, two sources).
+- Blocked marker: `<runtime>/state/<runID>.json` — the whole Notification
+  payload; field lab reads: `notification_type`.
+- Per-run settings: `<runtime>/settings.<runID>.json` — the `--settings` target.
+- **Answer guard / resolution.** A spooled dialog is suppressed once its
+  `tool_use_id` appears in the transcript (the retro-flush landed = resolved);
+  the PostToolUse hook is the primary spool delete, this scan the backstop. The
+  chat GCs the three per-run files once the run is no longer active (an active
+  run's spool survives a lab restart — the file persists).
+
+**Appendix payloads (2.1.198 live, ids/paths anonymized — the fixture ground
+truth):**
+
+```
+PreToolUse:
+  {"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","session_id":"…",
+   "transcript_path":"…/<sessionId>.jsonl","cwd":"…","permission_mode":"auto",
+   "tool_use_id":"toolu_01KU2pbDQNUNFim79s9FKf6i",
+   "tool_input":{"questions":[{"question":"Which flavor of test question do you prefer?",
+     "header":"Test","multiSelect":false,"options":[
+       {"label":"Option A","description":"The first test option."},
+       {"label":"Option B","description":"The second test option."},
+       {"label":"Option C","description":"The third test option."}]}]}}
+
+Notification:
+  {"hook_event_name":"Notification","notification_type":"permission_prompt",
+   "message":"Claude needs your permission","session_id":"…","transcript_path":"…","cwd":"…"}
+
+PostToolUse:
+  {"hook_event_name":"PostToolUse","tool_name":"AskUserQuestion",
+   "tool_use_id":"toolu_01KU2pbDQNUNFim79s9FKf6i","tool_input":{"questions":[…]},
+   "tool_response":{"answers":{"Which flavor of test question do you prefer?":"Option B"},"annotations":{}}}
+```
+
+Provenance: hook schema + `--settings` semantics read from the 2.1.198 docs and
+`claude --help`; the payload shapes captured live in the throwaway session.
+When a Claude Code upgrade breaks live dialog capture, re-verify: the settings
+`hooks` shape, the three payload field names, the observational exit-0 contract,
+and that `--settings` still merges additively — then update the port, the
+fixtures, the tests, and this section in one commit.
 
 ## Live re-verification
 

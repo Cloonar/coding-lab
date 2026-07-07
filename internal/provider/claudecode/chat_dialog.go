@@ -69,9 +69,11 @@ func askUserQuestionDialog(b tBlock) provider.Dialog {
 }
 
 // planDialog renders an ExitPlanMode approval. The approve/reject choices are
-// TUI-owned (not in the tool input), so per the never-scrape rule the plan is
-// shown but answering degrades to the deep-link hint; Interrupt (Escape) and a
-// free-text reply still work from the chat.
+// TUI-owned (not in the tool input), so per the never-scrape rule the plan text
+// is shown but answering degrades to the deep-link hint. It is still a pending
+// dialog (Answerable=false), so the composer is locked like any other (issue
+// #17 dec 5 — stray free text must not hit the focused plan picker); the
+// operator approves in claude.ai or interrupts (Escape).
 func planDialog(b tBlock) provider.Dialog {
 	var in struct {
 		Plan string `json:"plan"`

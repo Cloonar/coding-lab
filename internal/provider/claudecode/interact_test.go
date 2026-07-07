@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -70,13 +71,33 @@ func TestAnswerDialog_playsRecipe(t *testing.T) {
 	if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Index: 1}); err != nil {
 		t.Fatalf("AnswerDialog: %v", err)
 	}
-	// Up Up / Down / Enter — the normalize-then-navigate recipe.
+	// Up Up Up / Down / Enter — normalize-then-navigate. The climb is
+	// len(Options)=3 (2 modeled options + Other) plus the un-modeled trailing
+	// "Chat about this" row (ADR-0020 / compat §7): 3−1+1 = 3 Ups.
 	var keys []string
 	for _, e := range f.KeyLog(chatSession) {
 		keys = append(keys, e.Keys)
 	}
-	if got := strings.Join(keys, "|"); got != "Up Up|Down|Enter" {
-		t.Errorf("answer key log = %q; want \"Up Up|Down|Enter\"", got)
+	if got := strings.Join(keys, "|"); got != "Up Up Up|Down|Enter" {
+		t.Errorf("answer key log = %q; want \"Up Up Up|Down|Enter\"", got)
+	}
+}
+
+// With a non-zero keyDelay, AnswerDialog paces its ops and honours context
+// cancellation between them — it plays the first op, then stops at the first
+// paced gap once the context is done (compat §7 pacing).
+func TestAnswerDialog_pacedRespectsCancel(t *testing.T) {
+	p, f := armedRunner(t)
+	p.keyDelay = time.Hour // make the first inter-op gap effectively block
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled: the first gap returns immediately
+	d := provider.Dialog{Answerable: true, Options: []provider.DialogOption{{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true}}}
+	if err := p.AnswerDialog(ctx, chatSession, d, provider.DialogAnswer{Index: 1}); err == nil {
+		t.Fatal("AnswerDialog with a cancelled context = nil; want context error")
+	}
+	// Only the first op (the normalize Up batch) was played before the gap.
+	if log := f.KeyLog(chatSession); len(log) != 1 {
+		t.Errorf("played %d ops before the cancelled gap; want 1 (stopped at the pace)", len(log))
 	}
 }
 
