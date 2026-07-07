@@ -243,6 +243,12 @@ hermetically (`internal/tmuxx/integration_test.go`, real tmux private
 socket); the claude-side "queue while mid-turn" behavior is re-verified
 live on upgrades.
 
+**UI surfacing (ADR-0022):** this Reply path is **retained at the backend**
+but is **no longer surfaced in the UI mid-turn** — while the agent is working
+the chat composer shows a one-tap Interrupt in place of Send, so a reply can
+only be sent once the agent returns to idle/needs_input. The send-keys recipe
+above is unchanged; it is simply unreachable from the SPA during a turn.
+
 ## 7. Dialog keystroke recipes — fixture (2.1.198)
 
 An interactive dialog is an **unanswered** `tool_use` in the transcript for
@@ -305,12 +311,14 @@ key names are standard tmux `send-keys` arguments.
 ## 8. Interrupt keystroke — fixture (2.1.198)
 
 The chat's stop-generating affordance sends a single `Escape`
-(`Provider.Interrupt` → `SendNamedKeys(session, "Escape")`), behind a
-confirm tap in the UI. It is distinct from a run Stop: it never touches the
-session lifecycle, the budget clock, the claim, or the three-strikes
-counter (issue #7 decision 12) — intervention neutrality is structural
-(nothing in the chat path writes a run outcome). fixture — the send is
-tmux-hermetic; the claude-side Escape-interrupts-the-turn behavior is
+(`Provider.Interrupt` → `SendNamedKeys(session, "Escape")`), fired by a
+**one-tap** Interrupt square in the composer (ADR-0022 dropped the earlier
+confirm tap — interrupt is non-destructive, so a confirmation is friction; the
+danger-red header Stop keeps its two-step confirm). It is distinct from a run
+Stop: it never touches the session lifecycle, the budget clock, the claim, or
+the three-strikes counter (issue #7 decision 12) — intervention neutrality is
+structural (nothing in the chat path writes a run outcome). fixture — the send
+is tmux-hermetic; the claude-side Escape-interrupts-the-turn behavior is
 re-verified live on upgrades.
 
 ## 9. Dialog-capture hook contract — live end-to-end (2.1.198)
