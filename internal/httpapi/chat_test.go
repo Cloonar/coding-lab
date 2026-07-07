@@ -62,6 +62,38 @@ func TestAPI_ChatMessages_window(t *testing.T) {
 	}
 }
 
+// The live PreToolUse spool (ADR-0020) surfaces as the top-level pending_dialog
+// field alongside state:"question" — NOT as a message in the stream.
+func TestAPI_ChatMessages_pendingDialog(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	// The transcript alone derives 'working' with no dialog message.
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "…"}}})
+	x.prov.SetPendingDialog(&provider.Dialog{ToolID: "toolu_1", DialogKind: "question", Answerable: true,
+		Prompt: "Pick?", Options: []provider.DialogOption{{Label: "A"}, {Label: "Other", IsOther: true}}})
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body := decodeBody(t, resp)
+	if body["state"] != provider.StateQuestion {
+		t.Errorf("state = %v; want question (the spool overrides transcript working)", body["state"])
+	}
+	pd, ok := body["pending_dialog"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending_dialog = %v; want the spool dialog object", body["pending_dialog"])
+	}
+	if pd["tool_id"] != "toolu_1" || pd["answerable"] != true {
+		t.Errorf("pending_dialog = %v; want an answerable dialog toolu_1", pd)
+	}
+	// The stream stays transcript-derived: the single text message, no dialog.
+	if msgs, _ := body["messages"].([]any); len(msgs) != 1 {
+		t.Errorf("messages = %v; want only the transcript's 1 message", body["messages"])
+	}
+}
+
 func TestAPI_ChatMessages_locatingAndGone(t *testing.T) {
 	x := newInstanceServer(t)
 	runID, _ := startRun(t, x)
