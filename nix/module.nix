@@ -66,6 +66,10 @@ let
     "--base-url"
     cfg.baseUrl
   ]
+  ++ lib.optionals (cfg.agentUrl != null) [
+    "--agent-url"
+    cfg.agentUrl
+  ]
   ++ lib.optionals cfg.proxyAuth.enable [
     "--proxy-auth"
     "--proxy-auth-header"
@@ -152,6 +156,22 @@ in
       description = ''
         External base URL (--base-url). Drives Secure-cookie detection and
         the CSRF Origin check — set it whenever lab sits behind TLS.
+      '';
+    };
+
+    agentUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "http://127.0.0.1:${toString listenPort}";
+      defaultText = lib.literalExpression ''"http://127.0.0.1:<port from listenAddr>"'';
+      example = "http://lab-host.internal:8080";
+      description = ''
+        Session-facing base URL (--agent-url) handed to labctl as `LAB_URL`.
+        Defaults to a loopback URL derived from {option}`listenAddr`, so that
+        agent/machine traffic reaches lab directly and never hairpins out
+        through {option}`baseUrl`'s external origin and any SSO/auth proxy in
+        front of it. Override it only when sessions run off-host and must reach
+        lab over the network; set it to `null` to fall back to lab's own
+        precedence (baseUrl, else loopback).
       '';
     };
 

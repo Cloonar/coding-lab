@@ -32,6 +32,7 @@ func TestParse(t *testing.T) {
 		ProxyAuth:       false,
 		ProxyAuthHeader: "Remote-User",
 		BaseURL:         "",
+		AgentURL:        "",
 	}
 
 	with := func(mut func(*Config)) Config {
@@ -162,6 +163,43 @@ func TestParse(t *testing.T) {
 		{
 			name:    "base url must be absolute",
 			args:    []string{"--base-url", "lab.example.com"},
+			wantErr: "http(s)",
+		},
+		{
+			name: "agent url env override",
+			env:  map[string]string{"LAB_AGENT_URL": "http://127.0.0.1:8080"},
+			want: with(func(c *Config) { c.AgentURL = "http://127.0.0.1:8080" }),
+		},
+		{
+			name: "agent url flag beats env",
+			args: []string{"--agent-url", "http://127.0.0.1:9000"},
+			env:  map[string]string{"LAB_AGENT_URL": "http://127.0.0.1:8080"},
+			want: with(func(c *Config) { c.AgentURL = "http://127.0.0.1:9000" }),
+		},
+		{
+			name: "agent url is independent of base url",
+			args: []string{"--base-url", "https://lab.example.com", "--agent-url", "http://127.0.0.1:8080"},
+			want: with(func(c *Config) {
+				c.BaseURL = "https://lab.example.com"
+				c.AgentURL = "http://127.0.0.1:8080"
+			}),
+		},
+		{
+			name:    "agent url must be http(s)",
+			args:    []string{"--agent-url", "ftp://127.0.0.1:8080"},
+			wantErr: "http(s)",
+		},
+		{
+			name:    "agent url must be absolute",
+			args:    []string{"--agent-url", "lab-host.internal"},
+			wantErr: "http(s)",
+		},
+		{
+			// A bare host:port (scheme omitted) trips url.Parse; validateHTTPURL
+			// must still surface the actionable http(s) hint, not the parser's
+			// "first path segment cannot contain colon".
+			name:    "agent url bare host:port hints http(s)",
+			args:    []string{"--agent-url", "127.0.0.1:8080"},
 			wantErr: "http(s)",
 		},
 		{

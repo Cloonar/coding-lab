@@ -48,12 +48,19 @@ type Config struct {
 	TrustedProxies  []netip.Prefix
 
 	BaseURL string // external base URL; "" when unset
+
+	// AgentURL is the session-facing base URL handed to labctl as LAB_URL,
+	// independent of BaseURL. "" when unset; the session-URL helper then falls
+	// back to BaseURL, else loopback. It exists so machine traffic can stay on
+	// loopback while BaseURL points at an external (possibly SSO-fronted)
+	// origin (issue #30).
+	AgentURL string
 }
 
 // Parse resolves args (flags without the program name) and environment into
 // a Config. Env overrides defaults, flags override env. Recognized env vars:
 // LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_CLAUDE_CONFIG,
-// LAB_BASE_URL.
+// LAB_BASE_URL, LAB_AGENT_URL.
 func Parse(args []string, getenv func(string) string) (Config, error) {
 	fs := flag.NewFlagSet("lab", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -77,7 +84,8 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 		proxyAuthHeader = fs.String("proxy-auth-header", DefaultProxyAuthHeader, "header carrying the proxy-authenticated username")
 		trustedProxies  = fs.String("trusted-proxies", "", "comma-separated CIDRs of trusted reverse proxies")
 
-		baseURL = fs.String("base-url", "", "external base URL, e.g. https://lab.example.com (env LAB_BASE_URL)")
+		baseURL  = fs.String("base-url", "", "external base URL, e.g. https://lab.example.com (env LAB_BASE_URL)")
+		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL; defaults to --base-url, else http://127.0.0.1:<port> (env LAB_AGENT_URL)")
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -136,14 +144,16 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	cfg.ClaudeConfig = pick("claude-config", *claudeConfig, "LAB_CLAUDE_CONFIG", defaultClaudeConfig)
 
 	cfg.BaseURL = pick("base-url", *baseURL, "LAB_BASE_URL", "")
-
 	if cfg.BaseURL != "" {
-		u, err := url.Parse(cfg.BaseURL)
-		if err != nil {
-			return Config{}, fmt.Errorf("--base-url: %w", err)
+		if err := validateHTTPURL("--base-url", cfg.BaseURL); err != nil {
+			return Config{}, err
 		}
-		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return Config{}, fmt.Errorf("--base-url %q: want an absolute http(s) URL", cfg.BaseURL)
+	}
+
+	cfg.AgentURL = pick("agent-url", *agentURL, "LAB_AGENT_URL", "")
+	if cfg.AgentURL != "" {
+		if err := validateHTTPURL("--agent-url", cfg.AgentURL); err != nil {
+			return Config{}, err
 		}
 	}
 
@@ -181,4 +191,20 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateHTTPURL rejects a value that is not an absolute http(s) URL. Used
+// for --base-url and --agent-url alike: both name origins that must carry a
+// scheme and host (relative or other-scheme values are a misconfiguration
+// caught at startup, not silently accepted).
+func validateHTTPURL(flag, value string) error {
+	// A bare host:port (scheme omitted) trips url.Parse's "first path segment
+	// cannot contain colon"; fold that into the same actionable message rather
+	// than leaking the parser's wording. || short-circuits, so u is only
+	// dereferenced when err is nil.
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%s %q: want an absolute http(s) URL", flag, value)
+	}
+	return nil
 }

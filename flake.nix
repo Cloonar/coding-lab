@@ -158,6 +158,14 @@
                   echo "ExecStart contains shell single-quotes (escapeShellArgs?)" >&2
                   exit 1
                 fi
+
+                # Regression (issue #30): machine traffic must default to
+                # loopback. Even with the external https baseUrl set above, the
+                # module defaults agentUrl to a loopback URL derived from
+                # listenAddr and passes it as --agent-url, so labctl's LAB_URL
+                # never hairpins out through the SSO/auth proxy.
+                grep '^ExecStart=' "$unitPath" | grep -qF -- '"--agent-url" "http://127.0.0.1:8080"'
+
                 cp "$unitPath" $out
               '';
         }
