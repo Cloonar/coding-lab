@@ -293,6 +293,16 @@ in
 
       environment.HOME = home;
 
+      # SHELL for the unit (and thus the tmux server and every session spawned
+      # under it): Claude Code resolves its Bash tool's shell from $SHELL, so
+      # the lab system user's nologin passwd entry would otherwise leak through
+      # and brick every spawned agent's first Bash call ("No suitable shell
+      # found"). Same class of fix as HOME above — pin a real POSIX shell in the
+      # unit environment ONLY; the account stays non-login in passwd
+      # (isSystemUser). A tmux server that survives an upgrade keeps its old
+      # env, so a running deploy picks this up only after that server restarts.
+      environment.SHELL = "${pkgs.bashInteractive}/bin/bash";
+
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
