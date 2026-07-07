@@ -31,6 +31,12 @@ type LaunchSpec struct {
 	WorktreePath string
 	Model        string
 	Effort       string
+	// Options is the resolved provider-owned spawn-options bag (issue #19 /
+	// ADR-0021), already filtered + validated to the provider's schema by
+	// ResolveSpawnOptions. Empty for manual runs; for AFK runs it carries the
+	// resolved bag (e.g. {"ultracode":"true"}). Threaded verbatim into
+	// SpawnSpec.Options — the provider applies it.
+	Options map[string]string
 
 	// BudgetDeadline is the persisted budget clock (D12b; AFK runs only) and
 	// TokenExpiry the run token's expires_at (§3a: AFK → budget_deadline +
@@ -186,17 +192,24 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// transcript-only behavior); dialog capture must never block a launch. A
 	// provider without the DialogHooker capability contributes nothing.
 	//
-	// The flag must precede the trailing prompt positional (claude CLI:
-	// `claude [options] [prompt]`), so build the argv flags-first with an empty
-	// prompt, inject --settings among the flags, then append the seed prompt
-	// last — never after --settings, where the parser could swallow it.
-	spawnArgv := spec.Provider.SpawnArgv(name, spec.Model, spec.Effort, "")
+	// Build the spawn argv from the provider (issue #19 SpawnSpec seam): the
+	// seed prompt rides as the trailing positional and the provider applies any
+	// provider-owned spawn options to it (e.g. ultracode prepends a directive) —
+	// lab never sees the option mechanism. The dialog-capture --settings flag
+	// (ADR-0020) must still land among the flags, BEFORE that trailing prompt
+	// (claude CLI: `[options] [prompt]`, never after where the parser could
+	// swallow it), so inject it before the prompt element when a seed prompt is
+	// present, else at the end.
+	spawnArgv := spec.Provider.SpawnArgv(provider.SpawnSpec{
+		SessionName:   name,
+		Model:         spec.Model,
+		Effort:        spec.Effort,
+		Options:       spec.Options,
+		InitialPrompt: spec.SeedPrompt,
+	})
 	if extra, path := s.armDialogHooks(spec.Provider, runID); path != "" {
 		dialogSettingsPath = path
-		spawnArgv = append(spawnArgv, extra...)
-	}
-	if spec.SeedPrompt != "" {
-		spawnArgv = append(spawnArgv, spec.SeedPrompt)
+		spawnArgv = injectBeforePrompt(spawnArgv, extra, spec.SeedPrompt != "")
 	}
 
 	// Spawn in the worktree (never the reference repo), prlimit-wrapped by the
@@ -217,6 +230,26 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	s.ArmCapture(created)
 	s.publishRunChanged(repo.ID)
 	return created, nil
+}
+
+// injectBeforePrompt places the dialog-capture --settings flag among the spawn
+// flags: before the trailing prompt positional when a seed prompt is present
+// (hasPrompt — the provider appended it as the last argv element, possibly
+// option-transformed), else at the end. Keeps claude's `[options] [prompt]`
+// order intact so the parser never swallows --settings as prompt text (ADR-0020;
+// mirrors the pre-issue-#19 flags-first construction).
+func injectBeforePrompt(argv, extra []string, hasPrompt bool) []string {
+	if len(extra) == 0 {
+		return argv
+	}
+	if !hasPrompt {
+		return append(argv, extra...)
+	}
+	n := len(argv) - 1 // the trailing prompt positional
+	out := make([]string, 0, len(argv)+len(extra))
+	out = append(out, argv[:n]...)
+	out = append(out, extra...)
+	return append(out, argv[n])
 }
 
 // armDialogHooks writes the per-run dialog-capture settings file (ADR-0020) into

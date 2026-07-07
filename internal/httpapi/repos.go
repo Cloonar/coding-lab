@@ -19,30 +19,37 @@ import (
 // repoResponse is the pinned repo JSON shape. Nullable columns render as
 // JSON null (no omitempty), so the SPA always sees every key.
 type repoResponse struct {
-	ID                   string  `json:"id"`
-	Name                 string  `json:"name"`
-	RemoteURL            string  `json:"remote_url"`
-	CredentialID         *string `json:"credential_id"`
-	ForgeCredentialID    *string `json:"forge_credential_id"`
-	TrackerBinding       string  `json:"tracker_binding"`
-	ForgeKind            string  `json:"forge_kind"`
-	DefaultBranch        string  `json:"default_branch"`
-	Provider             string  `json:"provider"`
-	Incogni              bool    `json:"incogni"`
-	ModelDefault         *string `json:"model_default"`
-	EffortDefault        *string `json:"effort_default"`
-	GitAuthorName        *string `json:"git_author_name"`
-	GitAuthorEmail       *string `json:"git_author_email"`
-	AFKBranchPattern     string  `json:"afk_branch_pattern"`
-	ManualBranchPrefix   string  `json:"manual_branch_prefix"`
-	AFKAutoEnabled       bool    `json:"afk_auto_enabled"`
-	ConsecutiveFailures  int     `json:"consecutive_failures"`
-	BudgetMinutes        *int    `json:"budget_minutes"`
-	MaxInstancesOverride *int    `json:"max_instances_override"`
-	CloneStatus          string  `json:"clone_status"`
-	CloneError           *string `json:"clone_error"`
-	CreatedAt            string  `json:"created_at"`
-	LastOpenedAt         *string `json:"last_opened_at"`
+	ID                string  `json:"id"`
+	Name              string  `json:"name"`
+	RemoteURL         string  `json:"remote_url"`
+	CredentialID      *string `json:"credential_id"`
+	ForgeCredentialID *string `json:"forge_credential_id"`
+	TrackerBinding    string  `json:"tracker_binding"`
+	ForgeKind         string  `json:"forge_kind"`
+	DefaultBranch     string  `json:"default_branch"`
+	Provider          string  `json:"provider"`
+	Incogni           bool    `json:"incogni"`
+	ModelDefault      *string `json:"model_default"`
+	EffortDefault     *string `json:"effort_default"`
+	// AFK-override spawn defaults (issue #19 / ADR-0021). Nullable: null means
+	// inherit the base default. AFKOptions renders as a JSON object (or null when
+	// unset); a nil map marshals to null (no omitempty), so the SPA always sees
+	// every key.
+	AFKModelDefault      *string           `json:"afk_model_default"`
+	AFKEffortDefault     *string           `json:"afk_effort_default"`
+	AFKOptions           map[string]string `json:"afk_options"`
+	GitAuthorName        *string           `json:"git_author_name"`
+	GitAuthorEmail       *string           `json:"git_author_email"`
+	AFKBranchPattern     string            `json:"afk_branch_pattern"`
+	ManualBranchPrefix   string            `json:"manual_branch_prefix"`
+	AFKAutoEnabled       bool              `json:"afk_auto_enabled"`
+	ConsecutiveFailures  int               `json:"consecutive_failures"`
+	BudgetMinutes        *int              `json:"budget_minutes"`
+	MaxInstancesOverride *int              `json:"max_instances_override"`
+	CloneStatus          string            `json:"clone_status"`
+	CloneError           *string           `json:"clone_error"`
+	CreatedAt            string            `json:"created_at"`
+	LastOpenedAt         *string           `json:"last_opened_at"`
 }
 
 func repoJSON(r store.Repo) repoResponse {
@@ -59,6 +66,9 @@ func repoJSON(r store.Repo) repoResponse {
 		Incogni:              r.Incogni,
 		ModelDefault:         r.ModelDefault,
 		EffortDefault:        r.EffortDefault,
+		AFKModelDefault:      r.AFKModelDefault,
+		AFKEffortDefault:     r.AFKEffortDefault,
+		AFKOptions:           r.AFKOptions,
 		GitAuthorName:        r.GitAuthorName,
 		GitAuthorEmail:       r.GitAuthorEmail,
 		AFKBranchPattern:     r.AFKBranchPattern,
@@ -196,6 +206,12 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			u.ModelDefault, err = patchNullableString(raw, key)
 		case "effort_default":
 			u.EffortDefault, err = patchNullableString(raw, key)
+		case "afk_model_default":
+			u.AFKModelDefault, err = patchNullableString(raw, key)
+		case "afk_effort_default":
+			u.AFKEffortDefault, err = patchNullableString(raw, key)
+		case "afk_options":
+			u.AFKOptions, err = patchOptionsBag(raw, key)
 		case "incogni":
 			u.Incogni, err = patchBool(raw, key)
 		case "git_author_name":
@@ -285,6 +301,20 @@ func patchNullableInt(raw json.RawMessage, field string) (store.Opt[*int], error
 	var v *int
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return store.Opt[*int]{}, fmt.Errorf("field %s must be an integer or null", field)
+	}
+	return store.Set(v), nil
+}
+
+// patchOptionsBag reads the nullable afk_options PATCH field (issue #19): null
+// clears the column back to NULL (inherit the global bag); a JSON object of
+// string values sets the repo's explicit bag (even {} — "explicitly no
+// options"). The bag is filtered + validated against the provider at spawn
+// (mirroring how repo model_default is validated at spawn, not at PATCH), so
+// this only enforces the shape.
+func patchOptionsBag(raw json.RawMessage, field string) (store.Opt[map[string]string], error) {
+	var v map[string]string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return store.Opt[map[string]string]{}, fmt.Errorf("field %s must be an object of string values or null", field)
 	}
 	return store.Set(v), nil
 }

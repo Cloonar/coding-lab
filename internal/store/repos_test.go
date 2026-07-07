@@ -283,6 +283,86 @@ func TestUpdateRepoSettings(t *testing.T) {
 	})
 }
 
+// The AFK-override spawn-default columns (issue #19 / ADR-0021): the two
+// nullable strings and the JSON options bag round-trip through create + update,
+// and a present-but-empty bag stays distinct from NULL.
+func TestRepoAFKSpawnDefaultsRoundTrip(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+
+		// Create with all three AFK columns populated.
+		full := testRepo("afkdefaults", now)
+		full.AFKModelDefault = strPtr("sonnet")
+		full.AFKEffortDefault = strPtr("low")
+		full.AFKOptions = map[string]string{"ultracode": "true"}
+		created, err := s.CreateRepo(ctx, full)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		got, err := s.RepoByID(ctx, full.ID)
+		if err != nil {
+			t.Fatalf("by id: %v", err)
+		}
+		if !reflect.DeepEqual(got, created) {
+			t.Errorf("afk columns round trip mismatch:\n got %+v\nwant %+v", got, created)
+		}
+
+		// A fresh minimal repo has all three NULL.
+		min := testRepo("afkminimal", now)
+		if _, err := s.CreateRepo(ctx, min); err != nil {
+			t.Fatalf("create minimal: %v", err)
+		}
+		gotMin, err := s.RepoByID(ctx, min.ID)
+		if err != nil {
+			t.Fatalf("by id minimal: %v", err)
+		}
+		if gotMin.AFKModelDefault != nil || gotMin.AFKEffortDefault != nil || gotMin.AFKOptions != nil {
+			t.Errorf("minimal repo has non-nil AFK defaults: %+v", gotMin)
+		}
+
+		// Update: set the two strings and replace the bag.
+		updated, err := s.UpdateRepoSettings(ctx, full.ID, RepoSettingsUpdate{
+			AFKModelDefault:  Set(strPtr("fable")),
+			AFKEffortDefault: Set(strPtr("high")),
+			AFKOptions:       Set(map[string]string{"ultracode": "false"}),
+		})
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if updated.AFKModelDefault == nil || *updated.AFKModelDefault != "fable" ||
+			updated.AFKEffortDefault == nil || *updated.AFKEffortDefault != "high" ||
+			updated.AFKOptions["ultracode"] != "false" {
+			t.Errorf("updated AFK defaults = %+v, want fable/high/{ultracode:false}", updated)
+		}
+
+		// A present-but-empty bag persists as an empty (non-nil) map — "explicitly
+		// no options", distinct from NULL/inherit.
+		updated, err = s.UpdateRepoSettings(ctx, full.ID, RepoSettingsUpdate{
+			AFKOptions: Set(map[string]string{}),
+		})
+		if err != nil {
+			t.Fatalf("update empty bag: %v", err)
+		}
+		if updated.AFKOptions == nil || len(updated.AFKOptions) != 0 {
+			t.Errorf("empty bag = %+v, want a non-nil empty map", updated.AFKOptions)
+		}
+
+		// Clear back to NULL.
+		updated, err = s.UpdateRepoSettings(ctx, full.ID, RepoSettingsUpdate{
+			AFKModelDefault:  Set[*string](nil),
+			AFKEffortDefault: Set[*string](nil),
+			AFKOptions:       Set[map[string]string](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		if updated.AFKModelDefault != nil || updated.AFKEffortDefault != nil || updated.AFKOptions != nil {
+			t.Errorf("cleared AFK defaults = %+v, want all nil", updated)
+		}
+	})
+}
+
 func TestUpdateRepoCloneStatusAndTouch(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()

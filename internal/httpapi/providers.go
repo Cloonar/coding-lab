@@ -19,6 +19,10 @@ type providerResponse struct {
 	ID      string            `json:"id"`
 	Models  []provider.Option `json:"models"`
 	Efforts []provider.Option `json:"efforts"`
+	// Options is the provider's declared spawn-options schema (issue #19 /
+	// ADR-0021) — always present (may be []), driving the schema-rendered "AFK
+	// defaults" section in the settings UIs.
+	Options []provider.OptionSpec `json:"options"`
 	// FallbackOpen is the provider's generic web open affordance (URL + human
 	// title, ADR-0017), present only when the provider implements DeepLinker
 	// (has a web surface); absent for link-less providers, whose instance rows
@@ -34,7 +38,10 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 	provs := s.providers.List()
 	items := make([]providerResponse, 0, len(provs))
 	for _, p := range provs {
-		resp := providerResponse{ID: p.ID(), Models: p.Models(), Efforts: p.Efforts()}
+		resp := providerResponse{ID: p.ID(), Models: p.Models(), Efforts: p.Efforts(), Options: p.SpawnOptions()}
+		if resp.Options == nil {
+			resp.Options = []provider.OptionSpec{}
+		}
 		if dl, ok := p.(provider.DeepLinker); ok {
 			fo := dl.FallbackOpen()
 			resp.FallbackOpen = &fo

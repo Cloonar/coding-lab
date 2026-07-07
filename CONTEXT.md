@@ -98,6 +98,14 @@ _Avoid_: PAT, API token (those are the operator's), personal login
 An `AgentProvider` implementation — spawn argv, auth flow, worktree seeding, model/effort catalog, chat surface — plus optional capabilities it may advertise by type assertion (`DeepLinker` for deep-link capture + fallback-open metadata, `ConnectingReporter` for the connecting pulse; ADR-0017). `claude-code` is the only MVP implementation and implements both.
 _Avoid_: backend, engine, vendor
 
+**Spawn options**:
+The provider-owned, provider-declared bag of spawn settings that sits beside the typed model/effort. The provider *declares* its schema (`SpawnOptions() []OptionSpec`), lab *stores, validates, and renders* the bag generically, and the provider *applies* it (never as positional argv). Validated against the resolving repo's provider schema exactly like model/effort — an unknown key or bad value is a 400. claude-code's only entry is the AFK-only `ultracode` boolean, applied by prepending a provider-owned directive to a non-empty initial prompt; a promptless manual spawn is a natural no-op. Future providers (#2 Codex, Gemini) declare their own — the typed core never churns (ADR-0021).
+_Avoid_: flags, provider config, params, feature toggles
+
+**AFK default vs manual pre-fill**:
+Two resolutions of the same model/effort/options knobs. A **manual pre-fill** is *soft* — the value the Start form shows pre-filled, which the operator overrides per spawn (request → repo base → global base). An **AFK default** is *hard* — with no operator, it is literally what runs, resolved by layering an optional AFK-override over the base (repo.afk ?? global.afk ?? repo.base ?? global.base); an empty override inherits the base. The base is the shared `spawn_model_default` / `model_default` etc.; the AFK-override slots and the options bag are additive (ADR-0021).
+_Avoid_: preset, profile, per-run override
+
 **Skills bundle**:
 The vendored, pinned skill set at `assets/skills/`, embedded in the binary and copied into each worktree's `.claude/skills/` at spawn (listed in `.git/info/exclude`, never committable).
 _Avoid_: plugins, user-level skills

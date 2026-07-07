@@ -213,6 +213,7 @@ beforeEach(() => {
       id: 'claude-code',
       models: [],
       efforts: [],
+      options: [],
       fallback_open: {
         url: 'https://claude.ai/code',
         title: "Opens the claude.ai session picker — the exact deep link wasn't captured",
@@ -619,7 +620,7 @@ describe('RunChat', () => {
 
   it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {
     runOnServer = { ...baseRun(), provider: 'codex', deep_link_url: null };
-    providersOnServer = [{ id: 'codex', models: [], efforts: [] }];
+    providersOnServer = [{ id: 'codex', models: [], efforts: [], options: [] }];
     await mountChat();
 
     expect(

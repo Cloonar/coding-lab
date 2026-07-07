@@ -167,7 +167,19 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 		return store.Run{}, launchAtCap, nil
 	}
 
-	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, "", "")
+	kind := store.RunKindAFKManual
+	if auto {
+		kind = store.RunKindAFKAuto
+	}
+	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, kind, "", "")
+	if err != nil {
+		return store.Run{}, launchSpawned, err
+	}
+	// The AFK spawn-options bag (issue #19): resolved from the repo's afk_options
+	// (falling back to the global spawn_options_afk), filtered + validated to the
+	// provider. The afk package stays provider-agnostic — it never inspects the
+	// bag (e.g. ultracode is invisible here); the provider applies it at spawn.
+	options, err := s.instances.ResolveSpawnOptions(ctx, prov, repo, kind)
 	if err != nil {
 		return store.Run{}, launchSpawned, err
 	}
@@ -181,10 +193,6 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 	branch := gitx.RenderBranch(repo.AFKBranchPattern, n)
 	deadline := s.now().Add(s.effectiveBudget(ctx, repo))
 	tokenExpiry := deadline.Add(runTokenSlack)
-	kind := store.RunKindAFKManual
-	if auto {
-		kind = store.RunKindAFKAuto
-	}
 
 	run, err := s.instances.Launch(ctx, instance.LaunchSpec{
 		Repo:           repo,
@@ -196,6 +204,7 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 		WorktreePath:   s.worktreePath(repo.Name, n),
 		Model:          model,
 		Effort:         effort,
+		Options:        options,
 		BudgetDeadline: &deadline,
 		TokenExpiry:    &tokenExpiry,
 		SeedPrompt:     SeedPrompt(n, branch, repo.Incogni),

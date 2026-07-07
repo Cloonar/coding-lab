@@ -105,6 +105,37 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates[key] = v
+		case store.SettingSpawnModelDefaultAFK:
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			// Empty = inherit the base default (issue #19), so unlike the base
+			// key an empty AFK override is explicitly allowed.
+			if v != "" && !s.spawnDefaultAllowed(v, true) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q", v))
+				return
+			}
+			updates[key] = v
+		case store.SettingSpawnEffortDefaultAFK:
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			if v != "" && !s.spawnDefaultAllowed(v, false) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown effort %q", v))
+				return
+			}
+			updates[key] = v
+		case store.SettingSpawnOptionsAFK:
+			v, err := s.parseSpawnOptionsBag(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			updates[key] = v
 		case store.SettingGitAuthorName, store.SettingGitAuthorEmail:
 			v, err := parseSettingString(raw)
 			if err != nil {
@@ -176,4 +207,52 @@ func (s *Server) spawnDefaultAllowed(value string, model bool) bool {
 		}
 	}
 	return false
+}
+
+// parseSpawnOptionsBag validates the global spawn_options_afk value (issue #19 /
+// ADR-0021) and returns the canonical JSON string to store. The value must be a
+// JSON object of string values; each key must be declared by some registered
+// provider and its value legal for that option's type (unknown key / bad value
+// → the returned error becomes a 400, mirroring an unknown model/effort). An
+// empty object is allowed. With no provider registry the bag passes unchecked
+// (spawn re-validates). The error messages are operator-facing.
+func (s *Server) parseSpawnOptionsBag(raw json.RawMessage) (string, error) {
+	var bag map[string]string
+	if err := json.Unmarshal(raw, &bag); err != nil {
+		return "", fmt.Errorf("%s must be a JSON object of string values", store.SettingSpawnOptionsAFK)
+	}
+	if bag == nil {
+		bag = map[string]string{}
+	}
+	if s.providers != nil {
+		for key, val := range bag {
+			spec, ok := s.findSpawnOption(key)
+			if !ok {
+				return "", fmt.Errorf("unknown spawn option %q", key)
+			}
+			if !provider.ValidOptionValue(spec, val) {
+				return "", fmt.Errorf("invalid value %q for spawn option %q", val, key)
+			}
+		}
+	}
+	// Canonicalize (strip whitespace, drop non-object noise) before storing so
+	// the GET value is a clean bag.
+	out, err := json.Marshal(bag)
+	if err != nil {
+		return "", fmt.Errorf("%s: %v", store.SettingSpawnOptionsAFK, err)
+	}
+	return string(out), nil
+}
+
+// findSpawnOption returns the OptionSpec declaring key across all registered
+// providers (a global bag may span providers once more than one exists), or
+// false. The first provider that declares the key wins — providers that share a
+// key must agree on its type.
+func (s *Server) findSpawnOption(key string) (provider.OptionSpec, bool) {
+	for _, p := range s.providers.List() {
+		if spec, ok := provider.FindSpawnOption(p.SpawnOptions(), key); ok {
+			return spec, true
+		}
+	}
+	return provider.OptionSpec{}, false
 }

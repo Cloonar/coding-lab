@@ -23,6 +23,9 @@ type Fake struct {
 	id      string
 	models  []provider.Option
 	efforts []provider.Option
+	options []provider.OptionSpec
+
+	spawnSpecs []provider.SpawnSpec // every SpawnArgv spec, in order (threading assertions)
 
 	loggedIn   bool
 	email      string
@@ -92,6 +95,9 @@ func New() *Fake {
 			{Value: "low", Label: "low"}, {Value: "medium", Label: "medium"},
 			{Value: "high", Label: "high"}, {Value: "xhigh", Label: "xhigh"}, {Value: "max", Label: "max"},
 		},
+		options: []provider.OptionSpec{
+			{Key: "ultracode", Label: "Ultracode (multi-agent workflows)", Type: provider.OptionTypeBool, Default: "false"},
+		},
 		loggedIn:     true,
 		email:        "op@example.invalid",
 		method:       "claude.ai",
@@ -108,21 +114,44 @@ func (f *Fake) ID() string { return f.id }
 func (f *Fake) Models() []provider.Option  { return f.models }
 func (f *Fake) Efforts() []provider.Option { return f.efforts }
 
+// SpawnOptions returns the declared spawn-options schema (issue #19); the New
+// fake declares claude-code's ultracode bool so resolver/UI tests have a
+// schema to validate/render against.
+func (f *Fake) SpawnOptions() []provider.OptionSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]provider.OptionSpec(nil), f.options...)
+}
+
 // SpawnArgv mirrors the pinned claude argv shape so tests can assert the
 // recorded tmux argv, including the seed prompt carried as the trailing
-// positional (non-empty initialPrompt) — manual spawns pass "" and get none.
-func (f *Fake) SpawnArgv(session, model, effort, initialPrompt string) []string {
-	argv := []string{"claude", "--remote-control", session, "--permission-mode", "auto"}
-	if model != "" {
-		argv = append(argv, "--model", model)
+// positional (non-empty InitialPrompt) — manual spawns pass "" and get none.
+// It records the whole spec so tests can assert the resolved Options bag was
+// threaded through (issue #19); it does NOT apply ultracode itself — that is a
+// claude-code coupling exercised by the compat snapshot, not the fake.
+func (f *Fake) SpawnArgv(spec provider.SpawnSpec) []string {
+	f.mu.Lock()
+	f.spawnSpecs = append(f.spawnSpecs, spec)
+	f.mu.Unlock()
+	argv := []string{"claude", "--remote-control", spec.SessionName, "--permission-mode", "auto"}
+	if spec.Model != "" {
+		argv = append(argv, "--model", spec.Model)
 	}
-	if effort != "" {
-		argv = append(argv, "--effort", effort)
+	if spec.Effort != "" {
+		argv = append(argv, "--effort", spec.Effort)
 	}
-	if initialPrompt != "" {
-		argv = append(argv, initialPrompt)
+	if spec.InitialPrompt != "" {
+		argv = append(argv, spec.InitialPrompt)
 	}
 	return argv
+}
+
+// SpawnSpecs returns the SpawnSpec of each SpawnArgv call, in order — the
+// options-threading assertion (resolved Options reached the provider).
+func (f *Fake) SpawnSpecs() []provider.SpawnSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]provider.SpawnSpec(nil), f.spawnSpecs...)
 }
 
 func (f *Fake) AuthStatus(_ context.Context, force bool) (provider.AuthStatus, error) {

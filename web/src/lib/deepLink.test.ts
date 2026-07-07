@@ -96,8 +96,8 @@ describe('openState', () => {
 
 describe('providerOpen', () => {
   const providers: Provider[] = [
-    { id: 'claude-code', models: [], efforts: [], fallback_open: claudeFallback },
-    { id: 'codex', models: [], efforts: [] },
+    { id: 'claude-code', models: [], efforts: [], options: [], fallback_open: claudeFallback },
+    { id: 'codex', models: [], efforts: [], options: [] },
   ];
 
   it('returns a provider fallback-open by id', () => {

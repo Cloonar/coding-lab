@@ -21,17 +21,21 @@ import {
   errorMessage,
   getRepo,
   listCredentials,
+  listProviders,
   updateRepo,
   type CredentialListItem,
+  type Provider,
   type Repo,
   type RepoPatch,
   type TrackerBinding,
 } from '../api';
+import CatalogSelect from '../components/CatalogSelect';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { remoteHost } from '../lib/repoName';
+import { providerFor } from '../lib/spawn';
 
 export default function RepoSettings() {
   return (
@@ -46,6 +50,7 @@ function RepoSettingsView() {
   const events = useEvents();
   const [repo, { refetch }] = createResource(() => getRepo(params.id));
   const [credentials] = createResource(() => listCredentials());
+  const [providers] = createResource(() => listProviders());
   onCleanup(
     events.subscribe('repo.changed', (event) => {
       if (event.repoID === params.id) void refetch();
@@ -79,7 +84,12 @@ function RepoSettingsView() {
                 </Show>
               </div>
               <p class="muted card-sub mono">{remoteHost(r().remote_url)}</p>
-              <SettingsForm repo={r} credentials={credentials() ?? []} onSaved={refetch} />
+              <SettingsForm
+                repo={r}
+                credentials={credentials() ?? []}
+                provider={providerFor(providers() ?? [], r().provider)}
+                onSaved={refetch}
+              />
               <DangerZone repo={r} />
             </>
           )}
@@ -103,9 +113,28 @@ function normInt(value: string): number | null | undefined {
   return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 
+/** Maps a repo afk_options bag (null = inherit) to per-key booleans. */
+function toBoolMap(options: Record<string, string> | null): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(options ?? {})) out[key] = value === 'true';
+  return out;
+}
+
+/** Key-order-independent equality probe for two boolean option maps. */
+function optionsKey(options: Record<string, boolean>): string {
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.keys(options)
+        .sort()
+        .map((key) => [key, options[key]]),
+    ),
+  );
+}
+
 function SettingsForm(props: {
   repo: Accessor<Repo>;
   credentials: CredentialListItem[];
+  provider: Provider | null;
   onSaved: () => void;
 }) {
   // Drafts seed from a repo SNAPSHOT (`seed`). buildPatch diffs each draft
@@ -126,6 +155,15 @@ function SettingsForm(props: {
   const [manualPrefix, setManualPrefix] = createSignal(initial.manual_branch_prefix);
   const [model, setModel] = createSignal(initial.model_default ?? '');
   const [effort, setEffort] = createSignal(initial.effort_default ?? '');
+  const [afkModel, setAfkModel] = createSignal(initial.afk_model_default ?? '');
+  const [afkEffort, setAfkEffort] = createSignal(initial.afk_effort_default ?? '');
+  // Per-key checkbox state for the provider's bool options (null bag = inherit,
+  // seeded to all-unchecked). Once any checkbox differs from the seed, the full
+  // declared bag is PATCHed as the explicit repo override.
+  const [afkOptions, setAfkOptions] = createSignal<Record<string, boolean>>(
+    toBoolMap(initial.afk_options),
+  );
+  const boolOptions = () => (props.provider?.options ?? []).filter((o) => o.type === 'bool');
   const [afkAuto, setAfkAuto] = createSignal(initial.afk_auto_enabled);
   const [budget, setBudget] = createSignal(
     initial.budget_minutes === null ? '' : String(initial.budget_minutes),
@@ -168,6 +206,18 @@ function SettingsForm(props: {
         resync(manualPrefix, setManualPrefix, (r) => r.manual_branch_prefix, fresh);
         resync(model, setModel, (r) => r.model_default ?? '', fresh);
         resync(effort, setEffort, (r) => r.effort_default ?? '', fresh);
+        resync(afkModel, setAfkModel, (r) => r.afk_model_default ?? '', fresh);
+        resync(afkEffort, setAfkEffort, (r) => r.afk_effort_default ?? '', fresh);
+        // afk_options is an object, so resync it by value: an untouched draft
+        // (still equal to the seed, or already caught up with fresh) follows
+        // the server; a dirty draft keeps the operator's in-flight toggles.
+        const draftOpts = afkOptions();
+        if (
+          optionsKey(draftOpts) === optionsKey(toBoolMap(seed.afk_options)) ||
+          optionsKey(draftOpts) === optionsKey(toBoolMap(fresh.afk_options))
+        ) {
+          setAfkOptions(toBoolMap(fresh.afk_options));
+        }
         resync(afkAuto, setAfkAuto, (r) => r.afk_auto_enabled, fresh);
         resync(
           budget,
@@ -220,6 +270,24 @@ function SettingsForm(props: {
 
     if (normText(model()) !== current.model_default) patch.model_default = normText(model());
     if (normText(effort()) !== current.effort_default) patch.effort_default = normText(effort());
+
+    if (normText(afkModel()) !== current.afk_model_default) {
+      patch.afk_model_default = normText(afkModel());
+    }
+    if (normText(afkEffort()) !== current.afk_effort_default) {
+      patch.afk_effort_default = normText(afkEffort());
+    }
+    // Send the full declared bag once any bool option differs from its seed.
+    const declared = boolOptions();
+    if (declared.length > 0) {
+      const seeded = toBoolMap(current.afk_options);
+      const checked = (key: string) => afkOptions()[key] ?? false;
+      if (declared.some((o) => checked(o.key) !== (seeded[o.key] ?? false))) {
+        patch.afk_options = Object.fromEntries(
+          declared.map((o) => [o.key, checked(o.key) ? 'true' : 'false']),
+        );
+      }
+    }
 
     if (afkAuto() !== current.afk_auto_enabled) patch.afk_auto_enabled = afkAuto();
     const budgetMinutes = normInt(budget());
@@ -438,6 +506,48 @@ function SettingsForm(props: {
             onInput={(e) => setEffort(e.currentTarget.value)}
           />
         </label>
+      </section>
+
+      <section class="card">
+        <h2>AFK defaults</h2>
+        <small class="hint hint-block">
+          Overrides for unattended AFK runs on this repo. Blank / unchecked inherits the global AFK
+          default.
+        </small>
+        <CatalogSelect
+          label="Model"
+          name="afk_model_default"
+          value={afkModel()}
+          options={props.provider?.models ?? []}
+          inheritLabel="Inherit global AFK default"
+          onChange={setAfkModel}
+        />
+        <CatalogSelect
+          label="Effort"
+          name="afk_effort_default"
+          value={afkEffort()}
+          options={props.provider?.efforts ?? []}
+          inheritLabel="Inherit global AFK default"
+          onChange={setAfkEffort}
+        />
+        <For each={boolOptions()}>
+          {(option) => (
+            <label class="check">
+              <input
+                type="checkbox"
+                name={`afk_options.${option.key}`}
+                checked={afkOptions()[option.key] ?? false}
+                onChange={(e) =>
+                  setAfkOptions({ ...afkOptions(), [option.key]: e.currentTarget.checked })
+                }
+              />
+              <span>{option.label}</span>
+            </label>
+          )}
+        </For>
+        <Show when={boolOptions().length > 0}>
+          <small class="hint hint-block">A repo option bag overrides the global AFK options.</small>
+        </Show>
       </section>
 
       <section class="card">

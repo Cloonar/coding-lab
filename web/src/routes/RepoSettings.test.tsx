@@ -10,11 +10,33 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Repo } from '../api';
+import type { Provider, Repo } from '../api';
 import App from '../App';
 import RepoSettings from './RepoSettings';
 
 const REPO_ID = 'repo_1';
+
+/** claude-code catalog with the ultracode bool option (issue #19). */
+function baseProviders(): Provider[] {
+  return [
+    {
+      id: 'claude-code',
+      models: [
+        { value: 'opus[1m]', label: 'Opus (1M)' },
+        { value: 'sonnet', label: 'Sonnet' },
+      ],
+      efforts: [{ value: 'high', label: 'high' }],
+      options: [
+        {
+          key: 'ultracode',
+          label: 'Ultracode (multi-agent workflows)',
+          type: 'bool',
+          default: 'false',
+        },
+      ],
+    },
+  ];
+}
 
 /** Stand-in for EventSource: lets tests push SSE events into the app. */
 class FakeEventSource {
@@ -58,6 +80,9 @@ function baseRepo(): Repo {
     incogni: false,
     model_default: null,
     effort_default: null,
+    afk_model_default: null,
+    afk_effort_default: null,
+    afk_options: null,
     git_author_name: null,
     git_author_email: null,
     afk_branch_pattern: 'afk/<N>',
@@ -84,6 +109,7 @@ function jsonResponse(status: number, body: unknown) {
 }
 
 let repoOnServer: Repo;
+let providersOnServer: Provider[];
 let patchBodies: Record<string, unknown>[];
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
@@ -102,6 +128,9 @@ function stubApi(): void {
       }
       if (url === '/api/v1/credentials' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { credentials: [] }));
+      }
+      if (url === '/api/v1/providers' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { providers: providersOnServer }));
       }
       if (url === `/api/v1/repos/${REPO_ID}` && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { ...repoOnServer }));
@@ -161,6 +190,16 @@ function typeInto(el: HTMLInputElement, value: string): void {
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+function chooseOption(el: HTMLSelectElement, value: string): void {
+  el.value = value;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function toggleCheckbox(el: HTMLInputElement, checked: boolean): void {
+  el.checked = checked;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 function submitForm(): void {
   const form = container.querySelector('form');
   if (!form) throw new Error('missing settings form');
@@ -176,6 +215,7 @@ function emitRepoChanged(): void {
 
 beforeEach(() => {
   repoOnServer = baseRepo();
+  providersOnServer = baseProviders();
   patchBodies = [];
   stubApi();
 });
@@ -248,5 +288,60 @@ describe('RepoSettings stale-draft handling', () => {
     // clobbered back to the stale draft value.
     expect(patchBodies).toEqual([{ default_branch: 'trunk' }]);
     expect(repoOnServer.name).toBe('renamed-on-server');
+  });
+});
+
+describe('RepoSettings AFK defaults', () => {
+  it('renders the inherit option and the schema-driven ultracode checkbox', async () => {
+    await mountSettings();
+    const model = await waitFor(
+      () => container.querySelector<HTMLSelectElement>('select[name="afk_model_default"]'),
+      'AFK defaults section',
+    );
+
+    // The inherit entry sits first with an empty value, and unset seeds to it.
+    expect(model.options[0]?.value).toBe('');
+    expect(model.options[0]?.textContent).toBe('Inherit global AFK default');
+    expect(model.value).toBe('');
+
+    // The ultracode bool option renders unchecked (repo afk_options is null).
+    const ultracode = input('afk_options.ultracode');
+    expect(ultracode.type).toBe('checkbox');
+    expect(ultracode.checked).toBe(false);
+  });
+
+  it('toggling ultracode PATCHes the full declared bag', async () => {
+    await mountSettings();
+    const ultracode = await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="afk_options.ultracode"]'),
+      'ultracode checkbox',
+    );
+
+    toggleCheckbox(ultracode, true);
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ afk_options: { ultracode: 'true' } }]);
+    expect(repoOnServer.afk_options).toEqual({ ultracode: 'true' });
+
+    // The seed advanced with the save: a second submit has nothing to send.
+    submitForm();
+    await settle();
+    expect(patchBodies).toHaveLength(1);
+  });
+
+  it('selecting an AFK model PATCHes afk_model_default only', async () => {
+    await mountSettings();
+    const model = await waitFor(
+      () => container.querySelector<HTMLSelectElement>('select[name="afk_model_default"]'),
+      'AFK model select',
+    );
+
+    chooseOption(model, 'sonnet');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ afk_model_default: 'sonnet' }]);
+    expect(repoOnServer.afk_model_default).toBe('sonnet');
   });
 });
