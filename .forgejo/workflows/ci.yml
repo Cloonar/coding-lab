@@ -1,8 +1,9 @@
 # CI = `nix flake check` (design §10): local and CI run the same gate.
-# Runner prerequisites (nix with flakes, egress/mirrors for proxy.golang.org,
-# registry.npmjs.org, cache.nixos.org and the flake inputs) are documented in
-# docs/ops.md. The `nix` runs-on label is a placeholder — adjust it to the
-# labels your Forgejo instance's runners actually advertise.
+# The stock `ubuntu-latest` runner has no nix, so the job installs it first
+# (Determinate nix-installer, daemonless `--init none`) and runs the check in
+# the same step. Runner prerequisites — outbound egress for the installer,
+# proxy.golang.org, registry.npmjs.org, cache.nixos.org and the flake inputs —
+# are documented in docs/ops.md.
 name: ci
 
 on:
@@ -12,19 +13,24 @@ on:
 
 jobs:
   flake-check:
-    runs-on: nix
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: nix flake check
-        run: nix flake check -L
+      - name: install nix + flake check
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+            | sh -s -- install linux --no-confirm --init none
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+          nix flake check -L
 
   # M2 stub — postgres-backed store suite. Uncomment when M2 lands: the
   # sqlite store suite already runs inside `nix flake check`; this job adds
   # the same suite against a real postgres via LAB_TEST_POSTGRES_DSN
-  # (design §3a migration parity / §11 store bar).
+  # (design §3a migration parity / §11 store bar). Needs the same in-job nix
+  # install as flake-check, plus runner support for service containers.
   #
   # store-postgres:
-  #   runs-on: nix
+  #   runs-on: ubuntu-latest
   #   services:
   #     postgres:
   #       image: postgres:17
@@ -37,4 +43,8 @@ jobs:
   #     - name: store suite against postgres
   #       env:
   #         LAB_TEST_POSTGRES_DSN: postgres://lab:lab@postgres:5432/lab_test?sslmode=disable
-  #       run: nix develop --command go test ./internal/store/...
+  #       run: |
+  #         curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+  #           | sh -s -- install linux --no-confirm --init none
+  #         . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+  #         nix develop --command go test ./internal/store/...

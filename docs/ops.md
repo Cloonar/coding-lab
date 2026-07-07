@@ -217,14 +217,13 @@ Restore procedure:
 
 ## CI runner prerequisites
 
-The Forgejo Actions workflow ([`.forgejo/workflows/ci.yml`](../.forgejo/workflows/ci.yml)) runs one gate on PRs and main: `nix flake check` — identical to the local command, so local green == CI green. Runners need:
+The Forgejo Actions workflow ([`.forgejo/workflows/ci.yml`](../.forgejo/workflows/ci.yml)) runs one gate on PRs and main: `nix flake check` — identical to the local command, so local green == CI green. It targets the stock `ubuntu-latest` runner, which ships no nix, so the job installs it first (the Determinate nix-installer, daemonless `--init none`) and runs the check in the same step. Runners need:
 
-- nix with flakes enabled (`experimental-features = nix-command flakes`).
-- Egress (or mirrors/substituters) for `proxy.golang.org`, `registry.npmjs.org`, `cache.nixos.org`, and the flake inputs (github.com for nixpkgs).
-- Enough disk for the nix store: the check builds the Go toolchain, node_modules (via `importNpmLock`), and runs the Go suite against real git/tmux/prlimit inside the sandbox.
-- The workflow's `runs-on: nix` label is a **placeholder** — adjust it to the labels your Forgejo instance's runners actually advertise.
+- Outbound egress (or in-instance mirrors/substituters) for the installer (`install.determinate.systems`), `cache.nixos.org` (binary substitutes for the Go toolchain and nixpkgs, so they are not rebuilt from source), `proxy.golang.org`, `registry.npmjs.org`, and the flake inputs (github.com for nixpkgs).
+- Steps run as root, or with `sudo`, so the installer can create `/nix` — the default for the stock Docker-backed runner.
+- Enough disk for the nix store: the check builds the `lab`/`web` outputs and node_modules (via `importNpmLock`), runs the Go suite against real git/tmux/prlimit inside the sandbox, and evaluates the nixos module.
 
-The store suite additionally runs against a real Postgres wherever `LAB_TEST_POSTGRES_DSN` is set; `ci.yml` carries a ready-made `store-postgres` job as a commented template (service container + DSN export) — uncomment it once your runners support service containers.
+The store suite additionally runs against a real Postgres wherever `LAB_TEST_POSTGRES_DSN` is set; `ci.yml` carries a ready-made `store-postgres` job as a commented template (service container + DSN export, plus the same in-job nix install) — uncomment it once your runners support service containers.
 
 ## Observability
 
