@@ -204,7 +204,7 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 
 	httpClient := c.HTTP
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: httpTimeout}
+		httpClient = &http.Client{Timeout: httpTimeout, CheckRedirect: noRedirect}
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -216,6 +216,13 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)
 	}
+	// The agent API never redirects. A 3xx means the request hit something else
+	// in front of lab — typically an SSO/auth proxy that bounces unauthenticated
+	// machine traffic to a login page. Surface the redirect target instead of
+	// following it and choking on HTML (issue #30).
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return c.redirectError(resp)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var envelope struct {
 			Error string `json:"error"`
@@ -223,7 +230,17 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 		if json.Unmarshal(data, &envelope) == nil && envelope.Error != "" {
 			return fmt.Errorf("%s", envelope.Error)
 		}
+		if isHTML(resp, data) {
+			return c.proxyHintError(resp.StatusCode)
+		}
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	// A 2xx whose body is HTML — a proxy serving its login page inline with a
+	// 200 rather than a redirect — is never a real agent-API response. Reject it
+	// for every command, including mutations (out == nil) that would otherwise
+	// return nil here and report a lost write as success (issue #30).
+	if isHTML(resp, data) {
+		return c.proxyHintError(resp.StatusCode)
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -231,4 +248,36 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 		}
 	}
 	return nil
+}
+
+// noRedirect stops the client at the first redirect so do can report it,
+// rather than following it out to a login page and decoding HTML as JSON.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// redirectError describes a 3xx from the agent API: the status, the redirect
+// target, and the likely cause (LAB_URL aimed at an auth proxy).
+func (c *Client) redirectError(resp *http.Response) error {
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		loc = "(no Location header)"
+	}
+	return fmt.Errorf("agent API returned HTTP %d redirect to %s; LAB_URL (%s) may be pointed at an auth proxy instead of the lab server",
+		resp.StatusCode, loc, strings.TrimRight(c.BaseURL, "/"))
+}
+
+// proxyHintError describes an HTML response where JSON was expected — the
+// tell-tale of an SSO/auth proxy answering in lab's place.
+func (c *Client) proxyHintError(status int) error {
+	return fmt.Errorf("agent API returned an HTML page (HTTP %d), not JSON; LAB_URL (%s) may be pointed at an auth proxy instead of the lab server",
+		status, strings.TrimRight(c.BaseURL, "/"))
+}
+
+// isHTML reports whether a response body is an HTML document rather than the
+// JSON envelope — by Content-Type or a leading '<' once whitespace is trimmed.
+func isHTML(resp *http.Response, data []byte) bool {
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		return true
+	}
+	trimmed := bytes.TrimSpace(data)
+	return len(trimmed) > 0 && trimmed[0] == '<'
 }

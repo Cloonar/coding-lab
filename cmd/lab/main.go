@@ -64,6 +64,8 @@ Flags (env overrides in parentheses; flag > env > default):
   -proxy-auth-header string  header carrying the proxy-authenticated username (default "Remote-User")
   -trusted-proxies string  comma-separated CIDRs of trusted reverse proxies
   -base-url string         external base URL, e.g. https://lab.example.com (LAB_BASE_URL)
+  -agent-url string        session-facing base URL handed to labctl as LAB_URL;
+                           defaults to --base-url, else http://127.0.0.1:<port> (LAB_AGENT_URL)
 `
 
 func main() {
@@ -407,9 +409,15 @@ func loadOrGenerateMasterKey(path string, logger *slog.Logger) ([]byte, error) {
 	return vault.Load(path)
 }
 
-// labURL is the LAB_URL handed to spawned sessions: the external base URL when
-// set, else http://127.0.0.1:<listen-port> (labctl runs on the same host).
+// labURL is the LAB_URL handed to spawned sessions. Precedence: the dedicated
+// agent URL when set, else the external base URL, else http://127.0.0.1:<port>
+// (labctl runs on the same host). The agent URL wins over the base URL so a
+// deployment behind an SSO/auth proxy can keep machine traffic on loopback
+// while the base URL still names the external origin (issue #30).
 func labURL(cfg config.Config) string {
+	if cfg.AgentURL != "" {
+		return cfg.AgentURL
+	}
 	if cfg.BaseURL != "" {
 		return cfg.BaseURL
 	}

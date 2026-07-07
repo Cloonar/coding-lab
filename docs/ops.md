@@ -17,6 +17,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `stateDir` | `/var/lib/lab` | State root (layout below). Managed via systemd `StateDirectory` when left at the default; otherwise the operator provides the directory (lab creates missing children itself, 0700). |
 | `listenAddr` | `":8080"` | Passed as `--addr`. |
 | `baseUrl` | `null` | Passed as `--base-url`. Drives Secure-cookie detection and the CSRF Origin check — set it whenever lab sits behind TLS. |
+| `agentUrl` | `"http://127.0.0.1:<port>"` | Passed as `--agent-url`. Session-facing base URL handed to `labctl` as `LAB_URL`. Defaults to a loopback URL derived from `listenAddr` so agent traffic reaches lab directly and never hairpins out through `baseUrl` and any SSO/auth proxy in front of it. Override only when sessions run off-host; set to `null` to fall back to lab's own precedence (baseUrl, else loopback). |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps lab's derived sqlite default **and** lets a `LAB_DB` entry in `environmentFile` take effect (precedence is flag > env > default — a `--db` flag would shadow `LAB_DB`). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
@@ -95,6 +96,7 @@ Sharp edges (all enforced server-side):
 
 - The proxy header is trusted **only** when the TCP peer (never X-Forwarded-For) is inside `--trusted-proxies` **and** the header value exactly equals the admin username; on mismatch lab falls through to its own auth and logs once per distinct value.
 - Set `--base-url` (`services.lab.baseUrl`) to the public https URL. It drives the CSRF Origin check and Secure cookies. Cookies are Secure when the request came over TLS, or `--base-url` is https, or `X-Forwarded-Proto: https` arrives from a trusted proxy — if none of these can ever hold, lab logs a prominent warning at startup.
+- **Do not route agent traffic through the proxy.** `labctl` inside a session authenticates to `/agent/v1` with a run token only — no SSO session, no cookies. If its `LAB_URL` pointed at the external origin, every call would hairpin out to the proxy, get 302'd to the login portal, and fail. The NixOS module defaults `services.lab.agentUrl` (`--agent-url`) to `http://127.0.0.1:<port>`, so `LAB_URL` stays on loopback and bypasses the proxy entirely — no operator action needed. Only override it when sessions run off-host (then expose `/agent/v1` to those hosts by network reach, not by widening the public vhost). If you ever see `labctl` fail with an HTML/redirect error, `LAB_URL` is aimed at the proxy — check `agentUrl`.
 - Keep `proxy_buffering off` for `/api/v1/events` or the SSE stream stalls.
 
 ### Bare metal
@@ -149,7 +151,8 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--proxy-auth` | — | off | Accept the proxy auth header from trusted proxies. |
 | `--proxy-auth-header` | — | `Remote-User` | Header carrying the proxy-authenticated username. |
 | `--trusted-proxies` | — | (empty) | Comma-separated CIDRs of trusted reverse proxies (also gates `X-Forwarded-Proto` / `X-Forwarded-For` trust). |
-| `--base-url` | `LAB_BASE_URL` | (empty) | Absolute http(s) external URL. Drives Secure cookies, the CSRF Origin check, and the `LAB_URL` handed to sessions (falls back to `http://127.0.0.1:<port>`). |
+| `--base-url` | `LAB_BASE_URL` | (empty) | Absolute http(s) external URL. Drives Secure cookies and the CSRF Origin check. Also seeds the `LAB_URL` handed to sessions **unless** `--agent-url` is set. |
+| `--agent-url` | `LAB_AGENT_URL` | (empty) | Absolute http(s) session-facing URL handed to `labctl` as `LAB_URL`. Precedence: `--agent-url` → `--base-url` → `http://127.0.0.1:<port>`. Set it (or the NixOS `agentUrl` default) to a loopback URL so agent traffic bypasses any front proxy. |
 
 Runtime-mutable knobs live in the `settings` table (Settings UI / `PATCH /api/v1/settings`), not flags:
 

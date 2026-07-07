@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -670,5 +671,72 @@ func TestAPIErrorsExitOne(t *testing.T) {
 	}
 	if stderr == "" {
 		t.Error("stderr empty, want a transport error message")
+	}
+}
+
+// TestRedirectSurfacesActionableError checks that labctl does NOT follow a 3xx
+// from the agent API — the signature of an SSO/auth proxy bouncing machine
+// traffic to a login page — and instead reports the redirect target and the
+// "may be pointed at an auth proxy" hint, rather than choking on the login
+// HTML with a JSON-decode error (issue #30).
+func TestRedirectSurfacesActionableError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://sso.example.com/login?rd="+r.URL.Path, http.StatusFound)
+	}))
+	defer ts.Close()
+
+	env := map[string]string{"LAB_URL": ts.URL, "LAB_TOKEN": "lab_run_x"}
+	code, stdout, stderr := run(t, []string{"issue", "list"}, env)
+	if code != 1 || stdout != "" {
+		t.Fatalf("exit = %d, stdout %q, want 1", code, stdout)
+	}
+	for _, want := range []string{"302", "sso.example.com/login", "auth proxy"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+	}
+	if strings.Contains(stderr, "invalid character") || strings.Contains(stderr, "decoding response") {
+		t.Errorf("stderr = %q, still a JSON-decode error", stderr)
+	}
+}
+
+// TestHTMLBodySurfacesProxyHint checks the redirect-less variants: a proxy that
+// answers with its login/error page as text/html at various statuses. The
+// decoder would fail with "invalid character '<'" (or, worse, a mutating
+// command with no decode step would silently exit 0); labctl instead names the
+// HTML/auth-proxy cause and fails for every command shape (issue #30).
+func TestHTMLBodySurfacesProxyHint(t *testing.T) {
+	const htmlBody = "<!DOCTYPE html><html><body>Please sign in</body></html>"
+	tests := []struct {
+		name   string
+		status int
+		args   []string // a read command (out != nil) vs a mutation (out == nil)
+	}{
+		{"200 read", http.StatusOK, []string{"issue", "list"}},
+		{"200 mutation", http.StatusOK, []string{"issue", "close", "1"}},
+		{"401 read", http.StatusUnauthorized, []string{"issue", "list"}},
+		{"502 mutation", http.StatusBadGateway, []string{"issue", "close", "1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, htmlBody)
+			}))
+			defer ts.Close()
+
+			env := map[string]string{"LAB_URL": ts.URL, "LAB_TOKEN": "lab_run_x"}
+			code, stdout, stderr := run(t, tt.args, env)
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1 (stdout %q, stderr %q)", code, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "HTML") || !strings.Contains(stderr, "auth proxy") {
+				t.Errorf("stderr = %q, want the HTML/auth-proxy hint", stderr)
+			}
+			if strings.Contains(stderr, "invalid character") || strings.Contains(stderr, "decoding response") {
+				t.Errorf("stderr = %q, still a JSON-decode error", stderr)
+			}
+		})
 	}
 }
