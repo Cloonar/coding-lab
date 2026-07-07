@@ -11,6 +11,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -20,6 +21,44 @@ import (
 type Option struct {
 	Value string `json:"value"`
 	Label string `json:"label"`
+}
+
+// OptionSpec declares one provider-owned spawn option (issue #19 / ADR-0021):
+// the generic, extensible seam beside the typed model/effort. The provider
+// DECLARES its options (this schema); lab STORES/VALIDATES/RENDERS the bag
+// generically from it; the provider APPLIES the resolved values in SpawnArgv.
+// Type is "bool" for the MVP (enum/string reserved). Default is the value used
+// when the operator has set nothing (e.g. "false"). Pinned API shape.
+type OptionSpec struct {
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	Type    string `json:"type"`    // "bool" (enum/string reserved)
+	Default string `json:"default"` // e.g. "false"
+}
+
+// OptionTypeBool is the only spawn-option type the MVP supports; its bag value
+// is the string "true" or "false" (enum/string types are reserved).
+const OptionTypeBool = "bool"
+
+// SpawnSpec is the full input to AgentProvider.SpawnArgv (issue #19 / ADR-0021).
+// Passing a struct — not positional args — means a new provider spawn option
+// (Options) never churns the interface signature. model/effort stay typed and
+// first-class; Options is the generic bag the provider applies itself.
+type SpawnSpec struct {
+	SessionName string
+	Model       string // "" omits the --model flag
+	Effort      string // "" omits the --effort flag
+	// Options is the resolved provider-owned spawn-options bag (issue #19),
+	// already filtered + validated to this provider's declared schema by the
+	// caller. The provider applies it however it sees fit (claude-code prepends
+	// an ultracode directive to a non-empty InitialPrompt). Empty/nil → no-op.
+	Options map[string]string
+	// InitialPrompt is the AFK seed prompt, carried as the agent's trailing
+	// positional argument (the pinned v0 mechanism, present before the process
+	// so it never races the cold-start TUI). Manual spawns pass "" and get no
+	// trailing argument — which also makes every prompt-scoped option (ultracode)
+	// a natural no-op for manual runs.
+	InitialPrompt string
 }
 
 // AuthStatus is the machine-level login state of a provider (pinned API:
@@ -140,13 +179,18 @@ type AgentProvider interface {
 	// Models and Efforts are the provider-owned catalogs, in dropdown order.
 	Models() []Option
 	Efforts() []Option
-	// SpawnArgv builds the full command an instance session runs. Empty
-	// model/effort omit the respective flag. A non-empty initialPrompt is
-	// carried as the agent's trailing positional argument (the AFK seed
-	// prompt) — the pinned v0 mechanism, so the prompt exists before the
-	// process and is never raced by a post-spawn keystroke injection; manual
-	// spawns pass "" and get no trailing argument.
-	SpawnArgv(sessionName, model, effort, initialPrompt string) []string
+	// SpawnOptions is the provider-owned catalog of generic spawn options
+	// (issue #19 / ADR-0021) — the declared schema lab renders and validates
+	// the options bag against. Empty when the provider declares none.
+	SpawnOptions() []OptionSpec
+	// SpawnArgv builds the full command an instance session runs from a
+	// SpawnSpec. Empty model/effort omit the respective flag. A non-empty
+	// InitialPrompt is carried as the agent's trailing positional argument (the
+	// AFK seed prompt) — the pinned v0 mechanism, so the prompt exists before
+	// the process and is never raced by a post-spawn keystroke injection; manual
+	// spawns pass "" and get no trailing argument. The provider applies
+	// spec.Options itself (a provider-owned mechanism, never a lab concern).
+	SpawnArgv(spec SpawnSpec) []string
 	// AuthStatus reports the machine-level login state. Results are cached
 	// briefly inside the provider; force bypasses the cache — spawn
 	// decisions MUST force (never trust the cache before a spawn). An error
@@ -300,4 +344,60 @@ func HasOption(opts []Option, value string) bool {
 		}
 	}
 	return false
+}
+
+// FindSpawnOption returns the OptionSpec declaring key, or false — the lookup
+// behind spawn-options validation/filtering.
+func FindSpawnOption(specs []OptionSpec, key string) (OptionSpec, bool) {
+	for _, s := range specs {
+		if s.Key == key {
+			return s, true
+		}
+	}
+	return OptionSpec{}, false
+}
+
+// ValidOptionValue reports whether v is a legal value for spec's type. Bool
+// options accept exactly "true"/"false" (the reserved enum/string types have
+// no MVP validation and pass through).
+func ValidOptionValue(spec OptionSpec, v string) bool {
+	switch spec.Type {
+	case OptionTypeBool:
+		return v == "true" || v == "false"
+	default:
+		return true
+	}
+}
+
+// ValidateSpawnOptions checks a bag against a provider's declared schema
+// (issue #19): every key must be declared and its value legal for the option's
+// type. It returns a descriptive error (an unknown key or a bad value — the
+// 400 discipline that mirrors an unknown model/effort) or nil. A nil/empty bag
+// is always valid.
+func ValidateSpawnOptions(specs []OptionSpec, bag map[string]string) error {
+	for key, val := range bag {
+		spec, ok := FindSpawnOption(specs, key)
+		if !ok {
+			return fmt.Errorf("unknown spawn option %q", key)
+		}
+		if !ValidOptionValue(spec, val) {
+			return fmt.Errorf("invalid value %q for spawn option %q", val, key)
+		}
+	}
+	return nil
+}
+
+// FilterSpawnOptions returns the subset of bag whose keys this provider
+// declares (issue #19): a global bag may span providers once more than one
+// exists, so at spawn it is narrowed to the resolving repo's provider. A key
+// the provider does not declare is dropped, not an error. Returns a non-nil map
+// (possibly empty).
+func FilterSpawnOptions(specs []OptionSpec, bag map[string]string) map[string]string {
+	out := make(map[string]string, len(bag))
+	for key, val := range bag {
+		if _, ok := FindSpawnOption(specs, key); ok {
+			out[key] = val
+		}
+	}
+	return out
 }

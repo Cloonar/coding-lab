@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -78,29 +79,29 @@ func (s *Service) cleanupCredential(repo store.Repo, runID string) {
 	}
 }
 
-// ResolveModelEffort layers the spawn model/effort per D12d: an explicit
-// per-spawn value wins, then the repo default, then the global settings
-// default; the resolved pair is validated against the provider's catalogs
-// (closed allowlists — an unknown value is a 400, never spawned). Exported
-// for the M5 AFK engine, whose spawns resolve through the same rule.
-func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, reqModel, reqEffort string) (model, effort string, err error) {
-	model = reqModel
-	if model == "" && repo.ModelDefault != nil {
-		model = *repo.ModelDefault
+// isAFKKind reports whether a run kind resolves through the AFK-override layer
+// (issue #19): both AFK kinds share the same override-then-base resolution;
+// manual does not.
+func isAFKKind(kind string) bool {
+	return kind == store.RunKindAFKManual || kind == store.RunKindAFKAuto
+}
+
+// ResolveModelEffort layers the spawn model/effort, run-kind-aware (D12d +
+// issue #19 / ADR-0021). A MANUAL run: explicit per-spawn value → repo base
+// default → global base default. An AFK run has no per-spawn request; it
+// consults the AFK-override layer FIRST — repo.afk_* → global spawn_*_default_afk
+// — then falls back to the same base (repo base → global base). Empty AFK
+// overrides mean inherit, so the layering degrades cleanly. The resolved pair
+// is validated against the provider's catalogs (closed allowlists — an unknown
+// value is a 400, never spawned). Exported for the M5 AFK engine, whose spawns
+// resolve through the same rule.
+func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, kind, reqModel, reqEffort string) (model, effort string, err error) {
+	afk := isAFKKind(kind)
+	if model, err = s.layerSpawnDefault(ctx, afk, reqModel, repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault); err != nil {
+		return "", "", err
 	}
-	if model == "" {
-		if model, err = s.store.GetString(ctx, store.SettingSpawnModelDefault, ""); err != nil {
-			return "", "", err
-		}
-	}
-	effort = reqEffort
-	if effort == "" && repo.EffortDefault != nil {
-		effort = *repo.EffortDefault
-	}
-	if effort == "" {
-		if effort, err = s.store.GetString(ctx, store.SettingSpawnEffortDefault, ""); err != nil {
-			return "", "", err
-		}
+	if effort, err = s.layerSpawnDefault(ctx, afk, reqEffort, repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault); err != nil {
+		return "", "", err
 	}
 	if !provider.HasOption(prov.Models(), model) {
 		return "", "", badRequestf("unknown model %q", model)
@@ -109,6 +110,82 @@ func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentPro
 		return "", "", badRequestf("unknown effort %q", effort)
 	}
 	return model, effort, nil
+}
+
+// layerSpawnDefault resolves one spawn default (model or effort) through the
+// D12d + issue-#19 layering. For an AFK run it consults the AFK-override layer
+// first (repo override column, then the global AFK-override setting), each
+// empty = inherit; then every run type falls back to the base layer (the
+// per-spawn request for manual, then the repo base column, then the global base
+// setting). req is always "" for AFK (the start is bodyless).
+func (s *Service) layerSpawnDefault(ctx context.Context, afk bool, req string, repoAFK, repoBase *string, afkKey, baseKey string) (string, error) {
+	if afk {
+		if repoAFK != nil && *repoAFK != "" {
+			return *repoAFK, nil
+		}
+		v, err := s.store.GetString(ctx, afkKey, "")
+		if err != nil {
+			return "", err
+		}
+		if v != "" {
+			return v, nil
+		}
+	}
+	if req != "" {
+		return req, nil
+	}
+	if repoBase != nil && *repoBase != "" {
+		return *repoBase, nil
+	}
+	return s.store.GetString(ctx, baseKey, "")
+}
+
+// ResolveSpawnOptions resolves the provider-owned spawn-options bag for a launch
+// of the given kind (issue #19 / ADR-0021). A MANUAL run carries no options —
+// the operator types provider keywords (ultracode) into the Start prompt
+// themselves. An AFK run resolves repo.afk_options ?? global spawn_options_afk,
+// then FILTERS the bag to the provider's declared schema (a global bag may span
+// providers once more than one exists) and VALIDATES the remainder (a bad value
+// is a badRequest, mirroring an unknown model/effort). Always returns a non-nil
+// map.
+func (s *Service) ResolveSpawnOptions(ctx context.Context, prov provider.AgentProvider, repo store.Repo, kind string) (map[string]string, error) {
+	if !isAFKKind(kind) {
+		return map[string]string{}, nil
+	}
+	bag := repo.AFKOptions // a present map (even empty) wins over the global bag
+	if bag == nil {
+		raw, err := s.store.GetString(ctx, store.SettingSpawnOptionsAFK, "")
+		if err != nil {
+			return nil, err
+		}
+		if bag, err = decodeOptionsBag(raw); err != nil {
+			return nil, err
+		}
+	}
+	specs := prov.SpawnOptions()
+	filtered := provider.FilterSpawnOptions(specs, bag)
+	if err := provider.ValidateSpawnOptions(specs, filtered); err != nil {
+		return nil, badRequestf("%s", err)
+	}
+	return filtered, nil
+}
+
+// decodeOptionsBag parses the global spawn_options_afk JSON value: an empty
+// string is an empty bag (nothing configured); non-empty JSON is decoded, and
+// malformed JSON is a loud error (never a silent empty bag). Always returns a
+// non-nil map on success.
+func decodeOptionsBag(raw string) (map[string]string, error) {
+	if raw == "" {
+		return map[string]string{}, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, badRequestf("spawn_options_afk: invalid JSON: %v", err)
+	}
+	if m == nil {
+		m = map[string]string{}
+	}
+	return m, nil
 }
 
 // authorEnv resolves the git author/committer identity for a spawned session:

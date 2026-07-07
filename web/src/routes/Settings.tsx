@@ -12,10 +12,10 @@ import {
   listProviders,
   updateSettings,
   type IntSettingKey,
-  type ProviderOption,
   type Settings as SettingsPayload,
   type TextSettingKey,
 } from '../api';
+import CatalogSelect from '../components/CatalogSelect';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import TopBar from '../components/TopBar';
@@ -111,12 +111,25 @@ function SettingsForm(props: {
   const [drafts, setDrafts] = createSignal<Record<string, string>>({
     spawn_model_default: seedDraft(initial, 'spawn_model_default'),
     spawn_effort_default: seedDraft(initial, 'spawn_effort_default'),
+    spawn_model_default_afk: seedDraft(initial, 'spawn_model_default_afk'),
+    spawn_effort_default_afk: seedDraft(initial, 'spawn_effort_default_afk'),
     git_author_name: seedDraft(initial, 'git_author_name'),
     git_author_email: seedDraft(initial, 'git_author_email'),
     ...Object.fromEntries(INT_FIELDS.map((f) => [f.key, seedDraft(initial, f.key)])),
   });
   const draft = (key: string) => drafts()[key] ?? '';
   const setDraft = (key: string, value: string) => setDrafts({ ...drafts(), [key]: value });
+
+  // AFK spawn-option checkboxes (bool provider options). The signal holds only
+  // operator overrides; the seed reads the mounted snapshot, so a provider
+  // catalog that loads after mount still resolves the right seeded state.
+  const [optionDrafts, setOptionDrafts] = createSignal<Record<string, boolean>>({});
+  const seedChecked = (key: string) => initial.spawn_options_afk?.[key] === 'true';
+  const optionChecked = (key: string) => optionDrafts()[key] ?? seedChecked(key);
+  const setOptionChecked = (key: string, value: boolean) =>
+    setOptionDrafts({ ...optionDrafts(), [key]: value });
+  const boolOptions = () => (props.provider?.options ?? []).filter((o) => o.type === 'bool');
+  const optionsDirty = () => boolOptions().some((o) => optionChecked(o.key) !== seedChecked(o.key));
 
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -140,6 +153,8 @@ function SettingsForm(props: {
     for (const key of [
       'spawn_model_default',
       'spawn_effort_default',
+      'spawn_model_default_afk',
+      'spawn_effort_default_afk',
       'git_author_name',
       'git_author_email',
     ] as TextSettingKey[]) {
@@ -149,6 +164,13 @@ function SettingsForm(props: {
       if (!intDirty(field.key)) continue;
       if (intError(field.key) !== null) return null; // blocked by a field error
       patch[field.key] = Number(draft(field.key).trim());
+    }
+    // Send the full declared bag ("true"/"false" per key) once any option
+    // differs from its seed — a partial patch would be ambiguous server-side.
+    if (optionsDirty()) {
+      patch.spawn_options_afk = Object.fromEntries(
+        boolOptions().map((o) => [o.key, optionChecked(o.key) ? 'true' : 'false']),
+      );
     }
     return patch;
   };
@@ -211,6 +233,43 @@ function SettingsForm(props: {
       </section>
 
       <section class="card">
+        <h2>AFK defaults</h2>
+        <small class="hint hint-block">
+          Used for unattended AFK runs. Leave a field on “Same as default” to inherit the spawn
+          default above.
+        </small>
+        <CatalogSelect
+          label="Model"
+          name="spawn_model_default_afk"
+          value={draft('spawn_model_default_afk')}
+          options={props.provider?.models ?? []}
+          inheritLabel="Same as default"
+          onChange={(value) => setDraft('spawn_model_default_afk', value)}
+        />
+        <CatalogSelect
+          label="Effort"
+          name="spawn_effort_default_afk"
+          value={draft('spawn_effort_default_afk')}
+          options={props.provider?.efforts ?? []}
+          inheritLabel="Same as default"
+          onChange={(value) => setDraft('spawn_effort_default_afk', value)}
+        />
+        <For each={boolOptions()}>
+          {(option) => (
+            <label class="check">
+              <input
+                type="checkbox"
+                name={`spawn_options_afk.${option.key}`}
+                checked={optionChecked(option.key)}
+                onChange={(e) => setOptionChecked(option.key, e.currentTarget.checked)}
+              />
+              <span>{option.label}</span>
+            </label>
+          )}
+        </For>
+      </section>
+
+      <section class="card">
         <h2>Capacity & AFK</h2>
         <For each={INT_FIELDS}>
           {(field) => (
@@ -265,39 +324,5 @@ function SettingsForm(props: {
         {busy() ? 'Saving…' : 'Save settings'}
       </button>
     </form>
-  );
-}
-
-/**
- * Model/effort select over the provider catalog. A stored value missing from
- * the catalog stays selectable as-is (marked), so an untouched field never
- * silently changes on save.
- */
-function CatalogSelect(props: {
-  label: string;
-  name: string;
-  value: string;
-  options: ProviderOption[];
-  onChange: (value: string) => void;
-}) {
-  const known = () => props.options.some((option) => option.value === props.value);
-  return (
-    <label class="field">
-      <span>{props.label}</span>
-      <select
-        name={props.name}
-        value={props.value}
-        onChange={(e) => props.onChange(e.currentTarget.value)}
-      >
-        <Show when={!known()}>
-          <option value={props.value}>
-            {props.value === '' ? '(unset)' : `${props.value} (not in catalog)`}
-          </option>
-        </Show>
-        <For each={props.options}>
-          {(option) => <option value={option.value}>{option.label}</option>}
-        </For>
-      </select>
-    </label>
   );
 }

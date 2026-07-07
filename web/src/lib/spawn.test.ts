@@ -34,8 +34,8 @@ describe('resolveSpawnOption', () => {
 
 describe('providerFor', () => {
   const providers: Provider[] = [
-    { id: 'claude-code', models: MODELS, efforts: [] },
-    { id: 'other', models: [], efforts: [] },
+    { id: 'claude-code', models: MODELS, efforts: [], options: [] },
+    { id: 'other', models: [], efforts: [], options: [] },
   ];
 
   it('finds the repo provider by id', () => {

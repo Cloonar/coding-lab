@@ -80,7 +80,9 @@ func TestCompat_AuthStatusFixture_parses(t *testing.T) {
 // Spawn argv snapshot (compat.md §1, pinned M3 constant). Manual spawn: no
 // seed prompt, so no trailing positional.
 func TestCompat_SpawnArgvSnapshot(t *testing.T) {
-	got := strings.Join(claudecode.SpawnArgv("claude", "repo~dom-20260706-0910", "opus[1m]", "max", ""), " ")
+	got := strings.Join(claudecode.SpawnArgv("claude", provider.SpawnSpec{
+		SessionName: "repo~dom-20260706-0910", Model: "opus[1m]", Effort: "max",
+	}), " ")
 	want := "claude --remote-control repo~dom-20260706-0910 --permission-mode auto --model opus[1m] --effort max"
 	if got != want {
 		t.Errorf("spawn argv drifted:\n got  %q\n want %q", got, want)
@@ -91,10 +93,34 @@ func TestCompat_SpawnArgvSnapshot(t *testing.T) {
 // model/effort flags (pinned v0 mechanism, claude CLI `[options] [prompt]`) —
 // carried at spawn, never injected post-spawn.
 func TestCompat_SpawnArgvSeedPromptSnapshot(t *testing.T) {
-	got := strings.Join(claudecode.SpawnArgv("claude", "repo~afk-7", "opus[1m]", "max", "resolve #7"), " ")
+	got := strings.Join(claudecode.SpawnArgv("claude", provider.SpawnSpec{
+		SessionName: "repo~afk-7", Model: "opus[1m]", Effort: "max", InitialPrompt: "resolve #7",
+	}), " ")
 	want := "claude --remote-control repo~afk-7 --permission-mode auto --model opus[1m] --effort max resolve #7"
 	if got != want {
 		t.Errorf("seeded spawn argv drifted:\n got  %q\n want %q", got, want)
+	}
+}
+
+// ultracode spawn argv (issue #19 / ADR-0021): the provider-owned directive is
+// prepended to the non-empty seed prompt, kept as ONE trailing positional. The
+// wording is lab's own (compat.md §1) — NOT a pinned Claude coupling — so this
+// snapshot guards the argv builder, not a claude version. A manual spawn's empty
+// prompt makes it a natural no-op (covered by TestSpawnArgv).
+func TestCompat_SpawnArgvUltracodeSnapshot(t *testing.T) {
+	argv := claudecode.SpawnArgv("claude", provider.SpawnSpec{
+		SessionName: "repo~afk-7", Model: "opus[1m]", Effort: "max",
+		Options: map[string]string{"ultracode": "true"}, InitialPrompt: "resolve #7",
+	})
+	// The directive rides as the single trailing positional (never split).
+	if last := argv[len(argv)-1]; !strings.HasSuffix(last, "\n\nresolve #7") || !strings.Contains(last, "ultracode mode") {
+		t.Errorf("ultracode prompt not prepended as one trailing positional: %q", last)
+	}
+	// The flags ahead of the prompt are unchanged.
+	head := strings.Join(argv[:len(argv)-1], " ")
+	wantHead := "claude --remote-control repo~afk-7 --permission-mode auto --model opus[1m] --effort max"
+	if head != wantHead {
+		t.Errorf("ultracode spawn flags drifted:\n got  %q\n want %q", head, wantHead)
 	}
 }
 

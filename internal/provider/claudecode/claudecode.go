@@ -84,6 +84,25 @@ var efforts = []provider.Option{
 	{Value: "max", Label: "max"},
 }
 
+// spawnOptions is claude-code's provider-owned spawn-options catalog (issue #19
+// / ADR-0021): the declared schema lab renders and validates the options bag
+// against. ultracode is the first (and currently only) entry — the AFK-only
+// keyword that steers a run into multi-agent workflows. It is a *prompt trigger
+// keyword* (renamed from "workflow" in Claude Code v2.1.186), NOT a CLI flag,
+// env var, or settings.json field — which is why it is applied by prompt
+// injection (ultracodeDirective) rather than argv.
+var spawnOptions = []provider.OptionSpec{
+	{Key: "ultracode", Label: "Ultracode (multi-agent workflows)", Type: provider.OptionTypeBool, Default: "false"},
+}
+
+// ultracodeDirective is the provider-owned line prepended to a non-empty
+// InitialPrompt when the ultracode option is on. It is OUR wording — freely
+// tunable, NOT a pinned Claude coupling (compat §1) — so it is not on the
+// fragile list and needs no version pin; the argv builder is merely re-snapshot
+// tested. A manual spawn passes an empty prompt, so this never fires for manual
+// runs (decision: ultracode is AFK-only; manual users type the keyword).
+const ultracodeDirective = "Operate in ultracode mode: decompose substantial work into a multi-agent workflow."
+
 // Options configures a Provider. Everything except Logger and Now is
 // required.
 type Options struct {
@@ -216,37 +235,58 @@ func (p *Provider) Models() []provider.Option { return slices.Clone(models) }
 // Efforts returns a copy of the effort catalog, in dropdown order.
 func (p *Provider) Efforts() []provider.Option { return slices.Clone(efforts) }
 
+// SpawnOptions returns a copy of the spawn-options catalog (issue #19), in
+// render order.
+func (p *Provider) SpawnOptions() []provider.OptionSpec { return slices.Clone(spawnOptions) }
+
 // SpawnArgv builds the pinned instance spawn command:
 //
 //	{claude} --remote-control <session> --permission-mode auto [--model M] [--effort E] [prompt]
 //
 // Empty model/effort omit the flag (defaults resolve from settings before
-// the call, so production always passes both). A non-empty initialPrompt is
+// the call, so production always passes both). A non-empty InitialPrompt is
 // appended as claude's trailing positional argument — the AFK seed prompt,
 // pinned to the v0 mechanism (v0 afk.go: append(baseStartArgv(),
 // afkSeedPrompt(n))) so it is present before the process starts and cannot be
 // lost to the cold-start TUI race; manual spawns pass "" and get no trailing
-// argument.
-func (p *Provider) SpawnArgv(sessionName, model, effort, initialPrompt string) []string {
-	return SpawnArgv(p.claudeBin, sessionName, model, effort, initialPrompt)
+// argument. spec.Options is applied here, provider-owned (ultracode prepends a
+// directive to a non-empty prompt).
+func (p *Provider) SpawnArgv(spec provider.SpawnSpec) []string {
+	return SpawnArgv(p.claudeBin, spec)
 }
 
 // SpawnArgv is the pure spawn-argv builder behind Provider.SpawnArgv,
 // exported for the compat snapshot test.
-func SpawnArgv(claudeBin, sessionName, model, effort, initialPrompt string) []string {
-	argv := []string{claudeBin, "--remote-control", sessionName, "--permission-mode", "auto"}
-	if model != "" {
-		argv = append(argv, "--model", model)
+func SpawnArgv(claudeBin string, spec provider.SpawnSpec) []string {
+	argv := []string{claudeBin, "--remote-control", spec.SessionName, "--permission-mode", "auto"}
+	if spec.Model != "" {
+		argv = append(argv, "--model", spec.Model)
 	}
-	if effort != "" {
-		argv = append(argv, "--effort", effort)
+	if spec.Effort != "" {
+		argv = append(argv, "--effort", spec.Effort)
 	}
 	// Trailing positional AFTER the flags (claude CLI: `claude [options]
-	// [prompt]`). Omitted when empty so a manual spawn carries no stray arg.
-	if initialPrompt != "" {
-		argv = append(argv, initialPrompt)
+	// [prompt]`). The provider applies its own spawn options to the prompt here
+	// — ultracode prepends a directive — so a bad option can never reach argv
+	// as a flag. Omitted when empty so a manual spawn carries no stray arg (and
+	// a prompt-scoped option is a natural no-op for manual runs).
+	if prompt := applySpawnOptions(spec.InitialPrompt, spec.Options); prompt != "" {
+		argv = append(argv, prompt)
 	}
 	return argv
+}
+
+// applySpawnOptions applies claude-code's spawn options to the seed prompt. It
+// is a no-op on an empty prompt (manual spawns), so ultracode is AFK-only by
+// construction. ultracode prepends a directive line ahead of the seed prompt.
+func applySpawnOptions(prompt string, options map[string]string) string {
+	if prompt == "" {
+		return ""
+	}
+	if options["ultracode"] == "true" {
+		return ultracodeDirective + "\n\n" + prompt
+	}
+	return prompt
 }
 
 type authChangedPayload struct {

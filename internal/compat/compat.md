@@ -57,6 +57,15 @@ Provenance legend:
 - Flag order model-then-effort is lab's own pinned M3 constant (v0
   appended effort-then-model; claude accepts both orders). Snapshot test:
   `TestCompat_SpawnArgvSnapshot`.
+- The builder takes a `provider.SpawnSpec` (issue #19 / ADR-0021), so a new
+  provider spawn option never churns the argv signature. `spec.Options` is
+  applied provider-side: `ultracode` (the AFK-only multi-agent keyword)
+  prepends a **lab-owned directive** to a *non-empty* seed prompt — it is
+  claude's own prompt-trigger keyword (renamed from "workflow" in v2.1.186),
+  NOT a CLI flag/env/settings field, so this is prompt injection, not argv.
+  The directive wording is OURS and freely tunable — **not** a pinned Claude
+  coupling; the snapshot (`TestCompat_SpawnArgvUltracodeSnapshot`) guards only
+  that the builder still prepends it as one trailing positional.
 
 ## 2. Deep-link registry (`~/.claude/sessions/<pid>.json`) — live (2.1.198)
 

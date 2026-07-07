@@ -147,7 +147,7 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 // trailing positional when non-empty. Flags precede the positional so the
 // parser never swallows --settings as prompt text.
 func (f *fixture) wantSpawnArgv(name, model, effort, seed, runID string) []string {
-	argv := f.prov.SpawnArgv(name, model, effort, "")
+	argv := f.prov.SpawnArgv(provider.SpawnSpec{SessionName: name, Model: model, Effort: effort})
 	argv = append(argv, "--settings", filepath.Join(f.runtime, "settings."+runID+".json"))
 	if seed != "" {
 		argv = append(argv, seed)

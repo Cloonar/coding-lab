@@ -37,9 +37,16 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 		return store.Run{}, badRequestf("repository provider %q is not registered", repo.Provider)
 	}
 
-	model, effort, err := s.ResolveModelEffort(ctx, prov, repo, p.Model, p.Effort)
+	model, effort, err := s.ResolveModelEffort(ctx, prov, repo, store.RunKindManual, p.Model, p.Effort)
 	if err != nil {
 		return store.Run{}, err // BadRequestError → 400 (or a store error)
+	}
+	// Manual runs carry no provider options (the operator types keywords like
+	// ultracode into the Start prompt themselves); ResolveSpawnOptions returns
+	// an empty bag for a manual kind.
+	options, err := s.ResolveSpawnOptions(ctx, prov, repo, store.RunKindManual)
+	if err != nil {
+		return store.Run{}, err
 	}
 
 	// One tmux listing serves both the cap check and the label-collision set
@@ -74,6 +81,7 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 		WorktreePath: s.worktreePath(repo.Name, label),
 		Model:        model,
 		Effort:       effort,
+		Options:      options,
 	})
 }
 

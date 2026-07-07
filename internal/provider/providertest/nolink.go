@@ -44,18 +44,23 @@ func (f *NoLinkFake) ID() string                 { return f.id }
 func (f *NoLinkFake) Models() []provider.Option  { return f.models }
 func (f *NoLinkFake) Efforts() []provider.Option { return f.efforts }
 
+// SpawnOptions declares no spawn options — a stand-in for a provider that
+// hasn't adopted the generic bag yet (issue #19). Its resolved options bag is
+// always empty.
+func (f *NoLinkFake) SpawnOptions() []provider.OptionSpec { return nil }
+
 // SpawnArgv mirrors a minimal headless-CLI argv (no --remote-control, no web
 // bridge). The seed prompt still rides as the trailing positional.
-func (f *NoLinkFake) SpawnArgv(session, model, effort, initialPrompt string) []string {
-	argv := []string{"codex", "run", session}
-	if model != "" {
-		argv = append(argv, "--model", model)
+func (f *NoLinkFake) SpawnArgv(spec provider.SpawnSpec) []string {
+	argv := []string{"codex", "run", spec.SessionName}
+	if spec.Model != "" {
+		argv = append(argv, "--model", spec.Model)
 	}
-	if effort != "" {
-		argv = append(argv, "--effort", effort)
+	if spec.Effort != "" {
+		argv = append(argv, "--effort", spec.Effort)
 	}
-	if initialPrompt != "" {
-		argv = append(argv, initialPrompt)
+	if spec.InitialPrompt != "" {
+		argv = append(argv, spec.InitialPrompt)
 	}
 	return argv
 }

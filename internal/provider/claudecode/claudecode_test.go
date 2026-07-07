@@ -12,7 +12,9 @@ func TestSpawnArgv(t *testing.T) {
 	for _, tc := range []struct {
 		name                        string
 		session, model, eff, prompt string
+		options                     map[string]string
 		want                        string
+		wantLast                    string // expected trailing positional ("" → none)
 	}{
 		{
 			// Pinned M3 constant: {claude} --remote-control <session>
@@ -33,23 +35,52 @@ func TestSpawnArgv(t *testing.T) {
 			// the --model/--effort flags, present before the process starts (no
 			// post-spawn keystroke race). One argv element even with spaces.
 			name: "seed prompt is the trailing positional", session: "r~afk-7", model: "sonnet", eff: "high", prompt: "resolve issue 7 and open a PR",
-			want: "claude --remote-control r~afk-7 --permission-mode auto --model sonnet --effort high resolve issue 7 and open a PR",
+			want:     "claude --remote-control r~afk-7 --permission-mode auto --model sonnet --effort high resolve issue 7 and open a PR",
+			wantLast: "resolve issue 7 and open a PR",
 		},
 		{
 			// Manual spawns pass "" — no trailing argument at all.
 			name: "empty prompt omitted", session: "r~x", model: "sonnet", eff: "high",
 			want: "claude --remote-control r~x --permission-mode auto --model sonnet --effort high",
 		},
+		{
+			// ultracode on + a non-empty prompt: the directive line is prepended
+			// to the seed prompt, still ONE trailing positional (issue #19).
+			name: "ultracode prepends the directive to the seed prompt", session: "r~afk-7", model: "opus[1m]", eff: "max",
+			prompt: "resolve #7", options: map[string]string{"ultracode": "true"},
+			want:     "claude --remote-control r~afk-7 --permission-mode auto --model opus[1m] --effort max " + ultracodeDirective + "\n\nresolve #7",
+			wantLast: ultracodeDirective + "\n\nresolve #7",
+		},
+		{
+			// ultracode on but an EMPTY prompt (manual): natural no-op — no
+			// trailing positional at all (ultracode is AFK-only).
+			name: "ultracode no-op on empty prompt", session: "r~x", model: "sonnet", eff: "high",
+			options: map[string]string{"ultracode": "true"},
+			want:    "claude --remote-control r~x --permission-mode auto --model sonnet --effort high",
+		},
+		{
+			// ultracode explicitly off leaves the seed prompt untouched.
+			name: "ultracode false leaves the prompt untouched", session: "r~afk-7", model: "sonnet", eff: "high",
+			prompt: "resolve #7", options: map[string]string{"ultracode": "false"},
+			want:     "claude --remote-control r~afk-7 --permission-mode auto --model sonnet --effort high resolve #7",
+			wantLast: "resolve #7",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			argv := SpawnArgv("claude", tc.session, tc.model, tc.eff, tc.prompt)
+			argv := SpawnArgv("claude", provider.SpawnSpec{
+				SessionName:   tc.session,
+				Model:         tc.model,
+				Effort:        tc.eff,
+				Options:       tc.options,
+				InitialPrompt: tc.prompt,
+			})
 			if got := strings.Join(argv, " "); got != tc.want {
 				t.Errorf("SpawnArgv = %q; want %q", got, tc.want)
 			}
-			// The seed prompt is exactly one trailing argv element even with
-			// spaces — never split, never fragmented across the pty.
-			if tc.prompt != "" && argv[len(argv)-1] != tc.prompt {
-				t.Errorf("last argv element = %q; want the seed prompt %q as one positional", argv[len(argv)-1], tc.prompt)
+			// The (possibly ultracode-transformed) prompt is exactly one trailing
+			// argv element even with spaces/newlines — never split across the pty.
+			if tc.wantLast != "" && argv[len(argv)-1] != tc.wantLast {
+				t.Errorf("last argv element = %q; want %q as one positional", argv[len(argv)-1], tc.wantLast)
 			}
 		})
 	}

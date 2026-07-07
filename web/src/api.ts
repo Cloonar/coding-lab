@@ -206,6 +206,11 @@ export interface Repo {
   incogni: boolean;
   model_default: string | null;
   effort_default: string | null;
+  /** AFK-run overrides (null = inherit the global AFK default). */
+  afk_model_default: string | null;
+  afk_effort_default: string | null;
+  /** Provider spawn-option bag for AFK runs (null = inherit global). */
+  afk_options: Record<string, string> | null;
   git_author_name: string | null;
   git_author_email: string | null;
   afk_branch_pattern: string;
@@ -242,6 +247,10 @@ export interface RepoPatch {
   default_branch?: string;
   model_default?: string | null;
   effort_default?: string | null;
+  /** AFK-run overrides; null or "" clears back to the global AFK default. */
+  afk_model_default?: string | null;
+  afk_effort_default?: string | null;
+  afk_options?: Record<string, string> | null;
   incogni?: boolean;
   git_author_name?: string | null;
   git_author_email?: string | null;
@@ -300,10 +309,24 @@ export interface ProviderFallbackOpen {
   title: string;
 }
 
+/**
+ * One provider-owned spawn option (issue #19). `type` is "bool" for now — the
+ * value is the string "true"/"false"; unknown types are ignorable/no-render.
+ * `default` is the value applied when the operator hasn't set the option.
+ */
+export interface ProviderOptionSpec {
+  key: string;
+  label: string;
+  type: string;
+  default: string;
+}
+
 export interface Provider {
   id: string;
   models: ProviderOption[];
   efforts: ProviderOption[];
+  /** Declared spawn options (always present; may be empty). */
+  options: ProviderOptionSpec[];
   fallback_open?: ProviderFallbackOpen;
 }
 
@@ -839,6 +862,8 @@ export const INT_SETTING_KEYS = [
 export const TEXT_SETTING_KEYS = [
   'spawn_model_default',
   'spawn_effort_default',
+  'spawn_model_default_afk',
+  'spawn_effort_default_afk',
   'git_author_name',
   'git_author_email',
 ] as const;
@@ -849,8 +874,14 @@ export type TextSettingKey = (typeof TEXT_SETTING_KEYS)[number];
 /**
  * The runtime-mutable settings (§3a keys). All fields optional: GET returns
  * whatever is stored, PATCH sends only the fields being changed.
+ *
+ * `spawn_options_afk` is the provider spawn-option bag for AFK runs. The server
+ * stores it as a JSON string and returns it as one on GET; normalizeSettings
+ * parses it to an object here, and PATCH sends it back as an object.
  */
-export type Settings = Partial<Record<IntSettingKey, number> & Record<TextSettingKey, string>>;
+export type Settings = Partial<Record<IntSettingKey, number> & Record<TextSettingKey, string>> & {
+  spawn_options_afk?: Record<string, string>;
+};
 
 /**
  * Normalizes a settings payload: tolerates both a flat {key: value} object
@@ -877,6 +908,27 @@ export function normalizeSettings(raw: unknown): Settings {
           ? Number(value)
           : NaN;
     if (Number.isInteger(n)) out[key] = n;
+  }
+  // spawn_options_afk arrives as a raw JSON string (GET) or an object (PATCH
+  // echo); parse defensively and coerce values to strings. A missing key or
+  // garbage (parse failure / non-object / array) is omitted entirely.
+  const rawOptions = map['spawn_options_afk'];
+  let parsed: unknown;
+  if (typeof rawOptions === 'string') {
+    try {
+      parsed = JSON.parse(rawOptions);
+    } catch {
+      parsed = undefined;
+    }
+  } else if (typeof rawOptions === 'object' && rawOptions !== null) {
+    parsed = rawOptions;
+  }
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    const options: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      options[key] = String(value);
+    }
+    out.spawn_options_afk = options;
   }
   return out;
 }

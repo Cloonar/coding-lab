@@ -21,6 +21,17 @@ const (
 	SettingSweepIntervalMinutes = "sweep_interval_minutes"
 	SettingGitAuthorName        = "git_author_name"
 	SettingGitAuthorEmail       = "git_author_email"
+
+	// AFK-override spawn defaults (issue #19 / ADR-0021): the AFK-only layer
+	// that resolves BEFORE the base spawn_model_default/spawn_effort_default
+	// above. Empty (or absent) means inherit the base. spawn_options_afk holds
+	// the provider-owned options bag as JSON (e.g. {"ultracode":"true"}). These
+	// are intentionally NOT seeded by SeedDefaultSettings — absent = inherit —
+	// so existing installs keep their current AFK behaviour until an override
+	// is set.
+	SettingSpawnModelDefaultAFK  = "spawn_model_default_afk"
+	SettingSpawnEffortDefaultAFK = "spawn_effort_default_afk"
+	SettingSpawnOptionsAFK       = "spawn_options_afk"
 )
 
 // GetSetting returns the raw value for key, or ErrNotFound.

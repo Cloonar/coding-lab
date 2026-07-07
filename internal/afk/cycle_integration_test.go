@@ -328,16 +328,16 @@ func (p *cycleProvider) setScript(repoName, script string) {
 	p.scripts[repoName+"~"] = script
 }
 
-func (p *cycleProvider) SpawnArgv(session, _, _, initialPrompt string) []string {
+func (p *cycleProvider) SpawnArgv(spec provider.SpawnSpec) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for prefix, script := range p.scripts {
-		if strings.HasPrefix(session, prefix) {
+		if strings.HasPrefix(spec.SessionName, prefix) {
 			// Seed prompt carried as the trailing positional (pinned v0
 			// mechanism) — the fake claude reads it from the last arg (launch
 			// injects a --settings flag ahead of it), not stdin.
-			if initialPrompt != "" {
-				return []string{script, initialPrompt}
+			if spec.InitialPrompt != "" {
+				return []string{script, spec.InitialPrompt}
 			}
 			return []string{script}
 		}

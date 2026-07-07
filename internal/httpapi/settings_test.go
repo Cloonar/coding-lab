@@ -116,6 +116,13 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		{"blank model", map[string]any{"spawn_model_default": ""}},
 		{"unknown effort", map[string]any{"spawn_effort_default": "ultra"}},
 		{"unknown key", map[string]any{"warp_factor": 9}},
+		// AFK-override defaults (issue #19): a NON-empty value still validates
+		// against the provider catalogs; the options bag validates keys + values.
+		{"afk unknown model", map[string]any{"spawn_model_default_afk": "gpt-9"}},
+		{"afk unknown effort", map[string]any{"spawn_effort_default_afk": "ultra"}},
+		{"unknown spawn option key", map[string]any{"spawn_options_afk": map[string]any{"warp_drive": "true"}}},
+		{"bad spawn option value", map[string]any{"spawn_options_afk": map[string]any{"ultracode": "maybe"}}},
+		{"spawn options not an object", map[string]any{"spawn_options_afk": "nope"}},
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,5 +149,44 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 	// Nothing above changed the tick either.
 	if n, err := x.st.GetInt(context.Background(), store.SettingAFKTickSeconds, 0); err != nil || n != 30 {
 		t.Errorf("afk_tick_seconds = %d (%v), want the seeded 30", n, err)
+	}
+}
+
+// The AFK-override defaults (issue #19 / ADR-0021): a catalog value lands, an
+// EMPTY AFK model/effort is explicitly allowed (means inherit — unlike the base
+// key), and the options bag validates + round-trips as canonical JSON.
+func TestAPI_SettingsAFKDefaultsRoundtrip(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingSpawnModelDefaultAFK:  "sonnet",
+		store.SettingSpawnEffortDefaultAFK: "", // inherit — allowed for the AFK override
+		store.SettingSpawnOptionsAFK:       map[string]any{"ultracode": "true"},
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingSpawnModelDefaultAFK] != "sonnet" {
+		t.Errorf("spawn_model_default_afk = %v, want sonnet", got[store.SettingSpawnModelDefaultAFK])
+	}
+	if got[store.SettingSpawnEffortDefaultAFK] != "" {
+		t.Errorf("spawn_effort_default_afk = %v, want empty (inherit)", got[store.SettingSpawnEffortDefaultAFK])
+	}
+	// The bag comes back as canonical JSON text.
+	if got[store.SettingSpawnOptionsAFK] != `{"ultracode":"true"}` {
+		t.Errorf("spawn_options_afk = %v, want the canonical bag", got[store.SettingSpawnOptionsAFK])
+	}
+	// Persisted where ResolveSpawnOptions reads it.
+	if v, err := x.st.GetString(context.Background(), store.SettingSpawnOptionsAFK, ""); err != nil || v != `{"ultracode":"true"}` {
+		t.Errorf("stored spawn_options_afk = %q (%v)", v, err)
+	}
+
+	// An empty options object is valid and round-trips.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingSpawnOptionsAFK: map[string]any{},
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingSpawnOptionsAFK] != `{}` {
+		t.Errorf("empty spawn_options_afk = %v, want {}", got[store.SettingSpawnOptionsAFK])
 	}
 }
