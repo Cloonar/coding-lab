@@ -6,6 +6,7 @@ import {
   claudeAuthStatus,
   claudeLoginCode,
   claudeLoginStart,
+  claudeLogout,
   closeCR,
   createCredential,
   createIssue,
@@ -441,6 +442,21 @@ describe('provider endpoints', () => {
     await expect(claudeLoginCode('aB3-_x#state=Zm9v-_')).resolves.toBeUndefined();
     expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/login/code');
     expect(JSON.parse(requestInit(mock).body as string)).toEqual({ code: 'aB3-_x#state=Zm9v-_' });
+  });
+
+  it('POST logout hits the auth/logout route with CSRF and returns the logged-out status', async () => {
+    const loggedOut = {
+      logged_in: false,
+      email: '',
+      method: '',
+      checked_at: '2026-07-08T00:00:00.000Z',
+    };
+    const mock = stubFetch(jsonResponse(200, loggedOut));
+
+    await expect(claudeLogout()).resolves.toEqual(loggedOut);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/logout');
+    expect(requestInit(mock).method).toBe('POST');
+    expect(requestInit(mock).headers).toMatchObject({ 'X-Lab-Csrf': '1' });
   });
 });
 

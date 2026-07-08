@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -134,4 +135,36 @@ func (s *Server) handleClaudeLoginCode(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.internalError(w, "submitting claude login code", err)
 	}
+}
+
+// handleClaudeLogout is POST /api/v1/providers/claude/auth/logout: drop the
+// machine's current Claude account so a fresh one can be logged in (issue #46).
+// A machine-wide auth cut behind the SPA's confirm gate — bare by decision, it
+// does not touch running instances. The provider's Logout force-refreshes
+// status, so a 200 reflects the now-logged-out cache; on success this endpoint
+// (mirroring /login/code's post-login publish) emits claude.auth.changed so the
+// SPA flips live. A logout that could not drop the account is the canonical
+// opaque 500 (the tool's stderr is logged server-side, not returned).
+func (s *Server) handleClaudeLogout(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.claudeProvider(w)
+	if !ok {
+		return
+	}
+	if err := p.Logout(r.Context()); err != nil {
+		s.internalError(w, "logging out of claude", err)
+		return
+	}
+	s.bus.Publish(events.Event{
+		Type:    claudecode.EventAuthChanged,
+		Payload: map[string]string{"type": claudecode.EventAuthChanged},
+	})
+	// The provider's Logout left the status cache fresh (logged-out); echo it so
+	// the client can update without waiting for the SSE round-trip.
+	st, _ := p.AuthStatus(r.Context(), false)
+	writeJSON(w, http.StatusOK, authStatusResponse{
+		LoggedIn:  st.LoggedIn,
+		Email:     st.Email,
+		Method:    st.Method,
+		CheckedAt: store.FormatTime(st.CheckedAt),
+	})
 }

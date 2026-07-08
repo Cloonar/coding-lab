@@ -43,6 +43,8 @@ type Fake struct {
 	loginErr     error
 	codeErr      error
 	codes        []string // codes submitted via LoginSubmitCode
+	logoutErr    error    // scripted Logout failure (loggedIn stays true)
+	logouts      int      // Logout call count
 	captureCt    int      // CaptureDeepLink call count
 
 	// Chat surface (issue #7). transcriptPath is what LocateTranscript
@@ -178,6 +180,20 @@ func (f *Fake) LoginSubmitCode(_ context.Context, code string) error {
 	defer f.mu.Unlock()
 	f.codes = append(f.codes, code)
 	return f.codeErr
+}
+
+// Logout records the call and, unless a failure is scripted, flips the fake to
+// logged-out — the observable transition the HTTP handler reads back (status
+// cache now logged-out) and announces via claude.auth.changed.
+func (f *Fake) Logout(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logouts++
+	if f.logoutErr != nil {
+		return f.logoutErr
+	}
+	f.loggedIn = false
+	return nil
 }
 
 // CaptureDeepLink implements provider.DeepLinker: it returns the scripted real
@@ -455,6 +471,16 @@ func (f *Fake) LocateCount() int {
 // SetLoginError / SetCodeError script the login flow.
 func (f *Fake) SetLoginError(err error) { f.mu.Lock(); f.loginErr = err; f.mu.Unlock() }
 func (f *Fake) SetCodeError(err error)  { f.mu.Lock(); f.codeErr = err; f.mu.Unlock() }
+
+// SetLogoutError scripts a Logout failure (the fake stays logged-in).
+func (f *Fake) SetLogoutError(err error) { f.mu.Lock(); f.logoutErr = err; f.mu.Unlock() }
+
+// Logouts reports how many times Logout ran.
+func (f *Fake) Logouts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logouts
+}
 
 // Seeded returns the worktrees SeedWorkspace was called with.
 func (f *Fake) Seeded() []string {

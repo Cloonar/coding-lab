@@ -410,6 +410,62 @@ func TestAPI_ClaudeAuthStatusAndLogin(t *testing.T) {
 	}
 }
 
+// Machine-wide logout (issue #46): the endpoint is CSRF-guarded, calls the
+// provider's Logout, emits claude.auth.changed, and leaves the status cache
+// reading logged-out. A failed logout surfaces as a 500.
+func TestAPI_ClaudeLogout(t *testing.T) {
+	x := newInstanceServer(t)
+	h := csrfHeaders(x.ts.URL)
+	log := recordBus(t, x.bus)
+
+	// The Fake starts logged in.
+	resp := x.do("GET", "/api/v1/providers/claude/auth/status", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if st := decodeBody(t, resp); st["logged_in"] != true {
+		t.Fatalf("precondition: auth status = %v; want logged in", st)
+	}
+
+	// CSRF-guarded like every mutating route: no CSRF header → 403, and the
+	// provider is never called.
+	resp = x.do("POST", "/api/v1/providers/claude/auth/logout", map[string]any{}, nil)
+	wantStatus(t, resp, http.StatusForbidden)
+	_ = resp.Body.Close()
+	if n := x.prov.Logouts(); n != 0 {
+		t.Fatalf("Logout called %d times on a CSRF-rejected request; want 0", n)
+	}
+
+	// Happy path: 200 with the now-logged-out status echoed back.
+	resp = x.do("POST", "/api/v1/providers/claude/auth/logout", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if st := decodeBody(t, resp); st["logged_in"] != false {
+		t.Errorf("logout response = %v; want logged_in false", st)
+	}
+	if n := x.prov.Logouts(); n != 1 {
+		t.Errorf("Logout called %d times; want 1", n)
+	}
+
+	// claude.auth.changed fired (the SPA refetches on it).
+	if !sawEvent(log, "claude.auth.changed") {
+		t.Error("no claude.auth.changed event after logout")
+	}
+
+	// The status cache now reads logged-out without forcing.
+	resp = x.do("GET", "/api/v1/providers/claude/auth/status", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if st := decodeBody(t, resp); st["logged_in"] != false {
+		t.Errorf("status after logout = %v; want logged_in false (cache invalidated)", st)
+	}
+
+	// A logout the provider could not complete is a 500.
+	x.prov.SetLoggedIn(true)
+	x.prov.SetLogoutError(errors.New("still logged in after credentials removal"))
+	resp = x.do("POST", "/api/v1/providers/claude/auth/logout", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusInternalServerError)
+	if body := decodeBody(t, resp); body["error"] == "" {
+		t.Error("failed logout returned no error message")
+	}
+}
+
 // --- helpers -------------------------------------------------------------
 
 func start(t *testing.T, x *instTestServer, h map[string]string) {

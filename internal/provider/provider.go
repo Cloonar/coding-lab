@@ -204,6 +204,15 @@ type AgentProvider interface {
 	// LoginSubmitCode delivers the pasted OAuth code to the pending login
 	// flow and waits for the login to land.
 	LoginSubmitCode(ctx context.Context, code string) error
+	// Logout drops the machine's current provider account so a fresh one can
+	// be logged in — the symmetric counterpart to the login flow. Auth is
+	// machine-level, so this is a machine-wide cut: it does NOT stop running
+	// instances (they survive on their in-memory token until it refreshes,
+	// then fail). Success is decided from a force-refreshed status, not the
+	// underlying command's exit code; the refresh leaves the provider's auth
+	// cache reflecting the logged-out truth. Returns an error only when the
+	// account could not be dropped.
+	Logout(ctx context.Context) error
 	// SeedWorkspace pre-approves a fresh worktree so the agent launches
 	// unattended (trust/MCP grants, ignore entries). Called after the
 	// worktree exists and before the session spawns; a failure aborts the

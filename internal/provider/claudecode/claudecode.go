@@ -46,6 +46,7 @@ const (
 	defaultLoginTimeout   = 20 * time.Second // post-code auth-status poll
 	defaultLoginPoll      = 1 * time.Second  // gap between forced refreshes
 	defaultAuthTTL        = 30 * time.Second // login-status cache freshness
+	defaultLogoutTimeout  = 20 * time.Second // defensive cap on `claude auth logout` (non-interactive)
 
 	// defaultDialogKeyDelay paces the dialog-answer keystroke recipe: a gap
 	// between each send-keys op so the remote-control TUI processes a picker
@@ -149,6 +150,7 @@ type Provider struct {
 	loginTimeout   time.Duration
 	loginPoll      time.Duration
 	authTTL        time.Duration
+	logoutTimeout  time.Duration // defensive cap on the non-interactive `claude auth logout`
 	keyDelay       time.Duration // inter-op gap in the dialog-answer recipe (compat §7)
 
 	// authMu guards the lazy login-status cache. The ~0.75s status command
@@ -221,6 +223,7 @@ func New(o Options) (*Provider, error) {
 		loginTimeout:   defaultLoginTimeout,
 		loginPoll:      defaultLoginPoll,
 		authTTL:        defaultAuthTTL,
+		logoutTimeout:  defaultLogoutTimeout,
 		keyDelay:       defaultDialogKeyDelay,
 		capturing:      map[string]bool{},
 	}, nil

@@ -1097,6 +1097,24 @@ details.parked summary {
   color: var(--err-text);
 }
 
+/* Claude logout confirm gate (issue #46): same danger framing as discard. */
+.logout-confirm {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-control);
+  background: var(--err-bg);
+}
+
+.logout-warning {
+  margin: 0 0 0.75rem;
+  color: var(--err-text);
+}
+
+.logout-runs {
+  font-weight: 600;
+}
+
 /* Runs ------------------------------------------------------------------------- */
 
 .runs-filter {
