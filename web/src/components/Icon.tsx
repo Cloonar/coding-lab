@@ -26,7 +26,9 @@ export type IconName =
   | 'message-square'
   | 'log-out'
   | 'copy'
-  | 'check';
+  | 'check'
+  | 'more-horizontal'
+  | 'chevron-down';
 
 // name -> the svg children for that glyph. Functions (not shared nodes) so a
 // glyph used in several places produces its own DOM each time. Each returned
@@ -105,6 +107,14 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     </>
   ),
   check: () => <path d="M20 6 9 17l-5-5" />,
+  'more-horizontal': () => (
+    <>
+      <circle cx="12" cy="12" r="1" />
+      <circle cx="19" cy="12" r="1" />
+      <circle cx="5" cy="12" r="1" />
+    </>
+  ),
+  'chevron-down': () => <path d="m6 9 6 6 6-6" />,
 };
 
 export default function Icon(props: {

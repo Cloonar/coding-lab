@@ -182,6 +182,18 @@ function buttonByLabel(label: string): HTMLButtonElement | null {
   return container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 }
 
+// The mobile `•••` overflow menu (issue #35 §1). Its trigger is always present;
+// its items render only while the menu is open (like TopBar), so they never leak
+// duplicate buttons into the default-DOM assertions above.
+function moreButton(): HTMLButtonElement | null {
+  return buttonByLabel('More actions');
+}
+function menuItem(text: string): HTMLButtonElement | undefined {
+  return Array.from(container.querySelectorAll('.chat-menu button')).find(
+    (b) => b.textContent?.trim() === text,
+  ) as HTMLButtonElement | undefined;
+}
+
 // jsdom has no clipboard — install a spy so copy buttons are exercisable.
 function stubClipboard(): ReturnType<typeof vi.fn> {
   const writeText = vi.fn(() => Promise.resolve());
@@ -470,7 +482,7 @@ describe('RunChat', () => {
     expect(answerPosts[0]).toMatchObject({ tool_id: 'toolu_field', index: 1 });
   });
 
-  it('shows a generic needs-input card when blocked with no structured dialog', async () => {
+  it('surfaces a needs-input status line in the stream and keeps the composer usable', async () => {
     messagesOnServer = {
       messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'done' }],
       state: 'needs_input',
@@ -481,9 +493,11 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    // needs_input keeps the composer usable, with a generic "needs input" hint.
+    // needs_input keeps the composer usable (just the input row) and surfaces
+    // the waiting status as the last line of the stream, not a composer note (§3).
     expect(container.querySelector('.chat-input')).not.toBeNull();
-    expect(container.textContent).toContain('Claude needs input');
+    expect(container.textContent).toContain('Claude is waiting for your reply.');
+    expect(container.querySelector('.chat-composer-note')).toBeNull(); // moved into the stream
   });
 
   it('resets the stream and unlocks the composer when the transcript rotates', async () => {
@@ -1119,5 +1133,179 @@ describe('RunChat', () => {
     btn.click();
     await settle();
     expect(writeText).toHaveBeenCalledWith('print(1)\nprint(2)');
+  });
+
+  // --- Needs-input status line relocated into the stream (issue #35 §3) ---
+
+  it('renders the needs-input status line as the last stream item, not a composer note', async () => {
+    withAssistantText('done'); // fixture state is needs_input
+    await mountChat();
+
+    const stream = container.querySelector('.chat-stream')!;
+    const line = stream.querySelector('.chat-needs-input');
+    expect(line?.textContent).toBe('Claude is waiting for your reply.');
+    // §3: it is the LAST stream child (so it only shows at the bottom).
+    expect(stream.lastElementChild).toBe(line);
+    // A status line, not a chat bubble, and not the old composer note.
+    expect(line?.closest('.chat-msg')).toBeNull();
+    expect(container.querySelector('.chat-composer-note')).toBeNull();
+    expect(container.querySelector('.chat-input')).not.toBeNull();
+  });
+
+  it('hides the needs-input line when the run resumes working', async () => {
+    withAssistantText('done');
+    await mountChat();
+    expect(container.querySelector('.chat-needs-input')).not.toBeNull();
+
+    messagesOnServer = { ...messagesOnServer, state: 'working' };
+    emitMessagesChanged();
+    await settle();
+
+    // The line clears and the working hint takes over (reactive on state).
+    expect(container.querySelector('.chat-needs-input')).toBeNull();
+    expect(container.textContent).not.toContain('Claude is waiting for your reply.');
+    expect(container.querySelector('.chat-composer-hint')?.textContent).toContain(
+      'tap to interrupt',
+    );
+  });
+
+  it('drops the old claude.ai wording from the needs-input surface', async () => {
+    withAssistantText('done');
+    await mountChat();
+
+    expect(container.textContent).not.toContain('reply below');
+    expect(container.textContent).not.toContain('open it in claude.ai');
+  });
+
+  // --- One-line header + ••• dropdown (issue #35 §1) ---
+
+  it('always renders the ••• menu trigger, even when the run is not live', async () => {
+    runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
+    messagesOnServer = { ...messagesOnServer, state: 'ended' };
+    await mountChat();
+
+    expect(moreButton()).not.toBeNull();
+    // Closed by default → no menu items leak into the DOM.
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
+  });
+
+  it('opens an anchored dropdown with Show thinking and Stop run for a live run', async () => {
+    await mountChat(); // default fixture: live, needs_input
+
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
+    moreButton()!.click();
+    await settle();
+
+    expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
+    expect(menuItem('Show thinking')).toBeDefined();
+    expect(menuItem('Stop run…')).toBeDefined();
+  });
+
+  it('omits Stop run from the dropdown when the run has ended', async () => {
+    runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
+    messagesOnServer = { ...messagesOnServer, state: 'ended' };
+    await mountChat();
+
+    moreButton()!.click();
+    await settle();
+    expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
+    expect(menuItem('Show thinking')).toBeDefined();
+    expect(menuItem('Stop run…')).toBeUndefined();
+  });
+
+  it('toggles thinking from the dropdown item', async () => {
+    await mountChat();
+    expect(container.textContent).not.toContain('secret reasoning');
+
+    moreButton()!.click();
+    await settle();
+    menuItem('Show thinking')!.click();
+    await settle();
+
+    expect(container.textContent).toContain('secret reasoning');
+  });
+
+  it('closes the dropdown on Escape', async () => {
+    await mountChat();
+    moreButton()!.click();
+    await settle();
+    expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await settle();
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
+  });
+
+  it('renders a state dot carrying the convo class token for the live state', async () => {
+    await mountChat(); // needs_input fixture
+    // The mobile dot and the full chip both live in the DOM (CSS gates which
+    // shows); the dot carries stateBadge('needs_input').cls, which the CSS maps
+    // to the convo color (jsdom applies no stylesheet, so only the class is
+    // assertable here — the color mapping is exercised by conversation.test.ts).
+    expect(container.querySelector('.chat-state-dot.needs-input')).not.toBeNull();
+  });
+
+  // --- Quick-return header + jump-to-latest pill wiring (issue #35 §2 + §4) ---
+  // jsdom has no layout/scroll engine, so the reducer logic is unit-tested in
+  // chatStream.test.ts; here we lock the rendered DOM contract the component
+  // wires up (so deleting the pill, no-op'ing onJump, or inverting a class fails).
+
+  it('renders the header visible (no --hidden class) by default', async () => {
+    await mountChat();
+    const header = container.querySelector('.chat-header') as HTMLElement;
+    expect(header).not.toBeNull();
+    expect(header.classList.contains('chat-header--hidden')).toBe(false); // headerVisible starts true
+  });
+
+  it('mounts the jump pill hidden and reveals it (emphasized on needs_input) when scrolled up', async () => {
+    withAssistantText('done'); // needs_input fixture
+    await mountChat();
+
+    const pillBtn = container.querySelector('.chat-jump') as HTMLButtonElement;
+    expect(pillBtn).not.toBeNull(); // always mounted so it can fade OUT
+    // At/near the bottom (jsdom metrics are 0) → hidden + inert.
+    expect(pillBtn.classList.contains('hidden')).toBe(true);
+    expect(pillBtn.getAttribute('aria-hidden')).toBe('true');
+    expect(pillBtn.tabIndex).toBe(-1);
+
+    // Fake a scrolled-up viewport and fire a user scroll → the pill reveals.
+    const stream = container.querySelector('.chat-stream') as HTMLElement;
+    Object.defineProperty(stream, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(stream, 'clientHeight', { value: 100, configurable: true });
+    stream.scrollTop = 0;
+    stream.dispatchEvent(new Event('scroll'));
+    await settle();
+
+    expect(pillBtn.classList.contains('hidden')).toBe(false);
+    // needs_input content below the fold → emphasized pill with the needs-you copy.
+    expect(pillBtn.classList.contains('emphasis')).toBe(true);
+    expect(pillBtn.getAttribute('aria-label')).toBe('Claude is waiting — jump to latest');
+    expect(pillBtn.textContent).toContain('Claude needs you');
+
+    // Tapping smooth-scrolls to the latest (jsdom's scrollTo is a no-op stub, so
+    // spy it to prove onJump → jumpToLatest is wired).
+    const scrollToSpy = vi.fn();
+    stream.scrollTo = scrollToSpy as unknown as typeof stream.scrollTo;
+    pillBtn.click();
+    await settle();
+    expect(scrollToSpy).toHaveBeenCalledWith(expect.objectContaining({ behavior: 'smooth' }));
+  });
+
+  it('shows the non-emphasized pill copy when the content below is not a needs-you signal', async () => {
+    messagesOnServer = { ...messagesOnServer, state: 'working' }; // not needs_input
+    await mountChat();
+
+    const pillBtn = container.querySelector('.chat-jump') as HTMLButtonElement;
+    const stream = container.querySelector('.chat-stream') as HTMLElement;
+    Object.defineProperty(stream, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(stream, 'clientHeight', { value: 100, configurable: true });
+    stream.scrollTop = 0;
+    stream.dispatchEvent(new Event('scroll'));
+    await settle();
+
+    expect(pillBtn.classList.contains('hidden')).toBe(false);
+    expect(pillBtn.classList.contains('emphasis')).toBe(false);
+    expect(pillBtn.getAttribute('aria-label')).toBe('Jump to latest');
+    expect(pillBtn.textContent).toContain('Latest');
   });
 });

@@ -7,11 +7,15 @@ import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../api';
 import {
   BOTTOM_SLACK_PX,
+  HEADER_HIDE_THRESHOLD_PX,
   anchoredScrollTop,
   isNearBottom,
   maxSeq,
   mergeMessages,
   mergeRefetch,
+  pillState,
+  quickReturnReduce,
+  type QuickReturnState,
 } from './chatStream';
 
 const msg = (seq: number, text: string): ChatMessage => ({
@@ -96,5 +100,68 @@ describe('anchoredScrollTop', () => {
 
   it('never anchors backwards when nothing was prepended', () => {
     expect(anchoredScrollTop({ scrollTop: 120, scrollHeight: 1000 }, 1000)).toBe(120);
+  });
+});
+
+describe('quickReturnReduce (issue #35 §2)', () => {
+  const start = (over: Partial<QuickReturnState> = {}): QuickReturnState => ({
+    lastScrollTop: 500,
+    hideAccum: 0,
+    visible: true,
+    ...over,
+  });
+  const H = 48; // header height gate
+
+  it('pins the header inside the header band and at the very top', () => {
+    expect(quickReturnReduce(start({ visible: false }), 0, H).visible).toBe(true);
+    expect(quickReturnReduce(start({ visible: false }), H, H).visible).toBe(true);
+    // iOS rubber-band overscroll (negative scrollTop) also pins it.
+    expect(quickReturnReduce(start({ visible: false }), -30, H).visible).toBe(true);
+  });
+
+  it('reveals on any backtrack toward the top (hair-trigger) and resets the streak', () => {
+    const next = quickReturnReduce(start({ visible: false, hideAccum: 99 }), 497, H);
+    expect(next.visible).toBe(true);
+    expect(next.hideAccum).toBe(0);
+  });
+
+  it('hides only after committed reading-onward scroll crosses the threshold', () => {
+    let st = start(); // 500, visible
+    st = quickReturnReduce(st, 505, H); // +5, below threshold
+    expect(st.visible).toBe(true);
+    st = quickReturnReduce(st, 512, H); // +7 → 12 committed ≥ 10
+    expect(st.visible).toBe(false);
+    expect(HEADER_HIDE_THRESHOLD_PX).toBe(10);
+  });
+
+  it('a reversal resets the streak so a tiny wobble never hides it', () => {
+    let st = start();
+    st = quickReturnReduce(st, 506, H); // +6
+    st = quickReturnReduce(st, 503, H); // reversal → reset + reveal
+    st = quickReturnReduce(st, 509, H); // +6 again, streak only 6
+    expect(st.visible).toBe(true);
+  });
+
+  it('is a no-op on a zero delta', () => {
+    const st = start({ hideAccum: 4 });
+    expect(quickReturnReduce(st, 500, H)).toEqual(st);
+  });
+});
+
+describe('pillState (issue #35 §4)', () => {
+  it('is hidden at/near the bottom', () => {
+    expect(pillState(true, false)).toEqual({ visible: false, emphasized: false });
+  });
+
+  it('is visible (append-only ⇒ newer content below) when scrolled up', () => {
+    expect(pillState(false, false)).toEqual({ visible: true, emphasized: false });
+  });
+
+  it('is emphasized when the content below is a needs-you signal', () => {
+    expect(pillState(false, true)).toEqual({ visible: true, emphasized: true });
+  });
+
+  it('never claims emphasis while hidden', () => {
+    expect(pillState(true, true)).toEqual({ visible: false, emphasized: false });
   });
 });

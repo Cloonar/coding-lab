@@ -9,7 +9,7 @@
 // Phone-first, v0 design language.
 
 import { A, useParams } from '@solidjs/router';
-import { Dynamic } from 'solid-js/web';
+import { Dynamic, Portal } from 'solid-js/web';
 import {
   For,
   Match,
@@ -21,6 +21,7 @@ import {
   createSignal,
   on,
   onCleanup,
+  onMount,
 } from 'solid-js';
 import {
   answerRun,
@@ -48,9 +49,12 @@ import {
   maxSeq,
   mergeMessages,
   mergeRefetch,
+  pillState,
+  quickReturnReduce,
+  type QuickReturnState,
 } from '../lib/chatStream';
 import { stateBadge } from '../lib/conversation';
-import { openState, providerOpen } from '../lib/deepLink';
+import { openState, providerOpen, type OpenState } from '../lib/deepLink';
 import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { resourceValue } from '../lib/resource';
@@ -115,9 +119,126 @@ function RunChatView() {
 
   // The stream is the scroll container (.chat-page bounds the viewport).
   let streamEl: HTMLDivElement | undefined;
-  const scrollToBottom = () => {
-    if (streamEl !== undefined) streamEl.scrollTop = streamEl.scrollHeight;
+
+  // --- Single scroll controller (issue #35 §2 + §4) --------------------------
+  // One passive listener on .chat-stream drives BOTH the quick-return header
+  // (§2, mobile) and the jump-to-latest pill (§4). Reactive outputs:
+  const [headerVisible, setHeaderVisible] = createSignal(true); // §2 overlay shown?
+  const [nearBottom, setNearBottom] = createSignal(true); // §4 at/near the end?
+  // Append-only stream ⇒ "scrolled up" already means "newer content below" (§4).
+  const pill = () => pillState(nearBottom(), state() === 'needs_input');
+
+  // Imperative bookkeeping — plain lets, NOT signals: they mutate on every scroll
+  // tick and must never schedule a render.
+  let headerEl: HTMLElement | undefined; // forwarded up from ChatHeader, for measuring
+  let pageEl: HTMLElement | undefined; // .chat-page, carries the --chat-header-h var
+  let headerHeightPx = 0; // cached header height (the §2 gate; never read per-tick)
+  let quickReturn: QuickReturnState = { lastScrollTop: 0, hideAccum: 0, visible: true };
+  // Programmatic-scroll guard (§2 "only user-initiated scroll toggles the header").
+  let programmaticScroll = false;
+  let programmaticRaf = 0; // instant writes clear on the next frame
+  let programmaticTimer = 0; // smooth (tap-to-latest) writes clear on a bounded timer
+
+  const clearProgrammatic = () => {
+    programmaticScroll = false;
+    programmaticRaf = 0;
+    programmaticTimer = 0;
+    // Adopt the settled position as the baseline so the first genuine swipe
+    // measures its delta from here, not the pre-jump value.
+    if (streamEl !== undefined)
+      quickReturn = { ...quickReturn, lastScrollTop: streamEl.scrollTop, hideAccum: 0 };
   };
+
+  // Mark the coming scrollTop write(s) as programmatic so §2 ignores them. A
+  // scrollTop write dispatches its scroll event asynchronously and browsers
+  // coalesce writes into one event — or fire NONE if the value is unchanged — so
+  // the flag is cleared by an UNCONDITIONAL rAF/timer, never inside the handler,
+  // and thus can't get stuck. Instant writes settle within one frame; a smooth
+  // scroll emits a burst over ~300ms, so it holds the flag on a bounded timer.
+  const beginProgrammaticScroll = (smooth = false) => {
+    programmaticScroll = true;
+    if (programmaticRaf !== 0 && typeof cancelAnimationFrame !== 'undefined')
+      cancelAnimationFrame(programmaticRaf);
+    if (programmaticTimer !== 0) clearTimeout(programmaticTimer);
+    programmaticRaf = 0;
+    programmaticTimer = 0;
+    if (smooth) {
+      // A smooth scroll emits a burst of events over ~300ms; a bounded timer
+      // outlasts it so the tail isn't misread as a user swipe.
+      programmaticTimer = setTimeout(clearProgrammatic, 350);
+    } else if (typeof requestAnimationFrame !== 'undefined') {
+      programmaticRaf = requestAnimationFrame(clearProgrammatic);
+    } else {
+      clearProgrammatic();
+    }
+  };
+
+  const scrollToBottom = () => {
+    if (streamEl === undefined) return;
+    beginProgrammaticScroll(); // instant — §2 must not read this as a user swipe
+    streamEl.scrollTop = streamEl.scrollHeight;
+  };
+
+  const onScroll = () => {
+    const el = streamEl;
+    if (el === undefined) return;
+    setNearBottom(isNearBottom(el)); // §4 — always, even during programmatic scroll
+    if (programmaticScroll) {
+      // Track the moving position but leave §2 visibility untouched.
+      quickReturn = { ...quickReturn, lastScrollTop: el.scrollTop, hideAccum: 0 };
+      return;
+    }
+    quickReturn = quickReturnReduce(quickReturn, el.scrollTop, headerHeightPx);
+    setHeaderVisible(quickReturn.visible);
+  };
+
+  const prefersReducedMotion = () =>
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+  // §4 pill tap: smooth-scroll to the latest and EXPLICITLY reveal the header —
+  // the jump moves downward (the §2 hide direction), so the reveal can't be
+  // derived from scroll direction and must be forced (the programmatic guard
+  // suppresses the reducer anyway).
+  const jumpToLatest = () => {
+    const el = streamEl;
+    if (el === undefined) return;
+    setHeaderVisible(true);
+    quickReturn = { ...quickReturn, visible: true, hideAccum: 0 };
+    const smooth = !prefersReducedMotion();
+    beginProgrammaticScroll(smooth);
+    if (smooth && typeof el.scrollTo === 'function')
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    else el.scrollTop = el.scrollHeight;
+  };
+
+  // Cache the header height (the §2 gate) once on mount and whenever it resizes
+  // (the mobile row wraps; "Confirm stop" changes it). Never read offsetHeight in
+  // onScroll — that forces a synchronous reflow and defeats the composited overlay.
+  const measureHeader = () => {
+    if (headerEl === undefined) return;
+    headerHeightPx = headerEl.offsetHeight; // 0 in jsdom → gate = scrollTop ≤ 0, harmless
+    pageEl?.style.setProperty('--chat-header-h', `${headerHeightPx}px`);
+  };
+
+  onMount(() => {
+    const el = streamEl;
+    if (el === undefined) return;
+    el.addEventListener('scroll', onScroll, { passive: true });
+    onCleanup(() => el.removeEventListener('scroll', onScroll));
+    measureHeader();
+    if (typeof ResizeObserver !== 'undefined' && headerEl !== undefined) {
+      const ro = new ResizeObserver(() => measureHeader());
+      ro.observe(headerEl);
+      onCleanup(() => ro.disconnect());
+    }
+  });
+
+  onCleanup(() => {
+    if (programmaticRaf !== 0 && typeof cancelAnimationFrame !== 'undefined')
+      cancelAnimationFrame(programmaticRaf);
+    if (programmaticTimer !== 0) clearTimeout(programmaticTimer);
+  });
 
   // Monotonic fetch token: only the newest in-flight fetch may apply its
   // result, so a slow stale response can't revert an answered dialog to
@@ -189,6 +310,9 @@ function RunChatView() {
           : { scrollTop: streamEl.scrollTop, scrollHeight: streamEl.scrollHeight };
       setMessages((prev) => mergeMessages(prev, res.messages));
       if (streamEl !== undefined && before !== undefined) {
+        // The anchor write adds the prepended height to scrollTop — a large
+        // hide-direction delta that would otherwise slam the header shut (§2).
+        beginProgrammaticScroll();
         streamEl.scrollTop = anchoredScrollTop(before, streamEl.scrollHeight);
       }
     } catch (err) {
@@ -299,60 +423,78 @@ function RunChatView() {
     m.kind === 'text' && m.thinking === true && !showThinking();
 
   return (
-    <main class="page chat-page">
-      <ChatHeader
-        run={runData()}
-        providers={providers()}
-        state={state()}
-        showThinking={showThinking()}
-        onToggleThinking={() => setShowThinking((v) => !v)}
-        onError={setError}
-        onChanged={() => void refetchRun()}
-      />
+    <main class="page chat-page" ref={pageEl}>
+      {/* The banner sits above the body so the mobile overlay header (§2), which
+          is absolutely positioned within .chat-body, can never paint over it. */}
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
 
-      <div class="chat-stream" role="log" aria-live="polite" ref={streamEl}>
-        <Switch>
-          <Match when={transcript() === 'locating' && messages().length === 0}>
-            <p class="empty">Waiting for the transcript…</p>
-          </Match>
-          <Match when={transcript() === 'gone'}>
-            <p class="empty">Transcript no longer available.</p>
-          </Match>
-          <Match when={messages().length === 0}>
-            <p class="empty">No messages yet.</p>
-          </Match>
-          <Match when={messages().length > 0}>
-            <Show when={hasMore()}>
-              <button type="button" class="seg chat-earlier" onClick={() => void loadEarlier()}>
-                Load earlier
-              </button>
-            </Show>
-            <For each={renderItems()}>
-              {(item) => (
-                <Switch>
-                  <Match when={item.kind === 'toolGroup' && item}>
-                    {(group) => (
-                      <ToolGroupView
-                        group={group()}
-                        showThinking={showThinking()}
-                        open={openGroups().has(group().key)}
-                        onToggle={(o) => setGroupOpen(group().key, o)}
-                      />
-                    )}
-                  </Match>
-                  <Match when={item.kind === 'message' && item}>
-                    {(msg) => (
-                      <Show when={!hiddenThinking(msg().message)}>
-                        <MessageView message={msg().message} />
-                      </Show>
-                    )}
-                  </Match>
-                </Switch>
-              )}
-            </For>
-          </Match>
-        </Switch>
+      {/* .chat-body is the positioning context for the quick-return header (§2):
+          on mobile the header overlays the stream's top and slides via translateY
+          while the stream reserves the header's band with padding-top, so hiding
+          the header reclaims reading space with no reflow. */}
+      <div class="chat-body">
+        <ChatHeader
+          run={runData()}
+          providers={providers()}
+          state={state()}
+          showThinking={showThinking()}
+          onToggleThinking={() => setShowThinking((v) => !v)}
+          onError={setError}
+          onChanged={() => void refetchRun()}
+          hidden={!headerVisible()}
+          headerRef={(el) => (headerEl = el)}
+        />
+
+        <div class="chat-stream" role="log" aria-live="polite" ref={streamEl}>
+          <Switch>
+            <Match when={transcript() === 'locating' && messages().length === 0}>
+              <p class="empty">Waiting for the transcript…</p>
+            </Match>
+            <Match when={transcript() === 'gone'}>
+              <p class="empty">Transcript no longer available.</p>
+            </Match>
+            <Match when={messages().length === 0}>
+              <p class="empty">No messages yet.</p>
+            </Match>
+            <Match when={messages().length > 0}>
+              <Show when={hasMore()}>
+                <button type="button" class="seg chat-earlier" onClick={() => void loadEarlier()}>
+                  Load earlier
+                </button>
+              </Show>
+              <For each={renderItems()}>
+                {(item) => (
+                  <Switch>
+                    <Match when={item.kind === 'toolGroup' && item}>
+                      {(group) => (
+                        <ToolGroupView
+                          group={group()}
+                          showThinking={showThinking()}
+                          open={openGroups().has(group().key)}
+                          onToggle={(o) => setGroupOpen(group().key, o)}
+                        />
+                      )}
+                    </Match>
+                    <Match when={item.kind === 'message' && item}>
+                      {(msg) => (
+                        <Show when={!hiddenThinking(msg().message)}>
+                          <MessageView message={msg().message} />
+                        </Show>
+                      )}
+                    </Match>
+                  </Switch>
+                )}
+              </For>
+            </Match>
+          </Switch>
+          {/* §3 — the needs-input note lives in the stream, not the composer: a
+            subtle centered status line (styled like .chat-lifecycle, not a
+            bubble), the last stream child so it only shows at the bottom.
+            Reactive on state(); slides off with the rest as you scroll up. */}
+          <Show when={state() === 'needs_input'}>
+            <p class="chat-lifecycle chat-needs-input">Claude is waiting for your reply.</p>
+          </Show>
+        </div>
       </div>
 
       <Composer
@@ -361,6 +503,9 @@ function RunChatView() {
         ended={ended()}
         transcript={transcript()}
         dialog={pendingDialog()}
+        jumpVisible={pill().visible}
+        jumpEmphasis={pill().emphasized}
+        onJump={jumpToLatest}
         onError={setError}
         onSent={() => void refetchMessages()}
       />
@@ -376,6 +521,8 @@ function ChatHeader(props: {
   onToggleThinking: () => void;
   onError: (message: string) => void;
   onChanged: () => void;
+  hidden: boolean;
+  headerRef: (el: HTMLElement) => void;
 }) {
   const [confirming, setConfirming] = createSignal(false);
   const [stopping, setStopping] = createSignal(false);
@@ -419,7 +566,10 @@ function ChatHeader(props: {
   };
 
   return (
-    <header class="chat-header">
+    <header
+      ref={props.headerRef}
+      classList={{ 'chat-header': true, 'chat-header--hidden': props.hidden }}
+    >
       <A
         href="/"
         class="crumb chat-back icon-btn"
@@ -429,53 +579,217 @@ function ChatHeader(props: {
         <Icon name="arrow-left" />
       </A>
       <span class="chat-title">{title()}</span>
+
+      {/* <640px: the convo chip distilled to a colored dot beside the title. A
+          labeled graphic (role=img), not a live region — an aria-label swap
+          wouldn't announce, and the full chip is display:none here so the dot is
+          the only state cue a screen reader can reach on mobile. */}
       <Show when={badge()}>
         {(b) => (
-          <span classList={{ chip: true, convo: true, [b().cls]: true }} title={b().title}>
+          <span
+            classList={{ 'chat-state-dot': true, [b().cls]: true }}
+            title={b().title}
+            aria-label={b().title}
+            role="img"
+          />
+        )}
+      </Show>
+      {/* >=640px: the full text chip (same markup as before, now display-gated). */}
+      <Show when={badge()}>
+        {(b) => (
+          <span
+            classList={{ chip: true, convo: true, 'chat-state-chip': true, [b().cls]: true }}
+            title={b().title}
+          >
             {b().label}
           </span>
         )}
       </Show>
+
       <span class="spacer" />
+
+      {/* >=640px: the original inline controls, verbatim. display:contents at
+          >=640px makes this wrapper transparent (identical flex row to before);
+          <640px the wrapper is display:none and the controls live in the menu. */}
+      <div class="chat-desktop-actions">
+        <button
+          type="button"
+          class="seg chat-thinking-toggle"
+          aria-pressed={props.showThinking}
+          onClick={() => props.onToggleThinking()}
+          title="Show or hide the agent's thinking"
+        >
+          {props.showThinking ? 'Hide thinking' : 'Show thinking'}
+        </button>
+        <Show when={open()}>{(s) => <OpenAffordance state={s()} />}</Show>
+        <Show when={live()}>
+          <Switch>
+            <Match when={!confirming()}>
+              <button
+                type="button"
+                class="icon-btn danger chat-stop"
+                aria-label="Stop the instance"
+                title="Stop the instance"
+                onClick={() => setConfirming(true)}
+              >
+                <Icon name="square" />
+              </button>
+            </Match>
+            <Match when={confirming()}>
+              <button
+                type="button"
+                class="danger chat-stop-confirm"
+                disabled={stopping()}
+                onClick={() => void stop()}
+              >
+                {stopping() ? 'Stopping…' : 'Confirm stop'}
+              </button>
+              <button type="button" class="seg" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+            </Match>
+          </Switch>
+        </Show>
+      </div>
+
+      {/* <640px: everything the one-line row can't hold moves into `•••`. */}
+      <ChatMenu
+        showThinking={props.showThinking}
+        onToggleThinking={props.onToggleThinking}
+        openState={open()}
+        live={live()}
+        confirming={confirming()}
+        stopping={stopping()}
+        onRequestStop={() => setConfirming(true)}
+        onCancelStop={() => setConfirming(false)}
+        onStop={() => void stop()}
+      />
+    </header>
+  );
+}
+
+// The mobile (<640px) header overflow menu (§1): an anchored dropdown mirroring
+// TopBar's nav-menu/nav-scrim pattern — outside-tap + Escape + tap-to-close —
+// carrying the controls the one-line header can't hold inline: the thinking
+// toggle, the open affordance (when available), and the two-step Stop (live
+// only). `•••` is always present; the items are contextual. CSS hides the whole
+// wrapper at >=640px, where the inline header controls render instead.
+function ChatMenu(props: {
+  showThinking: boolean;
+  onToggleThinking: () => void;
+  openState: OpenState | null;
+  live: boolean;
+  confirming: boolean;
+  stopping: boolean;
+  onRequestStop: () => void;
+  onCancelStop: () => void;
+  onStop: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  // Closing always abandons a half-armed Stop, so the confirm can't linger
+  // invisibly and fire on the next open.
+  const close = () => {
+    setMenuOpen(false);
+    props.onCancelStop();
+  };
+
+  // Close on Escape while open (mirrors TopBar).
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && menuOpen()) close();
+  };
+  window.addEventListener('keydown', onKeyDown);
+  onCleanup(() => window.removeEventListener('keydown', onKeyDown));
+
+  return (
+    <div class="chat-menu">
       <button
         type="button"
-        class="seg chat-thinking-toggle"
-        aria-pressed={props.showThinking}
-        onClick={() => props.onToggleThinking()}
-        title="Show or hide the agent's thinking"
+        class="icon-btn chat-menu-toggle"
+        aria-label="More actions"
+        title="More actions"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen()}
+        aria-controls={menuOpen() ? 'chat-menu-panel' : undefined}
+        onClick={() => (menuOpen() ? close() : setMenuOpen(true))}
       >
-        {props.showThinking ? 'Hide thinking' : 'Show thinking'}
+        <Icon name="more-horizontal" />
       </button>
-      <Show when={open()}>{(s) => <OpenAffordance state={s()} />}</Show>
-      <Show when={live()}>
-        <Switch>
-          <Match when={!confirming()}>
-            <button
-              type="button"
-              class="icon-btn danger chat-stop"
-              aria-label="Stop the instance"
-              title="Stop the instance"
-              onClick={() => setConfirming(true)}
-            >
-              <Icon name="square" />
-            </button>
-          </Match>
-          <Match when={confirming()}>
-            <button
-              type="button"
-              class="danger chat-stop-confirm"
-              disabled={stopping()}
-              onClick={() => void stop()}
-            >
-              {stopping() ? 'Stopping…' : 'Confirm stop'}
-            </button>
-            <button type="button" class="seg" onClick={() => setConfirming(false)}>
-              Cancel
-            </button>
-          </Match>
-        </Switch>
+
+      <Show when={menuOpen()}>
+        <div class="chat-menu-panel" id="chat-menu-panel" role="menu">
+          <button
+            type="button"
+            class="chat-menu-item"
+            role="menuitem"
+            onClick={() => {
+              props.onToggleThinking();
+              close();
+            }}
+          >
+            <Icon name="message-square" class="chat-menu-icon" />
+            <span>{props.showThinking ? 'Hide thinking' : 'Show thinking'}</span>
+          </button>
+
+          {/* Presentational wrapper (role=none): the OpenAffordance renders its
+              own focusable <a>/<button>, so nesting it inside a role=menuitem
+              would be invalid ARIA. Closing on click still works via bubbling. */}
+          <Show when={props.openState}>
+            {(s) => (
+              <div class="chat-menu-item chat-menu-open" role="none" onClick={close}>
+                <OpenAffordance state={s()} />
+              </div>
+            )}
+          </Show>
+
+          <Show when={props.live}>
+            <Switch>
+              <Match when={!props.confirming}>
+                <button
+                  type="button"
+                  class="chat-menu-item danger"
+                  role="menuitem"
+                  onClick={() => props.onRequestStop()}
+                >
+                  <Icon name="square" class="chat-menu-icon" />
+                  <span>Stop run…</span>
+                </button>
+              </Match>
+              <Match when={props.confirming}>
+                <button
+                  type="button"
+                  class="chat-menu-item danger"
+                  role="menuitem"
+                  disabled={props.stopping}
+                  onClick={() => props.onStop()}
+                >
+                  <Icon name="square" class="chat-menu-icon" />
+                  <span>{props.stopping ? 'Stopping…' : 'Confirm stop'}</span>
+                </button>
+                <button
+                  type="button"
+                  class="chat-menu-item"
+                  role="menuitem"
+                  onClick={() => props.onCancelStop()}
+                >
+                  <span class="chat-menu-icon" aria-hidden="true" />
+                  <span>Cancel</span>
+                </button>
+              </Match>
+            </Switch>
+          </Show>
+        </div>
       </Show>
-    </header>
+
+      {/* Portal the scrim to document.body: the mobile header is its own
+          stacking context (position:absolute; z-index:2), so a scrim nested
+          inside it would dim the header's own back/title. At body level it sits
+          below the header and dims only the page behind — like TopBar's scrim. */}
+      <Show when={menuOpen()}>
+        <Portal>
+          <div class="chat-menu-scrim" aria-hidden="true" onClick={close} />
+        </Portal>
+      </Show>
+    </div>
   );
 }
 
@@ -822,6 +1136,9 @@ function Composer(props: {
   ended: boolean;
   transcript: TranscriptStatus;
   dialog: Dialog | null;
+  jumpVisible: boolean;
+  jumpEmphasis: boolean;
+  onJump: () => void;
   onError: (message: string) => void;
   onSent: () => void;
 }) {
@@ -887,6 +1204,21 @@ function Composer(props: {
 
   return (
     <div class="chat-composer">
+      {/* §4 — jump-to-latest pill: floats ~12px above the field, over the
+          stream. Kept mounted and toggled via a class so it can fade OUT (not
+          just in); accent-emphasized when the content below is a needs-you
+          signal. Not focusable while hidden. */}
+      <button
+        type="button"
+        classList={{ 'chat-jump': true, hidden: !props.jumpVisible, emphasis: props.jumpEmphasis }}
+        aria-hidden={!props.jumpVisible}
+        tabindex={props.jumpVisible ? 0 : -1}
+        aria-label={props.jumpEmphasis ? 'Claude is waiting — jump to latest' : 'Jump to latest'}
+        onClick={() => props.onJump()}
+      >
+        <Icon name="chevron-down" size={16} class="chat-jump-icon" />
+        <span>{props.jumpEmphasis ? 'Claude needs you' : 'Latest'}</span>
+      </button>
       <Switch>
         <Match when={props.ended}>
           <p class="chat-composer-note">This instance has ended — the chat is read-only.</p>
@@ -917,12 +1249,9 @@ function Composer(props: {
         <Match when={true}>
           {/* Residual blocked state with no structured dialog — e.g. a plain
               tool-permission prompt or the post-decline "stuck" case (decision
-              7). The composer stays usable, with a hint. */}
-          <Show when={props.state === 'needs_input'}>
-            <p class="chat-composer-note">
-              Claude needs input — reply below, or open it in claude.ai.
-            </p>
-          </Show>
+              7). The composer stays usable. The needs-input note now lives in
+              the stream as a status line (§3), so needs_input collapses to just
+              the input row here. */}
           <div class="chat-composer-row">
             <textarea
               ref={(el) => {
