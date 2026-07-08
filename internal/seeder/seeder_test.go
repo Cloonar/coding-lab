@@ -103,8 +103,10 @@ func TestSeedWorkspace_skillsBundleLandsVerbatim(t *testing.T) {
 	if files == 0 {
 		t.Fatal("embedded skills bundle is empty — go:embed all:skills broken")
 	}
-	// Spot-check the bundle carries the expected skills at all.
-	for _, name := range []string{"tdd", "triage", "to-issues"} {
+	// Spot-check the bundle carries the expected skills at all. land-pr is the
+	// cloonar-local skill (not from upstream) — guard it against an upstream bump
+	// that replaces the mattpocock dirs wholesale and forgets to keep it.
+	for _, name := range []string{"tdd", "triage", "to-issues", "land-pr"} {
 		if _, err := os.Stat(filepath.Join(wt, ".claude", "skills", name, "SKILL.md")); err != nil {
 			t.Errorf("skill %s not seeded: %v", name, err)
 		}
