@@ -5,30 +5,36 @@
 :root {
   color-scheme: light dark;
 
-  --bg: #f6f7f9;
+  /* Warm reskin (issue #41 phase 2a) — bone/ivory light, terracotta accent.
+     Every var below keeps its original name; components never changed. */
+  --bg: #faf9f5;
   --card: #ffffff;
-  --text: #1b1f24;
-  --muted: #697586;
-  --border: #e4e7eb;
-  --hover: #f0f2f5;
-  --accent: #2563eb;
-  --accent-text: #ffffff;
+  --text: #1f1e1d;
+  --muted: #6b675c;
+  --border: #e8e4da;
+  --hover: #f1efe8;
+  --accent: #d97757;
+  /* Warm coffee-brown, not white: white-on-#d97757 is 3.12:1 and fails WCAG
+     AA (4.5:1) for text. This dark warm brown clears it at 5.36:1 instead. */
+  --accent-text: #2a1a12;
   --danger: #c0362c;
   --danger-border: #e6b8b3;
-  --ok: #19a463;
-  --run-bg: #e6f6ec;
-  --run-text: #14693e;
-  --idle-bg: #eceff2;
-  --idle-text: #5b6573;
-  --chip-bg: #eef1f5;
-  --chip-text: #3b4452;
-  --banner-bg: #fff8e1;
-  --banner-border: #f3d99a;
+  --ok: #1a9c5b;
+  --run-bg: #e7f2e1;
+  --run-text: #1f6b3d;
+  --idle-bg: #ece7db;
+  --idle-text: #5f594c;
+  --chip-bg: #eeeae0;
+  --chip-text: #524c3f;
+  --banner-bg: #faf1d8;
+  --banner-border: #e9cd8e;
   --banner-text: #5b4b16;
-  --err-bg: #fdeceb;
-  --err-border: #f3c2bd;
-  --err-text: #9c2820;
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.04);
+  --err-bg: #fbeae5;
+  --err-border: #eec2b8;
+  --err-text: #9c3324;
+  --shadow: 0 1px 2px rgba(40, 32, 22, 0.06), 0 1px 3px rgba(40, 32, 22, 0.04);
+
+  --font-serif: 'Source Serif 4 Variable', Georgia, 'Times New Roman', serif;
 
   --radius-card: 14px;
   --radius-control: 10px;
@@ -47,28 +53,30 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0e1217;
-    --card: #161b22;
-    --text: #e4e8ee;
-    --muted: #97a1b0;
-    --border: #262d36;
-    --hover: #1e242c;
-    --accent: #3b82f6;
-    --danger: #f0736a;
+    /* Warm charcoal, not blue-black — accent stays the same terracotta as
+       light (accent-text is theme-agnostic too: not redeclared here). */
+    --bg: #262624;
+    --card: #30302e;
+    --text: #ecebe6;
+    --muted: #a5a196;
+    --border: #3e3c37;
+    --hover: #373631;
+    --accent: #d97757;
+    --danger: #f28577;
     --danger-border: #5c2b27;
-    --ok: #34d399;
-    --run-bg: #11331f;
-    --run-text: #5fd99a;
-    --idle-bg: #232a32;
-    --idle-text: #97a1b0;
-    --chip-bg: #232a32;
-    --chip-text: #c3ccd6;
-    --banner-bg: #2a2510;
-    --banner-border: #574c1c;
-    --banner-text: #e3d7a3;
-    --err-bg: #2a1513;
+    --ok: #3ecf8e;
+    --run-bg: #17301d;
+    --run-text: #6cd99a;
+    --idle-bg: #35332e;
+    --idle-text: #a8a398;
+    --chip-bg: #3a3833;
+    --chip-text: #d6d2c7;
+    --banner-bg: #2e2712;
+    --banner-border: #5c4f20;
+    --banner-text: #e6d9a6;
+    --err-bg: #2e1613;
     --err-border: #5c2b27;
-    --err-text: #f3a9a2;
+    --err-text: #f3aca2;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   }
 }
@@ -100,6 +108,43 @@ body {
 code,
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Type --------------------------------------------------------------------- */
+
+/* Vendored variable fonts (OFL), web/public/fonts/ — one file per style spans
+   the whole 200-900 weight axis (woff2-variations), so headings can use any
+   weight in range without shipping per-weight static cuts. */
+@font-face {
+  font-family: 'Source Serif 4 Variable';
+  src: url('/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Source Serif 4 Variable';
+  src: url('/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* Headings + the brand wordmark read in the serif (Claude-web feel). UI
+   chrome and code keep the system sans/mono stacks set above — untouched.
+   :not(.md-h) excludes chat markdown headings (issue #13): assistant/user
+   prose stays system sans here, Phase 3 owns any chat typography beyond
+   that. */
+h1:not(.md-h),
+h2:not(.md-h),
+h3:not(.md-h) {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand {
+  font-family: var(--font-serif);
 }
 
 /* Layout ------------------------------------------------------------------ */
@@ -2863,4 +2908,27 @@ h6.md-h {
   .composer-chip-label {
     max-width: 7rem;
   }
+}
+
+/* Auth card (issue #41 phase 2a) -------------------------------------------- */
+
+/* Login/Setup render <main class="page"><div class="card auth-card">…</div>
+   </main> (see routes/Login.tsx, routes/Setup.tsx) — :has() scopes the
+   centered treatment to those two routes without a new class hook on <main>,
+   so every other .page consumer (still top-anchored) is untouched. Falls
+   back to the plain top-anchored .card look in browsers without :has()
+   support — .auth-card's own max-width/margin below still centers it
+   horizontally either way. */
+main.page:has(> .auth-card) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  margin: 0 auto;
 }
