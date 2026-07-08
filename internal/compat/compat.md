@@ -312,7 +312,10 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   captured on this host in a scratch dir, ids/paths verbatim).** The user
   event that carries a dialog tool's `tool_result` block also carries
   top-level resolution ground truth lab's verification backstop reads
-  (`tItem.ToolUseResult`/`ToolDenialKind`, `dialogintent.go`):
+  (`tItem.ToolUseResult`/`ToolDenialKind`, `dialogintent.go`) — and, since
+  issue #56, the same ground truth derives the answered dialog's `Outcome`
+  for history display (`dialogoutcome.go`: a resolved dialog stays a dialog
+  message carrying its recorded answer, never a demoted tool chip):
   - **Answered `AskUserQuestion`**: `toolUseResult` is an OBJECT
     `{"questions":[…input echo…],"answers":{"<question text>":"<label>" |
     "<l1, l2>"},"annotations":{}}` — multi-select labels comma+space-joined in

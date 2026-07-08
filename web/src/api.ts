@@ -516,15 +516,53 @@ export interface Question {
   multi_select?: boolean;
 }
 
+/**
+ * The recorded resolution of an answered dialog (provider.go DialogOutcome).
+ * Its PRESENCE on a Dialog is the answered signal: every field is omitempty,
+ * so a plan rejected without typed feedback serializes as `"outcome": {}` —
+ * never key "answered" on the inner fields.
+ */
+export interface DialogOutcome {
+  /** Resolved without an answer: denial, interrupt, unattended timeout, or unreadable result. */
+  dismissed?: boolean;
+  /** Question kind: one per question, dialog order. */
+  results?: QuestionResult[];
+  /** Plan kind: the plan was approved. */
+  approved?: boolean;
+  /** Plan kind: rejection feedback text, if typed. */
+  feedback?: string;
+}
+
+/**
+ * One question's resolved answer for display (provider.go QuestionResult).
+ * Neither `chosen` nor `other_text` means that question got no recorded
+ * answer; a multi-select result can carry BOTH.
+ */
+export interface QuestionResult {
+  /** The question text. */
+  question: string;
+  /** Chosen listed option label(s), recorded toggle order. */
+  chosen?: string[];
+  /** Free-text answer (the synthesized Other row). */
+  other_text?: string;
+}
+
 export interface Dialog {
   tool_id: string;
   dialog_kind: DialogKind;
+  /** For the plan kind, the FULL plan markdown (issue #56 — no length cap). */
   prompt: string;
   options?: DialogOption[];
   multi?: boolean;
   /** Present ONLY for multi-question dialogs (issue #51 decision 3). */
   questions?: Question[];
   answerable: boolean;
+  /**
+   * Resolution of an answered dialog (issue #56 decision 3): non-null MEANS
+   * answered; absent means still pending. Answered dialogs keep their full
+   * options/questions; the live pending_dialog field never carries one.
+   */
+  outcome?: DialogOutcome;
 }
 
 /** One entry of the universal chat schema. */

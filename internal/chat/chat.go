@@ -439,10 +439,14 @@ func (s *Service) dialogPending(ctx context.Context, run store.Run) bool {
 	return view.State == provider.StateQuestion
 }
 
-// lastDialog returns the last dialog message's Dialog, if the tail is one.
+// lastDialog returns the last PENDING dialog message's Dialog, if any.
+// Answered dialogs (Outcome set) stay in the stream as history since issue
+// #56, so this dormant-fallback answer path must skip them — a resolved
+// dialog is never a keystroke target, and returning one would aim AnswerDialog
+// at a picker that no longer exists.
 func lastDialog(msgs []provider.Message) (provider.Dialog, bool) {
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Kind == provider.MessageDialog && msgs[i].Dialog != nil {
+		if msgs[i].Kind == provider.MessageDialog && msgs[i].Dialog != nil && msgs[i].Dialog.Outcome == nil {
 			return *msgs[i].Dialog, true
 		}
 	}

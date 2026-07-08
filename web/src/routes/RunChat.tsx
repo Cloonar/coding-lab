@@ -1,14 +1,14 @@
 // Embedded chat (/runs/:id, issue #7 / ADR-0016): the body IS the chat. A
 // compact header (title · conversational state · deep link · New conversation ·
-// Stop), the conversation stream (user/assistant text, tool chips, pending
-// dialog, lifecycle/errors; thinking behind a toggle), and a fixed bottom
-// composer whose state follows the run — locked while a dialog is pending,
-// disabled for ended instances, and morphing its Send button into a one-tap
-// Interrupt while the agent is working (ADR-0022). Reads through GET
-// /runs/:id/messages and refetches on run.messages.changed; replies / answers /
-// interrupts POST back. Every string that names the agent derives from the
-// provider's display metadata (issue #51 decision 9). Phone-first, v0 design
-// language.
+// Stop), the conversation stream (user/assistant text, tool chips, the pending
+// dialog as an interactive inline card (issue #56), lifecycle/errors; thinking
+// behind a toggle), and a fixed bottom composer whose state follows the run —
+// collapsed to a waiting note while a dialog is pending, disabled for ended
+// instances, and morphing its Send button into a one-tap Interrupt while the
+// agent is working (ADR-0022). Reads through GET /runs/:id/messages and
+// refetches on run.messages.changed; replies / answers / interrupts POST back.
+// Every string that names the agent derives from the provider's display
+// metadata (issue #51 decision 9). Phone-first, v0 design language.
 
 import { A, useParams } from '@solidjs/router';
 import { Dynamic, Portal } from 'solid-js/web';
@@ -42,6 +42,7 @@ import {
   type Provider,
   type Question,
   type QuestionAnswer,
+  type QuestionResult,
   type Run,
   type RunCommand,
   type TranscriptStatus,
@@ -205,6 +206,35 @@ function RunChatView() {
     streamEl.scrollTop = streamEl.scrollHeight;
   };
 
+  // The interactive pending-dialog card in the stream (issue #56) — captured
+  // for the arrival scroll below; whichever render position mounts it (at its
+  // transcript message, or appended) assigns it. Imperative bookkeeping like
+  // streamEl, never rendered.
+  let dialogCardEl: HTMLDivElement | undefined;
+  // The last pending dialog identity a refetch delivered: only a NOT-yet-seen
+  // tool_id retargets the follow scroll to the card, so an SSE tick while the
+  // same dialog stays pending never re-yanks the viewport (decision 5).
+  let seenDialogToolId: string | null = null;
+
+  // Bring the just-arrived dialog card's TOP into view (issue #56 decision 5):
+  // the question text, not the stream's bottom, is the thing to read. Deferred
+  // a microtask (like the composer's autoGrow) so the card rendered by this
+  // refetch's signal writes has attached; guarded like every scripted scroll
+  // (§2). jsdom has no scrollIntoView — optional call, like the autocomplete's.
+  const scrollToPendingCard = () => {
+    queueMicrotask(() => {
+      const el = dialogCardEl;
+      if (el === undefined || !el.isConnected) {
+        // The card didn't render (e.g. the run ended under the dialog) — keep
+        // the plain bottom-follow rather than dropping the scroll entirely.
+        scrollToBottom();
+        return;
+      }
+      beginProgrammaticScroll();
+      el.scrollIntoView?.({ block: 'start' });
+    });
+  };
+
   const onScroll = () => {
     const el = streamEl;
     if (el === undefined) return;
@@ -294,7 +324,14 @@ function RunChatView() {
       const latest = await getRunMessages(params.id, { limit: MESSAGE_LIMIT });
       if (token !== fetchToken) return;
       setState(latest.state);
-      setPendingDialogField(latest.pending_dialog ?? null);
+      // Does this response bring a pending dialog this client hasn't shown
+      // yet? Decided BEFORE the tracking id updates, and tracked regardless of
+      // follow — a scrolled-up reader is never yanked (the jump pill covers
+      // them), and their card doesn't become "new" again later.
+      const dialog = latest.pending_dialog ?? null;
+      const newDialog = dialog !== null && dialog.tool_id !== seenDialogToolId;
+      seenDialogToolId = dialog?.tool_id ?? null;
+      setPendingDialogField(dialog);
       setTranscript(latest.transcript);
       setTranscriptId(latest.transcript_id);
       // Writing transcript_id can synchronously run the rotation effect (Solid
@@ -313,7 +350,11 @@ function RunChatView() {
       // on the initial window), so reading history isn't yanked down.
       const follow = cursor === 0 || (streamEl !== undefined && isNearBottom(streamEl));
       setMessages((prev) => mergeRefetch(prev, tail, latest.messages));
-      if (follow) scrollToBottom();
+      // A just-arrived dialog retargets the follow scroll from the stream's
+      // bottom to its card's top (issue #56 decision 5); otherwise today's
+      // plain bottom-follow.
+      if (follow && newDialog) scrollToPendingCard();
+      else if (follow) scrollToBottom();
       setLoaded(true); // the server's transcript status is now trustworthy
     } catch (err) {
       if (token === fetchToken) setError(errorMessage(err));
@@ -353,6 +394,9 @@ function RunChatView() {
     setMessages([]);
     setState('');
     setPendingDialogField(null);
+    // A fresh stream forgets the seen dialog too: a run navigated back into
+    // (or rotated) with a still-pending dialog scrolls its card into view.
+    seenDialogToolId = null;
     setTranscript('available');
     setHasMore(false);
     setExhausted(false);
@@ -539,9 +583,35 @@ function RunChatView() {
     const msgs = messages();
     for (let i = msgs.length - 1; i >= 0; i--) {
       const d = msgs[i]?.dialog;
-      if (msgs[i]?.kind === 'dialog' && d) return d;
+      // An outcome-bearing dialog is ANSWERED (issue #56 decision 3) — the
+      // fallback must never resurrect it as pending and re-lock the composer.
+      if (msgs[i]?.kind === 'dialog' && d && d.outcome == null) return d;
     }
     return null;
+  };
+  // The pending dialog the STREAM should offer as an interactive card (issue
+  // #56 decision 1): only while the run is live with a transcript — the same
+  // gate the composer's Match order has always applied (ended/gone outrank
+  // the dialog, an answer POST could land nowhere).
+  const activeDialog = (): Dialog | null =>
+    ended() || transcript() === 'gone' ? null : pendingDialog();
+  // The interactive card replaces a stream dialog message when the two are
+  // the SAME dialog (tool_id match): the card renders at the transcript
+  // position, fed by the spool-authoritative field data (richer than a
+  // transcript echo), and the dialog never shows twice. A stream dialog
+  // message NOT matching the pending one keeps its inert prompt-only render.
+  const pendingCardFor = (m: ChatMessage): Dialog | null => {
+    const d = activeDialog();
+    return d !== null && m.kind === 'dialog' && m.dialog?.tool_id === d.tool_id ? d : null;
+  };
+  // The usual case: the spool-served pending dialog has no transcript message
+  // (the agent CLI never flushes a pending tool_use), so the card is appended
+  // after the last stream item instead.
+  const appendedDialog = (): Dialog | null => {
+    const d = activeDialog();
+    if (d === null) return null;
+    const matched = messages().some((m) => m.kind === 'dialog' && m.dialog?.tool_id === d.tool_id);
+    return matched ? null : d;
   };
   // Group consecutive tool runs at render time (decision 7). Grouping runs on
   // the FULL list — including thinking — so the run boundaries are stable
@@ -607,8 +677,28 @@ function RunChatView() {
                     </Match>
                     <Match when={item.kind === 'message' && item}>
                       {(msg) => (
-                        <Show when={!hiddenThinking(msg().message)}>
-                          <MessageView message={msg().message} />
+                        // A dialog message matching the pending dialog renders
+                        // as the interactive card AT ITS TRANSCRIPT POSITION
+                        // (issue #56 decision 1) — never also as the inert
+                        // prompt line, and never a second time below.
+                        <Show
+                          when={pendingCardFor(msg().message)}
+                          fallback={
+                            <Show when={!hiddenThinking(msg().message)}>
+                              <MessageView message={msg().message} />
+                            </Show>
+                          }
+                        >
+                          {(d) => (
+                            <DialogCard
+                              runID={params.id}
+                              dialog={d()}
+                              openHint={openHint()}
+                              onError={setError}
+                              onAnswered={() => void refetchMessages()}
+                              cardRef={(el) => (dialogCardEl = el)}
+                            />
+                          )}
                         </Show>
                       )}
                     </Match>
@@ -617,6 +707,23 @@ function RunChatView() {
               </For>
             </Match>
           </Switch>
+          {/* The pending dialog as an interactive stream card (issue #56
+              decision 1), appended after the last item when no transcript
+              message carries its tool_id — the usual case: the spool-served
+              dialog never reaches the transcript. When one does, the card
+              renders at that message's position above instead. */}
+          <Show when={appendedDialog()}>
+            {(d) => (
+              <DialogCard
+                runID={params.id}
+                dialog={d()}
+                openHint={openHint()}
+                onError={setError}
+                onAnswered={() => void refetchMessages()}
+                cardRef={(el) => (dialogCardEl = el)}
+              />
+            )}
+          </Show>
           {/* §3 — the needs-input note lives in the stream, not the composer: a
             subtle centered status line (styled like .chat-lifecycle, not a
             bubble), the last stream child so it only shows at the bottom.
@@ -1076,6 +1183,15 @@ function MessageView(props: { message: ChatMessage }) {
       </Match>
       <Match when={m().kind === 'tool'}>
         <ToolChip message={m()} />
+      </Match>
+      {/* An ANSWERED dialog stays in history as a compact, inert Q→A summary
+          (issue #56 decision 3). Outcome PRESENCE is the answered signal —
+          never the inner fields: a plan rejected without typed feedback
+          serializes as an all-omitempty {}. A dialog message WITHOUT an
+          outcome keeps the prompt-only line below (the pending interactive
+          card is intercepted upstream by pendingCardFor, not here). */}
+      <Match when={m().kind === 'dialog' && m().dialog?.outcome ? m().dialog : null}>
+        {(d) => <AnsweredDialog dialog={d()} />}
       </Match>
       <Match when={m().kind === 'dialog'}>
         <div class="chat-dialog-inline">
@@ -1566,16 +1682,18 @@ function Composer(props: {
         <Match when={props.transcript === 'gone'}>
           <p class="chat-composer-note">Transcript no longer available — the chat is read-only.</p>
         </Match>
+        {/* A dialog is pending: the interactive card lives in the STREAM
+            (issue #56 decision 1), so the composer collapses to a slim
+            waiting note pointing up at it plus the Interrupt escape hatch —
+            no textarea, free text can't answer a focused picker (decision 2).
+            Mirrors the degraded question-state branch below. */}
         <Match when={props.dialog}>
-          {(d) => (
-            <DialogPanel
-              runID={props.runID}
-              dialog={d()}
-              openHint={props.openHint}
-              onError={props.onError}
-              onAnswered={props.onSent}
-            />
-          )}
+          <div class="chat-dialog">
+            <p class="chat-composer-note">
+              {capitalize(props.agentName)} is waiting on your answer — see the question above.
+            </p>
+            <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onSent} />
+          </div>
         </Match>
         {/* state 'question' with no structured dialog (a dormant transcript
             flush, or a shape lab can't render): the composer stays locked — a
@@ -1690,6 +1808,139 @@ function Composer(props: {
   );
 }
 
+// The pending dialog as a full-width stream card (issue #56 decision 1): the
+// interactive DialogPanel wrapped in house card chrome, rendered inside
+// .chat-stream — at its matching transcript message's position when one
+// exists, else appended after the last item. cardRef hands the element up for
+// the arrival scroll (decision 5).
+function DialogCard(props: {
+  runID: string;
+  dialog: Dialog;
+  openHint: string;
+  onError: (message: string) => void;
+  onAnswered: () => void;
+  cardRef: (el: HTMLDivElement) => void;
+}) {
+  return (
+    <div class="chat-dialog-card" ref={(el) => props.cardRef(el)}>
+      <DialogPanel
+        runID={props.runID}
+        dialog={props.dialog}
+        openHint={props.openHint}
+        onError={props.onError}
+        onAnswered={props.onAnswered}
+      />
+    </div>
+  );
+}
+
+/**
+ * An answered dialog message in history (issue #56 decision 3): a compact,
+ * inert Q→A summary — visibly quieter than the interactive card, no buttons,
+ * no unchosen options. The caller guards on outcome PRESENCE (the answered
+ * signal); this component never re-derives it from inner fields.
+ */
+function AnsweredDialog(props: { dialog: Dialog }) {
+  const outcome = () => props.dialog.outcome ?? {};
+  const results = () => outcome().results ?? [];
+  // Question texts for the renders that have no per-question answers to show
+  // (dismissed, or an empty outcome): the outcome's own texts when recorded,
+  // else the dialog's questions, else the prompt.
+  const questionTexts = () => {
+    if (results().length > 0) return results().map((r) => r.question);
+    const questions = props.dialog.questions ?? [];
+    if (questions.length > 0) return questions.map((q) => q.text);
+    return [props.dialog.prompt];
+  };
+  const planMarker = () =>
+    outcome().dismissed === true
+      ? 'Plan dismissed'
+      : outcome().approved === true
+        ? 'Plan approved'
+        : 'Plan rejected';
+  return (
+    <div class="chat-dialog-answered">
+      <Switch>
+        {/* Plan review: the FULL plan markdown stays readable in history
+            (same .chat-dialog-plan render as the live card), followed by a
+            one-line resolution marker; typed rejection feedback reads as an
+            operator quote. */}
+        <Match when={props.dialog.dialog_kind === 'plan'}>
+          <div class="chat-dialog-plan">
+            <Markdown source={props.dialog.prompt} />
+          </div>
+          <p class="chat-dialog-outcome">{planMarker()}</p>
+          <Show when={outcome().dismissed !== true && outcome().approved !== true}>
+            <Show when={outcome().feedback}>
+              {(f) => (
+                <p class="dialog-qa-answer">
+                  <span class="dialog-qa-other">“{f()}”</span>
+                </p>
+              )}
+            </Show>
+          </Show>
+        </Match>
+        {/* Dismissed question/approval: the question text(s) with ONE
+            dismissed marker — there is no answer to show. */}
+        <Match when={outcome().dismissed === true}>
+          <For each={questionTexts()}>{(text) => <p class="dialog-qa-question">{text}</p>}</For>
+          <p class="chat-dialog-outcome">Dismissed</p>
+        </Match>
+        {/* Question kind (and the reserved approval kind): one Q→A pair per
+            recorded result, dialog order. */}
+        <Match when={results().length > 0}>
+          <For each={results()}>
+            {(r) => (
+              <div class="dialog-qa">
+                <p class="dialog-qa-question">{r.question}</p>
+                <AnswerLine result={r} />
+              </div>
+            )}
+          </For>
+        </Match>
+        {/* Answered but nothing recorded (an empty, non-dismissed outcome on
+            a question) — mark the questions unanswered rather than vanish. */}
+        <Match when={true}>
+          <For each={questionTexts()}>
+            {(text) => (
+              <div class="dialog-qa">
+                <p class="dialog-qa-question">{text}</p>
+                <p class="dialog-qa-answer">
+                  <span class="dialog-qa-none">No answer recorded</span>
+                </p>
+              </div>
+            )}
+          </For>
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+/**
+ * One recorded answer line: the chosen labels joined ", " (recorded toggle
+ * order), then any typed Other text as a quoted span — visually distinct
+ * from a listed label; a multi-select result can carry both. Neither means
+ * that question got no recorded answer → the unanswered marker.
+ */
+function AnswerLine(props: { result: QuestionResult }) {
+  const chosen = () => props.result.chosen ?? [];
+  const other = () => props.result.other_text ?? '';
+  return (
+    <p class="dialog-qa-answer">
+      <Show when={chosen().length > 0}>
+        <span class="dialog-qa-chosen">{chosen().join(', ')}</span>
+      </Show>
+      <Show when={other() !== ''}>
+        <span class="dialog-qa-other">“{other()}”</span>
+      </Show>
+      <Show when={chosen().length === 0 && other() === ''}>
+        <span class="dialog-qa-none">No answer recorded</span>
+      </Show>
+    </p>
+  );
+}
+
 function DialogPanel(props: {
   runID: string;
   dialog: Dialog;
@@ -1739,9 +1990,10 @@ function DialogPanel(props: {
 
   return (
     <div class="chat-dialog">
-      {/* A plan review's prompt IS the plan body — render it as markdown in a
-          bounded scroll area (issue #51 decision 3). Every other kind keeps
-          the plain one-line prompt. */}
+      {/* A plan review's prompt IS the plan body — rendered as markdown in
+          full (issue #56 decision 4): the chat pane is the only scrollbar, so
+          approve/reject sit after the whole plan. Every other kind keeps the
+          plain one-line prompt. */}
       <Show
         when={props.dialog.dialog_kind === 'plan'}
         fallback={<p class="chat-dialog-prompt">{props.dialog.prompt}</p>}
@@ -1768,20 +2020,20 @@ function DialogPanel(props: {
               onSubmit={(answers) => void answer({ answers })}
             />
           </Match>
-          {/* Multi-select: checkboxes + a single confirm. */}
+          {/* Multi-select: toggle cards (issue #56 decision 7 — the former
+              bare checkbox rows dropped the option descriptions) + a single
+              confirm. The selection signal and Submit payload are unchanged. */}
           <Match when={props.dialog.multi}>
             <ul class="dialog-options">
               <For each={options()}>
                 {(opt, i) => (
                   <li>
-                    <label class="dialog-check">
-                      <input
-                        type="checkbox"
-                        checked={selected().includes(i())}
-                        onChange={() => toggle(i())}
-                      />
-                      {opt.label}
-                    </label>
+                    <OptionToggle
+                      option={opt}
+                      pressed={selected().includes(i())}
+                      disabled={busy()}
+                      onToggle={() => toggle(i())}
+                    />
                   </li>
                 )}
               </For>
@@ -1827,7 +2079,7 @@ function DialogPanel(props: {
                     >
                       <button
                         type="button"
-                        class="dialog-option seg"
+                        class="dialog-option"
                         disabled={busy()}
                         onClick={() => void answer({ index: i() })}
                       >
@@ -1841,24 +2093,56 @@ function DialogPanel(props: {
           </Match>
         </Switch>
       </Show>
-      <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onAnswered} />
     </div>
   );
 }
 
 /**
- * One option's face — bold label over a secondary description — shared by
- * every option-button shape so question options and plan approve/reject rows
- * read alike.
+ * One option's face — bold label over the ALWAYS-visible muted description
+ * (issue #56 decision 7) — shared by every option-card shape so single-select
+ * rows, multi-select toggles and plan approve/reject rows read alike. The
+ * body wrapper takes the card's flexible column so a check indicator can ride
+ * the row's trailing edge.
  */
 function OptionContent(props: { option: DialogOption }) {
   return (
-    <>
+    <span class="dialog-option-body">
       <span class="dialog-option-label">{props.option.label}</span>
       <Show when={props.option.description}>
         <span class="dialog-option-desc">{props.option.description}</span>
       </Show>
-    </>
+    </span>
+  );
+}
+
+/**
+ * A toggleable option card (issue #56 decision 7): the shared card face plus
+ * a pressed state — accent border, subtle tint and a check indicator —
+ * announced via aria-pressed. Used by the flat multi-select path and the
+ * multi-question form; tapping only toggles, submission stays with the
+ * form's own Submit.
+ */
+function OptionToggle(props: {
+  option: DialogOption;
+  pressed: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      classList={{ 'dialog-option': true, selected: props.pressed }}
+      aria-pressed={props.pressed}
+      disabled={props.disabled}
+      onClick={() => props.onToggle()}
+    >
+      <OptionContent option={props.option} />
+      <Show when={props.pressed}>
+        <span class="dialog-option-check" aria-hidden="true">
+          <Icon name="check" size={16} />
+        </span>
+      </Show>
+    </button>
   );
 }
 
@@ -1966,19 +2250,12 @@ function MultiQuestionForm(props: {
                 <For each={visibleOptions(q)}>
                   {(entry) => (
                     <li>
-                      <button
-                        type="button"
-                        classList={{
-                          'dialog-option': true,
-                          seg: true,
-                          selected: isPicked(qi(), entry.idx),
-                        }}
-                        aria-pressed={isPicked(qi(), entry.idx)}
+                      <OptionToggle
+                        option={entry.opt}
+                        pressed={isPicked(qi(), entry.idx)}
                         disabled={props.busy}
-                        onClick={() => togglePick(qi(), entry.idx, q.multi_select === true)}
-                      >
-                        <OptionContent option={entry.opt} />
-                      </button>
+                        onToggle={() => togglePick(qi(), entry.idx, q.multi_select === true)}
+                      />
                       <Show when={entry.opt.is_other && isPicked(qi(), entry.idx)}>
                         <input
                           class="chat-input dialog-other-input"
@@ -2007,8 +2284,10 @@ function MultiQuestionForm(props: {
 // One-tap Interrupt escape hatch (ADR-0022, superseding ADR-0016's confirm tap):
 // a square accent icon-button that fires interruptRun (Escape) immediately, no
 // confirmation — interrupt is non-destructive (the agent survives, idles, and is
-// re-promptable), so a confirm tap is friction. Rendered in the locked
-// question-state and in the DialogPanel (decision 5); it stays inert (no pulse),
+// re-promptable), so a confirm tap is friction. Rendered in the composer's two
+// locked branches — dialog-pending waiting note (issue #56 decision 2) and the
+// degraded question state (decision 5) — so exactly one always-visible escape
+// hatch exists however far the stream card scrolls. It stays inert (no pulse),
 // unlike the working-state morph button in Composer, which shares createInterrupt
 // but draws its own pulsing square. Distinct from the header Stop, which stays
 // danger-red + two-step (destructive teardown, ADR-0019).

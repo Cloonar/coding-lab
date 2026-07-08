@@ -9,9 +9,19 @@
 // - the composer replies (POST /reply) and clears; Cmd/Ctrl+Enter sends, bare
 //   Enter does not; while working the Send button morphs into a one-tap
 //   Interrupt (ADR-0022) — no Send, no "queued" copy, textarea stays editable;
-// - a pending dialog locks the composer and renders native option buttons that
-//   POST /answer with the option index; the panel is gated on state==='question'
-//   and its selections reset when the dialog identity (tool_id) changes;
+// - a pending dialog renders as an interactive card INSIDE the chat stream
+//   (issue #56) — deduped by tool_id against a transcript dialog message, never
+//   twice — with native option buttons that POST /answer with the option index;
+//   the composer collapses to a waiting note + Interrupt (no textarea) until it
+//   resolves; the messages-scan fallback is gated on state==='question' and
+//   selections reset when the dialog identity (tool_id) changes; a newly
+//   arriving card scrolls its top into view only while following the tail;
+// - an ANSWERED dialog message (outcome present — issue #56 decision 3)
+//   renders as a compact inert Q→A summary: no buttons, no interactive card,
+//   no raw tool chip; outcome PRESENCE alone is the answered signal;
+// - dialog options are house-style cards (issue #56 decision 7): full-width,
+//   descriptions always visible — the flat multi-select path is toggle-card
+//   buttons (aria-pressed) instead of checkboxes, same Submit payload;
 // - an ended run is read-only (no composer, no reply POST); a gone transcript
 //   on a live run gets transcript-specific copy;
 // - interrupt POSTs /interrupt with one tap (no confirm), from the working
@@ -21,7 +31,7 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage, MessagesResponse, Provider, Run, RunCommand } from '../api';
+import type { ChatMessage, Dialog, MessagesResponse, Provider, Run, RunCommand } from '../api';
 import App from '../App';
 import { clearQueued, peekQueued, setQueued } from '../lib/queuedMessage';
 import RunChat from './RunChat';
@@ -491,9 +501,14 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    // The free-text reply composer is replaced by the dialog panel.
+    // The free-text reply composer collapses while the dialog is pending.
     expect(container.querySelector('.chat-composer-row')).toBeNull();
-    expect(container.textContent).toContain('Which fix?');
+    // The interactive card renders in the STREAM at the dialog message's
+    // position (issue #56) — the message does not double as an inert prompt.
+    const card = container.querySelector('.chat-stream .chat-dialog-card');
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('Which fix?');
+    expect(container.querySelector('.chat-dialog-inline')).toBeNull();
 
     buttonByText('Patch forward')!.click();
     await settle();
@@ -520,14 +535,231 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    // Composer is locked; the dialog panel renders the field's prompt + options.
+    // Composer is locked; the card renders the field's prompt + options,
+    // APPENDED as the last stream item (nothing in the transcript anchors it).
     expect(container.querySelector('.chat-composer-row')).toBeNull();
-    expect(container.textContent).toContain('Pick a flavor?');
+    const card = container.querySelector('.chat-stream .chat-dialog-card');
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('Pick a flavor?');
+    expect(container.querySelector('.chat-stream')!.lastElementChild).toBe(card);
 
     buttonByText('Option B')!.click();
     await settle();
     expect(answerPosts).toHaveLength(1);
     expect(answerPosts[0]).toMatchObject({ tool_id: 'toolu_field', index: 1 });
+  });
+
+  // --- Inline dialog cards in the stream (issue #56) ---
+
+  const singleSelectDialog = (toolID = 'toolu_card') => ({
+    tool_id: toolID,
+    dialog_kind: 'question' as const,
+    prompt: 'Pick a flavor?',
+    answerable: true,
+    options: [{ label: 'Option A' }, { label: 'Option B' }],
+  });
+
+  it('collapses the composer to a waiting note + Interrupt while the card is pending', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: singleSelectDialog(),
+    };
+    await mountChat();
+
+    // The interactive single-select renders inside the scrollable stream.
+    const card = container.querySelector('.chat-stream .chat-dialog-card');
+    expect(card).not.toBeNull();
+    expect(card?.querySelector('.chat-dialog-prompt')?.textContent).toBe('Pick a flavor?');
+
+    // The composer: one-line waiting note pointing up at the card, plus the
+    // Interrupt escape hatch — no textarea, no Send (decision 2).
+    expect(container.querySelector('.chat-composer-row')).toBeNull();
+    expect(container.querySelector('.chat-input')).toBeNull();
+    expect(buttonByLabel('Send')).toBeNull();
+    expect(container.querySelector('.chat-composer .chat-composer-note')?.textContent).toBe(
+      'Claude Code is waiting on your answer — see the question above.',
+    );
+    // Exactly ONE Interrupt affordance, in the composer — always visible
+    // however far the stream card scrolls (the card carries none).
+    expect(container.querySelectorAll('.chat-interrupt')).toHaveLength(1);
+    expect(container.querySelector('.chat-composer .chat-interrupt')).not.toBeNull();
+    buttonByLabel('Interrupt')!.click();
+    await settle();
+    expect(interruptPosts).toBe(1); // one tap, no confirm
+  });
+
+  it('renders the dialog exactly once when a stream message and pending_dialog share a tool_id', async () => {
+    // The transcript flushed a dialog message AND the spool serves the same
+    // tool_id: ONE interactive card, at the stream message's position, fed by
+    // the richer field data.
+    messagesOnServer = {
+      messages: [
+        {
+          seq: 1,
+          kind: 'dialog',
+          dialog: {
+            tool_id: 'toolu_dup',
+            dialog_kind: 'question',
+            prompt: 'Which fix?',
+            answerable: true,
+            options: [{ label: 'Revert' }, { label: 'Patch forward' }],
+          },
+        },
+        { seq: 2, kind: 'text', role: 'assistant', text: 'context after' },
+      ],
+      state: 'question',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_dup',
+        dialog_kind: 'question',
+        prompt: 'Which fix?',
+        answerable: true,
+        options: [
+          { label: 'Revert', description: 'Roll back the change' },
+          { label: 'Patch forward' },
+        ],
+      },
+    };
+    await mountChat();
+
+    // Exactly one card, the interactive options render once, and no inert
+    // duplicate of the same prompt remains.
+    expect(container.querySelectorAll('.chat-dialog-card')).toHaveLength(1);
+    expect(
+      Array.from(container.querySelectorAll('button.dialog-option')).filter(
+        (b) => b.querySelector('.dialog-option-label')?.textContent === 'Revert',
+      ),
+    ).toHaveLength(1);
+    expect(container.querySelector('.chat-dialog-inline')).toBeNull();
+
+    // At the stream MESSAGE's position — the later text message follows it —
+    // and carrying the spool field's data (the transcript copy lacks the
+    // description).
+    const card = container.querySelector('.chat-stream .chat-dialog-card')!;
+    expect(card.nextElementSibling?.textContent).toContain('context after');
+    expect(card.querySelector('.dialog-option-desc')?.textContent).toBe('Roll back the change');
+
+    buttonByText('Patch forward')!.click();
+    await settle();
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toMatchObject({ tool_id: 'toolu_dup', index: 1 });
+  });
+
+  it('removes the card and returns the textarea once the dialog resolves', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: singleSelectDialog(),
+    };
+    await mountChat();
+    expect(container.querySelector('.chat-dialog-card')).not.toBeNull();
+    expect(container.querySelector('.chat-input')).toBeNull();
+
+    // The dialog resolves (answered on another surface) and the agent works on.
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
+      state: 'working',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: null,
+    };
+    emitMessagesChanged();
+    await settle();
+
+    expect(container.querySelector('.chat-dialog-card')).toBeNull();
+    expect(container.querySelector('.chat-composer-row')).not.toBeNull();
+    expect(container.querySelector('.chat-input')).not.toBeNull();
+  });
+
+  // --- Arrival auto-scroll (issue #56 decision 5) ---
+  // jsdom has no Element.prototype.scrollIntoView — install a recording stub
+  // (capturing `this`) so the card scroll is observable and attributable.
+
+  function stubScrollIntoView(): {
+    calls: { target: Element; arg: unknown }[];
+    restore: () => void;
+  } {
+    const calls: { target: Element; arg: unknown }[] = [];
+    const proto = Element.prototype as unknown as { scrollIntoView?: (arg?: unknown) => void };
+    proto.scrollIntoView = vi.fn(function (this: Element, arg?: unknown) {
+      calls.push({ target: this, arg });
+    });
+    return {
+      calls,
+      restore: () => {
+        delete proto.scrollIntoView;
+      },
+    };
+  }
+
+  it('scrolls the arriving dialog card top into view while following the tail', async () => {
+    const scrolls = stubScrollIntoView();
+    try {
+      await mountChat(); // no dialog yet; jsdom geometry reads as at-bottom
+      expect(scrolls.calls).toHaveLength(0);
+
+      // A refetch brings a NEW pending dialog: follow is on, so the CARD's
+      // top comes into view — not the stream bottom.
+      messagesOnServer = {
+        ...messagesOnServer,
+        state: 'question',
+        pending_dialog: singleSelectDialog('toolu_scroll'),
+      };
+      emitMessagesChanged();
+      await settle();
+
+      const card = container.querySelector('.chat-dialog-card');
+      expect(card).not.toBeNull();
+      expect(scrolls.calls).toHaveLength(1);
+      expect(scrolls.calls[0]?.target).toBe(card);
+      expect(scrolls.calls[0]?.arg).toEqual({ block: 'start' });
+
+      // The SAME dialog on the next tick is not new — no re-yank.
+      emitMessagesChanged();
+      await settle();
+      expect(scrolls.calls).toHaveLength(1);
+    } finally {
+      scrolls.restore();
+    }
+  });
+
+  it('leaves the viewport alone when a dialog arrives while scrolled up', async () => {
+    const scrolls = stubScrollIntoView();
+    try {
+      await mountChat(); // no dialog yet
+      // Fake a scrolled-up viewport (the jump-pill test's geometry recipe):
+      // far from the bottom, so follow is off.
+      const stream = container.querySelector('.chat-stream') as HTMLElement;
+      Object.defineProperty(stream, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(stream, 'clientHeight', { value: 100, configurable: true });
+      stream.scrollTop = 0;
+
+      messagesOnServer = {
+        ...messagesOnServer,
+        state: 'question',
+        pending_dialog: singleSelectDialog('toolu_up'),
+      };
+      emitMessagesChanged();
+      await settle();
+
+      // The card rendered, but the position was preserved — the jump pill is
+      // the scrolled-up reader's affordance (untouched by issue #56).
+      expect(container.querySelector('.chat-dialog-card')).not.toBeNull();
+      expect(scrolls.calls).toHaveLength(0);
+      expect(stream.scrollTop).toBe(0); // no bottom-follow either
+    } finally {
+      scrolls.restore();
+    }
   });
 
   it('surfaces a needs-input status line in the stream and keeps the composer usable', async () => {
@@ -913,7 +1145,8 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    (container.querySelector('.dialog-check input') as HTMLInputElement).click();
+    // Flat multi-select options are toggle cards (issue #56 decision 7).
+    buttonByText('One')!.click();
     await settle();
     expect(buttonByText('Submit')!.disabled).toBe(false);
 
@@ -1527,9 +1760,22 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    // Composer locked; the two questions render stacked, in order, each with
-    // its header chip + question text; options show label + description.
+    // Composer locked; the form lives in the stream card with NO inner
+    // scrollbox — nothing in the card carries an inline max-height (the CSS
+    // caps are gone; jsdom applies no stylesheet, so inline style is the
+    // assertable surface). The chat pane stays the only scrollbar.
     expect(container.querySelector('.chat-composer-row')).toBeNull();
+    const mqCard = container.querySelector('.chat-stream .chat-dialog-card');
+    expect(mqCard).not.toBeNull();
+    expect(mqCard?.querySelector('.dialog-questions')).not.toBeNull();
+    expect(
+      Array.from(mqCard!.querySelectorAll<HTMLElement>('*')).filter(
+        (el) => el.style.maxHeight !== '',
+      ),
+    ).toEqual([]);
+
+    // The two questions render stacked, in order, each with its header chip +
+    // question text; options show label + description.
     const headers = Array.from(container.querySelectorAll('.dialog-question-header')).map(
       (el) => el.textContent,
     );
@@ -1643,12 +1889,15 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    // The prompt IS the plan body — rendered markdown, not raw markup.
-    const plan = container.querySelector('.chat-dialog-plan');
+    // The prompt IS the plan body — rendered markdown, not raw markup, inside
+    // the stream card (issue #56 decision 4: full height, no inner scrollbox,
+    // approve/reject after the whole plan).
+    const plan = container.querySelector('.chat-stream .chat-dialog-card .chat-dialog-plan');
     expect(plan).not.toBeNull();
     expect(plan?.querySelector('.md-h')?.textContent).toBe('The plan');
     expect(plan?.querySelector('strong')?.textContent).toBe('bold');
     expect(plan?.textContent).not.toContain('# The plan');
+    expect((plan as HTMLElement).style.maxHeight).toBe('');
 
     // Real option buttons with label + description; answering stays the flat
     // single-select shape (no answers[]).
@@ -1701,10 +1950,275 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    expect(container.querySelector('.chat-composer-note')?.textContent).toBe(
+    // The degraded note renders inside the stream card (the composer shows its
+    // own waiting note alongside — hence the scoped query).
+    expect(container.querySelector('.chat-dialog-card .chat-composer-note')?.textContent).toBe(
       "This dialog can't be answered here — open it at claude.ai to respond.",
     );
     expect(container.querySelector('button.dialog-option')).toBeNull();
+  });
+
+  // --- Answered Q→A summaries in the stream (issue #56 decision 3) ---
+  // A dialog message WITH an outcome is history: a compact inert summary —
+  // never the interactive card, never a raw tool chip, no buttons. Outcome
+  // PRESENCE alone is the answered signal (an all-omitempty rejection
+  // serializes as {}), so nothing keys on the inner fields.
+
+  /** Serve one answered dialog message followed by later assistant text. */
+  function withAnsweredDialog(dialog: Dialog): void {
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'dialog', dialog },
+        { seq: 2, kind: 'text', role: 'assistant', text: 'moving on' },
+      ],
+      state: 'working',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: null,
+    };
+  }
+
+  it('renders an answered single-select dialog as an inert Q→A summary', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_done',
+      dialog_kind: 'question',
+      prompt: 'Which fix?',
+      answerable: true,
+      options: [{ label: 'Revert' }, { label: 'Patch forward' }],
+      outcome: { results: [{ question: 'Which fix?', chosen: ['Patch forward'] }] },
+    });
+    await mountChat();
+
+    const summary = container.querySelector('.chat-stream .chat-dialog-answered');
+    expect(summary).not.toBeNull();
+    // The question (muted line) above the chosen label.
+    expect(summary?.querySelector('.dialog-qa-question')?.textContent).toBe('Which fix?');
+    expect(summary?.querySelector('.dialog-qa-chosen')?.textContent).toBe('Patch forward');
+    // Compact history: the unchosen option is NOT rendered.
+    expect(summary?.textContent).not.toContain('Revert');
+    // Inert: no buttons, no interactive card, no raw tool chip.
+    expect(summary?.querySelector('button')).toBeNull();
+    expect(container.querySelector('.chat-dialog-card')).toBeNull();
+    expect(container.querySelector('.chat-tool')).toBeNull();
+  });
+
+  it('renders one Q→A pair per outcome result, in dialog order', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_mq_done',
+      dialog_kind: 'question',
+      prompt: '2 questions',
+      answerable: true,
+      outcome: {
+        results: [
+          { question: 'Which approach?', chosen: ['Patch forward'] },
+          { question: 'Which areas?', chosen: ['Frontend', 'Backend'] },
+        ],
+      },
+    });
+    await mountChat();
+
+    const pairs = Array.from(container.querySelectorAll('.dialog-qa'));
+    expect(pairs).toHaveLength(2);
+    expect(pairs[0]?.querySelector('.dialog-qa-question')?.textContent).toBe('Which approach?');
+    expect(pairs[0]?.querySelector('.dialog-qa-chosen')?.textContent).toBe('Patch forward');
+    expect(pairs[1]?.querySelector('.dialog-qa-question')?.textContent).toBe('Which areas?');
+    // Multi-select labels join with ", " in recorded toggle order.
+    expect(pairs[1]?.querySelector('.dialog-qa-chosen')?.textContent).toBe('Frontend, Backend');
+  });
+
+  it('renders an other-text answer as the operator’s quoted words, distinct from labels', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_other',
+      dialog_kind: 'question',
+      prompt: 'Which fix?',
+      answerable: true,
+      outcome: {
+        // A multi-select result can carry BOTH chosen labels and typed text.
+        results: [
+          { question: 'Which fix?', chosen: ['Patch forward'], other_text: 'and add a test' },
+        ],
+      },
+    });
+    await mountChat();
+
+    const answer = container.querySelector('.dialog-qa-answer');
+    expect(answer?.querySelector('.dialog-qa-chosen')?.textContent).toBe('Patch forward');
+    // The typed text renders quoted — a different text node than a label.
+    expect(answer?.querySelector('.dialog-qa-other')?.textContent).toBe('“and add a test”');
+  });
+
+  it('marks a result with neither chosen nor other_text as unanswered', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_blank',
+      dialog_kind: 'question',
+      prompt: 'Which fix?',
+      answerable: true,
+      outcome: { results: [{ question: 'Which fix?' }] },
+    });
+    await mountChat();
+
+    expect(container.querySelector('.dialog-qa-question')?.textContent).toBe('Which fix?');
+    expect(container.querySelector('.dialog-qa-none')?.textContent).toBe('No answer recorded');
+  });
+
+  it('renders a dismissed dialog as the question text plus one dismissed marker', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_dismissed',
+      dialog_kind: 'question',
+      prompt: 'Which fix?',
+      answerable: true,
+      options: [{ label: 'Revert' }],
+      outcome: { dismissed: true, results: [{ question: 'Which fix?' }] },
+    });
+    await mountChat();
+
+    const summary = container.querySelector('.chat-dialog-answered')!;
+    expect(summary.querySelector('.dialog-qa-question')?.textContent).toBe('Which fix?');
+    const markers = summary.querySelectorAll('.chat-dialog-outcome');
+    expect(markers).toHaveLength(1);
+    expect(markers[0]?.textContent).toBe('Dismissed');
+    expect(summary.querySelector('button')).toBeNull();
+    expect(container.querySelector('.chat-dialog-card')).toBeNull();
+  });
+
+  it('renders an approved plan as the full markdown plus the approved marker, inert', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_plan_ok',
+      dialog_kind: 'plan',
+      prompt: '# The plan\n\nDo **bold** things',
+      answerable: true,
+      options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+      outcome: { approved: true },
+    });
+    await mountChat();
+
+    const summary = container.querySelector('.chat-dialog-answered')!;
+    // The FULL plan, rendered markdown (same .chat-dialog-plan face as live).
+    expect(summary.querySelector('.chat-dialog-plan .md-h')?.textContent).toBe('The plan');
+    expect(summary.querySelector('.chat-dialog-plan strong')?.textContent).toBe('bold');
+    expect(summary.querySelector('.chat-dialog-outcome')?.textContent).toBe('Plan approved');
+    // No approve/reject buttons — this is history.
+    expect(summary.querySelector('button')).toBeNull();
+    expect(buttonByText('Approve')).toBeNull();
+    expect(container.querySelector('.chat-dialog-card')).toBeNull();
+  });
+
+  it('renders a rejected plan with the typed feedback as an operator quote', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_plan_no',
+      dialog_kind: 'plan',
+      prompt: '# The plan\n\nSteps',
+      answerable: true,
+      outcome: { feedback: 'tighten the tests first' },
+    });
+    await mountChat();
+
+    const summary = container.querySelector('.chat-dialog-answered')!;
+    expect(summary.querySelector('.chat-dialog-outcome')?.textContent).toBe('Plan rejected');
+    expect(summary.querySelector('.dialog-qa-other')?.textContent).toBe(
+      '“tighten the tests first”',
+    );
+  });
+
+  it('treats an EMPTY outcome object as answered (rejection without feedback)', async () => {
+    // The critical wire semantics: all outcome fields are omitempty, so a plan
+    // rejected without typed feedback arrives as {} — still answered.
+    withAnsweredDialog({
+      tool_id: 'toolu_plan_bare',
+      dialog_kind: 'plan',
+      prompt: '# The plan\n\nSteps',
+      answerable: true,
+      outcome: {},
+    });
+    await mountChat();
+
+    expect(container.querySelector('.chat-dialog-card')).toBeNull();
+    expect(container.querySelector('.chat-dialog-answered .chat-dialog-outcome')?.textContent).toBe(
+      'Plan rejected',
+    );
+    expect(container.querySelector('.chat-dialog-answered button')).toBeNull();
+  });
+
+  it('renders a plan dismissal marker', async () => {
+    withAnsweredDialog({
+      tool_id: 'toolu_plan_gone',
+      dialog_kind: 'plan',
+      prompt: '# The plan\n\nSteps',
+      answerable: true,
+      outcome: { dismissed: true },
+    });
+    await mountChat();
+
+    expect(container.querySelector('.chat-dialog-answered .chat-dialog-outcome')?.textContent).toBe(
+      'Plan dismissed',
+    );
+  });
+
+  // --- House-style option cards (issue #56 decision 7) ---
+
+  function optionCard(label: string): HTMLButtonElement {
+    const btn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button.dialog-option'),
+    ).find((b) => b.querySelector('.dialog-option-label')?.textContent === label);
+    if (!btn) throw new Error(`missing option card "${label}"`);
+    return btn;
+  }
+
+  it('renders flat multi-select options as toggle cards with visible descriptions', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_flat_multi',
+        dialog_kind: 'question',
+        prompt: 'Which areas?',
+        answerable: true,
+        multi: true,
+        options: [
+          { label: 'Frontend', description: 'The SPA under web/' },
+          { label: 'Backend', description: 'The Go API' },
+        ],
+      },
+    };
+    await mountChat();
+
+    // Toggle-card buttons, not checkboxes — and the descriptions show now.
+    expect(container.querySelector('.dialog-check')).toBeNull();
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(optionCard('Frontend').querySelector('.dialog-option-desc')?.textContent).toBe(
+      'The SPA under web/',
+    );
+    // Card, not pill: the seg class is gone from dialog options.
+    expect(optionCard('Frontend').classList.contains('seg')).toBe(false);
+    // Completeness gating: nothing selected yet → Submit disabled.
+    expect(buttonByText('Submit')!.disabled).toBe(true);
+
+    // Toggling carries the selected state on the card itself.
+    expect(optionCard('Frontend').getAttribute('aria-pressed')).toBe('false');
+    optionCard('Frontend').click();
+    await settle();
+    expect(optionCard('Frontend').getAttribute('aria-pressed')).toBe('true');
+    expect(optionCard('Frontend').classList.contains('selected')).toBe(true);
+    expect(optionCard('Frontend').querySelector('.dialog-option-check')).not.toBeNull();
+
+    // Toggling OFF works too, then re-select both for the submit.
+    optionCard('Frontend').click();
+    await settle();
+    expect(optionCard('Frontend').getAttribute('aria-pressed')).toBe('false');
+    expect(optionCard('Frontend').querySelector('.dialog-option-check')).toBeNull();
+    optionCard('Frontend').click();
+    optionCard('Backend').click();
+    await settle();
+
+    // The Submit flow and payload are byte-for-byte the pre-card contract.
+    buttonByText('Submit')!.click();
+    await settle();
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toEqual({ tool_id: 'toolu_flat_multi', selected: [0, 1] });
   });
 
   // --- Slash-command autocomplete (issue #51 decision 5) ---

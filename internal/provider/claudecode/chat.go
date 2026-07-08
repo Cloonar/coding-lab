@@ -19,10 +19,14 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
-// truncateLimit caps a tool chip's expandable input/output and a dialog
-// prompt/plan body — enough to be useful on a phone, small enough to keep the
+// truncateLimit caps a tool chip's expandable input/output and a local-command
+// stdout lifecycle — enough to be useful on a phone, small enough to keep the
 // messages payload envelope-sized. The chat is chat-first; full fidelity lives
-// in the claude.ai deep link.
+// in the claude.ai deep link. Dialog prompts are exempt (issue #56 decision 4):
+// a plan body renders in full — a cut plan is unreviewable, and plans are
+// model-output-bounded — and a question prompt doubles as the key
+// toolUseResult.answers records under, so truncating it would break the
+// answered-dialog outcome lookup (dialogoutcome.go).
 const truncateLimit = 2000
 
 // SlugForDir renders claude's transcript project-directory name for an
@@ -138,9 +142,14 @@ func parseTranscript(r io.Reader, intents *intentRegistry) (provider.Chat, error
 
 func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, error) {
 	// First pass: which tool_use ids have a matching tool_result (i.e. are
-	// answered). A dialog tool with no result is a pending dialog.
+	// answered), and HOW each resolved — the top-level toolUseResult /
+	// toolDenialKind of the event carrying the result block, the same ground
+	// truth the verification backstop reads (compat §5). Presence in the map
+	// means answered; the recorded resolution feeds the answered dialog's
+	// Outcome at emission time (issue #56 decision 3). A dialog tool with no
+	// entry is a pending dialog.
 	var lines [][]byte
-	answered := map[string]bool{}
+	resolutions := map[string]resolvedTool{}
 	for sc.Scan() {
 		b := append([]byte(nil), sc.Bytes()...)
 		lines = append(lines, b)
@@ -150,7 +159,9 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		}
 		for _, blk := range it.Message.blocks() {
 			if blk.Type == "tool_result" && blk.ToolUseID != "" {
-				answered[blk.ToolUseID] = true
+				resolutions[blk.ToolUseID] = resolvedTool{
+					toolUseResult: it.ToolUseResult, denialKind: it.ToolDenialKind,
+				}
 			}
 		}
 	}
@@ -227,7 +238,22 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 				emit(provider.Message{Kind: provider.MessageText, Role: "assistant", Time: it.Timestamp, Text: think, Thinking: true})
 				lastKey = "assistant:thinking"
 			case "tool_use":
-				if d, ok := dialogFromToolUse(blk); ok && !answered[blk.ID] {
+				// A dialog tool is a DIALOG message whether pending or resolved
+				// (issue #56 decision 3): a resolved one carries the recorded
+				// answer in Outcome so history renders a compact Q→A summary,
+				// never the raw JSON chip it used to demote to. Only genuinely
+				// pending dialogs set lastKey="dialog"; a resolved dialog
+				// behaves like a resolved tool for state derivation — exactly
+				// as its demoted chip did — and is NOT registered in byTool:
+				// its Outcome is derived up front from the first pass, there
+				// is no chip to back-patch when its tool_result event follows.
+				if d, ok := dialogFromToolUse(blk); ok {
+					if res, resolved := resolutions[blk.ID]; resolved {
+						d.Outcome = outcomeFor(d, res)
+						emit(provider.Message{Kind: provider.MessageDialog, Time: it.Timestamp, Dialog: &d})
+						lastKey = "tool_use"
+						continue
+					}
 					emit(provider.Message{Kind: provider.MessageDialog, Time: it.Timestamp, Dialog: &d})
 					lastKey = "dialog"
 					continue
@@ -325,7 +351,12 @@ func deriveState(msgs []provider.Message, lastKey string) string {
 	}
 	// A pending dialog is the last dialog message with Answerable-or-not; its
 	// presence anywhere as the final content event means the agent is blocked.
-	if last := msgs[len(msgs)-1]; last.Kind == provider.MessageDialog {
+	// Pending ONLY (issue #56 decision 3): an answered dialog (Outcome set)
+	// stays a dialog message in history, and a transcript tail of one — the
+	// retro-flushed tool_use whose tool_result event carries no message of its
+	// own — means the agent just resumed, never that it is waiting.
+	if last := msgs[len(msgs)-1]; last.Kind == provider.MessageDialog &&
+		last.Dialog != nil && last.Dialog.Outcome == nil {
 		return provider.StateQuestion
 	}
 	switch lastKey {
