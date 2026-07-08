@@ -77,6 +77,11 @@ The decisions, pinned (settled with the maintainer 2026-07-07 via
 
 ## Status
 
+Superseded by ADR-0029 (issue #61): the working-state morph and its
+send-block are reversed — Send is always available and Interrupt lives
+in the chat header. ADR-0022's supersessions of ADR-0016 (no queued
+hint; one-tap interrupt) remain in force via ADR-0029.
+
 Accepted. A pure SPA diff: `web/src/routes/RunChat.tsx`, `web/src/base.css`, and
 `web/src/routes/RunChat.test.tsx`, plus this ADR and the two compat.md notes
 below. **No** Go, API, SSE, message-schema, provider, or migration change. A

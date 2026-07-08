@@ -891,6 +891,10 @@ input:focus-visible {
   color: var(--danger);
 }
 
+.icon-btn.accent {
+  color: var(--accent);
+}
+
 /* Forms — 16px inputs (no iOS zoom), 44px targets --------------------------- */
 
 .field {
@@ -2141,9 +2145,11 @@ a.chip.cr-count:hover {
   border: none;
   border-radius: var(--radius-control);
 }
-/* Composer send / interrupt: icon-only accent squares sharing the same slot
-   (ADR-0022). The extra .icon-btn is ONLY on these composer buttons, never on
-   the dialog Submit/Send buttons. */
+/* Composer Send + the locked-state Interrupt escape hatch: icon-only accent
+   squares sharing one slot style (ADR-0029). .chat-send is the always-present
+   composer Send; .chat-interrupt now serves only the two locked-state escape
+   hatches (dialog-pending, degraded question). The extra .icon-btn is ONLY on
+   these composer buttons, never on the dialog Submit/Send buttons. */
 .chat-send.icon-btn,
 .chat-interrupt.icon-btn {
   min-width: 44px;
@@ -2153,42 +2159,18 @@ a.chip.cr-count:hover {
   border: none;
 }
 .chat-send.icon-btn.busy,
-.chat-interrupt.icon-btn.busy {
+.chat-interrupt.icon-btn.busy,
+.chat-turn-interrupt.icon-btn.busy {
   opacity: 0.6;
 }
 .chat-interrupt-busy {
   font-size: 1.1rem;
   line-height: 1;
 }
-/* Working-state cue (decision 9c): a subtle accent ring that breathes so the
-   square reads as "the agent is working — tap to interrupt". Motion only; the
-   button is fully usable without it. */
-.chat-interrupt.icon-btn.pulse {
-  animation: interrupt-pulse 1.8s ease-in-out infinite;
-}
-@keyframes interrupt-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .chat-interrupt.icon-btn.pulse {
-    animation: none;
-  }
-}
 .chat-composer-note {
   margin: 0;
   padding: 0.5rem;
   text-align: center;
-  color: var(--muted);
-}
-.chat-composer-hint {
-  margin: 0.35rem 0 0;
-  font-size: 0.8rem;
   color: var(--muted);
 }
 
@@ -2630,12 +2612,18 @@ h6.md-h {
 .chat-menu-item.danger {
   color: var(--danger);
 }
+.chat-menu-item.accent {
+  color: var(--accent);
+}
 .chat-menu-icon {
   flex: none;
   color: var(--muted);
 }
 .chat-menu-item.danger .chat-menu-icon {
   color: var(--danger);
+}
+.chat-menu-item.accent .chat-menu-icon {
+  color: var(--accent);
 }
 /* The OpenAffordance in a menu row reveals BOTH icon and label (the header
    context keeps it icon-only). This must appear after
@@ -2867,10 +2855,11 @@ h6.md-h {
 .chat-composer-row .chat-input:focus-visible {
   outline: none; /* the focus ring lives on the container */
 }
-/* Send/interrupt morph button: a 36px accent circle pinned bottom-right, with a
-   44px hit area via ::after. Stays pinned as the field auto-grows. */
-.chat-composer-row .chat-send.icon-btn,
-.chat-composer-row .chat-interrupt.icon-btn {
+/* Composer Send button: a 36px accent circle pinned bottom-right, with a 44px
+   hit area via ::after. Stays pinned as the field auto-grows. The row no longer
+   hosts an interrupt (ADR-0029: Send never morphs; Interrupt lives in the
+   header). */
+.chat-composer-row .chat-send.icon-btn {
   position: absolute;
   right: 6px;
   bottom: 4px;
@@ -2881,8 +2870,7 @@ h6.md-h {
   padding: 0;
   border-radius: 50%;
 }
-.chat-composer-row .chat-send.icon-btn::after,
-.chat-composer-row .chat-interrupt.icon-btn::after {
+.chat-composer-row .chat-send.icon-btn::after {
   content: '';
   position: absolute;
   inset: -4px; /* 36 + 2*4 = 44px touch target */

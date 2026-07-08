@@ -275,20 +275,26 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   reversed here.
 
   **State neutrality is load-bearing and UNCHANGED (issue #45, kept by #51):**
-  echoes never touch the state fold (`lastKey`). `/clear`/`/rewind` rotate to
-  a fresh transcript whose only tail is this echo (with no following assistant
-  turn, ever); counted as an ordinary `user:text` it would derive `working`
-  forever, locking the composer into the pulsing Interrupt with no Send
-  (ADR-0022 — the issue #45 stuck-composer root cause). Rendered-but-excluded,
-  the fresh transcript still has no trailing *turn* → the idle default; a tail
-  echo after real turns keeps the pre-echo state. A genuine plain-text reply
-  is unchanged — it still derives `working`, preserving the Send→Interrupt
-  morph. Some commands (`/triage`) *do* invoke the model; the brief window
-  before their first token reads prior-state/idle rather than `working` and
-  self-corrects within one poll — no per-command special-casing. fixture (the
-  echo + output lines in `transcript-2.1.198.jsonl` map to the `/help` text +
-  stdout lifecycle pair, `TestCompat_TranscriptFixture_maps`; the state edges
-  in `TestCompat_TranscriptEcho_stateNeutral` and
+  echoes never touch the state fold (`lastKey`). `/clear`/`/rewind` rotate
+  to a fresh transcript whose only tail is this echo (with no following
+  assistant turn, ever); counted as an ordinary `user:text` it would derive
+  `working` forever. Under the then-current ADR-0022 morph that lockout was
+  the issue #45 stuck-composer root cause — a false `working` locked the
+  composer into the pulsing Interrupt with no Send. Since ADR-0029 (issue
+  #61) the composer no longer reads `working` at all, so a false `working`
+  now costs only the state badge; state neutrality still matters for that
+  badge (and any future needs-you cue) to stay honest, even though it no
+  longer gates Send, Clear, or Interrupt. Rendered-but-excluded, the fresh
+  transcript still has no trailing *turn* → the idle default; a tail
+  echo after real turns keeps the pre-echo state. A genuine plain-text
+  reply is unchanged — it still derives `working`, now surfaced only via
+  the state badge rather than the retired Send→Interrupt morph. Some
+  commands (`/triage`) *do* invoke the model; the brief window before
+  their first token reads prior-state/idle rather than `working` and
+  self-corrects within one poll — no per-command special-casing. fixture
+  (the echo + output lines in `transcript-2.1.198.jsonl` map to the `/help`
+  text + stdout lifecycle pair, `TestCompat_TranscriptFixture_maps`;
+  the state edges in `TestCompat_TranscriptEcho_stateNeutral` and
   `claudecode.TestParseTranscript_commandEchoNeverDrivesState`).
 - **Read-through only**: the transcript file is the source of truth; lab
   persists only `runs.transcript_path` (captured async by cwd-match, the
@@ -398,11 +404,14 @@ the same paste with a settling gap submits reliably (found by
 `TestCompat_Live_askUserQuestionRecipe`; short replies never hit the window
 because it scales with paste size).
 
-**UI surfacing (ADR-0022):** this Reply path is **retained at the backend**
-but is **no longer surfaced in the UI mid-turn** — while the agent is working
-the chat composer shows a one-tap Interrupt in place of Send, so a reply can
-only be sent once the agent returns to idle/needs_input. The send-keys recipe
-above is unchanged; it is simply unreachable from the SPA during a turn.
+**UI surfacing (ADR-0029, superseding ADR-0022):** this Reply path is
+surfaced **at all times** — the composer's Send is never gated on `working`
+(ADR-0022's Send↔Interrupt morph is reversed). While the agent is mid-turn
+the SPA still POSTs the reply immediately via the same `replyRun` path,
+and the paste rides Claude Code's own TUI queue exactly as before — the
+send-keys recipe above is unchanged. The UI shows **no queue affordance**:
+no optimistic echo, no "queued" hint — the reply becomes visible only
+when the transcript reflects it.
 
 ## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08)
 
@@ -589,12 +598,19 @@ back through the transcript — no divergence handling is needed.
 
 The chat's stop-generating affordance sends a single `Escape`
 (`Provider.Interrupt` → `SendNamedKeys(session, "Escape")`), fired by a
-**one-tap** Interrupt square in the composer (ADR-0022 dropped the earlier
-confirm tap — interrupt is non-destructive, so a confirmation is friction; the
-danger-red header Stop keeps its two-step confirm). It is distinct from a run
-Stop: it never touches the session lifecycle, the budget clock, the claim, or
-the three-strikes counter (issue #7 decision 12) — intervention neutrality is
-structural (nothing in the chat path writes a run outcome). fixture — the send
+**one-tap** Interrupt control (ADR-0022 dropped the earlier confirm tap
+— interrupt is non-destructive, so a confirmation is friction — and
+ADR-0029 (issue #61) relocated the control itself). It now lives in the
+chat header: a `pause` icon-button immediately left of Stop on desktop,
+a `•••` menu item above Stop on mobile — gated on the run being
+**live**, not `working` (§5's state-neutrality bullet), plus the two
+locked-state composer escape hatches (dialog-pending, degraded question),
+which keep the same one-tap `pause` control. The danger-red header Stop
+keeps its two-step verbal confirm; the two controls no longer share a glyph
+(ADR-0029 decision 6). It is distinct from a run Stop: it never touches
+the session lifecycle, the budget clock, the claim, or the three-strikes
+counter (issue #7 decision 12) — intervention neutrality is structural
+(nothing in the chat path writes a run outcome). fixture — the send
 is tmux-hermetic; the claude-side Escape-interrupts-the-turn behavior is
 re-verified live on upgrades.
 

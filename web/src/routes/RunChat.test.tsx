@@ -7,8 +7,10 @@
 //   appends accumulate gap-free, and a stale in-flight response never applies
 //   over a newer one (request-token guard);
 // - the composer replies (POST /reply) and clears; Cmd/Ctrl+Enter sends, bare
-//   Enter does not; while working the Send button morphs into a one-tap
-//   Interrupt (ADR-0022) — no Send, no "queued" copy, textarea stays editable;
+//   Enter does not; Send is ALWAYS present in the unlocked states and enabled
+//   with text even while working (ADR-0029, issue #61), POSTing /reply
+//   immediately — no morph, no queue copy, no working hint; Cmd/Ctrl+Enter
+//   sends while working too;
 // - a pending dialog renders as an interactive card INSIDE the chat stream
 //   (issue #56) — deduped by tool_id against a transcript dialog message, never
 //   twice — with native option buttons that POST /answer with the option index;
@@ -24,8 +26,10 @@
 //   buttons (aria-pressed) instead of checkboxes, same Submit payload;
 // - an ended run is read-only (no composer, no reply POST); a gone transcript
 //   on a live run gets transcript-specific copy;
-// - interrupt POSTs /interrupt with one tap (no confirm), from the working
-//   composer and from the locked question-state escape hatch;
+// - one-tap interrupt (POST /interrupt, no confirm) lives in the live-gated
+//   header — inline on desktop and a `•••` menu item above Stop, a `pause`
+//   glyph distinct from the two-step danger `square` Stop — plus the two
+//   locked-state escape hatches; New conversation stays available while working;
 // - "Load earlier" never resurrects once paging-up hit the beginning.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
@@ -375,31 +379,41 @@ describe('RunChat', () => {
     expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
   });
 
-  it('morphs Send into a one-tap Interrupt while the agent is working', async () => {
+  it('keeps Send available and sending while the agent is working', async () => {
+    // ADR-0029 (issue #61): Send no longer morphs — it stays in the composer
+    // through `working`, enabled once the box has text, and POSTs /reply
+    // immediately (a genuinely mid-turn reply is queued by the agent's own TUI,
+    // with no queue UI here). No working hint, no "tap to interrupt" copy.
     messagesOnServer = { ...messagesOnServer, state: 'working' };
     await mountChat();
 
-    // No Send affordance and no "queued" copy anywhere while working.
-    expect(buttonByLabel('Send')).toBeNull();
+    const row = container.querySelector('.chat-composer-row');
+    expect(row).not.toBeNull();
+    const send = row!.querySelector<HTMLButtonElement>('button[aria-label="Send"]');
+    expect(send).not.toBeNull();
+    // Disabled while the box is empty, even though the agent is working.
+    expect(send!.disabled).toBe(true);
+    // The composer carries no Interrupt of its own now (the header holds the
+    // one-tap turn Interrupt); scope so the live header button isn't counted.
+    expect(container.querySelector('.chat-composer button[aria-label="Interrupt"]')).toBeNull();
+    // The deleted working hint / "tap to interrupt" / queue copy are all gone.
+    expect(container.querySelector('.chat-composer-hint')).toBeNull();
+    expect(container.textContent).not.toContain('tap to interrupt');
     expect(container.textContent).not.toContain('queued');
-    expect(container.querySelector('.chat-composer-hint')?.textContent).toContain(
-      'tap to interrupt',
-    );
 
-    // A single square Interrupt, carrying the reduced-motion-gated pulse cue
-    // (decision 9c); the textarea stays editable (compose-ahead).
-    const interrupt = buttonByLabel('Interrupt');
-    expect(interrupt).not.toBeNull();
-    expect(interrupt!.classList.contains('pulse')).toBe(true);
-    expect(interrupt!.classList.contains('chat-interrupt')).toBe(true); // accent-square hook
+    // Typing enables Send; the textarea is editable throughout.
     const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
-    expect(input).not.toBeNull();
     expect(input.disabled).toBe(false);
-
-    // One tap posts /interrupt — no confirm step.
-    interrupt!.click();
+    input.value = 'mid-turn thought';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
     await settle();
-    expect(interruptPosts).toBe(1);
+    expect(send!.disabled).toBe(false);
+
+    // Clicking POSTs /reply immediately with the typed text.
+    send!.click();
+    await settle();
+    expect(replyPosts).toHaveLength(1);
+    expect(replyPosts[0]?.text).toBe('mid-turn thought');
   });
 
   it('disables Send while the composer is empty', async () => {
@@ -422,34 +436,51 @@ describe('RunChat', () => {
     expect(buttonByLabel('Send')!.disabled).toBe(true);
   });
 
-  it('preserves a compose-ahead draft and morphs Send back when the agent idles', async () => {
+  it('preserves a compose-ahead draft across a working→idle state flip', async () => {
     messagesOnServer = { ...messagesOnServer, state: 'working' };
     await mountChat();
 
-    // Type a draft while working — no Send, only the square Interrupt.
-    expect(buttonByLabel('Send')).toBeNull();
+    // Type a draft while working — Send is already present and enabled (ADR-0029).
     const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
-    input.value = 'queued thought';
+    input.value = 'draft thought';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     await settle();
+    expect(buttonByLabel('Send')!.disabled).toBe(false);
 
-    // The agent returns to needs_input: Send morphs back, enabled, and the draft
-    // survives — sending it posts the retained text.
+    // The agent returns to needs_input: the draft survives the state flip and
+    // sending it posts the retained text.
     messagesOnServer = { ...messagesOnServer, state: 'needs_input' };
     emitMessagesChanged();
     await settle();
 
     const preserved = container.querySelector('.chat-input') as HTMLTextAreaElement;
-    expect(preserved.value).toBe('queued thought');
+    expect(preserved.value).toBe('draft thought');
     const send = buttonByLabel('Send');
     expect(send).not.toBeNull();
     expect(send!.disabled).toBe(false);
-    expect(buttonByLabel('Interrupt')).toBeNull(); // the working square is gone
 
     send!.click();
     await settle();
     expect(replyPosts).toHaveLength(1);
-    expect(replyPosts[0]?.text).toBe('queued thought');
+    expect(replyPosts[0]?.text).toBe('draft thought');
+  });
+
+  it('sends on Cmd/Ctrl+Enter even while the agent is working (ADR-0029)', async () => {
+    messagesOnServer = { ...messagesOnServer, state: 'working' };
+    await mountChat();
+
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.value = 'ship it now';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    // The shortcut no longer gates on `working` — it sends in every unlocked state.
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await settle();
+    expect(replyPosts).toHaveLength(1);
+    expect(replyPosts[0]?.text).toBe('ship it now');
   });
 
   it('refetches only for this run on run.messages.changed', async () => {
@@ -583,11 +614,17 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-composer .chat-composer-note')?.textContent).toBe(
       'Claude Code is waiting on your answer — see the question above.',
     );
-    // Exactly ONE Interrupt affordance, in the composer — always visible
-    // however far the stream card scrolls (the card carries none).
+    // Exactly ONE escape-hatch `.chat-interrupt`, in the composer — always
+    // visible however far the stream card scrolls, and the card carries none.
+    // (The live header's turn Interrupt is class `chat-turn-interrupt`, which
+    // does not match `.chat-interrupt`, so it is intentionally not counted here.)
+    const hatch = container.querySelector<HTMLButtonElement>('.chat-composer .chat-interrupt');
+    expect(hatch).not.toBeNull();
     expect(container.querySelectorAll('.chat-interrupt')).toHaveLength(1);
-    expect(container.querySelector('.chat-composer .chat-interrupt')).not.toBeNull();
-    buttonByLabel('Interrupt')!.click();
+    expect(card?.querySelector('.chat-interrupt')).toBeNull();
+    // Scope the click to the escape hatch: buttonByLabel('Interrupt') would hit
+    // the header turn Interrupt first in DOM order on this live run.
+    hatch!.click();
     await settle();
     expect(interruptPosts).toBe(1); // one tap, no confirm
   });
@@ -961,7 +998,7 @@ describe('RunChat', () => {
 
   it('offers a one-tap Interrupt escape hatch in the locked question state', async () => {
     // state 'question' with no structured dialog: the composer is locked, but a
-    // one-tap Interrupt square remains (decision 5) — no confirm step.
+    // one-tap Interrupt escape hatch remains (decision 5) — no confirm step.
     messagesOnServer = {
       messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'thinking…' }],
       state: 'question',
@@ -972,12 +1009,15 @@ describe('RunChat', () => {
     await mountChat();
 
     expect(container.querySelector('.chat-composer-row')).toBeNull(); // locked
-    const interrupt = buttonByLabel('Interrupt');
-    expect(interrupt).not.toBeNull();
-    // The escape-hatch square is inert — no pulse (decision 5); the pulse is the
-    // working-state cue only.
-    expect(interrupt!.classList.contains('pulse')).toBe(false);
-    interrupt!.click();
+    // Scope to the composer: on this live run the header also renders a turn
+    // Interrupt (class `chat-turn-interrupt`), which buttonByLabel would hit
+    // first in DOM order.
+    const hatch = container.querySelector<HTMLButtonElement>('.chat-composer .chat-interrupt');
+    expect(hatch).not.toBeNull();
+    // The hatch wears the `pause` glyph now (two rects) — the morph's pulse cue
+    // is gone; two rects also read distinct from the danger `square` Stop's one.
+    expect(hatch!.querySelectorAll('svg rect')).toHaveLength(2);
+    hatch!.click();
     await settle();
     expect(interruptPosts).toBe(1); // one tap, no confirm gate
   });
@@ -1092,7 +1132,9 @@ describe('RunChat', () => {
     await settle();
     expect(container.textContent).not.toContain('stale tail');
     expect(container.textContent).toContain('fresh tail');
-    expect(container.querySelector('.chat-composer-hint')).toBeNull(); // state not reverted
+    // State stayed needs_input (the stale 'working' tail was dropped): the
+    // needs-input status line is still in the stream, not reverted away.
+    expect(container.querySelector('.chat-needs-input')).not.toBeNull();
     expect(held).toHaveLength(3); // A never proceeded to its latest-window fetch
   });
 
@@ -1461,12 +1503,12 @@ describe('RunChat', () => {
     emitMessagesChanged();
     await settle();
 
-    // The line clears and the working hint takes over (reactive on state).
+    // The needs-input line clears. The composer no longer reacts to `working`
+    // (ADR-0029): no working hint element exists, and Send stays present.
     expect(container.querySelector('.chat-needs-input')).toBeNull();
     expect(container.textContent).not.toContain('is waiting for your reply.');
-    expect(container.querySelector('.chat-composer-hint')?.textContent).toContain(
-      'tap to interrupt',
-    );
+    expect(container.querySelector('.chat-composer-hint')).toBeNull();
+    expect(buttonByLabel('Send')).not.toBeNull();
   });
 
   it('drops the old claude.ai wording from the needs-input surface', async () => {
@@ -1489,7 +1531,7 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-menu-panel')).toBeNull();
   });
 
-  it('opens an anchored dropdown with Show thinking and Stop run for a live run', async () => {
+  it('opens an anchored dropdown with Show thinking, Interrupt and Stop run for a live run', async () => {
     await mountChat(); // default fixture: live, needs_input
 
     expect(container.querySelector('.chat-menu-panel')).toBeNull();
@@ -1498,6 +1540,7 @@ describe('RunChat', () => {
 
     expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
     expect(menuItem('Show thinking')).toBeDefined();
+    expect(menuItem('Interrupt')).toBeDefined(); // live turn Interrupt (ADR-0029)
     expect(menuItem('Stop run…')).toBeDefined();
   });
 
@@ -1510,6 +1553,8 @@ describe('RunChat', () => {
     await settle();
     expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
     expect(menuItem('Show thinking')).toBeDefined();
+    // Both the turn Interrupt and Stop are live-gated — gone on an ended run.
+    expect(menuItem('Interrupt')).toBeUndefined();
     expect(menuItem('Stop run…')).toBeUndefined();
   });
 
@@ -1543,6 +1588,67 @@ describe('RunChat', () => {
     // to the convo color (jsdom applies no stylesheet, so only the class is
     // assertable here — the color mapping is exercised by conversation.test.ts).
     expect(container.querySelector('.chat-state-dot.needs-input')).not.toBeNull();
+  });
+
+  // --- Header turn Interrupt (ADR-0029, issue #61) ---
+  // The one-tap turn Interrupt relocated from the composer to the header, gated
+  // on the LIVE run outcome (not the derived `working` state). jsdom loads no
+  // CSS, so both the desktop actions and the `•••` menu are in the DOM at once.
+
+  it('renders a one-tap desktop header Interrupt that posts /interrupt, live-gated', async () => {
+    await mountChat(); // default fixture: live (outcome active)
+
+    const interrupt = container.querySelector<HTMLButtonElement>(
+      '.chat-desktop-actions button[aria-label="Interrupt"]',
+    );
+    expect(interrupt).not.toBeNull();
+    expect(interrupt!.classList.contains('chat-turn-interrupt')).toBe(true);
+    expect(interrupt!.title).toBe('Interrupt the current turn (keeps the session)');
+    // The `pause` glyph (two rects) reads distinct from the danger two-step
+    // `square` Stop (one rect) that renders immediately after it.
+    expect(interrupt!.querySelectorAll('svg rect')).toHaveLength(2);
+    const stop = container.querySelector<HTMLButtonElement>('.chat-desktop-actions .chat-stop');
+    expect(stop!.querySelectorAll('svg rect')).toHaveLength(1);
+
+    // One click fires interrupt with no confirm step.
+    interrupt!.click();
+    await settle();
+    expect(interruptPosts).toBe(1);
+  });
+
+  it('omits the header Interrupt for an ended run (live-gated)', async () => {
+    runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
+    messagesOnServer = { ...messagesOnServer, state: 'ended' };
+    await mountChat();
+
+    expect(
+      container.querySelector('.chat-desktop-actions button[aria-label="Interrupt"]'),
+    ).toBeNull();
+    // None anywhere: not live (no header/menu turn Interrupt) and the ended
+    // composer is read-only (no escape hatch).
+    expect(buttonByLabel('Interrupt')).toBeNull();
+  });
+
+  it('offers a menu Interrupt above Stop that fires and closes the menu', async () => {
+    await mountChat(); // default fixture: live
+    moreButton()!.click();
+    await settle();
+
+    const panel = container.querySelector('.chat-menu-panel')!;
+    const interrupt = menuItem('Interrupt');
+    const stop = menuItem('Stop run…');
+    expect(interrupt).toBeDefined();
+    expect(stop).toBeDefined();
+    expect(interrupt!.title).toBe('Interrupt the current turn (keeps the session)');
+    // Listed ABOVE the danger Stop item among the panel's buttons.
+    const buttons = Array.from(panel.querySelectorAll('button'));
+    expect(buttons.indexOf(interrupt!)).toBeLessThan(buttons.indexOf(stop!));
+
+    // Clicking fires interrupt AND closes the menu (one tap, no confirm).
+    interrupt!.click();
+    await settle();
+    expect(interruptPosts).toBe(1);
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
   });
 
   // --- Quick-return header + jump-to-latest pill wiring (issue #35 §2 + §4) ---
@@ -2396,12 +2502,14 @@ describe('RunChat', () => {
     expect(popRows()).toHaveLength(2);
   });
 
-  it('hides New conversation while the agent is mid-turn (working)', async () => {
-    // A clear bypasses the composer (calls replyRun directly), so it must honor
-    // the same ADR-0022 mid-turn send-block the composer enforces — otherwise
-    // clicking it pastes /clear into the live TUI in the middle of a turn.
+  it('keeps New conversation available while the agent is mid-turn (working)', async () => {
+    // ADR-0029 (issue #61) removed the working exclusion: a mid-turn /clear now
+    // rides the same TUI-queued reply path as any send, so New conversation is
+    // gated only by composerLocked() (ended / gone / dialog / question), not by
+    // the derived `working` state — which can be a stale-transcript-tail false
+    // positive (issue #38) that must not hide the affordance.
     messagesOnServer = { ...messagesOnServer, state: 'working' };
     await mountChat();
-    expect(buttonByText('New conversation')).toBeNull();
+    expect(buttonByText('New conversation')).not.toBeNull();
   });
 });
