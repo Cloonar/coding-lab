@@ -291,11 +291,13 @@ func TestRepoAFKSpawnDefaultsRoundTrip(t *testing.T) {
 		ctx := context.Background()
 		now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
 
-		// Create with all three AFK columns populated.
+		// Create with all AFK columns populated (issue #19 defaults + the #52
+		// afk_prompt override).
 		full := testRepo("afkdefaults", now)
 		full.AFKModelDefault = strPtr("sonnet")
 		full.AFKEffortDefault = strPtr("low")
 		full.AFKOptions = map[string]string{"ultracode": "true"}
+		full.AFKPrompt = strPtr("Resolve <N> on <BRANCH>.")
 		created, err := s.CreateRepo(ctx, full)
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -317,23 +319,26 @@ func TestRepoAFKSpawnDefaultsRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("by id minimal: %v", err)
 		}
-		if gotMin.AFKModelDefault != nil || gotMin.AFKEffortDefault != nil || gotMin.AFKOptions != nil {
+		if gotMin.AFKModelDefault != nil || gotMin.AFKEffortDefault != nil ||
+			gotMin.AFKOptions != nil || gotMin.AFKPrompt != nil {
 			t.Errorf("minimal repo has non-nil AFK defaults: %+v", gotMin)
 		}
 
-		// Update: set the two strings and replace the bag.
+		// Update: set the two strings, replace the bag, and change the prompt.
 		updated, err := s.UpdateRepoSettings(ctx, full.ID, RepoSettingsUpdate{
 			AFKModelDefault:  Set(strPtr("fable")),
 			AFKEffortDefault: Set(strPtr("high")),
 			AFKOptions:       Set(map[string]string{"ultracode": "false"}),
+			AFKPrompt:        Set(strPtr("Updated <BRANCH> playbook.")),
 		})
 		if err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		if updated.AFKModelDefault == nil || *updated.AFKModelDefault != "fable" ||
 			updated.AFKEffortDefault == nil || *updated.AFKEffortDefault != "high" ||
-			updated.AFKOptions["ultracode"] != "false" {
-			t.Errorf("updated AFK defaults = %+v, want fable/high/{ultracode:false}", updated)
+			updated.AFKOptions["ultracode"] != "false" ||
+			updated.AFKPrompt == nil || *updated.AFKPrompt != "Updated <BRANCH> playbook." {
+			t.Errorf("updated AFK defaults = %+v, want fable/high/{ultracode:false}/updated prompt", updated)
 		}
 
 		// A present-but-empty bag persists as an empty (non-nil) map — "explicitly
@@ -353,11 +358,13 @@ func TestRepoAFKSpawnDefaultsRoundTrip(t *testing.T) {
 			AFKModelDefault:  Set[*string](nil),
 			AFKEffortDefault: Set[*string](nil),
 			AFKOptions:       Set[map[string]string](nil),
+			AFKPrompt:        Set[*string](nil),
 		})
 		if err != nil {
 			t.Fatalf("clear: %v", err)
 		}
-		if updated.AFKModelDefault != nil || updated.AFKEffortDefault != nil || updated.AFKOptions != nil {
+		if updated.AFKModelDefault != nil || updated.AFKEffortDefault != nil ||
+			updated.AFKOptions != nil || updated.AFKPrompt != nil {
 			t.Errorf("cleared AFK defaults = %+v, want all nil", updated)
 		}
 	})

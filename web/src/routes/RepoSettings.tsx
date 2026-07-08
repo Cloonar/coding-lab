@@ -155,6 +155,7 @@ function SettingsForm(props: {
   const [effort, setEffort] = createSignal(initial.effort_default ?? '');
   const [afkModel, setAfkModel] = createSignal(initial.afk_model_default ?? '');
   const [afkEffort, setAfkEffort] = createSignal(initial.afk_effort_default ?? '');
+  const [afkPrompt, setAfkPrompt] = createSignal(initial.afk_prompt ?? '');
   // Per-key checkbox state for the provider's bool options (null bag = inherit,
   // seeded to all-unchecked). Once any checkbox differs from the seed, the full
   // declared bag is PATCHed as the explicit repo override.
@@ -206,6 +207,7 @@ function SettingsForm(props: {
         resync(effort, setEffort, (r) => r.effort_default ?? '', fresh);
         resync(afkModel, setAfkModel, (r) => r.afk_model_default ?? '', fresh);
         resync(afkEffort, setAfkEffort, (r) => r.afk_effort_default ?? '', fresh);
+        resync(afkPrompt, setAfkPrompt, (r) => r.afk_prompt ?? '', fresh);
         // afk_options is an object, so resync it by value: an untouched draft
         // (still equal to the seed, or already caught up with fresh) follows
         // the server; a dirty draft keeps the operator's in-flight toggles.
@@ -275,6 +277,7 @@ function SettingsForm(props: {
     if (normText(afkEffort()) !== current.afk_effort_default) {
       patch.afk_effort_default = normText(afkEffort());
     }
+    if (normText(afkPrompt()) !== current.afk_prompt) patch.afk_prompt = normText(afkPrompt());
     // Send the full declared bag once any bool option differs from its seed.
     const declared = boolOptions();
     if (declared.length > 0) {
@@ -546,6 +549,29 @@ function SettingsForm(props: {
         <Show when={boolOptions().length > 0}>
           <small class="hint hint-block">A repo option bag overrides the global AFK options.</small>
         </Show>
+        <label class="field">
+          <span>Seed prompt</span>
+          <textarea
+            name="afk_prompt"
+            rows="10"
+            value={afkPrompt()}
+            onInput={(e) => setAfkPrompt(e.currentTarget.value)}
+            placeholder={props.repo().afk_prompt_effective}
+          />
+        </label>
+        <Show when={afkPrompt() === ''}>
+          <button
+            type="button"
+            class="small"
+            onClick={() => setAfkPrompt(props.repo().afk_prompt_effective)}
+          >
+            Customize
+          </button>
+        </Show>
+        <small class="hint hint-block">
+          The run is detected as done only by an open PR on its branch — a prompt that never opens a
+          PR burns its budget, counts as a failure, and three failures auto-pause the repo's AFK.
+        </small>
       </section>
 
       <section class="card">

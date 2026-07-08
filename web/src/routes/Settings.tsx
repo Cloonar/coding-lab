@@ -116,6 +116,7 @@ function SettingsForm(props: {
     spawn_effort_default_afk: seedDraft(initial, 'spawn_effort_default_afk'),
     git_author_name: seedDraft(initial, 'git_author_name'),
     git_author_email: seedDraft(initial, 'git_author_email'),
+    afk_prompt: seedDraft(initial, 'afk_prompt'),
     ...Object.fromEntries(INT_FIELDS.map((f) => [f.key, seedDraft(initial, f.key)])),
   });
   const draft = (key: string) => drafts()[key] ?? '';
@@ -158,7 +159,10 @@ function SettingsForm(props: {
       'spawn_effort_default_afk',
       'git_author_name',
       'git_author_email',
+      'afk_prompt',
     ] as TextSettingKey[]) {
+      // afk_prompt_default is deliberately absent from this list: it is a
+      // read-only, server-injected key (issue #52) that must never be PATCHed.
       if (textDirty(key)) patch[key] = draft(key).trim();
     }
     for (const field of INT_FIELDS) {
@@ -268,6 +272,29 @@ function SettingsForm(props: {
             </label>
           )}
         </For>
+        <label class="field">
+          <span>Seed prompt</span>
+          <textarea
+            name="afk_prompt"
+            rows="10"
+            value={draft('afk_prompt')}
+            onInput={(e) => setDraft('afk_prompt', e.currentTarget.value)}
+            placeholder={initial.afk_prompt_default ?? ''}
+          />
+        </label>
+        <Show when={draft('afk_prompt') === ''}>
+          <button
+            type="button"
+            class="small"
+            onClick={() => setDraft('afk_prompt', initial.afk_prompt_default ?? '')}
+          >
+            Customize
+          </button>
+        </Show>
+        <small class="hint hint-block">
+          The run is detected as done only by an open PR on its branch — a prompt that never opens a
+          PR burns its budget, counts as a failure, and three failures auto-pause the repo's AFK.
+        </small>
       </section>
 
       <section class="card">

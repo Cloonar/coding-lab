@@ -7,6 +7,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -60,6 +61,59 @@ func TestAPI_SettingsGetTyped(t *testing.T) {
 	}
 	if got[store.SettingGitAuthorName] != "" {
 		t.Errorf("git_author_name = %v, want empty", got[store.SettingGitAuthorName])
+	}
+	// The read-only afk_prompt_default (issue #52 / ADR-0027) is injected into
+	// every settings response: the built-in template with its <N> token literal.
+	def, ok := got["afk_prompt_default"].(string)
+	if !ok || def == "" {
+		t.Errorf("afk_prompt_default = %v (%T), want the non-empty built-in template", got["afk_prompt_default"], got["afk_prompt_default"])
+	}
+	if !strings.Contains(def, "<N>") {
+		t.Errorf("afk_prompt_default missing literal <N>:\n%s", def)
+	}
+}
+
+// The AFK seed-prompt override (issue #52 / ADR-0027): a real value stores and
+// echoes, whitespace-only normalizes to "" (inherit), an over-cap value is a 400,
+// and the read-only afk_prompt_default is rejected on PATCH as an unknown key.
+func TestAPI_SettingsAFKPromptOverride(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	// A real override stores and echoes verbatim.
+	resp := x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingAFKPrompt: "Custom playbook: resolve <N> on <BRANCH>.",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingAFKPrompt] != "Custom playbook: resolve <N> on <BRANCH>." {
+		t.Errorf("afk_prompt = %v, want the stored override verbatim", got[store.SettingAFKPrompt])
+	}
+	if v, err := x.st.GetString(context.Background(), store.SettingAFKPrompt, ""); err != nil || v != "Custom playbook: resolve <N> on <BRANCH>." {
+		t.Errorf("stored afk_prompt = %q (%v)", v, err)
+	}
+
+	// Whitespace-only normalizes to "" (inherit the built-in).
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingAFKPrompt: "   \n\t "}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingAFKPrompt] != "" {
+		t.Errorf("whitespace-only afk_prompt = %q, want \"\" (inherit)", got[store.SettingAFKPrompt])
+	}
+
+	// Over the 16 KiB cap → 400.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingAFKPrompt: strings.Repeat("a", (16<<10)+1),
+	}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); body["error"] == "" {
+		t.Error("over-cap afk_prompt 400 without error message")
+	}
+
+	// PATCHing the read-only default is an unknown-key 400.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{"afk_prompt_default": "x"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); body["error"] == "" {
+		t.Error("afk_prompt_default 400 without error message")
 	}
 }
 

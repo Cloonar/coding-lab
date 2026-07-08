@@ -52,9 +52,14 @@ type Repo struct {
 	// inherit the base ModelDefault/EffortDefault above (and the globals behind
 	// them). AFKOptions is the provider-owned options bag, nil when unset (a
 	// present-but-empty map means "explicitly no options", distinct from NULL).
-	AFKModelDefault      *string
-	AFKEffortDefault     *string
-	AFKOptions           map[string]string
+	AFKModelDefault  *string
+	AFKEffortDefault *string
+	AFKOptions       map[string]string
+	// AFKPrompt is the repo-level AFK seed-prompt override (issue #52 /
+	// ADR-0027). Nil / NULL means inherit the next layer (the global afk_prompt
+	// setting, then the built-in template). A non-empty value REPLACES the whole
+	// built-in prompt at spawn, with <N>/<BRANCH> tokens interpolated.
+	AFKPrompt            *string
 	Incogni              bool
 	GitAuthorName        *string
 	GitAuthorEmail       *string
@@ -81,7 +86,7 @@ const repoColumns = `id, name, remote_url, credential_id, forge_credential_id,
 	consecutive_failures, budget_minutes, max_instances_override,
 	clone_status, clone_error, next_issue_number, next_cr_number,
 	created_at, last_opened_at,
-	afk_model_default, afk_effort_default, afk_options`
+	afk_model_default, afk_effort_default, afk_options, afk_prompt`
 
 // triageLabels are the five canonical triage labels seeded per repo at
 // creation (design §3a colors; docs/agents/triage-labels.md meanings).
@@ -117,7 +122,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 	}
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO repos (`+repoColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.Name, r.RemoteURL, r.CredentialID, r.ForgeCredentialID,
 		r.TrackerBinding, r.ForgeKind, r.DefaultBranch, r.Provider, r.ModelDefault,
 		r.EffortDefault, r.Incogni, r.GitAuthorName, r.GitAuthorEmail,
@@ -125,7 +130,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 		r.ConsecutiveFailures, r.BudgetMinutes, r.MaxInstancesOverride,
 		r.CloneStatus, r.CloneError, r.NextIssueNumber, r.NextCRNumber,
 		fmtTime(r.CreatedAt), fmtNullTime(r.LastOpenedAt),
-		r.AFKModelDefault, r.AFKEffortDefault, afkOptions)
+		r.AFKModelDefault, r.AFKEffortDefault, afkOptions, r.AFKPrompt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Repo{}, fmt.Errorf("create repo %q: %w", r.Name, ErrNameTaken)
@@ -231,6 +236,7 @@ type RepoSettingsUpdate struct {
 	AFKModelDefault      Opt[*string]
 	AFKEffortDefault     Opt[*string]
 	AFKOptions           Opt[map[string]string] // nil map clears (NULL); a present map (even empty) is stored as JSON
+	AFKPrompt            Opt[*string]           // AFK seed-prompt override (issue #52 / ADR-0027); nil clears (NULL = inherit)
 	Incogni              Opt[bool]
 	GitAuthorName        Opt[*string]
 	GitAuthorEmail       Opt[*string]
@@ -286,6 +292,9 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 			return Repo{}, fmt.Errorf("update repo %q: %w", id, err)
 		}
 		add("afk_options", v)
+	}
+	if u.AFKPrompt.Set {
+		add("afk_prompt", u.AFKPrompt.Value)
 	}
 	if u.Incogni.Set {
 		add("incogni", u.Incogni.Value)
@@ -451,7 +460,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		created                           string
 		lastOpened                        sql.NullString
 		afkModelDef, afkEffortDef         sql.NullString
-		afkOptions                        sql.NullString
+		afkOptions, afkPrompt             sql.NullString
 	)
 	if err := scan(&r.ID, &r.Name, &r.RemoteURL, &credID, &forgeCredID,
 		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &r.Provider, &modelDef,
@@ -460,7 +469,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		&r.ConsecutiveFailures, &budget, &maxInst,
 		&r.CloneStatus, &cloneErr, &r.NextIssueNumber, &r.NextCRNumber,
 		&created, &lastOpened,
-		&afkModelDef, &afkEffortDef, &afkOptions); err != nil {
+		&afkModelDef, &afkEffortDef, &afkOptions, &afkPrompt); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
@@ -474,6 +483,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.MaxInstancesOverride = nullInt(maxInst)
 	r.AFKModelDefault = nullStr(afkModelDef)
 	r.AFKEffortDefault = nullStr(afkEffortDef)
+	r.AFKPrompt = nullStr(afkPrompt)
 
 	var err error
 	if r.AFKOptions, err = unmarshalOptions(afkOptions); err != nil {

@@ -711,7 +711,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 		// Seed prompt arrived as the spawn argv's trailing positional ($1):
 		// its first line matches the pinned SeedPrompt.
 		seed, _ := os.ReadFile(filepath.Join(out, "seed.txt"))
-		if got, want := strings.TrimSpace(string(seed)), strings.SplitN(afk.SeedPrompt(1, "afk/1", false), "\n", 2)[0]; got != want {
+		if got, want := strings.TrimSpace(string(seed)), strings.SplitN(afk.SeedPrompt(1, "afk/1", false, ""), "\n", 2)[0]; got != want {
 			t.Errorf("seed first line = %q, want %q", got, want)
 		}
 		// labctl issue view answered the run's CLAIMED issue with the pinned
@@ -1449,7 +1449,7 @@ func TestAFKCycleIncogniBuiltinIntegration(t *testing.T) {
 		// The FULL seed prompt is the incogni rendering (measure 2): branch
 		// issue-1 and the no-attribution sentence on the commit step.
 		seed, _ := os.ReadFile(filepath.Join(out1, "seed.txt"))
-		if got, want := string(seed), afk.SeedPrompt(1, "issue-1", true); got != want {
+		if got, want := string(seed), afk.SeedPrompt(1, "issue-1", true, ""); got != want {
 			t.Errorf("seed prompt = %q, want %q", got, want)
 		}
 		if !strings.Contains(string(seed), "No AI attribution, no Co-Authored-By, no generated-with footers anywhere.") {

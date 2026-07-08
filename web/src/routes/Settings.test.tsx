@@ -134,6 +134,24 @@ function input(name: string): HTMLInputElement {
   return el;
 }
 
+function textarea(name: string): HTMLTextAreaElement {
+  const el = container.querySelector<HTMLTextAreaElement>(`textarea[name="${name}"]`);
+  if (!el) throw new Error(`missing textarea[name="${name}"]`);
+  return el;
+}
+
+function button(text: string): HTMLButtonElement {
+  const buttons = Array.from(container.querySelectorAll('button'));
+  const el = buttons.find((b) => b.textContent?.trim() === text);
+  if (!el) throw new Error(`missing button ${JSON.stringify(text)}`);
+  return el;
+}
+
+function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  el.value = value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 function chooseOption(el: HTMLSelectElement, value: string): void {
   el.value = value;
   el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -228,5 +246,68 @@ describe('Settings AFK defaults', () => {
 
     // Empty is allowed for the AFK key — it clears back to the base default.
     expect(patchBodies).toEqual([{ spawn_model_default_afk: '' }]);
+  });
+});
+
+describe('Settings AFK seed prompt (issue #52)', () => {
+  const DEFAULT_PROMPT = 'Resolve issue #<N> on branch <BRANCH>, then open a PR.';
+
+  it('renders empty with the built-in default as the placeholder', async () => {
+    settingsOnServer = { afk_prompt_default: DEFAULT_PROMPT };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+
+    const field = textarea('afk_prompt');
+    expect(field.value).toBe('');
+    expect(field.placeholder).toBe(DEFAULT_PROMPT);
+  });
+
+  it('Customize copies the effective default into the textarea for editing', async () => {
+    settingsOnServer = { afk_prompt_default: DEFAULT_PROMPT };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+
+    button('Customize').click();
+
+    expect(textarea('afk_prompt').value).toBe(DEFAULT_PROMPT);
+  });
+
+  it('editing the prompt and saving PATCHes afk_prompt', async () => {
+    settingsOnServer = { afk_prompt_default: DEFAULT_PROMPT };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+
+    typeInto(textarea('afk_prompt'), 'Always branch from main and open a PR when finished.');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([
+      { afk_prompt: 'Always branch from main and open a PR when finished.' },
+    ]);
+  });
+
+  it('clearing a stored prompt back to empty PATCHes afk_prompt as ""', async () => {
+    settingsOnServer = { afk_prompt: 'A previously customized prompt.' };
+    await mountSettings();
+    const field = await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+    expect(field.value).toBe('A previously customized prompt.');
+
+    typeInto(field, '');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ afk_prompt: '' }]);
   });
 });
