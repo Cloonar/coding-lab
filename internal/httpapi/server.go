@@ -308,6 +308,7 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/v1/providers/claude/auth/status", s.requireAuth(s.handleClaudeAuthStatus))
 		api.HandleFunc("POST /api/v1/providers/claude/auth/login/start", s.requireAuth(s.handleClaudeLoginStart))
 		api.HandleFunc("POST /api/v1/providers/claude/auth/login/code", s.requireAuth(s.handleClaudeLoginCode))
+		api.HandleFunc("POST /api/v1/providers/claude/auth/logout", s.requireAuth(s.handleClaudeLogout))
 	}
 
 	// M4 tracker surface: the operator's issue and label read/mutate views

@@ -418,3 +418,42 @@ func TestCompat_Live_authStatusParses(t *testing.T) {
 	}
 	t.Logf("live status: logged_in=%v method=%q email=%q", st.LoggedIn, st.Method, st.Email)
 }
+
+// Live logout pin (issue #46 DoD): the machine-level logout is a fragile Claude
+// coupling — that `claude auth logout` needs no TTY and clears the creds file.
+// Opt-in via LAB_COMPAT_LIVE=1 so CI stays hermetic.
+//
+// ⚠️ ISOLATION IS LOAD-BEARING: this runs the REAL `claude auth logout`. It is
+// pinned to a throwaway CLAUDE_CONFIG_DIR seeded with a fake credentials file,
+// so it can never touch the lab's real login. t.Setenv restores the env after
+// the test, and claude honors CLAUDE_CONFIG_DIR — the same seam
+// claudecode.credentialsPath resolves. Never drop the isolation.
+func TestCompat_Live_authLogout(t *testing.T) {
+	if os.Getenv("LAB_COMPAT_LIVE") != "1" {
+		t.Skip("set LAB_COMPAT_LIVE=1 to probe the installed claude binary")
+	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		t.Skipf("claude not on PATH: %v", err)
+	}
+
+	// Isolate: a throwaway config dir with a fake credentials file. Nothing
+	// here reaches the operator's real ~/.claude.
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	creds := filepath.Join(dir, ".credentials.json")
+	if err := os.WriteFile(creds, []byte(`{"claudeAiOauth":{"accessToken":"fake","refreshToken":"fake","expiresAt":0}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-interactive: no TTY is wired up. A hang here (waiting on a prompt)
+	// trips the outer `go test` timeout, which is the failure we want to catch.
+	out, runErr := exec.Command(bin, "auth", "logout").CombinedOutput()
+	t.Logf("live `claude auth logout` exit=%v output=%q", runErr, strings.TrimSpace(string(out)))
+
+	// Observable state, not exit code (D: "Success = status"). The seeded
+	// credentials file must be gone.
+	if _, err := os.Stat(creds); !os.IsNotExist(err) {
+		t.Errorf("credentials file still present after `claude auth logout`: stat err = %v", err)
+	}
+}

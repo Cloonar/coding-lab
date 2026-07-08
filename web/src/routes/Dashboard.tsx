@@ -62,6 +62,10 @@ function DashboardView() {
   const instancesOf = (repoID: string): Instance[] =>
     (instances() ?? []).filter((instance) => instance.repo_id === repoID);
 
+  // Running instances survive a Claude logout on their in-memory token until it
+  // refreshes; the auth card's logout confirm names this count (issue #46).
+  const activeRuns = (): number => (instances() ?? []).filter((instance) => instance.live).length;
+
   const retry = async (repo: Repo) => {
     setError(null);
     progress.clear(repo.id); // stale percent from the failed attempt
@@ -97,7 +101,7 @@ function DashboardView() {
       <TopBar />
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <div class="stack">
-        <ClaudeAuthCard />
+        <ClaudeAuthCard activeRuns={activeRuns()} />
       </div>
       <Switch>
         <Match when={repos.error !== undefined}>

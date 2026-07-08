@@ -1,21 +1,25 @@
 // Claude auth card (dashboard top): machine-level login status, force
-// refresh, and the OAuth login flow — Login yields a tappable authorize link
-// plus a code paste field; the pasted code answers 202 and completion lands
-// via the claude.auth.changed SSE event (the card refetches on it, so the
-// status flips live). Starting login again doubles as cancel/retry (v0).
+// refresh, the OAuth login flow, and a machine-wide logout for switching
+// accounts (issue #46) — Login yields a tappable authorize link plus a code
+// paste field; the pasted code answers 202 and completion lands via the
+// claude.auth.changed SSE event (the card refetches on it, so the status flips
+// live). Logout sits behind a confirm dialog that names the running-instance
+// count and warns that AFK auto stays on. Starting login again doubles as
+// cancel/retry (v0).
 
 import { Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
 import {
   claudeAuthStatus,
   claudeLoginCode,
   claudeLoginStart,
+  claudeLogout,
   errorMessage,
   type ClaudeAuthStatus,
 } from '../api';
 import { useEvents } from '../events';
 import ErrorBanner from './ErrorBanner';
 
-export default function ClaudeAuthCard() {
+export default function ClaudeAuthCard(props: { activeRuns?: number }) {
   const events = useEvents();
   const [status, { refetch, mutate }] = createResource(() => claudeAuthStatus());
   onCleanup(
@@ -29,6 +33,7 @@ export default function ClaudeAuthCard() {
   const [oauthUrl, setOauthUrl] = createSignal<string | null>(null);
   const [code, setCode] = createSignal('');
   const [waiting, setWaiting] = createSignal(false);
+  const [confirmingLogout, setConfirmingLogout] = createSignal(false);
 
   const loggedIn = () => status()?.logged_in === true;
 
@@ -88,6 +93,21 @@ export default function ClaudeAuthCard() {
     }
   };
 
+  const doLogout = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // 200 echoes the now-logged-out status; adopt it directly so the card
+      // flips even before the claude.auth.changed refetch lands.
+      mutate(await claudeLogout());
+      setConfirmingLogout(false);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section class="card auth-status-card">
       <div class="card-head">
@@ -123,6 +143,28 @@ export default function ClaudeAuthCard() {
             Logged in as <span class="mono">{status()!.email}</span>
             <Show when={status()!.method !== ''}> via {status()!.method}</Show>
           </p>
+          <Show
+            when={confirmingLogout()}
+            fallback={
+              <div class="card-actions">
+                <button
+                  type="button"
+                  class="danger claude-logout"
+                  onClick={() => setConfirmingLogout(true)}
+                  disabled={busy()}
+                >
+                  Log out
+                </button>
+              </div>
+            }
+          >
+            <LogoutConfirm
+              activeRuns={props.activeRuns ?? 0}
+              busy={busy()}
+              onCancel={() => setConfirmingLogout(false)}
+              onConfirm={() => void doLogout()}
+            />
+          </Show>
         </Match>
         <Match when={status() !== undefined}>
           <Show
@@ -177,5 +219,48 @@ export default function ClaudeAuthCard() {
         </Match>
       </Switch>
     </section>
+  );
+}
+
+/**
+ * Logout confirm gate: machine-wide logout is bare by decision — it does NOT
+ * stop running instances, so the dialog names how many keep running and warns
+ * that AFK auto stays on (expect failed-spawn churn until a fresh login). A
+ * plain confirm, not a typed-confirm: logout is reversible by logging back in.
+ */
+function LogoutConfirm(props: {
+  activeRuns: number;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const runs = () => props.activeRuns;
+  const plural = () => (runs() === 1 ? '' : 's');
+  return (
+    <div class="logout-confirm" role="alertdialog" aria-label="Log out of Claude">
+      <p class="logout-warning">
+        This drops the machine's Claude account so you can log in a fresh one.{' '}
+        <Show when={runs() > 0} fallback={<>No instances are running right now.</>}>
+          <span class="logout-runs">
+            {runs()} running instance{plural()}
+          </span>{' '}
+          keep working on the current token until it refreshes, then fail.
+        </Show>{' '}
+        AFK auto stays on — expect failed-spawn churn until you log in fresh.
+      </p>
+      <div class="card-actions">
+        <button
+          type="button"
+          class="danger claude-logout-confirm"
+          disabled={props.busy}
+          onClick={() => props.onConfirm()}
+        >
+          {props.busy ? 'Logging out…' : 'Log out'}
+        </button>
+        <button type="button" onClick={() => props.onCancel()} disabled={props.busy}>
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }

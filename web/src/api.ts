@@ -362,6 +362,18 @@ export function claudeLoginCode(code: string): Promise<void> {
   return request<void>('POST', '/providers/claude/auth/login/code', { code });
 }
 
+/**
+ * Drops the machine's current Claude account so a fresh one can be logged in
+ * (issue #46). Machine-wide and bare by decision: it does NOT stop running
+ * instances — they keep working on their in-memory token until it refreshes,
+ * then fail. 200 echoes the now-logged-out status; the server also emits
+ * claude.auth.changed so every open card flips live. A logout that could not
+ * drop the account is a 500.
+ */
+export function claudeLogout(): Promise<ClaudeAuthStatus> {
+  return request<ClaudeAuthStatus>('POST', '/providers/claude/auth/logout');
+}
+
 // --- M3: instances & runs ---
 
 export type RunKind = 'manual' | 'afk_manual' | 'afk_auto';

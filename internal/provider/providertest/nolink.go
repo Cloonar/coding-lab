@@ -71,6 +71,7 @@ func (f *NoLinkFake) AuthStatus(context.Context, bool) (provider.AuthStatus, err
 
 func (f *NoLinkFake) LoginStart(context.Context) (string, error)    { return "", nil }
 func (f *NoLinkFake) LoginSubmitCode(context.Context, string) error { return nil }
+func (f *NoLinkFake) Logout(context.Context) error                  { return nil }
 
 func (f *NoLinkFake) SeedWorkspace(worktree string, _ provider.SeedOpts) error {
 	f.mu.Lock()
