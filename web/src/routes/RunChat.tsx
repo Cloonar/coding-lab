@@ -1,14 +1,16 @@
 // Embedded chat (/runs/:id, issue #7 / ADR-0016): the body IS the chat. A
 // compact header (title · conversational state · deep link · New conversation ·
-// Stop), the conversation stream (user/assistant text, tool chips, the pending
-// dialog as an interactive inline card (issue #56), lifecycle/errors; thinking
-// behind a toggle), and a fixed bottom composer whose state follows the run —
-// collapsed to a waiting note while a dialog is pending, disabled for ended
-// instances, and morphing its Send button into a one-tap Interrupt while the
-// agent is working (ADR-0022). Reads through GET /runs/:id/messages and
-// refetches on run.messages.changed; replies / answers / interrupts POST back.
-// Every string that names the agent derives from the provider's display
-// metadata (issue #51 decision 9). Phone-first, v0 design language.
+// Interrupt · Stop), the conversation stream (user/assistant text, tool chips,
+// the pending dialog as an interactive inline card (issue #56), lifecycle/errors;
+// thinking behind a toggle), and a fixed bottom composer whose state follows the
+// run — collapsed to a waiting note while a dialog is pending, disabled for ended
+// instances. Send is ALWAYS available and fires immediately (ADR-0029, issue #61);
+// the one-tap turn Interrupt lives in the header next to Stop, gated on the live
+// outcome — not the derived `working` state, which can be a stale-transcript-tail
+// false positive (issue #38). Reads through GET /runs/:id/messages and refetches
+// on run.messages.changed; replies / answers / interrupts POST back. Every string
+// that names the agent derives from the provider's display metadata (issue #51
+// decision 9). Phone-first, v0 design language.
 
 import { A, useParams } from '@solidjs/router';
 import { Dynamic, Portal } from 'solid-js/web';
@@ -509,16 +511,16 @@ function RunChatView() {
   // role=clear affordance (issue #51 decision 2): a clear-role catalog entry
   // binds the header's "New conversation" action; execution rides the NORMAL
   // reply path (the backend echoes the command as user text and the transcript
-  // rotation resets the stream). Hidden while the composer is locked, the run
-  // has ended, OR the agent is mid-turn — the reply would land nowhere good.
-  // The working exclusion mirrors the composer's own ADR-0022 send-block: Send
-  // morphs to Interrupt mid-turn and nothing can be sent, so a clear (which
-  // bypasses the composer by calling replyRun directly) must be blocked too,
-  // else it pastes /clear into the live TUI in the middle of a turn.
+  // rotation resets the stream). New conversation follows the composer —
+  // available whenever not composerLocked() (ended / transcript gone / dialog /
+  // question). Its old `working` exclusion existed only to mirror the ADR-0022
+  // send-block, which ADR-0029 (issue #61) removed; a mid-turn /clear now rides
+  // the same TUI-queued reply path as any send, and a false `working` (a stale
+  // transcript tail — issue #38) can no longer hide the affordance.
   const clearCommand = () => (commands() ?? []).find((c) => c.role === 'clear');
   const composerLocked = () =>
     ended() || transcript() === 'gone' || pendingDialog() !== null || state() === 'question';
-  const canClear = () => clearCommand() !== undefined && !composerLocked() && state() !== 'working';
+  const canClear = () => clearCommand() !== undefined && !composerLocked();
   const sendClear = async () => {
     const name = clearCommand()?.name;
     if (name === undefined) return;
@@ -641,6 +643,7 @@ function RunChatView() {
           onClear={sendClear}
           onError={setError}
           onChanged={() => void refetchRun()}
+          onInterrupted={() => void refetchMessages()}
           hidden={!headerVisible()}
           headerRef={(el) => (headerEl = el)}
         />
@@ -785,6 +788,8 @@ function ChatHeader(props: {
   onClear: () => Promise<void>;
   onError: (message: string) => void;
   onChanged: () => void;
+  /** One-tap turn Interrupt fired from the header/menu (ADR-0029) — refetch on done. */
+  onInterrupted: () => void;
   hidden: boolean;
   headerRef: (el: HTMLElement) => void;
 }) {
@@ -850,6 +855,14 @@ function ChatHeader(props: {
       props.onChanged();
     }
   };
+
+  // The header's one-tap turn Interrupt (ADR-0029), shared by the inline
+  // desktop button and its `•••` menu twin.
+  const interrupt = createInterrupt(
+    () => props.run?.id ?? '',
+    (m) => props.onError(m),
+    () => props.onInterrupted(),
+  );
 
   return (
     <header
@@ -931,6 +944,25 @@ function ChatHeader(props: {
           {props.showThinking ? 'Hide thinking' : 'Show thinking'}
         </button>
         <Show when={open()}>{(s) => <OpenAffordance state={s()} />}</Show>
+        {/* One-tap turn Interrupt (ADR-0029) — gated on live(), not the derived
+            (possibly false) `working` state; accent + `pause`, deliberately
+            distinct from the adjacent danger two-step `square` Stop. */}
+        <Show when={live()}>
+          <button
+            type="button"
+            class="icon-btn accent chat-turn-interrupt"
+            classList={{ busy: interrupt.busy() }}
+            aria-label="Interrupt"
+            title="Interrupt the current turn (keeps the session)"
+            onClick={() => void interrupt.run()}
+          >
+            <Show when={interrupt.busy()} fallback={<Icon name="pause" />}>
+              <span class="chat-interrupt-busy" aria-hidden="true">
+                …
+              </span>
+            </Show>
+          </button>
+        </Show>
         <Show when={live()}>
           <Switch>
             <Match when={!confirming()}>
@@ -969,6 +1001,7 @@ function ChatHeader(props: {
         live={live()}
         confirming={confirming()}
         stopping={stopping()}
+        onInterrupt={() => void interrupt.run()}
         onRequestStop={() => setConfirming(true)}
         onCancelStop={() => setConfirming(false)}
         onStop={() => void stop()}
@@ -986,9 +1019,10 @@ function ChatHeader(props: {
 // The mobile (<640px) header overflow menu (§1): an anchored dropdown mirroring
 // TopBar's nav-menu/nav-scrim pattern — outside-tap + Escape + tap-to-close —
 // carrying the controls the one-line header can't hold inline: the thinking
-// toggle, the open affordance (when available), and the two-step Stop (live
-// only). `•••` is always present; the items are contextual. CSS hides the whole
-// wrapper at >=640px, where the inline header controls render instead.
+// toggle, the open affordance (when available), New conversation, the one-tap
+// turn Interrupt and the two-step Stop (both live only). `•••` is always
+// present; the items are contextual. CSS hides the whole wrapper at >=640px,
+// where the inline header controls render instead.
 function ChatMenu(props: {
   showThinking: boolean;
   onToggleThinking: () => void;
@@ -996,6 +1030,7 @@ function ChatMenu(props: {
   live: boolean;
   confirming: boolean;
   stopping: boolean;
+  onInterrupt: () => void;
   onRequestStop: () => void;
   onCancelStop: () => void;
   onStop: () => void;
@@ -1100,6 +1135,24 @@ function ChatMenu(props: {
                 </button>
               </Match>
             </Switch>
+          </Show>
+
+          {/* One-tap turn Interrupt (ADR-0029): no confirm step, unlike the
+              two-step Stop below — it keeps the session, just ends the turn. */}
+          <Show when={props.live}>
+            <button
+              type="button"
+              class="chat-menu-item accent"
+              role="menuitem"
+              title="Interrupt the current turn (keeps the session)"
+              onClick={() => {
+                props.onInterrupt();
+                close();
+              }}
+            >
+              <Icon name="pause" class="chat-menu-icon" />
+              <span>Interrupt</span>
+            </button>
           </Show>
 
           <Show when={props.live}>
@@ -1479,10 +1532,10 @@ function CopyButton(props: { text: string; label?: string; title?: string }) {
   );
 }
 
-// Shared one-tap interrupt action (ADR-0022): POST /interrupt (the tmux Escape),
-// no confirm, re-entrancy-guarded. Backs both the working-state morph button and
-// the question/dialog escape-hatch squares, so the "one tap, no confirm" contract
-// lives in exactly one place.
+// Shared one-tap interrupt action (ADR-0029): POST /interrupt (the tmux Escape),
+// no confirm, re-entrancy-guarded. Backs the header's turn Interrupt (and its
+// mobile menu twin) plus the two question/dialog escape-hatch buttons, so the
+// "one tap, no confirm" contract lives in exactly one place.
 function createInterrupt(runID: () => string, onError: (m: string) => void, onDone: () => void) {
   const [busy, setBusy] = createSignal(false);
   const run = async () => {
@@ -1536,18 +1589,9 @@ function Composer(props: {
       { defer: true },
     ),
   );
-  const interrupt = createInterrupt(
-    () => props.runID,
-    (m) => props.onError(m),
-    () => props.onSent(),
-  );
-
-  // The morph pivot (ADR-0022): while the agent is working the composer button
-  // is a one-tap Interrupt, never a Send — nothing can be sent mid-turn, so the
-  // "queued" affordance is gone from the UI (the backend Reply is untouched, it
-  // is simply unreachable here until the agent idles). The textarea stays
-  // editable throughout for compose-ahead.
-  const working = () => props.state === 'working';
+  // Send is gated only on a non-empty box and no in-flight POST — never on the
+  // run's derived state (ADR-0029, issue #61): the composer no longer morphs and
+  // has no Interrupt of its own (that moved to the header).
   const canSend = () => !sending() && text().trim() !== '';
 
   // Auto-grow (decision 9b): reset to one row then grow to the content height,
@@ -1618,11 +1662,11 @@ function Composer(props: {
     inputEl?.focus();
   };
 
-  // Cmd/Ctrl+Enter sends in the sendable states only (decision 9a). Bare Enter
-  // is never a send — a phone's return key must insert a newline — and while
-  // working there is no keyboard interrupt (the square is the only interrupt).
-  // While the command popover is open, Up/Down cycle, Enter/Tab accept and
-  // Escape closes; Cmd/Ctrl+Enter still sends over it.
+  // Cmd/Ctrl+Enter now sends in every unlocked state (ADR-0029, issue #61): Send
+  // is always available, so the shortcut no longer gates on `working`. Bare Enter
+  // is never a send — a phone's return key must insert a newline. While the
+  // command popover is open, Up/Down cycle, Enter/Tab accept and Escape closes;
+  // Cmd/Ctrl+Enter still sends over it.
   const onKeyDown = (e: KeyboardEvent) => {
     if (acOpen() && !(e.metaKey || e.ctrlKey)) {
       const matches = acMatches();
@@ -1648,7 +1692,7 @@ function Composer(props: {
         return;
       }
     }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !working()) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void send();
     }
@@ -1769,39 +1813,25 @@ function Composer(props: {
               }}
               onKeyDown={onKeyDown}
             />
-            {/* One morphing button (decision 2): the SAME <button> element in
-                both states — glyph, action, accessible name, and enabled/busy
-                swap on working() — so keyboard focus is never dropped across the
-                flip. Send (disabled when empty / in flight) when idle/needs_input;
-                a one-tap Interrupt (always enabled, no confirm, pulsing) while
-                working, showing the busy "…" while /interrupt is in flight. */}
+            {/* Always-Send (ADR-0029, issue #61): Send never reads the derived
+                `working` state, because that state can be false — a stale
+                transcript tail (issue #38) — and would then hide the operator's
+                only way to reply. A genuinely mid-turn reply is queued by the
+                agent's own TUI (the backend Reply is unchanged — ADR-0016's
+                paste+Enter), with no queue affordance in the UI: the reply
+                simply echoes once the transcript reflects it. */}
             <button
               type="button"
-              classList={{
-                'icon-btn': true,
-                'chat-send': !working(),
-                'chat-interrupt': working(),
-                pulse: working() && !interrupt.busy(),
-                busy: working() ? interrupt.busy() : sending(),
-              }}
-              aria-label={working() ? 'Interrupt' : 'Send'}
-              title={working() ? 'Interrupt the agent (Escape)' : 'Send'}
-              disabled={working() ? false : !canSend()}
-              onClick={() => void (working() ? interrupt.run() : send())}
+              class="icon-btn chat-send"
+              classList={{ busy: sending() }}
+              aria-label="Send"
+              title="Send"
+              disabled={!canSend()}
+              onClick={() => void send()}
             >
-              <Show
-                when={working() && interrupt.busy()}
-                fallback={<Icon name={working() ? 'square' : 'send'} />}
-              >
-                <span class="chat-interrupt-busy" aria-hidden="true">
-                  …
-                </span>
-              </Show>
+              <Icon name="send" />
             </button>
           </div>
-          <Show when={working()}>
-            <p class="chat-composer-hint">The agent is working — tap to interrupt.</p>
-          </Show>
         </Match>
       </Switch>
     </div>
@@ -2281,16 +2311,16 @@ function MultiQuestionForm(props: {
   );
 }
 
-// One-tap Interrupt escape hatch (ADR-0022, superseding ADR-0016's confirm tap):
-// a square accent icon-button that fires interruptRun (Escape) immediately, no
+// One-tap Interrupt escape hatch (ADR-0029, superseding ADR-0016's confirm tap):
+// an accent `pause` icon-button that fires interruptRun (Escape) immediately, no
 // confirmation — interrupt is non-destructive (the agent survives, idles, and is
 // re-promptable), so a confirm tap is friction. Rendered in the composer's two
 // locked branches — dialog-pending waiting note (issue #56 decision 2) and the
 // degraded question state (decision 5) — so exactly one always-visible escape
-// hatch exists however far the stream card scrolls. It stays inert (no pulse),
-// unlike the working-state morph button in Composer, which shares createInterrupt
-// but draws its own pulsing square. Distinct from the header Stop, which stays
-// danger-red + two-step (destructive teardown, ADR-0019).
+// hatch exists however far the stream card scrolls. It shares the `pause` glyph
+// with the header's turn Interrupt (the composer Send no longer morphs — ADR-0029),
+// and stays distinct from the danger `square` Stop, which is two-step (destructive
+// teardown, ADR-0019).
 function InterruptButton(props: {
   runID: string;
   onError: (message: string) => void;
@@ -2310,7 +2340,7 @@ function InterruptButton(props: {
       title="Interrupt the agent (Escape)"
       onClick={() => void interrupt.run()}
     >
-      <Show when={interrupt.busy()} fallback={<Icon name="square" />}>
+      <Show when={interrupt.busy()} fallback={<Icon name="pause" />}>
         <span class="chat-interrupt-busy" aria-hidden="true">
           …
         </span>

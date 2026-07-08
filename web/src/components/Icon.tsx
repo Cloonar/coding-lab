@@ -21,6 +21,7 @@ export type IconName =
   | 'folder'
   | 'key'
   | 'play'
+  | 'pause'
   | 'ticket'
   | 'settings'
   | 'message-square'
@@ -80,6 +81,12 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3" />
   ),
   play: () => <polygon points="6 3 20 12 6 21 6 3" />,
+  pause: () => (
+    <>
+      <rect x="14" y="4" width="4" height="16" rx="1" />
+      <rect x="4" y="4" width="4" height="16" rx="1" />
+    </>
+  ),
   ticket: () => (
     <>
       <path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z" />
