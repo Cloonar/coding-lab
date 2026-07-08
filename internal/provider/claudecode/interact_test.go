@@ -123,10 +123,11 @@ func TestReply_normalizesCRLF(t *testing.T) {
 
 // Multi-question answers are POSITIONAL (issue #51 decision 3: answers[i]
 // answers Questions[i]) with strict per-question encoding — single-select in
-// Index (Selected empty), multi-select in Selected (OtherText forbidden),
-// OtherText exactly when the chosen row IsOther. A payload in the OLD
-// divergent SPA encoding (question index in Index, the single-select choice
-// in Selected) must be REJECTED at the door rather than silently misplayed:
+// Index (Selected empty; OtherText exactly when the chosen row IsOther),
+// multi-select in Selected plus optional OtherText for the free-text row
+// (whose index never appears in Selected). A payload in the OLD divergent
+// SPA encoding (question index in Index, the single-select choice in
+// Selected) must be REJECTED at the door rather than silently misplayed:
 // keystrokes built from a misread answer are exactly the desync the
 // verification backstop exists for, and a 4xx beats a post-hoc warning.
 func TestDialogKeystrokes_multiQuestionEncodingValidation(t *testing.T) {
@@ -146,9 +147,9 @@ func TestDialogKeystrokes_multiQuestionEncodingValidation(t *testing.T) {
 		// The old divergent encoding: Index carried the QUESTION index and
 		// Selected carried the single-select choice.
 		"old encoding: selected on single-select": {[]provider.QuestionAnswer{{Index: 0, Selected: []int{1}}, {Index: 1, Selected: []int{0}}}, ErrInvalidReply},
-		"multi-select with empty selected":        {[]provider.QuestionAnswer{{Index: 0}, {}}, ErrInvalidReply},
-		"multi-select toggling the Other row":     {[]provider.QuestionAnswer{{Index: 0}, {Selected: []int{2}}}, ErrDialogNotAnswerable},
-		"multi-select with other text":            {[]provider.QuestionAnswer{{Index: 0}, {Selected: []int{0}, OtherText: "x"}}, ErrInvalidReply},
+		"multi-select with no answer at all":      {[]provider.QuestionAnswer{{Index: 0}, {}}, ErrInvalidReply},
+		"multi-select toggling the Other row":     {[]provider.QuestionAnswer{{Index: 0}, {Selected: []int{2}}}, ErrInvalidReply},
+		"multi-select multi-line other text":      {[]provider.QuestionAnswer{{Index: 0}, {Selected: []int{0}, OtherText: "a\nb"}}, ErrInvalidReply},
 		"single-select index out of range":        {[]provider.QuestionAnswer{{Index: 9}, {Selected: []int{0}}}, ErrDialogNotAnswerable},
 		"other row without text":                  {[]provider.QuestionAnswer{{Index: 2}, {Selected: []int{0}}}, ErrInvalidReply},
 		"other text on a non-Other row":           {[]provider.QuestionAnswer{{Index: 0, OtherText: "stray"}, {Selected: []int{0}}}, ErrInvalidReply},
@@ -158,11 +159,18 @@ func TestDialogKeystrokes_multiQuestionEncodingValidation(t *testing.T) {
 			t.Errorf("%s: err = %v; want %v", name, err, c.want)
 		}
 	}
-	// The valid positional encoding passes.
+	// The valid positional encodings pass: single-select Other text, a plain
+	// multi-select toggle set, and a multi-select with the free-text row
+	// riding other_text alongside a toggle (captured 2026-07-09, compat §7).
 	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Answers: []provider.QuestionAnswer{
 		{Index: 2, OtherText: "Teal"}, {Selected: []int{0, 1}},
 	}}); err != nil {
 		t.Errorf("valid positional answers rejected: %v", err)
+	}
+	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Answers: []provider.QuestionAnswer{
+		{Index: 0}, {Selected: []int{0}, OtherText: "dragonfruit"},
+	}}); err != nil {
+		t.Errorf("multi-select with other text rejected: %v", err)
 	}
 }
 
@@ -212,22 +220,31 @@ func TestAnswerDialog_multiSelectValidation(t *testing.T) {
 		{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true},
 	}}
 	cases := map[string]struct {
-		sel  []int
-		want error
+		sel   []int
+		other string
+		want  error
 	}{
-		// A zero-selection Enter would confirm nothing as if it answered.
-		"empty": {nil, ErrInvalidReply},
+		// A zero-selection Enter would confirm nothing as if it answered —
+		// unless the free-text row answers alone (valid, covered below).
+		"empty": {nil, "", ErrInvalidReply},
 		// A dropped index would confirm a selection the operator never made.
-		"out of range": {[]int{0, 7}, ErrInvalidReply},
-		// Space on the free-text Other row is an uncaptured TUI path.
-		"other row": {[]int{0, 2}, ErrDialogNotAnswerable},
+		"out of range": {[]int{0, 7}, "", ErrInvalidReply},
+		// The free-text row's toggle IS its text: it rides other_text, never
+		// Selected (Space on the row would type a literal space — compat §7).
+		"other row toggled by index": {[]int{0, 2}, "", ErrInvalidReply},
+		// The row is a one-line field; a newline records as literal \r.
+		"multi-line other text": {[]int{0}, "two\nlines", ErrInvalidReply},
 	}
 	for name, c := range cases {
-		if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Selected: c.sel}); !errors.Is(err, c.want) {
+		if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Selected: c.sel, OtherText: c.other}); !errors.Is(err, c.want) {
 			t.Errorf("%s: err = %v; want %v", name, err, c.want)
 		}
 	}
 	if n := len(f.KeyLog(chatSession)); n != 0 {
 		t.Errorf("rejected answers still sent %d keystrokes; want 0", n)
+	}
+	// Free text alone (nothing toggled) is a valid multi-select answer.
+	if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{OtherText: "kale"}); err != nil {
+		t.Errorf("other-only multi-select answer rejected: %v", err)
 	}
 }

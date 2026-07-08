@@ -1988,6 +1988,24 @@ function DialogPanel(props: {
   const toggle = (i: number) =>
     setSelected((prev) => (prev.includes(i) ? prev.filter((x) => x !== i) : [...prev, i]));
 
+  // Flat multi-select payload: real toggles in `selected` (ascending — the
+  // adapter walks the picker downward), the Other row's text in `other_text`.
+  // The Other INDEX stays out of `selected` (the adapter rejects it — the
+  // free-text row's toggle IS its text, compat §7).
+  const otherIdx = () => options().findIndex((opt) => opt.is_other === true);
+  const otherOn = () => selected().includes(otherIdx()) && otherIdx() >= 0;
+  const realSelected = () =>
+    selected()
+      .filter((i) => i !== otherIdx())
+      .sort((a, b) => a - b);
+  const multiAnswerReady = () =>
+    otherOn() ? otherText().trim() !== '' : selected().length > 0;
+  const multiPayload = () => {
+    const payload: { selected: number[]; other_text?: string } = { selected: realSelected() };
+    if (otherOn()) payload.other_text = otherText().trim();
+    return payload;
+  };
+
   return (
     <div class="chat-dialog">
       {/* A plan review's prompt IS the plan body — rendered as markdown in
@@ -2022,7 +2040,10 @@ function DialogPanel(props: {
           </Match>
           {/* Multi-select: toggle cards (issue #56 decision 7 — the former
               bare checkbox rows dropped the option descriptions) + a single
-              confirm. The selection signal and Submit payload are unchanged. */}
+              confirm. The synthesized Other row toggles like the rest and
+              opens a free-text input; its INDEX never enters the payload —
+              the text IS its toggle, riding other_text (the adapter fills
+              the TUI's "Type something" row with it, compat §7). */}
           <Match when={props.dialog.multi}>
             <ul class="dialog-options">
               <For each={options()}>
@@ -2034,6 +2055,15 @@ function DialogPanel(props: {
                       disabled={busy()}
                       onToggle={() => toggle(i())}
                     />
+                    <Show when={opt.is_other && selected().includes(i())}>
+                      <input
+                        class="chat-input dialog-other-input"
+                        placeholder="Type your answer…"
+                        aria-label="Other — type your answer"
+                        value={otherText()}
+                        onInput={(e) => setOtherText(e.currentTarget.value)}
+                      />
+                    </Show>
                   </li>
                 )}
               </For>
@@ -2041,8 +2071,8 @@ function DialogPanel(props: {
             <button
               type="button"
               class="chat-send"
-              disabled={busy() || selected().length === 0}
-              onClick={() => void answer({ selected: selected() })}
+              disabled={busy() || !multiAnswerReady()}
+              onClick={() => void answer(multiPayload())}
             >
               Submit
             </button>
@@ -2151,17 +2181,20 @@ function OptionToggle(props: {
  * provider's own app renders question forms: stacked questions in order, each
  * a small header chip + the question text + option buttons; multi_select
  * questions toggle; the synthesized "Other" row (is_other) opens a free-text
- * input for a single-select question. ONE submit answers all questions
- * atomically via answers[] — disabled until every question is answered (Other
- * requires non-empty text).
+ * input when picked — for single-select AND multi-select questions. ONE
+ * submit answers all questions atomically via answers[] — disabled until
+ * every question is answered (a picked Other requires non-empty text).
  *
  * Answer encoding (provider.go QuestionAnswer is authoritative): association
  * is POSITIONAL — answers[i] answers questions[i]. Each entry mirrors the
  * flat single-question shape: a single-select question sends `index` = the
  * chosen OPTION index (+ `other_text` when that row is the is_other row); a
- * multi_select question sends `selected` = the toggled option indices
- * ascending, `index` absent. The adapter drives real picker rows from these
- * fields, so this shape is a wire contract, not a UI convenience.
+ * multi_select question sends `selected` = the toggled REAL option indices
+ * ascending (`index` absent) + `other_text` when the Other row is toggled —
+ * never the Other row's index (its text IS its toggle; the adapter fills the
+ * TUI's free-text row from other_text, compat §7). The adapter drives real
+ * picker rows from these fields, so this shape is a wire contract, not a UI
+ * convenience.
  */
 function MultiQuestionForm(props: {
   questions: Question[];
@@ -2184,16 +2217,13 @@ function MultiQuestionForm(props: {
     ),
   );
 
-  // The renderable options of a question, keeping their ORIGINAL option
-  // indices (the adapter navigates picker rows by index). Multi-select
-  // questions drop the synthesized Other row: the adapter rejects Other
-  // inside a multi-select answer by policy (normSelected — the TUI's
-  // Other-in-multi-select recipe is unverified), so offering the row here
-  // would only collect an answer the backend bounces.
-  const visibleOptions = (q: Question): { opt: DialogOption; idx: number }[] =>
-    q.options
-      .map((opt, idx) => ({ opt, idx }))
-      .filter(({ opt }) => !(q.multi_select === true && opt.is_other === true));
+  // Every option of a question with its ORIGINAL index (the adapter
+  // navigates picker rows by index). The synthesized Other row renders for
+  // multi-select questions too — toggling it opens the free-text input, and
+  // its text rides other_text (the adapter fills the TUI's "Type something"
+  // row, which pastes-and-checks in one move — compat §7, live 2026-07-09).
+  const allOptions = (q: Question): { opt: DialogOption; idx: number }[] =>
+    q.options.map((opt, idx) => ({ opt, idx }));
 
   const picked = (qi: number) => picks().get(qi) ?? [];
   const otherText = (qi: number) => others().get(qi) ?? '';
@@ -2227,7 +2257,16 @@ function MultiQuestionForm(props: {
     if (!complete()) return;
     props.onSubmit(
       props.questions.map((q, qi): QuestionAnswer => {
-        if (q.multi_select === true) return { selected: picked(qi) }; // ascending by construction
+        if (q.multi_select === true) {
+          // Real toggles ride `selected` (ascending by construction); the
+          // Other row's INDEX never does — its text IS its toggle
+          // (other_text, compat §7).
+          const a: QuestionAnswer = {
+            selected: picked(qi).filter((oi) => q.options[oi]?.is_other !== true),
+          };
+          if (otherPicked(qi, q)) a.other_text = otherText(qi).trim();
+          return a;
+        }
         const idx = picked(qi)[0] ?? 0; // complete() guarantees exactly one pick
         const a: QuestionAnswer = { index: idx };
         if (q.options[idx]?.is_other === true) a.other_text = otherText(qi).trim();
@@ -2247,7 +2286,7 @@ function MultiQuestionForm(props: {
               </Show>
               <p class="chat-dialog-prompt">{q.text}</p>
               <ul class="dialog-options">
-                <For each={visibleOptions(q)}>
+                <For each={allOptions(q)}>
                   {(entry) => (
                     <li>
                       <OptionToggle

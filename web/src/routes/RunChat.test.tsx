@@ -1786,16 +1786,15 @@ describe('RunChat', () => {
       'Roll back the change',
     );
 
-    // The single-select question keeps its synthesized Other row, but the
-    // multi-select question renders WITHOUT it: the adapter rejects Other in
-    // a multi-select answer (normSelected policy — recipe unverified), so the
-    // form never offers it.
+    // BOTH questions keep the synthesized Other row — the multi-select one
+    // included (the adapter fills the TUI's free-text row from other_text;
+    // compat §7, captured live 2026-07-09).
     const optionLabels = (qi: number) =>
       Array.from(questionEl(qi).querySelectorAll('.dialog-option-label')).map(
         (el) => el.textContent,
       );
     expect(optionLabels(0)).toEqual(['Revert', 'Patch forward', 'Other']);
-    expect(optionLabels(1)).toEqual(['Frontend', 'Backend']);
+    expect(optionLabels(1)).toEqual(['Frontend', 'Backend', 'Other']);
 
     // ONE submit for the whole form, disabled until every question is answered.
     const submit = () => buttonByText('Submit')!;
@@ -1864,6 +1863,41 @@ describe('RunChat', () => {
     expect(answerPosts[0]).toEqual({
       tool_id: 'toolu_mq',
       answers: [{ index: 2, other_text: 'ship a hotfix' }, { selected: [0] }],
+    });
+  });
+
+  it('multi-select Other in a form: toggling it gates on text and rides other_text, never selected', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: multiQuestionDialog(),
+    };
+    await mountChat();
+
+    questionOption(0, 'Revert').click();
+    questionOption(1, 'Backend').click();
+    questionOption(1, 'Other').click();
+    await settle();
+    // Other toggled but empty → the form is incomplete.
+    expect(questionOption(1, 'Other').getAttribute('aria-pressed')).toBe('true');
+    expect(buttonByText('Submit')!.disabled).toBe(true);
+
+    const other = questionEl(1).querySelector('.dialog-other-input') as HTMLInputElement;
+    other.value = 'the build scripts';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+
+    buttonByText('Submit')!.click();
+    await settle();
+    // The Other row's INDEX (2) stays out of selected — its text IS its
+    // toggle (the adapter pastes it onto the TUI's free-text row, compat §7).
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_mq',
+      answers: [{ index: 0 }, { selected: [1], other_text: 'the build scripts' }],
     });
   });
 
@@ -2165,6 +2199,21 @@ describe('RunChat', () => {
     return btn;
   }
 
+  /** The REAL wire shape: the adapter appends the free-text Other row
+   *  (is_other) to EVERY question, multi-select included (chat_dialog.go). */
+  const flatMultiDialog = () => ({
+    tool_id: 'toolu_flat_multi',
+    dialog_kind: 'question' as const,
+    prompt: 'Which areas?',
+    answerable: true,
+    multi: true,
+    options: [
+      { label: 'Frontend', description: 'The SPA under web/' },
+      { label: 'Backend', description: 'The Go API' },
+      { label: 'Other', is_other: true },
+    ],
+  });
+
   it('renders flat multi-select options as toggle cards with visible descriptions', async () => {
     messagesOnServer = {
       messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
@@ -2172,17 +2221,7 @@ describe('RunChat', () => {
       cursor: 1,
       has_more: false,
       transcript: 'available',
-      pending_dialog: {
-        tool_id: 'toolu_flat_multi',
-        dialog_kind: 'question',
-        prompt: 'Which areas?',
-        answerable: true,
-        multi: true,
-        options: [
-          { label: 'Frontend', description: 'The SPA under web/' },
-          { label: 'Backend', description: 'The Go API' },
-        ],
-      },
+      pending_dialog: flatMultiDialog(),
     };
     await mountChat();
 
@@ -2214,11 +2253,80 @@ describe('RunChat', () => {
     optionCard('Backend').click();
     await settle();
 
-    // The Submit flow and payload are byte-for-byte the pre-card contract.
+    // The Submit flow and payload are byte-for-byte the pre-card contract
+    // (an untouched Other row adds nothing to the wire).
     buttonByText('Submit')!.click();
     await settle();
     expect(answerPosts).toHaveLength(1);
     expect(answerPosts[0]).toEqual({ tool_id: 'toolu_flat_multi', selected: [0, 1] });
+  });
+
+  it('flat multi-select Other: toggling opens the input, gates Submit on text, rides other_text', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: flatMultiDialog(),
+    };
+    await mountChat();
+
+    // No stray input while Other is untoggled.
+    expect(container.querySelector('.dialog-other-input')).toBeNull();
+
+    optionCard('Backend').click();
+    optionCard('Other').click();
+    await settle();
+    // Other toggled but empty → Submit stays disabled even with a real pick.
+    expect(optionCard('Other').getAttribute('aria-pressed')).toBe('true');
+    expect(buttonByText('Submit')!.disabled).toBe(true);
+
+    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
+    expect(other).not.toBeNull();
+    other.value = 'the CI pipeline';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+
+    buttonByText('Submit')!.click();
+    await settle();
+    // The Other row's INDEX (2) never enters selected — its text IS its
+    // toggle (the adapter pastes it onto the TUI's "Type something" row,
+    // which fills AND checks it — compat §7, live 2026-07-09).
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_flat_multi',
+      selected: [1],
+      other_text: 'the CI pipeline',
+    });
+  });
+
+  it('flat multi-select accepts an Other-only answer (nothing else toggled)', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: flatMultiDialog(),
+    };
+    await mountChat();
+
+    optionCard('Other').click();
+    await settle();
+    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
+    other.value = 'docs only';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    buttonByText('Submit')!.click();
+    await settle();
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_flat_multi',
+      selected: [],
+      other_text: 'docs only',
+    });
   });
 
   // --- Slash-command autocomplete (issue #51 decision 5) ---

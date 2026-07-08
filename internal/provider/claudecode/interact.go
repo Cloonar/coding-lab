@@ -85,7 +85,11 @@ func (p *Provider) Interrupt(ctx context.Context, sessionName string) error {
 // gap (p.keyDelay, compat §7) separates each op: over the remote-control bridge
 // a committing Enter sent immediately after a Down navigation intermittently
 // races ahead of it and selects the wrong row (live-verified 2.1.198) — pacing
-// the ops makes the recipe deterministic.
+// the ops makes the recipe deterministic. Every op carries at most ONE named
+// key: the picker DROPS a burst of key names delivered in one send-keys call
+// (LIVE 2026-07-09 — a four-Down burst moved the cursor zero rows, so the old
+// batched walk never reached the Submit row and multi-select answers hung
+// unanswered), and pacing only exists BETWEEN ops.
 //
 // Once the recipe validates, the intended answer is recorded in the intent
 // registry (issue #51 decision 3, dialogintent.go) so ReadTranscript can
@@ -135,16 +139,19 @@ func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog 
 // above), so each recipe is a pure downward walk. Exported for the compat
 // snapshot test.
 //
-// Shapes (all live-verified 2026-07-08, 2.1.198 — compat §7 carries the row
-// models and the three recipe bugs this rewrite fixed):
+// Shapes (live-verified 2026-07-08 and re-driven 2026-07-09, 2.1.198 —
+// compat §7 carries the row models and the recipe bugs these rewrites fixed;
+// every Down below is its own op, never a batch — see AnswerDialog):
 //
 //   - flat single-select question: [Down×idx][Enter]; an IsOther row takes
 //     [Down×idx][PasteText][Enter] — type FIRST (Enter on the empty free-text
 //     row declines the whole dialog).
-//   - flat multi-select question: [Down-walk with Space toggles][Down onto the
-//     Submit row][Enter], then the review screen [Enter] (Enter on an option
-//     row toggles, it never commits; the ✔ Submit tab model adds a review
-//     screen even for a single multi-select question).
+//   - flat multi-select question: [Down/Space walk toggling each selected
+//     row][optional: Down-walk onto the free-text row, PasteText — the paste
+//     fills the row AND checks it (live 2026-07-09)][Down onto the Submit
+//     row][Enter], then the review screen [Enter] (Enter on an option row
+//     toggles, it never commits; the ✔ Submit tab model adds a review screen
+//     even for a single multi-select question).
 //   - multi-question form: the per-question recipes concatenated in question
 //     order (committing a question auto-advances the form; no transition keys),
 //     then the review screen [Enter].
@@ -155,12 +162,14 @@ func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog 
 // multi-question dialog requires exactly len(Questions) positional Answers —
 // answers[i] answers Questions[i]; per question, single-select carries the
 // chosen option in Index (Selected must be empty; OtherText exactly when the
-// row IsOther) and multi-select carries the toggled options in Selected
-// (Index unused, OtherText forbidden, the Other row untoggleable). A flat
-// dialog accepts the flat fields as today, or a single Answers element with
-// answers[0] semantics. Violations return the provider sentinels so the API's
-// 400/409 mapping stays meaningful — a misencoded answer must fail at the
-// door, never play misplaced keystrokes.
+// row IsOther) and multi-select carries the toggled options in Selected plus,
+// optionally, OtherText for the free-text row (Index unused; the IsOther row's
+// index never appears in Selected — free text IS its toggle, and OtherText
+// alone with an empty Selected is a valid answer). A flat dialog accepts the
+// flat fields as today, or a single Answers element with answers[0] semantics.
+// Violations return the provider sentinels so the API's 400/409 mapping stays
+// meaningful — a misencoded answer must fail at the door, never play misplaced
+// keystrokes.
 func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp, error) {
 	if !d.Answerable {
 		return nil, ErrDialogNotAnswerable
@@ -184,7 +193,7 @@ func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp,
 		return singleSelectOps(d.Options, answer.Index, answer.OtherText)
 	}
 	if d.Multi {
-		ops, err := multiSelectOps(d.Options, answer.Selected)
+		ops, err := multiSelectOps(d.Options, answer.Selected, answer.OtherText)
 		if err != nil {
 			return nil, err
 		}
@@ -224,10 +233,7 @@ func multiQuestionKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([
 // and 4xx at the door beats a warning after the fact.
 func questionOps(q provider.Question, a provider.QuestionAnswer) ([]KeyOp, error) {
 	if q.MultiSelect {
-		if a.OtherText != "" {
-			return nil, fmt.Errorf("%w: other text has no meaning for a multi-select question", ErrInvalidReply)
-		}
-		return multiSelectOps(q.Options, a.Selected)
+		return multiSelectOps(q.Options, a.Selected, a.OtherText)
 	}
 	if len(a.Selected) > 0 {
 		return nil, fmt.Errorf("%w: selected indices have no meaning for a single-select question (use index)", ErrInvalidReply)
@@ -257,14 +263,11 @@ func singleSelectOps(opts []provider.DialogOption, idx int, otherText string) ([
 	if idx < 0 || idx >= rows {
 		return nil, fmt.Errorf("%w: option index %d out of range [0,%d)", ErrDialogNotAnswerable, idx, rows)
 	}
-	var ops []KeyOp
-	if down := repeat("Down", idx); len(down) > 0 {
-		ops = append(ops, KeyOp{Named: down})
-	}
+	ops := downOps(idx)
 	if opts[idx].IsOther {
-		clean, err := validateReply(otherText)
+		clean, err := validateOtherText(otherText)
 		if err != nil {
-			return nil, fmt.Errorf("%w: other text: %w", ErrInvalidReply, err)
+			return nil, err
 		}
 		return append(ops, KeyOp{Text: clean}, KeyOp{Named: []string{"Enter"}}), nil
 	}
@@ -275,14 +278,15 @@ func singleSelectOps(opts []provider.DialogOption, idx int, otherText string) ([
 }
 
 // multiSelectOps is the multi-select picker recipe: from the top-of-picker
-// start, walk down toggling each selected row with Space, then commit via the
-// UNNUMBERED Submit row Claude Code appends below the options.
+// start, walk down toggling each selected row with Space, optionally fill the
+// free-text row, then commit via the UNNUMBERED Submit row Claude Code appends
+// below the options.
 //
-//	[Down/Space walk] [Down × (rows − last)] [Enter]
+//	[Down/Space walk] [Down × k, PasteText]? [Down × (rows − cur)] [Enter]
 //
 // The Submit row's navigation index is rows (options 0..rows−1, Submit next),
-// so the final Down batch (rows − last-selected) is never empty — the recipe
-// can never end on a bare option-row Enter.
+// so the final Down walk (rows − cursor) is never empty — the recipe can never
+// end on a bare option-row Enter.
 //
 // LIVE BUG FIX (2026-07-08, 2.1.198): the pre-#51 recipe confirmed with a
 // bare Enter on the last toggled row — but Enter on an option row TOGGLES
@@ -290,8 +294,15 @@ func singleSelectOps(opts []provider.DialogOption, idx int, otherText string) ([
 // commits. Commit = navigate onto Submit, Enter there. (The pre-#51 climb is
 // gone — Up wraps, so a climb would land in the wrong place; see the no-climb
 // note above DialogKeystrokes.)
-func multiSelectOps(opts []provider.DialogOption, sel []int) ([]KeyOp, error) {
-	sel, err := normSelected(opts, sel)
+//
+// Free-text row (LIVE 2026-07-09, 2.1.198): pasting text onto the "Type
+// something" row FILLS it and CHECKS it in one move — no Space toggle. Space
+// must never precede the paste: on that row Space TYPES a literal space into
+// the field (live: a Space-then-type answer recorded " extra cheese", leading
+// space and all), so the toggle IS the text. The row is chat_dialog's appended
+// LAST option, keeping the walk downward past the toggled rows.
+func multiSelectOps(opts []provider.DialogOption, sel []int, otherText string) ([]KeyOp, error) {
+	sel, err := normSelected(opts, sel, otherText != "")
 	if err != nil {
 		return nil, err
 	}
@@ -299,14 +310,30 @@ func multiSelectOps(opts []provider.DialogOption, sel []int) ([]KeyOp, error) {
 	var ops []KeyOp
 	cur := 0
 	for _, idx := range sel {
-		if down := repeat("Down", idx-cur); len(down) > 0 {
-			ops = append(ops, KeyOp{Named: down})
-		}
+		ops = append(ops, downOps(idx-cur)...)
 		ops = append(ops, KeyOp{Named: []string{"Space"}}) // toggle this option on
 		cur = idx
 	}
-	ops = append(ops, KeyOp{Named: repeat("Down", rows-cur)}) // onto the Submit row
-	return append(ops, KeyOp{Named: []string{"Enter"}}), nil  // commit
+	if otherText != "" {
+		clean, err := validateOtherText(otherText)
+		if err != nil {
+			return nil, err
+		}
+		other := otherRowIndex(opts)
+		if other < 0 {
+			return nil, fmt.Errorf("%w: this question has no free-text option", ErrInvalidReply)
+		}
+		if other < cur {
+			// Unreachable while chat_dialog appends the row last; guarded so a
+			// future shape drift fails loudly instead of walking Up (which wraps).
+			return nil, fmt.Errorf("%w: free-text row above a selected option", ErrDialogNotAnswerable)
+		}
+		ops = append(ops, downOps(other-cur)...)
+		ops = append(ops, KeyOp{Text: clean}) // fills AND checks the row
+		cur = other
+	}
+	ops = append(ops, downOps(rows-cur)...)                  // onto the Submit row
+	return append(ops, KeyOp{Named: []string{"Enter"}}), nil // commit
 }
 
 // reviewOps commits the "Review your answers" screen that ends every form
@@ -327,12 +354,13 @@ func reviewOps() []KeyOp {
 
 // normSelected validates and normalizes a multi-select answer against a
 // question's options: every index must be a real, non-Other option (a silently
-// dropped index would confirm a selection the operator never made, and Space
-// on the free-text Other row is an uncaptured TUI path — degrade that to the
-// deep link). The result is ascending and de-duplicated so the walk only ever
+// dropped index would confirm a selection the operator never made, and the
+// free-text row's toggle IS its text — it rides OtherText, never Selected).
+// An empty selection is valid exactly when other text answers the question
+// alone. The result is ascending and de-duplicated so the walk only ever
 // moves down.
-func normSelected(opts []provider.DialogOption, sel []int) ([]int, error) {
-	if len(sel) == 0 {
+func normSelected(opts []provider.DialogOption, sel []int, hasOther bool) ([]int, error) {
+	if len(sel) == 0 && !hasOther {
 		return nil, fmt.Errorf("%w: no options selected", ErrInvalidReply)
 	}
 	rows := len(opts)
@@ -343,7 +371,7 @@ func normSelected(opts []provider.DialogOption, sel []int) ([]int, error) {
 			return nil, fmt.Errorf("%w: option index %d out of range [0,%d)", ErrInvalidReply, i, rows)
 		}
 		if opts[i].IsOther {
-			return nil, fmt.Errorf("%w: the Other option cannot be toggled in a multi-select", ErrDialogNotAnswerable)
+			return nil, fmt.Errorf("%w: the free-text option is answered via other_text, not a toggle", ErrInvalidReply)
 		}
 		if !seen[i] {
 			seen[i] = true
@@ -359,15 +387,47 @@ func normSelected(opts []provider.DialogOption, sel []int) ([]int, error) {
 	return out, nil
 }
 
-func repeat(key string, n int) []string {
-	if n <= 0 {
-		return nil
+// otherRowIndex locates the synthesized free-text row, -1 when absent.
+func otherRowIndex(opts []provider.DialogOption) int {
+	for i, o := range opts {
+		if o.IsOther {
+			return i
+		}
 	}
-	out := make([]string, n)
-	for i := range out {
-		out[i] = key
+	return -1
+}
+
+// downOps emits n Down presses as n single-key ops. One named key per op is a
+// hard rule for picker navigation (compat §7, live 2026-07-09): the 2.1.198
+// picker drops a BURST of key names delivered in one send-keys call (a
+// four-Down burst moved the cursor zero rows), and AnswerDialog's keyDelay
+// pacing applies only between ops — so a walk is only reliable as one op per
+// key.
+func downOps(n int) []KeyOp {
+	out := make([]KeyOp, 0, max(n, 0))
+	for range n {
+		out = append(out, KeyOp{Named: []string{"Down"}})
 	}
 	return out
+}
+
+// validateOtherText validates free text destined for a PICKER ROW — the
+// question Other row (single- or multi-select) and the plan feedback row —
+// validateReply plus a single-line rule. The row is a one-line inline field: a
+// newline pasted into it does not break the paste, but it lands IN the
+// recorded answer as a literal \r (LIVE 2026-07-09, 2.1.198: a trailing
+// pasted newline recorded "no anchovies\r"), so multi-line text corrupts the
+// answer instead of formatting it. Reject at the door; the SPA's row inputs
+// are single-line, so only raw API clients can even hit this.
+func validateOtherText(raw string) (string, error) {
+	clean, err := validateReply(raw)
+	if err != nil {
+		return "", fmt.Errorf("%w: other text: %w", ErrInvalidReply, err)
+	}
+	if strings.ContainsAny(clean, "\n\t") {
+		return "", fmt.Errorf("%w: other text must be a single line", ErrInvalidReply)
+	}
+	return clean, nil
 }
 
 // validateReply trims and sanity-checks free text before it reaches the paste

@@ -404,7 +404,7 @@ the chat composer shows a one-tap Interrupt in place of Send, so a reply can
 only be sent once the agent returns to idle/needs_input. The send-keys recipe
 above is unchanged; it is simply unreachable from the SPA during a turn.
 
-## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08)
+## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08; multi-select re-driven 2026-07-09)
 
 An interactive dialog is an **unanswered** `tool_use` in the transcript (or,
 live, the §9 spool — one mapper, two sources) for a recognised tool. Option
@@ -417,9 +417,13 @@ on 2026-07-08** (the ADR-0020 process, real tmux, lab's spawn shape for the
 plan run); that session found **three live bugs in the previously shipped
 recipes** (the wrapping normalize-climb, the type-first Other row, and the
 multi-select Submit row — the reply paste-race in §6 was a fourth defect that
-same session found), all fixed and pinned below. Recipe snapshots:
-`TestCompat_DialogKeystrokes*`; the `Up/Down/Space/Enter` key names are
-standard tmux `send-keys` arguments.
+same session found), all fixed and pinned below. A **2026-07-09 live session
+re-drove the multi-select picker** end to end (five committed rounds) after
+the field report "multi-select submit does nothing": it found the batched-walk
+key-burst drop (universal rule below) and captured the free-text row's
+paste-fills-and-checks behavior, replacing the previous "Other untoggleable in
+multi-select" policy. Recipe snapshots: `TestCompat_DialogKeystrokes*`; the
+`Up/Down/Space/Enter` key names are standard tmux `send-keys` arguments.
 
 **Universal recipe rules.**
 
@@ -442,6 +446,18 @@ standard tmux `send-keys` arguments.
   `Enter` (§6). Unpaced, the committing `Enter` intermittently raced ahead of
   the `Down` navigation over the remote-control bridge and selected the wrong
   row; 0ms was flaky, 150ms+ reliable. Re-verify on upgrades.
+- **One named key per op — never batch a walk (LIVE BUG FIXED,
+  2026-07-09)**: the picker DROPS a burst of key names delivered in one
+  `send-keys` call. Driven live: `send-keys Down Down Down Down` (one call)
+  moved the cursor **zero rows**, after which the recipe's Enters merely
+  toggled the top row and the dialog hung pending forever — the field-reported
+  "multi-select submit does nothing" root cause; the same walk as four
+  separate keyDelay-paced calls navigated correctly on every round. (A
+  two-key burst landed on one occasion, so the drop threshold is
+  burst-size/timing dependent — the pinned rule is therefore *never* batch.)
+  Every recipe emits one named key per op so the pacing above applies
+  between every key; `SendNamedKeys` keeps its variadic signature, recipes
+  just never hand it a multi-key walk.
 - **Answer validation is strict at the door** (issue #51): a misencoded
   answer returns `provider.ErrInvalidReply` (400) or
   `ErrDialogNotAnswerable` (409) before any key plays — blind keystrokes
@@ -487,7 +503,7 @@ gains a "✔ Submit" tab. Row model (live):
 Which toppings?
 ❯ 1. [ ] Olives
   2. [ ] Onions
-  3. [ ] Type something    ← toggleable checkbox too (lab rejects Other-in-multi)
+  3. [ ] Type something    ← free-text row: pasting text FILLS + CHECKS it
      Submit                ← UNNUMBERED, navigable row BELOW "Type something"
 ──────────────
   4. Chat about this
@@ -495,17 +511,35 @@ Which toppings?
 
 - Navigation row order: options… (incl. the free-text row), Submit, Chat
   about this. The Submit row's 0-based navigation index = len(modeled rows),
-  so the commit walks `Down × (len(modeled rows) − last-selected)` onto it.
-- Recipe: `[Down-walk toggling each selected row with Space][Down onto
-  Submit][Enter]`, then the review step (below). Selected indices are
-  validated (in-range, no duplicates, ascending walk) and the free-text row
-  is **not** toggleable through lab (`normSelected` — Space on it is an
-  uncaptured TUI path).
+  so the commit walks `Down × (len(modeled rows) − cursor)` onto it — one
+  Down per op (universal rule above).
+- Recipe: `[Down/Space walk toggling each selected row][optional: Down-walk
+  onto the free-text row, PasteText][Down onto Submit][Enter]`, then the
+  review step (below). Selected indices are validated (in-range, no
+  duplicates, ascending walk, never the free-text row's index — its text IS
+  its toggle, riding `other_text`).
 - **LIVE BUG FIXED (2026-07-08)**: the previously shipped recipe confirmed
   with a bare `Enter` after the Space walk — but **`Enter` on an option row
   TOGGLES exactly like Space** (observed: it flipped the last selection OFF,
   Cherry `[✔]`→`[ ]`) and never commits. Commit = navigate onto the Submit
   row, `Enter` there.
+- **Free-text row IN a multi-select — captured (LIVE, 2026-07-09)**:
+  bracketed-pasting text onto the "Type something" row **fills the row and
+  checks it in one move** (`4. [✔] no anchovies`) — supported through
+  `other_text` since then (previously rejected as an uncaptured path).
+  Hazards, both live-observed: **(1) no Space toggle first** — on this row
+  Space TYPES a literal space into the field (a Space-then-type round
+  recorded `" extra cheese"`, leading space and all — the checkbox state
+  follows the field being non-empty); **(2) single-line only** — a newline
+  inside/after the pasted text lands in the recorded answer as a literal
+  `\r` (probe recorded `"no anchovies\r"` from a trailing newline), so
+  `other_text` is validated single-line at the door.
+- **Recorded answer shape (live)**: the chosen labels joined `", "` in
+  TOGGLE order — not option order (2026-07-08: Apple then Cherry recorded
+  `"Cherry, Apple"`) — with a filled free-text row riding as one more
+  segment (2026-07-09: toggle Onions + paste "no anchovies" recorded
+  `"Onions, no anchovies"`; intent verification compares segment multisets,
+  see `sameAnswer`).
 
 **Multi-question forms (N ≥ 2)** — tab bar `←  ☐ Q1hdr  ☐ Q2hdr  ✔ Submit  →`
 (headers render as chips, ☐ → ☒ as answered). Mapped to `Dialog{Kind:

@@ -44,9 +44,11 @@ type dialogIntent struct {
 
 	// answers (question kind) maps each question's text to the answer string
 	// claude records for it in toolUseResult.answers: the chosen option label,
-	// multi-select labels comma+space-joined in row order, or the free text
-	// verbatim for an Other answer (live 2026-07-08: `"answers":{"Which
-	// fruits do you like?":"Apple, Cherry","Favorite pet?":"Ferret"}`).
+	// multi-select labels comma+space-joined in row order — with a filled
+	// free-text row riding as one more segment (live 2026-07-09: "Onions, no
+	// anchovies") — or the free text verbatim for an Other answer (live
+	// 2026-07-08: `"answers":{"Which fruits do you like?":"Apple, Cherry",
+	// "Favorite pet?":"Ferret"}`).
 	answers map[string]string
 
 	// approve/feedback (plan kind): rows 0–1 of the pinned picker approve,
@@ -132,7 +134,7 @@ func intentFor(d provider.Dialog, a provider.DialogAnswer) (dialogIntent, bool) 
 		}
 		in := dialogIntent{kind: provider.DialogKindPlan, approve: a.Index <= 1}
 		if d.Options[a.Index].IsOther {
-			if text, err := validateReply(a.OtherText); err == nil {
+			if text, err := validateOtherText(a.OtherText); err == nil {
 				in.feedback = text
 			}
 		}
@@ -192,13 +194,23 @@ func sameAnswer(got, want string) bool {
 // expectedAnswer renders one question's expected recorded answer string.
 func expectedAnswer(opts []provider.DialogOption, multi bool, a provider.QuestionAnswer) (string, bool) {
 	if multi {
-		sel, err := normSelected(opts, a.Selected)
+		sel, err := normSelected(opts, a.Selected, a.OtherText != "")
 		if err != nil {
 			return "", false
 		}
-		labels := make([]string, len(sel))
-		for i, idx := range sel {
-			labels[i] = opts[idx].Label
+		labels := make([]string, 0, len(sel)+1)
+		for _, idx := range sel {
+			labels = append(labels, opts[idx].Label)
+		}
+		if a.OtherText != "" {
+			// The free-text row's fill records as one more ", "-joined segment
+			// (live 2026-07-09: "Onions, no anchovies"); sameAnswer compares
+			// segment multisets, so its recorded position never matters.
+			text, err := validateOtherText(a.OtherText)
+			if err != nil {
+				return "", false
+			}
+			labels = append(labels, text)
 		}
 		return strings.Join(labels, ", "), true
 	}
@@ -206,7 +218,7 @@ func expectedAnswer(opts []provider.DialogOption, multi bool, a provider.Questio
 		return "", false
 	}
 	if opts[a.Index].IsOther {
-		text, err := validateReply(a.OtherText)
+		text, err := validateOtherText(a.OtherText)
 		if err != nil {
 			return "", false
 		}

@@ -52,9 +52,10 @@ func dialogFromToolUse(b tBlock) (provider.Dialog, bool) {
 // and is answerable through the sequenced picker recipe since issue #51
 // (before which it degraded to a deep-link hint). Every question gets the
 // synthesized free-text Other row appended: the tool always offers free text
-// (single-select: type-first inline fill; multi-select: a toggleable checkbox
-// lab refuses to toggle — see normSelected), and the IsOther row IS the
-// "free text allowed" signal in both shapes.
+// (single-select: type-first inline fill; multi-select: pasting text onto the
+// row fills AND checks it, riding other_text alongside the toggles — live
+// 2026-07-09), and the IsOther row IS the "free text allowed" signal in both
+// shapes.
 func askUserQuestionDialog(b tBlock) provider.Dialog {
 	var in struct {
 		Questions []struct {
