@@ -150,6 +150,14 @@ function RunChatView() {
       setPendingDialogField(latest.pending_dialog ?? null);
       setTranscript(latest.transcript);
       setTranscriptId(latest.transcript_id);
+      // Writing transcript_id can synchronously run the rotation effect (Solid
+      // flushes user effects on a signal write), which resets the stream and
+      // fires a superseding refetch — bumping fetchToken. If that happened, this
+      // now-stale refetch must NOT merge its pre-rotation tail/latest back over
+      // the reset: a transcript-A tail line whose seq exceeds B's would survive
+      // the seq-keyed merge and leak forever (issue #34). Re-guard so the newer
+      // refetch owns the stream.
+      if (token !== fetchToken) return;
       if (!exhausted()) setHasMore(latest.has_more);
       // A first window that already covers the whole transcript means there
       // is nothing older to load — ever (messages only append).

@@ -538,6 +538,81 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-input')).not.toBeNull();
   });
 
+  it('does not leak a stale high-seq tail when a rotation straddles a refetch', async () => {
+    // The hard case: a rotation lands BETWEEN the two fetches of one refetch.
+    // Accumulated stream on transcript A is [seq1, seq2]. A refetch fires
+    // because A gained seq3; its after=2 tail GET still sees A (returns seq3),
+    // then /clear rotates and the latest GET (and every later GET) sees the
+    // fresh transcript B (seq1). Writing transcript_id resets the stream and
+    // fires a superseding refetch mid-function; the stale outer refetch must not
+    // merge its seq3 A-line back in — a seq that B (max seq 1) never overwrites
+    // would otherwise persist forever (issue #34).
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'text', role: 'user', text: 'A-one' },
+        { seq: 2, kind: 'text', role: 'assistant', text: 'A-two' },
+      ],
+      state: 'working',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+      transcript_id: 'sess-A',
+      pending_dialog: null,
+    };
+    await mountChat();
+    expect(container.textContent).toContain('A-two');
+
+    const aTail: MessagesResponse = {
+      messages: [{ seq: 3, kind: 'text', role: 'assistant', text: 'A-stale-three' }],
+      state: 'working',
+      cursor: 3,
+      has_more: true,
+      transcript: 'available',
+      transcript_id: 'sess-A',
+      pending_dialog: null,
+    };
+    const bWindow: MessagesResponse = {
+      messages: [{ seq: 1, kind: 'text', role: 'user', text: 'B-fresh-one' }],
+      state: 'needs_input',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      transcript_id: 'sess-B',
+      pending_dialog: null,
+    };
+    // The after=2 tail GET sees A; the latest GET (after=0) and all later GETs
+    // see rotated B — forcing the rotation to land inside a single refetch.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url === '/api/v1/auth/state')
+          return Promise.resolve(
+            jsonResponse(200, { setup_required: false, authenticated: true, username: 'dominik' }),
+          );
+        if (url === '/api/v1/providers')
+          return Promise.resolve(jsonResponse(200, { providers: providersOnServer }));
+        if (url === `/api/v1/runs/${RUN_ID}` && method === 'GET')
+          return Promise.resolve(jsonResponse(200, { ...runOnServer }));
+        if (url.startsWith(`/api/v1/runs/${RUN_ID}/messages`)) {
+          const after = Number(new URL(url, 'http://lab').searchParams.get('after') ?? '0');
+          return Promise.resolve(jsonResponse(200, after === 2 ? aTail : bWindow));
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
+      }),
+    );
+
+    emitMessagesChanged();
+    await settle();
+    await settle();
+
+    // Only the fresh transcript B shows; the stale seq-3 A tail is gone.
+    expect(container.textContent).toContain('B-fresh-one');
+    expect(container.textContent).not.toContain('A-stale-three');
+    expect(container.textContent).not.toContain('A-two');
+  });
+
   it('does not reset the stream on the first transcript locate (locating -> available)', async () => {
     // The server always sends transcript_id (no omitempty): "" while locating.
     // The locating -> available transition ("" -> hash) is NOT a rotation and
