@@ -188,8 +188,8 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 			switch blk.Type {
 			case "text":
 				text := strings.TrimSpace(blk.textField())
-				if text == "" || it.IsMeta {
-					continue // skip empty and injected-context (isMeta) text
+				if text == "" || it.IsMeta || isLocalCommandEcho(text) {
+					continue // skip empty, injected-context (isMeta), and local slash-command echoes/output (issue #45)
 				}
 				emit(provider.Message{Kind: provider.MessageText, Role: it.Message.Role, Time: it.Timestamp, Text: text})
 				lastKey = it.Message.Role + ":text"
@@ -219,6 +219,23 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 	}
 
 	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey), Cursor: seq}, nil
+}
+
+// isLocalCommandEcho reports whether a user text block is one of Claude Code's
+// non-conversational local-command breadcrumbs rather than a real turn: the
+// slash-command echo it writes when the operator runs a local command
+// (`<command-name>…` / `<command-message>…`, e.g. /clear, /rewind) and that
+// command's captured output (`<local-command-stdout>…`). These carry no isMeta
+// flag (compat.md §5) yet must not render as a message or drive conversational
+// state — a /clear rotates to a fresh transcript whose only tail is this echo,
+// so treating it as a real user turn strands the run in `working` with the
+// composer stuck on Interrupt (issue #45). text is already trimmed; tag order
+// varies and there is leading whitespace, so match a trimmed prefix, never an
+// exact string.
+func isLocalCommandEcho(text string) bool {
+	return strings.HasPrefix(text, "<command-name>") ||
+		strings.HasPrefix(text, "<command-message>") ||
+		strings.HasPrefix(text, "<local-command-stdout>")
 }
 
 // deriveState reduces the transcript tail to one conversational state

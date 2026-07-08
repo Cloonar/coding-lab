@@ -217,7 +217,7 @@ Provenance legend:
 ## 5. Transcript location + JSONL schema — location live (2.1.198), schema fixture
 
 The embedded chat (issue #7 / ADR-0016) reads claude's live session
-transcript. Four coupled facts, all in `internal/provider/claudecode`
+transcript. Seven coupled facts, all in `internal/provider/claudecode`
 (`chat.go`, `chat_types.go`), pinned by `TestCompat_SlugForDir`,
 `TestCompat_TranscriptFixture_maps`, and `TestCompat_RegistryFixture_hasSessionID`:
 
@@ -246,6 +246,30 @@ transcript. Four coupled facts, all in `internal/provider/claudecode`
   (`text|tool|dialog|lifecycle`) by `ParseTranscript`. fixture (assembled
   from real 2.1.198 line shapes; re-verify live when an upgrade
   misbehaves).
+- **Non-conversational user text (isMeta + local-command echo)**: two kinds
+  of `user`-role text are UI breadcrumbs, not turns, and are skipped so they
+  neither render as a bubble nor drive conversational state (`isLocalCommandEcho`,
+  alongside the existing `isMeta` skip). (1) `isMeta:true` injected context.
+  (2) A **local slash-command echo** and its output, which carry **no** isMeta
+  flag: a `user` message whose (trimmed) string content begins with
+  `<command-name>` or `<command-message>` — the breadcrumb Claude Code writes
+  when the operator runs a local command (`/clear`, `/rewind`, `/help`, …) — and
+  the command's captured output, `<local-command-stdout>`. Ground truth (live,
+  2.1.198, 2026-07-08): content is a plain string like
+  `"<command-name>/clear</command-name>\n  <command-message>clear</command-message>\n  <command-args></command-args>"`;
+  tag order varies and there is leading whitespace, so the match is a trimmed
+  **prefix**, never an exact string. **Load-bearing for the composer (issue
+  #45):** `/clear`/`/rewind` rotate to a fresh transcript whose only tail is
+  this echo (with no following assistant turn, ever); mapped as an ordinary
+  `user:text` it would derive `working` forever, locking the composer into the
+  pulsing Interrupt with no Send (ADR-0022). Skipping it upstream leaves the
+  fresh transcript with no trailing turn → the idle default. A genuine
+  plain-text reply is unchanged — it still derives `working`, preserving the
+  Send→Interrupt morph. Some commands (`/triage`) *do* invoke the model; the
+  brief window before their first token reads prior-state/idle rather than
+  `working` and self-corrects within one poll — no per-command special-casing.
+  fixture (the echo + output lines in `transcript-2.1.198.jsonl` are dropped;
+  state edges pinned in `chat_test.go`).
 - **Read-through only**: the transcript file is the source of truth; lab
   persists only `runs.transcript_path` (captured async by cwd-match, the
   `deep_link_url` pattern) so ended runs stay readable while claude retains
