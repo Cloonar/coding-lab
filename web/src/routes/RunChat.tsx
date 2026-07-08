@@ -420,6 +420,16 @@ function RunChatView() {
       void refetchMessages();
     }),
   );
+  // Reconnect = events lost while the socket was down. Other views recover via
+  // createLiveResource (see ../lib/liveResource), but the message accumulator
+  // here is a cursor/seq-merge (ADR-0016), not a resource — so resync is wired
+  // by hand instead of migrating this view to that helper.
+  onCleanup(
+    events.subscribe('resync', () => {
+      void refetchRun();
+      void refetchMessages();
+    }),
+  );
   /* eslint-enable solid/reactivity */
 
   const runData = () => resourceValue(run);

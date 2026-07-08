@@ -7,11 +7,29 @@
 // registry. Payloads are small JSON envelopes `{type, repoID?, …}` — clients
 // refetch on event, no state diffing over SSE.
 //
+// Resync on reconnect: the event bus is in-process fire-and-forget with no
+// replay, so every event emitted while the socket was down is lost for good.
+// Each reconnect therefore synthesizes a client-only `resync` pseudo-event
+// (never sent over the wire, deliberately absent from EVENT_TYPES) so views
+// refetch and recover whatever they missed. The session's first open is
+// skipped: components already fetch their initial resources on mount, so a
+// resync there would double-fetch every view. Resync is not a wire event and
+// never resets the backoff.
+//
 // Silent-death detection: the server heartbeats every 25s, so a healthy
 // stream never goes 65s without an event. A watchdog force-closes and
 // reconnects when it does (NAT idle teardown, wifi→cellular switch, device
-// sleep — cases where EventSource never fires onerror). Window `online` and
-// visibilitychange→visible reconnect immediately when the stream is stale.
+// sleep — cases where EventSource never fires onerror).
+//
+// Always-fresh wake: iOS silently kills a backgrounded PWA's socket, and a
+// nominally-"connected" dead socket can otherwise sit green until the 65s
+// watchdog fires. So a wake — window `online`/`pageshow`/`focus` and
+// visibilitychange→visible — force-cycles the stream unless an event landed
+// within the last 10s (FRESH_MS; heartbeats count). That short window is the
+// anti-flap guard: a fresh open stamps lastEventAt, so rapid app-switcher
+// peeks don't thrash the socket. It is deliberately stricter than the 65s
+// STALE_MS watchdog, which stays the silent-death backstop for streams no
+// wake event touched.
 
 import { createSignal, type Accessor } from 'solid-js';
 
@@ -30,7 +48,7 @@ export const EVENT_TYPES = [
 export type LabEventType = (typeof EVENT_TYPES)[number];
 
 export interface LabEvent {
-  type: LabEventType;
+  type: LabEventType | 'resync';
   repoID?: string;
   [key: string]: unknown;
 }
@@ -58,8 +76,12 @@ export interface ConnectOptions {
 export interface EventsConnection {
   /** Solid signal: true while the stream is open, false while reconnecting. */
   connected: Accessor<boolean>;
-  /** Registers a handler for one event type; returns an unsubscribe fn. */
-  subscribe(type: LabEventType, handler: LabEventHandler): () => void;
+  /**
+   * Registers a handler for one event type; returns an unsubscribe fn. The
+   * client-only `resync` pseudo-event fires on every reconnect (see header) so
+   * views can refetch state lost while the socket was down.
+   */
+  subscribe(type: LabEventType | 'resync', handler: LabEventHandler): () => void;
   /** Stops reconnecting and closes the stream for good. */
   close(): void;
 }
@@ -69,6 +91,8 @@ const DEFAULT_MIN_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 30_000;
 /** No event (heartbeats included) for this long ⇒ the stream is silently dead. */
 const STALE_MS = 65_000; // > 2x the server's 25s heartbeat interval
+/** On wake, force-cycle a "connected" stream unless an event landed this recently. */
+const FRESH_MS = 10_000; // anti-flap: a fresh open stamps lastEventAt (see header)
 
 export function connectEvents(options: ConnectOptions = {}): EventsConnection {
   const url = options.url ?? DEFAULT_URL;
@@ -78,7 +102,7 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
     options.newEventSource ?? ((u: string) => new EventSource(u) as unknown as EventSourceLike);
 
   const [connected, setConnected] = createSignal(false);
-  const handlers = new Map<LabEventType, Set<LabEventHandler>>();
+  const handlers = new Map<LabEventType | 'resync', Set<LabEventHandler>>();
 
   let source: EventSourceLike | null = null;
   let delay = minDelay;
@@ -86,8 +110,9 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   let lastEventAt = 0; // Date.now() of the current source's open or last event
   let closed = false;
+  let firstOpen = true; // resync fires on reconnect opens, never the first (see header)
 
-  const dispatch = (type: LabEventType, raw: string): void => {
+  const dispatch = (type: LabEventType | 'resync', raw: string): void => {
     let event: LabEvent = { type };
     if (raw !== '') {
       try {
@@ -149,6 +174,11 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
       setConnected(true);
       lastEventAt = Date.now();
       armWatchdog();
+      // Reconnect = a gap in the fire-and-forget bus, so nudge subscribers to
+      // refetch. The session's first open is skipped: views fetch their initial
+      // state on mount, and a resync there would just double-fetch every view.
+      if (!firstOpen) dispatch('resync', '');
+      firstOpen = false;
     };
     es.onerror = () => fail(es, false);
     for (const type of EVENT_TYPES) {
@@ -166,9 +196,11 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
     }
   };
 
-  // Network back / tab visible again: skip the rest of the backoff wait, and
-  // force-cycle a nominally connected stream that is stale (a slept device
-  // fires visibilitychange before its suspended watchdog timer gets to run).
+  // A wake (network back, tab visible, PWA foregrounded): skip the rest of the
+  // backoff wait, and force-cycle a nominally-connected stream unless it proved
+  // itself fresh within FRESH_MS. iOS kills backgrounded sockets silently, so
+  // "connected" alone isn't trustworthy on resume — but a just-opened stream
+  // stamps lastEventAt, so quick app-switcher peeks don't thrash the socket.
   const wake = (): void => {
     if (closed) return;
     if (source === null) {
@@ -179,13 +211,15 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
       }
       return;
     }
-    if (Date.now() - lastEventAt > STALE_MS) fail(source, true);
+    if (Date.now() - lastEventAt > FRESH_MS) fail(source, true);
   };
   const onVisibilityChange = (): void => {
     if (document.visibilityState === 'visible') wake();
   };
 
   window.addEventListener('online', wake);
+  window.addEventListener('pageshow', wake);
+  window.addEventListener('focus', wake);
   document.addEventListener('visibilitychange', onVisibilityChange);
 
   open();
@@ -206,6 +240,8 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
     close() {
       closed = true;
       window.removeEventListener('online', wake);
+      window.removeEventListener('pageshow', wake);
+      window.removeEventListener('focus', wake);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       if (timer !== undefined) {
         clearTimeout(timer);

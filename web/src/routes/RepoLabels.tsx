@@ -6,16 +6,7 @@
 // forge. Label mutations emit issue.changed, which refetches here too.
 
 import { A, useParams } from '@solidjs/router';
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createEffect,
-  createResource,
-  createSignal,
-  onCleanup,
-} from 'solid-js';
+import { For, Match, Show, Switch, createEffect, createResource, createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import {
   createLabel,
@@ -30,9 +21,9 @@ import {
 import ErrorBanner from '../components/ErrorBanner';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
 import { canMutateTracker } from '../lib/issues';
 import { DEFAULT_LABEL_COLOR, normalizeHex } from '../lib/labels';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 export default function RepoLabels() {
@@ -45,7 +36,6 @@ export default function RepoLabels() {
 
 function RepoLabelsView() {
   const params = useParams<{ id: string }>();
-  const events = useEvents();
 
   const [repo] = createResource(
     () => params.id,
@@ -59,9 +49,10 @@ function RepoLabelsView() {
     const r = repoData();
     return r !== undefined && canMutateTracker(r.tracker_binding);
   };
-  const [labels, { refetch }] = createResource(
+  const [labels, { refetch }] = createLiveResource(
     () => (builtin() ? params.id : null),
     (id) => listLabels(id),
+    [{ type: 'issue.changed', match: (event) => event.repoID === params.id && builtin() }],
   );
   // The rows render from a store reconciled by label id, NOT from the raw
   // resource: an SSE-triggered refetch returns fresh object identities, and a
@@ -74,11 +65,6 @@ function RepoLabelsView() {
     const next = resourceValue(labels);
     if (next !== undefined) setRows(reconcile(next, { key: 'id' }));
   });
-  onCleanup(
-    events.subscribe('issue.changed', (event) => {
-      if (event.repoID === params.id && builtin()) void refetch();
-    }),
-  );
 
   const [error, setError] = createSignal<string | null>(null);
   const [editing, setEditing] = createSignal<string | null>(null); // label id

@@ -6,7 +6,7 @@
 // "managed on the forge" note while the read view keeps working.
 
 import { A, useParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
+import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
 import {
   createIssueComment,
   errorMessage,
@@ -22,9 +22,9 @@ import ErrorBanner from '../components/ErrorBanner';
 import LabelChip from '../components/LabelChip';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
 import { canMutateTracker, formatDateTime } from '../lib/issues';
 import { sameLabelSet, toggleLabel } from '../lib/labels';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 export default function IssueDetail() {
@@ -37,36 +37,35 @@ export default function IssueDetail() {
 
 function IssueDetailView() {
   const params = useParams<{ id: string; number: string }>();
-  const events = useEvents();
   const issueNumber = () => Number(params.number);
 
   const [repo] = createResource(
     () => params.id,
     (id) => getRepo(id),
   );
-  const [issue, { refetch }] = createResource(
+  const [issue, { refetch }] = createLiveResource(
     () => `${params.id}\n${params.number}`,
     (key) => {
       const sep = key.indexOf('\n');
       return getIssue(key.slice(0, sep), Number(key.slice(sep + 1)));
     },
+    [{ type: 'issue.changed', match: (event) => event.repoID === params.id }],
   );
   // Every read outside the guarded <Match> branches goes through these
   // non-throwing accessors: a failed getRepo/listLabels must degrade the page
   // (read-only view + error banner), not blank a successfully loaded issue.
   const repoData = () => resourceValue(repo);
-  const [labels, { refetch: refetchLabels }] = createResource(
+  const [labels] = createLiveResource(
     () => (repoData()?.tracker_binding === 'builtin' ? params.id : null),
     (id) => listLabels(id),
+    [
+      {
+        type: 'issue.changed',
+        match: (event) => event.repoID === params.id && repoData()?.tracker_binding === 'builtin',
+      },
+    ],
   );
   const labelList = () => resourceValue(labels);
-  onCleanup(
-    events.subscribe('issue.changed', (event) => {
-      if (event.repoID !== params.id) return;
-      void refetch();
-      if (repoData()?.tracker_binding === 'builtin') void refetchLabels();
-    }),
-  );
 
   const canMutate = () => {
     const r = repoData();

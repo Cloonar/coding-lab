@@ -6,7 +6,7 @@
 // forge. issue.changed (scoped to this repo) refetches everything.
 
 import { A, useParams, useSearchParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, onCleanup } from 'solid-js';
+import { For, Match, Show, Switch, createResource } from 'solid-js';
 import {
   errorMessage,
   getRepo,
@@ -18,7 +18,6 @@ import {
 } from '../api';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
 import {
   availableLabelNames,
   canMutateTracker,
@@ -27,6 +26,7 @@ import {
   hasReadyLabel,
 } from '../lib/issues';
 import { labelChipStyle } from '../lib/labels';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 const STATE_FILTERS: IssueStateFilter[] = ['open', 'closed', 'all'];
@@ -42,7 +42,6 @@ export default function RepoIssues() {
 function RepoIssuesView() {
   const params = useParams<{ id: string }>();
   const [query, setQuery] = useSearchParams<{ state?: string; label?: string }>();
-  const events = useEvents();
 
   const state = (): IssueStateFilter =>
     query.state === 'closed' || query.state === 'all' ? query.state : 'open';
@@ -56,16 +55,18 @@ function RepoIssuesView() {
   // String key: a search-param change that leaves the state untouched (label
   // narrowing) yields the same key, so the page is NOT refetched — the label
   // chips filter the already-fetched page client-side.
-  const [page, { refetch }] = createResource(
+  const [page] = createLiveResource(
     () => `${params.id}\n${state()}`,
     (key) => {
       const sep = key.indexOf('\n');
       return listIssues(key.slice(0, sep), key.slice(sep + 1) as IssueStateFilter);
     },
+    [{ type: 'issue.changed', match: (event) => event.repoID === params.id }],
   );
-  const [ready, { refetch: refetchReady }] = createResource(
+  const [ready] = createLiveResource(
     () => params.id,
     (id) => listReadyIssues(id),
+    [{ type: 'issue.changed', match: (event) => event.repoID === params.id }],
   );
   // Every read outside the guarded <Match> branches goes through these
   // non-throwing accessors: a failed listIssues must render the error banner
@@ -76,20 +77,17 @@ function RepoIssuesView() {
   const readyData = () => resourceValue(ready);
   // Label colors exist only on the builtin tracker; the resource stays idle
   // (and GET /labels is never called) for a forge-bound repo.
-  const [labels, { refetch: refetchLabels }] = createResource(
+  const [labels] = createLiveResource(
     () => (pageData()?.binding === 'builtin' ? params.id : null),
     (id) => listLabels(id),
+    [
+      {
+        type: 'issue.changed',
+        match: (event) => event.repoID === params.id && pageData()?.binding === 'builtin',
+      },
+    ],
   );
   const labelList = () => resourceValue(labels);
-
-  onCleanup(
-    events.subscribe('issue.changed', (event) => {
-      if (event.repoID !== params.id) return;
-      void refetch();
-      void refetchReady();
-      if (pageData()?.binding === 'builtin') void refetchLabels();
-    }),
-  );
 
   const canMutate = () => {
     const binding = pageData()?.binding;

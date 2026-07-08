@@ -4,22 +4,16 @@
 // Discard is the ONE unguarded destruction in lab — the dialog says so
 // honestly and only arms the button once the exact branch name is typed.
 
-import { For, Show, createResource, createSignal, onCleanup } from 'solid-js';
+import { For, Show, createSignal } from 'solid-js';
 import { discardParked, errorMessage, listParked, type ParkedEntry } from '../api';
-import { useEvents } from '../events';
+import { createLiveResource } from '../lib/liveResource';
 import ErrorBanner from './ErrorBanner';
 
 export default function ParkedSection(props: { repoID: string }) {
-  const events = useEvents();
-  const [parked, { refetch }] = createResource(
+  const [parked, { refetch }] = createLiveResource(
     () => props.repoID,
     (repoID) => listParked(repoID),
-  );
-  onCleanup(
-    // eslint-disable-next-line solid/reactivity -- the handler re-reads props.repoID fresh on every SSE event
-    events.subscribe('parked.changed', (event) => {
-      if (event.repoID === props.repoID) void refetch();
-    }),
+    [{ type: 'parked.changed', match: (event) => event.repoID === props.repoID }],
   );
 
   const [error, setError] = createSignal<string | null>(null);

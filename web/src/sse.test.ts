@@ -268,6 +268,149 @@ describe('connectEvents wake events', () => {
 
     expect(instances).toHaveLength(1);
   });
+
+  it('visibilitychange→visible force-cycles a stale-past-FRESH_MS connected stream', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    instances[0]!.open();
+    instances[0]!.emit('heartbeat', '');
+    expect(conn.connected()).toBe(true);
+
+    // Past FRESH_MS (10s) but well under the 65s watchdog: the watchdog has
+    // not fired, yet a foreground resume must not trust the "connected" socket.
+    vi.advanceTimersByTime(15_000);
+    expect(instances).toHaveLength(1); // watchdog has not tripped
+
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    expect(instances[0]!.closed).toBe(true);
+    expect(instances).toHaveLength(2); // new source immediately, no backoff wait
+
+    conn.close();
+  });
+
+  it('a wake within FRESH_MS leaves a nominally connected stream untouched', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    instances[0]!.open();
+    instances[0]!.emit('heartbeat', '');
+
+    vi.advanceTimersByTime(5_000); // still inside the freshness window
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    expect(instances).toHaveLength(1);
+    expect(conn.connected()).toBe(true);
+    expect(instances[0]!.closed).toBe(false);
+
+    conn.close();
+  });
+
+  it('pageshow force-cycles a stream stale past FRESH_MS', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    instances[0]!.open();
+    instances[0]!.emit('heartbeat', '');
+    vi.advanceTimersByTime(15_000);
+
+    window.dispatchEvent(new Event('pageshow'));
+
+    expect(instances[0]!.closed).toBe(true);
+    expect(instances).toHaveLength(2);
+
+    conn.close();
+  });
+
+  it('focus force-cycles a stream stale past FRESH_MS', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    instances[0]!.open();
+    instances[0]!.emit('heartbeat', '');
+    vi.advanceTimersByTime(15_000);
+
+    window.dispatchEvent(new Event('focus'));
+
+    expect(instances[0]!.closed).toBe(true);
+    expect(instances).toHaveLength(2);
+
+    conn.close();
+  });
+
+  it('pageshow and focus after close() never resurrect the connection', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    instances[0]!.error(); // reconnect pending
+    conn.close();
+
+    window.dispatchEvent(new Event('pageshow'));
+    window.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(120_000);
+
+    expect(instances).toHaveLength(1);
+  });
+});
+
+describe('connectEvents resync', () => {
+  it('is a client-only pseudo-event, absent from the wire vocabulary', () => {
+    expect(EVENT_TYPES).not.toContain('resync');
+  });
+
+  it("fires resync on reconnect opens but never on the session's first open", () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    const resyncs: LabEvent[] = [];
+    conn.subscribe('resync', (e) => resyncs.push(e));
+
+    // First open of the session: mount-time fetches already have the state,
+    // so no resync — a burst here would double-fetch every view.
+    instances[0]!.open();
+    instances[0]!.emit('heartbeat', '');
+    expect(resyncs).toHaveLength(0);
+
+    // Drop and reconnect: the second open synthesizes exactly one resync.
+    instances[0]!.error();
+    vi.advanceTimersByTime(1_000);
+    expect(instances).toHaveLength(2);
+    instances[1]!.open();
+
+    expect(resyncs).toEqual([{ type: 'resync' }]);
+
+    conn.close();
+  });
+
+  it('resync on a reconnect open does not reset the backoff', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    const resyncs: LabEvent[] = [];
+    conn.subscribe('resync', (e) => resyncs.push(e));
+
+    // Establish a real session: first open + a wire event resets backoff to 1s.
+    instances[0]!.open();
+    instances[0]!.emit('heartbeat', '');
+    expect(resyncs).toHaveLength(0); // first open never resyncs
+
+    // Drop; the retry lands 1s later and the reconnect open fires a resync.
+    instances[0]!.error();
+    vi.advanceTimersByTime(1_000);
+    instances[1]!.open();
+    expect(resyncs).toEqual([{ type: 'resync' }]);
+
+    // That open carried no wire event, so it must NOT have reset the backoff:
+    // the next failure retries at 2s, not the 1s minimum.
+    instances[1]!.error();
+    vi.advanceTimersByTime(1_999);
+    expect(instances).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(instances).toHaveLength(3);
+
+    conn.close();
+  });
 });
 
 describe('connectEvents subscriptions', () => {

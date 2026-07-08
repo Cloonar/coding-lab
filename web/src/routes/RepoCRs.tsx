@@ -5,12 +5,12 @@
 // (scoped to this repo) refetches the page.
 
 import { A, useParams, useSearchParams } from '@solidjs/router';
-import { For, Match, Switch, createResource, onCleanup } from 'solid-js';
+import { For, Match, Switch, createResource } from 'solid-js';
 import { errorMessage, getRepo, listCRs, type CRStateFilter, type CRSummary } from '../api';
 import ClosesChips from '../components/ClosesChips';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
 import { formatDateTime } from '../lib/issues';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 const STATE_FILTERS: CRStateFilter[] = ['open', 'merged', 'closed', 'all'];
@@ -26,7 +26,6 @@ export default function RepoCRs() {
 function RepoCRsView() {
   const params = useParams<{ id: string }>();
   const [query, setQuery] = useSearchParams<{ state?: string }>();
-  const events = useEvents();
 
   const state = (): CRStateFilter =>
     query.state === 'merged' || query.state === 'closed' || query.state === 'all'
@@ -37,22 +36,16 @@ function RepoCRsView() {
     () => params.id,
     (id) => getRepo(id),
   );
-  const [page, { refetch }] = createResource(
+  const [page] = createLiveResource(
     () => `${params.id}\n${state()}`,
     (key) => {
       const sep = key.indexOf('\n');
       return listCRs(key.slice(0, sep), key.slice(sep + 1) as CRStateFilter);
     },
+    [{ type: 'cr.changed', match: (event) => event.repoID === params.id }],
   );
   // Non-throwing accessor: a failed repo lookup must not blank a loaded list.
   const repoData = () => resourceValue(repo);
-
-  onCleanup(
-    events.subscribe('cr.changed', (event) => {
-      if (event.repoID !== params.id) return;
-      void refetch();
-    }),
-  );
 
   const emptyText = () =>
     state() === 'all' ? 'No change requests.' : `No ${state()} change requests.`;

@@ -3,17 +3,7 @@
 // zone deletes the repo (confirm; force checkbox appears after a 409).
 
 import { A, useNavigate, useParams } from '@solidjs/router';
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createEffect,
-  createResource,
-  createSignal,
-  on,
-  onCleanup,
-} from 'solid-js';
+import { For, Match, Show, Switch, createEffect, createResource, createSignal, on } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import {
   ApiError,
@@ -32,7 +22,7 @@ import {
 import CatalogSelect from '../components/CatalogSelect';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
+import { createLiveResource } from '../lib/liveResource';
 import { remoteHost } from '../lib/repoName';
 import { providerFor } from '../lib/spawn';
 
@@ -46,15 +36,12 @@ export default function RepoSettings() {
 
 function RepoSettingsView() {
   const params = useParams<{ id: string }>();
-  const events = useEvents();
-  const [repo, { refetch }] = createResource(() => getRepo(params.id));
+  const [repo, { refetch }] = createLiveResource(
+    () => getRepo(params.id),
+    [{ type: 'repo.changed', match: (event) => event.repoID === params.id }],
+  );
   const [credentials] = createResource(() => listCredentials());
   const [providers] = createResource(() => listProviders());
-  onCleanup(
-    events.subscribe('repo.changed', (event) => {
-      if (event.repoID === params.id) void refetch();
-    }),
-  );
 
   return (
     <main class="page">
