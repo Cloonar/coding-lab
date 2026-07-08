@@ -166,4 +166,35 @@ describe('SideNav ACTIVE list', () => {
     const row = railRows()[0]!;
     expect(row.querySelector('button')).toBeNull();
   });
+
+  it("carries the run's state in the row's accessible name (the dot is color-only)", async () => {
+    mount([
+      instance({ id: 'run_attn', session_name: 'proj~a-20260706-1500', state: 'needs_input' }),
+      instance({ id: 'run_plain', session_name: 'proj~b-20260706-1501', state: 'idle' }),
+    ]);
+    await settle();
+    const byHref = (href: string) => railRows().find((r) => r.getAttribute('href') === href)!;
+    expect(byHref('/runs/run_attn').getAttribute('aria-label')).toBe(
+      'a · 15:00 — proj — needs input',
+    );
+    // No live badge (idle) → no trailing state word.
+    expect(byHref('/runs/run_plain').getAttribute('aria-label')).toBe('b · 15:01 — proj');
+  });
+
+  it('shows the AFK budget countdown on the secondary line, and only for AFK rows', async () => {
+    const deadline = new Date(Date.now() + 30 * 60_000).toISOString();
+    mount([
+      instance({ id: 'run_afk', session_name: 'proj~afk-12', budget_deadline: deadline }),
+      // A manual run never shows a budget, even with a (stray) deadline.
+      instance({
+        id: 'run_manual',
+        session_name: 'proj~m-20260706-1500',
+        budget_deadline: deadline,
+      }),
+    ]);
+    await settle();
+    const byHref = (href: string) => railRows().find((r) => r.getAttribute('href') === href)!;
+    expect(byHref('/runs/run_afk').textContent).toMatch(/left/);
+    expect(byHref('/runs/run_manual').textContent).not.toMatch(/left/);
+  });
 });

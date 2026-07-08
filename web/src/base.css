@@ -17,6 +17,9 @@
   /* Warm coffee-brown, not white: white-on-#d97757 is 3.12:1 and fails WCAG
      AA (4.5:1) for text. This dark warm brown clears it at 5.36:1 instead. */
   --accent-text: #2a1a12;
+  /* Terracotta as TEXT (links, active nav, tinted chips) needs a darker cut:
+     raw #d97757 on bone is only 2.96:1. Burnt terracotta clears AA at 4.83:1. */
+  --link: #b0532f;
   --danger: #c0362c;
   --danger-border: #e6b8b3;
   --ok: #1a9c5b;
@@ -62,6 +65,8 @@
     --border: #3e3c37;
     --hover: #373631;
     --accent: #d97757;
+    /* Lighter cut for dark: #d97757 is 4.24:1 on cards; this clears 5.3:1. */
+    --link: #e08d70;
     --danger: #f28577;
     --danger-border: #5c2b27;
     --ok: #3ecf8e;
@@ -183,7 +188,7 @@ h2 {
 }
 
 a {
-  color: var(--accent);
+  color: var(--link);
 }
 
 a.plain {
@@ -261,11 +266,21 @@ a.plain {
   border-right: 1px solid var(--border);
   overflow-y: auto;
   transform: translateX(-100%);
-  transition: transform 0.24s ease;
+  /* A closed drawer leaves the a11y tree and the tab order, not just the
+     viewport — otherwise every page starts with ~10 invisible off-screen tab
+     stops (the old TopBar menu unmounted entirely; this is its equivalent).
+     visibility flips AFTER the slide-out so closing still animates; the open
+     rule below restores it immediately so opening never slides in invisible. */
+  visibility: hidden;
+  transition:
+    transform 0.24s ease,
+    visibility 0s linear 0.24s;
 }
 
 .shell.drawer-open .shell-rail {
   transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.24s ease;
 }
 
 /* Collapsed re-open chevron — desktop-only (see the >=1024 block). */
@@ -401,6 +416,11 @@ a.plain {
   white-space: nowrap;
 }
 
+/* AFK budget countdown on the secondary line (re-homed from InstanceList). */
+.rail-row-budget.over {
+  color: var(--danger);
+}
+
 /* Pushes the footer nav + signed-in row to the bottom of the rail. */
 .rail-spacer {
   flex: 1;
@@ -432,7 +452,7 @@ a.plain {
 }
 
 .rail-nav-link.active {
-  color: var(--accent);
+  color: var(--link);
   font-weight: 650;
 }
 
@@ -442,7 +462,7 @@ a.plain {
 }
 
 .rail-nav-link.active .rail-nav-icon {
-  color: var(--accent);
+  color: var(--link);
 }
 
 .rail-foot {
@@ -462,7 +482,7 @@ a.plain {
 
 .rail-logout {
   flex: none;
-  min-height: 36px;
+  min-height: 44px;
   padding: 0.35rem 0.6rem;
 }
 
@@ -487,6 +507,7 @@ a.plain {
     max-width: none;
     transform: none;
     transition: none;
+    visibility: visible; /* the base rule hides the closed DRAWER — not the rail */
   }
 
   .shell-content {
@@ -624,7 +645,7 @@ a.plain {
 }
 
 .card-link {
-  color: var(--accent);
+  color: var(--link);
   text-decoration: none;
   font-weight: 550;
   min-height: 44px;
@@ -653,7 +674,7 @@ button.attach-copy {
   margin-top: var(--space-3);
   border: 1px dashed var(--border);
   border-radius: var(--radius-card);
-  color: var(--accent);
+  color: var(--link);
   text-decoration: none;
   font-weight: 550;
 }
@@ -712,7 +733,7 @@ button.attach-copy {
 
 .chip.incogni {
   background: color-mix(in srgb, var(--accent) 14%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 .chip.in-use {
@@ -1189,7 +1210,7 @@ details.parked summary {
   min-height: 44px;
   cursor: pointer;
   font-weight: 550;
-  color: var(--accent);
+  color: var(--link);
   list-style: none;
 }
 
@@ -1590,13 +1611,13 @@ button.small {
 
 .chip.state-merged {
   background: color-mix(in srgb, var(--accent) 14%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 a.chip.closes-chip {
   text-decoration: none;
   background: color-mix(in srgb, var(--accent) 10%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 a.chip.closes-chip:hover {
@@ -1714,7 +1735,7 @@ a.chip.cr-count:hover {
 
 .diff-row.diff-hunk {
   background: color-mix(in srgb, var(--accent) 8%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 .diff-row.diff-meta {
@@ -1809,7 +1830,7 @@ a.chip.cr-count:hover {
   padding: 0.6rem;
   min-height: 44px;
   font-size: 0.85rem;
-  color: var(--accent);
+  color: var(--link);
   background: none;
   border: 1px dashed var(--border);
   border-radius: 8px;
@@ -2233,7 +2254,7 @@ h6.md-h {
   margin: 0.25rem 0;
 }
 .md-link {
-  color: var(--accent);
+  color: var(--link);
   overflow-wrap: anywhere;
 }
 .role-user .md-link {
@@ -2939,7 +2960,7 @@ h6.md-h {
   align-items: center;
 }
 .afk-strip-reset {
-  min-height: 36px;
+  min-height: 44px;
   padding: 0 0.7rem;
 }
 

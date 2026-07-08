@@ -7,10 +7,11 @@
 // destructive action — Stop lives in the chat header and on the Repos page.
 
 import { A } from '@solidjs/router';
-import { For, Show, createSignal } from 'solid-js';
+import { For, Show, createSignal, onCleanup } from 'solid-js';
 import { errorMessage, logout, type Instance } from '../api';
 import { useAuth } from '../auth';
 import { useEvents } from '../events';
+import { budgetRemaining, parseAFKLabel } from '../lib/afk';
 import { stateBadge } from '../lib/conversation';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
 import { orderRail } from '../lib/railOrder';
@@ -32,6 +33,12 @@ export default function SideNav(props: {
   // ACTIVE = live instances only; ended/dead runs drop out (History is the
   // archive). orderRail sorts attention → working → rest, newest first.
   const rows = () => orderRail(props.instances.filter((instance) => instance.live));
+
+  // Display-only countdown tick for AFK budget hints (the spec's one sanctioned
+  // interval, inherited from the old InstanceList rows).
+  const [now, setNow] = createSignal(Date.now());
+  const ticker = setInterval(() => setNow(Date.now()), 30_000);
+  onCleanup(() => clearInterval(ticker));
 
   const doLogout = async () => {
     setBusy(true);
@@ -71,7 +78,9 @@ export default function SideNav(props: {
       <Show when={rows().length > 0} fallback={<p class="rail-empty">No live runs.</p>}>
         <ul class="rail-active">
           <For each={rows()}>
-            {(instance) => <RailRow instance={instance} onNavigate={props.onNavigate} />}
+            {(instance) => (
+              <RailRow instance={instance} now={now()} onNavigate={props.onNavigate} />
+            )}
           </For>
         </ul>
       </Show>
@@ -143,17 +152,30 @@ export default function SideNav(props: {
   );
 }
 
-function RailRow(props: { instance: Instance; onNavigate?: () => void }) {
+function RailRow(props: { instance: Instance; now: number; onNavigate?: () => void }) {
   const state = () => props.instance.state;
   const title = () =>
     instanceTitle(sessionLabel(props.instance.session_name)) || props.instance.branch;
   const badge = () => stateBadge(state());
+  // AFK rows keep their budget countdown (re-homed from the old InstanceList):
+  // the deadline is the run's only time pressure and lives nowhere else.
+  const afk = () => parseAFKLabel(sessionLabel(props.instance.session_name));
+  const budget = () =>
+    afk() === null ? null : budgetRemaining(props.instance.budget_deadline, props.now);
+  // The dot is color-only, so the link's accessible name carries the state
+  // word a screen reader would otherwise miss.
+  const ariaLabel = () => {
+    const base = `${title()} — ${props.instance.repo_name}`;
+    const b = badge();
+    return b === null ? base : `${base} — ${b.label}`;
+  };
   return (
     <li>
       <A
         href={`/runs/${props.instance.id}`}
         end
         class="rail-row"
+        aria-label={ariaLabel()}
         onClick={() => props.onNavigate?.()}
       >
         <span
@@ -167,7 +189,20 @@ function RailRow(props: { instance: Instance; onNavigate?: () => void }) {
         />
         <span class="rail-row-body">
           <span class="rail-row-title">{title()}</span>
-          <span class="rail-row-repo">{props.instance.repo_name}</span>
+          <span class="rail-row-repo">
+            {props.instance.repo_name}
+            <Show when={budget()}>
+              {(b) => (
+                <span
+                  classList={{ 'rail-row-budget': true, over: b() === 'over budget' }}
+                  title="Time left on this AFK run's budget"
+                >
+                  {' · '}
+                  {b()}
+                </span>
+              )}
+            </Show>
+          </span>
         </span>
       </A>
     </li>
