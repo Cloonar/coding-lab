@@ -10,11 +10,12 @@ import {
   errorMessage,
   listCredentials,
   listInstances,
+  listProviders,
   updateCredential,
   type CredentialKind,
   type CredentialListItem,
 } from '../api';
-import ClaudeAuthCard from '../components/ClaudeAuthCard';
+import ProviderAuthCard from '../components/ProviderAuthCard';
 import ErrorBanner from '../components/ErrorBanner';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
@@ -46,8 +47,14 @@ function CredentialsView() {
   // The referenced flag follows repo rows (create/delete/PATCH change FKs).
   onCleanup(events.subscribe('repo.changed', () => void refetch()));
 
-  // Live instance count for the Claude logout confirm copy (issue #46): running
-  // instances survive a logout on their in-memory token until it refreshes.
+  // One auth card per registered provider, driven by its auth descriptor
+  // (issue #51 decision 7) — the provider list is the only source of provider
+  // identity and display copy here.
+  const [providers] = createResource(() => listProviders());
+
+  // Live instance count for the provider logout confirm copy (issue #46):
+  // running instances survive a logout on their in-memory token until it
+  // refreshes.
   const [instances, { refetch: refetchInstances }] = createResource(() => listInstances());
   onCleanup(events.subscribe('run.changed', () => void refetchInstances()));
   const liveCount = () => (resourceValue(instances) ?? []).filter((i) => i.live).length;
@@ -57,7 +64,9 @@ function CredentialsView() {
   return (
     <main class="page">
       <div class="stack">
-        <ClaudeAuthCard activeRuns={liveCount()} />
+        <For each={resourceValue(providers) ?? []}>
+          {(provider) => <ProviderAuthCard provider={provider} activeRuns={liveCount()} />}
+        </For>
       </div>
       <div class="section-head">
         <h2>Credentials</h2>

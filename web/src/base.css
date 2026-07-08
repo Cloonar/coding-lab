@@ -2179,6 +2179,57 @@ a.chip.cr-count:hover {
   display: flex;
   gap: 0.4rem;
 }
+
+/* Option faces (issue #51): bold label over a secondary description, shared by
+   single-question options, plan approve/reject rows and the question form. */
+.dialog-option-label {
+  display: block;
+  font-weight: 600;
+}
+.dialog-option-desc {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+/* A picked (not yet submitted) option in the multi-question form. */
+.dialog-option.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+
+/* Plan review (issue #51): the prompt IS the plan body — markdown in a bounded
+   scroll area so a long plan never shoves the approve/reject rows off-screen. */
+.chat-dialog-plan {
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+}
+
+/* Multi-question form (issue #51): stacked questions, each a small header chip
+   + the question text + its option buttons; ONE submit for all answers. */
+.dialog-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.dialog-question {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.dialog-question-header {
+  align-self: flex-start;
+}
+.dialog-other-input {
+  width: 100%;
+  margin-top: 0.3rem;
+}
+
 .chat-earlier {
   align-self: center;
 }
@@ -2638,6 +2689,64 @@ h6.md-h {
   .chat-jump {
     transition: none;
   }
+}
+
+/* Slash-command autocomplete (issue #51 decision 5): anchored to the sticky
+   .chat-composer like the jump pill, floating over the stream just above the
+   field. Rows: /name + arg hint (dim mono) + source badge, description below. */
+.chat-cmd-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 3;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 0.3rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.chat-cmd-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  column-gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  cursor: pointer;
+}
+.chat-cmd-row:hover,
+.chat-cmd-row.active {
+  background: var(--hover);
+}
+.chat-cmd-name {
+  font-weight: 600;
+}
+.chat-cmd-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.chat-cmd-source {
+  justify-self: end;
+  font-size: 0.7rem;
+  padding: 0.05rem 0.45rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+.chat-cmd-desc {
+  grid-column: 1 / -1;
+  font-size: 0.85rem;
+  color: var(--muted);
 }
 
 /* §5 — the merged composer field: one rounded-rect holding a borderless

@@ -1395,8 +1395,11 @@ func TestAFKCycleIncogniBuiltinIntegration(t *testing.T) {
 	})
 	// The fixture mirrors reposvc's clone-completion install for incogni
 	// repos: the guard lives in the BARE reference clone, shared by every
-	// worktree via the common git dir (D15 measure 7).
-	if err := seeder.InstallPrePushHook(w.bare(repo)); err != nil {
+	// worktree via the common git dir (D15 measure 7). Its scrub/seeded-path
+	// patterns come from the repo's provider (issue #51 decision 8), exactly
+	// as reposvc resolves them from repos.provider.
+	incMeta := w.prov.SeedMeta()
+	if err := seeder.InstallPrePushHook(w.bare(repo), incMeta.ScrubPatterns, incMeta.SeededPathPatterns); err != nil {
 		t.Fatalf("InstallPrePushHook: %v", err)
 	}
 	w.readyIssue(repo, "Wire the flux capacitor", "make it hum")

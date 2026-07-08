@@ -50,11 +50,13 @@ type repoScopedPayload struct {
 
 // WorkspaceSeeder is the lab-side worktree seeding seam (design §1
 // internal/seeder; brief D13), run on every Launch after the provider's own
-// SeedWorkspace: the embedded skills bundle into .claude/skills/, the
-// generated CLAUDE.local.md, and their .git/info/exclude entries. Satisfied
-// by *seeder.Seeder; tests substitute a failing stub to drive the rollback.
+// SeedWorkspace: the embedded skills bundle, the generated context file, and
+// their .git/info/exclude entries — all shaped by the launching provider's
+// meta (issue #51 decision 8: the seeder is generic, the provider declares the
+// skills dir / context-file name / exclude entries). Satisfied by
+// *seeder.Seeder; tests substitute a failing stub to drive the rollback.
 type WorkspaceSeeder interface {
-	SeedWorkspace(worktree string, repo store.Repo, opts seeder.Opts) error
+	SeedWorkspace(worktree string, repo store.Repo, meta provider.SeedMeta, opts seeder.Opts) error
 }
 
 // Options configures a Service. Everything except Logger, GitEnv, CaptureCtx,

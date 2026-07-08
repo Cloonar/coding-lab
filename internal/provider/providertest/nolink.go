@@ -44,6 +44,33 @@ func (f *NoLinkFake) ID() string                 { return f.id }
 func (f *NoLinkFake) Models() []provider.Option  { return f.models }
 func (f *NoLinkFake) Efforts() []provider.Option { return f.efforts }
 
+// DisplayName is a fixed human name distinct from the claude-code Fake's, so
+// provider-neutral-copy tests can tell the two apart (issue #51 decision 9).
+func (f *NoLinkFake) DisplayName() string { return "Codex Fake" }
+
+// AuthFlow declares the external kind — auth managed outside lab, status-only
+// (issue #51 decision 7) — the natural stand-in for a provider lab cannot log
+// in itself.
+func (f *NoLinkFake) AuthFlow() provider.AuthFlow {
+	return provider.AuthFlow{Kind: provider.AuthFlowExternal}
+}
+
+// SeedMeta declares a minimal non-claude layout so generic-seeder tests can
+// prove nothing claude-shaped is hardcoded (issue #51 decision 8).
+func (f *NoLinkFake) SeedMeta() provider.SeedMeta {
+	return provider.SeedMeta{
+		ContextFileName: "AGENTS.local.md",
+		SkillsDir:       ".codex/skills",
+		ExcludeEntries:  []string{".codex/", "AGENTS.local.md"},
+	}
+}
+
+// Commands declares no slash commands — a stand-in for a provider whose
+// catalog scan hasn't been built (issue #51 decision 5).
+func (f *NoLinkFake) Commands(context.Context, string) ([]provider.CommandSpec, error) {
+	return nil, nil
+}
+
 // SpawnOptions declares no spawn options — a stand-in for a provider that
 // hasn't adopted the generic bag yet (issue #19). Its resolved options bag is
 // always empty.

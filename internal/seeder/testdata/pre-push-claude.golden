@@ -1,0 +1,42 @@
+#!/bin/sh
+# lab incogni guard — installed by lab on incogni repos; do not edit.
+# Rejects pushes whose outgoing commits carry AI attribution in the commit
+# message or touch lab-seeded files. Removed when incogni is toggled off.
+# Fails CLOSED: an unscannable ref is refused, never waved through.
+
+fail=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Deleting a remote ref (all-zero local sha, any hash length) pushes no
+    # commits. Match zeros by pattern so SHA-1 (40) and SHA-256 (64) both work.
+    case "$local_sha" in *[!0]*) : ;; *) continue ;; esac
+    case "$remote_sha" in
+        *[!0]*) range="$remote_sha..$local_sha" ;;      # known remote tip
+        *)      range="$local_sha --not --remotes=origin" ;; # new branch
+    esac
+    # Enumerate outgoing commits; a rev-list failure (unknown remote sha after
+    # a force-push, wrong-length sentinel, corrupt range) fails the push.
+    commits=$(git rev-list $range) || {
+        echo "lab incogni guard: cannot enumerate outgoing commits for $remote_ref ($range); refusing push" >&2
+        exit 1
+    }
+    for commit in $commits; do
+        if git log -1 --format=%B "$commit" | grep -i -q \
+            -e 'co-authored-by:[[:space:]]*claude' \
+            -e 'co-authored-by:.*<[^>]*@anthropic\.com>' \
+            -e 'generated with.*claude' \
+            -e 'claude-session:'; then
+            echo "lab incogni guard: commit $commit ($remote_ref) carries AI attribution in its message; rewrite it before pushing" >&2
+            fail=1
+        fi
+        # -m diffs a merge against each parent so files the merge itself
+        # introduces (evil merges, conflict resolutions) are not invisible.
+        if git diff-tree -m --no-commit-id --name-only -r "$commit" | grep -q \
+            -e '^\.claude/skills/' \
+            -e '^\.claude/settings\.local\.json$' \
+            -e '^CLAUDE\.local\.md$'; then
+            echo "lab incogni guard: commit $commit ($remote_ref) touches lab-seeded files; drop them before pushing" >&2
+            fail=1
+        fi
+    done
+done
+exit $fail

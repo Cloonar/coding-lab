@@ -8,12 +8,13 @@
 //   verbatim, and never navigates or queues;
 // - zero repos hides the composer and shows the exact "No repositories yet"
 //   empty state (the Playwright smoke + login/setup round-trip assert this on `/`);
-// - a logged-out Claude surfaces the slim reconnect banner.
+// - a logged-out provider surfaces the slim reconnect banner, named by the
+//   provider's display_name (issue #51 decision 9).
 
 import { MemoryRouter, Route, createMemoryHistory, useParams } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClaudeAuthStatus, Provider, Repo } from '../api';
+import type { Provider, ProviderAuthStatus, Repo } from '../api';
 import App from '../App';
 import { clearQueued, peekQueued } from '../lib/queuedMessage';
 import NewRun from './NewRun';
@@ -62,6 +63,8 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
 const PROVIDERS: Provider[] = [
   {
     id: 'claude-code',
+    display_name: 'Claude Code',
+    auth: { kind: 'oauth-code' },
     models: [
       { value: 'sonnet', label: 'Sonnet' },
       { value: 'opus', label: 'Opus' },
@@ -75,7 +78,7 @@ const PROVIDERS: Provider[] = [
 ];
 
 let reposOnServer: Repo[];
-let authOnServer: ClaudeAuthStatus;
+let authOnServer: ProviderAuthStatus;
 let instancePost: { status: number; runID: string };
 let instancePosts: Record<string, unknown>[];
 let dispose: (() => void) | undefined;
@@ -115,7 +118,9 @@ function stubApi(): void {
       if (url === '/api/v1/settings' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, {}));
       }
-      if (url === '/api/v1/providers/claude/auth/status' && method === 'GET') {
+      // Per-provider-id auth route (issue #51 decision 7), keyed on the
+      // selected repo's provider.
+      if (url === '/api/v1/providers/claude-code/auth/status' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, authOnServer));
       }
       if (url.startsWith('/api/v1/repos/repo_1/ready') && method === 'GET') {
@@ -284,12 +289,13 @@ describe('NewRun composer', () => {
     expect(addLink?.textContent).toContain('add one');
   });
 
-  it('surfaces the logged-out reconnect banner when Claude is logged out', async () => {
+  it('surfaces the reconnect banner named by display_name when the provider is logged out', async () => {
     authOnServer = { logged_in: false, email: '', method: '', checked_at: '' };
     await mountHome();
 
     const warn = container.querySelector('.newrun-warn');
-    expect(warn?.textContent).toContain('Claude is logged out');
+    // Copy flows from the provider's display_name, not a hardcoded brand.
+    expect(warn?.textContent).toContain('Claude Code is logged out');
     const link = warn?.querySelector('a');
     expect(link?.getAttribute('href')).toBe('/credentials');
   });

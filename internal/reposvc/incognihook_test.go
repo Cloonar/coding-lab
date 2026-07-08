@@ -34,6 +34,13 @@ func TestIncogniPrePushHookAddAndToggle(t *testing.T) {
 	if fi, err := os.Stat(seeder.PrePushHookPath(bare)); err != nil || fi.Mode()&0o111 == 0 {
 		t.Fatalf("hook not executable: %v %v", fi, err)
 	}
+	// The guard's scrub patterns came from the repo's provider (issue #51
+	// decision 8): reposvc resolved repos.provider → SeedMeta → hook script.
+	if body, err := os.ReadFile(seeder.PrePushHookPath(bare)); err != nil {
+		t.Fatalf("read hook: %v", err)
+	} else if !strings.Contains(string(body), `co-authored-by:[[:space:]]*claude`) {
+		t.Error("installed hook missing the provider-declared scrub pattern; reposvc→provider→hook wiring broken")
+	}
 
 	// Toggle-off removes it; the flag flip persists.
 	updated, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{

@@ -20,11 +20,11 @@ import {
   onCleanup,
 } from 'solid-js';
 import {
-  claudeAuthStatus,
   errorMessage,
   getSpawnDefaults,
   listProviders,
   listRepos,
+  providerAuthStatus,
   startInstance,
   type Repo,
   type Run,
@@ -62,14 +62,12 @@ function NewRunView() {
   const [repos, { refetch: refetchRepos }] = createResource(() => listRepos());
   const [providers] = createResource(() => listProviders());
   const [defaults] = createResource(() => getSpawnDefaults());
-  const [authStatus, { refetch: refetchAuth }] = createResource(() => claudeAuthStatus());
   const progress = createCloneProgressStore(events);
   const toast = createToast();
   onCleanup(progress.dispose);
   // repo.changed keeps clone_status fresh so a cloning repo becomes selectable
-  // the moment it lands; the claude auth banner refetches on its own SSE event.
+  // the moment it lands; the auth banner refetches on its own SSE event.
   onCleanup(events.subscribe('repo.changed', () => void refetchRepos()));
-  onCleanup(events.subscribe('claude.auth.changed', () => void refetchAuth()));
 
   const readLastRepo = (): string | null => {
     try {
@@ -109,6 +107,17 @@ function NewRunView() {
   const models = () => provider()?.models ?? [];
   const efforts = () => provider()?.efforts ?? [];
   const defaultsValue = () => resourceValue(defaults) ?? {};
+
+  // Machine-level auth for the SELECTED repo's provider: the status route is
+  // per-provider-id (issue #51 decision 7), so the resource keys on the repo
+  // pick and refetches on the provider-generic SSE event. Copy comes from the
+  // provider's display_name — never a hardcoded agent name.
+  const [authStatus, { refetch: refetchAuth }] = createResource(
+    () => selectedRepo()?.provider,
+    (id) => providerAuthStatus(id),
+  );
+  onCleanup(events.subscribe('provider.auth.changed', () => void refetchAuth()));
+  const providerName = () => provider()?.display_name ?? 'The provider';
 
   // '' = untouched → submit the resolved default. Tracking the operator's pick
   // separately keeps a late providers/settings load from clobbering it.
@@ -188,8 +197,9 @@ function NewRunView() {
       if (body !== '') setQueued(run.id, body);
       navigate('/runs/' + run.id);
     } catch (err) {
-      // 409 (cap / claude logged out / repo not ready) et al. surface verbatim;
-      // the composer text STAYS (we never cleared it) so nothing is lost.
+      // 409 (cap / provider logged out / repo not ready) et al. surface
+      // verbatim; the composer text STAYS (we never cleared it) so nothing is
+      // lost.
       setError(errorMessage(err));
     } finally {
       setBusy(false);
@@ -215,7 +225,7 @@ function NewRunView() {
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Show when={loggedOut()}>
         <p class="newrun-warn" role="alert">
-          Claude is logged out — <A href="/credentials">reconnect</A>.
+          {providerName()} is logged out — <A href="/credentials">reconnect</A>.
         </p>
       </Show>
 

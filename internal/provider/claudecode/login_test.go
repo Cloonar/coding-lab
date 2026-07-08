@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // Transcribed v0 contract: sessions_test.go TestExtractOAuthURL
@@ -159,7 +161,7 @@ func TestLoginSubmitCode_invalidRejectedBeforeSendKeys(t *testing.T) {
 
 // Happy path: the code goes to the login session literally (one line +
 // Enter), the forced status poll sees the login land, the login session
-// is killed and claude.auth.changed is published.
+// is killed and provider.auth.changed is published.
 func TestLoginSubmitCode_happyPath(t *testing.T) {
 	state := t.TempDir() + "/state"
 	if err := os.WriteFile(state, []byte(`{"loggedIn":false}`), 0o600); err != nil {
@@ -201,8 +203,12 @@ func TestLoginSubmitCode_happyPath(t *testing.T) {
 		if e.Type != EventAuthChanged {
 			t.Errorf("event type = %q; want %q", e.Type, EventAuthChanged)
 		}
+		// The generalized payload carries the provider id (issue #51 dec 7).
+		if pl, ok := e.Payload.(provider.AuthChangedPayload); !ok || pl.Provider != ID {
+			t.Errorf("event payload = %#v; want AuthChangedPayload with provider %q", e.Payload, ID)
+		}
 	case <-time.After(2 * time.Second):
-		t.Error("no claude.auth.changed event after successful login")
+		t.Error("no provider.auth.changed event after successful login")
 	}
 	// The forced polling left the cache fresh and logged-in.
 	if st, err := p.AuthStatus(ctx, false); err != nil || !st.LoggedIn {

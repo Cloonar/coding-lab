@@ -81,7 +81,10 @@ function SettingsView() {
           {(current) => (
             <SettingsForm
               initial={current()}
-              provider={providerFor(providers() ?? [], 'claude-code')}
+              // Global spawn defaults have no repo context; the catalog comes
+              // from the API's provider list (its first entry — providerFor's
+              // fallback), never from a hardcoded provider id (issue #51).
+              provider={providerFor(providers() ?? [], '')}
               onSaved={() => void refetch()}
             />
           )}

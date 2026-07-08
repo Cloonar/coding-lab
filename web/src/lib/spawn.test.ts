@@ -33,9 +33,17 @@ describe('resolveSpawnOption', () => {
 });
 
 describe('providerFor', () => {
+  const auth = { kind: 'oauth-code' } as const;
   const providers: Provider[] = [
-    { id: 'claude-code', models: MODELS, efforts: [], options: [] },
-    { id: 'other', models: [], efforts: [], options: [] },
+    {
+      id: 'claude-code',
+      display_name: 'Claude Code',
+      models: MODELS,
+      efforts: [],
+      options: [],
+      auth,
+    },
+    { id: 'other', display_name: 'Other', models: [], efforts: [], options: [], auth },
   ];
 
   it('finds the repo provider by id', () => {

@@ -1,12 +1,9 @@
 import { createResource, createRoot } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  answerRun,
   ApiError,
   authState,
-  claudeAuthStatus,
-  claudeLoginCode,
-  claudeLoginStart,
-  claudeLogout,
   closeCR,
   createCredential,
   createIssue,
@@ -21,6 +18,7 @@ import {
   discardParked,
   errorMessage,
   extractSpawnDefaults,
+  fetchRunCommands,
   getCR,
   getIssue,
   getSettings,
@@ -42,6 +40,10 @@ import {
   me,
   mergeCR,
   normalizeSettings,
+  providerAuthStatus,
+  providerLoginCode,
+  providerLoginStart,
+  providerLogout,
   resetAFK,
   retryClone,
   setAFKAuto,
@@ -384,11 +386,14 @@ describe('repo endpoints', () => {
 });
 
 describe('provider endpoints', () => {
-  it('GET /providers unwraps the {providers} envelope', async () => {
+  it('GET /providers unwraps the {providers} envelope (display_name + auth descriptor)', async () => {
     const provider = {
       id: 'claude-code',
+      display_name: 'Claude Code',
       models: [{ value: 'opus[1m]', label: 'Opus (1M)' }],
       efforts: [{ value: 'max', label: 'max' }],
+      options: [],
+      auth: { kind: 'oauth-code' },
     };
     const mock = stubFetch(jsonResponse(200, { providers: [provider] }));
 
@@ -399,7 +404,7 @@ describe('provider endpoints', () => {
     expect(requestInit(mock).method).toBe('GET');
   });
 
-  it('GET auth status appends ?force=1 only when forcing (cache bypass)', async () => {
+  it('GET auth status hits the per-provider-id route, ?force=1 only when forcing', async () => {
     const status = {
       logged_in: true,
       email: 'x@y.z',
@@ -407,31 +412,31 @@ describe('provider endpoints', () => {
       checked_at: '2026-07-06T00:00:00.000Z',
     };
     let mock = stubFetch(jsonResponse(200, status));
-    await expect(claudeAuthStatus()).resolves.toEqual(status);
-    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/status');
+    await expect(providerAuthStatus('claude-code')).resolves.toEqual(status);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude-code/auth/status');
 
     mock = stubFetch(jsonResponse(200, status));
-    await claudeAuthStatus(true);
-    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/status?force=1');
+    await providerAuthStatus('claude-code', true);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude-code/auth/status?force=1');
   });
 
   it('POST login/start returns the oauth_url and surfaces the 409 already-logged-in message', async () => {
     let mock = stubFetch(jsonResponse(200, { oauth_url: 'https://claude.com/cai/oauth/x' }));
-    await expect(claudeLoginStart()).resolves.toEqual({
+    await expect(providerLoginStart('claude-code')).resolves.toEqual({
       oauth_url: 'https://claude.com/cai/oauth/x',
     });
-    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/login/start');
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude-code/auth/login/start');
     expect(requestInit(mock).method).toBe('POST');
     expect(requestInit(mock).headers).toMatchObject({ 'X-Lab-Csrf': '1' });
 
     mock = stubFetch(jsonResponse(409, { error: 'already logged in' }));
-    const err = await claudeLoginStart().catch((e: unknown) => e);
+    const err = await providerLoginStart('claude-code').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(409);
     expect((err as ApiError).message).toBe('already logged in');
   });
 
-  it('POST login/code sends {code} and tolerates the empty 202 body', async () => {
+  it('POST login/code sends {code} to the provider id route and tolerates the empty 202 body', async () => {
     const mock = stubFetch({
       ok: true,
       status: 202,
@@ -439,12 +444,12 @@ describe('provider endpoints', () => {
       text: () => Promise.resolve(''),
     });
 
-    await expect(claudeLoginCode('aB3-_x#state=Zm9v-_')).resolves.toBeUndefined();
-    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/login/code');
+    await expect(providerLoginCode('claude-code', 'aB3-_x#state=Zm9v-_')).resolves.toBeUndefined();
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude-code/auth/login/code');
     expect(JSON.parse(requestInit(mock).body as string)).toEqual({ code: 'aB3-_x#state=Zm9v-_' });
   });
 
-  it('POST logout hits the auth/logout route with CSRF and returns the logged-out status', async () => {
+  it('POST logout hits the per-provider auth/logout route with CSRF and returns the status', async () => {
     const loggedOut = {
       logged_in: false,
       email: '',
@@ -453,10 +458,49 @@ describe('provider endpoints', () => {
     };
     const mock = stubFetch(jsonResponse(200, loggedOut));
 
-    await expect(claudeLogout()).resolves.toEqual(loggedOut);
-    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude/auth/logout');
+    await expect(providerLogout('claude-code')).resolves.toEqual(loggedOut);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/providers/claude-code/auth/logout');
     expect(requestInit(mock).method).toBe('POST');
     expect(requestInit(mock).headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+  });
+});
+
+describe('run command + answer endpoints (issue #51)', () => {
+  it('GET /runs/{id}/commands unwraps the {commands} envelope', async () => {
+    const command = {
+      name: 'clear',
+      description: 'Clear conversation history',
+      arg_hint: '',
+      source: 'builtin',
+      role: 'clear',
+      chat_safe: true,
+    };
+    const mock = stubFetch(jsonResponse(200, { commands: [command] }));
+
+    await expect(fetchRunCommands('run_1')).resolves.toEqual([command]);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/runs/run_1/commands');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('POST /runs/{id}/answer carries positional per-question answers[] alongside tool_id', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    // answers[i] answers questions[i] — no question-index field. Single-select
+    // = option `index` (+ other_text when that row is the is_other row);
+    // multi-select = `selected` ascending, index absent.
+    await answerRun('run_1', {
+      tool_id: 'toolu_1',
+      answers: [{ index: 1 }, { selected: [0, 2] }, { index: 3, other_text: 'custom' }],
+    });
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/runs/run_1/answer');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      tool_id: 'toolu_1',
+      answers: [{ index: 1 }, { selected: [0, 2] }, { index: 3, other_text: 'custom' }],
+    });
   });
 });
 

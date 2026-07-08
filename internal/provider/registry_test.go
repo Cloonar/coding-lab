@@ -9,10 +9,12 @@ import (
 type stubProvider struct{ id string }
 
 func (s stubProvider) ID() string                   { return s.id }
+func (s stubProvider) DisplayName() string          { return s.id }
 func (s stubProvider) Models() []Option             { return nil }
 func (s stubProvider) Efforts() []Option            { return nil }
 func (s stubProvider) SpawnOptions() []OptionSpec   { return nil }
 func (s stubProvider) SpawnArgv(SpawnSpec) []string { return nil }
+func (s stubProvider) AuthFlow() AuthFlow           { return AuthFlow{Kind: AuthFlowExternal} }
 func (s stubProvider) AuthStatus(context.Context, bool) (AuthStatus, error) {
 	return AuthStatus{}, nil
 }
@@ -23,6 +25,10 @@ func (s stubProvider) CaptureDeepLink(context.Context, string, string) (string, 
 	return "", nil
 }
 func (s stubProvider) SeedWorkspace(string, SeedOpts) error { return nil }
+func (s stubProvider) SeedMeta() SeedMeta                   { return SeedMeta{} }
+func (s stubProvider) Commands(context.Context, string) ([]CommandSpec, error) {
+	return nil, nil
+}
 func (s stubProvider) LocateTranscript(context.Context, string, string) (string, error) {
 	return "", nil
 }

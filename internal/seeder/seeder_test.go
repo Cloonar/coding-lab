@@ -9,15 +9,40 @@ import (
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/assets"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 )
 
-// builtinRepo/forgeRepo are the two binding shapes CLAUDE.local.md renders.
+// builtinRepo/forgeRepo are the two binding shapes the context file renders.
 var (
 	builtinRepo = store.Repo{Name: "proj", TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none"}
 	forgeRepo   = store.Repo{Name: "proj", TrackerBinding: store.TrackerBindingForge, ForgeKind: "forgejo"}
 )
+
+// claudeGoldenMeta is claude-code's seed declaration, duplicated here as a
+// GOLDEN LITERAL (issue #51 decision 8 byte-identity acceptance). The seeder is
+// generic — these tests prove that GIVEN today's claude shapes it produces
+// today's exact output. The seeder must NOT import claudecode, so the values
+// are inlined; a drift in claudecode.SeedMeta() is caught separately by
+// claudecode's own seedmeta_test.go, which pins the real declaration to the
+// same literals. Any divergence between the two fails one side or the other.
+var claudeGoldenMeta = provider.SeedMeta{
+	ContextFileName: "CLAUDE.local.md",
+	SkillsDir:       ".claude/skills",
+	ExcludeEntries:  []string{".claude/", "CLAUDE.local.md"},
+	SeededPathPatterns: []string{
+		`^\.claude/skills/`,
+		`^\.claude/settings\.local\.json$`,
+		`^CLAUDE\.local\.md$`,
+	},
+	ScrubPatterns: []string{
+		`co-authored-by:[[:space:]]*claude`,
+		`co-authored-by:.*<[^>]*@anthropic\.com>`,
+		`generated with.*claude`,
+		`claude-session:`,
+	},
+}
 
 // newWorktree builds a REAL linked worktree (bare-style main checkout +
 // `git worktree add`), the shape every Launch seeds: its .git is a gitdir
@@ -53,7 +78,7 @@ func git(t *testing.T, env []string, args ...string) string {
 
 func seed(t *testing.T, wt string, repo store.Repo) {
 	t.Helper()
-	if err := New().SeedWorkspace(wt, repo, Opts{}); err != nil {
+	if err := New().SeedWorkspace(wt, repo, claudeGoldenMeta, Opts{}); err != nil {
 		t.Fatalf("SeedWorkspace: %v", err)
 	}
 }
@@ -156,10 +181,10 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 	}
 }
 
-func TestRenderClaudeLocal_forgeBinding(t *testing.T) {
-	body, err := renderClaudeLocal(forgeRepo)
+func TestRenderContextFile_forgeBinding(t *testing.T) {
+	body, err := renderContextFile(forgeRepo)
 	if err != nil {
-		t.Fatalf("renderClaudeLocal: %v", err)
+		t.Fatalf("renderContextFile: %v", err)
 	}
 	got := string(body)
 	if !strings.Contains(got, "tracker binding is **forge** (forgejo)") {
@@ -187,7 +212,7 @@ func TestSeedWorkspace_excludedFromStatusAndDeduped(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(readFile(t, path), "\n")
-	for _, entry := range ExcludeEntries {
+	for _, entry := range claudeGoldenMeta.ExcludeEntries {
 		n := 0
 		for _, l := range lines {
 			if l == entry {
@@ -236,7 +261,7 @@ func TestSeedWorkspace_reseedOverwritesLabFilesKeepsUserFiles(t *testing.T) {
 // first, and they need the git dir).
 func TestSeedWorkspace_missingGitFailsLoudAndWritesNothing(t *testing.T) {
 	dir := t.TempDir()
-	if err := New().SeedWorkspace(dir, builtinRepo, Opts{}); err == nil {
+	if err := New().SeedWorkspace(dir, builtinRepo, claudeGoldenMeta, Opts{}); err == nil {
 		t.Fatal("SeedWorkspace on a dir with no .git succeeded; want an error")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "CLAUDE.local.md")); err == nil {
@@ -244,5 +269,46 @@ func TestSeedWorkspace_missingGitFailsLoudAndWritesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".claude")); err == nil {
 		t.Error(".claude/ created despite the seed failing")
+	}
+}
+
+// Empty-field semantics (issue #51 decision 8): a provider that declares no
+// skills dir and no context file gets neither — but its exclude entries still
+// apply. seedSkills/seedContextFile skip on empty, so a minimal provider is a
+// no-op beyond excludes rather than a crash or a stray .claude/.
+func TestSeedWorkspace_emptyMetaSkipsSkillsAndContextFile(t *testing.T) {
+	wt, _ := newWorktree(t)
+	meta := provider.SeedMeta{ExcludeEntries: []string{"scratch/"}}
+	if err := New().SeedWorkspace(wt, builtinRepo, meta, Opts{}); err != nil {
+		t.Fatalf("SeedWorkspace with empty skills/context meta: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".claude")); err == nil {
+		t.Error(".claude/ created for a provider declaring no skills dir")
+	}
+	if _, err := os.Stat(filepath.Join(wt, "CLAUDE.local.md")); err == nil {
+		t.Error("context file created for a provider declaring no context name")
+	}
+	// The declared exclude entry still lands.
+	path, err := GitExcludePath(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readFile(t, path), "scratch/") {
+		t.Error("declared exclude entry not applied")
+	}
+}
+
+// Even a provider that declares NO exclude entries still fails loud on a
+// non-git dir before writing anything: EnsureExcludes resolves the git dir up
+// front regardless of entry count, preserving the write-nothing-on-bad-dir
+// contract independent of the meta.
+func TestSeedWorkspace_emptyExcludesStillFailsLoudOnMissingGit(t *testing.T) {
+	dir := t.TempDir()
+	meta := provider.SeedMeta{SkillsDir: ".claude/skills", ContextFileName: "CLAUDE.local.md"}
+	if err := New().SeedWorkspace(dir, builtinRepo, meta, Opts{}); err == nil {
+		t.Fatal("SeedWorkspace on a non-git dir with empty ExcludeEntries succeeded; want an error")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude")); err == nil {
+		t.Error(".claude/ created despite the seed failing on a non-git dir")
 	}
 }

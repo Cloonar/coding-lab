@@ -86,14 +86,14 @@ func (s *Service) sync(ctx context.Context) {
 // file of every run no longer active (ADR-0020: a spool for an ended run is
 // garbage; one for an active run survives a lab restart, so the active set is
 // the keep-set — the same principle as the credential runtime GC). Runs against
-// every provider advertising the DialogHooker capability.
+// every provider advertising the LiveSignals capability.
 func (s *Service) sweepSpools(activeIDs map[string]bool) {
 	if s.runtimeDir == "" {
 		return
 	}
 	keep := func(runID string) bool { return activeIDs[runID] }
 	for _, prov := range s.providers.List() {
-		h, ok := prov.(provider.DialogHooker)
+		h, ok := prov.(provider.LiveSignals)
 		if !ok {
 			continue
 		}
@@ -132,7 +132,7 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 	if !ok {
 		return
 	}
-	hooker, _ := prov.(provider.DialogHooker) // nil for a transcript-only provider
+	signals, _ := prov.(provider.LiveSignals) // nil for a transcript-only provider
 	t := time.NewTicker(s.poll)
 	defer t.Stop()
 
@@ -172,8 +172,8 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			}
 		}
 		var sig string
-		if hooker != nil && s.runtimeDir != "" {
-			sig = hooker.SpoolSig(run.ID, s.runtimeDir)
+		if signals != nil && s.runtimeDir != "" {
+			sig = signals.SpoolSig(run.ID, s.runtimeDir)
 		}
 		if first || transcriptChanged || sig != lastSig {
 			if transcriptChanged {

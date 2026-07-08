@@ -334,7 +334,7 @@ func TestRead_spoolDialogForcesQuestion(t *testing.T) {
 	// Code never flushes a pending tool_use) — the spool is the only live source.
 	fake.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
 		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "…"}}})
-	fake.SetPendingDialog(&provider.Dialog{ToolID: "t_spool", DialogKind: "question", Answerable: true,
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t_spool", Kind: provider.DialogKindQuestion, Answerable: true,
 		Options: []provider.DialogOption{{Label: "A"}, {Label: "Other", IsOther: true}}})
 
 	v, err := svc.Read(context.Background(), run)
@@ -448,7 +448,7 @@ func TestSweepSpools_runsPerProvider(t *testing.T) {
 	svc, _, fake, _ := newService(t)
 	svc.sweepSpools(map[string]bool{"run_active": true})
 	if got := fake.Sweeps(); got != 1 {
-		t.Errorf("SweepSpools calls = %d; want 1 (once per DialogHooker provider)", got)
+		t.Errorf("SweepSpools calls = %d; want 1 (once per LiveSignals provider)", got)
 	}
 }
 

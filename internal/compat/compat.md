@@ -6,12 +6,15 @@ document tracks brief §11 (known-fragile couplings 1–4; item 5 —
 provider-owned model/effort catalogs — is solved structurally in
 `internal/provider`, D14) plus the four embedded-chat couplings 5–8 added
 by issue #7 / ADR-0016 (transcript location + JSONL schema, the reply,
-dialog, and interrupt send-keys recipes) and the hook contract §9 added by
+dialog, and interrupt send-keys recipes), the hook contract §9 added by
 issue #17 / ADR-0020 (the PreToolUse/PostToolUse/Notification hook payloads +
-the spool protocol that captures a pending dialog live). The implementation
-of every coupling lives in `internal/provider/claudecode`; the probe tests
-in this package exercise the same code paths against captured fixtures in
-`testdata/`.
+the spool protocol that captures a pending dialog live), and the builtin
+slash-command catalog §10 added by issue #51 (which also live-re-verified §7
+against 2.1.198 on 2026-07-08, generalizing the dialog recipes to
+multi-question forms and plan approval and fixing three live recipe bugs). The
+implementation of every coupling lives in `internal/provider/claudecode`;
+the probe tests in this package exercise the same code paths against
+captured fixtures in `testdata/`.
 
 **M3 live acceptance (2026-07-06, real claude 2.1.198, real registry
 `~/.claude/sessions`).** A single real `--remote-control` instance was
@@ -247,29 +250,46 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   from real 2.1.198 line shapes; re-verify live when an upgrade
   misbehaves).
 - **Non-conversational user text (isMeta + local-command echo)**: two kinds
-  of `user`-role text are UI breadcrumbs, not turns, and are skipped so they
-  neither render as a bubble nor drive conversational state (`isLocalCommandEcho`,
-  alongside the existing `isMeta` skip). (1) `isMeta:true` injected context.
-  (2) A **local slash-command echo** and its output, which carry **no** isMeta
-  flag: a `user` message whose (trimmed) string content begins with
-  `<command-name>` or `<command-message>` — the breadcrumb Claude Code writes
-  when the operator runs a local command (`/clear`, `/rewind`, `/help`, …) — and
-  the command's captured output, `<local-command-stdout>`. Ground truth (live,
-  2.1.198, 2026-07-08): content is a plain string like
+  of `user`-role text are UI breadcrumbs, not turns. (1) `isMeta:true`
+  injected context — dropped entirely. (2) A **local slash-command echo** and
+  its output, which carry **no** isMeta flag: a `user` message whose (trimmed)
+  string content begins with `<command-name>`, `<command-message>`, or
+  `<command-args>` — the breadcrumb Claude Code writes when the operator runs
+  a local command (`/clear`, `/rewind`, `/help`, …) — and the command's
+  captured output, `<local-command-stdout>`. Ground truth (live, 2.1.198,
+  2026-07-08): content is a plain string like
   `"<command-name>/clear</command-name>\n  <command-message>clear</command-message>\n  <command-args></command-args>"`;
-  tag order varies and there is leading whitespace, so the match is a trimmed
-  **prefix**, never an exact string. **Load-bearing for the composer (issue
-  #45):** `/clear`/`/rewind` rotate to a fresh transcript whose only tail is
-  this echo (with no following assistant turn, ever); mapped as an ordinary
-  `user:text` it would derive `working` forever, locking the composer into the
-  pulsing Interrupt with no Send (ADR-0022). Skipping it upstream leaves the
-  fresh transcript with no trailing turn → the idle default. A genuine
-  plain-text reply is unchanged — it still derives `working`, preserving the
-  Send→Interrupt morph. Some commands (`/triage`) *do* invoke the model; the
-  brief window before their first token reads prior-state/idle rather than
-  `working` and self-corrects within one poll — no per-command special-casing.
-  fixture (the echo + output lines in `transcript-2.1.198.jsonl` are dropped;
-  state edges pinned in `chat_test.go`).
+  tag order varies and there is leading whitespace, so classification is a
+  trimmed **prefix** match and extraction is by tag (`commandEcho`), never by
+  position.
+
+  **Rendering (issue #51 decision 2, reversing half of issue #45).** The echo
+  maps to a **visible user text message** carrying the command line — the
+  `<command-name>` body plus the `<command-args>` body when non-empty (e.g.
+  `/clear`, `/foo bar baz`); a sent slash command is real conversational
+  context and renders as plain user text, no schema change. A non-empty
+  (trimmed) `<local-command-stdout>` maps to a follow-up **lifecycle** message
+  with the (truncated) output; an empty one is dropped. An echo with no
+  extractable command name renders nothing (degrades to issue #45's drop).
+  History: issue #45 dropped both lines entirely; only the rendering half is
+  reversed here.
+
+  **State neutrality is load-bearing and UNCHANGED (issue #45, kept by #51):**
+  echoes never touch the state fold (`lastKey`). `/clear`/`/rewind` rotate to
+  a fresh transcript whose only tail is this echo (with no following assistant
+  turn, ever); counted as an ordinary `user:text` it would derive `working`
+  forever, locking the composer into the pulsing Interrupt with no Send
+  (ADR-0022 — the issue #45 stuck-composer root cause). Rendered-but-excluded,
+  the fresh transcript still has no trailing *turn* → the idle default; a tail
+  echo after real turns keeps the pre-echo state. A genuine plain-text reply
+  is unchanged — it still derives `working`, preserving the Send→Interrupt
+  morph. Some commands (`/triage`) *do* invoke the model; the brief window
+  before their first token reads prior-state/idle rather than `working` and
+  self-corrects within one poll — no per-command special-casing. fixture (the
+  echo + output lines in `transcript-2.1.198.jsonl` map to the `/help` text +
+  stdout lifecycle pair, `TestCompat_TranscriptFixture_maps`; the state edges
+  in `TestCompat_TranscriptEcho_stateNeutral` and
+  `claudecode.TestParseTranscript_commandEchoNeverDrivesState`).
 - **Read-through only**: the transcript file is the source of truth; lab
   persists only `runs.transcript_path` (captured async by cwd-match, the
   `deep_link_url` pattern) so ended runs stay readable while claude retains
@@ -286,6 +306,52 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   it from a PreToolUse hook instead. The transcript-scan dialog path (an
   unanswered `tool_use` in §5) stays as a dormant fallback for a future Claude
   Code that flushes pending `tool_use`.
+- **Dialog resolution shapes (`toolUseResult` / `toolDenialKind`) + the 60s
+  afkTimeout — live (2.1.198, 2026-07-08, the issue #51 verification runs;
+  full transcripts in `testdata/transcript-{askuserquestion,exitplanmode,multiselect-timeout}-live-2.1.198.jsonl`,
+  captured on this host in a scratch dir, ids/paths verbatim).** The user
+  event that carries a dialog tool's `tool_result` block also carries
+  top-level resolution ground truth lab's verification backstop reads
+  (`tItem.ToolUseResult`/`ToolDenialKind`, `dialogintent.go`):
+  - **Answered `AskUserQuestion`**: `toolUseResult` is an OBJECT
+    `{"questions":[…input echo…],"answers":{"<question text>":"<label>" |
+    "<l1, l2>"},"annotations":{}}` — multi-select labels comma+space-joined in
+    row order, an Other/free-text answer recorded **verbatim** (live:
+    `"Favorite pet?":"Ferret"`). The `tool_result` content string is the
+    human form (`Your questions have been answered: "<q>"="<label>", …`).
+  - **Declined**: `toolUseResult` is the plain STRING `"User rejected tool
+    use"` with `toolDenialKind:"user-rejected"` and `is_error:true` on the
+    `tool_result` block.
+  - **60s unattended timeout (afkTimeout)**: a picker left undriven resolves
+    ITSELF after 60s — content `"No response after 60s — the user may be away
+    from keyboard. Proceed using your best judgment…"`, `toolUseResult`
+    `{"questions":[…],"answers":{},"annotations":{},"afkTimeoutMs":60000}`,
+    NOT an error (claude proceeds). Consequences: a pending dialog can vanish
+    on its own (the answer-time tool_id re-read already turns a late answer
+    into a 409); the backstop treats `afkTimeoutMs` + a recorded intent as
+    "lab's answer did not land" (warn) — with no intent there is nothing to
+    verify (silent).
+  - **`ExitPlanMode` approved**: `toolUseResult` is an OBJECT
+    `{"plan":"…","isAgent":…,"filePath":"…","planWasEdited":…}`; content
+    starts `"User has approved your plan."`.
+  - **`ExitPlanMode` rejected with feedback**: `toolUseResult` is the STRING
+    `"Error: The user doesn't want to proceed with this tool use. … To tell
+    you how to proceed, the user said:\n<feedback>"` with
+    `toolDenialKind:"user-rejected"` — the typed feedback rides inside the
+    denial string.
+
+  **Post-resolve verification backstop (issue #51 decision 3).** AnswerDialog
+  records the intended answer in-memory (per tool_use_id, bounded at 100,
+  oldest-evicted); `Provider.ReadTranscript` — NOT the pure `ParseTranscript`,
+  which compat fixtures drive — compares the recorded resolution against the
+  intent and emits a lifecycle message with `Error=true` immediately after the
+  tool result on a mismatch (wrong label, a denial lab did not intend, an
+  afkTimeout after lab answered). Matches verify silently and clear the
+  intent; a mismatch warning re-emits deterministically per parse while the
+  intent exists. **Restart caveat (accepted, advisory-only):** intents are
+  in-memory, so after a lab restart the warning disappears from subsequent
+  parses (later seqs shift down one). Pinned by the `TestBackstop_*` tests in
+  `claudecode` and `TestCompat_LiveTranscripts_resolutionShapes`.
 - **Rotation on `/clear` and `/rewind` (the sessionId → transcript file
   rotates; lab follows by effect)**: `/clear` calls `setConversationId(newUUID)`
   → a brand-new `<newSessionId>.jsonl`; the old file is left intact and
@@ -306,7 +372,7 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   the current transcript as stale (§9). `/compact` keeps the **same** sessionId
   and appends to the same file, so it is **unaffected** (issue #34).
 
-## 6. Reply send-keys — fixture (2.1.198 send path)
+## 6. Reply send-keys — live (2.1.198, 2026-07-08)
 
 A mid-session reply is a **bracketed paste** of the text followed by a
 separate `Enter` (`Provider.Reply`, `internal/tmuxx` `PasteText` +
@@ -316,10 +382,18 @@ turn-by-turn — the argv-only stance (§1) covers the *initial* prompt only;
 mid-session replies are exempt (issue #7 decision 4). A mid-turn agent
 queues the reply in its own TUI. Control characters other than tab/newline
 are rejected before the paste (`validateReply`) so a stray escape cannot
-break out of the composer. fixture — the send mechanism is exercised
-hermetically (`internal/tmuxx/integration_test.go`, real tmux private
-socket); the claude-side "queue while mid-turn" behavior is re-verified
-live on upgrades.
+break out of the composer. The send mechanism is exercised hermetically
+(`internal/tmuxx/integration_test.go`, real tmux private socket); the
+claude-side "queue while mid-turn" behavior is re-verified live on upgrades.
+
+**Paste→Enter pacing (LIVE 2026-07-08, 2.1.198):** the submitting `Enter` is
+paced by the same `keyDelay` gap as the dialog recipes (§7). An `Enter` sent
+in the same instant as a **multi-line** paste races the composer's paste
+processing and is dropped — observed end to end: a ~600-char 7-line paste
+with an immediate `Enter` sat unsubmitted in the composer indefinitely, while
+the same paste with a settling gap submits reliably (found by
+`TestCompat_Live_askUserQuestionRecipe`; short replies never hit the window
+because it scales with paste size).
 
 **UI surfacing (ADR-0022):** this Reply path is **retained at the backend**
 but is **no longer surfaced in the UI mid-turn** — while the agent is working
@@ -327,64 +401,186 @@ the chat composer shows a one-tap Interrupt in place of Send, so a reply can
 only be sent once the agent returns to idle/needs_input. The send-keys recipe
 above is unchanged; it is simply unreachable from the SPA during a turn.
 
-## 7. Dialog keystroke recipes — fixture (2.1.198)
+## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08)
 
-An interactive dialog is an **unanswered** `tool_use` in the transcript for
-a recognised tool. Option buttons are built **only** from the structured
-tool input — never scraped from the TUI widget (issue #7 decision 5):
+An interactive dialog is an **unanswered** `tool_use` in the transcript (or,
+live, the §9 spool — one mapper, two sources) for a recognised tool. Option
+buttons are built from the structured tool input plus **write-side pinned
+constants** for rows the TUI synthesizes (issue #51 decision 3): the
+free-text row and the whole plan picker are pinned like the keystroke
+recipes themselves — the never-scrape rule is untouched, nothing reads the
+pane. Every row model and key semantics below was **driven live on 2.1.198
+on 2026-07-08** (the ADR-0020 process, real tmux, lab's spawn shape for the
+plan run); that session found **three live bugs in the previously shipped
+recipes** (the wrapping normalize-climb, the type-first Other row, and the
+multi-select Submit row — the reply paste-race in §6 was a fourth defect that
+same session found), all fixed and pinned below. Recipe snapshots:
+`TestCompat_DialogKeystrokes*`; the `Up/Down/Space/Enter` key names are
+standard tmux `send-keys` arguments.
 
-- **`AskUserQuestion`**: a single question renders its `options` as tappable
-  buttons plus a synthesized free-text **Other** row (the tool always
-  offers Other). The answer recipe (`DialogKeystrokes`, played by
-  `Provider.AnswerDialog`): normalise the cursor to the top option, `Down` ×
-  chosen-index, `Enter`. Multi-select (`multiSelect:true`) toggles each chosen
-  option with `Space` then confirms with `Enter`. **Other** selects the row,
-  pastes the free text, `Enter`. A **multi-question** `AskUserQuestion` is not
-  answerable through a single-picker recipe → degrades to the deep-link hint.
-  - **Picker geometry (re-verified live, 2.1.198, 2026-07-07).** The picker has
-    **two** synthesized trailing rows below the tool's options: "Type
-    something." (the **Other** row, modelled in `d.Options`) **and** "Chat about
-    this" (**not** modelled), which sits *below* Other:
+**Universal recipe rules.**
 
-    ```
-    ❯ 1. Option A / 2. Option B / 3. Option C
-      4. Type something.     ← the "Other" free-text row (modeled)
-      5. Chat about this     ← NOT modeled; sits below Other
-    Enter to select · ↑/↓ to navigate · Esc to cancel
-    ```
+- **No normalize-to-top climb — downward-only walk (LIVE BUG FIXED,
+  2026-07-08)**: the recipes navigate purely DOWN from the picker's top row.
+  The first cut (and the pre-#51 single-select recipe) opened every picker
+  with an `Up × N` climb to "normalise the cursor to the top", assuming Up
+  **clamps**. Driving the real pickers disproved both halves: **(1) Up
+  WRAPS** — one Up from the top option jumps to the LAST option, and on the
+  review screen from "Submit answers" to "Cancel", so a climb lands on the
+  wrong row (and on the review screen would silently **cancel the whole
+  form**); **(2)** every freshly-presented picker already starts on row 0,
+  and lab always answers a fresh picker in one `AnswerDialog` shot, so there
+  is nothing to normalise. No climb, no per-shape trailing-synth-row
+  constants. If a future version stops opening at the top, the §5 backstop
+  catches the mismatch.
+- **Inter-keystroke pacing (live, 2026-07-07/-08)**: `Provider.AnswerDialog`
+  sleeps `keyDelay` (`defaultDialogKeyDelay` = 250ms) between ops, and
+  `Provider.Reply` sleeps the same gap between the paste and the submitting
+  `Enter` (§6). Unpaced, the committing `Enter` intermittently raced ahead of
+  the `Down` navigation over the remote-control bridge and selected the wrong
+  row; 0ms was flaky, 150ms+ reliable. Re-verify on upgrades.
+- **Answer validation is strict at the door** (issue #51): a misencoded
+  answer returns `provider.ErrInvalidReply` (400) or
+  `ErrDialogNotAnswerable` (409) before any key plays — blind keystrokes
+  built from a misread answer are exactly the desync the §5 backstop exists
+  to catch, and failing fast beats warning after. (This also tightened the
+  pre-#51 flat path: stray `other_text` on a non-free-text row is now
+  rejected instead of silently dropped.)
 
-    Down-navigation to a listed option or Other is unaffected (both sit above
-    "Chat about this"), but the normalise-to-top climb was one row short of the
-    true picker height. It is now `Up × (len(d.Options) − 1 +
-    pickerTrailingSynthRows)` (`pickerTrailingSynthRows` = 1, the "Chat about
-    this" row). Over-climbing is safe — the picker **clamps** at the top row (the
-    same clamp the pre-existing normalise relied on). When a Claude Code upgrade
-    adds/removes a trailing synth row, bump the constant. live.
-- **`ExitPlanMode`** (plan approval): the plan text is shown, but the
-  approve/reject choices are **TUI-owned** (not in the tool input), so per
-  the never-scrape rule answering degrades to the "open in claude.ai"
-  deep-link hint. It is a pending dialog, so the composer is locked (issue #17
-  dec 5 — stray free text must not land in the focused plan picker); the
-  operator approves in claude.ai or interrupts (Escape). Revisit when the
-  plan-approval option widget is captured live. (ADR-0016 originally described a
-  free-text reply working here; issue #17's uniform composer-lock supersedes it.)
-- **Unknown** interactive tools degrade to the deep-link hint. Answers the
-  operator gives in claude.ai flow back through the transcript — no
-  divergence handling is needed.
+**Single-select `AskUserQuestion` picker** (whether flat or one question of a
+multi-question form). Row model (live):
 
-Recipe snapshot: `TestCompat_DialogKeystrokes`. The `Up/Down/Space/Enter`
-key names are standard tmux `send-keys` arguments.
+```
+☐ Pet                      ← header chip tab bar
+Favorite pet?
+❯ 1. Dog                   (description on the next line)
+  2. Cat
+  3. Type something.       ← free-text row, ALWAYS present (modeled as "Other", IsOther)
+──────────────
+  4. Chat about this       ← trailing synth row, NOT modeled
+```
 
-- **Inter-keystroke pacing (live-verified, 2.1.198, 2026-07-07).** The recipe's
-  ops MUST be paced — `Provider.AnswerDialog` sleeps `keyDelay`
-  (`defaultDialogKeyDelay` = 250ms) between each op. Driving the picker
-  back-to-back with no gap over the remote-control bridge **intermittently**
-  raced the committing `Enter` ahead of the `Down` navigation and selected the
-  wrong row (index 0 instead of the intended one). Observed live: 0ms was flaky
-  (wrong option on some trials), 150ms+ reliable across trials. This is the
-  brief's "robustify the recipe" — the answer path never drove a real picker
-  before issue #17. When an upgrade changes picker responsiveness, re-verify the
-  delay is still sufficient. live.
+- lab models the listed options **plus** the free-text row in `Options`; its
+  stable label is **"Other"** while the 2.1.198 TUI renders **"Type
+  something."** — a deliberate, documented divergence: the label is lab UI
+  vocabulary, and the recipe navigates by **index**, so only the row's
+  existence/position couple to claude.
+- Recipe: `[Down×idx][Enter]` (no climb — see the universal rules). `Enter`
+  on an option row selects it and resolves a single-question single-select
+  form immediately (**no review step**).
+- **Other/free-text rows — LIVE BUG FIXED (2026-07-08)**: the correct recipe
+  is `[Down×idx][PasteText][Enter]` — **type first**. The text fills
+  the row inline ("3. Ferret"), then `Enter` submits; the recorded answer is
+  the text verbatim. The previously shipped `[…][Enter][PasteText][Enter]`
+  was wrong on 2.1.198: **`Enter` on the empty "Type something." row DECLINES
+  the whole dialog** (recorded `toolUseResult:"User rejected tool use"`,
+  `toolDenialKind:"user-rejected"`). The same type-first path drives the plan
+  feedback row.
+
+**Multi-select picker** (`multiSelect:true`, flat or in a form) — the tab bar
+gains a "✔ Submit" tab. Row model (live):
+
+```
+Which toppings?
+❯ 1. [ ] Olives
+  2. [ ] Onions
+  3. [ ] Type something    ← toggleable checkbox too (lab rejects Other-in-multi)
+     Submit                ← UNNUMBERED, navigable row BELOW "Type something"
+──────────────
+  4. Chat about this
+```
+
+- Navigation row order: options… (incl. the free-text row), Submit, Chat
+  about this. The Submit row's 0-based navigation index = len(modeled rows),
+  so the commit walks `Down × (len(modeled rows) − last-selected)` onto it.
+- Recipe: `[Down-walk toggling each selected row with Space][Down onto
+  Submit][Enter]`, then the review step (below). Selected indices are
+  validated (in-range, no duplicates, ascending walk) and the free-text row
+  is **not** toggleable through lab (`normSelected` — Space on it is an
+  uncaptured TUI path).
+- **LIVE BUG FIXED (2026-07-08)**: the previously shipped recipe confirmed
+  with a bare `Enter` after the Space walk — but **`Enter` on an option row
+  TOGGLES exactly like Space** (observed: it flipped the last selection OFF,
+  Cherry `[✔]`→`[ ]`) and never commits. Commit = navigate onto the Submit
+  row, `Enter` there.
+
+**Multi-question forms (N ≥ 2)** — tab bar `←  ☐ Q1hdr  ☐ Q2hdr  ✔ Submit  →`
+(headers render as chips, ☐ → ☒ as answered). Mapped to `Dialog{Kind:
+question, Prompt: "<N> questions", Questions: […]}` with per-question
+options (+ the Other row each) — answerable since issue #51 (previously a
+render-degraded deep-link hint). Sequencing (live): questions present one
+picker at a time; **committing a question auto-advances** to the next
+picker, so the recipe is simply the per-question recipes concatenated in
+question order — no transition keys (keyDelay pacing still applies) — then
+the review step. Answers are **positional** (`answers[i]` answers
+`Questions[i]`; `POST /runs/{id}/answer` carries them in `answers`).
+
+**Review step** — present iff the form carries the "✔ Submit" tab: **N ≥ 2
+questions, or a single multiSelect question**. (Live-driven for N=2 and for
+the single multiSelect case; a multi-question form of ONLY single-select
+questions was not separately driven — its review step is derived from the
+tab model, flagged honestly here, and the §5 backstop catches drift.) Screen
+(live):
+
+```
+Review your answers
+ ● Which color do you prefer?  → Red
+Ready to submit your answers?
+❯ 1. Submit answers
+  2. Cancel
+```
+
+Two rows, cursor **defaults to "Submit answers"** (row 0); recipe: `[Enter]`
+(a bare commit — no climb). **LIVE BUG FIXED (2026-07-08)**: the first cut
+sent `[Up][Enter]` to "normalise", but **Up WRAPS** from "Submit answers" to
+"Cancel", so `[Up][Enter]` silently **cancelled the whole form** (discarding
+every answer; the model then re-asked). Enter alone commits.
+
+**`ExitPlanMode` (plan approval)** — answerable since issue #51 (previously
+plan text + deep-link hint; ADR-0016's free-text-reply description and issue
+#17's lock-only stance are both superseded). `Kind=plan`, Prompt = the
+(truncated) plan markdown, Options = **four rows pinned 1:1 by INDEX** with
+the live picker:
+
+```
+Claude has written up a plan and is ready to execute. Would you like to proceed?
+❯ 1. Yes, and use auto mode          / Yes, auto-accept edits   (row 0 TUI text VARIES)
+  2. Yes, manually approve edits
+  3. No, refine with Ultraplan on Claude Code on the web
+  4. Tell Claude what to change        ← free-text feedback row (IsOther)
+```
+
+- **Labels are lab's, not the TUI's**: the `DialogOption` labels lab surfaces
+  are its OWN operator-facing wording — `Approve — auto-accept edits`,
+  `Approve — review each edit`, `Reject — refine the plan`, `Reject with
+  feedback` — NOT a mirror of the TUI text. Two live runs on 2026-07-08 under
+  the **same** spawn flag showed **row 0's TUI label vary with session state**
+  ("Yes, and use auto mode" → "Yes, auto-accept edits"; the bundle builds the
+  set from the permission mode + auto-mode state — option values
+  `yes-accept-edits[-keep-context]`, `yes-auto-clear-context`,
+  `yes-resume-auto-mode`, `no`, …). Mirroring that drifting text would desync
+  the SPA's rendered buttons run to run; the recipe couples only to the
+  **index**, and the stable semantic is what matters: **rows 0–1 approve,
+  rows 2–3 reject**, row 3 the free-text feedback row. The §5 backstop
+  (approve-vs-denial, never label) catches a genuine index-order change.
+- **No review screen** — Enter on the chosen row resolves the plan directly.
+- Recipe: `[Down×idx][Enter]` (no climb); row 3 takes the type-first free-text
+  path (`[Down×3][PasteText][Enter]`) and rejects the plan with the typed
+  feedback. Rows 0–1 approve, rows 2–3 reject; the row shape was
+  identical on a revised-plan picker (stable across re-presentations).
+- Recorded outcomes (§5): approved → content "User has approved your plan…",
+  `toolUseResult` object; rejected via row 4 → the denial string with the
+  feedback after "the user said:\n".
+
+**Timeout**: any of these pickers left unanswered resolves ITSELF after 60s
+(§5 afkTimeout) — an answer sent after that 409s on the tool_id re-read, and
+the §5 backstop warns if lab's keys were sent but the timeout landed.
+
+**Unknown** interactive tools (and question shapes lab cannot render from
+the input, e.g. a question with no listed options) degrade to
+`Answerable=false` + the deep-link hint; the composer stays locked while
+they pend (issue #17 dec 5). Answers the operator gives in claude.ai flow
+back through the transcript — no divergence handling is needed.
 
 ## 8. Interrupt keystroke — fixture (2.1.198)
 
@@ -497,6 +693,87 @@ When a Claude Code upgrade breaks live dialog capture, re-verify: the settings
 and that `--settings` still merges additively — then update the port, the
 fixtures, the tests, and this section in one commit.
 
+## 10. Builtin slash-command catalog — bundle extraction (2.1.198, 2026-07-08)
+
+The command catalog (issue #51 decision 5; `claudecode/commands.go`, served
+as `GET /api/v1/runs/{id}/commands`) merges a **pinned builtin table** with
+worktree scans. The builtin rows were extracted from the shipped 2.1.198
+binary's embedded JS — strings dump via `tr -c '[:print:]' '\n' <
+.claude-wrapped`, then matching the `{type:"local|local-jsx|prompt",
+name:"…",description:"…",argumentHint:"…",aliases:[…]}` command definitions —
+descriptions and argHints **verbatim**, primary names only. Pinned by
+`TestCompat_BuiltinCommands_pinned` (clear's exact row + the chat-safe set).
+
+Curation rule: **ChatSafe=true** iff the command executes inline and returns
+to the prompt; **false** for anything that opens an interactive
+picker/editor/UI lab cannot see (never-scrape: lab could neither render nor
+answer it) or that fights lab's own management of the session. The provider
+returns ALL rows with honest flags; the API layer filters.
+
+Chat-safe rows (served to the composer), in pinned order:
+
+| command | argHint | notes |
+| --- | --- | --- |
+| `clear` | `[name]` | **Role=clear** (the "New conversation" binding, decision 2). Aliases `reset`,`new` (aliases are documented here, never served). |
+| `compact` | `<optional custom summarization instructions>` | |
+| `context` | `[all]` | interactive-TUI variant ("colored grid"); a thin-client variant with different text exists, gated off in lab's spawn shape |
+| `usage` | | aliases `cost`,`stats` |
+| `status` | | prints the status panel inline |
+| `export` | `[filename]` | |
+| `release-notes` | | |
+| `init` | | description getter is env-dependent (`CLAUDE_CODE_NEW_INIT` alt text); pinned to the default branch |
+| `review` | `[pr number]` | type `prompt` — runs as a model turn |
+| `security-review` | | type `prompt` |
+
+Curated out (ChatSafe=false, served to the API but filtered from chat), with
+the per-row reason:
+
+| command | reason excluded |
+| --- | --- |
+| `add-dir` | interactive UI; would widen the session beyond lab's worktree isolation |
+| `agents` | 2.1.198 ships a removal stub (description literally starts "(removed)"); zero value in chat |
+| `config` | opens the settings panel (aliases `settings`) |
+| `doctor` | interactive diagnostics UI |
+| `exit` | quits the CLI — kills the session lab manages (aliases `quit`; description getter env-dependent, pinned to "Exit the CLI") |
+| `feedback` | interactive submission UI |
+| `hooks` | interactive viewer — and lab injects its own hooks (§9) |
+| `ide` | IDE-integration UI; no IDE exists in a lab session |
+| `install-github-app` | interactive wizard + browser flow |
+| `login` / `logout` | machine-level auth is lab's own surface (§3); an in-TUI flow would fight it |
+| `mcp` | interactive manager |
+| `memory` | opens $EDITOR in the TUI |
+| `model` | opens the model picker (the stable local-variant text/argHint are pinned; the TUI getter appends "(currently <model>)" dynamically) |
+| `permissions` | interactive rules UI (aliases `allowed-tools`) |
+| `plan` | flips plan mode / opens plan surfaces the chat cannot see |
+| `privacy-settings` | interactive panel |
+| `resume` | session picker; also breaks the run ↔ transcript identity lab tracks (§5 rotation) |
+| `rewind` | interactive rewind UI (aliases `checkpoint`,`undo`; description "Restore the code and/or conversation to a previous point") |
+| `statusline` | terminal-UI setup flow (type `prompt`) targeting user-global settings — pointless and invasive from lab |
+| `terminal-setup` | local-terminal keybinding install; description getter is terminal-dependent, pinned to the default branch |
+| `upgrade` | billing/browser flow |
+| `usage-credits` | billing configuration UI |
+
+Not in the 2.1.198 bundle at all (checked during extraction, not served, kept
+here so the next re-extraction doesn't hunt for them): `output-style`, `vim`,
+`pr-comments`. Also present in the bundle but deliberately NOT pinned:
+internal/hidden/experimental commands (`btw`, `fork`, `radio`, `stickers`,
+`heapdump`, `teleport`, …) — the table pins the operator-relevant surface,
+not the bundle's entire command registry; re-curate on upgrade.
+
+Scanned sources merged after the builtins (both ChatSafe — a custom
+command/skill is a prompt template, claude runs it as a normal turn):
+
+- **project**: `<worktree>/.claude/commands/*.md` (name = basename sans
+  `.md`) and the seeded skills `<worktree>/.claude/skills/*/SKILL.md`, one
+  group sorted alphabetically. Frontmatter keys read: `name`, `description`,
+  `argument-hint`, `user-invocable` — a skill with `user-invocable: false` is
+  hidden (2.1.198 schema, verbatim: "If false, hides the slash command from
+  users; only the model can invoke it via the Skill tool.").
+- **user**: `~/.claude/commands/*.md` (injectable for tests), sorted
+  alphabetically.
+
+Missing dirs are silently empty; only real I/O failures error.
+
 ## Live re-verification
 
 `TestCompat_Live_authStatusParses` runs `claude auth status --json`
@@ -504,6 +781,20 @@ against the installed binary when `LAB_COMPAT_LIVE=1` is set (skipped
 otherwise, so CI stays hermetic). Use it after a Claude Code upgrade:
 
     LAB_COMPAT_LIVE=1 go test ./internal/compat/ -run Live -v
+
+**End-to-end recipe re-verification (issue #51).** `live_recipes_test.go`
+adds `TestCompat_Live_askUserQuestionRecipe` and
+`TestCompat_Live_exitPlanModeApproval` under the same gate: each spawns a
+REAL claude (haiku) in a scratch tmux session, prompts it to raise the
+pinned dialog shape, waits for the picker, plays the answer through the real
+`DialogKeystrokes`/`AnswerDialog` path with production pacing, then reads
+the transcript back and asserts the RECORDED answers (§5 `toolUseResult`)
+match the intent — the same comparison the backstop makes. They exist so the
+next Claude Code upgrade re-verifies the §7 recipes with one command instead
+of a by-hand TUI session; they need tmux + a logged-in claude and take a few
+minutes. (They watch the pane via `capture-pane` to know WHEN the picker is
+up — that is the verification harness observing its own probe, not a
+production scrape; the recipes themselves stay blind.)
 
 When any pin above breaks: update the claudecode port, the fixture, the
 affected tests, and this document in the same commit.

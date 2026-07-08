@@ -395,7 +395,7 @@ func TestStart_repoGitIdentityReachesSpawnEnv(t *testing.T) {
 // failingSeeder drives the lab-side-seeding rollback path.
 type failingSeeder struct{}
 
-func (failingSeeder) SeedWorkspace(string, store.Repo, seeder.Opts) error {
+func (failingSeeder) SeedWorkspace(string, store.Repo, provider.SeedMeta, seeder.Opts) error {
 	return errors.New("skills bundle write failed")
 }
 

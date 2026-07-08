@@ -21,7 +21,7 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage, MessagesResponse, Provider, Run } from '../api';
+import type { ChatMessage, MessagesResponse, Provider, Run, RunCommand } from '../api';
 import App from '../App';
 import { clearQueued, peekQueued, setQueued } from '../lib/queuedMessage';
 import RunChat from './RunChat';
@@ -73,6 +73,7 @@ function baseRun(): Run {
 let runOnServer: Run;
 let messagesOnServer: MessagesResponse;
 let providersOnServer: Provider[];
+let commandsOnServer: RunCommand[];
 let replyPosts: { text: string }[];
 // Reply POST status — 204 by default; a test flips it to 409 to exercise the
 // queued-message auto-send failure path (draft seeding).
@@ -135,6 +136,10 @@ function stubApi(): void {
       }
       if (url.startsWith(`/api/v1/runs/${RUN_ID}/messages`) && method === 'GET') {
         return Promise.resolve(jsonResponse(200, messagesWindow(url)));
+      }
+      // The run's slash-command catalog (issue #51 decision 5).
+      if (url === `/api/v1/runs/${RUN_ID}/commands` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { commands: commandsOnServer }));
       }
       if (url === `/api/v1/runs/${RUN_ID}/reply` && method === 'POST') {
         replyPosts.push(JSON.parse(String(init?.body)) as { text: string });
@@ -238,6 +243,8 @@ beforeEach(() => {
   providersOnServer = [
     {
       id: 'claude-code',
+      display_name: 'Claude Code',
+      auth: { kind: 'oauth-code' },
       models: [],
       efforts: [],
       options: [],
@@ -245,6 +252,30 @@ beforeEach(() => {
         url: 'https://claude.ai/code',
         title: "Opens the claude.ai session picker — the exact deep link wasn't captured",
       },
+    },
+  ];
+  commandsOnServer = [
+    {
+      name: 'clear',
+      description: 'Wipe conversation history and free up context',
+      arg_hint: '',
+      source: 'builtin',
+      role: 'clear',
+      chat_safe: true,
+    },
+    {
+      name: 'compact',
+      description: 'Compact the conversation',
+      arg_hint: 'instructions',
+      source: 'builtin',
+      chat_safe: true,
+    },
+    {
+      name: 'deploy',
+      description: 'Ship it',
+      arg_hint: 'env',
+      source: 'project',
+      chat_safe: true,
     },
   ];
   messagesOnServer = {
@@ -513,7 +544,7 @@ describe('RunChat', () => {
     // needs_input keeps the composer usable (just the input row) and surfaces
     // the waiting status as the last line of the stream, not a composer note (§3).
     expect(container.querySelector('.chat-input')).not.toBeNull();
-    expect(container.textContent).toContain('Claude is waiting for your reply.');
+    expect(container.textContent).toContain('Claude Code is waiting for your reply.');
     expect(container.querySelector('.chat-composer-note')).toBeNull(); // moved into the stream
   });
 
@@ -934,7 +965,16 @@ describe('RunChat', () => {
 
   it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {
     runOnServer = { ...baseRun(), provider: 'codex', deep_link_url: null };
-    providersOnServer = [{ id: 'codex', models: [], efforts: [], options: [] }];
+    providersOnServer = [
+      {
+        id: 'codex',
+        display_name: 'Codex CLI',
+        auth: { kind: 'external' },
+        models: [],
+        efforts: [],
+        options: [],
+      },
+    ];
     await mountChat();
 
     expect(
@@ -1170,7 +1210,7 @@ describe('RunChat', () => {
 
     const stream = container.querySelector('.chat-stream')!;
     const line = stream.querySelector('.chat-needs-input');
-    expect(line?.textContent).toBe('Claude is waiting for your reply.');
+    expect(line?.textContent).toBe('Claude Code is waiting for your reply.');
     // §3: it is the LAST stream child (so it only shows at the bottom).
     expect(stream.lastElementChild).toBe(line);
     // A status line, not a chat bubble, and not the old composer note.
@@ -1190,7 +1230,7 @@ describe('RunChat', () => {
 
     // The line clears and the working hint takes over (reactive on state).
     expect(container.querySelector('.chat-needs-input')).toBeNull();
-    expect(container.textContent).not.toContain('Claude is waiting for your reply.');
+    expect(container.textContent).not.toContain('is waiting for your reply.');
     expect(container.querySelector('.chat-composer-hint')?.textContent).toContain(
       'tap to interrupt',
     );
@@ -1306,8 +1346,8 @@ describe('RunChat', () => {
     expect(pillBtn.classList.contains('hidden')).toBe(false);
     // needs_input content below the fold → emphasized pill with the needs-you copy.
     expect(pillBtn.classList.contains('emphasis')).toBe(true);
-    expect(pillBtn.getAttribute('aria-label')).toBe('Claude is waiting — jump to latest');
-    expect(pillBtn.textContent).toContain('Claude needs you');
+    expect(pillBtn.getAttribute('aria-label')).toBe('Claude Code is waiting — jump to latest');
+    expect(pillBtn.textContent).toContain('Claude Code needs you');
 
     // Tapping smooth-scrolls to the latest (jsdom's scrollTo is a no-op stub, so
     // spy it to prove onJump → jumpToLatest is wired).
@@ -1355,7 +1395,7 @@ describe('RunChat', () => {
     const bubble = container.querySelector('.chat-stream .chat-msg.role-user.pending');
     expect(bubble).not.toBeNull();
     expect(bubble?.textContent).toContain('kick things off');
-    expect(bubble?.textContent).toContain('Sends when Claude is ready');
+    expect(bubble?.textContent).toContain('Sends when Claude Code is ready');
     // It is the LAST stream child — nearest the composer it collapses into.
     expect(container.querySelector('.chat-stream')!.lastElementChild).toBe(bubble);
     // Not sent yet (transcript still locating).
@@ -1396,5 +1436,456 @@ describe('RunChat', () => {
       'seed me back',
     );
     expect(container.querySelector('.chat-msg.pending')).toBeNull();
+  });
+
+  // --- Provider-neutral copy (issue #51 decision 9) ---
+
+  it('drives every agent-naming string from the provider display_name', async () => {
+    providersOnServer[0]!.display_name = 'Agent Zed';
+    withAssistantText('done'); // needs_input
+    await mountChat();
+
+    expect(container.querySelector('.chat-needs-input')?.textContent).toBe(
+      'Agent Zed is waiting for your reply.',
+    );
+    expect(container.textContent).not.toContain('Claude');
+  });
+
+  it('falls back to "the agent" while provider metadata is missing', async () => {
+    providersOnServer = []; // no metadata for the run's provider
+    withAssistantText('done'); // needs_input
+    await mountChat();
+
+    expect(container.querySelector('.chat-needs-input')?.textContent).toBe(
+      'The agent is waiting for your reply.',
+    );
+  });
+
+  it('derives the answer-elsewhere hint from fallback_open in the locked question state', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'thinking…' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    // fallback_open.url is https://claude.ai/code → the hint names its host.
+    expect(container.querySelector('.chat-composer-note')?.textContent).toBe(
+      'Claude Code needs input — open it at claude.ai to respond.',
+    );
+  });
+
+  // --- Multi-question dialogs (issue #51 decision 3) ---
+
+  const multiQuestionDialog = () => ({
+    tool_id: 'toolu_mq',
+    dialog_kind: 'question' as const,
+    prompt: '2 questions',
+    answerable: true,
+    questions: [
+      {
+        header: 'Approach',
+        text: 'Which approach?',
+        options: [
+          { label: 'Revert', description: 'Roll back the change' },
+          { label: 'Patch forward' },
+          { label: 'Other', is_other: true },
+        ],
+      },
+      {
+        header: 'Scope',
+        text: 'Which areas?',
+        multi_select: true,
+        options: [{ label: 'Frontend' }, { label: 'Backend' }, { label: 'Other', is_other: true }],
+      },
+    ],
+  });
+
+  function questionEl(i: number): Element {
+    const el = container.querySelectorAll('.dialog-question')[i];
+    if (!el) throw new Error(`missing .dialog-question[${i}]`);
+    return el;
+  }
+  function questionOption(qi: number, label: string): HTMLButtonElement {
+    const btn = Array.from(
+      questionEl(qi).querySelectorAll<HTMLButtonElement>('button.dialog-option'),
+    ).find((b) => b.querySelector('.dialog-option-label')?.textContent === label);
+    if (!btn) throw new Error(`missing option "${label}" in question ${qi}`);
+    return btn;
+  }
+
+  it('renders a multi-question form and submits all answers atomically via answers[]', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: multiQuestionDialog(),
+    };
+    await mountChat();
+
+    // Composer locked; the two questions render stacked, in order, each with
+    // its header chip + question text; options show label + description.
+    expect(container.querySelector('.chat-composer-row')).toBeNull();
+    const headers = Array.from(container.querySelectorAll('.dialog-question-header')).map(
+      (el) => el.textContent,
+    );
+    expect(headers).toEqual(['Approach', 'Scope']);
+    expect(questionEl(0).textContent).toContain('Which approach?');
+    expect(questionEl(1).textContent).toContain('Which areas?');
+    expect(questionOption(0, 'Revert').querySelector('.dialog-option-desc')?.textContent).toBe(
+      'Roll back the change',
+    );
+
+    // The single-select question keeps its synthesized Other row, but the
+    // multi-select question renders WITHOUT it: the adapter rejects Other in
+    // a multi-select answer (normSelected policy — recipe unverified), so the
+    // form never offers it.
+    const optionLabels = (qi: number) =>
+      Array.from(questionEl(qi).querySelectorAll('.dialog-option-label')).map(
+        (el) => el.textContent,
+      );
+    expect(optionLabels(0)).toEqual(['Revert', 'Patch forward', 'Other']);
+    expect(optionLabels(1)).toEqual(['Frontend', 'Backend']);
+
+    // ONE submit for the whole form, disabled until every question is answered.
+    const submit = () => buttonByText('Submit')!;
+    expect(submit().disabled).toBe(true);
+
+    // Answer question 0 (single select) — still incomplete.
+    questionOption(0, 'Patch forward').click();
+    await settle();
+    expect(questionOption(0, 'Patch forward').getAttribute('aria-pressed')).toBe('true');
+    expect(submit().disabled).toBe(true);
+
+    // Question 1 is multi-select: toggle two options.
+    questionOption(1, 'Frontend').click();
+    questionOption(1, 'Backend').click();
+    await settle();
+    expect(submit().disabled).toBe(false);
+
+    // Multi-select toggles OFF again too.
+    questionOption(1, 'Backend').click();
+    await settle();
+    expect(questionOption(1, 'Backend').getAttribute('aria-pressed')).toBe('false');
+    questionOption(1, 'Backend').click();
+    await settle();
+
+    submit().click();
+    await settle();
+
+    // One atomic POST, positionally aligned with the questions (no question
+    // index on the wire): a single-select answer is `index` = the chosen
+    // OPTION index (never `selected`); a multi-select answer is `selected` =
+    // the toggled option indices ascending (no `index`). No flat fields.
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_mq',
+      answers: [{ index: 1 }, { selected: [0, 1] }],
+    });
+  });
+
+  it('requires non-empty Other text for a single-select Other pick too', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: multiQuestionDialog(),
+    };
+    await mountChat();
+
+    // Pick Other in question 0 and answer question 1 fully.
+    questionOption(0, 'Other').click();
+    questionOption(1, 'Frontend').click();
+    await settle();
+    expect(buttonByText('Submit')!.disabled).toBe(true); // Other text missing
+
+    const other = questionEl(0).querySelector('.dialog-other-input') as HTMLInputElement;
+    other.value = 'ship a hotfix';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+
+    buttonByText('Submit')!.click();
+    await settle();
+    // Single-select Other = index of the is_other row + the free text; the
+    // multi-select answer stays selected-only.
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_mq',
+      answers: [{ index: 2, other_text: 'ship a hotfix' }, { selected: [0] }],
+    });
+  });
+
+  // --- Plan approval + generic approval kind (issue #51 decision 3) ---
+
+  it('renders a plan dialog as markdown with real approve/reject buttons answering flat', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'planned' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_plan',
+        dialog_kind: 'plan',
+        prompt: '# The plan\n\nDo **bold** things',
+        answerable: true,
+        options: [
+          { label: 'Approve', description: 'Start implementing' },
+          { label: 'Keep planning', description: 'Send feedback instead' },
+        ],
+      },
+    };
+    await mountChat();
+
+    // The prompt IS the plan body — rendered markdown, not raw markup.
+    const plan = container.querySelector('.chat-dialog-plan');
+    expect(plan).not.toBeNull();
+    expect(plan?.querySelector('.md-h')?.textContent).toBe('The plan');
+    expect(plan?.querySelector('strong')?.textContent).toBe('bold');
+    expect(plan?.textContent).not.toContain('# The plan');
+
+    // Real option buttons with label + description; answering stays the flat
+    // single-select shape (no answers[]).
+    const approve = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button.dialog-option'),
+    ).find((b) => b.querySelector('.dialog-option-label')?.textContent === 'Approve');
+    expect(approve?.querySelector('.dialog-option-desc')?.textContent).toBe('Start implementing');
+    approve!.click();
+    await settle();
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toEqual({ tool_id: 'toolu_plan', index: 0 });
+  });
+
+  it('renders the approval kind like a single-question dialog', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'may I?' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_ok',
+        dialog_kind: 'approval',
+        prompt: 'Allow the tool call?',
+        answerable: true,
+        options: [{ label: 'Allow' }, { label: 'Deny' }],
+      },
+    };
+    await mountChat();
+
+    expect(container.textContent).toContain('Allow the tool call?');
+    buttonByText('Deny')!.click();
+    await settle();
+    expect(answerPosts[0]).toEqual({ tool_id: 'toolu_ok', index: 1 });
+  });
+
+  it('keeps the degraded note for a not-answerable dialog, hinting the provider surface', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'stuck' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_odd',
+        dialog_kind: 'question',
+        prompt: 'A shape lab cannot drive',
+        answerable: false,
+      },
+    };
+    await mountChat();
+
+    expect(container.querySelector('.chat-composer-note')?.textContent).toBe(
+      "This dialog can't be answered here — open it at claude.ai to respond.",
+    );
+    expect(container.querySelector('button.dialog-option')).toBeNull();
+  });
+
+  // --- Slash-command autocomplete (issue #51 decision 5) ---
+
+  function setComposerText(value: string): void {
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  function composerKey(key: string, init: KeyboardEventInit = {}): void {
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }));
+  }
+  function popRows(): HTMLButtonElement[] {
+    return Array.from(container.querySelectorAll<HTMLButtonElement>('.chat-cmd-row'));
+  }
+
+  it('opens the command popover only for a leading slash and filters across name/desc/hint', async () => {
+    await mountChat();
+
+    // A mid-message slash never triggers it (prefix-only).
+    setComposerText('deploy a/b please');
+    await settle();
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+
+    // A leading slash lists the whole catalog with name, hint, description
+    // and source badge.
+    setComposerText('/');
+    await settle();
+    const rows = popRows();
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.querySelector('.chat-cmd-name')?.textContent).toBe('/clear');
+    expect(rows[1]?.querySelector('.chat-cmd-hint')?.textContent).toBe('instructions');
+    expect(rows[2]?.querySelector('.chat-cmd-desc')?.textContent).toBe('Ship it');
+    expect(rows[2]?.querySelector('.chat-cmd-source')?.textContent).toBe('project');
+
+    // Filtering matches the name…
+    setComposerText('/cle');
+    await settle();
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toEqual([
+      '/clear',
+    ]);
+
+    // …the description, and the arg hint.
+    setComposerText('/ship');
+    await settle();
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toEqual([
+      '/deploy',
+    ]);
+    setComposerText('/env');
+    await settle();
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toEqual([
+      '/deploy',
+    ]);
+
+    // No match → closed.
+    setComposerText('/nosuch');
+    await settle();
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+  });
+
+  it('cycles with arrows, accepts with Enter (inserting "/name "), closes on Escape', async () => {
+    await mountChat();
+    setComposerText('/');
+    await settle();
+
+    // Down moves the active row; the listbox exposes it via aria-selected.
+    composerKey('ArrowDown');
+    await settle();
+    expect(popRows()[1]?.getAttribute('aria-selected')).toBe('true');
+
+    // Enter accepts the active command — no reply is sent, no newline typed.
+    composerKey('Enter');
+    await settle();
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/compact ');
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+    expect(replyPosts).toHaveLength(0);
+
+    // Typing revives the popover; Escape dismisses it until the next keystroke.
+    setComposerText('/cl');
+    await settle();
+    expect(container.querySelector('.chat-cmd-pop')).not.toBeNull();
+    composerKey('Escape');
+    await settle();
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+
+    // Tab accepts too.
+    setComposerText('/dep');
+    await settle();
+    composerKey('Tab');
+    await settle();
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/deploy ');
+  });
+
+  it('accepts a command on click and sends it through the normal reply path', async () => {
+    await mountChat();
+    setComposerText('/cle');
+    await settle();
+
+    popRows()[0]!.click();
+    await settle();
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/clear ');
+
+    // Sending is the ordinary reply POST — no special casing for commands.
+    buttonByLabel('Send')!.click();
+    await settle();
+    expect(replyPosts).toEqual([{ text: '/clear' }]);
+  });
+
+  // --- New conversation (role=clear, issue #51 decision 2) ---
+
+  it('binds New conversation to the clear-role command behind an inline confirm', async () => {
+    await mountChat(); // default: active run, needs_input, catalog has role=clear
+
+    const newConvo = buttonByText('New conversation');
+    expect(newConvo).not.toBeNull();
+    newConvo!.click();
+    await settle();
+
+    // Inline confirm — nothing sent yet; Cancel disarms.
+    expect(replyPosts).toHaveLength(0);
+    expect(buttonByText('Confirm clear')).not.toBeNull();
+    buttonByText('Cancel')!.click();
+    await settle();
+    expect(buttonByText('Confirm clear')).toBeNull();
+
+    // Confirming sends the command AS A REPLY ("/clear") — the normal path.
+    buttonByText('New conversation')!.click();
+    await settle();
+    buttonByText('Confirm clear')!.click();
+    await settle();
+    expect(replyPosts).toEqual([{ text: '/clear' }]);
+  });
+
+  it('hides New conversation while a dialog locks the composer and on an ended run', async () => {
+    messagesOnServer = {
+      messages: [
+        {
+          seq: 1,
+          kind: 'dialog',
+          dialog: {
+            tool_id: 'toolu_1',
+            dialog_kind: 'question',
+            prompt: 'Which fix?',
+            answerable: true,
+            options: [{ label: 'Revert' }],
+          },
+        },
+      ],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+    expect(buttonByText('New conversation')).toBeNull();
+
+    dispose?.();
+    container.remove();
+    runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
+    messagesOnServer = { ...messagesOnServer, messages: [], state: 'ended', pending_dialog: null };
+    await mountChat();
+    expect(buttonByText('New conversation')).toBeNull();
+  });
+
+  it('offers no New conversation when the catalog has no clear-role command', async () => {
+    commandsOnServer = commandsOnServer.filter((c) => c.role !== 'clear');
+    await mountChat();
+    expect(buttonByText('New conversation')).toBeNull();
+    // The remaining commands still autocomplete.
+    setComposerText('/');
+    await settle();
+    expect(popRows()).toHaveLength(2);
+  });
+
+  it('hides New conversation while the agent is mid-turn (working)', async () => {
+    // A clear bypasses the composer (calls replyRun directly), so it must honor
+    // the same ADR-0022 mid-turn send-block the composer enforces — otherwise
+    // clicking it pastes /clear into the live TUI in the middle of a turn.
+    messagesOnServer = { ...messagesOnServer, state: 'working' };
+    await mountChat();
+    expect(buttonByText('New conversation')).toBeNull();
   });
 });

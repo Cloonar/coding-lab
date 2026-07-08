@@ -1,20 +1,28 @@
 package httpapi
 
-// Embedded-chat endpoints (issue #7 / ADR-0016): read a run's transcript
-// mapped into the universal message schema, and reply / answer a dialog /
-// interrupt back into the live session. Business logic lives in internal/chat
-// (which owns the provider seam); this file translates JSON ⇄ service calls and
-// maps typed errors onto status codes. Intervention is budget/claim/strike
-// neutral — none of these touch a run's outcome.
+// Embedded-chat endpoints (issue #7 / ADR-0016, generalized in issue #51):
+// read a run's transcript mapped into the universal message schema, list the
+// provider's slash-command catalog for the composer's autocomplete, and reply /
+// answer a dialog / interrupt back into the live session:
+//   GET  /api/v1/runs/{id}/messages
+//   GET  /api/v1/runs/{id}/commands
+//   POST /api/v1/runs/{id}/reply
+//   POST /api/v1/runs/{id}/answer
+//   POST /api/v1/runs/{id}/interrupt
+// Business logic lives in internal/chat (which owns the provider seam); this
+// file translates JSON ⇄ service calls and maps typed errors onto status
+// codes. Intervention is budget/claim/strike neutral — none of these touch a
+// run's outcome.
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
-	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
@@ -144,6 +152,102 @@ func windowMessages(all []provider.Message, after, before int64, limit int) ([]p
 	}
 }
 
+// commandsCacheTTL bounds how long a run's slash-command catalog is memoized
+// (issue #51 decision 5). The provider's Commands scans the worktree's
+// project/user command directories — too costly to re-run on every
+// autocomplete keystroke — so a successful result is cached per run for this
+// window; short enough that a freshly-added project command surfaces promptly.
+const commandsCacheTTL = 30 * time.Second
+
+// commandsCacheEntry is one memoized Commands result with the wall-clock time
+// it was computed (the TTL anchor). Only the served (chat-safe) slice is
+// cached, and only on success — a scan error is never memoized, so a transient
+// failure stays retryable.
+type commandsCacheEntry struct {
+	commands []provider.CommandSpec
+	at       time.Time
+}
+
+type commandsResponse struct {
+	Commands []provider.CommandSpec `json:"commands"`
+}
+
+// handleRunCommands is GET /api/v1/runs/{id}/commands — the composer's
+// slash-command autocomplete source (issue #51 decision 5). Worktree-dependent
+// (project/user commands are discovered relative to the run's worktree), hence
+// served per run; any run outcome may ask, since an ended run still
+// autocompletes its history's commands. Only ChatSafe entries reach the client:
+// a command that would strand the TUI in a picker lab cannot see ships
+// ChatSafe=false and is curated out by the adapter. The chat-safe slice is
+// cached per run for commandsCacheTTL (Commands is a filesystem scan); a scan
+// error is a 500 and is never cached.
+func (s *Server) handleRunCommands(w http.ResponseWriter, r *http.Request) {
+	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeRunError(w, "listing commands", err)
+		return
+	}
+	if cmds, ok := s.cachedCommands(run.ID); ok {
+		writeJSON(w, http.StatusOK, commandsResponse{Commands: cmds})
+		return
+	}
+	prov, ok := s.providerForRun(w, run)
+	if !ok {
+		return
+	}
+	all, err := prov.Commands(r.Context(), run.WorktreePath)
+	if err != nil {
+		s.internalError(w, "listing commands", err)
+		return
+	}
+	// Serve only chat-safe entries; always a non-null array, even when none
+	// survive curation (the SPA renders "no commands", never a null crash).
+	cmds := make([]provider.CommandSpec, 0, len(all))
+	for _, c := range all {
+		if c.ChatSafe {
+			cmds = append(cmds, c)
+		}
+	}
+	s.storeCommands(run.ID, cmds)
+	writeJSON(w, http.StatusOK, commandsResponse{Commands: cmds})
+}
+
+// cachedCommands returns a run's memoized chat-safe command catalog when the
+// entry is still within commandsCacheTTL, keyed by run id.
+func (s *Server) cachedCommands(runID string) ([]provider.CommandSpec, bool) {
+	s.commandsMu.Lock()
+	defer s.commandsMu.Unlock()
+	e, ok := s.commandsCache[runID]
+	if !ok || s.now().Sub(e.at) >= commandsCacheTTL {
+		return nil, false
+	}
+	return e.commands, true
+}
+
+// storeCommands memoizes a run's chat-safe command catalog under the TTL clock.
+func (s *Server) storeCommands(runID string, cmds []provider.CommandSpec) {
+	s.commandsMu.Lock()
+	defer s.commandsMu.Unlock()
+	s.commandsCache[runID] = commandsCacheEntry{commands: cmds, at: s.now()}
+}
+
+// providerForRun resolves the AgentProvider that ran run from the registry
+// (issue #51 decision 5/7). An existing run always names a registered provider,
+// so a miss (or an unwired registry) is a server-side inconsistency answered
+// with a 500 — distinct from the unknown-RUN 404 the caller already handled.
+func (s *Server) providerForRun(w http.ResponseWriter, run store.Run) (provider.AgentProvider, bool) {
+	if s.providers == nil {
+		s.internalError(w, "resolving run provider", fmt.Errorf("provider registry not configured"))
+		return nil, false
+	}
+	prov, ok := s.providers.Get(run.Provider)
+	if !ok {
+		s.internalError(w, "resolving run provider", fmt.Errorf("run %s: unknown provider %q", run.ID, run.Provider))
+		return nil, false
+	}
+	return prov, true
+}
+
 type replyRequest struct {
 	Text string `json:"text"`
 }
@@ -172,12 +276,29 @@ type answerRequest struct {
 	Index     int    `json:"index"`
 	Selected  []int  `json:"selected"`
 	OtherText string `json:"other_text"`
+	// Answers carries one entry per question of a MULTI-question dialog (issue
+	// #51 decision 3), all collected in one submit. Both the flat fields and
+	// Answers are threaded through to the provider unchanged — when Answers is
+	// non-empty it wins, but the seam (not this layer) decides that, so the
+	// flat shape keeps working for single-question dialogs with zero churn.
+	Answers []answerQuestion `json:"answers"`
+}
+
+// answerQuestion is one question's answer within a multi-question submit: the
+// single-select Index into that question's options, the multi-select Selected
+// toggles, and OtherText when the chosen row is the free-text "Other".
+type answerQuestion struct {
+	Index     int    `json:"index"`
+	Selected  []int  `json:"selected"`
+	OtherText string `json:"other_text"`
 }
 
 // handleRunAnswer is POST /api/v1/runs/{id}/answer — answer the pending dialog.
 // tool_id is required: the service re-reads the live dialog under the session
 // lock and refuses a mismatch, so a stale client never answers a dialog that
-// already moved on.
+// already moved on. The flat fields answer a single-question dialog; answers[]
+// answers a multi-question form (issue #51 decision 3) — both are passed to the
+// provider, which resolves precedence.
 func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -193,6 +314,12 @@ func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	answer := provider.DialogAnswer{Index: req.Index, Selected: req.Selected, OtherText: req.OtherText}
+	if len(req.Answers) > 0 {
+		answer.Answers = make([]provider.QuestionAnswer, len(req.Answers))
+		for i, a := range req.Answers {
+			answer.Answers[i] = provider.QuestionAnswer{Index: a.Index, Selected: a.Selected, OtherText: a.OtherText}
+		}
+	}
 	if err := s.chat.AnswerDialog(r.Context(), run, req.ToolID, answer); err != nil {
 		s.writeChatActionError(w, "answering", err)
 		return
@@ -225,17 +352,19 @@ func (s *Server) writeRunError(w http.ResponseWriter, doing string, err error) {
 }
 
 // writeChatActionError maps reply/answer/interrupt errors onto status codes.
+// The interaction sentinels are provider-generic (issue #51 decision 7) —
+// this file never imports a concrete provider.
 func (s *Server) writeChatActionError(w http.ResponseWriter, doing string, err error) {
 	switch {
 	case errors.Is(err, chat.ErrRunEnded), errors.Is(err, chat.ErrDialogPending),
 		errors.Is(err, chat.ErrNoDialog), errors.Is(err, chat.ErrDialogChanged),
-		errors.Is(err, claudecode.ErrDialogNotAnswerable):
+		errors.Is(err, provider.ErrDialogNotAnswerable):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, tmuxx.ErrSessionNotFound):
 		// The run row says active but the tmux session is gone (killed
 		// externally; the reaper hasn't flipped the outcome yet).
 		writeError(w, http.StatusConflict, "the instance's session is gone; it will be marked ended shortly")
-	case errors.Is(err, claudecode.ErrInvalidReply):
+	case errors.Is(err, provider.ErrInvalidReply):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		s.internalError(w, doing, err)

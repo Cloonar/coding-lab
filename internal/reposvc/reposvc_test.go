@@ -19,6 +19,8 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
@@ -54,6 +56,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("vault.New: %v", err)
 	}
 	reposDir := filepath.Join(stateDir, "repos")
+	// A registry with the claude-code fake (its SeedMeta mirrors the real
+	// provider's) so the incogni hook resolves patterns off repos.provider,
+	// the production path (issue #51 decision 8).
+	providerReg, err := provider.NewRegistry(providertest.New())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
 	svc, err := New(Options{
 		Store:        st,
 		Vault:        v,
@@ -63,6 +72,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		Logger:       logx.New(io.Discard),
 		ReposDir:     reposDir,
 		GitEnv:       testutil.HermeticGitEnv(home),
+		Providers:    providerReg,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

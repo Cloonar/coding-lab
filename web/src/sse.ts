@@ -20,7 +20,7 @@ export const EVENT_TYPES = [
   'run.changed',
   'parked.changed',
   'clone.progress',
-  'claude.auth.changed',
+  'provider.auth.changed',
   'issue.changed',
   'cr.changed',
   'run.messages.changed',

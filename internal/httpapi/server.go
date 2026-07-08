@@ -163,6 +163,14 @@ type Server struct {
 
 	setupMu sync.Mutex
 
+	// commandsCache memoizes GET /runs/{id}/commands per run for
+	// commandsCacheTTL (issue #51 decision 5): the provider's Commands scans
+	// the worktree's project/user command directories, far too costly to
+	// re-run on every autocomplete keystroke. Keyed by run id; errors are never
+	// cached, so a transient scan failure stays retryable.
+	commandsMu    sync.Mutex
+	commandsCache map[string]commandsCacheEntry
+
 	proxyLoggedMu sync.Mutex
 	proxyLogged   map[string]struct{}
 }
@@ -197,34 +205,35 @@ func New(o Options) (*Server, error) {
 	}
 
 	s := &Server{
-		store:       o.Store,
-		bus:         o.Bus,
-		log:         logger,
-		metrics:     m,
-		vault:       o.Vault,
-		repos:       o.Repos,
-		instances:   o.Instances,
-		reconcile:   o.Reconcile,
-		chat:        o.Chat,
-		providers:   o.Providers,
-		tracker:     o.Tracker,
-		afk:         o.AFK,
-		git:         o.Git,
-		mat:         o.Materializer,
-		reposDir:    o.ReposDir,
-		gitEnv:      o.GitEnv,
-		crmerge:     o.CRMerge,
-		proxyAuth:   o.ProxyAuth,
-		proxyHeader: o.ProxyAuthHeader,
-		trusted:     o.TrustedProxies,
-		agent:       o.AgentHandler,
-		ui:          ui,
-		heartbeat:   heartbeat,
-		now:         now,
-		limiter:     newLoginLimiter(loginLimiterEntries),
-		argon:       defaultArgonParams,
-		argonSem:    make(chan struct{}, argonConcurrency),
-		proxyLogged: make(map[string]struct{}),
+		store:         o.Store,
+		bus:           o.Bus,
+		log:           logger,
+		metrics:       m,
+		vault:         o.Vault,
+		repos:         o.Repos,
+		instances:     o.Instances,
+		reconcile:     o.Reconcile,
+		chat:          o.Chat,
+		providers:     o.Providers,
+		tracker:       o.Tracker,
+		afk:           o.AFK,
+		git:           o.Git,
+		mat:           o.Materializer,
+		reposDir:      o.ReposDir,
+		gitEnv:        o.GitEnv,
+		crmerge:       o.CRMerge,
+		proxyAuth:     o.ProxyAuth,
+		proxyHeader:   o.ProxyAuthHeader,
+		trusted:       o.TrustedProxies,
+		agent:         o.AgentHandler,
+		ui:            ui,
+		heartbeat:     heartbeat,
+		now:           now,
+		limiter:       newLoginLimiter(loginLimiterEntries),
+		argon:         defaultArgonParams,
+		argonSem:      make(chan struct{}, argonConcurrency),
+		proxyLogged:   make(map[string]struct{}),
+		commandsCache: make(map[string]commandsCacheEntry),
 	}
 	s.shutdownCtx, s.shutdownCancel = context.WithCancel(context.Background())
 
@@ -296,6 +305,7 @@ func (s *Server) Handler() http.Handler {
 	// chat brain.
 	if s.chat != nil {
 		api.HandleFunc("GET /api/v1/runs/{id}/messages", s.requireAuth(s.handleRunMessages))
+		api.HandleFunc("GET /api/v1/runs/{id}/commands", s.requireAuth(s.handleRunCommands))
 		api.HandleFunc("POST /api/v1/runs/{id}/reply", s.requireAuth(s.handleRunReply))
 		api.HandleFunc("POST /api/v1/runs/{id}/answer", s.requireAuth(s.handleRunAnswer))
 		api.HandleFunc("POST /api/v1/runs/{id}/interrupt", s.requireAuth(s.handleRunInterrupt))
@@ -306,10 +316,10 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.providers != nil {
 		api.HandleFunc("GET /api/v1/providers", s.requireAuth(s.handleProvidersList))
-		api.HandleFunc("GET /api/v1/providers/claude/auth/status", s.requireAuth(s.handleClaudeAuthStatus))
-		api.HandleFunc("POST /api/v1/providers/claude/auth/login/start", s.requireAuth(s.handleClaudeLoginStart))
-		api.HandleFunc("POST /api/v1/providers/claude/auth/login/code", s.requireAuth(s.handleClaudeLoginCode))
-		api.HandleFunc("POST /api/v1/providers/claude/auth/logout", s.requireAuth(s.handleClaudeLogout))
+		api.HandleFunc("GET /api/v1/providers/{id}/auth/status", s.requireAuth(s.handleProviderAuthStatus))
+		api.HandleFunc("POST /api/v1/providers/{id}/auth/login/start", s.requireAuth(s.handleProviderLoginStart))
+		api.HandleFunc("POST /api/v1/providers/{id}/auth/login/code", s.requireAuth(s.handleProviderLoginCode))
+		api.HandleFunc("POST /api/v1/providers/{id}/auth/logout", s.requireAuth(s.handleProviderLogout))
 	}
 
 	// M4 tracker surface: the operator's issue and label read/mutate views

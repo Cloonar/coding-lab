@@ -6,8 +6,8 @@
 // clone.progress feeds a per-card signal; parked.changed lives in the strip.
 //
 // The side rail owns live-run rows now, so there is deliberately NO InstanceList
-// here, and no ClaudeAuthCard / AFKSection / StartInstanceForm (Credentials owns
-// the auth card; the AFK strip + composer move to the Home page in Phase 2b).
+// here, and no ProviderAuthCard / AFKSection / StartInstanceForm (Credentials
+// owns the auth cards; the AFK strip + composer move to the Home page in 2b).
 
 import { A } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
