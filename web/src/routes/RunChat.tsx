@@ -1478,6 +1478,12 @@ function Composer(props: {
   const acOpen = () => !acDismissed() && acMatches().length > 0;
   // Typing resets the highlight to the best (first) match and un-dismisses.
   createEffect(on(text, () => setAcIndex(0), { defer: true }));
+  // The list scrolls past 40vh, so cycling must drag the active row into view
+  // (optional call: jsdom has no scrollIntoView).
+  createEffect(() => {
+    if (!acOpen()) return;
+    document.getElementById(`chat-cmd-opt-${acIndex()}`)?.scrollIntoView?.({ block: 'nearest' });
+  });
   const acceptCommand = (cmd: RunCommand) => {
     setText(`/${cmd.name} `);
     // Dismiss until the next keystroke: Enter must go back to being a newline
@@ -1594,6 +1600,7 @@ function Composer(props: {
                     classList={{ 'chat-cmd-row': true, active: i() === acIndex() }}
                     role="option"
                     aria-selected={i() === acIndex()}
+                    title={cmd.description}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => acceptCommand(cmd)}
                   >
