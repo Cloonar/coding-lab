@@ -1,16 +1,19 @@
-// AFK repo-card controls contract:
-// - the start button carries the claimable-count hint and stays a real,
-//   enabled button at every count (0 → only visually greyed) — the hint must
-//   never HTML-block the authoritative click; the server 409s a stale click;
-// - the paused banner ('Paused after 3 failures') appears at the >= 3
-//   boundary with its Reset button POSTing afk/reset;
+// AFK strip contract (issue #41) — the compact port of the old repo-card
+// AFKSection, so its behavior is verified here:
+// - 'Run one (N ready)' carries the claimable-count hint and stays a real,
+//   enabled button at every count (0 → only visually greyed) — the hint never
+//   HTML-blocks the authoritative click; the server 409s a stale click;
+// - an unknown count (ready endpoint failed) → a plain button, no hint;
+// - a successful start reports the spawned run (the parent toasts it);
+// - the paused banner ('Paused after 3 failures') appears at the >= 3 boundary
+//   with its Reset POSTing afk/reset;
 // - the auto toggle is a real button PUTting {enabled: !current}.
 
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Repo, Run } from '../api';
 import { EventsProvider } from '../events';
-import AFKSection from './AFKSection';
+import AFKStrip from './AFKStrip';
 
 const REPO_ID = 'repo_1';
 
@@ -130,7 +133,7 @@ async function mountAFK(repo: Repo): Promise<void> {
   dispose = render(
     () => (
       <EventsProvider>
-        <AFKSection
+        <AFKStrip
           repo={repo}
           onRepoChanged={() => {
             repoChanged += 1;
@@ -174,11 +177,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('AFKSection start button (claimable-count hint)', () => {
+describe('AFKStrip start button (claimable-count hint)', () => {
   it('shows the count and stays enabled while claimable issues exist', async () => {
     await mountAFK(repoFixture());
 
-    const start = button('Start AFK run (2 ready)');
+    const start = button('Run one (2 ready)');
     expect(start.disabled).toBe(false);
   });
 
@@ -188,7 +191,7 @@ describe('AFKSection start button (claimable-count hint)', () => {
     startResponses = [{ status: 409, body: { error: 'no ready-for-agent issues to start' } }];
     await mountAFK(repoFixture());
 
-    const start = button('Start AFK run (0 ready)');
+    const start = button('Run one (0 ready)');
     expect(start.disabled).toBe(false); // NOT HTML-disabled — only greyed
     expect(start.classList.contains('greyed')).toBe(true);
 
@@ -203,15 +206,15 @@ describe('AFKSection start button (claimable-count hint)', () => {
     claimableFail = true;
     await mountAFK(repoFixture());
 
-    const start = button('Start AFK run');
+    const start = button('Run one');
     expect(start.textContent).not.toContain('ready)');
     expect(start.disabled).toBe(false);
   });
 
-  it('POSTs afk/start and reports the spawned run', async () => {
+  it('POSTs afk/start and reports the spawned run (parent toasts, no navigation)', async () => {
     await mountAFK(repoFixture());
 
-    button('Start AFK run (2 ready)').click();
+    button('Run one (2 ready)').click();
     claimableCount = 1; // the claim consumed one issue; the refetch sees it
     await settle();
 
@@ -219,14 +222,14 @@ describe('AFKSection start button (claimable-count hint)', () => {
     expect(started).toHaveLength(1);
     expect(started[0]?.issue_number).toBe(7);
     expect(errors).toEqual([]);
-    expect(button('Start AFK run (1 ready)').disabled).toBe(false);
+    expect(button('Run one (1 ready)').disabled).toBe(false);
   });
 
   it('surfaces the server 409 verbatim (the click is authoritative, not the hint)', async () => {
     startResponses = [{ status: 409, body: { error: 'no ready-for-agent issues to start' } }];
     await mountAFK(repoFixture());
 
-    button('Start AFK run (2 ready)').click();
+    button('Run one (2 ready)').click();
     await settle();
 
     expect(errors).toEqual(['no ready-for-agent issues to start']);
@@ -234,7 +237,7 @@ describe('AFKSection start button (claimable-count hint)', () => {
   });
 });
 
-describe('AFKSection paused banner (three strikes, boundary >= 3)', () => {
+describe('AFKStrip paused banner (three strikes, boundary >= 3)', () => {
   it('stays hidden below the threshold', async () => {
     await mountAFK(repoFixture({ consecutive_failures: 2 }));
 
@@ -256,15 +259,15 @@ describe('AFKSection paused banner (three strikes, boundary >= 3)', () => {
   it('keeps the start button rendered while paused (server 409s it)', async () => {
     await mountAFK(repoFixture({ consecutive_failures: 4 }));
 
-    expect(button('Start AFK run (2 ready)').disabled).toBe(false);
+    expect(button('Run one (2 ready)').disabled).toBe(false);
   });
 });
 
-describe('AFKSection auto toggle', () => {
+describe('AFKStrip auto toggle', () => {
   it('PUTs the flipped flag and refreshes the repo row', async () => {
     await mountAFK(repoFixture({ afk_auto_enabled: false }));
 
-    button('Auto AFK runs: Off').click();
+    button('Auto: Off').click();
     await settle();
 
     const puts = requestsTo(`/api/v1/repos/${REPO_ID}/afk/auto`);
@@ -277,7 +280,7 @@ describe('AFKSection auto toggle', () => {
   it('renders On and PUTs {enabled: false} when currently enabled', async () => {
     await mountAFK(repoFixture({ afk_auto_enabled: true }));
 
-    button('Auto AFK runs: On').click();
+    button('Auto: On').click();
     await settle();
 
     expect(requestsTo(`/api/v1/repos/${REPO_ID}/afk/auto`)[0]?.body).toEqual({ enabled: false });

@@ -2601,3 +2601,266 @@ h6.md-h {
     display: none;
   }
 }
+
+/* New-run composer (issue #41, Phase 2b) ----------------------------------- */
+/* Appended section — expressed entirely in existing tokens. Note for Phase 3:
+   the queued-first-message bubble reuses .chat-msg.role-user + .chat-msg-tag;
+   the .chat-msg.pending modifier below (dim only) is additive and yours to fold
+   into the chat restyle. */
+
+/* Centered composer surface. .page already centers a 760px column; the card
+   sits narrower and drops in from the top for a roomy, chat-first Home. */
+.composer {
+  width: 100%;
+  max-width: 680px;
+  margin: clamp(1.5rem, 8vh, 5rem) auto 0;
+}
+
+/* Slim logged-out warning — banner semantics, compact, on its own line. */
+.newrun-warn {
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto 0.9rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--banner-bg);
+  border: 1px solid var(--banner-border);
+  border-radius: var(--radius-control);
+  color: var(--banner-text);
+  font-size: 0.9rem;
+}
+.newrun-warn a {
+  color: inherit;
+  font-weight: 600;
+}
+
+/* The merged field: one rounded card holding the textarea and a bottom toolbar
+   (chips + send), mirroring .chat-composer-row's merged look. */
+.composer-field {
+  padding: var(--space-1) var(--space-1) var(--space-2);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.composer-field:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.composer-field.disabled {
+  opacity: 0.6;
+}
+.composer-input {
+  display: block;
+  width: 100%;
+  /* Auto-grows one row → content height; JS sets the exact height inline, this
+     clamps it and hands overflow to internal scroll. */
+  min-height: 2.75rem;
+  max-height: 12rem;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  font: inherit;
+  font-size: 16px; /* no iOS zoom */
+  line-height: 1.45;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  resize: none;
+}
+.composer-input:focus-visible {
+  outline: none; /* the focus ring lives on the field container */
+}
+
+/* Bottom toolbar: chips left, send right; wraps on narrow screens. */
+.composer-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: 0 var(--space-2);
+}
+
+/* Chip-styled controls: 44px touch targets, pill shape. */
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 44px;
+  padding: 0 0.7rem;
+  font-size: 0.9rem;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.composer-chip:hover {
+  background: var(--hover);
+}
+.composer-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.composer-chip-icon,
+.composer-chip-caret {
+  flex: none;
+  color: var(--muted);
+}
+.composer-chip-label {
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The model/effort selects keep the native arrow; 16px dodges iOS zoom and
+   inline-block overrides the chip's inline-flex (which selects render oddly). */
+.composer-select {
+  display: inline-block;
+  font-size: 16px;
+}
+.more-chip.icon-btn {
+  min-width: 44px;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--border);
+}
+.more-chip.icon-btn:hover {
+  background: var(--hover);
+}
+
+/* Accent circular send. */
+.composer-send.icon-btn {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  padding: 0;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: 50%;
+}
+.composer-send.icon-btn:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+.composer-send.icon-btn:disabled,
+.composer-send.icon-btn.busy {
+  opacity: 0.6;
+}
+
+/* Anchored popovers (repo picker, `…` options) — the chat-menu dropdown look
+   with their own classes. Outside-click closes via a document listener (no
+   scrim element), so the panel just needs to sit above sibling content. */
+.composer-pop {
+  position: relative;
+  display: inline-flex;
+}
+.composer-pop-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 5;
+  min-width: 14rem;
+  max-width: min(20rem, calc(100vw - 1.5rem));
+  max-height: 15rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.more-pop {
+  min-width: 16rem;
+  padding: 0.7rem;
+}
+.composer-label-field {
+  margin: 0;
+}
+
+/* Repo rows: ready selectable; cloning/error HTML-disabled with status text. */
+.repo-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  font-weight: 550;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.repo-row:hover:not(:disabled) {
+  background: var(--hover);
+}
+.repo-row:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.repo-row.selected {
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+.repo-row-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.repo-row-status {
+  flex: none;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* AFK strip under the composer. */
+.afk-strip {
+  margin-top: var(--space-3);
+}
+.afk-strip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.afk-strip-start,
+.afk-strip-auto {
+  min-height: 44px;
+  font-size: 0.9rem;
+  font-weight: 550;
+}
+/* Greyed hint at a known-0 claimable count — visual only; the button stays a
+   real, enabled control (the server re-checks and 409s a stale click). */
+.afk-strip-start.greyed {
+  opacity: 0.55;
+}
+.afk-strip-paused {
+  margin-bottom: var(--space-2);
+  align-items: center;
+}
+.afk-strip-reset {
+  min-height: 36px;
+  padding: 0 0.7rem;
+}
+
+/* Queued-first-message pending bubble: reuses .chat-msg.role-user; .pending
+   just dims it while it waits to auto-send (Phase 3 owns the final look). */
+.chat-msg.pending {
+  opacity: 0.6;
+}
+
+/* <640px: the composer fills the width and the chip row wraps naturally. */
+@media (max-width: 639.98px) {
+  .composer {
+    margin-top: var(--space-4);
+  }
+  .composer-chip-label {
+    max-width: 7rem;
+  }
+}

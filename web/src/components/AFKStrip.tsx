@@ -1,9 +1,11 @@
-// AFK controls on a repo card: 'Start AFK run (N ready)' with the claimable
-// count (a hint — at 0 the button stays a real, enabled button, only visually
-// greyed; the server re-checks claim/cap/auth authoritatively on every start
-// and 409s a stale click), the auto toggle as a real button (v0: never a
-// checkbox), and the three-strikes paused banner with the human Reset — the
-// only un-pause there is.
+// AFK strip under the New-run composer (issue #41), scoped to the SELECTED
+// repo: a compact one-row port of the old repo-card AFKSection. Same behavior —
+// 'Run one (N ready)' with the claimable-count hint (a hint only: at 0 the
+// button stays a real, enabled button, just greyed, since the server re-checks
+// claim/cap/auth authoritatively and 409s a stale click), the auto toggle as a
+// real button (aria-pressed, never a checkbox), and the three-strikes paused
+// banner with the human Reset (the only un-pause). AFK start success is a toast
+// in the parent, never a navigation — the composer stays put.
 
 import { Show, createResource, createSignal, onCleanup } from 'solid-js';
 import {
@@ -19,11 +21,11 @@ import { useEvents } from '../events';
 import { afkStartHint, isAFKPaused } from '../lib/afk';
 import { resourceValue } from '../lib/resource';
 
-export default function AFKSection(props: {
+export default function AFKStrip(props: {
   repo: Repo;
   /** The repo row changed server-side (auto toggle / reset) — refetch repos. */
   onRepoChanged: () => void;
-  /** An AFK run spawned — refetch instances, toast. */
+  /** An AFK run spawned — toast it (NO navigation). */
   onStarted: (run: Run) => void;
   onError: (message: string) => void;
 }) {
@@ -103,13 +105,13 @@ export default function AFKSection(props: {
   };
 
   return (
-    <div class="afk-section">
+    <div class="afk-strip">
       <Show when={paused()}>
-        <div class="banner error afk-paused" role="alert">
+        <div class="banner error afk-strip-paused" role="alert">
           <span class="banner-text">Paused after 3 failures</span>
           <button
             type="button"
-            class="afk-reset"
+            class="afk-strip-reset"
             onClick={() => void reset()}
             disabled={busy() !== null}
           >
@@ -117,23 +119,23 @@ export default function AFKSection(props: {
           </button>
         </div>
       </Show>
-      <div class="afk-controls">
+      <div class="afk-strip-row">
         <button
           type="button"
-          classList={{ 'afk-start': true, greyed: hint().greyed }}
+          classList={{ 'afk-strip-start': true, greyed: hint().greyed }}
           onClick={() => void start()}
           disabled={busy() !== null}
         >
-          {busy() === 'start' ? 'Starting…' : `Start AFK run${hint().suffix}`}
+          {busy() === 'start' ? 'Starting…' : `Run one${hint().suffix}`}
         </button>
         <button
           type="button"
-          class="afk-auto"
+          class="afk-strip-auto"
           onClick={() => void toggleAuto()}
           disabled={busy() !== null}
           aria-pressed={props.repo.afk_auto_enabled}
         >
-          Auto AFK runs: {props.repo.afk_auto_enabled ? 'On' : 'Off'}
+          Auto: {props.repo.afk_auto_enabled ? 'On' : 'Off'}
         </button>
       </div>
     </div>
