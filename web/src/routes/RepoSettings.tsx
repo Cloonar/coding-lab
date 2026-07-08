@@ -569,9 +569,8 @@ function SettingsForm(props: {
           </button>
         </Show>
         <small class="hint hint-block">
-          The run is detected as done only by an open PR on its branch — a prompt that never
-          opens a PR burns its budget, counts as a failure, and three failures auto-pause the
-          repo's AFK.
+          The run is detected as done only by an open PR on its branch — a prompt that never opens a
+          PR burns its budget, counts as a failure, and three failures auto-pause the repo's AFK.
         </small>
       </section>
 
