@@ -280,7 +280,8 @@ func TestCompat_SlugForDir(t *testing.T) {
 // shapes lab folds a real 2.1.198-shaped transcript through. Drives the parser
 // from a captured fixture covering every mapped event: bridge lifecycle, user
 // text, hidden thinking, assistant text, tool chips with ok/error results, an
-// isMeta skip, a surfaced API error, and a pending dialog.
+// isMeta skip, a local slash-command echo + its captured output skip, a
+// surfaced API error, and a pending dialog.
 func TestCompat_TranscriptFixture_maps(t *testing.T) {
 	f, err := os.Open(filepath.Join("testdata", "transcript-2.1.198.jsonl"))
 	if err != nil {
@@ -293,7 +294,17 @@ func TestCompat_TranscriptFixture_maps(t *testing.T) {
 	}
 
 	if chat.Cursor != 9 || len(chat.Messages) != 9 {
-		t.Fatalf("mapped %d messages (cursor %d); want 9 (the isMeta line is dropped)", len(chat.Messages), chat.Cursor)
+		t.Fatalf("mapped %d messages (cursor %d); want 9 (the isMeta and local slash-command lines are dropped)", len(chat.Messages), chat.Cursor)
+	}
+	// A local slash-command echo / its output must never surface as a bubble —
+	// the raw <command-…> / <local-command-stdout> tags stay out of the chat
+	// (issue #45).
+	for i, msg := range chat.Messages {
+		if strings.Contains(msg.Text, "<command-name>") ||
+			strings.Contains(msg.Text, "<command-message>") ||
+			strings.Contains(msg.Text, "<local-command-stdout>") {
+			t.Errorf("msg%d leaked a raw local-command tag: %q", i, msg.Text)
+		}
 	}
 	if chat.State != provider.StateQuestion {
 		t.Errorf("State = %q; want %q (tail is a pending dialog)", chat.State, provider.StateQuestion)
