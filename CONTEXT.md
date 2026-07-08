@@ -29,7 +29,7 @@ The provider-native session file the Chat reads through (Claude Code: the live J
 _Avoid_: log, history, raw output, session file (in UI copy)
 
 **Conversational state**:
-The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live badge on Dashboard rows and the chat header. Distinct from `live` (tmux liveness) and the run's terminal outcome.
+The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live state dot on the runs rail and a badge in the chat header. Distinct from `live` (tmux liveness) and the run's terminal outcome.
 _Avoid_: status, activity, progress
 
 **Reference repo**:

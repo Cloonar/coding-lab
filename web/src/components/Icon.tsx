@@ -28,7 +28,10 @@ export type IconName =
   | 'copy'
   | 'check'
   | 'more-horizontal'
-  | 'chevron-down';
+  | 'chevron-down'
+  | 'chevrons-left'
+  | 'chevrons-right'
+  | 'history';
 
 // name -> the svg children for that glyph. Functions (not shared nodes) so a
 // glyph used in several places produces its own DOM each time. Each returned
@@ -115,6 +118,25 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     </>
   ),
   'chevron-down': () => <path d="m6 9 6 6 6-6" />,
+  'chevrons-left': () => (
+    <>
+      <path d="m11 17-5-5 5-5" />
+      <path d="m18 17-5-5 5-5" />
+    </>
+  ),
+  'chevrons-right': () => (
+    <>
+      <path d="m6 17 5-5-5-5" />
+      <path d="m13 17 5-5-5-5" />
+    </>
+  ),
+  history: () => (
+    <>
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M12 7v5l4 2" />
+    </>
+  ),
 };
 
 export default function Icon(props: {

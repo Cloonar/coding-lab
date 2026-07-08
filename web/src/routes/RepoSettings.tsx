@@ -32,7 +32,6 @@ import {
 import CatalogSelect from '../components/CatalogSelect';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { remoteHost } from '../lib/repoName';
 import { providerFor } from '../lib/spawn';
@@ -59,7 +58,6 @@ function RepoSettingsView() {
 
   return (
     <main class="page">
-      <TopBar />
       <Switch>
         <Match when={repo.error !== undefined}>
           <div class="banner error" role="alert">

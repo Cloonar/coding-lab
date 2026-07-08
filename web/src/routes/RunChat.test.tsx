@@ -23,6 +23,7 @@ import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, MessagesResponse, Provider, Run } from '../api';
 import App from '../App';
+import { clearQueued, peekQueued, setQueued } from '../lib/queuedMessage';
 import RunChat from './RunChat';
 
 const RUN_ID = 'run_1';
@@ -73,6 +74,9 @@ let runOnServer: Run;
 let messagesOnServer: MessagesResponse;
 let providersOnServer: Provider[];
 let replyPosts: { text: string }[];
+// Reply POST status — 204 by default; a test flips it to 409 to exercise the
+// queued-message auto-send failure path (draft seeding).
+let replyStatus: number;
 let answerPosts: Record<string, unknown>[];
 let interruptPosts: number;
 let dispose: (() => void) | undefined;
@@ -134,7 +138,11 @@ function stubApi(): void {
       }
       if (url === `/api/v1/runs/${RUN_ID}/reply` && method === 'POST') {
         replyPosts.push(JSON.parse(String(init?.body)) as { text: string });
-        return Promise.resolve(jsonResponse(204, ''));
+        return Promise.resolve(
+          replyStatus >= 400
+            ? jsonResponse(replyStatus, { error: 'run is not accepting replies' })
+            : jsonResponse(replyStatus, ''),
+        );
       }
       if (url === `/api/v1/runs/${RUN_ID}/answer` && method === 'POST') {
         answerPosts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -143,6 +151,11 @@ function stubApi(): void {
       if (url === `/api/v1/runs/${RUN_ID}/interrupt` && method === 'POST') {
         interruptPosts += 1;
         return Promise.resolve(jsonResponse(204, ''));
+      }
+      // AppShell mounts the side rail once authenticated; it fetches the
+      // instance list for the ACTIVE rail + attention badge.
+      if (url === '/api/v1/instances' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { instances: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
     }),
@@ -251,6 +264,7 @@ beforeEach(() => {
     transcript: 'available',
   };
   replyPosts = [];
+  replyStatus = 204;
   answerPosts = [];
   interruptPosts = 0;
   stubApi();
@@ -263,6 +277,9 @@ afterEach(() => {
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
   Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+  // The queued-message store is module-global — clear this run's entry so a
+  // test that queues never leaks into the next.
+  clearQueued(RUN_ID);
 });
 
 describe('RunChat', () => {
@@ -613,6 +630,11 @@ describe('RunChat', () => {
           const after = Number(new URL(url, 'http://lab').searchParams.get('after') ?? '0');
           return Promise.resolve(jsonResponse(200, after === 2 ? aTail : bWindow));
         }
+        // AppShell mounts the side rail once authenticated; it fetches the
+        // instance list for the ACTIVE rail + attention badge.
+        if (url === '/api/v1/instances' && method === 'GET') {
+          return Promise.resolve(jsonResponse(200, { instances: [] }));
+        }
         return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
       }),
     );
@@ -700,18 +722,23 @@ describe('RunChat', () => {
   it('ignores run.changed for other repos', async () => {
     await mountChat();
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    const before = fetchMock.mock.calls.length;
+    // Count only this run's own fetches: the app shell's rail refetches the
+    // instance list on every run.changed (any repo), which is orthogonal to
+    // RunChat's repo-scoped refetch under test here.
+    const runFetches = () =>
+      fetchMock.mock.calls.filter((call) => String(call[0]).includes(`/runs/${RUN_ID}`)).length;
+    const before = runFetches();
 
     FakeEventSource.instances[0]?.emit('run.changed', {
       type: 'run.changed',
       repoID: 'repo_other',
     });
     await settle();
-    expect(fetchMock.mock.calls.length).toBe(before);
+    expect(runFetches()).toBe(before);
 
     FakeEventSource.instances[0]?.emit('run.changed', { type: 'run.changed', repoID: 'repo_1' });
     await settle();
-    expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+    expect(runFetches()).toBeGreaterThan(before);
   });
 
   it('tails a refetch with after=<cursor>, paginating past the window limit gap-free', async () => {
@@ -1307,5 +1334,67 @@ describe('RunChat', () => {
     expect(pillBtn.classList.contains('emphasis')).toBe(false);
     expect(pillBtn.getAttribute('aria-label')).toBe('Jump to latest');
     expect(pillBtn.textContent).toContain('Latest');
+  });
+
+  // --- Queued first message from the New-run composer (issue #41) ---
+
+  it('renders the queued first message as a pending user bubble while it waits', async () => {
+    // A still-locating transcript means the run is not ready — the auto-send
+    // holds, so the pending bubble stays visible.
+    messagesOnServer = {
+      messages: [],
+      state: 'idle',
+      cursor: 0,
+      has_more: false,
+      transcript: 'locating',
+      transcript_id: '',
+    };
+    setQueued(RUN_ID, 'kick things off');
+    await mountChat();
+
+    const bubble = container.querySelector('.chat-stream .chat-msg.role-user.pending');
+    expect(bubble).not.toBeNull();
+    expect(bubble?.textContent).toContain('kick things off');
+    expect(bubble?.textContent).toContain('Sends when Claude is ready');
+    // It is the LAST stream child — nearest the composer it collapses into.
+    expect(container.querySelector('.chat-stream')!.lastElementChild).toBe(bubble);
+    // Not sent yet (transcript still locating).
+    expect(replyPosts).toHaveLength(0);
+  });
+
+  it('auto-sends the queued first message exactly once when the transcript is available', async () => {
+    withAssistantText('ready'); // needs_input + transcript available on a live run
+    setQueued(RUN_ID, 'queued opener');
+    await mountChat();
+
+    // Fired once with the queued text; the pending bubble cleared.
+    expect(replyPosts).toHaveLength(1);
+    expect(replyPosts[0]?.text).toBe('queued opener');
+    expect(container.querySelector('.chat-msg.pending')).toBeNull();
+    expect(peekQueued(RUN_ID)).toBeUndefined();
+
+    // A later SSE refetch must NOT re-send — the entry was consumed before the POST.
+    emitMessagesChanged();
+    await settle();
+    expect(replyPosts).toHaveLength(1);
+  });
+
+  it('seeds the composer draft and shows an error when the auto-send fails', async () => {
+    withAssistantText('ready'); // live, needs_input → composer usable
+    replyStatus = 409;
+    setQueued(RUN_ID, 'seed me back');
+    await mountChat();
+
+    // The single attempt failed: the error surfaces, the entry is gone (taken
+    // before the POST), and the text is handed to the composer as a draft.
+    expect(replyPosts).toHaveLength(1);
+    expect(peekQueued(RUN_ID)).toBeUndefined();
+    expect(container.querySelector('.banner.error')?.textContent).toContain(
+      'run is not accepting replies',
+    );
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe(
+      'seed me back',
+    );
+    expect(container.querySelector('.chat-msg.pending')).toBeNull();
   });
 });

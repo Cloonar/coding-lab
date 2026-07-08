@@ -18,7 +18,6 @@ import {
 import CatalogSelect from '../components/CatalogSelect';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { providerFor } from '../lib/spawn';
 
 interface IntField {
@@ -69,7 +68,6 @@ function SettingsView() {
 
   return (
     <main class="page">
-      <TopBar />
       <div class="section-head">
         <h2>Settings</h2>
       </div>

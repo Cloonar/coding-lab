@@ -30,7 +30,6 @@ import {
 import ErrorBanner from '../components/ErrorBanner';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { canMutateTracker } from '../lib/issues';
 import { DEFAULT_LABEL_COLOR, normalizeHex } from '../lib/labels';
@@ -103,7 +102,6 @@ function RepoLabelsView() {
 
   return (
     <main class="page">
-      <TopBar />
       <p class="crumb">
         <A href={`/repos/${params.id}/issues`}>← Issues</A>
       </p>

@@ -18,7 +18,6 @@ import {
 } from '../api';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import {
   availableLabelNames,
@@ -121,7 +120,6 @@ function RepoIssuesView() {
 
   return (
     <main class="page">
-      <TopBar />
       <div class="section-head">
         <h2>{repoData()?.name ?? 'Repository'} · Issues</h2>
         <Show when={canMutate()}>

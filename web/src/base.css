@@ -5,30 +5,39 @@
 :root {
   color-scheme: light dark;
 
-  --bg: #f6f7f9;
+  /* Warm reskin (issue #41 phase 2a) — bone/ivory light, terracotta accent.
+     Every var below keeps its original name; components never changed. */
+  --bg: #faf9f5;
   --card: #ffffff;
-  --text: #1b1f24;
-  --muted: #697586;
-  --border: #e4e7eb;
-  --hover: #f0f2f5;
-  --accent: #2563eb;
-  --accent-text: #ffffff;
+  --text: #1f1e1d;
+  --muted: #6b675c;
+  --border: #e8e4da;
+  --hover: #f1efe8;
+  --accent: #d97757;
+  /* Warm coffee-brown, not white: white-on-#d97757 is 3.12:1 and fails WCAG
+     AA (4.5:1) for text. This dark warm brown clears it at 5.36:1 instead. */
+  --accent-text: #2a1a12;
+  /* Terracotta as TEXT (links, active nav, tinted chips) needs a darker cut:
+     raw #d97757 on bone is only 2.96:1. Burnt terracotta clears AA at 4.83:1. */
+  --link: #b0532f;
   --danger: #c0362c;
   --danger-border: #e6b8b3;
-  --ok: #19a463;
-  --run-bg: #e6f6ec;
-  --run-text: #14693e;
-  --idle-bg: #eceff2;
-  --idle-text: #5b6573;
-  --chip-bg: #eef1f5;
-  --chip-text: #3b4452;
-  --banner-bg: #fff8e1;
-  --banner-border: #f3d99a;
+  --ok: #1a9c5b;
+  --run-bg: #e7f2e1;
+  --run-text: #1f6b3d;
+  --idle-bg: #ece7db;
+  --idle-text: #5f594c;
+  --chip-bg: #eeeae0;
+  --chip-text: #524c3f;
+  --banner-bg: #faf1d8;
+  --banner-border: #e9cd8e;
   --banner-text: #5b4b16;
-  --err-bg: #fdeceb;
-  --err-border: #f3c2bd;
-  --err-text: #9c2820;
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.04);
+  --err-bg: #fbeae5;
+  --err-border: #eec2b8;
+  --err-text: #9c3324;
+  --shadow: 0 1px 2px rgba(40, 32, 22, 0.06), 0 1px 3px rgba(40, 32, 22, 0.04);
+
+  --font-serif: 'Source Serif 4 Variable', Georgia, 'Times New Roman', serif;
 
   --radius-card: 14px;
   --radius-control: 10px;
@@ -47,28 +56,32 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0e1217;
-    --card: #161b22;
-    --text: #e4e8ee;
-    --muted: #97a1b0;
-    --border: #262d36;
-    --hover: #1e242c;
-    --accent: #3b82f6;
-    --danger: #f0736a;
+    /* Warm charcoal, not blue-black — accent stays the same terracotta as
+       light (accent-text is theme-agnostic too: not redeclared here). */
+    --bg: #262624;
+    --card: #30302e;
+    --text: #ecebe6;
+    --muted: #a5a196;
+    --border: #3e3c37;
+    --hover: #373631;
+    --accent: #d97757;
+    /* Lighter cut for dark: #d97757 is 4.24:1 on cards; this clears 5.3:1. */
+    --link: #e08d70;
+    --danger: #f28577;
     --danger-border: #5c2b27;
-    --ok: #34d399;
-    --run-bg: #11331f;
-    --run-text: #5fd99a;
-    --idle-bg: #232a32;
-    --idle-text: #97a1b0;
-    --chip-bg: #232a32;
-    --chip-text: #c3ccd6;
-    --banner-bg: #2a2510;
-    --banner-border: #574c1c;
-    --banner-text: #e3d7a3;
-    --err-bg: #2a1513;
+    --ok: #3ecf8e;
+    --run-bg: #17301d;
+    --run-text: #6cd99a;
+    --idle-bg: #35332e;
+    --idle-text: #a8a398;
+    --chip-bg: #3a3833;
+    --chip-text: #d6d2c7;
+    --banner-bg: #2e2712;
+    --banner-border: #5c4f20;
+    --banner-text: #e6d9a6;
+    --err-bg: #2e1613;
     --err-border: #5c2b27;
-    --err-text: #f3a9a2;
+    --err-text: #f3aca2;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   }
 }
@@ -102,26 +115,49 @@ code,
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Type --------------------------------------------------------------------- */
+
+/* Vendored variable fonts (OFL), web/public/fonts/ — one file per style spans
+   the whole 200-900 weight axis (woff2-variations), so headings can use any
+   weight in range without shipping per-weight static cuts. */
+@font-face {
+  font-family: 'Source Serif 4 Variable';
+  src: url('/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Source Serif 4 Variable';
+  src: url('/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* Headings + the brand wordmark read in the serif (Claude-web feel). UI
+   chrome and code keep the system sans/mono stacks set above — untouched.
+   :not(.md-h) excludes chat markdown headings (issue #13): assistant/user
+   prose stays system sans here, Phase 3 owns any chat typography beyond
+   that. */
+h1:not(.md-h),
+h2:not(.md-h),
+h3:not(.md-h) {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand {
+  font-family: var(--font-serif);
+}
+
 /* Layout ------------------------------------------------------------------ */
 
 .page {
   max-width: 760px;
   margin: 0 auto;
   padding: var(--space-3) var(--space-3) var(--space-6);
-}
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding: 0.6rem 0;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: var(--space-4);
 }
 
 .spacer {
@@ -152,7 +188,7 @@ h2 {
 }
 
 a {
-  color: var(--accent);
+  color: var(--link);
 }
 
 a.plain {
@@ -160,162 +196,350 @@ a.plain {
   text-decoration: none;
 }
 
-/* Header nav ---------------------------------------------------------------- */
+/* App shell / side rail --------------------------------------------------- */
+/* Phase 1 structural shell (issue #41): a persistent 260px side rail beside the
+   routed content at >=1024px; the SAME SideNav as a left overlay drawer below
+   that (hamburger or left-edge swipe to open; scrim/Escape/route-change/leftward
+   swipe to close). Everything is expressed in existing tokens (--card, --border,
+   --hover, --accent, --space-*) so Phase 2a can swap token VALUES with no edits
+   here — no hardcoded colors. Class map for later phases: .shell (root, carries
+   .drawer-open / .rail-collapsed), .shell-topstrip / .strip-hamburger / .attn-
+   badge (mobile), .shell-scrim, .shell-rail (drawer/persistent wrapper),
+   .shell-content, .rail-reopen (collapsed chevron), and .rail-* inside SideNav. */
 
-.nav {
-  display: none; /* mobile: nav lives in the dropdown; restored at >=640px */
+.shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Mobile top strip (<1024px; the component also hides it on /runs/:id). */
+.shell-topstrip {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
   align-items: center;
-  gap: 0.1rem;
+  gap: 0.65rem;
+  padding: 0.5rem var(--space-3);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
 }
 
-.nav-link {
-  color: var(--muted);
-  text-decoration: none;
-  font-weight: 550;
-  padding: 0.3rem 0.45rem;
-  border-radius: var(--radius-control);
-}
-
-.nav-link:hover {
-  background: var(--hover);
+.strip-hamburger {
+  position: relative;
   color: var(--text);
 }
 
-.nav-link.active {
-  color: var(--accent);
-  font-weight: 650;
+/* Attention badge on the hamburger: any live run is needs_input/question. */
+.attn-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  border: 2px solid var(--bg);
 }
 
-.nav-link.disabled {
-  cursor: default;
-  opacity: 0.5;
+/* Scrim behind the drawer (mobile). */
+.shell-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(0, 0, 0, 0.4);
 }
 
-.nav-link.disabled:hover {
-  background: none;
-  color: var(--muted);
+/* The rail wrapper. Mobile: an off-canvas drawer sliding in from the left. */
+.shell-rail {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 30;
+  width: 260px;
+  max-width: 85vw;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  transform: translateX(-100%);
+  /* A closed drawer leaves the a11y tree and the tab order, not just the
+     viewport — otherwise every page starts with ~10 invisible off-screen tab
+     stops (the old TopBar menu unmounted entirely; this is its equivalent).
+     visibility flips AFTER the slide-out so closing still animates; the open
+     rule below restores it immediately so opening never slides in invisible. */
+  visibility: hidden;
+  transition:
+    transform 0.24s ease,
+    visibility 0s linear 0.24s;
 }
 
-/* Mobile-first (<640px): inline username + desktop Log out hidden; the
-   hamburger + dropdown carry navigation. (.nav itself is hidden above.) */
-.user-name,
-.desktop-logout {
+.shell.drawer-open .shell-rail {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.24s ease;
+}
+
+/* Collapsed re-open chevron — desktop-only (see the >=1024 block). */
+.rail-reopen {
   display: none;
 }
 
-.nav-toggle {
-  color: var(--text); /* size/hit-area come from .icon-btn */
-}
-
-/* Full-width dropdown anchored to the bottom of the sticky topbar. */
-.nav-menu {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 20;
+/* SideNav inner content. */
+.rail {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 0.5rem;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-top: none;
-  border-radius: 0 0 var(--radius-card) var(--radius-card);
-  box-shadow: var(--shadow);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  min-height: 100%;
 }
 
-.nav-menu-links {
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Collapse chevron is desktop-only (collapse applies only >=1024px). */
+.rail-collapse {
+  display: none;
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.rail-newrun {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.rail-newrun:hover {
+  text-decoration: none;
+  filter: brightness(0.96);
+}
+
+.rail-section-label {
+  margin: var(--space-2) 0 0;
+  padding: 0 0.2rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.rail-active {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
-.nav-menu-link {
+.rail-empty {
+  margin: 0;
+  padding: 0.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.rail-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.rail-row:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+
+/* Current run highlighted via the router's aria-current="page". */
+.rail-row[aria-current='page'] {
+  background: var(--hover);
+  font-weight: 600;
+}
+
+.rail-row-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+}
+
+/* Attention = accent (matches the hamburger badge); working = the convo amber. */
+.rail-row-dot.needs-input,
+.rail-row-dot.question {
+  background: var(--accent);
+}
+
+.rail-row-dot.working {
+  background: var(--banner-text);
+}
+
+.rail-row-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.rail-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-row-repo {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* AFK budget countdown on the secondary line (re-homed from InstanceList). */
+.rail-row-budget.over {
+  color: var(--danger);
+}
+
+/* Pushes the footer nav + signed-in row to the bottom of the rail. */
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.rail-nav-link {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   min-height: 44px;
-  padding: 0.4rem 0.6rem;
+  padding: 0.4rem 0.5rem;
   color: var(--text);
   text-decoration: none;
   font-weight: 550;
   border-radius: var(--radius-control);
 }
 
-.nav-menu-link:hover {
+.rail-nav-link:hover {
   background: var(--hover);
+  text-decoration: none;
 }
 
-.nav-menu-link.active {
-  color: var(--accent);
+.rail-nav-link.active {
+  color: var(--link);
   font-weight: 650;
 }
 
-.nav-menu-icon {
+.rail-nav-icon {
   flex: none;
   color: var(--muted);
 }
 
-.nav-menu-link.active .nav-menu-icon {
-  color: var(--accent);
+.rail-nav-link.active .rail-nav-icon {
+  color: var(--link);
 }
 
-.nav-menu-foot {
+.rail-foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-  margin-top: 0.4rem;
-  padding-top: 0.5rem;
+  gap: 0.5rem;
+  padding-top: var(--space-2);
+  margin-top: var(--space-2);
   border-top: 1px solid var(--border);
 }
 
-.nav-menu-user {
-  padding-left: 0.6rem;
+.rail-user {
+  flex: 1;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.nav-menu-logout {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
+.rail-logout {
+  flex: none;
   min-height: 44px;
+  padding: 0.35rem 0.6rem;
 }
 
-.nav-menu-logout .nav-menu-icon {
-  color: inherit;
-}
-
-/* Viewport scrim behind the dropdown; under the sticky topbar (z-index:10). */
-.nav-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 5;
-  background: rgba(0, 0, 0, 0.4);
-}
-
-/* Desktop (>=640px): inline nav + username + Log out; hide hamburger/menu/scrim. */
-@media (min-width: 640px) {
-  .nav {
+/* Desktop >=1024px: persistent rail beside the content; no drawer chrome. */
+@media (min-width: 1024px) {
+  .shell {
     display: flex;
+    align-items: stretch;
   }
 
-  .user-name {
-    display: inline;
-  }
-
-  .desktop-logout {
-    display: inline-flex;
-    align-items: center;
-  }
-
-  /* `.topbar .nav-toggle` (0,2,0) must out-specify `.icon-btn`'s
-     display:inline-flex (0,1,0), which is declared later in the file — a bare
-     `.nav-toggle` here ties on specificity and loses on source order, leaving
-     the hamburger visible on desktop. */
-  .topbar .nav-toggle,
-  .nav-menu,
-  .nav-scrim {
+  .shell-topstrip,
+  .shell-scrim {
     display: none;
+  }
+
+  .shell-rail {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    height: 100dvh;
+    flex: none;
+    max-width: none;
+    transform: none;
+    transition: none;
+    visibility: visible; /* the base rule hides the closed DRAWER — not the rail */
+  }
+
+  .shell-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .rail-collapse {
+    display: inline-flex;
+  }
+
+  /* Collapsed: hide the rail, surface a fixed re-open chevron top-left. */
+  .shell.rail-collapsed .shell-rail {
+    display: none;
+  }
+
+  .shell.rail-collapsed .rail-reopen {
+    display: inline-flex;
+    position: fixed;
+    top: var(--space-3);
+    left: var(--space-3);
+    z-index: 30;
+    background: var(--card);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+}
+
+/* prefers-reduced-motion: the drawer snaps rather than slides. */
+@media (prefers-reduced-motion: reduce) {
+  .shell-rail {
+    transition: none;
   }
 }
 
@@ -421,7 +645,7 @@ a.plain {
 }
 
 .card-link {
-  color: var(--accent);
+  color: var(--link);
   text-decoration: none;
   font-weight: 550;
   min-height: 44px;
@@ -450,7 +674,7 @@ button.attach-copy {
   margin-top: var(--space-3);
   border: 1px dashed var(--border);
   border-radius: var(--radius-card);
-  color: var(--accent);
+  color: var(--link);
   text-decoration: none;
   font-weight: 550;
 }
@@ -509,7 +733,7 @@ button.attach-copy {
 
 .chip.incogni {
   background: color-mix(in srgb, var(--accent) 14%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 .chip.in-use {
@@ -986,7 +1210,7 @@ details.parked summary {
   min-height: 44px;
   cursor: pointer;
   font-weight: 550;
-  color: var(--accent);
+  color: var(--link);
   list-style: none;
 }
 
@@ -1387,13 +1611,13 @@ button.small {
 
 .chip.state-merged {
   background: color-mix(in srgb, var(--accent) 14%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 a.chip.closes-chip {
   text-decoration: none;
   background: color-mix(in srgb, var(--accent) 10%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 a.chip.closes-chip:hover {
@@ -1511,7 +1735,7 @@ a.chip.cr-count:hover {
 
 .diff-row.diff-hunk {
   background: color-mix(in srgb, var(--accent) 8%, var(--card));
-  color: var(--accent);
+  color: var(--link);
 }
 
 .diff-row.diff-meta {
@@ -1606,7 +1830,7 @@ a.chip.cr-count:hover {
   padding: 0.6rem;
   min-height: 44px;
   font-size: 0.85rem;
-  color: var(--accent);
+  color: var(--link);
   background: none;
   border: 1px dashed var(--border);
   border-radius: 8px;
@@ -1627,7 +1851,10 @@ a.chip.cr-count:hover {
 
 /* The chat page is a BOUNDED flex column (height, not min-height): the
    document never scrolls, .chat-stream is the scroll container, and the
-   composer stays pinned at the bottom. */
+   composer stays pinned at the bottom. Inside the app shell (issue #41) the
+   rail sits BESIDE the chat (a width, never a height), and the mobile top
+   strip is hidden on /runs/:id, so this 100dvh fill still equals the viewport
+   at every breakpoint — a flex/height chain, no magic offset for chrome above. */
 .chat-page {
   display: flex;
   flex-direction: column;
@@ -1695,27 +1922,64 @@ a.chip.cr-count:hover {
   padding: var(--space-3) 0;
 }
 
-/* Messages: assistant left, user right-aligned bubble. */
+/* Messages (issue #41 Phase 3): assistant text is bubble-less serif prose on
+   the page; only the user reply keeps a bubble — a soft warm neutral, never
+   accent (accent is reserved for actions/attention). Order matters: .thinking
+   and .pending follow .role-* so they win the equal-specificity overrides. */
 .chat-msg {
-  max-width: 88%;
-  padding: 0.5rem 0.7rem;
-  border-radius: var(--radius-control);
-  border: 1px solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow);
+  max-width: 100%;
+  min-width: 0;
 }
+/* Assistant / default role: full-column serif prose, no card. The serif family
+   is scoped to the prose blocks (below) so code blocks, copy buttons and lang
+   labels keep the system sans/mono stacks — UI chrome never turns serif. */
+.chat-msg.role-assistant {
+  font-size: 16.5px;
+  color: var(--text);
+}
+.chat-msg.role-assistant .md-p,
+.chat-msg.role-assistant .md-list,
+.chat-msg.role-assistant .md-quote,
+.chat-msg.role-assistant .md-table {
+  font-family: var(--font-serif);
+}
+.chat-msg.role-assistant .md-p,
+.chat-msg.role-assistant .md-list li {
+  line-height: 1.65;
+}
+/* User reply: soft warm-neutral bubble, right-aligned, system sans. Light uses
+   the slightly deeper --idle-bg (reads as a bubble on bone: 13.5:1 text on the
+   fill, 1.17:1 fill vs --bg); dark uses the pinned --chip-bg tone (9.8:1). */
 .chat-msg.role-user {
   align-self: flex-end;
-  background: var(--accent);
-  color: var(--accent-text);
-  border-color: var(--accent);
+  max-width: 85%;
+  padding: 0.5rem 0.8rem;
+  border-radius: 16px;
+  background: var(--idle-bg);
+  color: var(--text);
 }
+@media (prefers-color-scheme: dark) {
+  .chat-msg.role-user {
+    background: var(--chip-bg);
+  }
+}
+/* Thinking: a quiet serif-italic aside, no bubble, a notch smaller than prose.
+   No copy button and (almost) never code here, so the whole block — tag
+   included — can carry the italic. */
 .chat-msg.thinking {
   align-self: stretch;
   max-width: 100%;
-  background: var(--idle-bg);
-  color: var(--idle-text);
-  border-style: dashed;
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 14.5px;
+  color: var(--muted);
+}
+/* Queued first message (Phase 2b, folded in here in Phase 3): a real user
+   bubble parked until the New-run composer's text auto-sends. Held dim with its
+   "Sends when Claude is ready" tag so it reads as deliberately pending, not
+   disabled. (Moved from the New-run composer section.) */
+.chat-msg.role-user.pending {
+  opacity: 0.7;
 }
 .chat-msg-tag {
   display: block;
@@ -1730,14 +1994,15 @@ a.chip.cr-count:hover {
   overflow-wrap: anywhere;
 }
 
-/* Tool activity: a one-line chip expanding on tap to truncated in/out. */
+/* Tool activity (issue #41 Phase 3): a quiet bordered mono row — a transparent
+   outline expanding on tap. No accent; only an error tints the text red. */
 .chat-tool {
   align-self: flex-start;
   max-width: 100%;
   width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-  background: var(--chip-bg);
+  background: transparent;
 }
 .tool-summary {
   display: flex;
@@ -1746,7 +2011,9 @@ a.chip.cr-count:hover {
   min-height: 44px;
   padding: 0.3rem 0.6rem;
   cursor: pointer;
-  color: var(--chip-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 .tool-summary .tool-title {
   flex: 1;
@@ -1760,10 +2027,12 @@ a.chip.cr-count:hover {
 .tool-status {
   font-weight: 600;
 }
+/* Expanded I/O: a subtly recessed mono panel under the summary. */
 .tool-body {
   margin: 0;
   padding: 0.4rem 0.6rem;
   border-top: 1px solid var(--border);
+  background: var(--hover);
   overflow-x: auto;
   white-space: pre;
   font-size: 0.8rem;
@@ -1936,9 +2205,11 @@ a.chip.cr-count:hover {
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
+/* Chat markdown headings ride the serif too — they live in assistant prose. */
 .md-h {
   margin: 0.2rem 0;
   line-height: 1.3;
+  font-family: var(--font-serif);
   font-weight: 650;
   overflow-wrap: anywhere;
 }
@@ -1983,7 +2254,7 @@ h6.md-h {
   margin: 0.25rem 0;
 }
 .md-link {
-  color: var(--accent);
+  color: var(--link);
   overflow-wrap: anywhere;
 }
 .role-user .md-link {
@@ -2000,12 +2271,16 @@ h6.md-h {
   color: var(--chip-text);
   overflow-wrap: anywhere;
 }
+/* The user bubble now shares the chip tint, so inline code falls back to the
+   page bg there to stay legible against it (dark: recessed; light: lighter). */
+.role-user .md-code {
+  background: var(--bg);
+}
 
 /* Fenced code block: header bar (language + copy) over a horizontally
    scrollable <pre>. No syntax highlighting (decision 4) — plain monospace. */
-/* Code surfaces set their OWN neutral colors — never inheriting the accent
-   user bubble's white text, which would leave a white-on-light pre unreadable
-   (WCAG AA). A light code card reads clearly on either bubble. */
+/* Code surfaces set their OWN neutral colors and mono family, so a block reads
+   the same inside the user bubble or the bubble-less assistant prose. */
 .md-codeblock {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2105,14 +2380,15 @@ h6.md-h {
 
 /* --- Coalesced tool-call runs (issue #13) ------------------------------- */
 
-/* The outer "N tool calls" disclosure that wraps a run of chips. */
+/* The outer "N tool calls" disclosure that wraps a run of chips — the same
+   quiet transparent-outline treatment as a lone chip (Phase 3). */
 .chat-tool-group {
   align-self: flex-start;
   width: 100%;
   max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-  background: var(--chip-bg);
+  background: transparent;
 }
 .tool-group-summary {
   display: flex;
@@ -2122,7 +2398,9 @@ h6.md-h {
   min-height: 44px;
   padding: 0.3rem 0.6rem;
   cursor: pointer;
-  color: var(--chip-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
   font-weight: 600;
 }
 .tool-group-summary.has-error {
@@ -2137,15 +2415,13 @@ h6.md-h {
   font-weight: 500;
 }
 /* The expanded run: the individual chips (and any interleaved thinking) stack
-   vertically, indented slightly from the group frame. */
+   vertically, indented slightly from the group frame. The chips keep the shared
+   transparent outline — no nested fill now the frame itself is transparent. */
 .tool-group-body {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
   padding: 0 0.5rem 0.5rem;
-}
-.tool-group-body .chat-tool {
-  background: var(--card);
 }
 
 /* --- Chat UI redesign (issue #35) --------------------------------------- */
@@ -2330,7 +2606,7 @@ h6.md-h {
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   box-shadow:
-    0 4px 12px rgba(16, 24, 40, 0.14),
+    0 4px 12px rgba(40, 32, 22, 0.14),
     var(--shadow);
   cursor: pointer;
   transition:
@@ -2439,4 +2715,288 @@ h6.md-h {
   .chat-menu-scrim {
     display: none;
   }
+}
+
+/* New-run composer (issue #41, Phase 2b) ----------------------------------- */
+/* Appended section — expressed entirely in existing tokens. Note for Phase 3:
+   the queued-first-message bubble reuses .chat-msg.role-user + .chat-msg-tag;
+   the .chat-msg.pending modifier below (dim only) is additive and yours to fold
+   into the chat restyle. */
+
+/* Centered composer surface. .page already centers a 760px column; the card
+   sits narrower and drops in from the top for a roomy, chat-first Home. */
+.composer {
+  width: 100%;
+  max-width: 680px;
+  margin: clamp(1.5rem, 8vh, 5rem) auto 0;
+}
+
+/* Slim logged-out warning — banner semantics, compact, on its own line. */
+.newrun-warn {
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto 0.9rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--banner-bg);
+  border: 1px solid var(--banner-border);
+  border-radius: var(--radius-control);
+  color: var(--banner-text);
+  font-size: 0.9rem;
+}
+.newrun-warn a {
+  color: inherit;
+  font-weight: 600;
+}
+
+/* The merged field: one rounded card holding the textarea and a bottom toolbar
+   (chips + send), mirroring .chat-composer-row's merged look. */
+.composer-field {
+  padding: var(--space-1) var(--space-1) var(--space-2);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.composer-field:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.composer-field.disabled {
+  opacity: 0.6;
+}
+.composer-input {
+  display: block;
+  width: 100%;
+  /* Auto-grows one row → content height; JS sets the exact height inline, this
+     clamps it and hands overflow to internal scroll. */
+  min-height: 2.75rem;
+  max-height: 12rem;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  font: inherit;
+  font-size: 16px; /* no iOS zoom */
+  line-height: 1.45;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  resize: none;
+}
+.composer-input:focus-visible {
+  outline: none; /* the focus ring lives on the field container */
+}
+
+/* Bottom toolbar: chips left, send right; wraps on narrow screens. */
+.composer-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: 0 var(--space-2);
+}
+
+/* Chip-styled controls: 44px touch targets, pill shape. */
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 44px;
+  padding: 0 0.7rem;
+  font-size: 0.9rem;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.composer-chip:hover {
+  background: var(--hover);
+}
+.composer-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.composer-chip-icon,
+.composer-chip-caret {
+  flex: none;
+  color: var(--muted);
+}
+.composer-chip-label {
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The model/effort selects keep the native arrow; 16px dodges iOS zoom and
+   inline-block overrides the chip's inline-flex (which selects render oddly). */
+.composer-select {
+  display: inline-block;
+  font-size: 16px;
+}
+.more-chip.icon-btn {
+  min-width: 44px;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--border);
+}
+.more-chip.icon-btn:hover {
+  background: var(--hover);
+}
+
+/* Accent circular send. */
+.composer-send.icon-btn {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  padding: 0;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: 50%;
+}
+.composer-send.icon-btn:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+.composer-send.icon-btn:disabled,
+.composer-send.icon-btn.busy {
+  opacity: 0.6;
+}
+
+/* Anchored popovers (repo picker, `…` options) — the chat-menu dropdown look
+   with their own classes. Outside-click closes via a document listener (no
+   scrim element), so the panel just needs to sit above sibling content. */
+.composer-pop {
+  position: relative;
+  display: inline-flex;
+}
+.composer-pop-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 5;
+  min-width: 14rem;
+  max-width: min(20rem, calc(100vw - 1.5rem));
+  max-height: 15rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.more-pop {
+  min-width: 16rem;
+  padding: 0.7rem;
+}
+.composer-label-field {
+  margin: 0;
+}
+
+/* Repo rows: ready selectable; cloning/error HTML-disabled with status text. */
+.repo-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  font-weight: 550;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.repo-row:hover:not(:disabled) {
+  background: var(--hover);
+}
+.repo-row:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.repo-row.selected {
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+.repo-row-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.repo-row-status {
+  flex: none;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* AFK strip under the composer. */
+.afk-strip {
+  margin-top: var(--space-3);
+}
+.afk-strip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.afk-strip-start,
+.afk-strip-auto {
+  min-height: 44px;
+  font-size: 0.9rem;
+  font-weight: 550;
+}
+/* Greyed hint at a known-0 claimable count — visual only; the button stays a
+   real, enabled control (the server re-checks and 409s a stale click). */
+.afk-strip-start.greyed {
+  opacity: 0.55;
+}
+.afk-strip-paused {
+  margin-bottom: var(--space-2);
+  align-items: center;
+}
+.afk-strip-reset {
+  min-height: 44px;
+  padding: 0 0.7rem;
+}
+
+/* Queued-first-message pending bubble: its .chat-msg.role-user.pending styling
+   now lives with the chat message rules above (Phase 3 folded it into the
+   restyle) — see the "Queued first message" rule in the chat section. */
+
+/* <640px: the composer fills the width and the chip row wraps naturally. */
+@media (max-width: 639.98px) {
+  .composer {
+    margin-top: var(--space-4);
+  }
+  .composer-chip-label {
+    max-width: 7rem;
+  }
+}
+
+/* Auth card (issue #41 phase 2a) -------------------------------------------- */
+
+/* Login/Setup render <main class="page"><div class="card auth-card">…</div>
+   </main> (see routes/Login.tsx, routes/Setup.tsx) — :has() scopes the
+   centered treatment to those two routes without a new class hook on <main>,
+   so every other .page consumer (still top-anchored) is untouched. Falls
+   back to the plain top-anchored .card look in browsers without :has()
+   support — .auth-card's own max-width/margin below still centers it
+   horizontally either way. */
+main.page:has(> .auth-card) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  margin: 0 auto;
 }

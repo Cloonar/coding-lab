@@ -5,6 +5,7 @@
 import { Match, Show, Switch, onCleanup, type ParentProps } from 'solid-js';
 import { setUnauthorizedHandler } from './api';
 import { AuthProvider, useAuth } from './auth';
+import AppShell from './components/AppShell';
 import { EventsProvider } from './events';
 
 function Shell(props: ParentProps) {
@@ -39,9 +40,13 @@ function Shell(props: ParentProps) {
       </Match>
       <Match when={auth.state === 'ready' || auth.state === 'refreshing'}>
         {/* One SSE connection for the whole authenticated app; it survives
-            route changes and closes on logout when the Show flips. */}
+            route changes and closes on logout when the Show flips. The app
+            shell (side rail + content) mounts once here, inside the SSE
+            provider, and wraps every authenticated route. */}
         <Show when={auth()?.authenticated} fallback={props.children}>
-          <EventsProvider>{props.children}</EventsProvider>
+          <EventsProvider>
+            <AppShell>{props.children}</AppShell>
+          </EventsProvider>
         </Show>
       </Match>
     </Switch>

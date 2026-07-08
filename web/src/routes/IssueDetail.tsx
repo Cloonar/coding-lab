@@ -22,7 +22,6 @@ import ErrorBanner from '../components/ErrorBanner';
 import LabelChip from '../components/LabelChip';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { canMutateTracker, formatDateTime } from '../lib/issues';
 import { sameLabelSet, toggleLabel } from '../lib/labels';
@@ -96,7 +95,6 @@ function IssueDetailView() {
 
   return (
     <main class="page">
-      <TopBar />
       <p class="crumb">
         <A href={`/repos/${params.id}/issues`}>← Issues</A>
       </p>
