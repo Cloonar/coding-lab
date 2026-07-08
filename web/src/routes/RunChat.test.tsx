@@ -144,6 +144,11 @@ function stubApi(): void {
         interruptPosts += 1;
         return Promise.resolve(jsonResponse(204, ''));
       }
+      // AppShell mounts the side rail once authenticated; it fetches the
+      // instance list for the ACTIVE rail + attention badge.
+      if (url === '/api/v1/instances' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { instances: [] }));
+      }
       return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
     }),
   );
@@ -613,6 +618,11 @@ describe('RunChat', () => {
           const after = Number(new URL(url, 'http://lab').searchParams.get('after') ?? '0');
           return Promise.resolve(jsonResponse(200, after === 2 ? aTail : bWindow));
         }
+        // AppShell mounts the side rail once authenticated; it fetches the
+        // instance list for the ACTIVE rail + attention badge.
+        if (url === '/api/v1/instances' && method === 'GET') {
+          return Promise.resolve(jsonResponse(200, { instances: [] }));
+        }
         return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
       }),
     );
@@ -700,18 +710,23 @@ describe('RunChat', () => {
   it('ignores run.changed for other repos', async () => {
     await mountChat();
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    const before = fetchMock.mock.calls.length;
+    // Count only this run's own fetches: the app shell's rail refetches the
+    // instance list on every run.changed (any repo), which is orthogonal to
+    // RunChat's repo-scoped refetch under test here.
+    const runFetches = () =>
+      fetchMock.mock.calls.filter((call) => String(call[0]).includes(`/runs/${RUN_ID}`)).length;
+    const before = runFetches();
 
     FakeEventSource.instances[0]?.emit('run.changed', {
       type: 'run.changed',
       repoID: 'repo_other',
     });
     await settle();
-    expect(fetchMock.mock.calls.length).toBe(before);
+    expect(runFetches()).toBe(before);
 
     FakeEventSource.instances[0]?.emit('run.changed', { type: 'run.changed', repoID: 'repo_1' });
     await settle();
-    expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+    expect(runFetches()).toBeGreaterThan(before);
   });
 
   it('tails a refetch with after=<cursor>, paginating past the window limit gap-free', async () => {

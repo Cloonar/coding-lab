@@ -5,16 +5,17 @@ import App from './App';
 import AddRepo from './routes/AddRepo';
 import CRDetail from './routes/CRDetail';
 import Credentials from './routes/Credentials';
-import Dashboard from './routes/Dashboard';
+import History from './routes/History';
 import IssueDetail from './routes/IssueDetail';
 import Login from './routes/Login';
 import NewIssue from './routes/NewIssue';
+import NewRun from './routes/NewRun';
 import RepoCRs from './routes/RepoCRs';
 import RepoIssues from './routes/RepoIssues';
 import RepoLabels from './routes/RepoLabels';
+import Repos from './routes/Repos';
 import RepoSettings from './routes/RepoSettings';
 import RunChat from './routes/RunChat';
-import Runs from './routes/Runs';
 import Settings from './routes/Settings';
 import Setup from './routes/Setup';
 import Tokens from './routes/Tokens';
@@ -31,9 +32,12 @@ render(
     <Router root={App}>
       <Route path="/setup" component={Setup} />
       <Route path="/login" component={Login} />
-      <Route path="/" component={Dashboard} />
+      <Route path="/" component={NewRun} />
+      <Route path="/repos" component={Repos} />
       <Route path="/credentials" component={Credentials} />
-      <Route path="/runs" component={Runs} />
+      <Route path="/history" component={History} />
+      {/* Static /runs redirect must precede the /runs/:id chat route. */}
+      <Route path="/runs" component={() => <Navigate href="/history" />} />
       <Route path="/runs/:id" component={RunChat} />
       <Route path="/settings" component={Settings} />
       <Route path="/tokens" component={Tokens} />

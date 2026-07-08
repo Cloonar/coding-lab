@@ -14,7 +14,6 @@ import {
 } from '../api';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 
 function onDate(timestamp: string): string {
   const date = new Date(timestamp);
@@ -36,7 +35,6 @@ function TokensView() {
 
   return (
     <main class="page">
-      <TopBar />
       <div class="section-head">
         <h2>API tokens</h2>
       </div>

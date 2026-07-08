@@ -13,7 +13,6 @@ import {
 } from '../api';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { deriveRepoName } from '../lib/repoName';
 
 type BindingChoice = 'auto' | TrackerBinding;
@@ -71,7 +70,6 @@ function AddRepoView() {
 
   return (
     <main class="page">
-      <TopBar />
       <div class="card form-card">
         <h2>Add repository</h2>
         <p class="muted">

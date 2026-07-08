@@ -570,12 +570,7 @@ function ChatHeader(props: {
       ref={props.headerRef}
       classList={{ 'chat-header': true, 'chat-header--hidden': props.hidden }}
     >
-      <A
-        href="/"
-        class="crumb chat-back icon-btn"
-        aria-label="Back to the dashboard"
-        title="Back to the dashboard"
-      >
+      <A href="/" class="crumb chat-back icon-btn" aria-label="Back to home" title="Back to home">
         <Icon name="arrow-left" />
       </A>
       <span class="chat-title">{title()}</span>

@@ -9,7 +9,6 @@ import { createIssue, errorMessage, getRepo, listLabels, type CreateIssueRequest
 import ErrorBanner from '../components/ErrorBanner';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { canMutateTracker } from '../lib/issues';
 import { toggleLabel } from '../lib/labels';
 import { resourceValue } from '../lib/resource';
@@ -74,7 +73,6 @@ function NewIssueView() {
 
   return (
     <main class="page">
-      <TopBar />
       <p class="crumb">
         <A href={`/repos/${params.id}/issues`}>← Issues</A>
       </p>

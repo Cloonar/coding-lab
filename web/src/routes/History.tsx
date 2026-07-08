@@ -1,15 +1,15 @@
-// Runs history (/runs, per-repo filter via ?repo=, outcome filter via
+// Run history (/history, per-repo filter via ?repo=, outcome filter via
 // ?outcome=): phone-first cards with kind, label/branch, model/effort,
 // started time, duration and the outcome badge (active/success/death/
 // timeout/stopped) plus failure_reason. AFK kinds title as 'AFK #N' from the
 // run's issue number. Newest first, straight from GET /runs; the outcome
-// filter narrows client-side; run.changed refetches.
+// filter narrows client-side; run.changed refetches. (Formerly /runs; /runs
+// now redirects here, and /runs/:id stays the chat.)
 
 import { A, useSearchParams } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, onCleanup } from 'solid-js';
 import { errorMessage, listRuns, listRepos, type Run, type RunKind, type RunOutcome } from '../api';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
 
@@ -23,15 +23,15 @@ const KIND_LABELS: Record<RunKind, string> = {
 
 const OUTCOMES: RunOutcome[] = ['active', 'success', 'death', 'timeout', 'stopped'];
 
-export default function Runs() {
+export default function History() {
   return (
     <RequireAuth>
-      <RunsView />
+      <HistoryView />
     </RequireAuth>
   );
 }
 
-function RunsView() {
+function HistoryView() {
   const events = useEvents();
   const [params, setParams] = useSearchParams<{ repo?: string; outcome?: string }>();
   const repoFilter = () => (typeof params.repo === 'string' ? params.repo : '');
@@ -61,9 +61,8 @@ function RunsView() {
 
   return (
     <main class="page">
-      <TopBar />
       <div class="section-head">
-        <h2>Runs</h2>
+        <h2>History</h2>
         <label class="field runs-filter">
           <select
             name="outcome-filter"

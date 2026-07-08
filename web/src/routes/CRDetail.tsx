@@ -25,7 +25,6 @@ import { closeCR, errorMessage, getCR, mergeCR, type CRDetail as CR } from '../a
 import ClosesChips from '../components/ClosesChips';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { classifyDiff, groupDiffFiles, type DiffFileGroup } from '../lib/crs';
 import { formatDateTime } from '../lib/issues';
@@ -105,7 +104,6 @@ function CRDetailView() {
 
   return (
     <main class="page">
-      <TopBar />
       <p class="crumb">
         <A href={`/repos/${params.id}/crs`}>← Change requests</A>
       </p>

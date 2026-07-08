@@ -9,7 +9,6 @@ import { For, Match, Switch, createResource, onCleanup } from 'solid-js';
 import { errorMessage, getRepo, listCRs, type CRStateFilter, type CRSummary } from '../api';
 import ClosesChips from '../components/ClosesChips';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { formatDateTime } from '../lib/issues';
 import { resourceValue } from '../lib/resource';
@@ -60,7 +59,6 @@ function RepoCRsView() {
 
   return (
     <main class="page">
-      <TopBar />
       <div class="section-head">
         <h2>{repoData()?.name ?? 'Repository'} · Change requests</h2>
         <div class="head-actions">

@@ -9,15 +9,17 @@ import {
   deleteCredential,
   errorMessage,
   listCredentials,
+  listInstances,
   updateCredential,
   type CredentialKind,
   type CredentialListItem,
 } from '../api';
+import ClaudeAuthCard from '../components/ClaudeAuthCard';
 import ErrorBanner from '../components/ErrorBanner';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
+import { resourceValue } from '../lib/resource';
 
 export const KIND_LABELS: Record<CredentialKind, string> = {
   ssh_key: 'SSH key',
@@ -44,11 +46,19 @@ function CredentialsView() {
   // The referenced flag follows repo rows (create/delete/PATCH change FKs).
   onCleanup(events.subscribe('repo.changed', () => void refetch()));
 
+  // Live instance count for the Claude logout confirm copy (issue #46): running
+  // instances survive a logout on their in-memory token until it refreshes.
+  const [instances, { refetch: refetchInstances }] = createResource(() => listInstances());
+  onCleanup(events.subscribe('run.changed', () => void refetchInstances()));
+  const liveCount = () => (resourceValue(instances) ?? []).filter((i) => i.live).length;
+
   const [showCreate, setShowCreate] = createSignal(false);
 
   return (
     <main class="page">
-      <TopBar />
+      <div class="stack">
+        <ClaudeAuthCard activeRuns={liveCount()} />
+      </div>
       <div class="section-head">
         <h2>Credentials</h2>
         <button type="button" class="primary" onClick={() => setShowCreate(!showCreate())}>

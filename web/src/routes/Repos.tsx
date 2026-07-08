@@ -1,56 +1,47 @@
-// Dashboard: Claude auth card, then repo cards (name, remote host, chips,
-// clone status with live SSE progress) each carrying its start-instance form,
-// the AFK section (start/auto/paused), live instance list, stop-all and
-// parked strip — or the add-repo empty state. repo.changed → refetch repos
-// (paused banner + auto toggle follow the repo row); run.changed → refetch
-// instances; clone.progress → per-card signal only; parked.changed lives in
-// the strip.
+// Repos (/repos, re-homed from the old Dashboard): repo cards (name, remote
+// host, chips, clone status with live SSE progress), each carrying its clone
+// progress / retry banner, the Issues/CRs/Settings links, a parked strip and a
+// Stop-all — or the add-repo empty state. repo.changed refetches repos;
+// run.changed refetches instances (Stop-all reads their live count);
+// clone.progress feeds a per-card signal; parked.changed lives in the strip.
+//
+// The side rail owns live-run rows now, so there is deliberately NO InstanceList
+// here, and no ClaudeAuthCard / AFKSection / StartInstanceForm (Credentials owns
+// the auth card; the AFK strip + composer move to the Home page in Phase 2b).
 
 import { A } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
 import {
   errorMessage,
-  getSpawnDefaults,
   listCRs,
   listInstances,
-  listProviders,
   listRepos,
   retryClone,
   stopAll,
   type Instance,
-  type Provider,
   type Repo,
-  type Run,
 } from '../api';
-import AFKSection from '../components/AFKSection';
-import ClaudeAuthCard from '../components/ClaudeAuthCard';
 import ErrorBanner from '../components/ErrorBanner';
-import InstanceList from '../components/InstanceList';
 import ParkedSection from '../components/ParkedSection';
 import RequireAuth from '../components/RequireAuth';
-import StartInstanceForm from '../components/StartInstanceForm';
 import { createToast } from '../components/Toast';
-import TopBar from '../components/TopBar';
 import { useEvents } from '../events';
 import { remoteHost } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
-import { providerFor } from '../lib/spawn';
 import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
 
-export default function Dashboard() {
+export default function Repos() {
   return (
     <RequireAuth>
-      <DashboardView />
+      <ReposView />
     </RequireAuth>
   );
 }
 
-function DashboardView() {
+function ReposView() {
   const events = useEvents();
   const [repos, { refetch }] = createResource(() => listRepos());
   const [instances, { refetch: refetchInstances }] = createResource(() => listInstances());
-  const [providers] = createResource(() => listProviders());
-  const [spawnDefaults] = createResource(() => getSpawnDefaults());
   const progress = createCloneProgressStore(events);
   const toast = createToast();
   onCleanup(progress.dispose);
@@ -59,12 +50,10 @@ function DashboardView() {
 
   const [error, setError] = createSignal<string | null>(null);
 
-  const instancesOf = (repoID: string): Instance[] =>
-    (instances() ?? []).filter((instance) => instance.repo_id === repoID);
-
-  // Running instances survive a Claude logout on their in-memory token until it
-  // refreshes; the auth card's logout confirm names this count (issue #46).
-  const activeRuns = (): number => (instances() ?? []).filter((instance) => instance.live).length;
+  const liveOf = (repoID: string): Instance[] =>
+    (resourceValue(instances) ?? []).filter(
+      (instance) => instance.repo_id === repoID && instance.live,
+    );
 
   const retry = async (repo: Repo) => {
     setError(null);
@@ -89,20 +78,12 @@ function DashboardView() {
     }
   };
 
-  const afkStarted = (run: Run) => {
-    toast.show(
-      run.issue_number === null ? 'AFK run started' : `AFK run started on #${run.issue_number}`,
-    );
-    void refetchInstances();
-  };
-
   return (
     <main class="page">
-      <TopBar />
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <div class="stack">
-        <ClaudeAuthCard activeRuns={activeRuns()} />
+      <div class="section-head">
+        <h2>Repositories</h2>
       </div>
+      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={repos.error !== undefined}>
           <div class="banner error" role="alert">
@@ -120,18 +101,10 @@ function DashboardView() {
               {(repo) => (
                 <RepoCard
                   repo={repo}
-                  instances={instancesOf(repo.id)}
-                  providers={providers()}
-                  provider={providerFor(providers() ?? [], repo.provider)}
-                  defaults={spawnDefaults() ?? {}}
+                  liveInstances={liveOf(repo.id)}
                   progress={progress.progress(repo.id)}
                   onRetry={() => void retry(repo)}
                   onStopAll={() => void stopAllIn(repo)}
-                  onInstancesChanged={() => void refetchInstances()}
-                  onRepoChanged={() => void refetch()}
-                  onAFKStarted={afkStarted}
-                  onStopped={(outcome) => toast.show(outcome)}
-                  onError={setError}
                 />
               )}
             </For>
@@ -150,27 +123,22 @@ function DashboardView() {
 
 function RepoCard(props: {
   repo: Repo;
-  instances: Instance[];
-  providers: Provider[] | undefined;
-  provider: ReturnType<typeof providerFor>;
-  defaults: { model?: string; effort?: string };
+  liveInstances: Instance[];
   progress: CloneProgress | null;
   onRetry: () => void;
   onStopAll: () => void;
-  onInstancesChanged: () => void;
-  onRepoChanged: () => void;
-  onAFKStarted: (run: Run) => void;
-  onStopped: (outcome: 'removed' | 'parked') => void;
-  onError: (message: string) => void;
 }) {
+  // Rail rows carry no Stop, so the repo card is the stop surface: visible
+  // whenever the repo has at least one live instance (one is stoppable here).
+  const liveCount = () => props.liveInstances.length;
   return (
     <article class="card repo-card">
       <div class="card-head">
         <span class="card-title">{props.repo.name}</span>
         <span class="spacer" />
-        <Show when={props.instances.length > 1}>
+        <Show when={liveCount() >= 1}>
           <button type="button" class="danger stop-all" onClick={() => props.onStopAll()}>
-            Stop all
+            Stop all ({liveCount()})
           </button>
         </Show>
         <A href={`/repos/${props.repo.id}/issues`} class="card-link">
@@ -216,28 +184,7 @@ function RepoCard(props: {
           </button>
         </div>
       </Show>
-      <Show when={props.instances.length > 0}>
-        <InstanceList
-          instances={props.instances}
-          providers={props.providers}
-          onStopped={props.onStopped}
-          onChanged={props.onInstancesChanged}
-          onError={props.onError}
-        />
-      </Show>
       <Show when={props.repo.clone_status === 'ready'}>
-        <AFKSection
-          repo={props.repo}
-          onRepoChanged={props.onRepoChanged}
-          onStarted={props.onAFKStarted}
-          onError={props.onError}
-        />
-        <StartInstanceForm
-          repo={props.repo}
-          provider={props.provider}
-          defaults={props.defaults}
-          onStarted={props.onInstancesChanged}
-        />
         <ParkedSection repoID={props.repo.id} />
       </Show>
     </article>
@@ -247,8 +194,8 @@ function RepoCard(props: {
 /**
  * Open-CR count chip (builtin-bound repos only — the caller gates): the CR
  * entry point on the repo card. Self-fetching with a scoped cr.changed
- * refetch; a failing CR endpoint hides the chip instead of breaking the
- * dashboard (non-throwing resource read).
+ * refetch; a failing CR endpoint hides the chip instead of breaking the page
+ * (non-throwing resource read).
  */
 function OpenCRChip(props: { repoID: string }) {
   const events = useEvents();

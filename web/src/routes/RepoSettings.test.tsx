@@ -141,6 +141,11 @@ function stubApi(): void {
         repoOnServer = { ...repoOnServer, ...patch };
         return Promise.resolve(jsonResponse(200, { ...repoOnServer }));
       }
+      // AppShell mounts the side rail once authenticated; it fetches the
+      // instance list for the ACTIVE rail + attention badge.
+      if (url === '/api/v1/instances' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { instances: [] }));
+      }
       return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
     }),
   );

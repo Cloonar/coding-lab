@@ -110,20 +110,6 @@ code,
   padding: var(--space-3) var(--space-3) var(--space-6);
 }
 
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding: 0.6rem 0;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: var(--space-4);
-}
-
 .spacer {
   flex: 1;
 }
@@ -160,162 +146,334 @@ a.plain {
   text-decoration: none;
 }
 
-/* Header nav ---------------------------------------------------------------- */
+/* App shell / side rail --------------------------------------------------- */
+/* Phase 1 structural shell (issue #41): a persistent 260px side rail beside the
+   routed content at >=1024px; the SAME SideNav as a left overlay drawer below
+   that (hamburger or left-edge swipe to open; scrim/Escape/route-change/leftward
+   swipe to close). Everything is expressed in existing tokens (--card, --border,
+   --hover, --accent, --space-*) so Phase 2a can swap token VALUES with no edits
+   here — no hardcoded colors. Class map for later phases: .shell (root, carries
+   .drawer-open / .rail-collapsed), .shell-topstrip / .strip-hamburger / .attn-
+   badge (mobile), .shell-scrim, .shell-rail (drawer/persistent wrapper),
+   .shell-content, .rail-reopen (collapsed chevron), and .rail-* inside SideNav. */
 
-.nav {
-  display: none; /* mobile: nav lives in the dropdown; restored at >=640px */
+.shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Mobile top strip (<1024px; the component also hides it on /runs/:id). */
+.shell-topstrip {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
   align-items: center;
-  gap: 0.1rem;
+  gap: 0.65rem;
+  padding: 0.5rem var(--space-3);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
 }
 
-.nav-link {
-  color: var(--muted);
-  text-decoration: none;
-  font-weight: 550;
-  padding: 0.3rem 0.45rem;
-  border-radius: var(--radius-control);
-}
-
-.nav-link:hover {
-  background: var(--hover);
+.strip-hamburger {
+  position: relative;
   color: var(--text);
 }
 
-.nav-link.active {
-  color: var(--accent);
-  font-weight: 650;
+/* Attention badge on the hamburger: any live run is needs_input/question. */
+.attn-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  border: 2px solid var(--bg);
 }
 
-.nav-link.disabled {
-  cursor: default;
-  opacity: 0.5;
+/* Scrim behind the drawer (mobile). */
+.shell-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(0, 0, 0, 0.4);
 }
 
-.nav-link.disabled:hover {
-  background: none;
-  color: var(--muted);
+/* The rail wrapper. Mobile: an off-canvas drawer sliding in from the left. */
+.shell-rail {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 30;
+  width: 260px;
+  max-width: 85vw;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  transform: translateX(-100%);
+  transition: transform 0.24s ease;
 }
 
-/* Mobile-first (<640px): inline username + desktop Log out hidden; the
-   hamburger + dropdown carry navigation. (.nav itself is hidden above.) */
-.user-name,
-.desktop-logout {
+.shell.drawer-open .shell-rail {
+  transform: translateX(0);
+}
+
+/* Collapsed re-open chevron — desktop-only (see the >=1024 block). */
+.rail-reopen {
   display: none;
 }
 
-.nav-toggle {
-  color: var(--text); /* size/hit-area come from .icon-btn */
-}
-
-/* Full-width dropdown anchored to the bottom of the sticky topbar. */
-.nav-menu {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 20;
+/* SideNav inner content. */
+.rail {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 0.5rem;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-top: none;
-  border-radius: 0 0 var(--radius-card) var(--radius-card);
-  box-shadow: var(--shadow);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  min-height: 100%;
 }
 
-.nav-menu-links {
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Collapse chevron is desktop-only (collapse applies only >=1024px). */
+.rail-collapse {
+  display: none;
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.rail-newrun {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.rail-newrun:hover {
+  text-decoration: none;
+  filter: brightness(0.96);
+}
+
+.rail-section-label {
+  margin: var(--space-2) 0 0;
+  padding: 0 0.2rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.rail-active {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
-.nav-menu-link {
+.rail-empty {
+  margin: 0;
+  padding: 0.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.rail-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.rail-row:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+
+/* Current run highlighted via the router's aria-current="page". */
+.rail-row[aria-current='page'] {
+  background: var(--hover);
+  font-weight: 600;
+}
+
+.rail-row-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+}
+
+/* Attention = accent (matches the hamburger badge); working = the convo amber. */
+.rail-row-dot.needs-input,
+.rail-row-dot.question {
+  background: var(--accent);
+}
+
+.rail-row-dot.working {
+  background: var(--banner-text);
+}
+
+.rail-row-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.rail-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-row-repo {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pushes the footer nav + signed-in row to the bottom of the rail. */
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.rail-nav-link {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   min-height: 44px;
-  padding: 0.4rem 0.6rem;
+  padding: 0.4rem 0.5rem;
   color: var(--text);
   text-decoration: none;
   font-weight: 550;
   border-radius: var(--radius-control);
 }
 
-.nav-menu-link:hover {
+.rail-nav-link:hover {
   background: var(--hover);
+  text-decoration: none;
 }
 
-.nav-menu-link.active {
+.rail-nav-link.active {
   color: var(--accent);
   font-weight: 650;
 }
 
-.nav-menu-icon {
+.rail-nav-icon {
   flex: none;
   color: var(--muted);
 }
 
-.nav-menu-link.active .nav-menu-icon {
+.rail-nav-link.active .rail-nav-icon {
   color: var(--accent);
 }
 
-.nav-menu-foot {
+.rail-foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-  margin-top: 0.4rem;
-  padding-top: 0.5rem;
+  gap: 0.5rem;
+  padding-top: var(--space-2);
+  margin-top: var(--space-2);
   border-top: 1px solid var(--border);
 }
 
-.nav-menu-user {
-  padding-left: 0.6rem;
+.rail-user {
+  flex: 1;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.nav-menu-logout {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-height: 44px;
+.rail-logout {
+  flex: none;
+  min-height: 36px;
+  padding: 0.35rem 0.6rem;
 }
 
-.nav-menu-logout .nav-menu-icon {
-  color: inherit;
-}
-
-/* Viewport scrim behind the dropdown; under the sticky topbar (z-index:10). */
-.nav-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 5;
-  background: rgba(0, 0, 0, 0.4);
-}
-
-/* Desktop (>=640px): inline nav + username + Log out; hide hamburger/menu/scrim. */
-@media (min-width: 640px) {
-  .nav {
+/* Desktop >=1024px: persistent rail beside the content; no drawer chrome. */
+@media (min-width: 1024px) {
+  .shell {
     display: flex;
+    align-items: stretch;
   }
 
-  .user-name {
-    display: inline;
-  }
-
-  .desktop-logout {
-    display: inline-flex;
-    align-items: center;
-  }
-
-  /* `.topbar .nav-toggle` (0,2,0) must out-specify `.icon-btn`'s
-     display:inline-flex (0,1,0), which is declared later in the file — a bare
-     `.nav-toggle` here ties on specificity and loses on source order, leaving
-     the hamburger visible on desktop. */
-  .topbar .nav-toggle,
-  .nav-menu,
-  .nav-scrim {
+  .shell-topstrip,
+  .shell-scrim {
     display: none;
+  }
+
+  .shell-rail {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    height: 100dvh;
+    flex: none;
+    max-width: none;
+    transform: none;
+    transition: none;
+  }
+
+  .shell-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .rail-collapse {
+    display: inline-flex;
+  }
+
+  /* Collapsed: hide the rail, surface a fixed re-open chevron top-left. */
+  .shell.rail-collapsed .shell-rail {
+    display: none;
+  }
+
+  .shell.rail-collapsed .rail-reopen {
+    display: inline-flex;
+    position: fixed;
+    top: var(--space-3);
+    left: var(--space-3);
+    z-index: 30;
+    background: var(--card);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+}
+
+/* prefers-reduced-motion: the drawer snaps rather than slides. */
+@media (prefers-reduced-motion: reduce) {
+  .shell-rail {
+    transition: none;
   }
 }
 
@@ -1627,7 +1785,10 @@ a.chip.cr-count:hover {
 
 /* The chat page is a BOUNDED flex column (height, not min-height): the
    document never scrolls, .chat-stream is the scroll container, and the
-   composer stays pinned at the bottom. */
+   composer stays pinned at the bottom. Inside the app shell (issue #41) the
+   rail sits BESIDE the chat (a width, never a height), and the mobile top
+   strip is hidden on /runs/:id, so this 100dvh fill still equals the viewport
+   at every breakpoint — a flex/height chain, no magic offset for chrome above. */
 .chat-page {
   display: flex;
   flex-direction: column;
