@@ -7,11 +7,11 @@
 // now redirects here, and /runs/:id stays the chat.)
 
 import { A, useSearchParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, onCleanup } from 'solid-js';
+import { For, Match, Show, Switch, createResource } from 'solid-js';
 import { errorMessage, listRuns, listRepos, type Run, type RunKind, type RunOutcome } from '../api';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
+import { createLiveResource } from '../lib/liveResource';
 
 const RUNS_LIMIT = 50;
 
@@ -32,7 +32,6 @@ export default function History() {
 }
 
 function HistoryView() {
-  const events = useEvents();
   const [params, setParams] = useSearchParams<{ repo?: string; outcome?: string }>();
   const repoFilter = () => (typeof params.repo === 'string' ? params.repo : '');
   const outcomeFilter = (): RunOutcome | '' => {
@@ -43,13 +42,10 @@ function HistoryView() {
   };
 
   const [repos] = createResource(() => listRepos());
-  const [runs, { refetch }] = createResource(repoFilter, (repo) =>
-    listRuns({ repo: repo === '' ? undefined : repo, limit: RUNS_LIMIT }),
-  );
-  onCleanup(
-    events.subscribe('run.changed', () => {
-      void refetch();
-    }),
+  const [runs] = createLiveResource(
+    repoFilter,
+    (repo) => listRuns({ repo: repo === '' ? undefined : repo, limit: RUNS_LIMIT }),
+    [{ type: 'run.changed' }],
   );
 
   // The outcome filter narrows the already-fetched page client-side.

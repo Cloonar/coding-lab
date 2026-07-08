@@ -14,7 +14,7 @@
 // and warns that AFK auto stays on. Starting login again doubles as
 // cancel/retry (v0). All copy derives from the provider's display_name.
 
-import { Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
+import { Match, Show, Switch, createSignal } from 'solid-js';
 import {
   errorMessage,
   providerAuthStatus,
@@ -24,23 +24,24 @@ import {
   type Provider,
   type ProviderAuthStatus,
 } from '../api';
-import { useEvents } from '../events';
+import { createLiveResource } from '../lib/liveResource';
 import ErrorBanner from './ErrorBanner';
 
 export default function ProviderAuthCard(props: { provider: Provider; activeRuns?: number }) {
-  const events = useEvents();
-  const [status, { refetch, mutate }] = createResource(
+  const [status, { refetch, mutate }] = createLiveResource(
     () => props.provider.id,
     (id) => providerAuthStatus(id),
-  );
-  onCleanup(
-    // eslint-disable-next-line solid/reactivity -- the handler re-reads props.provider.id fresh on every SSE event
-    events.subscribe('provider.auth.changed', (event) => {
-      // The payload names the provider; refetch on a match (or on an old
-      // payload without one, defensively).
-      const id = event['provider'];
-      if (typeof id !== 'string' || id === props.provider.id) void refetch();
-    }),
+    [
+      {
+        type: 'provider.auth.changed',
+        match: (event) => {
+          // The payload names the provider; refetch on a match (or on an old
+          // payload without one, defensively).
+          const id = event['provider'];
+          return typeof id !== 'string' || id === props.provider.id;
+        },
+      },
+    ],
   );
 
   const [error, setError] = createSignal<string | null>(null);

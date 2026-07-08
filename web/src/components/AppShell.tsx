@@ -8,18 +8,11 @@
 // children bare — /login and /setup therefore never get the shell.
 
 import { useLocation } from '@solidjs/router';
-import {
-  Show,
-  createEffect,
-  createResource,
-  createSignal,
-  on,
-  onCleanup,
-  type ParentProps,
-} from 'solid-js';
+import { Show, createEffect, createSignal, on, onCleanup, type ParentProps } from 'solid-js';
 import { listInstances } from '../api';
 import { useAuth } from '../auth';
 import { useEvents } from '../events';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 import Icon from './Icon';
 import SideNav from './SideNav';
@@ -50,16 +43,10 @@ function ShellFrame(props: ParentProps) {
 
   // The single shell-wide instances resource (spec pin): rail rows and the
   // mobile attention badge both read this one list.
-  const [instances, { refetch }] = createResource(() => listInstances());
-  onCleanup(events.subscribe('run.changed', () => void refetch()));
-  let debounce: ReturnType<typeof setTimeout> | undefined;
-  onCleanup(
-    events.subscribe('run.messages.changed', () => {
-      clearTimeout(debounce);
-      debounce = setTimeout(() => void refetch(), MESSAGES_DEBOUNCE_MS);
-    }),
+  const [instances] = createLiveResource(
+    () => listInstances(),
+    [{ type: 'run.changed' }, { type: 'run.messages.changed', debounceMs: MESSAGES_DEBOUNCE_MS }],
   );
-  onCleanup(() => clearTimeout(debounce));
 
   const all = () => resourceValue(instances) ?? [];
   const hasAttention = () =>

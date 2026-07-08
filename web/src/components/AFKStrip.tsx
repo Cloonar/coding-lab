@@ -7,7 +7,7 @@
 // banner with the human Reset (the only un-pause). AFK start success is a toast
 // in the parent, never a navigation — the composer stays put.
 
-import { Show, createResource, createSignal, onCleanup } from 'solid-js';
+import { Show, createSignal } from 'solid-js';
 import {
   errorMessage,
   listClaimableIssues,
@@ -17,8 +17,8 @@ import {
   type Repo,
   type Run,
 } from '../api';
-import { useEvents } from '../events';
 import { afkStartHint, isAFKPaused } from '../lib/afk';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 export default function AFKStrip(props: {
@@ -29,27 +29,18 @@ export default function AFKStrip(props: {
   onStarted: (run: Run) => void;
   onError: (message: string) => void;
 }) {
-  const events = useEvents();
-  const [claimable, { refetch }] = createResource(
-    () => props.repo.id,
-    (id) => listClaimableIssues(id),
-  );
   // The claimable count follows issues (labels/state edits), claims (runs
   // starting/ending) and parked branches (discard frees a claim).
   // run.changed carries no repoID — refetch unconditionally.
-  /* eslint-disable solid/reactivity -- handlers re-read props.repo.id fresh per SSE event */
-  onCleanup(
-    events.subscribe('issue.changed', (event) => {
-      if (event.repoID === props.repo.id) void refetch();
-    }),
+  const [claimable, { refetch }] = createLiveResource(
+    () => props.repo.id,
+    (id) => listClaimableIssues(id),
+    [
+      { type: 'issue.changed', match: (event) => event.repoID === props.repo.id },
+      { type: 'run.changed' },
+      { type: 'parked.changed', match: (event) => event.repoID === props.repo.id },
+    ],
   );
-  onCleanup(events.subscribe('run.changed', () => void refetch()));
-  onCleanup(
-    events.subscribe('parked.changed', (event) => {
-      if (event.repoID === props.repo.id) void refetch();
-    }),
-  );
-  /* eslint-enable solid/reactivity */
 
   // Unknown count (still loading / ready endpoint failed) → null → plain
   // enabled button: the hint must never block the authoritative click.

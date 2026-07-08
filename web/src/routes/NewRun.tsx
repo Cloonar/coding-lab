@@ -36,6 +36,7 @@ import Icon from '../components/Icon';
 import RequireAuth from '../components/RequireAuth';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
+import { createLiveResource } from '../lib/liveResource';
 import { providerFor, resolveSpawnOption } from '../lib/spawn';
 import { setQueued } from '../lib/queuedMessage';
 import { resourceValue } from '../lib/resource';
@@ -59,15 +60,17 @@ function NewRunView() {
   const events = useEvents();
   const navigate = useNavigate();
 
-  const [repos, { refetch: refetchRepos }] = createResource(() => listRepos());
+  // repo.changed keeps clone_status fresh so a cloning repo becomes selectable
+  // the moment it lands; the auth banner refetches on its own SSE event.
+  const [repos, { refetch: refetchRepos }] = createLiveResource(
+    () => listRepos(),
+    [{ type: 'repo.changed' }],
+  );
   const [providers] = createResource(() => listProviders());
   const [defaults] = createResource(() => getSpawnDefaults());
   const progress = createCloneProgressStore(events);
   const toast = createToast();
   onCleanup(progress.dispose);
-  // repo.changed keeps clone_status fresh so a cloning repo becomes selectable
-  // the moment it lands; the auth banner refetches on its own SSE event.
-  onCleanup(events.subscribe('repo.changed', () => void refetchRepos()));
 
   const readLastRepo = (): string | null => {
     try {
@@ -112,11 +115,11 @@ function NewRunView() {
   // per-provider-id (issue #51 decision 7), so the resource keys on the repo
   // pick and refetches on the provider-generic SSE event. Copy comes from the
   // provider's display_name — never a hardcoded agent name.
-  const [authStatus, { refetch: refetchAuth }] = createResource(
+  const [authStatus] = createLiveResource(
     () => selectedRepo()?.provider,
     (id) => providerAuthStatus(id),
+    [{ type: 'provider.auth.changed' }],
   );
-  onCleanup(events.subscribe('provider.auth.changed', () => void refetchAuth()));
   const providerName = () => provider()?.display_name ?? 'The provider';
 
   // '' = untouched → submit the resolved default. Tracking the operator's pick

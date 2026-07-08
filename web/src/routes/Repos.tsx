@@ -10,7 +10,7 @@
 // owns the auth cards; the AFK strip + composer move to the Home page in 2b).
 
 import { A } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
+import { For, Match, Show, Switch, createSignal, onCleanup } from 'solid-js';
 import {
   errorMessage,
   listCRs,
@@ -26,6 +26,7 @@ import ParkedSection from '../components/ParkedSection';
 import RequireAuth from '../components/RequireAuth';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
+import { createLiveResource } from '../lib/liveResource';
 import { remoteHost } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
 import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
@@ -40,13 +41,14 @@ export default function Repos() {
 
 function ReposView() {
   const events = useEvents();
-  const [repos, { refetch }] = createResource(() => listRepos());
-  const [instances, { refetch: refetchInstances }] = createResource(() => listInstances());
+  const [repos, { refetch }] = createLiveResource(() => listRepos(), [{ type: 'repo.changed' }]);
+  const [instances, { refetch: refetchInstances }] = createLiveResource(
+    () => listInstances(),
+    [{ type: 'run.changed' }],
+  );
   const progress = createCloneProgressStore(events);
   const toast = createToast();
   onCleanup(progress.dispose);
-  onCleanup(events.subscribe('repo.changed', () => void refetch()));
-  onCleanup(events.subscribe('run.changed', () => void refetchInstances()));
 
   const [error, setError] = createSignal<string | null>(null);
 
@@ -198,16 +200,10 @@ function RepoCard(props: {
  * (non-throwing resource read).
  */
 function OpenCRChip(props: { repoID: string }) {
-  const events = useEvents();
-  const [crs, { refetch }] = createResource(
+  const [crs] = createLiveResource(
     () => props.repoID,
     (repoID) => listCRs(repoID, 'open'),
-  );
-  onCleanup(
-    // eslint-disable-next-line solid/reactivity -- the handler re-reads props.repoID fresh on every SSE event
-    events.subscribe('cr.changed', (event) => {
-      if (event.repoID === props.repoID) void refetch();
-    }),
+    [{ type: 'cr.changed', match: (event) => event.repoID === props.repoID }],
   );
   const count = () => resourceValue(crs)?.length ?? 0;
   return (

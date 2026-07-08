@@ -11,23 +11,14 @@
 // cr.changed (scoped to this repo) refetches.
 
 import { A, useParams } from '@solidjs/router';
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createMemo,
-  createResource,
-  createSignal,
-  onCleanup,
-} from 'solid-js';
+import { For, Match, Show, Switch, createMemo, createSignal } from 'solid-js';
 import { closeCR, errorMessage, getCR, mergeCR, type CRDetail as CR } from '../api';
 import ClosesChips from '../components/ClosesChips';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
 import { classifyDiff, groupDiffFiles, type DiffFileGroup } from '../lib/crs';
 import { formatDateTime } from '../lib/issues';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 export default function CRDetail() {
@@ -40,25 +31,18 @@ export default function CRDetail() {
 
 function CRDetailView() {
   const params = useParams<{ id: string; number: string }>();
-  const events = useEvents();
   const crNumber = () => Number(params.number);
 
-  const [cr, { refetch }] = createResource(
+  const [cr, { refetch }] = createLiveResource(
     () => `${params.id}\n${params.number}`,
     (key) => {
       const sep = key.indexOf('\n');
       return getCR(key.slice(0, sep), Number(key.slice(sep + 1)));
     },
+    [{ type: 'cr.changed', match: (event) => event.repoID === params.id }],
   );
   // Non-throwing accessor for reads outside the guarded <Match> branches.
   const crData = () => resourceValue(cr);
-
-  onCleanup(
-    events.subscribe('cr.changed', (event) => {
-      if (event.repoID !== params.id) return;
-      void refetch();
-    }),
-  );
 
   // Memoized: the classifier walks the (up to ~1MiB) diff text once per
   // fetched detail, not once per render.

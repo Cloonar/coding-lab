@@ -3,7 +3,7 @@
 // and delete with the server's 409 message surfaced. Secrets are write-only:
 // no payload is ever fetched, shown or prefilled anywhere on this page.
 
-import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
+import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
 import {
   createCredential,
   deleteCredential,
@@ -19,7 +19,7 @@ import ProviderAuthCard from '../components/ProviderAuthCard';
 import ErrorBanner from '../components/ErrorBanner';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
-import { useEvents } from '../events';
+import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 export const KIND_LABELS: Record<CredentialKind, string> = {
@@ -42,10 +42,11 @@ export default function Credentials() {
 }
 
 function CredentialsView() {
-  const events = useEvents();
-  const [credentials, { refetch }] = createResource(() => listCredentials());
   // The referenced flag follows repo rows (create/delete/PATCH change FKs).
-  onCleanup(events.subscribe('repo.changed', () => void refetch()));
+  const [credentials, { refetch }] = createLiveResource(
+    () => listCredentials(),
+    [{ type: 'repo.changed' }],
+  );
 
   // One auth card per registered provider, driven by its auth descriptor
   // (issue #51 decision 7) — the provider list is the only source of provider
@@ -55,8 +56,7 @@ function CredentialsView() {
   // Live instance count for the provider logout confirm copy (issue #46):
   // running instances survive a logout on their in-memory token until it
   // refreshes.
-  const [instances, { refetch: refetchInstances }] = createResource(() => listInstances());
-  onCleanup(events.subscribe('run.changed', () => void refetchInstances()));
+  const [instances] = createLiveResource(() => listInstances(), [{ type: 'run.changed' }]);
   const liveCount = () => (resourceValue(instances) ?? []).filter((i) => i.live).length;
 
   const [showCreate, setShowCreate] = createSignal(false);
