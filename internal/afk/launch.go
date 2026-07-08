@@ -183,6 +183,16 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 	if err != nil {
 		return store.Run{}, launchSpawned, err
 	}
+	// The AFK seed-prompt override (issue #52 / ADR-0027): repo.afk_prompt ??
+	// the global afk_prompt setting, "" = the built-in template. Resolved on
+	// this same locked launch path as model/effort/options so both AFK kinds
+	// (manual and auto go through here) pick up a current override. A non-empty
+	// override REPLACES the built-in wholesale; incogni is NOT re-appended (it
+	// stays mechanically enforced downstream — SeedPrompt's WYSIWYG contract).
+	prompt, err := s.instances.ResolveAFKPrompt(ctx, repo)
+	if err != nil {
+		return store.Run{}, launchSpawned, err
+	}
 
 	// An AFK run's identity: label afk-<N> / afk-auto-<N>, session
 	// <repoName>~<label>, branch = the repo's afk_branch_pattern rendered
@@ -207,7 +217,7 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 		Options:        options,
 		BudgetDeadline: &deadline,
 		TokenExpiry:    &tokenExpiry,
-		SeedPrompt:     SeedPrompt(n, branch, repo.Incogni),
+		SeedPrompt:     SeedPrompt(n, branch, repo.Incogni, prompt),
 	})
 	if err != nil {
 		return store.Run{}, launchSpawned, err

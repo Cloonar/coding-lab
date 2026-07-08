@@ -32,6 +32,17 @@ const (
 	SettingSpawnModelDefaultAFK  = "spawn_model_default_afk"
 	SettingSpawnEffortDefaultAFK = "spawn_effort_default_afk"
 	SettingSpawnOptionsAFK       = "spawn_options_afk"
+
+	// AFK seed-prompt override (issue #52 / ADR-0027): the global layer between
+	// repos.afk_prompt and the built-in template (afk.SeedPromptTemplate).
+	// Absent or blank = inherit the built-in — so like the AFK spawn defaults
+	// above it is intentionally NOT seeded by SeedDefaultSettings, keeping every
+	// existing install on the built-in prompt until an override is set. The
+	// name is the plain "afk_prompt", NOT "..._afk": the "_afk" SUFFIX grammar
+	// is reserved for the AFK override OF a base spawn default
+	// (spawn_model_default → spawn_model_default_afk), and there is no base
+	// prompt to override — so this matches the suffix-less afk_budget_minutes.
+	SettingAFKPrompt = "afk_prompt"
 )
 
 // GetSetting returns the raw value for key, or ErrNotFound.

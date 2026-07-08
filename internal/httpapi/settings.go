@@ -15,9 +15,25 @@ import (
 	"strconv"
 	"strings"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
+
+// afkPromptMaxBytes caps a stored afk_prompt override (issue #52 / ADR-0027),
+// enforced identically by the global settings PATCH here and the repo-level
+// afk_prompt PATCH in repos.go (same package). The seed prompt travels as the
+// spawn's trailing argv positional, so an unbounded value would risk the OS
+// ARG_MAX ceiling at spawn; 16 KiB sits far under any platform limit yet is
+// ample for a full custom playbook.
+const afkPromptMaxBytes = 16 << 10
+
+// afkPromptDefaultKey is the read-only settings field carrying the built-in
+// seed-prompt template (issue #52 / ADR-0027). It is NOT a stored settings row:
+// SeedDefaultSettings never writes it and PATCH rejects it as an unknown key.
+// It is injected into every settings response so the UI can show the factory
+// prompt as the placeholder an operator's afk_prompt override would replace.
+const afkPromptDefaultKey = "afk_prompt_default"
 
 // settingsIntMin is the closed set of integer settings keys with each key's
 // minimum: a zero cap or budget would deadlock every spawn, and sub-5s ticks
@@ -47,6 +63,17 @@ func typedSettings(all map[string]string) map[string]any {
 	return out
 }
 
+// injectReadonlySettings adds the computed read-only settings fields (issue #52
+// / ADR-0027) to a typed settings map before it is returned, so GET and PATCH
+// carry an identical surface (both handlers route through here). afk_prompt_default
+// is the BASE seed-prompt template — non-incogni, tokens un-interpolated — the
+// exact text the built-in SeedPrompt renders from and that an afk_prompt override
+// replaces.
+func injectReadonlySettings(m map[string]any) map[string]any {
+	m[afkPromptDefaultKey] = afk.SeedPromptTemplate(false)
+	return m
+}
+
 // handleSettingsGet is GET /api/v1/settings: every key+value, typed.
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	all, err := s.store.AllSettings(r.Context())
@@ -54,7 +81,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "loading settings", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": typedSettings(all)})
+	writeJSON(w, http.StatusOK, map[string]any{"settings": injectReadonlySettings(typedSettings(all))})
 }
 
 // handleSettingsPatch is PATCH /api/v1/settings {key: value, …}: validate
@@ -136,6 +163,23 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates[key] = v
+		case store.SettingAFKPrompt:
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			// Whitespace-only normalizes to "" = inherit the built-in (issue #52
+			// / ADR-0027); a real override is stored AS-IS — no trimming, since a
+			// prompt may legitimately carry leading/trailing structure. The cap
+			// guards the spawn argv (afkPromptMaxBytes).
+			if strings.TrimSpace(v) == "" {
+				v = ""
+			} else if len(v) > afkPromptMaxBytes {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("afk_prompt must be at most %d bytes", afkPromptMaxBytes))
+				return
+			}
+			updates[key] = v
 		case store.SettingGitAuthorName, store.SettingGitAuthorEmail:
 			v, err := parseSettingString(raw)
 			if err != nil {
@@ -163,7 +207,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "loading settings", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": typedSettings(all)})
+	writeJSON(w, http.StatusOK, map[string]any{"settings": injectReadonlySettings(typedSettings(all))})
 }
 
 // parseSettingInt accepts a JSON integer or a string holding one (the SPA

@@ -211,6 +211,14 @@ export interface Repo {
   afk_effort_default: string | null;
   /** Provider spawn-option bag for AFK runs (null = inherit global). */
   afk_options: Record<string, string> | null;
+  /** AFK seed-prompt override (issue #52); null = inherit afk_prompt_effective. */
+  afk_prompt: string | null;
+  /**
+   * Read-only: what this repo would use if its own afk_prompt were empty —
+   * the global override if set, else the built-in default (incogni-aware).
+   * Tokens (<N>, <BRANCH>) are left un-interpolated. Always present.
+   */
+  afk_prompt_effective: string;
   git_author_name: string | null;
   git_author_email: string | null;
   afk_branch_pattern: string;
@@ -251,6 +259,8 @@ export interface RepoPatch {
   afk_model_default?: string | null;
   afk_effort_default?: string | null;
   afk_options?: Record<string, string> | null;
+  /** null/""/whitespace-only clears back to afk_prompt_effective. */
+  afk_prompt?: string | null;
   incogni?: boolean;
   git_author_name?: string | null;
   git_author_email?: string | null;
@@ -975,6 +985,16 @@ export const TEXT_SETTING_KEYS = [
   'spawn_effort_default_afk',
   'git_author_name',
   'git_author_email',
+  'afk_prompt',
+  /**
+   * Read-only, server-injected (issue #52): the built-in seed-prompt template
+   * with literal <N>/<BRANCH> tokens un-interpolated. Listed here only so
+   * normalizeSettings' loop below picks it up for Settings.tsx to read as the
+   * textarea placeholder — callers MUST NOT include it in an updateSettings
+   * patch (the server 400s). Settings.tsx's buildPatch iterates its own
+   * explicit key list rather than this array, which keeps it out of PATCHes.
+   */
+  'afk_prompt_default',
 ] as const;
 
 export type IntSettingKey = (typeof INT_SETTING_KEYS)[number];
@@ -987,6 +1007,9 @@ export type TextSettingKey = (typeof TEXT_SETTING_KEYS)[number];
  * `spawn_options_afk` is the provider spawn-option bag for AFK runs. The server
  * stores it as a JSON string and returns it as one on GET; normalizeSettings
  * parses it to an object here, and PATCH sends it back as an object.
+ *
+ * `afk_prompt_default` is read-only (see TEXT_SETTING_KEYS above) — present on
+ * every GET, must never be sent back in a PATCH.
  */
 export type Settings = Partial<Record<IntSettingKey, number> & Record<TextSettingKey, string>> & {
   spawn_options_afk?: Record<string, string>;

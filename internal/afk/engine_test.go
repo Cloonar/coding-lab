@@ -423,7 +423,7 @@ func TestStartManualAFK_claimsLowestAndLaunches(t *testing.T) {
 	if !live || sess.Dir != wt {
 		t.Fatalf("session live=%v dir=%q, want live in %q", live, sess.Dir, wt)
 	}
-	if last := sess.Argv[len(sess.Argv)-1]; last != SeedPrompt(7, "afk/7", false) {
+	if last := sess.Argv[len(sess.Argv)-1]; last != SeedPrompt(7, "afk/7", false, "") {
 		t.Errorf("last spawn argv = %q, want the exact SeedPrompt as one trailing positional", last)
 	}
 	if sent := f.runner.Sent(run.SessionName); len(sent) != 0 {
@@ -442,6 +442,35 @@ func TestStartManualAFK_claimsLowestAndLaunches(t *testing.T) {
 	wantExpiry := wantDeadline.Add(30 * time.Minute)
 	if info.ExpiresAt == nil || !info.ExpiresAt.Equal(wantExpiry) {
 		t.Errorf("token expiry = %v, want %v", info.ExpiresAt, wantExpiry)
+	}
+}
+
+// TestStartManualAFK_repoOverrideReachesSeedPrompt pins the #52/ADR-0027 launch
+// wiring end-to-end within the engine: a repo-level afk_prompt override is
+// resolved on the locked launch path (ResolveAFKPrompt) and rendered into the
+// seed prompt carried as the spawn's trailing argv positional — with <N>/<BRANCH>
+// interpolated and the built-in template fully replaced.
+func TestStartManualAFK_repoOverrideReachesSeedPrompt(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReady(7)
+
+	override := "Custom playbook: resolve <N> on <BRANCH>, then stop."
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID,
+		store.RepoSettingsUpdate{AFKPrompt: store.Set(&override)}); err != nil {
+		t.Fatalf("set afk_prompt override: %v", err)
+	}
+
+	run, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK: %v", err)
+	}
+	sess, live := f.runner.Session(run.SessionName)
+	if !live {
+		t.Fatalf("session %q not live", run.SessionName)
+	}
+	want := "Custom playbook: resolve 7 on afk/7, then stop."
+	if last := sess.Argv[len(sess.Argv)-1]; last != want {
+		t.Errorf("seed argv = %q, want the rendered repo override %q", last, want)
 	}
 }
 

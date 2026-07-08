@@ -85,6 +85,8 @@ function baseRepo(): Repo {
     afk_model_default: null,
     afk_effort_default: null,
     afk_options: null,
+    afk_prompt: null,
+    afk_prompt_effective: 'Resolve issue #<N> on branch <BRANCH>, then open a PR.',
     git_author_name: null,
     git_author_email: null,
     afk_branch_pattern: 'afk/<N>',
@@ -192,7 +194,20 @@ function input(name: string): HTMLInputElement {
   return el;
 }
 
-function typeInto(el: HTMLInputElement, value: string): void {
+function textarea(name: string): HTMLTextAreaElement {
+  const el = container.querySelector<HTMLTextAreaElement>(`textarea[name="${name}"]`);
+  if (!el) throw new Error(`missing textarea[name="${name}"]`);
+  return el;
+}
+
+function button(text: string): HTMLButtonElement {
+  const buttons = Array.from(container.querySelectorAll('button'));
+  const el = buttons.find((b) => b.textContent?.trim() === text);
+  if (!el) throw new Error(`missing button ${JSON.stringify(text)}`);
+  return el;
+}
+
+function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
   el.value = value;
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
@@ -350,5 +365,63 @@ describe('RepoSettings AFK defaults', () => {
 
     expect(patchBodies).toEqual([{ afk_model_default: 'sonnet' }]);
     expect(repoOnServer.afk_model_default).toBe('sonnet');
+  });
+});
+
+describe('RepoSettings AFK seed prompt (issue #52)', () => {
+  it("renders empty with the repo's afk_prompt_effective as the placeholder", async () => {
+    await mountSettings();
+    const field = await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+
+    expect(field.value).toBe('');
+    expect(field.placeholder).toBe(repoOnServer.afk_prompt_effective);
+  });
+
+  it('Customize copies afk_prompt_effective into the textarea for editing', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+
+    button('Customize').click();
+
+    expect(textarea('afk_prompt').value).toBe(repoOnServer.afk_prompt_effective);
+  });
+
+  it('editing the prompt and saving PATCHes afk_prompt as a string', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+
+    typeInto(textarea('afk_prompt'), 'Always branch from main and open a PR when finished.');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([
+      { afk_prompt: 'Always branch from main and open a PR when finished.' },
+    ]);
+    expect(repoOnServer.afk_prompt).toBe('Always branch from main and open a PR when finished.');
+  });
+
+  it('clearing a stored override PATCHes afk_prompt as null', async () => {
+    repoOnServer = { ...repoOnServer, afk_prompt: 'A previously customized prompt.' };
+    await mountSettings();
+    const field = await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+    expect(field.value).toBe('A previously customized prompt.');
+
+    typeInto(field, '');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ afk_prompt: null }]);
   });
 });

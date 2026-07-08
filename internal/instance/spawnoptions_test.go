@@ -155,6 +155,40 @@ func TestResolveSpawnOptions(t *testing.T) {
 	}
 }
 
+// ResolveAFKPrompt layers the AFK seed-prompt override (issue #52 / ADR-0027):
+// the repo's afk_prompt wins over the global afk_prompt setting, which wins over
+// "" — the sentinel the afk package reads as "use the built-in template". A nil
+// or empty repo override inherits the next layer.
+func TestResolveAFKPrompt(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// Nothing configured → "" (built-in).
+	setGlobal(t, f, store.SettingAFKPrompt, "")
+	if got, err := f.svc.ResolveAFKPrompt(ctx, store.Repo{}); err != nil || got != "" {
+		t.Fatalf("no override = %q (%v), want empty (use the built-in)", got, err)
+	}
+
+	// Global override wins over the built-in.
+	setGlobal(t, f, store.SettingAFKPrompt, "global playbook <N>")
+	if got, err := f.svc.ResolveAFKPrompt(ctx, store.Repo{}); err != nil || got != "global playbook <N>" {
+		t.Fatalf("global override = %q (%v), want the global value", got, err)
+	}
+
+	// Repo override wins over the global override.
+	repo := store.Repo{AFKPrompt: strptr("repo playbook <BRANCH>")}
+	if got, err := f.svc.ResolveAFKPrompt(ctx, repo); err != nil || got != "repo playbook <BRANCH>" {
+		t.Fatalf("repo override = %q (%v), want the repo value (wins over global)", got, err)
+	}
+
+	// An empty-string repo override inherits the global (defensive: the API
+	// normalizes whitespace-only → NULL, but "" must never win as an override).
+	repo = store.Repo{AFKPrompt: strptr("")}
+	if got, err := f.svc.ResolveAFKPrompt(ctx, repo); err != nil || got != "global playbook <N>" {
+		t.Fatalf("empty repo override = %q (%v), want the global value (inherit)", got, err)
+	}
+}
+
 // Launch threads the resolved options bag through LaunchSpec.Options into the
 // provider's SpawnSpec (issue #19), and the dialog-capture --settings flag still
 // lands among the flags, BEFORE the trailing seed prompt.

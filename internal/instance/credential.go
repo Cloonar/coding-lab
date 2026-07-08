@@ -170,6 +170,23 @@ func (s *Service) ResolveSpawnOptions(ctx context.Context, prov provider.AgentPr
 	return filtered, nil
 }
 
+// ResolveAFKPrompt resolves the AFK seed-prompt override for a launch (issue
+// #52 / ADR-0027), the sibling of ResolveSpawnOptions on the AFK layer: the
+// repo's afk_prompt (non-nil and non-empty) wins, else the global afk_prompt
+// setting, else "" — which the afk package reads as "use the built-in template"
+// (afk.SeedPromptTemplate). Whitespace-only overrides normalize to inherit at
+// the API boundary, so a stored value that reaches here is already the operator's
+// verbatim prompt. There is no kind parameter: unlike ResolveModelEffort /
+// ResolveSpawnOptions there is no manual analogue — only the AFK launch path
+// (internal/afk/launch.go, both AFK kinds) resolves a seed prompt, so the caller
+// gates on kind and this method assumes an AFK run.
+func (s *Service) ResolveAFKPrompt(ctx context.Context, repo store.Repo) (string, error) {
+	if repo.AFKPrompt != nil && *repo.AFKPrompt != "" {
+		return *repo.AFKPrompt, nil
+	}
+	return s.store.GetString(ctx, store.SettingAFKPrompt, "")
+}
+
 // decodeOptionsBag parses the global spawn_options_afk JSON value: an empty
 // string is an empty bag (nothing configured); non-empty JSON is decoded, and
 // malformed JSON is a loud error (never a silent empty bag). Always returns a

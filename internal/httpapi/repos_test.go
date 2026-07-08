@@ -190,7 +190,8 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		"tracker_binding", "forge_kind", "default_branch", "provider", "incogni", "model_default",
 		"effort_default", "git_author_name", "git_author_email", "afk_branch_pattern",
 		"manual_branch_prefix", "afk_auto_enabled", "consecutive_failures", "budget_minutes",
-		"max_instances_override", "clone_status", "clone_error", "created_at", "last_opened_at"} {
+		"max_instances_override", "clone_status", "clone_error", "created_at", "last_opened_at",
+		"afk_prompt", "afk_prompt_effective"} {
 		if _, ok := repo[k]; !ok {
 			t.Errorf("repo JSON missing pinned key %q", k)
 		}
@@ -453,6 +454,83 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 	resp = x.do("PATCH", "/api/v1/repos/repo_missing", map[string]any{"name": "x"}, h)
 	wantStatus(t, resp, http.StatusNotFound)
 	_ = decodeBody(t, resp)
+}
+
+// TestRepoAFKPromptOverride pins the #52/ADR-0027 repo surface: afk_prompt is
+// null when unset and afk_prompt_effective falls back to the built-in; the global
+// afk_prompt becomes a no-own-override repo's effective; a repo's own PATCHed
+// override echoes back but does NOT change effective (effective is the fallback a
+// cleared field reveals); whitespace-only clears to null; an over-cap value is a
+// 400; and an incogni repo's effective carries the incogni sentence.
+func TestRepoAFKPromptOverride(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+
+	resp := x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	id := decodeBody(t, resp)["id"].(string)
+	x.waitCloneStatus(t, id, "ready")
+
+	// Unset: afk_prompt is null; effective is the built-in (literal <N>).
+	repo := x.getRepo(t, id)
+	if _, ok := repo["afk_prompt"]; !ok {
+		t.Fatal("repo JSON missing afk_prompt key")
+	}
+	if repo["afk_prompt"] != nil {
+		t.Errorf("afk_prompt = %v, want null when unset", repo["afk_prompt"])
+	}
+	if eff, _ := repo["afk_prompt_effective"].(string); !strings.Contains(eff, "<N>") {
+		t.Errorf("afk_prompt_effective = %q, want the built-in with literal <N>", repo["afk_prompt_effective"])
+	}
+
+	// A global override becomes the effective for a repo with no own override.
+	if err := x.st.SetSetting(context.Background(), store.SettingAFKPrompt, "global override <N>"); err != nil {
+		t.Fatalf("set global afk_prompt: %v", err)
+	}
+	if repo = x.getRepo(t, id); repo["afk_prompt_effective"] != "global override <N>" {
+		t.Errorf("effective with global set = %v, want the global override", repo["afk_prompt_effective"])
+	}
+	if err := x.st.SetSetting(context.Background(), store.SettingAFKPrompt, ""); err != nil {
+		t.Fatalf("clear global afk_prompt: %v", err)
+	}
+
+	// A repo's own override echoes in afk_prompt but effective still ignores it
+	// (effective is the fallback, computed as if the repo's own value were empty).
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"afk_prompt": "repo playbook <BRANCH>"}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["afk_prompt"] != "repo playbook <BRANCH>" {
+		t.Errorf("afk_prompt after PATCH = %v, want the stored value", repo["afk_prompt"])
+	}
+	if eff, _ := repo["afk_prompt_effective"].(string); !strings.Contains(eff, "<N>") {
+		t.Errorf("afk_prompt_effective after repo PATCH = %q, want the built-in (effective ignores the repo's own override)", repo["afk_prompt_effective"])
+	}
+
+	// Whitespace-only clears back to null (inherit).
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"afk_prompt": "   \n "}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if repo = decodeBody(t, resp); repo["afk_prompt"] != nil {
+		t.Errorf("afk_prompt after whitespace PATCH = %v, want null", repo["afk_prompt"])
+	}
+
+	// Over the 16 KiB cap → 400.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"afk_prompt": strings.Repeat("a", (16<<10)+1)}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); got["error"] == "" {
+		t.Fatal("over-cap afk_prompt 400 without error message")
+	}
+
+	// An incogni repo inheriting the built-in sees the incogni sentence in
+	// effective (asserted on the create response, no clone wait needed).
+	resp = x.do("POST", "/api/v1/repos", map[string]any{
+		"remote_url": origin, "name": "incog", "incogni": true,
+	}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	inc := decodeBody(t, resp)
+	if eff, _ := inc["afk_prompt_effective"].(string); !strings.Contains(eff, "No AI attribution") {
+		t.Errorf("incogni effective = %q, want the incogni attribution sentence", inc["afk_prompt_effective"])
+	}
 }
 
 func TestRepoDeleteMatrix(t *testing.T) {

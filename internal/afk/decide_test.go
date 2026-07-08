@@ -224,11 +224,44 @@ func TestLabelRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSeedPrompt pins the §8.4 template: every ADR-0007 contract element,
-// labctl-only vocabulary (never tea/gh), the repo's rendered branch (never a
-// literal afk/), and the incogni sentence only on incogni repos.
+// wantSeedDefaultNonIncogni is the byte-exact built-in seed prompt for
+// SeedPrompt(63, "issue-63", false, "") — the pinned §8.4 template with <N> and
+// <BRANCH> interpolated. Any drift here is a contract change (compat snapshot).
+const wantSeedDefaultNonIncogni = "You are an autonomous AFK run. Resolve exactly one issue, open a pull request, and stop.\n" +
+	"\n" +
+	"1. Run `labctl issue view 63` and read it fully, including comments.\n" +
+	"2. Work only on branch `issue-63` in this worktree; never switch branches.\n" +
+	"3. Implement the issue completely, following the repository's own conventions (CLAUDE.md / AGENTS.md).\n" +
+	"4. Run the project's tests, build, and linters; fix what you break.\n" +
+	"5. Commit in Conventional Commits style.\n" +
+	"6. `git push -u origin issue-63`.\n" +
+	"7. `labctl pr create --title \"…\" --body \"…\"` — the body must include `Closes #63`.\n" +
+	"8. Then stop working. Do not start unrelated work."
+
+// wantSeedDefaultIncogni is the byte-exact built-in for SeedPrompt(7, "afk/7",
+// true, "") — identical but for the branch/number and the attribution sentence
+// appended to the commit step.
+const wantSeedDefaultIncogni = "You are an autonomous AFK run. Resolve exactly one issue, open a pull request, and stop.\n" +
+	"\n" +
+	"1. Run `labctl issue view 7` and read it fully, including comments.\n" +
+	"2. Work only on branch `afk/7` in this worktree; never switch branches.\n" +
+	"3. Implement the issue completely, following the repository's own conventions (CLAUDE.md / AGENTS.md).\n" +
+	"4. Run the project's tests, build, and linters; fix what you break.\n" +
+	"5. Commit in Conventional Commits style. No AI attribution, no Co-Authored-By, no generated-with footers anywhere.\n" +
+	"6. `git push -u origin afk/7`.\n" +
+	"7. `labctl pr create --title \"…\" --body \"…\"` — the body must include `Closes #7`.\n" +
+	"8. Then stop working. Do not start unrelated work."
+
+// TestSeedPrompt pins the §8.4 built-in template: the byte-exact output for both
+// incogni values (BYTE-IDENTICAL to the pre-#52 SeedPrompt — the override arg
+// left ""), plus every ADR-0007 contract element, labctl-only vocabulary (never
+// tea/gh), the repo's rendered branch (never a literal afk/), and the incogni
+// sentence only on incogni repos.
 func TestSeedPrompt(t *testing.T) {
-	p := SeedPrompt(63, "issue-63", false)
+	p := SeedPrompt(63, "issue-63", false, "")
+	if p != wantSeedDefaultNonIncogni {
+		t.Errorf("non-incogni seed prompt drifted:\n got %q\nwant %q", p, wantSeedDefaultNonIncogni)
+	}
 	for _, want := range []string{
 		"Resolve exactly one issue",
 		"`labctl issue view 63`",
@@ -255,11 +288,79 @@ func TestSeedPrompt(t *testing.T) {
 		t.Error("non-incogni seed prompt carries the incogni sentence")
 	}
 
-	inc := SeedPrompt(7, "afk/7", true)
+	inc := SeedPrompt(7, "afk/7", true, "")
+	if inc != wantSeedDefaultIncogni {
+		t.Errorf("incogni seed prompt drifted:\n got %q\nwant %q", inc, wantSeedDefaultIncogni)
+	}
 	if !strings.Contains(inc, "No AI attribution, no Co-Authored-By, no generated-with footers anywhere.") {
 		t.Errorf("incogni seed prompt missing the attribution sentence:\n%s", inc)
 	}
 	if !strings.Contains(inc, "5. Commit in Conventional Commits style. No AI attribution") {
 		t.Errorf("incogni sentence not attached to the commit step:\n%s", inc)
+	}
+}
+
+// TestSeedPromptTemplate pins that the built-in template carries the LITERAL
+// tokens (issue #52 / ADR-0027) — the un-interpolated text the settings/repo API
+// serves as the default/effective preview.
+func TestSeedPromptTemplate(t *testing.T) {
+	for _, incogni := range []bool{false, true} {
+		tmpl := SeedPromptTemplate(incogni)
+		if !strings.Contains(tmpl, "<N>") {
+			t.Errorf("template (incogni=%v) missing literal <N>:\n%s", incogni, tmpl)
+		}
+		if !strings.Contains(tmpl, "<BRANCH>") {
+			t.Errorf("template (incogni=%v) missing literal <BRANCH>:\n%s", incogni, tmpl)
+		}
+	}
+	// The incogni variant is the only one carrying the attribution sentence.
+	if strings.Contains(SeedPromptTemplate(false), "No AI attribution") {
+		t.Error("non-incogni template carries the incogni sentence")
+	}
+	if !strings.Contains(SeedPromptTemplate(true), "No AI attribution, no Co-Authored-By, no generated-with footers anywhere.") {
+		t.Error("incogni template missing the attribution sentence")
+	}
+}
+
+// TestSeedPromptOverride pins the #52/ADR-0027 override semantics: a non-empty
+// override REPLACES the built-in verbatim, tokens interpolate at EVERY occurrence,
+// a token-less override passes through unchanged, unknown tokens stay literal, and
+// an override on an incogni repo does NOT gain the attribution sentence (WYSIWYG).
+func TestSeedPromptOverride(t *testing.T) {
+	// Override wins over the built-in; both tokens replaced.
+	got := SeedPrompt(42, "afk/42", false, "Fix <N> on <BRANCH>.")
+	if want := "Fix 42 on afk/42."; got != want {
+		t.Errorf("override = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "labctl") {
+		t.Errorf("override did not replace the built-in: %q", got)
+	}
+
+	// Every occurrence of each token is replaced (ReplaceAll, not a single sub).
+	got = SeedPrompt(9, "issue-9", false, "<N> <N> <BRANCH> <BRANCH> <N>")
+	if want := "9 9 issue-9 issue-9 9"; got != want {
+		t.Errorf("multi-occurrence override = %q, want %q", got, want)
+	}
+
+	// A token-less override passes through verbatim.
+	got = SeedPrompt(1, "afk/1", false, "just do the thing")
+	if want := "just do the thing"; got != want {
+		t.Errorf("token-less override = %q, want %q", got, want)
+	}
+
+	// An unknown token stays literal; the known ones still interpolate.
+	got = SeedPrompt(5, "afk/5", false, "<FOO> issue <N> on <BRANCH>")
+	if want := "<FOO> issue 5 on afk/5"; got != want {
+		t.Errorf("unknown-token override = %q, want %q", got, want)
+	}
+
+	// An override on an incogni repo does NOT gain the attribution sentence:
+	// incogni is enforced downstream, so the override text is WYSIWYG.
+	got = SeedPrompt(3, "issue-3", true, "handle <N>")
+	if want := "handle 3"; got != want {
+		t.Errorf("incogni override = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "No AI attribution") {
+		t.Errorf("incogni override gained the attribution sentence: %q", got)
 	}
 }

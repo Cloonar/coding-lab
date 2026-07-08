@@ -6,12 +6,14 @@ package httpapi
 // service errors onto status codes.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
@@ -35,24 +37,37 @@ type repoResponse struct {
 	// inherit the base default. AFKOptions renders as a JSON object (or null when
 	// unset); a nil map marshals to null (no omitempty), so the SPA always sees
 	// every key.
-	AFKModelDefault      *string           `json:"afk_model_default"`
-	AFKEffortDefault     *string           `json:"afk_effort_default"`
-	AFKOptions           map[string]string `json:"afk_options"`
-	GitAuthorName        *string           `json:"git_author_name"`
-	GitAuthorEmail       *string           `json:"git_author_email"`
-	AFKBranchPattern     string            `json:"afk_branch_pattern"`
-	ManualBranchPrefix   string            `json:"manual_branch_prefix"`
-	AFKAutoEnabled       bool              `json:"afk_auto_enabled"`
-	ConsecutiveFailures  int               `json:"consecutive_failures"`
-	BudgetMinutes        *int              `json:"budget_minutes"`
-	MaxInstancesOverride *int              `json:"max_instances_override"`
-	CloneStatus          string            `json:"clone_status"`
-	CloneError           *string           `json:"clone_error"`
-	CreatedAt            string            `json:"created_at"`
-	LastOpenedAt         *string           `json:"last_opened_at"`
+	AFKModelDefault  *string           `json:"afk_model_default"`
+	AFKEffortDefault *string           `json:"afk_effort_default"`
+	AFKOptions       map[string]string `json:"afk_options"`
+	// AFK seed-prompt override (issue #52 / ADR-0027). AFKPrompt is the repo's
+	// own override (null = inherit). AFKPromptEffective is read-only and computed:
+	// what the repo WOULD use if its own override were empty — the global
+	// afk_prompt setting if set, else the built-in template for the repo's incogni
+	// flag, tokens un-interpolated. It deliberately ignores the repo's own override
+	// so the UI can show the fallback a cleared field reveals.
+	AFKPrompt            *string `json:"afk_prompt"`
+	AFKPromptEffective   string  `json:"afk_prompt_effective"`
+	GitAuthorName        *string `json:"git_author_name"`
+	GitAuthorEmail       *string `json:"git_author_email"`
+	AFKBranchPattern     string  `json:"afk_branch_pattern"`
+	ManualBranchPrefix   string  `json:"manual_branch_prefix"`
+	AFKAutoEnabled       bool    `json:"afk_auto_enabled"`
+	ConsecutiveFailures  int     `json:"consecutive_failures"`
+	BudgetMinutes        *int    `json:"budget_minutes"`
+	MaxInstancesOverride *int    `json:"max_instances_override"`
+	CloneStatus          string  `json:"clone_status"`
+	CloneError           *string `json:"clone_error"`
+	CreatedAt            string  `json:"created_at"`
+	LastOpenedAt         *string `json:"last_opened_at"`
 }
 
-func repoJSON(r store.Repo) repoResponse {
+// repoJSON renders a repo row as its pinned JSON shape. It is a pure function
+// of (repo, afkPromptEffective): afkPromptEffective is computed by the caller —
+// once per response for the singular handlers, once per list (a single settings
+// read) for the list handler — because it depends on the global afk_prompt
+// setting, which repoJSON must not read (keeping it side-effect free).
+func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
 	resp := repoResponse{
 		ID:                   r.ID,
 		Name:                 r.Name,
@@ -69,6 +84,8 @@ func repoJSON(r store.Repo) repoResponse {
 		AFKModelDefault:      r.AFKModelDefault,
 		AFKEffortDefault:     r.AFKEffortDefault,
 		AFKOptions:           r.AFKOptions,
+		AFKPrompt:            r.AFKPrompt,
+		AFKPromptEffective:   afkPromptEffective,
 		GitAuthorName:        r.GitAuthorName,
 		GitAuthorEmail:       r.GitAuthorEmail,
 		AFKBranchPattern:     r.AFKBranchPattern,
@@ -86,6 +103,32 @@ func repoJSON(r store.Repo) repoResponse {
 		resp.LastOpenedAt = &t
 	}
 	return resp
+}
+
+// effectiveAFKPrompt is the pure afk_prompt_effective rule (issue #52 /
+// ADR-0027) given an already-read global afk_prompt setting: a non-empty global
+// override is what a repo without its own override would use; otherwise the
+// built-in template for the repo's incogni flag (tokens un-interpolated). By
+// definition it IGNORES the repo's own afk_prompt — it is the fallback a cleared
+// field would reveal. Shared by the single-repo helper and the list handler so
+// the layering has one source of truth.
+func effectiveAFKPrompt(global string, repo store.Repo) string {
+	if global != "" {
+		return global
+	}
+	return afk.SeedPromptTemplate(repo.Incogni)
+}
+
+// afkPromptEffective computes afk_prompt_effective for one repo, reading the
+// global afk_prompt setting once. The singular repo handlers (get/create/update/
+// afk toggles) call this; the list handler reads the global itself once and calls
+// effectiveAFKPrompt per repo, so a list of N repos still does ONE settings read.
+func (s *Server) afkPromptEffective(ctx context.Context, repo store.Repo) (string, error) {
+	global, err := s.store.GetString(ctx, store.SettingAFKPrompt, "")
+	if err != nil {
+		return "", err
+	}
+	return effectiveAFKPrompt(global, repo), nil
 }
 
 // writeRepoError maps reposvc/store errors onto the pinned status codes.
@@ -141,7 +184,12 @@ func (s *Server) handleRepoCreate(w http.ResponseWriter, r *http.Request) {
 		s.writeRepoError(w, "creating repo", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, repoJSON(repo))
+	eff, err := s.afkPromptEffective(r.Context(), repo)
+	if err != nil {
+		s.internalError(w, "creating repo", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, repoJSON(repo, eff))
 }
 
 // normalizeOptID treats an absent, null, or empty-string id as nil.
@@ -163,9 +211,17 @@ func (s *Server) handleRepoList(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "listing repos", err)
 		return
 	}
+	// One settings read for the whole list (issue #52 / ADR-0027): the global
+	// afk_prompt is the same fallback for every repo, so read it once and derive
+	// each row's afk_prompt_effective from it — never a read per repo.
+	global, err := s.store.GetString(r.Context(), store.SettingAFKPrompt, "")
+	if err != nil {
+		s.internalError(w, "listing repos", err)
+		return
+	}
 	items := make([]repoResponse, 0, len(repos))
 	for _, repo := range repos {
-		items = append(items, repoJSON(repo))
+		items = append(items, repoJSON(repo, effectiveAFKPrompt(global, repo)))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"repos": items})
 }
@@ -177,7 +233,12 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 		s.writeRepoError(w, "loading repo", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, repoJSON(repo))
+	eff, err := s.afkPromptEffective(r.Context(), repo)
+	if err != nil {
+		s.internalError(w, "loading repo", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
 }
 
 // handleRepoUpdate is PATCH /api/v1/repos/{id}. The body is read as raw
@@ -212,6 +273,14 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			u.AFKEffortDefault, err = patchNullableString(raw, key)
 		case "afk_options":
 			u.AFKOptions, err = patchOptionsBag(raw, key)
+		case "afk_prompt":
+			// patchNullableString already maps null/whitespace-only → nil (NULL =
+			// inherit); a real override is kept verbatim. Cap it (issue #52 /
+			// ADR-0027) with the same message the settings PATCH uses.
+			u.AFKPrompt, err = patchNullableString(raw, key)
+			if err == nil && u.AFKPrompt.Value != nil && len(*u.AFKPrompt.Value) > afkPromptMaxBytes {
+				err = fmt.Errorf("afk_prompt must be at most %d bytes", afkPromptMaxBytes)
+			}
 		case "incogni":
 			u.Incogni, err = patchBool(raw, key)
 		case "git_author_name":
@@ -241,7 +310,12 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		s.writeRepoError(w, "updating repo", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, repoJSON(repo))
+	eff, err := s.afkPromptEffective(r.Context(), repo)
+	if err != nil {
+		s.internalError(w, "updating repo", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
 }
 
 // handleRepoDelete is DELETE /api/v1/repos/{id}[?force=true]: 204, or 409

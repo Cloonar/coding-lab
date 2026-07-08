@@ -42,6 +42,8 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
     afk_model_default: null,
     afk_effort_default: null,
     afk_options: null,
+    afk_prompt: null,
+    afk_prompt_effective: 'Resolve issue #<N> on branch <BRANCH>, then open a PR.',
     git_author_name: null,
     git_author_email: null,
     afk_branch_pattern: 'afk/<N>',
