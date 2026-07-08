@@ -5,7 +5,9 @@
 // conversational state and publishes a debounced run.messages.changed so the
 // chat view refetches. Read-through only — no message table; the sole
 // persisted state is runs.transcript_path, captured by cwd-match exactly like
-// the deep link.
+// the deep link — and, for an active run, re-pointed when the live session
+// rotates its transcript (a /clear or /rewind starts a new sessionId →
+// transcript file, compat §5), so the chat follows the fresh session (issue #34).
 //
 // Intervention neutrality (issue #7 decision 12): a reply, dialog answer, or
 // interrupt goes through provider send-keys and never touches a run's budget
@@ -17,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"sync"
 	"time"
@@ -176,6 +179,14 @@ type View struct {
 	// PreToolUse spool (nil when none is pending). When set, State is
 	// StateQuestion.
 	PendingDialog *provider.Dialog
+	// TranscriptID is the opaque, provider-neutral identity of the transcript
+	// this view was read from — a stable hash of the resolved path (transcriptID)
+	// that changes exactly when the run's transcript rotates (a /clear or /rewind
+	// starts a new sessionId → transcript file, compat §5, and lab re-points the
+	// run at it). The chat view watches this token to reset its accumulated
+	// stream, since the fresh transcript restarts seq at 1. "" when no transcript
+	// is located yet (issue #34).
+	TranscriptID string
 }
 
 // Read returns the run's chat: it resolves the transcript path (using the
@@ -206,7 +217,7 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
-	view := View{Chat: chat}
+	view := View{Chat: chat, TranscriptID: transcriptID(path)}
 	if run.Outcome != store.RunOutcomeActive {
 		view.State = provider.StateEnded // a terminal run's state never comes from the spool
 		return view, nil
@@ -256,29 +267,78 @@ func (s *Service) hooker(providerID string) (provider.DialogHooker, bool) {
 	return h, ok
 }
 
-// resolvePath returns the transcript path for run: the persisted one if set,
-// otherwise a best-effort locate that is persisted (and announced) on a hit so
-// the first chat open works before the tailer has run. "" means not found yet.
-// Locating only ever runs for an active run: the locate is a cwd-match against
-// the newest LIVE claude in the worktree, so for an ended run any hit would by
-// definition belong to a newer run reusing the worktree — persisting it would
-// permanently point this run at someone else's transcript.
+// resolvePath returns the transcript path for run. An ENDED run returns its
+// persisted path verbatim and NEVER re-locates: the locate is a cwd-match
+// against the newest LIVE claude in the worktree, so any hit would by definition
+// belong to a newer run reusing the worktree — adopting it would permanently
+// point this run at someone else's transcript (the successor-safety this guard
+// preserves). An ACTIVE run re-asks the provider each read and adopts a rotation
+// (locateActive). "" means not found yet.
 func (s *Service) resolvePath(ctx context.Context, prov provider.AgentProvider, run store.Run) string {
-	if run.TranscriptPath != nil && *run.TranscriptPath != "" {
-		return *run.TranscriptPath
+	known := ""
+	if run.TranscriptPath != nil {
+		known = *run.TranscriptPath
 	}
 	if run.Outcome != store.RunOutcomeActive {
-		return ""
+		return known
 	}
+	return s.locateActive(ctx, prov, run, known)
+}
+
+// locateActive re-locates the live transcript for an ACTIVE run and follows a
+// rotation, persisting a newly adopted path so the first chat open works before
+// the tailer has run and so an ended run stays readable. known is the caller's
+// current best path — the persisted path for a Read (run comes fresh from the
+// store per request), the tailer's own cached path for the poll loop (whose
+// in-memory run is captured stale at arm time, so run.TranscriptPath would
+// mislead it). Detecting the rotation by its EFFECT — the located transcript
+// changing — keeps lab core ignorant of any agent's clear command (the design's
+// "detect by effect, not by cause"); it also covers a clear run out-of-band
+// (inside claude.ai, or /rewind) for free. Rules:
+//   - a locate miss (transient registry gap / between-states) keeps known — an
+//     empty result never clobbers a path already in hand;
+//   - the same path is a no-op;
+//   - a different, non-empty path is a rotation (a /clear or /rewind rotated the
+//     sessionId → a fresh transcript file, compat §5): adopt and persist it.
+func (s *Service) locateActive(ctx context.Context, prov provider.AgentProvider, run store.Run, known string) string {
 	path, err := prov.LocateTranscript(ctx, run.SessionName, run.WorktreePath)
 	if err != nil || path == "" {
-		return ""
+		return known
+	}
+	if path == known {
+		return known
+	}
+	// Adopting a DIFFERENT path persists it — re-verify the run is STILL active
+	// against the store first. A caller's run.Outcome can be stale: the tailer
+	// captures it at arm time and can outlive the run's end by up to one resync
+	// interval when a run.changed is dropped (tailer's Run doc). LocateTranscript
+	// is a pure cwd-match, so without this a since-ended run would adopt a
+	// successor run's transcript in a reused worktree and permanently point its
+	// row at someone else's chat — the successor-safety resolvePath's ended-run
+	// guard preserves. Costs one store read per rotation (rare), never per tick.
+	if cur, err := s.store.RunByID(ctx, run.ID); err != nil || cur.Outcome != store.RunOutcomeActive {
+		return known
 	}
 	if err := s.store.UpdateRunTranscriptPath(ctx, run.ID, path); err != nil {
 		s.log.Warn("persisting located transcript", "component", "chat",
 			"run", run.ID, "session", run.SessionName, "err", err)
 	}
 	return path
+}
+
+// transcriptID is the opaque identity the chat view watches to notice a
+// transcript rotation: a stable hash of the resolved path that changes exactly
+// when the path does. Empty in → empty out (nothing located yet). Provider-
+// neutral in the envelope (any provider's path hashes the same way) yet
+// provider-derived in substance — the path is the provider's, and this is the
+// same value the backend compares to detect the rotation (issue #34).
+func transcriptID(path string) string {
+	if path == "" {
+		return ""
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(path))
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 // Reply delivers a free-text reply to a live instance. It refuses ended runs

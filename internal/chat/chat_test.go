@@ -78,6 +78,135 @@ func TestRead_persistsLocatedPath(t *testing.T) {
 	}
 }
 
+func TestRead_reLocatesOnRotation(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/a.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "old"}}})
+
+	v1, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read A: %v", err)
+	}
+	idA := v1.TranscriptID
+	if idA == "" {
+		t.Fatal("TranscriptID empty for a located transcript")
+	}
+	// Re-read the row so the persisted path (A) is in hand, exactly as httpapi
+	// does per request.
+	run, _ = st.RunByID(context.Background(), run.ID)
+
+	// /clear rotates: a DIFFERENT, non-empty file with fresh (cleared) content.
+	fake.SetTranscriptPath("/b.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateNeedsInput, Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "new"}}})
+
+	v2, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read B: %v", err)
+	}
+	if len(v2.Messages) != 1 || v2.Messages[0].Text != "new" {
+		t.Errorf("messages = %+v; want the fresh transcript's 'new'", v2.Messages)
+	}
+	if v2.TranscriptID == "" || v2.TranscriptID == idA {
+		t.Errorf("TranscriptID = %q; want a new non-empty id after rotation (was %q)", v2.TranscriptID, idA)
+	}
+	// Re-pointed and persisted (single value — re-point & forget).
+	got, _ := st.RunByID(context.Background(), run.ID)
+	if got.TranscriptPath == nil || *got.TranscriptPath != "/b.jsonl" {
+		t.Errorf("persisted path = %v; want /b.jsonl", got.TranscriptPath)
+	}
+}
+
+func TestRead_emptyLocateKeepsPath(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	// Path A persisted from an earlier live read.
+	if err := st.UpdateRunTranscriptPath(context.Background(), run.ID, "/a.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = st.RunByID(context.Background(), run.ID)
+	fake.SetChat(provider.Chat{State: provider.StateWorking,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "a"}}})
+	// A transient locate gap (the process is momentarily absent from the
+	// registry / between states) must NEVER clobber a path already in hand.
+	fake.SetTranscriptPath("")
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.TranscriptID != transcriptID("/a.jsonl") {
+		t.Errorf("TranscriptID = %q; want the id of the kept path A", v.TranscriptID)
+	}
+	got, _ := st.RunByID(context.Background(), run.ID)
+	if got.TranscriptPath == nil || *got.TranscriptPath != "/a.jsonl" {
+		t.Errorf("persisted path = %v; want /a.jsonl unchanged", got.TranscriptPath)
+	}
+}
+
+func TestRead_endedRunIgnoresRotation(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeStopped)
+	if err := st.UpdateRunTranscriptPath(context.Background(), run.ID, "/a.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = st.RunByID(context.Background(), run.ID)
+	fake.SetChat(provider.Chat{State: provider.StateNeedsInput})
+	// A live successor's transcript is locatable in the reused worktree — an
+	// ended run must ignore it entirely (never re-locate, never re-point).
+	fake.SetTranscriptPath("/successor.jsonl")
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.State != provider.StateEnded {
+		t.Errorf("state = %q; want ended", v.State)
+	}
+	if n := fake.LocateCount(); n != 0 {
+		t.Errorf("LocateTranscript ran %d times for an ended run; want 0", n)
+	}
+	if v.TranscriptID != transcriptID("/a.jsonl") {
+		t.Errorf("TranscriptID = %q; want the id of the persisted A (no re-locate)", v.TranscriptID)
+	}
+	got, _ := st.RunByID(context.Background(), run.ID)
+	if got.TranscriptPath == nil || *got.TranscriptPath != "/a.jsonl" {
+		t.Errorf("persisted path = %v; want /a.jsonl (never re-pointed)", got.TranscriptPath)
+	}
+}
+
+// locateActive must NOT persist a rotation for a run that has since ended, even
+// when the caller holds a stale ACTIVE snapshot — the tailer can outlive its
+// run's end by up to one resync interval (a dropped run.changed), and
+// LocateTranscript is a pure cwd-match, so a successor run reusing the worktree
+// would otherwise be adopted onto the ended run's row (successor-safety).
+func TestLocateActive_skipsPersistForEndedRun(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	if err := st.UpdateRunTranscriptPath(context.Background(), run.ID, "/a.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	// The caller's snapshot still says active (as the tailer's would), but the
+	// run has since ended and its worktree now hosts a successor's transcript.
+	staleActive, _ := st.RunByID(context.Background(), run.ID)
+	if err := st.EndRun(context.Background(), run.ID, store.RunOutcomeStopped, time.Now(), ""); err != nil {
+		t.Fatal(err)
+	}
+	fake.SetTranscriptPath("/successor.jsonl")
+	prov, _ := svc.providers.Get(run.Provider)
+
+	got := svc.locateActive(context.Background(), prov, staleActive, "/a.jsonl")
+	if got != "/a.jsonl" {
+		t.Errorf("locateActive adopted %q for a since-ended run; want the known path /a.jsonl", got)
+	}
+	row, _ := st.RunByID(context.Background(), run.ID)
+	if row.TranscriptPath == nil || *row.TranscriptPath != "/a.jsonl" {
+		t.Errorf("persisted path = %v; want /a.jsonl (a successor must never be adopted onto an ended run)", row.TranscriptPath)
+	}
+}
+
 func TestRead_endedRunOverridesState(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeStopped)
@@ -358,6 +487,57 @@ func TestTailer_republishesOnSpoolChangeWhileTranscriptFrozen(t *testing.T) {
 	}, "tailer to flip to question on the spool change alone")
 	if !drainFor(sub, EventMessagesChanged, 2*time.Second) {
 		t.Error("no run.messages.changed published on the spool-only change")
+	}
+}
+
+// A /clear (or /rewind) rotates the sessionId → a brand-new transcript file.
+// The tailer must re-resolve each tick, follow the rotation, re-point the run
+// row, re-derive state from the fresh file, and republish — otherwise it stats
+// the frozen old file forever and the chat never updates (issue #34).
+func TestTailer_followsTranscriptRotation(t *testing.T) {
+	svc, st, fake, bus := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	dir := t.TempDir()
+	pathA := dir + "/a.jsonl"
+	pathB := dir + "/b.jsonl"
+	writeFile(t, pathA, "{}")
+	fake.SetTranscriptPath(pathA)
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+
+	sub, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go svc.Run(ctx)
+
+	waitFor(t, func() bool {
+		s, ok := svc.State(run.SessionName)
+		return ok && s == provider.StateWorking
+	}, "tailer to derive the initial working state on transcript A")
+	drainFor(sub, EventMessagesChanged, 2*time.Second) // consume the initial publish
+
+	got, _ := st.RunByID(context.Background(), run.ID)
+	if got.TranscriptPath == nil || *got.TranscriptPath != pathA {
+		t.Fatalf("persisted path = %v; want A (%s)", got.TranscriptPath, pathA)
+	}
+
+	// /clear rotates: a brand-new file B with fresh (cleared) content. Set the
+	// new chat BEFORE the new path so that once the tailer sees B it reads B's
+	// content, never an intermediate mix.
+	writeFile(t, pathB, "{}")
+	fake.SetChat(provider.Chat{State: provider.StateNeedsInput})
+	fake.SetTranscriptPath(pathB)
+
+	waitFor(t, func() bool {
+		s, ok := svc.State(run.SessionName)
+		return ok && s == provider.StateNeedsInput
+	}, "tailer to follow the rotation to B and re-derive state")
+	if !drainFor(sub, EventMessagesChanged, 2*time.Second) {
+		t.Error("no run.messages.changed published on the rotation")
+	}
+	got, _ = st.RunByID(context.Background(), run.ID)
+	if got.TranscriptPath == nil || *got.TranscriptPath != pathB {
+		t.Errorf("persisted path after rotation = %v; want B (%s)", got.TranscriptPath, pathB)
 	}
 }
 

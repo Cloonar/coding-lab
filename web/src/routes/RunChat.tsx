@@ -84,6 +84,11 @@ function RunChatView() {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [state, setState] = createSignal<ConversationState>('');
   const [transcript, setTranscript] = createSignal<TranscriptStatus>('available');
+  // The located transcript's opaque identity (issue #34). A change means the
+  // run's transcript rotated (a /clear or /rewind → new sessionId → new file),
+  // so the accumulated stream must be dropped before the fresh seq-1 messages
+  // merge in. undefined until the first response; older servers omit it.
+  const [transcriptId, setTranscriptId] = createSignal<string | undefined>(undefined);
   // The live pending dialog from the server's top-level pending_dialog field
   // (ADR-0020) — the authoritative source, since Claude Code never flushes a
   // pending tool_use to the transcript. null when none is pending.
@@ -144,6 +149,15 @@ function RunChatView() {
       setState(latest.state);
       setPendingDialogField(latest.pending_dialog ?? null);
       setTranscript(latest.transcript);
+      setTranscriptId(latest.transcript_id);
+      // Writing transcript_id can synchronously run the rotation effect (Solid
+      // flushes user effects on a signal write), which resets the stream and
+      // fires a superseding refetch — bumping fetchToken. If that happened, this
+      // now-stale refetch must NOT merge its pre-rotation tail/latest back over
+      // the reset: a transcript-A tail line whose seq exceeds B's would survive
+      // the seq-keyed merge and leak forever (issue #34). Re-guard so the newer
+      // refetch owns the stream.
+      if (token !== fetchToken) return;
       if (!exhausted()) setHasMore(latest.has_more);
       // A first window that already covers the whole transcript means there
       // is nothing older to load — ever (messages only append).
@@ -182,6 +196,19 @@ function RunChatView() {
     }
   };
 
+  // Reset the accumulated stream + derived state to the empty baseline. Shared
+  // by the route-change reset and the transcript-rotation reset below.
+  const resetStream = () => {
+    setMessages([]);
+    setState('');
+    setPendingDialogField(null);
+    setTranscript('available');
+    setHasMore(false);
+    setExhausted(false);
+    setError(null);
+    setOpenGroups(new Set<number>());
+  };
+
   // All chat state is keyed to the route param: navigating /runs/A → /runs/B
   // re-uses this component, so reset the accumulated stream and reload (the
   // token bump inside refetchMessages orphans any in-flight fetch for A).
@@ -189,16 +216,37 @@ function RunChatView() {
     on(
       () => params.id,
       () => {
-        setMessages([]);
-        setState('');
-        setPendingDialogField(null);
-        setTranscript('available');
-        setHasMore(false);
-        setExhausted(false);
-        setError(null);
-        setOpenGroups(new Set<number>());
+        resetStream();
+        // Clear the rotation token too, so run B's first response (undefined →
+        // its id) is not mistaken for a rotation by the effect below.
+        setTranscriptId(undefined);
         void refetchMessages();
       },
+    ),
+  );
+
+  // Transcript rotation (issue #34): /clear (or /rewind) starts a new sessionId →
+  // transcript that the backend re-points this SAME run at, so the route-change
+  // reset above never fires. The fresh transcript restarts seq at 1, which would
+  // collide with the stale accumulated messages in the seq-keyed merge — so on a
+  // genuine change of transcript_id, reset the stream exactly like a route change
+  // and refetch: the chat visibly empties and the composer comes back to life.
+  // Guarded to a real A → B change — the initial undefined → id set (and any
+  // reset-to-undefined on navigation) is not a rotation.
+  createEffect(
+    on(
+      transcriptId,
+      (id, prev) => {
+        // Only a real hash → different-hash change is a rotation. The empty
+        // string is the server's locating/gone sentinel (transcript_id has no
+        // omitempty), so `!id`/`!prev` skips locating→available (the first
+        // locate) and available→gone — neither is a rotation, and the seq-1
+        // collision only exists between two real transcripts.
+        if (!id || !prev || id === prev) return;
+        resetStream();
+        void refetchMessages();
+      },
+      { defer: true },
     ),
   );
 

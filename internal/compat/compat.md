@@ -262,6 +262,25 @@ transcript. Four coupled facts, all in `internal/provider/claudecode`
   it from a PreToolUse hook instead. The transcript-scan dialog path (an
   unanswered `tool_use` in §5) stays as a dormant fallback for a future Claude
   Code that flushes pending `tool_use`.
+- **Rotation on `/clear` and `/rewind` (the sessionId → transcript file
+  rotates; lab follows by effect)**: `/clear` calls `setConversationId(newUUID)`
+  → a brand-new `<newSessionId>.jsonl`; the old file is left intact and
+  `claude --resume`-able (refs: anthropics/claude-code#37451, #3046). `/rewind`,
+  and a clear run out-of-band inside claude.ai, rotate the same way. Because lab
+  pins each run to a single `runs.transcript_path`, it must **re-point** that
+  value: for an ACTIVE run `internal/chat`'s tailer and every `Read` re-ask
+  `LocateTranscript` each tick and adopt a **different, non-empty** result
+  (`locateActive`), keyed off the observable *effect* — the located file
+  changing — so lab core never parses any agent's clear command. `LocateTranscript`
+  re-resolves to the current sessionId because `~/.claude/sessions/<pid>.json`'s
+  `sessionId` updates promptly on `/clear` (live-verified 2.1.198, 2026-07-08).
+  An ENDED run never re-locates (successor-safety, above). Two consequences lab
+  handles: (1) the messages response carries `transcript_id` (a stable hash of
+  the path) the SPA keys a stream reset on — the fresh transcript restarts `seq`
+  at 1; (2) a pre-rotation **dialog spool** does not self-heal (its `tool_use_id`
+  is absent from the new file), so `PendingDialog` also treats a spool older than
+  the current transcript as stale (§9). `/compact` keeps the **same** sessionId
+  and appends to the same file, so it is **unaffected** (issue #34).
 
 ## 6. Reply send-keys — fixture (2.1.198 send path)
 
@@ -412,9 +431,16 @@ the flag is never swallowed as prompt text. Hooks fire normally under
 - Per-run settings: `<runtime>/settings.<runID>.json` — the `--settings` target.
 - **Answer guard / resolution.** A spooled dialog is suppressed once its
   `tool_use_id` appears in the transcript (the retro-flush landed = resolved);
-  the PostToolUse hook is the primary spool delete, this scan the backstop. The
-  chat GCs the three per-run files once the run is no longer active (an active
-  run's spool survives a lab restart — the file persists).
+  the PostToolUse hook is the primary spool delete, this scan the backstop. It
+  is **also** suppressed when the transcript has rotated past it (a `/clear` or
+  `/rewind` re-point, §5): `PendingDialog` OR's a spool-older-than-transcript
+  mtime check with the tool-id check (mirroring the blocked-marker staleness
+  guard), so a pre-clear spool cannot keep the composer locked against the fresh
+  session (issue #34). Safe for the genuine pending case — the transcript stays
+  byte-frozen during a pending dialog (§5) while the spool is written after it,
+  so the spool is always the newer file. The chat GCs the three per-run files
+  once the run is no longer active (an active run's spool survives a lab restart
+  — the file persists).
 
 **Appendix payloads (2.1.198 live, ids/paths anonymized — the fixture ground
 truth):**

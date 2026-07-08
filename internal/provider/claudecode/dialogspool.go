@@ -175,12 +175,17 @@ func DialogFromHookPayload(payload []byte) (provider.Dialog, bool) {
 }
 
 // PendingDialog implements provider.DialogHooker: read the dialog spool, map it
-// through the shared mapper, and suppress it once resolved. A spool whose
-// tool_use_id is already present in the transcript is answered (the tool_use is
-// flushed only on resolution) — return false so a stale spool never re-opens an
-// answered picker.
+// through the shared mapper, and suppress it once resolved or stale. A spool
+// whose tool_use_id is already present in the transcript is answered (the
+// tool_use is flushed only on resolution) — return false so a stale spool never
+// re-opens an answered picker.
 func (p *Provider) PendingDialog(runID, dir, transcriptPath string) (provider.Dialog, bool) {
-	b, err := os.ReadFile(dialogSpoolPath(dir, runID))
+	spool := dialogSpoolPath(dir, runID)
+	si, err := os.Stat(spool)
+	if err != nil {
+		return provider.Dialog{}, false
+	}
+	b, err := os.ReadFile(spool)
 	if err != nil {
 		return provider.Dialog{}, false
 	}
@@ -190,8 +195,22 @@ func (p *Provider) PendingDialog(runID, dir, transcriptPath string) (provider.Di
 	}
 	// d.ToolID carries the spool's tool_use_id (dialogFromToolUse copies it);
 	// its presence in the transcript means the retro-flush landed → resolved.
+	// This is the primary check (the PostToolUse hook is the primary clear).
 	if transcriptPath != "" && d.ToolID != "" && toolIDInTranscript(transcriptPath, d.ToolID) {
 		return provider.Dialog{}, false
+	}
+	// Staleness backstop (issue #34), OR'd with the tool-id check above and
+	// mirroring BlockedState's guard: a spool older than the current transcript
+	// is stale. During a genuine pending dialog the transcript stays byte-frozen
+	// (compat §5) while the spool is written after it, so the spool is always
+	// newer and the dialog still shows; this only fires when the transcript
+	// ROTATED (a /clear or /rewind re-pointed the run at a fresh, newer file) —
+	// the old file's spool must not keep the composer locked against the new
+	// session.
+	if transcriptPath != "" {
+		if ti, err := os.Stat(transcriptPath); err == nil && ti.ModTime().After(si.ModTime()) {
+			return provider.Dialog{}, false
+		}
 	}
 	return d, true
 }
