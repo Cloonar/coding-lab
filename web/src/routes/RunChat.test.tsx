@@ -1740,6 +1740,8 @@ describe('RunChat', () => {
     expect(rows[1]?.querySelector('.chat-cmd-hint')?.textContent).toBe('instructions');
     expect(rows[2]?.querySelector('.chat-cmd-desc')?.textContent).toBe('Ship it');
     expect(rows[2]?.querySelector('.chat-cmd-source')?.textContent).toBe('project');
+    // The description clamps to one line in CSS; the row's tooltip carries it in full.
+    expect(rows[2]?.title).toBe('Ship it');
 
     // Filtering matches the name…
     setComposerText('/cle');

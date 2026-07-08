@@ -2711,6 +2711,7 @@ h6.md-h {
   box-shadow: var(--shadow);
 }
 .chat-cmd-row {
+  flex: none; /* a taller-than-40vh list must scroll — shrunk rows paint over each other */
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: baseline;
@@ -2731,9 +2732,16 @@ h6.md-h {
 .chat-cmd-name {
   font-weight: 600;
 }
+/* Hint and description clamp to one line (full text rides the row's title
+   tooltip): rows stay uniform and the popover stays scannable. min-width: 0
+   lets the grid tracks shrink below the nowrap text's min-content width. */
 .chat-cmd-hint {
   font-size: 0.8rem;
   color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-cmd-source {
   justify-self: end;
@@ -2747,6 +2755,10 @@ h6.md-h {
   grid-column: 1 / -1;
   font-size: 0.85rem;
   color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* §5 — the merged composer field: one rounded-rect holding a borderless
