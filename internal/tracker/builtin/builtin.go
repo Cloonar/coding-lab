@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
@@ -24,6 +26,10 @@ type Tracker struct {
 	repoID string
 	now    func() time.Time
 	author author
+	// merger is the shared CR-merge service MergePull routes into (ADR-0011).
+	// Nil when the wiring layer provided none — MergePull then fails loud
+	// rather than pretending to merge.
+	merger tracker.CRMerger
 }
 
 // author is the identity CreateComment stamps on a new comment.
@@ -41,6 +47,7 @@ func New(cfg tracker.BuiltinConfig) tracker.Tracker {
 		repoID: cfg.RepoID,
 		now:    time.Now,
 		author: author{kind: store.CommentAuthorOperator},
+		merger: cfg.Merger,
 	}
 }
 
@@ -172,6 +179,57 @@ func (t *Tracker) CreatePull(ctx context.Context, head, base, title, body string
 		return tracker.PullRef{}, fmt.Errorf("builtin create pull: %w", err)
 	}
 	return toPullRef(cr), nil
+}
+
+// MergePull lands the built-in change request `number` by routing into the
+// shared crmerge service (ADR-0011 orchestration: per-CR serialization,
+// cancellation-immune git window, Closes #N closure, cr.changed/issue.changed
+// events) and returns the merged PullRef. Reusing that service — rather than
+// reimplementing the merge here — is what keeps the operator route and this
+// agent route byte-for-byte identical.
+//
+// Convergent: an already-merged CR is a no-op SUCCESS naming the merged state,
+// not an error (the service returns store.ErrCRNotOpen without touching git; a
+// re-read distinguishes merged → converge from closed-unmerged → reject),
+// matching CreatePull's duplicate handling and gitx.CRMerge's own convergence.
+// Every refusal the service surfaces — git head-missing / push-rejected /
+// merge-conflict, a closed-unmerged CR, or no configured author identity —
+// becomes tracker.ErrMergeRejected carrying the backend's OWN words; an
+// unknown number surfaces store.ErrNotFound (→ 404). Without a merge service
+// wired it fails loud rather than pretending to merge.
+func (t *Tracker) MergePull(ctx context.Context, number int) (tracker.PullRef, error) {
+	if t.merger == nil {
+		return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: no CR-merge service wired", number)
+	}
+	merged, err := t.merger.Merge(ctx, t.repoID, number)
+	if err == nil {
+		return toPullRef(merged), nil
+	}
+	if errors.Is(err, store.ErrCRNotOpen) {
+		// Not-open without a git run: converge iff it is already merged. A
+		// transient re-read failure is NOT a refusal — surface it raw so the
+		// agent gets a 500, not a spurious "merge refused" 409.
+		cr, rerr := t.store.CRByRepoNumber(ctx, t.repoID, number)
+		if rerr != nil {
+			return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: %w", number, rerr)
+		}
+		if cr.State == store.CRStateMerged {
+			return toPullRef(cr), nil // convergent no-op success
+		}
+		// Closed-unmerged (no reopen): a genuine refusal.
+		return tracker.PullRef{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
+	}
+	// Only the backend's REAL refusals become ErrMergeRejected (→ 409 with the
+	// words verbatim), matching the operator route's whitelist. Everything else
+	// — an unknown number (store.ErrNotFound → 404), a transient DB error, a
+	// credential misconfig — stays a raw error so the agent answers 404/500
+	// rather than a permanent, retry-proof "merge refused", and so internal
+	// diagnostics never leak as a refusal message.
+	if errors.Is(err, gitx.ErrHeadMissing) || errors.Is(err, gitx.ErrPushRejected) ||
+		errors.Is(err, gitx.ErrMergeConflict) || errors.Is(err, crmerge.ErrNoAuthorIdentity) {
+		return tracker.PullRef{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
+	}
+	return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: %w", number, err)
 }
 
 // CloseIssue transitions an issue to closed (stamping closed_at).

@@ -128,10 +128,13 @@ func (f resolverFunc) TrackerFor(ctx context.Context, repo store.Repo) (tracker.
 
 // fakeForge is a minimal recording tracker for the forge-bound PR path.
 type fakeForge struct {
-	pullRef     tracker.PullRef
-	createdPull *[4]string // head, base, title, body
-	pulls       []tracker.PullRef
-	pullDetail  *tracker.PullDetail // served by Pull when the number matches
+	pullRef      tracker.PullRef
+	createdPull  *[4]string // head, base, title, body
+	pulls        []tracker.PullRef
+	pullDetail   *tracker.PullDetail // served by Pull when the number matches
+	mergeRef     tracker.PullRef     // returned by MergePull on success
+	mergeErr     error               // returned by MergePull when set
+	mergedNumber int                 // records the last MergePull argument
 }
 
 func (f *fakeForge) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -160,6 +163,13 @@ func (f *fakeForge) Pull(_ context.Context, number int) (tracker.PullDetail, err
 func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	f.createdPull = &[4]string{head, base, title, body}
 	return f.pullRef, nil
+}
+func (f *fakeForge) MergePull(_ context.Context, number int) (tracker.PullRef, error) {
+	f.mergedNumber = number
+	if f.mergeErr != nil {
+		return tracker.PullRef{}, f.mergeErr
+	}
+	return f.mergeRef, nil
 }
 func (f *fakeForge) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeForge) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
@@ -567,6 +577,54 @@ func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 // state/head/url metadata lines, then the FULL body — the captured-card-YAML
 // retrieval path, no raw forge fallback. An unknown number is the server's
 // 404 envelope → message on stderr, exit 1 (never 2, never a panic).
+// TestPRMergeOutput: `labctl pr merge <n>` prints one parseable line
+// (#number<TAB>state<TAB>url) and passes the number through to MergePull.
+func TestPRMergeOutput(t *testing.T) {
+	fk := &fakeForge{mergeRef: tracker.PullRef{
+		Number: 12, HeadBranch: "afk/1", State: tracker.PullMerged, URL: "https://forge.example/pr/12",
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "merge", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "#12\tmerged\thttps://forge.example/pr/12\n" {
+		t.Errorf("stdout = %q, want #12<TAB>merged<TAB>url", stdout)
+	}
+	if fk.mergedNumber != 12 {
+		t.Errorf("MergePull arg = %d, want 12", fk.mergedNumber)
+	}
+}
+
+// TestPRMergeRejectedExit1: a backend rejection prints the message on stderr
+// and exits 1 (the pinned API-error exit code).
+func TestPRMergeRejectedExit1(t *testing.T) {
+	fk := &fakeForge{mergeErr: fmt.Errorf("%w: required status check \"ci\" is expected", tracker.ErrMergeRejected)}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "merge", "12"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "required status check") {
+		t.Errorf("stderr = %q, want the backend's own words", stderr)
+	}
+}
+
+// TestPRMergeUsage: a missing or non-integer number is a usage error (exit 2).
+func TestPRMergeUsage(t *testing.T) {
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return &fakeForge{}, nil }))
+	for _, args := range [][]string{{"pr", "merge"}, {"pr", "merge", "abc"}, {"pr", "merge", "1", "2"}} {
+		if code, _, _ := run(t, args, f.env()); code != 2 {
+			t.Errorf("run %v: exit = %d, want 2", args, code)
+		}
+	}
+}
+
 func TestPRViewOutput(t *testing.T) {
 	fk := &fakeForge{pullDetail: &tracker.PullDetail{
 		Number: 12, Title: "feat: capture card", Body: "card: |\n  kind: capture",

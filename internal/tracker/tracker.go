@@ -45,6 +45,18 @@ var ErrDuplicateOpenPull = errors.New("an open pull request for this head branch
 // error names the offending label.
 var ErrUnknownLabel = errors.New("tracker: unknown label")
 
+// ErrMergeRejected marks a MergePull the backend refused to land: a forge's
+// branch-protection or unsatisfied-required-check answer, a merge conflict,
+// or (built-in) a git push a pre-receive hook declined. It mirrors gitx's
+// ErrPushRejected property — the wrapped message carries the backend's OWN
+// words verbatim (the forge's error body, or git's stderr), because that text
+// is exactly what the agent needs to read to know why the merge did not take.
+// Mergeability is the backend's call, never reasoned about agent-side: lab
+// attempts the merge and surfaces the rejection as-is with a non-zero exit
+// (ADR-0011's "push refusals surface git's stderr verbatim", widened to the
+// agent surface). The agent API answers 409 with the message.
+var ErrMergeRejected = errors.New("tracker: merge rejected")
+
 // ErrRateLimited marks a forge call throttled by the upstream rate limiter
 // (GitHub answers 403/429 with X-RateLimit-Remaining: 0 or a Retry-After
 // header when the token's hourly budget is spent). The GitHub client wraps it
@@ -187,6 +199,21 @@ type Tracker interface {
 	// CreatePull opens a pull request / change request from head onto base.
 	// Exercised in M5/M6; implemented now for symmetry.
 	CreatePull(ctx context.Context, head, base, title, body string) (PullRef, error)
+
+	// MergePull lands pull/change request `number` and returns its resulting
+	// PullRef (State PullMerged on success). The merge method is fixed — no
+	// caller flag: fast-forward when possible else a merge commit on the
+	// built-in binding, a single fixed forge merge method on a forge binding
+	// (the forge applies its own configured strategy). Mergeability is the
+	// backend's call: MergePull does NOT pre-check required status checks or
+	// branch protection; it attempts the merge and, if the backend refuses,
+	// wraps ErrMergeRejected around the refusal's own words. The head branch
+	// is never deleted (branch lifecycle stays owned by the sweep/teardown).
+	// Convergent: merging an already-merged pull is a no-op success naming
+	// the existing merged state, not an error. An unknown number wraps
+	// ErrNotFound. On a forge binding the merge is a server-credentialed
+	// call — no forge token ever reaches the agent session (ADR-0014).
+	MergePull(ctx context.Context, number int) (PullRef, error)
 
 	// CloseIssue transitions an issue to closed.
 	CloseIssue(ctx context.Context, number int) error

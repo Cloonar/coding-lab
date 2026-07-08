@@ -148,6 +148,6 @@ _Avoid_: password, keyring, vault key file synonyms
 ## Flagged ambiguities
 
 - **"session" vs "instance"** — a tmux session is the process container; the domain object is the **instance**. Resolution: say *instance* everywhere; "session name" appears only as the tmux identity `<repo>~<label>`.
-- **"PR"** — reserved for the forge object. The built-in tracker's object is a **change request**. The one deliberate blur is the agent command `labctl pr create`, which routes to either behind the Tracker interface.
+- **"PR"** — reserved for the forge object. The built-in tracker's object is a **change request**. The one deliberate blur is the agent `labctl pr` surface (`create` / `view` / `list` / `merge`), which routes to either object behind the Tracker interface.
 - **"reference repo"** — in v0 this was the human's `~/projects/<name>` checkout; here it is always the lab-owned bare clone. The invariant carried over: lab never touches its HEAD or working tree, only refs and worktrees.
 - **"token"** — three distinct things: a **PAT** (operator API, `lab_pat_…`), a **run token** (agent, `lab_run_…`), and a *forge token* (a credential kind in the vault, server-side only — never in session env or materialized files; it also carries the forge *flavor* — forgejo or github — and the API origin the REST client targets, ADR-0015).

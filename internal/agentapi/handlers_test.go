@@ -29,6 +29,8 @@ type fakeTracker struct {
 
 	createdPull  *pullArgs
 	pullRef      tracker.PullRef
+	mergeRef     tracker.PullRef // returned by MergePull on success
+	merged       []int           // records MergePull arguments
 	pulls        []tracker.PullRef
 	pullDetails  []tracker.PullDetail
 	comments     []commentArgs
@@ -103,6 +105,13 @@ func (f *fakeTracker) CreatePull(_ context.Context, head, base, title, body stri
 	}
 	f.createdPull = &pullArgs{head: head, base: base, title: title, body: body}
 	return f.pullRef, nil
+}
+func (f *fakeTracker) MergePull(_ context.Context, number int) (tracker.PullRef, error) {
+	if f.err != nil {
+		return tracker.PullRef{}, f.err
+	}
+	f.merged = append(f.merged, number)
+	return f.mergeRef, nil
 }
 func (f *fakeTracker) CloseIssue(_ context.Context, number int) error {
 	if f.err != nil {
@@ -732,6 +741,55 @@ func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 // forge-bound repo: GET /prs/{n} answers the full detail including the BODY —
 // the captured-card-YAML retrieval path — GET /prs lists the repo's PRs
 // across states, and an unknown number is the canonical 404 envelope.
+// TestPRMerge_forge drives POST /agent/v1/prs/{n}/merge on a forge-bound
+// repo: success reports the merged state; a forge refusal surfaces verbatim as
+// a 409; an unknown number is the canonical 404 envelope.
+func TestPRMerge_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_m", "forge", "forgejo")
+	f.seedRunKind(t, "run_m", "repo_m", "afk_auto", "active", intp(9), "afk/9")
+	token := f.seedToken(t, "run_m", nil)
+
+	// Success: the forge merged; the response reports the merged state and the
+	// handler passed the path number through to MergePull.
+	fk := &fakeTracker{mergeRef: tracker.PullRef{
+		Number: 9, HeadBranch: "afk/9", State: tracker.PullMerged,
+		URL: "https://git.example.com/o/r/pulls/9",
+	}}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/merge", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("merge: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got prMergeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := prMergeResponse{Number: 9, State: "merged", Head: "afk/9", URL: "https://git.example.com/o/r/pulls/9"}
+	if got != want {
+		t.Errorf("merge response = %+v, want %+v", got, want)
+	}
+	if len(fk.merged) != 1 || fk.merged[0] != 9 {
+		t.Errorf("MergePull args = %v, want [9]", fk.merged)
+	}
+
+	// Rejection: the backend's own words surface verbatim as a 409.
+	reject := &fakeTracker{err: fmt.Errorf("%w: required status check \"ci\" is expected", tracker.ErrMergeRejected)}
+	rr = doJSON(t, f.forgeServer(reject).Handler(), "POST", "/agent/v1/prs/9/merge", token, "")
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("rejected merge: status = %d, want 409 (body %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "required status check") {
+		t.Errorf("409 body = %s, want the backend's own words", rr.Body.String())
+	}
+
+	// Unknown number → the canonical 404 envelope.
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "POST", "/agent/v1/prs/999/merge", token, "")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown merge: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+}
+
 func TestPRViewAndList_forge(t *testing.T) {
 	f := newFixture(t)
 	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")

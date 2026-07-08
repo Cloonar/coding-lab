@@ -337,6 +337,9 @@ func (s *stubForgeTracker) Pull(_ context.Context, number int) (tracker.PullDeta
 func (s *stubForgeTracker) CreatePull(context.Context, string, string, string, string) (tracker.PullRef, error) {
 	return tracker.PullRef{}, nil
 }
+func (s *stubForgeTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
+	return tracker.PullRef{}, nil
+}
 
 func (s *stubForgeTracker) CloseIssue(context.Context, int) error { return nil }
 func (s *stubForgeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
