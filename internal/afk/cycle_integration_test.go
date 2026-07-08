@@ -57,6 +57,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
+	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
@@ -1011,12 +1012,18 @@ type operatorAPI struct {
 
 func newOperatorAPI(w *cycleWorld) *operatorAPI {
 	w.t.Helper()
+	git := gitx.New("git")
+	mergeSvc := crmerge.New(crmerge.Config{
+		Store: w.st, Git: git, Bus: w.bus,
+		ReposDir: w.reposDir, GitEnv: w.env, Now: w.clock.Now,
+	})
 	srv, err := httpapi.New(httpapi.Options{
 		Store:  w.st,
 		Bus:    w.bus,
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Git:    gitx.New("git"), ReposDir: w.reposDir, GitEnv: w.env,
-		Now: w.clock.Now,
+		Git:    git, ReposDir: w.reposDir, GitEnv: w.env,
+		CRMerge: mergeSvc,
+		Now:     w.clock.Now,
 	})
 	if err != nil {
 		w.t.Fatalf("httpapi.New: %v", err)

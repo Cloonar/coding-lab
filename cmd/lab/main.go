@@ -23,6 +23,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
+	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
@@ -155,6 +156,24 @@ func run() int {
 	gitEngine := gitx.New(cfg.GitBin)
 	reposDir := filepath.Join(cfg.StateDir, "repos")
 	worktreeRoot := filepath.Join(cfg.StateDir, "worktrees")
+
+	// Shared CR-merge service (ADR-0011): the operator merge/close routes and
+	// the agent surface's built-in MergePull both land through this one
+	// orchestration. Injected into the tracker registry so the built-in
+	// tracker can reuse it (SetCRMerger is read lazily at TrackerFor time, so
+	// wiring it here — after the registry was built — is fine), and handed to
+	// the HTTP API for the operator /crs routes.
+	mergeSvc := crmerge.New(crmerge.Config{
+		Store:        st,
+		Git:          gitEngine,
+		Vault:        vlt,
+		Materializer: mat,
+		Bus:          bus,
+		ReposDir:     reposDir,
+		Now:          time.Now,
+		Logger:       logger,
+	})
+	trackerReg.SetCRMerger(mergeSvc)
 
 	// M3 instance/AFK stack. It needs claude's global config path (resolved
 	// from HOME); with none, the instance/parked/provider routes stay unmounted
@@ -330,6 +349,7 @@ func run() int {
 		Git:             gitEngine,
 		Materializer:    mat,
 		ReposDir:        reposDir,
+		CRMerge:         mergeSvc,
 		BaseURL:         cfg.BaseURL,
 		ProxyAuth:       cfg.ProxyAuth,
 		ProxyAuthHeader: cfg.ProxyAuthHeader,

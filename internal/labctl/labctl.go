@@ -32,6 +32,7 @@ Usage:
   labctl pr create --title T --body B   open a PR/CR for the current branch
   labctl pr view <n>                    show PR n (number, title, state, head, url, body)
   labctl pr list                        list the repo's PRs across all states (number, state, head, url)
+  labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
   labctl --version                      print version
 
 Environment:
@@ -327,6 +328,25 @@ func runPR(args []string, env Env) int {
 				_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\t%s\t%s\n",
 					pr.Number, pr.State, pr.Head, pr.URL)
 			}
+			return nil
+		})
+	case "merge":
+		if len(args) != 2 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr merge: want <n>")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr merge: PR number %q is not an integer\n", args[1])
+			return 2
+		}
+		return withClient(env, "pr merge", func(c *Client) error {
+			pm, err := c.PRMerge(n)
+			if err != nil {
+				return err
+			}
+			// One parseable line: number, resulting state, URL.
+			_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\t%s\n", pm.Number, pm.State, pm.URL)
 			return nil
 		})
 	case "create":

@@ -18,6 +18,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
+	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
@@ -79,12 +80,17 @@ type Options struct {
 	AFK *afk.Service
 
 	// Git + ReposDir back the change-request surface (M6): the CR detail
-	// diff and the merge run against <ReposDir>/<repoID>.git. Both nil/empty
-	// leaves the /crs routes unmounted. Materializer supplies the per-op
-	// credential files a credentialed merge pushes with (Vault decrypts).
+	// diff runs against <ReposDir>/<repoID>.git. Both nil/empty leaves the
+	// /crs read routes unmounted. Materializer supplies the per-op credential
+	// files a credentialed merge pushes with (Vault decrypts).
 	Git          *gitx.Engine
 	Materializer *vault.Materializer
 	ReposDir     string
+	// CRMerge is the shared CR-merge/close orchestration (ADR-0011) the
+	// operator merge/close routes delegate to — the same service the agent
+	// surface's built-in MergePull reuses. Nil leaves the /crs merge+close
+	// routes unmounted (the list/detail reads still mount on Git+ReposDir).
+	CRMerge *crmerge.Service
 	// GitEnv is appended to every git subprocess the CR surface runs, before
 	// the per-credential env. Production leaves it nil; tests pass
 	// testutil.HermeticGitEnv (the reposvc convention).
@@ -128,6 +134,7 @@ type Server struct {
 	mat       *vault.Materializer
 	reposDir  string
 	gitEnv    []string
+	crmerge   *crmerge.Service
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -141,13 +148,6 @@ type Server struct {
 
 	heartbeat time.Duration
 	now       func() time.Time
-
-	// crMu serializes merge and close per change request: the open-state
-	// check and the (seconds-wide, network-bound) git merge must not race a
-	// concurrent close, or origin ends up merged while the CR row reads
-	// closed-unmerged with no recovery path. Keyed by CR id; entries are
-	// never evicted (a CR id count is bounded by real CRs, bytes are trivial).
-	crMu keyedMutex
 
 	limiter  *loginLimiter
 	argon    argonParams
@@ -213,6 +213,7 @@ func New(o Options) (*Server, error) {
 		mat:         o.Materializer,
 		reposDir:    o.ReposDir,
 		gitEnv:      o.GitEnv,
+		crmerge:     o.CRMerge,
 		proxyAuth:   o.ProxyAuth,
 		proxyHeader: o.ProxyAuthHeader,
 		trusted:     o.TrustedProxies,
@@ -335,8 +336,12 @@ func (s *Server) Handler() http.Handler {
 	if s.git != nil && s.reposDir != "" {
 		api.HandleFunc("GET /api/v1/repos/{id}/crs", s.requireAuth(s.handleCRList))
 		api.HandleFunc("GET /api/v1/repos/{id}/crs/{n}", s.requireAuth(s.handleCRGet))
-		api.HandleFunc("POST /api/v1/repos/{id}/crs/{n}/merge", s.requireAuth(s.handleCRMerge))
-		api.HandleFunc("POST /api/v1/repos/{id}/crs/{n}/close", s.requireAuth(s.handleCRClose))
+		// Merge and close delegate to the shared crmerge.Service; mounted only
+		// when it was wired (production always wires it alongside Git+ReposDir).
+		if s.crmerge != nil {
+			api.HandleFunc("POST /api/v1/repos/{id}/crs/{n}/merge", s.requireAuth(s.handleCRMerge))
+			api.HandleFunc("POST /api/v1/repos/{id}/crs/{n}/close", s.requireAuth(s.handleCRClose))
+		}
 	}
 
 	// M5 AFK operator surface (operator auth; CSRF guards the mutations).

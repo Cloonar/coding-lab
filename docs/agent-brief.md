@@ -114,7 +114,7 @@ Events: `GET /events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `cl
 
 ### 8.3 `labctl`
 
-Reads `LAB_URL`/`LAB_TOKEN` from env. Commands: `labctl issue view [n]`, `labctl issue list` (number, state, created-at, labels, title), `labctl issue create --title … --body … [--labels a,b]`, `labctl issue comment <n> <body>`, `labctl issue label add <n> <labels>`, `labctl issue label remove <n> <labels>`, `labctl issue close <n>`, `labctl label list`, `labctl label create --name … [--color … --description …]` (idempotent), `labctl pr create --title … --body …`. Plain, parseable output; exit codes meaningful (0 success · 1 API/HTTP error · 2 usage/configuration error). Ship as a second small binary from the same module, present on every session's PATH.
+Reads `LAB_URL`/`LAB_TOKEN` from env. Commands: `labctl issue view [n]`, `labctl issue list` (number, state, created-at, labels, title), `labctl issue create --title … --body … [--labels a,b]`, `labctl issue comment <n> <body>`, `labctl issue label add <n> <labels>`, `labctl issue label remove <n> <labels>`, `labctl issue close <n>`, `labctl label list`, `labctl label create --name … [--color … --description …]` (idempotent), `labctl pr create --title … --body …`, `labctl pr view <n>`, `labctl pr list`, `labctl pr merge <n>` (fixed method; the forge/base enforces mergeability, a refusal surfaces verbatim). Plain, parseable output; exit codes meaningful (0 success · 1 API/HTTP error · 2 usage/configuration error). Ship as a second small binary from the same module, present on every session's PATH.
 
 ### 8.4 AFK seed prompt (template — adapt v0's `afkSeedPrompt`)
 

@@ -26,7 +26,8 @@ func (f failingTracker) Pull(context.Context, int) (PullDetail, error) {
 func (f failingTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, f.err
 }
-func (f failingTracker) CloseIssue(context.Context, int) error { return f.err }
+func (f failingTracker) MergePull(context.Context, int) (PullRef, error) { return PullRef{}, f.err }
+func (f failingTracker) CloseIssue(context.Context, int) error           { return f.err }
 func (f failingTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
 	return Issue{}, f.err
 }
@@ -80,6 +81,7 @@ func driveAll(t *testing.T, trk Tracker) {
 	_, _ = trk.Pulls(ctx)
 	_, _ = trk.Pull(ctx, 1)
 	_, _ = trk.CreatePull(ctx, "afk/1", "main", "t", "b")
+	_, _ = trk.MergePull(ctx, 1)
 	_ = trk.CloseIssue(ctx, 1)
 	_, _ = trk.CreateIssue(ctx, "t", "b", []string{"bug"})
 	_ = trk.AddIssueLabels(ctx, 1, []string{"bug"})
@@ -90,7 +92,7 @@ func driveAll(t *testing.T, trk Tracker) {
 
 // opOrder mirrors driveAll.
 var opOrder = []string{OpReadyIssues, OpIssues, OpIssue, OpCreateComment, OpPulls, OpPull, OpCreatePull,
-	OpCloseIssue, OpCreateIssue, OpAddIssueLabels, OpRemoveIssueLabels, OpLabels, OpEnsureLabel}
+	OpMergePull, OpCloseIssue, OpCreateIssue, OpAddIssueLabels, OpRemoveIssueLabels, OpLabels, OpEnsureLabel}
 
 func TestObserverReportsEveryOp(t *testing.T) {
 	f := newRegistryFixture(t)

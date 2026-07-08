@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
@@ -624,5 +626,158 @@ func TestBuiltin_CreatePullRefusesDuplicateOpenHead(t *testing.T) {
 	}
 	if _, err := tr.CreatePull(ctx, "afk/3", "main", "after close", "Closes #3"); err != nil {
 		t.Errorf("CreatePull after close: %v", err)
+	}
+}
+
+// --- MergePull -------------------------------------------------------------
+
+// fakeMerger is a scriptable tracker.CRMerger for the builtin MergePull tests:
+// it stands in for the shared crmerge.Service so these tests exercise the
+// tracker's error-mapping and convergence logic without a git fixture.
+type fakeMerger struct {
+	cr    store.CR
+	err   error
+	calls int
+}
+
+func (f *fakeMerger) Merge(_ context.Context, _ string, _ int) (store.CR, error) {
+	f.calls++
+	return f.cr, f.err
+}
+
+// newTrackerWithMerger builds a built-in tracker wired to a CR-merge service.
+func newTrackerWithMerger(s *store.Store, repoID string, m tracker.CRMerger) *Tracker {
+	tr := New(tracker.BuiltinConfig{Store: s, RepoID: repoID, Merger: m}).(*Tracker)
+	tr.now = func() time.Time { return fixedNow }
+	return tr
+}
+
+// TestBuiltin_MergePull_success: the service merges; the returned PullRef is
+// the merged CR.
+func TestBuiltin_MergePull_success(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	merged := store.CR{RepoID: repo.ID, Number: 1, HeadBranch: "afk/1", State: store.CRStateMerged}
+	tr := newTrackerWithMerger(s, repo.ID, &fakeMerger{cr: merged})
+
+	pr, err := tr.MergePull(ctx, 1)
+	if err != nil {
+		t.Fatalf("MergePull: %v", err)
+	}
+	if pr.Number != 1 || pr.State != tracker.PullMerged || pr.HeadBranch != "afk/1" {
+		t.Errorf("PullRef = %+v, want #1 afk/1 merged", pr)
+	}
+}
+
+// TestBuiltin_MergePull_alreadyMergedConverges pins the idempotency contract:
+// the service refuses a non-open CR (ErrCRNotOpen, no git run); MergePull
+// re-reads the store, sees it already merged, and returns success.
+func TestBuiltin_MergePull_alreadyMergedConverges(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	if _, err := s.CreateCR(ctx, repo.ID, "cr", "", "afk/1", "main", nil, fixedNow); err != nil {
+		t.Fatalf("CreateCR: %v", err)
+	}
+	if _, err := s.MergeCR(ctx, repo.ID, 1, "abc1234", fixedNow); err != nil {
+		t.Fatalf("MergeCR: %v", err)
+	}
+	m := &fakeMerger{err: fmt.Errorf("%w (state %q)", store.ErrCRNotOpen, "merged")}
+	tr := newTrackerWithMerger(s, repo.ID, m)
+
+	pr, err := tr.MergePull(ctx, 1)
+	if err != nil {
+		t.Fatalf("MergePull (convergent) err = %v, want success", err)
+	}
+	if pr.State != tracker.PullMerged || pr.Number != 1 {
+		t.Errorf("convergent PullRef = %+v, want #1 merged", pr)
+	}
+}
+
+// TestBuiltin_MergePull_closedUnmergedRejected: a closed-unmerged CR is NOT a
+// convergent success — it is a rejection (no reopen exists).
+func TestBuiltin_MergePull_closedUnmergedRejected(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	if _, err := s.CreateCR(ctx, repo.ID, "cr", "", "afk/1", "main", nil, fixedNow); err != nil {
+		t.Fatalf("CreateCR: %v", err)
+	}
+	if _, err := s.CloseCR(ctx, repo.ID, 1, fixedNow); err != nil {
+		t.Fatalf("CloseCR: %v", err)
+	}
+	m := &fakeMerger{err: fmt.Errorf("%w (state %q)", store.ErrCRNotOpen, "closed")}
+	tr := newTrackerWithMerger(s, repo.ID, m)
+
+	if _, err := tr.MergePull(ctx, 1); !errors.Is(err, tracker.ErrMergeRejected) {
+		t.Fatalf("MergePull on closed CR err = %v, want ErrMergeRejected", err)
+	}
+}
+
+// TestBuiltin_MergePull_gitRefusalIsRejected: a git refusal (push rejected,
+// conflict, head missing) — a typed gitx sentinel — surfaces as
+// ErrMergeRejected carrying its own words.
+func TestBuiltin_MergePull_gitRefusalIsRejected(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	m := &fakeMerger{err: fmt.Errorf("%w: protected branch main", gitx.ErrPushRejected)}
+	tr := newTrackerWithMerger(s, repo.ID, m)
+
+	_, err := tr.MergePull(ctx, 1)
+	if !errors.Is(err, tracker.ErrMergeRejected) {
+		t.Fatalf("err = %v, want ErrMergeRejected", err)
+	}
+	if !strings.Contains(err.Error(), "protected branch main") {
+		t.Fatalf("err = %q, want the backend's own words verbatim", err.Error())
+	}
+}
+
+// TestBuiltin_MergePull_internalErrorIsNotRejected: a transient/internal error
+// from the service (a DB failure, a credential misconfig) is NOT a merge
+// refusal — it stays a raw error so the agent answers 500 rather than a
+// permanent, retry-proof 409, and no internal diagnostic leaks as a refusal.
+func TestBuiltin_MergePull_internalErrorIsNotRejected(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	m := &fakeMerger{err: errors.New("database is locked")}
+	tr := newTrackerWithMerger(s, repo.ID, m)
+
+	_, err := tr.MergePull(ctx, 1)
+	if err == nil {
+		t.Fatal("MergePull err = nil, want the internal error surfaced")
+	}
+	if errors.Is(err, tracker.ErrMergeRejected) {
+		t.Fatalf("internal error mislabeled as a merge refusal: %v", err)
+	}
+}
+
+// TestBuiltin_MergePull_notFound: an unknown number stays store.ErrNotFound.
+func TestBuiltin_MergePull_notFound(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	m := &fakeMerger{err: fmt.Errorf("cr %s#9: %w", repo.ID, store.ErrNotFound)}
+	tr := newTrackerWithMerger(s, repo.ID, m)
+
+	if _, err := tr.MergePull(ctx, 9); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestBuiltin_MergePull_noServiceWiredFailsLoud: with no merge service wired,
+// MergePull fails loud rather than pretending to merge — and it is NOT a merge
+// rejection (that would misreport a wiring bug as an unmergeable PR).
+func TestBuiltin_MergePull_noServiceWiredFailsLoud(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID) // no Merger
+
+	_, err := tr.MergePull(ctx, 1)
+	if err == nil || errors.Is(err, tracker.ErrMergeRejected) {
+		t.Fatalf("err = %v, want a plain wiring error (not a merge rejection)", err)
 	}
 }

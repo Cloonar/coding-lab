@@ -69,11 +69,30 @@ var (
 	ErrForgeHost = errors.New("tracker: invalid forge host in credential")
 )
 
+// CRMerger is the built-in change-request merge orchestration, injected into
+// the built-in tracker so its MergePull reuses the ADR-0011 merge service the
+// operator route uses — instead of reimplementing the per-CR serialization,
+// cancellation-immunity, Closes-#N closure, and events. The concrete
+// implementation (internal/crmerge.Service) is wired by the same layer that
+// injects the backend factories (cmd/lab), so this package never imports it
+// and no cycle forms. Merge lands the repo's open CR `number` and returns the
+// merged row; a non-open CR yields the current row plus store.ErrCRNotOpen so
+// the caller can decide whether an already-merged CR is a convergent success
+// (the agent seam) or a conflict (the operator route).
+type CRMerger interface {
+	Merge(ctx context.Context, repoID string, number int) (store.CR, error)
+}
+
 // BuiltinConfig is everything the store-backed tracker needs for one repo.
 // tracker/builtin.New consumes it.
 type BuiltinConfig struct {
 	Store  *store.Store
 	RepoID string
+	// Merger is the shared CR-merge service the built-in tracker's MergePull
+	// routes into. Nil when the wiring layer did not provide one (degraded
+	// wiring / a test that never merges): MergePull then fails loudly rather
+	// than half-merging.
+	Merger CRMerger
 }
 
 // ForgejoConfig is everything the Forgejo REST client needs for one repo.
@@ -125,6 +144,7 @@ type Registry struct {
 	newForgejo ForgejoFactory
 	newGitHub  GitHubFactory
 	observe    Observer // optional metrics seam (instrument.go); nil → unwrapped
+	merger     CRMerger // optional built-in CR-merge service; nil → MergePull fails loud
 }
 
 // NewRegistry builds a Registry. st and v back forge-credential decryption and
@@ -146,6 +166,12 @@ func NewRegistry(st *store.Store, v *vault.Vault, httpClient *http.Client, built
 	}
 }
 
+// SetCRMerger wires the built-in CR-merge service the built-in tracker's
+// MergePull routes into. Call once during startup wiring, before any
+// TrackerFor — the field is read without a lock, exactly like SetObserver.
+// Left unset (tests, degraded wiring), a built-in MergePull fails loud.
+func (r *Registry) SetCRMerger(m CRMerger) { r.merger = m }
+
 // TrackerFor returns the Tracker that answers for repo. A builtin binding
 // yields the store-backed tracker; a forge binding decrypts the repo's forge
 // credential and builds the REST client its flavor names (forgejo or github).
@@ -157,7 +183,7 @@ func NewRegistry(st *store.Store, v *vault.Vault, httpClient *http.Client, built
 func (r *Registry) TrackerFor(ctx context.Context, repo store.Repo) (Tracker, error) {
 	switch repo.TrackerBinding {
 	case store.TrackerBindingBuiltin:
-		return r.instrument(r.newBuiltin(BuiltinConfig{Store: r.store, RepoID: repo.ID}), store.TrackerBindingBuiltin), nil
+		return r.instrument(r.newBuiltin(BuiltinConfig{Store: r.store, RepoID: repo.ID, Merger: r.merger}), store.TrackerBindingBuiltin), nil
 	case store.TrackerBindingForge:
 		trk, err := r.forgeTracker(ctx, repo)
 		if err != nil {

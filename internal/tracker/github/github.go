@@ -279,6 +279,47 @@ func (c *Client) CreatePull(ctx context.Context, head, base, title, body string)
 	return toPullRef(gh), nil
 }
 
+// MergePull merges pull request `number` on GitHub and returns its merged
+// PullRef. GitHub — not lab — decides mergeability: MergePull does NOT
+// pre-check required status checks or branch protection. It first GETs the
+// pull so an already-merged one is a convergent no-op success, then PUTs the
+// fixed "merge" method (a merge commit; GitHub enforces its own configured
+// allowed methods and branch protection). A refusal — a required check
+// unsatisfied (405), a protected base, a changed head (409) — is GitHub's own
+// non-2xx answer, wrapped in tracker.ErrMergeRejected with that answer's body
+// verbatim; an unknown number stays tracker.ErrNotFound. The merge is
+// authorized by this client's server-side forge token, so no forge credential
+// ever reaches the agent session (ADR-0014). The head branch is not deleted.
+func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, error) {
+	var gh ghPull
+	if _, err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &gh); err != nil {
+		return tracker.PullRef{}, err // 404 → tracker.ErrNotFound
+	}
+	if derivePullState(gh.State, gh.MergedAt != nil) == tracker.PullMerged {
+		return toPullRef(gh), nil // convergent no-op: already merged
+	}
+	req := struct {
+		MergeMethod string `json:"merge_method"`
+	}{MergeMethod: "merge"}
+	if _, err := c.do(ctx, http.MethodPut, c.pullPath(number)+"/merge", nil, req, nil); err != nil {
+		// A 404 (unknown PR) and a throttle (GitHub's secondary limits target
+		// mutating requests) are typed upstream conditions, not merge refusals
+		// — surface them as-is so the agent gets a 404 / a retryable upstream
+		// error, never a permanent, retry-proof "merge refused" 409.
+		if errors.Is(err, tracker.ErrNotFound) || errors.Is(err, tracker.ErrRateLimited) {
+			return tracker.PullRef{}, err
+		}
+		return tracker.PullRef{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
+	}
+	// Merged. The head ref and web URL do not change on merge; report merged.
+	return tracker.PullRef{
+		Number:     gh.Number,
+		HeadBranch: gh.Head.Ref,
+		State:      tracker.PullMerged,
+		URL:        gh.HTMLURL,
+	}, nil
+}
+
 // CloseIssue closes an issue via PATCH state=closed.
 func (c *Client) CloseIssue(ctx context.Context, number int) error {
 	req := struct {

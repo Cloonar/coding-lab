@@ -5,27 +5,22 @@ package httpapi
 // answers 409 on a forge-bound repo — its PRs live on the forge, exactly like
 // the issue mutations. Reads come straight from the store (the CR rows are
 // lab's own data, no tracker indirection needed); the detail view computes
-// the diff live from the bare repo via gitx.CRDiff; merge is the small
-// orchestration pinned by the contract: credential env from the vault
-// materializer (per-op, cleaned after), author identity from the repo
-// override else global settings (D15 measure 5 — the repo's REAL identity,
-// never a bot), gitx.CRMerge against the repo's real origin, store.MergeCR,
-// then best-effort closing of every `Closes #N` built-in issue. Every CR
-// mutation publishes cr.changed on the bus (clients refetch on event).
+// the diff live from the bare repo via gitx.CRDiff; merge and close delegate
+// to the shared crmerge.Service (ADR-0011) — the same orchestration the agent
+// surface's MergePull reuses — so the per-CR serialization, cancellation-
+// immune git window, author identity, per-op credential, Closes #N closure,
+// and cr.changed/issue.changed events live in ONE place. These handlers are
+// the thin operator-side error map onto the M6 status codes.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"strings"
-	"sync"
 
-	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
-	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
 // EventCRChanged is the SSE event name published on any change-request
@@ -36,23 +31,6 @@ const EventCRChanged = "cr.changed"
 // forgeCRMessage is the pinned 409 body for /crs routes on a forge-bound
 // repo — the sibling of forgeTrackerMessage, but pointing at pull requests.
 const forgeCRMessage = "repository uses a forge tracker; manage pull requests on the forge"
-
-// noAuthorIdentityMessage answers a merge attempted before any git author
-// identity exists. CRMerge's merge commit is authored per D15 measure 5 —
-// the repo's configured REAL identity, never a fallback bot identity — so
-// with neither the repo fields nor the global settings configured there is
-// nothing lab may author as; refusing up front (409, configuration conflict)
-// beats an opaque git failure halfway through the merge.
-const noAuthorIdentityMessage = "git author identity is not configured; set git_author_name and git_author_email in settings (or on the repository)"
-
-// publishCRChanged emits cr.changed for repoID. Same envelope shape as every
-// repo-scoped event ({type, repoID}).
-func (s *Server) publishCRChanged(repoID string) {
-	s.bus.Publish(events.Event{Type: EventCRChanged, Payload: struct {
-		Type   string `json:"type"`
-		RepoID string `json:"repoID"`
-	}{Type: EventCRChanged, RepoID: repoID}})
-}
 
 // crResponse is the pinned list-view CR JSON: {number, title, state,
 // head_branch, base_branch, closes, created_at, merged_at, merge_commit}.
@@ -215,23 +193,16 @@ func (s *Server) handleCRGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleCRMerge is POST /api/v1/repos/{id}/crs/{n}/merge — the M6 merge
-// orchestration (pinned contract):
-//
-//  1. builtin-bound repo, existing OPEN CR (non-open → 409 with the state);
-//  2. author identity: repo git_author_name/email else the global settings
-//     pair (both required — see noAuthorIdentityMessage);
-//  3. the repo's git credential materialized per-op (opID crmerge-<crID>),
-//     removed again when the merge returns;
-//  4. gitx.CRMerge against the repo's REAL origin: ErrHeadMissing and
-//     ErrPushRejected are 409s whose body is the error text verbatim (the
-//     push-rejection stderr IS what the operator needs to read);
-//  5. past the push there is no return: store.MergeCR, the best-effort close
-//     of every cr_closes built-in issue (per-issue, log failures), and the
-//     cr.changed/issue.changed events run on a cancellation-immune context —
-//     a dropped connection must not strand a pushed merge unrecorded. If a
-//     concurrent merge won the store race (ErrCRNotOpen), git has already
-//     converged (CRMerge invariant) and the 409 tells the operator the truth.
+// handleCRMerge is POST /api/v1/repos/{id}/crs/{n}/merge — the operator entry
+// to the shared CR-merge orchestration (crmerge.Service, ADR-0011). The
+// service owns the whole contract: per-CR serialization, cancellation-immune
+// git window, author identity, per-op credential, gitx.CRMerge against the
+// real origin, store.MergeCR, best-effort Closes #N closure, and the
+// cr.changed/issue.changed events. This handler is the thin operator-side
+// error map: a non-open CR (and a store race that becomes one) stays 409 with
+// the state, gitx's typed refusals surface their own words as the 409 body,
+// and the no-author-identity refusal is a 409 too — exactly the M6 status
+// codes, now shared byte-for-byte with the agent surface.
 func (s *Server) handleCRMerge(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -240,95 +211,26 @@ func (s *Server) handleCRMerge(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBuiltinCRs(w, repo) {
 		return
 	}
-	cr, ok := s.loadCR(w, r, repo)
+	n, ok := issueNumber(r)
 	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 
-	// Serialize against a concurrent close/merge of the SAME CR: the git
-	// merge below is a seconds-wide network operation, and a close landing
-	// inside it would strand origin merged while the row reads
-	// closed-unmerged (no reopen exists). Under the lock, re-read the state
-	// so a mutation that won the lock first is seen.
-	unlock := s.crMu.lock(cr.ID)
-	defer unlock()
-
-	// The merge is not abortable once we commit to it: a phone dropping the
-	// connection after the push but before the bookkeeping must not strand a
-	// pushed merge unrecorded (or skip gitx's refresh fetch). Everything from
-	// here runs cancellation-immune.
-	ctx := context.WithoutCancel(r.Context())
-
-	cr, err := s.store.CRByRepoNumber(ctx, repo.ID, cr.Number)
-	if err != nil {
-		s.internalError(w, "reloading change request", err)
-		return
-	}
-	if cr.State != store.CRStateOpen {
-		writeError(w, http.StatusConflict, fmt.Sprintf("change request is not open (state %q)", cr.State))
-		return
-	}
-
-	authorName, authorEmail, err := s.crAuthorIdentity(ctx, repo)
-	if err != nil {
-		s.internalError(w, "resolving git author identity", err)
-		return
-	}
-	if authorName == "" || authorEmail == "" {
-		writeError(w, http.StatusConflict, noAuthorIdentityMessage)
-		return
-	}
-
-	credEnv, cleanup, err := s.crCredentialEnv(ctx, repo, "crmerge-"+cr.ID)
-	if err != nil {
-		s.internalError(w, "materializing git credential", err)
-		return
-	}
-	defer cleanup()
-
-	env := append(append([]string{}, s.gitEnv...), credEnv...)
-	message := fmt.Sprintf("Merge change request #%d: %s", cr.Number, cr.Title)
-	mergeCommit, err := s.git.CRMerge(ctx, s.crBareDir(repo.ID),
-		cr.BaseBranch, cr.HeadBranch, message, authorName, authorEmail, env)
+	merged, err := s.crmerge.Merge(r.Context(), repo.ID, n)
 	if err != nil {
 		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not found")
 		case errors.Is(err, gitx.ErrHeadMissing), errors.Is(err, gitx.ErrPushRejected),
-			errors.Is(err, gitx.ErrMergeConflict):
+			errors.Is(err, gitx.ErrMergeConflict), errors.Is(err, store.ErrCRNotOpen),
+			errors.Is(err, crmerge.ErrNoAuthorIdentity):
 			writeError(w, http.StatusConflict, err.Error())
 		default:
 			s.internalError(w, "merging change request", err)
 		}
 		return
 	}
-
-	// The merge is on origin. Record it, close the closes-issues, publish.
-	merged, err := s.store.MergeCR(ctx, repo.ID, cr.Number, mergeCommit, s.now())
-	if err != nil {
-		switch {
-		case errors.Is(err, store.ErrCRNotOpen):
-			writeError(w, http.StatusConflict, err.Error())
-		case errors.Is(err, store.ErrNotFound):
-			writeError(w, http.StatusNotFound, "not found")
-		default:
-			s.internalError(w, "recording change-request merge", err)
-		}
-		return
-	}
-
-	closedAny := false
-	for _, n := range merged.Closes {
-		if _, err := s.store.UpdateIssue(ctx, repo.ID, n,
-			store.IssueUpdate{State: store.Set(store.IssueStateClosed)}, s.now()); err != nil {
-			s.log.Warn("closing issue for merged change request",
-				"component", "httpapi", "repo", repo.ID, "cr", merged.Number, "issue", n, "err", err)
-			continue
-		}
-		closedAny = true
-	}
-	if closedAny {
-		s.publishIssueChanged(repo.ID)
-	}
-	s.publishCRChanged(repo.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"cr": crFullJSON(merged)})
 }
 
@@ -343,15 +245,14 @@ func (s *Server) handleCRClose(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBuiltinCRs(w, repo) {
 		return
 	}
-	target, ok := s.loadCR(w, r, repo)
+	n, ok := issueNumber(r)
 	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	// Same per-CR lock as merge: a close must not land inside a concurrent
-	// merge's git window (see handleCRMerge).
-	unlock := s.crMu.lock(target.ID)
-	defer unlock()
-	cr, err := s.store.CloseCR(r.Context(), repo.ID, target.Number, s.now())
+	// crmerge.Close shares the merge mutex, so a close never lands inside a
+	// concurrent merge's git window (see handleCRMerge / ADR-0011).
+	cr, err := s.crmerge.Close(r.Context(), repo.ID, n)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrCRNotOpen):
@@ -363,112 +264,5 @@ func (s *Server) handleCRClose(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.publishCRChanged(repo.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"cr": crFullJSON(cr)})
-}
-
-// crAuthorIdentity resolves the merge commit's author/committer identity:
-// the repo's git_author_name/email override the global settings pair,
-// field-by-field (same layering as the spawned-session authorEnv in
-// internal/instance). Empty results mean "not configured" — the caller
-// refuses the merge rather than authoring as nobody or as a bot.
-func (s *Server) crAuthorIdentity(ctx context.Context, repo store.Repo) (name, email string, err error) {
-	if repo.GitAuthorName != nil {
-		name = strings.TrimSpace(*repo.GitAuthorName)
-	}
-	if repo.GitAuthorEmail != nil {
-		email = strings.TrimSpace(*repo.GitAuthorEmail)
-	}
-	if name == "" {
-		if name, err = s.store.GetString(ctx, store.SettingGitAuthorName, ""); err != nil {
-			return "", "", err
-		}
-	}
-	if email == "" {
-		if email, err = s.store.GetString(ctx, store.SettingGitAuthorEmail, ""); err != nil {
-			return "", "", err
-		}
-	}
-	// Whitespace-only values are "not configured": git strips whitespace
-	// idents and rejects the commit with an opaque "empty ident name" —
-	// catching it here keeps the up-front 409 honest.
-	return strings.TrimSpace(name), strings.TrimSpace(email), nil
-}
-
-// keyedMutex is a per-key mutual exclusion helper: lock(key) blocks while
-// another holder owns the same key and returns the unlock func. Entries are
-// tiny and never evicted — key cardinality is bounded by real CR ids.
-type keyedMutex struct {
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
-}
-
-func (k *keyedMutex) lock(key string) (unlock func()) {
-	k.mu.Lock()
-	if k.locks == nil {
-		k.locks = map[string]*sync.Mutex{}
-	}
-	m, ok := k.locks[key]
-	if !ok {
-		m = &sync.Mutex{}
-		k.locks[key] = m
-	}
-	k.mu.Unlock()
-	m.Lock()
-	return m.Unlock
-}
-
-// crCredentialEnv materializes the repo's GIT credential for one merge op
-// (design §6) and returns the git env entries plus a cleanup removing exactly
-// this op's files. A repo without a credential yields no env and a no-op
-// cleanup (a filesystem/local remote needs none). Mirrors the per-service
-// credentialEnv helpers in reposvc and instance — the same §6 wiring, kept
-// local so the merge path stays a plain httpapi orchestration.
-func (s *Server) crCredentialEnv(ctx context.Context, repo store.Repo, opID string) (env []string, cleanup func(), err error) {
-	noop := func() {}
-	if repo.CredentialID == nil {
-		return nil, noop, nil
-	}
-	if s.vault == nil || s.mat == nil {
-		return nil, noop, errors.New("credentialed merge without a vault/materializer wired")
-	}
-	cred, err := s.store.CredentialByID(ctx, *repo.CredentialID)
-	if err != nil {
-		return nil, noop, err
-	}
-	remove := func() {
-		if err := s.mat.Cleanup(cred.ID, opID); err != nil {
-			s.log.Warn("cleaning materialized credential", "component", "httpapi", "err", err)
-		}
-	}
-	switch cred.Kind {
-	case store.CredentialKindSSHKey:
-		var p vault.SSHKeyPayload
-		if err := s.vault.DecryptPayload(cred.EncryptedPayload, &p); err != nil {
-			return nil, noop, err
-		}
-		keyPath, sshAskpass, err := s.mat.MaterializeSSHKey(cred.ID, opID, p)
-		if err != nil {
-			remove()
-			return nil, noop, err
-		}
-		if sshAskpass != "" {
-			return vault.SSHEnvWithPassphrase(keyPath, s.mat.KnownHostsPath(), sshAskpass), remove, nil
-		}
-		return vault.SSHEnv(keyPath, s.mat.KnownHostsPath()), remove, nil
-	case store.CredentialKindHTTPSToken:
-		var p vault.HTTPSTokenPayload
-		if err := s.vault.DecryptPayload(cred.EncryptedPayload, &p); err != nil {
-			return nil, noop, err
-		}
-		askpass, err := s.mat.MaterializeAskpass(cred.ID, opID, p)
-		if err != nil {
-			remove()
-			return nil, noop, err
-		}
-		return vault.HTTPSEnv(askpass), remove, nil
-	default:
-		// forge_token never authenticates git (design §3a).
-		return nil, noop, fmt.Errorf("credential kind %s cannot authenticate git", cred.Kind)
-	}
 }

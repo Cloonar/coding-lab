@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
+	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
@@ -71,12 +72,18 @@ func newCRServer(t *testing.T) *crTestServer {
 			func(tracker.GitHubConfig) tracker.Tracker {
 				panic("github factory invoked in a builtin-only CR test")
 			})
+		mergeSvc := crmerge.New(crmerge.Config{
+			Store: o.Store, Git: eng, Vault: vlt, Materializer: mat,
+			Bus: o.Bus, ReposDir: reposDir, GitEnv: env, Now: time.Now, Logger: o.Logger,
+		})
+		reg.SetCRMerger(mergeSvc)
 		o.Tracker = reg
 		o.Vault = vlt
 		o.Git = eng
 		o.Materializer = mat
 		o.ReposDir = reposDir
 		o.GitEnv = env
+		o.CRMerge = mergeSvc
 		o.AgentHandler = agentapi.New(o.Store, reg, o.Bus, o.Logger, time.Now).Handler()
 	})
 	x.setup("op", "password123")
@@ -473,8 +480,8 @@ func TestCRMergeAuthorIdentityRequired(t *testing.T) {
 
 	resp := x.do("POST", "/api/v1/repos/"+f.repo.ID+"/crs/1/merge", nil, csrfHeaders(x.ts.URL))
 	wantStatus(t, resp, http.StatusConflict)
-	if got := decodeBody(t, resp); got["error"] != noAuthorIdentityMessage {
-		t.Fatalf("409 body = %v, want %q", got["error"], noAuthorIdentityMessage)
+	if got := decodeBody(t, resp); got["error"] != crmerge.NoAuthorIdentityMessage {
+		t.Fatalf("409 body = %v, want %q", got["error"], crmerge.NoAuthorIdentityMessage)
 	}
 	if o := f.originMain(t); o != before {
 		t.Fatalf("origin main moved (%s → %s) despite the identity refusal", before, o)
@@ -637,41 +644,79 @@ func TestAgentBuiltinPRCreateFullLoop(t *testing.T) {
 	}
 }
 
-// keyedMutex is the per-CR merge/close serializer (M6 review: a close landing
-// inside a merge's git window strands origin merged while the row reads
-// closed-unmerged). Pin its two properties: same key excludes, different keys
-// do not.
-func TestKeyedMutex(t *testing.T) {
-	var km keyedMutex
-	unlockA := km.lock("a")
-	// Different key: never blocks.
-	done := make(chan struct{})
-	go func() {
-		unlock := km.lock("b")
-		unlock()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("lock(b) blocked behind lock(a)")
+// TestAgentBuiltinPRMergeFullLoop proves the acceptance criteria on a
+// builtin-bound repo entirely over the run-token agent surface: the agent's
+// POST /agent/v1/prs/{n}/merge lands the CR through the SAME crmerge service
+// the operator route uses (ff push here), closing every Closes #N and emitting
+// cr.changed/issue.changed; the head branch survives the merge (teardown/sweep
+// GCs it, not merge); and a re-merge is a convergent no-op success rather than
+// an error.
+func TestAgentBuiltinPRMergeFullLoop(t *testing.T) {
+	x := newCRServer(t)
+	f := newCRRepo(t, x, "proj", nil)
+	setAuthorIdentity(t, x, "Real Author", "real@example.invalid")
+	issueN := seedCRIssue(t, x, f.repo.ID, "land it")
+	head := f.addHead(t, "afk/1", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "land.txt"), []byte("land\n"), 0o644); err != nil {
+			t.Fatalf("write land.txt: %v", err)
+		}
+	})
+	seedCR(t, x, f.repo.ID, "feat: land it", "Closes #1", "afk/1")
+	log := recordBus(t, x.bus)
+
+	// The run row + token, the way the AFK engine mints them.
+	run, err := x.st.CreateRun(context.Background(), store.Run{
+		ID: ids.NewID("run"), RepoID: f.repo.ID, Kind: store.RunKindAFKAuto,
+		Provider: "claude-code", IssueNumber: &issueN, Branch: "afk/1",
+		WorktreePath: "/tmp/wt", SessionName: "sess-merge-test", Model: "opus[1m]",
+		Effort: "max", StartedAt: time.Now(), Outcome: store.RunOutcomeActive,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
 	}
-	// Same key: blocks until release.
-	acquired := make(chan struct{})
-	go func() {
-		unlock := km.lock("a")
-		unlock()
-		close(acquired)
-	}()
-	select {
-	case <-acquired:
-		t.Fatal("second lock(a) acquired while held")
-	case <-time.After(50 * time.Millisecond):
+	token, hash := ids.NewToken("run")
+	if err := x.st.CreateRunToken(context.Background(), run.ID, hash, nil, time.Now()); err != nil {
+		t.Fatalf("CreateRunToken: %v", err)
 	}
-	unlockA()
-	select {
-	case <-acquired:
-	case <-time.After(2 * time.Second):
-		t.Fatal("second lock(a) never acquired after release")
+	auth := map[string]string{"Authorization": "Bearer " + token}
+
+	// Agent merge: 200 with the merged state, over the run-token surface only.
+	resp := doWith(t, http.DefaultClient, x.ts.URL, "POST", "/agent/v1/prs/1/merge", nil, auth)
+	wantStatus(t, resp, http.StatusOK)
+	merged := decodeBody(t, resp)
+	if merged["state"] != store.CRStateMerged {
+		t.Fatalf("merge state = %v, want merged", merged["state"])
+	}
+	if merged["url"] != "/repos/"+f.repo.ID+"/crs/1" {
+		t.Fatalf("merge url = %v, want the lab-relative CR route", merged["url"])
+	}
+
+	// The same service the operator route uses: origin advanced (fast-forward),
+	// the Closes #1 issue closed, both events published.
+	if o := f.originMain(t); o != head {
+		t.Fatalf("origin main = %s, want %s (fast-forward push)", o, head)
+	}
+	is, err := x.st.IssueByRepoNumber(context.Background(), f.repo.ID, issueN)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	if is.State != store.IssueStateClosed {
+		t.Fatalf("issue state = %q, want closed after the agent merge", is.State)
+	}
+	waitForBusEvent(t, log, EventCRChanged)
+	waitForBusEvent(t, log, EventIssueChanged)
+
+	// The head branch still exists immediately after the merge — teardown/the
+	// sweep GCs a merged head, merge does not touch it (acceptance criterion).
+	if sha := repoGitCmd(t, x.home, f.bare, "rev-parse", "refs/heads/afk/1"); sha != head {
+		t.Fatalf("head branch afk/1 = %q after merge, want it still at %s", sha, head)
+	}
+
+	// Convergent: re-merging an already-merged CR is a no-op SUCCESS, not an
+	// error (unlike the operator route's 409 — the agent land step is retried).
+	resp = doWith(t, http.DefaultClient, x.ts.URL, "POST", "/agent/v1/prs/1/merge", nil, auth)
+	wantStatus(t, resp, http.StatusOK)
+	if again := decodeBody(t, resp); again["state"] != store.CRStateMerged {
+		t.Fatalf("re-merge state = %v, want a convergent merged no-op", again["state"])
 	}
 }

@@ -473,6 +473,140 @@ func TestCreatePull(t *testing.T) {
 	}
 }
 
+// --- MergePull -------------------------------------------------------------
+
+// TestMergePull_success drives the open→merge path: GET the pull, then PUT the
+// fixed "merge" method to /pulls/{n}/merge; the returned ref reports merged.
+func TestMergePull_success(t *testing.T) {
+	var mergeMethod, mergePath string
+	var mergeBody map[string]any
+	putCalled := false
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"number":42,"state":"open","merged_at":null,"head":{"ref":"afk/42"},
+			  "html_url":"https://github.com/octocat/hello-world/pull/42"}`)
+		case http.MethodPut:
+			putCalled = true
+			mergeMethod, mergePath = r.Method, r.URL.Path
+			mergeBody = decodeBody(t, r)
+			_, _ = io.WriteString(w, `{"sha":"abc123","merged":true,"message":"Pull Request successfully merged"}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	ref, err := c.MergePull(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("MergePull: %v", err)
+	}
+	if !putCalled {
+		t.Fatal("MergePull did not PUT a merge")
+	}
+	if mergeMethod != http.MethodPut || mergePath != apiPrefix+"/pulls/42/merge" {
+		t.Errorf("merge request = %s %s; want PUT %s/pulls/42/merge", mergeMethod, mergePath, apiPrefix)
+	}
+	if mergeBody["merge_method"] != "merge" {
+		t.Errorf("merge_method = %v; want the fixed \"merge\"", mergeBody["merge_method"])
+	}
+	// The head branch must survive the merge (acceptance criterion 3): the
+	// merge request carries ONLY merge_method — no branch-delete flag.
+	if len(mergeBody) != 1 {
+		t.Errorf("merge body = %v; want only merge_method (no branch-delete flag)", mergeBody)
+	}
+	want := tracker.PullRef{Number: 42, HeadBranch: "afk/42", State: tracker.PullMerged, URL: "https://github.com/octocat/hello-world/pull/42"}
+	if ref != want {
+		t.Errorf("PullRef = %+v; want %+v", ref, want)
+	}
+}
+
+// TestMergePull_alreadyMergedIsConvergentNoOp: a pull GitHub already reports
+// merged (merged_at set) is a no-op success — no merge PUT.
+func TestMergePull_alreadyMergedIsConvergentNoOp(t *testing.T) {
+	putCalled := false
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			putCalled = true
+		}
+		_, _ = io.WriteString(w, `{"number":42,"state":"closed","merged_at":"2026-07-08T00:00:00Z","head":{"ref":"afk/42"},
+		  "html_url":"https://github.com/octocat/hello-world/pull/42"}`)
+	})
+
+	ref, err := c.MergePull(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("MergePull: %v", err)
+	}
+	if putCalled {
+		t.Fatal("MergePull PUT a merge for an already-merged pull; want a convergent no-op")
+	}
+	if ref.State != tracker.PullMerged {
+		t.Errorf("state = %s; want merged", ref.State)
+	}
+}
+
+// TestMergePull_rejectedSurfacesGitHubWordsVerbatim: a 405 refusal becomes
+// tracker.ErrMergeRejected carrying GitHub's own words — and never the token.
+func TestMergePull_rejectedSurfacesGitHubWordsVerbatim(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"number":42,"state":"open","merged_at":null,"head":{"ref":"afk/42"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, `{"message":"Required status check \"ci\" is expected."}`)
+	})
+
+	_, err := c.MergePull(context.Background(), 42)
+	if !errors.Is(err, tracker.ErrMergeRejected) {
+		t.Fatalf("err = %v, want ErrMergeRejected", err)
+	}
+	if !strings.Contains(err.Error(), "Required status check") {
+		t.Fatalf("err = %q, want GitHub's own words verbatim", err.Error())
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestMergePull_notFound: an unknown number's 404 unwraps to ErrNotFound.
+func TestMergePull_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+	})
+
+	_, err := c.MergePull(context.Background(), 999)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMergePull_rateLimitedNotRejected: a throttled merge PUT stays
+// tracker.ErrRateLimited (a transient upstream throttle), NOT ErrMergeRejected
+// (a permanent refusal) — GitHub's secondary limits target mutating requests,
+// so the merge PUT is exactly where this bites; the agent must retry, not
+// treat a mergeable PR as refused.
+func TestMergePull_rateLimitedNotRejected(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"number":42,"state":"open","merged_at":null,"head":{"ref":"afk/42"}}`)
+			return
+		}
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1783500000")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"You have exceeded a secondary rate limit"}`)
+	})
+
+	_, err := c.MergePull(context.Background(), 42)
+	if !errors.Is(err, tracker.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited (a throttle, not a refusal)", err)
+	}
+	if errors.Is(err, tracker.ErrMergeRejected) {
+		t.Fatalf("throttle mislabeled as a merge refusal: %v", err)
+	}
+}
+
 // --- CloseIssue ------------------------------------------------------------
 
 func TestCloseIssue(t *testing.T) {

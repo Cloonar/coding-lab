@@ -72,6 +72,15 @@ type PRRef struct {
 	URL    string `json:"url"`
 }
 
+// PRMerged is the agent API's POST /prs/{n}/merge answer: the merged PR's
+// number, three-valued state (merged on success), head branch, and URL.
+type PRMerged struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
+	Head   string `json:"head"`
+	URL    string `json:"url"`
+}
+
 // Client is the transport to /agent/v1, built from LAB_URL/LAB_TOKEN.
 type Client struct {
 	BaseURL string
@@ -122,6 +131,13 @@ func (c *Client) PRView(n int) (PRDetail, error) {
 	var pd PRDetail
 	err := c.do(http.MethodGet, "/agent/v1/prs/"+strconv.Itoa(n), nil, &pd)
 	return pd, err
+}
+
+// PRMerge merges PR/CR n and returns the merged PR's state, head, and URL.
+func (c *Client) PRMerge(n int) (PRMerged, error) {
+	var pm PRMerged
+	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/merge", nil, &pm)
+	return pm, err
 }
 
 // PRList lists the repo's PRs across all states.

@@ -516,6 +516,117 @@ func TestCreatePull(t *testing.T) {
 	}
 }
 
+// --- MergePull -------------------------------------------------------------
+
+// TestMergePull_success drives the open→merge path: GET the pull (idempotency
+// probe), then POST the fixed "merge" method to /pulls/{n}/merge; the returned
+// ref reports the merged state.
+func TestMergePull_success(t *testing.T) {
+	var mergePath string
+	var mergeBody map[string]any
+	postCalled := false
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"number":42,"state":"open","merged":false,"head":{"ref":"afk/42"},
+			  "html_url":"https://git.cloonar.com/o/r/pulls/42"}`)
+		case http.MethodPost:
+			postCalled = true
+			mergePath = r.URL.Path
+			mergeBody = decodeBody(t, r)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	ref, err := c.MergePull(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("MergePull: %v", err)
+	}
+	if !postCalled {
+		t.Fatal("MergePull did not POST a merge")
+	}
+	if mergePath != apiPrefix+"/pulls/42/merge" {
+		t.Errorf("merge path = %s; want %s/pulls/42/merge", mergePath, apiPrefix)
+	}
+	if mergeBody["Do"] != "merge" {
+		t.Errorf("merge Do = %v; want the fixed \"merge\" method", mergeBody["Do"])
+	}
+	// The head branch must survive the merge (acceptance criterion 3): the
+	// merge request carries ONLY Do — no delete_branch_after_merge.
+	if len(mergeBody) != 1 {
+		t.Errorf("merge body = %v; want only Do (no delete_branch_after_merge)", mergeBody)
+	}
+	want := tracker.PullRef{Number: 42, HeadBranch: "afk/42", State: tracker.PullMerged, URL: "https://git.cloonar.com/o/r/pulls/42"}
+	if ref != want {
+		t.Errorf("PullRef = %+v; want %+v", ref, want)
+	}
+}
+
+// TestMergePull_alreadyMergedIsConvergentNoOp pins the idempotency contract:
+// a pull the forge already reports merged is a no-op success — no merge POST.
+func TestMergePull_alreadyMergedIsConvergentNoOp(t *testing.T) {
+	postCalled := false
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postCalled = true
+		}
+		_, _ = io.WriteString(w, `{"number":42,"state":"closed","merged":true,"head":{"ref":"afk/42"},
+		  "html_url":"https://git.cloonar.com/o/r/pulls/42"}`)
+	})
+
+	ref, err := c.MergePull(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("MergePull: %v", err)
+	}
+	if postCalled {
+		t.Fatal("MergePull POSTed a merge for an already-merged pull; want a convergent no-op")
+	}
+	if ref.State != tracker.PullMerged {
+		t.Errorf("state = %s; want merged", ref.State)
+	}
+}
+
+// TestMergePull_rejectedSurfacesForgeWordsVerbatim pins the "mergeability is
+// the forge's call" contract: a forge refusal (here a 405 with the required-
+// check message) becomes tracker.ErrMergeRejected carrying the forge's own
+// words — and never the token.
+func TestMergePull_rejectedSurfacesForgeWordsVerbatim(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"number":42,"state":"open","merged":false,"head":{"ref":"afk/42"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, `{"message":"Please check the required status checks before merging"}`)
+	})
+
+	_, err := c.MergePull(context.Background(), 42)
+	if !errors.Is(err, tracker.ErrMergeRejected) {
+		t.Fatalf("err = %v, want ErrMergeRejected", err)
+	}
+	if !strings.Contains(err.Error(), "required status checks") {
+		t.Fatalf("err = %q, want the forge's own words verbatim", err.Error())
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestMergePull_notFound: an unknown number's 404 unwraps to ErrNotFound.
+func TestMergePull_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"pull request does not exist"}`)
+	})
+
+	_, err := c.MergePull(context.Background(), 999)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 // --- CloseIssue ------------------------------------------------------------
 
 func TestCloseIssue(t *testing.T) {

@@ -13,7 +13,7 @@ Merging records `merged_at`/`merge_commit`, closes every `Closes #N` built-in is
 
 ## Status
 
-Accepted. Completes D11 (with ADR-0009's issue half); shipped in M6. Full circle proven by the builtin cycle integration test: claim → work → `labctl pr create` → reap success → UI merge → issue auto-closed → sweep GC of the merged head.
+Accepted. Completes D11 (with ADR-0009's issue half); shipped in M6. Full circle proven by the builtin cycle integration test: claim → work → `labctl pr create` → reap success → UI merge → issue auto-closed → sweep GC of the merged head. The merge orchestration described here is later lifted into a shared `crmerge.Service` and extended to the agent surface (`labctl pr merge`) and the forge bindings by ADR-0024; the invariants above hold unchanged on both the operator and agent paths.
 
 ## Considered options
 

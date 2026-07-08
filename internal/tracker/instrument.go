@@ -23,6 +23,7 @@ const (
 	OpPulls             = "pulls"
 	OpPull              = "pull"
 	OpCreatePull        = "create_pull"
+	OpMergePull         = "merge_pull"
 	OpCloseIssue        = "close"
 	OpCreateIssue       = "create_issue"
 	OpAddIssueLabels    = "label_add"
@@ -114,6 +115,12 @@ func (o *observed) Pull(ctx context.Context, number int) (PullDetail, error) {
 func (o *observed) CreatePull(ctx context.Context, head, base, title, body string) (PullRef, error) {
 	pull, err := o.t.CreatePull(ctx, head, base, title, body)
 	o.report(OpCreatePull, err)
+	return pull, err
+}
+
+func (o *observed) MergePull(ctx context.Context, number int) (PullRef, error) {
+	pull, err := o.t.MergePull(ctx, number)
+	o.report(OpMergePull, err)
 	return pull, err
 }
 

@@ -28,7 +28,8 @@ func (stubTracker) Pull(context.Context, int) (PullDetail, error)    { return Pu
 func (stubTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, nil
 }
-func (stubTracker) CloseIssue(context.Context, int) error { return nil }
+func (stubTracker) MergePull(context.Context, int) (PullRef, error) { return PullRef{}, nil }
+func (stubTracker) CloseIssue(context.Context, int) error           { return nil }
 func (stubTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
 	return Issue{}, nil
 }

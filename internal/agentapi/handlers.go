@@ -212,6 +212,13 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo sto
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if errors.Is(err, tracker.ErrMergeRejected) {
+		// A merge the backend refused (required check red, protected branch,
+		// conflict, closed-unmerged): 409 with the backend's own words
+		// verbatim — mergeability is the backend's call, not lab's.
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if repo.TrackerBinding == store.TrackerBindingForge {
 		s.log.Warn(doing, "component", "agentapi", "repo", repo.ID, "err", err)
 		jsonError(w, http.StatusBadGateway, err.Error())
@@ -679,6 +686,53 @@ func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 		items = append(items, prListItem{Number: p.Number, State: p.State, Head: p.HeadBranch, URL: p.URL})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"prs": items})
+}
+
+// prMergeResponse is the POST /agent/v1/prs/{n}/merge answer: the merged PR's
+// number, three-valued state (merged on success), head branch, and web/lab
+// URL — what `labctl pr merge` prints.
+type prMergeResponse struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
+	Head   string `json:"head"`
+	URL    string `json:"url"`
+}
+
+// handlePRMerge is POST /agent/v1/prs/{n}/merge: land PR/CR n of the run's
+// repo and report the result. The merge method is fixed — no flag. Lab does
+// not reason about mergeability: the backend (the forge, or the built-in git
+// push under a pre-receive hook) enforces required checks and branch
+// protection, and a refusal surfaces verbatim as a 409 with a non-zero
+// labctl exit. Convergent: merging an already-merged PR is a no-op success.
+// On a forge-bound repo the merge runs under the SERVER's forge token — the
+// run-token repo scope stays the only agent-side boundary, and no forge
+// credential ever reaches the session (ADR-0014). The head branch is not
+// deleted (teardown/sweep GCs a merged head, not merge).
+func (s *Server) handlePRMerge(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	pr, err := tk.MergePull(r.Context(), n)
+	if err != nil {
+		s.writeTrackerError(w, "merging pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, prMergeResponse{
+		Number: pr.Number,
+		State:  pr.State,
+		Head:   pr.HeadBranch,
+		URL:    pr.URL,
+	})
 }
 
 // publishCRChanged emits cr.changed for repoID — the same {type, repoID}
