@@ -615,10 +615,12 @@ func TestCompat_HookPayload_planDialog_maps(t *testing.T) {
 
 // The full live transcripts (captured 2026-07-08, 2.1.198 — the issue #51
 // dialog verification runs) parse through the real mapper: every resolved
-// dialog is a tool chip whose Output carries the recorded resolution string,
-// with is_error only on denials. These pin the RESOLUTION shapes the
-// verification backstop reads (compat §5): the answered content string, the
-// user-rejected denial, the 60s afkTimeout, and the plan approve/reject pair.
+// dialog stays a DIALOG message whose Outcome carries the recorded resolution
+// (issue #56 — never a demoted tool chip). These pin the RESOLUTION shapes
+// (compat §5) that both the verification backstop and the outcome derivation
+// read: the answered answers map (label, ", "-joined multi-select, free text
+// verbatim), the user-rejected denial, the 60s afkTimeout, and the plan
+// approve/reject-with-feedback pair.
 func TestCompat_LiveTranscripts_resolutionShapes(t *testing.T) {
 	parse := func(name string) provider.Chat {
 		t.Helper()
@@ -633,14 +635,17 @@ func TestCompat_LiveTranscripts_resolutionShapes(t *testing.T) {
 		}
 		return chat
 	}
-	tool := func(chat provider.Chat, seq int64) *provider.ToolInfo {
+	outcome := func(chat provider.Chat, seq int64) *provider.DialogOutcome {
 		t.Helper()
 		for _, m := range chat.Messages {
 			if m.Seq == seq {
-				if m.Tool == nil {
-					t.Fatalf("seq %d = %+v; want a tool chip", seq, m)
+				if m.Kind != provider.MessageDialog || m.Dialog == nil || m.Tool != nil {
+					t.Fatalf("seq %d = %+v; want a dialog message (resolved dialogs are never tool chips)", seq, m)
 				}
-				return m.Tool
+				if m.Dialog.Outcome == nil {
+					t.Fatalf("seq %d dialog has no Outcome; a resolved dialog must not look pending", seq)
+				}
+				return m.Dialog.Outcome
 			}
 		}
 		t.Fatalf("no message with seq %d", seq)
@@ -652,42 +657,47 @@ func TestCompat_LiveTranscripts_resolutionShapes(t *testing.T) {
 	if chat.Cursor != 11 {
 		t.Fatalf("askuserquestion cursor = %d; want 11", chat.Cursor)
 	}
-	answered := tool(chat, 4)
-	if answered.Status != "ok" ||
-		!strings.Contains(answered.Output, `"Which color do you prefer?"="Red"`) ||
-		!strings.Contains(answered.Output, `"Which fruits do you like?"="Apple, Cherry"`) {
-		t.Errorf("answered form chip = %+v; want ok with the recorded answers string", answered)
+	answered := outcome(chat, 4)
+	// "Apple, Cherry" splits into the two listed labels (the fixture's Fruits
+	// options are Apple/Banana/Cherry), in the recorded order.
+	wantForm := []provider.QuestionResult{
+		{Question: "Which color do you prefer?", Chosen: []string{"Red"}},
+		{Question: "Which fruits do you like?", Chosen: []string{"Apple", "Cherry"}},
 	}
-	declined := tool(chat, 7)
-	if declined.Status != "error" || !strings.Contains(declined.Output, "The user doesn't want to proceed") {
-		t.Errorf("declined chip = %+v; want error with the denial string", declined)
+	if answered.Dismissed || !reflect.DeepEqual(answered.Results, wantForm) {
+		t.Errorf("answered form outcome = %+v; want results %+v", answered, wantForm)
 	}
-	ferret := tool(chat, 10)
-	if ferret.Status != "ok" || !strings.Contains(ferret.Output, `"Favorite pet?"="Ferret"`) {
-		t.Errorf("free-text chip = %+v; want the typed answer recorded verbatim", ferret)
+	declined := outcome(chat, 7)
+	if !declined.Dismissed || len(declined.Results) != 0 {
+		t.Errorf("declined outcome = %+v; want Dismissed with no results", declined)
+	}
+	ferret := outcome(chat, 10)
+	// "Ferret" is not a listed label (Dog/Cat) — the typed Other text verbatim.
+	if !reflect.DeepEqual(ferret.Results, []provider.QuestionResult{{Question: "Favorite pet?", OtherText: "Ferret"}}) {
+		t.Errorf("free-text outcome = %+v; want the typed answer verbatim in OtherText", ferret)
 	}
 
 	// Single-question multiSelect: one 60s afkTimeout, one Submit-row answer.
 	chat = parse("transcript-multiselect-timeout-live-2.1.198.jsonl")
-	timeout := tool(chat, 2)
-	if timeout.Status != "ok" || !strings.HasPrefix(timeout.Output, "No response after 60s") {
-		t.Errorf("timeout chip = %+v; want the afkTimeout content (NOT an error — claude proceeds)", timeout)
+	timeout := outcome(chat, 2)
+	if !timeout.Dismissed || len(timeout.Results) != 0 {
+		t.Errorf("timeout outcome = %+v; want Dismissed (answers:{} + afkTimeoutMs — no answer to show)", timeout)
 	}
-	submitted := tool(chat, 5)
-	if submitted.Status != "ok" || !strings.Contains(submitted.Output, `"Which toppings?"="Olives"`) {
-		t.Errorf("submit-row chip = %+v; want the committed multi-select answer", submitted)
+	submitted := outcome(chat, 5)
+	if !reflect.DeepEqual(submitted.Results, []provider.QuestionResult{{Question: "Which toppings?", Chosen: []string{"Olives"}}}) {
+		t.Errorf("submit-row outcome = %+v; want the committed multi-select label Olives", submitted)
 	}
 
 	// ExitPlanMode: reject-with-feedback, then the revised plan approved.
 	chat = parse("transcript-exitplanmode-live-2.1.198.jsonl")
-	rejected := tool(chat, 7)
-	if rejected.Status != "error" ||
-		!strings.Contains(rejected.Output, "To tell you how to proceed, the user said:\nAlso add the current date to the note") {
-		t.Errorf("plan reject chip = %+v; want the denial with the typed feedback", rejected)
+	rejected := outcome(chat, 7)
+	if rejected.Approved || rejected.Dismissed ||
+		rejected.Feedback != "Also add the current date to the note" {
+		t.Errorf("plan reject outcome = %+v; want the typed feedback extracted from the denial string", rejected)
 	}
-	approved := tool(chat, 9)
-	if approved.Status != "ok" || !strings.HasPrefix(approved.Output, "User has approved your plan") {
-		t.Errorf("plan approve chip = %+v; want the approval content", approved)
+	approved := outcome(chat, 9)
+	if !approved.Approved || approved.Dismissed || approved.Feedback != "" {
+		t.Errorf("plan approve outcome = %+v; want Approved", approved)
 	}
 }
 

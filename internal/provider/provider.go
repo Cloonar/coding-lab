@@ -163,7 +163,7 @@ type SeedMeta struct {
 const (
 	MessageText      = "text"      // user or assistant prose (Thinking marks hidden-by-default)
 	MessageTool      = "tool"      // a tool call, rendered as a one-line chip
-	MessageDialog    = "dialog"    // a pending interactive prompt awaiting the operator
+	MessageDialog    = "dialog"    // an interactive prompt: pending (Outcome nil) or answered (issue #56)
 	MessageLifecycle = "lifecycle" // a session-level event (bridge status, error, end)
 )
 
@@ -216,11 +216,11 @@ const (
 	DialogKindApproval = "approval"
 )
 
-// Dialog is the dialog-kind payload: an interactive prompt detected as an
-// unanswered tool call in the transcript (or the live signal spool). When
-// Answerable, the UI renders native option buttons and answers via
-// AnswerDialog; otherwise it degrades to the provider's web open affordance
-// hint (unknown/unsupported dialog shapes — never scrape the TUI widget).
+// Dialog is the dialog-kind payload: an interactive prompt detected as a tool
+// call in the transcript (or the live signal spool). When Answerable, the UI
+// renders native option buttons and answers via AnswerDialog; otherwise it
+// degrades to the provider's web open affordance hint (unknown/unsupported
+// dialog shapes — never scrape the TUI widget).
 //
 // Two shapes share this struct (issue #51 decision 3). A SINGLE-question
 // dialog uses the flat fields (Prompt/Options/Multi) with Questions nil —
@@ -230,6 +230,11 @@ const (
 // (len(Questions) >= 2) carries each question in Questions, Prompt degrades
 // to a short summary (e.g. "3 questions"), and the flat Options/Multi stay
 // empty.
+//
+// An ANSWERED dialog stays a dialog message in history (issue #56 decision 3
+// — no more demotion to a raw tool chip): Outcome carries the resolution the
+// provider recorded, and the UI renders a compact Q→A summary instead of the
+// interactive picker. Outcome nil means the dialog is still pending.
 type Dialog struct {
 	ToolID     string         `json:"tool_id"`
 	Kind       string         `json:"dialog_kind"` // DialogKind* (question|plan|approval)
@@ -238,6 +243,23 @@ type Dialog struct {
 	Multi      bool           `json:"multi,omitempty"`     // multi-select (Space toggles)
 	Questions  []Question     `json:"questions,omitempty"` // multi-question form ONLY (len >= 2)
 	Answerable bool           `json:"answerable"`
+	Outcome    *DialogOutcome `json:"outcome,omitempty"` // resolution of an answered dialog; nil while pending
+}
+
+// DialogOutcome is the recorded resolution of an answered dialog, derived
+// from the transcript's toolUseResult/toolDenialKind ground truth (compat §5).
+type DialogOutcome struct {
+	Dismissed bool             `json:"dismissed,omitempty"` // resolved without an answer: denial, interrupt, unattended timeout, or unreadable result
+	Results   []QuestionResult `json:"results,omitempty"`   // question kind: one per question, dialog order
+	Approved  bool             `json:"approved,omitempty"`  // plan kind: the plan was approved
+	Feedback  string           `json:"feedback,omitempty"`  // plan kind: rejection feedback text, if typed
+}
+
+// QuestionResult is one question's resolved answer for display.
+type QuestionResult struct {
+	Question  string   `json:"question"`             // the question text
+	Chosen    []string `json:"chosen,omitempty"`     // chosen listed option label(s), recorded order
+	OtherText string   `json:"other_text,omitempty"` // free-text answer (the synthesized Other row)
 }
 
 // Question is one question of a multi-question Dialog (issue #51 decision 3).

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,6 +18,27 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
+
+// Inline dialog tool_use events (live 2.1.198 input shapes, compat §5/§7) and
+// their resolution lines, shared by the outcome and state-edge tests. All key
+// tool ids are "d1" so one result line pairs with any use line.
+const (
+	colorUseLine  = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"d1","name":"AskUserQuestion","input":{"questions":[{"question":"Which color do you prefer?","header":"Color","multiSelect":false,"options":[{"label":"Red","description":"warm"},{"label":"Blue","description":"cool"}]}]}}]}}`
+	fruitsUseLine = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"d1","name":"AskUserQuestion","input":{"questions":[{"question":"Which fruits do you like?","header":"Fruits","multiSelect":true,"options":[{"label":"Apple","description":"crisp"},{"label":"Banana","description":"soft"},{"label":"Cherry","description":"tart"}]}]}}]}}`
+	twoQUseLine   = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"d1","name":"AskUserQuestion","input":{"questions":[{"question":"Which color do you prefer?","header":"Color","multiSelect":false,"options":[{"label":"Red","description":"warm"},{"label":"Blue","description":"cool"}]},{"question":"Which fruits do you like?","header":"Fruits","multiSelect":true,"options":[{"label":"Apple","description":"crisp"},{"label":"Banana","description":"soft"},{"label":"Cherry","description":"tart"}]}]}}]}}`
+	planUseLine   = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"d1","name":"ExitPlanMode","input":{"plan":"# The plan\n\n- do the thing"}}]}}`
+)
+
+// resolutionLine renders the user event that flushes d1's tool_result, with
+// toolUseResult as the top-level ground truth (compat §5); denial adds the
+// user-rejected stamp that accompanies every decline on 2.1.198.
+func resolutionLine(toolUseResult string, denial bool) string {
+	l := `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"resolved","tool_use_id":"d1"}]},"toolUseResult":` + toolUseResult
+	if denial {
+		l += `,"toolDenialKind":"user-rejected"`
+	}
+	return l + `}`
+}
 
 func chatProvider(t *testing.T, registryDir, projectsDir string) *Provider {
 	t.Helper()
@@ -111,6 +133,20 @@ func TestParseTranscript_stateEdges(t *testing.T) {
 			line(`{"type":"user","message":{"role":"user","content":"<local-command-stdout>ok</local-command-stdout>"}}`),
 			provider.StateIdle,
 		},
+		// A pending dialog (no tool_result yet) blocks the run on the operator.
+		"pending dialog asks": {
+			line(colorUseLine),
+			provider.StateQuestion,
+		},
+		// A RESOLVED dialog at the tail is history, not a question (issue #56
+		// decision 3): the retro-flushed tool_use + tool_result pair means the
+		// agent just resumed — the answered dialog message must derive working
+		// exactly as its demoted tool chip did before.
+		"resolved dialog works": {
+			line(colorUseLine) +
+				line(resolutionLine(`{"questions":[],"answers":{"Which color do you prefer?":"Red"},"annotations":{}}`, false)),
+			provider.StateWorking,
+		},
 	}
 	for name, c := range cases {
 		got, err := ParseTranscript(strings.NewReader(c.lines))
@@ -120,6 +156,126 @@ func TestParseTranscript_stateEdges(t *testing.T) {
 		if got.State != c.want {
 			t.Errorf("%s: state = %q; want %q", name, got.State, c.want)
 		}
+	}
+}
+
+// An answered dialog stays a DIALOG message carrying the resolved answer in
+// Outcome (issue #56 decision 3) — never the demoted raw-JSON tool chip it
+// used to become. Every resolution below is the live 2.1.198 shape (compat
+// §5): the answers map keyed by question text, the ", "-joined multi-select
+// labels in TOGGLE order, the denial string + user-rejected stamp, the 60s
+// unattended timeout's answers:{} + afkTimeoutMs, and the plan approve
+// object / reject-with-feedback denial string.
+func TestParseTranscript_answeredDialogOutcomes(t *testing.T) {
+	cases := map[string]struct {
+		lines string
+		want  provider.DialogOutcome
+	}{
+		"single-select recorded label": {
+			lines: line(colorUseLine) +
+				line(resolutionLine(`{"questions":[],"answers":{"Which color do you prefer?":"Red"},"annotations":{}}`, false)),
+			want: provider.DialogOutcome{Results: []provider.QuestionResult{
+				{Question: "Which color do you prefer?", Chosen: []string{"Red"}},
+			}},
+		},
+		// A free-text (Other-row) answer records verbatim and is not a listed
+		// label — it must land in OtherText untouched, even with a ", " in it
+		// (single-select never splits).
+		"free-text Other answer": {
+			lines: line(colorUseLine) +
+				line(resolutionLine(`{"questions":[],"answers":{"Which color do you prefer?":"Chartreuse, please"},"annotations":{}}`, false)),
+			want: provider.DialogOutcome{Results: []provider.QuestionResult{
+				{Question: "Which color do you prefer?", OtherText: "Chartreuse, please"},
+			}},
+		},
+		// Results come one per question in DIALOG order, regardless of the
+		// answers map's JSON order (fruits first here).
+		"multi-question dialog order": {
+			lines: line(twoQUseLine) +
+				line(resolutionLine(`{"questions":[],"answers":{"Which fruits do you like?":"Apple, Cherry","Which color do you prefer?":"Red"},"annotations":{}}`, false)),
+			want: provider.DialogOutcome{Results: []provider.QuestionResult{
+				{Question: "Which color do you prefer?", Chosen: []string{"Red"}},
+				{Question: "Which fruits do you like?", Chosen: []string{"Apple", "Cherry"}},
+			}},
+		},
+		// Multi-select records TOGGLE order, not option order (live: Cherry
+		// toggled before Apple records "Cherry, Apple") — Chosen preserves it.
+		"multi-select toggle order": {
+			lines: line(fruitsUseLine) +
+				line(resolutionLine(`{"questions":[],"answers":{"Which fruits do you like?":"Cherry, Apple"},"annotations":{}}`, false)),
+			want: provider.DialogOutcome{Results: []provider.QuestionResult{
+				{Question: "Which fruits do you like?", Chosen: []string{"Cherry", "Apple"}},
+			}},
+		},
+		// Non-label segments of a multi-select answer are the Other free text,
+		// re-joined with ", " when the text itself contained the separator.
+		"multi-select with free-text leftover": {
+			lines: line(fruitsUseLine) +
+				line(resolutionLine(`{"questions":[],"answers":{"Which fruits do you like?":"Cherry, hold the mayo, extra sauce"},"annotations":{}}`, false)),
+			want: provider.DialogOutcome{Results: []provider.QuestionResult{
+				{Question: "Which fruits do you like?", Chosen: []string{"Cherry"}, OtherText: "hold the mayo, extra sauce"},
+			}},
+		},
+		"denial dismissed": {
+			lines: line(colorUseLine) + line(resolutionLine(`"User rejected tool use"`, true)),
+			want:  provider.DialogOutcome{Dismissed: true},
+		},
+		// The 60s unattended timeout resolves with answers:{} — no answer to
+		// show, so it dismisses rather than inventing empty results.
+		"unattended timeout dismissed": {
+			lines: line(fruitsUseLine) +
+				line(resolutionLine(`{"questions":[],"answers":{},"annotations":{},"afkTimeoutMs":60000}`, false)),
+			want: provider.DialogOutcome{Dismissed: true},
+		},
+		"plan approved": {
+			lines: line(planUseLine) +
+				line(resolutionLine(`{"plan":"# The plan\n\n- do the thing","isAgent":false,"filePath":"/tmp/p.md","planWasEdited":false}`, false)),
+			want: provider.DialogOutcome{Approved: true},
+		},
+		// The typed rejection feedback rides after the last "the user said:\n"
+		// of the denial string; a plain rejection (no marker) leaves it empty.
+		"plan rejected with feedback": {
+			lines: line(planUseLine) +
+				line(resolutionLine(`"Error: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nAdd tests first"`, true)),
+			want: provider.DialogOutcome{Feedback: "Add tests first"},
+		},
+	}
+	for name, c := range cases {
+		got, err := ParseTranscript(strings.NewReader(c.lines))
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", name, err)
+		}
+		if len(got.Messages) != 1 {
+			t.Fatalf("%s: %d messages; want exactly the dialog (the tool_result event emits none)", name, len(got.Messages))
+		}
+		m := got.Messages[0]
+		if m.Kind != provider.MessageDialog || m.Dialog == nil || m.Tool != nil {
+			t.Fatalf("%s: message = %+v; want a dialog message, never a tool chip", name, m)
+		}
+		if m.Dialog.Outcome == nil {
+			t.Fatalf("%s: Outcome = nil; want %+v (a resolved dialog must not look pending)", name, c.want)
+		}
+		if !reflect.DeepEqual(*m.Dialog.Outcome, c.want) {
+			t.Errorf("%s: outcome = %+v; want %+v", name, *m.Dialog.Outcome, c.want)
+		}
+	}
+}
+
+// Issue #56 decision 4: the plan markdown is NEVER truncated — the UI renders
+// plans in full, so a body past the old 2000-byte cap passes through whole
+// (pending and answered alike; the live spool path shares planDialog).
+func TestParseTranscript_planPromptUntruncated(t *testing.T) {
+	plan := strings.Repeat("x", 3*truncateLimit)
+	use := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"ExitPlanMode","input":{"plan":"` + plan + `"}}]}}`
+	got, err := ParseTranscript(strings.NewReader(line(use)))
+	if err != nil {
+		t.Fatalf("ParseTranscript: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Dialog == nil {
+		t.Fatalf("messages = %+v; want the one plan dialog", got.Messages)
+	}
+	if p := got.Messages[0].Dialog.Prompt; p != plan {
+		t.Errorf("plan prompt = %d bytes; want the full %d-byte plan untruncated", len(p), len(plan))
 	}
 }
 

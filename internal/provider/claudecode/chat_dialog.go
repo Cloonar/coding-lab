@@ -2,12 +2,13 @@ package claudecode
 
 // Interactive-dialog detection (issue #7 decision 5, generalized by issue #51
 // decision 3). A pending dialog is an unanswered tool_use for a known
-// interactive tool. Option buttons are built ONLY from the structured tool
-// input — never scraped from the TUI widget — plus write-side PINNED
-// constants for rows the TUI synthesizes beyond the input (the free-text
-// "Other" row, the whole ExitPlanMode picker): a pinned constant is a
-// keystroke-recipe-style coupling (compat §7), verified against the live
-// 2.1.198 picker, and nothing ever reads the pane.
+// interactive tool; an ANSWERED one maps identically and gains its Outcome in
+// the fold (issue #56, dialogoutcome.go). Option buttons are built ONLY from
+// the structured tool input — never scraped from the TUI widget — plus
+// write-side PINNED constants for rows the TUI synthesizes beyond the input
+// (the free-text "Other" row, the whole ExitPlanMode picker): a pinned
+// constant is a keystroke-recipe-style coupling (compat §7), verified against
+// the live 2.1.198 picker, and nothing ever reads the pane.
 
 import (
 	"encoding/json"
@@ -133,13 +134,16 @@ func planPickerOptions() []provider.DialogOption {
 	}
 }
 
-// planDialog renders an ExitPlanMode approval: Kind=plan, the (truncated) plan
-// markdown as the Prompt, and the pinned approve/reject rows as Options —
-// ANSWERABLE since issue #51 decision 3 (it degraded to a deep-link hint while
-// the picker rows were uncaptured; they are live-pinned now, see
-// planPickerOptions). Single-select; answered via the plan keystroke recipe
-// (compat §7). The full plan also lands on disk (input planFilePath, ignored —
-// the transcript carries the same markdown).
+// planDialog renders an ExitPlanMode approval: Kind=plan, the FULL plan
+// markdown as the Prompt (issue #56 decision 4: a cut plan is unreviewable, so
+// the UI renders plans whole; the payload growth is accepted — plans are
+// model-output-bounded — and the live spool path inherits the same
+// untruncated body since dialogspool.go reuses this mapper), and the pinned
+// approve/reject rows as Options — ANSWERABLE since issue #51 decision 3 (it
+// degraded to a deep-link hint while the picker rows were uncaptured; they are
+// live-pinned now, see planPickerOptions). Single-select; answered via the
+// plan keystroke recipe (compat §7). The full plan also lands on disk (input
+// planFilePath, ignored — the transcript carries the same markdown).
 func planDialog(b tBlock) provider.Dialog {
 	var in struct {
 		Plan string `json:"plan"`
@@ -152,7 +156,7 @@ func planDialog(b tBlock) provider.Dialog {
 	return provider.Dialog{
 		ToolID:     b.ID,
 		Kind:       provider.DialogKindPlan,
-		Prompt:     truncate(prompt, truncateLimit),
+		Prompt:     prompt,
 		Options:    planPickerOptions(),
 		Answerable: true,
 	}

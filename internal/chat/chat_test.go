@@ -273,6 +273,16 @@ func TestPendingDialog_requiresQuestionTail(t *testing.T) {
 	if !ok || d.ToolID != "t_live" {
 		t.Errorf("PendingDialog = %+v, %v; want the tail dialog t_live", d, ok)
 	}
+
+	// An ANSWERED dialog (Outcome set, issue #56) is history, never a keystroke
+	// target — the dormant-fallback scan must skip it, even at the tail.
+	fake.SetChat(provider.Chat{State: provider.StateQuestion, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{ToolID: "t_done",
+			Outcome: &provider.DialogOutcome{Approved: true}}},
+	}})
+	if d, ok := svc.PendingDialog(context.Background(), run); ok {
+		t.Errorf("PendingDialog = %+v for an answered dialog; want none (must never re-target a resolved picker)", d)
+	}
 }
 
 func TestAnswerDialog_toolIDGuard(t *testing.T) {

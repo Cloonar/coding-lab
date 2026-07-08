@@ -2061,6 +2061,48 @@ a.chip.cr-count:hover {
   font-weight: 600;
 }
 
+/* Answered Q→A summaries (issue #56 decision 3): a resolved dialog stays in
+   history as a compact, inert summary — a muted rail instead of card chrome,
+   visibly quieter than the interactive .chat-dialog-card. Each pair is the
+   question (muted, small) above the recorded answer; dismissals and plan
+   resolutions get one muted marker line. No buttons, no unchosen options. */
+.chat-dialog-answered {
+  align-self: flex-start;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.15rem 0 0.15rem 0.75rem;
+  border-left: 2px solid var(--border);
+}
+.dialog-qa {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.dialog-qa-question {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.dialog-qa-answer {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.35rem;
+}
+/* The operator's typed words — distinct from a listed option label. */
+.dialog-qa-other {
+  font-style: italic;
+}
+.dialog-qa-none,
+.chat-dialog-outcome {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 /* Fixed bottom composer; state follows the run. */
 .chat-composer {
   position: sticky;
@@ -2164,16 +2206,28 @@ a.chip.cr-count:hover {
   flex-direction: column;
   gap: 0.4rem;
 }
+/* House-style option cards (issue #56 decision 7): every dialog option — the
+   single-select rows, the flat multi-select toggles (formerly bare checkbox
+   rows that dropped descriptions), and the multi-question form's buttons —
+   is a full-width rectangular card on the control radius, never the seg
+   pill: left-aligned, bold label with the muted description always visible
+   beneath, and a check indicator riding the trailing edge when toggled on. */
 .dialog-option {
   width: 100%;
-  text-align: left;
-  min-height: 44px;
-}
-.dialog-check {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.6rem;
   min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+}
+.dialog-option-body {
+  display: block;
+  flex: 1;
+  min-width: 0;
 }
 .dialog-other {
   display: flex;
@@ -2191,17 +2245,22 @@ a.chip.cr-count:hover {
   font-size: 0.85rem;
   color: var(--muted);
 }
-/* A picked (not yet submitted) option in the multi-question form. */
+/* A picked (not yet submitted) toggle: accent border + subtle tint + the
+   check indicator (issue #56 decision 7); aria-pressed carries the state. */
 .dialog-option.selected {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, var(--card));
 }
+.dialog-option-check {
+  display: inline-flex;
+  flex: none;
+  color: var(--accent);
+}
 
-/* Plan review (issue #51): the prompt IS the plan body — markdown in a bounded
-   scroll area so a long plan never shoves the approve/reject rows off-screen. */
+/* Plan review (issue #51): the prompt IS the plan body — markdown at natural
+   height (issue #56: the chat pane is the only scrollbar, no inner scrollbox),
+   so the approve/reject rows sit after the fully-rendered plan. */
 .chat-dialog-plan {
-  max-height: 40vh;
-  overflow-y: auto;
   padding: 0.5rem 0.6rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
@@ -2209,13 +2268,12 @@ a.chip.cr-count:hover {
 }
 
 /* Multi-question form (issue #51): stacked questions, each a small header chip
-   + the question text + its option buttons; ONE submit for all answers. */
+   + the question text + its option buttons; ONE submit for all answers. Natural
+   height — the chat pane is the only scrollbar (issue #56). */
 .dialog-questions {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  max-height: 50vh;
-  overflow-y: auto;
 }
 .dialog-question {
   display: flex;
@@ -2228,6 +2286,27 @@ a.chip.cr-count:hover {
 .dialog-other-input {
   width: 100%;
   margin-top: 0.3rem;
+}
+
+/* Inline dialog cards (issue #56) ------------------------------------------ */
+
+/* The pending dialog as a stream card (decision 1): a full-width house card
+   inside .chat-stream, scrolling with the conversation. scroll-margin keeps
+   the card's question text clear of the chat header when the arrival scroll
+   brings the card's top into view (decision 5). */
+.chat-dialog-card {
+  padding: var(--space-4);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  scroll-margin-top: var(--space-3);
+}
+/* <640px the header overlays the stream's top band (§2), so the margin must
+   also clear its measured height — same offset the stream's padding reserves. */
+@media (max-width: 639.98px) {
+  .chat-dialog-card {
+    scroll-margin-top: calc(var(--chat-header-h, 48px) + var(--space-3));
+  }
 }
 
 .chat-earlier {
