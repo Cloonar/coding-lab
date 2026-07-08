@@ -67,7 +67,7 @@ type Options struct {
 	Logger    *slog.Logger
 
 	// RuntimeDir is lab's runtime dir (<state>/runtime — the materializer dir),
-	// where a DialogHooker provider spools a run's pending dialog + blocked
+	// where a LiveSignals provider spools a run's pending dialog + blocked
 	// marker (ADR-0020). Empty disables the spool read/GC (the chat keeps
 	// transcript-only behavior); cmd/lab passes the materializer's Dir().
 	RuntimeDir string
@@ -169,7 +169,7 @@ func New(o Options) (*Service, error) {
 }
 
 // View is the chat service's combined read: the transcript-derived chat plus
-// the live spool signals a DialogHooker provider surfaces (ADR-0020). The
+// the live spool signals a LiveSignals provider surfaces (ADR-0020). The
 // message stream (embedded provider.Chat) stays purely transcript-derived —
 // PendingDialog is a side-channel field, never a synthetic message, so seq
 // numbers remain reparse-stable when the real tool_use retro-flushes.
@@ -226,7 +226,7 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	return view, nil
 }
 
-// applyLiveSignals overlays a DialogHooker provider's spool signals onto an
+// applyLiveSignals overlays a LiveSignals provider's spool signals onto an
 // ACTIVE run's transcript-derived view (ADR-0020). Precedence: a live pending
 // dialog forces StateQuestion and is surfaced as View.PendingDialog (kept out
 // of the message stream — decision 5); else, when the transcript itself does
@@ -234,11 +234,11 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 // live blocked marker forces StateNeedsInput (decision 7). A provider without
 // the capability, or an empty RuntimeDir, is a no-op — transcript-only.
 func (s *Service) applyLiveSignals(view *View, run store.Run, path string) {
-	hooker, ok := s.hooker(run.Provider)
+	signals, ok := s.liveSignals(run.Provider)
 	if !ok {
 		return
 	}
-	if d, ok := hooker.PendingDialog(run.ID, s.runtimeDir, path); ok {
+	if d, ok := signals.PendingDialog(run.ID, s.runtimeDir, path); ok {
 		view.State = provider.StateQuestion
 		dc := d
 		view.PendingDialog = &dc
@@ -247,15 +247,15 @@ func (s *Service) applyLiveSignals(view *View, run store.Run, path string) {
 	if view.State == provider.StateQuestion {
 		return // a transcript-flushed dialog stands on its own (dormant fallback)
 	}
-	if st, ok := hooker.BlockedState(run.ID, s.runtimeDir, path); ok {
+	if st, ok := signals.BlockedState(run.ID, s.runtimeDir, path); ok {
 		view.State = st
 	}
 }
 
-// hooker resolves a provider id to its optional DialogHooker capability
+// liveSignals resolves a provider id to its optional LiveSignals capability
 // (ADR-0020). (nil, false) when the provider is unregistered, lacks the
 // capability, or the runtime dir is unset.
-func (s *Service) hooker(providerID string) (provider.DialogHooker, bool) {
+func (s *Service) liveSignals(providerID string) (provider.LiveSignals, bool) {
 	if s.runtimeDir == "" {
 		return nil, false
 	}
@@ -263,8 +263,8 @@ func (s *Service) hooker(providerID string) (provider.DialogHooker, bool) {
 	if !ok {
 		return nil, false
 	}
-	h, ok := prov.(provider.DialogHooker)
-	return h, ok
+	ls, ok := prov.(provider.LiveSignals)
+	return ls, ok
 }
 
 // resolvePath returns the transcript path for run. An ENDED run returns its

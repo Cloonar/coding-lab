@@ -304,6 +304,10 @@ func run() int {
 		Logger:       logger,
 		ReposDir:     reposDir,
 		Metrics:      m,
+		// Providers resolves each repo's incogni-hook scrub patterns from its
+		// declared provider (issue #51 decision 8). nil in the degraded boot
+		// where no provider is configured (ClaudeConfig unresolved above).
+		Providers: providerReg,
 	}
 	if instanceSvc != nil {
 		// Preserve live-session credential files across the restart heal — the

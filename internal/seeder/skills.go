@@ -9,21 +9,23 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/assets"
 )
 
-// skillsRoot is where the embedded bundle lands inside a worktree (D13),
-// slash-separated; joined per-OS at copy time.
-const skillsRoot = ".claude/skills"
-
-// seedSkills copies the embedded skills bundle into
-// <worktree>/.claude/skills/. Copy-over semantics: lab's files are
-// overwritten so a re-seed heals any drift, but files added under skills/ by
+// seedSkills copies the embedded skills bundle into <worktree>/<skillsDir>/,
+// where skillsDir is the provider's declared skills layout (issue #51 decision
+// 8; claude: ".claude/skills"), slash-separated and joined per-OS at copy
+// time. A provider that declares no skills dir (skillsDir empty) gets no
+// bundle — the copy is skipped. Copy-over semantics: lab's files are
+// overwritten so a re-seed heals any drift, but files added under the dir by
 // the user (or a previous run) are never deleted — the copy walks the
 // bundle, not the destination.
-func seedSkills(worktree string) error {
+func seedSkills(worktree, skillsDir string) error {
+	if skillsDir == "" {
+		return nil
+	}
 	bundle, err := fs.Sub(assets.Skills, "skills")
 	if err != nil {
 		return fmt.Errorf("opening embedded skills bundle: %w", err)
 	}
-	root := filepath.Join(worktree, filepath.FromSlash(skillsRoot))
+	root := filepath.Join(worktree, filepath.FromSlash(skillsDir))
 	return fs.WalkDir(bundle, ".", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("walking skills bundle at %s: %w", p, walkErr)

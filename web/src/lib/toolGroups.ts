@@ -6,7 +6,7 @@
 //
 // Run rule: scan maximal runs of {tool | thinking} messages (a run breaks on
 // text/dialog/lifecycle). thinking FOLDS IN — it never breaks a run and is not
-// counted (Claude interleaves thinking → tool → thinking → tool, and thinking
+// counted (agents interleave thinking → tool → thinking → tool, and thinking
 // is hidden-by-default noise). A run with 2+ tools becomes a group; a run with
 // 0 or 1 tools passes through message-by-message (a lone tool renders exactly
 // as before). The group key is the first tool's immutable seq, so the view's

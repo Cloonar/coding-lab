@@ -20,10 +20,20 @@ import (
 type Fake struct {
 	mu sync.Mutex
 
-	id      string
-	models  []provider.Option
-	efforts []provider.Option
-	options []provider.OptionSpec
+	id          string
+	displayName string
+	models      []provider.Option
+	efforts     []provider.Option
+	options     []provider.OptionSpec
+	authFlow    provider.AuthFlow
+	seedMeta    provider.SeedMeta
+
+	// Slash-command catalog (issue #51 decision 5). commands/commandsErr
+	// script Commands; commandsCalls records the worktrees it was asked
+	// about, in order.
+	commands      []provider.CommandSpec
+	commandsErr   error
+	commandsCalls []string
 
 	spawnSpecs []provider.SpawnSpec // every SpawnArgv spec, in order (threading assertions)
 
@@ -61,10 +71,10 @@ type Fake struct {
 	replyErr       error
 	interruptErr   error
 
-	// Dialog-hook capability (issue #17 / ADR-0020). hookArgs/hookSettings
-	// script HookSettings; pendingDialog/blocked/spoolSig script the spool
-	// reads; hookCalls records HookSettings runIDs and sweeps counts
-	// SweepSpools.
+	// LiveSignals capability (issue #17 / ADR-0020, renamed in issue #51).
+	// hookArgs/hookSettings script Setup; pendingDialog/blocked/spoolSig
+	// script the spool reads; hookCalls records Setup runIDs and sweeps
+	// counts SweepSpools.
 	hookSettings  []byte
 	hookArgs      []string
 	pendingDialog *provider.Dialog
@@ -80,13 +90,33 @@ var (
 	_ provider.AgentProvider      = (*Fake)(nil)
 	_ provider.ConnectingReporter = (*Fake)(nil)
 	_ provider.DeepLinker         = (*Fake)(nil)
-	_ provider.DialogHooker       = (*Fake)(nil)
+	_ provider.LiveSignals        = (*Fake)(nil)
 )
 
-// New returns a logged-in fake with the claude-code id and catalogs.
+// New returns a logged-in fake with the claude-code id, display name,
+// catalogs, auth flow descriptor (oauth-code), and seed metadata (claude's
+// declared values, issue #51 decision 8).
 func New() *Fake {
 	return &Fake{
-		id: "claude-code",
+		id:          "claude-code",
+		displayName: "Claude Code",
+		authFlow:    provider.AuthFlow{Kind: provider.AuthFlowOAuthCode},
+		seedMeta: provider.SeedMeta{
+			ContextFileName: "CLAUDE.local.md",
+			SkillsDir:       ".claude/skills",
+			ExcludeEntries:  []string{".claude/", "CLAUDE.local.md"},
+			SeededPathPatterns: []string{
+				`^\.claude/skills/`,
+				`^\.claude/settings\.local\.json$`,
+				`^CLAUDE\.local\.md$`,
+			},
+			ScrubPatterns: []string{
+				`co-authored-by:[[:space:]]*claude`,
+				`co-authored-by:.*<[^>]*@anthropic\.com>`,
+				`generated with.*claude`,
+				`claude-session:`,
+			},
+		},
 		models: []provider.Option{
 			{Value: "opus[1m]", Label: "Opus (1M)"},
 			{Value: "sonnet", Label: "Sonnet"},
@@ -112,6 +142,42 @@ func New() *Fake {
 }
 
 func (f *Fake) ID() string { return f.id }
+
+// DisplayName returns the scripted human name (issue #51 decision 9;
+// default "Claude Code").
+func (f *Fake) DisplayName() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.displayName
+}
+
+// AuthFlow returns the scripted auth flow descriptor (issue #51 decision 7;
+// default oauth-code).
+func (f *Fake) AuthFlow() provider.AuthFlow {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.authFlow
+}
+
+// SeedMeta returns the scripted seeding metadata (issue #51 decision 8;
+// default = claude-code's declared values).
+func (f *Fake) SeedMeta() provider.SeedMeta {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.seedMeta
+}
+
+// Commands returns the scripted slash-command catalog (or error), recording
+// the worktree it was asked about (issue #51 decision 5).
+func (f *Fake) Commands(_ context.Context, worktree string) ([]provider.CommandSpec, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commandsCalls = append(f.commandsCalls, worktree)
+	if f.commandsErr != nil {
+		return nil, f.commandsErr
+	}
+	return append([]provider.CommandSpec(nil), f.commands...), nil
+}
 
 func (f *Fake) Models() []provider.Option  { return f.models }
 func (f *Fake) Efforts() []provider.Option { return f.efforts }
@@ -184,7 +250,7 @@ func (f *Fake) LoginSubmitCode(_ context.Context, code string) error {
 
 // Logout records the call and, unless a failure is scripted, flips the fake to
 // logged-out — the observable transition the HTTP handler reads back (status
-// cache now logged-out) and announces via claude.auth.changed.
+// cache now logged-out) and announces via provider.auth.changed.
 func (f *Fake) Logout(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -283,11 +349,11 @@ func (f *Fake) Interrupt(_ context.Context, _ string) error {
 	return nil
 }
 
-// --- dialog-hook capability (issue #17 / ADR-0020) -----------------------
+// --- LiveSignals capability (issue #17 / ADR-0020, renamed in #51) --------
 
-// HookSettings records the runID and returns the scripted settings/args (a
+// Setup records the runID and returns the scripted settings/args (a
 // default --settings <dir>/settings.<runID>.json when unset).
-func (f *Fake) HookSettings(runID, dir string) ([]byte, string, []string) {
+func (f *Fake) Setup(runID, dir string) ([]byte, string, []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hookCalls = append(f.hookCalls, runID)
@@ -356,7 +422,7 @@ func (f *Fake) SetSpoolSig(sig string) {
 	f.spoolSig = sig
 }
 
-// SetHookResult scripts HookSettings' returned bytes and args ("" args → the
+// SetHookResult scripts Setup's returned bytes and args ("" args → the
 // default --settings path).
 func (f *Fake) SetHookResult(settings []byte, args []string) {
 	f.mu.Lock()
@@ -364,7 +430,7 @@ func (f *Fake) SetHookResult(settings []byte, args []string) {
 	f.hookSettings, f.hookArgs = settings, args
 }
 
-// HookCalls returns the runIDs passed to HookSettings, in order.
+// HookCalls returns the runIDs passed to Setup, in order.
 func (f *Fake) HookCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -385,6 +451,41 @@ func (f *Fake) SetLoggedIn(v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loggedIn = v
+}
+
+// SetDisplayName scripts the human name DisplayName returns.
+func (f *Fake) SetDisplayName(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.displayName = name
+}
+
+// SetAuthFlow scripts the auth flow descriptor AuthFlow returns.
+func (f *Fake) SetAuthFlow(af provider.AuthFlow) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.authFlow = af
+}
+
+// SetSeedMeta scripts the seeding metadata SeedMeta returns.
+func (f *Fake) SetSeedMeta(m provider.SeedMeta) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seedMeta = m
+}
+
+// SetCommands scripts the slash-command catalog (and error) Commands returns.
+func (f *Fake) SetCommands(specs []provider.CommandSpec, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commands, f.commandsErr = specs, err
+}
+
+// CommandsCalls returns the worktrees Commands was asked about, in order.
+func (f *Fake) CommandsCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.commandsCalls...)
 }
 
 // SetDeepLink scripts CaptureDeepLink's real hit ("" → a miss).

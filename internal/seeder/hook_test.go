@@ -109,7 +109,7 @@ func (f *hookFixture) resetTo(sha string) {
 
 func TestPrePushHook_endToEnd(t *testing.T) {
 	f := newHookFixture(t)
-	if err := InstallPrePushHook(f.bare); err != nil {
+	if err := InstallPrePushHook(f.bare, claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns); err != nil {
 		t.Fatalf("InstallPrePushHook: %v", err)
 	}
 	if !PrePushHookInstalled(f.bare) {
@@ -186,7 +186,7 @@ func TestPrePushHook_endToEnd(t *testing.T) {
 func TestPrePushHook_installIdempotentAndRemoveMissing(t *testing.T) {
 	bare := t.TempDir()
 	for range 2 { // second install overwrites lab's own hook silently
-		if err := InstallPrePushHook(bare); err != nil {
+		if err := InstallPrePushHook(bare, claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns); err != nil {
 			t.Fatalf("InstallPrePushHook: %v", err)
 		}
 	}
@@ -211,7 +211,7 @@ func TestPrePushHook_neverTouchesForeignHook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallPrePushHook(bare); err == nil {
+	if err := InstallPrePushHook(bare, claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns); err == nil {
 		t.Error("InstallPrePushHook overwrote a foreign hook; want an error")
 	}
 	if err := RemovePrePushHook(bare); err != nil {
@@ -228,7 +228,7 @@ func TestPrePushHook_neverTouchesForeignHook(t *testing.T) {
 // guard must let it push. Only lab's actual seeded paths are blocked.
 func TestPrePushHook_allowsTrackedNonSeededClaudeFiles(t *testing.T) {
 	f := newHookFixture(t)
-	if err := InstallPrePushHook(f.bare); err != nil {
+	if err := InstallPrePushHook(f.bare, claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns); err != nil {
 		t.Fatalf("InstallPrePushHook: %v", err)
 	}
 	// A repo tracking its own .claude/commands/deploy.md — editing it pushes.
@@ -250,7 +250,7 @@ func TestPrePushHook_allowsTrackedNonSeededClaudeFiles(t *testing.T) {
 // git cannot enumerate refuses the push rather than waving it through.
 func TestPrePushHook_mergeCommitIntroducingSeededPathRejected(t *testing.T) {
 	f := newHookFixture(t)
-	if err := InstallPrePushHook(f.bare); err != nil {
+	if err := InstallPrePushHook(f.bare, claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns); err != nil {
 		t.Fatalf("InstallPrePushHook: %v", err)
 	}
 	// Build a side branch, then a merge commit that adds the seeded file

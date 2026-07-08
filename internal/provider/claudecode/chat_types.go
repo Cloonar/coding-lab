@@ -23,6 +23,16 @@ type tItem struct {
 	IsMeta            bool      `json:"isMeta"`
 	IsApiErrorMessage bool      `json:"isApiErrorMessage"`
 	Message           *tMessage `json:"message"`
+	// ToolUseResult / ToolDenialKind are the top-level resolution ground truth
+	// claude stamps onto the user event that carries a tool_result block —
+	// the verification-backstop source (issue #51 decision 3, compat §5, live
+	// 2026-07-08 2.1.198). ToolUseResult is an OBJECT for a recorded answer
+	// ({questions,answers,annotations[,afkTimeoutMs]} for AskUserQuestion;
+	// {plan,filePath,…} for an approved ExitPlanMode) and a plain STRING for a
+	// denial ("User rejected tool use" / "Error: The user doesn't want to
+	// proceed…"); ToolDenialKind is "user-rejected" on a decline.
+	ToolUseResult  json.RawMessage `json:"toolUseResult"`
+	ToolDenialKind string          `json:"toolDenialKind"`
 }
 
 type tMessage struct {

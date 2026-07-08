@@ -28,28 +28,22 @@ import (
 // overwrite a hook without it; Remove only deletes a hook carrying it.
 const hookMarker = "# lab incogni guard"
 
-// hookMessagePatterns are the case-insensitive grep patterns the hook runs
-// against each outgoing commit's message (D15 §9 measure 7 + the
-// Claude-Session trailer verified on Claude Code 2.1.198, compat.md §4).
-// 'generated with.*claude' covers the '🤖 Generated with [Claude Code](…)'
-// footer and every 'Generated with Claude…' variant.
-var hookMessagePatterns = []string{
-	`co-authored-by:[[:space:]]*claude`,
-	`co-authored-by:.*<[^>]*@anthropic\.com>`, // the stable discriminator is the email, not a "Claude" display name
-	`generated with.*claude`,
-	`claude-session:`,
-}
-
 // PrePushHookPath is the hook location inside a bare reference repo.
 func PrePushHookPath(bareDir string) string {
 	return filepath.Join(bareDir, "hooks", "pre-push")
 }
 
 // InstallPrePushHook writes the incogni guard as bareDir's pre-push hook
-// (0755, atomic tmp+rename). Idempotent over lab's own hook; a pre-existing
-// FOREIGN pre-push hook is never overwritten — that is an error the caller
-// surfaces (the operator resolves the conflict by hand).
-func InstallPrePushHook(bareDir string) error {
+// (0755, atomic tmp+rename). scrubPatterns are the case-insensitive greps run
+// against each outgoing commit MESSAGE (attribution markers) and
+// seededPathPatterns the BREs run against each commit's CHANGED PATHS — both
+// provider-declared (issue #51 decision 8: SeedMeta.ScrubPatterns /
+// .SeededPathPatterns), so the guard scrubs whatever the repo's agent CLI
+// stamps. Either list empty omits its scan (a provider with no attribution
+// markers still guards seeded paths, and vice versa). Idempotent over lab's
+// own hook; a pre-existing FOREIGN pre-push hook is never overwritten — that
+// is an error the caller surfaces (the operator resolves the conflict by hand).
+func InstallPrePushHook(bareDir string, scrubPatterns, seededPathPatterns []string) error {
 	path := PrePushHookPath(bareDir)
 	existing, err := os.ReadFile(path)
 	switch {
@@ -71,7 +65,7 @@ func InstallPrePushHook(bareDir string) error {
 	}
 	tmpPath := tmp.Name()
 	cleanup := func() { _ = os.Remove(tmpPath) }
-	if _, err := tmp.WriteString(prePushHookScript()); err != nil {
+	if _, err := tmp.WriteString(prePushHookScript(scrubPatterns, seededPathPatterns)); err != nil {
 		_ = tmp.Close()
 		cleanup()
 		return fmt.Errorf("write %s: %w", path, err)
@@ -119,20 +113,58 @@ func PrePushHookInstalled(bareDir string) bool {
 	return err == nil && strings.Contains(string(data), hookMarker)
 }
 
-// prePushHookScript renders the POSIX-sh hook. Message patterns come from
-// hookMessagePatterns; path patterns from SeededPathPatterns (the paths lab
-// actually seeds — NOT the broader ExcludeEntries, which would reject a
-// repo's own tracked .claude/ content). The guard FAILS CLOSED: any error
-// enumerating a ref's outgoing commits rejects the push rather than letting
-// it through, because measure 7 is leak-proof-by-construction (D15) — an
-// unscannable push is a refused push.
-func prePushHookScript() string {
-	var msg, path strings.Builder
-	for _, p := range hookMessagePatterns {
-		msg.WriteString(" \\\n            -e '" + p + "'")
+// prePushHookScript renders the POSIX-sh hook from the provider's patterns
+// (issue #51 decision 8). scrubPatterns match each outgoing commit MESSAGE
+// (case-insensitive), seededPathPatterns the CHANGED PATHS — the paths lab
+// actually seeds, NOT the broader ExcludeEntries, which would reject a repo's
+// own tracked provider config. Each scan is emitted only when its pattern list
+// is non-empty: a provider that declares no scrub markers keeps the path guard
+// (and vice versa); a provider that declares neither yields a hook that
+// enumerates but rejects nothing on content. The guard FAILS CLOSED
+// regardless: any error enumerating a ref's outgoing commits rejects the push
+// rather than letting it through, because measure 7 is
+// leak-proof-by-construction (D15) — an unscannable push is a refused push.
+//
+// BYTE-IDENTITY (issue #51): with claude-code's patterns the two scans are
+// both present and this renders the exact script it did before the seam split
+// — pinned by TestPrePushHookScript_claudeGolden.
+func prePushHookScript(scrubPatterns, seededPathPatterns []string) string {
+	msgBlock := ""
+	if len(scrubPatterns) > 0 {
+		var msg strings.Builder
+		for _, p := range scrubPatterns {
+			msg.WriteString(" \\\n            -e '" + p + "'")
+		}
+		msgBlock = `        if git log -1 --format=%B "$commit" | grep -i -q` + msg.String() + `; then
+            echo "lab incogni guard: commit $commit ($remote_ref) carries AI attribution in its message; rewrite it before pushing" >&2
+            fail=1
+        fi
+`
 	}
-	for _, p := range SeededPathPatterns {
-		path.WriteString(" \\\n            -e '" + p + "'")
+	pathBlock := ""
+	if len(seededPathPatterns) > 0 {
+		var path strings.Builder
+		for _, p := range seededPathPatterns {
+			path.WriteString(" \\\n            -e '" + p + "'")
+		}
+		pathBlock = `        # -m diffs a merge against each parent so files the merge itself
+        # introduces (evil merges, conflict resolutions) are not invisible.
+        if git diff-tree -m --no-commit-id --name-only -r "$commit" | grep -q` + path.String() + `; then
+            echo "lab incogni guard: commit $commit ($remote_ref) touches lab-seeded files; drop them before pushing" >&2
+            fail=1
+        fi
+`
+	}
+	// The per-commit loop body is the two optional scan blocks. When a provider
+	// declares NEITHER pattern set (both blocks empty — e.g. the zero SeedMeta a
+	// degraded no-registry boot passes, or a future provider with no attribution
+	// markers and no seeded paths), the body must still be a valid `for` body: an
+	// empty `do … done` is a hard /bin/sh syntax error, so git would abort EVERY
+	// push with a raw parse error instead of the guard enumerating-but-rejecting-
+	// nothing. A `:` no-op keeps the script parseable and the loop a clean pass.
+	loopBody := msgBlock + pathBlock
+	if loopBody == "" {
+		loopBody = "        :\n" // no scan patterns declared — enumerate, reject nothing
 	}
 	return `#!/bin/sh
 ` + hookMarker + ` — installed by lab on incogni repos; do not edit.
@@ -156,17 +188,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         exit 1
     }
     for commit in $commits; do
-        if git log -1 --format=%B "$commit" | grep -i -q` + msg.String() + `; then
-            echo "lab incogni guard: commit $commit ($remote_ref) carries AI attribution in its message; rewrite it before pushing" >&2
-            fail=1
-        fi
-        # -m diffs a merge against each parent so files the merge itself
-        # introduces (evil merges, conflict resolutions) are not invisible.
-        if git diff-tree -m --no-commit-id --name-only -r "$commit" | grep -q` + path.String() + `; then
-            echo "lab incogni guard: commit $commit ($remote_ref) touches lab-seeded files; drop them before pushing" >&2
-            fail=1
-        fi
-    done
+` + loopBody + `    done
 done
 exit $fail
 `

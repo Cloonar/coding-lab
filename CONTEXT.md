@@ -32,6 +32,10 @@ _Avoid_: log, history, raw output, session file (in UI copy)
 The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live state dot on the runs rail and a badge in the chat header. Distinct from `live` (tmux liveness) and the run's terminal outcome.
 _Avoid_: status, activity, progress
 
+**Slash-command catalog**:
+The provider's slash commands, surfaced in the Chat composer as autocomplete the moment the input starts with `/` (filtered as you type by name, description, and argument hint). Served per instance — project- and user-level commands are discovered relative to the worktree — and curated to **chat-safe** commands only: one that would strand the agent's TUI in a picker lab cannot see is withheld. The entry tagged `role=clear` (Claude Code's `/clear`) also backs a **New conversation** action that clears the instance's context in place; every command executes down the ordinary reply path as pasted text, never a dedicated endpoint.
+_Avoid_: command palette, quick switcher, command menu
+
 **Reference repo**:
 The lab-owned bare clone at `<state>/repos/<id>.git` — the worktree parent and host for all fetch/branch/worktree git ops, never an instance's cwd. (v0 meant the human's main checkout; bare means structurally never dirty.)
 _Avoid_: main checkout, scan root, mirror

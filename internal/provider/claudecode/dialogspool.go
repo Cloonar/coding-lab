@@ -26,7 +26,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
-var _ provider.DialogHooker = (*Provider)(nil)
+var _ provider.LiveSignals = (*Provider)(nil)
 
 // spoolTempMaxAge is how old an atomic-write temp sibling (`<runID>.json.tmp`
 // from a hook, or `.settings.tmp-*` from lab's own write) must be before
@@ -90,7 +90,7 @@ type hookCmd struct {
 	Command string `json:"command"`
 }
 
-// HookSettings implements provider.DialogHooker: the per-run settings file that
+// Setup implements provider.LiveSignals: the per-run settings file that
 // arms the three dialog-capture hooks, plus the --settings flag pointing at it.
 // The hook commands self-create their spool subdirs (mkdir -p) so a dialog that
 // opens after a lab restart still spools with no re-arming.
@@ -103,7 +103,7 @@ type hookCmd struct {
 //     question resolves by any route (TUI, chat send-keys, or claude.ai).
 //   - Notification: atomic-write stdin (carrying notification_type) to the
 //     blocked marker, so residual blocked states drive the badge (decision 7).
-func (p *Provider) HookSettings(runID, dir string) (settings []byte, settingsPath string, args []string) {
+func (p *Provider) Setup(runID, dir string) (settings []byte, settingsPath string, args []string) {
 	spool := dialogSpoolPath(dir, runID)
 	marker := markerPath(dir, runID)
 	s := hookSettings{Hooks: hookGroups{
@@ -174,7 +174,7 @@ func DialogFromHookPayload(payload []byte) (provider.Dialog, bool) {
 	return dialogFromToolUse(tBlock{Name: s.ToolName, ID: s.ToolUseID, Input: s.ToolInput})
 }
 
-// PendingDialog implements provider.DialogHooker: read the dialog spool, map it
+// PendingDialog implements provider.LiveSignals: read the dialog spool, map it
 // through the shared mapper, and suppress it once resolved or stale. A spool
 // whose tool_use_id is already present in the transcript is answered (the
 // tool_use is flushed only on resolution) — return false so a stale spool never
@@ -220,7 +220,7 @@ type spooledNotification struct {
 	NotificationType string `json:"notification_type"`
 }
 
-// BlockedState implements provider.DialogHooker: a live Notification marker maps
+// BlockedState implements provider.LiveSignals: a live Notification marker maps
 // any blocked notification_type to StateNeedsInput. The marker is stale — the
 // block resolved — once the transcript is written after it (next activity), so
 // a transcript mtime past the marker mtime suppresses it.
@@ -245,7 +245,7 @@ func (p *Provider) BlockedState(runID, dir, transcriptPath string) (string, bool
 	return provider.StateNeedsInput, true
 }
 
-// SpoolSig implements provider.DialogHooker: a cheap existence+mtime+size digest
+// SpoolSig implements provider.LiveSignals: a cheap existence+mtime+size digest
 // of the dialog spool and the marker, so the tailer republishes when a dialog
 // appears while the transcript stays byte-frozen. "" when neither file exists.
 func (p *Provider) SpoolSig(runID, dir string) string {
@@ -258,7 +258,7 @@ func (p *Provider) SpoolSig(runID, dir string) string {
 	return b.String()
 }
 
-// SweepSpools implements provider.DialogHooker: remove the dialog spool, the
+// SweepSpools implements provider.LiveSignals: remove the dialog spool, the
 // marker, and the per-run settings file for every run whose keep(runID) is
 // false, plus any stale atomic-write temp orphan. Enumerates by directory so an
 // orphan from a crashed run (whose row is gone) is still reaped. Missing files

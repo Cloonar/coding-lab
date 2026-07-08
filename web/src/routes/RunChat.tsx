@@ -1,12 +1,14 @@
 // Embedded chat (/runs/:id, issue #7 / ADR-0016): the body IS the chat. A
-// compact header (title · conversational state · deep link · Stop), the
-// conversation stream (user/assistant text, tool chips, pending dialog,
-// lifecycle/errors; thinking behind a toggle), and a fixed bottom composer
-// whose state follows the run — locked while a dialog is pending, disabled for
-// ended instances, and morphing its Send button into a one-tap Interrupt while
-// the agent is working (ADR-0022). Reads through GET /runs/:id/messages and
-// refetches on run.messages.changed; replies / answers / interrupts POST back.
-// Phone-first, v0 design language.
+// compact header (title · conversational state · deep link · New conversation ·
+// Stop), the conversation stream (user/assistant text, tool chips, pending
+// dialog, lifecycle/errors; thinking behind a toggle), and a fixed bottom
+// composer whose state follows the run — locked while a dialog is pending,
+// disabled for ended instances, and morphing its Send button into a one-tap
+// Interrupt while the agent is working (ADR-0022). Reads through GET
+// /runs/:id/messages and refetches on run.messages.changed; replies / answers /
+// interrupts POST back. Every string that names the agent derives from the
+// provider's display metadata (issue #51 decision 9). Phone-first, v0 design
+// language.
 
 import { A, useParams } from '@solidjs/router';
 import { Dynamic, Portal } from 'solid-js/web';
@@ -26,6 +28,7 @@ import {
 import {
   answerRun,
   errorMessage,
+  fetchRunCommands,
   getRun,
   getRunMessages,
   interruptRun,
@@ -35,8 +38,12 @@ import {
   type ChatMessage,
   type ConversationState,
   type Dialog,
+  type DialogOption,
   type Provider,
+  type Question,
+  type QuestionAnswer,
   type Run,
+  type RunCommand,
   type TranscriptStatus,
 } from '../api';
 import ErrorBanner from '../components/ErrorBanner';
@@ -84,6 +91,16 @@ function RunChatView() {
   // or none for a link-less provider (then the header shows tmux-attach).
   const [providers] = createResource(() => listProviders());
 
+  // The run's slash-command catalog (issue #51 decision 5): chat-safe commands
+  // for the composer autocomplete and the role=clear header affordance.
+  // Worktree-dependent, hence per-run; the server caches ~30s. A failing
+  // endpoint degrades to an empty catalog (no autocomplete, no affordance)
+  // rather than breaking the chat.
+  const [commands] = createResource(
+    () => params.id,
+    (id) => fetchRunCommands(id).catch(() => [] as RunCommand[]),
+  );
+
   // The message window is accumulated (merged by seq) so scroll-up history and
   // in-place tool-status updates both survive a refetch.
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
@@ -95,7 +112,7 @@ function RunChatView() {
   // merge in. undefined until the first response; older servers omit it.
   const [transcriptId, setTranscriptId] = createSignal<string | undefined>(undefined);
   // The live pending dialog from the server's top-level pending_dialog field
-  // (ADR-0020) — the authoritative source, since Claude Code never flushes a
+  // (ADR-0020) — the authoritative source, since the agent CLI never flushes a
   // pending tool_use to the transcript. null when none is pending.
   const [pendingDialogField, setPendingDialogField] = createSignal<Dialog | null>(null);
   const [hasMore, setHasMore] = createSignal(false);
@@ -411,6 +428,50 @@ function RunChatView() {
     return r !== undefined && r.outcome !== 'active';
   };
 
+  // Provider display metadata for this run (issue #51 decision 9): every
+  // user-facing string that names the agent derives from display_name, and the
+  // "answer it elsewhere" hints derive from fallback_open — no provider brand
+  // is ever hardcoded here.
+  const runProvider = (): Provider | undefined => {
+    const r = runData();
+    const list = resourceValue(providers);
+    if (r === undefined || list === undefined) return undefined;
+    return list.find((p) => p.id === r.provider);
+  };
+  const agentName = () => runProvider()?.display_name ?? 'the agent';
+  // Where to answer when lab can't: the provider's web surface host when it
+  // has one (fallback_open), else the generic session wording for a
+  // terminal-only provider (whose header offers the tmux attach).
+  const openHint = () => {
+    const fb = runProvider()?.fallback_open;
+    if (fb === undefined || fb.url === '') return 'open the session';
+    try {
+      return `open it at ${new URL(fb.url).host}`;
+    } catch {
+      return 'open the session';
+    }
+  };
+
+  // role=clear affordance (issue #51 decision 2): a clear-role catalog entry
+  // binds the header's "New conversation" action; execution rides the NORMAL
+  // reply path (the backend echoes the command as user text and the transcript
+  // rotation resets the stream). Hidden while the composer is locked, the run
+  // has ended, OR the agent is mid-turn — the reply would land nowhere good.
+  // The working exclusion mirrors the composer's own ADR-0022 send-block: Send
+  // morphs to Interrupt mid-turn and nothing can be sent, so a clear (which
+  // bypasses the composer by calling replyRun directly) must be blocked too,
+  // else it pastes /clear into the live TUI in the middle of a turn.
+  const clearCommand = () => (commands() ?? []).find((c) => c.role === 'clear');
+  const composerLocked = () =>
+    ended() || transcript() === 'gone' || pendingDialog() !== null || state() === 'question';
+  const canClear = () => clearCommand() !== undefined && !composerLocked() && state() !== 'working';
+  const sendClear = async () => {
+    const name = clearCommand()?.name;
+    if (name === undefined) return;
+    await replyRun(params.id, `/${name}`);
+    await refetchMessages();
+  };
+
   // The queued first message parked by the New-run composer for THIS run
   // (issue #41), or undefined. Reactive on the queue's version signal so the
   // pending bubble appears/clears live.
@@ -436,7 +497,7 @@ function RunChatView() {
     if (ended() || transcript() === 'gone') {
       // It can never send now — drop it and say so, rather than parking forever.
       clearQueued(id);
-      setError('Queued message not sent — the run ended before Claude was ready.');
+      setError(`Queued message not sent — the run ended before ${agentName()} was ready.`);
       return;
     }
     if (transcript() !== 'available') return; // still locating — a later refetch retries
@@ -457,8 +518,8 @@ function RunChatView() {
     })();
   });
   // The pending dialog: the server's top-level pending_dialog field is
-  // authoritative (ADR-0020 — the live PreToolUse spool). The messages-scan is
-  // the dormant fallback for a future Claude Code that flushes a pending
+  // authoritative (ADR-0020 — the live-signals spool). The messages-scan is
+  // the dormant fallback for a future provider CLI that flushes a pending
   // tool_use to the transcript; it is gated on state === 'question' so a dialog
   // answered outside the refetch window can't lock the composer forever.
   const pendingDialog = (): Dialog | null => {
@@ -496,6 +557,8 @@ function RunChatView() {
           state={state()}
           showThinking={showThinking()}
           onToggleThinking={() => setShowThinking((v) => !v)}
+          canClear={canClear()}
+          onClear={sendClear}
           onError={setError}
           onChanged={() => void refetchRun()}
           hidden={!headerVisible()}
@@ -549,7 +612,9 @@ function RunChatView() {
             bubble), the last stream child so it only shows at the bottom.
             Reactive on state(); slides off with the rest as you scroll up. */}
           <Show when={state() === 'needs_input'}>
-            <p class="chat-lifecycle chat-needs-input">Claude is waiting for your reply.</p>
+            <p class="chat-lifecycle chat-needs-input">
+              {capitalize(agentName())} is waiting for your reply.
+            </p>
           </Show>
           {/* Queued first message (issue #41): the operator's message parked by
               the New-run composer, shown as the LAST stream item — below the
@@ -559,7 +624,7 @@ function RunChatView() {
               about-to-send message. The .pending hook is Phase 3's to restyle. */}
           <Show when={queuedText() !== undefined}>
             <div class="chat-msg role-user pending">
-              <span class="chat-msg-tag">Sends when Claude is ready</span>
+              <span class="chat-msg-tag">Sends when {agentName()} is ready</span>
               <Markdown source={queuedText() ?? ''} />
             </div>
           </Show>
@@ -573,6 +638,9 @@ function RunChatView() {
         transcript={transcript()}
         dialog={pendingDialog()}
         draftSeed={draftSeed()}
+        commands={commands() ?? []}
+        agentName={agentName()}
+        openHint={openHint()}
         jumpVisible={pill().visible}
         jumpEmphasis={pill().emphasized}
         onJump={jumpToLatest}
@@ -583,12 +651,21 @@ function RunChatView() {
   );
 }
 
+/** Sentence-start capitalization for the "the agent" display-name fallback. */
+function capitalize(s: string): string {
+  return s === '' ? s : s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function ChatHeader(props: {
   run: Run | undefined;
   providers: Provider[] | undefined;
   state: ConversationState;
   showThinking: boolean;
   onToggleThinking: () => void;
+  /** role=clear command available AND the composer is unlocked (issue #51). */
+  canClear: boolean;
+  /** Sends the provider's clear command via the normal reply path. */
+  onClear: () => Promise<void>;
   onError: (message: string) => void;
   onChanged: () => void;
   hidden: boolean;
@@ -596,6 +673,28 @@ function ChatHeader(props: {
 }) {
   const [confirming, setConfirming] = createSignal(false);
   const [stopping, setStopping] = createSignal(false);
+  // "New conversation" (issue #51 decision 2): inline confirm — the chat
+  // clears for real — then the clear command rides the normal reply path.
+  const [clearConfirming, setClearConfirming] = createSignal(false);
+  const [clearing, setClearing] = createSignal(false);
+  // The affordance can vanish mid-confirm (a dialog locks the composer, the
+  // run ends): drop the armed confirm so it can't linger invisibly and fire
+  // on the next appearance.
+  createEffect(() => {
+    if (!props.canClear) setClearConfirming(false);
+  });
+  const doClear = async () => {
+    if (clearing()) return;
+    setClearing(true);
+    try {
+      await props.onClear();
+      setClearConfirming(false);
+    } catch (err) {
+      props.onError(errorMessage(err));
+    } finally {
+      setClearing(false);
+    }
+  };
   // "repo · label" — the session name is `<repo>~<label>` and the label alone
   // is ambiguous across repos.
   const title = () => {
@@ -677,6 +776,34 @@ function ChatHeader(props: {
           >=640px makes this wrapper transparent (identical flex row to before);
           <640px the wrapper is display:none and the controls live in the menu. */}
       <div class="chat-desktop-actions">
+        <Show when={props.canClear}>
+          <Switch>
+            <Match when={!clearConfirming()}>
+              <button
+                type="button"
+                class="seg chat-new-convo"
+                title="Clear this chat and start a fresh conversation"
+                onClick={() => setClearConfirming(true)}
+              >
+                New conversation
+              </button>
+            </Match>
+            <Match when={clearConfirming()}>
+              <button
+                type="button"
+                class="seg chat-new-convo-confirm"
+                title="This clears the chat history for real"
+                disabled={clearing()}
+                onClick={() => void doClear()}
+              >
+                {clearing() ? 'Clearing…' : 'Confirm clear'}
+              </button>
+              <button type="button" class="seg" onClick={() => setClearConfirming(false)}>
+                Cancel
+              </button>
+            </Match>
+          </Switch>
+        </Show>
         <button
           type="button"
           class="seg chat-thinking-toggle"
@@ -728,6 +855,12 @@ function ChatHeader(props: {
         onRequestStop={() => setConfirming(true)}
         onCancelStop={() => setConfirming(false)}
         onStop={() => void stop()}
+        canClear={props.canClear}
+        clearConfirming={clearConfirming()}
+        clearing={clearing()}
+        onRequestClear={() => setClearConfirming(true)}
+        onCancelClear={() => setClearConfirming(false)}
+        onClear={() => void doClear()}
       />
     </header>
   );
@@ -749,13 +882,20 @@ function ChatMenu(props: {
   onRequestStop: () => void;
   onCancelStop: () => void;
   onStop: () => void;
+  canClear: boolean;
+  clearConfirming: boolean;
+  clearing: boolean;
+  onRequestClear: () => void;
+  onCancelClear: () => void;
+  onClear: () => void;
 }) {
   const [menuOpen, setMenuOpen] = createSignal(false);
-  // Closing always abandons a half-armed Stop, so the confirm can't linger
-  // invisibly and fire on the next open.
+  // Closing always abandons a half-armed Stop/Clear, so a confirm can't
+  // linger invisibly and fire on the next open.
   const close = () => {
     setMenuOpen(false);
     props.onCancelStop();
+    props.onCancelClear();
   };
 
   // Close on Escape while open (mirrors TopBar).
@@ -804,6 +944,45 @@ function ChatMenu(props: {
                 <OpenAffordance state={s()} />
               </div>
             )}
+          </Show>
+
+          {/* New conversation (issue #51): same two-step confirm as Stop —
+              the clear command wipes the chat for real. */}
+          <Show when={props.canClear}>
+            <Switch>
+              <Match when={!props.clearConfirming}>
+                <button
+                  type="button"
+                  class="chat-menu-item"
+                  role="menuitem"
+                  onClick={() => props.onRequestClear()}
+                >
+                  <Icon name="plus" class="chat-menu-icon" />
+                  <span>New conversation…</span>
+                </button>
+              </Match>
+              <Match when={props.clearConfirming}>
+                <button
+                  type="button"
+                  class="chat-menu-item"
+                  role="menuitem"
+                  disabled={props.clearing}
+                  onClick={() => props.onClear()}
+                >
+                  <Icon name="plus" class="chat-menu-icon" />
+                  <span>{props.clearing ? 'Clearing…' : 'Confirm clear'}</span>
+                </button>
+                <button
+                  type="button"
+                  class="chat-menu-item"
+                  role="menuitem"
+                  onClick={() => props.onCancelClear()}
+                >
+                  <span class="chat-menu-icon" aria-hidden="true" />
+                  <span>Cancel</span>
+                </button>
+              </Match>
+            </Switch>
           </Show>
 
           <Show when={props.live}>
@@ -1117,7 +1296,7 @@ function InlineNode(props: { node: Inline }) {
   );
 }
 
-// A fenced code block with a claude.ai-style header bar: language label left,
+// A fenced code block with a chat-app-style header bar: language label left,
 // copy-raw button right, always visible (mobile has no hover). The copy source
 // is the parser-retained literal fence content (decision 13).
 function CodeBlock(props: { lang: string; text: string }) {
@@ -1203,6 +1382,12 @@ function Composer(props: {
   dialog: Dialog | null;
   /** A handed-down draft (a failed queued-message auto-send), or null. */
   draftSeed: string | null;
+  /** The run's chat-safe slash-command catalog (issue #51 decision 5). */
+  commands: RunCommand[];
+  /** The provider's display name ('the agent' while metadata loads). */
+  agentName: string;
+  /** "open it at <host>" / "open the session" — the answer-elsewhere hint. */
+  openHint: string;
   jumpVisible: boolean;
   jumpEmphasis: boolean;
   onJump: () => void;
@@ -1273,10 +1458,64 @@ function Composer(props: {
     }
   };
 
+  // --- Slash-command autocomplete (issue #51 decision 5) --------------------
+  // Prefix-only: the popover exists only while the WHOLE input starts with '/'
+  // (a mid-message slash never triggers it). The filter is a case-insensitive
+  // substring match across name, description and arg hint. Accepting inserts
+  // "/name " and keeps focus in the textarea; sending stays the NORMAL reply
+  // path — the backend renders the command echo as user text (issue #51
+  // decision 2), so nothing here special-cases a slash message.
+  const [acDismissed, setAcDismissed] = createSignal(false); // Escape until the next keystroke
+  const [acIndex, setAcIndex] = createSignal(0);
+  const acMatches = (): RunCommand[] => {
+    const value = text();
+    if (!value.startsWith('/')) return [];
+    const q = value.slice(1).toLowerCase();
+    return props.commands.filter((c) =>
+      [c.name, c.description ?? '', c.arg_hint ?? ''].some((f) => f.toLowerCase().includes(q)),
+    );
+  };
+  const acOpen = () => !acDismissed() && acMatches().length > 0;
+  // Typing resets the highlight to the best (first) match and un-dismisses.
+  createEffect(on(text, () => setAcIndex(0), { defer: true }));
+  const acceptCommand = (cmd: RunCommand) => {
+    setText(`/${cmd.name} `);
+    // Dismiss until the next keystroke: Enter must go back to being a newline
+    // once the pick landed (descriptions often still match "name ").
+    setAcDismissed(true);
+    inputEl?.focus();
+  };
+
   // Cmd/Ctrl+Enter sends in the sendable states only (decision 9a). Bare Enter
   // is never a send — a phone's return key must insert a newline — and while
   // working there is no keyboard interrupt (the square is the only interrupt).
+  // While the command popover is open, Up/Down cycle, Enter/Tab accept and
+  // Escape closes; Cmd/Ctrl+Enter still sends over it.
   const onKeyDown = (e: KeyboardEvent) => {
+    if (acOpen() && !(e.metaKey || e.ctrlKey)) {
+      const matches = acMatches();
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setAcIndex((i) => (i + 1) % matches.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setAcIndex((i) => (i - 1 + matches.length) % matches.length);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setAcDismissed(true);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const pick = matches[Math.min(acIndex(), matches.length - 1)];
+        if (pick !== undefined) acceptCommand(pick);
+        return;
+      }
+    }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !working()) {
       e.preventDefault();
       void send();
@@ -1294,11 +1533,15 @@ function Composer(props: {
         classList={{ 'chat-jump': true, hidden: !props.jumpVisible, emphasis: props.jumpEmphasis }}
         aria-hidden={!props.jumpVisible}
         tabindex={props.jumpVisible ? 0 : -1}
-        aria-label={props.jumpEmphasis ? 'Claude is waiting — jump to latest' : 'Jump to latest'}
+        aria-label={
+          props.jumpEmphasis
+            ? `${capitalize(props.agentName)} is waiting — jump to latest`
+            : 'Jump to latest'
+        }
         onClick={() => props.onJump()}
       >
         <Icon name="chevron-down" size={16} class="chat-jump-icon" />
-        <span>{props.jumpEmphasis ? 'Claude needs you' : 'Latest'}</span>
+        <span>{props.jumpEmphasis ? `${capitalize(props.agentName)} needs you` : 'Latest'}</span>
       </button>
       <Switch>
         <Match when={props.ended}>
@@ -1312,6 +1555,7 @@ function Composer(props: {
             <DialogPanel
               runID={props.runID}
               dialog={d()}
+              openHint={props.openHint}
               onError={props.onError}
               onAnswered={props.onSent}
             />
@@ -1320,10 +1564,12 @@ function Composer(props: {
         {/* state 'question' with no structured dialog (a dormant transcript
             flush, or a shape lab can't render): the composer stays locked — a
             free-text reply would land in a focused picker — and the operator
-            answers in claude.ai or interrupts (decision 5). */}
+            answers on the provider's own surface or interrupts (decision 5). */}
         <Match when={props.state === 'question'}>
           <div class="chat-dialog">
-            <p class="chat-composer-note">Claude needs input — open it in claude.ai to respond.</p>
+            <p class="chat-composer-note">
+              {capitalize(props.agentName)} needs input — {props.openHint} to respond.
+            </p>
             <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onSent} />
           </div>
         </Match>
@@ -1333,6 +1579,37 @@ function Composer(props: {
               7). The composer stays usable. The needs-input note now lives in
               the stream as a status line (§3), so needs_input collapses to just
               the input row here. */}
+          {/* Slash-command autocomplete popover (issue #51 decision 5): floats
+              above the input like the jump pill; rows carry /name, the arg
+              hint (dim), the description and a source badge. Keyboard runs
+              through onKeyDown; mousedown is swallowed so a click never steals
+              the textarea's focus. */}
+          <Show when={acOpen()}>
+            <div class="chat-cmd-pop" id="chat-cmd-pop" role="listbox" aria-label="Slash commands">
+              <For each={acMatches()}>
+                {(cmd, i) => (
+                  <button
+                    type="button"
+                    id={`chat-cmd-opt-${i()}`}
+                    classList={{ 'chat-cmd-row': true, active: i() === acIndex() }}
+                    role="option"
+                    aria-selected={i() === acIndex()}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => acceptCommand(cmd)}
+                  >
+                    <span class="chat-cmd-name mono">/{cmd.name}</span>
+                    <Show when={cmd.arg_hint}>
+                      <span class="chat-cmd-hint mono">{cmd.arg_hint}</span>
+                    </Show>
+                    <span class={`chat-cmd-source src-${cmd.source}`}>{cmd.source}</span>
+                    <Show when={cmd.description}>
+                      <span class="chat-cmd-desc">{cmd.description}</span>
+                    </Show>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
           <div class="chat-composer-row">
             <textarea
               ref={(el) => {
@@ -1347,7 +1624,14 @@ function Composer(props: {
               rows={1}
               placeholder="Reply to the agent…"
               value={text()}
-              onInput={(e) => setText(e.currentTarget.value)}
+              aria-autocomplete="list"
+              aria-controls={acOpen() ? 'chat-cmd-pop' : undefined}
+              aria-activedescendant={acOpen() ? `chat-cmd-opt-${acIndex()}` : undefined}
+              onInput={(e) => {
+                // A fresh keystroke revives an Escape-dismissed popover.
+                setAcDismissed(false);
+                setText(e.currentTarget.value);
+              }}
               onKeyDown={onKeyDown}
             />
             {/* One morphing button (decision 2): the SAME <button> element in
@@ -1392,6 +1676,8 @@ function Composer(props: {
 function DialogPanel(props: {
   runID: string;
   dialog: Dialog;
+  /** "open it at <host>" / "open the session" — for the degraded note. */
+  openHint: string;
   onError: (message: string) => void;
   onAnswered: () => void;
 }) {
@@ -1414,7 +1700,13 @@ function DialogPanel(props: {
   );
 
   const options = () => props.dialog.options ?? [];
-  const answer = async (payload: { index?: number; selected?: number[]; other_text?: string }) => {
+  const questions = () => props.dialog.questions ?? [];
+  const answer = async (payload: {
+    index?: number;
+    selected?: number[];
+    other_text?: string;
+    answers?: QuestionAnswer[];
+  }) => {
     setBusy(true);
     try {
       await answerRun(props.runID, { tool_id: props.dialog.tool_id, ...payload });
@@ -1430,16 +1722,35 @@ function DialogPanel(props: {
 
   return (
     <div class="chat-dialog">
-      <p class="chat-dialog-prompt">{props.dialog.prompt}</p>
+      {/* A plan review's prompt IS the plan body — render it as markdown in a
+          bounded scroll area (issue #51 decision 3). Every other kind keeps
+          the plain one-line prompt. */}
+      <Show
+        when={props.dialog.dialog_kind === 'plan'}
+        fallback={<p class="chat-dialog-prompt">{props.dialog.prompt}</p>}
+      >
+        <div class="chat-dialog-plan">
+          <Markdown source={props.dialog.prompt} />
+        </div>
+      </Show>
       <Show
         when={props.dialog.answerable}
         fallback={
           <p class="chat-composer-note">
-            This dialog can't be answered here — open it in claude.ai.
+            This dialog can't be answered here — {props.openHint} to respond.
           </p>
         }
       >
         <Switch>
+          {/* Multi-question form (issue #51 decision 3): one atomic submit. */}
+          <Match when={questions().length > 0}>
+            <MultiQuestionForm
+              questions={questions()}
+              resetKey={props.dialog.tool_id}
+              busy={busy()}
+              onSubmit={(answers) => void answer({ answers })}
+            />
+          </Match>
           {/* Multi-select: checkboxes + a single confirm. */}
           <Match when={props.dialog.multi}>
             <ul class="dialog-options">
@@ -1467,7 +1778,9 @@ function DialogPanel(props: {
               Submit
             </button>
           </Match>
-          {/* Single-select: one button per option; the Other row takes text. */}
+          {/* Single-select: one button per option; the Other row takes text.
+              Plan approval and the generic 'approval' kind land here too —
+              their pinned options answer as a flat single-select index. */}
           <Match when={true}>
             <ul class="dialog-options">
               <For each={options()}>
@@ -1480,6 +1793,7 @@ function DialogPanel(props: {
                           <input
                             class="chat-input"
                             placeholder="Other…"
+                            aria-label="Other — type your answer"
                             value={otherText()}
                             onInput={(e) => setOtherText(e.currentTarget.value)}
                           />
@@ -1499,9 +1813,8 @@ function DialogPanel(props: {
                         class="dialog-option seg"
                         disabled={busy()}
                         onClick={() => void answer({ index: i() })}
-                        title={opt.description}
                       >
-                        {opt.label}
+                        <OptionContent option={opt} />
                       </button>
                     </Show>
                   </li>
@@ -1513,6 +1826,164 @@ function DialogPanel(props: {
       </Show>
       <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onAnswered} />
     </div>
+  );
+}
+
+/**
+ * One option's face — bold label over a secondary description — shared by
+ * every option-button shape so question options and plan approve/reject rows
+ * read alike.
+ */
+function OptionContent(props: { option: DialogOption }) {
+  return (
+    <>
+      <span class="dialog-option-label">{props.option.label}</span>
+      <Show when={props.option.description}>
+        <span class="dialog-option-desc">{props.option.description}</span>
+      </Show>
+    </>
+  );
+}
+
+/**
+ * The multi-question form (issue #51 decision 3), rendered the way the
+ * provider's own app renders question forms: stacked questions in order, each
+ * a small header chip + the question text + option buttons; multi_select
+ * questions toggle; the synthesized "Other" row (is_other) opens a free-text
+ * input for a single-select question. ONE submit answers all questions
+ * atomically via answers[] — disabled until every question is answered (Other
+ * requires non-empty text).
+ *
+ * Answer encoding (provider.go QuestionAnswer is authoritative): association
+ * is POSITIONAL — answers[i] answers questions[i]. Each entry mirrors the
+ * flat single-question shape: a single-select question sends `index` = the
+ * chosen OPTION index (+ `other_text` when that row is the is_other row); a
+ * multi_select question sends `selected` = the toggled option indices
+ * ascending, `index` absent. The adapter drives real picker rows from these
+ * fields, so this shape is a wire contract, not a UI convenience.
+ */
+function MultiQuestionForm(props: {
+  questions: Question[];
+  /** The dialog identity (tool_id): selections reset when it changes. */
+  resetKey: string;
+  busy: boolean;
+  onSubmit: (answers: QuestionAnswer[]) => void;
+}) {
+  const [picks, setPicks] = createSignal<ReadonlyMap<number, number[]>>(new Map());
+  const [others, setOthers] = createSignal<ReadonlyMap<number, string>>(new Map());
+
+  createEffect(
+    on(
+      () => props.resetKey,
+      () => {
+        setPicks(new Map());
+        setOthers(new Map());
+      },
+      { defer: true },
+    ),
+  );
+
+  // The renderable options of a question, keeping their ORIGINAL option
+  // indices (the adapter navigates picker rows by index). Multi-select
+  // questions drop the synthesized Other row: the adapter rejects Other
+  // inside a multi-select answer by policy (normSelected — the TUI's
+  // Other-in-multi-select recipe is unverified), so offering the row here
+  // would only collect an answer the backend bounces.
+  const visibleOptions = (q: Question): { opt: DialogOption; idx: number }[] =>
+    q.options
+      .map((opt, idx) => ({ opt, idx }))
+      .filter(({ opt }) => !(q.multi_select === true && opt.is_other === true));
+
+  const picked = (qi: number) => picks().get(qi) ?? [];
+  const otherText = (qi: number) => others().get(qi) ?? '';
+  const isPicked = (qi: number, oi: number) => picked(qi).includes(oi);
+  const togglePick = (qi: number, oi: number, multi: boolean) =>
+    setPicks((prev) => {
+      const next = new Map(prev);
+      const current = prev.get(qi) ?? [];
+      if (multi) {
+        next.set(
+          qi,
+          current.includes(oi)
+            ? current.filter((x) => x !== oi)
+            : [...current, oi].sort((a, b) => a - b),
+        );
+      } else {
+        // Single select: picking replaces; re-picking clears.
+        next.set(qi, current.includes(oi) ? [] : [oi]);
+      }
+      return next;
+    });
+  const setOther = (qi: number, value: string) => setOthers((prev) => new Map(prev).set(qi, value));
+
+  const otherPicked = (qi: number, q: Question) =>
+    picked(qi).some((oi) => q.options[oi]?.is_other === true);
+  const questionAnswered = (qi: number, q: Question) =>
+    picked(qi).length > 0 && (!otherPicked(qi, q) || otherText(qi).trim() !== '');
+  const complete = () => props.questions.every((q, qi) => questionAnswered(qi, q));
+
+  const submit = () => {
+    if (!complete()) return;
+    props.onSubmit(
+      props.questions.map((q, qi): QuestionAnswer => {
+        if (q.multi_select === true) return { selected: picked(qi) }; // ascending by construction
+        const idx = picked(qi)[0] ?? 0; // complete() guarantees exactly one pick
+        const a: QuestionAnswer = { index: idx };
+        if (q.options[idx]?.is_other === true) a.other_text = otherText(qi).trim();
+        return a;
+      }),
+    );
+  };
+
+  return (
+    <>
+      <div class="dialog-questions">
+        <For each={props.questions}>
+          {(q, qi) => (
+            <div class="dialog-question" role="group" aria-label={q.text}>
+              <Show when={q.header}>
+                <span class="chip dialog-question-header">{q.header}</span>
+              </Show>
+              <p class="chat-dialog-prompt">{q.text}</p>
+              <ul class="dialog-options">
+                <For each={visibleOptions(q)}>
+                  {(entry) => (
+                    <li>
+                      <button
+                        type="button"
+                        classList={{
+                          'dialog-option': true,
+                          seg: true,
+                          selected: isPicked(qi(), entry.idx),
+                        }}
+                        aria-pressed={isPicked(qi(), entry.idx)}
+                        disabled={props.busy}
+                        onClick={() => togglePick(qi(), entry.idx, q.multi_select === true)}
+                      >
+                        <OptionContent option={entry.opt} />
+                      </button>
+                      <Show when={entry.opt.is_other && isPicked(qi(), entry.idx)}>
+                        <input
+                          class="chat-input dialog-other-input"
+                          placeholder="Type your answer…"
+                          aria-label={`Other answer for: ${q.text}`}
+                          value={otherText(qi())}
+                          onInput={(e) => setOther(qi(), e.currentTarget.value)}
+                        />
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          )}
+        </For>
+      </div>
+      {/* ONE atomic submit for every question (issue #51 decision 3). */}
+      <button type="button" class="chat-send" disabled={props.busy || !complete()} onClick={submit}>
+        Submit
+      </button>
+    </>
   );
 }
 

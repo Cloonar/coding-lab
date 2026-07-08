@@ -8,20 +8,22 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // maxLoginCodeLen caps a pasted OAuth code before it reaches tmux
 // send-keys (v0-pinned: stops a runaway paste).
 const maxLoginCodeLen = 4096
 
-// ErrInvalidCode wraps a rejected login code (empty / oversize / control
-// characters). The API layer maps it to 400.
-var ErrInvalidCode = errors.New("invalid login code")
-
-// ErrLoginTimeout is returned when auth status does not flip within
-// loginTimeout after the code was delivered (v0 message preserved). The
-// API layer maps it to 504; the stuck login session has been torn down.
-var ErrLoginTimeout = errors.New("login did not complete in time — try again")
+// ErrInvalidCode / ErrLoginTimeout are thin aliases of the provider-generic
+// sentinels (issue #51 decision 7 — httpapi maps their status codes without
+// importing claudecode); the v0 message texts moved with them. See the
+// provider package for the contract docs.
+var (
+	ErrInvalidCode  = provider.ErrInvalidCode
+	ErrLoginTimeout = provider.ErrLoginTimeout
+)
 
 // claudeOAuthURLRe matches the authorize link `claude auth login` prints.
 // Verified on claude 2.1.150 (re-pinned in internal/compat): the real link
@@ -116,7 +118,7 @@ func (p *Provider) LoginStart(ctx context.Context) (string, error) {
 // A bad code never tears the session down — the login session is still
 // waiting, so the user just retries. On success the login session is
 // killed (idempotent; `claude auth login` usually already exited) and
-// claude.auth.changed is published. On timeout the stuck attempt is torn
+// provider.auth.changed is published. On timeout the stuck attempt is torn
 // down and ErrLoginTimeout returned.
 func (p *Provider) LoginSubmitCode(ctx context.Context, raw string) error {
 	code, err := validateLoginCode(raw)

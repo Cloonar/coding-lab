@@ -99,6 +99,13 @@ func sessionIDForDir(registryDir, dir string) string {
 // provider.ErrTranscriptGone (the run ended and claude retired the file); any
 // other read error is returned as-is. Malformed lines are skipped, never fatal
 // — a transcript is appended live and its tail can be a half-written line.
+//
+// Unlike the pure ParseTranscript, this read is INTENT-AWARE (issue #51
+// decision 3): resolved dialog tools are verified against the answers lab
+// recorded at AnswerDialog time, and a mismatch emits a lifecycle warning
+// right after the tool result (dialogintent.go). The intent registry is
+// in-memory, so a warning present before a lab restart disappears from parses
+// after it — accepted, the backstop is advisory-only (compat §5).
 func (p *Provider) ReadTranscript(path string) (provider.Chat, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -108,22 +115,28 @@ func (p *Provider) ReadTranscript(path string) (provider.Chat, error) {
 		return provider.Chat{}, err
 	}
 	defer func() { _ = f.Close() }()
-	return ParseTranscript(f)
+	return parseTranscript(f, &p.intents)
 }
 
 // ParseTranscript folds the JSONL lines of r into the universal schema. It is
 // a pure function of the byte stream — exported so the compat test drives it
-// from a captured fixture. See the transcript grammar pinned in compat.md §5.
-// A scan error (a line beyond the buffer cap, an I/O failure) is returned
-// rather than swallowed: silently stopping mid-file would serve a truncated
-// chat — and a cursor that moves backwards — forever.
+// from a captured fixture (Provider.ReadTranscript adds the intent-aware
+// verification overlay on top). See the transcript grammar pinned in
+// compat.md §5. A scan error (a line beyond the buffer cap, an I/O failure)
+// is returned rather than swallowed: silently stopping mid-file would serve a
+// truncated chat — and a cursor that moves backwards — forever.
 func ParseTranscript(r io.Reader) (provider.Chat, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcripts run to a few MB
-	return foldTranscript(sc)
+	return parseTranscript(r, nil)
 }
 
-func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
+// parseTranscript is the shared fold; a nil intents skips verification.
+func parseTranscript(r io.Reader, intents *intentRegistry) (provider.Chat, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcripts run to a few MB
+	return foldTranscript(sc, intents)
+}
+
+func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, error) {
 	// First pass: which tool_use ids have a matching tool_result (i.e. are
 	// answered). A dialog tool with no result is a pending dialog.
 	var lines [][]byte
@@ -188,8 +201,21 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 			switch blk.Type {
 			case "text":
 				text := strings.TrimSpace(blk.textField())
-				if text == "" || it.IsMeta || isLocalCommandEcho(text) {
-					continue // skip empty, injected-context (isMeta), and local slash-command echoes/output (issue #45)
+				if text == "" || it.IsMeta {
+					continue // skip empty and injected-context (isMeta) blocks
+				}
+				// A local slash-command echo renders as a plain user text
+				// message showing the command line, its captured output as a
+				// lifecycle message — but NEITHER touches lastKey: echoes are
+				// excluded from state derivation (issues #45/#51, compat §5).
+				if cmd, stdout, isEcho := commandEcho(text); isEcho {
+					if cmd != "" {
+						emit(provider.Message{Kind: provider.MessageText, Role: it.Message.Role, Time: it.Timestamp, Text: cmd})
+					}
+					if stdout != "" {
+						emit(provider.Message{Kind: provider.MessageLifecycle, Time: it.Timestamp, Text: truncate(stdout, truncateLimit)})
+					}
+					continue
 				}
 				emit(provider.Message{Kind: provider.MessageText, Role: it.Message.Role, Time: it.Timestamp, Text: text})
 				lastKey = it.Message.Role + ":text"
@@ -214,6 +240,19 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 					patchToolResult(msgs[idx].Tool, blk)
 				}
 				lastKey = "tool_result"
+				// Verification backstop (issue #51 decision 3): a resolved
+				// dialog tool with a recorded answer intent is checked against
+				// the event's recorded outcome; a mismatch emits a lifecycle
+				// warning immediately after the tool result. Advisory only —
+				// it deliberately does not touch lastKey, so the warning never
+				// alters state derivation.
+				if intents != nil {
+					if warn, ok := intents.verify(blk.ToolUseID, resolvedTool{
+						toolUseResult: it.ToolUseResult, denialKind: it.ToolDenialKind,
+					}); ok && warn != "" {
+						emit(provider.Message{Kind: provider.MessageLifecycle, Time: it.Timestamp, Text: warn, Error: true})
+					}
+				}
 			}
 		}
 	}
@@ -221,21 +260,58 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey), Cursor: seq}, nil
 }
 
-// isLocalCommandEcho reports whether a user text block is one of Claude Code's
-// non-conversational local-command breadcrumbs rather than a real turn: the
-// slash-command echo it writes when the operator runs a local command
-// (`<command-name>…` / `<command-message>…`, e.g. /clear, /rewind) and that
-// command's captured output (`<local-command-stdout>…`). These carry no isMeta
-// flag (compat.md §5) yet must not render as a message or drive conversational
-// state — a /clear rotates to a fresh transcript whose only tail is this echo,
-// so treating it as a real user turn strands the run in `working` with the
-// composer stuck on Interrupt (issue #45). text is already trimmed; tag order
-// varies and there is leading whitespace, so match a trimmed prefix, never an
-// exact string.
-func isLocalCommandEcho(text string) bool {
-	return strings.HasPrefix(text, "<command-name>") ||
-		strings.HasPrefix(text, "<command-message>") ||
-		strings.HasPrefix(text, "<local-command-stdout>")
+// commandEcho classifies (and parses) Claude Code's local-command breadcrumbs:
+// the slash-command echo it writes when the operator runs a local command
+// (`<command-name>…`/`<command-message>…`/`<command-args>…`, e.g. /clear,
+// /rewind) and that command's captured output (`<local-command-stdout>…`).
+// These carry no isMeta flag (compat.md §5); text is already trimmed, and tag
+// order varies with leading whitespace between tags, so classification is a
+// trimmed-prefix match and extraction is by tag, never by position.
+//
+// History: issue #45 DROPPED echoes entirely (they formerly derived `working`
+// and stuck the composer on Interrupt after /clear — the state half of that
+// fix stands, see foldTranscript: echoes never touch lastKey). Issue #51
+// decision 2 reverses the rendering half: the operator's sent command is real
+// conversational context, so the echo maps to a visible user text message
+// showing the command line — cmd is "<command-name value>[ <command-args
+// value>]" (e.g. "/clear", "/foo args") — and a non-empty stdout maps to a
+// follow-up lifecycle message. An echo with no extractable command name (or
+// an empty stdout) yields empty strings and renders nothing, degrading to the
+// old drop.
+func commandEcho(text string) (cmd, stdout string, isEcho bool) {
+	switch {
+	case strings.HasPrefix(text, "<local-command-stdout>"):
+		return "", strings.TrimSpace(tagContent(text, "local-command-stdout")), true
+	case strings.HasPrefix(text, "<command-name>"),
+		strings.HasPrefix(text, "<command-message>"),
+		strings.HasPrefix(text, "<command-args>"):
+		cmd = strings.TrimSpace(tagContent(text, "command-name")) // carries the slash, live: "/clear"
+		if cmd == "" {
+			return "", "", true
+		}
+		if args := strings.TrimSpace(tagContent(text, "command-args")); args != "" {
+			cmd += " " + args
+		}
+		return cmd, "", true
+	}
+	return "", "", false
+}
+
+// tagContent extracts the first <tag>…</tag> body from s, or "" — the minimal
+// pull-by-tag parse the echo breadcrumbs need (they are flat, single-level
+// pseudo-XML; a real parser would pin more than the coupling warrants).
+func tagContent(s, tag string) string {
+	open, close := "<"+tag+">", "</"+tag+">"
+	i := strings.Index(s, open)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(open):]
+	j := strings.Index(rest, close)
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // deriveState reduces the transcript tail to one conversational state

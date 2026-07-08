@@ -15,7 +15,7 @@ import (
 // is machine-level/per-OS-user (ADR-0001/0008), so this is a machine-wide cut:
 // running instances survive on their in-memory token until it refreshes/401s;
 // new spawns fail immediately. It does NOT stop instances (bare by decision)
-// and does NOT publish claude.auth.changed — the HTTP layer owns the SSE
+// and does NOT publish provider.auth.changed — the HTTP layer owns the SSE
 // announcement and the confirm gate, exactly as the DoD assigns them.
 //
 // Success is decided from a force-refreshed status, NEVER the command's exit

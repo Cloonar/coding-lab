@@ -93,19 +93,20 @@ func TestParseTranscript_stateEdges(t *testing.T) {
 			provider.StateWorking,
 		},
 		// A /clear rotates to a fresh transcript whose only tail is the local
-		// slash-command echo; it is non-conversational, so the tail is empty and
-		// the run reads idle — not stuck in `working` (issue #45).
+		// slash-command echo; it renders (issue #51 decision 2) but stays
+		// state-neutral, so the run reads idle — not stuck in `working`
+		// (issue #45).
 		"clear echo idles": {
 			line(`{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n  <command-message>clear</command-message>\n  <command-args></command-args>"}}`),
 			provider.StateIdle,
 		},
 		// Tag order varies (compat.md §5), so an echo that leads with
-		// <command-message> is also non-conversational — pins that OR arm.
+		// <command-message> is also recognised — pins that OR arm.
 		"command-message-led echo idles": {
 			line(`{"type":"user","message":{"role":"user","content":"<command-message>rewind</command-message>\n  <command-name>/rewind</command-name>"}}`),
 			provider.StateIdle,
 		},
-		// Local-command output is likewise non-conversational.
+		// Local-command output is likewise state-neutral.
 		"command output idles": {
 			line(`{"type":"user","message":{"role":"user","content":"<local-command-stdout>ok</local-command-stdout>"}}`),
 			provider.StateIdle,
@@ -122,39 +123,88 @@ func TestParseTranscript_stateEdges(t *testing.T) {
 	}
 }
 
-// A local slash-command echo (/clear, /rewind, …) and its captured output are
-// non-conversational breadcrumbs: they must not render as user bubbles (no raw
-// <command-…> / <local-command-stdout> tags in the chat) and must not drive
-// conversational state. A genuine plain-text reply after the echo is
-// unaffected — it still renders and derives `working`, preserving the
-// Send→Interrupt morph (ADR-0022). Issue #45.
-func TestParseTranscript_localCommandEcho(t *testing.T) {
+// A local slash-command echo (/clear, /rewind, …) renders as a plain user
+// text message showing the command line, and its captured output as a
+// lifecycle message (issue #51 decision 2 reversed issue #45's rendering
+// half) — the raw <command-…> / <local-command-stdout> tags never leak into
+// the chat, and a genuine plain-text reply after the echo is unaffected.
+func TestParseTranscript_localCommandEchoRenders(t *testing.T) {
 	echo := line(`{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n  <command-message>clear</command-message>\n  <command-args></command-args>"}}`) +
 		line(`{"type":"user","message":{"role":"user","content":"<local-command-stdout>Conversation cleared</local-command-stdout>"}}`)
 
-	// Echo (and output) alone: no messages, idle state — the stuck-Interrupt case.
 	got, err := ParseTranscript(strings.NewReader(echo))
 	if err != nil {
 		t.Fatalf("ParseTranscript(echo): %v", err)
 	}
-	if len(got.Messages) != 0 {
-		t.Errorf("echo rendered %d messages; want 0 (no raw <command-…> bubble)", len(got.Messages))
+	if len(got.Messages) != 2 {
+		t.Fatalf("echo rendered %d messages; want the command line + its output", len(got.Messages))
 	}
-	if got.State != provider.StateIdle {
-		t.Errorf("echo state = %q; want %q", got.State, provider.StateIdle)
+	if m := got.Messages[0]; m.Kind != provider.MessageText || m.Role != "user" || m.Text != "/clear" {
+		t.Errorf("echo msg0 = %+v; want user text \"/clear\"", m)
+	}
+	if m := got.Messages[1]; m.Kind != provider.MessageLifecycle || m.Text != "Conversation cleared" || m.Error {
+		t.Errorf("echo msg1 = %+v; want a non-error lifecycle with the stdout", m)
 	}
 
-	// Echo then a genuine reply: only the reply renders, and it still derives working.
+	// A command with args echoes as one "/name args" line; an empty stdout is
+	// dropped entirely.
+	got, err = ParseTranscript(strings.NewReader(
+		line(`{"type":"user","message":{"role":"user","content":"<command-name>/foo</command-name>\n  <command-message>foo</command-message>\n  <command-args>bar baz</command-args>"}}`) +
+			line(`{"type":"user","message":{"role":"user","content":"<local-command-stdout></local-command-stdout>"}}`)))
+	if err != nil {
+		t.Fatalf("ParseTranscript(args echo): %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Text != "/foo bar baz" {
+		t.Fatalf("args echo messages = %+v; want just \"/foo bar baz\"", got.Messages)
+	}
+
+	// Echo then a genuine reply: the reply still renders and derives working
+	// (the Send→Interrupt morph, ADR-0022).
 	got, err = ParseTranscript(strings.NewReader(echo +
 		line(`{"type":"user","message":{"role":"user","content":"now do the thing"}}`)))
 	if err != nil {
 		t.Fatalf("ParseTranscript(echo+reply): %v", err)
 	}
-	if len(got.Messages) != 1 || got.Messages[0].Text != "now do the thing" {
-		t.Fatalf("echo+reply messages = %+v; want just the genuine reply", got.Messages)
+	if n := len(got.Messages); n != 3 || got.Messages[2].Text != "now do the thing" {
+		t.Fatalf("echo+reply messages = %+v; want echo, stdout, reply", got.Messages)
 	}
 	if got.State != provider.StateWorking {
 		t.Errorf("echo+reply state = %q; want %q (Send→Interrupt morph preserved)", got.State, provider.StateWorking)
+	}
+}
+
+// THE issue-#45 / issue-#51 regression pin: command echoes are excluded from
+// state derivation even though they now render. The echo formerly drove
+// deriveState to `working`, which stranded the composer on a pulsing
+// Interrupt with no Send after /clear (the stuck-composer root cause,
+// ADR-0022 / issue #45); issue #51 decision 2 made echoes visible but kept
+// them state-neutral. Two edges: a transcript whose tail is ONLY an echo
+// (+stdout) after real turns keeps the pre-echo state, and a fresh
+// post-/clear transcript containing ONLY the echo derives idle.
+func TestParseTranscript_commandEchoNeverDrivesState(t *testing.T) {
+	echoTail := line(`{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n  <command-message>clear</command-message>\n  <command-args></command-args>"}}`) +
+		line(`{"type":"user","message":{"role":"user","content":"<local-command-stdout>cleared</local-command-stdout>"}}`)
+
+	// Real turns, then only the echo: the assistant's ended turn still decides
+	// the state — needs_input, exactly as if the echo were absent.
+	turns := line(`{"type":"user","message":{"role":"user","content":"go"}}`) +
+		line(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+	got, err := ParseTranscript(strings.NewReader(turns + echoTail))
+	if err != nil {
+		t.Fatalf("ParseTranscript(turns+echo): %v", err)
+	}
+	if got.State != provider.StateNeedsInput {
+		t.Errorf("turns+echo state = %q; want %q (echo must not override the pre-echo state)", got.State, provider.StateNeedsInput)
+	}
+
+	// A fresh post-/clear transcript contains ONLY the echo: idle, never
+	// `working` — the composer shows Send, not the stuck Interrupt.
+	got, err = ParseTranscript(strings.NewReader(echoTail))
+	if err != nil {
+		t.Fatalf("ParseTranscript(echo only): %v", err)
+	}
+	if got.State != provider.StateIdle {
+		t.Errorf("fresh post-/clear state = %q; want %q (the stuck-composer case)", got.State, provider.StateIdle)
 	}
 }
 

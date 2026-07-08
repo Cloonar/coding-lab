@@ -11,7 +11,7 @@ import (
 
 // Event is one bus message. Type is the SSE event name (brief §8.1:
 // repo.changed, run.changed, parked.changed, clone.progress,
-// claude.auth.changed, issue.changed, cr.changed, heartbeat); Payload is a
+// provider.auth.changed, issue.changed, cr.changed, heartbeat); Payload is a
 // small JSON envelope ({type, repoID?, …}).
 type Event struct {
 	Type    string

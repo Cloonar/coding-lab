@@ -7,6 +7,7 @@ package claudecode
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -71,15 +72,15 @@ func TestAnswerDialog_playsRecipe(t *testing.T) {
 	if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Index: 1}); err != nil {
 		t.Fatalf("AnswerDialog: %v", err)
 	}
-	// Up Up Up / Down / Enter — normalize-then-navigate. The climb is
-	// len(Options)=3 (2 modeled options + Other) plus the un-modeled trailing
-	// "Chat about this" row (ADR-0020 / compat §7): 3−1+1 = 3 Ups.
+	// Down / Enter — a pure downward walk from the picker's top row. No climb:
+	// Up wraps on 2.1.198 and the picker opens on row 0, so a climb would land
+	// on the wrong row (compat §7, live 2026-07-08).
 	var keys []string
 	for _, e := range f.KeyLog(chatSession) {
 		keys = append(keys, e.Keys)
 	}
-	if got := strings.Join(keys, "|"); got != "Up Up Up|Down|Enter" {
-		t.Errorf("answer key log = %q; want \"Up Up Up|Down|Enter\"", got)
+	if got := strings.Join(keys, "|"); got != "Down|Enter" {
+		t.Errorf("answer key log = %q; want \"Down|Enter\"", got)
 	}
 }
 
@@ -103,7 +104,7 @@ func TestAnswerDialog_pacedRespectsCancel(t *testing.T) {
 
 func TestAnswerDialog_refusesUnanswerable(t *testing.T) {
 	p, _ := armedRunner(t)
-	d := provider.Dialog{Answerable: false, DialogKind: "plan"}
+	d := provider.Dialog{Answerable: false, Kind: provider.DialogKindPlan}
 	if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{}); !errors.Is(err, ErrDialogNotAnswerable) {
 		t.Errorf("AnswerDialog(plan) err = %v; want ErrDialogNotAnswerable", err)
 	}
@@ -117,6 +118,91 @@ func TestReply_normalizesCRLF(t *testing.T) {
 	log := f.KeyLog(chatSession)
 	if len(log) == 0 || log[0].Text != "line one\nline two\nline three" {
 		t.Errorf("pasted text = %+v; want CR/CRLF normalized to LF", log)
+	}
+}
+
+// Multi-question answers are POSITIONAL (issue #51 decision 3: answers[i]
+// answers Questions[i]) with strict per-question encoding — single-select in
+// Index (Selected empty), multi-select in Selected (OtherText forbidden),
+// OtherText exactly when the chosen row IsOther. A payload in the OLD
+// divergent SPA encoding (question index in Index, the single-select choice
+// in Selected) must be REJECTED at the door rather than silently misplayed:
+// keystrokes built from a misread answer are exactly the desync the
+// verification backstop exists for, and a 4xx beats a post-hoc warning.
+func TestDialogKeystrokes_multiQuestionEncodingValidation(t *testing.T) {
+	d := provider.Dialog{
+		Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+		Questions: []provider.Question{
+			{Text: "Color?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, {Label: "Other", IsOther: true}}},
+			{Text: "Fruits?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Apple"}, {Label: "Banana"}, {Label: "Other", IsOther: true}}},
+		},
+	}
+	cases := map[string]struct {
+		answers []provider.QuestionAnswer
+		want    error
+	}{
+		"answer count below questions": {[]provider.QuestionAnswer{{Index: 0}}, ErrInvalidReply},
+		"answer count above questions": {[]provider.QuestionAnswer{{Index: 0}, {Selected: []int{0}}, {Index: 1}}, ErrInvalidReply},
+		// The old divergent encoding: Index carried the QUESTION index and
+		// Selected carried the single-select choice.
+		"old encoding: selected on single-select": {[]provider.QuestionAnswer{{Index: 0, Selected: []int{1}}, {Index: 1, Selected: []int{0}}}, ErrInvalidReply},
+		"multi-select with empty selected":        {[]provider.QuestionAnswer{{Index: 0}, {}}, ErrInvalidReply},
+		"multi-select toggling the Other row":     {[]provider.QuestionAnswer{{Index: 0}, {Selected: []int{2}}}, ErrDialogNotAnswerable},
+		"multi-select with other text":            {[]provider.QuestionAnswer{{Index: 0}, {Selected: []int{0}, OtherText: "x"}}, ErrInvalidReply},
+		"single-select index out of range":        {[]provider.QuestionAnswer{{Index: 9}, {Selected: []int{0}}}, ErrDialogNotAnswerable},
+		"other row without text":                  {[]provider.QuestionAnswer{{Index: 2}, {Selected: []int{0}}}, ErrInvalidReply},
+		"other text on a non-Other row":           {[]provider.QuestionAnswer{{Index: 0, OtherText: "stray"}, {Selected: []int{0}}}, ErrInvalidReply},
+	}
+	for name, c := range cases {
+		if _, err := DialogKeystrokes(d, provider.DialogAnswer{Answers: c.answers}); !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v; want %v", name, err, c.want)
+		}
+	}
+	// The valid positional encoding passes.
+	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Answers: []provider.QuestionAnswer{
+		{Index: 2, OtherText: "Teal"}, {Selected: []int{0, 1}},
+	}}); err != nil {
+		t.Errorf("valid positional answers rejected: %v", err)
+	}
+}
+
+// A flat single-question dialog accepts a one-element Answers slice with
+// answers[0] semantics (API symmetry with the multi-question encoding); more
+// than one element cannot address it.
+func TestDialogKeystrokes_flatAcceptsSingleAnswersElement(t *testing.T) {
+	d := provider.Dialog{Answerable: true, Options: []provider.DialogOption{
+		{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true},
+	}}
+	flat, err := DialogKeystrokes(d, provider.DialogAnswer{Index: 1})
+	if err != nil {
+		t.Fatalf("flat: %v", err)
+	}
+	viaAnswers, err := DialogKeystrokes(d, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 1}}})
+	if err != nil {
+		t.Fatalf("answers[0]: %v", err)
+	}
+	if !reflect.DeepEqual(flat, viaAnswers) {
+		t.Errorf("answers[0] recipe %v != flat recipe %v", viaAnswers, flat)
+	}
+	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 0}, {Index: 1}}}); !errors.Is(err, ErrInvalidReply) {
+		t.Errorf("two answers on a flat dialog: err = %v; want ErrInvalidReply", err)
+	}
+}
+
+// The plan picker rejects out-of-range rows and requires feedback text on the
+// free-text row (row 3), mirroring the question rules.
+func TestDialogKeystrokes_planValidation(t *testing.T) {
+	d := provider.Dialog{Kind: provider.DialogKindPlan, Answerable: true, Options: []provider.DialogOption{
+		{Label: "Approve — auto-accept edits"},
+		{Label: "Approve — review each edit"},
+		{Label: "Reject — refine the plan"},
+		{Label: "Reject with feedback", IsOther: true},
+	}}
+	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Index: 4}); !errors.Is(err, ErrDialogNotAnswerable) {
+		t.Errorf("out of range: err = %v; want ErrDialogNotAnswerable", err)
+	}
+	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Index: 3}); !errors.Is(err, ErrInvalidReply) {
+		t.Errorf("feedback row without text: err = %v; want ErrInvalidReply", err)
 	}
 }
 

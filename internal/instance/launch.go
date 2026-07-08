@@ -97,7 +97,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 
 	// dialogSettingsPath is the per-run dialog-capture settings file (ADR-0020),
 	// written just before the spawn; rollback unlinks it. "" until armed (or
-	// for a provider without the DialogHooker capability).
+	// for a provider without the LiveSignals capability).
 	var dialogSettingsPath string
 
 	// rollback restores the exact pre-launch state after the worktree exists:
@@ -144,7 +144,9 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
-	if err := s.seeder.SeedWorkspace(wtPath, repo, seeder.Opts{}); err != nil {
+	// The generic seeder consumes the SAME provider's declared shapes (issue
+	// #51 decision 8): skills dir, context-file name, exclude entries.
+	if err := s.seeder.SeedWorkspace(wtPath, repo, spec.Provider.SeedMeta(), seeder.Opts{}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -190,7 +192,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// Code never flushes a pending tool_use to the transcript live). Best-
 	// effort — a write failure logs and spawns without capture (the chat keeps
 	// transcript-only behavior); dialog capture must never block a launch. A
-	// provider without the DialogHooker capability contributes nothing.
+	// provider without the LiveSignals capability contributes nothing.
 	//
 	// Build the spawn argv from the provider (issue #19 SpawnSpec seam): the
 	// seed prompt rides as the trailing positional and the provider applies any
@@ -254,15 +256,15 @@ func injectBeforePrompt(argv, extra []string, hasPrompt bool) []string {
 
 // armDialogHooks writes the per-run dialog-capture settings file (ADR-0020) into
 // the runtime dir and returns the spawn args to append (--settings <path>) plus
-// the settings path (for rollback). A provider without the DialogHooker
+// the settings path (for rollback). A provider without the LiveSignals
 // capability contributes nothing. Best-effort: a write failure logs and returns
 // no args — the run still spawns, its chat just keeps transcript-only behavior.
 func (s *Service) armDialogHooks(prov provider.AgentProvider, runID string) (args []string, settingsPath string) {
-	hooker, ok := prov.(provider.DialogHooker)
+	signals, ok := prov.(provider.LiveSignals)
 	if !ok {
 		return nil, ""
 	}
-	settings, path, extra := hooker.HookSettings(runID, s.mat.Dir())
+	settings, path, extra := signals.Setup(runID, s.mat.Dir())
 	if err := writeFileAtomic0600(path, settings); err != nil {
 		s.log.Warn("arming dialog hooks", "component", "instance", "run", runID, "err", err)
 		return nil, ""

@@ -365,6 +365,20 @@ func TestAPI_Providers(t *testing.T) {
 	if p["id"] != "claude-code" {
 		t.Errorf("provider id = %v", p["id"])
 	}
+	// display_name drives all user-facing copy (issue #51 decision 9): the SPA
+	// renders it instead of hardcoding a provider name.
+	if p["display_name"] != "Claude Code" {
+		t.Errorf("display_name = %v, want Claude Code", p["display_name"])
+	}
+	// auth is the always-present auth-flow descriptor (issue #51 decision 7)
+	// the SPA's auth card renders from — oauth-code for claude.
+	auth, ok := p["auth"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth descriptor missing: %v", p)
+	}
+	if auth["kind"] != provider.AuthFlowOAuthCode {
+		t.Errorf("auth.kind = %v, want %q", auth["kind"], provider.AuthFlowOAuthCode)
+	}
 	if models, _ := p["models"].([]any); len(models) != 4 {
 		t.Errorf("models = %v, want 4", p["models"])
 	}
@@ -379,47 +393,75 @@ func TestAPI_Providers(t *testing.T) {
 	}
 }
 
-func TestAPI_ClaudeAuthStatusAndLogin(t *testing.T) {
+// The auth routes are keyed by the registered provider id (issue #51 decision
+// 7): {id}="claude-code" resolves; an unknown id 404s; the login-code error
+// mapping runs on the provider-generic sentinels (400 for a rejected code, 504
+// on login timeout), so httpapi couples to no concrete provider.
+func TestAPI_ProviderAuthStatusAndLogin(t *testing.T) {
 	x := newInstanceServer(t)
 	h := csrfHeaders(x.ts.URL)
+	const base = "/api/v1/providers/claude-code/auth"
 
-	resp := x.do("GET", "/api/v1/providers/claude/auth/status", nil, nil)
+	resp := x.do("GET", base+"/status", nil, nil)
 	wantStatus(t, resp, http.StatusOK)
 	if st := decodeBody(t, resp); st["logged_in"] != true || st["checked_at"] == "" {
 		t.Errorf("auth status = %v", st)
 	}
 
 	// Login start while logged in → 409.
-	resp = x.do("POST", "/api/v1/providers/claude/auth/login/start", map[string]any{}, h)
+	resp = x.do("POST", base+"/login/start", map[string]any{}, h)
 	wantStatus(t, resp, http.StatusConflict)
 
 	// Logged out → 200 with the oauth url.
 	x.prov.SetLoggedIn(false)
-	resp = x.do("POST", "/api/v1/providers/claude/auth/login/start", map[string]any{}, h)
+	resp = x.do("POST", base+"/login/start", map[string]any{}, h)
 	wantStatus(t, resp, http.StatusOK)
 	if got := decodeBody(t, resp); got["oauth_url"] == "" {
 		t.Errorf("oauth_url empty: %v", got)
 	}
 
 	// Code submit → 202.
-	resp = x.do("POST", "/api/v1/providers/claude/auth/login/code", map[string]any{"code": "abc#state=1"}, h)
+	resp = x.do("POST", base+"/login/code", map[string]any{"code": "abc#state=1"}, h)
 	wantStatus(t, resp, http.StatusAccepted)
 	_ = resp.Body.Close()
 	if codes := x.prov.SubmittedCodes(); len(codes) != 1 || codes[0] != "abc#state=1" {
 		t.Errorf("submitted codes = %v", codes)
 	}
+
+	// A rejected code → 400 via the generic provider.ErrInvalidCode sentinel.
+	x.prov.SetCodeError(provider.ErrInvalidCode)
+	resp = x.do("POST", base+"/login/code", map[string]any{"code": "bad"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+
+	// A login that never lands → 504 via provider.ErrLoginTimeout.
+	x.prov.SetCodeError(provider.ErrLoginTimeout)
+	resp = x.do("POST", base+"/login/code", map[string]any{"code": "slow"}, h)
+	wantStatus(t, resp, http.StatusGatewayTimeout)
+
+	// An unknown provider id 404s on every auth route.
+	const nope = "/api/v1/providers/nope/auth"
+	resp = x.do("GET", nope+"/status", nil, nil)
+	wantStatus(t, resp, http.StatusNotFound)
+	resp = x.do("POST", nope+"/login/start", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusNotFound)
+	resp = x.do("POST", nope+"/login/code", map[string]any{"code": "x"}, h)
+	wantStatus(t, resp, http.StatusNotFound)
+	resp = x.do("POST", nope+"/logout", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusNotFound)
 }
 
-// Machine-wide logout (issue #46): the endpoint is CSRF-guarded, calls the
-// provider's Logout, emits claude.auth.changed, and leaves the status cache
-// reading logged-out. A failed logout surfaces as a 500.
-func TestAPI_ClaudeLogout(t *testing.T) {
+// Machine-wide logout (issue #46, per-id in issue #51 decision 7): the endpoint
+// is CSRF-guarded, calls the provider's Logout, emits provider.auth.changed
+// carrying the provider's own id, and leaves the status cache reading
+// logged-out. A failed logout surfaces as a 500.
+func TestAPI_ProviderLogout(t *testing.T) {
 	x := newInstanceServer(t)
 	h := csrfHeaders(x.ts.URL)
 	log := recordBus(t, x.bus)
+	const base = "/api/v1/providers/claude-code/auth"
 
 	// The Fake starts logged in.
-	resp := x.do("GET", "/api/v1/providers/claude/auth/status", nil, nil)
+	resp := x.do("GET", base+"/status", nil, nil)
 	wantStatus(t, resp, http.StatusOK)
 	if st := decodeBody(t, resp); st["logged_in"] != true {
 		t.Fatalf("precondition: auth status = %v; want logged in", st)
@@ -427,7 +469,7 @@ func TestAPI_ClaudeLogout(t *testing.T) {
 
 	// CSRF-guarded like every mutating route: no CSRF header → 403, and the
 	// provider is never called.
-	resp = x.do("POST", "/api/v1/providers/claude/auth/logout", map[string]any{}, nil)
+	resp = x.do("POST", base+"/logout", map[string]any{}, nil)
 	wantStatus(t, resp, http.StatusForbidden)
 	_ = resp.Body.Close()
 	if n := x.prov.Logouts(); n != 0 {
@@ -435,7 +477,7 @@ func TestAPI_ClaudeLogout(t *testing.T) {
 	}
 
 	// Happy path: 200 with the now-logged-out status echoed back.
-	resp = x.do("POST", "/api/v1/providers/claude/auth/logout", map[string]any{}, h)
+	resp = x.do("POST", base+"/logout", map[string]any{}, h)
 	wantStatus(t, resp, http.StatusOK)
 	if st := decodeBody(t, resp); st["logged_in"] != false {
 		t.Errorf("logout response = %v; want logged_in false", st)
@@ -444,13 +486,19 @@ func TestAPI_ClaudeLogout(t *testing.T) {
 		t.Errorf("Logout called %d times; want 1", n)
 	}
 
-	// claude.auth.changed fired (the SPA refetches on it).
-	if !sawEvent(log, "claude.auth.changed") {
-		t.Error("no claude.auth.changed event after logout")
+	// provider.auth.changed fired with the provider's own id in the payload
+	// (the SPA scopes its refetch to the right auth card).
+	ev := waitForBusEvent(t, log, provider.EventAuthChanged)
+	payload, ok := ev.Payload.(provider.AuthChangedPayload)
+	if !ok {
+		t.Fatalf("auth-changed payload = %T; want provider.AuthChangedPayload", ev.Payload)
+	}
+	if payload.Provider != "claude-code" || payload.Type != provider.EventAuthChanged {
+		t.Errorf("auth-changed payload = %+v; want provider=claude-code type=%s", payload, provider.EventAuthChanged)
 	}
 
 	// The status cache now reads logged-out without forcing.
-	resp = x.do("GET", "/api/v1/providers/claude/auth/status", nil, nil)
+	resp = x.do("GET", base+"/status", nil, nil)
 	wantStatus(t, resp, http.StatusOK)
 	if st := decodeBody(t, resp); st["logged_in"] != false {
 		t.Errorf("status after logout = %v; want logged_in false (cache invalidated)", st)
@@ -459,7 +507,7 @@ func TestAPI_ClaudeLogout(t *testing.T) {
 	// A logout the provider could not complete is a 500.
 	x.prov.SetLoggedIn(true)
 	x.prov.SetLogoutError(errors.New("still logged in after credentials removal"))
-	resp = x.do("POST", "/api/v1/providers/claude/auth/logout", map[string]any{}, h)
+	resp = x.do("POST", base+"/logout", map[string]any{}, h)
 	wantStatus(t, resp, http.StatusInternalServerError)
 	if body := decodeBody(t, resp); body["error"] == "" {
 		t.Error("failed logout returned no error message")

@@ -47,10 +47,10 @@ func writeSpool(t *testing.T, dir, sub, runID, body string) {
 	}
 }
 
-func TestHookSettings_shapeAndArgs(t *testing.T) {
+func TestSetup_shapeAndArgs(t *testing.T) {
 	p := spoolTestProvider(t)
 	dir := t.TempDir()
-	settings, settingsPath, args := p.HookSettings("run_1", dir)
+	settings, settingsPath, args := p.Setup("run_1", dir)
 
 	if settingsPath != filepath.Join(dir, "settings.run_1.json") {
 		t.Errorf("settingsPath = %q", settingsPath)
@@ -127,6 +127,38 @@ func TestPendingDialog_readsAndSuppressesResolved(t *testing.T) {
 	writeFileWithModTime(t, other, `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ZZZ","name":"Bash","input":{}}]}}`+"\n", frozen)
 	if _, ok := p.PendingDialog("run_1", dir, other); !ok {
 		t.Error("PendingDialog: an unrelated tool_use_id must not suppress the dialog")
+	}
+}
+
+// PendingDialog rides the same mapper as the transcript (dialogFromToolUse),
+// so the shapes issue #51 made answerable — multi-question AskUserQuestion
+// and ExitPlanMode — are answerable through the spool with no spool-specific
+// code. Payloads mirror the live 2.1.198 hook/tool inputs (2026-07-08).
+func TestPendingDialog_multiQuestionAndPlanAnswerable(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+
+	multiQ := `{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"toolu_MQ","tool_input":{"questions":[{"question":"Which color do you prefer?","header":"Color","multiSelect":false,"options":[{"label":"Red","description":"warm"},{"label":"Blue","description":"cool"}]},{"question":"Which fruits do you like?","header":"Fruits","multiSelect":true,"options":[{"label":"Apple"},{"label":"Banana"},{"label":"Cherry"}]}]}}`
+	writeSpool(t, dir, dialogsSubdir, "run_mq", multiQ)
+	d, ok := p.PendingDialog("run_mq", dir, "")
+	if !ok || !d.Answerable || d.Kind != provider.DialogKindQuestion {
+		t.Fatalf("multi-question spool = %+v,%v; want an answerable question dialog", d, ok)
+	}
+	if len(d.Questions) != 2 || d.Prompt != "2 questions" {
+		t.Fatalf("dialog = %+v; want Questions len 2 with the summary prompt", d)
+	}
+	if q := d.Questions[1]; !q.MultiSelect || q.Header != "Fruits" || len(q.Options) != 4 || !q.Options[3].IsOther {
+		t.Errorf("question 1 = %+v; want multiSelect Fruits with Apple/Banana/Cherry + Other", q)
+	}
+
+	plan := `{"hook_event_name":"PreToolUse","tool_name":"ExitPlanMode","tool_use_id":"toolu_PL","tool_input":{"plan":"# Plan\n\n- do the thing\n","planFilePath":"/tmp/plan.md"}}`
+	writeSpool(t, dir, dialogsSubdir, "run_pl", plan)
+	d, ok = p.PendingDialog("run_pl", dir, "")
+	if !ok || !d.Answerable || d.Kind != provider.DialogKindPlan {
+		t.Fatalf("plan spool = %+v,%v; want an answerable plan dialog", d, ok)
+	}
+	if len(d.Options) != 4 || !d.Options[3].IsOther {
+		t.Errorf("plan options = %+v; want the four pinned picker rows with the feedback row last", d.Options)
 	}
 }
 
@@ -238,7 +270,7 @@ func TestHookCommands_endToEndThroughSh(t *testing.T) {
 	}
 	p := spoolTestProvider(t)
 	dir := t.TempDir()
-	settings, _, _ := p.HookSettings("run_e2e", dir)
+	settings, _, _ := p.Setup("run_e2e", dir)
 
 	var s hookSettings
 	if err := json.Unmarshal(settings, &s); err != nil {

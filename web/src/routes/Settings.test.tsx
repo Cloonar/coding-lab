@@ -16,6 +16,8 @@ function baseProviders(): Provider[] {
   return [
     {
       id: 'claude-code',
+      display_name: 'Claude Code',
+      auth: { kind: 'oauth-code' },
       models: [
         { value: 'opus[1m]', label: 'Opus (1M)' },
         { value: 'sonnet', label: 'Sonnet' },

@@ -33,9 +33,12 @@ const ID = "claude-code"
 // (design §4d).
 const LoginSession = tmuxx.LoginSession
 
-// EventAuthChanged is the SSE event published when the machine-level Claude
-// login state changes (pinned SSE contract: `claude.auth.changed {}`).
-const EventAuthChanged = "claude.auth.changed"
+// EventAuthChanged aliases the provider-generic SSE auth event (issue #51
+// decision 7): the wire name is provider.auth.changed and the payload
+// carries this provider's id — the old claude.auth.changed name is gone,
+// SPA listener renamed in lockstep. Kept as an alias so package-internal
+// references and tests read naturally.
+const EventAuthChanged = provider.EventAuthChanged
 
 // Pinned durations (port-spec claude-integration §5). Constructor-seeded
 // struct fields so tests can shrink them without touching production
@@ -119,12 +122,16 @@ type Options struct {
 	// chat surface reads <ProjectsDir>/<cwd-slug>/<sessionId>.jsonl.
 	// Injectable for tests.
 	ProjectsDir string
+	// UserCommandsDir is claude's user-level custom slash-command directory
+	// ($HOME/.claude/commands), scanned by Commands (issue #51 decision 5).
+	// Defaults to the "commands" sibling of RegistryDir; injectable for tests.
+	UserCommandsDir string
 	// LoginDir is the working directory of the login session ($HOME —
 	// login is global, one machine-level credential).
 	LoginDir string
 	// Runner drives tmux for the login session.
 	Runner tmuxx.SessionRunner
-	// Bus receives claude.auth.changed on login success.
+	// Bus receives provider.auth.changed on login success.
 	Bus *events.Bus
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
@@ -135,15 +142,16 @@ type Options struct {
 
 // Provider is the claude-code AgentProvider. Construct with New.
 type Provider struct {
-	claudeBin   string
-	configPath  string
-	registryDir string
-	projectsDir string
-	loginDir    string
-	runner      tmuxx.SessionRunner
-	bus         *events.Bus
-	log         *slog.Logger
-	now         func() time.Time
+	claudeBin       string
+	configPath      string
+	registryDir     string
+	projectsDir     string
+	userCommandsDir string
+	loginDir        string
+	runner          tmuxx.SessionRunner
+	bus             *events.Bus
+	log             *slog.Logger
+	now             func() time.Time
 
 	captureTimeout time.Duration
 	bridgeTimeout  time.Duration
@@ -170,6 +178,12 @@ type Provider struct {
 	// in-flight deep-link capture — the "connecting…" render state.
 	captureMu sync.Mutex
 	capturing map[string]bool
+
+	// intents is the post-resolve verification backstop's in-memory intent
+	// registry (issue #51 decision 3, dialogintent.go): AnswerDialog records
+	// what an answer was meant to be, ReadTranscript verifies the recorded
+	// resolution against it. Zero value ready; bounded internally.
+	intents intentRegistry
 }
 
 var _ provider.AgentProvider = (*Provider)(nil)
@@ -201,36 +215,90 @@ func New(o Options) (*Provider, error) {
 	if now == nil {
 		now = time.Now
 	}
-	// ProjectsDir defaults to the sibling of RegistryDir (~/.claude/sessions →
-	// ~/.claude/projects) so existing callers keep working; main.go sets it
-	// explicitly.
+	// ProjectsDir/UserCommandsDir default to siblings of RegistryDir
+	// (~/.claude/sessions → ~/.claude/projects, ~/.claude/commands) so
+	// existing callers keep working; main.go sets ProjectsDir explicitly.
 	projectsDir := o.ProjectsDir
 	if projectsDir == "" {
 		projectsDir = filepath.Join(filepath.Dir(o.RegistryDir), "projects")
 	}
+	userCommandsDir := o.UserCommandsDir
+	if userCommandsDir == "" {
+		userCommandsDir = filepath.Join(filepath.Dir(o.RegistryDir), "commands")
+	}
 	return &Provider{
-		claudeBin:      o.ClaudeBin,
-		configPath:     o.ConfigPath,
-		registryDir:    o.RegistryDir,
-		projectsDir:    projectsDir,
-		loginDir:       o.LoginDir,
-		runner:         o.Runner,
-		bus:            o.Bus,
-		log:            logger,
-		now:            now,
-		captureTimeout: defaultCaptureTimeout,
-		bridgeTimeout:  defaultBridgeTimeout,
-		loginTimeout:   defaultLoginTimeout,
-		loginPoll:      defaultLoginPoll,
-		authTTL:        defaultAuthTTL,
-		logoutTimeout:  defaultLogoutTimeout,
-		keyDelay:       defaultDialogKeyDelay,
-		capturing:      map[string]bool{},
+		claudeBin:       o.ClaudeBin,
+		configPath:      o.ConfigPath,
+		registryDir:     o.RegistryDir,
+		projectsDir:     projectsDir,
+		userCommandsDir: userCommandsDir,
+		loginDir:        o.LoginDir,
+		runner:          o.Runner,
+		bus:             o.Bus,
+		log:             logger,
+		now:             now,
+		captureTimeout:  defaultCaptureTimeout,
+		bridgeTimeout:   defaultBridgeTimeout,
+		loginTimeout:    defaultLoginTimeout,
+		loginPoll:       defaultLoginPoll,
+		authTTL:         defaultAuthTTL,
+		logoutTimeout:   defaultLogoutTimeout,
+		keyDelay:        defaultDialogKeyDelay,
+		capturing:       map[string]bool{},
 	}, nil
 }
 
 // ID implements provider.AgentProvider.
 func (p *Provider) ID() string { return ID }
+
+// DisplayName implements provider.AgentProvider (issue #51 decision 9): the
+// human name driving all UI copy for this provider.
+func (p *Provider) DisplayName() string { return "Claude Code" }
+
+// AuthFlow implements provider.AgentProvider (issue #51 decision 7): claude
+// logs in via the paste-back OAuth code flow — LoginStart returns the
+// authorize URL, the operator pastes the resulting code into LoginSubmitCode.
+// No extra operator instructions are needed.
+func (p *Provider) AuthFlow() provider.AuthFlow {
+	return provider.AuthFlow{Kind: provider.AuthFlowOAuthCode}
+}
+
+// seedMeta is claude-code's workspace-seeding declaration (issue #51 decision
+// 8), consumed by the ONE generic seeder (issue #51 Phase 2c:
+// internal/seeder.SeedWorkspace takes it per call; the seeder's own claude
+// vars are gone). Byte-identity of the seeded worktree is pinned from both
+// sides: the seeder goldens assert "generic seeder + these values == the
+// pre-#51 bytes" against their OWN inlined literals (no claudecode import),
+// and claudecode/seedmeta_test.go pins THIS declaration to the same literals
+// — a drift in either place fails a test. Changing any value here changes
+// what lab seeds into every claude-code worktree.
+var seedMeta = provider.SeedMeta{
+	ContextFileName: "CLAUDE.local.md",
+	SkillsDir:       ".claude/skills",
+	ExcludeEntries:  []string{".claude/", "CLAUDE.local.md"},
+	SeededPathPatterns: []string{
+		`^\.claude/skills/`,
+		`^\.claude/settings\.local\.json$`,
+		`^CLAUDE\.local\.md$`,
+	},
+	ScrubPatterns: []string{
+		`co-authored-by:[[:space:]]*claude`,
+		`co-authored-by:.*<[^>]*@anthropic\.com>`, // the stable discriminator is the email, not a "Claude" display name
+		`generated with.*claude`,
+		`claude-session:`,
+	},
+}
+
+// SeedMeta implements provider.AgentProvider: claude-code's seeding shapes,
+// returned as a copy with cloned slices so a caller can never mutate the
+// declaration.
+func (p *Provider) SeedMeta() provider.SeedMeta {
+	m := seedMeta
+	m.ExcludeEntries = slices.Clone(m.ExcludeEntries)
+	m.SeededPathPatterns = slices.Clone(m.SeededPathPatterns)
+	m.ScrubPatterns = slices.Clone(m.ScrubPatterns)
+	return m
+}
 
 // Models returns a copy of the model catalog, in dropdown order.
 func (p *Provider) Models() []provider.Option { return slices.Clone(models) }
@@ -292,12 +360,11 @@ func applySpawnOptions(prompt string, options map[string]string) string {
 	return prompt
 }
 
-type authChangedPayload struct {
-	Type string `json:"type"`
-}
-
 func (p *Provider) publishAuthChanged() {
-	p.bus.Publish(events.Event{Type: EventAuthChanged, Payload: authChangedPayload{Type: EventAuthChanged}})
+	p.bus.Publish(events.Event{
+		Type:    provider.EventAuthChanged,
+		Payload: provider.AuthChangedPayload{Type: provider.EventAuthChanged, Provider: ID},
+	})
 }
 
 // sleepOrDone waits d or until ctx is cancelled; reports false on

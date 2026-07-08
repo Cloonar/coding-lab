@@ -27,6 +27,7 @@ export type IconName =
   | 'log-out'
   | 'copy'
   | 'check'
+  | 'plus'
   | 'more-horizontal'
   | 'chevron-down'
   | 'chevrons-left'
@@ -110,6 +111,12 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     </>
   ),
   check: () => <path d="M20 6 9 17l-5-5" />,
+  plus: () => (
+    <>
+      <path d="M5 12h14" />
+      <path d="M12 5v14" />
+    </>
+  ),
   'more-horizontal': () => (
     <>
       <circle cx="12" cy="12" r="1" />

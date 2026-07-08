@@ -321,12 +321,30 @@ export interface ProviderOptionSpec {
   default: string;
 }
 
+/** The provider's auth-flow kinds (issue #51 decision 7). */
+export type ProviderAuthKind = 'oauth-code' | 'oauth-redirect' | 'api-key' | 'external';
+
+/**
+ * Provider-declared auth flow descriptor (issue #51 decision 7): which login
+ * shape the auth card renders. `instructions` carries operator guidance for
+ * the oauth-redirect flow (e.g. an SSH port-forward hint); `credential_ref`
+ * is reserved for the api-key flow (schema-only for now).
+ */
+export interface ProviderAuthFlow {
+  kind: ProviderAuthKind;
+  instructions?: string;
+  credential_ref?: string;
+}
+
 export interface Provider {
   id: string;
+  /** Human name driving all UI copy (issue #51 decision 9) — never hardcode it. */
+  display_name: string;
   models: ProviderOption[];
   efforts: ProviderOption[];
   /** Declared spawn options (always present; may be empty). */
   options: ProviderOptionSpec[];
+  auth: ProviderAuthFlow;
   fallback_open?: ProviderFallbackOpen;
 }
 
@@ -335,43 +353,46 @@ export async function listProviders(): Promise<Provider[]> {
   return res.providers;
 }
 
-// --- M3: Claude auth ---
+// --- M3: provider auth (per-provider-id routes, issue #51 decision 7) ---
 
-export interface ClaudeAuthStatus {
+export interface ProviderAuthStatus {
   logged_in: boolean;
   email: string;
   method: string;
   checked_at: string;
 }
 
-/** force=true bypasses the server's 30s status cache. */
-export function claudeAuthStatus(force = false): Promise<ClaudeAuthStatus> {
-  return request<ClaudeAuthStatus>(
+/** force=true bypasses the server's 30s status cache. Unknown id → 404. */
+export function providerAuthStatus(id: string, force = false): Promise<ProviderAuthStatus> {
+  return request<ProviderAuthStatus>(
     'GET',
-    '/providers/claude/auth/status' + (force ? '?force=1' : ''),
+    `/providers/${encodeURIComponent(id)}/auth/status` + (force ? '?force=1' : ''),
   );
 }
 
 /** 409s when already logged in — the caller refetches status instead. */
-export function claudeLoginStart(): Promise<{ oauth_url: string }> {
-  return request<{ oauth_url: string }>('POST', '/providers/claude/auth/login/start');
+export function providerLoginStart(id: string): Promise<{ oauth_url: string }> {
+  return request<{ oauth_url: string }>(
+    'POST',
+    `/providers/${encodeURIComponent(id)}/auth/login/start`,
+  );
 }
 
-/** 202: the code was delivered; completion arrives via claude.auth.changed. */
-export function claudeLoginCode(code: string): Promise<void> {
-  return request<void>('POST', '/providers/claude/auth/login/code', { code });
+/** 202: the code was delivered; completion arrives via provider.auth.changed. */
+export function providerLoginCode(id: string, code: string): Promise<void> {
+  return request<void>('POST', `/providers/${encodeURIComponent(id)}/auth/login/code`, { code });
 }
 
 /**
- * Drops the machine's current Claude account so a fresh one can be logged in
- * (issue #46). Machine-wide and bare by decision: it does NOT stop running
- * instances — they keep working on their in-memory token until it refreshes,
- * then fail. 200 echoes the now-logged-out status; the server also emits
- * claude.auth.changed so every open card flips live. A logout that could not
- * drop the account is a 500.
+ * Drops the machine's current account for this provider so a fresh one can be
+ * logged in (issue #46). Machine-wide and bare by decision: it does NOT stop
+ * running instances — they keep working on their in-memory token until it
+ * refreshes, then fail. 200 echoes the now-logged-out status; the server also
+ * emits provider.auth.changed so every open card flips live. A logout that
+ * could not drop the account is a 500.
  */
-export function claudeLogout(): Promise<ClaudeAuthStatus> {
-  return request<ClaudeAuthStatus>('POST', '/providers/claude/auth/logout');
+export function providerLogout(id: string): Promise<ProviderAuthStatus> {
+  return request<ProviderAuthStatus>('POST', `/providers/${encodeURIComponent(id)}/auth/logout`);
 }
 
 // --- M3: instances & runs ---
@@ -416,7 +437,7 @@ export interface StartInstanceRequest {
   effort?: string;
 }
 
-/** 201 run JSON | 409 (cap / claude logged out / repo not ready) | 400. */
+/** 201 run JSON | 409 (cap / provider logged out / repo not ready) | 400. */
 export function startInstance(repoID: string, req: StartInstanceRequest): Promise<Run> {
   return request<Run>('POST', `/repos/${encodeURIComponent(repoID)}/instances`, req);
 }
@@ -469,12 +490,30 @@ export interface DialogOption {
   is_other?: boolean;
 }
 
+/** Dialog kinds (issue #51 decision 3). "approval" = generic yes/no approval. */
+export type DialogKind = 'question' | 'plan' | 'approval';
+
+/**
+ * One question of a multi-question dialog. The synthesized free-text "Other"
+ * row (is_other) IS the "free text allowed" signal, same convention as the
+ * flat single-question shape.
+ */
+export interface Question {
+  /** Short chip label rendered above the question text. */
+  header?: string;
+  text: string;
+  options: DialogOption[];
+  multi_select?: boolean;
+}
+
 export interface Dialog {
   tool_id: string;
-  dialog_kind: 'question' | 'plan' | 'unknown';
+  dialog_kind: DialogKind;
   prompt: string;
   options?: DialogOption[];
   multi?: boolean;
+  /** Present ONLY for multi-question dialogs (issue #51 decision 3). */
+  questions?: Question[];
   answerable: boolean;
 }
 
@@ -500,12 +539,13 @@ export interface MessagesResponse {
   cursor: number;
   has_more: boolean;
   /**
-   * The run's live interactive dialog from the PreToolUse spool (ADR-0020),
-   * null when none is pending. Top-level, NOT a message in the stream — Claude
-   * Code never flushes a pending tool_use to the transcript, so this is the only
-   * live source. Present alongside state:"question". Prefer it over the
-   * messages-scan, which stays a dormant fallback for a future flushed tool_use.
-   * Optional on the client (older responses omit it) — treat absent as null.
+   * The run's live interactive dialog from the provider's live-signals spool
+   * (ADR-0020), null when none is pending. Top-level, NOT a message in the
+   * stream — the agent CLI never flushes a pending tool_use to the transcript,
+   * so this is the only live source. Present alongside state:"question".
+   * Prefer it over the messages-scan, which stays a dormant fallback for a
+   * future flushed tool_use. Optional on the client (older responses omit
+   * it) — treat absent as null.
    */
   pending_dialog?: Dialog | null;
   transcript: TranscriptStatus;
@@ -542,11 +582,31 @@ export function replyRun(id: string, text: string): Promise<void> {
   return request<void>('POST', `/runs/${encodeURIComponent(id)}/reply`, { text });
 }
 
+/**
+ * One question's answer inside a multi-question dialog. Association is
+ * POSITIONAL — answers[i] answers questions[i]; there is no question-index
+ * field. Each entry mirrors the flat single-question shape (provider.go
+ * QuestionAnswer is authoritative): a single-select question sends `index` =
+ * the chosen OPTION index (`other_text` rides along only when that row is the
+ * synthesized is_other row); a multi_select question sends `selected` = the
+ * toggled option indices ascending, with `index` absent.
+ */
+export interface QuestionAnswer {
+  index?: number;
+  selected?: number[];
+  other_text?: string;
+}
+
 export interface AnswerRequest {
   tool_id: string;
   index?: number;
   selected?: number[];
   other_text?: string;
+  /**
+   * Per-question answers, positionally aligned with dialog.questions; when
+   * non-empty the flat fields are ignored.
+   */
+  answers?: QuestionAnswer[];
 }
 
 export function answerRun(id: string, req: AnswerRequest): Promise<void> {
@@ -555,6 +615,33 @@ export function answerRun(id: string, req: AnswerRequest): Promise<void> {
 
 export function interruptRun(id: string): Promise<void> {
   return request<void>('POST', `/runs/${encodeURIComponent(id)}/interrupt`);
+}
+
+// --- Slash-command catalog (issue #51 decision 5) ---
+
+/**
+ * One chat-safe slash command of the run's provider catalog. `name` comes
+ * WITHOUT the leading slash; `source` is builtin|project|user; `role` is the
+ * optional semantic tag (only "clear" defined for now) the UI may bind an
+ * affordance to. The server curates out non-chat-safe entries, but the flag
+ * is still serialized.
+ */
+export interface RunCommand {
+  name: string;
+  description?: string;
+  arg_hint?: string;
+  source: string;
+  role?: string;
+  chat_safe: boolean;
+}
+
+/** The run's slash-command catalog (worktree-dependent, server-cached ~30s). */
+export async function fetchRunCommands(id: string): Promise<RunCommand[]> {
+  const res = await request<{ commands: RunCommand[] }>(
+    'GET',
+    `/runs/${encodeURIComponent(id)}/commands`,
+  );
+  return res.commands;
 }
 
 // --- M3: parked ---

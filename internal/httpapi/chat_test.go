@@ -72,7 +72,7 @@ func TestAPI_ChatMessages_pendingDialog(t *testing.T) {
 	// The transcript alone derives 'working' with no dialog message.
 	x.prov.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
 		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "…"}}})
-	x.prov.SetPendingDialog(&provider.Dialog{ToolID: "toolu_1", DialogKind: "question", Answerable: true,
+	x.prov.SetPendingDialog(&provider.Dialog{ToolID: "toolu_1", Kind: provider.DialogKindQuestion, Answerable: true,
 		Prompt: "Pick?", Options: []provider.DialogOption{{Label: "A"}, {Label: "Other", IsOther: true}}})
 
 	resp := x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
@@ -211,6 +211,147 @@ func TestAPI_ChatAnswer(t *testing.T) {
 	// picker by blind index.
 	resp = x.do("POST", "/api/v1/runs/"+runID+"/answer", map[string]any{"index": 0}, h)
 	wantStatus(t, resp, http.StatusBadRequest)
+}
+
+// commandsOf extracts the {"commands":[…]} array as decoded maps.
+func commandsOf(t *testing.T, body map[string]any) []map[string]any {
+	t.Helper()
+	raw, ok := body["commands"].([]any)
+	if !ok {
+		t.Fatalf("commands is not a JSON array (null?): %v", body["commands"])
+	}
+	out := make([]map[string]any, 0, len(raw))
+	for _, e := range raw {
+		out = append(out, e.(map[string]any))
+	}
+	return out
+}
+
+// The composer autocomplete source serves only chat-safe commands (issue #51
+// decision 5) and is cached per run: the second read does not re-hit the
+// provider's filesystem scan.
+func TestAPI_RunCommands(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetCommands([]provider.CommandSpec{
+		{Name: "clear", Description: "Clear the conversation", Source: "builtin", Role: provider.CommandRoleClear, ChatSafe: true},
+		{Name: "compact", Source: "builtin", ChatSafe: true},
+		{Name: "login", Source: "builtin", ChatSafe: false}, // would strand the TUI in a picker
+	}, nil)
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	cmds := commandsOf(t, decodeBody(t, resp))
+	if len(cmds) != 2 {
+		t.Fatalf("commands = %v; want 2 chat-safe (login curated out)", cmds)
+	}
+	if cmds[0]["name"] != "clear" || cmds[0]["role"] != provider.CommandRoleClear || cmds[1]["name"] != "compact" {
+		t.Errorf("commands = %v; want clear(role=clear)+compact", cmds)
+	}
+	for _, c := range cmds {
+		if c["name"] == "login" {
+			t.Errorf("chat-unsafe command leaked: %v", c)
+		}
+	}
+
+	// A second read is served from cache — the provider scan ran exactly once.
+	resp = x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if got := commandsOf(t, decodeBody(t, resp)); len(got) != 2 {
+		t.Errorf("cached read commands = %v; want 2", got)
+	}
+	if n := len(x.prov.CommandsCalls()); n != 1 {
+		t.Errorf("Commands called %d times across two reads; want 1 (cached)", n)
+	}
+}
+
+// No chat-safe commands still serves a non-null empty array (the SPA renders
+// "no commands", never crashes on null).
+func TestAPI_RunCommands_noneChatSafeIsNonNullArray(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetCommands([]provider.CommandSpec{
+		{Name: "login", Source: "builtin", ChatSafe: false},
+	}, nil)
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if cmds := commandsOf(t, decodeBody(t, resp)); len(cmds) != 0 {
+		t.Errorf("commands = %v; want an empty (but non-null) array", cmds)
+	}
+}
+
+func TestAPI_RunCommands_unknownRun404(t *testing.T) {
+	x := newInstanceServer(t)
+	resp := x.do("GET", "/api/v1/runs/run_missing/commands", nil, nil)
+	wantStatus(t, resp, http.StatusNotFound)
+}
+
+// A provider scan error is a 500 and is never cached — the next read retries.
+func TestAPI_RunCommands_providerError(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetCommands(nil, fmt.Errorf("scanning command dirs"))
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
+	wantStatus(t, resp, http.StatusInternalServerError)
+	_ = resp.Body.Close()
+
+	// A retry re-hits the provider (the error was not cached).
+	resp = x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
+	wantStatus(t, resp, http.StatusInternalServerError)
+	_ = resp.Body.Close()
+	if n := len(x.prov.CommandsCalls()); n != 2 {
+		t.Errorf("Commands called %d times; want 2 (errors are not cached)", n)
+	}
+}
+
+// A multi-question dialog is answered in one submit via answers[] (issue #51
+// decision 3): each per-question answer threads into the provider's recorded
+// DialogAnswer.Answers unchanged.
+func TestAPI_ChatAnswer_multiQuestion(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(provider.Chat{
+		State: provider.StateQuestion,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{
+			ToolID: "toolu_multi", Kind: provider.DialogKindQuestion, Answerable: true, Prompt: "2 questions",
+			Questions: []provider.Question{
+				{Text: "Q1", Options: []provider.DialogOption{{Label: "a"}, {Label: "b"}}},
+				{Text: "Q2", MultiSelect: true, Options: []provider.DialogOption{{Label: "c"}, {Label: "d"}, {Label: "Other", IsOther: true}}},
+			},
+		}}},
+	})
+
+	body := map[string]any{
+		"tool_id": "toolu_multi",
+		"answers": []map[string]any{
+			{"index": 1},
+			{"selected": []int{0, 2}, "other_text": "custom"},
+		},
+	}
+	resp := x.do("POST", "/api/v1/runs/"+runID+"/answer", body, csrfHeaders(x.ts.URL))
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+
+	got := x.prov.Answers()
+	if len(got) != 1 {
+		t.Fatalf("answers recorded = %d; want 1", len(got))
+	}
+	a := got[0]
+	if len(a.Answers) != 2 {
+		t.Fatalf("per-question answers = %+v; want 2", a.Answers)
+	}
+	if a.Answers[0].Index != 1 {
+		t.Errorf("answers[0].Index = %d; want 1", a.Answers[0].Index)
+	}
+	if len(a.Answers[1].Selected) != 2 || a.Answers[1].Selected[0] != 0 || a.Answers[1].Selected[1] != 2 {
+		t.Errorf("answers[1].Selected = %v; want [0 2]", a.Answers[1].Selected)
+	}
+	if a.Answers[1].OtherText != "custom" {
+		t.Errorf("answers[1].OtherText = %q; want custom", a.Answers[1].OtherText)
+	}
 }
 
 func TestAPI_ChatSessionGone_conflict(t *testing.T) {

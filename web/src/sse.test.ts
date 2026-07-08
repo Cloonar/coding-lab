@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { connectEvents, type EventSourceLike, type LabEvent } from './sse';
+import { EVENT_TYPES, connectEvents, type EventSourceLike, type LabEvent } from './sse';
 
 class FakeEventSource implements EventSourceLike {
   onopen: (() => void) | null = null;
@@ -287,6 +287,28 @@ describe('connectEvents subscriptions', () => {
 
     expect(repoEvents).toEqual([{ type: 'repo.changed', repoID: 'repo_abc' }]);
     expect(heartbeats).toEqual([{ type: 'heartbeat' }]);
+
+    conn.close();
+  });
+
+  it('registers the provider-generic auth event and delivers its provider id (issue #51)', () => {
+    // The rename is a clean break: claude.auth.changed is gone from the wire
+    // vocabulary; provider.auth.changed carries the provider id.
+    expect(EVENT_TYPES).toContain('provider.auth.changed');
+    expect(EVENT_TYPES).not.toContain('claude.auth.changed');
+
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    const seen: LabEvent[] = [];
+    conn.subscribe('provider.auth.changed', (e) => seen.push(e));
+
+    instances[0]!.open();
+    instances[0]!.emit(
+      'provider.auth.changed',
+      '{"type":"provider.auth.changed","provider":"claude-code"}',
+    );
+    expect(seen).toEqual([{ type: 'provider.auth.changed', provider: 'claude-code' }]);
 
     conn.close();
   });

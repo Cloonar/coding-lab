@@ -280,8 +280,9 @@ func TestCompat_SlugForDir(t *testing.T) {
 // shapes lab folds a real 2.1.198-shaped transcript through. Drives the parser
 // from a captured fixture covering every mapped event: bridge lifecycle, user
 // text, hidden thinking, assistant text, tool chips with ok/error results, an
-// isMeta skip, a local slash-command echo + its captured output skip, a
-// surfaced API error, and a pending dialog.
+// isMeta skip, a local slash-command echo + its captured output (rendered as
+// a user text + lifecycle pair since issue #51 decision 2), a surfaced API
+// error, and a pending dialog.
 func TestCompat_TranscriptFixture_maps(t *testing.T) {
 	f, err := os.Open(filepath.Join("testdata", "transcript-2.1.198.jsonl"))
 	if err != nil {
@@ -293,12 +294,11 @@ func TestCompat_TranscriptFixture_maps(t *testing.T) {
 		t.Fatalf("ParseTranscript: %v", err)
 	}
 
-	if chat.Cursor != 9 || len(chat.Messages) != 9 {
-		t.Fatalf("mapped %d messages (cursor %d); want 9 (the isMeta and local slash-command lines are dropped)", len(chat.Messages), chat.Cursor)
+	if chat.Cursor != 11 || len(chat.Messages) != 11 {
+		t.Fatalf("mapped %d messages (cursor %d); want 11 (the isMeta line is dropped; the echo maps to a command line + output)", len(chat.Messages), chat.Cursor)
 	}
-	// A local slash-command echo / its output must never surface as a bubble —
-	// the raw <command-…> / <local-command-stdout> tags stay out of the chat
-	// (issue #45).
+	// The slash-command echo renders PARSED (issue #51 decision 2) — the raw
+	// <command-…> / <local-command-stdout> tags never leak into the chat.
 	for i, msg := range chat.Messages {
 		if strings.Contains(msg.Text, "<command-name>") ||
 			strings.Contains(msg.Text, "<command-message>") ||
@@ -326,21 +326,56 @@ func TestCompat_TranscriptFixture_maps(t *testing.T) {
 	if got := m[4].Tool.Title; got != "Ran labctl issue create --title \"Test issue\" --labels needs-triage" {
 		t.Errorf("tool title = %q; want the Bash first-line chip", got)
 	}
-	if m[6].Kind != provider.MessageTool || m[6].Tool == nil || m[6].Tool.Status != "error" {
-		t.Errorf("msg6 = %+v; want an error tool chip (is_error result)", m[6])
+	// The /help echo: a visible user text message with the command line, then
+	// its captured output as a lifecycle message (issue #51 decision 2).
+	if m[6].Kind != provider.MessageText || m[6].Role != "user" || m[6].Text != "/help" {
+		t.Errorf("msg6 = %+v; want the echoed command line \"/help\" as user text", m[6])
 	}
-	if m[7].Kind != provider.MessageLifecycle || !m[7].Error {
-		t.Errorf("msg7 = %+v; want a surfaced API error", m[7])
+	if m[7].Kind != provider.MessageLifecycle || m[7].Error || m[7].Text != "Available commands: /clear, /compact, /help" {
+		t.Errorf("msg7 = %+v; want the command stdout as a non-error lifecycle", m[7])
 	}
-	d := m[8]
+	if m[8].Kind != provider.MessageTool || m[8].Tool == nil || m[8].Tool.Status != "error" {
+		t.Errorf("msg8 = %+v; want an error tool chip (is_error result)", m[8])
+	}
+	if m[9].Kind != provider.MessageLifecycle || !m[9].Error {
+		t.Errorf("msg9 = %+v; want a surfaced API error", m[9])
+	}
+	d := m[10]
 	if d.Kind != provider.MessageDialog || d.Dialog == nil {
-		t.Fatalf("msg8 = %+v; want a dialog", d)
+		t.Fatalf("msg10 = %+v; want a dialog", d)
 	}
 	if !d.Dialog.Answerable || d.Dialog.Multi || len(d.Dialog.Options) != 3 {
 		t.Errorf("dialog = %+v; want an answerable single-select with 2 options + Other", d.Dialog)
 	}
 	if !d.Dialog.Options[2].IsOther {
 		t.Errorf("dialog last option = %+v; want the synthesized Other row", d.Dialog.Options[2])
+	}
+}
+
+// Command echoes are excluded from state derivation even though they render
+// (issue #45's stuck-composer fix, kept by issue #51 decision 2): the fixture
+// tail below a real assistant turn is only the echo + output, and the state
+// must stay the assistant's — while a fresh post-/clear transcript holding
+// ONLY the echo derives idle, never `working`.
+func TestCompat_TranscriptEcho_stateNeutral(t *testing.T) {
+	echo := `{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n  <command-message>clear</command-message>\n  <command-args></command-args>"}}` + "\n" +
+		`{"type":"user","message":{"role":"user","content":"<local-command-stdout>ok</local-command-stdout>"}}` + "\n"
+	turns := `{"type":"user","message":{"role":"user","content":"go"}}` + "\n" +
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n"
+
+	chat, err := claudecode.ParseTranscript(strings.NewReader(turns + echo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.State != provider.StateNeedsInput {
+		t.Errorf("echo-tailed state = %q; want %q (pre-echo state kept)", chat.State, provider.StateNeedsInput)
+	}
+	chat, err = claudecode.ParseTranscript(strings.NewReader(echo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.State != provider.StateIdle {
+		t.Errorf("post-/clear echo-only state = %q; want %q (the issue-#45 stuck-composer pin)", chat.State, provider.StateIdle)
 	}
 }
 
@@ -360,7 +395,7 @@ func TestCompat_HookPayload_maps(t *testing.T) {
 	if d.ToolID != "toolu_01KU2pbDQNUNFim79s9FKf6i" {
 		t.Errorf("ToolID = %q; want the payload tool_use_id", d.ToolID)
 	}
-	if d.DialogKind != "question" || !d.Answerable || d.Multi {
+	if d.Kind != "question" || !d.Answerable || d.Multi {
 		t.Errorf("dialog = %+v; want an answerable single-select question", d)
 	}
 	if d.Prompt != "Which flavor of test question do you prefer?" {
@@ -375,12 +410,13 @@ func TestCompat_HookPayload_maps(t *testing.T) {
 	}
 }
 
-// Dialog answer keystrokes (compat.md §7): the send-keys recipe for a picker.
-// Normalise to the top, navigate down to the choice, Enter; multi-select
-// toggles with Space; Other selects then types. The normalise climb covers the
-// modeled options PLUS the un-modeled trailing "Chat about this" row Claude Code
-// 2.1.198 synthesizes below Other (ADR-0020) — with 3 modeled options it is
-// Up × 3 (3−1 + 1 trailing synth row), not Up × 2.
+// Dialog answer keystrokes (compat.md §7, live-verified 2026-07-08 on
+// 2.1.198): per-shape recipes over per-shape picker geometry. The plain
+// single-select recipe is UNCHANGED from the pre-#51 snapshot (back-compat
+// proof); the Other and multi-select recipes pin the two live-bug FIXES —
+// type-first free text (Enter on the empty row declines the dialog) and the
+// Submit-row commit (Enter on an option row toggles instead of committing) —
+// and the multi-question/plan/review snapshots pin the new shapes.
 func TestCompat_DialogKeystrokes(t *testing.T) {
 	single := provider.Dialog{Answerable: true, Options: []provider.DialogOption{
 		{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true},
@@ -389,26 +425,325 @@ func TestCompat_DialogKeystrokes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("single-select: %v", err)
 	}
-	want := []claudecode.KeyOp{{Named: []string{"Up", "Up", "Up"}}, {Named: []string{"Down"}}, {Named: []string{"Enter"}}}
+	// No climb (LIVE 2026-07-08: Up wraps, and the picker opens on the top
+	// row) — a pure downward walk: Down to the chosen row, Enter.
+	want := []claudecode.KeyOp{{Named: []string{"Down"}}, {Named: []string{"Enter"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("single-select recipe = %v; want %v", got, want)
 	}
 
+	// Other/free-text (LIVE BUG FIX 2026-07-08): paste FIRST, then Enter — the
+	// old [Enter][text][Enter] declined the whole dialog on the empty row.
+	got, _ = claudecode.DialogKeystrokes(single, provider.DialogAnswer{Index: 2, OtherText: "custom"})
+	want = []claudecode.KeyOp{{Named: []string{"Down", "Down"}},
+		{Text: "custom"}, {Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Other recipe = %v; want %v", got, want)
+	}
+
+	// Multi-select (LIVE BUG FIX 2026-07-08): commit via the unnumbered Submit
+	// row (navigation index = row count, here 3), never a bare Enter (Enter
+	// toggles). No climb; from the top: toggle a (Space), Down×2 to c, toggle,
+	// Down×(3−2) onto Submit, Enter. A single multiSelect question then ends on
+	// the review screen ([Enter] — cursor defaults to "Submit answers").
 	multi := provider.Dialog{Answerable: true, Multi: true, Options: []provider.DialogOption{
 		{Label: "a"}, {Label: "b"}, {Label: "c"},
 	}}
 	got, _ = claudecode.DialogKeystrokes(multi, provider.DialogAnswer{Selected: []int{0, 2}})
-	want = []claudecode.KeyOp{{Named: []string{"Up", "Up", "Up"}}, {Named: []string{"Space"}},
-		{Named: []string{"Down", "Down"}}, {Named: []string{"Space"}}, {Named: []string{"Enter"}}}
+	want = []claudecode.KeyOp{{Named: []string{"Space"}},
+		{Named: []string{"Down", "Down"}}, {Named: []string{"Space"}},
+		{Named: []string{"Down"}}, {Named: []string{"Enter"}}, // onto Submit, commit
+		{Named: []string{"Enter"}}} // review: Submit answers (cursor already there)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("multi-select recipe = %v; want %v", got, want)
 	}
+}
 
-	got, _ = claudecode.DialogKeystrokes(single, provider.DialogAnswer{Index: 2, OtherText: "custom"})
-	want = []claudecode.KeyOp{{Named: []string{"Up", "Up", "Up"}}, {Named: []string{"Down", "Down"}},
-		{Named: []string{"Enter"}}, {Text: "custom"}, {Named: []string{"Enter"}}}
+// Multi-question sequencing (compat.md §7, live 2026-07-08): per-question
+// recipes concatenated in question order — committing a question auto-advances
+// the form, so there are no transition keys — then the review screen [Enter].
+// No climb on any picker (Up wraps; pickers open on the top row).
+func TestCompat_DialogKeystrokes_multiQuestion(t *testing.T) {
+	d := provider.Dialog{
+		Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+		Questions: []provider.Question{
+			{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{
+				{Label: "Red"}, {Label: "Blue"}, {Label: "Other", IsOther: true}}},
+			{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{
+				{Label: "Apple"}, {Label: "Banana"}, {Label: "Cherry"}, {Label: "Other", IsOther: true}}},
+		},
+	}
+	got, err := claudecode.DialogKeystrokes(d, provider.DialogAnswer{Answers: []provider.QuestionAnswer{
+		{Index: 0},              // Q0: Red (single-select, resolves on Enter, auto-advances)
+		{Selected: []int{0, 2}}, // Q1: Apple + Cherry, committed via the Submit row
+	}})
+	if err != nil {
+		t.Fatalf("multi-question: %v", err)
+	}
+	want := []claudecode.KeyOp{
+		// Q0: Red is the top row → Enter selects it (auto-advances to Q1).
+		{Named: []string{"Enter"}},
+		// Q1: from the top, toggle Apple (Space), Down×2 to Cherry, toggle;
+		// Down×2 onto Submit (index 4), Enter.
+		{Named: []string{"Space"}},
+		{Named: []string{"Down", "Down"}}, {Named: []string{"Space"}},
+		{Named: []string{"Down", "Down"}}, {Named: []string{"Enter"}},
+		// Review: cursor already on "Submit answers"; a bare Enter submits.
+		{Named: []string{"Enter"}},
+	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Other recipe = %v; want %v", got, want)
+		t.Errorf("multi-question recipe = %v; want %v", got, want)
+	}
+}
+
+// Plan-approval keystrokes (compat.md §7, live 2026-07-08): four pinned rows,
+// no review screen, no climb (Enter on the chosen row resolves directly). Row
+// 3 follows the Other path: type the feedback first, then Enter.
+func TestCompat_DialogKeystrokes_plan(t *testing.T) {
+	plan := provider.Dialog{Kind: provider.DialogKindPlan, Answerable: true, Prompt: "# Plan",
+		Options: []provider.DialogOption{
+			{Label: "Approve — auto-accept edits"},
+			{Label: "Approve — review each edit"},
+			{Label: "Reject — refine the plan"},
+			{Label: "Reject with feedback", IsOther: true},
+		}}
+	got, err := claudecode.DialogKeystrokes(plan, provider.DialogAnswer{Index: 0})
+	if err != nil {
+		t.Fatalf("plan approve: %v", err)
+	}
+	// Row 0 is the top row → Enter approves directly (no climb, no review).
+	want := []claudecode.KeyOp{{Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("plan approve recipe = %v; want %v", got, want)
+	}
+
+	got, err = claudecode.DialogKeystrokes(plan, provider.DialogAnswer{Index: 3, OtherText: "tighten the tests"})
+	if err != nil {
+		t.Fatalf("plan feedback: %v", err)
+	}
+	want = []claudecode.KeyOp{{Named: []string{"Down", "Down", "Down"}},
+		{Text: "tighten the tests"}, {Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("plan feedback recipe = %v; want %v", got, want)
+	}
+}
+
+// Multi-question hook payload → Dialog (compat.md §7/§9): the 2-question form
+// captured live 2026-07-08 (the tool_input is byte-identical between the
+// PreToolUse payload and the transcript tool_use — one mapper, two sources;
+// this fixture's input is the live transcript's, wrapped in the §9 payload
+// shape). Since issue #51 the form maps to Kind=question with per-question
+// Questions and IS answerable.
+func TestCompat_HookPayload_multiQuestion_maps(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "hook-pretooluse-multiquestion-2.1.198.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := claudecode.DialogFromHookPayload(b)
+	if !ok {
+		t.Fatal("DialogFromHookPayload: not recognised as a dialog")
+	}
+	if d.Kind != "question" || !d.Answerable || d.Prompt != "2 questions" {
+		t.Fatalf("dialog = %+v; want an answerable question form with the summary prompt", d)
+	}
+	if len(d.Options) != 0 || d.Multi {
+		t.Errorf("flat fields = %+v/%v; want empty (the form lives in Questions)", d.Options, d.Multi)
+	}
+	if len(d.Questions) != 2 {
+		t.Fatalf("questions = %+v; want 2", d.Questions)
+	}
+	q0, q1 := d.Questions[0], d.Questions[1]
+	if q0.Header != "Color" || q0.Text != "Which color do you prefer?" || q0.MultiSelect {
+		t.Errorf("q0 = %+v; want the single-select Color question", q0)
+	}
+	// Listed options + the synthesized Other row, per question. lab's label is
+	// the stable "Other" (the 2.1.198 TUI renders "Type something." — a
+	// documented divergence, compat §7; the recipe navigates by index).
+	if len(q0.Options) != 3 || q0.Options[0].Label != "Red" || q0.Options[1].Description != "cool" || !q0.Options[2].IsOther || q0.Options[2].Label != "Other" {
+		t.Errorf("q0 options = %+v; want Red/Blue + Other", q0.Options)
+	}
+	if q1.Header != "Fruits" || !q1.MultiSelect || len(q1.Options) != 4 || !q1.Options[3].IsOther {
+		t.Errorf("q1 = %+v; want the multiSelect Fruits question with Apple/Banana/Cherry + Other", q1)
+	}
+}
+
+// ExitPlanMode payload → Dialog (compat.md §7): Kind=plan, the plan markdown
+// as the prompt, and the four PINNED picker rows (live 2026-07-08 under lab's
+// exact spawn shape) — answerable since issue #51. The input's planFilePath is
+// deliberately ignored.
+func TestCompat_HookPayload_planDialog_maps(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "hook-pretooluse-exitplanmode-2.1.198.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := claudecode.DialogFromHookPayload(b)
+	if !ok {
+		t.Fatal("DialogFromHookPayload: not recognised as a dialog")
+	}
+	if d.Kind != "plan" || !d.Answerable || d.Multi {
+		t.Fatalf("dialog = %+v; want an answerable single-select plan", d)
+	}
+	if !strings.HasPrefix(d.Prompt, "# Plan: Add README.md note") {
+		t.Errorf("Prompt = %q; want the plan markdown", d.Prompt)
+	}
+	// The four rows, 1:1 by index with the real picker — lab's own semantic
+	// labels (the TUI's row-0 text drifts with session state; compat §7).
+	wantRows := []string{
+		"Approve — auto-accept edits",
+		"Approve — review each edit",
+		"Reject — refine the plan",
+		"Reject with feedback",
+	}
+	if len(d.Options) != len(wantRows) {
+		t.Fatalf("options = %+v; want the 4 pinned rows", d.Options)
+	}
+	for i, want := range wantRows {
+		if d.Options[i].Label != want {
+			t.Errorf("row %d = %q; want %q", i, d.Options[i].Label, want)
+		}
+		if d.Options[i].Description != "" {
+			t.Errorf("row %d carries an invented description %q; the live picker shows none", i, d.Options[i].Description)
+		}
+	}
+	if d.Options[0].IsOther || d.Options[1].IsOther || d.Options[2].IsOther {
+		t.Errorf("rows 0-2 must not be free-text rows: %+v", d.Options)
+	}
+	if !d.Options[3].IsOther {
+		t.Errorf("row 3 = %+v; want the free-text feedback row (IsOther)", d.Options[3])
+	}
+}
+
+// The full live transcripts (captured 2026-07-08, 2.1.198 — the issue #51
+// dialog verification runs) parse through the real mapper: every resolved
+// dialog is a tool chip whose Output carries the recorded resolution string,
+// with is_error only on denials. These pin the RESOLUTION shapes the
+// verification backstop reads (compat §5): the answered content string, the
+// user-rejected denial, the 60s afkTimeout, and the plan approve/reject pair.
+func TestCompat_LiveTranscripts_resolutionShapes(t *testing.T) {
+	parse := func(name string) provider.Chat {
+		t.Helper()
+		f, err := os.Open(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = f.Close() }()
+		chat, err := claudecode.ParseTranscript(f)
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", name, err)
+		}
+		return chat
+	}
+	tool := func(chat provider.Chat, seq int64) *provider.ToolInfo {
+		t.Helper()
+		for _, m := range chat.Messages {
+			if m.Seq == seq {
+				if m.Tool == nil {
+					t.Fatalf("seq %d = %+v; want a tool chip", seq, m)
+				}
+				return m.Tool
+			}
+		}
+		t.Fatalf("no message with seq %d", seq)
+		return nil
+	}
+
+	// 2-question form answered + a decline + a free-text "Ferret" answer.
+	chat := parse("transcript-askuserquestion-live-2.1.198.jsonl")
+	if chat.Cursor != 11 {
+		t.Fatalf("askuserquestion cursor = %d; want 11", chat.Cursor)
+	}
+	answered := tool(chat, 4)
+	if answered.Status != "ok" ||
+		!strings.Contains(answered.Output, `"Which color do you prefer?"="Red"`) ||
+		!strings.Contains(answered.Output, `"Which fruits do you like?"="Apple, Cherry"`) {
+		t.Errorf("answered form chip = %+v; want ok with the recorded answers string", answered)
+	}
+	declined := tool(chat, 7)
+	if declined.Status != "error" || !strings.Contains(declined.Output, "The user doesn't want to proceed") {
+		t.Errorf("declined chip = %+v; want error with the denial string", declined)
+	}
+	ferret := tool(chat, 10)
+	if ferret.Status != "ok" || !strings.Contains(ferret.Output, `"Favorite pet?"="Ferret"`) {
+		t.Errorf("free-text chip = %+v; want the typed answer recorded verbatim", ferret)
+	}
+
+	// Single-question multiSelect: one 60s afkTimeout, one Submit-row answer.
+	chat = parse("transcript-multiselect-timeout-live-2.1.198.jsonl")
+	timeout := tool(chat, 2)
+	if timeout.Status != "ok" || !strings.HasPrefix(timeout.Output, "No response after 60s") {
+		t.Errorf("timeout chip = %+v; want the afkTimeout content (NOT an error — claude proceeds)", timeout)
+	}
+	submitted := tool(chat, 5)
+	if submitted.Status != "ok" || !strings.Contains(submitted.Output, `"Which toppings?"="Olives"`) {
+		t.Errorf("submit-row chip = %+v; want the committed multi-select answer", submitted)
+	}
+
+	// ExitPlanMode: reject-with-feedback, then the revised plan approved.
+	chat = parse("transcript-exitplanmode-live-2.1.198.jsonl")
+	rejected := tool(chat, 7)
+	if rejected.Status != "error" ||
+		!strings.Contains(rejected.Output, "To tell you how to proceed, the user said:\nAlso add the current date to the note") {
+		t.Errorf("plan reject chip = %+v; want the denial with the typed feedback", rejected)
+	}
+	approved := tool(chat, 9)
+	if approved.Status != "ok" || !strings.HasPrefix(approved.Output, "User has approved your plan") {
+		t.Errorf("plan approve chip = %+v; want the approval content", approved)
+	}
+}
+
+// Builtin slash-command table pin (compat.md §10, bundle-extracted 2.1.198):
+// /clear's exact row (description verbatim, the role=clear tag, its arg
+// hint), pinned-order builtins-first, and the exact chat-safe set — the
+// curation is a per-row verdict, so any drift (a new safe command, a flipped
+// verdict) must be a conscious edit here and in §10.
+func TestCompat_BuiltinCommands_pinned(t *testing.T) {
+	cmds := claudecode.BuiltinCommands()
+	if len(cmds) == 0 || cmds[0].Name != "clear" {
+		t.Fatalf("builtins[0] = %+v; want /clear first (pinned order)", cmds)
+	}
+	clear := cmds[0]
+	if clear.Description != "Start a new session with empty context; previous session stays on disk (resumable with /resume)" {
+		t.Errorf("clear description = %q; want the 2.1.198 bundle text verbatim", clear.Description)
+	}
+	if clear.ArgHint != "[name]" || clear.Role != provider.CommandRoleClear || !clear.ChatSafe || clear.Source != "builtin" {
+		t.Errorf("clear row = %+v; want [name]/role=clear/chat-safe/builtin", clear)
+	}
+
+	wantSafe := []string{"clear", "compact", "context", "usage", "status", "export",
+		"release-notes", "init", "review", "security-review"}
+	var gotSafe []string
+	for _, c := range cmds {
+		if c.Source != "builtin" {
+			t.Errorf("builtin table carries a non-builtin source: %+v", c)
+		}
+		if c.ChatSafe {
+			gotSafe = append(gotSafe, c.Name)
+		}
+		if c.Name == "clear" && c.Role != provider.CommandRoleClear {
+			t.Errorf("clear lost its role tag: %+v", c)
+		}
+		if c.Name != "clear" && c.Role != "" {
+			t.Errorf("%s carries an undefined role %q; only clear is tagged", c.Name, c.Role)
+		}
+	}
+	if !reflect.DeepEqual(gotSafe, wantSafe) {
+		t.Errorf("chat-safe builtin set drifted:\n got  %v\n want %v", gotSafe, wantSafe)
+	}
+	// Curated-out rows that must stay present-but-unsafe (the API filters;
+	// the catalog stays honest): the picker/editor/UI and lifecycle commands.
+	unsafe := map[string]bool{}
+	for _, c := range cmds {
+		if !c.ChatSafe {
+			unsafe[c.Name] = true
+		}
+	}
+	for _, name := range []string{"model", "config", "permissions", "hooks", "mcp", "agents",
+		"memory", "resume", "rewind", "statusline", "privacy-settings", "add-dir", "ide",
+		"feedback", "doctor", "login", "logout", "exit", "upgrade", "install-github-app",
+		"terminal-setup", "usage-credits", "plan"} {
+		if !unsafe[name] {
+			t.Errorf("expected curated-out builtin %q missing from the table", name)
+		}
 	}
 }
 

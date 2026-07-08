@@ -27,6 +27,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
@@ -125,6 +126,15 @@ type Options struct {
 	// lab_clones_in_flight). Nil is a no-op (the report methods are
 	// nil-safe).
 	Metrics *metrics.Metrics
+	// Providers resolves a repo's provider id (repos.provider) to its
+	// AgentProvider, whose SeedMeta supplies the incogni pre-push hook's
+	// scrub + seeded-path patterns (issue #51 decision 8: the seeder is
+	// generic; the provider declares what to scrub). Nil is the degraded boot
+	// with no provider configured (cmd/lab: "instance features disabled") —
+	// an incogni hook then guards nothing on content, which is inert because
+	// no agent runs in that mode. A repo naming a provider the registry does
+	// not carry is a wiring error the install surfaces.
+	Providers *provider.Registry
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -144,7 +154,8 @@ type Service struct {
 	credentialKeep func(filename string) bool
 	liveInstances  func(ctx context.Context, repoID string) (int, error)
 	stopInstances  func(ctx context.Context, repoID string) (int, error)
-	metrics        *metrics.Metrics // nil-safe report methods
+	metrics        *metrics.Metrics   // nil-safe report methods
+	providers      *provider.Registry // nil in the no-provider degraded boot
 
 	// mu guards jobs: the single-flight registry of running clone jobs,
 	// keyed by repo id.
@@ -193,6 +204,7 @@ func New(o Options) (*Service, error) {
 		liveInstances:  o.LiveInstances,
 		stopInstances:  o.StopInstances,
 		metrics:        o.Metrics,
+		providers:      o.Providers,
 		jobs:           make(map[string]*cloneJob),
 	}, nil
 }
@@ -615,13 +627,41 @@ func (s *Service) StartupHeal(ctx context.Context) error {
 
 // installIncogniHook writes the pre-push guard AND pins the bare repo's local
 // core.hooksPath to the absolute hooks dir, so a global/system core.hooksPath
-// (husky &c.) cannot route agent pushes past the guard (D15 §9 measure 7).
+// (husky &c.) cannot route agent pushes past the guard (D15 §9 measure 7). The
+// guard's scrub + seeded-path patterns come from the repo's provider (issue
+// #51 decision 8) — resolved from repos.provider, so each repo is guarded
+// against exactly what its agent CLI stamps.
 func (s *Service) installIncogniHook(ctx context.Context, id string) error {
+	meta, err := s.incogniSeedMeta(ctx, id)
+	if err != nil {
+		return err
+	}
 	bareDir := s.bareDir(id)
-	if err := seeder.InstallPrePushHook(bareDir); err != nil {
+	if err := seeder.InstallPrePushHook(bareDir, meta.ScrubPatterns, meta.SeededPathPatterns); err != nil {
 		return err
 	}
 	return s.git.PinHooksPath(ctx, bareDir, s.gitEnv)
+}
+
+// incogniSeedMeta resolves the seeding metadata for repo id's provider — the
+// source of the incogni hook's scrub + seeded-path patterns (issue #51
+// decision 8). A repo names its provider (repos.provider); the registry maps
+// it to the declaration. Without a registry (the no-provider degraded boot)
+// there is nothing to resolve and the zero meta yields a content-inert guard;
+// a repo naming a provider the registry does not carry is a wiring error.
+func (s *Service) incogniSeedMeta(ctx context.Context, id string) (provider.SeedMeta, error) {
+	if s.providers == nil {
+		return provider.SeedMeta{}, nil
+	}
+	repo, err := s.store.RepoByID(ctx, id)
+	if err != nil {
+		return provider.SeedMeta{}, fmt.Errorf("resolving provider for incogni hook: %w", err)
+	}
+	p, ok := s.providers.Get(repo.Provider)
+	if !ok {
+		return provider.SeedMeta{}, fmt.Errorf("repo %s names unknown provider %q", id, repo.Provider)
+	}
+	return p.SeedMeta(), nil
 }
 
 // removeIncogniHook removes lab's guard and unpins core.hooksPath, restoring
