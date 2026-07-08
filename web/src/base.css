@@ -1901,27 +1901,64 @@ a.chip.cr-count:hover {
   padding: var(--space-3) 0;
 }
 
-/* Messages: assistant left, user right-aligned bubble. */
+/* Messages (issue #41 Phase 3): assistant text is bubble-less serif prose on
+   the page; only the user reply keeps a bubble — a soft warm neutral, never
+   accent (accent is reserved for actions/attention). Order matters: .thinking
+   and .pending follow .role-* so they win the equal-specificity overrides. */
 .chat-msg {
-  max-width: 88%;
-  padding: 0.5rem 0.7rem;
-  border-radius: var(--radius-control);
-  border: 1px solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow);
+  max-width: 100%;
+  min-width: 0;
 }
+/* Assistant / default role: full-column serif prose, no card. The serif family
+   is scoped to the prose blocks (below) so code blocks, copy buttons and lang
+   labels keep the system sans/mono stacks — UI chrome never turns serif. */
+.chat-msg.role-assistant {
+  font-size: 16.5px;
+  color: var(--text);
+}
+.chat-msg.role-assistant .md-p,
+.chat-msg.role-assistant .md-list,
+.chat-msg.role-assistant .md-quote,
+.chat-msg.role-assistant .md-table {
+  font-family: var(--font-serif);
+}
+.chat-msg.role-assistant .md-p,
+.chat-msg.role-assistant .md-list li {
+  line-height: 1.65;
+}
+/* User reply: soft warm-neutral bubble, right-aligned, system sans. Light uses
+   the slightly deeper --idle-bg (reads as a bubble on bone: 13.5:1 text on the
+   fill, 1.17:1 fill vs --bg); dark uses the pinned --chip-bg tone (9.8:1). */
 .chat-msg.role-user {
   align-self: flex-end;
-  background: var(--accent);
-  color: var(--accent-text);
-  border-color: var(--accent);
+  max-width: 85%;
+  padding: 0.5rem 0.8rem;
+  border-radius: 16px;
+  background: var(--idle-bg);
+  color: var(--text);
 }
+@media (prefers-color-scheme: dark) {
+  .chat-msg.role-user {
+    background: var(--chip-bg);
+  }
+}
+/* Thinking: a quiet serif-italic aside, no bubble, a notch smaller than prose.
+   No copy button and (almost) never code here, so the whole block — tag
+   included — can carry the italic. */
 .chat-msg.thinking {
   align-self: stretch;
   max-width: 100%;
-  background: var(--idle-bg);
-  color: var(--idle-text);
-  border-style: dashed;
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 14.5px;
+  color: var(--muted);
+}
+/* Queued first message (Phase 2b, folded in here in Phase 3): a real user
+   bubble parked until the New-run composer's text auto-sends. Held dim with its
+   "Sends when Claude is ready" tag so it reads as deliberately pending, not
+   disabled. (Moved from the New-run composer section.) */
+.chat-msg.role-user.pending {
+  opacity: 0.7;
 }
 .chat-msg-tag {
   display: block;
@@ -1936,14 +1973,15 @@ a.chip.cr-count:hover {
   overflow-wrap: anywhere;
 }
 
-/* Tool activity: a one-line chip expanding on tap to truncated in/out. */
+/* Tool activity (issue #41 Phase 3): a quiet bordered mono row — a transparent
+   outline expanding on tap. No accent; only an error tints the text red. */
 .chat-tool {
   align-self: flex-start;
   max-width: 100%;
   width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-  background: var(--chip-bg);
+  background: transparent;
 }
 .tool-summary {
   display: flex;
@@ -1952,7 +1990,9 @@ a.chip.cr-count:hover {
   min-height: 44px;
   padding: 0.3rem 0.6rem;
   cursor: pointer;
-  color: var(--chip-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 .tool-summary .tool-title {
   flex: 1;
@@ -1966,10 +2006,12 @@ a.chip.cr-count:hover {
 .tool-status {
   font-weight: 600;
 }
+/* Expanded I/O: a subtly recessed mono panel under the summary. */
 .tool-body {
   margin: 0;
   padding: 0.4rem 0.6rem;
   border-top: 1px solid var(--border);
+  background: var(--hover);
   overflow-x: auto;
   white-space: pre;
   font-size: 0.8rem;
@@ -2142,9 +2184,11 @@ a.chip.cr-count:hover {
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
+/* Chat markdown headings ride the serif too — they live in assistant prose. */
 .md-h {
   margin: 0.2rem 0;
   line-height: 1.3;
+  font-family: var(--font-serif);
   font-weight: 650;
   overflow-wrap: anywhere;
 }
@@ -2206,12 +2250,16 @@ h6.md-h {
   color: var(--chip-text);
   overflow-wrap: anywhere;
 }
+/* The user bubble now shares the chip tint, so inline code falls back to the
+   page bg there to stay legible against it (dark: recessed; light: lighter). */
+.role-user .md-code {
+  background: var(--bg);
+}
 
 /* Fenced code block: header bar (language + copy) over a horizontally
    scrollable <pre>. No syntax highlighting (decision 4) — plain monospace. */
-/* Code surfaces set their OWN neutral colors — never inheriting the accent
-   user bubble's white text, which would leave a white-on-light pre unreadable
-   (WCAG AA). A light code card reads clearly on either bubble. */
+/* Code surfaces set their OWN neutral colors and mono family, so a block reads
+   the same inside the user bubble or the bubble-less assistant prose. */
 .md-codeblock {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2311,14 +2359,15 @@ h6.md-h {
 
 /* --- Coalesced tool-call runs (issue #13) ------------------------------- */
 
-/* The outer "N tool calls" disclosure that wraps a run of chips. */
+/* The outer "N tool calls" disclosure that wraps a run of chips — the same
+   quiet transparent-outline treatment as a lone chip (Phase 3). */
 .chat-tool-group {
   align-self: flex-start;
   width: 100%;
   max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-  background: var(--chip-bg);
+  background: transparent;
 }
 .tool-group-summary {
   display: flex;
@@ -2328,7 +2377,9 @@ h6.md-h {
   min-height: 44px;
   padding: 0.3rem 0.6rem;
   cursor: pointer;
-  color: var(--chip-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
   font-weight: 600;
 }
 .tool-group-summary.has-error {
@@ -2343,15 +2394,13 @@ h6.md-h {
   font-weight: 500;
 }
 /* The expanded run: the individual chips (and any interleaved thinking) stack
-   vertically, indented slightly from the group frame. */
+   vertically, indented slightly from the group frame. The chips keep the shared
+   transparent outline — no nested fill now the frame itself is transparent. */
 .tool-group-body {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
   padding: 0 0.5rem 0.5rem;
-}
-.tool-group-body .chat-tool {
-  background: var(--card);
 }
 
 /* --- Chat UI redesign (issue #35) --------------------------------------- */
@@ -2536,7 +2585,7 @@ h6.md-h {
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   box-shadow:
-    0 4px 12px rgba(16, 24, 40, 0.14),
+    0 4px 12px rgba(40, 32, 22, 0.14),
     var(--shadow);
   cursor: pointer;
   transition:
@@ -2894,11 +2943,9 @@ h6.md-h {
   padding: 0 0.7rem;
 }
 
-/* Queued-first-message pending bubble: reuses .chat-msg.role-user; .pending
-   just dims it while it waits to auto-send (Phase 3 owns the final look). */
-.chat-msg.pending {
-  opacity: 0.6;
-}
+/* Queued-first-message pending bubble: its .chat-msg.role-user.pending styling
+   now lives with the chat message rules above (Phase 3 folded it into the
+   restyle) — see the "Queued first message" rule in the chat section. */
 
 /* <640px: the composer fills the width and the chip row wraps naturally. */
 @media (max-width: 639.98px) {
