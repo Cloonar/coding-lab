@@ -111,7 +111,7 @@ Two resolutions of the same model/effort/provider/options knobs. A **manual pre-
 _Avoid_: preset, profile, per-run override
 
 **Skills bundle**:
-The vendored, pinned skill set at `assets/skills/`, embedded in the binary and copied into each worktree's `.claude/skills/` at spawn (listed in `.git/info/exclude`, never committable).
+The vendored, pinned skill set at `assets/skills/`, embedded in the binary (a single `go:embed` source) and copied verbatim into each worktree at the provider's declared `SeedMeta.SkillsDir` at spawn (claude: `.claude/skills/`; listed in `.git/info/exclude`, never committable). The same bundle seeds every provider; a provider without native skill discovery instead learns of it through a **skills index** appended to its generated context file — one pointer line per skill, rendered from the skill's frontmatter (ADR-0035).
 _Avoid_: plugins, user-level skills
 
 **Incogni mode**:
