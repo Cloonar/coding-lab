@@ -3,7 +3,6 @@ package afk
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
@@ -63,9 +62,13 @@ func (s *Service) StartManualAFK(ctx context.Context, repoID string) (store.Run,
 	if repo.ConsecutiveFailures >= PauseThreshold {
 		return store.Run{}, ErrRepoPaused
 	}
-	prov, ok := s.providers.Get(repo.Provider)
-	if !ok {
-		return store.Run{}, fmt.Errorf("repository provider %q is not registered", repo.Provider)
+	// The AFK-effective provider (issue #66): repo.afk_provider_default →
+	// global spawn_provider_default_afk → repo.provider → global
+	// provider_default → first registered, every layer skipping unregistered
+	// ids. There is no per-spawn request (the start is bodyless).
+	prov, err := s.instances.ResolveProvider(ctx, repo, store.RunKindAFKManual, "")
+	if err != nil {
+		return store.Run{}, err
 	}
 	// FORCE the auth refresh — never a cached status: a spawn while logged
 	// out strands a doomed remote-control session that reaps as a death,
@@ -113,9 +116,16 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 	if repo.CloneStatus != store.CloneStatusReady {
 		return store.Run{}, launchSpawned, instance.ErrRepoNotReady
 	}
-	prov, ok := s.providers.Get(repo.Provider)
-	if !ok {
-		return store.Run{}, launchSpawned, fmt.Errorf("repository provider %q is not registered", repo.Provider)
+	kind := store.RunKindAFKManual
+	if auto {
+		kind = store.RunKindAFKAuto
+	}
+	// The AFK-effective provider (issue #66), resolved under the lock so a
+	// mid-tick settings/repo change is honoured — the same currency rule as
+	// model/effort/options below.
+	prov, err := s.instances.ResolveProvider(ctx, repo, kind, "")
+	if err != nil {
+		return store.Run{}, launchSpawned, err
 	}
 	trk, err := s.trackers.TrackerFor(ctx, repo)
 	if err != nil {
@@ -167,10 +177,6 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 		return store.Run{}, launchAtCap, nil
 	}
 
-	kind := store.RunKindAFKManual
-	if auto {
-		kind = store.RunKindAFKAuto
-	}
 	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, kind, "", "")
 	if err != nil {
 		return store.Run{}, launchSpawned, err

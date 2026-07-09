@@ -38,7 +38,6 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
-	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -77,10 +76,13 @@ type TrackerResolver interface {
 // Options configures a Service. Everything except Logger, GitEnv, Sweep, and
 // Now is required.
 type Options struct {
-	Store        *store.Store
-	Git          *gitx.Engine
-	Runner       tmuxx.SessionRunner
-	Providers    *provider.Registry
+	Store  *store.Store
+	Git    *gitx.Engine
+	Runner tmuxx.SessionRunner
+	// Trackers resolves a repo-scoped tracker. Providers is deliberately NOT
+	// an option any more (issue #66): the engine resolves each launch's
+	// effective provider through Instances.ResolveProvider — one skip-layer
+	// resolution rule, owned by the instance service.
 	Trackers     TrackerResolver
 	Instances    *instance.Service
 	Materializer *vault.Materializer
@@ -123,7 +125,6 @@ type Service struct {
 	store     *store.Store
 	git       *gitx.Engine
 	runner    tmuxx.SessionRunner
-	providers *provider.Registry
 	trackers  TrackerResolver
 	instances *instance.Service
 	mat       *vault.Materializer
@@ -159,8 +160,6 @@ func New(o Options) (*Service, error) {
 		return nil, fmt.Errorf("afk: Options.Git is required")
 	case o.Runner == nil:
 		return nil, fmt.Errorf("afk: Options.Runner is required")
-	case o.Providers == nil:
-		return nil, fmt.Errorf("afk: Options.Providers is required")
 	case o.Trackers == nil:
 		return nil, fmt.Errorf("afk: Options.Trackers is required")
 	case o.Instances == nil:
@@ -188,7 +187,6 @@ func New(o Options) (*Service, error) {
 		store:        o.Store,
 		git:          o.Git,
 		runner:       o.Runner,
-		providers:    o.Providers,
 		trackers:     o.Trackers,
 		instances:    o.Instances,
 		mat:          o.Materializer,

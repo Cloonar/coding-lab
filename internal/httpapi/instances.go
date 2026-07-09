@@ -31,24 +31,27 @@ type instanceResponse struct {
 }
 
 type instanceCreateRequest struct {
-	Label  string `json:"label"`
-	Model  string `json:"model"`
-	Effort string `json:"effort"`
+	Label    string `json:"label"`
+	Provider string `json:"provider"` // optional per-spawn provider pick (issue #66); "" inherits
+	Model    string `json:"model"`
+	Effort   string `json:"effort"`
 }
 
 // handleInstanceCreate is POST /api/v1/repos/{id}/instances: 201 with the run,
-// or 409 (cap / logged out / repo not ready), 400 (unknown model/effort), 404
-// (unknown repo), 500 (worktree/spawn failure — the git cause surfaces).
+// or 409 (cap / logged out / repo not ready), 400 (unknown provider/model/
+// effort), 404 (unknown repo), 500 (worktree/spawn failure — the git cause
+// surfaces).
 func (s *Server) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 	req, ok := decodeOptionalJSON[instanceCreateRequest](w, r)
 	if !ok {
 		return
 	}
 	run, err := s.instances.Start(r.Context(), instance.StartParams{
-		RepoID: r.PathValue("id"),
-		Label:  req.Label,
-		Model:  req.Model,
-		Effort: req.Effort,
+		RepoID:   r.PathValue("id"),
+		Label:    req.Label,
+		Provider: req.Provider,
+		Model:    req.Model,
+		Effort:   req.Effort,
 	})
 	if err != nil {
 		s.writeInstanceError(w, "starting instance", err)

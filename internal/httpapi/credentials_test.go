@@ -268,7 +268,7 @@ func TestCredentialDeleteReferenced(t *testing.T) {
 		ID: ids.NewID("repo"), Name: "ref-holder", RemoteURL: "git@git.cloonar.com:me/x.git",
 		CredentialID: &credID, ForgeCredentialID: &forgeID,
 		TrackerBinding: store.TrackerBindingForge, ForgeKind: "forgejo",
-		DefaultBranch: "main", Provider: "claude-code",
+		DefaultBranch:    "main",
 		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
 	}

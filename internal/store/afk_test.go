@@ -16,7 +16,7 @@ func afkFixtureRepo(t *testing.T, st *Store, name string) Repo {
 	repo, err := st.CreateRepo(context.Background(), Repo{
 		ID: ids.NewID("repo"), Name: name, RemoteURL: "https://example.invalid/" + name + ".git",
 		TrackerBinding: TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: "claude-code", AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: CloneStatusReady, CreatedAt: afkClock,
 	})
 	if err != nil {

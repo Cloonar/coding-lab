@@ -337,6 +337,17 @@ describe('repo endpoints', () => {
     });
   });
 
+  it('POST /repos carries an explicit provider pick through as-is', async () => {
+    const mock = stubFetch(jsonResponse(201, { id: 'repo_1', clone_status: 'cloning' }));
+
+    await createRepo({ remote_url: 'git@h:o/r.git', provider: 'codex' });
+
+    expect(JSON.parse(requestInit(mock).body as string)).toEqual({
+      remote_url: 'git@h:o/r.git',
+      provider: 'codex',
+    });
+  });
+
   it('GET /repos unwraps the {repos} envelope', async () => {
     const mock = stubFetch(jsonResponse(200, { repos: [{ id: 'repo_1' }] }));
 
@@ -357,6 +368,17 @@ describe('repo endpoints', () => {
     expect(JSON.parse(init.body as string)).toEqual({
       budget_minutes: null,
       afk_auto_enabled: true,
+    });
+  });
+
+  it('PATCH /repos/{id} carries provider and afk_provider_default, null clearing to inherit', async () => {
+    const mock = stubFetch(jsonResponse(200, { id: 'repo_1' }));
+
+    await updateRepo('repo_1', { provider: null, afk_provider_default: 'codex' });
+
+    expect(JSON.parse(requestInit(mock).body as string)).toEqual({
+      provider: null,
+      afk_provider_default: 'codex',
     });
   });
 
@@ -521,6 +543,17 @@ describe('instance endpoints', () => {
     });
   });
 
+  it('POST /repos/{id}/instances carries the per-spawn provider pick', async () => {
+    const mock = stubFetch(jsonResponse(201, { id: 'run_1', outcome: 'active' }));
+
+    await startInstance('repo_1', { provider: 'codex', model: 'gpt-5-codex' });
+
+    expect(JSON.parse(requestInit(mock).body as string)).toEqual({
+      provider: 'codex',
+      model: 'gpt-5-codex',
+    });
+  });
+
   it('POST /repos/{id}/instances surfaces the 409 cap message verbatim', async () => {
     stubFetch(jsonResponse(409, { error: 'instance cap reached (6)' }));
 
@@ -599,10 +632,17 @@ describe('parked endpoints', () => {
 });
 
 describe('spawn defaults from settings', () => {
-  it('extracts the two spawn keys from a flat settings object', () => {
+  it('extracts the spawn keys from a flat settings object', () => {
     expect(
       extractSpawnDefaults({ spawn_model_default: 'opus[1m]', spawn_effort_default: 'max' }),
     ).toEqual({ model: 'opus[1m]', effort: 'max' });
+  });
+
+  it('extracts the global provider default from provider_default', () => {
+    expect(extractSpawnDefaults({ provider_default: 'claude-code' })).toEqual({
+      provider: 'claude-code',
+    });
+    expect(extractSpawnDefaults({ provider_default: '' })).toEqual({});
   });
 
   it('extracts from a {settings: {...}} envelope', () => {
@@ -915,6 +955,8 @@ describe('settings endpoints', () => {
   it('normalizeSettings keeps typed values, coerces numeric strings, drops garbage', () => {
     expect(
       normalizeSettings({
+        provider_default: 'claude-code',
+        spawn_provider_default_afk: '',
         spawn_model_default: 'opus[1m]',
         spawn_effort_default: 'max',
         max_instances: 6,
@@ -924,6 +966,8 @@ describe('settings endpoints', () => {
         unknown_key: 'x',
       }),
     ).toEqual({
+      provider_default: 'claude-code',
+      spawn_provider_default_afk: '', // "" = inherit, a meaningful value
       spawn_model_default: 'opus[1m]',
       spawn_effort_default: 'max',
       max_instances: 6,

@@ -19,22 +19,27 @@ func setGlobal(t *testing.T, f *fixture, key, val string) {
 	}
 }
 
-// ResolveModelEffort is run-kind-aware (issue #19 / ADR-0021): manual layers
-// request → repo base → global base; AFK consults the AFK-override layer first
-// (repo.afk_* → global spawn_*_default_afk), each empty = inherit, then the same
-// base. The seeded global base is opus[1m]/max.
+// ResolveModelEffort is run-kind-aware (issue #19 / ADR-0021) and SKIP-LAYER
+// (issue #66): manual layers request → repo base → global base; AFK consults
+// the AFK-override layer first (repo.afk_* → global spawn_*_default_afk), each
+// empty = inherit, then the same base. A DEFAULT-layer value outside the
+// provider's catalog is treated as unset and falls through; only the explicit
+// request is strict (unknown → 400). All layers unset/foreign → the catalog's
+// first entry. The seeded global base is opus[1m]/max; the fake catalog's
+// first entries are opus[1m]/low.
 func TestResolveModelEffort_kindAwareLayering(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
 	cases := []struct {
-		name                            string
-		kind                            string
-		repo                            store.Repo
-		globalAFKModel, globalAFKEffort string
-		reqModel, reqEffort             string
-		wantModel, wantEffort           string
-		wantErr                         bool
+		name                              string
+		kind                              string
+		repo                              store.Repo
+		globalAFKModel, globalAFKEffort   string
+		globalBaseModel, globalBaseEffort string // "" keeps the seeded opus[1m]/max
+		reqModel, reqEffort               string
+		wantModel, wantEffort             string
+		wantErr                           bool
 	}{
 		{
 			name: "manual falls back to the global base", kind: store.RunKindManual,
@@ -72,15 +77,52 @@ func TestResolveModelEffort_kindAwareLayering(t *testing.T) {
 			wantModel: "haiku", wantEffort: "low",
 		},
 		{
-			name: "afk override outside the catalog is a bad request", kind: store.RunKindAFKAuto,
-			repo: store.Repo{AFKModelDefault: strptr("gpt-9")}, wantErr: true,
+			// Issue #66: a foreign AFK override is SKIPPED (treated as unset),
+			// never a 400 — resolution falls through to the base.
+			name: "afk override outside the catalog falls through to the base", kind: store.RunKindAFKAuto,
+			repo:      store.Repo{AFKModelDefault: strptr("gpt-9")},
+			wantModel: "opus[1m]", wantEffort: "max",
+		},
+		{
+			// A foreign repo base falls through to the global base.
+			name: "foreign repo base falls through to the global base", kind: store.RunKindManual,
+			repo:      store.Repo{ModelDefault: strptr("gpt-9"), EffortDefault: strptr("turbo")},
+			wantModel: "opus[1m]", wantEffort: "max",
+		},
+		{
+			// Every layer foreign → the catalog's first entry (opus[1m]/low).
+			name: "all layers foreign resolve to the catalog first entry", kind: store.RunKindAFKAuto,
+			repo:           store.Repo{AFKModelDefault: strptr("gpt-9"), ModelDefault: strptr("gpt-8")},
+			globalAFKModel: "gpt-7", globalAFKEffort: "turbo",
+			globalBaseModel: "gpt-6", globalBaseEffort: "hyper",
+			wantModel: "opus[1m]", wantEffort: "low",
+		},
+		{
+			// The explicit per-spawn request stays STRICT: unknown → 400, even
+			// though a default layer with the same value would fall through.
+			name: "explicit request outside the catalog is a bad request", kind: store.RunKindManual,
+			reqModel: "gpt-9", wantErr: true,
+		},
+		{
+			name: "explicit effort request outside the catalog is a bad request", kind: store.RunKindManual,
+			reqEffort: "turbo", wantErr: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Reset the AFK-override globals for each case (empty = unset).
+			// Reset the AFK-override globals for each case (empty = unset) and
+			// pin the base globals (empty keeps the seeded opus[1m]/max).
 			setGlobal(t, f, store.SettingSpawnModelDefaultAFK, tc.globalAFKModel)
 			setGlobal(t, f, store.SettingSpawnEffortDefaultAFK, tc.globalAFKEffort)
+			baseModel, baseEffort := tc.globalBaseModel, tc.globalBaseEffort
+			if baseModel == "" {
+				baseModel = "opus[1m]"
+			}
+			if baseEffort == "" {
+				baseEffort = "max"
+			}
+			setGlobal(t, f, store.SettingSpawnModelDefault, baseModel)
+			setGlobal(t, f, store.SettingSpawnEffortDefault, baseEffort)
 
 			model, effort, err := f.svc.ResolveModelEffort(ctx, f.prov, tc.repo, tc.kind, tc.reqModel, tc.reqEffort)
 			if tc.wantErr {

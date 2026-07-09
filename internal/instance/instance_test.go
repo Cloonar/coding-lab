@@ -48,12 +48,15 @@ type fixture struct {
 
 // fixtureOpts parametrizes the provider under test. The zero value gives the
 // default claude-code Fake (a DeepLinker); a link-less provider is supplied via
-// prov + providerID + the model/effort defaults its catalog offers.
+// prov + providerID + the model/effort defaults its catalog offers. extraProvs
+// are registered AFTER the primary provider (issue #66: multi-provider
+// registries for the provider-layering tests).
 type fixtureOpts struct {
 	prov       provider.AgentProvider
 	providerID string
 	modelDef   *string
 	effortDef  *string
+	extraProvs []provider.AgentProvider
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -74,7 +77,7 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 
 	git := gitx.New("git")
 	st := testutil.TempStore(t)
-	if err := st.SeedDefaultSettings(t.Context(), 6); err != nil {
+	if err := st.SeedDefaultSettings(t.Context(), 6, "claude-code"); err != nil {
 		t.Fatalf("SeedDefaultSettings: %v", err)
 	}
 	repoID := ids.NewID("repo")
@@ -92,7 +95,7 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	repo, err := st.CreateRepo(t.Context(), store.Repo{
 		ID: repoID, Name: "proj", RemoteURL: "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: providerID, AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		Provider: &providerID, AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		ModelDefault: o.modelDef, EffortDefault: o.effortDef,
 		CloneStatus: store.CloneStatusReady, CreatedAt: clockTime,
 	})
@@ -117,7 +120,7 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 		prov = providertest.New()
 		agentProv = prov
 	}
-	reg, err := provider.NewRegistry(agentProv)
+	reg, err := provider.NewRegistry(append([]provider.AgentProvider{agentProv}, o.extraProvs...)...)
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

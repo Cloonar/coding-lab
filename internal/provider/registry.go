@@ -43,3 +43,24 @@ func (r *Registry) List() []AgentProvider {
 	}
 	return out
 }
+
+// DefaultFor resolves a skip-layer default chain (issue #66): the first
+// candidate id that is non-empty AND registered wins; an empty or
+// unregistered candidate is treated as unset and falls through — a stored
+// default naming a provider this install does not carry must never wedge a
+// spawn. When no candidate matches, the first registered provider is the
+// final fallback. ok is false only for an empty registry.
+func (r *Registry) DefaultFor(candidates ...string) (AgentProvider, bool) {
+	for _, id := range candidates {
+		if id == "" {
+			continue
+		}
+		if p, ok := r.byID[id]; ok {
+			return p, true
+		}
+	}
+	if len(r.order) == 0 {
+		return nil, false
+	}
+	return r.byID[r.order[0]], true
+}

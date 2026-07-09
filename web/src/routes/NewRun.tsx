@@ -1,22 +1,24 @@
 // New run (Home, `/`) — the composer-first surface (issue #41, Phase 2b): a big
-// centered composer (repo · model · effort chips, a `…` popover, an autogrowing
-// textarea, an accent circular send), an AFK strip for the selected repo, and a
-// slim logged-out banner. Send spawns an instance, queues any typed text as the
-// run's first message, and navigates to the chat. Never auto-navigates on load.
+// centered composer (repo · agent · model · effort chips, a `…` popover, an
+// autogrowing textarea, an accent circular send), an AFK strip for the selected
+// repo, and a slim logged-out banner. Send spawns an instance, queues any typed
+// text as the run's first message, and navigates to the chat. Never
+// auto-navigates on load. The agent chip appears only with ≥2 registered
+// providers; the per-spawn pick is ephemeral (ADR-0030).
 //
-// Manual spawn accepts ONLY label/model/effort (internal/httpapi/instances.go
-// has no provider-options bag), so provider spawn options stay out of the `…`
-// popover here and issue #21 stays open.
+// Manual spawn accepts ONLY label/provider/model/effort (internal/httpapi/
+// instances.go has no provider-options bag), so provider spawn options stay out
+// of the `…` popover here and issue #21 stays open.
 
 import { A, useNavigate } from '@solidjs/router';
 import {
-  For,
   Match,
   Show,
   Switch,
   createEffect,
   createResource,
   createSignal,
+  on,
   onCleanup,
 } from 'solid-js';
 import {
@@ -34,6 +36,7 @@ import AFKStrip from '../components/AFKStrip';
 import ErrorBanner from '../components/ErrorBanner';
 import Icon from '../components/Icon';
 import RequireAuth from '../components/RequireAuth';
+import Select, { type SelectOption } from '../components/Select';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
 import { createLiveResource } from '../lib/liveResource';
@@ -102,21 +105,55 @@ function NewRunView() {
     setSelectedId(repo.id);
     writeLastRepo(repo.id);
   };
+  // Ready-only selection, as before: disabled rows can't be clicked, but a
+  // stale commit (e.g. the synthesized empty row) must never strand the pick.
+  const pickRepoById = (id: string): void => {
+    const repo = (resourceValue(repos) ?? []).find((r) => r.id === id);
+    if (repo !== undefined && repo.clone_status === 'ready') pickRepo(repo);
+  };
+  // Options for the repo Select: every repo listed; non-ready rows disabled
+  // with their status text (live clone % from the cloneProgress store).
+  const repoOptions = (): SelectOption[] =>
+    (resourceValue(repos) ?? []).map((repo) => ({
+      value: repo.id,
+      label: repo.name,
+      disabled: repo.clone_status !== 'ready',
+      status: repoStatus(repo, progress.progress(repo.id)),
+    }));
 
+  const providerList = () => resourceValue(providers) ?? [];
+  const defaultsValue = () => resourceValue(defaults) ?? {};
+
+  // Per-spawn provider pick ('' = no pick). Ephemeral by design (ADR-0030): it
+  // resets on repo change (below) and on page load; the repo override and the
+  // global default are the durable levers.
+  const [providerPick, setProviderPick] = createSignal('');
+  createEffect(
+    on(
+      () => selectedRepo()?.id,
+      () => setProviderPick(''),
+      { defer: true },
+    ),
+  );
+
+  // The EFFECTIVE provider: per-spawn pick → repo override → global default →
+  // first registered provider (skip-layer, mirroring the backend resolver).
   const provider = () => {
     const repo = selectedRepo();
-    return repo ? providerFor(resourceValue(providers) ?? [], repo.provider) : null;
+    if (repo === null) return null;
+    return providerFor(providerList(), providerPick(), repo.provider, defaultsValue().provider);
   };
   const models = () => provider()?.models ?? [];
   const efforts = () => provider()?.efforts ?? [];
-  const defaultsValue = () => resourceValue(defaults) ?? {};
+  const providerOptions = (): SelectOption[] =>
+    providerList().map((p) => ({ value: p.id, label: p.display_name }));
 
-  // Machine-level auth for the SELECTED repo's provider: the status route is
-  // per-provider-id (issue #51 decision 7), so the resource keys on the repo
-  // pick and refetches on the provider-generic SSE event. Copy comes from the
-  // provider's display_name — never a hardcoded agent name.
+  // Machine-level auth for the EFFECTIVE provider: the status route is
+  // per-provider-id (issue #51 decision 7), so the resource keys on the
+  // effective provider id and refetches on the provider-generic SSE event.
+  // Copy comes from the provider's display_name — never a hardcoded agent name.
   const [authStatus] = createLiveResource(
-    () => selectedRepo()?.provider,
+    () => provider()?.id,
     (id) => providerAuthStatus(id),
     [{ type: 'provider.auth.changed' }],
   );
@@ -126,6 +163,19 @@ function NewRunView() {
   // separately keeps a late providers/settings load from clobbering it.
   const [modelPick, setModelPick] = createSignal('');
   const [effortPick, setEffortPick] = createSignal('');
+  // A pick belongs to the catalog it was made from: when the EFFECTIVE
+  // provider changes (a provider pick, a repo switch, a late defaults load),
+  // stale model/effort picks reset so a foreign value can never 400 a spawn.
+  createEffect(
+    on(
+      () => provider()?.id,
+      () => {
+        setModelPick('');
+        setEffortPick('');
+      },
+      { defer: true },
+    ),
+  );
   const model = () =>
     modelPick() !== ''
       ? modelPick()
@@ -139,8 +189,9 @@ function NewRunView() {
   const [text, setText] = createSignal('');
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  // One popover open at a time (repo picker or the `…` options).
-  const [pop, setPop] = createSignal<'repo' | 'more' | null>(null);
+  // The `…` options popover. The Select chips manage their own open state and
+  // close this one via onOpen (one popover open at a time, as before).
+  const [pop, setPop] = createSignal<'more' | null>(null);
 
   const loggedOut = () => resourceValue(authStatus)?.logged_in === false;
 
@@ -151,10 +202,12 @@ function NewRunView() {
   window.addEventListener('keydown', onKeyDownGlobal);
   onCleanup(() => window.removeEventListener('keydown', onKeyDownGlobal));
 
-  // Outside-click closes the open popover: a document listener mounted only
-  // while one is open. A click inside any .composer-pop wrapper is left to that
-  // popover's own handlers (its trigger toggles, a row selects); anything else
-  // closes it. Mounted after the opening click, so it never self-closes.
+  // Outside-click closes the `…` popover: a document listener mounted only
+  // while it is open. A click inside the .composer-pop wrapper is left to the
+  // popover's own handlers (its trigger toggles); anything else closes it —
+  // including clicks on the Select chips, which is exactly the old
+  // one-popover-at-a-time behavior. Mounted after the opening click, so it
+  // never self-closes.
   createEffect(() => {
     if (pop() === null) return;
     const onDocMouseDown = (e: MouseEvent): void => {
@@ -191,6 +244,9 @@ function NewRunView() {
       const req: StartInstanceRequest = {};
       const trimmedLabel = label().trim();
       if (trimmedLabel !== '') req.label = trimmedLabel;
+      // Only an EXPLICIT per-spawn pick rides along — the resolved default
+      // chain is the server's to walk (and validate) itself.
+      if (providerPick() !== '') req.provider = providerPick();
       if (model() !== '') req.model = model();
       if (effort() !== '') req.effort = effort();
       const run = await startInstance(repo.id, req);
@@ -263,37 +319,49 @@ function NewRunView() {
                 disabled={selectedRepo() === null}
               />
               <div class="composer-bar">
-                <RepoChip
-                  repos={resourceValue(repos) ?? []}
-                  selected={selectedRepo()}
-                  progressOf={(id) => progress.progress(id)}
-                  open={pop() === 'repo'}
-                  onToggle={() => setPop((p) => (p === 'repo' ? null : 'repo'))}
-                  onClose={() => setPop(null)}
-                  onSelect={pickRepo}
+                <Select
+                  skin="chip"
+                  label="Repository"
+                  icon={<Icon name="folder" size={15} class="composer-chip-icon" />}
+                  value={selectedRepo()?.id ?? ''}
+                  options={repoOptions()}
+                  onChange={pickRepoById}
+                  onOpen={() => setPop(null)}
                 />
-                <select
-                  class="composer-chip composer-select"
-                  aria-label="Model"
+                {/* The agent chip exists only when there is a real choice —
+                    with a single registered provider the composer stays
+                    exactly as before (ADR-0030). */}
+                <Show when={providerList().length >= 2}>
+                  <Select
+                    skin="chip"
+                    label="Agent"
+                    value={provider()?.id ?? ''}
+                    options={providerOptions()}
+                    onChange={setProviderPick}
+                    onOpen={() => setPop(null)}
+                  />
+                </Show>
+                <Select
+                  skin="chip"
+                  label="Model"
                   value={model()}
+                  options={models()}
                   disabled={models().length === 0}
-                  onInput={(e) => setModelPick(e.currentTarget.value)}
-                >
-                  <For each={models()}>
-                    {(option) => <option value={option.value}>{option.label}</option>}
-                  </For>
-                </select>
-                <select
-                  class="composer-chip composer-select"
-                  aria-label="Effort"
-                  value={effort()}
-                  disabled={efforts().length === 0}
-                  onInput={(e) => setEffortPick(e.currentTarget.value)}
-                >
-                  <For each={efforts()}>
-                    {(option) => <option value={option.value}>{option.label}</option>}
-                  </For>
-                </select>
+                  onChange={setModelPick}
+                  onOpen={() => setPop(null)}
+                />
+                {/* No efforts catalog = the provider has no effort knob at
+                    all — hide the chip rather than pin a disabled control. */}
+                <Show when={efforts().length > 0}>
+                  <Select
+                    skin="chip"
+                    label="Effort"
+                    value={effort()}
+                    options={efforts()}
+                    onChange={setEffortPick}
+                    onOpen={() => setPop(null)}
+                  />
+                </Show>
                 <MoreChip
                   label={label()}
                   onLabel={setLabel}
@@ -338,82 +406,16 @@ function afkStartedMessage(run: Run): string {
   return run.issue_number !== null ? `AFK run started on #${run.issue_number}` : 'AFK run started';
 }
 
-function RepoChip(props: {
-  repos: Repo[];
-  selected: Repo | null;
-  progressOf: (id: string) => CloneProgress | null;
-  open: boolean;
-  onToggle: () => void;
-  onClose: () => void;
-  onSelect: (repo: Repo) => void;
-}) {
-  return (
-    <div class="composer-pop">
-      <button
-        type="button"
-        class="composer-chip repo-chip"
-        aria-haspopup="listbox"
-        aria-expanded={props.open}
-        onClick={() => props.onToggle()}
-      >
-        <Icon name="folder" size={15} class="composer-chip-icon" />
-        <span class="composer-chip-label">{props.selected?.name ?? 'Choose repo'}</span>
-        <Icon name="chevron-down" size={14} class="composer-chip-caret" />
-      </button>
-      <Show when={props.open}>
-        <div class="composer-pop-panel repo-pop" role="listbox">
-          <For each={props.repos}>
-            {(repo) => (
-              <RepoRow
-                repo={repo}
-                progress={props.progressOf(repo.id)}
-                selected={repo.id === props.selected?.id}
-                onSelect={() => {
-                  props.onSelect(repo);
-                  props.onClose();
-                }}
-              />
-            )}
-          </For>
-        </div>
-      </Show>
-    </div>
-  );
-}
-
-// One repo in the picker: ready repos are selectable; cloning/error rows stay
-// visible but HTML-disabled, showing their status (+ the live clone % from the
+// Status text for a non-ready repo row: cloning/error repos stay visible in
+// the picker but disabled, showing their state (+ the live clone % from the
 // cloneProgress store while cloning).
-function RepoRow(props: {
-  repo: Repo;
-  progress: CloneProgress | null;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const ready = () => props.repo.clone_status === 'ready';
-  const status = () => {
-    if (props.repo.clone_status === 'error') return 'clone failed';
-    if (props.repo.clone_status === 'cloning') {
-      const percent = props.progress?.percent;
-      return percent !== null && percent !== undefined ? `cloning ${percent}%` : 'cloning…';
-    }
-    return '';
-  };
-  return (
-    <button
-      type="button"
-      classList={{ 'repo-row': true, selected: props.selected }}
-      role="option"
-      aria-selected={props.selected}
-      disabled={!ready()}
-      onClick={() => props.onSelect()}
-    >
-      <span class="repo-row-name">{props.repo.name}</span>
-      <Show when={!ready()}>
-        <span class="repo-row-status">{status()}</span>
-      </Show>
-    </button>
-  );
+function repoStatus(repo: Repo, progress: CloneProgress | null): string | undefined {
+  if (repo.clone_status === 'error') return 'clone failed';
+  if (repo.clone_status === 'cloning') {
+    const percent = progress?.percent;
+    return percent !== null && percent !== undefined ? `cloning ${percent}%` : 'cloning…';
+  }
+  return undefined;
 }
 
 // The `…` popover: the optional label only (≤32 chars). Manual spawn accepts no

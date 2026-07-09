@@ -14,6 +14,7 @@ import (
 const (
 	SettingSpawnModelDefault    = "spawn_model_default"
 	SettingSpawnEffortDefault   = "spawn_effort_default"
+	SettingProviderDefault      = "provider_default"
 	SettingMaxInstances         = "max_instances"
 	SettingAFKBudgetMinutes     = "afk_budget_minutes"
 	SettingAFKTickSeconds       = "afk_tick_seconds"
@@ -32,6 +33,13 @@ const (
 	SettingSpawnModelDefaultAFK  = "spawn_model_default_afk"
 	SettingSpawnEffortDefaultAFK = "spawn_effort_default_afk"
 	SettingSpawnOptionsAFK       = "spawn_options_afk"
+
+	// AFK-override provider default (issue #66): the AFK-only layer that
+	// resolves BEFORE the base provider_default above (mirroring the
+	// spawn_*_default_afk pair). Empty or absent = inherit the base chain, so
+	// like the other AFK overrides it is intentionally NOT seeded by
+	// SeedDefaultSettings.
+	SettingSpawnProviderDefaultAFK = "spawn_provider_default_afk"
 
 	// AFK seed-prompt override (issue #52 / ADR-0027): the global layer between
 	// repos.afk_prompt and the built-in template (afk.SeedPromptTemplate).
@@ -129,11 +137,15 @@ func (s *Store) GetInt(ctx context.Context, key string, def int) (int, error) {
 
 // SeedDefaultSettings inserts the design §3a defaults for every missing key
 // and never overwrites an existing row (--max-instances seeds the row on
-// first start; thereafter settings wins).
-func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int) error {
+// first start; thereafter settings wins). defaultProvider seeds the
+// provider_default row (issue #66) — the caller passes the first registered
+// provider's ID so the store stays provider-agnostic; "" seeds an
+// empty-means-inherit row (the degraded no-provider boot).
+func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defaultProvider string) error {
 	defaults := map[string]string{
 		SettingSpawnModelDefault:    "opus[1m]",
 		SettingSpawnEffortDefault:   "max",
+		SettingProviderDefault:      defaultProvider,
 		SettingMaxInstances:         strconv.Itoa(maxInstances),
 		SettingAFKBudgetMinutes:     "120",
 		SettingAFKTickSeconds:       "30",

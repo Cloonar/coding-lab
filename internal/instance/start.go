@@ -9,12 +9,13 @@ import (
 )
 
 // StartParams is the manual-instance start input (pinned API: POST
-// /api/v1/repos/{id}/instances {label?, model?, effort?}).
+// /api/v1/repos/{id}/instances {label?, provider?, model?, effort?}).
 type StartParams struct {
-	RepoID string
-	Label  string // optional user label; sanitized + timestamped into the instance label
-	Model  string // optional per-spawn override; "" → repo/settings default
-	Effort string // optional per-spawn override; "" → repo/settings default
+	RepoID   string
+	Label    string // optional user label; sanitized + timestamped into the instance label
+	Provider string // optional per-spawn provider pick (issue #66); "" → repo/settings default
+	Model    string // optional per-spawn override; "" → repo/settings default
+	Effort   string // optional per-spawn override; "" → repo/settings default
 }
 
 // Start spawns a manual instance following the v0-pinned sequence with full
@@ -32,9 +33,13 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 	if repo.CloneStatus != store.CloneStatusReady {
 		return store.Run{}, ErrRepoNotReady
 	}
-	prov, ok := s.providers.Get(repo.Provider)
-	if !ok {
-		return store.Run{}, badRequestf("repository provider %q is not registered", repo.Provider)
+	// The effective provider (issue #66): explicit request (strict — unknown →
+	// 400) → repo.provider → global provider_default → first registered, the
+	// default layers skipping unregistered ids. Model/effort then resolve
+	// against the RESOLVED provider's catalogs.
+	prov, err := s.ResolveProvider(ctx, repo, store.RunKindManual, p.Provider)
+	if err != nil {
+		return store.Run{}, err // BadRequestError → 400 (or a store error)
 	}
 
 	model, effort, err := s.ResolveModelEffort(ctx, prov, repo, store.RunKindManual, p.Model, p.Effort)

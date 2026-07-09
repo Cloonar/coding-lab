@@ -45,9 +45,12 @@ type Repo struct {
 	TrackerBinding    string  // forge|builtin
 	ForgeKind         string  // forgejo|github|none (tracker.Detect at add time)
 	DefaultBranch     string
-	Provider          string
-	ModelDefault      *string
-	EffortDefault     *string
+	// Provider is the repo's agent-CLI override (issue #66). Nil / NULL means
+	// inherit the next layer (the global provider_default setting, then the
+	// first registered provider) — the same skip-layer chain model/effort use.
+	Provider      *string
+	ModelDefault  *string
+	EffortDefault *string
 	// AFK-override spawn defaults (issue #19 / ADR-0021). Nil / NULL means
 	// inherit the base ModelDefault/EffortDefault above (and the globals behind
 	// them). AFKOptions is the provider-owned options bag, nil when unset (a
@@ -55,6 +58,10 @@ type Repo struct {
 	AFKModelDefault  *string
 	AFKEffortDefault *string
 	AFKOptions       map[string]string
+	// AFKProviderDefault is the AFK-override sibling of Provider (issue #66):
+	// the provider an unattended run resolves FIRST, before the global
+	// spawn_provider_default_afk and the base Provider chain. Nil = inherit.
+	AFKProviderDefault *string
 	// AFKPrompt is the repo-level AFK seed-prompt override (issue #52 /
 	// ADR-0027). Nil / NULL means inherit the next layer (the global afk_prompt
 	// setting, then the built-in template). A non-empty value REPLACES the whole
@@ -86,7 +93,8 @@ const repoColumns = `id, name, remote_url, credential_id, forge_credential_id,
 	consecutive_failures, budget_minutes, max_instances_override,
 	clone_status, clone_error, next_issue_number, next_cr_number,
 	created_at, last_opened_at,
-	afk_model_default, afk_effort_default, afk_options, afk_prompt`
+	afk_model_default, afk_effort_default, afk_options, afk_prompt,
+	afk_provider_default`
 
 // triageLabels are the five canonical triage labels seeded per repo at
 // creation (design §3a colors; docs/agents/triage-labels.md meanings).
@@ -122,7 +130,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 	}
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO repos (`+repoColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.Name, r.RemoteURL, r.CredentialID, r.ForgeCredentialID,
 		r.TrackerBinding, r.ForgeKind, r.DefaultBranch, r.Provider, r.ModelDefault,
 		r.EffortDefault, r.Incogni, r.GitAuthorName, r.GitAuthorEmail,
@@ -130,7 +138,8 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 		r.ConsecutiveFailures, r.BudgetMinutes, r.MaxInstancesOverride,
 		r.CloneStatus, r.CloneError, r.NextIssueNumber, r.NextCRNumber,
 		fmtTime(r.CreatedAt), fmtNullTime(r.LastOpenedAt),
-		r.AFKModelDefault, r.AFKEffortDefault, afkOptions, r.AFKPrompt)
+		r.AFKModelDefault, r.AFKEffortDefault, afkOptions, r.AFKPrompt,
+		r.AFKProviderDefault)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Repo{}, fmt.Errorf("create repo %q: %w", r.Name, ErrNameTaken)
@@ -231,10 +240,12 @@ type RepoSettingsUpdate struct {
 	ForgeCredentialID    Opt[*string]
 	TrackerBinding       Opt[string]
 	DefaultBranch        Opt[string]
+	Provider             Opt[*string] // agent-CLI override (issue #66); nil clears (NULL = inherit)
 	ModelDefault         Opt[*string]
 	EffortDefault        Opt[*string]
 	AFKModelDefault      Opt[*string]
 	AFKEffortDefault     Opt[*string]
+	AFKProviderDefault   Opt[*string]           // AFK-override provider (issue #66); nil clears (NULL = inherit)
 	AFKOptions           Opt[map[string]string] // nil map clears (NULL); a present map (even empty) is stored as JSON
 	AFKPrompt            Opt[*string]           // AFK seed-prompt override (issue #52 / ADR-0027); nil clears (NULL = inherit)
 	Incogni              Opt[bool]
@@ -274,6 +285,9 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 	if u.DefaultBranch.Set {
 		add("default_branch", u.DefaultBranch.Value)
 	}
+	if u.Provider.Set {
+		add("provider", u.Provider.Value)
+	}
 	if u.ModelDefault.Set {
 		add("model_default", u.ModelDefault.Value)
 	}
@@ -285,6 +299,9 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 	}
 	if u.AFKEffortDefault.Set {
 		add("afk_effort_default", u.AFKEffortDefault.Value)
+	}
+	if u.AFKProviderDefault.Set {
+		add("afk_provider_default", u.AFKProviderDefault.Value)
 	}
 	if u.AFKOptions.Set {
 		v, err := marshalOptions(u.AFKOptions.Value)
@@ -454,6 +471,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	var (
 		r                                 Repo
 		credID, forgeCredID               sql.NullString
+		providerCol                       sql.NullString
 		modelDef, effortDef               sql.NullString
 		authorName, authorEmail, cloneErr sql.NullString
 		budget, maxInst                   sql.NullInt64
@@ -461,19 +479,22 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		lastOpened                        sql.NullString
 		afkModelDef, afkEffortDef         sql.NullString
 		afkOptions, afkPrompt             sql.NullString
+		afkProviderDef                    sql.NullString
 	)
 	if err := scan(&r.ID, &r.Name, &r.RemoteURL, &credID, &forgeCredID,
-		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &r.Provider, &modelDef,
+		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &providerCol, &modelDef,
 		&effortDef, &r.Incogni, &authorName, &authorEmail,
 		&r.AFKBranchPattern, &r.ManualBranchPrefix, &r.AFKAutoEnabled,
 		&r.ConsecutiveFailures, &budget, &maxInst,
 		&r.CloneStatus, &cloneErr, &r.NextIssueNumber, &r.NextCRNumber,
 		&created, &lastOpened,
-		&afkModelDef, &afkEffortDef, &afkOptions, &afkPrompt); err != nil {
+		&afkModelDef, &afkEffortDef, &afkOptions, &afkPrompt,
+		&afkProviderDef); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
 	r.ForgeCredentialID = nullStr(forgeCredID)
+	r.Provider = nullStr(providerCol)
 	r.ModelDefault = nullStr(modelDef)
 	r.EffortDefault = nullStr(effortDef)
 	r.GitAuthorName = nullStr(authorName)
@@ -484,6 +505,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.AFKModelDefault = nullStr(afkModelDef)
 	r.AFKEffortDefault = nullStr(afkEffortDef)
 	r.AFKPrompt = nullStr(afkPrompt)
+	r.AFKProviderDefault = nullStr(afkProviderDef)
 
 	var err error
 	if r.AFKOptions, err = unmarshalOptions(afkOptions); err != nil {

@@ -10,6 +10,7 @@ import {
   deleteRepo,
   errorMessage,
   getRepo,
+  getSettings,
   listCredentials,
   listProviders,
   updateRepo,
@@ -17,9 +18,10 @@ import {
   type Provider,
   type Repo,
   type RepoPatch,
+  type Settings,
   type TrackerBinding,
 } from '../api';
-import CatalogSelect from '../components/CatalogSelect';
+import Select, { type SelectOption } from '../components/Select';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import { createLiveResource } from '../lib/liveResource';
@@ -42,6 +44,9 @@ function RepoSettingsView() {
   );
   const [credentials] = createResource(() => listCredentials());
   const [providers] = createResource(() => listProviders());
+  // Global settings feed the effective-provider chains (provider_default /
+  // spawn_provider_default_afk) the catalogs below resolve against.
+  const [settings] = createResource(() => getSettings());
 
   return (
     <main class="page">
@@ -72,7 +77,8 @@ function RepoSettingsView() {
               <SettingsForm
                 repo={r}
                 credentials={credentials() ?? []}
-                provider={providerFor(providers() ?? [], r().provider)}
+                providers={providers() ?? []}
+                settings={settings() ?? {}}
                 onSaved={refetch}
               />
               <DangerZone repo={r} />
@@ -119,7 +125,8 @@ function optionsKey(options: Record<string, boolean>): string {
 function SettingsForm(props: {
   repo: Accessor<Repo>;
   credentials: CredentialListItem[];
-  provider: Provider | null;
+  providers: Provider[];
+  settings: Settings;
   onSaved: () => void;
 }) {
   // Drafts seed from a repo SNAPSHOT (`seed`). buildPatch diffs each draft
@@ -138,18 +145,39 @@ function SettingsForm(props: {
   const [defaultBranch, setDefaultBranch] = createSignal(initial.default_branch);
   const [afkPattern, setAfkPattern] = createSignal(initial.afk_branch_pattern);
   const [manualPrefix, setManualPrefix] = createSignal(initial.manual_branch_prefix);
+  const [provider, setProvider] = createSignal(initial.provider ?? '');
   const [model, setModel] = createSignal(initial.model_default ?? '');
   const [effort, setEffort] = createSignal(initial.effort_default ?? '');
+  const [afkProvider, setAfkProvider] = createSignal(initial.afk_provider_default ?? '');
   const [afkModel, setAfkModel] = createSignal(initial.afk_model_default ?? '');
   const [afkEffort, setAfkEffort] = createSignal(initial.afk_effort_default ?? '');
   const [afkPrompt, setAfkPrompt] = createSignal(initial.afk_prompt ?? '');
+
+  // Effective providers, resolved LIVE against the DRAFT values (skip-layer,
+  // ADR-0030) so the model/effort catalogs below re-catalog as the operator
+  // flips the agent selects — before anything is saved. Stored values foreign
+  // to the new catalog persist untouched and just show "(not in catalog)".
+  const providerOptions = (): SelectOption[] =>
+    props.providers.map((p) => ({ value: p.id, label: p.display_name }));
+  const baseProvider = () =>
+    providerFor(props.providers, provider(), props.settings.provider_default);
+  const afkEffectiveProvider = () =>
+    providerFor(
+      props.providers,
+      afkProvider(),
+      props.settings.spawn_provider_default_afk,
+      provider(),
+      props.settings.provider_default,
+    );
+
   // Per-key checkbox state for the provider's bool options (null bag = inherit,
   // seeded to all-unchecked). Once any checkbox differs from the seed, the full
   // declared bag is PATCHed as the explicit repo override.
   const [afkOptions, setAfkOptions] = createSignal<Record<string, boolean>>(
     toBoolMap(initial.afk_options),
   );
-  const boolOptions = () => (props.provider?.options ?? []).filter((o) => o.type === 'bool');
+  const boolOptions = () =>
+    (afkEffectiveProvider()?.options ?? []).filter((o) => o.type === 'bool');
   const [afkAuto, setAfkAuto] = createSignal(initial.afk_auto_enabled);
   const [budget, setBudget] = createSignal(
     initial.budget_minutes === null ? '' : String(initial.budget_minutes),
@@ -190,8 +218,10 @@ function SettingsForm(props: {
         resync(defaultBranch, setDefaultBranch, (r) => r.default_branch, fresh);
         resync(afkPattern, setAfkPattern, (r) => r.afk_branch_pattern, fresh);
         resync(manualPrefix, setManualPrefix, (r) => r.manual_branch_prefix, fresh);
+        resync(provider, setProvider, (r) => r.provider ?? '', fresh);
         resync(model, setModel, (r) => r.model_default ?? '', fresh);
         resync(effort, setEffort, (r) => r.effort_default ?? '', fresh);
+        resync(afkProvider, setAfkProvider, (r) => r.afk_provider_default ?? '', fresh);
         resync(afkModel, setAfkModel, (r) => r.afk_model_default ?? '', fresh);
         resync(afkEffort, setAfkEffort, (r) => r.afk_effort_default ?? '', fresh);
         resync(afkPrompt, setAfkPrompt, (r) => r.afk_prompt ?? '', fresh);
@@ -255,9 +285,13 @@ function SettingsForm(props: {
     const prefix = manualPrefix().trim();
     if (prefix !== current.manual_branch_prefix) patch.manual_branch_prefix = prefix;
 
+    if (normText(provider()) !== current.provider) patch.provider = normText(provider());
     if (normText(model()) !== current.model_default) patch.model_default = normText(model());
     if (normText(effort()) !== current.effort_default) patch.effort_default = normText(effort());
 
+    if (normText(afkProvider()) !== current.afk_provider_default) {
+      patch.afk_provider_default = normText(afkProvider());
+    }
     if (normText(afkModel()) !== current.afk_model_default) {
       patch.afk_model_default = normText(afkModel());
     }
@@ -467,33 +501,33 @@ function SettingsForm(props: {
 
       <section class="card">
         <h2>Spawn defaults</h2>
-        <label class="field">
-          <span>Model</span>
-          <input
-            type="text"
-            name="model_default"
-            autocomplete="off"
-            spellcheck={false}
-            class="mono"
-            placeholder="global default"
-            value={model()}
-            onInput={(e) => setModel(e.currentTarget.value)}
-          />
-          <small class="hint">Free text for now — provider catalogs arrive in M3.</small>
-        </label>
-        <label class="field">
-          <span>Effort</span>
-          <input
-            type="text"
-            name="effort_default"
-            autocomplete="off"
-            spellcheck={false}
-            class="mono"
-            placeholder="global default"
-            value={effort()}
-            onInput={(e) => setEffort(e.currentTarget.value)}
-          />
-        </label>
+        <Select
+          skin="field"
+          label="Agent"
+          name="provider"
+          value={provider()}
+          options={providerOptions()}
+          inheritLabel="Inherit global default"
+          onChange={setProvider}
+        />
+        <Select
+          skin="field"
+          label="Model"
+          name="model_default"
+          value={model()}
+          options={baseProvider()?.models ?? []}
+          inheritLabel="Inherit global default"
+          onChange={setModel}
+        />
+        <Select
+          skin="field"
+          label="Effort"
+          name="effort_default"
+          value={effort()}
+          options={baseProvider()?.efforts ?? []}
+          inheritLabel="Inherit global default"
+          onChange={setEffort}
+        />
       </section>
 
       <section class="card">
@@ -502,19 +536,30 @@ function SettingsForm(props: {
           Overrides for unattended AFK runs on this repo. Blank / unchecked inherits the global AFK
           default.
         </small>
-        <CatalogSelect
+        <Select
+          skin="field"
+          label="AFK agent"
+          name="afk_provider_default"
+          value={afkProvider()}
+          options={providerOptions()}
+          inheritLabel="Inherit global AFK default"
+          onChange={setAfkProvider}
+        />
+        <Select
+          skin="field"
           label="Model"
           name="afk_model_default"
           value={afkModel()}
-          options={props.provider?.models ?? []}
+          options={afkEffectiveProvider()?.models ?? []}
           inheritLabel="Inherit global AFK default"
           onChange={setAfkModel}
         />
-        <CatalogSelect
+        <Select
+          skin="field"
           label="Effort"
           name="afk_effort_default"
           value={afkEffort()}
-          options={props.provider?.efforts ?? []}
+          options={afkEffectiveProvider()?.efforts ?? []}
           inheritLabel="Inherit global AFK default"
           onChange={setAfkEffort}
         />

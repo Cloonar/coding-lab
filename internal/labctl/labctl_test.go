@@ -206,7 +206,6 @@ func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerReso
 		TrackerBinding:     binding,
 		ForgeKind:          forgeKind,
 		DefaultBranch:      "main",
-		Provider:           "claude-code",
 		AFKBranchPattern:   "afk/<N>",
 		ManualBranchPrefix: "lab/",
 		CloneStatus:        store.CloneStatusReady,

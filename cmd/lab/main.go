@@ -105,11 +105,6 @@ func run() int {
 		}
 	}()
 
-	if err := st.SeedDefaultSettings(ctx, cfg.MaxInstances); err != nil {
-		logger.Error("seeding default settings", "component", "main", "err", err)
-		return 1
-	}
-
 	bus := events.NewBus()
 	m := metrics.New()
 
@@ -254,7 +249,6 @@ func run() int {
 			Store:        st,
 			Git:          gitEngine,
 			Runner:       runner,
-			Providers:    providerReg,
 			Trackers:     trackerReg,
 			Instances:    instanceSvc,
 			Materializer: mat,
@@ -293,6 +287,22 @@ func run() int {
 		// tmux+active-runs view — registered only with the instance stack up
 		// (without it no runner exists; the absent series says so).
 		m.RegisterInstances(instanceSvc.LiveCounts)
+	}
+
+	// Seed the settings AFTER the provider registry exists: provider_default
+	// is seeded to the FIRST registered provider's ID (issue #66) so the store
+	// stays provider-agnostic ("claude-code" today). The degraded no-provider
+	// boot seeds an empty row — empty means inherit, and the spawn surface is
+	// unmounted in that mode anyway. Nothing before this point reads settings.
+	defaultProviderID := ""
+	if providerReg != nil {
+		if list := providerReg.List(); len(list) > 0 {
+			defaultProviderID = list[0].ID()
+		}
+	}
+	if err := st.SeedDefaultSettings(ctx, cfg.MaxInstances, defaultProviderID); err != nil {
+		logger.Error("seeding default settings", "component", "main", "err", err)
+		return 1
 	}
 
 	repoOpts := reposvc.Options{

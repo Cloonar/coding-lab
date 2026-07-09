@@ -99,7 +99,7 @@ _Avoid_: PAT, API token (those are the operator's), personal login
 ### Providers & seeding
 
 **Provider**:
-An `AgentProvider` implementation — spawn argv, auth flow, worktree seeding, model/effort catalog, chat surface — plus optional capabilities it may advertise by type assertion (`DeepLinker` for deep-link capture + fallback-open metadata, `ConnectingReporter` for the connecting pulse; ADR-0017). `claude-code` is the only MVP implementation and implements both.
+An `AgentProvider` implementation — spawn argv, auth flow, worktree seeding, model/effort catalog, chat surface — plus optional capabilities it may advertise by type assertion (`DeepLinker` for deep-link capture + fallback-open metadata, `ConnectingReporter` for the connecting pulse; ADR-0017). `claude-code` is the only MVP implementation and implements both. The **effective provider** of a spawn is resolved per spawn by three-level layering — per-spawn pick → repo override → global default, with symmetric AFK overrides — never a fixed per-repo stamp (ADR-0030).
 _Avoid_: backend, engine, vendor
 
 **Spawn options**:
@@ -107,7 +107,7 @@ The provider-owned, provider-declared bag of spawn settings that sits beside the
 _Avoid_: flags, provider config, params, feature toggles
 
 **AFK default vs manual pre-fill**:
-Two resolutions of the same model/effort/options knobs. A **manual pre-fill** is *soft* — the value the Start form shows pre-filled, which the operator overrides per spawn (request → repo base → global base). An **AFK default** is *hard* — with no operator, it is literally what runs, resolved by layering an optional AFK-override over the base (repo.afk ?? global.afk ?? repo.base ?? global.base); an empty override inherits the base. The base is the shared `spawn_model_default` / `model_default` etc.; the AFK-override slots and the options bag are additive (ADR-0021).
+Two resolutions of the same model/effort/provider/options knobs. A **manual pre-fill** is *soft* — the value the Start form shows pre-filled, which the operator overrides per spawn (request → repo base → global base). An **AFK default** is *hard* — with no operator, it is literally what runs, resolved by layering an optional AFK-override over the base (repo.afk ?? global.afk ?? repo.base ?? global.base); an empty override inherits the base. The base is the shared `spawn_model_default` / `model_default` etc.; the AFK-override slots and the options bag are additive (ADR-0021); provider is layered the same way (ADR-0030). Default-layer resolution is skip-layer: a default not in the effective provider's catalog is treated as unset and falls through; an empty catalog resolves the knob to nothing and omits it; an explicit request value stays strict (a 400).
 _Avoid_: preset, profile, per-run override
 
 **Skills bundle**:
@@ -133,7 +133,7 @@ _Avoid_: password, keyring, vault key file synonyms
 - The **chat** reads an instance's **transcript** through the provider seam and lets the operator reply/answer/interrupt; it complements the deep link and applies to every instance. Replying to or interrupting an **AFK run** is a **neutral** intervention — it never touches the **budget clock**, **claim**, or **three-strikes pause**. The tailer's **conversational state** feeds the instance list's live badges.
 - **Guarded teardown** runs at all four teardown sites (manual Stop, AFK reaper, startup reconciliation, merged-sweep) and produces **parked work**; the **unguarded Discard** is the only way to destroy it and the only requeue.
 - A **neutral Stop** parks the claim and never feeds the **three-strikes pause** counter.
-- Each repo has exactly one **tracker binding** and one **provider**, and may enable **incogni mode**.
+- Each repo has exactly one **tracker binding** and an *effective provider* resolved by layering (the repo override is optional), and may enable **incogni mode**.
 - Every AFK run receives one **run token**; every spawn (manual or AFK) seeds the **skills bundle** and `CLAUDE.local.md`.
 - The **master key** encrypts every credential; a repo's git credential reaches sessions via `GIT_SSH_COMMAND`/`GIT_ASKPASS`, its forge token never does.
 - On a `forge`-bound repo the done-signal is a PR; on a `builtin`-bound repo it is a **change request** — one contract, one reaper.

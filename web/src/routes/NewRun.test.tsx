@@ -41,6 +41,7 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
     incogni: false,
     model_default: null,
     effort_default: null,
+    afk_provider_default: null,
     afk_model_default: null,
     afk_effort_default: null,
     afk_options: null,
@@ -79,8 +80,24 @@ const PROVIDERS: Provider[] = [
   },
 ];
 
+/** A second provider WITHOUT an effort knob (empty efforts catalog). */
+const CODEX: Provider = {
+  id: 'codex',
+  display_name: 'Codex',
+  auth: { kind: 'api-key' },
+  models: [
+    { value: 'gpt-5-codex', label: 'GPT-5 Codex' },
+    { value: 'gpt-5', label: 'GPT-5' },
+  ],
+  efforts: [],
+  options: [],
+};
+
 let reposOnServer: Repo[];
+let providersOnServer: Provider[];
+let settingsOnServer: Record<string, unknown>;
 let authOnServer: ProviderAuthStatus;
+let authRequests: string[];
 let instancePost: { status: number; runID: string };
 let instancePosts: Record<string, unknown>[];
 let dispose: (() => void) | undefined;
@@ -115,17 +132,19 @@ function stubApi(): void {
         return Promise.resolve(jsonResponse(200, { repos: reposOnServer }));
       }
       if (url === '/api/v1/providers' && method === 'GET') {
-        return Promise.resolve(jsonResponse(200, { providers: PROVIDERS }));
+        return Promise.resolve(jsonResponse(200, { providers: providersOnServer }));
       }
       if (url === '/api/v1/settings' && method === 'GET') {
-        return Promise.resolve(jsonResponse(200, {}));
+        return Promise.resolve(jsonResponse(200, { ...settingsOnServer }));
       }
       // Per-provider-id auth route (issue #51 decision 7), keyed on the
-      // selected repo's provider.
-      if (url === '/api/v1/providers/claude-code/auth/status' && method === 'GET') {
+      // EFFECTIVE provider; the requested id is recorded for assertions.
+      const authMatch = /^\/api\/v1\/providers\/([^/]+)\/auth\/status$/.exec(url);
+      if (authMatch !== null && method === 'GET') {
+        authRequests.push(authMatch[1]!);
         return Promise.resolve(jsonResponse(200, authOnServer));
       }
-      if (url.startsWith('/api/v1/repos/repo_1/ready') && method === 'GET') {
+      if (/^\/api\/v1\/repos\/[^/]+\/ready/.test(url) && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { issues: [{ number: 1, title: 'x' }] }));
       }
       if (url === '/api/v1/repos/repo_1/instances' && method === 'POST') {
@@ -168,19 +187,34 @@ async function mountHome(): Promise<void> {
   await settle();
 }
 
-function setSelectValue(label: string, value: string): void {
-  const select = container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;
-  select.value = value;
-  select.dispatchEvent(new Event('input', { bubbles: true }));
+/** Opens a composer Select chip and clicks the option with the given label. */
+async function chooseFromChip(chipLabel: string, optionLabel: string): Promise<void> {
+  container.querySelector<HTMLButtonElement>(`button[aria-label="${chipLabel}"]`)!.click();
+  await settle();
+  const row = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="option"]')).find(
+    (r) => r.querySelector('.select-option-label')?.textContent === optionLabel,
+  );
+  if (!row) throw new Error(`missing option ${JSON.stringify(optionLabel)} in ${chipLabel}`);
+  row.click();
+  await settle();
 }
 
 function startButton(): HTMLButtonElement {
   return container.querySelector<HTMLButtonElement>('button[aria-label="Start run"]')!;
 }
 
+/** The text a composer Select chip currently shows on its trigger. */
+function chipLabel(label: string): string | null {
+  const chip = container.querySelector(`button[aria-label="${label}"] .composer-chip-label`);
+  return chip === null ? null : chip.textContent;
+}
+
 beforeEach(() => {
   reposOnServer = [repoFixture()];
+  providersOnServer = [...PROVIDERS];
+  settingsOnServer = {};
   authOnServer = { logged_in: true, email: 'me@x', method: 'oauth', checked_at: '' };
+  authRequests = [];
   instancePost = { status: 201, runID: 'run_new' };
   instancePosts = [];
   // A stale last-repo must not strand the composer; default to the empty slate.
@@ -208,10 +242,15 @@ describe('NewRun composer', () => {
 
     expect(container.querySelector('.composer-field')).not.toBeNull();
     expect(container.querySelector('.composer-input')).not.toBeNull();
-    expect(container.querySelector('select[aria-label="Model"]')).not.toBeNull();
-    expect(container.querySelector('select[aria-label="Effort"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Model"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Effort"]')).not.toBeNull();
+    // With a single registered provider there is no choice to offer: the
+    // agent chip must not render at all (ADR-0030 — pixel-identical composer).
+    expect(container.querySelector('button[aria-label="Agent"]')).toBeNull();
     // The repo chip names the selected (first ready) repo.
-    expect(container.querySelector('.repo-chip')?.textContent).toContain('coding-lab');
+    expect(container.querySelector('button[aria-label="Repository"]')?.textContent).toContain(
+      'coding-lab',
+    );
     // Not the zero-repos slate.
     expect(container.textContent).not.toContain('No repositories yet');
   });
@@ -223,8 +262,8 @@ describe('NewRun composer', () => {
     input.value = 'do the thing';
     input.dispatchEvent(new Event('input', { bubbles: true }));
 
-    setSelectValue('Model', 'opus');
-    setSelectValue('Effort', 'high');
+    await chooseFromChip('Model', 'Opus');
+    await chooseFromChip('Effort', 'High');
 
     // Open the `…` popover and set the optional label.
     container.querySelector<HTMLButtonElement>('button[aria-label="More options"]')!.click();
@@ -300,5 +339,102 @@ describe('NewRun composer', () => {
     expect(warn?.textContent).toContain('Claude Code is logged out');
     const link = warn?.querySelector('a');
     expect(link?.getAttribute('href')).toBe('/credentials');
+  });
+});
+
+// The agent chip (issue #66 / ADR-0030): rendered only with ≥2 registered
+// providers; the effective provider = ephemeral pick → repo override → global
+// provider_default → first provider, and everything downstream (model/effort
+// catalogs, the auth banner) follows it.
+describe('NewRun composer agent chip (multi-provider)', () => {
+  beforeEach(() => {
+    providersOnServer = [...PROVIDERS, CODEX];
+  });
+
+  it('shows the chip resolving the global provider_default when the repo inherits', async () => {
+    reposOnServer = [repoFixture({ provider: null })];
+    settingsOnServer = { provider_default: 'codex' };
+    await mountHome();
+
+    expect(chipLabel('Agent')).toBe('Codex');
+    // The model catalog follows the effective provider…
+    expect(chipLabel('Model')).toBe('GPT-5 Codex');
+    // …and a provider without an effort knob renders NO effort chip at all.
+    expect(container.querySelector('button[aria-label="Effort"]')).toBeNull();
+  });
+
+  it('lets the repo provider override the global default', async () => {
+    reposOnServer = [repoFixture({ provider: 'claude-code' })];
+    settingsOnServer = { provider_default: 'codex' };
+    await mountHome();
+
+    expect(chipLabel('Agent')).toBe('Claude Code');
+    expect(chipLabel('Model')).toBe('Sonnet');
+    expect(container.querySelector('button[aria-label="Effort"]')).not.toBeNull();
+  });
+
+  it('picking an agent re-catalogs model/effort, resets prior picks, and rides the POST', async () => {
+    reposOnServer = [repoFixture({ provider: 'claude-code' })];
+    await mountHome();
+
+    // Foreign picks made under the previous provider…
+    await chooseFromChip('Model', 'Opus');
+    await chooseFromChip('Effort', 'High');
+
+    await chooseFromChip('Agent', 'Codex');
+
+    // …are reset: the model chip re-catalogs to the new provider's default
+    // and the effort chip disappears (empty efforts catalog).
+    expect(chipLabel('Model')).toBe('GPT-5 Codex');
+    expect(container.querySelector('button[aria-label="Effort"]')).toBeNull();
+
+    startButton().click();
+    await settle();
+
+    // The explicit pick rides along; the stale Opus/High picks must NOT.
+    expect(instancePosts).toEqual([{ provider: 'codex', model: 'gpt-5-codex' }]);
+  });
+
+  it('omits provider from the POST when the operator never touched the chip', async () => {
+    reposOnServer = [repoFixture({ provider: 'codex' })];
+    await mountHome();
+
+    startButton().click();
+    await settle();
+
+    // The repo/global layers are the SERVER's to resolve — only an explicit
+    // per-spawn pick is sent.
+    expect(instancePosts).toEqual([{ model: 'gpt-5-codex' }]);
+  });
+
+  it('resets the ephemeral pick on repo switch', async () => {
+    reposOnServer = [
+      repoFixture({ provider: 'claude-code' }),
+      repoFixture({ id: 'repo_2', name: 'other-repo', provider: 'claude-code' }),
+    ];
+    await mountHome();
+
+    await chooseFromChip('Agent', 'Codex');
+    expect(chipLabel('Agent')).toBe('Codex');
+    expect(container.querySelector('button[aria-label="Effort"]')).toBeNull();
+
+    await chooseFromChip('Repository', 'other-repo');
+
+    // The pick is ephemeral: the new repo resolves its own effective provider
+    // and the model/effort surfaces follow it again.
+    expect(chipLabel('Agent')).toBe('Claude Code');
+    expect(chipLabel('Model')).toBe('Sonnet');
+    expect(container.querySelector('button[aria-label="Effort"]')).not.toBeNull();
+  });
+
+  it('keys the auth banner on the effective provider and names its display_name', async () => {
+    reposOnServer = [repoFixture({ provider: 'codex' })];
+    authOnServer = { logged_in: false, email: '', method: '', checked_at: '' };
+    await mountHome();
+
+    // The status route was asked about the EFFECTIVE provider…
+    expect(authRequests).toContain('codex');
+    // …and the banner copy flows from its display_name.
+    expect(container.querySelector('.newrun-warn')?.textContent).toContain('Codex is logged out');
   });
 });

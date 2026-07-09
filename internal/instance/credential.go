@@ -86,58 +86,122 @@ func isAFKKind(kind string) bool {
 	return kind == store.RunKindAFKManual || kind == store.RunKindAFKAuto
 }
 
+// ResolveProvider resolves the EFFECTIVE agent provider for a spawn of the
+// given kind (issue #66) — the same three-level, skip-layer layering
+// model/effort use. A MANUAL run: explicit per-spawn request → repo.provider →
+// global provider_default → first registered. An AFK run has no per-spawn
+// request; it consults the AFK-override layer FIRST — repo.afk_provider_default
+// → global spawn_provider_default_afk — then the same base chain. Only the
+// explicit request is STRICT (an unknown non-empty id is a 400); every default
+// layer skips a value the registry does not carry, treating it as unset, so a
+// stored default naming an absent provider can never wedge a spawn.
+func (s *Service) ResolveProvider(ctx context.Context, repo store.Repo, kind, reqProvider string) (provider.AgentProvider, error) {
+	if reqProvider != "" {
+		p, ok := s.providers.Get(reqProvider)
+		if !ok {
+			return nil, badRequestf("unknown provider %q", reqProvider)
+		}
+		return p, nil
+	}
+	var candidates []string
+	if isAFKKind(kind) {
+		candidates = append(candidates, strOrEmpty(repo.AFKProviderDefault))
+		v, err := s.store.GetString(ctx, store.SettingSpawnProviderDefaultAFK, "")
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, v)
+	}
+	candidates = append(candidates, strOrEmpty(repo.Provider))
+	v, err := s.store.GetString(ctx, store.SettingProviderDefault, "")
+	if err != nil {
+		return nil, err
+	}
+	candidates = append(candidates, v)
+	p, ok := s.providers.DefaultFor(candidates...)
+	if !ok {
+		return nil, fmt.Errorf("no agent providers registered")
+	}
+	return p, nil
+}
+
+// strOrEmpty flattens a nullable column for the candidate chains (nil = "").
+func strOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 // ResolveModelEffort layers the spawn model/effort, run-kind-aware (D12d +
-// issue #19 / ADR-0021). A MANUAL run: explicit per-spawn value → repo base
+// issue #19 / ADR-0021) and skip-layer against the EFFECTIVE provider's
+// catalogs (issue #66). A MANUAL run: explicit per-spawn value → repo base
 // default → global base default. An AFK run has no per-spawn request; it
 // consults the AFK-override layer FIRST — repo.afk_* → global spawn_*_default_afk
-// — then falls back to the same base (repo base → global base). Empty AFK
-// overrides mean inherit, so the layering degrades cleanly. The resolved pair
-// is validated against the provider's catalogs (closed allowlists — an unknown
-// value is a 400, never spawned). Exported for the M5 AFK engine, whose spawns
-// resolve through the same rule.
+// — then falls back to the same base (repo base → global base). A DEFAULT-layer
+// value the provider's catalog does not carry is treated as unset and falls
+// through (a claude-shaped global default must not 400 a spawn on another
+// provider); only the explicit request stays strict (unknown → 400). With every
+// layer unset or foreign the catalog's first entry wins; an EMPTY catalog (a
+// provider without that knob) resolves to "" — the CLI flag is omitted.
+// Exported for the M5 AFK engine, whose spawns resolve through the same rule.
 func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, kind, reqModel, reqEffort string) (model, effort string, err error) {
 	afk := isAFKKind(kind)
-	if model, err = s.layerSpawnDefault(ctx, afk, reqModel, repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault); err != nil {
+	if model, err = s.layerSpawnDefault(ctx, prov.Models(), afk, reqModel, repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault, "model"); err != nil {
 		return "", "", err
 	}
-	if effort, err = s.layerSpawnDefault(ctx, afk, reqEffort, repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault); err != nil {
+	if effort, err = s.layerSpawnDefault(ctx, prov.Efforts(), afk, reqEffort, repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault, "effort"); err != nil {
 		return "", "", err
-	}
-	if !provider.HasOption(prov.Models(), model) {
-		return "", "", badRequestf("unknown model %q", model)
-	}
-	if !provider.HasOption(prov.Efforts(), effort) {
-		return "", "", badRequestf("unknown effort %q", effort)
 	}
 	return model, effort, nil
 }
 
 // layerSpawnDefault resolves one spawn default (model or effort) through the
-// D12d + issue-#19 layering. For an AFK run it consults the AFK-override layer
-// first (repo override column, then the global AFK-override setting), each
-// empty = inherit; then every run type falls back to the base layer (the
-// per-spawn request for manual, then the repo base column, then the global base
-// setting). req is always "" for AFK (the start is bodyless).
-func (s *Service) layerSpawnDefault(ctx context.Context, afk bool, req string, repoAFK, repoBase *string, afkKey, baseKey string) (string, error) {
+// D12d + issue-#19 layering with issue-#66 skip-layer semantics: the explicit
+// per-spawn request is STRICT (a non-empty value outside catalog — including
+// any non-empty value against an empty catalog — is a 400); every default
+// layer counts only when its value is non-empty AND present in the effective
+// provider's catalog, else it is treated as unset and falls through. For an
+// AFK run the AFK-override layer (repo override column, then the global
+// AFK-override setting) is consulted first; then every run type falls back to
+// the base layer (repo base column, then the global base setting), and finally
+// the catalog's first entry — or "" for a provider whose catalog is empty
+// (the flag is omitted at spawn). req is always "" for AFK (the start is
+// bodyless). knob names the field in the 400 message ("model"/"effort").
+func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Option, afk bool, req string, repoAFK, repoBase *string, afkKey, baseKey, knob string) (string, error) {
+	if req != "" {
+		if !provider.HasOption(catalog, req) {
+			return "", badRequestf("unknown %s %q", knob, req)
+		}
+		return req, nil
+	}
+	inCatalog := func(v string) bool { return v != "" && provider.HasOption(catalog, v) }
 	if afk {
-		if repoAFK != nil && *repoAFK != "" {
+		if repoAFK != nil && inCatalog(*repoAFK) {
 			return *repoAFK, nil
 		}
 		v, err := s.store.GetString(ctx, afkKey, "")
 		if err != nil {
 			return "", err
 		}
-		if v != "" {
+		if inCatalog(v) {
 			return v, nil
 		}
 	}
-	if req != "" {
-		return req, nil
-	}
-	if repoBase != nil && *repoBase != "" {
+	if repoBase != nil && inCatalog(*repoBase) {
 		return *repoBase, nil
 	}
-	return s.store.GetString(ctx, baseKey, "")
+	v, err := s.store.GetString(ctx, baseKey, "")
+	if err != nil {
+		return "", err
+	}
+	if inCatalog(v) {
+		return v, nil
+	}
+	if len(catalog) == 0 {
+		return "", nil
+	}
+	return catalog[0].Value, nil
 }
 
 // ResolveSpawnOptions resolves the provider-owned spawn-options bag for a launch

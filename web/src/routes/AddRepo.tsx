@@ -8,11 +8,13 @@ import {
   createRepo,
   errorMessage,
   listCredentials,
+  listProviders,
   type CreateRepoRequest,
   type TrackerBinding,
 } from '../api';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
+import Select from '../components/Select';
 import { deriveRepoName } from '../lib/repoName';
 
 type BindingChoice = 'auto' | TrackerBinding;
@@ -28,9 +30,12 @@ export default function AddRepo() {
 function AddRepoView() {
   const navigate = useNavigate();
   const [credentials] = createResource(() => listCredentials());
+  const [providers] = createResource(() => listProviders());
   const gitCredentials = () =>
     (credentials() ?? []).filter((c) => c.kind === 'ssh_key' || c.kind === 'https_token');
   const forgeCredentials = () => (credentials() ?? []).filter((c) => c.kind === 'forge_token');
+  const providerOptions = () =>
+    (providers() ?? []).map((p) => ({ value: p.id, label: p.display_name }));
 
   const [url, setUrl] = createSignal('');
   const [name, setName] = createSignal('');
@@ -38,6 +43,8 @@ function AddRepoView() {
   const [credentialId, setCredentialId] = createSignal('');
   const [forgeCredentialId, setForgeCredentialId] = createSignal('');
   const [binding, setBinding] = createSignal<BindingChoice>('auto');
+  // '' = inherit the global provider_default; only a non-empty pick is sent.
+  const [provider, setProvider] = createSignal('');
   const [incogni, setIncogni] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -54,6 +61,7 @@ function AddRepoView() {
     const req: CreateRepoRequest = { remote_url: url().trim() };
     if (nameTouched() && name().trim() !== '') req.name = name().trim();
     if (credentialId() !== '') req.credential_id = credentialId();
+    if (provider() !== '') req.provider = provider();
     if (binding() !== 'auto') req.tracker_binding = binding();
     if (binding() !== 'builtin' && forgeCredentialId() !== '') {
       req.forge_credential_id = forgeCredentialId();
@@ -127,6 +135,15 @@ function AddRepoView() {
               </For>
             </select>
           </label>
+          <Select
+            skin="field"
+            label="Agent"
+            name="provider"
+            value={provider()}
+            options={providerOptions()}
+            inheritLabel="Global default"
+            onChange={setProvider}
+          />
           <label class="field">
             <span>Tracker binding</span>
             <select

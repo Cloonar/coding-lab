@@ -37,7 +37,7 @@ func seedRun(t *testing.T, st *store.Store, outcome string) store.Run {
 	t.Helper()
 	repo, err := st.CreateRepo(context.Background(), store.Repo{
 		ID: "repo1", Name: "proj", RemoteURL: "file:///x", TrackerBinding: store.TrackerBindingBuiltin,
-		ForgeKind: "none", DefaultBranch: "main", Provider: "claude-code", AFKBranchPattern: "afk/<N>",
+		ForgeKind: "none", DefaultBranch: "main", AFKBranchPattern: "afk/<N>",
 		ManualBranchPrefix: "lab/", CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
 	})
 	if err != nil {
@@ -607,7 +607,7 @@ func seedRunID(t *testing.T, st *store.Store, id, outcome string) store.Run {
 	if _, err := st.RepoByID(context.Background(), "repo1"); err != nil {
 		_, _ = st.CreateRepo(context.Background(), store.Repo{
 			ID: "repo1", Name: "proj", RemoteURL: "file:///x", TrackerBinding: store.TrackerBindingBuiltin,
-			ForgeKind: "none", DefaultBranch: "main", Provider: "claude-code", AFKBranchPattern: "afk/<N>",
+			ForgeKind: "none", DefaultBranch: "main", AFKBranchPattern: "afk/<N>",
 			ManualBranchPrefix: "lab/", CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
 		})
 	}

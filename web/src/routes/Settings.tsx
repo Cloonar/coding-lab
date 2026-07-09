@@ -12,10 +12,11 @@ import {
   listProviders,
   updateSettings,
   type IntSettingKey,
+  type Provider,
   type Settings as SettingsPayload,
   type TextSettingKey,
 } from '../api';
-import CatalogSelect from '../components/CatalogSelect';
+import Select, { type SelectOption } from '../components/Select';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import { providerFor } from '../lib/spawn';
@@ -81,10 +82,11 @@ function SettingsView() {
           {(current) => (
             <SettingsForm
               initial={current()}
-              // Global spawn defaults have no repo context; the catalog comes
-              // from the API's provider list (its first entry — providerFor's
-              // fallback), never from a hardcoded provider id (issue #51).
-              provider={providerFor(providers() ?? [], '')}
+              // Global spawn defaults have no repo context; the catalogs
+              // resolve against the DRAFTED provider_default / AFK provider
+              // (skip-layer over this list), never a hardcoded provider id
+              // (issue #51).
+              providers={providers() ?? []}
               onSaved={() => void refetch()}
             />
           )}
@@ -102,7 +104,7 @@ function seedDraft(initial: SettingsPayload, key: IntSettingKey | TextSettingKey
 
 function SettingsForm(props: {
   initial: SettingsPayload;
-  provider: ReturnType<typeof providerFor>;
+  providers: Provider[];
   onSaved: () => void;
 }) {
   // Drafts seed from the settings snapshot the form mounted with; buildPatch
@@ -110,8 +112,10 @@ function SettingsForm(props: {
   // (settings have no SSE event, so no resync is needed).
   const initial = props.initial;
   const [drafts, setDrafts] = createSignal<Record<string, string>>({
+    provider_default: seedDraft(initial, 'provider_default'),
     spawn_model_default: seedDraft(initial, 'spawn_model_default'),
     spawn_effort_default: seedDraft(initial, 'spawn_effort_default'),
+    spawn_provider_default_afk: seedDraft(initial, 'spawn_provider_default_afk'),
     spawn_model_default_afk: seedDraft(initial, 'spawn_model_default_afk'),
     spawn_effort_default_afk: seedDraft(initial, 'spawn_effort_default_afk'),
     git_author_name: seedDraft(initial, 'git_author_name'),
@@ -122,6 +126,16 @@ function SettingsForm(props: {
   const draft = (key: string) => drafts()[key] ?? '';
   const setDraft = (key: string, value: string) => setDrafts({ ...drafts(), [key]: value });
 
+  // Effective providers, resolved LIVE against the DRAFTS (skip-layer,
+  // ADR-0030): the base catalogs follow the drafted provider_default, the AFK
+  // catalogs the drafted AFK provider (falling through to the base draft) —
+  // both re-catalog as the operator flips the agent selects, before save.
+  const providerOptions = (): SelectOption[] =>
+    props.providers.map((p) => ({ value: p.id, label: p.display_name }));
+  const baseProvider = () => providerFor(props.providers, draft('provider_default'));
+  const afkProvider = () =>
+    providerFor(props.providers, draft('spawn_provider_default_afk'), draft('provider_default'));
+
   // AFK spawn-option checkboxes (bool provider options). The signal holds only
   // operator overrides; the seed reads the mounted snapshot, so a provider
   // catalog that loads after mount still resolves the right seeded state.
@@ -130,7 +144,7 @@ function SettingsForm(props: {
   const optionChecked = (key: string) => optionDrafts()[key] ?? seedChecked(key);
   const setOptionChecked = (key: string, value: boolean) =>
     setOptionDrafts({ ...optionDrafts(), [key]: value });
-  const boolOptions = () => (props.provider?.options ?? []).filter((o) => o.type === 'bool');
+  const boolOptions = () => (afkProvider()?.options ?? []).filter((o) => o.type === 'bool');
   const optionsDirty = () => boolOptions().some((o) => optionChecked(o.key) !== seedChecked(o.key));
 
   const [busy, setBusy] = createSignal(false);
@@ -153,8 +167,10 @@ function SettingsForm(props: {
   const buildPatch = (): SettingsPayload | null => {
     const patch: SettingsPayload = {};
     for (const key of [
+      'provider_default',
       'spawn_model_default',
       'spawn_effort_default',
+      'spawn_provider_default_afk',
       'spawn_model_default_afk',
       'spawn_effort_default_afk',
       'git_author_name',
@@ -216,21 +232,38 @@ function SettingsForm(props: {
 
       <section class="card">
         <h2>Spawn defaults</h2>
-        <CatalogSelect
+        <Select
+          skin="field"
+          label="Agent"
+          name="provider_default"
+          // The ROOT of the provider chain — there is nothing to inherit from,
+          // so no inherit entry. An unseeded store shows the effective
+          // fallback (the first registered provider).
+          value={
+            draft('provider_default') !== ''
+              ? draft('provider_default')
+              : (baseProvider()?.id ?? '')
+          }
+          options={providerOptions()}
+          onChange={(value) => setDraft('provider_default', value)}
+        />
+        <Select
+          skin="field"
           label="Model"
           name="spawn_model_default"
           value={draft('spawn_model_default')}
-          options={props.provider?.models ?? []}
+          options={baseProvider()?.models ?? []}
           onChange={(value) => setDraft('spawn_model_default', value)}
         />
-        <CatalogSelect
+        <Select
+          skin="field"
           label="Effort"
           name="spawn_effort_default"
           value={draft('spawn_effort_default')}
-          options={props.provider?.efforts ?? []}
+          options={baseProvider()?.efforts ?? []}
           onChange={(value) => setDraft('spawn_effort_default', value)}
         />
-        <Show when={props.provider === null}>
+        <Show when={baseProvider() === null}>
           <small class="hint hint-block">
             Provider catalog unavailable — only the stored values are offered.
           </small>
@@ -243,19 +276,30 @@ function SettingsForm(props: {
           Used for unattended AFK runs. Leave a field on “Same as default” to inherit the spawn
           default above.
         </small>
-        <CatalogSelect
+        <Select
+          skin="field"
+          label="AFK agent"
+          name="spawn_provider_default_afk"
+          value={draft('spawn_provider_default_afk')}
+          options={providerOptions()}
+          inheritLabel="Same as default"
+          onChange={(value) => setDraft('spawn_provider_default_afk', value)}
+        />
+        <Select
+          skin="field"
           label="Model"
           name="spawn_model_default_afk"
           value={draft('spawn_model_default_afk')}
-          options={props.provider?.models ?? []}
+          options={afkProvider()?.models ?? []}
           inheritLabel="Same as default"
           onChange={(value) => setDraft('spawn_model_default_afk', value)}
         />
-        <CatalogSelect
+        <Select
+          skin="field"
           label="Effort"
           name="spawn_effort_default_afk"
           value={draft('spawn_effort_default_afk')}
-          options={props.provider?.efforts ?? []}
+          options={afkProvider()?.efforts ?? []}
           inheritLabel="Same as default"
           onChange={(value) => setDraft('spawn_effort_default_afk', value)}
         />

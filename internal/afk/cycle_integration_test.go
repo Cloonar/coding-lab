@@ -450,7 +450,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	labctlBin := buildLabctl(t)
 
 	st := testutil.TempStore(t)
-	if err := st.SeedDefaultSettings(ctx, 6); err != nil {
+	if err := st.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
 		t.Fatalf("SeedDefaultSettings: %v", err)
 	}
 	vlt, err := vault.New(make([]byte, vault.KeySize))
@@ -512,7 +512,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 		t.Fatalf("instance.New: %v", err)
 	}
 	svc, err := afk.New(afk.Options{
-		Store: st, Git: git, Runner: runner, Providers: reg, Trackers: trackers,
+		Store: st, Git: git, Runner: runner, Trackers: trackers,
 		Instances: inst, Materializer: mat, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
 	})
@@ -560,8 +560,8 @@ func (w *cycleWorld) addRepo(name, script string, mut func(*store.Repo), issues 
 		RemoteURL:      "https://forge.test/" + w.forgeOwner + "/" + name + ".git",
 		TrackerBinding: store.TrackerBindingForge, ForgeKind: "forgejo",
 		ForgeCredentialID: &w.forgeCredID,
-		DefaultBranch:     "main", Provider: "claude-code",
-		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		DefaultBranch:     "main",
+		AFKBranchPattern:  "afk/<N>", ManualBranchPrefix: "lab/",
 		GitAuthorName: &author, GitAuthorEmail: &email,
 		CloneStatus: store.CloneStatusReady, CreatedAt: clockTime,
 	}
@@ -959,7 +959,7 @@ func (w *cycleWorld) addBuiltinRepo(name, script string, mut func(*store.Repo)) 
 		ID: repoID, Name: name,
 		RemoteURL:      "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
-		DefaultBranch: "main", Provider: "claude-code",
+		DefaultBranch:    "main",
 		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		GitAuthorName: &author, GitAuthorEmail: &email,
 		CloneStatus: store.CloneStatusReady, CreatedAt: clockTime,

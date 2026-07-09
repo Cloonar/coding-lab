@@ -75,16 +75,18 @@ func (s *Service) ScheduleOnce(ctx context.Context) {
 			s.log.Warn("afk scheduler: repo", "component", "afk", "repo", candidate.Name, "err", err)
 			continue
 		}
-		prov, ok := s.providers.Get(repo.Provider)
-		if !ok {
-			s.log.Warn("afk scheduler: provider not registered", "component", "afk", "repo", repo.Name, "provider", repo.Provider)
+		// The AFK-effective provider (issue #66) gates the auth pre-check; the
+		// locked claim path re-resolves it authoritatively at launch.
+		prov, err := s.instances.ResolveProvider(ctx, repo, store.RunKindAFKAuto, "")
+		if err != nil {
+			s.log.Warn("afk scheduler: resolving provider", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
-		if _, checked := loggedIn[repo.Provider]; !checked {
+		if _, checked := loggedIn[prov.ID()]; !checked {
 			st, _ := prov.AuthStatus(ctx, true)
-			loggedIn[repo.Provider] = st.LoggedIn
+			loggedIn[prov.ID()] = st.LoggedIn
 		}
-		if !loggedIn[repo.Provider] {
+		if !loggedIn[prov.ID()] {
 			continue
 		}
 		// A repo whose tracker binding can't be driven (unsupported forge,

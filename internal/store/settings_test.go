@@ -96,7 +96,7 @@ func TestSeedDefaultSettings(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 
-		if err := s.SeedDefaultSettings(ctx, 6); err != nil {
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		all, err := s.AllSettings(ctx)
@@ -106,6 +106,7 @@ func TestSeedDefaultSettings(t *testing.T) {
 		want := map[string]string{
 			SettingSpawnModelDefault:    "opus[1m]",
 			SettingSpawnEffortDefault:   "max",
+			SettingProviderDefault:      "claude-code",
 			SettingMaxInstances:         "6",
 			SettingAFKBudgetMinutes:     "120",
 			SettingAFKTickSeconds:       "30",
@@ -137,7 +138,7 @@ func TestSeedDefaultSettingsIdempotent(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 
-		if err := s.SeedDefaultSettings(ctx, 6); err != nil {
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
 			t.Fatalf("first seed: %v", err)
 		}
 		// Operator changes two knobs at runtime.
@@ -152,9 +153,9 @@ func TestSeedDefaultSettingsIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Restart with a different --max-instances: existing rows win, the
-		// hole is refilled.
-		if err := s.SeedDefaultSettings(ctx, 10); err != nil {
+		// Restart with a different --max-instances (and a different first
+		// provider): existing rows win, the hole is refilled.
+		if err := s.SeedDefaultSettings(ctx, 10, "other-provider"); err != nil {
 			t.Fatalf("second seed: %v", err)
 		}
 
@@ -166,6 +167,9 @@ func TestSeedDefaultSettingsIdempotent(t *testing.T) {
 		}
 		if v, _ := s.GetInt(ctx, SettingAFKBudgetMinutes, 0); v != 120 {
 			t.Errorf("afk_budget_minutes refilled = %d, want 120", v)
+		}
+		if v, _ := s.GetString(ctx, SettingProviderDefault, ""); v != "claude-code" {
+			t.Errorf("provider_default after reseed = %q, want the first seed's claude-code", v)
 		}
 	})
 }

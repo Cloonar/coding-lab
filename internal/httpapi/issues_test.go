@@ -61,7 +61,7 @@ func seedTrackerRepo(t *testing.T, x *testServer, name string, mod func(*store.R
 		Name:           name,
 		RemoteURL:      "git@git.cloonar.com:Cloonar/" + name + ".git",
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
-		DefaultBranch: "main", Provider: "claude-code",
+		DefaultBranch:    "main",
 		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
 	}

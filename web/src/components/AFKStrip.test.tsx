@@ -39,6 +39,7 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
     incogni: false,
     model_default: null,
     effort_default: null,
+    afk_provider_default: null,
     afk_model_default: null,
     afk_effort_default: null,
     afk_options: null,

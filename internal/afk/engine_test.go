@@ -217,7 +217,7 @@ func newFixtureWrapped(t *testing.T, pattern string, wrap func(*tmuxx.Fake) tmux
 
 	git := gitx.New("git")
 	st := testutil.TempStore(t)
-	if err := st.SeedDefaultSettings(t.Context(), 6); err != nil {
+	if err := st.SeedDefaultSettings(t.Context(), 6, "claude-code"); err != nil {
 		t.Fatalf("SeedDefaultSettings: %v", err)
 	}
 
@@ -255,7 +255,7 @@ func newFixtureWrapped(t *testing.T, pattern string, wrap func(*tmuxx.Fake) tmux
 
 	trackers := newFakeResolver()
 	svc, err := New(Options{
-		Store: st, Git: git, Runner: svcRunner, Providers: reg, Trackers: trackers,
+		Store: st, Git: git, Runner: svcRunner, Trackers: trackers,
 		Instances: inst, Materializer: mat, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
 	})
@@ -289,7 +289,7 @@ func (f *fixture) addRepo(name, pattern string) (store.Repo, *fakeTracker) {
 	repo, err := f.st.CreateRepo(f.t.Context(), store.Repo{
 		ID: repoID, Name: name, RemoteURL: "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: "claude-code", AFKBranchPattern: pattern, ManualBranchPrefix: "lab/",
+		AFKBranchPattern: pattern, ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusReady, CreatedAt: clockTime,
 	})
 	if err != nil {
