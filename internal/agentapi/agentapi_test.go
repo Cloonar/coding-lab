@@ -228,6 +228,7 @@ func TestAllRoutesAreMountedBehindAuth(t *testing.T) {
 		{"GET", "/agent/v1/labels", "", http.StatusOK},
 		{"POST", "/agent/v1/labels", `{"name":"bug"}`, http.StatusOK},
 		{"POST", "/agent/v1/prs", `{"title":"t","body":"b"}`, http.StatusCreated}, // builtin → change request (M6)
+		{"GET", "/agent/v1/prs/1/checks", "", http.StatusOK},                      // CR #1 created by the row above → 200 state none
 	}
 	for _, rt := range routes {
 		// Without a token: 401.

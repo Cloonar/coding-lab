@@ -81,6 +81,26 @@ type PRMerged struct {
 	URL    string `json:"url"`
 }
 
+// PRChecksReport is the agent API's GET /prs/{n}/checks answer: the per-check
+// rows plus the single-word aggregate State the server already computed via
+// tracker.ChecksState (failure|pending|success|none). The client never
+// recomputes the aggregate — it reads State and drives its exit code off it.
+type PRChecksReport struct {
+	State  string    `json:"state"`
+	Checks []PRCheck `json:"checks"`
+}
+
+// PRCheck is one row of the checks report: one CI check / commit-status for the
+// PR/CR's head commit. RawState (camelCase on the wire) is the forge's own
+// state word verbatim, beside lab's normalized State.
+type PRCheck struct {
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	RawState string `json:"rawState"`
+	Summary  string `json:"summary"`
+	URL      string `json:"url"`
+}
+
 // Client is the transport to /agent/v1, built from LAB_URL/LAB_TOKEN.
 type Client struct {
 	BaseURL string
@@ -138,6 +158,14 @@ func (c *Client) PRMerge(n int) (PRMerged, error) {
 	var pm PRMerged
 	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/merge", nil, &pm)
 	return pm, err
+}
+
+// PRChecks fetches the CI status report for PR/CR n — the rows plus the
+// server-computed aggregate State (the fix-the-red loop, issue #72).
+func (c *Client) PRChecks(n int) (PRChecksReport, error) {
+	var rep PRChecksReport
+	err := c.do(http.MethodGet, "/agent/v1/prs/"+strconv.Itoa(n)+"/checks", nil, &rep)
+	return rep, err
 }
 
 // PRList lists the repo's PRs across all states.

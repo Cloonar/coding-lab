@@ -157,6 +157,19 @@ func (t *Tracker) Pull(ctx context.Context, number int) (tracker.PullDetail, err
 	return toPullDetail(cr), nil
 }
 
+// Checks returns the CI check rows for change request `number`'s current
+// head commit — always a non-nil empty slice: the built-in tracker has no CI
+// machinery to report on, and an empty result is success (tracker.ChecksState
+// reads it as tracker.ChecksNone), not an error — a built-in repo truthfully
+// has no checks. It resolves the CR through the same store lookup Pull uses,
+// so an unknown number surfaces store.ErrNotFound exactly like Pull.
+func (t *Tracker) Checks(ctx context.Context, number int) ([]tracker.Check, error) {
+	if _, err := t.store.CRByRepoNumber(ctx, t.repoID, number); err != nil {
+		return nil, fmt.Errorf("builtin checks %d: %w", number, err)
+	}
+	return []tracker.Check{}, nil
+}
+
 // CreatePull opens a change request from head onto base — the builtin answer
 // to a forge PR create (the agent API's POST /prs routes here for
 // builtin-bound repos). The issues the body closes are parsed with the shared

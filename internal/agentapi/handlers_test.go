@@ -33,6 +33,7 @@ type fakeTracker struct {
 	merged       []int           // records MergePull arguments
 	pulls        []tracker.PullRef
 	pullDetails  []tracker.PullDetail
+	checks       []tracker.Check // returned by Checks (with f.err)
 	comments     []commentArgs
 	createdIssue *issueArgs
 	labelAdds    []labelsArgs
@@ -98,6 +99,9 @@ func (f *fakeTracker) Pull(_ context.Context, number int) (tracker.PullDetail, e
 		}
 	}
 	return tracker.PullDetail{}, fmt.Errorf("pull %d: %w", number, tracker.ErrNotFound)
+}
+func (f *fakeTracker) Checks(context.Context, int) ([]tracker.Check, error) {
+	return f.checks, f.err
 }
 func (f *fakeTracker) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	if f.err != nil {
@@ -910,6 +914,69 @@ func TestPRViewAndList_builtin(t *testing.T) {
 	rr = doJSON(t, handler, "GET", "/agent/v1/prs/999", token, "")
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("GET /prs/999: status = %d, want 404", rr.Code)
+	}
+}
+
+// TestPRChecks_forge pins GET /agent/v1/prs/{n}/checks (issue #72): the rows
+// come back verbatim and the aggregate is computed SERVER-SIDE via the pure
+// tracker.ChecksState. The fixture rows carry success + pending + failure, so
+// a naive "any pending" client would say pending — the body proving `failure`
+// proves precedence ran on the server. The full JSON body is asserted,
+// including the camelCase `rawState` key. An unknown number is the canonical
+// 404 envelope; a throttled forge is a distinct 503.
+func TestPRChecks_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	// success + pending + failure → aggregate failure (precedence over a live
+	// pending sibling), proving the server did not just forward a forge verdict.
+	fk := &fakeTracker{checks: []tracker.Check{
+		{Name: "build", State: tracker.CheckSuccess, RawState: "success", Summary: "ok", URL: "https://ci/build"},
+		{Name: "lint", State: tracker.CheckPending, RawState: "in_progress", Summary: "", URL: "https://ci/lint"},
+		{Name: "test", State: tracker.CheckFailure, RawState: "failure", Summary: "3 failing", URL: "https://ci/test"},
+	}}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/checks", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("checks: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	wantBody := `{"state":"failure","checks":[` +
+		`{"name":"build","state":"success","rawState":"success","summary":"ok","url":"https://ci/build"},` +
+		`{"name":"lint","state":"pending","rawState":"in_progress","summary":"","url":"https://ci/lint"},` +
+		`{"name":"test","state":"failure","rawState":"failure","summary":"3 failing","url":"https://ci/test"}]}`
+	if got := strings.TrimSpace(rr.Body.String()); got != wantBody {
+		t.Errorf("checks body =\n%s\nwant\n%s", got, wantBody)
+	}
+
+	// Zero rows: state none and the array is literal [], never null (an agent
+	// parsing the array must not special-case a nil).
+	empty := &fakeTracker{checks: []tracker.Check{}}
+	rr = doJSON(t, f.forgeServer(empty).Handler(), "GET", "/agent/v1/prs/12/checks", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("empty checks: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"state":"none","checks":[]}` {
+		t.Errorf("empty checks body = %s, want {\"state\":\"none\",\"checks\":[]}", got)
+	}
+
+	// Unknown number → the canonical 404 envelope (the fake wraps ErrNotFound
+	// like the real client's upstream 404).
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "GET", "/agent/v1/prs/999/checks", token, "")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown checks: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+
+	// Throttled forge → 503 with the diagnostic (ErrRateLimited, not the
+	// generic 502): a distinct state the agent comes back later on.
+	limited := &fakeTracker{err: fmt.Errorf("github checks: %w (resets 12:30)", tracker.ErrRateLimited)}
+	rr = doJSON(t, f.forgeServer(limited).Handler(), "GET", "/agent/v1/prs/12/checks", token, "")
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("rate-limited checks: status = %d, want 503 (body %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "rate limited") {
+		t.Errorf("503 body = %s, want the rate-limit diagnostic", rr.Body.String())
 	}
 }
 

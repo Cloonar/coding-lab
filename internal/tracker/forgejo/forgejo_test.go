@@ -483,6 +483,130 @@ func TestPull_notFound(t *testing.T) {
 	}
 }
 
+// --- Checks ------------------------------------------------------------
+
+// TestChecks pins the two-call shape (GET the pull for head.sha, then GET the
+// combined-status endpoint for that SHA) and the normalization table: every
+// row not affirmatively "success" or "pending" collapses to CheckFailure,
+// while RawState keeps the forge's own word verbatim.
+func TestChecks(t *testing.T) {
+	const sha = "deadbeefcafe0123456789abcdef0123456789a"
+	var gotPullPath, gotStatusPath string
+	var gotStatusAuth string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == apiPrefix+"/pulls/72" && r.Method == http.MethodGet:
+			gotPullPath = r.URL.Path
+			_, _ = fmt.Fprintf(w, `{"number":72,"title":"feat: thing","state":"open","merged":false,
+			  "head":{"ref":"afk/63","sha":%q},
+			  "html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/72"}`, sha)
+		case r.URL.Path == apiPrefix+"/commits/"+sha+"/status" && r.Method == http.MethodGet:
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = io.WriteString(w, `{"state":"pending","statuses":[]}`) // paginate-until-empty probe
+				return
+			}
+			gotStatusPath = r.URL.Path
+			gotStatusAuth = r.Header.Get("Authorization")
+			_, _ = io.WriteString(w, `{"state":"pending","statuses":[
+			  {"context":"ci/build","state":"success","description":"build ok","target_url":"https://ci/1"},
+			  {"context":"ci/test","state":"pending","description":"running","target_url":"https://ci/2"},
+			  {"context":"ci/lint","state":"failure","description":"lint failed","target_url":"https://ci/3"},
+			  {"context":"ci/deploy","state":"error","description":"errored out","target_url":"https://ci/4"},
+			  {"context":"ci/flaky","state":"warning","description":"flaky warn","target_url":"https://ci/5"},
+			  {"context":"ci/weird","state":"totally-unknown","description":"???","target_url":"https://ci/6"}
+			]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	})
+
+	checks, err := c.Checks(context.Background(), 72)
+	if err != nil {
+		t.Fatalf("Checks: %v", err)
+	}
+	if gotPullPath != apiPrefix+"/pulls/72" {
+		t.Errorf("pull request path = %q; want %q", gotPullPath, apiPrefix+"/pulls/72")
+	}
+	if gotStatusPath != apiPrefix+"/commits/"+sha+"/status" {
+		t.Errorf("status request path = %q; want %q (must carry the head SHA)", gotStatusPath, apiPrefix+"/commits/"+sha+"/status")
+	}
+	if gotStatusAuth != "token "+testToken {
+		t.Errorf("status request Authorization = %q; want %q", gotStatusAuth, "token "+testToken)
+	}
+
+	want := []tracker.Check{
+		{Name: "ci/build", State: tracker.CheckSuccess, RawState: "success", Summary: "build ok", URL: "https://ci/1"},
+		{Name: "ci/test", State: tracker.CheckPending, RawState: "pending", Summary: "running", URL: "https://ci/2"},
+		{Name: "ci/lint", State: tracker.CheckFailure, RawState: "failure", Summary: "lint failed", URL: "https://ci/3"},
+		{Name: "ci/deploy", State: tracker.CheckFailure, RawState: "error", Summary: "errored out", URL: "https://ci/4"},
+		{Name: "ci/flaky", State: tracker.CheckFailure, RawState: "warning", Summary: "flaky warn", URL: "https://ci/5"},
+		{Name: "ci/weird", State: tracker.CheckFailure, RawState: "totally-unknown", Summary: "???", URL: "https://ci/6"},
+	}
+	if len(checks) != len(want) {
+		t.Fatalf("got %d checks; want %d: %+v", len(checks), len(want), checks)
+	}
+	for i := range want {
+		if checks[i] != want[i] {
+			t.Errorf("check[%d] = %+v; want %+v", i, checks[i], want[i])
+		}
+	}
+}
+
+// TestChecks_zeroStatuses is the load-bearing case of the whole feature: the
+// combined endpoint answers a combined state of "pending" for a commit with
+// zero registered statuses (there is no CI to be pending on), and that
+// combined verdict must never be trusted. Checks must return a non-nil empty
+// slice, and the aggregate — computed client-side by tracker.ChecksState,
+// never read off the forge — must be ChecksNone, not CheckPending.
+func TestChecks_zeroStatuses(t *testing.T) {
+	const sha = "0000000000000000000000000000000000000a"
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == apiPrefix+"/pulls/9" && r.Method == http.MethodGet:
+			_, _ = fmt.Fprintf(w, `{"number":9,"state":"open","merged":false,"head":{"ref":"afk/9","sha":%q}}`, sha)
+		case r.URL.Path == apiPrefix+"/commits/"+sha+"/status" && r.Method == http.MethodGet:
+			// The forge's own combined state says "pending" despite zero jobs.
+			_, _ = io.WriteString(w, `{"state":"pending","statuses":[]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	})
+
+	checks, err := c.Checks(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("Checks: %v", err)
+	}
+	if checks == nil {
+		t.Fatal("checks = nil; want a non-nil empty slice")
+	}
+	if len(checks) != 0 {
+		t.Fatalf("checks = %+v; want empty", checks)
+	}
+	if got := tracker.ChecksState(checks); got != tracker.ChecksNone {
+		t.Fatalf("ChecksState(checks) = %q; want %q — the forge's combined \"pending\" verdict must never be trusted", got, tracker.ChecksNone)
+	}
+}
+
+// TestChecks_notFound mirrors TestPull_notFound: an unknown pull number fails
+// on the first GET (the pull lookup) and unwraps to tracker.ErrNotFound,
+// never leaking the token.
+func TestChecks_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"pull request does not exist"}`)
+	})
+
+	_, err := c.Checks(context.Background(), 999)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
 // --- CreatePull ------------------------------------------------------------
 
 func TestCreatePull(t *testing.T) {

@@ -69,6 +69,12 @@ func TestRunCommandSurface(t *testing.T) {
 		{"pr view bad n", []string{"pr", "view", "twelve"}, agentEnv, 2, "", "not an integer"},
 		{"pr list too many", []string{"pr", "list", "x"}, agentEnv, 2, "", "too many arguments"},
 
+		// `pr checks` OVERRIDES the binary-wide usage code: a usage error is 1,
+		// not 2 (2 is reserved for a red aggregate), and still prints usage.
+		{"pr checks no n", []string{"pr", "checks"}, agentEnv, 1, "", "Usage"},
+		{"pr checks bad n", []string{"pr", "checks", "twelve"}, agentEnv, 1, "", "not a positive integer"},
+		{"pr checks too many", []string{"pr", "checks", "1", "2"}, agentEnv, 1, "", "want <n>"},
+
 		{"issue create missing title", []string{"issue", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
 		{"issue create missing body", []string{"issue", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
 		{"issue create stray args", []string{"issue", "create", "--title", "t", "--body", "b", "x"}, agentEnv, 2, "", "unexpected arguments"},
@@ -135,6 +141,9 @@ type fakeForge struct {
 	mergeRef     tracker.PullRef     // returned by MergePull on success
 	mergeErr     error               // returned by MergePull when set
 	mergedNumber int                 // records the last MergePull argument
+	checks       []tracker.Check     // returned by Checks (single-shot tests)
+	checksSeq    [][]tracker.Check   // consecutive Checks() results (--wait); overrides checks when set
+	checksCall   int                 // index into checksSeq
 }
 
 func (f *fakeForge) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -159,6 +168,19 @@ func (f *fakeForge) Pull(_ context.Context, number int) (tracker.PullDetail, err
 	}
 	// Shaped like the real client's upstream-404: wraps the typed sentinel.
 	return tracker.PullDetail{}, fmt.Errorf("forgejo GET /repos/o/r/pulls/%d: unexpected status 404: %w", number, tracker.ErrNotFound)
+}
+func (f *fakeForge) Checks(context.Context, int) ([]tracker.Check, error) {
+	if f.checksSeq != nil {
+		// Serve the next scripted result; clamp to the last so extra polls keep
+		// seeing the terminal state.
+		i := f.checksCall
+		if i >= len(f.checksSeq) {
+			i = len(f.checksSeq) - 1
+		}
+		f.checksCall++
+		return f.checksSeq[i], nil
+	}
+	return f.checks, nil
 }
 func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	f.createdPull = &[4]string{head, base, title, body}
@@ -704,6 +726,161 @@ func TestPRViewBuiltinRoundTrip(t *testing.T) {
 	}
 	if !strings.HasPrefix(stdout, "#1\topen\tafk/1\t/repos/") {
 		t.Errorf("stdout = %q, want the CR row", stdout)
+	}
+}
+
+// TestPRChecksRed pins the red path (issue #72): the rows render in the wire
+// column order name<TAB>state<TAB>rawState<TAB>summary<TAB>url under a
+// `state: <aggregate>` line, and a red aggregate exits 2 — the one code that
+// means "checks are red", distinct from every other failure (which is 1).
+func TestPRChecksRed(t *testing.T) {
+	fk := &fakeForge{checks: []tracker.Check{
+		{Name: "build", State: tracker.CheckSuccess, RawState: "success", Summary: "ok", URL: "https://ci/build"},
+		{Name: "test", State: tracker.CheckFailure, RawState: "failure", Summary: "3 failing", URL: "https://ci/test"},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "checks", "12"}, f.env())
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (red aggregate); stderr %q", code, stderr)
+	}
+	want := "state: failure\n" +
+		"build\tsuccess\tsuccess\tok\thttps://ci/build\n" +
+		"test\tfailure\tfailure\t3 failing\thttps://ci/test\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// TestPRChecksGreen: an all-success aggregate exits 0 (green — the loop is done).
+func TestPRChecksGreen(t *testing.T) {
+	fk := &fakeForge{checks: []tracker.Check{
+		{Name: "build", State: tracker.CheckSuccess, RawState: "success", Summary: "", URL: "https://ci/build"},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "checks", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (green); stderr %q", code, stderr)
+	}
+	if stdout != "state: success\nbuild\tsuccess\tsuccess\t\thttps://ci/build\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+// TestPRChecksPendingExit3: a single-shot fetch that finds the aggregate still
+// pending exits 3 ("still pending at exit" covers the single-shot case too).
+func TestPRChecksPendingExit3(t *testing.T) {
+	fk := &fakeForge{checks: []tracker.Check{
+		{Name: "build", State: tracker.CheckPending, RawState: "in_progress", Summary: "", URL: "https://ci/build"},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "checks", "12"}, f.env())
+	if code != 3 {
+		t.Fatalf("exit = %d, want 3 (still pending); stderr %q", code, stderr)
+	}
+	if stdout != "state: pending\nbuild\tpending\tin_progress\t\thttps://ci/build\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+// TestPRChecksBuiltinNone: a builtin repo truthfully has no CI, so a CR's
+// checks aggregate to none — printed as just the state line, exit 0. The CR is
+// seeded end-to-end via `pr create`, the way the builtin PR-view test does.
+func TestPRChecksBuiltinNone(t *testing.T) {
+	f := newBuiltinFixture(t)
+	if code, _, stderr := run(t, []string{"pr", "create", "--title", "feat: x", "--body", "Did it."}, f.env()); code != 0 {
+		t.Fatalf("pr create: exit = %d, stderr %q", code, stderr)
+	}
+
+	code, stdout, stderr := run(t, []string{"pr", "checks", "1"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (none); stderr %q", code, stderr)
+	}
+	if stdout != "state: none\n" {
+		t.Errorf("stdout = %q, want just the state line (zero rows)", stdout)
+	}
+}
+
+// TestPRChecksWaitSucceeds: --wait polls CLIENT-SIDE (the harness blocks
+// foreground sleep) until the aggregate leaves pending. The fake returns
+// pending then success; labctl prints ONLY the final success report, once, and
+// exits 0. Poll knobs are shrunk to milliseconds so the loop is sub-second.
+func TestPRChecksWaitSucceeds(t *testing.T) {
+	origInterval, origCap := checksPollInterval, checksWaitCap
+	checksPollInterval = time.Millisecond
+	checksWaitCap = time.Second
+	t.Cleanup(func() { checksPollInterval, checksWaitCap = origInterval, origCap })
+
+	fk := &fakeForge{checksSeq: [][]tracker.Check{
+		{{Name: "ci", State: tracker.CheckPending, RawState: "queued", Summary: "", URL: "https://ci/1"}},
+		{{Name: "ci", State: tracker.CheckSuccess, RawState: "success", Summary: "", URL: "https://ci/1"}},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "checks", "12", "--wait"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr %q", code, stderr)
+	}
+	if stdout != "state: success\nci\tsuccess\tsuccess\t\thttps://ci/1\n" {
+		t.Errorf("stdout = %q, want a single success report", stdout)
+	}
+	if strings.Count(stdout, "state:") != 1 {
+		t.Errorf("stdout has %d state lines, want exactly 1 (report printed once, never per poll)", strings.Count(stdout, "state:"))
+	}
+}
+
+// TestPRChecksWaitTimesOut: --wait that stays pending past the (shrunken) cap
+// prints the still-pending report once and exits 3.
+func TestPRChecksWaitTimesOut(t *testing.T) {
+	origInterval, origCap := checksPollInterval, checksWaitCap
+	checksPollInterval = time.Millisecond
+	checksWaitCap = 5 * time.Millisecond
+	t.Cleanup(func() { checksPollInterval, checksWaitCap = origInterval, origCap })
+
+	fk := &fakeForge{checks: []tracker.Check{
+		{Name: "ci", State: tracker.CheckPending, RawState: "queued", Summary: "", URL: "https://ci/1"},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "checks", "12", "--wait"}, f.env())
+	if code != 3 {
+		t.Fatalf("exit = %d, want 3 (pending past cap); stderr %q", code, stderr)
+	}
+	if stdout != "state: pending\nci\tpending\tqueued\t\thttps://ci/1\n" {
+		t.Errorf("stdout = %q, want the still-pending report", stdout)
+	}
+	if strings.Count(stdout, "state:") != 1 {
+		t.Errorf("stdout has %d state lines, want exactly 1", strings.Count(stdout, "state:"))
+	}
+}
+
+// TestPRChecksUnknownAggregateExitsOne pins the malformed-answer edge: an
+// aggregate word outside the four-word vocabulary (a non-lab server, or
+// version skew — a real lab server computes it via tracker.ChecksState and
+// can only emit the four) is an API error, exit 1 with a diagnostic — never a
+// silent 0 an agent would read as green. Needs a raw server: the in-process
+// fixture cannot produce an out-of-vocabulary aggregate.
+func TestPRChecksUnknownAggregateExitsOne(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = io.WriteString(w, `{"state":"weird","checks":[]}`)
+	}))
+	defer ts.Close()
+
+	env := map[string]string{"LAB_URL": ts.URL, "LAB_TOKEN": "lab_run_x"}
+	code, _, stderr := run(t, []string{"pr", "checks", "1"}, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, `unexpected aggregate state "weird"`) {
+		t.Errorf("stderr = %q, want the unexpected-aggregate diagnostic", stderr)
 	}
 }
 

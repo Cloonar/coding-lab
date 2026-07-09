@@ -366,6 +366,36 @@ func TestBuiltin_Pull(t *testing.T) {
 	}
 }
 
+// TestBuiltin_Checks pins the built-in tracker's CI answer: the built-in
+// tracker has no CI machinery, so a known CR's checks come back as a non-nil
+// empty slice (ChecksState reads that as tracker.ChecksNone, not an error),
+// and an unknown number surfaces store.ErrNotFound exactly like Pull.
+func TestBuiltin_Checks(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	if _, err := tr.CreatePull(ctx, "afk/1", "main", "feat: capture card", "Closes #1"); err != nil {
+		t.Fatalf("CreatePull: %v", err)
+	}
+
+	checks, err := tr.Checks(ctx, 1)
+	if err != nil {
+		t.Fatalf("Checks: %v", err)
+	}
+	if checks == nil || len(checks) != 0 {
+		t.Errorf("Checks = %#v, want a non-nil empty slice", checks)
+	}
+	if got := tracker.ChecksState(checks); got != tracker.ChecksNone {
+		t.Errorf("ChecksState(Checks(1)) = %q, want %q", got, tracker.ChecksNone)
+	}
+
+	if _, err := tr.Checks(ctx, 999); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("Checks(999) err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestBuiltin_CreatePull pins the builtin PR create (M6): a CR is persisted
 // with head/base/title/body, its closes parsed from the body with the shared
 // grammar, and the returned PullRef is the open CR.

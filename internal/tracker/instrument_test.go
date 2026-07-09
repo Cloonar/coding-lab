@@ -23,6 +23,7 @@ func (f failingTracker) Pulls(context.Context) ([]PullRef, error) { return nil, 
 func (f failingTracker) Pull(context.Context, int) (PullDetail, error) {
 	return PullDetail{}, f.err
 }
+func (f failingTracker) Checks(context.Context, int) ([]Check, error) { return nil, f.err }
 func (f failingTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, f.err
 }
@@ -80,6 +81,7 @@ func driveAll(t *testing.T, trk Tracker) {
 	_ = trk.CreateComment(ctx, 1, "body")
 	_, _ = trk.Pulls(ctx)
 	_, _ = trk.Pull(ctx, 1)
+	_, _ = trk.Checks(ctx, 1)
 	_, _ = trk.CreatePull(ctx, "afk/1", "main", "t", "b")
 	_, _ = trk.MergePull(ctx, 1)
 	_ = trk.CloseIssue(ctx, 1)
@@ -91,7 +93,7 @@ func driveAll(t *testing.T, trk Tracker) {
 }
 
 // opOrder mirrors driveAll.
-var opOrder = []string{OpReadyIssues, OpIssues, OpIssue, OpCreateComment, OpPulls, OpPull, OpCreatePull,
+var opOrder = []string{OpReadyIssues, OpIssues, OpIssue, OpCreateComment, OpPulls, OpPull, OpChecks, OpCreatePull,
 	OpMergePull, OpCloseIssue, OpCreateIssue, OpAddIssueLabels, OpRemoveIssueLabels, OpLabels, OpEnsureLabel}
 
 func TestObserverReportsEveryOp(t *testing.T) {
