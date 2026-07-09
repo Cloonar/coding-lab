@@ -1,10 +1,35 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
 )
+
+// TestUsageDocumentsGenericProviderFlags pins the issue #78 / ADR-0034
+// acceptance that `-help` documents the generic per-provider flags and marks
+// the pre-#78 spellings as deprecated aliases. usage is the package-level
+// const printed on flag.ErrHelp, so assert against it directly.
+func TestUsageDocumentsGenericProviderFlags(t *testing.T) {
+	for _, want := range []string{
+		"-provider-bin",
+		"-provider-config",
+		"LAB_PROVIDER_BIN_<ID>",
+		"LAB_PROVIDER_CONFIG_<ID>",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("usage does not document %q", want)
+		}
+	}
+	// The deprecated aliases must appear AND be labelled deprecated.
+	if !strings.Contains(usage, "-claude") || !strings.Contains(usage, "-claude-config") {
+		t.Error("usage no longer mentions the -claude / -claude-config aliases")
+	}
+	if !strings.Contains(usage, "deprecated") {
+		t.Error("usage does not mark -claude / -claude-config as deprecated")
+	}
+}
 
 // TestLabURL pins the session-facing LAB_URL precedence: the dedicated agent
 // URL wins over the external base URL, which wins over the loopback fallback

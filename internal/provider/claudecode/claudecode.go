@@ -107,13 +107,22 @@ var spawnOptions = []provider.OptionSpec{
 // runs (decision: ultracode is AFK-only; manual users type the keyword).
 const ultracodeDirective = "Operate in ultracode mode: decompose substantial work into a multi-agent workflow."
 
-// Options configures a Provider. Everything except Logger and Now is
-// required.
+// Options configures a Provider. Everything except Logger, Now, ClaudeBin,
+// and ConfigPath is required.
 type Options struct {
-	// ClaudeBin is the claude binary (path or PATH-resolved name).
+	// ClaudeBin is the claude binary (path or PATH-resolved name). Empty
+	// defaults to the adapter-owned "claude" (PATH lookup): issue #78 moved
+	// per-provider bin/config-path defaults out of internal/config and into
+	// the owning adapter, so a caller with no configured entry for this
+	// provider still gets a working Provider.
 	ClaudeBin string
 	// ConfigPath is claude's global config file (~/.claude.json), the
-	// folder-trust seeding target (config --claude-config).
+	// folder-trust seeding target. Empty defaults to LoginDir/.claude.json
+	// (LoginDir is the service user's HOME) — the same adapter-owned-default
+	// decision as ClaudeBin (issue #78). The old `-claude-config` flag /
+	// LAB_CLAUDE_CONFIG env is becoming a deprecated alias for the generic
+	// `-provider-config claude-code=path`; either way the resolved value
+	// lands here unchanged.
 	ConfigPath string
 	// RegistryDir is claude's per-process session registry
 	// ($HOME/.claude/sessions); injectable for tests.
@@ -191,13 +200,13 @@ var _ provider.ConnectingReporter = (*Provider)(nil)
 var _ provider.DeepLinker = (*Provider)(nil)
 
 // New validates o and returns a Provider with the pinned production
-// timeouts.
+// timeouts. ClaudeBin/ConfigPath are the two fields issue #78 made
+// optional: main hands them through only when a caller has configured an
+// entry for this provider (the generic `-provider-bin`/`-provider-config`
+// maps, or their deprecated `-claude`/`-claude-config` aliases), and New
+// fills the adapter-owned default when the entry is absent.
 func New(o Options) (*Provider, error) {
 	switch {
-	case o.ClaudeBin == "":
-		return nil, errors.New("claudecode: Options.ClaudeBin is required")
-	case o.ConfigPath == "":
-		return nil, errors.New("claudecode: Options.ConfigPath is required")
 	case o.RegistryDir == "":
 		return nil, errors.New("claudecode: Options.RegistryDir is required")
 	case o.LoginDir == "":
@@ -215,6 +224,19 @@ func New(o Options) (*Provider, error) {
 	if now == nil {
 		now = time.Now
 	}
+	// ClaudeBin defaults to a bare PATH-resolved name; ConfigPath defaults
+	// to LoginDir/.claude.json, mirroring claude's own ~/.claude.json
+	// convention. LoginDir is validated above, so it is always set here
+	// (issue #78: adapters keep their own defaults when no config entry
+	// exists).
+	claudeBin := o.ClaudeBin
+	if claudeBin == "" {
+		claudeBin = "claude"
+	}
+	configPath := o.ConfigPath
+	if configPath == "" {
+		configPath = filepath.Join(o.LoginDir, ".claude.json")
+	}
 	// ProjectsDir/UserCommandsDir default to siblings of RegistryDir
 	// (~/.claude/sessions → ~/.claude/projects, ~/.claude/commands) so
 	// existing callers keep working; main.go sets ProjectsDir explicitly.
@@ -227,8 +249,8 @@ func New(o Options) (*Provider, error) {
 		userCommandsDir = filepath.Join(filepath.Dir(o.RegistryDir), "commands")
 	}
 	return &Provider{
-		claudeBin:       o.ClaudeBin,
-		configPath:      o.ConfigPath,
+		claudeBin:       claudeBin,
+		configPath:      configPath,
 		registryDir:     o.RegistryDir,
 		projectsDir:     projectsDir,
 		userCommandsDir: userCommandsDir,

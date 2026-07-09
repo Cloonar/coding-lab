@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -151,9 +152,10 @@ func TestNew_requiredOptions(t *testing.T) {
 	if _, err := New(base()); err != nil {
 		t.Fatalf("New with all options: %v", err)
 	}
+	// ClaudeBin/ConfigPath are no longer required (issue #78: adapters keep
+	// their own defaults when no config entry exists) — only the fields
+	// below still fail construction when empty/nil.
 	for name, mut := range map[string]func(*Options){
-		"ClaudeBin":   func(o *Options) { o.ClaudeBin = "" },
-		"ConfigPath":  func(o *Options) { o.ConfigPath = "" },
 		"RegistryDir": func(o *Options) { o.RegistryDir = "" },
 		"LoginDir":    func(o *Options) { o.LoginDir = "" },
 		"Runner":      func(o *Options) { o.Runner = nil },
@@ -164,5 +166,81 @@ func TestNew_requiredOptions(t *testing.T) {
 		if _, err := New(o); err == nil {
 			t.Errorf("New without %s succeeded; want error", name)
 		}
+	}
+}
+
+// TestNew_claudeBinConfigPathDefaults pins issue #78's adapter-owned
+// defaults: an empty ClaudeBin/ConfigPath no longer errors, it falls back to
+// a PATH-resolved "claude" / LoginDir/.claude.json — and an explicit value
+// still wins over the default.
+func TestNew_claudeBinConfigPathDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		claudeBin      string
+		configPath     string
+		loginDir       string
+		wantClaudeBin  string
+		wantConfigPath string
+	}{
+		{
+			name:           "empty ClaudeBin defaults to PATH-resolved claude",
+			claudeBin:      "",
+			configPath:     "/tmp/x/.claude.json",
+			loginDir:       "/tmp/x",
+			wantClaudeBin:  "claude",
+			wantConfigPath: "/tmp/x/.claude.json",
+		},
+		{
+			name:           "empty ConfigPath defaults to LoginDir/.claude.json",
+			claudeBin:      "claude",
+			configPath:     "",
+			loginDir:       "/tmp/x",
+			wantClaudeBin:  "claude",
+			wantConfigPath: filepath.Join("/tmp/x", ".claude.json"),
+		},
+		{
+			name:           "both empty default independently",
+			claudeBin:      "",
+			configPath:     "",
+			loginDir:       "/tmp/y",
+			wantClaudeBin:  "claude",
+			wantConfigPath: filepath.Join("/tmp/y", ".claude.json"),
+		},
+		{
+			name:           "explicit ClaudeBin wins over the default",
+			claudeBin:      "/opt/custom/claude",
+			configPath:     "/tmp/x/.claude.json",
+			loginDir:       "/tmp/x",
+			wantClaudeBin:  "/opt/custom/claude",
+			wantConfigPath: "/tmp/x/.claude.json",
+		},
+		{
+			name:           "explicit ConfigPath wins over the default",
+			claudeBin:      "claude",
+			configPath:     "/etc/claude/custom.json",
+			loginDir:       "/tmp/x",
+			wantClaudeBin:  "claude",
+			wantConfigPath: "/etc/claude/custom.json",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(Options{
+				ClaudeBin:   tc.claudeBin,
+				ConfigPath:  tc.configPath,
+				RegistryDir: "/tmp/x/sessions",
+				LoginDir:    tc.loginDir,
+				Runner:      newFakeRunner(),
+				Bus:         events.NewBus(),
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if p.claudeBin != tc.wantClaudeBin {
+				t.Errorf("claudeBin = %q; want %q", p.claudeBin, tc.wantClaudeBin)
+			}
+			if p.configPath != tc.wantConfigPath {
+				t.Errorf("configPath = %q; want %q", p.configPath, tc.wantConfigPath)
+			}
+		})
 	}
 }
