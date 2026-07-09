@@ -329,14 +329,15 @@ func TestAPI_StopAll(t *testing.T) {
 	h := csrfHeaders(x.ts.URL)
 	startLabelled(t, x, h, "a")
 	startLabelled(t, x, h, "b")
-	x.runner.AddLive(tmuxx.LoginSession)
+	loginSession := tmuxx.LoginSessionName("claude-code")
+	x.runner.AddLive(loginSession)
 
 	resp := x.do("POST", "/api/v1/repos/"+x.repo.ID+"/stop-all", nil, h)
 	wantStatus(t, resp, http.StatusOK)
 	if got := decodeBody(t, resp); got["stopped"] != float64(2) {
 		t.Errorf("stopped = %v, want 2", got["stopped"])
 	}
-	if _, live := x.runner.Session(tmuxx.LoginSession); !live {
+	if _, live := x.runner.Session(loginSession); !live {
 		t.Error("stop-all killed the login session")
 	}
 }

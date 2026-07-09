@@ -121,16 +121,17 @@ func TestTmux_quickFailIsSurfaced(t *testing.T) {
 func TestTmux_loginSessionIsOrdinary(t *testing.T) {
 	ctx := t.Context()
 	tm := testTmux(t)
+	loginSession := LoginSessionName("claude-code")
 
-	if err := tm.Start(ctx, LoginSession, t.TempDir(), []string{"sleep", "600"}, nil); err != nil {
-		t.Fatalf("Start(%s): %v", LoginSession, err)
+	if err := tm.Start(ctx, loginSession, t.TempDir(), []string{"sleep", "600"}, nil); err != nil {
+		t.Fatalf("Start(%s): %v", loginSession, err)
 	}
 	names, err := tm.List(ctx)
-	if err != nil || !slices.Contains(names, LoginSession) {
-		t.Fatalf("List = %v, %v; expected to contain %q", names, err, LoginSession)
+	if err != nil || !slices.Contains(names, loginSession) {
+		t.Fatalf("List = %v, %v; expected to contain %q", names, err, loginSession)
 	}
-	if err := tm.Stop(ctx, LoginSession); err != nil {
-		t.Fatalf("Stop(%s): %v", LoginSession, err)
+	if err := tm.Stop(ctx, loginSession); err != nil {
+		t.Fatalf("Stop(%s): %v", loginSession, err)
 	}
 }
 

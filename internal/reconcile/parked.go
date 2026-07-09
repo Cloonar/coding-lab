@@ -163,7 +163,7 @@ func (s *Service) killSessionOnBranch(ctx context.Context, repo store.Repo, bran
 		return
 	}
 	for _, name := range live {
-		if name == tmuxx.LoginSession || !gitx.BelongsTo(name, repo.Name) {
+		if tmuxx.IsLoginSession(name) || !gitx.BelongsTo(name, repo.Name) {
 			continue
 		}
 		_, label := gitx.ParseSessionName(name)

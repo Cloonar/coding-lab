@@ -61,9 +61,12 @@ func TestInstanceBranch(t *testing.T) {
 }
 
 func TestOwnedBranches(t *testing.T) {
+	// Two providers' login sessions coexist, plus the legacy bare name — none
+	// of them own a branch (issue #77).
 	sessions := []string{
 		"proj~afk-7", "proj~afk-auto-8", "proj~feature-20260608-1530", "proj~20260608-1600",
-		"projfoo~afk-9", "other~afk-3", tmuxx.LoginSession,
+		"projfoo~afk-9", "other~afk-3", tmuxx.LoginSessionName("claude-code"),
+		tmuxx.LoginSessionName("codex"), "lab-login",
 	}
 	got := ownedBranches("afk/<N>", "lab/", sessions, "proj")
 	want := map[string]bool{

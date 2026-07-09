@@ -499,6 +499,16 @@ func TestDiscard_killsLiveSessionAndTerminatesRun(t *testing.T) {
 	f.runner.AddLive(name)
 	run := f.activeRun(name, "lab/x-20260608-1530", nil)
 
+	// Two providers' login sessions, plus the legacy bare name, are live
+	// alongside the target — killSessionOnBranch must never touch them
+	// (issue #77).
+	loginA := tmuxx.LoginSessionName("claude-code")
+	loginB := tmuxx.LoginSessionName("codex")
+	legacyLogin := "lab-login"
+	f.runner.AddLive(loginA)
+	f.runner.AddLive(loginB)
+	f.runner.AddLive(legacyLogin)
+
 	if err := f.svc.Discard(t.Context(), f.repo.ID, "lab/x-20260608-1530"); err != nil {
 		t.Fatalf("Discard: %v", err)
 	}
@@ -510,6 +520,11 @@ func TestDiscard_killsLiveSessionAndTerminatesRun(t *testing.T) {
 	}
 	if recDirExists(wt) || f.branchExists("lab/x-20260608-1530") {
 		t.Error("discard left the worktree/branch behind")
+	}
+	for _, login := range []string{loginA, loginB, legacyLogin} {
+		if _, live := f.runner.Session(login); !live {
+			t.Errorf("discard killed login session %q", login)
+		}
 	}
 	_ = run
 }

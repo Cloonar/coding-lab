@@ -55,7 +55,8 @@ func TestFake_lifecycleAndList(t *testing.T) {
 		t.Fatalf("empty List = %v, %v; want nil, nil", names, err)
 	}
 
-	for _, n := range []string{"b~x", "a~y", LoginSession} {
+	loginSession := LoginSessionName("claude-code")
+	for _, n := range []string{"b~x", "a~y", loginSession} {
 		if err := f.Start(ctx, n, "/d", []string{"cmd"}, nil); err != nil {
 			t.Fatalf("Start %s: %v", n, err)
 		}
@@ -64,7 +65,7 @@ func TestFake_lifecycleAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if want := []string{"a~y", "b~x", LoginSession}; !slices.Equal(names, want) {
+	if want := []string{"a~y", "b~x", loginSession}; !slices.Equal(names, want) {
 		t.Errorf("List = %q; want sorted %q", names, want)
 	}
 
@@ -116,22 +117,23 @@ func TestFake_sendKeysRecorderAndPane(t *testing.T) {
 		t.Errorf("CapturePane on missing session: want error")
 	}
 
-	if err := f.Start(ctx, LoginSession, "/home", []string{"claude", "auth", "login", "--claudeai"}, nil); err != nil {
+	loginSession := LoginSessionName("claude-code")
+	if err := f.Start(ctx, loginSession, "/home", []string{"claude", "auth", "login", "--claudeai"}, nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := f.SendKeys(ctx, LoginSession, "code#part1", false); err != nil {
+	if err := f.SendKeys(ctx, loginSession, "code#part1", false); err != nil {
 		t.Fatalf("SendKeys: %v", err)
 	}
-	if err := f.SendKeys(ctx, LoginSession, "part2", true); err != nil {
+	if err := f.SendKeys(ctx, loginSession, "part2", true); err != nil {
 		t.Fatalf("SendKeys: %v", err)
 	}
 	want := []SentKey{{Text: "code#part1", Enter: false}, {Text: "part2", Enter: true}}
-	if got := f.Sent(LoginSession); !slices.Equal(got, want) {
+	if got := f.Sent(loginSession); !slices.Equal(got, want) {
 		t.Errorf("Sent = %v; want %v", got, want)
 	}
 
-	f.SetPane(LoginSession, "visit: https://claude.com/cai/oauth/authorize?code=true")
-	got, err := f.CapturePane(ctx, LoginSession)
+	f.SetPane(loginSession, "visit: https://claude.com/cai/oauth/authorize?code=true")
+	got, err := f.CapturePane(ctx, loginSession)
 	if err != nil {
 		t.Fatalf("CapturePane: %v", err)
 	}
@@ -140,10 +142,10 @@ func TestFake_sendKeysRecorderAndPane(t *testing.T) {
 	}
 
 	// The SendKeys record survives Stop so tests can assert post-teardown.
-	if err := f.Stop(ctx, LoginSession); err != nil {
+	if err := f.Stop(ctx, loginSession); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if got := f.Sent(LoginSession); !slices.Equal(got, want) {
+	if got := f.Sent(loginSession); !slices.Equal(got, want) {
 		t.Errorf("Sent after Stop = %v; want %v", got, want)
 	}
 }

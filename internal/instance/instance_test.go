@@ -221,6 +221,21 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// LiveInstanceCount excludes every provider login session — two providers'
+// login sessions coexisting, plus a leftover legacy bare "lab-login", must
+// never inflate the cap count (issue #77).
+func TestLiveInstanceCount_excludesAllLoginSessions(t *testing.T) {
+	live := []string{
+		"proj~afk-7", // one real instance session
+		tmuxx.LoginSessionName("claude-code"),
+		tmuxx.LoginSessionName("codex"),
+		"lab-login", // legacy, pre-per-provider
+	}
+	if got := LiveInstanceCount(live); got != 1 {
+		t.Errorf("LiveInstanceCount(%v) = %d, want 1", live, got)
+	}
+}
+
 func TestStart_happyPath(t *testing.T) {
 	f := newFixture(t)
 	f.prov.SetDeepLink("https://claude.ai/code/session_real")
@@ -735,6 +750,9 @@ func TestStop_afkRefused(t *testing.T) {
 	}
 }
 
+// Two providers' login sessions coexist, plus the legacy bare name a
+// pre-per-provider binary would have left behind — StopAll must skip every
+// one of them (issue #77).
 func TestStopAll_skipsLoginAndCountsManual(t *testing.T) {
 	f := newFixture(t)
 	a, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID, Label: "a"})
@@ -745,7 +763,12 @@ func TestStopAll_skipsLoginAndCountsManual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start b: %v", err)
 	}
-	f.runner.AddLive(tmuxx.LoginSession) // must be excluded
+	loginSessionA := tmuxx.LoginSessionName("claude-code")
+	loginSessionB := tmuxx.LoginSessionName("codex")
+	legacyLoginSession := "lab-login"
+	f.runner.AddLive(loginSessionA)      // must be excluded
+	f.runner.AddLive(loginSessionB)      // a second provider's login — coexists, also excluded
+	f.runner.AddLive(legacyLoginSession) // legacy bare name — still recognized, excluded
 
 	n, err := f.svc.StopAll(t.Context(), f.repo.ID)
 	if err != nil {
@@ -754,8 +777,10 @@ func TestStopAll_skipsLoginAndCountsManual(t *testing.T) {
 	if n != 2 {
 		t.Errorf("stopped = %d, want 2", n)
 	}
-	if _, live := f.runner.Session(tmuxx.LoginSession); !live {
-		t.Error("StopAll killed the login session")
+	for _, login := range []string{loginSessionA, loginSessionB, legacyLoginSession} {
+		if _, live := f.runner.Session(login); !live {
+			t.Errorf("StopAll killed the login session %q", login)
+		}
 	}
 	for _, run := range []store.Run{a, b} {
 		if _, live := f.runner.Session(run.SessionName); live {

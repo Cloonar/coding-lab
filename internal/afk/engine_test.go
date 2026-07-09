@@ -1006,12 +1006,19 @@ func TestReap_drainsZombieSessionAfterFailedKill(t *testing.T) {
 
 // Regression: the zombie drain must skip a startguard-marked (mid-Launch)
 // session — killing it would race the launcher-owned rollback — while still
-// draining the same row-less session once it is unmarked.
+// draining the same row-less session once it is unmarked. Also pins that two
+// providers' login sessions, plus the legacy bare name, coexist in the live
+// list across both drain passes without ever being touched (issue #77).
 func TestReap_zombieDrainRespectsStartguard(t *testing.T) {
 	f := newFixture(t)
 	name := gitx.ComposeSessionName(f.repo.Name, "afk-9") // belongs to repo "proj"
 	f.runner.AddLive(name)                                // live, but no active run row
 	f.guard.Mark(name)
+
+	logins := []string{tmuxx.LoginSessionName("claude-code"), tmuxx.LoginSessionName("codex"), "lab-login"}
+	for _, login := range logins {
+		f.runner.AddLive(login)
+	}
 
 	// Marked: the drain leaves it alone.
 	f.svc.ReapOnce(t.Context(), f.clock.Now())
@@ -1024,6 +1031,11 @@ func TestReap_zombieDrainRespectsStartguard(t *testing.T) {
 	f.svc.ReapOnce(t.Context(), f.clock.Now())
 	if _, live := f.runner.Session(name); live {
 		t.Error("drain left a row-less, unmarked zombie session alive")
+	}
+	for _, login := range logins {
+		if _, live := f.runner.Session(login); !live {
+			t.Errorf("drain killed login session %q", login)
+		}
 	}
 }
 

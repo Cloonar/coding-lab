@@ -73,7 +73,7 @@ func (p *Provider) loginArgv() []string {
 }
 
 // LoginStart implements provider.AgentProvider. It starts the global login
-// flow in the fixed LoginSession tmux session (cwd $HOME — login is
+// flow in this provider's loginSession tmux session (cwd $HOME — login is
 // global, one machine-level credential) and synchronously scrapes the
 // OAuth authorize URL from the pane (poll every 200ms up to
 // captureTimeout).
@@ -86,7 +86,7 @@ func (p *Provider) loginArgv() []string {
 // A scrape miss is not an error: it returns "" with a loud warning, and a
 // later LoginStart re-scrapes.
 func (p *Provider) LoginStart(ctx context.Context) (string, error) {
-	running, err := p.runner.IsRunning(ctx, LoginSession)
+	running, err := p.runner.IsRunning(ctx, loginSession)
 	if err != nil {
 		return "", fmt.Errorf("login session check: %w", err)
 	}
@@ -96,14 +96,14 @@ func (p *Provider) LoginStart(ctx context.Context) (string, error) {
 		}
 	} else {
 		p.setLoginURL("")
-		if err := p.runner.Start(ctx, LoginSession, p.loginDir, p.loginArgv(), nil); err != nil {
+		if err := p.runner.Start(ctx, loginSession, p.loginDir, p.loginArgv(), nil); err != nil {
 			return "", fmt.Errorf("start login session: %w", err)
 		}
 	}
 	url := p.captureOAuthURL(ctx, p.captureTimeout)
 	if url == "" {
 		p.log.Warn("oauth url not found in login pane — retry login start to re-scrape",
-			"component", "provider.claudecode", "session", LoginSession, "timeout", p.captureTimeout)
+			"component", "provider.claudecode", "session", loginSession, "timeout", p.captureTimeout)
 		return "", nil
 	}
 	p.setLoginURL(url)
@@ -125,16 +125,16 @@ func (p *Provider) LoginSubmitCode(ctx context.Context, raw string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidCode, err)
 	}
-	if err := p.runner.SendKeys(ctx, LoginSession, code, true); err != nil {
+	if err := p.runner.SendKeys(ctx, loginSession, code, true); err != nil {
 		return fmt.Errorf("send login code: %w", err)
 	}
 	deadline := time.Now().Add(p.loginTimeout)
 	for {
 		st, _ := p.AuthStatus(ctx, true) // error ⇒ treated as logged out
 		if st.LoggedIn {
-			if err := p.runner.Stop(ctx, LoginSession); err != nil {
+			if err := p.runner.Stop(ctx, loginSession); err != nil {
 				p.log.Warn("stop login session after login",
-					"component", "provider.claudecode", "session", LoginSession, "err", err)
+					"component", "provider.claudecode", "session", loginSession, "err", err)
 			}
 			p.setLoginURL("")
 			p.publishAuthChanged()
@@ -148,9 +148,9 @@ func (p *Provider) LoginSubmitCode(ctx context.Context, raw string) error {
 		}
 	}
 	// Timed out: tear down the stuck attempt and hint the user to retry.
-	if err := p.runner.Stop(ctx, LoginSession); err != nil {
+	if err := p.runner.Stop(ctx, loginSession); err != nil {
 		p.log.Warn("stop login session after login timeout",
-			"component", "provider.claudecode", "session", LoginSession, "err", err)
+			"component", "provider.claudecode", "session", loginSession, "err", err)
 	}
 	p.setLoginURL("")
 	return ErrLoginTimeout
@@ -163,7 +163,7 @@ func (p *Provider) LoginSubmitCode(ctx context.Context, raw string) error {
 func (p *Provider) captureOAuthURL(ctx context.Context, timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
 	for {
-		if pane, err := p.runner.CapturePane(ctx, LoginSession); err == nil {
+		if pane, err := p.runner.CapturePane(ctx, loginSession); err == nil {
 			if url := ExtractOAuthURL(pane); url != "" {
 				return url
 			}
