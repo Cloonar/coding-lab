@@ -11,6 +11,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -36,20 +37,28 @@ type Server struct {
 	bus      *events.Bus
 	log      *slog.Logger
 	now      func() time.Time
+	scrub    []*regexp.Regexp
 }
 
 // New builds an agent API server. trackers resolves each repo's Tracker
 // (production: *tracker.Registry); bus carries the cr.changed event a builtin
 // PR create publishes (nil → no events, some unit tests run without a bus);
 // now is the injected clock for the token validity rule (nil → time.Now).
-func New(st *store.Store, trackers TrackerResolver, bus *events.Bus, logger *slog.Logger, now func() time.Time) *Server {
+// scrub is the compiled cross-provider union of every registered provider's
+// declared attribution ScrubPatterns — the per-line predicate the incogni
+// body sanitizer runs (production: providerReg.ScrubRegexps(), ADR-0033).
+// A nil/empty scrub means no markers are known (no registered providers), so
+// incogni bodies pass through unstripped — the same content-inert degradation
+// as the pre-push hook on an empty registry. agentapi takes plain compiled
+// regexps and never imports internal/provider, staying provider-agnostic.
+func New(st *store.Store, trackers TrackerResolver, bus *events.Bus, logger *slog.Logger, now func() time.Time, scrub []*regexp.Regexp) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &Server{store: st, trackers: trackers, bus: bus, log: logger, now: now}
+	return &Server{store: st, trackers: trackers, bus: bus, log: logger, now: now, scrub: scrub}
 }
 
 // Handler returns the /agent/v1 tree wrapped in run-token auth.

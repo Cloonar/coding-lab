@@ -219,14 +219,16 @@ const BranchToken = "<BRANCH>"
 // commit, push, open a PR with `Closes #N`, then stop). The tracker surface is
 // labctl ONLY (D10 — tea/gh are gone); the branch is the repo's rendered claim
 // branch, never a literal prefix. The incogni variant appends the attribution
-// sentence to the commit step (D15 §9 measure 2; the wording is M7-final). This
+// sentence to the commit step (D15 §9 measure 2; reworded from the M7-final
+// text by ADR-0033 so the sentence itself spells no attribution-marker token —
+// the core-neutrality arch test scans every core literal, prompts included). This
 // exact text (non-incogni, tokens un-interpolated) is what the settings/repo
 // API serves as the default/effective preview an operator's afk_prompt override
 // would replace.
 func SeedPromptTemplate(incogni bool) string {
 	commit := "5. Commit in Conventional Commits style."
 	if incogni {
-		commit += " No AI attribution, no Co-Authored-By, no generated-with footers anywhere."
+		commit += " No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links."
 	}
 	return strings.Join([]string{
 		"You are an autonomous AFK run. Resolve exactly one issue, open a pull request, and stop.",

@@ -278,7 +278,7 @@ func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerReso
 		t.Fatalf("CreateRunToken: %v", err)
 	}
 
-	handler := agentapi.New(st, resolver, nil, nil, func() time.Time { return fixedNow }).Handler()
+	handler := agentapi.New(st, resolver, nil, nil, func() time.Time { return fixedNow }, nil).Handler()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

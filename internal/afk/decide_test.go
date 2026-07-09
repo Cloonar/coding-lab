@@ -247,7 +247,7 @@ const wantSeedDefaultIncogni = "You are an autonomous AFK run. Resolve exactly o
 	"2. Work only on branch `afk/7` in this worktree; never switch branches.\n" +
 	"3. Implement the issue completely, following the repository's own conventions (CLAUDE.md / AGENTS.md).\n" +
 	"4. Run the project's tests, build, and linters; fix what you break.\n" +
-	"5. Commit in Conventional Commits style. No AI attribution, no Co-Authored-By, no generated-with footers anywhere.\n" +
+	"5. Commit in Conventional Commits style. No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links.\n" +
 	"6. `git push -u origin afk/7`.\n" +
 	"7. `labctl pr create --title \"…\" --body \"…\"` — the body must include `Closes #7`.\n" +
 	"8. Then stop working. Do not start unrelated work."
@@ -292,7 +292,7 @@ func TestSeedPrompt(t *testing.T) {
 	if inc != wantSeedDefaultIncogni {
 		t.Errorf("incogni seed prompt drifted:\n got %q\nwant %q", inc, wantSeedDefaultIncogni)
 	}
-	if !strings.Contains(inc, "No AI attribution, no Co-Authored-By, no generated-with footers anywhere.") {
+	if !strings.Contains(inc, "No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links.") {
 		t.Errorf("incogni seed prompt missing the attribution sentence:\n%s", inc)
 	}
 	if !strings.Contains(inc, "5. Commit in Conventional Commits style. No AI attribution") {
@@ -317,7 +317,7 @@ func TestSeedPromptTemplate(t *testing.T) {
 	if strings.Contains(SeedPromptTemplate(false), "No AI attribution") {
 		t.Error("non-incogni template carries the incogni sentence")
 	}
-	if !strings.Contains(SeedPromptTemplate(true), "No AI attribution, no Co-Authored-By, no generated-with footers anywhere.") {
+	if !strings.Contains(SeedPromptTemplate(true), "No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links.") {
 		t.Error("incogni template missing the attribution sentence")
 	}
 }

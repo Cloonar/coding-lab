@@ -47,6 +47,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +82,26 @@ import (
 // (package afk) — this file lives in the external afk_test package (see the
 // header note) and cannot see them.
 var clockTime = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+// cycleClaudeScrub is a pinned fixture twin of claudecode's declared
+// SeedMeta().ScrubPatterns (internal/provider/claudecode) — this external test
+// must not import the concrete provider, so the four patterns live here as
+// literals and are compiled through the REAL provider.CompileScrubPatterns,
+// exactly as production feeds agentapi.New the registry's compiled union
+// (ADR-0033). Drift from the real declaration is caught by claudecode's own
+// seedmeta tests, not here.
+var cycleClaudeScrub = func() []*regexp.Regexp {
+	res, err := provider.CompileScrubPatterns([]string{
+		`co-authored-by:[[:space:]]*claude`,
+		`co-authored-by:.*<[^>]*@anthropic\.com>`,
+		`generated with.*claude`,
+		`claude-session:`,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return res
+}()
 
 func gitCmd(t *testing.T, home, dir string, args ...string) string {
 	t.Helper()
@@ -489,8 +510,11 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 
 	// The REAL agent API over httptest — LAB_URL for every spawned session.
 	// It carries the real bus (production wiring): a builtin PR create
-	// publishes cr.changed.
-	agent := httptest.NewServer(agentapi.New(st, trackers, bus, nil, clock.Now).Handler())
+	// publishes cr.changed. scrub is the compiled cross-provider union that
+	// production feeds from providerReg.ScrubRegexps() (ADR-0033); here it is
+	// the pinned claude fixture twin, so the incogni cycle's poisoned PR body
+	// is sanitized server-side over the same predicate.
+	agent := httptest.NewServer(agentapi.New(st, trackers, bus, nil, clock.Now, cycleClaudeScrub).Handler())
 	t.Cleanup(agent.Close)
 
 	prov := &cycleProvider{Fake: providertest.New(), scripts: map[string]string{}}
@@ -1452,7 +1476,7 @@ func TestAFKCycleIncogniBuiltinIntegration(t *testing.T) {
 		if got, want := string(seed), afk.SeedPrompt(1, "issue-1", true, ""); got != want {
 			t.Errorf("seed prompt = %q, want %q", got, want)
 		}
-		if !strings.Contains(string(seed), "No AI attribution, no Co-Authored-By, no generated-with footers anywhere.") {
+		if !strings.Contains(string(seed), "No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links.") {
 			t.Error("seed prompt lacks the incogni sentence")
 		}
 		// The seeded worktree was clean at spawn AND pre-push: skills bundle,

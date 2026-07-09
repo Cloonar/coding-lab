@@ -39,6 +39,19 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
+	// A registry with just the claude-code fake (its SeedMeta mirrors the
+	// real provider's) — the common case for the tests in this package that
+	// don't care about cross-provider union behavior (ADR-0033).
+	return newTestEnvProviders(t, providertest.New())
+}
+
+// newTestEnvProviders is newTestEnv parameterized over the registry's
+// providers, so the union tests (issue #75 / ADR-0033: the incogni hook
+// screens every registered provider's patterns, not just one repo's) can
+// register more than the single default fake without duplicating the rest of
+// the env wiring.
+func newTestEnvProviders(t *testing.T, providers ...provider.AgentProvider) *testEnv {
+	t.Helper()
 	testutil.RequireTool(t, "git")
 
 	st := testutil.TempStore(t)
@@ -56,10 +69,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("vault.New: %v", err)
 	}
 	reposDir := filepath.Join(stateDir, "repos")
-	// A registry with the claude-code fake (its SeedMeta mirrors the real
-	// provider's) so the incogni hook resolves patterns off repos.provider,
-	// the production path (issue #51 decision 8).
-	providerReg, err := provider.NewRegistry(providertest.New())
+	providerReg, err := provider.NewRegistry(providers...)
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
