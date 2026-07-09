@@ -410,13 +410,15 @@ func TestCompat_HookPayload_maps(t *testing.T) {
 	}
 }
 
-// Dialog answer keystrokes (compat.md §7, live-verified 2026-07-08 on
-// 2.1.198): per-shape recipes over per-shape picker geometry. The plain
-// single-select recipe is UNCHANGED from the pre-#51 snapshot (back-compat
-// proof); the Other and multi-select recipes pin the two live-bug FIXES —
-// type-first free text (Enter on the empty row declines the dialog) and the
-// Submit-row commit (Enter on an option row toggles instead of committing) —
-// and the multi-question/plan/review snapshots pin the new shapes.
+// Dialog answer keystrokes (compat.md §7, live-verified 2026-07-08 and
+// re-driven 2026-07-09 on 2.1.198): per-shape recipes over per-shape picker
+// geometry. The Other and multi-select recipes pin the live-bug FIXES —
+// type-first free text (Enter on the empty row declines the dialog), the
+// Submit-row commit (Enter on an option row toggles instead of committing),
+// and ONE NAMED KEY PER OP (the picker drops a burst of keys sent in one
+// send-keys call: live 2026-07-09, a four-Down burst moved the cursor zero
+// rows, so batched walks never reached the Submit row) — and the
+// multi-question/plan/review snapshots pin the remaining shapes.
 func TestCompat_DialogKeystrokes(t *testing.T) {
 	single := provider.Dialog{Answerable: true, Options: []provider.DialogOption{
 		{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true},
@@ -434,28 +436,56 @@ func TestCompat_DialogKeystrokes(t *testing.T) {
 
 	// Other/free-text (LIVE BUG FIX 2026-07-08): paste FIRST, then Enter — the
 	// old [Enter][text][Enter] declined the whole dialog on the empty row.
+	// Each Down is its own op (2026-07-09).
 	got, _ = claudecode.DialogKeystrokes(single, provider.DialogAnswer{Index: 2, OtherText: "custom"})
-	want = []claudecode.KeyOp{{Named: []string{"Down", "Down"}},
+	want = []claudecode.KeyOp{{Named: []string{"Down"}}, {Named: []string{"Down"}},
 		{Text: "custom"}, {Named: []string{"Enter"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Other recipe = %v; want %v", got, want)
 	}
 
-	// Multi-select (LIVE BUG FIX 2026-07-08): commit via the unnumbered Submit
-	// row (navigation index = row count, here 3), never a bare Enter (Enter
-	// toggles). No climb; from the top: toggle a (Space), Down×2 to c, toggle,
-	// Down×(3−2) onto Submit, Enter. A single multiSelect question then ends on
-	// the review screen ([Enter] — cursor defaults to "Submit answers").
+	// Multi-select (LIVE BUG FIXES 2026-07-08 + 2026-07-09): commit via the
+	// unnumbered Submit row (navigation index = row count, here 4), never a
+	// bare Enter (Enter toggles); every Down its own op (a batched walk is
+	// dropped and the recipe then commits nothing — the 2026-07-09 root cause).
+	// From the top: toggle a (Space), Down, Down to c, toggle, Down×(4−2) onto
+	// Submit, Enter. A single multiSelect question then ends on the review
+	// screen ([Enter] — cursor defaults to "Submit answers").
 	multi := provider.Dialog{Answerable: true, Multi: true, Options: []provider.DialogOption{
-		{Label: "a"}, {Label: "b"}, {Label: "c"},
+		{Label: "a"}, {Label: "b"}, {Label: "c"}, {Label: "Other", IsOther: true},
 	}}
 	got, _ = claudecode.DialogKeystrokes(multi, provider.DialogAnswer{Selected: []int{0, 2}})
 	want = []claudecode.KeyOp{{Named: []string{"Space"}},
-		{Named: []string{"Down", "Down"}}, {Named: []string{"Space"}},
-		{Named: []string{"Down"}}, {Named: []string{"Enter"}}, // onto Submit, commit
+		{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Named: []string{"Space"}},
+		{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Named: []string{"Enter"}}, // onto Submit, commit
 		{Named: []string{"Enter"}}} // review: Submit answers (cursor already there)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("multi-select recipe = %v; want %v", got, want)
+	}
+
+	// Multi-select free text (LIVE 2026-07-09): pasting onto the "Type
+	// something" row FILLS it and CHECKS it — no Space (Space would type a
+	// literal leading space into the field). The row is the appended LAST
+	// option, so the walk stays downward: toggle b, Down to the Other row,
+	// paste, Down onto Submit, Enter, review Enter. Recorded ground truth:
+	// "Onions, no anchovies" — toggled labels plus the text as the last
+	// segment.
+	got, _ = claudecode.DialogKeystrokes(multi, provider.DialogAnswer{Selected: []int{1}, OtherText: "no anchovies"})
+	want = []claudecode.KeyOp{{Named: []string{"Down"}}, {Named: []string{"Space"}},
+		{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Text: "no anchovies"},
+		{Named: []string{"Down"}}, {Named: []string{"Enter"}},
+		{Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("multi-select+other recipe = %v; want %v", got, want)
+	}
+
+	// Free text ALONE is a valid multi-select answer (nothing toggled).
+	got, _ = claudecode.DialogKeystrokes(multi, provider.DialogAnswer{OtherText: "surprise me"})
+	want = []claudecode.KeyOp{{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Named: []string{"Down"}},
+		{Text: "surprise me"}, {Named: []string{"Down"}}, {Named: []string{"Enter"}},
+		{Named: []string{"Enter"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("multi-select other-only recipe = %v; want %v", got, want)
 	}
 }
 
@@ -483,11 +513,12 @@ func TestCompat_DialogKeystrokes_multiQuestion(t *testing.T) {
 	want := []claudecode.KeyOp{
 		// Q0: Red is the top row → Enter selects it (auto-advances to Q1).
 		{Named: []string{"Enter"}},
-		// Q1: from the top, toggle Apple (Space), Down×2 to Cherry, toggle;
-		// Down×2 onto Submit (index 4), Enter.
+		// Q1: from the top, toggle Apple (Space), Down twice to Cherry (one
+		// key per op — 2026-07-09), toggle; Down twice onto Submit (index 4),
+		// Enter.
 		{Named: []string{"Space"}},
-		{Named: []string{"Down", "Down"}}, {Named: []string{"Space"}},
-		{Named: []string{"Down", "Down"}}, {Named: []string{"Enter"}},
+		{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Named: []string{"Space"}},
+		{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Named: []string{"Enter"}},
 		// Review: cursor already on "Submit answers"; a bare Enter submits.
 		{Named: []string{"Enter"}},
 	}
@@ -521,7 +552,7 @@ func TestCompat_DialogKeystrokes_plan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan feedback: %v", err)
 	}
-	want = []claudecode.KeyOp{{Named: []string{"Down", "Down", "Down"}},
+	want = []claudecode.KeyOp{{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Named: []string{"Down"}},
 		{Text: "tighten the tests"}, {Named: []string{"Enter"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("plan feedback recipe = %v; want %v", got, want)

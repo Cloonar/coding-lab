@@ -637,7 +637,11 @@ export function replyRun(id: string, text: string): Promise<void> {
  * QuestionAnswer is authoritative): a single-select question sends `index` =
  * the chosen OPTION index (`other_text` rides along only when that row is the
  * synthesized is_other row); a multi_select question sends `selected` = the
- * toggled option indices ascending, with `index` absent.
+ * toggled REAL option indices ascending (`index` absent) plus `other_text`
+ * when the Other row is toggled — the is_other row's index never appears in
+ * `selected` (its free text IS its toggle; the adapter pastes it onto the
+ * TUI's "Type something" row). `other_text` alone with an empty `selected`
+ * is a valid multi-select answer.
  */
 export interface QuestionAnswer {
   index?: number;

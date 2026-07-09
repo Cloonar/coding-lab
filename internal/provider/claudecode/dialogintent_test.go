@@ -134,6 +134,37 @@ func TestBackstop_wrongLabelRecorded_warns(t *testing.T) {
 	}
 }
 
+// A multi-select answer carrying free text records the text as one more
+// ", "-joined segment, in TOGGLE order (live 2026-07-09: toggling Onions then
+// pasting "no anchovies" recorded "Onions, no anchovies"). The intent compare
+// is segment-multiset based (sameAnswer), so both the live order and a
+// flipped order verify silently; a record missing the text warns.
+func TestBackstop_multiSelectWithOtherText(t *testing.T) {
+	const recordedLive = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"answered","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-09T00:02:10.000Z","toolUseResult":{"questions":[],"answers":{"Which color do you prefer?":"Red","Which fruits do you like?":"Banana, no anchovies"},"annotations":{}}}`
+	answer := provider.DialogAnswer{Answers: []provider.QuestionAnswer{
+		{Index: 0}, {Selected: []int{1}, OtherText: "no anchovies"},
+	}}
+	chat := answerThenRead(t, twoQuestionDialog("toolu_2q"), answer,
+		resolvedTranscript(toolAskUserQuestion, "toolu_2q", recordedLive))
+	if w := backstopWarnings(chat); len(w) != 0 {
+		t.Errorf("live-shape multi+other record emitted warnings: %+v", w)
+	}
+
+	const recordedFlipped = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"answered","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-09T00:02:10.000Z","toolUseResult":{"questions":[],"answers":{"Which color do you prefer?":"Red","Which fruits do you like?":"no anchovies, Banana"},"annotations":{}}}`
+	chat = answerThenRead(t, twoQuestionDialog("toolu_2q"), answer,
+		resolvedTranscript(toolAskUserQuestion, "toolu_2q", recordedFlipped))
+	if w := backstopWarnings(chat); len(w) != 0 {
+		t.Errorf("flipped-order multi+other record emitted warnings: %+v", w)
+	}
+
+	const recordedMissingOther = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"answered","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-09T00:02:10.000Z","toolUseResult":{"questions":[],"answers":{"Which color do you prefer?":"Red","Which fruits do you like?":"Banana"},"annotations":{}}}`
+	chat = answerThenRead(t, twoQuestionDialog("toolu_2q"), answer,
+		resolvedTranscript(toolAskUserQuestion, "toolu_2q", recordedMissingOther))
+	if w := backstopWarnings(chat); len(w) != 1 {
+		t.Errorf("record missing the free text: %d warnings; want 1", len(w))
+	}
+}
+
 func TestBackstop_afkTimeoutAfterAnswer_warns(t *testing.T) {
 	d := provider.Dialog{
 		ToolID: "toolu_to", Kind: provider.DialogKindQuestion, Prompt: "Which toppings?",
