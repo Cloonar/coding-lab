@@ -98,34 +98,99 @@
 
           nixos-module =
             let
-              dummy = lib.nixosSystem {
-                modules = [
-                  self.nixosModules.lab
-                  {
-                    nixpkgs.hostPlatform = system;
-                    system.stateVersion = "25.11";
-                    services.lab = {
-                      enable = true;
-                      claudePackage = pkgs.hello; # stand-in: only its bin/ lands on PATH
-                      baseUrl = "https://lab.example.com";
-                      # Regression (module.nix ExecStart): '%' and '$' in a flag
-                      # value must survive systemd's specifier/env expansion.
-                      db = "postgres://lab:p%40ss$word@db.example.com/lab?sslmode=disable";
-                      environmentFile = "/run/secrets/lab.env";
-                      openFirewall = true;
-                      proxyAuth = {
-                        enable = true;
-                        trustedProxies = [ "10.0.0.0/8" ];
-                      };
-                    };
-                  }
-                ];
+              # Shared settings for every dummy nixosSystem. The db value keeps
+              # the ExecStart '%'/'$' escaping regression (module.nix); the
+              # per-dummy agentPackages/claudePackage overrides layer on top.
+              common = {
+                nixpkgs.hostPlatform = system;
+                system.stateVersion = "25.11";
+                services.lab = {
+                  enable = true;
+                  baseUrl = "https://lab.example.com";
+                  # Regression (module.nix ExecStart): '%' and '$' in a flag
+                  # value must survive systemd's specifier/env expansion.
+                  db = "postgres://lab:p%40ss$word@db.example.com/lab?sslmode=disable";
+                  environmentFile = "/run/secrets/lab.env";
+                  openFirewall = true;
+                  proxyAuth = {
+                    enable = true;
+                    trustedProxies = [ "10.0.0.0/8" ];
+                  };
+                };
               };
+              mkDummy = extra: lib.nixosSystem { modules = [ self.nixosModules.lab common extra ]; };
+
+              # Text-level dummy: its unit text IS realized by the runCommand,
+              # so it must carry NO real agent CLIs. It exercises the deprecated
+              # claudePackage alias with pkgs.hello (a cheap free stand-in whose
+              # bin/ lands on PATH) and nulls the codex default to keep codex
+              # out of the check's build closure.
+              dummy = mkDummy {
+                services.lab = {
+                  claudePackage = pkgs.hello;
+                  agentPackages.codex = null;
+                };
+              };
+
+              # Eval-only dummies: the asserts below read package *names* off
+              # config.systemd.services.lab.path. lib.getName / pname access
+              # does not force outPaths, so the unfree claude-code default
+              # evaluates without allowUnfree and nothing here gets built — the
+              # real agent CLIs stay out of the check's build closure.
+              defaultsDummy = mkDummy { services.lab.extraPackages = [ pkgs.hello ]; }; # defaults + additivity
+              claudeNullDummy = mkDummy { services.lab.agentPackages."claude-code" = null; }; # per-key opt-out
+              conflictDummy = mkDummy {
+                services.lab = {
+                  claudePackage = pkgs.hello;
+                  agentPackages."claude-code" = pkgs.hello;
+                };
+              }; # must fail the new claudePackage/agentPackages conflict assertion
+
+              unitPathNames = d: map lib.getName d.config.systemd.services.lab.path;
+              baselineNames = [
+                "gawk"
+                "gnutar"
+                "gzip"
+                "xz"
+                "zstd"
+                "unzip"
+                "curl"
+                "jq"
+                "file"
+                "patch"
+                "procps"
+                "ripgrep"
+                "nix"
+              ];
+              hasAll = want: names: lib.all (n: lib.elem n names) want;
+              # conflictDummy asserts on config.assertions directly: a failed
+              # assertion only throws at toplevel build (config.system.build.*),
+              # so we inspect the merged assertion list instead of building it.
+              failedAssertionMessages =
+                d: map (a: a.message) (lib.filter (a: !a.assertion) d.config.assertions);
             in
+            assert lib.assertMsg (hasAll (baselineNames ++ [ "claude-code" "codex" "hello" ]) (unitPathNames defaultsDummy))
+              "nixos-module check: defaults must put claude-code + codex + the tools baseline on the unit PATH, and extraPackages must append";
+            assert lib.assertMsg (!(lib.elem "claude-code" (unitPathNames claudeNullDummy)) && hasAll (baselineNames ++ [ "codex" ]) (unitPathNames claudeNullDummy))
+              "nixos-module check: agentPackages.\"claude-code\" = null must drop claude while the codex default and baseline survive (per-key merge)";
+            assert lib.assertMsg (lib.any (m: lib.hasInfix "claudePackage" m && lib.hasInfix "agentPackages" m) (failedAssertionMessages conflictDummy))
+              "nixos-module check: claudePackage + explicit agentPackages.\"claude-code\" must fail eval with a message naming both options";
+            assert lib.assertMsg (lib.any (lib.hasInfix "claudePackage") dummy.config.warnings)
+              "nixos-module check: setting the deprecated claudePackage must emit a deprecation warning";
+            assert lib.assertMsg (!lib.any (lib.hasInfix "claudePackage") defaultsDummy.config.warnings)
+              "nixos-module check: the defaults must not warn";
+            assert lib.assertMsg (lib.hasInfix "unfree" defaultsDummy.options.services.lab.agentPackages.description)
+              "nixos-module check: the agentPackages description must document the unfree claude-code default";
             pkgs.runCommand "lab-nixos-module-eval"
               {
                 unit = dummy.config.systemd.units."lab.service".text;
                 passAsFile = [ "unit" ];
+                # PATH-serialization greps below match against these store paths:
+                # the alias (hello), a baseline tool, ripgrep, and nix.
+                hello = pkgs.hello;
+                gawk = pkgs.gawk;
+                ripgrep = pkgs.ripgrep;
+                nixPkg = dummy.config.nix.package;
               }
               ''
                 # Load-bearing unit invariants (design §9, adrs-nix port spec).
@@ -165,6 +230,16 @@
                 # listenAddr and passes it as --agent-url, so labctl's LAB_URL
                 # never hairpins out through the SSO/auth proxy.
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '"--agent-url" "http://127.0.0.1:8080"'
+
+                # Text-level PATH serialization (issue #74): prove the path list
+                # actually lands on the unit's Environment=PATH line — the
+                # claudePackage alias (hello), a baseline tool (gawk), ripgrep,
+                # and nix. The eval-time asserts above cover the attrset merge
+                # semantics; these prove the wiring reaches the real unit text.
+                grep -q "$hello/bin" "$unitPath"
+                grep -q "$gawk/bin" "$unitPath"
+                grep -q "$ripgrep/bin" "$unitPath"
+                grep -q "$nixPkg/bin" "$unitPath"
 
                 cp "$unitPath" $out
               '';

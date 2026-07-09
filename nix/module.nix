@@ -34,6 +34,7 @@
 self:
 {
   config,
+  options,
   lib,
   pkgs,
   utils,
@@ -85,15 +86,40 @@ let
   ]
   ++ cfg.extraFlags;
 
-  # HOME for the unit (and thus every spawned session): claude and git both
-  # need a writable HOME. Prefer the configured user's home; fall back to the
-  # state dir for system users without a real one.
+  # HOME for the unit (and thus every spawned session): the agent CLIs and git
+  # both need a writable HOME. Prefer the configured user's home; fall back to
+  # the state dir for system users without a real one.
   home =
     let
       u = config.users.users.${cfg.user} or null;
       h = if u == null then "" else (u.home or "");
     in
     if h != "" && h != "/homeless-shelter" then h else cfg.stateDir;
+
+  # Operative agentPackages defaults, injected per-key at mkOptionDefault
+  # priority (see the config section) so a consumer's definition of ONE key
+  # merges per-key with the rest instead of replacing the whole attrset. The
+  # option's own `default` is documentation only — it would replace-not-merge.
+  agentPackageDefaults = {
+    "claude-code" = pkgs.claude-code;
+    codex = pkgs.codex;
+  };
+
+  # An agentPackages."claude-code" definition is "explicit" when it beats the
+  # injected mkOptionDefault priority — that is what the claudePackage
+  # conflict assertion keys on. Reads only per-attr priorities, never the
+  # values, so it cannot force the (unfree) default packages to evaluate.
+  agentPackagesPrio = lib.modules.mergeAttrDefinitionsWithPrio options.services.lab.agentPackages;
+  claudeCodeExplicitlySet =
+    agentPackagesPrio ? "claude-code"
+    && agentPackagesPrio."claude-code".highestPrio < (lib.mkOptionDefault null).priority;
+
+  # Deprecated-alias overlay: the claudePackage value populates
+  # agentPackages."claude-code". The conflict assertion below guarantees no
+  # explicit agentPackages."claude-code" is being silently overridden here.
+  effectiveAgentPackages =
+    cfg.agentPackages
+    // lib.optionalAttrs (cfg.claudePackage != null) { "claude-code" = cfg.claudePackage; };
 in
 {
   options.services.lab = {
@@ -106,13 +132,50 @@ in
       description = "The lab package (contains both `lab` and `labctl`; both land on the unit PATH).";
     };
 
+    agentPackages = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.nullOr lib.types.package);
+      default = {
+        "claude-code" = pkgs.claude-code;
+        codex = pkgs.codex;
+      };
+      defaultText = lib.literalExpression ''{ "claude-code" = pkgs.claude-code; codex = pkgs.codex; }'';
+      description = ''
+        Agent CLI packages, keyed by lab provider ID — the same strings the
+        provider registry, the DB `provider` column, and the API use. Every
+        non-null value's `bin/` lands on the unit PATH, and thus on the PATH of
+        every session spawned under the unit.
+
+        Setting one key to `null` disables that CLI while the other defaults
+        survive: the declared defaults are injected per-key at
+        `lib.mkOptionDefault` priority, so a definition of one key merges
+        with — rather than replaces — the rest.
+
+        `claude-code` is **unfree** in nixpkgs. Hosts that forbid unfree
+        software set `agentPackages."claude-code" = null` (dropping the Claude
+        CLI while keeping the codex default) or scope
+        `nixpkgs.config.allowUnfreePredicate` to allow it.
+      '';
+    };
+
+    extraPackages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      description = ''
+        Extra packages appended to the unit PATH, and thus to the PATH of every
+        spawned session. Purely additive — never affects
+        {option}`agentPackages` or the fixed tools baseline.
+      '';
+    };
+
     claudePackage = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
       default = null;
       description = ''
-        Claude Code package whose bin/ is added to the unit PATH. When null,
-        `claude` must reach the unit PATH some other way (e.g.
-        {option}`systemd.services.lab.path`) or spawns will fail.
+        Deprecated alias for {option}`agentPackages."claude-code"`. When
+        non-null it populates `agentPackages."claude-code"` (its bin/ lands on
+        the unit PATH) and emits a deprecation warning. Setting it together
+        with an explicit {option}`agentPackages."claude-code"` definition fails
+        eval — set `agentPackages."claude-code"` directly instead.
       '';
     };
 
@@ -122,7 +185,7 @@ in
       description = ''
         User the service (and every agent session) runs as. The default
         creates a `lab` system user with its home at {option}`stateDir`;
-        claude's own auth/config state lives under that HOME.
+        each agent CLI's own auth/config state lives under that HOME.
       '';
     };
 
@@ -273,12 +336,22 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Operative agentPackages defaults, injected per-key at mkOptionDefault
+    # priority so a consumer defining ONE key (or nulling it) keeps the rest.
+    services.lab.agentPackages = lib.mapAttrs (_: lib.mkOptionDefault) agentPackageDefaults;
+
     assertions = [
       {
         assertion = cfg.proxyAuth.enable -> cfg.proxyAuth.trustedProxies != [ ];
         message = "services.lab.proxyAuth.enable requires at least one entry in services.lab.proxyAuth.trustedProxies (the header is only ever trusted from those peers).";
       }
+      {
+        assertion = !(cfg.claudePackage != null && claudeCodeExplicitlySet);
+        message = "services.lab.claudePackage (deprecated) and an explicit services.lab.agentPackages.\"claude-code\" are both set — the alias would silently override the explicit definition. Drop the deprecated services.lab.claudePackage and keep services.lab.agentPackages.\"claude-code\".";
+      }
     ];
+
+    warnings = lib.optional (cfg.claudePackage != null) "services.lab.claudePackage is deprecated and will be removed; set services.lab.agentPackages.\"claude-code\" instead (it now lands on the unit PATH as agentPackages.\"claude-code\").";
 
     users.users = lib.mkIf (cfg.user == "lab") {
       lab = {
@@ -309,7 +382,30 @@ in
         pkgs.openssh
         pkgs.util-linux
       ]
-      ++ lib.optional (cfg.claudePackage != null) cfg.claudePackage;
+      # Fixed baseline of tools every session can assume — deliberately not an
+      # option, deliberately no language toolchains (those come from each
+      # project's flake via nix). config.nix.package puts `nix` on PATH so
+      # sessions can `nix develop`/`nix shell` for per-project toolchains.
+      # (issue #74 / ADR-0033)
+      ++ [
+        pkgs.gawk
+        pkgs.gnutar
+        pkgs.gzip
+        pkgs.xz
+        pkgs.zstd
+        pkgs.unzip
+        pkgs.curl
+        pkgs.jq
+        pkgs.file
+        pkgs.patch
+        pkgs.procps
+        pkgs.ripgrep
+        config.nix.package
+      ]
+      # Agent CLIs (non-null agentPackages values, claudePackage alias folded
+      # in) then the additive extraPackages.
+      ++ lib.filter (p: p != null) (lib.attrValues effectiveAgentPackages)
+      ++ cfg.extraPackages;
 
       environment.HOME = home;
 
