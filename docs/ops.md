@@ -12,7 +12,9 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 |---|---|---|
 | `enable` | `false` | Enable the service. |
 | `package` | this flake's `packages.lab` | The lab package; ships both `lab` and `labctl`, both land on the unit PATH. |
-| `claudePackage` | `null` | Claude Code package whose `bin/` is added to the unit PATH. When null, `claude` must reach the unit PATH some other way (e.g. `systemd.services.lab.path`) or spawns will fail. |
+| `agentPackages` | `{ "claude-code" = pkgs.claude-code; codex = pkgs.codex; }` | Agent-CLI packages whose `bin/` is added to the unit PATH, an `attrsOf (nullOr package)` **keyed by lab provider ID** (the same strings the provider registry, the DB `provider` column, and the API use). Defaults merge **per key** (injected at `mkOptionDefault` priority), so `agentPackages."claude-code" = null` drops claude while the codex default survives, and adding a key keeps both defaults. `claude-code` is **unfree** in nixpkgs: allow it (`nixpkgs.config.allowUnfreePredicate = p: lib.getName p == "claude-code";`) or set the key to `null`. |
+| `extraPackages` | `[ ]` | Extra `package`s appended to the unit PATH. Purely additive — never affects `agentPackages` or the fixed tools baseline. The sanctioned knob for a host-specific tool a session needs. |
+| `claudePackage` | `null` | **Deprecated alias** for `agentPackages."claude-code"`. When non-null it populates that key and emits a deprecation warning; setting both it and an explicit `agentPackages."claude-code"` fails eval with an assertion naming both options. Prefer `agentPackages`. |
 | `user` / `group` | `lab` / `lab` | Service identity. The default creates a `lab` system user with its home at `stateDir`; claude's own auth/config state lives under that HOME. |
 | `stateDir` | `/var/lib/lab` | State root (layout below). Managed via systemd `StateDirectory` when left at the default; otherwise the operator provides the directory (lab creates missing children itself, 0700). |
 | `listenAddr` | `":8080"` | Passed as `--addr`. |
@@ -46,9 +48,12 @@ Full example — sops-provided master key, Postgres DSN via `environmentFile`:
   #   LAB_DB=postgres://lab:PASSWORD@10.0.0.5/lab?sslmode=require
   sops.secrets."lab/env" = { };
 
+  # agentPackages defaults to claude-code + codex; claude-code is unfree, so
+  # allow it (or set `services.lab.agentPackages."claude-code" = null;`):
+  nixpkgs.config.allowUnfreePredicate = p: lib.getName p == "claude-code";
+
   services.lab = {
     enable = true;
-    claudePackage = pkgs.claude-code;
     baseUrl = "https://lab.example.com";
     masterKeyFile = config.sops.secrets."lab/master.key".path;
     environmentFile = config.sops.secrets."lab/env".path;   # LAB_DB; leave `db` at null
@@ -66,7 +71,7 @@ Full example — sops-provided master key, Postgres DSN via `environmentFile`:
 
 - `KillMode=process` is **load-bearing**: the tmux server lab spawns (and every agent session under it) lives in this unit's cgroup. `KillMode=process` makes a restart/deploy kill only the lab process; lab re-adopts the surviving tmux server on start. A config switch never drops a session.
 - `Type=simple`, `Restart=on-failure`, `RestartSec=5`.
-- Unit PATH includes git, tmux, **openssh**, util-linux, `package` (for `labctl`), and `claudePackage`. openssh is load-bearing: origins are SSH remotes and git forks `ssh` off PATH — without it every fetch dies with "cannot run ssh".
+- Unit PATH includes git, tmux, **openssh**, util-linux, `package` (for `labctl`), the fixed tools baseline (`gawk`, `gnutar`, `gzip`, `xz`, `zstd`, `unzip`, `curl`, `jq`, `file`, `patch`, `procps` (`ps`), `ripgrep` (`rg`), and `nix` via `config.nix.package` — so a session can run a project flake's devshell for per-project toolchains), every non-null `agentPackages` value, and `extraPackages`. The baseline is fixed, not an option (a contract every provider's session can assume; `extraPackages` is the additive knob); language toolchains are deliberately excluded and come from each project's flake. openssh is load-bearing: origins are SSH remotes and git forks `ssh` off PATH — without it every fetch dies with "cannot run ssh".
 - `ExecStart` uses systemd escaping (`escapeSystemdExecArgs`), not shell quoting — `%` and `$` in a DSN survive.
 
 **nixpkgs pin**: the flake input must ship `go_1_26`. Currently `github:NixOS/nixpkgs/nixos-unstable`, locked at `d407951447dcd00442e97087bf374aad70c04cea`. Record pin changes here.
