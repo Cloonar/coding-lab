@@ -1,10 +1,11 @@
 // Embedded chat (/runs/:id, issue #7 / ADR-0016): the body IS the chat. A
-// compact header (title · conversational state · deep link · New conversation ·
-// Interrupt · Stop), the conversation stream (user/assistant text, tool chips,
-// the pending dialog as an interactive inline card (issue #56), lifecycle/errors;
-// thinking behind a toggle), and a fixed bottom composer whose state follows the
-// run — collapsed to a waiting note while a dialog is pending, disabled for ended
-// instances. Send is ALWAYS available and fires immediately (ADR-0029, issue #61);
+// compact header (title · conversational state · spawn-time model chip (issue
+// #68) · deep link · Interrupt · Stop), the conversation stream (user/assistant
+// text, tool chips, the pending dialog as an interactive inline card (issue
+// #56), lifecycle/errors; thinking permanently hidden at paint — issue #68),
+// and a fixed bottom composer whose state follows the run — collapsed to a
+// waiting note while a dialog is pending, disabled for ended instances. Send is
+// ALWAYS available and fires immediately (ADR-0029, issue #61);
 // the one-tap turn Interrupt lives in the header next to Stop, gated on the live
 // outcome — not the derived `working` state, which can be a stale-transcript-tail
 // false positive (issue #38). Reads through GET /runs/:id/messages and refetches
@@ -95,10 +96,9 @@ function RunChatView() {
   const [providers] = createResource(() => listProviders());
 
   // The run's slash-command catalog (issue #51 decision 5): chat-safe commands
-  // for the composer autocomplete and the role=clear header affordance.
-  // Worktree-dependent, hence per-run; the server caches ~30s. A failing
-  // endpoint degrades to an empty catalog (no autocomplete, no affordance)
-  // rather than breaking the chat.
+  // feeding the composer autocomplete. Worktree-dependent, hence per-run; the
+  // server caches ~30s. A failing endpoint degrades to an empty catalog (no
+  // autocomplete) rather than breaking the chat.
   const [commands] = createResource(
     () => params.id,
     (id) => fetchRunCommands(id).catch(() => [] as RunCommand[]),
@@ -123,7 +123,6 @@ function RunChatView() {
   // latest-window has_more, which talks about ITS window, not our accumulated
   // stream.
   const [exhausted, setExhausted] = createSignal(false);
-  const [showThinking, setShowThinking] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   // Auto-send of the queued first message (issue #41) waits for the first real
   // server response before trusting transcript(): the signal defaults
@@ -508,26 +507,6 @@ function RunChatView() {
     }
   };
 
-  // role=clear affordance (issue #51 decision 2): a clear-role catalog entry
-  // binds the header's "New conversation" action; execution rides the NORMAL
-  // reply path (the backend echoes the command as user text and the transcript
-  // rotation resets the stream). New conversation follows the composer —
-  // available whenever not composerLocked() (ended / transcript gone / dialog /
-  // question). Its old `working` exclusion existed only to mirror the ADR-0022
-  // send-block, which ADR-0029 (issue #61) removed; a mid-turn /clear now rides
-  // the same TUI-queued reply path as any send, and a false `working` (a stale
-  // transcript tail — issue #38) can no longer hide the affordance.
-  const clearCommand = () => (commands() ?? []).find((c) => c.role === 'clear');
-  const composerLocked = () =>
-    ended() || transcript() === 'gone' || pendingDialog() !== null || state() === 'question';
-  const canClear = () => clearCommand() !== undefined && !composerLocked();
-  const sendClear = async () => {
-    const name = clearCommand()?.name;
-    if (name === undefined) return;
-    await replyRun(params.id, `/${name}`);
-    await refetchMessages();
-  };
-
   // The queued first message parked by the New-run composer for THIS run
   // (issue #41), or undefined. Reactive on the queue's version signal so the
   // pending bubble appears/clears live.
@@ -615,12 +594,12 @@ function RunChatView() {
     const matched = messages().some((m) => m.kind === 'dialog' && m.dialog?.tool_id === d.tool_id);
     return matched ? null : d;
   };
-  // Group consecutive tool runs at render time (decision 7). Grouping runs on
-  // the FULL list — including thinking — so the run boundaries are stable
-  // across the thinking toggle; thinking is filtered out at paint, not here.
+  // Group consecutive tool runs at render time (decision 7). Thinking is
+  // permanently dropped at paint (issue #68) — never shown, transcripts on
+  // disk keep everything — while grouping still runs on the FULL list
+  // (including thinking) so tool-run boundaries and seq keys stay stable.
   const renderItems = () => groupMessages(messages());
-  const hiddenThinking = (m: ChatMessage) =>
-    m.kind === 'text' && m.thinking === true && !showThinking();
+  const hiddenThinking = (m: ChatMessage) => m.kind === 'text' && m.thinking === true;
 
   return (
     <main class="page chat-page" ref={pageEl}>
@@ -637,10 +616,6 @@ function RunChatView() {
           run={runData()}
           providers={providers()}
           state={state()}
-          showThinking={showThinking()}
-          onToggleThinking={() => setShowThinking((v) => !v)}
-          canClear={canClear()}
-          onClear={sendClear}
           onError={setError}
           onChanged={() => void refetchRun()}
           onInterrupted={() => void refetchMessages()}
@@ -672,7 +647,6 @@ function RunChatView() {
                       {(group) => (
                         <ToolGroupView
                           group={group()}
-                          showThinking={showThinking()}
                           open={openGroups().has(group().key)}
                           onToggle={(o) => setGroupOpen(group().key, o)}
                         />
@@ -780,12 +754,6 @@ function ChatHeader(props: {
   run: Run | undefined;
   providers: Provider[] | undefined;
   state: ConversationState;
-  showThinking: boolean;
-  onToggleThinking: () => void;
-  /** role=clear command available AND the composer is unlocked (issue #51). */
-  canClear: boolean;
-  /** Sends the provider's clear command via the normal reply path. */
-  onClear: () => Promise<void>;
   onError: (message: string) => void;
   onChanged: () => void;
   /** One-tap turn Interrupt fired from the header/menu (ADR-0029) — refetch on done. */
@@ -795,28 +763,6 @@ function ChatHeader(props: {
 }) {
   const [confirming, setConfirming] = createSignal(false);
   const [stopping, setStopping] = createSignal(false);
-  // "New conversation" (issue #51 decision 2): inline confirm — the chat
-  // clears for real — then the clear command rides the normal reply path.
-  const [clearConfirming, setClearConfirming] = createSignal(false);
-  const [clearing, setClearing] = createSignal(false);
-  // The affordance can vanish mid-confirm (a dialog locks the composer, the
-  // run ends): drop the armed confirm so it can't linger invisibly and fire
-  // on the next appearance.
-  createEffect(() => {
-    if (!props.canClear) setClearConfirming(false);
-  });
-  const doClear = async () => {
-    if (clearing()) return;
-    setClearing(true);
-    try {
-      await props.onClear();
-      setClearConfirming(false);
-    } catch (err) {
-      props.onError(errorMessage(err));
-    } finally {
-      setClearing(false);
-    }
-  };
   // "repo · label" — the session name is `<repo>~<label>` and the label alone
   // is ambiguous across repos.
   const title = () => {
@@ -829,6 +775,18 @@ function ChatHeader(props: {
   };
   const badge = () => stateBadge(props.state);
   const live = () => props.run !== undefined && props.run.outcome === 'active';
+  // The run's spawn-time model chip (issue #68): catalog pretty labels with the
+  // raw id as fallback, hidden entirely for legacy rows with no model. A
+  // mid-session /model switch is knowingly not reflected — spawn-time truth only.
+  const modelInfo = (): string | null => {
+    const r = props.run;
+    if (r === undefined || r.model === '') return null;
+    const p = props.providers?.find((x) => x.id === r.provider);
+    const model = p?.models.find((o) => o.value === r.model)?.label ?? r.model;
+    if (r.effort === '') return model;
+    const effort = p?.efforts.find((o) => o.value === r.effort)?.label ?? r.effort;
+    return `${model} · ${effort}`;
+  };
   // The open affordance (ADR-0017): the exact deep link when captured, else the
   // provider's generic web fallback, else a tmux-attach for a link-less
   // provider — same source of truth as the dashboard rows, never hardcoded.
@@ -899,6 +857,15 @@ function ChatHeader(props: {
           </span>
         )}
       </Show>
+      {/* >=640px: the run's spawn-time model, read-only (issue #68). <640px the
+          same string rides the ••• menu's info row instead. */}
+      <Show when={modelInfo()}>
+        {(info) => (
+          <span class="chip mono chat-model-chip" title="Model · effort (set at spawn)">
+            {info()}
+          </span>
+        )}
+      </Show>
 
       <span class="spacer" />
 
@@ -906,43 +873,6 @@ function ChatHeader(props: {
           >=640px makes this wrapper transparent (identical flex row to before);
           <640px the wrapper is display:none and the controls live in the menu. */}
       <div class="chat-desktop-actions">
-        <Show when={props.canClear}>
-          <Switch>
-            <Match when={!clearConfirming()}>
-              <button
-                type="button"
-                class="seg chat-new-convo"
-                title="Clear this chat and start a fresh conversation"
-                onClick={() => setClearConfirming(true)}
-              >
-                New conversation
-              </button>
-            </Match>
-            <Match when={clearConfirming()}>
-              <button
-                type="button"
-                class="seg chat-new-convo-confirm"
-                title="This clears the chat history for real"
-                disabled={clearing()}
-                onClick={() => void doClear()}
-              >
-                {clearing() ? 'Clearing…' : 'Confirm clear'}
-              </button>
-              <button type="button" class="seg" onClick={() => setClearConfirming(false)}>
-                Cancel
-              </button>
-            </Match>
-          </Switch>
-        </Show>
-        <button
-          type="button"
-          class="seg chat-thinking-toggle"
-          aria-pressed={props.showThinking}
-          onClick={() => props.onToggleThinking()}
-          title="Show or hide the agent's thinking"
-        >
-          {props.showThinking ? 'Hide thinking' : 'Show thinking'}
-        </button>
         <Show when={open()}>{(s) => <OpenAffordance state={s()} />}</Show>
         {/* One-tap turn Interrupt (ADR-0029) — gated on live(), not the derived
             (possibly false) `working` state; accent + `pause`, deliberately
@@ -995,8 +925,7 @@ function ChatHeader(props: {
 
       {/* <640px: everything the one-line row can't hold moves into `•••`. */}
       <ChatMenu
-        showThinking={props.showThinking}
-        onToggleThinking={props.onToggleThinking}
+        modelInfo={modelInfo()}
         openState={open()}
         live={live()}
         confirming={confirming()}
@@ -1005,12 +934,6 @@ function ChatHeader(props: {
         onRequestStop={() => setConfirming(true)}
         onCancelStop={() => setConfirming(false)}
         onStop={() => void stop()}
-        canClear={props.canClear}
-        clearConfirming={clearConfirming()}
-        clearing={clearing()}
-        onRequestClear={() => setClearConfirming(true)}
-        onCancelClear={() => setClearConfirming(false)}
-        onClear={() => void doClear()}
       />
     </header>
   );
@@ -1018,14 +941,14 @@ function ChatHeader(props: {
 
 // The mobile (<640px) header overflow menu (§1): an anchored dropdown mirroring
 // TopBar's nav-menu/nav-scrim pattern — outside-tap + Escape + tap-to-close —
-// carrying the controls the one-line header can't hold inline: the thinking
-// toggle, the open affordance (when available), New conversation, the one-tap
-// turn Interrupt and the two-step Stop (both live only). `•••` is always
-// present; the items are contextual. CSS hides the whole wrapper at >=640px,
-// where the inline header controls render instead.
+// carrying the controls the one-line header can't hold inline: the model info
+// row (non-interactive, top, issue #68), the open affordance (when available),
+// the one-tap turn Interrupt and the two-step Stop (both live only). `•••` is
+// always present; the items are contextual. CSS hides the whole wrapper at
+// >=640px, where the inline header controls render instead.
 function ChatMenu(props: {
-  showThinking: boolean;
-  onToggleThinking: () => void;
+  /** The run's spawn-time model · effort string, or null to hide the row (issue #68). */
+  modelInfo: string | null;
   openState: OpenState | null;
   live: boolean;
   confirming: boolean;
@@ -1034,20 +957,13 @@ function ChatMenu(props: {
   onRequestStop: () => void;
   onCancelStop: () => void;
   onStop: () => void;
-  canClear: boolean;
-  clearConfirming: boolean;
-  clearing: boolean;
-  onRequestClear: () => void;
-  onCancelClear: () => void;
-  onClear: () => void;
 }) {
   const [menuOpen, setMenuOpen] = createSignal(false);
-  // Closing always abandons a half-armed Stop/Clear, so a confirm can't
-  // linger invisibly and fire on the next open.
+  // Closing always abandons a half-armed Stop, so a confirm can't linger
+  // invisibly and fire on the next open.
   const close = () => {
     setMenuOpen(false);
     props.onCancelStop();
-    props.onCancelClear();
   };
 
   // Close on Escape while open (mirrors TopBar).
@@ -1074,18 +990,16 @@ function ChatMenu(props: {
 
       <Show when={menuOpen()}>
         <div class="chat-menu-panel" id="chat-menu-panel" role="menu">
-          <button
-            type="button"
-            class="chat-menu-item"
-            role="menuitem"
-            onClick={() => {
-              props.onToggleThinking();
-              close();
-            }}
-          >
-            <Icon name="message-square" class="chat-menu-icon" />
-            <span>{props.showThinking ? 'Hide thinking' : 'Show thinking'}</span>
-          </button>
+          {/* Non-interactive info row (issue #68): the run's spawn-time model, pinned
+              at the top. role=none keeps it out of the menu's item semantics — it is
+              not focusable and arrow/tab navigation never lands on it. */}
+          <Show when={props.modelInfo}>
+            {(info) => (
+              <div class="chat-menu-info" role="none">
+                {info()}
+              </div>
+            )}
+          </Show>
 
           {/* Presentational wrapper (role=none): the OpenAffordance renders its
               own focusable <a>/<button>, so nesting it inside a role=menuitem
@@ -1096,45 +1010,6 @@ function ChatMenu(props: {
                 <OpenAffordance state={s()} />
               </div>
             )}
-          </Show>
-
-          {/* New conversation (issue #51): same two-step confirm as Stop —
-              the clear command wipes the chat for real. */}
-          <Show when={props.canClear}>
-            <Switch>
-              <Match when={!props.clearConfirming}>
-                <button
-                  type="button"
-                  class="chat-menu-item"
-                  role="menuitem"
-                  onClick={() => props.onRequestClear()}
-                >
-                  <Icon name="plus" class="chat-menu-icon" />
-                  <span>New conversation…</span>
-                </button>
-              </Match>
-              <Match when={props.clearConfirming}>
-                <button
-                  type="button"
-                  class="chat-menu-item"
-                  role="menuitem"
-                  disabled={props.clearing}
-                  onClick={() => props.onClear()}
-                >
-                  <Icon name="plus" class="chat-menu-icon" />
-                  <span>{props.clearing ? 'Clearing…' : 'Confirm clear'}</span>
-                </button>
-                <button
-                  type="button"
-                  class="chat-menu-item"
-                  role="menuitem"
-                  onClick={() => props.onCancelClear()}
-                >
-                  <span class="chat-menu-icon" aria-hidden="true" />
-                  <span>Cancel</span>
-                </button>
-              </Match>
-            </Switch>
           </Show>
 
           {/* One-tap turn Interrupt (ADR-0029): no confirm step, unlike the
@@ -1283,15 +1158,13 @@ function ToolChip(props: { message: ChatMessage }) {
 // controlled by the parent so it survives SSE refetches (decision 12).
 function ToolGroupView(props: {
   group: ToolGroup;
-  showThinking: boolean;
   open: boolean;
   onToggle: (open: boolean) => void;
 }) {
   const summary = () => toolGroupSummary(props.group);
-  // Folded-in thinking renders in order inside the expanded group, but only
-  // when the thinking toggle is on (decision 9).
-  const items = () =>
-    props.group.items.filter((m) => props.showThinking || !(m.kind === 'text' && m.thinking));
+  // Folded-in thinking is dropped at paint (issue #68) — the group keeps its
+  // boundaries and counts, but thinking never renders.
+  const items = () => props.group.items.filter((m) => !(m.kind === 'text' && m.thinking));
   return (
     <details
       class="chat-tool-group"

@@ -2566,6 +2566,14 @@ h6.md-h {
 .chat-desktop-actions {
   display: none;
 }
+/* The spawn-time model chip (issue #68) — same >=640px-only display gate as
+   the state chip beside it; its string rides the ••• menu's info row on
+   mobile instead. Muted so it reads as metadata, not an interactive control. */
+.chat-model-chip {
+  display: none;
+  color: var(--muted);
+  font-weight: 500;
+}
 
 /* §1 — the `•••` overflow menu: an anchored dropdown mirroring TopBar's
    nav-menu/nav-scrim pattern (outside-tap + Escape + tap-to-close). */
@@ -2624,6 +2632,17 @@ h6.md-h {
 }
 .chat-menu-item.accent .chat-menu-icon {
   color: var(--accent);
+}
+/* Non-interactive model info row (issue #68), pinned above the menu items: a
+   plain div (no hover affordance — it's not clickable), muted and set off by
+   its own bottom border/margin so it reads as metadata, not an action. */
+.chat-menu-info {
+  padding: 0.4rem 0.6rem 0.55rem;
+  margin-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 /* The OpenAffordance in a menu row reveals BOTH icon and label (the header
    context keeps it icon-only). This must appear after
@@ -2894,6 +2913,10 @@ h6.md-h {
     display: none;
   }
   .chat-state-chip {
+    display: inline-block;
+  }
+  /* issue #68 — flips on beside the state chip at desktop width. */
+  .chat-model-chip {
     display: inline-block;
   }
   .chat-desktop-actions {

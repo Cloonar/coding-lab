@@ -1,6 +1,7 @@
 // RunChat behavioral contract (issue #7):
 // - the stream renders user/assistant text, tool chips, and lifecycle/errors;
-//   thinking is hidden until the toggle is pressed;
+//   thinking is permanently dropped at paint — in the stream and inside
+//   expanded tool groups — with no toggle to reveal it (issue #68);
 // - a run.messages.changed for THIS run refetches; other runs are ignored;
 //   run.changed for other repos is ignored too;
 // - a refetch tails with after=<cursor> (paginating past the window limit) so
@@ -29,7 +30,12 @@
 // - one-tap interrupt (POST /interrupt, no confirm) lives in the live-gated
 //   header — inline on desktop and a `•••` menu item above Stop, a `pause`
 //   glyph distinct from the two-step danger `square` Stop — plus the two
-//   locked-state escape hatches; New conversation stays available while working;
+//   locked-state escape hatches;
+// - the run's spawn-time model · effort rides a read-only chip beside the
+//   state chip on desktop, and a non-interactive info row (role=none, not a
+//   menuitem) pinned atop the `•••` panel on mobile — catalog pretty labels
+//   with the raw id as fallback, hidden entirely for a legacy row with no
+//   model (issue #68);
 // - "Load earlier" never resurrects once paging-up hit the beginning.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
@@ -328,18 +334,15 @@ afterEach(() => {
 });
 
 describe('RunChat', () => {
-  it('renders text and tool chips, hides thinking until toggled', async () => {
+  it('renders text and tool chips; thinking never renders (issue #68)', async () => {
     await mountChat();
 
     expect(container.textContent).toContain('do the thing');
     expect(container.textContent).toContain('all done');
     expect(container.querySelector('.chat-tool')?.textContent).toContain('Ran ls');
-    // Thinking hidden by default.
+    // Thinking is permanently dropped at paint — there is no toggle to reveal it.
     expect(container.textContent).not.toContain('secret reasoning');
-
-    buttonByText('Show thinking')!.click();
-    await settle();
-    expect(container.textContent).toContain('secret reasoning');
+    expect(buttonByText('Show thinking')).toBeNull();
   });
 
   it('replies through the composer and clears the input', async () => {
@@ -1367,7 +1370,7 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-tool-group')).toBeNull();
   });
 
-  it('hides folded-in thinking inside a group until the thinking toggle is on (decision 9)', async () => {
+  it('drops folded-in thinking inside an opened tool group, permanently (issue #68)', async () => {
     messagesOnServer = {
       messages: [
         { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok' } },
@@ -1381,18 +1384,23 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    // Thinking folds in (keeps the run together) but is hidden in the body and
-    // never counted while the toggle is off.
+    // Thinking folds in (keeps the run together) but is never counted.
+    expect(container.querySelector('.tool-group-count')?.textContent).toBe('2 tool calls');
     expect(container.querySelector('.tool-group-body')?.textContent).not.toContain(
       'secret group reasoning',
     );
-    expect(container.querySelector('.tool-group-count')?.textContent).toBe('2 tool calls');
 
-    buttonByText('Show thinking')!.click();
+    // Opening the group (a user tap) still never reveals it — there is no
+    // toggle left to flip.
+    const details = container.querySelector('.chat-tool-group') as HTMLDetailsElement;
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
     await settle();
-    expect(container.querySelector('.tool-group-body')?.textContent).toContain(
+
+    expect(container.querySelector('.tool-group-body')?.textContent).not.toContain(
       'secret group reasoning',
     );
+    expect(buttonByText('Show thinking')).toBeNull();
   });
 
   it('shows a live "running…" summary while a trailing run is still in flight', async () => {
@@ -1531,17 +1539,34 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-menu-panel')).toBeNull();
   });
 
-  it('opens an anchored dropdown with Show thinking, Interrupt and Stop run for a live run', async () => {
+  it('opens an anchored dropdown with the model info row, open affordance, Interrupt and Stop run for a live run', async () => {
     await mountChat(); // default fixture: live, needs_input
 
     expect(container.querySelector('.chat-menu-panel')).toBeNull();
     moreButton()!.click();
     await settle();
 
-    expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
-    expect(menuItem('Show thinking')).toBeDefined();
+    const panel = container.querySelector('.chat-menu-panel');
+    expect(panel).not.toBeNull();
+    expect(container.querySelector('.chat-menu-open')).not.toBeNull(); // the open affordance
     expect(menuItem('Interrupt')).toBeDefined(); // live turn Interrupt (ADR-0029)
     expect(menuItem('Stop run…')).toBeDefined();
+    expect(menuItem('Show thinking')).toBeUndefined();
+    expect(menuItem('New conversation')).toBeUndefined();
+
+    // The spawn-time model info row (issue #68): a plain, non-focusable div —
+    // NOT a menuitem — pinned as the panel's FIRST child, above every item.
+    const info = panel!.firstElementChild as HTMLElement;
+    expect(info.classList.contains('chat-menu-info')).toBe(true);
+    expect(info.tagName).toBe('DIV');
+    expect(info.getAttribute('role')).toBe('none');
+    expect(info.textContent).toBe('opus[1m] · max');
+
+    // The model string never leaks into an actual menu item.
+    const menuItemTexts = Array.from(document.querySelectorAll('[role=menuitem]')).map(
+      (el) => el.textContent,
+    );
+    expect(menuItemTexts.some((t) => t?.includes('opus[1m]'))).toBe(false);
   });
 
   it('omits Stop run from the dropdown when the run has ended', async () => {
@@ -1552,22 +1577,11 @@ describe('RunChat', () => {
     moreButton()!.click();
     await settle();
     expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
-    expect(menuItem('Show thinking')).toBeDefined();
+    // The model info row shows regardless of liveness (it's spawn-time, not run state).
+    expect(container.querySelector('.chat-menu-info')?.textContent).toBe('opus[1m] · max');
     // Both the turn Interrupt and Stop are live-gated — gone on an ended run.
     expect(menuItem('Interrupt')).toBeUndefined();
     expect(menuItem('Stop run…')).toBeUndefined();
-  });
-
-  it('toggles thinking from the dropdown item', async () => {
-    await mountChat();
-    expect(container.textContent).not.toContain('secret reasoning');
-
-    moreButton()!.click();
-    await settle();
-    menuItem('Show thinking')!.click();
-    await settle();
-
-    expect(container.textContent).toContain('secret reasoning');
   });
 
   it('closes the dropdown on Escape', async () => {
@@ -2544,80 +2558,56 @@ describe('RunChat', () => {
     expect(replyPosts).toEqual([{ text: '/clear' }]);
   });
 
-  // --- New conversation (role=clear, issue #51 decision 2) ---
+  // --- No New conversation control anywhere (removed, issue #68) ---
 
-  it('binds New conversation to the clear-role command behind an inline confirm', async () => {
-    await mountChat(); // default: active run, needs_input, catalog has role=clear
+  it('has no New conversation button or menu item; the clear command still autocompletes', async () => {
+    await mountChat(); // default: active run, catalog has a role=clear command
 
-    const newConvo = buttonByText('New conversation');
-    expect(newConvo).not.toBeNull();
-    newConvo!.click();
+    expect(buttonByText('New conversation')).toBeNull();
+    moreButton()!.click();
     await settle();
-
-    // Inline confirm — nothing sent yet; Cancel disarms.
-    expect(replyPosts).toHaveLength(0);
-    expect(buttonByText('Confirm clear')).not.toBeNull();
-    buttonByText('Cancel')!.click();
-    await settle();
+    expect(menuItem('New conversation')).toBeUndefined();
     expect(buttonByText('Confirm clear')).toBeNull();
 
-    // Confirming sends the command AS A REPLY ("/clear") — the normal path.
-    buttonByText('New conversation')!.click();
-    await settle();
-    buttonByText('Confirm clear')!.click();
-    await settle();
-    expect(replyPosts).toEqual([{ text: '/clear' }]);
-  });
-
-  it('hides New conversation while a dialog locks the composer and on an ended run', async () => {
-    messagesOnServer = {
-      messages: [
-        {
-          seq: 1,
-          kind: 'dialog',
-          dialog: {
-            tool_id: 'toolu_1',
-            dialog_kind: 'question',
-            prompt: 'Which fix?',
-            answerable: true,
-            options: [{ label: 'Revert' }],
-          },
-        },
-      ],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-    };
-    await mountChat();
-    expect(buttonByText('New conversation')).toBeNull();
-
-    dispose?.();
-    container.remove();
-    runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
-    messagesOnServer = { ...messagesOnServer, messages: [], state: 'ended', pending_dialog: null };
-    await mountChat();
-    expect(buttonByText('New conversation')).toBeNull();
-  });
-
-  it('offers no New conversation when the catalog has no clear-role command', async () => {
-    commandsOnServer = commandsOnServer.filter((c) => c.role !== 'clear');
-    await mountChat();
-    expect(buttonByText('New conversation')).toBeNull();
-    // The remaining commands still autocomplete.
+    // Composer autocomplete for /clear is untouched — only the dedicated
+    // button + two-step confirm are gone.
     setComposerText('/');
     await settle();
-    expect(popRows()).toHaveLength(2);
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toContain(
+      '/clear',
+    );
   });
 
-  it('keeps New conversation available while the agent is mid-turn (working)', async () => {
-    // ADR-0029 (issue #61) removed the working exclusion: a mid-turn /clear now
-    // rides the same TUI-queued reply path as any send, so New conversation is
-    // gated only by composerLocked() (ended / gone / dialog / question), not by
-    // the derived `working` state — which can be a stale-transcript-tail false
-    // positive (issue #38) that must not hide the affordance.
-    messagesOnServer = { ...messagesOnServer, state: 'working' };
+  // --- Spawn-time model chip (issue #68) ---
+
+  it('renders the desktop model chip with raw ids when the catalog has no match', async () => {
+    await mountChat(); // default mocks: providersOnServer[0].models/efforts are both []
+
+    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m] · max');
+  });
+
+  it('renders the desktop model chip with catalog pretty labels when they match', async () => {
+    providersOnServer[0]!.models = [{ value: 'opus[1m]', label: 'Opus 4.6 [1m]' }];
+    providersOnServer[0]!.efforts = [{ value: 'max', label: 'Max' }];
     await mountChat();
-    expect(buttonByText('New conversation')).not.toBeNull();
+
+    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('Opus 4.6 [1m] · Max');
+  });
+
+  it('hides the model chip and the menu info row entirely for a legacy run with no model', async () => {
+    runOnServer = { ...baseRun(), model: '' };
+    await mountChat();
+
+    expect(container.querySelector('.chat-model-chip')).toBeNull();
+    moreButton()!.click();
+    await settle();
+    expect(container.querySelector('.chat-menu-info')).toBeNull();
+  });
+
+  it('renders the model alone, with no separator, when effort is empty', async () => {
+    runOnServer = { ...baseRun(), effort: '' };
+    await mountChat();
+
+    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m]');
   });
 });
