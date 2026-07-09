@@ -145,7 +145,7 @@ func (s *Service) drainZombies(ctx context.Context) {
 		known[r.Name] = true
 	}
 	for _, name := range live {
-		if name == tmuxx.LoginSession {
+		if tmuxx.IsLoginSession(name) {
 			continue
 		}
 		repoName, _ := gitx.ParseSessionName(name)

@@ -63,7 +63,7 @@ func instanceBranch(afkPattern, manualPrefix, label string) string {
 func ownedBranches(afkPattern, manualPrefix string, sessions []string, repoName string) map[string]bool {
 	owned := make(map[string]bool)
 	for _, name := range sessions {
-		if name == tmuxx.LoginSession || !gitx.BelongsTo(name, repoName) {
+		if tmuxx.IsLoginSession(name) || !gitx.BelongsTo(name, repoName) {
 			continue
 		}
 		_, label := gitx.ParseSessionName(name)

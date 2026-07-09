@@ -85,7 +85,7 @@ func (s *Service) StopAll(ctx context.Context, repoID string) (int, error) {
 	}
 	stopped := 0
 	for _, name := range live {
-		if name == tmuxx.LoginSession || !gitx.BelongsTo(name, repo.Name) {
+		if tmuxx.IsLoginSession(name) || !gitx.BelongsTo(name, repo.Name) {
 			continue
 		}
 		run, err := s.store.RunBySession(ctx, name)

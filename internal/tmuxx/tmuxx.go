@@ -37,11 +37,30 @@ import (
 	"time"
 )
 
-// LoginSession is the fixed session name of the provider's `claude auth
-// login` flow. To this package it is a session like any other; the
-// exclusions — cap counting, branch ownership, stop-all — live in the
-// callers, keyed on this one symbol (design §4d).
-const LoginSession = "lab-login"
+// LoginSessionPrefix is the shared name prefix of every provider's login
+// session ("lab-login-<providerID>"). Kept a single const: LoginSessionName
+// derives per-provider names from it and IsLoginSession matches on it, so
+// the two cannot drift (issue #77).
+const LoginSessionPrefix = "lab-login"
+
+// LoginSessionName returns the login-session name for providerID
+// (lab-login-<providerID>, e.g. "lab-login-claude-code"). To this package
+// the result is a session like any other; the exclusions — cap counting,
+// branch ownership, stop-all — live in the callers via IsLoginSession
+// (design §4d).
+func LoginSessionName(providerID string) string {
+	return LoginSessionPrefix + "-" + providerID
+}
+
+// IsLoginSession reports whether name is a provider login session — the
+// one exclusion predicate callers key cap counting, branch ownership, and
+// stop-all on (design §4d). The bare legacy name "lab-login" (written by
+// pre-per-provider binaries) still matches, so a leftover login session
+// from an older build isn't accidentally treated as a normal instance
+// session.
+func IsLoginSession(name string) bool {
+	return name == LoginSessionPrefix || strings.HasPrefix(name, LoginSessionPrefix+"-")
+}
 
 // ErrSessionNotFound wraps a send/paste against a session that no longer
 // exists (killed externally, or the whole server is gone) — a state callers

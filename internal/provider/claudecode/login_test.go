@@ -71,7 +71,7 @@ func TestValidateLoginCode(t *testing.T) {
 // once the session is live, like a real pane.
 func TestLoginStart_capturesOAuthURL(t *testing.T) {
 	run := newLoginRunner()
-	run.SetPane(LoginSession, "Use the url below to sign in https://claude.ai/oauth/authorize?code=xyz")
+	run.SetPane(loginSession, "Use the url below to sign in https://claude.ai/oauth/authorize?code=xyz")
 	p, _ := testProvider(t, run)
 
 	url, err := p.LoginStart(context.Background())
@@ -81,7 +81,7 @@ func TestLoginStart_capturesOAuthURL(t *testing.T) {
 	if want := "https://claude.ai/oauth/authorize?code=xyz"; url != want {
 		t.Errorf("LoginStart url = %q; want %q", url, want)
 	}
-	sess, live := run.Session(LoginSession)
+	sess, live := run.Session(loginSession)
 	if !live {
 		t.Fatal("login session not running after LoginStart")
 	}
@@ -98,7 +98,7 @@ func TestLoginStart_capturesOAuthURL(t *testing.T) {
 // re-scrapes instead of double-spawning.
 func TestLoginStart_idempotentWhileLive(t *testing.T) {
 	run := newLoginRunner()
-	run.SetPane(LoginSession, "visit https://claude.ai/oauth/authorize?code=first")
+	run.SetPane(loginSession, "visit https://claude.ai/oauth/authorize?code=first")
 	p, _ := testProvider(t, run)
 	ctx := context.Background()
 
@@ -123,8 +123,8 @@ func TestLoginStart_idempotentWhileLive(t *testing.T) {
 // recovers the URL from the pane without spawning anything.
 func TestLoginStart_recoversURLFromLivePane(t *testing.T) {
 	run := newLoginRunner()
-	run.AddLive(LoginSession)
-	run.SetPane(LoginSession, "still waiting: https://claude.com/cai/oauth/authorize?code=survivor.")
+	run.AddLive(loginSession)
+	run.SetPane(loginSession, "still waiting: https://claude.com/cai/oauth/authorize?code=survivor.")
 	p, _ := testProvider(t, run)
 
 	url, err := p.LoginStart(context.Background())
@@ -143,7 +143,7 @@ func TestLoginStart_recoversURLFromLivePane(t *testing.T) {
 // (v0: the session is still waiting; the user just retries).
 func TestLoginSubmitCode_invalidRejectedBeforeSendKeys(t *testing.T) {
 	run := newLoginRunner()
-	run.AddLive(LoginSession)
+	run.AddLive(loginSession)
 	p, _ := testProvider(t, run)
 
 	for _, in := range []string{"", "   \t  ", "abc\ndef", strings.Repeat("a", maxLoginCodeLen+1)} {
@@ -151,10 +151,10 @@ func TestLoginSubmitCode_invalidRejectedBeforeSendKeys(t *testing.T) {
 			t.Errorf("LoginSubmitCode(%.10q…) err = %v; want ErrInvalidCode", in, err)
 		}
 	}
-	if n := len(run.Sent(LoginSession)); n != 0 {
+	if n := len(run.Sent(loginSession)); n != 0 {
 		t.Errorf("send-keys calls = %d; want 0 for invalid codes", n)
 	}
-	if ok, _ := run.IsRunning(context.Background(), LoginSession); !ok {
+	if ok, _ := run.IsRunning(context.Background(), loginSession); !ok {
 		t.Error("login session torn down by an invalid code; must stay up")
 	}
 }
@@ -168,7 +168,7 @@ func TestLoginSubmitCode_happyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := newLoginRunner()
-	run.AddLive(LoginSession)
+	run.AddLive(loginSession)
 	p, bus := testProvider(t, run)
 	p.claudeBin = fakeClaude(t, `cat '`+state+`'`)
 	p.loginTimeout = 2 * time.Second
@@ -191,11 +191,11 @@ func TestLoginSubmitCode_happyPath(t *testing.T) {
 		t.Fatalf("LoginSubmitCode: %v", err)
 	}
 
-	sent := run.Sent(LoginSession)
+	sent := run.Sent(loginSession)
 	if len(sent) != 1 || sent[0].Text != code || !sent[0].Enter {
-		t.Errorf("sent keys = %+v; want one literal line %q + Enter to %s", sent, code, LoginSession)
+		t.Errorf("sent keys = %+v; want one literal line %q + Enter to %s", sent, code, loginSession)
 	}
-	if ok, _ := run.IsRunning(ctx, LoginSession); ok {
+	if ok, _ := run.IsRunning(ctx, loginSession); ok {
 		t.Error("login session still running after successful login; want it killed")
 	}
 	select {
@@ -221,7 +221,7 @@ func TestLoginSubmitCode_happyPath(t *testing.T) {
 // remembered URL cleared, and ErrLoginTimeout returned.
 func TestLoginSubmitCode_timeoutTearsDown(t *testing.T) {
 	run := newLoginRunner()
-	run.AddLive(LoginSession)
+	run.AddLive(loginSession)
 	p, _ := testProvider(t, run)
 	p.claudeBin = fakeClaude(t, `echo '{"loggedIn":false}'`)
 	p.loginTimeout = 100 * time.Millisecond
@@ -232,7 +232,7 @@ func TestLoginSubmitCode_timeoutTearsDown(t *testing.T) {
 	if !errors.Is(err, ErrLoginTimeout) {
 		t.Fatalf("LoginSubmitCode err = %v; want ErrLoginTimeout", err)
 	}
-	if ok, _ := run.IsRunning(context.Background(), LoginSession); ok {
+	if ok, _ := run.IsRunning(context.Background(), loginSession); ok {
 		t.Error("login session still running after timeout; want it torn down")
 	}
 	if got := p.getLoginURL(); got != "" {

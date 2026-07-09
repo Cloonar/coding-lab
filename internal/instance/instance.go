@@ -221,13 +221,13 @@ func (s *Service) publishParkedChanged(repoID string) {
 }
 
 // LiveInstanceCount counts live sessions against the instance cap, excluding
-// the provider login session (design §4d — the one symbol every exclusion keys
-// on). Exported for the M5 AFK engine's locked cap check — one counting rule,
-// never two.
+// every provider login session (design §4d — the one predicate every
+// exclusion keys on). Exported for the M5 AFK engine's locked cap check — one
+// counting rule, never two.
 func LiveInstanceCount(live []string) int {
 	n := 0
 	for _, name := range live {
-		if name != tmuxx.LoginSession {
+		if !tmuxx.IsLoginSession(name) {
 			n++
 		}
 	}
@@ -248,7 +248,7 @@ func (s *Service) LiveInstances(ctx context.Context, repoID string) (int, error)
 	}
 	n := 0
 	for _, name := range live {
-		if name != tmuxx.LoginSession && gitx.BelongsTo(name, repo.Name) {
+		if !tmuxx.IsLoginSession(name) && gitx.BelongsTo(name, repo.Name) {
 			n++
 		}
 	}

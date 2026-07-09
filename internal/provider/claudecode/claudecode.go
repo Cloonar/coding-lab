@@ -27,11 +27,12 @@ import (
 // ID is the provider identifier stored in repos.provider / runs.provider.
 const ID = "claude-code"
 
-// LoginSession is the fixed tmux session name for the global `claude auth
-// login` flow. It never counts against the instance cap and is excluded
-// from ownership/stop-all — all exclusions key on the one tmuxx symbol
-// (design §4d).
-const LoginSession = tmuxx.LoginSession
+// loginSession is this provider's login tmux session for the global `claude
+// auth login` flow, derived from its provider id (lab-login-claude-code). It
+// never counts against the instance cap and is excluded from
+// ownership/stop-all — all exclusions recognize it via tmuxx.IsLoginSession,
+// no equality coupling to this name (design §4d, issue #77).
+var loginSession = tmuxx.LoginSessionName(ID)
 
 // EventAuthChanged aliases the provider-generic SSE auth event (issue #51
 // decision 7): the wire name is provider.auth.changed and the payload
