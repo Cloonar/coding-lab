@@ -239,6 +239,28 @@ function stubClipboard(): ReturnType<typeof vi.fn> {
   return writeText;
 }
 
+// jsdom has no window.matchMedia — install a fake that resolves ONLY the
+// fine-pointer query isComposerSend checks (ADR-0031, issue #70). Must match
+// query strings exactly and read `false` for anything else, since RunChat
+// also probes `(prefers-reduced-motion: reduce)` at mount. vi.stubGlobal ties
+// the mock's lifetime to the existing vi.unstubAllGlobals() in afterEach, so
+// no separate cleanup is needed here.
+function finePointer(matches: boolean): void {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      matches: matches && query === '(hover: hover) and (pointer: fine)',
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      onchange: null,
+      dispatchEvent: () => false,
+    })),
+  );
+}
+
 /** Set the server's messages to a single assistant text message. */
 function withAssistantText(text: string): void {
   messagesOnServer = {
@@ -360,26 +382,117 @@ describe('RunChat', () => {
     expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
   });
 
-  it('sends on Cmd/Ctrl+Enter but never on bare Enter', async () => {
+  it('bare Enter sends on fine-pointer; Shift+Enter stays a newline; Cmd/Ctrl+Enter always sends', async () => {
+    finePointer(true);
     await mountChat();
     const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
     input.value = 'ship it';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     await settle();
 
-    // Bare Enter must not send — a phone's return key inserts a newline.
+    // Bare Enter sends on a fine-pointer (mouse/trackpad) setup and clears the box.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(replyPosts).toHaveLength(1);
+    expect(replyPosts[0]?.text).toBe('ship it');
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
+
+    // Shift+Enter never sends — the browser-default newline is left alone
+    // (the handler must not preventDefault it).
+    input.value = 'more text';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    const shiftEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(shiftEnter);
+    await settle();
+    expect(replyPosts).toHaveLength(1); // unchanged
+    expect(shiftEnter.defaultPrevented).toBe(false);
+
+    // Cmd/Ctrl+Enter still sends and clears.
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await settle();
+    expect(replyPosts).toHaveLength(2);
+    expect(replyPosts[1]?.text).toBe('more text');
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('bare Enter never sends without a fine pointer (no matchMedia, or a touch profile)', async () => {
+    // Default jsdom: no window.matchMedia at all — reads as "not fine-pointer".
+    await mountChat();
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.value = 'no matchMedia here';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await settle();
     expect(replyPosts).toHaveLength(0);
 
-    // Cmd/Ctrl+Enter sends and clears.
     input.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
     );
     await settle();
     expect(replyPosts).toHaveLength(1);
-    expect(replyPosts[0]?.text).toBe('ship it');
-    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
+    expect(replyPosts[0]?.text).toBe('no matchMedia here');
+  });
+
+  it('bare Enter never sends on a touch profile (matchMedia present but not fine-pointer)', async () => {
+    finePointer(false);
+    await mountChat();
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.value = 'tap city';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(replyPosts).toHaveLength(0);
+
+    // Cmd/Ctrl+Enter sends regardless of pointer type.
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await settle();
+    expect(replyPosts).toHaveLength(1);
+    expect(replyPosts[0]?.text).toBe('tap city');
+  });
+
+  it('ignores Enter fired mid-IME-composition even on a fine-pointer setup', async () => {
+    finePointer(true);
+    await mountChat();
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.value = 'still composing';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await settle();
+    expect(replyPosts).toHaveLength(0);
+  });
+
+  it('does not send bare Enter on an empty box, and preventDefaults it (no stray newline)', async () => {
+    finePointer(true);
+    await mountChat(); // default needs_input, empty box
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    const evt = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    input.dispatchEvent(evt);
+    await settle();
+    expect(replyPosts).toHaveLength(0);
+    expect(evt.defaultPrevented).toBe(true);
   });
 
   it('keeps Send available and sending while the agent is working', async () => {
@@ -484,6 +597,18 @@ describe('RunChat', () => {
     await settle();
     expect(replyPosts).toHaveLength(1);
     expect(replyPosts[0]?.text).toBe('ship it now');
+
+    // Bare Enter on a fine-pointer setup sends too, mid-turn (issue #70): the
+    // always-send contract extends bare Enter the same way it already covers
+    // Cmd/Ctrl+Enter.
+    finePointer(true);
+    input.value = 'another mid-turn thought';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(replyPosts).toHaveLength(2);
+    expect(replyPosts[1]?.text).toBe('another mid-turn thought');
   });
 
   it('refetches only for this run on run.messages.changed', async () => {
@@ -2556,6 +2681,21 @@ describe('RunChat', () => {
     buttonByLabel('Send')!.click();
     await settle();
     expect(replyPosts).toEqual([{ text: '/clear' }]);
+  });
+
+  it('keeps popover-accept precedence over bare-Enter-send on a fine-pointer setup (issue #70)', async () => {
+    // With bare Enter now able to send on fine-pointer setups, the popover's
+    // own Enter-accepts precedence matters more — it must still win.
+    finePointer(true);
+    await mountChat();
+    setComposerText('/cle');
+    await settle();
+
+    composerKey('Enter');
+    await settle();
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/clear ');
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+    expect(replyPosts).toHaveLength(0); // accepted the command, did not send a reply
   });
 
   // --- No New conversation control anywhere (removed, issue #68) ---

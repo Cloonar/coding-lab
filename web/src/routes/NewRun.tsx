@@ -38,6 +38,7 @@ import Icon from '../components/Icon';
 import RequireAuth from '../components/RequireAuth';
 import Select, { type SelectOption } from '../components/Select';
 import { createToast } from '../components/Toast';
+import { isComposerSend } from '../lib/composerKeys';
 import { useEvents } from '../events';
 import { createLiveResource } from '../lib/liveResource';
 import { providerFor, resolveSpawnOption } from '../lib/spawn';
@@ -265,12 +266,20 @@ function NewRunView() {
     }
   };
 
-  // Cmd/Ctrl+Enter sends; bare Enter is a newline (matches the chat composer).
+  // Bare Enter sends on fine-pointer (mouse/trackpad) setups, matching the chat
+  // composer via the shared gate (ADR-0031, issue #70); Cmd/Ctrl+Enter keeps
+  // sending everywhere. Unlike the chat composer, `send()` here does NOT guard
+  // empty text — an empty body is a valid "plain spawn" via the Start button
+  // (see the comment above `send`) — so a bare Enter needs its own empty guard:
+  // an accidental keystroke on an empty box must not launch an instance, while
+  // Cmd/Ctrl+Enter keeps today's explicit empty-spawn behavior. preventDefault
+  // fires even on the guarded empty case, so the empty box never gains a
+  // leading newline (issue #70 decision 8).
   const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      void send();
-    }
+    if (!isComposerSend(e)) return;
+    e.preventDefault();
+    if (!(e.metaKey || e.ctrlKey) && text().trim() === '') return;
+    void send();
   };
 
   const noRepos = () => {
@@ -374,7 +383,7 @@ function NewRunView() {
                   class="composer-send icon-btn"
                   classList={{ busy: busy() }}
                   aria-label="Start run"
-                  title="Start run (Cmd/Ctrl+Enter)"
+                  title="Start run (Enter)"
                   disabled={!canSend()}
                   onClick={() => void send()}
                 >

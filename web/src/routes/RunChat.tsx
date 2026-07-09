@@ -64,6 +64,7 @@ import {
   quickReturnReduce,
   type QuickReturnState,
 } from '../lib/chatStream';
+import { isComposerSend } from '../lib/composerKeys';
 import { stateBadge } from '../lib/conversation';
 import { openState, providerOpen, type OpenState } from '../lib/deepLink';
 import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
@@ -1529,17 +1530,25 @@ function Composer(props: {
   });
   const acceptCommand = (cmd: RunCommand) => {
     setText(`/${cmd.name} `);
-    // Dismiss until the next keystroke: Enter must go back to being a newline
-    // once the pick landed (descriptions often still match "name ").
+    // Dismiss until the next keystroke: once the pick landed, Enter goes back
+    // to the normal send gate (on fine-pointer setups it would send) —
+    // dismissal only stops the popover from re-capturing it (descriptions
+    // often still match "name ").
     setAcDismissed(true);
     inputEl?.focus();
   };
 
-  // Cmd/Ctrl+Enter now sends in every unlocked state (ADR-0029, issue #61): Send
-  // is always available, so the shortcut no longer gates on `working`. Bare Enter
-  // is never a send — a phone's return key must insert a newline. While the
-  // command popover is open, Up/Down cycle, Enter/Tab accept and Escape closes;
-  // Cmd/Ctrl+Enter still sends over it.
+  // The keyboard send works in every unlocked state (ADR-0029, issue #61) —
+  // idle, needs_input, working — it never gates on `working`. Bare Enter
+  // now sends too, but only on fine-pointer (mouse/trackpad) setups (ADR-0031,
+  // issue #70); Shift+Enter and Alt+Enter stay an explicit newline, and
+  // Cmd/Ctrl+Enter keeps sending everywhere regardless of pointer type. Enter
+  // during IME composition is ignored (isComposerSend's isComposing/keyCode
+  // 229 guard) so committing composed text never fires a send. While the
+  // command popover is open, Up/Down cycle, Enter/Tab accept and Escape
+  // closes, taking precedence over the send gate below; Cmd/Ctrl+Enter still
+  // sends over it (existing `!(e.metaKey || e.ctrlKey)` gate on the popover
+  // branch).
   const onKeyDown = (e: KeyboardEvent) => {
     if (acOpen() && !(e.metaKey || e.ctrlKey)) {
       const matches = acMatches();
@@ -1565,7 +1574,7 @@ function Composer(props: {
         return;
       }
     }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    if (isComposerSend(e)) {
       e.preventDefault();
       void send();
     }
