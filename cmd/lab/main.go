@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -142,11 +143,6 @@ func run() int {
 	// lab_tracker_requests_total (M8): every tracker resolved through the
 	// registry reports (binding, op, ok) — never error text or token bytes.
 	trackerReg.SetObserver(m.TrackerRequest)
-
-	// Agent API (M5/M6): run-token-authenticated tracker surface, repo-scoped
-	// by the run row; resolves trackers through the same registry and
-	// publishes cr.changed when a builtin PR create opens a change request.
-	agent := agentapi.New(st, trackerReg, bus, logger, time.Now)
 
 	gitEngine := gitx.New(cfg.GitBin)
 	reposDir := filepath.Join(cfg.StateDir, "repos")
@@ -289,6 +285,19 @@ func run() int {
 		m.RegisterInstances(instanceSvc.LiveCounts)
 	}
 
+	// Agent API (M5/M6): run-token-authenticated tracker surface, repo-scoped
+	// by the run row; resolves trackers through the same registry and
+	// publishes cr.changed when a builtin PR create opens a change request.
+	// Built AFTER the provider registry so the incogni body sanitizer runs the
+	// compiled cross-provider union of every provider's declared ScrubPatterns
+	// (ADR-0033); a nil registry (degraded no-provider boot) yields no scrub,
+	// so incogni bodies pass through unstripped — content-inert like the hook.
+	var scrub []*regexp.Regexp
+	if providerReg != nil {
+		scrub = providerReg.ScrubRegexps()
+	}
+	agent := agentapi.New(st, trackerReg, bus, logger, time.Now, scrub)
+
 	// Seed the settings AFTER the provider registry exists: provider_default
 	// is seeded to the FIRST registered provider's ID (issue #66) so the store
 	// stays provider-agnostic ("claude-code" today). The degraded no-provider
@@ -314,9 +323,10 @@ func run() int {
 		Logger:       logger,
 		ReposDir:     reposDir,
 		Metrics:      m,
-		// Providers resolves each repo's incogni-hook scrub patterns from its
-		// declared provider (issue #51 decision 8). nil in the degraded boot
-		// where no provider is configured (ClaudeConfig unresolved above).
+		// Providers backs the incogni pre-push hook: it screens the union of
+		// every registered provider's declared scrub patterns (ADR-0033). nil in
+		// the degraded boot where no provider is configured (ClaudeConfig
+		// unresolved above), which renders a content-inert guard.
 		Providers: providerReg,
 	}
 	if instanceSvc != nil {

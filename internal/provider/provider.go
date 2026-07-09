@@ -150,9 +150,20 @@ type SeedMeta struct {
 	// guard never rejects a repo's own tracked provider config (commands,
 	// agents, a committed settings file).
 	SeededPathPatterns []string
-	// ScrubPatterns are the case-insensitive greps the incogni pre-push hook
-	// runs against each outgoing commit message (attribution markers such as
-	// co-authored-by/session trailers).
+	// ScrubPatterns are this provider's incogni attribution-marker patterns
+	// (co-authored-by/session trailers) — one declaration, TWO enforcement
+	// points (issue #75 / ADR-0033). The pre-push hook runs them as
+	// case-insensitive POSIX BRE `grep -i` patterns against each outgoing
+	// commit message; the agent-API body sanitizer compiles them (via
+	// CompileScrubPatterns) into case-insensitive Go RE2 regexps and runs
+	// them against outgoing agent-API bodies. Because one declaration feeds
+	// both engines, every pattern must stay in the BRE∩RE2 common dialect
+	// (claudecode's four patterns are the pinned example). Both enforcement
+	// points apply the UNION across ALL registered providers
+	// (Registry.UnionScrubPatterns/ScrubRegexps), not just the resolving
+	// repo's own provider — a per-session provider override (ADR-0030) can
+	// run any registered provider on any repo, so a marker only one OTHER
+	// provider declares must still be caught.
 	ScrubPatterns []string
 }
 

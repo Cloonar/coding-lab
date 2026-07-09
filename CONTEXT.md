@@ -115,7 +115,7 @@ The vendored, pinned skill set at `assets/skills/`, embedded in the binary and c
 _Avoid_: plugins, user-level skills
 
 **Incogni mode**:
-A per-repo flag applying seven leak-prevention measures so a run's output carries no AI attribution — neutral branch patterns, sanitized bodies, real git identity, pre-push guard. It cannot hide the forge account of the token used, nor style/timing signals.
+A per-repo flag applying seven leak-prevention measures so a run's output carries no AI attribution — neutral branch patterns, sanitized bodies, real git identity, pre-push guard. Sanitized bodies and the pre-push guard both screen against the union of every registered provider's declared markers, not just the repo's own provider (ADR-0033), so a per-session provider override (ADR-0030) is never screened by the wrong provider's patterns. It cannot hide the forge account of the token used, nor style/timing signals.
 _Avoid_: stealth mode, anonymous mode
 
 ### Security

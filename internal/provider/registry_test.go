@@ -2,11 +2,18 @@ package provider
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 )
 
-// stubProvider is the minimal AgentProvider for registry tests.
-type stubProvider struct{ id string }
+// stubProvider is the minimal AgentProvider for registry tests. seedMeta lets
+// a test script SeedMeta() (e.g. ScrubPatterns/SeededPathPatterns for the
+// union tests); the zero value returns SeedMeta{}, as before.
+type stubProvider struct {
+	id       string
+	seedMeta SeedMeta
+}
 
 func (s stubProvider) ID() string                   { return s.id }
 func (s stubProvider) DisplayName() string          { return s.id }
@@ -25,7 +32,7 @@ func (s stubProvider) CaptureDeepLink(context.Context, string, string) (string, 
 	return "", nil
 }
 func (s stubProvider) SeedWorkspace(string, SeedOpts) error { return nil }
-func (s stubProvider) SeedMeta() SeedMeta                   { return SeedMeta{} }
+func (s stubProvider) SeedMeta() SeedMeta                   { return s.seedMeta }
 func (s stubProvider) Commands(context.Context, string) ([]CommandSpec, error) {
 	return nil, nil
 }
@@ -88,4 +95,110 @@ func ids(ps []AgentProvider) []string {
 		out[i] = p.ID()
 	}
 	return out
+}
+
+// --- issue #75 / ADR-0033: cross-provider scrub/seeded-path unions --------
+
+func TestRegistry_unionScrubAndPathPatternsDedup(t *testing.T) {
+	a := stubProvider{id: "a", seedMeta: SeedMeta{
+		ScrubPatterns:      []string{"foo", "bar"},
+		SeededPathPatterns: []string{"^a/", "^shared/"},
+	}}
+	b := stubProvider{id: "b", seedMeta: SeedMeta{
+		ScrubPatterns:      []string{"bar", "baz"},      // "bar" duplicates a's
+		SeededPathPatterns: []string{"^shared/", "^b/"}, // "^shared/" duplicates a's
+	}}
+	r, err := NewRegistry(a, b)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	wantScrub := []string{"foo", "bar", "baz"}
+	if got := r.UnionScrubPatterns(); !reflect.DeepEqual(got, wantScrub) {
+		t.Errorf("UnionScrubPatterns() = %v; want %v (registration order, declaration order, first-occurrence dedup)", got, wantScrub)
+	}
+
+	wantPaths := []string{"^a/", "^shared/", "^b/"}
+	if got := r.UnionSeededPathPatterns(); !reflect.DeepEqual(got, wantPaths) {
+		t.Errorf("UnionSeededPathPatterns() = %v; want %v", got, wantPaths)
+	}
+}
+
+func TestRegistry_scrubRegexpsCompileCaseInsensitiveAndMatch(t *testing.T) {
+	a := stubProvider{id: "a", seedMeta: SeedMeta{
+		ScrubPatterns: []string{`co-authored-by:[[:space:]]*claude`},
+	}}
+	r, err := NewRegistry(a)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	res := r.ScrubRegexps()
+	if len(res) != 1 {
+		t.Fatalf("ScrubRegexps() len = %d; want 1", len(res))
+	}
+	if !res[0].MatchString("Co-Authored-By: Claude <x@y>") {
+		t.Errorf("compiled regexp did not match a mixed-case sample; want case-insensitive match")
+	}
+}
+
+func TestRegistry_rejectsProviderWithBREOnlyScrubPattern(t *testing.T) {
+	// "foo(" is a valid BRE (a literal, unescaped paren) but an invalid RE2
+	// (an unclosed group) — exactly the BRE∩RE2 dialect drift NewRegistry
+	// must catch at boot (issue #75 / ADR-0033).
+	a := stubProvider{id: "bad-provider", seedMeta: SeedMeta{
+		ScrubPatterns: []string{"foo("},
+	}}
+	_, err := NewRegistry(a)
+	if err == nil {
+		t.Fatal("NewRegistry accepted an uncompilable (RE2) scrub pattern; want error")
+	}
+	if !strings.Contains(err.Error(), "bad-provider") {
+		t.Errorf("error = %q; want it to name the offending provider id", err.Error())
+	}
+}
+
+func TestRegistry_emptyRegistryUnionsAreNilSafe(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	if got := r.UnionScrubPatterns(); len(got) != 0 {
+		t.Errorf("UnionScrubPatterns() on empty registry = %v; want empty", got)
+	}
+	if got := r.UnionSeededPathPatterns(); len(got) != 0 {
+		t.Errorf("UnionSeededPathPatterns() on empty registry = %v; want empty", got)
+	}
+	if got := r.ScrubRegexps(); len(got) != 0 {
+		t.Errorf("ScrubRegexps() on empty registry = %v; want empty", got)
+	}
+}
+
+func TestRegistry_unionsAndRegexpsReturnClones(t *testing.T) {
+	a := stubProvider{id: "a", seedMeta: SeedMeta{
+		ScrubPatterns:      []string{"foo"},
+		SeededPathPatterns: []string{"^a/"},
+	}}
+	r, err := NewRegistry(a)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	scrub := r.UnionScrubPatterns()
+	scrub[0] = "mutated"
+	if got := r.UnionScrubPatterns()[0]; got != "foo" {
+		t.Errorf("UnionScrubPatterns() shares backing array across calls: got %q", got)
+	}
+
+	paths := r.UnionSeededPathPatterns()
+	paths[0] = "mutated"
+	if got := r.UnionSeededPathPatterns()[0]; got != "^a/" {
+		t.Errorf("UnionSeededPathPatterns() shares backing array across calls: got %q", got)
+	}
+
+	regexps := r.ScrubRegexps()
+	regexps[0] = nil
+	if got := r.ScrubRegexps()[0]; got == nil {
+		t.Error("ScrubRegexps() shares backing array across calls: got nil after mutating a prior call's slice")
+	}
 }

@@ -123,14 +123,15 @@ type Options struct {
 	// lab_clones_in_flight). Nil is a no-op (the report methods are
 	// nil-safe).
 	Metrics *metrics.Metrics
-	// Providers resolves a repo's provider id (repos.provider) to its
-	// AgentProvider, whose SeedMeta supplies the incogni pre-push hook's
-	// scrub + seeded-path patterns (issue #51 decision 8: the seeder is
-	// generic; the provider declares what to scrub). Nil is the degraded boot
-	// with no provider configured (cmd/lab: "instance features disabled") —
-	// an incogni hook then guards nothing on content, which is inert because
-	// no agent runs in that mode. A repo naming a provider the registry does
-	// not carry is a wiring error the install surfaces.
+	// Providers backs provider-id validation (Get, issue #66) and the incogni
+	// pre-push hook's scrub + seeded-path patterns, which are the UNION of
+	// every registered provider's declared SeedMeta rather than one repo's
+	// resolved provider (ADR-0033: a per-session provider override, ADR-0030,
+	// can run any registered provider on any repo, so the guard can no longer
+	// be keyed to a single provider). Nil is the degraded boot with no
+	// provider configured (cmd/lab: "instance features disabled") — an
+	// incogni hook then guards nothing on content, which is inert because no
+	// agent runs in that mode.
 	Providers *provider.Registry
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
@@ -652,49 +653,36 @@ func (s *Service) StartupHeal(ctx context.Context) error {
 // installIncogniHook writes the pre-push guard AND pins the bare repo's local
 // core.hooksPath to the absolute hooks dir, so a global/system core.hooksPath
 // (husky &c.) cannot route agent pushes past the guard (D15 §9 measure 7). The
-// guard's scrub + seeded-path patterns come from the repo's provider (issue
-// #51 decision 8) — resolved from repos.provider, so each repo is guarded
-// against exactly what its agent CLI stamps.
+// guard's scrub + seeded-path patterns are the union of every registered
+// provider's declared patterns (ADR-0033), not just repo id's own — since
+// ADR-0030 made the agent CLI a per-spawn override, any registered provider
+// can push through this repo's guard in a given session, so a guard keyed to
+// one repo's provider would miss the others.
 func (s *Service) installIncogniHook(ctx context.Context, id string) error {
-	meta, err := s.incogniSeedMeta(ctx, id)
-	if err != nil {
-		return err
-	}
+	scrub, seededPaths := s.incogniPatterns()
 	bareDir := s.bareDir(id)
-	if err := seeder.InstallPrePushHook(bareDir, meta.ScrubPatterns, meta.SeededPathPatterns); err != nil {
+	if err := seeder.InstallPrePushHook(bareDir, scrub, seededPaths); err != nil {
 		return err
 	}
 	return s.git.PinHooksPath(ctx, bareDir, s.gitEnv)
 }
 
-// incogniSeedMeta resolves the seeding metadata for repo id's EFFECTIVE
-// provider — the source of the incogni hook's scrub + seeded-path patterns
-// (issue #51 decision 8). Since issue #66 repos.provider is a nullable
-// override, so the base skip-layer chain applies: repo.provider → global
-// provider_default → first registered, unregistered ids treated as unset.
-// Without a registry (the no-provider degraded boot) there is nothing to
-// resolve and the zero meta yields a content-inert guard.
-func (s *Service) incogniSeedMeta(ctx context.Context, id string) (provider.SeedMeta, error) {
+// incogniPatterns returns the incogni pre-push guard's scrub + seeded-path
+// patterns: the union of EVERY registered provider's declared SeedMeta
+// (ADR-0033), never one repo's own effective provider. ADR-0030 made the
+// agent CLI a per-session override — any registered provider can run against
+// any repo for one push — so a guard keyed to a single provider is exactly
+// the race ADR-0033 closes; the union is screened regardless of which
+// provider the pushing session actually ran. A nil registry (the no-provider
+// degraded boot) and an empty registry both yield empty pattern lists — a
+// content-inert guard, matching seeder.InstallPrePushHook's existing
+// empty-list handling — rather than an error: unlike the old per-repo
+// resolution, there is no "unresolvable provider" case left to reject.
+func (s *Service) incogniPatterns() (scrub, seededPaths []string) {
 	if s.providers == nil {
-		return provider.SeedMeta{}, nil
+		return nil, nil
 	}
-	repo, err := s.store.RepoByID(ctx, id)
-	if err != nil {
-		return provider.SeedMeta{}, fmt.Errorf("resolving provider for incogni hook: %w", err)
-	}
-	repoProv := ""
-	if repo.Provider != nil {
-		repoProv = *repo.Provider
-	}
-	globalProv, err := s.store.GetString(ctx, store.SettingProviderDefault, "")
-	if err != nil {
-		return provider.SeedMeta{}, fmt.Errorf("resolving provider for incogni hook: %w", err)
-	}
-	p, ok := s.providers.DefaultFor(repoProv, globalProv)
-	if !ok {
-		return provider.SeedMeta{}, fmt.Errorf("repo %s: no agent providers registered", id)
-	}
-	return p.SeedMeta(), nil
+	return s.providers.UnionScrubPatterns(), s.providers.UnionSeededPathPatterns()
 }
 
 // removeIncogniHook removes lab's guard and unpins core.hooksPath, restoring

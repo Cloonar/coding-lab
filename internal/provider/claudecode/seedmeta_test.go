@@ -54,3 +54,50 @@ func TestSeedMeta_returnsClones(t *testing.T) {
 		t.Errorf("SeedMeta() shares backing arrays across calls: %#v", fresh)
 	}
 }
+
+// BRE↔RE2 semantic equivalence pin (issue #75 / ADR-0033). claudecode's four
+// declared ScrubPatterns now feed TWO enforcement points — the pre-push
+// hook's `grep -i` (BRE) and the agent-API body sanitizer's compiled `(?i)`
+// Go regexp (RE2) — so this locks that the REAL declaration (a) compiles
+// cleanly via provider.CompileScrubPatterns and (b) each compiled pattern
+// still matches the canonical attribution line it exists to catch, and (c)
+// an unrelated co-author line and an unrelated "generated with" line match
+// NONE of the four. A change to any pattern that breaks either side fails
+// here, not silently at one of the two enforcement points.
+func TestSeedMeta_scrubPatternsCompileAndMatchCanonicalSamples(t *testing.T) {
+	m := (&Provider{}).SeedMeta()
+	res, err := provider.CompileScrubPatterns(m.ScrubPatterns)
+	if err != nil {
+		t.Fatalf("CompileScrubPatterns(claudecode's declared ScrubPatterns): %v", err)
+	}
+	if len(res) != len(m.ScrubPatterns) {
+		t.Fatalf("CompileScrubPatterns returned %d regexps; want %d", len(res), len(m.ScrubPatterns))
+	}
+
+	// One canonical sample per declared pattern, in declaration order.
+	samples := []string{
+		"Co-Authored-By: Claude <noreply@anthropic.com>",
+		"Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+		"🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+		"Claude-Session: https://claude.ai/code/session_x",
+	}
+	for i, sample := range samples {
+		if !res[i].MatchString(sample) {
+			t.Errorf("pattern %d (%q) did not match its canonical sample %q", i, m.ScrubPatterns[i], sample)
+		}
+	}
+
+	// Lines that must slip past every pattern: a human co-author with no
+	// anthropic.com email, and an unrelated "generated with" trailer.
+	nonMatches := []string{
+		"Co-Authored-By: Alice <alice@example.com>",
+		"Docs generated with pandoc.",
+	}
+	for _, sample := range nonMatches {
+		for i, re := range res {
+			if re.MatchString(sample) {
+				t.Errorf("pattern %d (%q) unexpectedly matched non-marker line %q", i, m.ScrubPatterns[i], sample)
+			}
+		}
+	}
+}

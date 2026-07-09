@@ -140,7 +140,7 @@ func builtinResolver(st *store.Store) TrackerResolver {
 }
 
 func (f *testFixture) server() *Server {
-	return New(f.st, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now })
+	return New(f.st, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now }, nil)
 }
 
 func TestRunTokenAuthMatrix(t *testing.T) {

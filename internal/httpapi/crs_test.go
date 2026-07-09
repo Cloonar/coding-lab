@@ -84,7 +84,7 @@ func newCRServer(t *testing.T) *crTestServer {
 		o.ReposDir = reposDir
 		o.GitEnv = env
 		o.CRMerge = mergeSvc
-		o.AgentHandler = agentapi.New(o.Store, reg, o.Bus, o.Logger, time.Now).Handler()
+		o.AgentHandler = agentapi.New(o.Store, reg, o.Bus, o.Logger, time.Now, nil).Handler()
 	})
 	x.setup("op", "password123")
 	return &crTestServer{testServer: x, home: home, reposDir: reposDir, eng: eng, env: env}

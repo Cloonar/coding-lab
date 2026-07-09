@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -354,7 +355,7 @@ func (s *Server) handleCommentCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tk = runScoped(tk, repo, info.RunID)
-	if err := tk.CreateComment(r.Context(), n, sanitizeBody(repo, req.Body)); err != nil {
+	if err := tk.CreateComment(r.Context(), n, s.sanitizeBody(repo, req.Body)); err != nil {
 		s.writeTrackerError(w, "creating comment", repo, err)
 		return
 	}
@@ -408,7 +409,7 @@ func (s *Server) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tk = runScoped(tk, repo, info.RunID)
-	is, err := tk.CreateIssue(r.Context(), req.Title, sanitizeBody(repo, req.Body), req.Labels)
+	is, err := tk.CreateIssue(r.Context(), req.Title, s.sanitizeBody(repo, req.Body), req.Labels)
 	if err != nil {
 		s.writeTrackerError(w, "creating issue", repo, err)
 		return
@@ -600,7 +601,7 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 	if (info.Kind == store.RunKindAFKManual || info.Kind == store.RunKindAFKAuto) && info.IssueNumber != nil {
 		body = ensureCloses(body, *info.IssueNumber)
 	}
-	body = sanitizeBody(repo, body)
+	body = s.sanitizeBody(repo, body)
 
 	tk, ok := s.trackerFor(w, r, repo)
 	if !ok {
@@ -864,32 +865,38 @@ func ensureCloses(body string, n int) string {
 // sanitizeBody is the incogni sanitization seam (design §5: "applies
 // incogni sanitization server-side before forwarding to tracker"; D15 §9
 // measure 3, defense in depth behind the seeded attribution-off settings):
-// for incogni repos, known attribution footers/trailers are stripped from
-// EVERY agent-authored body — PR/CR, issue, and comment create alike
-// (ADR-0014: no unsanitized write path) — before it reaches the tracker.
-// Non-incogni bodies pass through byte-identical. On the PR path it runs
-// AFTER ensureCloses, so an injected `Closes #N` is never touched.
-func sanitizeBody(repo store.Repo, body string) string {
+// for incogni repos, every line matching a provider-declared attribution
+// pattern (the compiled cross-provider union carried on the Server, issue
+// #75 / ADR-0033) is stripped from EVERY agent-authored body — PR/CR, issue,
+// and comment create alike (ADR-0014: no unsanitized write path) — before it
+// reaches the tracker. Non-incogni bodies pass through byte-identical. On the
+// PR path it runs AFTER ensureCloses, so an injected `Closes #N` is never
+// touched.
+func (s *Server) sanitizeBody(repo store.Repo, body string) string {
 	if !repo.Incogni {
 		return body
 	}
-	return stripAttribution(body)
+	return stripAttribution(body, s.scrub)
 }
 
-// stripAttribution removes every line that is a known AI-attribution marker
-// (attributionLine) and repairs ONLY the seam each removal leaves — the blank
-// line immediately before a removed line is swallowed so a "text\n\nfooter"
-// seam does not leave a doubled blank, and dangling trailing blanks (footers
-// live at the end) are trimmed. Blank runs elsewhere — a deliberate gap
-// inside a fenced code block, paragraph spacing far from the footer — are
-// left byte-identical; the old whole-body collapse corrupted them. A body
-// with no attribution lines is returned unchanged.
-func stripAttribution(body string) string {
+// stripAttribution removes every line matching any provider-declared
+// attribution pattern in scrub — the compiled `(?i)` cross-provider union
+// that replaced core's hardcoded claude shapes (issue #75 / ADR-0033, D15 §9
+// measure 3). It repairs ONLY the seam each removal leaves — the blank line
+// immediately before a removed line is swallowed so a "text\n\nfooter" seam
+// does not leave a doubled blank, and dangling trailing blanks (footers live
+// at the end) are trimmed. Blank runs elsewhere — a deliberate gap inside a
+// fenced code block, paragraph spacing far from the footer — are left
+// byte-identical; the old whole-body collapse corrupted them. A body with no
+// matching lines is returned unchanged, and an empty scrub (no registered
+// providers → no known markers) matches nothing and strips nothing, the same
+// content-inert degradation as the pre-push hook on an empty registry.
+func stripAttribution(body string, scrub []*regexp.Regexp) string {
 	lines := strings.Split(body, "\n")
 	out := make([]string, 0, len(lines))
 	stripped := false
 	for _, line := range lines {
-		if attributionLine(line) {
+		if matchesAttribution(line, scrub) {
 			stripped = true
 			// Collapse the seam: drop a blank immediately preceding the
 			// removed line so the removal doesn't widen a paragraph gap.
@@ -916,30 +923,16 @@ func stripAttribution(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// attributionLine reports whether a body line is a known AI-attribution
-// marker (D15 §9 measure 3; key/footer shapes verified against Claude Code
-// 2.1.198 — compat.md §4):
-//
-//   - a `Co-Authored-By: Claude…` trailer, any case;
-//   - a generated-with footer mentioning claude — covers
-//     `🤖 Generated with [Claude Code](…)` and the plain
-//     `Generated with Claude Code` variants;
-//   - a `Claude-Session:` trailer (the remote-control session link claude
-//     appends when attribution.sessionUrl is on).
-func attributionLine(line string) bool {
-	l := strings.ToLower(strings.TrimSpace(line))
-	if rest, ok := strings.CutPrefix(l, "co-authored-by:"); ok {
-		// Match a "Claude" display name OR an @anthropic.com email — the
-		// email is the stable discriminator across a model rename (compat.md
-		// §4 pins the trailer as "Co-Authored-By: <model> <noreply@anthropic.com>").
-		rest = strings.TrimSpace(rest)
-		return strings.HasPrefix(rest, "claude") || strings.Contains(rest, "anthropic.com")
-	}
-	if strings.HasPrefix(l, "claude-session:") {
-		return true
-	}
-	if i := strings.Index(l, "generated with"); i >= 0 {
-		return strings.Contains(l[i:], "claude")
+// matchesAttribution reports whether line matches any provider-declared scrub
+// pattern — the per-line predicate of the incogni sanitizer (issue #75 /
+// ADR-0033, D15 §9 measure 3). The regexps are already case-insensitive
+// (`(?i)`) and unanchored, so the raw line is matched as-is — leading
+// indentation needs no special casing.
+func matchesAttribution(line string, scrub []*regexp.Regexp) bool {
+	for _, re := range scrub {
+		if re.MatchString(line) {
+			return true
+		}
 	}
 	return false
 }

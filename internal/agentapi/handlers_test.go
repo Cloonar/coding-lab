@@ -157,11 +157,14 @@ func (f *fakeTracker) EnsureLabel(_ context.Context, name, color, description st
 	return l, nil
 }
 
-// forgeServer builds a Server whose resolver answers fk for every repo.
+// forgeServer builds a Server whose resolver answers fk for every repo. It
+// wires the claude fixture scrub (claudeScrub) as the sanitizer's declared
+// union, so the incogni body tests exercise the real per-line predicate
+// (ADR-0033); non-incogni tests gate out before the scrub is consulted.
 func (f *testFixture) forgeServer(fk tracker.Tracker) *Server {
 	return New(f.st, resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) {
 		return fk, nil
-	}), nil, discard(), func() time.Time { return f.now })
+	}), nil, discard(), func() time.Time { return f.now }, claudeScrub)
 }
 
 func doJSON(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -335,7 +338,7 @@ func TestIssueCreate_builtinAttributionLabelsAndEvent(t *testing.T) {
 	bus := events.NewBus()
 	ch, cancel := bus.Subscribe(context.Background())
 	defer cancel()
-	s := New(f.st, builtinResolver(f.st), bus, discard(), func() time.Time { return f.now })
+	s := New(f.st, builtinResolver(f.st), bus, discard(), func() time.Time { return f.now }, nil)
 
 	rr := doJSON(t, s.Handler(), "POST", "/agent/v1/issues", token,
 		`{"title":"found: flaky teardown","body":"Discovered mid-run.","labels":["needs-triage"]}`)
@@ -692,7 +695,7 @@ func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 	bus := events.NewBus()
 	ch, cancel := bus.Subscribe(context.Background())
 	defer cancel()
-	s := New(f.st, builtinResolver(f.st), bus, discard(), func() time.Time { return f.now })
+	s := New(f.st, builtinResolver(f.st), bus, discard(), func() time.Time { return f.now }, nil)
 
 	// The body carries no Closes — the server injects "Closes #7" (pinned
 	// AFK rule), and THAT injected directive must reach cr_closes.
@@ -872,7 +875,7 @@ func TestPRViewAndList_builtin(t *testing.T) {
 	f.seedRun(t, "run_afk", "repo_a", "active") // afk_auto, issue 7, branch afk/7
 	token := f.seedToken(t, "run_afk", nil)
 
-	s := New(f.st, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now })
+	s := New(f.st, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now }, nil)
 	handler := s.Handler()
 
 	rr := doJSON(t, handler, "POST", "/agent/v1/prs", token, `{"title":"feat: capture card","body":"card: |\n  kind: capture"}`)
@@ -1005,7 +1008,7 @@ func TestTrackerErrorMapping(t *testing.T) {
 	// Tracker configuration conflict → 409.
 	s := New(f.st, resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) {
 		return nil, fmt.Errorf("tracker for repo: %w", tracker.ErrForgeCredentialMissing)
-	}), nil, discard(), func() time.Time { return f.now })
+	}), nil, discard(), func() time.Time { return f.now }, nil)
 	rr = doJSON(t, s.Handler(), "GET", "/agent/v1/issues", token, "")
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("config conflict: status = %d, want 409", rr.Code)

@@ -8,11 +8,52 @@ package agentapi
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"slices"
 	"testing"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
+
+// claudeScrubPatterns is a pinned fixture twin of claudecode's declared
+// SeedMeta().ScrubPatterns (internal/provider/claudecode): agentapi tests
+// must NOT import the concrete provider, so the four patterns live here as
+// string literals. Drift between this twin and the real declaration is caught
+// by claudecode's own seedmeta tests, not here (ADR-0033).
+var claudeScrubPatterns = []string{
+	`co-authored-by:[[:space:]]*claude`,
+	`co-authored-by:.*<[^>]*@anthropic\.com>`,
+	`generated with.*claude`,
+	`claude-session:`,
+}
+
+// codexScrubPatterns is a second, hypothetical provider's declaration (a
+// ChatGPT/@openai.com trailer shape, the #2 Codex motivation of ADR-0033). It
+// proves the sanitizer carries nothing claude-shaped in core: a codex-only set
+// strips codex footers and leaves claude-shaped lines untouched.
+var codexScrubPatterns = []string{
+	`co-authored-by:.*<[^>]*@openai\.com>`,
+	`codex-session:`,
+	`generated with.*codex`,
+}
+
+// claudeScrub and codexScrub are the fixture pattern sets compiled exactly as
+// production compiles a provider's declaration for agentapi.New — through the
+// real provider.CompileScrubPatterns (the `(?i)` case-insensitive twin).
+var (
+	claudeScrub = mustScrub(claudeScrubPatterns)
+	codexScrub  = mustScrub(codexScrubPatterns)
+)
+
+func mustScrub(patterns []string) []*regexp.Regexp {
+	res, err := provider.CompileScrubPatterns(patterns)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
 
 func TestStripAttribution(t *testing.T) {
 	tests := []struct {
@@ -59,22 +100,83 @@ func TestStripAttribution(t *testing.T) {
 		{"closes directive survives around a stripped footer",
 			"Fix it.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCloses #7",
 			"Fix it.\n\nCloses #7"},
+		// ADR-0033 reconciliation delta: the old hardcoded attributionLine
+		// stripped ANY bare "anthropic.com" mention after the co-authored-by
+		// prefix; the declared pattern requires the BRACKETED email
+		// (`<…@anthropic.com>`) — the stable discriminator ADR-0012's review
+		// pinned. So an unbracketed mention is now KEPT: deliberate coverage
+		// narrowing to match the hook's shape, byte-identical to its golden.
+		{"unbracketed anthropic mention kept (declared bracketed-email shape)",
+			"Done.\n\nCo-Authored-By: Fable at anthropic.com",
+			"Done.\n\nCo-Authored-By: Fable at anthropic.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := stripAttribution(tt.in); got != tt.want {
+			if got := stripAttribution(tt.in, claudeScrub); got != tt.want {
 				t.Errorf("stripAttribution(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
 }
 
+// TestStripAttributionProviderAgnostic proves nothing claude-shaped is
+// hardcoded: a codex-only pattern set strips a ChatGPT/@openai.com trailer and
+// a Codex-Session footer while a claude-shaped Co-Authored-By line — which no
+// codex pattern matches — is left in place (ADR-0033).
+func TestStripAttributionProviderAgnostic(t *testing.T) {
+	in := "Implements the fix.\n\n" +
+		"Co-Authored-By: Claude <noreply@anthropic.com>\n\n" +
+		"Co-authored-by: ChatGPT <noreply@openai.com>\n" +
+		"Codex-Session: https://chatgpt.example/c/session_x"
+	want := "Implements the fix.\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+	if got := stripAttribution(in, codexScrub); got != want {
+		t.Errorf("stripAttribution(codex) = %q, want %q", got, want)
+	}
+}
+
+// TestStripAttributionUnion pins the cross-provider union: claude+codex sets
+// together strip BOTH providers' footers from one body in one pass — the
+// production shape, where scrub is the registry-wide union (ADR-0033).
+func TestStripAttributionUnion(t *testing.T) {
+	union := slices.Concat(claudeScrub, codexScrub)
+	in := "Summary.\n\n" +
+		"🤖 Generated with [Claude Code](https://claude.com/claude-code)\n" +
+		"Co-authored-by: ChatGPT <noreply@openai.com>\n\n" +
+		"Co-Authored-By: Claude <noreply@anthropic.com>\n" +
+		"Codex-Session: https://chatgpt.example/c/session_x"
+	if got := stripAttribution(in, union); got != "Summary." {
+		t.Errorf("stripAttribution(union) = %q, want %q", got, "Summary.")
+	}
+}
+
+// TestStripAttributionEmptyScrub pins the content-inert degradation: with no
+// registered providers (nil/empty scrub) no markers are known, so an otherwise
+// poisoned incogni body passes through byte-identical — mirroring the pre-push
+// hook's empty-list handling (ADR-0033).
+func TestStripAttributionEmptyScrub(t *testing.T) {
+	poisoned := "Done.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n" +
+		"Co-Authored-By: Claude <noreply@anthropic.com>"
+	for _, scrub := range [][]*regexp.Regexp{nil, {}} {
+		if got := stripAttribution(poisoned, scrub); got != poisoned {
+			t.Errorf("stripAttribution(empty) = %q, want the body unchanged", got)
+		}
+	}
+	// The same content-inert pass-through through the Server method: an incogni
+	// repo with a scrub-less server strips nothing.
+	s := &Server{}
+	if got := s.sanitizeBody(store.Repo{Incogni: true}, poisoned); got != poisoned {
+		t.Errorf("sanitizeBody(nil scrub) = %q, want the body unchanged", got)
+	}
+}
+
 func TestSanitizeBodyGatesOnIncogni(t *testing.T) {
+	// In-package: construct the Server with the claude fixture scrub directly.
+	s := &Server{scrub: claudeScrub}
 	poisoned := "Done.\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
-	if got := sanitizeBody(store.Repo{Incogni: false}, poisoned); got != poisoned {
+	if got := s.sanitizeBody(store.Repo{Incogni: false}, poisoned); got != poisoned {
 		t.Errorf("non-incogni body altered: %q", got)
 	}
-	if got := sanitizeBody(store.Repo{Incogni: true}, poisoned); got != "Done." {
+	if got := s.sanitizeBody(store.Repo{Incogni: true}, poisoned); got != "Done." {
 		t.Errorf("incogni body = %q, want %q", got, "Done.")
 	}
 }
