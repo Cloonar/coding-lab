@@ -68,7 +68,9 @@ The decisions, pinned (settled with the maintainer 2026-07-07 via
 
 - **Composer polish, all within the design language.** (a) **Cmd/Ctrl+Enter
   sends** in the idle/needs_input state only — **never bare Enter**, so a phone's
-  return key inserts a newline instead of firing a send; the shortcut is inert
+  return key inserts a newline instead of firing a send [overturned on
+  fine-pointer devices by ADR-0031, 2026-07-09 — bare Enter now sends there;
+  touch devices are unaffected]; the shortcut is inert
   while working (no keyboard interrupt — the square is the only interrupt). (b)
   The textarea **auto-grows** from one row to a capped height then scrolls,
   replacing the fixed `rows={1}` + `resize: vertical`. (c) The working-state
@@ -81,6 +83,11 @@ Superseded by ADR-0029 (issue #61): the working-state morph and its
 send-block are reversed — Send is always available and Interrupt lives
 in the chat header. ADR-0022's supersessions of ADR-0016 (no queued
 hint; one-tap interrupt) remain in force via ADR-0029.
+
+[This ADR's bare-Enter-stays-a-newline clause, and the corresponding
+rejected option below, are additionally superseded/overturned by
+ADR-0031 (issue #70, 2026-07-09): bare Enter now sends on fine-pointer
+devices. Touch devices keep the original return-as-newline behaviour.]
 
 Accepted. A pure SPA diff: `web/src/routes/RunChat.tsx`, `web/src/base.css`, and
 `web/src/routes/RunChat.test.tsx`, plus this ADR and the two compat.md notes
@@ -102,7 +109,9 @@ provider-agnostic.
 - **Bare Enter sends (with Shift+Enter for a newline).** Rejected: the composer
   is phone-first (ADR-0005) and a mobile keyboard's return key must insert a
   newline, not submit. Cmd/Ctrl+Enter is the explicit send; bare Enter is always
-  a newline.
+  a newline. [Rejected then, overturned for fine-pointer devices by ADR-0031,
+  2026-07-09 — phones and other touch-only devices keep this rejection in
+  force; the reversal applies only where a fine pointer is present.]
 - **Style the composer Interrupt like the header Stop (danger-red).** Rejected:
   danger colour signals destructive teardown; a non-destructive interrupt in the
   accent colour, occupying the same slot Send just vacated, makes the morph read
@@ -122,7 +131,8 @@ provider-agnostic.
   one-tap UI. The keystroke recipes themselves are unchanged.
 - Component tests select the composer controls by accessible name — `Send` and
   `Interrupt` (ADR-0019's pattern for icon-only controls) — and assert the morph,
-  the one-tap interrupt (no confirm), the Cmd/Ctrl+Enter vs bare-Enter split, and
+  the one-tap interrupt (no confirm), the Cmd/Ctrl+Enter vs bare-Enter split
+  [bare-Enter side overturned on fine-pointer devices by ADR-0031], and
   the absence of any "queued" copy.
 - The pulse adds one keyframe behind a `prefers-reduced-motion` guard, matching
   the existing reduced-motion discipline (`pulse-fade`, `progress-slide`); the

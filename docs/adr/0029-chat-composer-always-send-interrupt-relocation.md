@@ -42,7 +42,9 @@ The decisions, pinned (settled with the maintainer 2026-07-09 via /grill-me
 
 - **Cmd/Ctrl+Enter always sends** in `idle`/`needs_input`/`working` alike;
   **bare Enter stays a newline** in every state (the composer is phone-first,
-  ADR-0005). The slash-command popover's own keys are unchanged.
+  ADR-0005) [overturned on fine-pointer devices by ADR-0031, 2026-07-09 —
+  bare Enter now sends there too; touch devices keep this rule unchanged].
+  The slash-command popover's own keys are unchanged.
 
 - **The working-only cue is deleted.** "The agent is working — tap to
   interrupt." described the morph's square; with no morph left to describe,
@@ -95,6 +97,10 @@ Accepted. Supersedes ADR-0022 — which morphed Send↔Interrupt on
 `working` — while keeping ADR-0022's own supersessions of ADR-0016 in
 force: the queued-hint removal and the one-tap-no-confirm interrupt carry
 forward unchanged, now attached to the relocated header control.
+
+Partially superseded by ADR-0031 (issue #70): bare Enter now sends on
+fine-pointer devices; Shift+Enter is the newline. Always-Send, no-queue,
+and the header Interrupt remain in force.
 
 (Numbering note: issue #61's text asked for "ADR-0028"; that number was
 already taken by the answered-dialog-cards ADR, which landed first —

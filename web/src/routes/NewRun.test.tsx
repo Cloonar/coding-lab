@@ -209,6 +209,37 @@ function chipLabel(label: string): string | null {
   return chip === null ? null : chip.textContent;
 }
 
+// jsdom has no window.matchMedia — install a fake that resolves ONLY the
+// fine-pointer query isComposerSend checks (ADR-0031, issue #70). Must match
+// query strings exactly and read `false` for anything else. vi.stubGlobal
+// ties the mock's lifetime to the existing vi.unstubAllGlobals() in
+// afterEach, so no separate cleanup is needed here.
+function finePointer(matches: boolean): void {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      matches: matches && query === '(hover: hover) and (pointer: fine)',
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      onchange: null,
+      dispatchEvent: () => false,
+    })),
+  );
+}
+
+function composerInput(): HTMLTextAreaElement {
+  return container.querySelector('.composer-input') as HTMLTextAreaElement;
+}
+
+function typeText(value: string): void {
+  const input = composerInput();
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 beforeEach(() => {
   reposOnServer = [repoFixture()];
   providersOnServer = [...PROVIDERS];
@@ -339,6 +370,132 @@ describe('NewRun composer', () => {
     expect(warn?.textContent).toContain('Claude Code is logged out');
     const link = warn?.querySelector('a');
     expect(link?.getAttribute('href')).toBe('/credentials');
+  });
+});
+
+// Composer keyboard send (ADR-0031, issue #70): shares isComposerSend with
+// the chat composer. Bare Enter spawns only on a fine-pointer setup;
+// Shift/Alt+Enter never spawn; Cmd/Ctrl+Enter spawns everywhere, including on
+// an empty box — unlike the chat composer, an empty box is a valid "plain
+// spawn" here (today's Start-button behavior, pinned), so bare Enter needs
+// its own empty guard while Cmd/Ctrl+Enter keeps sending through.
+describe('NewRun composer keyboard send (issue #70)', () => {
+  it('fine-pointer: Shift+Enter never spawns; bare Enter spawns and queues the typed text', async () => {
+    finePointer(true);
+    await mountHome();
+    typeText('do the thing');
+    await settle();
+
+    const shiftEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    composerInput().dispatchEvent(shiftEnter);
+    await settle();
+    expect(instancePosts).toHaveLength(0);
+    expect(shiftEnter.defaultPrevented).toBe(false); // browser-default newline left alone
+
+    composerInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(instancePosts).toHaveLength(1);
+    expect(peekQueued('run_new')).toBe('do the thing');
+    expect(container.textContent).toContain('run:run_new');
+  });
+
+  it('fine-pointer: Cmd/Ctrl+Enter spawns', async () => {
+    finePointer(true);
+    await mountHome();
+    typeText('ctrl spawn');
+    await settle();
+
+    composerInput().dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await settle();
+    expect(instancePosts).toHaveLength(1);
+    expect(peekQueued('run_new')).toBe('ctrl spawn');
+  });
+
+  it('bare Enter never spawns without a fine pointer (no matchMedia, or a touch profile)', async () => {
+    // Default jsdom: no window.matchMedia at all — reads as "not fine-pointer".
+    await mountHome();
+    typeText('no matchMedia here');
+    await settle();
+
+    composerInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(instancePosts).toHaveLength(0);
+
+    composerInput().dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await settle();
+    expect(instancePosts).toHaveLength(1);
+    expect(peekQueued('run_new')).toBe('no matchMedia here');
+  });
+
+  it('touch profile: bare Enter does not spawn; Cmd/Ctrl+Enter still does', async () => {
+    finePointer(false);
+    await mountHome();
+    typeText('tap city');
+    await settle();
+
+    composerInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(instancePosts).toHaveLength(0);
+
+    composerInput().dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await settle();
+    expect(instancePosts).toHaveLength(1);
+    expect(peekQueued('run_new')).toBe('tap city');
+  });
+
+  it('fine-pointer: Enter fired mid-IME-composition does not spawn', async () => {
+    finePointer(true);
+    await mountHome();
+    typeText('still composing');
+    await settle();
+
+    composerInput().dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await settle();
+    expect(instancePosts).toHaveLength(0);
+  });
+
+  it('fine-pointer + empty box: bare Enter does not spawn (and preventDefaults it); Cmd/Ctrl+Enter still spawns the plain run', async () => {
+    finePointer(true);
+    await mountHome();
+
+    const evt = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    composerInput().dispatchEvent(evt);
+    await settle();
+    expect(instancePosts).toHaveLength(0);
+    expect(evt.defaultPrevented).toBe(true); // no stray newline in an already-empty box
+
+    composerInput().dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await settle();
+    // Empty text is a valid "plain spawn" (today's Start-button behavior) —
+    // Cmd/Ctrl+Enter keeps spawning it even under the new bare-Enter gate.
+    expect(instancePosts).toHaveLength(1);
+    expect(peekQueued('run_new')).toBeUndefined();
+    expect(container.textContent).toContain('run:run_new');
+  });
+
+  it('carries the "Start run (Enter)" tooltip on the Start button', async () => {
+    await mountHome();
+    expect(startButton().title).toBe('Start run (Enter)');
   });
 });
 
