@@ -489,6 +489,12 @@ func TestPull_notFound(t *testing.T) {
 // combined-status endpoint for that SHA) and the normalization table: every
 // row not affirmatively "success" or "pending" collapses to CheckFailure,
 // while RawState keeps the forge's own word verbatim.
+//
+// The fixture rows carry their state under the JSON key `status` — that is
+// Forgejo's real wire shape (swagger CommitStatus.status); only the combined
+// object's aggregate is keyed `state`. Regression: the decoder originally
+// read `state` off the rows, so every live row decoded as "" and the
+// unrecognized-state default turned an all-green run into an all-red one.
 func TestChecks(t *testing.T) {
 	const sha = "deadbeefcafe0123456789abcdef0123456789a"
 	var gotPullPath, gotStatusPath string
@@ -508,12 +514,12 @@ func TestChecks(t *testing.T) {
 			gotStatusPath = r.URL.Path
 			gotStatusAuth = r.Header.Get("Authorization")
 			_, _ = io.WriteString(w, `{"state":"pending","statuses":[
-			  {"context":"ci/build","state":"success","description":"build ok","target_url":"https://ci/1"},
-			  {"context":"ci/test","state":"pending","description":"running","target_url":"https://ci/2"},
-			  {"context":"ci/lint","state":"failure","description":"lint failed","target_url":"https://ci/3"},
-			  {"context":"ci/deploy","state":"error","description":"errored out","target_url":"https://ci/4"},
-			  {"context":"ci/flaky","state":"warning","description":"flaky warn","target_url":"https://ci/5"},
-			  {"context":"ci/weird","state":"totally-unknown","description":"???","target_url":"https://ci/6"}
+			  {"context":"ci/build","status":"success","description":"build ok","target_url":"https://ci/1"},
+			  {"context":"ci/test","status":"pending","description":"running","target_url":"https://ci/2"},
+			  {"context":"ci/lint","status":"failure","description":"lint failed","target_url":"https://ci/3"},
+			  {"context":"ci/deploy","status":"error","description":"errored out","target_url":"https://ci/4"},
+			  {"context":"ci/flaky","status":"warning","description":"flaky warn","target_url":"https://ci/5"},
+			  {"context":"ci/weird","status":"totally-unknown","description":"???","target_url":"https://ci/6"}
 			]}`)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
