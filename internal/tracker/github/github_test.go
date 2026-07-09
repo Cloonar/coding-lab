@@ -461,7 +461,7 @@ func TestChecks(t *testing.T) {
 		switch {
 		case r.URL.Path == apiPrefix+"/pulls/72" && r.Method == http.MethodGet:
 			gotPullPath = r.URL.Path
-			fmt.Fprintf(w, `{"number":72,"title":"feat: thing","state":"open","merged_at":null,
+			_, _ = fmt.Fprintf(w, `{"number":72,"title":"feat: thing","state":"open","merged_at":null,
 			  "head":{"ref":"afk/63","sha":%q},
 			  "html_url":"https://github.com/octocat/hello-world/pull/72"}`, sha)
 		case r.URL.Path == apiPrefix+"/commits/"+sha+"/check-runs" && r.Method == http.MethodGet:
@@ -561,7 +561,7 @@ func TestChecks_zeroRows(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == apiPrefix+"/pulls/9" && r.Method == http.MethodGet:
-			fmt.Fprintf(w, `{"number":9,"state":"open","merged_at":null,"head":{"ref":"afk/9","sha":%q}}`, sha)
+			_, _ = fmt.Fprintf(w, `{"number":9,"state":"open","merged_at":null,"head":{"ref":"afk/9","sha":%q}}`, sha)
 		case r.URL.Path == apiPrefix+"/commits/"+sha+"/check-runs" && r.Method == http.MethodGet:
 			_, _ = io.WriteString(w, `{"total_count":0,"check_runs":[]}`)
 		case r.URL.Path == apiPrefix+"/commits/"+sha+"/status" && r.Method == http.MethodGet:
