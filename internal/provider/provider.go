@@ -137,10 +137,30 @@ type SeedOpts struct {
 type SeedMeta struct {
 	// ContextFileName is the generated per-worktree context file the agent
 	// reads at the worktree root (claude: "CLAUDE.local.md").
+	//
+	// HARD RULE (issue #79 / ADR-0035): the name MUST be lab-owned and never
+	// repo-tracked — the `.local`-suffixed convention ("CLAUDE.local.md",
+	// "AGENTS.local.md"). Lab must never write a file repositories
+	// legitimately track (e.g. codex's native "AGENTS.md"): a tracked file
+	// cannot be hidden by .git/info/exclude, would be clobbered on every
+	// re-seed, would dirty every diff, and would break incogni (D15 §9
+	// measure 6). Making the agent CLI actually READ the lab-owned name is
+	// the adapter's own job in its SeedWorkspace (a live-verified coupling,
+	// the ADR-0008 bar) — never solved by declaring a tracked name here. The
+	// conformance suite (#80) will assert the convention.
 	ContextFileName string
 	// SkillsDir is the directory the embedded skills bundle is seeded into
 	// (claude: ".claude/skills").
 	SkillsDir string
+	// NativeSkillDiscovery declares whether the agent CLI discovers skills
+	// seeded into SkillsDir on its own (claude: true — the .claude/skills
+	// convention). When false and SkillsDir is non-empty, the seeder appends
+	// a generated skills index to the context file — one line per bundled
+	// skill, rendered from its frontmatter, pointing at its seeded path — so
+	// an agent that only reads context files still finds the playbooks on
+	// demand (issue #79 / ADR-0035). The bundle itself is identical for every
+	// provider; only the discovery route differs.
+	NativeSkillDiscovery bool
 	// ExcludeEntries are the .git/info/exclude lines hiding every lab-seeded
 	// file from git status (excludes touch only untracked files, so a
 	// repo-committed sibling stays visible).

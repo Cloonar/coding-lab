@@ -102,9 +102,10 @@ func New() *Fake {
 		displayName: "Claude Code",
 		authFlow:    provider.AuthFlow{Kind: provider.AuthFlowOAuthCode},
 		seedMeta: provider.SeedMeta{
-			ContextFileName: "CLAUDE.local.md",
-			SkillsDir:       ".claude/skills",
-			ExcludeEntries:  []string{".claude/", "CLAUDE.local.md"},
+			ContextFileName:      "CLAUDE.local.md",
+			SkillsDir:            ".claude/skills",
+			NativeSkillDiscovery: true,
+			ExcludeEntries:       []string{".claude/", "CLAUDE.local.md"},
 			SeededPathPatterns: []string{
 				`^\.claude/skills/`,
 				`^\.claude/settings\.local\.json$`,

@@ -296,9 +296,10 @@ func (p *Provider) AuthFlow() provider.AuthFlow {
 // — a drift in either place fails a test. Changing any value here changes
 // what lab seeds into every claude-code worktree.
 var seedMeta = provider.SeedMeta{
-	ContextFileName: "CLAUDE.local.md",
-	SkillsDir:       ".claude/skills",
-	ExcludeEntries:  []string{".claude/", "CLAUDE.local.md"},
+	ContextFileName:      "CLAUDE.local.md",
+	SkillsDir:            ".claude/skills",
+	NativeSkillDiscovery: true,
+	ExcludeEntries:       []string{".claude/", "CLAUDE.local.md"},
 	SeededPathPatterns: []string{
 		`^\.claude/skills/`,
 		`^\.claude/settings\.local\.json$`,

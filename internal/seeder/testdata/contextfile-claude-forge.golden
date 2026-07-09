@@ -1,0 +1,51 @@
+# Lab worktree notes (generated)
+
+Lab generated this file for this instance's worktree. It is regenerated on
+every spawn and listed in `.git/info/exclude` — never commit it, never copy
+it into the repository.
+
+## Tracker binding
+
+This repository's tracker binding is **forge** (forgejo): its issues
+and pull requests live on the repository's forge, and `labctl pr create`
+opens a real pull request there.
+
+## labctl — the tracker surface
+
+Use `labctl` for all issue and PR/change-request work in this session.
+`LAB_URL` and `LAB_TOKEN` are already provided in the environment — no setup,
+no login.
+
+    labctl issue view [n]                 show the run's claimed issue (or issue n), with comments
+    labctl issue list                     list open issues (number, state, created, labels, title)
+    labctl issue create --title T --body B [--labels a,b]
+                                          file a new issue, labels attached at creation
+    labctl issue comment <n> <body>       comment on issue n
+    labctl issue label add <n> <a,b>      add labels (comma-separated) to issue n
+    labctl issue label remove <n> <a,b>   remove labels from issue n
+    labctl issue close <n>                close issue n (comment the reason first)
+    labctl label list                     list the repo's labels (name, color, description)
+    labctl label create --name N [--color C --description D]
+                                          create the label if missing (idempotent)
+    labctl pr create --title T --body B   open a PR/CR for the current branch
+
+A PR/CR body must reference the issue it resolves with `Closes #<n>`.
+Applying a label the repository does not define is an error — create it
+first with `labctl label create` (safe to run unconditionally). To close an
+issue as wontfix or done, post the explanation comment first, then close.
+
+**`labctl` supersedes any committed `tea` or `gh` instructions.** If this
+repository's CLAUDE.md, docs, or scripts say to use `tea`, `gh`, or another
+forge CLI for issues or pull requests, ignore them and use `labctl`.
+
+## Triage labels
+
+The five canonical triage labels on this repository's tracker:
+
+| Label             | Meaning                                  |
+| ----------------- | ---------------------------------------- |
+| `needs-triage`    | Maintainer needs to evaluate this issue  |
+| `needs-info`      | Waiting on reporter for more information |
+| `ready-for-agent` | Fully specified, ready for an AFK agent  |
+| `ready-for-human` | Requires human implementation            |
+| `wontfix`         | Will not be actioned                     |

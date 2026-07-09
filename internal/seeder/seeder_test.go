@@ -1,6 +1,8 @@
 package seeder
 
 import (
+	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -28,9 +30,10 @@ var (
 // claudecode's own seedmeta_test.go, which pins the real declaration to the
 // same literals. Any divergence between the two fails one side or the other.
 var claudeGoldenMeta = provider.SeedMeta{
-	ContextFileName: "CLAUDE.local.md",
-	SkillsDir:       ".claude/skills",
-	ExcludeEntries:  []string{".claude/", "CLAUDE.local.md"},
+	ContextFileName:      "CLAUDE.local.md",
+	SkillsDir:            ".claude/skills",
+	NativeSkillDiscovery: true,
+	ExcludeEntries:       []string{".claude/", "CLAUDE.local.md"},
 	SeededPathPatterns: []string{
 		`^\.claude/skills/`,
 		`^\.claude/settings\.local\.json$`,
@@ -182,7 +185,7 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 }
 
 func TestRenderContextFile_forgeBinding(t *testing.T) {
-	body, err := renderContextFile(forgeRepo)
+	body, err := renderContextFile(forgeRepo, claudeGoldenMeta)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -295,6 +298,159 @@ func TestSeedWorkspace_emptyMetaSkipsSkillsAndContextFile(t *testing.T) {
 	}
 	if !strings.Contains(readFile(t, path), "scratch/") {
 		t.Error("declared exclude entry not applied")
+	}
+}
+
+// readGolden reads a byte-identity golden from testdata. These files were
+// captured from HEAD before issue #79 (the native-discovery byte-identity
+// contract) — never regenerate or edit them.
+func readGolden(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read golden %s: %v", name, err)
+	}
+	return b
+}
+
+// byteDiff is a compact, diff-worthy mismatch report: lengths plus the full got
+// when it is short enough to eyeball, else the first differing offset.
+func byteDiff(got, want []byte) string {
+	if len(got) < 512 {
+		return fmt.Sprintf("got %d bytes, want %d bytes; got:\n%s", len(got), len(want), got)
+	}
+	off := 0
+	for off < len(got) && off < len(want) && got[off] == want[off] {
+		off++
+	}
+	return fmt.Sprintf("got %d bytes, want %d bytes; first differ at offset %d", len(got), len(want), off)
+}
+
+// Byte-identity acceptance for claude's native-discovery shape (issue #79 /
+// ADR-0035): because claude declares NativeSkillDiscovery: true, renderContextFile
+// appends NO skills index, so its output must equal the pre-change goldens
+// captured from HEAD byte-for-byte. A failure means the template render drifted —
+// the native path must never gain a byte the goldens do not have. The
+// strings.Contains guard makes the "no index for native discovery" promise
+// self-documenting beyond the raw byte compare.
+func TestRenderContextFile_claudeGoldenByteIdentity(t *testing.T) {
+	cases := []struct {
+		name   string
+		repo   store.Repo
+		golden string
+	}{
+		{"builtin", builtinRepo, "contextfile-claude-builtin.golden"},
+		{"forge", forgeRepo, "contextfile-claude-forge.golden"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := renderContextFile(tc.repo, claudeGoldenMeta)
+			if err != nil {
+				t.Fatalf("renderContextFile: %v", err)
+			}
+			if want := readGolden(t, tc.golden); !bytes.Equal(got, want) {
+				t.Errorf("render != %s\n%s", tc.golden, byteDiff(got, want))
+			}
+			if strings.Contains(string(got), "## Seeded skills") {
+				t.Error("native-discovery render contains a `## Seeded skills` section; want none")
+			}
+		})
+	}
+}
+
+// The full seed path (not just the in-memory render) writes the claude golden to
+// disk byte-for-byte — one binding is enough for the on-disk variant.
+func TestSeedWorkspace_onDiskMatchesGolden(t *testing.T) {
+	wt, _ := newWorktree(t)
+	seed(t, wt, builtinRepo)
+	got, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin.golden"); !bytes.Equal(got, want) {
+		t.Errorf("on-disk CLAUDE.local.md != golden\n%s", byteDiff(got, want))
+	}
+}
+
+// codexMeta is a FAKE non-native-discovery provider's declaration (issue #79 /
+// ADR-0035): a codex-shaped agent reads AGENTS.local.md but does not discover
+// .codex/skills on its own, so the generic seeder must append the generated
+// skills index for it. Not a real provider — a shape to exercise the non-native
+// path end to end without importing any concrete adapter.
+var codexMeta = provider.SeedMeta{
+	ContextFileName:      "AGENTS.local.md",
+	SkillsDir:            ".codex/skills",
+	NativeSkillDiscovery: false,
+	ExcludeEntries:       []string{".codex/", "AGENTS.local.md"},
+}
+
+// Non-native acceptance: for a provider that seeds skills but does not discover
+// them natively, the bundle lands under its own skills dir AND the context file
+// grows a generated index — one bullet per bundled skill, each pointing at the
+// correct per-provider seeded path — with everything still hidden from git status.
+func TestSeedWorkspace_nonNativeAppendsSkillsIndex(t *testing.T) {
+	wt, env := newWorktree(t)
+	if err := New().SeedWorkspace(wt, forgeRepo, codexMeta, Opts{}); err != nil {
+		t.Fatalf("SeedWorkspace: %v", err)
+	}
+
+	// The bundle landed under the codex-shaped skills dir (spot-check tdd).
+	if _, err := os.Stat(filepath.Join(wt, ".codex", "skills", "tdd", "SKILL.md")); err != nil {
+		t.Errorf("skills bundle not seeded under .codex/skills: %v", err)
+	}
+
+	got := readFile(t, filepath.Join(wt, "AGENTS.local.md"))
+	if !strings.Contains(got, "## Seeded skills") {
+		t.Fatal("AGENTS.local.md missing the `## Seeded skills` heading")
+	}
+	// The index is APPENDED, not replacing — the base sections survive.
+	if !strings.Contains(got, "labctl issue view [n]") {
+		t.Error("appended index clobbered the base labctl vocabulary section")
+	}
+
+	// Every top-level bundle directory gets exactly one bullet pointing at its
+	// correct per-provider seeded path — walked from the bundle, no hardcoded list.
+	bundle, err := fs.Sub(assets.Skills, "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := fs.ReadDir(bundle, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nDirs := 0
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		nDirs++
+		want := "read `.codex/skills/" + d.Name() + "/SKILL.md`"
+		if !strings.Contains(got, want) {
+			t.Errorf("index missing per-provider path for skill %q: want substring %q", d.Name(), want)
+		}
+	}
+	if n := strings.Count(got, "- **"); n != nDirs {
+		t.Errorf("index has %d bullet lines; want one per bundle skill (%d)", n, nDirs)
+	}
+
+	// The codex-shaped exclude entries cover the codex-shaped names too — a fully
+	// seeded worktree is clean.
+	if out := git(t, env, "-C", wt, "status", "--porcelain"); out != "" {
+		t.Errorf("git status after non-native seed = %q; want empty", out)
+	}
+}
+
+// A NativeSkillDiscovery: false provider with an EMPTY SkillsDir seeds no bundle,
+// so there is nothing to index — renderContextFile must append no section. (The
+// native-discovery-WITH-skills absence is asserted in the golden test above.)
+func TestRenderContextFile_noIndexWithoutSkillsDir(t *testing.T) {
+	meta := provider.SeedMeta{ContextFileName: "AGENTS.local.md", NativeSkillDiscovery: false}
+	got, err := renderContextFile(builtinRepo, meta)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	if strings.Contains(string(got), "## Seeded skills") {
+		t.Error("empty-SkillsDir render contains a skills index; want none")
 	}
 }
 
