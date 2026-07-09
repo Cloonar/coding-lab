@@ -29,7 +29,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `proxyAuth.header` | `"Remote-User"` | Passed as `--proxy-auth-header`. |
 | `proxyAuth.trustedProxies` | `[ ]` | CIDRs, passed as `--trusted-proxies` whenever non-empty — also without `proxyAuth.enable`: the list gates X-Forwarded-Proto trust (Secure-cookie detection behind a TLS-terminating proxy with lab's own login). |
 | `openFirewall` | `false` | Open the firewall for the port in `listenAddr`. |
-| `extraFlags` | `[ ]` | Extra flags appended to `ExecStart` (e.g. `[ "--claude" "/run/current-system/sw/bin/claude" ]`). |
+| `extraFlags` | `[ ]` | Extra flags appended to `ExecStart` (e.g. `[ "--provider-bin" "claude-code=/run/current-system/sw/bin/claude" ]`). |
 
 Full example — sops-provided master key, Postgres DSN via `environmentFile`:
 
@@ -146,8 +146,10 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--state-dir` | `LAB_STATE_DIR` | `~/.local/state/lab` | State root (layout below). With no HOME and no value, lab refuses to start. |
 | `--db` | `LAB_DB` | `sqlite:<state-dir>/lab.db` | DSN. `sqlite:<path>` or `postgres://…` / `postgresql://…` switches backend. |
 | `--master-key-file` | `LAB_MASTER_KEY_FILE` | `<state-dir>/master.key` | Vault master key: 64 hex chars (32 bytes), 0600. Auto-generated when absent; loose perms or malformed content refuse startup. |
-| `--claude` | — | `claude` (PATH lookup) | Claude Code binary. |
-| `--claude-config` | `LAB_CLAUDE_CONFIG` | `~/.claude.json` (from HOME) | Claude's global config file, the folder-trust seeding target. When unresolvable (no HOME, no value), instance/AFK features stay unmounted and lab serves the rest with a loud warning. |
+| `--provider-bin` | `LAB_PROVIDER_BIN_<ID>` | adapter default | Per-provider agent binary, **repeatable** as `id=path` keyed by provider ID (`--provider-bin claude-code=/usr/bin/claude`). The env `<ID>` is the provider ID uppercased with dashes → underscores (`claude-code` → `LAB_PROVIDER_BIN_CLAUDE_CODE`). An unknown ID in the flag is a boot error listing the registered IDs (env keys are only read for registered IDs — a typoed env var name is inert). With no entry the adapter fills its own default (claude-code: `claude` via PATH lookup). |
+| `--provider-config` | `LAB_PROVIDER_CONFIG_<ID>` | adapter default | Per-provider global config file, **repeatable** as `id=path` keyed by provider ID (`--provider-config claude-code=/var/lib/lab/.claude.json`); same `<ID>` env mapping. claude-code's config is the folder-trust seeding target — with no HOME and no configured claude-code config path, instance/AFK features stay unmounted and lab serves the rest with a loud warning. With no entry the adapter fills its own default (claude-code: `~/.claude.json` from HOME). |
+| `--claude` | — | (see `--provider-bin`) | **Deprecated alias** for `--provider-bin claude-code=<path>`. Prefer the generic flag. |
+| `--claude-config` | `LAB_CLAUDE_CONFIG` | (see `--provider-config`) | **Deprecated alias** for `--provider-config claude-code=<path>` (env alias for `LAB_PROVIDER_CONFIG_CLAUDE_CODE`). Prefer the generic flag. |
 | `--tmux` | — | `tmux` (PATH lookup) | tmux binary. |
 | `--git` | — | `git` (PATH lookup) | git binary. |
 | `--prlimit` | — | `prlimit` (PATH lookup) | prlimit binary (session NOFILE cap). |
@@ -158,6 +160,8 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--trusted-proxies` | — | (empty) | Comma-separated CIDRs of trusted reverse proxies (also gates `X-Forwarded-Proto` / `X-Forwarded-For` trust). |
 | `--base-url` | `LAB_BASE_URL` | (empty) | Absolute http(s) external URL. Drives Secure cookies and the CSRF Origin check. Also seeds the `LAB_URL` handed to sessions **unless** `--agent-url` is set. |
 | `--agent-url` | `LAB_AGENT_URL` | (empty) | Absolute http(s) session-facing URL handed to `labctl` as `LAB_URL`. Precedence: `--agent-url` → `--base-url` → `http://127.0.0.1:<port>`. Set it (or the NixOS `agentUrl` default) to a loopback URL so agent traffic bypasses any front proxy. |
+
+The per-provider host settings (`--provider-bin` / `--provider-config` and their `--claude` / `--claude-config` aliases) resolve **per provider entry**, highest wins: **generic flag > generic env > alias flag > alias env** — the generic form always beats the claude-named alias for the same setting, and within each pair a flag beats its env. The registered provider IDs come from `cmd/lab`, so a new provider's binary and config path are two entries under its ID with no config change (ADR-0034).
 
 Runtime-mutable knobs live in the `settings` table (Settings UI / `PATCH /api/v1/settings`), not flags:
 

@@ -328,8 +328,8 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [
-        "--claude"
-        "/run/current-system/sw/bin/claude"
+        "--provider-bin"
+        "claude-code=/run/current-system/sw/bin/claude"
       ];
       description = "Extra command-line flags appended to ExecStart.";
     };

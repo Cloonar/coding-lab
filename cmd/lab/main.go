@@ -57,9 +57,11 @@ Flags (env overrides in parentheses; flag > env > default):
   -state-dir string        state directory (LAB_STATE_DIR; default ~/.local/state/lab)
   -db string               sqlite:<path> or postgres://… (LAB_DB; default sqlite:<state-dir>/lab.db)
   -master-key-file string  vault master key file (LAB_MASTER_KEY_FILE; default <state-dir>/master.key)
-  -claude, -tmux, -git, -prlimit string
+  -provider-bin id=path    per-provider agent binary, repeatable (LAB_PROVIDER_BIN_<ID>; adapter default: PATH lookup)
+  -provider-config id=path per-provider config file, repeatable (LAB_PROVIDER_CONFIG_<ID>; adapter default, claude-code: ~/.claude.json)
+  -tmux, -git, -prlimit string
                            binary paths (PATH lookup by default)
-  -claude-config string    claude's global config file (LAB_CLAUDE_CONFIG; default ~/.claude.json)
+  -claude, -claude-config  deprecated aliases for the claude-code -provider-bin/-provider-config entries (LAB_CLAUDE_CONFIG likewise); the generic form wins
   -max-instances int       global live-instance cap; seeds the settings row on first start (default 6)
   -session-nofile int      RLIMIT_NOFILE for spawned sessions; 0 disables (default 16384)
   -proxy-auth              accept the proxy auth header from trusted proxies
@@ -75,7 +77,11 @@ func main() {
 }
 
 func run() int {
-	cfg, err := config.Parse(os.Args[1:], os.Getenv)
+	// cmd/lab is the one place that names the registered providers: the
+	// providerIDs list validates the generic -provider-bin/-provider-config
+	// flags (issue #78 / ADR-0034). A future provider adds its ID here
+	// alongside its adapter construction below.
+	cfg, err := config.Parse(os.Args[1:], os.Getenv, []string{claudecode.ID})
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(os.Stderr, usage)
 		return 0
@@ -166,9 +172,11 @@ func run() int {
 	})
 	trackerReg.SetCRMerger(mergeSvc)
 
-	// M3 instance/AFK stack. It needs claude's global config path (resolved
-	// from HOME); with none, the instance/parked/provider routes stay unmounted
-	// and lab still serves the M2 surface.
+	// M3 instance/AFK stack. The claude-code adapter derives its default global
+	// config path from HOME (issue #78 / ADR-0034), so with HOME unset AND no
+	// explicit -provider-config claude-code=… entry there is nothing to hand it:
+	// the instance/parked/provider routes stay unmounted and lab still serves
+	// the M2 surface.
 	var (
 		instanceSvc  *instance.Service
 		reconcileSvc *reconcile.Service
@@ -176,15 +184,15 @@ func run() int {
 		afkSvc       *afk.Service
 		chatSvc      *chat.Service
 	)
-	if cfg.ClaudeConfig == "" {
-		logger.Warn("claude config path unresolved (HOME unset and no --claude-config); instance features disabled",
+	home := os.Getenv("HOME")
+	if home == "" && cfg.ProviderConfig[claudecode.ID] == "" {
+		logger.Warn("claude config path unresolved (HOME unset and no -provider-config claude-code=…); instance features disabled",
 			"component", "main")
 	} else {
-		home := os.Getenv("HOME")
 		runner := tmuxx.New(cfg.TmuxBin, tmuxx.WithNofileCap(cfg.PrlimitBin, cfg.SessionNofile))
 		claudeProvider, perr := claudecode.New(claudecode.Options{
-			ClaudeBin:   cfg.ClaudeBin,
-			ConfigPath:  cfg.ClaudeConfig,
+			ClaudeBin:   cfg.ProviderBin[claudecode.ID],
+			ConfigPath:  cfg.ProviderConfig[claudecode.ID],
 			RegistryDir: filepath.Join(home, ".claude", "sessions"),
 			ProjectsDir: filepath.Join(home, ".claude", "projects"),
 			LoginDir:    home,
@@ -325,8 +333,9 @@ func run() int {
 		Metrics:      m,
 		// Providers backs the incogni pre-push hook: it screens the union of
 		// every registered provider's declared scrub patterns (ADR-0033). nil in
-		// the degraded boot where no provider is configured (ClaudeConfig
-		// unresolved above), which renders a content-inert guard.
+		// the degraded boot where no provider is configured (HOME unset and no
+		// provider config entry resolved above), which renders a content-inert
+		// guard.
 		Providers: providerReg,
 	}
 	if instanceSvc != nil {

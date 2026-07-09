@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -22,6 +23,14 @@ const (
 	DefaultSessionNofile   = 16384
 )
 
+// aliasProviderID is the single provider id the deprecated -claude /
+// -claude-config / LAB_CLAUDE_CONFIG aliases write to. It exists solely to
+// keep those pre-#78 spellings working as aliases for the generic
+// -provider-bin / -provider-config maps and MUST NOT grow: it is the only
+// provider-named identifier this package is permitted to carry (issue #78),
+// and a new provider adds nothing here.
+const aliasProviderID = "claude-code"
+
 // Config is the fully resolved process configuration.
 type Config struct {
 	Addr          string // listen address
@@ -29,16 +38,22 @@ type Config struct {
 	DB            string // DSN: sqlite:<path> or postgres://…
 	MasterKeyFile string // path to the vault master key file
 
-	ClaudeBin  string
+	// ProviderBin maps a provider id to a binary-path override. A missing
+	// entry means the adapter uses its own default (a PATH lookup); config.go
+	// no longer owns any provider default (issue #78). Always non-nil after
+	// Parse and holds entries only for explicitly configured ids — set via
+	// -provider-bin, LAB_PROVIDER_BIN_<ID>, or the deprecated -claude alias.
+	ProviderBin map[string]string
+	// ProviderConfig maps a provider id to a config-file-path override. A
+	// missing entry means the adapter uses its own default. Always non-nil
+	// after Parse and holds entries only for explicitly configured ids — set
+	// via -provider-config, LAB_PROVIDER_CONFIG_<ID>, or the deprecated
+	// -claude-config / LAB_CLAUDE_CONFIG alias.
+	ProviderConfig map[string]string
+
 	TmuxBin    string
 	GitBin     string
 	PrlimitBin string
-
-	// ClaudeConfig is claude's global config file (~/.claude.json), the
-	// target of folder-trust seeding (port-spec claude-integration §2.10).
-	// Empty only when HOME is unset and neither flag nor env supplied it;
-	// the provider wiring refuses an empty path.
-	ClaudeConfig string
 
 	MaxInstances  int // seeds the max_instances settings row on first start
 	SessionNofile int // RLIMIT_NOFILE for spawned sessions; 0 disables
@@ -57,11 +72,43 @@ type Config struct {
 	AgentURL string
 }
 
+// providerMapFlag is the flag.Value behind the repeatable -provider-bin and
+// -provider-config flags. Each occurrence is an id=path pair; occurrences
+// accumulate into m. It validates every id against the caller's registered
+// providerIDs so a boot-time typo is caught immediately rather than silently
+// ignored, which is why Parse takes providerIDs and this package stays
+// provider-name-free (issue #78).
+type providerMapFlag struct {
+	providerIDs []string
+	m           map[string]string
+}
+
+func (p *providerMapFlag) String() string { return "" }
+
+func (p *providerMapFlag) Set(value string) error {
+	id, path, ok := strings.Cut(value, "=")
+	if !ok || id == "" || path == "" {
+		return fmt.Errorf("%q: want id=path", value)
+	}
+	if !slices.Contains(p.providerIDs, id) {
+		return fmt.Errorf("unknown provider id %q; registered ids: %s", id, strings.Join(p.providerIDs, ", "))
+	}
+	if _, dup := p.m[id]; dup {
+		return fmt.Errorf("provider id %q set more than once", id)
+	}
+	p.m[id] = path
+	return nil
+}
+
 // Parse resolves args (flags without the program name) and environment into
 // a Config. Env overrides defaults, flags override env. Recognized env vars:
-// LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_CLAUDE_CONFIG,
-// LAB_BASE_URL, LAB_AGENT_URL.
-func Parse(args []string, getenv func(string) string) (Config, error) {
+// LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_PROVIDER_BIN_<ID>,
+// LAB_PROVIDER_CONFIG_<ID>, LAB_CLAUDE_CONFIG (a deprecated alias for
+// LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_BASE_URL, LAB_AGENT_URL. providerIDs
+// is the caller's list of registered provider ids: the generic per-provider
+// flags are validated against it (an unknown id is a parse error), and the
+// LAB_PROVIDER_*_<ID> env forms are read only for ids it contains.
+func Parse(args []string, getenv func(string) string, providerIDs []string) (Config, error) {
 	fs := flag.NewFlagSet("lab", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -71,11 +118,9 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 		db            = fs.String("db", "", "database DSN: sqlite:<path> or postgres://… (default sqlite:<state-dir>/lab.db; env LAB_DB)")
 		masterKeyFile = fs.String("master-key-file", "", "vault master key file (default <state-dir>/master.key; env LAB_MASTER_KEY_FILE)")
 
-		claudeBin    = fs.String("claude", "claude", "claude binary (PATH lookup by default)")
-		claudeConfig = fs.String("claude-config", "", "claude's global config file (default ~/.claude.json; env LAB_CLAUDE_CONFIG)")
-		tmuxBin      = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
-		gitBin       = fs.String("git", "git", "git binary (PATH lookup by default)")
-		prlimitBin   = fs.String("prlimit", "prlimit", "prlimit binary (PATH lookup by default)")
+		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
+		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
+		prlimitBin = fs.String("prlimit", "prlimit", "prlimit binary (PATH lookup by default)")
 
 		maxInstances  = fs.Int("max-instances", DefaultMaxInstances, "global live-instance cap; seeds the settings row on first start")
 		sessionNofile = fs.Int("session-nofile", DefaultSessionNofile, "RLIMIT_NOFILE (soft+hard) for spawned sessions; 0 disables")
@@ -87,6 +132,23 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 		baseURL  = fs.String("base-url", "", "external base URL, e.g. https://lab.example.com (env LAB_BASE_URL)")
 		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL; defaults to --base-url, else http://127.0.0.1:<port> (env LAB_AGENT_URL)")
 	)
+
+	// Generic per-provider host overrides (issue #78): repeatable id=path
+	// flags accumulating into maps, each id validated against providerIDs.
+	binOverrides := &providerMapFlag{providerIDs: providerIDs, m: map[string]string{}}
+	configOverrides := &providerMapFlag{providerIDs: providerIDs, m: map[string]string{}}
+	fs.Var(binOverrides, "provider-bin", "provider binary path override, repeatable, id=path (env LAB_PROVIDER_BIN_<ID>)")
+	fs.Var(configOverrides, "provider-config", "provider config-file path override, repeatable, id=path (env LAB_PROVIDER_CONFIG_<ID>)")
+
+	// --- Deprecated alias shim (issue #78) ----------------------------------
+	// The ONLY provider-named flags left in this file. These spellings predate
+	// the generic -provider-bin / -provider-config maps and survive solely as
+	// aliases for the claude-code entry of those maps (see aliasProviderID).
+	// Do NOT add more provider-named flags here — a new provider is configured
+	// entirely through the generic map surface above.
+	claudeBin := fs.String("claude", "", "deprecated alias for -provider-bin claude-code=<path>")
+	claudeConfig := fs.String("claude-config", "", "deprecated alias for -provider-config claude-code=<path> (env LAB_CLAUDE_CONFIG)")
+	// ------------------------------------------------------------------------
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -134,14 +196,29 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	}
 	cfg.MasterKeyFile = pick("master-key-file", *masterKeyFile, "LAB_MASTER_KEY_FILE", filepath.Join(sd, "master.key"))
 
-	// ~/.claude.json is tied to the service user's HOME (it is claude's own
-	// file), not to --state-dir; with no HOME and no explicit value it stays
-	// empty rather than guessing.
-	defaultClaudeConfig := ""
-	if home := getenv("HOME"); home != "" {
-		defaultClaudeConfig = filepath.Join(home, ".claude.json")
+	// Per-provider host overrides. For each map, generic env fills an entry
+	// for a registered id, then the generic flag overrides it (flag > env).
+	// The maps stay non-nil and carry entries only for explicitly configured
+	// ids.
+	cfg.ProviderBin = resolveProviderMap(providerIDs, getenv, "LAB_PROVIDER_BIN_", binOverrides.m)
+	cfg.ProviderConfig = resolveProviderMap(providerIDs, getenv, "LAB_PROVIDER_CONFIG_", configOverrides.m)
+
+	// Deprecated alias shim (issue #78). Per-entry precedence is
+	// generic flag > generic env > alias flag > alias env: the alias fills the
+	// claude-code entry only when the generic forms (flag or env) left it
+	// unset, and between the alias flag and LAB_CLAUDE_CONFIG the flag wins
+	// (the existing pick rule). An empty alias value never creates an entry.
+	// -claude has no env form; -claude-config aliases LAB_CLAUDE_CONFIG.
+	if _, ok := cfg.ProviderBin[aliasProviderID]; !ok {
+		if v := pick("claude", *claudeBin, "", ""); v != "" {
+			cfg.ProviderBin[aliasProviderID] = v
+		}
 	}
-	cfg.ClaudeConfig = pick("claude-config", *claudeConfig, "LAB_CLAUDE_CONFIG", defaultClaudeConfig)
+	if _, ok := cfg.ProviderConfig[aliasProviderID]; !ok {
+		if v := pick("claude-config", *claudeConfig, "LAB_CLAUDE_CONFIG", ""); v != "" {
+			cfg.ProviderConfig[aliasProviderID] = v
+		}
+	}
 
 	cfg.BaseURL = pick("base-url", *baseURL, "LAB_BASE_URL", "")
 	if cfg.BaseURL != "" {
@@ -156,8 +233,6 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 			return Config{}, err
 		}
 	}
-
-	cfg.ClaudeBin = *claudeBin
 
 	cfg.TmuxBin = *tmuxBin
 	cfg.GitBin = *gitBin
@@ -191,6 +266,25 @@ func Parse(args []string, getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// resolveProviderMap builds a per-provider override map: for each registered
+// id a non-empty <envPrefix><ID> env value seeds the entry (ID is the id
+// upper-cased with '-' → '_', e.g. claude-code → CLAUDE_CODE), then the
+// generic-flag entries override those (flag > env). The result is always
+// non-nil and carries entries only for explicitly configured ids.
+func resolveProviderMap(providerIDs []string, getenv func(string) string, envPrefix string, flagVals map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, id := range providerIDs {
+		key := envPrefix + strings.ToUpper(strings.ReplaceAll(id, "-", "_"))
+		if v := getenv(key); v != "" {
+			out[id] = v
+		}
+	}
+	for id, path := range flagVals {
+		out[id] = path // generic flag beats generic env
+	}
+	return out
 }
 
 // validateHTTPURL rejects a value that is not an absolute http(s) URL. Used

@@ -22,8 +22,8 @@ func TestParse(t *testing.T) {
 		StateDir:        "/home/u/.local/state/lab",
 		DB:              "sqlite:/home/u/.local/state/lab/lab.db",
 		MasterKeyFile:   "/home/u/.local/state/lab/master.key",
-		ClaudeBin:       "claude",
-		ClaudeConfig:    "/home/u/.claude.json",
+		ProviderBin:     map[string]string{},
+		ProviderConfig:  map[string]string{},
 		TmuxBin:         "tmux",
 		GitBin:          "git",
 		PrlimitBin:      "prlimit",
@@ -35,6 +35,10 @@ func TestParse(t *testing.T) {
 		AgentURL:        "",
 	}
 
+	// with copies defaults and applies mut. NOTE: ProviderBin/ProviderConfig
+	// are shared map references with defaults, so a mutation must ASSIGN a
+	// fresh map (c.ProviderBin = map[...]{...}), never index into the shared
+	// one, or it would corrupt defaults for every later test.
 	with := func(mut func(*Config)) Config {
 		c := defaults
 		mut(&c)
@@ -42,15 +46,23 @@ func TestParse(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		args    []string
-		env     map[string]string
-		want    Config
-		wantErr string // substring; "" means success expected
+		name        string
+		args        []string
+		env         map[string]string
+		providerIDs []string // nil → []string{"claude-code"}
+		want        Config
+		wantErr     string // substring; "" means success expected
 	}{
 		{
 			name: "all defaults",
 			want: defaults,
+		},
+		{
+			name: "no provider flags or env leaves both maps non-nil and empty",
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{}
+				c.ProviderConfig = map[string]string{}
+			}),
 		},
 		{
 			name: "env overrides defaults",
@@ -108,14 +120,154 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "binary path overrides",
-			args: []string{"--claude", "/opt/claude/bin/claude", "--tmux", "/usr/bin/tmux", "--git", "/usr/bin/git", "--prlimit", "/usr/bin/prlimit"},
+			args: []string{"--tmux", "/usr/bin/tmux", "--git", "/usr/bin/git", "--prlimit", "/usr/bin/prlimit"},
 			want: with(func(c *Config) {
-				c.ClaudeBin = "/opt/claude/bin/claude"
 				c.TmuxBin = "/usr/bin/tmux"
 				c.GitBin = "/usr/bin/git"
 				c.PrlimitBin = "/usr/bin/prlimit"
 			}),
 		},
+
+		// --- generic per-provider host overrides (issue #78) ---
+		{
+			name: "provider-bin flag sets the map entry",
+			args: []string{"--provider-bin", "claude-code=/opt/cc/claude"},
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{"claude-code": "/opt/cc/claude"}
+			}),
+		},
+		{
+			name:        "provider-bin repeatable, two ids both land",
+			args:        []string{"--provider-bin", "claude-code=/opt/cc/claude", "--provider-bin", "codex=/opt/codex/codex"},
+			providerIDs: []string{"claude-code", "codex"},
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{"claude-code": "/opt/cc/claude", "codex": "/opt/codex/codex"}
+			}),
+		},
+		{
+			name:        "provider-config repeatable, two ids both land",
+			args:        []string{"--provider-config", "claude-code=/etc/cc.json", "--provider-config", "codex=/etc/codex.json"},
+			providerIDs: []string{"claude-code", "codex"},
+			want: with(func(c *Config) {
+				c.ProviderConfig = map[string]string{"claude-code": "/etc/cc.json", "codex": "/etc/codex.json"}
+			}),
+		},
+		{
+			name: "provider-bin env sets the entry with dash to underscore normalization",
+			env:  map[string]string{"LAB_PROVIDER_BIN_CLAUDE_CODE": "/env/claude"},
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{"claude-code": "/env/claude"}
+			}),
+		},
+		{
+			name: "provider-config env sets the entry",
+			env:  map[string]string{"LAB_PROVIDER_CONFIG_CLAUDE_CODE": "/env/cc.json"},
+			want: with(func(c *Config) {
+				c.ProviderConfig = map[string]string{"claude-code": "/env/cc.json"}
+			}),
+		},
+		{
+			name: "provider-bin flag beats provider-bin env",
+			args: []string{"--provider-bin", "claude-code=/flag/claude"},
+			env:  map[string]string{"LAB_PROVIDER_BIN_CLAUDE_CODE": "/env/claude"},
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{"claude-code": "/flag/claude"}
+			}),
+		},
+
+		// --- deprecated alias shim (issue #78) ---
+		{
+			name: "claude alias flag populates ProviderBin",
+			args: []string{"--claude", "/opt/claude/bin/claude"},
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{"claude-code": "/opt/claude/bin/claude"}
+			}),
+		},
+		{
+			name: "claude-config alias flag populates ProviderConfig",
+			args: []string{"--claude-config", "/etc/lab/claude.json"},
+			want: with(func(c *Config) {
+				c.ProviderConfig = map[string]string{"claude-code": "/etc/lab/claude.json"}
+			}),
+		},
+		{
+			name: "LAB_CLAUDE_CONFIG alias env populates ProviderConfig",
+			env:  map[string]string{"LAB_CLAUDE_CONFIG": "/elsewhere/claude.json"},
+			want: with(func(c *Config) {
+				c.ProviderConfig = map[string]string{"claude-code": "/elsewhere/claude.json"}
+			}),
+		},
+		{
+			name: "claude-config alias flag beats LAB_CLAUDE_CONFIG alias env",
+			args: []string{"--claude-config", "/etc/lab/claude.json"},
+			env:  map[string]string{"LAB_CLAUDE_CONFIG": "/elsewhere/claude.json"},
+			want: with(func(c *Config) {
+				c.ProviderConfig = map[string]string{"claude-code": "/etc/lab/claude.json"}
+			}),
+		},
+		{
+			name: "generic bin flag beats claude alias flag",
+			args: []string{"--provider-bin", "claude-code=/gen/claude", "--claude", "/alias/claude"},
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{"claude-code": "/gen/claude"}
+			}),
+		},
+		{
+			name: "generic bin env beats claude alias flag",
+			args: []string{"--claude", "/alias/claude"},
+			env:  map[string]string{"LAB_PROVIDER_BIN_CLAUDE_CODE": "/genenv/claude"},
+			want: with(func(c *Config) {
+				c.ProviderBin = map[string]string{"claude-code": "/genenv/claude"}
+			}),
+		},
+		{
+			name: "generic config flag beats claude-config alias flag",
+			args: []string{"--provider-config", "claude-code=/gen/cc.json", "--claude-config", "/alias/cc.json"},
+			want: with(func(c *Config) {
+				c.ProviderConfig = map[string]string{"claude-code": "/gen/cc.json"}
+			}),
+		},
+		{
+			name: "generic config env beats claude-config alias flag",
+			args: []string{"--claude-config", "/alias/cc.json"},
+			env:  map[string]string{"LAB_PROVIDER_CONFIG_CLAUDE_CODE": "/genenv/cc.json"},
+			want: with(func(c *Config) {
+				c.ProviderConfig = map[string]string{"claude-code": "/genenv/cc.json"}
+			}),
+		},
+
+		// --- generic override validation ---
+		{
+			name:    "provider-bin unknown id errors and names the id",
+			args:    []string{"--provider-bin", "bogus=/x"},
+			wantErr: "bogus",
+		},
+		{
+			name:    "provider-config unknown id errors and names the id",
+			args:    []string{"--provider-config", "bogus=/x"},
+			wantErr: "bogus",
+		},
+		{
+			name:    "provider-bin without = is malformed",
+			args:    []string{"--provider-bin", "claude-code"},
+			wantErr: "want id=path",
+		},
+		{
+			name:    "provider-bin empty id is malformed",
+			args:    []string{"--provider-bin", "=/x"},
+			wantErr: "want id=path",
+		},
+		{
+			name:    "provider-bin empty path is malformed",
+			args:    []string{"--provider-bin", "claude-code="},
+			wantErr: "want id=path",
+		},
+		{
+			name:    "provider-bin duplicate id in the same flag errors",
+			args:    []string{"--provider-bin", "claude-code=/x", "--provider-bin", "claude-code=/y"},
+			wantErr: "set more than once",
+		},
+
 		{
 			name: "caps and proxy auth",
 			args: []string{"--max-instances", "3", "--session-nofile", "0", "--proxy-auth", "--proxy-auth-header", "X-Remote-User", "--trusted-proxies", "10.0.0.0/8, fd00::/8"},
@@ -230,19 +382,7 @@ func TestParse(t *testing.T) {
 				c.StateDir = "/srv/lab"
 				c.DB = "sqlite:/srv/lab/lab.db"
 				c.MasterKeyFile = "/srv/lab/master.key"
-				c.ClaudeConfig = "" // no HOME → nothing to derive it from
 			}),
-		},
-		{
-			name: "claude config env and flag precedence",
-			args: []string{"--claude-config", "/etc/lab/claude.json"},
-			env:  map[string]string{"LAB_CLAUDE_CONFIG": "/elsewhere/claude.json"},
-			want: with(func(c *Config) { c.ClaudeConfig = "/etc/lab/claude.json" }),
-		},
-		{
-			name: "claude config env beats the HOME-derived default",
-			env:  map[string]string{"LAB_CLAUDE_CONFIG": "/elsewhere/claude.json"},
-			want: with(func(c *Config) { c.ClaudeConfig = "/elsewhere/claude.json" }),
 		},
 	}
 
@@ -252,7 +392,11 @@ func TestParse(t *testing.T) {
 			for k, v := range tt.env {
 				env[k] = v
 			}
-			got, err := Parse(tt.args, genv(env))
+			ids := tt.providerIDs
+			if ids == nil {
+				ids = []string{"claude-code"}
+			}
+			got, err := Parse(tt.args, genv(env), ids)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("Parse(%v) = %+v, want error containing %q", tt.args, got, tt.wantErr)
