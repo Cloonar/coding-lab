@@ -1998,8 +1998,7 @@ function DialogPanel(props: {
     selected()
       .filter((i) => i !== otherIdx())
       .sort((a, b) => a - b);
-  const multiAnswerReady = () =>
-    otherOn() ? otherText().trim() !== '' : selected().length > 0;
+  const multiAnswerReady = () => (otherOn() ? otherText().trim() !== '' : selected().length > 0);
   const multiPayload = () => {
     const payload: { selected: number[]; other_text?: string } = { selected: realSelected() };
     if (otherOn()) payload.other_text = otherText().trim();
