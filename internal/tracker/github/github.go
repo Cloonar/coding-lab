@@ -137,6 +137,7 @@ type ghComment struct {
 
 type ghPullHead struct {
 	Ref string `json:"ref"`
+	Sha string `json:"sha"`
 }
 
 type ghPull struct {
@@ -147,6 +148,47 @@ type ghPull struct {
 	MergedAt *time.Time `json:"merged_at"` // non-nil ⇒ merged (the list endpoint has no `merged` bool)
 	Head     ghPullHead `json:"head"`
 	HTMLURL  string     `json:"html_url"`
+}
+
+// ghCheckRun is one row from the Checks API
+// (commits/{sha}/check-runs) — a GitHub Actions workflow job, or any other
+// GitHub App's check run, against a commit. This is the ONLY place Actions
+// results appear: the legacy combined-status API below cannot see them.
+type ghCheckRun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`     // queued|in_progress|completed|... — not "completed" ⇒ CheckPending
+	Conclusion string `json:"conclusion"` // set only once status=="completed"
+	HTMLURL    string `json:"html_url"`
+	Output     struct {
+		Title string `json:"title"`
+	} `json:"output"`
+}
+
+// ghCheckRunsPage is one page of the Checks API response: the rows live
+// nested under check_runs, not a bare JSON array — fetchPages assumes a bare
+// array, so this endpoint goes through fetchNested instead.
+type ghCheckRunsPage struct {
+	TotalCount int          `json:"total_count"`
+	CheckRuns  []ghCheckRun `json:"check_runs"`
+}
+
+// ghStatus is one row from the legacy combined-status API
+// (commits/{sha}/status) — external CI services (many predating GitHub
+// Actions/Checks) report ONLY here, never as a check run.
+type ghStatus struct {
+	Context     string `json:"context"`
+	State       string `json:"state"`
+	Description string `json:"description"`
+	TargetURL   string `json:"target_url"`
+}
+
+// ghStatusPage is one page of the legacy combined-status API response: the
+// rows live nested under statuses. State is decoded but deliberately never
+// read — see Checks' doc comment for why lab computes its own aggregate
+// instead of trusting GitHub's combined verdict.
+type ghStatusPage struct {
+	State    string     `json:"state"`
+	Statuses []ghStatus `json:"statuses"`
 }
 
 // --- Tracker methods -------------------------------------------------------
@@ -260,6 +302,64 @@ func (c *Client) Pull(ctx context.Context, number int) (tracker.PullDetail, erro
 		return tracker.PullDetail{}, err
 	}
 	return toPullDetail(gh), nil
+}
+
+// Checks returns the CI check/status rows for pull `number`'s CURRENT head
+// commit. It resolves the head SHA AT QUERY TIME — a fresh GET of the pull
+// (the same endpoint/decode Pull uses), so a push or rebase that landed
+// moments before the read is reflected, never a memoized commit — then
+// queries BOTH of GitHub's independent CI-reporting surfaces for that SHA and
+// unions their rows, check-runs first then statuses:
+//
+//   - the Checks API (commits/{sha}/check-runs): GitHub Actions workflow jobs
+//     — and any other GitHub App's check runs — report ONLY here; the legacy
+//     status API below cannot see them.
+//   - the legacy combined-status API (commits/{sha}/status): external CI
+//     services (many predate Checks) report ONLY here, never as a check run.
+//
+// A repo wired to both (Actions plus an external service) is unremarkable,
+// so both are always queried, unconditionally. The union performs NO
+// deduplication across the two APIs: a system that reports to both for what
+// a human would call "the same check" yields two rows in the result.
+// Collapsing them would require guessing at name equivalence across two
+// different vocabularies (a check run's `name` vs a status's `context`) —
+// exactly the kind of implicit magic this package avoids elsewhere (ADR-0014's
+// strict label-name resolution, the verbatim-error pattern) — so the union is
+// left for the caller/agent to read as-is; that is the pinned decision, not
+// an oversight. The combined-status endpoint's own top-level `state` verdict
+// is decoded (ghStatusPage) but deliberately never consulted: aggregation is
+// tracker.ChecksState's job, computed client-side from the union this method
+// returns, never trusted from a forge's own combined badge (checks.go) — the
+// same "reports pending with nothing really pending" trap the Forgejo sibling
+// documents. An unknown pull number fails on the first GET (the pull lookup)
+// exactly like Pull: the statusError 404 path unwraps to tracker.ErrNotFound.
+// Both CI endpoints paginate like every other list on this client
+// (per_page/Link rel="next"). Zero rows from both is success, not an error: a
+// non-nil empty slice.
+func (c *Client) Checks(ctx context.Context, number int) ([]tracker.Check, error) {
+	var gh ghPull
+	if _, err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &gh); err != nil {
+		return nil, err // 404 → tracker.ErrNotFound, same as Pull
+	}
+	sha := gh.Head.Sha
+
+	runs, err := fetchNested(ctx, c, c.checkRunsPath(sha), func(p ghCheckRunsPage) []ghCheckRun { return p.CheckRuns })
+	if err != nil {
+		return nil, err
+	}
+	statuses, err := fetchNested(ctx, c, c.statusPath(sha), func(p ghStatusPage) []ghStatus { return p.Statuses })
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]tracker.Check, 0, len(runs)+len(statuses))
+	for _, r := range runs {
+		out = append(out, toCheckFromRun(r))
+	}
+	for _, s := range statuses {
+		out = append(out, toCheckFromStatus(s))
+	}
+	return out, nil
 }
 
 // CreatePull opens a pull request from head into base and returns the created
@@ -511,6 +611,18 @@ func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
 func (c *Client) pullPath(n int) string  { return c.repoPath("/pulls/" + strconv.Itoa(n)) }
 
+// checkRunsPath and statusPath are Checks' two CI-reporting endpoints for one
+// commit SHA. The SHA comes from GitHub's own Pull response rather than
+// operator input, but it is escaped like every other path segment built from
+// server data.
+func (c *Client) checkRunsPath(sha string) string {
+	return c.repoPath("/commits/" + url.PathEscape(sha) + "/check-runs")
+}
+
+func (c *Client) statusPath(sha string) string {
+	return c.repoPath("/commits/" + url.PathEscape(sha) + "/status")
+}
+
 // --- mapping ---------------------------------------------------------------
 
 // derivePullState collapses GitHub's (state, merged) into the three-valued
@@ -584,6 +696,61 @@ func toPullDetail(gh ghPull) tracker.PullDetail {
 	}
 }
 
+// toCheckFromRun maps one Checks API row onto lab's three-word vocabulary.
+// Mapping table:
+//
+//	status != "completed" (queued, in_progress, or any other in-flight word) → CheckPending, RawState = the status word
+//	status == "completed": conclusion decides, RawState = the conclusion word
+//	  success, neutral, skipped                        → CheckSuccess
+//	  cancelled, timed_out, action_required, failure,
+//	  and anything unrecognized                         → CheckFailure
+//
+// RawState always carries GitHub's own word verbatim — the status word while
+// in flight, the conclusion word once completed — never lab's collapsed
+// State.
+func toCheckFromRun(r ghCheckRun) tracker.Check {
+	state, raw := tracker.CheckPending, r.Status
+	if r.Status == "completed" {
+		raw = r.Conclusion
+		switch r.Conclusion {
+		case "success", "neutral", "skipped":
+			state = tracker.CheckSuccess
+		default: // cancelled, timed_out, action_required, failure, or unrecognized
+			state = tracker.CheckFailure
+		}
+	}
+	return tracker.Check{
+		Name:     r.Name,
+		State:    state,
+		RawState: raw,
+		Summary:  r.Output.Title,
+		URL:      r.HTMLURL,
+	}
+}
+
+// toCheckFromStatus maps one legacy combined-status row onto lab's
+// vocabulary: success → CheckSuccess, pending → CheckPending, everything
+// else (error, failure, or an unrecognized word) → CheckFailure. RawState
+// carries the state word verbatim.
+func toCheckFromStatus(s ghStatus) tracker.Check {
+	var state string
+	switch s.State {
+	case "success":
+		state = tracker.CheckSuccess
+	case "pending":
+		state = tracker.CheckPending
+	default: // error, failure, or unrecognized
+		state = tracker.CheckFailure
+	}
+	return tracker.Check{
+		Name:     s.Context,
+		State:    state,
+		RawState: s.State,
+		Summary:  s.Description,
+		URL:      s.TargetURL,
+	}
+}
+
 // --- transport -------------------------------------------------------------
 
 // fetchPages walks a paginated list endpoint (per_page=pageLimit) following
@@ -613,6 +780,35 @@ func fetchPages[T any](ctx context.Context, c *Client, path string, base url.Val
 			return nil, err
 		}
 		all = append(all, chunk...)
+		if !hasNextLink(hdr.Get("Link")) {
+			return all, nil
+		}
+	}
+}
+
+// fetchNested walks a paginated GitHub endpoint whose response body is a JSON
+// OBJECT with the page's rows nested under one field (the Checks API's
+// check_runs, the legacy status API's statuses) — unlike fetchPages, which
+// assumes a bare JSON array and so cannot decode either of these endpoints.
+// It otherwise follows the exact same convention: per_page=pageLimit, walk
+// while the Link header advertises rel="next", with the same maxPages
+// loud-truncation guard as fetchPages against a pathological or
+// non-paginating endpoint.
+func fetchNested[P any, T any](ctx context.Context, c *Client, path string, rows func(P) []T) ([]T, error) {
+	var all []T
+	for page := 1; ; page++ {
+		if page > maxPages {
+			return nil, fmt.Errorf("github GET %s: listing exceeds %d pages; refusing to silently truncate", path, maxPages)
+		}
+		q := url.Values{}
+		q.Set("per_page", strconv.Itoa(pageLimit))
+		q.Set("page", strconv.Itoa(page))
+		var body P
+		hdr, err := c.do(ctx, http.MethodGet, path, q, nil, &body)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, rows(body)...)
 		if !hasNextLink(hdr.Get("Link")) {
 			return all, nil
 		}

@@ -219,6 +219,17 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo sto
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if errors.Is(err, tracker.ErrRateLimited) {
+		// A forge rate limit (GitHub 403/429 with a spent hourly budget) is a
+		// transient upstream throttle, not a lab fault: 503 with the reset hint
+		// the client's message carries — a distinct status the caller simply
+		// comes back later on, never a retry in-client (ADR-0015, typed error;
+		// mirrors the operator API's httpapi precedent). Placed before the
+		// generic forge branch so a throttle never folds into the opaque 502.
+		s.log.Warn(doing, "component", "agentapi", "repo", repo.ID, "err", err)
+		jsonError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	if repo.TrackerBinding == store.TrackerBindingForge {
 		s.log.Warn(doing, "component", "agentapi", "repo", repo.ID, "err", err)
 		jsonError(w, http.StatusBadGateway, err.Error())
@@ -633,6 +644,33 @@ type prListItem struct {
 	URL    string `json:"url"`
 }
 
+// prChecksResponse is the GET /agent/v1/prs/{n}/checks shape (issue #72, the
+// fix-the-red loop): the per-check rows plus the single-word aggregate. The
+// aggregate is computed SERVER-SIDE via the pure tracker.ChecksState over the
+// rows and shipped in the payload, so the client never recomputes it and never
+// trusts a forge's own combined verdict — a forge reports "pending" for a head
+// carrying zero registered statuses, which would spin a waiting agent forever
+// (checks.go). State is the aggregate vocabulary failure|pending|success|none
+// (none iff zero rows); each row's State is the three-word normalized
+// vocabulary, with rawState carrying the forge's own word verbatim beside it.
+type prChecksResponse struct {
+	State  string        `json:"state"`
+	Checks []prCheckItem `json:"checks"`
+}
+
+// prCheckItem is one row of GET /agent/v1/prs/{n}/checks — one CI check /
+// commit-status for the PR/CR's current head commit. rawState (camelCase on
+// the wire) is the forge's own state word verbatim, beside lab's normalized
+// State, so an agent wanting more than pending/success/failure reads exactly
+// what the forge said instead of trusting lab's collapse.
+type prCheckItem struct {
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	RawState string `json:"rawState"`
+	Summary  string `json:"summary"`
+	URL      string `json:"url"`
+}
+
 // handlePRGet is GET /agent/v1/prs/{n}: one PR/CR of the run's repo in full,
 // body included. An unknown number is the canonical 404 envelope (either
 // binding's typed not-found), never a panic.
@@ -662,6 +700,52 @@ func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
 		State:  pd.State,
 		Head:   pd.HeadBranch,
 		URL:    pd.URL,
+	})
+}
+
+// handlePRChecks is GET /agent/v1/prs/{n}/checks: the CI status of PR/CR n's
+// current head commit — the reader of the fix-the-red loop (issue #72). It is
+// NOT a merge gate: pr merge stays attempt-and-surface (ADR-0024), so this is
+// purely advisory. The aggregate is computed SERVER-SIDE via the pure
+// tracker.ChecksState and shipped in the payload, so the client never
+// recomputes it or trusts a forge's own combined verdict (checks.go). The
+// rows always marshal as [] — never null — when empty, so an agent parsing the
+// array never special-cases a nil. An unknown number is the canonical 404
+// envelope (either binding's typed not-found); a throttled forge is a 503 (the
+// ErrRateLimited branch in writeTrackerError).
+func (s *Server) handlePRChecks(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	rows, err := tk.Checks(r.Context(), n)
+	if err != nil {
+		s.writeTrackerError(w, "loading pull request checks", repo, err)
+		return
+	}
+	// Non-nil so the array marshals as [] on zero rows, never null.
+	checks := make([]prCheckItem, 0, len(rows))
+	for _, c := range rows {
+		checks = append(checks, prCheckItem{
+			Name:     c.Name,
+			State:    c.State,
+			RawState: c.RawState,
+			Summary:  c.Summary,
+			URL:      c.URL,
+		})
+	}
+	writeJSON(w, http.StatusOK, prChecksResponse{
+		State:  tracker.ChecksState(rows),
+		Checks: checks,
 	})
 }
 

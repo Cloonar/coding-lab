@@ -55,14 +55,20 @@ open ──validate──► [blockers?] ──yes──► request-changes (tea
 
 Discover how to verify and merge *this* repo, first hit wins:
 
-1. **PR CI / check-runs**, if the repo has them — cheapest and most authoritative. Get the PR head SHA and read the combined commit status (Forgejo API `/repos/{owner}/{repo}/commits/{sha}/status` if `tea` doesn't surface it). Green = a vouching signal; red = a blocker. *(This repo runs Forgejo Actions CI — its combined status is the signal to read; don't re-run what it already ran.)*
+1. **PR CI / check-runs**, if the repo has them — cheapest and most authoritative. Read them with `labctl pr checks --wait <N>`: it prints the aggregate (`success | failure | pending | none`) plus one tab-separated row per check, waits out an in-flight run itself (~10s poll, ~5 min cap, all inside one call), and exits `0` on green/none · `2` on red · `3` if still pending at the cap. Green = a vouching signal; red = a blocker. *(This repo runs Forgejo Actions CI — its combined status is the signal to read; don't re-run what it already ran.)*
 2. **The repo's `CLAUDE.md`** — the norm across the fleet. It declares the build/test/lint commands, the gate model, and commit conventions. If it names a gate that runs before or at commit time, that gate already vouches — read it, don't re-run it.
 3. **Ecosystem auto-detect**, when there's no `CLAUDE.md`: `go.mod` → `go test ./... && go build ./...`; `composer.json` → `composer test` / `phpunit`; `package.json` → the test/build/lint scripts it declares; `flake.nix` / `*.nix` → `nix build` / eval; `Makefile` → `make test`.
 
 ## Validate a PR
 
 1. **Fetch & gate.** `tea pulls <N> --fields state,mergeable,head,base,title,body,labels,author`. Confirm it's open and not a draft. Skip drafts with a note.
-2. **Verification signal.** Decide whether anything already vouches for the PR's correctness, using [Learn the repo's rules](#learn-the-repos-rules): a green CI run, or a repo whose declared gate runs before merge. **If a signal vouches, do not re-run it** — say so in the verdict, so the human knows what's being relied on. **If nothing vouches** (no CI, no commit-time gate), run the project's own checks now. *(Know the reach of the signal you rely on: if the PR's CI is split so that some gates run only conditionally — e.g. an expensive nix/build gate gated behind dependency-file changes — a green light may not have exercised the path this diff touches. Call that out when it matters.)*
+2. **Verification signal.** Run `labctl pr checks --wait <N>` and decide from its result, per [Learn the repo's rules](#learn-the-repos-rules):
+   - **Exit `0`, `state: success`** — a signal vouches. **Do not re-run it** — say so in the verdict, so the human knows what's being relied on.
+   - **Exit `0`, `state: none`** — nothing vouches (no CI configured on this repo, or a commit-time gate the checks call can't see). Run the project's own checks now.
+   - **Exit `2`** (aggregate `failure`) — a blocker: report the failing check rows in the verdict and stop for the human. The fix belongs to the PR author, not the lander.
+   - **Exit `3`** (still pending at the ~5 min cap) — say so, and either re-run the wait or stop for the human. Never merge on a pending signal.
+
+   *(Know the reach of the signal you rely on: if the PR's CI is split so that some gates run only conditionally — e.g. an expensive nix/build gate gated behind dependency-file changes — a green light may not have exercised the path this diff touches. Call that out when it matters.)*
 3. **Convention lint.** Title is Conventional Commits (`feat:`, `fix(scope):`, …). Apply any extra rules the repo's `CLAUDE.md` states.
 4. **AFK contract (every repo).** If the head branch is `afk/<N>` (an AFK run), confirm the body carries a working **`Closes #<issue>`**. A missing/malformed link is a **blocker**: without it the merge won't auto-close the issue, which then stays open while its `afk/<N>` branch lingers as the run's claim — parked out of the `ready-for-agent` queue until the branch is deleted.
 5. **Review the diff.** Read the full diff and reason about correctness against the PR's stated intent and its linked issue. For a deeper pass, you may run `/code-review`. Flag anything that diverges from the issue's intent — if it's ambiguous whether a divergence is intentional, **grill** (see below).

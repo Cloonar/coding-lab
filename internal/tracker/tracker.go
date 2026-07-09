@@ -151,6 +151,33 @@ type PullDetail struct {
 	URL        string
 }
 
+// Check-state vocabulary a Checks() row's State is normalized into. The
+// normalization itself happens in the backends (the forge REST clients
+// collapse their own multi-word CI states onto these three; the builtin
+// tracker has no CI to normalize); RawState on the Check carries the forge's
+// own word verbatim, so an agent that wants more than pending/success/failure
+// can read exactly what the forge said instead of trusting lab's collapse.
+// ChecksNone is never a row's State — it is the AGGREGATE ChecksState (see
+// checks.go) returns for zero rows, computed lab-side and never taken from a
+// forge's own combined verdict.
+const (
+	CheckPending = "pending"
+	CheckSuccess = "success"
+	CheckFailure = "failure"
+	ChecksNone   = "none" // aggregate only: zero rows
+)
+
+// Check is one CI check / commit-status row for a pull/change request's
+// current head commit — a GitHub Check Run or a Forgejo commit status,
+// normalized onto lab's three-word vocabulary by the backend that read it.
+type Check struct {
+	Name     string // check/status context name, e.g. a CI job
+	State    string // normalized: CheckPending|CheckSuccess|CheckFailure
+	RawState string // the forge's own state word verbatim (ADR-0011/0024 "backend's own words" pattern)
+	Summary  string // the check's description/output title, may be empty
+	URL      string // for humans reading transcripts; the agent cannot browse
+}
+
 // Label is one repo label in lab's vocabulary. Callers speak label NAMES
 // only — the forge client's name-to-ID resolution and the builtin tracker's
 // label ids stay behind the seam. Color is a #rrggbb swatch; both bindings
@@ -195,6 +222,17 @@ type Tracker interface {
 	// unknown number wraps ErrNotFound (the builtin backend surfaces
 	// store.ErrNotFound, like Issue).
 	Pull(ctx context.Context, number int) (PullDetail, error)
+
+	// Checks returns the CI check/status rows for the pull/change request's
+	// CURRENT head commit — the backend resolves the head SHA at query time,
+	// so a push or rebase that lands before the read is reflected, never a
+	// memoized commit. An unknown number wraps ErrNotFound (the builtin
+	// backend surfaces store.ErrNotFound, like Pull). Zero rows is success —
+	// a non-nil empty slice, not an error: a repo with no CI configured
+	// truthfully has no checks to report. Aggregation over the returned rows
+	// is client-side via ChecksState, NEVER trusted from the forge's own
+	// combined-status verdict (checks.go explains why).
+	Checks(ctx context.Context, number int) ([]Check, error)
 
 	// CreatePull opens a pull request / change request from head onto base.
 	// Exercised in M5/M6; implemented now for symmetry.

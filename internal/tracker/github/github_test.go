@@ -442,6 +442,186 @@ func TestPull_rateLimited(t *testing.T) {
 	}
 }
 
+// --- Checks ------------------------------------------------------------
+
+// TestChecks pins the three-call shape (GET the pull for head.sha, then GET
+// the Checks API and the legacy combined-status API for that SHA) and the
+// union: check-runs rows first, then status rows, with NO deduplication —
+// the "ci" check-run and "ci" status below are the SAME name from the two
+// APIs and BOTH must survive into the result. It also covers the full
+// conclusion mapping table (success, neutral, skipped, cancelled, timed_out,
+// action_required, failure, one unrecognized conclusion) plus in-flight
+// check-run statuses (queued, in_progress), and the status-row mapping
+// (success, pending, error, failure).
+func TestChecks(t *testing.T) {
+	const sha = "deadbeefcafe0123456789abcdef0123456789a"
+	var gotPullPath, gotCheckRunsPath, gotStatusPath string
+	var gotCheckRunsAuth, gotStatusAuth string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == apiPrefix+"/pulls/72" && r.Method == http.MethodGet:
+			gotPullPath = r.URL.Path
+			fmt.Fprintf(w, `{"number":72,"title":"feat: thing","state":"open","merged_at":null,
+			  "head":{"ref":"afk/63","sha":%q},
+			  "html_url":"https://github.com/octocat/hello-world/pull/72"}`, sha)
+		case r.URL.Path == apiPrefix+"/commits/"+sha+"/check-runs" && r.Method == http.MethodGet:
+			gotCheckRunsPath = r.URL.Path
+			gotCheckRunsAuth = r.Header.Get("Authorization")
+			_, _ = io.WriteString(w, `{"total_count":11,"check_runs":[
+			  {"name":"build","status":"completed","conclusion":"success","html_url":"https://ci.example/build","output":{"title":"Build passed"}},
+			  {"name":"lint","status":"completed","conclusion":"neutral","html_url":"https://ci.example/lint","output":{"title":""}},
+			  {"name":"docs","status":"completed","conclusion":"skipped","html_url":"https://ci.example/docs","output":{"title":""}},
+			  {"name":"flaky","status":"completed","conclusion":"cancelled","html_url":"https://ci.example/flaky","output":{"title":""}},
+			  {"name":"slow","status":"completed","conclusion":"timed_out","html_url":"https://ci.example/slow","output":{"title":""}},
+			  {"name":"gated","status":"completed","conclusion":"action_required","html_url":"https://ci.example/gated","output":{"title":""}},
+			  {"name":"tests","status":"completed","conclusion":"failure","html_url":"https://ci.example/tests","output":{"title":"3 failed"}},
+			  {"name":"weird","status":"completed","conclusion":"totally_unknown","html_url":"https://ci.example/weird","output":{"title":""}},
+			  {"name":"deploy","status":"queued","conclusion":null,"html_url":"https://ci.example/deploy","output":{"title":""}},
+			  {"name":"e2e","status":"in_progress","conclusion":null,"html_url":"https://ci.example/e2e","output":{"title":""}},
+			  {"name":"ci","status":"completed","conclusion":"success","html_url":"https://checks.example/ci","output":{"title":"all good"}}
+			]}`)
+		case r.URL.Path == apiPrefix+"/commits/"+sha+"/status" && r.Method == http.MethodGet:
+			gotStatusPath = r.URL.Path
+			gotStatusAuth = r.Header.Get("Authorization")
+			_, _ = io.WriteString(w, `{"state":"success","statuses":[
+			  {"context":"ci","state":"success","description":"external ci also ok","target_url":"https://external.example/ci"},
+			  {"context":"external-success","state":"success","description":"","target_url":"https://external.example/success"},
+			  {"context":"external-pending","state":"pending","description":"","target_url":"https://external.example/pending"},
+			  {"context":"external-error","state":"error","description":"","target_url":"https://external.example/error"},
+			  {"context":"external-failure","state":"failure","description":"","target_url":"https://external.example/failure"}
+			]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	})
+
+	checks, err := c.Checks(context.Background(), 72)
+	if err != nil {
+		t.Fatalf("Checks: %v", err)
+	}
+	if gotPullPath != apiPrefix+"/pulls/72" {
+		t.Errorf("pull request path = %q; want %q", gotPullPath, apiPrefix+"/pulls/72")
+	}
+	if gotCheckRunsPath != apiPrefix+"/commits/"+sha+"/check-runs" {
+		t.Errorf("check-runs request path = %q; want %q (must carry the head SHA)", gotCheckRunsPath, apiPrefix+"/commits/"+sha+"/check-runs")
+	}
+	if gotStatusPath != apiPrefix+"/commits/"+sha+"/status" {
+		t.Errorf("status request path = %q; want %q (must carry the head SHA)", gotStatusPath, apiPrefix+"/commits/"+sha+"/status")
+	}
+	if gotCheckRunsAuth != "Bearer "+testToken {
+		t.Errorf("check-runs Authorization = %q; want %q", gotCheckRunsAuth, "Bearer "+testToken)
+	}
+	if gotStatusAuth != "Bearer "+testToken {
+		t.Errorf("status Authorization = %q; want %q", gotStatusAuth, "Bearer "+testToken)
+	}
+
+	want := []tracker.Check{
+		// --- check-runs (first) ---
+		{Name: "build", State: tracker.CheckSuccess, RawState: "success", Summary: "Build passed", URL: "https://ci.example/build"},
+		{Name: "lint", State: tracker.CheckSuccess, RawState: "neutral", URL: "https://ci.example/lint"},
+		{Name: "docs", State: tracker.CheckSuccess, RawState: "skipped", URL: "https://ci.example/docs"},
+		{Name: "flaky", State: tracker.CheckFailure, RawState: "cancelled", URL: "https://ci.example/flaky"},
+		{Name: "slow", State: tracker.CheckFailure, RawState: "timed_out", URL: "https://ci.example/slow"},
+		{Name: "gated", State: tracker.CheckFailure, RawState: "action_required", URL: "https://ci.example/gated"},
+		{Name: "tests", State: tracker.CheckFailure, RawState: "failure", Summary: "3 failed", URL: "https://ci.example/tests"},
+		{Name: "weird", State: tracker.CheckFailure, RawState: "totally_unknown", URL: "https://ci.example/weird"},
+		{Name: "deploy", State: tracker.CheckPending, RawState: "queued", URL: "https://ci.example/deploy"},
+		{Name: "e2e", State: tracker.CheckPending, RawState: "in_progress", URL: "https://ci.example/e2e"},
+		{Name: "ci", State: tracker.CheckSuccess, RawState: "success", Summary: "all good", URL: "https://checks.example/ci"},
+		// --- statuses (second; "ci" duplicates the check-run above — no dedup) ---
+		{Name: "ci", State: tracker.CheckSuccess, RawState: "success", Summary: "external ci also ok", URL: "https://external.example/ci"},
+		{Name: "external-success", State: tracker.CheckSuccess, RawState: "success", URL: "https://external.example/success"},
+		{Name: "external-pending", State: tracker.CheckPending, RawState: "pending", URL: "https://external.example/pending"},
+		{Name: "external-error", State: tracker.CheckFailure, RawState: "error", URL: "https://external.example/error"},
+		{Name: "external-failure", State: tracker.CheckFailure, RawState: "failure", URL: "https://external.example/failure"},
+	}
+	if len(checks) != len(want) {
+		t.Fatalf("got %d checks; want %d: %+v", len(checks), len(want), checks)
+	}
+	for i := range want {
+		if checks[i] != want[i] {
+			t.Errorf("check[%d] = %+v; want %+v", i, checks[i], want[i])
+		}
+	}
+	// The two "ci" rows (index 10, the check-run; index 11, the status) both
+	// survive — the pinned no-dedup decision.
+	if checks[10].Name != "ci" || checks[11].Name != "ci" || checks[10].URL == checks[11].URL {
+		t.Fatalf("expected two distinct same-named \"ci\" rows (one per API), got %+v and %+v", checks[10], checks[11])
+	}
+}
+
+// TestChecks_zeroRows: both CI endpoints answer zero rows (the combined
+// status still reports "pending" — GitHub's own verdict, ignored) → a
+// non-nil empty slice, nil error, and the client-side aggregate is
+// ChecksNone, never trusting the forge's "pending" for a commit with nothing
+// really pending on it (the same trap the Forgejo sibling documents).
+func TestChecks_zeroRows(t *testing.T) {
+	const sha = "0000000000000000000000000000000000000a"
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == apiPrefix+"/pulls/9" && r.Method == http.MethodGet:
+			fmt.Fprintf(w, `{"number":9,"state":"open","merged_at":null,"head":{"ref":"afk/9","sha":%q}}`, sha)
+		case r.URL.Path == apiPrefix+"/commits/"+sha+"/check-runs" && r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"total_count":0,"check_runs":[]}`)
+		case r.URL.Path == apiPrefix+"/commits/"+sha+"/status" && r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"state":"pending","statuses":[]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	})
+
+	checks, err := c.Checks(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("Checks: %v", err)
+	}
+	if checks == nil {
+		t.Fatal("checks = nil; want a non-nil empty slice")
+	}
+	if len(checks) != 0 {
+		t.Fatalf("checks = %+v; want empty", checks)
+	}
+	if got := tracker.ChecksState(checks); got != tracker.ChecksNone {
+		t.Fatalf("ChecksState(checks) = %q; want %q — the forge's combined \"pending\" verdict must never be trusted", got, tracker.ChecksNone)
+	}
+}
+
+// TestChecks_notFound mirrors TestPull_notFound: an unknown pull number fails
+// on the first GET (the pull lookup) and unwraps to tracker.ErrNotFound,
+// never leaking the token.
+func TestChecks_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+	})
+
+	_, err := c.Checks(context.Background(), 999)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestChecks_rateLimited mirrors TestPull_rateLimited: a throttled call on
+// the pull lookup unwraps to tracker.ErrRateLimited like every other GitHub
+// client op.
+func TestChecks_rateLimited(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1720000000")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"API rate limit exceeded"}`)
+	})
+
+	_, err := c.Checks(context.Background(), 72)
+	if !errors.Is(err, tracker.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
 // --- CreatePull ------------------------------------------------------------
 
 func TestCreatePull(t *testing.T) {

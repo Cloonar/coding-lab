@@ -4,7 +4,10 @@
 // (D10 — it supersedes tea/gh entirely).
 //
 // Exit codes (pinned): 0 success · 1 API/HTTP error (message on stderr) ·
-// 2 usage/configuration error. No color, no spinner — output is for agents.
+// 2 usage/configuration error. The `pr checks` verb DELIBERATELY overrides
+// this (see runPRChecks): its 2 means exactly "checks are red", so every other
+// failure — usage, env, transport, API — folds into 1, and a still-pending run
+// is 3. No color, no spinner — output is for agents.
 package labctl
 
 import (
@@ -13,6 +16,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const usage = `labctl — agent-side CLI for lab
@@ -33,6 +37,8 @@ Usage:
   labctl pr view <n>                    show PR n (number, title, state, head, url, body)
   labctl pr list                        list the repo's PRs across all states (number, state, head, url)
   labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
+  labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
+                                        pending (exit 0 green/none · 2 red · 3 still pending)
   labctl --version                      print version
 
 Environment:
@@ -349,6 +355,10 @@ func runPR(args []string, env Env) int {
 			_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\t%s\n", pm.Number, pm.State, pm.URL)
 			return nil
 		})
+	case "checks":
+		// Hand-rolled env/client setup (NOT withClient) — this verb's exit
+		// contract folds env/usage errors into 1, never withClient's 2.
+		return runPRChecks(args[1:], env)
 	case "create":
 		// handled below
 	default:
@@ -405,6 +415,144 @@ func printPR(w io.Writer, pd PRDetail) {
 	_, _ = fmt.Fprintf(w, "head: %s\n", pd.Head)
 	_, _ = fmt.Fprintf(w, "url: %s\n", pd.URL)
 	_, _ = fmt.Fprintf(w, "\n%s\n", pd.Body)
+}
+
+// checksPollInterval and checksWaitCap govern `labctl pr checks --wait`. It
+// polls the aggregate CLIENT-SIDE: the agent harness blocks a foreground
+// sleep, so labctl itself does the blocking — in ONE tool call — fetching the
+// report every interval until the aggregate leaves pending or the cap elapses.
+// They are vars, not consts, so tests can shrink them to milliseconds and keep
+// the whole poll loop in sub-second wall-time.
+var (
+	checksPollInterval = 10 * time.Second
+	checksWaitCap      = 5 * time.Minute
+)
+
+// Aggregate-state words `pr checks` branches its exit code on. They mirror
+// tracker.ChecksState's vocabulary on the wire; labctl keeps its own copies so
+// the CLI stays free of the internal/tracker dependency (like client.go's wire
+// types). The aggregate is always one of these four — never recomputed here.
+const (
+	checksFailure = "failure"
+	checksPending = "pending"
+	checksSuccess = "success"
+	checksNone    = "none"
+)
+
+// runPRChecks implements `labctl pr checks <n> [--wait]` (issue #72, the
+// fix-the-red loop). Its exit codes are DELIBERATELY different from the
+// binary-wide 2=usage convention (see the package doc): 2 must mean exactly one
+// thing — the aggregate is red — so an agent can branch on it unambiguously.
+// Every other failure (usage, missing env, transport, API) folds into 1; a
+// still-pending run is 3; a green-or-none run is 0. Because a missing-env must
+// be 1 (not withClient's 2), this hand-rolls the env/client setup rather than
+// routing through withClient.
+func runPRChecks(args []string, env Env) int {
+	// --wait may sit in any position after `checks`; scan it out, then require
+	// exactly one remaining arg — a positive PR number.
+	wait := false
+	var rest []string
+	for _, a := range args {
+		if a == "--wait" {
+			wait = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	if len(rest) != 1 {
+		return checksUsage(env, "want <n> [--wait]")
+	}
+	n, err := strconv.Atoi(rest[0])
+	if err != nil || n < 1 {
+		return checksUsage(env, fmt.Sprintf("PR number %q is not a positive integer", rest[0]))
+	}
+
+	baseURL := env.Getenv("LAB_URL")
+	token := env.Getenv("LAB_TOKEN")
+	if baseURL == "" || token == "" {
+		return checksErr(env, "LAB_URL and LAB_TOKEN must be set")
+	}
+	c := &Client{BaseURL: baseURL, Token: token}
+
+	if !wait {
+		// Single-shot: fetch once, print, exit by aggregate ("still pending at
+		// exit" covers the single-shot pending case too).
+		rep, err := c.PRChecks(n)
+		if err != nil {
+			return checksErr(env, err.Error())
+		}
+		printChecks(env.Stdout, rep)
+		return checksExit(env, rep.State)
+	}
+
+	// --wait: block here (the harness blocks foreground sleep) polling until the
+	// aggregate leaves pending or the cap elapses. Print only the FINAL report,
+	// once — a per-poll dump would be stdout noise an agent has to parse past.
+	deadline := time.Now().Add(checksWaitCap)
+	for {
+		rep, err := c.PRChecks(n)
+		if err != nil {
+			return checksErr(env, err.Error())
+		}
+		if rep.State != checksPending {
+			printChecks(env.Stdout, rep)
+			return checksExit(env, rep.State)
+		}
+		// Stop if the next sleep would carry us past the cap: surface the
+		// still-pending report now and exit 3.
+		if !time.Now().Add(checksPollInterval).Before(deadline) {
+			printChecks(env.Stdout, rep)
+			return 3
+		}
+		time.Sleep(checksPollInterval)
+	}
+}
+
+// checksExit maps the server-computed aggregate to this verb's pinned exit
+// code: red → 2, still pending → 3, success or none → 0. A word outside the
+// four-word vocabulary is a malformed answer (a non-lab server, or version
+// skew), reported as an API error (exit 1) — the same loud-over-silently-green
+// rule tracker.ChecksState applies to row states; 0 must never be reachable by
+// accident.
+func checksExit(env Env, state string) int {
+	switch state {
+	case checksFailure:
+		return 2
+	case checksPending:
+		return 3
+	case checksSuccess, checksNone:
+		return 0
+	default:
+		return checksErr(env, fmt.Sprintf("unexpected aggregate state %q in the server's answer", state))
+	}
+}
+
+// checksUsage reports a `pr checks` argument error. Per this verb's pinned
+// exit contract it returns 1 — NOT the binary-wide usage code 2 — so 2 stays
+// reserved for the single meaning "checks are red". It prints usage so an
+// agent that mis-called it sees the shape.
+func checksUsage(env Env, msg string) int {
+	_, _ = fmt.Fprintf(env.Stderr, "labctl pr checks: %s\n\n%s", msg, usage)
+	return 1
+}
+
+// checksErr reports an env/transport/API failure for `pr checks` — also exit 1
+// (only a red aggregate is 2), message on stderr in the house prefix.
+func checksErr(env Env, msg string) int {
+	_, _ = fmt.Fprintf(env.Stderr, "labctl pr checks: %s\n", msg)
+	return 1
+}
+
+// printChecks renders the plain-text checks report, house style (a state line
+// then tab-lists like `pr list`): first a `state: <aggregate>` line, then one
+// tab-separated row per check in the wire column order
+// name<TAB>state<TAB>rawState<TAB>summary<TAB>url. Zero rows print only the
+// state line. Called once per invocation — never per poll (agents parse stdout).
+func printChecks(w io.Writer, rep PRChecksReport) {
+	_, _ = fmt.Fprintf(w, "state: %s\n", rep.State)
+	for _, c := range rep.Checks {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.Name, c.State, c.RawState, c.Summary, c.URL)
+	}
 }
 
 // withClient builds the Client from LAB_URL/LAB_TOKEN and runs fn. Missing

@@ -119,6 +119,7 @@ type fjComment struct {
 
 type fjPullHead struct {
 	Ref string `json:"ref"`
+	Sha string `json:"sha"`
 }
 
 type fjPull struct {
@@ -129,6 +130,25 @@ type fjPull struct {
 	Merged  bool       `json:"merged"`
 	Head    fjPullHead `json:"head"`
 	HTMLURL string     `json:"html_url"`
+}
+
+// fjCommitStatus is one row of a combined-status response's `statuses` array
+// — a single CI job/check reported against a commit (Forgejo Actions reports
+// its own job results this way).
+type fjCommitStatus struct {
+	Context     string `json:"context"`
+	State       string `json:"state"`
+	Description string `json:"description"`
+	TargetURL   string `json:"target_url"`
+}
+
+// fjCombinedStatus is the decode shape of GET
+// .../commits/{sha}/status: the forge's own aggregate State (see Checks'
+// doc comment for why it is decoded but never used) plus the per-job Statuses
+// rows that Checks actually maps.
+type fjCombinedStatus struct {
+	State    string           `json:"state"`
+	Statuses []fjCommitStatus `json:"statuses"`
 }
 
 // --- Tracker methods -------------------------------------------------------
@@ -241,6 +261,67 @@ func (c *Client) Pull(ctx context.Context, number int) (tracker.PullDetail, erro
 		return tracker.PullDetail{}, err
 	}
 	return toPullDetail(fj), nil
+}
+
+// Checks returns the CI check/status rows for pull `number`'s CURRENT head
+// commit. It resolves the head SHA AT QUERY TIME — a fresh GET of the pull
+// (the same endpoint/decode Pull uses), so a push or rebase that landed
+// moments before the read is reflected, never a memoized commit — then GETs
+// the combined-status endpoint for that SHA, where Forgejo Actions reports
+// its own job results as commit statuses (one row per job). An unknown pull
+// number fails on that first GET exactly like Pull: the statusError 404 path
+// unwraps to tracker.ErrNotFound.
+//
+// Only the endpoint's `statuses` rows are mapped; its own combined `state`
+// field is deliberately IGNORED. Forgejo reports that combined state as
+// "pending" for a commit carrying ZERO registered statuses — there is no CI
+// to be pending on — which would spin a waiting agent forever if lab trusted
+// it as the aggregate instead of computing one. tracker.ChecksState computes
+// the real aggregate client-side from the rows this method returns (see
+// checks.go); Checks' only job is decoding those rows faithfully. Zero
+// statuses is success, not an error: a non-nil empty slice.
+func (c *Client) Checks(ctx context.Context, number int) ([]tracker.Check, error) {
+	var fj fjPull
+	if err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &fj); err != nil {
+		return nil, err // 404 → tracker.ErrNotFound, same as Pull
+	}
+	statuses, err := c.fetchCommitStatuses(ctx, fj.Head.Sha)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tracker.Check, 0, len(statuses))
+	for _, s := range statuses {
+		out = append(out, toCheck(s))
+	}
+	return out, nil
+}
+
+// fetchCommitStatuses walks the combined-status endpoint's embedded
+// `statuses` array page by page, following the same page/limit and
+// paginate-until-empty convention as every list endpoint in this client (see
+// fetchPages) so a commit carrying many CI job rows is never silently
+// truncated. It cannot go through fetchPages itself: that helper decodes a
+// bare JSON array, while this endpoint's response is a single object with
+// the rows embedded under `statuses`.
+func (c *Client) fetchCommitStatuses(ctx context.Context, sha string) ([]fjCommitStatus, error) {
+	path := c.commitStatusPath(sha)
+	var all []fjCommitStatus
+	for page := 1; ; page++ {
+		if page > maxPages {
+			return nil, fmt.Errorf("forgejo GET %s: listing exceeds %d pages; refusing to silently truncate", path, maxPages)
+		}
+		q := url.Values{}
+		q.Set("page", strconv.Itoa(page))
+		q.Set("limit", strconv.Itoa(pageLimit))
+		var combined fjCombinedStatus
+		if err := c.do(ctx, http.MethodGet, path, q, nil, &combined); err != nil {
+			return nil, err
+		}
+		if len(combined.Statuses) == 0 {
+			return all, nil
+		}
+		all = append(all, combined.Statuses...)
+	}
 }
 
 // CreatePull opens a pull request from head into base and returns the created
@@ -487,6 +568,13 @@ func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
 func (c *Client) pullPath(n int) string  { return c.repoPath("/pulls/" + strconv.Itoa(n)) }
 
+// commitStatusPath is the combined-status endpoint for one commit SHA. The
+// SHA comes from the forge's own Pull response rather than operator input,
+// but it is escaped like every other path segment built from server data.
+func (c *Client) commitStatusPath(sha string) string {
+	return c.repoPath("/commits/" + url.PathEscape(sha) + "/status")
+}
+
 // --- mapping ---------------------------------------------------------------
 
 // derivePullState collapses Forgejo's (state, merged) into the three-valued
@@ -559,6 +647,32 @@ func toPullRef(fj fjPull) tracker.PullRef {
 		HeadBranch: fj.Head.Ref,
 		State:      derivePullState(fj.State, fj.Merged),
 		URL:        fj.HTMLURL,
+	}
+}
+
+// toCheck maps one Forgejo commit-status row onto lab's Check vocabulary:
+// Name from context, Summary from description, URL from target_url, and
+// RawState the forge's own state word verbatim (ADR-0011/0024 "backend's own
+// words" pattern). State normalizes onto lab's three-word vocabulary:
+// "success" -> CheckSuccess, "pending" -> CheckPending, and EVERYTHING ELSE
+// ("error", "failure", "warning", or any word this package does not
+// recognize) -> CheckFailure — a row that is not affirmatively green or still
+// running reads as red to the consumer, while RawState still carries exactly
+// what Forgejo said.
+func toCheck(s fjCommitStatus) tracker.Check {
+	state := tracker.CheckFailure
+	switch s.State {
+	case "success":
+		state = tracker.CheckSuccess
+	case "pending":
+		state = tracker.CheckPending
+	}
+	return tracker.Check{
+		Name:     s.Context,
+		State:    state,
+		RawState: s.State,
+		Summary:  s.Description,
+		URL:      s.TargetURL,
 	}
 }
 

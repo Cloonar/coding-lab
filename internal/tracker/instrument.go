@@ -22,6 +22,7 @@ const (
 	OpCreateComment     = "comment"
 	OpPulls             = "pulls"
 	OpPull              = "pull"
+	OpChecks            = "checks"
 	OpCreatePull        = "create_pull"
 	OpMergePull         = "merge_pull"
 	OpCloseIssue        = "close"
@@ -110,6 +111,12 @@ func (o *observed) Pull(ctx context.Context, number int) (PullDetail, error) {
 	pull, err := o.t.Pull(ctx, number)
 	o.report(OpPull, err)
 	return pull, err
+}
+
+func (o *observed) Checks(ctx context.Context, number int) ([]Check, error) {
+	checks, err := o.t.Checks(ctx, number)
+	o.report(OpChecks, err)
+	return checks, err
 }
 
 func (o *observed) CreatePull(ctx context.Context, head, base, title, body string) (PullRef, error) {
