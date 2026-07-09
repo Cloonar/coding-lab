@@ -38,6 +38,16 @@ function baseProviders(): Provider[] {
   ];
 }
 
+/** A second provider with its own catalogs (agent-selection tests). */
+const CODEX: Provider = {
+  id: 'codex',
+  display_name: 'Codex',
+  auth: { kind: 'api-key' },
+  models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex' }],
+  efforts: [{ value: 'medium', label: 'medium' }],
+  options: [],
+};
+
 /** Stand-in for EventSource so the authenticated App shell can mount. */
 class FakeEventSource {
   onopen: (() => void) | null = null;
@@ -152,9 +162,32 @@ function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string): vo
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-function chooseOption(el: HTMLSelectElement, value: string): void {
-  el.value = value;
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+/** The unified Select trigger button (field skin) for a form field name. */
+function selectTrigger(name: string): HTMLButtonElement {
+  const el = container.querySelector<HTMLButtonElement>(`button[name="${name}"]`);
+  if (!el) throw new Error(`missing select trigger button[name="${name}"]`);
+  return el;
+}
+
+/** The label the named Select currently shows on its trigger. */
+function selectedLabel(name: string): string {
+  return selectTrigger(name).querySelector('.select-field-label')?.textContent ?? '';
+}
+
+function optionRows(): HTMLButtonElement[] {
+  return Array.from(container.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+}
+
+/** Opens the named Select and clicks the option with the given label. */
+async function chooseFromSelect(name: string, optionLabel: string): Promise<void> {
+  selectTrigger(name).click();
+  await settle();
+  const row = optionRows().find(
+    (r) => r.querySelector('.select-option-label')?.textContent === optionLabel,
+  );
+  if (!row) throw new Error(`missing option ${JSON.stringify(optionLabel)} in ${name}`);
+  row.click();
+  await settle();
 }
 
 function toggleCheckbox(el: HTMLInputElement, checked: boolean): void {
@@ -186,13 +219,20 @@ describe('Settings AFK defaults', () => {
   it('offers an inherit entry that seeds selected and the ultracode checkbox', async () => {
     await mountSettings();
     const model = await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="spawn_model_default_afk"]'),
+      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
       'AFK defaults section',
     );
 
-    expect(model.options[0]?.value).toBe('');
-    expect(model.options[0]?.textContent).toBe('Same as default');
-    expect(model.value).toBe('');
+    // Unset seeds to the inherit entry (value ''), which titles the trigger…
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Same as default');
+    // …and sits first (and selected) in the open panel.
+    model.click();
+    await settle();
+    const rows = optionRows();
+    expect(rows[0]?.textContent).toBe('Same as default');
+    expect(rows[0]?.getAttribute('aria-selected')).toBe('true');
+    model.click(); // toggle shut again
+    await settle();
 
     const ultracode = input('spawn_options_afk.ultracode');
     expect(ultracode.type).toBe('checkbox');
@@ -205,23 +245,23 @@ describe('Settings AFK defaults', () => {
       spawn_options_afk: '{"ultracode":"true"}', // server returns a JSON string
     };
     await mountSettings();
-    const model = await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="spawn_model_default_afk"]'),
+    await waitFor(
+      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
       'AFK defaults section',
     );
 
-    expect(model.value).toBe('sonnet');
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Sonnet');
     expect(input('spawn_options_afk.ultracode').checked).toBe(true);
   });
 
   it('PATCHes an AFK model and the full declared option bag', async () => {
     await mountSettings();
-    const model = await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="spawn_model_default_afk"]'),
+    await waitFor(
+      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
       'AFK defaults section',
     );
 
-    chooseOption(model, 'sonnet');
+    await chooseFromSelect('spawn_model_default_afk', 'Sonnet');
     toggleCheckbox(input('spawn_options_afk.ultracode'), true);
     submitForm();
     await settle();
@@ -234,13 +274,13 @@ describe('Settings AFK defaults', () => {
   it('selecting inherit clears a stored AFK model back to an empty string', async () => {
     settingsOnServer = { spawn_model_default_afk: 'opus[1m]' };
     await mountSettings();
-    const model = await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="spawn_model_default_afk"]'),
+    await waitFor(
+      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
       'AFK defaults section',
     );
-    expect(model.value).toBe('opus[1m]');
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Opus (1M)');
 
-    chooseOption(model, ''); // the inherit entry
+    await chooseFromSelect('spawn_model_default_afk', 'Same as default'); // the inherit entry
     submitForm();
     await settle();
 
@@ -309,5 +349,80 @@ describe('Settings AFK seed prompt (issue #52)', () => {
     await settle();
 
     expect(patchBodies).toEqual([{ afk_prompt: '' }]);
+  });
+});
+
+// Global agent defaults (issue #66 / ADR-0030): provider_default is the ROOT
+// of the chain (no inherit entry); spawn_provider_default_afk inherits it
+// ("" = same as default); the model/effort catalogs re-resolve live against
+// the DRAFTED providers before anything is saved.
+describe('Settings agent defaults (issue #66)', () => {
+  beforeEach(() => {
+    providersOnServer = [...baseProviders(), CODEX];
+  });
+
+  it('choosing a base agent PATCHes provider_default', async () => {
+    settingsOnServer = { provider_default: 'claude-code' };
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="provider_default"]'), 'agent select');
+    expect(selectedLabel('provider_default')).toBe('Claude Code');
+
+    await chooseFromSelect('provider_default', 'Codex');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ provider_default: 'codex' }]);
+  });
+
+  it('shows the effective first provider when the store is unseeded — no inherit entry', async () => {
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="provider_default"]'), 'agent select');
+
+    // The root of the chain has nothing to inherit from: the trigger resolves
+    // to the first registered provider and the panel offers no inherit row.
+    expect(selectedLabel('provider_default')).toBe('Claude Code');
+    selectTrigger('provider_default').click();
+    await settle();
+    expect(optionRows().map((r) => r.textContent)).toEqual(['Claude Code', 'Codex']);
+  });
+
+  it('choosing an AFK agent PATCHes spawn_provider_default_afk, "" on inherit', async () => {
+    settingsOnServer = { spawn_provider_default_afk: 'codex' };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('button[name="spawn_provider_default_afk"]'),
+      'AFK agent select',
+    );
+    expect(selectedLabel('spawn_provider_default_afk')).toBe('Codex');
+
+    await chooseFromSelect('spawn_provider_default_afk', 'Same as default');
+    submitForm();
+    await settle();
+
+    // Empty is the inherit value for the AFK key — it clears back to the base.
+    expect(patchBodies).toEqual([{ spawn_provider_default_afk: '' }]);
+  });
+
+  it('re-catalogs the base model select against the drafted provider_default', async () => {
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="provider_default"]'), 'agent select');
+
+    // Before the flip: the claude-code catalog.
+    selectTrigger('spawn_model_default').click();
+    await settle();
+    let labels = optionRows().map((r) => r.textContent);
+    expect(labels).toContain('Sonnet');
+    expect(labels).not.toContain('GPT-5 Codex');
+    selectTrigger('spawn_model_default').click(); // toggle shut
+    await settle();
+
+    await chooseFromSelect('provider_default', 'Codex');
+
+    // After the flip (still unsaved): the codex catalog.
+    selectTrigger('spawn_model_default').click();
+    await settle();
+    labels = optionRows().map((r) => r.textContent);
+    expect(labels).toContain('GPT-5 Codex');
+    expect(labels).not.toContain('Sonnet');
   });
 });

@@ -40,6 +40,16 @@ function baseProviders(): Provider[] {
   ];
 }
 
+/** A second provider with its own catalogs (agent-selection tests). */
+const CODEX: Provider = {
+  id: 'codex',
+  display_name: 'Codex',
+  auth: { kind: 'api-key' },
+  models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex' }],
+  efforts: [{ value: 'medium', label: 'medium' }],
+  options: [],
+};
+
 /** Stand-in for EventSource: lets tests push SSE events into the app. */
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -78,10 +88,11 @@ function baseRepo(): Repo {
     // The verified scenario: settings opened while the clone still runs, the
     // provisional default branch not yet replaced by detection.
     default_branch: 'main',
-    provider: 'claude',
+    provider: null,
     incogni: false,
     model_default: null,
     effort_default: null,
+    afk_provider_default: null,
     afk_model_default: null,
     afk_effort_default: null,
     afk_options: null,
@@ -114,6 +125,7 @@ function jsonResponse(status: number, body: unknown) {
 
 let repoOnServer: Repo;
 let providersOnServer: Provider[];
+let settingsOnServer: Record<string, unknown>;
 let patchBodies: Record<string, unknown>[];
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
@@ -135,6 +147,11 @@ function stubApi(): void {
       }
       if (url === '/api/v1/providers' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { providers: providersOnServer }));
+      }
+      // Global settings feed the effective-provider chains the catalogs
+      // resolve against (provider_default / spawn_provider_default_afk).
+      if (url === '/api/v1/settings' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { ...settingsOnServer }));
       }
       if (url === `/api/v1/repos/${REPO_ID}` && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { ...repoOnServer }));
@@ -212,9 +229,32 @@ function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string): vo
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-function chooseOption(el: HTMLSelectElement, value: string): void {
-  el.value = value;
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+/** The unified Select trigger button (field skin) for a form field name. */
+function selectTrigger(name: string): HTMLButtonElement {
+  const el = container.querySelector<HTMLButtonElement>(`button[name="${name}"]`);
+  if (!el) throw new Error(`missing select trigger button[name="${name}"]`);
+  return el;
+}
+
+/** The label the named Select currently shows on its trigger. */
+function selectedLabel(name: string): string {
+  return selectTrigger(name).querySelector('.select-field-label')?.textContent ?? '';
+}
+
+function optionRows(): HTMLButtonElement[] {
+  return Array.from(container.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+}
+
+/** Opens the named Select and clicks the option with the given label. */
+async function chooseFromSelect(name: string, optionLabel: string): Promise<void> {
+  selectTrigger(name).click();
+  await settle();
+  const row = optionRows().find(
+    (r) => r.querySelector('.select-option-label')?.textContent === optionLabel,
+  );
+  if (!row) throw new Error(`missing option ${JSON.stringify(optionLabel)} in ${name}`);
+  row.click();
+  await settle();
 }
 
 function toggleCheckbox(el: HTMLInputElement, checked: boolean): void {
@@ -238,6 +278,7 @@ function emitRepoChanged(): void {
 beforeEach(() => {
   repoOnServer = baseRepo();
   providersOnServer = baseProviders();
+  settingsOnServer = { provider_default: 'claude-code' };
   patchBodies = [];
   stubApi();
 });
@@ -317,14 +358,20 @@ describe('RepoSettings AFK defaults', () => {
   it('renders the inherit option and the schema-driven ultracode checkbox', async () => {
     await mountSettings();
     const model = await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="afk_model_default"]'),
+      () => container.querySelector<HTMLButtonElement>('button[name="afk_model_default"]'),
       'AFK defaults section',
     );
 
-    // The inherit entry sits first with an empty value, and unset seeds to it.
-    expect(model.options[0]?.value).toBe('');
-    expect(model.options[0]?.textContent).toBe('Inherit global AFK default');
-    expect(model.value).toBe('');
+    // Unset seeds to the inherit entry (value ''), which titles the trigger…
+    expect(model.textContent).toContain('Inherit global AFK default');
+    // …and sits first (and selected) in the open panel.
+    model.click();
+    await settle();
+    const rows = optionRows();
+    expect(rows[0]?.textContent).toBe('Inherit global AFK default');
+    expect(rows[0]?.getAttribute('aria-selected')).toBe('true');
+    model.click(); // toggle shut again
+    await settle();
 
     // The ultracode bool option renders unchecked (repo afk_options is null).
     const ultracode = input('afk_options.ultracode');
@@ -354,12 +401,12 @@ describe('RepoSettings AFK defaults', () => {
 
   it('selecting an AFK model PATCHes afk_model_default only', async () => {
     await mountSettings();
-    const model = await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="afk_model_default"]'),
+    await waitFor(
+      () => container.querySelector<HTMLButtonElement>('button[name="afk_model_default"]'),
       'AFK model select',
     );
 
-    chooseOption(model, 'sonnet');
+    await chooseFromSelect('afk_model_default', 'Sonnet');
     submitForm();
     await settle();
 
@@ -423,5 +470,105 @@ describe('RepoSettings AFK seed prompt (issue #52)', () => {
     await settle();
 
     expect(patchBodies).toEqual([{ afk_prompt: null }]);
+  });
+});
+
+// Agent selection (issue #66 / ADR-0030): base + AFK provider selects with an
+// explicit inherit entry, PATCHing via the '' → null convention; the
+// model/effort catalogs re-resolve live against the DRAFTED providers; stored
+// foreign values persist ("(not in catalog)") — nothing auto-clears.
+describe('RepoSettings agent selection (issue #66)', () => {
+  beforeEach(() => {
+    providersOnServer = [...baseProviders(), CODEX];
+  });
+
+  it('choosing an agent PATCHes {provider: id}', async () => {
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="provider"]'), 'agent select');
+    expect(selectedLabel('provider')).toBe('Inherit global default');
+
+    await chooseFromSelect('provider', 'Codex');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ provider: 'codex' }]);
+    expect(repoOnServer.provider).toBe('codex');
+  });
+
+  it('choosing inherit PATCHes {provider: null}', async () => {
+    repoOnServer = { ...repoOnServer, provider: 'claude-code' };
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="provider"]'), 'agent select');
+    expect(selectedLabel('provider')).toBe('Claude Code');
+
+    await chooseFromSelect('provider', 'Inherit global default');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ provider: null }]);
+  });
+
+  it('choosing an AFK agent PATCHes {afk_provider_default: id}', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('button[name="afk_provider_default"]'),
+      'AFK agent select',
+    );
+    expect(selectedLabel('afk_provider_default')).toBe('Inherit global AFK default');
+
+    await chooseFromSelect('afk_provider_default', 'Codex');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ afk_provider_default: 'codex' }]);
+    expect(repoOnServer.afk_provider_default).toBe('codex');
+  });
+
+  it('flipping the AFK agent draft re-catalogs the AFK model select before save', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('button[name="afk_provider_default"]'),
+      'AFK agent select',
+    );
+
+    // Before the flip: the AFK model catalog is the claude-code one.
+    selectTrigger('afk_model_default').click();
+    await settle();
+    let labels = optionRows().map((r) => r.textContent);
+    expect(labels).toContain('Sonnet');
+    expect(labels).not.toContain('GPT-5 Codex');
+    selectTrigger('afk_model_default').click(); // toggle shut
+    await settle();
+
+    await chooseFromSelect('afk_provider_default', 'Codex');
+
+    // After the flip (still unsaved): the catalog is the codex one, with the
+    // inherit entry intact at the top.
+    selectTrigger('afk_model_default').click();
+    await settle();
+    labels = optionRows().map((r) => r.textContent);
+    expect(labels[0]).toBe('Inherit global AFK default');
+    expect(labels).toContain('GPT-5 Codex');
+    expect(labels).not.toContain('Sonnet');
+  });
+
+  it('keeps a stored foreign model_default marked "(not in catalog)" across a provider flip', async () => {
+    repoOnServer = { ...repoOnServer, model_default: 'weird-model' };
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="provider"]'), 'agent select');
+
+    // Foreign to the effective catalog: offered as-is, marked, never dropped.
+    expect(selectedLabel('model_default')).toBe('weird-model (not in catalog)');
+
+    await chooseFromSelect('provider', 'Codex');
+    expect(selectedLabel('model_default')).toBe('weird-model (not in catalog)');
+
+    submitForm();
+    await settle();
+
+    // The flip PATCHes ONLY the provider — the stored model_default persists
+    // (skip-layer makes it harmless at spawn; flipping back restores it).
+    expect(patchBodies).toEqual([{ provider: 'codex' }]);
+    expect(repoOnServer.model_default).toBe('weird-model');
   });
 });

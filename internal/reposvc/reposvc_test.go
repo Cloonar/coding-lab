@@ -199,8 +199,10 @@ func TestAddCloneLifecycle(t *testing.T) {
 	if repo.Name != "origin" {
 		t.Errorf("derived name = %q, want origin", repo.Name)
 	}
-	if repo.Provider != DefaultProvider {
-		t.Errorf("provider = %q, want %q", repo.Provider, DefaultProvider)
+	// Provider stays NULL at create (issue #66): inherit — no code-stamped
+	// value that would later read as an operator choice.
+	if repo.Provider != nil {
+		t.Errorf("provider = %q, want nil (inherit)", *repo.Provider)
 	}
 	if repo.TrackerBinding != store.TrackerBindingBuiltin || repo.ForgeKind != "none" {
 		t.Errorf("binding/forge_kind = %q/%q, want builtin/none", repo.TrackerBinding, repo.ForgeKind)
@@ -504,7 +506,7 @@ func TestStartupHeal(t *testing.T) {
 		r := store.Repo{
 			ID: ids.NewID("repo"), Name: name, RemoteURL: "/tmp/" + name,
 			TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
-			DefaultBranch: "main", Provider: DefaultProvider,
+			DefaultBranch:    "main",
 			AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 			CloneStatus: store.CloneStatusCloning, CreatedAt: time.Now(),
 		}
@@ -607,7 +609,7 @@ func TestStartupHealProbeIsAnchored(t *testing.T) {
 		r := store.Repo{
 			ID: ids.NewID("repo"), Name: name, RemoteURL: "/tmp/" + name,
 			TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
-			DefaultBranch: "main", Provider: DefaultProvider,
+			DefaultBranch:    "main",
 			AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 			CloneStatus: store.CloneStatusCloning, CreatedAt: time.Now(),
 		}
@@ -669,7 +671,7 @@ func TestRetryConcurrentSingleFlight(t *testing.T) {
 	failed := store.Repo{
 		ID: ids.NewID("repo"), Name: "raceable", RemoteURL: "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
-		DefaultBranch: "main", Provider: DefaultProvider,
+		DefaultBranch:    "main",
 		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusError, CloneError: ptr("first clone failed"),
 		CreatedAt: time.Now(),
@@ -724,7 +726,7 @@ func TestForceDeleteSurvivesClientDisconnect(t *testing.T) {
 	repo := store.Repo{
 		ID: ids.NewID("repo"), Name: "vanishing", RemoteURL: "/tmp/vanishing",
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none",
-		DefaultBranch: "main", Provider: DefaultProvider,
+		DefaultBranch:    "main",
 		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusCloning, CreatedAt: time.Now(),
 	}

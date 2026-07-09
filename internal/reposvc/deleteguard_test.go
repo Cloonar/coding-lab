@@ -56,7 +56,7 @@ func (g *guardEnv) readyRepo(t *testing.T) store.Repo {
 	r, err := g.st.CreateRepo(context.Background(), store.Repo{
 		ID: ids.NewID("repo"), Name: "proj", RemoteURL: "/tmp/x",
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: DefaultProvider, AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
 	})
 	if err != nil {

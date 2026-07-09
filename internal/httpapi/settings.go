@@ -156,6 +156,34 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates[key] = v
+		case store.SettingProviderDefault:
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			// The base provider default (issue #66) must always name a real
+			// provider: unlike the AFK override below there is no lower layer
+			// an empty value could inherit from (the first-registered fallback
+			// is a resolution rule, not an operator setting).
+			if v == "" || !s.providerRegistered(v) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider %q", v))
+				return
+			}
+			updates[key] = v
+		case store.SettingSpawnProviderDefaultAFK:
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			// Empty = inherit the base provider chain (issue #66), mirroring
+			// the spawn_*_default_afk keys.
+			if v != "" && !s.providerRegistered(v) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider %q", v))
+				return
+			}
+			updates[key] = v
 		case store.SettingSpawnOptionsAFK:
 			v, err := s.parseSpawnOptionsBag(raw)
 			if err != nil {
@@ -251,6 +279,18 @@ func (s *Server) spawnDefaultAllowed(value string, model bool) bool {
 		}
 	}
 	return false
+}
+
+// providerRegistered reports whether id names a registered provider (issue
+// #66). With no provider registry (an instance-less lab) there is nothing to
+// check against, so the value passes — the spawn path skip-layers over an
+// unresolvable default anyway.
+func (s *Server) providerRegistered(id string) bool {
+	if s.providers == nil {
+		return true
+	}
+	_, ok := s.providers.Get(id)
+	return ok
 }
 
 // parseSpawnOptionsBag validates the global spawn_options_afk value (issue #19 /

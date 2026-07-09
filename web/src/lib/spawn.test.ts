@@ -57,4 +57,22 @@ describe('providerFor', () => {
   it('yields null when no providers exist', () => {
     expect(providerFor([], 'claude-code')).toBeNull();
   });
+
+  it('walks candidates skip-layer: the first REGISTERED id wins', () => {
+    expect(providerFor(providers, 'other', 'claude-code')?.id).toBe('other');
+    expect(providerFor(providers, 'ghost', 'other', 'claude-code')?.id).toBe('other');
+  });
+
+  it('skips null, undefined and empty layers', () => {
+    expect(providerFor(providers, null, undefined, '', 'other')?.id).toBe('other');
+  });
+
+  it('falls back to the first provider when every layer misses', () => {
+    expect(providerFor(providers, 'ghost', null, '', undefined)?.id).toBe('claude-code');
+    expect(providerFor(providers)?.id).toBe('claude-code');
+  });
+
+  it('yields null on an empty registry regardless of candidates', () => {
+    expect(providerFor([], 'ghost', 'other', null)).toBeNull();
+  });
 });

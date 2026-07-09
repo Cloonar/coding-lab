@@ -182,6 +182,25 @@ func (f *Fake) Commands(_ context.Context, worktree string) ([]provider.CommandS
 func (f *Fake) Models() []provider.Option  { return f.models }
 func (f *Fake) Efforts() []provider.Option { return f.efforts }
 
+// SetID rebrands the fake under another provider id (issue #66: multi-provider
+// registries need a second, differently-named fake). Call before the fake is
+// registered — a registry key never changes after NewRegistry.
+func (f *Fake) SetID(id string) {
+	f.mu.Lock()
+	f.id = id
+	f.mu.Unlock()
+}
+
+// SetCatalogs replaces the model/effort catalogs (issue #66: a foreign
+// provider whose catalog does not carry the claude-shaped defaults; an empty
+// — non-nil or nil — efforts slice models a provider without that knob).
+// Call before the fake is handed to concurrent code; Models/Efforts are
+// read without locking, mirroring their construction-time contract.
+func (f *Fake) SetCatalogs(models, efforts []provider.Option) {
+	f.models = models
+	f.efforts = efforts
+}
+
 // SpawnOptions returns the declared spawn-options schema (issue #19); the New
 // fake declares claude-code's ultracode bool so resolver/UI tests have a
 // schema to validate/render against.

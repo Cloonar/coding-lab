@@ -18,6 +18,8 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
@@ -35,7 +37,9 @@ type repoTestServer struct {
 }
 
 // newRepoTestServer builds a logged-in test server with the full M2 stack:
-// vault + materializer + gitx engine + reposvc, hermetic git env.
+// vault + materializer + gitx engine + reposvc, hermetic git env. The
+// two-provider registry (claude-code + fake-b) backs the repo provider
+// validation (issue #66).
 func newRepoTestServer(t *testing.T) *repoTestServer {
 	t.Helper()
 	testutil.RequireTool(t, "git")
@@ -52,6 +56,12 @@ func newRepoTestServer(t *testing.T) *repoTestServer {
 	if err != nil {
 		t.Fatalf("NewMaterializer: %v", err)
 	}
+	second := providertest.New()
+	second.SetID("fake-b")
+	reg, err := provider.NewRegistry(providertest.New(), second)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
 
 	var svc *reposvc.Service
 	x := newTestServer(t, func(o *Options) {
@@ -64,12 +74,14 @@ func newRepoTestServer(t *testing.T) *repoTestServer {
 			Logger:       logx.New(io.Discard),
 			ReposDir:     reposDir,
 			GitEnv:       testutil.HermeticGitEnv(home),
+			Providers:    reg,
 		})
 		if err != nil {
 			t.Fatalf("reposvc.New: %v", err)
 		}
 		o.Vault = v
 		o.Repos = svc
+		o.Providers = reg
 	})
 	t.Cleanup(svc.Close)
 	x.setup("op", "password123")
@@ -173,8 +185,11 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 	if repo["name"] != "origin" {
 		t.Errorf("derived name = %v, want origin", repo["name"])
 	}
-	if repo["provider"] != "claude-code" {
-		t.Errorf("provider = %v, want claude-code", repo["provider"])
+	// Provider is NULL at create (issue #66): inherit — the effective provider
+	// resolves at spawn (global provider_default → first registered), never a
+	// code-stamped row value.
+	if repo["provider"] != nil {
+		t.Errorf("provider = %v, want null (inherit)", repo["provider"])
 	}
 	if repo["tracker_binding"] != "builtin" || repo["forge_kind"] != "none" {
 		t.Errorf("binding/kind = %v/%v, want builtin/none", repo["tracker_binding"], repo["forge_kind"])
@@ -191,7 +206,7 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		"effort_default", "git_author_name", "git_author_email", "afk_branch_pattern",
 		"manual_branch_prefix", "afk_auto_enabled", "consecutive_failures", "budget_minutes",
 		"max_instances_override", "clone_status", "clone_error", "created_at", "last_opened_at",
-		"afk_prompt", "afk_prompt_effective"} {
+		"afk_prompt", "afk_prompt_effective", "afk_provider_default"} {
 		if _, ok := repo[k]; !ok {
 			t.Errorf("repo JSON missing pinned key %q", k)
 		}
@@ -530,6 +545,75 @@ func TestRepoAFKPromptOverride(t *testing.T) {
 	inc := decodeBody(t, resp)
 	if eff, _ := inc["afk_prompt_effective"].(string); !strings.Contains(eff, "No AI attribution") {
 		t.Errorf("incogni effective = %q, want the incogni attribution sentence", inc["afk_prompt_effective"])
+	}
+}
+
+// TestRepoProviderOverride pins the issue-#66 repo surface: POST /repos takes
+// an optional provider (strict when non-empty, null/absent = inherit), PATCH
+// sets/clears provider and afk_provider_default (null or "" → NULL), and an
+// unknown id is a 400 on both routes.
+func TestRepoProviderOverride(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+
+	// POST with an unknown provider → 400, nothing created.
+	resp := x.do("POST", "/api/v1/repos", map[string]any{
+		"remote_url": origin, "name": "badprov", "provider": "ghost",
+	}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); !strings.Contains(fmt.Sprint(got["error"]), "ghost") {
+		t.Errorf("400 body = %v, want message naming the unknown provider", got["error"])
+	}
+
+	// POST with a registered provider stores it.
+	resp = x.do("POST", "/api/v1/repos", map[string]any{
+		"remote_url": origin, "name": "onb", "provider": "fake-b",
+	}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	repo := decodeBody(t, resp)
+	if repo["provider"] != "fake-b" {
+		t.Errorf("created provider = %v, want fake-b", repo["provider"])
+	}
+	if repo["afk_provider_default"] != nil {
+		t.Errorf("afk_provider_default = %v, want null", repo["afk_provider_default"])
+	}
+	id := repo["id"].(string)
+
+	// PATCH both provider knobs.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
+		"provider": "claude-code", "afk_provider_default": "fake-b",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["provider"] != "claude-code" || repo["afk_provider_default"] != "fake-b" {
+		t.Errorf("patched providers = %v/%v, want claude-code/fake-b", repo["provider"], repo["afk_provider_default"])
+	}
+
+	// Unknown ids → 400 on either knob; the row is untouched.
+	for _, patch := range []map[string]any{
+		{"provider": "ghost"},
+		{"afk_provider_default": "ghost"},
+	} {
+		resp = x.do("PATCH", "/api/v1/repos/"+id, patch, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if got := decodeBody(t, resp); got["error"] == "" {
+			t.Fatal("unknown provider PATCH 400 without error message")
+		}
+	}
+	repo = x.getRepo(t, id)
+	if repo["provider"] != "claude-code" || repo["afk_provider_default"] != "fake-b" {
+		t.Errorf("row changed by rejected PATCH: %v/%v", repo["provider"], repo["afk_provider_default"])
+	}
+
+	// null clears both back to inherit; "" clears too.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
+		"provider": nil, "afk_provider_default": "",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["provider"] != nil || repo["afk_provider_default"] != nil {
+		t.Errorf("cleared providers = %v/%v, want nulls", repo["provider"], repo["afk_provider_default"])
 	}
 }
 

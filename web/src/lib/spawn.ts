@@ -6,9 +6,21 @@
 
 import type { Provider, ProviderOption } from '../api';
 
-/** The catalog for a repo's provider; falls back to the first provider. */
-export function providerFor(providers: Provider[], providerID: string): Provider | null {
-  return providers.find((p) => p.id === providerID) ?? providers[0] ?? null;
+/**
+ * Skip-layer provider resolution (ADR-0030): the first candidate id that is a
+ * registered provider wins; unknown/null/'' layers are skipped; nothing
+ * matching falls back to the first registered provider (null when none).
+ */
+export function providerFor(
+  providers: Provider[],
+  ...candidateIds: (string | null | undefined)[]
+): Provider | null {
+  for (const id of candidateIds) {
+    if (id == null || id === '') continue;
+    const match = providers.find((p) => p.id === id);
+    if (match !== undefined) return match;
+  }
+  return providers[0] ?? null;
 }
 
 /**

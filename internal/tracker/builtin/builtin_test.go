@@ -36,7 +36,7 @@ func seedRepo(t *testing.T, s *store.Store) store.Repo {
 	r, err := s.CreateRepo(context.Background(), store.Repo{
 		ID: ids.NewID("repo"), Name: "proj-" + ids.NewID("x")[:8], RemoteURL: "/tmp/x",
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: "claude-code", AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusReady, CreatedAt: fixedNow,
 	})
 	if err != nil {

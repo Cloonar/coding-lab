@@ -20,7 +20,7 @@ import (
 func newSettingsServer(t *testing.T) *testServer {
 	t.Helper()
 	x := newTestServer(t, func(o *Options) {
-		if err := o.Store.SeedDefaultSettings(context.Background(), 6); err != nil {
+		if err := o.Store.SeedDefaultSettings(context.Background(), 6, "claude-code"); err != nil {
 			t.Fatal(err)
 		}
 		reg, err := provider.NewRegistry(providertest.New())
@@ -174,6 +174,12 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		// against the provider catalogs; the options bag validates keys + values.
 		{"afk unknown model", map[string]any{"spawn_model_default_afk": "gpt-9"}},
 		{"afk unknown effort", map[string]any{"spawn_effort_default_afk": "ultra"}},
+		// The provider defaults (issue #66): the base key must always name a
+		// registered provider (no lower operator layer to inherit from); the
+		// AFK override allows "" (inherit) but rejects an unknown id.
+		{"unknown provider", map[string]any{"provider_default": "ghost"}},
+		{"blank provider", map[string]any{"provider_default": ""}},
+		{"afk unknown provider", map[string]any{"spawn_provider_default_afk": "ghost"}},
 		{"unknown spawn option key", map[string]any{"spawn_options_afk": map[string]any{"warp_drive": "true"}}},
 		{"bad spawn option value", map[string]any{"spawn_options_afk": map[string]any{"ultracode": "maybe"}}},
 		{"spawn options not an object", map[string]any{"spawn_options_afk": "nope"}},
@@ -242,5 +248,34 @@ func TestAPI_SettingsAFKDefaultsRoundtrip(t *testing.T) {
 	wantStatus(t, resp, http.StatusOK)
 	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingSpawnOptionsAFK] != `{}` {
 		t.Errorf("empty spawn_options_afk = %v, want {}", got[store.SettingSpawnOptionsAFK])
+	}
+}
+
+// The provider default keys (issue #66): a registered id lands on both keys,
+// and the AFK override accepts "" (inherit the base chain).
+func TestAPI_SettingsProviderDefaultsRoundtrip(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingProviderDefault:         "claude-code",
+		store.SettingSpawnProviderDefaultAFK: "claude-code",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingProviderDefault] != "claude-code" {
+		t.Errorf("provider_default = %v, want claude-code", got[store.SettingProviderDefault])
+	}
+	if got[store.SettingSpawnProviderDefaultAFK] != "claude-code" {
+		t.Errorf("spawn_provider_default_afk = %v, want claude-code", got[store.SettingSpawnProviderDefaultAFK])
+	}
+
+	// Clearing the AFK override back to inherit is allowed.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingSpawnProviderDefaultAFK: "",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingSpawnProviderDefaultAFK] != "" {
+		t.Errorf("cleared spawn_provider_default_afk = %v, want empty (inherit)", got[store.SettingSpawnProviderDefaultAFK])
 	}
 }

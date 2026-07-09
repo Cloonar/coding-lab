@@ -47,6 +47,13 @@ const firstSessionName = "proj~20260608-1530"
 
 func newInstanceServer(t *testing.T) *instTestServer {
 	t.Helper()
+	return newInstanceServerWith(t)
+}
+
+// newInstanceServerWith registers extraProvs AFTER the primary claude-code
+// fake (issue #66: multi-provider registries for the provider-pick tests).
+func newInstanceServerWith(t *testing.T, extraProvs ...provider.AgentProvider) *instTestServer {
+	t.Helper()
 	testutil.RequireTool(t, "git")
 	home := t.TempDir()
 	origin := makeRepoOrigin(t, home, "main", 2)
@@ -68,7 +75,7 @@ func newInstanceServer(t *testing.T) *instTestServer {
 
 	x := newTestServer(t, func(o *Options) {
 		st := o.Store
-		if err := st.SeedDefaultSettings(context.Background(), 6); err != nil {
+		if err := st.SeedDefaultSettings(context.Background(), 6, "claude-code"); err != nil {
 			t.Fatal(err)
 		}
 		repoID := ids.NewID("repo")
@@ -80,7 +87,7 @@ func newInstanceServer(t *testing.T) *instTestServer {
 		repo, err = st.CreateRepo(context.Background(), store.Repo{
 			ID: repoID, Name: "proj", RemoteURL: "file://" + origin,
 			TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-			Provider: "claude-code", AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+			AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 			CloneStatus: store.CloneStatusReady, CreatedAt: instClock,
 		})
 		if err != nil {
@@ -94,7 +101,7 @@ func newInstanceServer(t *testing.T) *instTestServer {
 		if err != nil {
 			t.Fatal(err)
 		}
-		reg, err := provider.NewRegistry(prov)
+		reg, err := provider.NewRegistry(append([]provider.AgentProvider{prov}, extraProvs...)...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,6 +181,54 @@ func TestAPI_InstanceStartHappyPath(t *testing.T) {
 	// run.changed was published (the SSE feed's source).
 	if !sawEvent(log, "run.changed") {
 		t.Error("no run.changed event on instance start")
+	}
+}
+
+// The per-spawn provider pick (issue #66): POST /repos/{id}/instances
+// {provider} runs on the named provider with skip-layer model/effort; an
+// unknown pick is a strict 400; an absent pick inherits the repo/global chain
+// (the seeded provider_default = claude-code here).
+func TestAPI_InstanceStartProviderPick(t *testing.T) {
+	b := providertest.New()
+	b.SetID("fake-b")
+	b.SetCatalogs(
+		[]provider.Option{{Value: "b-fast", Label: "B Fast"}, {Value: "b-deep", Label: "B Deep"}},
+		[]provider.Option{},
+	)
+	x := newInstanceServerWith(t, b)
+	h := csrfHeaders(x.ts.URL)
+
+	// Unknown pick → 400, nothing spawned.
+	resp := x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances", map[string]any{"provider": "ghost"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); got["error"] == "" {
+		t.Fatal("unknown provider 400 without error message")
+	}
+
+	// Absent pick inherits: the repo has no override, the seeded global
+	// provider_default is claude-code.
+	resp = x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	if run := decodeBody(t, resp); run["provider"] != "claude-code" {
+		t.Errorf("inherited provider = %v, want claude-code", run["provider"])
+	}
+
+	// Explicit pick runs on provider B: the run row records the resolved
+	// provider and the skip-layer model/effort (B's first model, effort ""
+	// for an empty efforts catalog) even though the seeded global model
+	// default is the claude-shaped opus[1m].
+	resp = x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances",
+		map[string]any{"provider": "fake-b", "label": "on-b"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	run := decodeBody(t, resp)
+	if run["provider"] != "fake-b" {
+		t.Errorf("picked provider = %v, want fake-b", run["provider"])
+	}
+	if run["model"] != "b-fast" || run["effort"] != "" {
+		t.Errorf("model/effort = %v/%v, want b-fast/\"\" (skip-layer against B)", run["model"], run["effort"])
+	}
+	if got := len(b.SpawnSpecs()); got != 1 {
+		t.Errorf("provider B spawned %d times, want 1", got)
 	}
 }
 

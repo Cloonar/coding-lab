@@ -68,7 +68,7 @@ func newRecFixture(t *testing.T) *recFixture {
 	repo, err := st.CreateRepo(t.Context(), store.Repo{
 		ID: repoID, Name: "proj", RemoteURL: "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: "claude-code", AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: store.CloneStatusReady, CreatedAt: recClock,
 	})
 	if err != nil {

@@ -21,7 +21,7 @@ func testRepo(name string, createdAt time.Time) Repo {
 		TrackerBinding:     TrackerBindingBuiltin,
 		ForgeKind:          "forgejo",
 		DefaultBranch:      "main",
-		Provider:           "claude-code",
+		Provider:           strPtr("claude-code"),
 		AFKBranchPattern:   "afk/<N>",
 		ManualBranchPrefix: "lab/",
 		CloneStatus:        CloneStatusCloning,
@@ -366,6 +366,71 @@ func TestRepoAFKSpawnDefaultsRoundTrip(t *testing.T) {
 		if updated.AFKModelDefault != nil || updated.AFKEffortDefault != nil ||
 			updated.AFKOptions != nil || updated.AFKPrompt != nil {
 			t.Errorf("cleared AFK defaults = %+v, want all nil", updated)
+		}
+	})
+}
+
+// The nullable provider columns (issue #66): repos.provider (now an override,
+// NULL = inherit) and repos.afk_provider_default round-trip through create and
+// patch, set and clear.
+func TestRepoProviderColumnsRoundTrip(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 9, 9, 0, 0, 0, time.UTC)
+
+		// Create with both set.
+		full := testRepo("provfull", now)
+		full.Provider = strPtr("fake-b")
+		full.AFKProviderDefault = strPtr("claude-code")
+		created, err := s.CreateRepo(ctx, full)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		got, err := s.RepoByID(ctx, full.ID)
+		if err != nil {
+			t.Fatalf("by id: %v", err)
+		}
+		if !reflect.DeepEqual(got, created) {
+			t.Errorf("provider columns round trip mismatch:\n got %+v\nwant %+v", got, created)
+		}
+
+		// A minimal repo has both NULL (provider is no longer NOT NULL).
+		min := testRepo("provmin", now)
+		min.Provider = nil
+		if _, err := s.CreateRepo(ctx, min); err != nil {
+			t.Fatalf("create minimal: %v", err)
+		}
+		gotMin, err := s.RepoByID(ctx, min.ID)
+		if err != nil {
+			t.Fatalf("by id minimal: %v", err)
+		}
+		if gotMin.Provider != nil || gotMin.AFKProviderDefault != nil {
+			t.Errorf("minimal repo provider columns = %v/%v, want nil/nil", gotMin.Provider, gotMin.AFKProviderDefault)
+		}
+
+		// Patch: set both.
+		updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			Provider:           Set(strPtr("claude-code")),
+			AFKProviderDefault: Set(strPtr("fake-b")),
+		})
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if updated.Provider == nil || *updated.Provider != "claude-code" ||
+			updated.AFKProviderDefault == nil || *updated.AFKProviderDefault != "fake-b" {
+			t.Errorf("updated provider columns = %+v, want claude-code/fake-b", updated)
+		}
+
+		// Patch: clear both back to NULL (inherit).
+		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			Provider:           Set[*string](nil),
+			AFKProviderDefault: Set[*string](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		if updated.Provider != nil || updated.AFKProviderDefault != nil {
+			t.Errorf("cleared provider columns = %v/%v, want nil/nil", updated.Provider, updated.AFKProviderDefault)
 		}
 	})
 }

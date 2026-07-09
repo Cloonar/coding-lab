@@ -34,9 +34,6 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
-// DefaultProvider is the provider every repo starts with (design §3a).
-const DefaultProvider = "claude-code"
-
 // Branch-pattern defaults (design §3a): incogni repos are seeded with
 // neutral names at CREATE; a later incogni PATCH never rewrites patterns.
 const (
@@ -246,7 +243,12 @@ type AddParams struct {
 	CredentialID      *string // GIT credential: ssh_key|https_token
 	ForgeCredentialID *string // forge_token
 	TrackerBinding    string  // ""|"auto"|"forge"|"builtin"
-	Incogni           bool
+	// Provider is the repo's optional agent-CLI override (issue #66). Nil or
+	// empty = inherit (NULL — the global provider_default, then the first
+	// registered provider, resolve at spawn). A non-empty value must name a
+	// registered provider (400).
+	Provider *string
+	Incogni  bool
 }
 
 // Add validates p, creates the repo row (defaults per the pinned contract;
@@ -311,6 +313,14 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		return store.Repo{}, badRequestf("tracker_binding: must be \"auto\", %q or %q", store.TrackerBindingForge, store.TrackerBindingBuiltin)
 	}
 
+	// Provider is stored only when the operator explicitly chose one (issue
+	// #66): NULL = inherit the global default chain at spawn — no code-stamped
+	// value that would read as an operator decision later.
+	prov, err := s.validateProvider("provider", p.Provider)
+	if err != nil {
+		return store.Repo{}, err
+	}
+
 	afkPattern, manualPrefix := defaultAFKPattern, defaultManualPrefix
 	if p.Incogni {
 		afkPattern, manualPrefix = incogniAFKPattern, incogniManualPrefix
@@ -325,7 +335,7 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		TrackerBinding:     binding,
 		ForgeKind:          string(info.Kind),
 		DefaultBranch:      "main", // provisional; detection updates it at clone completion
-		Provider:           DefaultProvider,
+		Provider:           prov,
 		Incogni:            p.Incogni,
 		AFKBranchPattern:   afkPattern,
 		ManualBranchPrefix: manualPrefix,
@@ -357,6 +367,20 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 			return store.Repo{}, badRequestf("name: must not be empty after sanitization")
 		}
 		u.Name.Value = name
+	}
+	if u.Provider.Set {
+		v, err := s.validateProvider("provider", u.Provider.Value)
+		if err != nil {
+			return store.Repo{}, err
+		}
+		u.Provider.Value = v
+	}
+	if u.AFKProviderDefault.Set {
+		v, err := s.validateProvider("afk_provider_default", u.AFKProviderDefault.Value)
+		if err != nil {
+			return store.Repo{}, err
+		}
+		u.AFKProviderDefault.Value = v
 	}
 	if u.CredentialID.Set && u.CredentialID.Value != nil {
 		if err := s.checkCredentialKind(ctx, "credential_id", *u.CredentialID.Value, vault.IsGitKind, "ssh_key or https_token"); err != nil {
@@ -643,12 +667,13 @@ func (s *Service) installIncogniHook(ctx context.Context, id string) error {
 	return s.git.PinHooksPath(ctx, bareDir, s.gitEnv)
 }
 
-// incogniSeedMeta resolves the seeding metadata for repo id's provider — the
-// source of the incogni hook's scrub + seeded-path patterns (issue #51
-// decision 8). A repo names its provider (repos.provider); the registry maps
-// it to the declaration. Without a registry (the no-provider degraded boot)
-// there is nothing to resolve and the zero meta yields a content-inert guard;
-// a repo naming a provider the registry does not carry is a wiring error.
+// incogniSeedMeta resolves the seeding metadata for repo id's EFFECTIVE
+// provider — the source of the incogni hook's scrub + seeded-path patterns
+// (issue #51 decision 8). Since issue #66 repos.provider is a nullable
+// override, so the base skip-layer chain applies: repo.provider → global
+// provider_default → first registered, unregistered ids treated as unset.
+// Without a registry (the no-provider degraded boot) there is nothing to
+// resolve and the zero meta yields a content-inert guard.
 func (s *Service) incogniSeedMeta(ctx context.Context, id string) (provider.SeedMeta, error) {
 	if s.providers == nil {
 		return provider.SeedMeta{}, nil
@@ -657,9 +682,17 @@ func (s *Service) incogniSeedMeta(ctx context.Context, id string) (provider.Seed
 	if err != nil {
 		return provider.SeedMeta{}, fmt.Errorf("resolving provider for incogni hook: %w", err)
 	}
-	p, ok := s.providers.Get(repo.Provider)
+	repoProv := ""
+	if repo.Provider != nil {
+		repoProv = *repo.Provider
+	}
+	globalProv, err := s.store.GetString(ctx, store.SettingProviderDefault, "")
+	if err != nil {
+		return provider.SeedMeta{}, fmt.Errorf("resolving provider for incogni hook: %w", err)
+	}
+	p, ok := s.providers.DefaultFor(repoProv, globalProv)
 	if !ok {
-		return provider.SeedMeta{}, fmt.Errorf("repo %s names unknown provider %q", id, repo.Provider)
+		return provider.SeedMeta{}, fmt.Errorf("repo %s: no agent providers registered", id)
 	}
 	return p.SeedMeta(), nil
 }
@@ -713,6 +746,27 @@ func (s *Service) probeBareRepo(id string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return s.git.ProbeBareRepo(ctx, dir, s.gitEnv)
+}
+
+// validateProvider normalizes and validates an optional provider id (issue
+// #66): nil or empty/whitespace means inherit and normalizes to nil (NULL);
+// a non-empty id must be registered — a typo must 400, never wedge future
+// spawns. Without a registry (the no-provider degraded boot) the value passes
+// unchecked, mirroring the settings PATCH; the spawn path re-resolves anyway.
+func (s *Service) validateProvider(field string, v *string) (*string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	id := strings.TrimSpace(*v)
+	if id == "" {
+		return nil, nil
+	}
+	if s.providers != nil {
+		if _, ok := s.providers.Get(id); !ok {
+			return nil, badRequestf("%s: unknown provider %q", field, id)
+		}
+	}
+	return &id, nil
 }
 
 // checkCredentialKind enforces the design §3a credential/forge split: the

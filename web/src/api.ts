@@ -202,11 +202,13 @@ export interface Repo {
   tracker_binding: TrackerBinding;
   forge_kind: ForgeKind;
   default_branch: string;
-  provider: string;
+  /** Agent provider override (null = inherit the global provider_default). */
+  provider: string | null;
   incogni: boolean;
   model_default: string | null;
   effort_default: string | null;
   /** AFK-run overrides (null = inherit the global AFK default). */
+  afk_provider_default: string | null;
   afk_model_default: string | null;
   afk_effort_default: string | null;
   /** Provider spawn-option bag for AFK runs (null = inherit global). */
@@ -243,6 +245,8 @@ export interface CreateRepoRequest {
   forge_credential_id?: string;
   /** Omitted/"auto" → forge when a forge kind is detected, else builtin. */
   tracker_binding?: 'auto' | TrackerBinding;
+  /** Agent provider override. Omitted → inherit the global provider_default. */
+  provider?: string;
   incogni?: boolean;
 }
 
@@ -253,9 +257,12 @@ export interface RepoPatch {
   forge_credential_id?: string | null;
   tracker_binding?: TrackerBinding;
   default_branch?: string;
+  /** null clears back to the global provider_default. */
+  provider?: string | null;
   model_default?: string | null;
   effort_default?: string | null;
   /** AFK-run overrides; null or "" clears back to the global AFK default. */
+  afk_provider_default?: string | null;
   afk_model_default?: string | null;
   afk_effort_default?: string | null;
   afk_options?: Record<string, string> | null;
@@ -443,6 +450,8 @@ export interface Instance extends Run {
 
 export interface StartInstanceRequest {
   label?: string;
+  /** Per-spawn provider pick (strict: an unknown id is a 400). */
+  provider?: string;
   model?: string;
   effort?: string;
 }
@@ -728,12 +737,13 @@ export function discardParked(repoID: string, branch: string): Promise<void> {
 // --- M3: spawn defaults from settings ---
 
 export interface SpawnDefaults {
+  provider?: string;
   model?: string;
   effort?: string;
 }
 
 /**
- * Pulls the two spawn-default keys out of a GET /settings payload, tolerating
+ * Pulls the spawn-default keys out of a GET /settings payload, tolerating
  * both a flat {key: value} object and a {settings: {key: value}} envelope —
  * the settings surface is an M4 contract, M3 only peeks at it.
  */
@@ -743,6 +753,8 @@ export function extractSpawnDefaults(raw: unknown): SpawnDefaults {
   const nested = map['settings'];
   if (typeof nested === 'object' && nested !== null) map = nested as Record<string, unknown>;
   const out: SpawnDefaults = {};
+  const provider = map['provider_default'];
+  if (typeof provider === 'string' && provider !== '') out.provider = provider;
   const model = map['spawn_model_default'];
   if (typeof model === 'string' && model !== '') out.model = model;
   const effort = map['spawn_effort_default'];
@@ -1021,8 +1033,12 @@ export const INT_SETTING_KEYS = [
 ] as const;
 
 export const TEXT_SETTING_KEYS = [
+  /** Root agent-provider default (seeded); the base of every provider chain. */
+  'provider_default',
   'spawn_model_default',
   'spawn_effort_default',
+  /** AFK provider override ("" = inherit provider_default). */
+  'spawn_provider_default_afk',
   'spawn_model_default_afk',
   'spawn_effort_default_afk',
   'git_author_name',

@@ -16,7 +16,7 @@ func seedRepoForRuns(t *testing.T, st *Store) Repo {
 	r, err := st.CreateRepo(context.Background(), Repo{
 		ID: ids.NewID("repo"), Name: "proj-" + ids.NewID("x")[:8], RemoteURL: "/tmp/x",
 		TrackerBinding: TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		Provider: "claude-code", AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
 		CloneStatus: CloneStatusReady, CreatedAt: time.Now(),
 	})
 	if err != nil {

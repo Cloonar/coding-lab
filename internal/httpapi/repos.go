@@ -29,17 +29,21 @@ type repoResponse struct {
 	TrackerBinding    string  `json:"tracker_binding"`
 	ForgeKind         string  `json:"forge_kind"`
 	DefaultBranch     string  `json:"default_branch"`
-	Provider          string  `json:"provider"`
-	Incogni           bool    `json:"incogni"`
-	ModelDefault      *string `json:"model_default"`
-	EffortDefault     *string `json:"effort_default"`
-	// AFK-override spawn defaults (issue #19 / ADR-0021). Nullable: null means
-	// inherit the base default. AFKOptions renders as a JSON object (or null when
-	// unset); a nil map marshals to null (no omitempty), so the SPA always sees
-	// every key.
-	AFKModelDefault  *string           `json:"afk_model_default"`
-	AFKEffortDefault *string           `json:"afk_effort_default"`
-	AFKOptions       map[string]string `json:"afk_options"`
+	// Provider is the repo's agent-CLI override (issue #66). Nullable: null
+	// means inherit (global provider_default, then the first registered
+	// provider — resolved at spawn, never materialized here).
+	Provider      *string `json:"provider"`
+	Incogni       bool    `json:"incogni"`
+	ModelDefault  *string `json:"model_default"`
+	EffortDefault *string `json:"effort_default"`
+	// AFK-override spawn defaults (issue #19 / ADR-0021; provider issue #66).
+	// Nullable: null means inherit the base default. AFKOptions renders as a
+	// JSON object (or null when unset); a nil map marshals to null (no
+	// omitempty), so the SPA always sees every key.
+	AFKModelDefault    *string           `json:"afk_model_default"`
+	AFKEffortDefault   *string           `json:"afk_effort_default"`
+	AFKProviderDefault *string           `json:"afk_provider_default"`
+	AFKOptions         map[string]string `json:"afk_options"`
 	// AFK seed-prompt override (issue #52 / ADR-0027). AFKPrompt is the repo's
 	// own override (null = inherit). AFKPromptEffective is read-only and computed:
 	// what the repo WOULD use if its own override were empty — the global
@@ -83,6 +87,7 @@ func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
 		EffortDefault:        r.EffortDefault,
 		AFKModelDefault:      r.AFKModelDefault,
 		AFKEffortDefault:     r.AFKEffortDefault,
+		AFKProviderDefault:   r.AFKProviderDefault,
 		AFKOptions:           r.AFKOptions,
 		AFKPrompt:            r.AFKPrompt,
 		AFKPromptEffective:   afkPromptEffective,
@@ -162,6 +167,7 @@ type repoCreateRequest struct {
 	CredentialID      *string `json:"credential_id"`
 	ForgeCredentialID *string `json:"forge_credential_id"`
 	TrackerBinding    string  `json:"tracker_binding"`
+	Provider          *string `json:"provider"` // optional agent-CLI override (issue #66); null/"" = inherit
 	Incogni           bool    `json:"incogni"`
 }
 
@@ -178,6 +184,7 @@ func (s *Server) handleRepoCreate(w http.ResponseWriter, r *http.Request) {
 		CredentialID:      normalizeOptID(req.CredentialID),
 		ForgeCredentialID: normalizeOptID(req.ForgeCredentialID),
 		TrackerBinding:    req.TrackerBinding,
+		Provider:          normalizeOptID(req.Provider),
 		Incogni:           req.Incogni,
 	})
 	if err != nil {
@@ -263,6 +270,12 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			u.TrackerBinding, err = patchString(raw, key)
 		case "default_branch":
 			u.DefaultBranch, err = patchString(raw, key)
+		case "provider":
+			// null/"" clears to NULL (inherit); a non-empty id is validated
+			// against the registry in reposvc.UpdateSettings (unknown → 400).
+			u.Provider, err = patchNullableString(raw, key)
+		case "afk_provider_default":
+			u.AFKProviderDefault, err = patchNullableString(raw, key)
 		case "model_default":
 			u.ModelDefault, err = patchNullableString(raw, key)
 		case "effort_default":
