@@ -134,10 +134,15 @@ type fjPull struct {
 
 // fjCommitStatus is one row of a combined-status response's `statuses` array
 // — a single CI job/check reported against a commit (Forgejo Actions reports
-// its own job results this way).
+// its own job results this way). The row's state word arrives under the JSON
+// key `status` (swagger CommitStatus.status) — only the enclosing combined
+// object keys its aggregate as `state`. The two keys diverging on the wire is
+// exactly the trap that shipped this decoder reading `state` off the rows:
+// every row decoded as "" and normalized to failure, so an all-green run
+// reported red.
 type fjCommitStatus struct {
 	Context     string `json:"context"`
-	State       string `json:"state"`
+	State       string `json:"status"`
 	Description string `json:"description"`
 	TargetURL   string `json:"target_url"`
 }
