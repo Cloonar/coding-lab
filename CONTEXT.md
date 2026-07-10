@@ -12,6 +12,10 @@ Self-hosted orchestrator for remote coding agents: the operator adds git reposit
 A running agent session in its own worktree on its own branch, forked from freshly-fetched `origin/<default>`, identified by the tmux session name `<repo>~<label>`.
 _Avoid_: job, task, workspace, slot
 
+**Title**:
+A user-set display name on an instance, stored as nullable `runs.title`; it overrides the label-derived title everywhere the UI names the instance — chat header, runs rail, History — but never becomes identity, since branch, worktree, and tmux session name all stay keyed off the label regardless (ADR-0040).
+_Avoid_: nickname, alias, custom label, session name
+
 **AFK run**:
 An unattended instance that takes one `ready-for-agent` issue from the repo's tracker, resolves it, and opens a PR (or change request).
 _Avoid_: background job, batch run, bot run

@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,13 +55,26 @@ type Run struct {
 	EndedAt        *time.Time
 	Outcome        string
 	FailureReason  *string
+	Title          *string // user-set display overlay (issue #111); never identity
+}
+
+// DisplayName is the run's user-facing name: the title overlay when non-blank
+// (issue #111), else the immutable session name — the one title-or-label
+// fallback the push builders and the SPA share.
+func (r Run) DisplayName() string {
+	if r.Title != nil {
+		if t := strings.TrimSpace(*r.Title); t != "" {
+			return t
+		}
+	}
+	return r.SessionName
 }
 
 // runColumns is the one column list every run SELECT/INSERT uses, in the order
 // scanRun reads.
 const runColumns = `id, repo_id, kind, provider, issue_number, branch,
 	worktree_path, session_name, model, effort, deep_link_url, transcript_path,
-	started_at, budget_deadline, ended_at, outcome, failure_reason`
+	started_at, budget_deadline, ended_at, outcome, failure_reason, title`
 
 // CreateRun inserts r exactly as given (the caller has derived every field:
 // session name, branch, worktree path, resolved model/effort). Timestamps are
@@ -80,11 +94,11 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	}
 	_, err := s.db.ExecContext(ctx, s.rebind(
 		`INSERT INTO runs (`+runColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.RepoID, r.Kind, r.Provider, r.IssueNumber, r.Branch,
 		r.WorktreePath, r.SessionName, r.Model, r.Effort, r.DeepLinkURL,
 		r.TranscriptPath, fmtTime(r.StartedAt), fmtNullTime(r.BudgetDeadline),
-		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason)
+		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason, r.Title)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return Run{}, fmt.Errorf("create run %q: %w", r.SessionName, ErrNotFound)
@@ -186,6 +200,25 @@ func (s *Store) UpdateRunDeepLink(ctx context.Context, id, url string) error {
 	return nil
 }
 
+// UpdateRunTitle sets or clears a run's user-set title overlay (issue #111).
+// nil stores NULL (no override). Display only — identity (session name,
+// branch, worktree, tmux) never changes.
+func (s *Store) UpdateRunTitle(ctx context.Context, id string, title *string) error {
+	res, err := s.db.ExecContext(ctx, s.rebind(
+		`UPDATE runs SET title = ? WHERE id = ?`), title, id)
+	if err != nil {
+		return fmt.Errorf("update run %q title: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update run %q title: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update run %q title: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // RunByID returns a run by its id — any outcome, unlike RunBySession: the
 // chat surface reads ended runs' transcripts too (ADR-0016).
 func (s *Store) RunByID(ctx context.Context, id string) (Run, error) {
@@ -258,16 +291,18 @@ func scanRun(scan func(dest ...any) error) (Run, error) {
 		budget     sql.NullString
 		ended      sql.NullString
 		failure    sql.NullString
+		title      sql.NullString
 	)
 	if err := scan(&r.ID, &r.RepoID, &r.Kind, &r.Provider, &issueN, &r.Branch,
 		&r.WorktreePath, &r.SessionName, &r.Model, &r.Effort, &deepLink,
-		&transcript, &started, &budget, &ended, &r.Outcome, &failure); err != nil {
+		&transcript, &started, &budget, &ended, &r.Outcome, &failure, &title); err != nil {
 		return Run{}, err
 	}
 	r.IssueNumber = nullInt(issueN)
 	r.DeepLinkURL = nullStr(deepLink)
 	r.TranscriptPath = nullStr(transcript)
 	r.FailureReason = nullStr(failure)
+	r.Title = nullStr(title)
 
 	var err error
 	if r.StartedAt, err = parseTime(started); err != nil {

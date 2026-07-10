@@ -135,6 +135,39 @@ func TestReap_forgeBindingSaysPR(t *testing.T) {
 	}
 }
 
+// A user-set run title replaces the session name in the push title (issue
+// #111); the session-name form in the tests above is the title-unset fallback.
+func TestReap_notifyUsesTitleOverlay(t *testing.T) {
+	f := newFixture(t)
+	cap := &captureNotifier{}
+	f.svc.notify = cap.notify
+	f.trk.setReady(7)
+
+	run, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK: %v", err)
+	}
+	f.commitInWorktree(run.WorktreePath)
+	title := "Payment retries"
+	if err := f.st.UpdateRunTitle(t.Context(), run.ID, &title); err != nil {
+		t.Fatalf("UpdateRunTitle: %v", err)
+	}
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	pull := f.trk.pulls[0]
+	f.trk.setPullTitle(pull.Number, "Resolve issue 7")
+
+	f.clock.Advance(time.Minute)
+	f.svc.ReapOnce(t.Context(), f.clock.Now())
+
+	if cap.count() != 1 {
+		t.Fatalf("notifications = %d, want exactly 1", cap.count())
+	}
+	want := fmt.Sprintf("Payment retries opened change request #%d", pull.Number)
+	if got := cap.last().Title; got != want {
+		t.Errorf("Title = %q, want %q (the title overlay replaces the session name)", got, want)
+	}
+}
+
 func TestReap_notifyDetailFetchDegrades(t *testing.T) {
 	f := newFixture(t)
 	cap := &captureNotifier{}

@@ -78,6 +78,7 @@ function baseRun(): Run {
     branch: 'lab/x',
     worktree_path: '/wt/x',
     session_name: 'proj~dom-20260706-1500',
+    title: null,
     model: 'opus[1m]',
     effort: 'max',
     deep_link_url: 'https://claude.ai/code/session_1',
@@ -99,6 +100,9 @@ let replyPosts: { text: string }[];
 let replyStatus: number;
 let answerPosts: Record<string, unknown>[];
 let interruptPosts: number;
+// Inline rename PATCHes (issue #111); the stub applies them to runOnServer so
+// the onChanged refetch sees the new title like the real server round-trip.
+let titlePatches: { title: string | null }[];
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
 
@@ -151,6 +155,12 @@ function stubApi(): void {
         return Promise.resolve(jsonResponse(200, { providers: providersOnServer }));
       }
       if (url === `/api/v1/runs/${RUN_ID}` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { ...runOnServer }));
+      }
+      if (url === `/api/v1/runs/${RUN_ID}` && method === 'PATCH') {
+        const patch = JSON.parse(String(init?.body)) as { title: string | null };
+        titlePatches.push(patch);
+        runOnServer = { ...runOnServer, title: patch.title };
         return Promise.resolve(jsonResponse(200, { ...runOnServer }));
       }
       if (url.startsWith(`/api/v1/runs/${RUN_ID}/messages`) && method === 'GET') {
@@ -339,6 +349,7 @@ beforeEach(() => {
   replyStatus = 204;
   answerPosts = [];
   interruptPosts = 0;
+  titlePatches = [];
   stubApi();
 });
 
@@ -1447,6 +1458,82 @@ describe('RunChat', () => {
     );
     expect(link?.getAttribute('href')).toBe('https://claude.ai/code');
     expect(link?.getAttribute('title')).toContain('claude.ai session picker');
+  });
+
+  // --- Inline rename (issue #111) ---
+
+  it('shows a set title verbatim with the raw label · session as secondary text + tooltip', async () => {
+    runOnServer = { ...baseRun(), title: 'Fix the flaky login test' };
+    await mountChat();
+
+    const btn = container.querySelector('button.chat-title')!;
+    expect(btn.querySelector('.chat-title-text')?.textContent).toBe('Fix the flaky login test');
+    // The raw identity keeps the branch/worktree/tmux correlation visible.
+    expect(btn.querySelector('.chat-title-raw')?.textContent).toBe(
+      'dom-20260706-1500 · proj~dom-20260706-1500',
+    );
+    expect(btn.getAttribute('title')).toBe('dom-20260706-1500 · proj~dom-20260706-1500');
+  });
+
+  it('renames inline: click the title, submit → PATCH {title}, refetch shows the new name', async () => {
+    await mountChat();
+    // No title set: no secondary raw-identity text rides the generated title.
+    expect(container.querySelector('.chat-title-raw')).toBeNull();
+
+    (container.querySelector('button.chat-title') as HTMLButtonElement).click();
+    await settle();
+    const input = container.querySelector('.chat-title-input') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe(''); // seeded with run.title ?? ''
+    expect(input.placeholder).toBe('proj · dom · 15:00'); // the generated title
+
+    input.value = '  Ship it  ';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    buttonByLabel('Save title')!.click();
+    await settle();
+
+    expect(titlePatches).toEqual([{ title: 'Ship it' }]); // trimmed
+    // Back in view mode, the refetched run's title renders.
+    expect(container.querySelector('.chat-title-input')).toBeNull();
+    expect(container.querySelector('.chat-title-text')?.textContent).toBe('Ship it');
+  });
+
+  it('clears the override on empty submit, and Escape/Cancel exit without saving', async () => {
+    runOnServer = { ...baseRun(), title: 'Old name' };
+    await mountChat();
+
+    // Escape exits edit mode without a PATCH.
+    (container.querySelector('button.chat-title') as HTMLButtonElement).click();
+    await settle();
+    const input = container.querySelector('.chat-title-input') as HTMLInputElement;
+    expect(input.value).toBe('Old name');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settle();
+    expect(container.querySelector('.chat-title-input')).toBeNull();
+    expect(titlePatches).toHaveLength(0);
+
+    // Cancel exits without saving too.
+    (container.querySelector('button.chat-title') as HTMLButtonElement).click();
+    await settle();
+    buttonByLabel('Cancel rename')!.click();
+    await settle();
+    expect(container.querySelector('.chat-title-input')).toBeNull();
+    expect(titlePatches).toHaveLength(0);
+
+    // Saving empty clears (PATCH {title: null}) — that IS the reset path —
+    // and the header falls back to the generated title.
+    (container.querySelector('button.chat-title') as HTMLButtonElement).click();
+    await settle();
+    const again = container.querySelector('.chat-title-input') as HTMLInputElement;
+    again.value = '   ';
+    again.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    buttonByLabel('Save title')!.click();
+    await settle();
+    expect(titlePatches).toEqual([{ title: null }]);
+    expect(container.querySelector('.chat-title-text')?.textContent).toBe('proj · dom · 15:00');
+    expect(container.querySelector('.chat-title-raw')).toBeNull();
   });
 
   it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {

@@ -5,9 +5,15 @@ package httpapi
 // listing embeds.
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -31,6 +37,7 @@ type runResponse struct {
 	Model          string  `json:"model"`
 	Effort         string  `json:"effort"`
 	DeepLinkURL    *string `json:"deep_link_url"`
+	Title          *string `json:"title"` // user-set display overlay (issue #111)
 	StartedAt      string  `json:"started_at"`
 	BudgetDeadline *string `json:"budget_deadline"`
 	EndedAt        *string `json:"ended_at"`
@@ -51,6 +58,7 @@ func runJSON(r store.Run) runResponse {
 		Model:         r.Model,
 		Effort:        r.Effort,
 		DeepLinkURL:   r.DeepLinkURL,
+		Title:         r.Title,
 		StartedAt:     store.FormatTime(r.StartedAt),
 		Outcome:       r.Outcome,
 		FailureReason: r.FailureReason,
@@ -93,4 +101,72 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		items = append(items, runJSON(run))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": items})
+}
+
+// runTitleMaxRunes caps a run title (issue #111). Counted in runes, not bytes:
+// the title is free display text that never reaches git/tmux/paths.
+const runTitleMaxRunes = 120
+
+// runChangedPayload mirrors instance's repoScopedPayload key-for-key ("type",
+// "repoID") so a title PATCH looks like any other run mutation to the SSE
+// rails' refetch.
+type runChangedPayload struct {
+	Type   string `json:"type"`
+	RepoID string `json:"repoID"`
+}
+
+// handleRunUpdate is PATCH /api/v1/runs/{id}. The only known field is title —
+// the user-set display overlay (issue #111): a string sets it (trimmed;
+// whitespace-only clears), JSON null clears, absent leaves it untouched, and
+// identity (session name, branch, worktree, tmux) never changes. Raw JSON per
+// field keeps null and absent distinguishable, like the repos PATCH.
+func (s *Server) handleRunUpdate(w http.ResponseWriter, r *http.Request) {
+	var body map[string]json.RawMessage
+	if decodeJSON(w, r, &body) != nil {
+		return
+	}
+	var title *string
+	setTitle := false
+	for key, raw := range body {
+		switch key {
+		case "title":
+			var v *string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				writeError(w, http.StatusBadRequest, "field title must be a string or null")
+				return
+			}
+			if v != nil {
+				t := strings.TrimSpace(*v)
+				if utf8.RuneCountInString(t) > runTitleMaxRunes {
+					writeError(w, http.StatusBadRequest,
+						fmt.Sprintf("title must be at most %d characters", runTitleMaxRunes))
+					return
+				}
+				if t != "" {
+					title = &t
+				}
+			}
+			setTitle = true
+		default:
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown field %q", key))
+			return
+		}
+	}
+	id := r.PathValue("id")
+	if setTitle {
+		if err := s.store.UpdateRunTitle(r.Context(), id, title); err != nil {
+			s.writeRunError(w, "updating run", err)
+			return
+		}
+	}
+	run, err := s.store.RunByID(r.Context(), id)
+	if err != nil {
+		s.writeRunError(w, "updating run", err)
+		return
+	}
+	if setTitle {
+		s.bus.Publish(events.Event{Type: instance.EventRunChanged,
+			Payload: runChangedPayload{Type: instance.EventRunChanged, RepoID: run.RepoID}})
+	}
+	writeJSON(w, http.StatusOK, runJSON(run))
 }

@@ -99,6 +99,46 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
+// TestUpdateRunTitle pins the title overlay (issue #111): set round-trips,
+// nil clears back to NULL, an unknown id is ErrNotFound.
+func TestUpdateRunTitle(t *testing.T) {
+	st := openTestSQLite(t)
+	ctx := context.Background()
+	repo := seedRepoForRuns(t, st)
+	run, err := st.CreateRun(ctx, manualRun(repo.ID, "proj~title", "lab/title", time.Now()))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	title := "Fix the flaky reaper"
+	if err := st.UpdateRunTitle(ctx, run.ID, &title); err != nil {
+		t.Fatalf("UpdateRunTitle: %v", err)
+	}
+	got, err := st.RunByID(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+	if got.Title == nil || *got.Title != title {
+		t.Errorf("title = %v, want %q", got.Title, title)
+	}
+
+	// nil clears back to NULL, read back as nil.
+	if err := st.UpdateRunTitle(ctx, run.ID, nil); err != nil {
+		t.Fatalf("UpdateRunTitle(nil): %v", err)
+	}
+	got, err = st.RunByID(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+	if got.Title != nil {
+		t.Errorf("cleared title = %q, want nil", *got.Title)
+	}
+
+	if err := st.UpdateRunTitle(ctx, "run_missing", &title); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown id err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestRunsByRepo_newestFirstAndLimit(t *testing.T) {
 	st := openTestSQLite(t)
 	ctx := context.Background()
