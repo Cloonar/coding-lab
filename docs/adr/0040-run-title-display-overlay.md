@@ -24,7 +24,7 @@ Accepted. Establishes the title overlay (`runs.title`, the PATCH endpoint, the s
 
 ## Consequences
 
-- `migrations/{sqlite,postgres}/0008_run_title.sql`: adds nullable `runs.title`.
+- `migrations/{sqlite,postgres}/0009_run_title.sql`: adds nullable `runs.title` (shipped as 0008; renumbered when it collided with #104's `0008_repo_secrets` on main).
 - `internal/store/runs.go`: a `Title` field on the run struct plus `UpdateRunTitle`, the one write path for the column (trim/clear/cap validation lives here or in the handler that calls it).
 - `internal/httpapi`: the `PATCH /api/v1/runs/{id}` handler validates and writes the title, then emits `run.changed` over SSE so every connected view picks up the new title without a poll.
 - `web/src/lib/instanceLabel.ts`: gains the `title || label-title || branch` fallback chain, consumed by the chat header, the runs rail, and History alike — one function, three render sites.
