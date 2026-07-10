@@ -96,7 +96,13 @@ func TestRepoSecretCreateListAndNoReadback(t *testing.T) {
 			t.Errorf("create response missing %q: %v", k, zKey)
 		}
 	}
-	if len(zKey) != 5 {
+	// A freshly created secret is never exposed: both keys present, both null.
+	for _, k := range []string{"exposed_run_id", "exposed_at"} {
+		if v, ok := zKey[k]; !ok || v != nil {
+			t.Errorf("create response %q = %v (ok=%v), want present and null", k, v, ok)
+		}
+	}
+	if len(zKey) != 7 {
 		t.Errorf("create response has extra fields: %v", zKey)
 	}
 	if zKey["name"] != "Z_KEY" || zKey["description"] != "last alphabetically" {
@@ -274,4 +280,77 @@ func TestRepoSecretRotateAndDelete(t *testing.T) {
 		map[string]any{"value": "x"}, csrfHeaders(x.ts.URL))
 	wantStatus(t, resp, http.StatusUnauthorized)
 	_ = resp.Body.Close()
+}
+
+// TestRepoSecretExposureSurfacesAndClears exercises the read-side of issue
+// #108's exposure flag through the LIST endpoint: store.MarkRepoSecretExposed
+// is the tailer's write path (out of scope here — arranged directly against
+// the store), but the settings page only ever learns about it by listing.
+func TestRepoSecretExposureSurfacesAndClears(t *testing.T) {
+	x, _ := newRepoSecretsTestServer(t)
+	repo := seedTrackerRepo(t, x, "proj", nil)
+	h := csrfHeaders(x.ts.URL)
+	base := "/api/v1/repos/" + repo.ID + "/secrets"
+
+	resp := x.do("POST", base, map[string]any{"name": "LEAKY", "value": testSecretValue}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	leaky := decodeBody(t, resp)
+	resp = x.do("POST", base, map[string]any{"name": "SAFE", "value": "other-val"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+
+	// Mark LEAKY exposed by a run's transcript (the tailer's write path —
+	// exposed_run_id carries no FK, so an arbitrary run id is fine here).
+	exposedAt := time.Date(2026, 7, 10, 13, 0, 0, 0, time.UTC)
+	flipped, err := x.st.MarkRepoSecretExposed(context.Background(), repo.ID, "LEAKY", "run_leaker", exposedAt)
+	if err != nil {
+		t.Fatalf("MarkRepoSecretExposed: %v", err)
+	}
+	if !flipped {
+		t.Fatal("MarkRepoSecretExposed did not flip unset -> exposed")
+	}
+
+	// List: LEAKY carries exposed_run_id + exposed_at; SAFE carries null for both.
+	resp = x.do("GET", base, nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	list := secretsOf(t, decodeBody(t, resp))
+	byName := make(map[string]map[string]any, len(list))
+	for _, item := range list {
+		byName[item["name"].(string)] = item
+	}
+	if got := byName["LEAKY"]["exposed_run_id"]; got != "run_leaker" {
+		t.Errorf("LEAKY exposed_run_id = %v, want run_leaker", got)
+	}
+	if got := byName["LEAKY"]["exposed_at"]; got != store.FormatTime(exposedAt) {
+		t.Errorf("LEAKY exposed_at = %v, want %v", got, store.FormatTime(exposedAt))
+	}
+	for _, k := range []string{"exposed_run_id", "exposed_at"} {
+		if v, ok := byName["SAFE"][k]; !ok || v != nil {
+			t.Errorf("SAFE %q = %v (ok=%v), want present and null", k, v, ok)
+		}
+	}
+
+	// Rotate LEAKY -> the exposure flag clears (RotateRepoSecret's job), and
+	// the NEXT list reflects it: both fields back to null.
+	resp = x.do("PATCH", base+"/"+leaky["id"].(string), map[string]any{"value": "rotated-" + testSecretValue}, h)
+	wantStatus(t, resp, http.StatusOK)
+	rotated := decodeBody(t, resp)
+	for _, k := range []string{"exposed_run_id", "exposed_at"} {
+		if v, ok := rotated[k]; !ok || v != nil {
+			t.Errorf("rotate response %q = %v (ok=%v), want present and null", k, v, ok)
+		}
+	}
+
+	resp = x.do("GET", base, nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	list = secretsOf(t, decodeBody(t, resp))
+	for _, item := range list {
+		if item["name"] != "LEAKY" {
+			continue
+		}
+		for _, k := range []string{"exposed_run_id", "exposed_at"} {
+			if v, ok := item[k]; !ok || v != nil {
+				t.Errorf("post-rotate list LEAKY %q = %v (ok=%v), want present and null", k, v, ok)
+			}
+		}
+	}
 }

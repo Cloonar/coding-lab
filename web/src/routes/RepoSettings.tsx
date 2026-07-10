@@ -881,6 +881,25 @@ function SecretRow(props: {
         <p class="muted card-sub">{props.secret.description}</p>
       </Show>
       <p class="muted card-sub">Updated {secretUpdatedOn(props.secret.updated_at)}</p>
+      {/* The sticky exposure warning (issue #108): exposed_run_id/exposed_at
+          are both null until a run's transcript surfaces the value, then both
+          set until the next rotate clears them — the refetch after a
+          successful rotate (props.onChanged, wired above) is what makes this
+          disappear, no separate clear-exposure call needed. */}
+      <Show when={props.secret.exposed_run_id}>
+        {(runID) => (
+          <p class="secret-exposed">
+            <span class="chip exposed">Exposed</span>{' '}
+            <span>
+              Exposed in run <A href={`/runs/${runID()}`}>{runID()}</A>
+              <Show when={props.secret.exposed_at}>
+                {(exposedAt) => <> · {secretUpdatedOn(exposedAt())}</>}
+              </Show>{' '}
+              — rotate to clear.
+            </span>
+          </p>
+        )}
+      </Show>
       <Show when={rotating()}>
         {/* Rotation: the field starts blank by construction — the old value is
             never fetched, so there is nothing to prefill. */}

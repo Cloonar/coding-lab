@@ -37,6 +37,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
+	"git.cloonar.com/Cloonar/coding-lab/internal/secrets"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -329,6 +330,13 @@ func run() int {
 			Notify: func(n chat.Notification) {
 				pushSender.Broadcast(push.Payload{Title: n.Title, Body: n.Body, Tag: n.Tag, Route: n.Route})
 			},
+			// Transcript exposure detection (issue #108): a closure over the
+			// secrets source so chat builds per-repo redactors without ever
+			// touching the vault or an encrypted blob itself. The vault always
+			// exists here (main bails before this point when vault.New fails),
+			// so the seam is wired unconditionally; a repo with no secrets
+			// still short-circuits inside the Source (nil redactor).
+			Secrets: (&secrets.Source{Values: st.AllRepoSecretValues, Decrypt: vlt.Decrypt}).Redactor,
 		})
 		if err != nil {
 			logger.Error("building chat service", "component", "main", "err", err)

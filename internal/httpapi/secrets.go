@@ -20,15 +20,27 @@ import (
 const repoSecretGrammarMessage = "name: must match ^[A-Z][A-Z0-9_]*$"
 
 // repoSecretJSON is the metadata shape every secret response answers with —
-// NEVER the value (design §12: no secret readback).
+// NEVER the value (design §12: no secret readback). exposed_run_id/exposed_at
+// mirror store.RepoSecret's sticky exposure flag (issue #108): both null
+// means never exposed since creation or the last rotation; both set is the
+// settings-page exposure warning's source. Like created_at/updated_at, the
+// keys are always present and render JSON null rather than being omitted, so
+// the SPA never has to distinguish "absent" from "not exposed".
 func repoSecretJSON(rs store.RepoSecret) map[string]any {
-	return map[string]any{
-		"id":          rs.ID,
-		"name":        rs.Name,
-		"description": rs.Description,
-		"created_at":  store.FormatTime(rs.CreatedAt),
-		"updated_at":  store.FormatTime(rs.UpdatedAt),
+	m := map[string]any{
+		"id":             rs.ID,
+		"name":           rs.Name,
+		"description":    rs.Description,
+		"created_at":     store.FormatTime(rs.CreatedAt),
+		"updated_at":     store.FormatTime(rs.UpdatedAt),
+		"exposed_run_id": rs.ExposedRunID,
+		"exposed_at":     nil,
 	}
+	if rs.ExposedAt != nil {
+		exposedAt := store.FormatTime(*rs.ExposedAt)
+		m["exposed_at"] = exposedAt
+	}
+	return m
 }
 
 // handleRepoSecretList is GET /api/v1/repos/{id}/secrets.

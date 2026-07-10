@@ -34,14 +34,25 @@ const (
 )
 
 // handleRunGet is GET /api/v1/runs/{id}: one run (any outcome) — the chat
-// header's source. 404 for an unknown id.
+// header's source. 404 for an unknown id. Unlike the runs-list and title-PATCH
+// handlers, this one also enriches the response with exposed_secrets (issue
+// #108): the chat header is the only surface that needs to warn "this run's
+// transcript leaked a secret", so the lookup happens exactly here rather than
+// inside the shared runJSON, keeping list pages N+1-free.
 func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.writeRunError(w, "getting run", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, runJSON(run))
+	exposed, err := s.store.ExposedSecretNamesForRun(r.Context(), run.ID)
+	if err != nil {
+		s.writeRunError(w, "getting run", err)
+		return
+	}
+	resp := runJSON(run)
+	resp.ExposedSecrets = exposed
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type messagesResponse struct {
