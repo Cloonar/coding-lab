@@ -1912,6 +1912,78 @@ a.chip.cr-count:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Inline rename (issue #111): the title is a click-to-edit <button> in view
+   mode and a compact <form> in edit mode — both wear .chat-title so the
+   header's flex sizing (mobile grower / desktop 40% cap) applies unchanged. */
+button.chat-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.chat-title:hover {
+  background: none;
+}
+/* Flex children ellipsize themselves (the container's clip can't reach them). */
+.chat-title-text,
+.chat-title-raw {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The raw `label · session` identity beside a set title — muted, secondary,
+   keeping the branch/worktree/tmux correlation visible. */
+.chat-title-raw {
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+/* The pencil fades in on hover/focus as the edit affordance; the whole title
+   is the button, so touch (no hover) loses nothing. */
+.chat-title-pencil {
+  flex: none;
+  align-self: center;
+  color: var(--muted);
+  opacity: 0;
+}
+button.chat-title:hover .chat-title-pencil,
+button.chat-title:focus-visible .chat-title-pencil {
+  opacity: 1;
+}
+/* Edit mode: input + save/cancel in the title's slot. 36px controls — the
+   header's 44px back button still sets the row height, so both modes measure
+   the same. */
+.chat-title-form {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  overflow: visible; /* don't clip the input's focus outline */
+}
+.chat-title-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 16px; /* no iOS zoom */
+  min-height: 36px;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+}
+.chat-title-form .icon-btn {
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0.35rem;
+}
 /* OpenAffordance is icon-only inside the chat header (both breakpoints). */
 .chat-header .action-label {
   display: none;

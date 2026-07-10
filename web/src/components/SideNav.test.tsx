@@ -40,6 +40,7 @@ function instance(overrides: Partial<Instance>): Instance {
     branch: 'lab/x',
     worktree_path: '/wt/x',
     session_name: 'proj~dom-20260706-1500',
+    title: null,
     model: 'opus[1m]',
     effort: 'max',
     deep_link_url: null,
@@ -179,6 +180,17 @@ describe('SideNav ACTIVE list', () => {
     );
     // No live badge (idle) → no trailing state word.
     expect(byHref('/runs/run_plain').getAttribute('aria-label')).toBe('b · 15:01 — proj');
+  });
+
+  it('shows a user-set title alone in the row and its accessible name (issue #111)', async () => {
+    mount([
+      instance({ id: 'run_titled', session_name: 'proj~a-20260706-1500', title: 'Fix the tests' }),
+    ]);
+    await settle();
+    const row = railRows()[0]!;
+    expect(row.querySelector('.rail-row-title')?.textContent).toBe('Fix the tests');
+    expect(row.textContent).not.toContain('15:00'); // the title ALONE, no raw label
+    expect(row.getAttribute('aria-label')).toBe('Fix the tests — proj');
   });
 
   it('shows the AFK budget countdown on the secondary line, and only for AFK rows', async () => {

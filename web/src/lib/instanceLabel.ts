@@ -53,3 +53,19 @@ export function instanceTitle(label: string): string {
   if (hhmm === '') return label;
   return user === '' ? hhmm : `${user} · ${hhmm}`;
 }
+
+/**
+ * Displayed run name (issue #111): a user-set title always wins (a pure
+ * display overlay, never touching identity); otherwise the parsed session
+ * label, else the branch. Structural parameter so callers pass any Run-shaped
+ * object without coupling this module to the API types.
+ */
+export function runDisplayTitle(run: {
+  title: string | null;
+  session_name: string;
+  branch: string;
+}): string {
+  const custom = run.title?.trim() ?? '';
+  if (custom !== '') return custom;
+  return instanceTitle(sessionLabel(run.session_name)) || run.branch;
+}

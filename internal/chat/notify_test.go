@@ -181,6 +181,25 @@ func TestNotifyGate_payloadFields(t *testing.T) {
 	}
 }
 
+// 8b. A user-set run title replaces the session name in the push title (issue
+// #111); a blank overlay falls back — test 8 above is the title-unset case.
+func TestNotifyGate_titleOverlayInTitle(t *testing.T) {
+	run := gateRun()
+	title := "Payment retries"
+	run.Title = &title
+	g := newNotifyGate(time.Now, 2*time.Second, run)
+	if got := g.buildPayload(chatOf(provider.StateNeedsInput)).Title; got != "Payment retries needs input" {
+		t.Errorf("Title = %q; want the title overlay", got)
+	}
+
+	blank := "   "
+	run.Title = &blank
+	g = newNotifyGate(time.Now, 2*time.Second, run)
+	if got := g.buildPayload(chatOf(provider.StateNeedsInput)).Title; got != "proj~afk-12 needs input" {
+		t.Errorf("Title = %q; want the session-name fallback for a blank overlay", got)
+	}
+}
+
 // 9. Body precedence and rune-safe truncation.
 func TestNotifyGate_bodyPrecedenceAndTruncation(t *testing.T) {
 	g := newNotifyGate(time.Now, 2*time.Second, gateRun())

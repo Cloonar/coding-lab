@@ -38,6 +38,7 @@ import {
   listProviders,
   replyRun,
   stopInstance,
+  updateRun,
   type ChatMessage,
   type ConversationState,
   type Dialog,
@@ -719,15 +720,58 @@ function ChatHeader(props: {
 }) {
   const [confirming, setConfirming] = createSignal(false);
   const [stopping, setStopping] = createSignal(false);
+  // Inline rename (issue #111): the title is click-to-edit. A user-set title
+  // is a pure display overlay — identity (session/branch/worktree/tmux) never
+  // changes — always available, live or finished.
+  const [titleMode, setTitleMode] = createSignal<'view' | 'edit'>('view');
+  const [titleDraft, setTitleDraft] = createSignal('');
+  const [titleSaving, setTitleSaving] = createSignal(false);
+  const customTitle = () => props.run?.title?.trim() ?? '';
   // "repo · label" — the session name is `<repo>~<label>` and the label alone
   // is ambiguous across repos.
-  const title = () => {
+  const generatedTitle = () => {
     const r = props.run;
     if (r === undefined) return 'Chat';
     const repo = sessionRepo(r.session_name);
     const label = instanceTitle(sessionLabel(r.session_name));
     if (label === '') return r.branch;
     return repo === '' ? label : `${repo} · ${label}`;
+  };
+  const title = () => (customTitle() === '' ? generatedTitle() : customTitle());
+  // Beside a set title, `label · session` keeps the branch/worktree/tmux
+  // correlation visible (the session name IS that identity).
+  const rawIdentity = () => {
+    const r = props.run;
+    if (r === undefined || customTitle() === '') return null;
+    return `${sessionLabel(r.session_name)} · ${r.session_name}`;
+  };
+  const startRename = () => {
+    const r = props.run;
+    if (r === undefined) return;
+    setTitleDraft(r.title ?? '');
+    setTitleMode('edit');
+  };
+  const saveTitle = (event: SubmitEvent) => {
+    event.preventDefault();
+    const r = props.run;
+    if (r === undefined) return;
+    // Empty-after-trim clears the override — reverting to the generated title
+    // IS the reset path; the server stores null.
+    const value = titleDraft().trim();
+    setTitleSaving(true);
+    void (async () => {
+      try {
+        await updateRun(r.id, { title: value === '' ? null : value });
+        setTitleMode('view');
+        props.onChanged();
+      } catch (err) {
+        // Errors ride the page banner via onError, like Stop/Interrupt — the
+        // single-row header has no room for inline error text.
+        props.onError(errorMessage(err));
+      } finally {
+        setTitleSaving(false);
+      }
+    })();
   };
   const badge = () => stateBadge(props.state);
   const live = () => props.run !== undefined && props.run.outcome === 'active';
@@ -786,7 +830,62 @@ function ChatHeader(props: {
       <A href="/" class="crumb chat-back icon-btn" aria-label="Back to home" title="Back to home">
         <Icon name="arrow-left" />
       </A>
-      <span class="chat-title">{title()}</span>
+      {/* View: a click-to-edit button (issue #111) — the set title verbatim
+          with the raw `label · session` identity beside it (and as tooltip),
+          or today's generated "repo · label" when no title is set. The pencil
+          fades in on hover/focus as the edit affordance. */}
+      <Switch>
+        <Match when={titleMode() === 'view'}>
+          <button
+            type="button"
+            class="chat-title"
+            title={rawIdentity() ?? 'Rename this instance'}
+            aria-label={`Rename: ${title()}`}
+            onClick={startRename}
+          >
+            <span class="chat-title-text">{title()}</span>
+            <Show when={rawIdentity()}>{(raw) => <span class="chat-title-raw">{raw()}</span>}</Show>
+            <Icon name="pencil" size={13} class="chat-title-pencil" />
+          </button>
+        </Match>
+        <Match when={titleMode() === 'edit'}>
+          <form class="chat-title chat-title-form" onSubmit={saveTitle}>
+            <input
+              type="text"
+              class="chat-title-input"
+              value={titleDraft()}
+              placeholder={generatedTitle()}
+              maxlength={120}
+              aria-label="Instance title"
+              onInput={(e) => setTitleDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setTitleMode('view');
+              }}
+              // Refs run before insertion; defer the focus until mounted.
+              ref={(el) => setTimeout(() => el.focus())}
+            />
+            <button
+              type="submit"
+              class="icon-btn accent chat-title-save"
+              aria-label="Save title"
+              title="Save title (empty reverts to the generated title)"
+              disabled={titleSaving()}
+            >
+              <Icon name="check" />
+            </button>
+            <button
+              type="button"
+              class="icon-btn chat-title-cancel"
+              aria-label="Cancel rename"
+              title="Cancel"
+              disabled={titleSaving()}
+              onClick={() => setTitleMode('view')}
+            >
+              <Icon name="x" />
+            </button>
+          </form>
+        </Match>
+      </Switch>
 
       {/* <640px: the convo chip distilled to a colored dot beside the title. A
           labeled graphic (role=img), not a live region — an aria-label swap

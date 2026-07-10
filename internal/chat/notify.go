@@ -107,14 +107,15 @@ func (g *notifyGate) due() (Notification, bool) {
 	return Notification{}, false
 }
 
-// buildPayload snapshots a Notification from the run and the fresh chat. Title,
-// Tag, and Route are pure run identity (SessionName is already the <repo>~<label>
-// string — no store lookup); Route is a PWA-internal path the service worker
-// navigates to, never a forge URL. Body follows the issue #99 precedence and is
-// truncated rune-safely.
+// buildPayload snapshots a Notification from the run and the fresh chat. Title
+// leads with the run's display name — the title overlay when set, else the
+// session name (issue #111, the same fallback the SPA renders); Tag and Route
+// are pure run identity, no store lookup; Route is a PWA-internal path the
+// service worker navigates to, never a forge URL. Body follows the issue #99
+// precedence and is truncated rune-safely.
 func (g *notifyGate) buildPayload(chat provider.Chat) Notification {
 	return Notification{
-		Title: g.run.SessionName + " needs input",
+		Title: g.run.DisplayName() + " needs input",
 		Body:  truncateRunes(notifyBody(chat), notifyBodyLimit),
 		Tag:   g.run.ID,
 		Route: "/runs/" + g.run.ID,

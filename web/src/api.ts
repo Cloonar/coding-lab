@@ -437,6 +437,8 @@ export interface Run {
   branch: string;
   worktree_path: string;
   session_name: string;
+  /** User-set display title (issue #111); null = no override. */
+  title: string | null;
   model: string;
   effort: string;
   deep_link_url: string | null;
@@ -506,6 +508,16 @@ export async function listRuns(opts: { repo?: string; limit?: number } = {}): Pr
 
 export function getRun(id: string): Promise<Run> {
   return request<Run>('GET', `/runs/${encodeURIComponent(id)}`);
+}
+
+export interface RunPatch {
+  /** Display title override (issue #111); null (or empty after trim) clears it. */
+  title?: string | null;
+}
+
+/** 200 with the full updated run; the server trims and rejects >120 chars. */
+export function updateRun(id: string, patch: RunPatch): Promise<Run> {
+  return request<Run>('PATCH', `/runs/${encodeURIComponent(id)}`, patch);
 }
 
 // --- Embedded chat (issue #7 / ADR-0016) ---

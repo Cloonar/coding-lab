@@ -106,6 +106,9 @@ function HistoryView() {
 
 function RunCard(props: { run: Run }) {
   const title = () => {
+    // A user-set title wins over everything (issue #111 rename overlay).
+    const custom = props.run.title?.trim() ?? '';
+    if (custom !== '') return custom;
     // AFK runs title from the persisted issue number (restart-proof); the
     // session label is the fallback for both AFK and manual runs.
     if (props.run.kind !== 'manual' && props.run.issue_number !== null) {

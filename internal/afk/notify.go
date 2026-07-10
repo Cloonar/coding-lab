@@ -33,7 +33,9 @@ type Notification struct {
 // heavier Pull detail call; a fetch error or an empty title degrades the body
 // to the bare "<noun> #<n>" form and warns — the send still fires and the reap
 // is never affected (every tracker REST call is already bounded at 30s per
-// request, so no extra timeout is layered on). Tag is the run ID so this
+// request, so no extra timeout is layered on). Title leads with the run's
+// display name — the title overlay when set, else the session name (issue
+// #111, the same fallback the SPA renders). Tag is the run ID so this
 // replaces the same run's needs-input item on the lock screen; Route is the
 // run's PWA-internal chat path, never the forge URL.
 func (s *Service) doneNotification(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, pull tracker.PullRef) Notification {
@@ -50,7 +52,7 @@ func (s *Service) doneNotification(ctx context.Context, trk tracker.Tracker, rep
 		s.log.Warn("afk notify: pull detail", "component", "afk", "run", run.ID, "pull", pull.Number, "reason", "empty title")
 	}
 	return Notification{
-		Title: fmt.Sprintf("%s opened %s #%d", run.SessionName, noun, pull.Number),
+		Title: fmt.Sprintf("%s opened %s #%d", run.DisplayName(), noun, pull.Number),
 		Body:  body,
 		Tag:   run.ID,
 		Route: "/runs/" + run.ID,

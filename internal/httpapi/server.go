@@ -312,6 +312,7 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("POST /api/v1/repos/{id}/stop-all", s.requireAuth(s.handleStopAll))
 		api.HandleFunc("GET /api/v1/runs", s.requireAuth(s.handleRunsList))
 		api.HandleFunc("GET /api/v1/runs/{id}", s.requireAuth(s.handleRunGet))
+		api.HandleFunc("PATCH /api/v1/runs/{id}", s.requireAuth(s.handleRunUpdate))
 	}
 
 	// Embedded chat (issue #7): the transcript read + reply/answer/interrupt

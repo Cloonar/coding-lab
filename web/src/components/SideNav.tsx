@@ -13,7 +13,7 @@ import { useAuth } from '../auth';
 import { useEvents } from '../events';
 import { budgetRemaining, parseAFKLabel } from '../lib/afk';
 import { stateBadge } from '../lib/conversation';
-import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
+import { runDisplayTitle, sessionLabel } from '../lib/instanceLabel';
 import { orderRail } from '../lib/railOrder';
 import ErrorBanner from './ErrorBanner';
 import Icon from './Icon';
@@ -154,8 +154,8 @@ export default function SideNav(props: {
 
 function RailRow(props: { instance: Instance; now: number; onNavigate?: () => void }) {
   const state = () => props.instance.state;
-  const title = () =>
-    instanceTitle(sessionLabel(props.instance.session_name)) || props.instance.branch;
+  // A user-set title wins over the parsed label (issue #111 rename overlay).
+  const title = () => runDisplayTitle(props.instance);
   const badge = () => stateBadge(state());
   // AFK rows keep their budget countdown (re-homed from the old InstanceList):
   // the deadline is the run's only time pressure and lives nowhere else.

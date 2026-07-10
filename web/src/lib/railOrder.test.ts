@@ -16,6 +16,7 @@ function inst(id: string, state: ConversationState, startedAt: string): Instance
     branch: `lab/${id}`,
     worktree_path: `/wt/${id}`,
     session_name: `proj~${id}`,
+    title: null,
     model: 'opus[1m]',
     effort: 'max',
     deep_link_url: null,

@@ -2,7 +2,13 @@
 // are the behavioral contract — do not trim or "improve" them.
 
 import { describe, expect, it } from 'vitest';
-import { instanceTitle, parseManualLabel, sessionLabel, sessionRepo } from './instanceLabel';
+import {
+  instanceTitle,
+  parseManualLabel,
+  runDisplayTitle,
+  sessionLabel,
+  sessionRepo,
+} from './instanceLabel';
 
 describe('sessionLabel (parseSessionName label part, first-~ split)', () => {
   const rows: [string, string][] = [
@@ -71,6 +77,23 @@ describe("instanceTitle ('label · 15:30' rendering like v0)", () => {
   for (const [label, want] of rows) {
     it(`${JSON.stringify(label)} → ${JSON.stringify(want)}`, () => {
       expect(instanceTitle(label)).toBe(want);
+    });
+  }
+});
+
+describe('runDisplayTitle (issue #111: user title → parsed label → branch)', () => {
+  const rows: [string | null, string, string][] = [
+    ['Fix the flaky login test', 'proj~afk-7', 'Fix the flaky login test'], // a set title always wins
+    ['  padded  ', 'proj~afk-7', 'padded'], // trimmed for display
+    ['   ', 'proj~afk-7', 'AFK #7'], // whitespace-only = no override
+    [null, 'proj~debug-20260608-1530', 'debug · 15:30'], // parseable label renders parsed
+    [null, 'proj~afk-feature', 'afk-feature'], // unparseable label verbatim
+    [null, 'proj', 'lab/x'], // empty label = legacy bare name → branch
+  ];
+
+  for (const [title, sessionName, want] of rows) {
+    it(`title=${JSON.stringify(title)} session=${JSON.stringify(sessionName)} → ${JSON.stringify(want)}`, () => {
+      expect(runDisplayTitle({ title, session_name: sessionName, branch: 'lab/x' })).toBe(want);
     });
   }
 });
