@@ -432,13 +432,13 @@ func TestForRunRescopesAndScans(t *testing.T) {
 	if len(rescoped.comments) != 1 || rescoped.comments[0] != (commentCall{5, "all clear"}) {
 		t.Errorf("rescoped inner comments = %+v", rescoped.comments)
 	}
-	if len(sc.recTracker.comments) != 0 {
-		t.Errorf("base (non-rescoped) inner got the comment: %+v", sc.recTracker.comments)
+	if len(sc.comments) != 0 {
+		t.Errorf("base (non-rescoped) inner got the comment: %+v", sc.comments)
 	}
 
 	// Dirty write on the rescoped scanner still blocks, inner untouched.
 	err := scoped.CreateComment(context.Background(), 5, "leak s3cr3t-deploy-value")
-	blockedErr(t, err)
+	_ = blockedErr(t, err)
 	if len(rescoped.comments) != 1 {
 		t.Errorf("rescoped inner got a blocked write: %+v", rescoped.comments)
 	}
@@ -460,7 +460,7 @@ func TestForRunWithoutRunScoperStillScans(t *testing.T) {
 	scoped := rs.ForRun("run_abc")
 
 	err := scoped.CreateComment(context.Background(), 1, "leak s3cr3t-deploy-value")
-	blockedErr(t, err)
+	_ = blockedErr(t, err)
 	if len(rec.comments) != 0 {
 		t.Errorf("inner got a blocked write: %+v", rec.comments)
 	}
