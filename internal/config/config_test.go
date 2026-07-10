@@ -22,6 +22,7 @@ func TestParse(t *testing.T) {
 		StateDir:        "/home/u/.local/state/lab",
 		DB:              "sqlite:/home/u/.local/state/lab/lab.db",
 		MasterKeyFile:   "/home/u/.local/state/lab/master.key",
+		VAPIDKeyFile:    "/home/u/.local/state/lab/vapid.key",
 		ProviderBin:     map[string]string{},
 		ProviderConfig:  map[string]string{},
 		TmuxBin:         "tmux",
@@ -79,21 +80,23 @@ func TestParse(t *testing.T) {
 			want: with(func(c *Config) { c.Addr = ":7000" }),
 		},
 		{
-			name: "state dir env moves db and master key defaults",
+			name: "state dir env moves db, master key, and vapid key defaults",
 			env:  map[string]string{"LAB_STATE_DIR": "/srv/lab"},
 			want: with(func(c *Config) {
 				c.StateDir = "/srv/lab"
 				c.DB = "sqlite:/srv/lab/lab.db"
 				c.MasterKeyFile = "/srv/lab/master.key"
+				c.VAPIDKeyFile = "/srv/lab/vapid.key"
 			}),
 		},
 		{
-			name: "state dir flag moves db and master key defaults",
+			name: "state dir flag moves db, master key, and vapid key defaults",
 			args: []string{"--state-dir", "/var/lib/lab"},
 			want: with(func(c *Config) {
 				c.StateDir = "/var/lib/lab"
 				c.DB = "sqlite:/var/lib/lab/lab.db"
 				c.MasterKeyFile = "/var/lib/lab/master.key"
+				c.VAPIDKeyFile = "/var/lib/lab/vapid.key"
 			}),
 		},
 		{
@@ -104,6 +107,7 @@ func TestParse(t *testing.T) {
 				c.StateDir = "/var/lib/lab"
 				c.DB = "postgres://lab@db/lab"
 				c.MasterKeyFile = "/var/lib/lab/master.key"
+				c.VAPIDKeyFile = "/var/lib/lab/vapid.key"
 			}),
 		},
 		{
@@ -117,6 +121,17 @@ func TestParse(t *testing.T) {
 			args: []string{"--master-key-file", "/run/creds/master.key"},
 			env:  map[string]string{"LAB_MASTER_KEY_FILE": "/elsewhere/master.key"},
 			want: with(func(c *Config) { c.MasterKeyFile = "/run/creds/master.key" }),
+		},
+		{
+			name: "vapid key file env override",
+			env:  map[string]string{"LAB_VAPID_KEY_FILE": "/elsewhere/vapid.key"},
+			want: with(func(c *Config) { c.VAPIDKeyFile = "/elsewhere/vapid.key" }),
+		},
+		{
+			name: "vapid key file flag beats env",
+			args: []string{"--vapid-key-file", "/run/creds/vapid.key"},
+			env:  map[string]string{"LAB_VAPID_KEY_FILE": "/elsewhere/vapid.key"},
+			want: with(func(c *Config) { c.VAPIDKeyFile = "/run/creds/vapid.key" }),
 		},
 		{
 			name: "binary path overrides",
@@ -382,6 +397,7 @@ func TestParse(t *testing.T) {
 				c.StateDir = "/srv/lab"
 				c.DB = "sqlite:/srv/lab/lab.db"
 				c.MasterKeyFile = "/srv/lab/master.key"
+				c.VAPIDKeyFile = "/srv/lab/vapid.key"
 			}),
 		},
 	}

@@ -128,6 +128,16 @@ _Avoid_: stealth mode, anonymous mode
 The 32-byte key (64 hex chars in a 0600 file, path configurable for sops-nix/LoadCredential) that encrypts credentials at rest with AES-256-GCM.
 _Avoid_: password, keyring, vault key file synonyms
 
+**VAPID key**:
+The P-256 keypair (64 hex chars in a 0600 file, path configurable) that signs the VAPID JWT (RFC 8292) authenticating lab to a browser's push service. Carries the **master key**'s file contract verbatim — auto-generated on first start, refuses loose permissions or malformed content, never overwritten — but is a separate key: it signs Web Push sends, it never touches vault-encrypted credentials. Rotating or deleting it strands every **push subscription**.
+_Avoid_: push key, notification key, subscription key
+
+### Notifications
+
+**Push subscription**:
+A device's Web Push registration — endpoint URL plus the browser's `p256dh`/`auth` keys — stored one row per device, not per user: it survives logout, is never vault-encrypted (unlike a credential), and is removed only explicitly (Settings → Notifications → Remove) or by the sender reaping it after a gateway 404/410. Enabling one is a user-gesture action from the settings page, never scripted or pre-provisioned.
+_Avoid_: device token, registration, push token
+
 ## Relationships
 
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
@@ -141,6 +151,7 @@ _Avoid_: password, keyring, vault key file synonyms
 - Every AFK run receives one **run token**; every spawn (manual or AFK) seeds the **skills bundle** and `CLAUDE.local.md`.
 - The **master key** encrypts every credential; a repo's git credential reaches sessions via `GIT_SSH_COMMAND`/`GIT_ASKPASS`, its forge token never does.
 - On a `forge`-bound repo the done-signal is a PR; on a `builtin`-bound repo it is a **change request** — one contract, one reaper.
+- The **VAPID key** signs every send to a **push subscription**; unlike the **master key**, it never touches the vault — a subscription is device-level trust, not a stored credential, and rotating the **VAPID key** strands every **push subscription** until each device re-enables.
 
 ## Example dialogue
 

@@ -24,6 +24,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/push"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -79,6 +80,10 @@ type Options struct {
 	// endpoint falls back to the raw ready count).
 	AFK *afk.Service
 
+	// Push is the Web Push sender (issue #98): the VAPID public key and
+	// subscription CRUD/test routes. Nil leaves the /push routes unmounted.
+	Push *push.Sender
+
 	// Git + ReposDir back the change-request surface (M6): the CR detail
 	// diff runs against <ReposDir>/<repoID>.git. Both nil/empty leaves the
 	// /crs read routes unmounted. Materializer supplies the per-op credential
@@ -130,6 +135,7 @@ type Server struct {
 	providers *provider.Registry
 	tracker   *tracker.Registry
 	afk       *afk.Service
+	push      *push.Sender
 	git       *gitx.Engine
 	mat       *vault.Materializer
 	reposDir  string
@@ -217,6 +223,7 @@ func New(o Options) (*Server, error) {
 		providers:     o.Providers,
 		tracker:       o.Tracker,
 		afk:           o.AFK,
+		push:          o.Push,
 		git:           o.Git,
 		mat:           o.Materializer,
 		reposDir:      o.ReposDir,
@@ -370,6 +377,17 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("DELETE /api/v1/tokens/{id}", s.requireAuth(s.handleTokenDelete))
 	api.HandleFunc("GET /api/v1/settings", s.requireAuth(s.handleSettingsGet))
 	api.HandleFunc("PATCH /api/v1/settings", s.requireAuth(s.handleSettingsPatch))
+
+	// Web Push (issue #98): the VAPID public key plus subscription CRUD/test
+	// (operator auth; CSRF guards the mutations). Mounted only when the
+	// sender was built.
+	if s.push != nil {
+		api.HandleFunc("GET /api/v1/push/key", s.requireAuth(s.handlePushKey))
+		api.HandleFunc("GET /api/v1/push/subscriptions", s.requireAuth(s.handlePushSubscriptionList))
+		api.HandleFunc("POST /api/v1/push/subscriptions", s.requireAuth(s.handlePushSubscriptionCreate))
+		api.HandleFunc("DELETE /api/v1/push/subscriptions/{id}", s.requireAuth(s.handlePushSubscriptionDelete))
+		api.HandleFunc("POST /api/v1/push/subscriptions/{id}/test", s.requireAuth(s.handlePushSubscriptionTest))
+	}
 
 	// Unknown API paths get JSON 404s, not the SPA shell.
 	api.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {

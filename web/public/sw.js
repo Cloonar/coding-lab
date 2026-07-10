@@ -144,3 +144,54 @@ self.addEventListener('fetch', (event) => {
     })(),
   );
 });
+
+// Web Push (issue #98). The payload is JSON {title, body, tag, route}; `route`
+// is a PWA-internal path (e.g. "/runs/abc") the click handler navigates to.
+//
+// WHY we always show a notification, even for absent or malformed data: iOS
+// Safari revokes the push subscription of a service worker that receives a
+// push without showing one, so a garbage payload still shows a minimal notice
+// rather than silently losing the device's subscription.
+self.addEventListener('push', (event) => {
+  let payload = {};
+  try {
+    if (event.data) payload = event.data.json();
+  } catch {
+    // Non-JSON / truncated body — fall through to the minimal fallback below.
+    payload = {};
+  }
+  const title = typeof payload.title === 'string' && payload.title !== '' ? payload.title : 'lab';
+  const options = { body: typeof payload.body === 'string' ? payload.body : '' };
+  // A tag coalesces notifications per run on the lock screen — pass it only
+  // when non-empty; an empty tag would collapse unrelated notifications into
+  // one and drop all but the last.
+  if (typeof payload.tag === 'string' && payload.tag !== '') options.tag = payload.tag;
+  // data.route is the only channel to the notificationclick handler (the
+  // Notification survives the SW being killed and respawned between the two).
+  options.data = { route: typeof payload.route === 'string' ? payload.route : '/' };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// A tapped notification focuses the existing app window (navigated to the
+// payload route) or opens a new one — so a push is a one-tap deep link.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const route = event.notification.data?.route || '/';
+  event.waitUntil(
+    (async () => {
+      const windowClients = await self.clients.matchAll({
+        type: 'window',
+        includeUncontrolled: true,
+      });
+      const client = windowClients[0];
+      if (client) {
+        // Guard both: navigate() rejects on a cross-origin or dead client, and
+        // we still want to focus whatever window we have if navigate fails.
+        await client.navigate(route).catch(() => {});
+        await client.focus().catch(() => {});
+        return;
+      }
+      await self.clients.openWindow(route);
+    })(),
+  );
+});
