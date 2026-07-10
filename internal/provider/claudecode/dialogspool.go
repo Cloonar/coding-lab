@@ -155,10 +155,15 @@ func shellSingleQuote(s string) string {
 // spooledTool is the PreToolUse payload subset the mapper needs (compat §9).
 // tool_input is the exact structured input the mapper also reads from a
 // transcript tool_use block, so dialogFromToolUse handles both sources.
+// session_id/transcript_path identify the session the dialog was captured
+// against — the rotation-staleness key (a /clear or /rewind starts a new
+// sessionId, so a spool naming the old one is stale).
 type spooledTool struct {
-	ToolName  string          `json:"tool_name"`
-	ToolUseID string          `json:"tool_use_id"`
-	ToolInput json.RawMessage `json:"tool_input"`
+	SessionID      string          `json:"session_id"`
+	TranscriptPath string          `json:"transcript_path"`
+	ToolName       string          `json:"tool_name"`
+	ToolUseID      string          `json:"tool_use_id"`
+	ToolInput      json.RawMessage `json:"tool_input"`
 }
 
 // DialogFromHookPayload maps a raw PreToolUse hook payload to a Dialog, the
@@ -189,6 +194,10 @@ func (p *Provider) PendingDialog(runID, dir, transcriptPath string) (provider.Di
 	if err != nil {
 		return provider.Dialog{}, false
 	}
+	var st spooledTool
+	if json.Unmarshal(b, &st) != nil {
+		return provider.Dialog{}, false
+	}
 	d, ok := DialogFromHookPayload(b)
 	if !ok {
 		return provider.Dialog{}, false
@@ -199,20 +208,46 @@ func (p *Provider) PendingDialog(runID, dir, transcriptPath string) (provider.Di
 	if transcriptPath != "" && d.ToolID != "" && toolIDInTranscript(transcriptPath, d.ToolID) {
 		return provider.Dialog{}, false
 	}
-	// Staleness backstop (issue #34), OR'd with the tool-id check above and
-	// mirroring BlockedState's guard: a spool older than the current transcript
-	// is stale. During a genuine pending dialog the transcript stays byte-frozen
-	// (compat §5) while the spool is written after it, so the spool is always
-	// newer and the dialog still shows; this only fires when the transcript
-	// ROTATED (a /clear or /rewind re-pointed the run at a fresh, newer file) —
-	// the old file's spool must not keep the composer locked against the new
-	// session.
+	// Rotation staleness (issue #34): a spool captured against a rotated-out
+	// session (a /clear or /rewind started a new sessionId → new file) must not
+	// keep the composer locked against the fresh session. Keyed to the SESSION
+	// IDENTITY the hook payload names, never to file mtimes: the transcript is
+	// NOT byte-frozen during a pending window — Claude Code appends
+	// queue-operation/attachment entries live when the operator queues a message
+	// while the picker is up (compat §5) — so an mtime comparison hides a
+	// genuinely pending dialog. A payload with no session identity (not a shape
+	// 2.1.198 emits) degrades to the old mtime backstop rather than never
+	// going stale.
 	if transcriptPath != "" {
-		if ti, err := os.Stat(transcriptPath); err == nil && ti.ModTime().After(si.ModTime()) {
+		if sid := spoolSessionID(st); sid != "" {
+			if sid != transcriptSessionID(transcriptPath) {
+				return provider.Dialog{}, false
+			}
+		} else if ti, err := os.Stat(transcriptPath); err == nil && ti.ModTime().After(si.ModTime()) {
 			return provider.Dialog{}, false
 		}
 	}
 	return d, true
+}
+
+// spoolSessionID is the session identity a PreToolUse payload was captured
+// against: session_id when present, else the transcript_path's stem. "" when
+// the payload carries neither.
+func spoolSessionID(s spooledTool) string {
+	if s.SessionID != "" {
+		return s.SessionID
+	}
+	return transcriptSessionID(s.TranscriptPath)
+}
+
+// transcriptSessionID extracts the sessionId from a transcript path — the
+// filename stem (<sessionId>.jsonl, compat §5). "" in → "" out.
+func transcriptSessionID(path string) string {
+	if path == "" {
+		return ""
+	}
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // spooledNotification is the Notification payload subset the marker carries.
