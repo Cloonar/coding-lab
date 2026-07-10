@@ -50,7 +50,8 @@ Usage:
   labctl secret list                    list the repo's secrets (name, description; never values)
   labctl secret exec <NAME...> -- <cmd> [args...]
                                         run cmd with each named secret injected as $NAME in its
-                                        env (values fetched at exec time; child's exit code passes through)
+                                        env (values fetched at exec time; child's exit code passes through);
+                                        child output is redacted — injected values appear as [REDACTED:NAME]
   labctl secret scan <rev-arg>...       scan the outgoing diff (git log -p over the given revisions)
                                         for secret values; findings or ANY failure exit 1 (fail closed)
   labctl --version                      print version

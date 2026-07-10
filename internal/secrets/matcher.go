@@ -13,12 +13,12 @@
 //
 // Feed may be handed the stream chopped into chunks at arbitrary positions —
 // down to one byte at a time — and still reports exactly the same matches, at
-// the same absolute End offsets, as a single Feed over the whole stream. It
-// achieves this by carrying over the last (maxPatternLen-1) bytes between
-// calls and reporting a match only when its end offset falls inside the
-// newly-fed chunk. An occurrence is therefore reported exactly once, no matter
-// where the chunk boundaries land, and no occurrence spanning a boundary is
-// lost.
+// the same absolute [Start, End) offsets, as a single Feed over the whole
+// stream. It achieves this by carrying over the last (maxPatternLen-1) bytes
+// between calls and reporting a match only when its end offset falls inside
+// the newly-fed chunk. An occurrence is therefore reported exactly once, at
+// chunking-invariant offsets, no matter where the chunk boundaries land, and
+// no occurrence spanning a boundary is lost.
 //
 // A Matcher is not safe for concurrent use: serialise Feed and Reset calls.
 // The compiled patterns are immutable after NewMatcher and may be reused
@@ -46,9 +46,10 @@ const (
 
 // Match reports one detected occurrence of a secret in the stream.
 type Match struct {
-	Name string // secret name as given to NewMatcher
-	Form Form
-	End  int64 // absolute stream offset just past the last byte of the match
+	Name  string // secret name as given to NewMatcher
+	Form  Form
+	Start int64 // absolute stream offset of the first byte of the match
+	End   int64 // absolute stream offset just past the last byte of the match
 }
 
 // pattern is one derived byte sequence to search for, tagged with the secret
@@ -156,7 +157,8 @@ func derive(v string) []derived {
 
 // Feed scans the next chunk. It returns every match whose final byte lies in
 // this chunk, including matches spanning previous chunk boundaries, in
-// ascending End order. Safe to call with empty or 1-byte chunks; an empty
+// ascending End order. Start and End are absolute stream offsets and both are
+// chunking-invariant. Safe to call with empty or 1-byte chunks; an empty
 // chunk is a no-op returning nil.
 func (m *Matcher) Feed(chunk []byte) []Match {
 	if len(chunk) == 0 {
@@ -186,9 +188,10 @@ func (m *Matcher) Feed(chunk []byte) []Match {
 				break
 			}
 			start := from + idx
-			end := base + int64(start) + int64(len(p.bytes))
+			absStart := base + int64(start)
+			end := absStart + int64(len(p.bytes))
 			if end > threshold {
-				matches = append(matches, Match{Name: p.name, Form: p.form, End: end})
+				matches = append(matches, Match{Name: p.name, Form: p.form, Start: absStart, End: end})
 			}
 			from = start + 1 // advance by one so overlapping occurrences are found
 		}

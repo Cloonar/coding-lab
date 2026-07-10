@@ -36,8 +36,9 @@ func b64rawurl(s string) string { return base64.RawURLEncoding.EncodeToString([]
 func hexLower(s string) string  { return hex.EncodeToString([]byte(s)) }
 func hexUpper(s string) string  { return strings.ToUpper(hex.EncodeToString([]byte(s))) }
 
-// key renders a match into a stable comparable string.
-func key(m Match) string { return fmt.Sprintf("%s|%s|%d", m.Name, m.Form, m.End) }
+// key renders a match into a stable comparable string. It covers the full
+// struct, Start included, so the chunking-invariance sweeps pin Start too.
+func key(m Match) string { return fmt.Sprintf("%s|%s|%d|%d", m.Name, m.Form, m.Start, m.End) }
 
 func keys(ms []Match) []string {
 	out := make([]string, len(ms))
@@ -48,13 +49,13 @@ func keys(ms []Match) []string {
 	return out
 }
 
-func mustSingle(t *testing.T, got []Match, wantName string, wantForm Form, wantEnd int64) {
+func mustSingle(t *testing.T, got []Match, wantName string, wantForm Form, wantStart, wantEnd int64) {
 	t.Helper()
 	if len(got) != 1 {
 		t.Fatalf("want exactly 1 match, got %d: %+v", len(got), got)
 	}
-	if got[0].Name != wantName || got[0].Form != wantForm || got[0].End != wantEnd {
-		t.Fatalf("match = %+v, want {Name:%q Form:%q End:%d}", got[0], wantName, wantForm, wantEnd)
+	if got[0] != (Match{Name: wantName, Form: wantForm, Start: wantStart, End: wantEnd}) {
+		t.Fatalf("match = %+v, want {Name:%q Form:%q Start:%d End:%d}", got[0], wantName, wantForm, wantStart, wantEnd)
 	}
 }
 
@@ -78,7 +79,8 @@ func TestFeed_EachForm(t *testing.T) {
 	const prefix = "log[ "
 	const suffix = " ]end"
 
-	// Forms that do not nest inside one another: exactly one match expected.
+	// Forms that do not nest inside one another: exactly one match expected,
+	// with Start pinned to the byte after the prefix (== End - len(pattern)).
 	single := []struct {
 		name string
 		enc  string
@@ -95,7 +97,10 @@ func TestFeed_EachForm(t *testing.T) {
 			m.Reset()
 			stream := []byte(prefix + tc.enc + suffix)
 			got := m.Feed(stream)
-			mustSingle(t, got, "api", tc.form, int64(len(prefix)+len(tc.enc)))
+			mustSingle(t, got, "api", tc.form, int64(len(prefix)), int64(len(prefix)+len(tc.enc)))
+			if got[0].Start != got[0].End-int64(len(tc.enc)) {
+				t.Fatalf("Start = %d, want End-len(pattern) = %d", got[0].Start, got[0].End-int64(len(tc.enc)))
+			}
 		})
 	}
 
@@ -116,7 +121,7 @@ func TestFeed_EachForm(t *testing.T) {
 			m.Reset()
 			stream := []byte(prefix + tc.enc + suffix)
 			got := m.Feed(stream)
-			mustContain(t, got, Match{Name: "api", Form: FormBase64, End: int64(len(prefix) + len(tc.enc))})
+			mustContain(t, got, Match{Name: "api", Form: FormBase64, Start: int64(len(prefix)), End: int64(len(prefix) + len(tc.enc))})
 		})
 	}
 }
@@ -131,7 +136,7 @@ func TestFeed_URLEncodedActuallyChanges(t *testing.T) {
 	m := NewMatcher(map[string]string{"tok": v})
 	enc := url.QueryEscape(v)
 	got := m.Feed([]byte("x=" + enc + "&y"))
-	mustSingle(t, got, "tok", FormURLEncoded, int64(2+len(enc)))
+	mustSingle(t, got, "tok", FormURLEncoded, 2, int64(2+len(enc)))
 }
 
 // --- 2. chunk-boundary sweep -----------------------------------------------
@@ -203,7 +208,7 @@ func TestFeed_NoDoubleReportAtBoundary(t *testing.T) {
 	boundary := len(prefix) + len(v) // split exactly where the match ends
 
 	first := m.Feed(stream[:boundary])
-	mustSingle(t, first, "s", FormExact, int64(boundary))
+	mustSingle(t, first, "s", FormExact, int64(len(prefix)), int64(boundary))
 
 	second := m.Feed(stream[boundary:])
 	if len(second) != 0 {
@@ -225,6 +230,10 @@ func TestFeed_TwoOccurrencesOneChunk(t *testing.T) {
 	want2 := int64(1 + len(v) + 3 + len(v))
 	if got[0].End != want1 || got[1].End != want2 {
 		t.Fatalf("ends = %d,%d want %d,%d", got[0].End, got[1].End, want1, want2)
+	}
+	// Start is always End minus the pattern length, per occurrence.
+	if got[0].Start != want1-int64(len(v)) || got[1].Start != want2-int64(len(v)) {
+		t.Fatalf("starts = %d,%d want %d,%d", got[0].Start, got[1].Start, want1-int64(len(v)), want2-int64(len(v)))
 	}
 	if got[0].End >= got[1].End {
 		t.Fatalf("matches not in ascending End order: %+v", got)
@@ -259,7 +268,7 @@ func TestFeed_AlphanumericIsExactOnly(t *testing.T) {
 
 	// The plaintext (== its own url-encoding) reports once, as FormExact.
 	got := m.Feed([]byte("--" + v + "--"))
-	mustSingle(t, got, "k", FormExact, int64(2+len(v)))
+	mustSingle(t, got, "k", FormExact, 2, int64(2+len(v)))
 	for _, mm := range got {
 		if mm.Form == FormURLEncoded {
 			t.Fatalf("alphanumeric value reported as urlencoded: %+v", got)
@@ -285,7 +294,7 @@ func TestReset_ClearsCarryAndOffset(t *testing.T) {
 	// Offsets restart at 0 after Reset.
 	m.Reset()
 	got := m.Feed([]byte("SECRET"))
-	mustSingle(t, got, "s", FormExact, int64(len(v)))
+	mustSingle(t, got, "s", FormExact, 0, int64(len(v)))
 }
 
 // --- 7. empty value / empty map / empty chunk ------------------------------
@@ -318,7 +327,7 @@ func TestEmptyChunkIsNoOp(t *testing.T) {
 	m.Feed([]byte("x"))
 	m.Feed(nil)
 	got := m.Feed([]byte("y"))
-	mustSingle(t, got, "s", FormExact, 2)
+	mustSingle(t, got, "s", FormExact, 0, 2)
 }
 
 // --- 8. base64 of value embedded in a larger base64 document ---------------
@@ -334,6 +343,6 @@ func TestFeed_Base64WithinBase64Doc(t *testing.T) {
 	got := m.Feed([]byte(doc))
 
 	// The embedded (padded) encoding must be found as a FormBase64 match
-	// ending just past it.
-	mustContain(t, got, Match{Name: "pw", Form: FormBase64, End: int64(len(lead) + len(inner))})
+	// starting right after the lead-in and ending just past it.
+	mustContain(t, got, Match{Name: "pw", Form: FormBase64, Start: int64(len(lead)), End: int64(len(lead) + len(inner))})
 }
