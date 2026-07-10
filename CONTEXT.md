@@ -138,6 +138,10 @@ _Avoid_: push key, notification key, subscription key
 A device's Web Push registration — endpoint URL plus the browser's `p256dh`/`auth` keys — stored one row per device, not per user: it survives logout, is never vault-encrypted (unlike a credential), and is removed only explicitly (Settings → Notifications → Remove) or by the sender reaping it after a gateway 404/410. Enabling one is a user-gesture action from the settings page, never scripted or pre-provisioned.
 _Avoid_: device token, registration, push token
 
+**Needs-input trigger**:
+The edge-triggered push fired when a run's **conversational state** settles into `needs_input`/`question` for the flap-debounce window (~2s) — an injected seam at the chat tailer's transition edge, never a bus subscriber (the bus drops events for a slow subscriber by design; a dropped event may not cost a notification). One send per episode, tag = run ID so a newer question replaces the stale lock-screen item, route is the run's PWA-internal chat path. Re-adopting a run already awaiting the operator deliberately re-fires; a run ending fires nothing. No periodic re-reminders.
+_Avoid_: reminder, alert, nag, bus subscriber
+
 ## Relationships
 
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
@@ -152,6 +156,7 @@ _Avoid_: device token, registration, push token
 - The **master key** encrypts every credential; a repo's git credential reaches sessions via `GIT_SSH_COMMAND`/`GIT_ASKPASS`, its forge token never does.
 - On a `forge`-bound repo the done-signal is a PR; on a `builtin`-bound repo it is a **change request** — one contract, one reaper.
 - The **VAPID key** signs every send to a **push subscription**; unlike the **master key**, it never touches the vault — a subscription is device-level trust, not a stored credential, and rotating the **VAPID key** strands every **push subscription** until each device re-enables.
+- The **needs-input trigger** rides the tailer's **conversational state** edge and broadcasts to every **push subscription** — device targeting, re-reminders, and escalation are all non-features in the v1 model.
 
 ## Example dialogue
 

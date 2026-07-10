@@ -315,6 +315,13 @@ func run() int {
 			Logger:     logger,
 			Ctx:        ctx,
 			RuntimeDir: mat.Dir(),
+			// Web push on the needs-input/question edge (issue #99): a closure
+			// over the push sender so chat never imports push. Broadcast is
+			// async/fire-and-forget, so the tailer's tick loop never blocks on
+			// gateway I/O.
+			Notify: func(n chat.Notification) {
+				pushSender.Broadcast(push.Payload{Title: n.Title, Body: n.Body, Tag: n.Tag, Route: n.Route})
+			},
 		})
 		if err != nil {
 			logger.Error("building chat service", "component", "main", "err", err)

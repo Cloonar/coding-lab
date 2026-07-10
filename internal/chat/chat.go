@@ -86,6 +86,17 @@ type Options struct {
 	Ctx context.Context
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
+
+	// Notify, when non-nil, receives one Notification when a run's conversational
+	// state settles into needs_input/question (edge-triggered with a flap
+	// debounce; ~2s). The tailer invokes it synchronously on its tick loop, so it
+	// must never block — push.Sender.Broadcast (async, fire-and-forget) satisfies
+	// this. Injected by cmd/lab as a closure over the push sender so chat never
+	// imports push. Nil → the trigger is absent (no other behavior change).
+	Notify func(Notification)
+	// NotifyDebounce overrides the flap-debounce window; 0 → the 2s default.
+	// Tests shrink it to drive the loop-level path quickly.
+	NotifyDebounce time.Duration
 }
 
 // defaultPoll is the tailer's file-change poll cadence. It doubles as the
@@ -103,6 +114,11 @@ type Service struct {
 	ctx        context.Context
 	now        func() time.Time
 	runtimeDir string
+
+	// notify is the injected push seam (issue #99), nil when cmd/lab wired none;
+	// notifyDebounce is the gate's flap-debounce window.
+	notify         func(Notification)
+	notifyDebounce time.Duration
 
 	tailers *tailerSet
 
@@ -162,6 +178,10 @@ func New(o Options) (*Service, error) {
 	if now == nil {
 		now = time.Now
 	}
+	notifyDebounce := o.NotifyDebounce
+	if notifyDebounce <= 0 {
+		notifyDebounce = defaultNotifyDebounce
+	}
 	return &Service{
 		store:      o.Store,
 		providers:  o.Providers,
@@ -171,7 +191,11 @@ func New(o Options) (*Service, error) {
 		ctx:        ctx,
 		now:        now,
 		runtimeDir: o.RuntimeDir,
-		tailers:    newTailerSet(),
+		// Store Notify verbatim (no nil-default, like reconcile's afkRunEnded): a
+		// nil closure stays nil and the tailer allocates no gate.
+		notify:         o.Notify,
+		notifyDebounce: notifyDebounce,
+		tailers:        newTailerSet(),
 	}, nil
 }
 

@@ -133,6 +133,15 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		return
 	}
 	signals, _ := prov.(provider.LiveSignals) // nil for a transcript-only provider
+	// The notify gate exists only when cmd/lab injected the push seam (issue
+	// #99). It is owned by this one goroutine (not concurrency-safe by design)
+	// and dies with it: a run ending or the dead-session sweep cancels ctx, so an
+	// armed-but-not-due gate simply never fires — that IS the desired "run
+	// ending fires nothing" semantics, no explicit teardown needed.
+	var gate *notifyGate
+	if s.notify != nil {
+		gate = newNotifyGate(s.now, s.notifyDebounce, run)
+	}
 	t := time.NewTicker(s.poll)
 	defer t.Stop()
 
@@ -184,25 +193,38 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			// core-side parse cache, so a spool-only flip re-reads the transcript
 			// too — a deliberate trade: spool flips are rare (a dialog opening or
 			// resolving), and the common no-change tick still costs only stats.
+			// A failed read updates NO bookkeeping (first/lastSig/lastState and
+			// the staged stat all stand), so the next tick re-detects the same
+			// change and retries the read instead of freezing on a half-observed
+			// change (e.g. the file vanishing mid-rotation).
 			chat, err := prov.ReadChat(run.ID, s.runtimeDir, path)
-			if err != nil {
-				// Skip the tick with NO bookkeeping update (first/lastSig/lastState
-				// and the staged stat all stand), so the next tick retries the
-				// read instead of freezing on a half-observed change (e.g. the
-				// file vanishing mid-rotation).
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
+			if err == nil {
+				s.tailers.setState(run.SessionName, chat.State)
+				// Feed the state edge to the notify gate with the PREVIOUS state
+				// (lastState, before the reassignment below) so it edge-triggers on
+				// the transition INTO needs_input/question (issue #99).
+				if gate != nil {
+					gate.observe(lastState, chat)
 				}
-				continue
+				if first || transcriptChanged || chat.State != lastState {
+					s.publishMessagesChanged(run)
+				}
+				first, lastSig, lastState = false, sig, chat.State
+				lastMod, lastSz = mod, sz
 			}
-			s.tailers.setState(run.SessionName, chat.State)
-			if first || transcriptChanged || chat.State != lastState {
-				s.publishMessagesChanged(run)
+		}
+		// The due-check ends EVERY tick — quiet no-change ticks and failed-read
+		// ticks alike (the debounce deadline elapses while nothing else about the
+		// run changes), and always AFTER this tick's observe: a revert read on
+		// the deadline tick disarms the gate before it can fire, and a fired
+		// payload reflects the freshest read (issue #99). A revert the transcript
+		// records inside the window but the poll only reads after the deadline
+		// still fires — the debounce is best-effort at poll granularity, and a
+		// rare marginal send is harmless under tag coalescing.
+		if gate != nil {
+			if n, ok := gate.due(); ok {
+				s.notify(n)
 			}
-			first, lastSig, lastState = false, sig, chat.State
-			lastMod, lastSz = mod, sz
 		}
 		select {
 		case <-ctx.Done():
