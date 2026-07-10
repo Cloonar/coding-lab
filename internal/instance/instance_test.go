@@ -443,6 +443,51 @@ func TestStart_repoGitIdentityReachesSpawnEnv(t *testing.T) {
 	}
 }
 
+// Launch fetches the repo's secret inventory (metadata only — names +
+// descriptions, never values; issue #104) and threads it into the seeder, so
+// a repo with secrets gets a Secrets section in its generated CLAUDE.local.md
+// with the norm, the quoting pattern, and each secret's name/description.
+// A repo with none (the default fixture repo, exercised by TestStart_happyPath)
+// keeps rendering with no such section at all.
+func TestStart_repoSecretsReachContextFile(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.st.CreateRepoSecret(t.Context(), ids.NewID("sec"), f.repo.ID,
+		"API_KEY", "Widget API token", []byte("sealed-blob"), f.clock.Now()); err != nil {
+		t.Fatalf("CreateRepoSecret: %v", err)
+	}
+	if _, err := f.st.CreateRepoSecret(t.Context(), ids.NewID("sec"), f.repo.ID,
+		"DEPLOY_TOKEN", "", []byte("sealed-blob-2"), f.clock.Now()); err != nil {
+		t.Fatalf("CreateRepoSecret: %v", err)
+	}
+
+	if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wt := filepath.Join(f.worktreeRoot, "proj-20260608-1530")
+	local, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatalf("CLAUDE.local.md missing after Launch: %v", err)
+	}
+	got := string(local)
+	for _, want := range []string{
+		"## Secrets",
+		"labctl secret exec",
+		"correct: labctl secret exec API_KEY -- sh -c '",
+		"`API_KEY` — Widget API token",
+		"`DEPLOY_TOKEN`",
+		"`labctl secret list` shows the live inventory",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("CLAUDE.local.md missing %q after Launch with repo secrets", want)
+		}
+	}
+	// Everything lab seeds — including the now-longer context file — stays
+	// invisible to the run's own git status.
+	if out := gitCmd(t, f.home, wt, "status", "--porcelain"); out != "" {
+		t.Errorf("git status after a secrets-bearing Launch = %q; want empty", out)
+	}
+}
+
 // failingSeeder drives the lab-side-seeding rollback path.
 type failingSeeder struct{}
 

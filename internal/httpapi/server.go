@@ -287,6 +287,13 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/v1/credentials", s.requireAuth(s.handleCredentialList))
 		api.HandleFunc("PATCH /api/v1/credentials/{id}", s.requireAuth(s.handleCredentialUpdate))
 		api.HandleFunc("DELETE /api/v1/credentials/{id}", s.requireAuth(s.handleCredentialDelete))
+
+		// Repo secrets (issue #104): write-only per-repo secrets, sealed with
+		// the same vault. Metadata list; create/rotate/delete never echo a value.
+		api.HandleFunc("GET /api/v1/repos/{id}/secrets", s.requireAuth(s.handleRepoSecretList))
+		api.HandleFunc("POST /api/v1/repos/{id}/secrets", s.requireAuth(s.handleRepoSecretCreate))
+		api.HandleFunc("PATCH /api/v1/repos/{id}/secrets/{sid}", s.requireAuth(s.handleRepoSecretRotate))
+		api.HandleFunc("DELETE /api/v1/repos/{id}/secrets/{sid}", s.requireAuth(s.handleRepoSecretDelete))
 	}
 	if s.repos != nil {
 		api.HandleFunc("POST /api/v1/repos", s.requireAuth(s.handleRepoCreate))

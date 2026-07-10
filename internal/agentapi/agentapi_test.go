@@ -2,6 +2,7 @@ package agentapi
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
+	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
 const timeFormat = "2006-01-02T15:04:05.000Z07:00"
@@ -25,6 +27,7 @@ const timeFormat = "2006-01-02T15:04:05.000Z07:00"
 // file for seeding repos/runs/run_tokens/issues at exact column values.
 type testFixture struct {
 	st  *store.Store
+	vlt *vault.Vault
 	db  *sql.DB
 	now time.Time
 }
@@ -46,9 +49,25 @@ func newFixture(t *testing.T) *testFixture {
 
 	return &testFixture{
 		st:  st,
+		vlt: newTestVault(t),
 		db:  db,
 		now: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
 	}
+}
+
+// newTestVault seals a Vault under a random 32-byte key — the decrypt key the
+// agentapi Server holds for POST /secrets/values.
+func newTestVault(t *testing.T) *vault.Vault {
+	t.Helper()
+	key := make([]byte, vault.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand key: %v", err)
+	}
+	v, err := vault.New(key)
+	if err != nil {
+		t.Fatalf("vault.New: %v", err)
+	}
+	return v
 }
 
 func (f *testFixture) exec(t *testing.T, query string, args ...any) {
@@ -140,7 +159,7 @@ func builtinResolver(st *store.Store) TrackerResolver {
 }
 
 func (f *testFixture) server() *Server {
-	return New(f.st, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now }, nil)
+	return New(f.st, f.vlt, builtinResolver(f.st), nil, discard(), func() time.Time { return f.now }, nil)
 }
 
 func TestRunTokenAuthMatrix(t *testing.T) {

@@ -2,10 +2,12 @@ package labctl
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
+	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
 func run(t *testing.T, args []string, env map[string]string) (code int, stdout, stderr string) {
@@ -75,6 +78,17 @@ func TestRunCommandSurface(t *testing.T) {
 		{"pr checks bad n", []string{"pr", "checks", "twelve"}, agentEnv, 1, "", "not a positive integer"},
 		{"pr checks too many", []string{"pr", "checks", "1", "2"}, agentEnv, 1, "", "want <n>"},
 
+		// secret surface: every mis-shape is the usage code 2 (the CHILD's exit
+		// passes through only once a well-formed exec actually runs).
+		{"secret no sub", []string{"secret"}, agentEnv, 2, "", "Usage"},
+		{"secret unknown sub", []string{"secret", "bogus"}, agentEnv, 2, "", `unknown subcommand "bogus"`},
+		{"secret list too many", []string{"secret", "list", "extra"}, agentEnv, 2, "", "too many arguments"},
+		{"secret exec no args", []string{"secret", "exec"}, agentEnv, 2, "", "separator is required"},
+		{"secret exec no sep", []string{"secret", "exec", "FOO", "echo"}, agentEnv, 2, "", "separator is required"},
+		{"secret exec no names", []string{"secret", "exec", "--", "echo"}, agentEnv, 2, "", "at least one secret NAME"},
+		{"secret exec no cmd", []string{"secret", "exec", "FOO", "--"}, agentEnv, 2, "", "want a command after --"},
+		{"secret exec missing env", []string{"secret", "exec", "FOO", "--", "echo", "hi"}, nil, 2, "", "LAB_URL and LAB_TOKEN must be set"},
+
 		{"issue create missing title", []string{"issue", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
 		{"issue create missing body", []string{"issue", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
 		{"issue create stray args", []string{"issue", "create", "--title", "t", "--body", "b", "x"}, agentEnv, 2, "", "unexpected arguments"},
@@ -121,6 +135,8 @@ var fixedNow = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 // talks to it exactly like a session would (LAB_URL/LAB_TOKEN + Bearer).
 type agentFixture struct {
 	st    *store.Store
+	vlt   *vault.Vault
+	repo  string
 	url   string
 	token string
 	runID string
@@ -278,11 +294,58 @@ func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerReso
 		t.Fatalf("CreateRunToken: %v", err)
 	}
 
-	handler := agentapi.New(st, resolver, nil, nil, func() time.Time { return fixedNow }, nil).Handler()
+	vlt := newTestVault(t)
+	handler := agentapi.New(st, vlt, resolver, nil, nil, func() time.Time { return fixedNow }, nil).Handler()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
-	return &agentFixture{st: st, url: ts.URL, token: token, runID: runID}
+	return &agentFixture{st: st, vlt: vlt, repo: repo.ID, url: ts.URL, token: token, runID: runID}
+}
+
+// newTestVault seals a Vault under a random 32-byte key — the same key the
+// fixture's agentapi Server decrypts secret blobs with.
+func newTestVault(t *testing.T) *vault.Vault {
+	t.Helper()
+	key := make([]byte, vault.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand key: %v", err)
+	}
+	v, err := vault.New(key)
+	if err != nil {
+		t.Fatalf("vault.New: %v", err)
+	}
+	return v
+}
+
+// seedSecret encrypts value with the fixture's vault and stores it under repo,
+// returning the secret's id (for a later rotation). The store only ever holds
+// ciphertext.
+func (f *agentFixture) seedSecret(t *testing.T, name, description, value string) string {
+	t.Helper()
+	blob, err := f.vlt.Encrypt([]byte(value))
+	if err != nil {
+		t.Fatalf("encrypt %s: %v", name, err)
+	}
+	sec, err := f.st.CreateRepoSecret(context.Background(), ids.NewID("sec"), f.repo, name, description, blob, fixedNow)
+	if err != nil {
+		t.Fatalf("CreateRepoSecret %s: %v", name, err)
+	}
+	return sec.ID
+}
+
+// testShell returns a POSIX sh usable as an absolute exec target, or skips the
+// test if none is available. `sh` is not on the sandbox PATH, so LookPath is
+// tried first and /bin/sh is the fallback (it is a real symlink here).
+func testShell(t *testing.T) string {
+	t.Helper()
+	if p, err := exec.LookPath("sh"); err == nil {
+		return p
+	}
+	if _, err := exec.LookPath("/bin/sh"); err == nil {
+		return "/bin/sh"
+	}
+	t.Skip("no sh available for secret exec test")
+	return ""
 }
 
 func builtinResolver(st **store.Store) agentapi.TrackerResolver {
@@ -972,5 +1035,137 @@ func TestHTMLBodySurfacesProxyHint(t *testing.T) {
 				t.Errorf("stderr = %q, still a JSON-decode error", stderr)
 			}
 		})
+	}
+}
+
+// --- secret surface ---------------------------------------------------------
+
+// TestSecretListOutput pins the `NAME<TAB>description` rows and that no value
+// crosses the list surface.
+func TestSecretListOutput(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "API_KEY", "prod key", "secret-value-never-shown")
+	f.seedSecret(t, "DB_URL", "", "postgres://who:cares@h/db")
+
+	code, stdout, stderr := run(t, []string{"secret", "list"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	// Ordered by name (store contract): API_KEY then DB_URL.
+	want := "API_KEY\tprod key\nDB_URL\t\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	if strings.Contains(stdout, "secret-value") || strings.Contains(stdout, "postgres://") {
+		t.Errorf("list leaked a value: %q", stdout)
+	}
+}
+
+// TestSecretExecInjectsValue pins the core exec path: the named secret reaches
+// the child as $NAME and the child's stdout (the value it prints) surfaces
+// verbatim, exit 0.
+func TestSecretExecInjectsValue(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "plaintext-injected")
+	sh := testShell(t)
+
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", `printf %s "$FOO"`}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "plaintext-injected" {
+		t.Errorf("stdout = %q, want the injected value", stdout)
+	}
+}
+
+// TestSecretExecLiveRotation pins that values are fetched per exec, never
+// cached: rotating the stored ciphertext (no client/fixture rebuild) changes
+// what the very next exec sees, with the same env.
+func TestSecretExecLiveRotation(t *testing.T) {
+	f := newBuiltinFixture(t)
+	id := f.seedSecret(t, "FOO", "", "v1")
+	sh := testShell(t)
+	args := []string{"secret", "exec", "FOO", "--", sh, "-c", `printf %s "$FOO"`}
+
+	code, stdout, stderr := run(t, args, f.env())
+	if code != 0 || stdout != "v1" {
+		t.Fatalf("first exec = %d %q, stderr %q, want 0 v1", code, stdout, stderr)
+	}
+
+	// Rotate the stored blob in place; no new client, no new server.
+	blob, err := f.vlt.Encrypt([]byte("v2"))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if _, err := f.st.RotateRepoSecret(context.Background(), id, blob, fixedNow); err != nil {
+		t.Fatalf("RotateRepoSecret: %v", err)
+	}
+
+	code, stdout, stderr = run(t, args, f.env())
+	if code != 0 || stdout != "v2" {
+		t.Fatalf("post-rotation exec = %d %q, stderr %q, want 0 v2", code, stdout, stderr)
+	}
+}
+
+// TestSecretExecPreservesExitCode pins the transparent exit passthrough: the
+// child's non-zero code is labctl's exit code.
+func TestSecretExecPreservesExitCode(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "irrelevant")
+	sh := testShell(t)
+
+	code, _, _ := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", "exit 7"}, f.env())
+	if code != 7 {
+		t.Fatalf("exit = %d, want the child's 7", code)
+	}
+}
+
+// TestSecretExecUnknownName pins that an unknown secret is an API error (exit
+// 1) whose message names the secret, and that the child NEVER runs (empty
+// stdout) — nothing half-executes on a miss.
+func TestSecretExecUnknownName(t *testing.T) {
+	f := newBuiltinFixture(t)
+	sh := testShell(t)
+
+	code, stdout, stderr := run(t, []string{"secret", "exec", "NOPE", "--", sh, "-c", `printf ran`}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (API error before exec)", code)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty (command must not run on a miss)", stdout)
+	}
+	if !strings.Contains(stderr, "NOPE") {
+		t.Errorf("stderr = %q, want it to name the missing secret", stderr)
+	}
+}
+
+// TestSecretExecArgvIsExactCommand pins that the value reaches the child ONLY
+// through the environment: the child echoes its own argv ($0 then $@) and then
+// $FOO, and the value shows up exactly once — in the env line, never among the
+// argv lines.
+func TestSecretExecArgvIsExactCommand(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "smuggled-plain")
+	sh := testShell(t)
+
+	// `sh -c SCRIPT $0 $@`: with trailing operands "sh" "alpha" "beta", the
+	// child sees $0=sh, $@=(alpha beta) — exactly the argv we passed.
+	script := `printf '%s\n' "$0" "$@"; printf 'env=%s\n' "$FOO"`
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", script, "sh", "alpha", "beta"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	want := "sh\nalpha\nbeta\nenv=smuggled-plain\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	// The value is present exactly once, and only in the env line.
+	if n := strings.Count(stdout, "smuggled-plain"); n != 1 {
+		t.Errorf("value appears %d times, want exactly once (env only)", n)
+	}
+	for _, argvLine := range []string{"sh", "alpha", "beta"} {
+		if strings.Contains(argvLine, "smuggled-plain") {
+			t.Errorf("value leaked into argv line %q", argvLine)
+		}
 	}
 }

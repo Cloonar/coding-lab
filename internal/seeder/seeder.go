@@ -40,9 +40,17 @@ type Seeder struct{}
 func New() *Seeder { return &Seeder{} }
 
 // Opts parametrizes SeedWorkspace — the growth point for later per-spawn
-// seeding knobs (mirrors provider.SeedOpts). Empty for now: the rendered
-// content derives entirely from the repo row and the provider's SeedMeta.
-type Opts struct{}
+// seeding knobs (mirrors provider.SeedOpts).
+type Opts struct {
+	// Secrets is the repo's secret INVENTORY — metadata only (name +
+	// description; see store.RepoSecret). The seeder never sees a value: it
+	// never imports internal/vault, and this field never carries a decrypted
+	// blob. When non-empty, renderContextFile appends a Secrets section
+	// (issue #104) documenting the usage norm and listing these names/
+	// descriptions; nil or empty yields no section, so a secret-less repo's
+	// context file is byte-identical to before this field existed.
+	Secrets []store.RepoSecret
+}
 
 // SeedWorkspace seeds worktree for a run on repo, driven by the provider's
 // meta (issue #51 decision 8): the exclude entries first (fails loud before
@@ -57,12 +65,12 @@ type Opts struct{}
 // ContextFileName skips the context file — a provider that seeds neither still
 // gets its exclude entries applied. Idempotent: a re-seed overwrites lab's
 // files, dedups exclude lines, and never deletes files a user added.
-func (s *Seeder) SeedWorkspace(worktree string, repo store.Repo, meta provider.SeedMeta, _ Opts) error {
+func (s *Seeder) SeedWorkspace(worktree string, repo store.Repo, meta provider.SeedMeta, opts Opts) error {
 	if err := EnsureExcludes(worktree, meta.ExcludeEntries); err != nil {
 		return err
 	}
 	if err := seedSkills(worktree, meta.SkillsDir); err != nil {
 		return err
 	}
-	return seedContextFile(worktree, repo, meta)
+	return seedContextFile(worktree, repo, meta, opts.Secrets)
 }

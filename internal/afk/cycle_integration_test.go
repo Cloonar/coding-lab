@@ -514,7 +514,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	// production feeds from providerReg.ScrubRegexps() (ADR-0033); here it is
 	// the pinned claude fixture twin, so the incogni cycle's poisoned PR body
 	// is sanitized server-side over the same predicate.
-	agent := httptest.NewServer(agentapi.New(st, trackers, bus, nil, clock.Now, cycleClaudeScrub).Handler())
+	agent := httptest.NewServer(agentapi.New(st, vlt, trackers, bus, nil, clock.Now, cycleClaudeScrub).Handler())
 	t.Cleanup(agent.Close)
 
 	prov := &cycleProvider{Fake: providertest.New(), scripts: map[string]string{}}

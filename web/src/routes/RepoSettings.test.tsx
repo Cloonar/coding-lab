@@ -10,7 +10,7 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Provider, Repo } from '../api';
+import type { Provider, Repo, RepoSecret } from '../api';
 import App from '../App';
 import RepoSettings from './RepoSettings';
 
@@ -127,6 +127,8 @@ let repoOnServer: Repo;
 let providersOnServer: Provider[];
 let settingsOnServer: Record<string, unknown>;
 let patchBodies: Record<string, unknown>[];
+let secretsOnServer: RepoSecret[];
+let secretRequestBodies: Record<string, unknown>[];
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
 
@@ -161,6 +163,42 @@ function stubApi(): void {
         patchBodies.push(patch);
         repoOnServer = { ...repoOnServer, ...patch };
         return Promise.resolve(jsonResponse(200, { ...repoOnServer }));
+      }
+      // Repo secrets (issue #104): metadata-only list + write-only
+      // create/rotate/delete. The fake server never stores or echoes a
+      // value — same write-only discipline the real API enforces.
+      if (url === `/api/v1/repos/${REPO_ID}/secrets` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { secrets: secretsOnServer }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/secrets` && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        secretRequestBodies.push(body);
+        const created: RepoSecret = {
+          id: `sec_${secretsOnServer.length + 1}`,
+          name: String(body.name),
+          description: String(body.description ?? ''),
+          created_at: '2026-07-10T00:00:00.000Z',
+          updated_at: '2026-07-10T00:00:00.000Z',
+        };
+        secretsOnServer = [...secretsOnServer, created];
+        return Promise.resolve(jsonResponse(201, created));
+      }
+      const secretMatch = /^\/api\/v1\/repos\/repo_1\/secrets\/([^/]+)$/.exec(url);
+      if (secretMatch && method === 'PATCH') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        secretRequestBodies.push(body);
+        const id = secretMatch[1];
+        const updated: RepoSecret = {
+          ...(secretsOnServer.find((s) => s.id === id) as RepoSecret),
+          updated_at: '2026-07-10T01:00:00.000Z',
+        };
+        secretsOnServer = secretsOnServer.map((s) => (s.id === id ? updated : s));
+        return Promise.resolve(jsonResponse(200, updated));
+      }
+      if (secretMatch && method === 'DELETE') {
+        const id = secretMatch[1];
+        secretsOnServer = secretsOnServer.filter((s) => s.id !== id);
+        return Promise.resolve(jsonResponse(204, undefined));
       }
       // AppShell mounts the side rail once authenticated; it fetches the
       // instance list for the ACTIVE rail + attention badge.
@@ -275,11 +313,31 @@ function emitRepoChanged(): void {
   }
 }
 
+/** The Secrets section's <section> element, scoped for row/form queries. */
+function secretsSection(): HTMLElement {
+  const header = Array.from(container.querySelectorAll('h2')).find(
+    (h) => h.textContent === 'Secrets',
+  );
+  if (!header) throw new Error('missing Secrets section heading');
+  const section = header.closest('section');
+  if (!section) throw new Error('Secrets heading has no enclosing <section>');
+  return section as HTMLElement;
+}
+
+/** Submits the (single) form inside root — scoped so it never hits the main settings form. */
+function submitFormWithin(root: ParentNode): void {
+  const form = root.querySelector('form');
+  if (!form) throw new Error('missing form within scope');
+  form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+}
+
 beforeEach(() => {
   repoOnServer = baseRepo();
   providersOnServer = baseProviders();
   settingsOnServer = { provider_default: 'claude-code' };
   patchBodies = [];
+  secretsOnServer = [];
+  secretRequestBodies = [];
   stubApi();
 });
 
@@ -570,5 +628,129 @@ describe('RepoSettings agent selection (issue #66)', () => {
     // (skip-layer makes it harmless at spawn; flipping back restores it).
     expect(patchBodies).toEqual([{ provider: 'codex' }]);
     expect(repoOnServer.model_default).toBe('weird-model');
+  });
+});
+
+// Repo secrets section (issue #104): write-only per-repo secrets — the API
+// mock here only ever hands back metadata, so "no value ever rendered" is
+// pinned by construction; these tests additionally assert the value INPUT is
+// password-typed and that requests carry only what the contract calls for.
+describe('RepoSettings secrets section', () => {
+  it('renders listed secrets with name, description and updated date', async () => {
+    secretsOnServer = [
+      {
+        id: 'sec_1',
+        name: 'API_KEY',
+        description: 'third-party api',
+        created_at: '2026-07-01T00:00:00.000Z',
+        updated_at: '2026-07-02T00:00:00.000Z',
+      },
+    ];
+    await mountSettings();
+    await waitFor(() => container.querySelector('h2') && secretsSection(), 'secrets section');
+
+    const section = secretsSection();
+    expect(section.textContent).toContain('API_KEY');
+    expect(section.textContent).toContain('third-party api');
+    // The secret name renders in a monospace element, per the design.
+    const nameEl = section.querySelector('.card-title.mono');
+    expect(nameEl?.textContent).toBe('API_KEY');
+
+    // No value ever appears anywhere on the page — the mock only ever hands
+    // back metadata, same as the real write-only API.
+    expect(container.textContent).not.toContain('sekrit');
+  });
+
+  it('renders the empty state when the repo has no secrets', async () => {
+    await mountSettings();
+    await waitFor(
+      () => (secretsSection().textContent?.includes('No secrets yet') ? true : null),
+      'empty state',
+    );
+    expect(secretsSection().textContent).toContain('No secrets yet');
+  });
+
+  it('add-secret form submits name, description and value, then refreshes the list', async () => {
+    await mountSettings();
+    await waitFor(() => secretsSection(), 'secrets section');
+
+    button('+ Add secret').click();
+    await settle();
+
+    const nameField = input('secret-name');
+    const valueField = input('secret-value');
+    expect(valueField.type).toBe('password');
+
+    typeInto(nameField, 'DEPLOY_TOKEN');
+    typeInto(input('secret-description'), 'deploy pipeline token');
+    typeInto(valueField, 'a-fresh-secret-value');
+
+    submitFormWithin(secretsSection());
+    await settle();
+
+    expect(secretRequestBodies).toEqual([
+      { name: 'DEPLOY_TOKEN', description: 'deploy pipeline token', value: 'a-fresh-secret-value' },
+    ]);
+    // The create form closes and the list reflects the new secret's metadata
+    // only — never the value that was just submitted.
+    expect(secretsSection().textContent).toContain('DEPLOY_TOKEN');
+    expect(secretsSection().textContent).not.toContain('a-fresh-secret-value');
+  });
+
+  it('rotate submits only the new value, never the name or id', async () => {
+    secretsOnServer = [
+      {
+        id: 'sec_1',
+        name: 'API_KEY',
+        description: '',
+        created_at: '2026-07-01T00:00:00.000Z',
+        updated_at: '2026-07-01T00:00:00.000Z',
+      },
+    ];
+    await mountSettings();
+    await waitFor(() => secretsSection().querySelector('.card-title.mono'), 'secret row');
+
+    button('Rotate').click();
+    await settle();
+
+    const rotateField = input('secret-rotate-value');
+    expect(rotateField.type).toBe('password');
+    typeInto(rotateField, 'rotated-secret-value');
+
+    submitFormWithin(secretsSection());
+    await settle();
+
+    expect(secretRequestBodies).toEqual([{ value: 'rotated-secret-value' }]);
+    // The row collapses back out of rotate mode and the list refreshes.
+    expect(secretsSection().querySelector('input[name="secret-rotate-value"]')).toBeNull();
+    expect(secretsSection().textContent).not.toContain('rotated-secret-value');
+  });
+
+  it('delete asks for confirmation before removing the secret', async () => {
+    secretsOnServer = [
+      {
+        id: 'sec_1',
+        name: 'API_KEY',
+        description: '',
+        created_at: '2026-07-01T00:00:00.000Z',
+        updated_at: '2026-07-01T00:00:00.000Z',
+      },
+    ];
+    await mountSettings();
+    await waitFor(() => secretsSection().querySelector('.card-title.mono'), 'secret row');
+
+    // Declining the confirm leaves the secret in place.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
+    button('Delete').click();
+    await settle();
+    expect(confirmSpy).toHaveBeenCalledWith('Delete secret "API_KEY"?');
+    expect(secretsSection().textContent).toContain('API_KEY');
+
+    // Confirming removes it.
+    confirmSpy.mockReturnValueOnce(true);
+    button('Delete').click();
+    await settle();
+    expect(secretsOnServer).toHaveLength(0);
+    expect(secretsSection().textContent).toContain('No secrets yet');
   });
 });

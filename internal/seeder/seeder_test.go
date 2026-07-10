@@ -47,6 +47,15 @@ var claudeGoldenMeta = provider.SeedMeta{
 	},
 }
 
+// testSecrets is the repo secret metadata fixture (issue #104) used by the
+// Secrets-section tests: already name-sorted, one with a description and one
+// without, so both bullet shapes get exercised. Metadata only, as the store
+// itself only ever hands the seeder — no value field exists on store.RepoSecret.
+var testSecrets = []store.RepoSecret{
+	{Name: "API_KEY", Description: "Widget API token"},
+	{Name: "DEPLOY_TOKEN"},
+}
+
 // newWorktree builds a REAL linked worktree (bare-style main checkout +
 // `git worktree add`), the shape every Launch seeds: its .git is a gitdir
 // pointer whose commondir leads back to the shared git dir, so the exclude
@@ -185,7 +194,7 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 }
 
 func TestRenderContextFile_forgeBinding(t *testing.T) {
-	body, err := renderContextFile(forgeRepo, claudeGoldenMeta)
+	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -344,7 +353,7 @@ func TestRenderContextFile_claudeGoldenByteIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderContextFile(tc.repo, claudeGoldenMeta)
+			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -353,6 +362,9 @@ func TestRenderContextFile_claudeGoldenByteIdentity(t *testing.T) {
 			}
 			if strings.Contains(string(got), "## Seeded skills") {
 				t.Error("native-discovery render contains a `## Seeded skills` section; want none")
+			}
+			if strings.Contains(string(got), "## Secrets") {
+				t.Error("zero-secrets render contains a `## Secrets` section; want none")
 			}
 		})
 	}
@@ -445,12 +457,112 @@ func TestSeedWorkspace_nonNativeAppendsSkillsIndex(t *testing.T) {
 // native-discovery-WITH-skills absence is asserted in the golden test above.)
 func TestRenderContextFile_noIndexWithoutSkillsDir(t *testing.T) {
 	meta := provider.SeedMeta{ContextFileName: "AGENTS.local.md", NativeSkillDiscovery: false}
-	got, err := renderContextFile(builtinRepo, meta)
+	got, err := renderContextFile(builtinRepo, meta, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
 	if strings.Contains(string(got), "## Seeded skills") {
 		t.Error("empty-SkillsDir render contains a skills index; want none")
+	}
+}
+
+// Zero secrets — both nil and an explicit empty slice — must render
+// byte-identical to the claude golden (issue #104): the new Opts.Secrets /
+// renderContextFile parameter is a pure addition, never a behavior change for
+// a secret-less repo. Reuses the same golden the pre-#104 byte-identity test
+// pins, so any accidental "## Secrets" leak on the empty path fails here too.
+func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
+	want := readGolden(t, "contextfile-claude-builtin.golden")
+	for name, secrets := range map[string][]store.RepoSecret{
+		"nil":   nil,
+		"empty": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets)
+			if err != nil {
+				t.Fatalf("renderContextFile: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("render with %s secrets != golden\n%s", name, byteDiff(got, want))
+			}
+		})
+	}
+}
+
+// With secrets, a claude-shaped (native-discovery) render carries the full
+// Secrets section: the heading, the usage norm, the single-quote/double-quote
+// quoting pattern (both the correct form and the trap), one bullet per
+// secret (name + description, or just the name when description is empty),
+// and the `labctl secret list` pointer. Byte-pinned against a NEW golden
+// (contextfile-claude-builtin-secrets.golden) captured for this shape.
+func TestRenderContextFile_withSecrets(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-secrets.golden"); !bytes.Equal(got, want) {
+		t.Errorf("render != contextfile-claude-builtin-secrets.golden\n%s", byteDiff(got, want))
+	}
+
+	gotStr := string(got)
+	wantContains := []string{
+		"## Secrets",
+		"never write one into a file, a commit, an issue, a\nPR body, or a chat reply",
+		"labctl secret exec\n<NAME...> -- <cmd>",
+		"correct: labctl secret exec API_KEY -- sh -c 'curl -H \"Authorization: Bearer $API_KEY\" https://example.com'",
+		"trap:    labctl secret exec API_KEY -- sh -c \"curl -H \\\"Authorization: Bearer $API_KEY\\\" https://example.com\"",
+		"Single-quote the child command",
+		"`API_KEY` — Widget API token",
+		"`DEPLOY_TOKEN`",
+		"`labctl secret list` shows the live inventory",
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("Secrets section missing %q", want)
+		}
+	}
+}
+
+// Non-native-discovery meta (the fake codex shape) with secrets: BOTH the
+// Secrets section and the generated skills index appear, and the Secrets
+// section comes FIRST — repo-driven content before the provider-driven tail
+// (the append order documented on appendSecretsSection).
+func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T) {
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+
+	secretsIdx := strings.Index(gotStr, "## Secrets")
+	skillsIdx := strings.Index(gotStr, "## Seeded skills")
+	if secretsIdx == -1 {
+		t.Fatal("missing `## Secrets` section")
+	}
+	if skillsIdx == -1 {
+		t.Fatal("missing `## Seeded skills` section")
+	}
+	if secretsIdx >= skillsIdx {
+		t.Errorf("Secrets section (offset %d) must precede Seeded skills (offset %d)", secretsIdx, skillsIdx)
+	}
+	if !strings.Contains(gotStr, "`API_KEY` — Widget API token") {
+		t.Error("non-native render missing secret inventory bullet")
+	}
+}
+
+// The full seed path writes the Secrets section to disk when Opts.Secrets is
+// non-empty (mirrors TestSeedWorkspace_onDiskMatchesGolden's mechanics).
+func TestSeedWorkspace_onDiskWithSecretsMatchesGolden(t *testing.T) {
+	wt, _ := newWorktree(t)
+	if err := New().SeedWorkspace(wt, builtinRepo, claudeGoldenMeta, Opts{Secrets: testSecrets}); err != nil {
+		t.Fatalf("SeedWorkspace: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-secrets.golden"); !bytes.Equal(got, want) {
+		t.Errorf("on-disk CLAUDE.local.md with secrets != golden\n%s", byteDiff(got, want))
 	}
 }
 
