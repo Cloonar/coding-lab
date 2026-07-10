@@ -116,6 +116,13 @@ type Options struct {
 	// no-op (the report methods are nil-safe).
 	Metrics *metrics.Metrics
 
+	// Notify, when non-nil, receives one notification per AFK run whose reap
+	// classified it as success — the done-signal push (issue #100). cmd/lab
+	// wires it over push.Sender.Broadcast so afk never imports push (ADR-0038
+	// import-boundary pattern, mirroring chat's needs-input trigger). Nil is a
+	// no-op, optional exactly like Metrics.
+	Notify func(Notification)
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -136,7 +143,8 @@ type Service struct {
 	worktreeRoot string
 	gitEnv       []string
 	sweep        func(context.Context)
-	metrics      *metrics.Metrics // nil-safe report methods
+	metrics      *metrics.Metrics   // nil-safe report methods
+	notify       func(Notification) // nil is a no-op, like metrics
 	now          func() time.Time
 
 	// mu single-flights the entire select→claim→spawn in launch — the ONE
@@ -198,6 +206,7 @@ func New(o Options) (*Service, error) {
 		gitEnv:       o.GitEnv,
 		sweep:        o.Sweep,
 		metrics:      o.Metrics,
+		notify:       o.Notify,
 		now:          now,
 	}, nil
 }

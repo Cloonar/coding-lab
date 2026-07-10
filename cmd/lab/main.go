@@ -298,6 +298,12 @@ func run() int {
 			WorktreeRoot: worktreeRoot,
 			Sweep:        reconcileSvc.RuntimeSweep,
 			Metrics:      m,
+			// Web push on the reaper's done-signal (issue #100): a closure over
+			// the push sender so afk never imports push. Broadcast is
+			// async/fire-and-forget, so the reaper never blocks on gateway I/O.
+			Notify: func(n afk.Notification) {
+				pushSender.Broadcast(push.Payload{Title: n.Title, Body: n.Body, Tag: n.Tag, Route: n.Route})
+			},
 		})
 		if err != nil {
 			logger.Error("building afk engine", "component", "main", "err", err)

@@ -142,6 +142,10 @@ _Avoid_: device token, registration, push token
 The edge-triggered push fired when a run's **conversational state** settles into `needs_input`/`question` for the flap-debounce window (~2s) — an injected seam at the chat tailer's transition edge, never a bus subscriber (the bus drops events for a slow subscriber by design; a dropped event may not cost a notification). One send per episode, tag = run ID so a newer question replaces the stale lock-screen item, route is the run's PWA-internal chat path. Re-adopting a run already awaiting the operator deliberately re-fires; a run ending fires nothing. No periodic re-reminders.
 _Avoid_: reminder, alert, nag, bus subscriber
 
+**Done-signal trigger**:
+The single push fired when the reaper's terminal classification of an **AFK run** is success — its **done-signal** landed. It rides the reaper's idempotent **claim**, so it sends exactly once per run with no debounce state (a reaped row leaves the active set and is never a reap candidate again). Title names the PR/**change request** by the repo's **tracker binding** (`<repo>~<label> opened PR #n` on `forge`, `… opened change request #n` on `builtin`), body is that pull's title (degrading to the bare number form when the detail fetch fails), tag = run ID so it replaces the same run's **needs-input trigger** item on the lock screen, route is the run's PWA-internal chat path — never the forge URL. Deaths, timeouts, a **neutral Stop**, and the **three-strikes pause**: no send.
+_Avoid_: forge link-out, completion email, per-outcome alerts
+
 ## Relationships
 
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
@@ -157,6 +161,7 @@ _Avoid_: reminder, alert, nag, bus subscriber
 - On a `forge`-bound repo the done-signal is a PR; on a `builtin`-bound repo it is a **change request** — one contract, one reaper.
 - The **VAPID key** signs every send to a **push subscription**; unlike the **master key**, it never touches the vault — a subscription is device-level trust, not a stored credential, and rotating the **VAPID key** strands every **push subscription** until each device re-enables.
 - The **needs-input trigger** rides the tailer's **conversational state** edge and broadcasts to every **push subscription** — device targeting, re-reminders, and escalation are all non-features in the v1 model.
+- The **done-signal trigger** rides the reaper's idempotent **claim** and broadcasts to every **push subscription** exactly once when a run reaps as success — never on a death, timeout, or **neutral Stop**.
 
 ## Example dialogue
 

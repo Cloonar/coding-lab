@@ -97,11 +97,13 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 		for _, run := range byRepo[repoID] {
 			// The done-signal: an open or merged PR/CR whose head is the
 			// run's branch (closed-unmerged deliberately does NOT count —
-			// tracker.PRPresent). Matched client-side against the one pull
-			// listing.
-			outcome, alive, claimed := s.classifyAndClaim(ctx, run, tracker.PRPresent(pulls, run.Branch), now)
+			// tracker.DonePull). Matched client-side against the one pull
+			// listing; donePull is the winning pull, meaningful only when the
+			// outcome is success (it feeds the done-signal notification).
+			donePull, prPresent := tracker.DonePull(pulls, run.Branch)
+			outcome, alive, claimed := s.classifyAndClaim(ctx, run, prPresent, now)
 			if claimed {
-				s.reapRun(ctx, repo, run, outcome, alive, now)
+				s.reapRun(ctx, trk, repo, run, outcome, alive, donePull, now)
 			}
 		}
 	}
@@ -249,11 +251,22 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, prPresent
 // here (classifyAndClaim refuses a stopped run under runsMu). now is the
 // tick time the claim stamped as ended_at, so the metrics duration below is
 // exactly started_at→ended_at.
-func (s *Service) reapRun(ctx context.Context, repo store.Repo, run store.Run, outcome Outcome, alive bool, now time.Time) {
+//
+// This chokepoint is also where the done-signal push fires — beside the
+// metrics report, once per success reap. trk and donePull are meaningful only
+// when outcome is success (donePull is the winning pull the notification names);
+// death, timeout, and the three-strikes pause never send.
+func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, outcome Outcome, alive bool, donePull tracker.PullRef, now time.Time) {
 	// The reaper half of the M8 terminal-outcome metrics (the neutral Stop
 	// is the other half — StopAFK). The outcome row is already written, so
 	// this reports exactly once per terminal reap.
 	s.metrics.AFKRunEnded(run.Kind, outcome.RunOutcome(), now.Sub(run.StartedAt))
+
+	// The done-signal push (issue #100): only a success reap notifies, riding
+	// this once-per-run chokepoint so the injected sender fires exactly once.
+	if outcome == OutcomeSuccess && s.notify != nil {
+		s.notify(s.doneNotification(ctx, trk, repo, run, donePull))
+	}
 
 	if alive {
 		if err := s.runner.Stop(ctx, run.SessionName); err != nil {
