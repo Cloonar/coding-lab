@@ -102,6 +102,10 @@ _Avoid_: PAT, API token (those are the operator's), personal login
 An `AgentProvider` implementation — spawn argv, auth flow, worktree seeding, model/effort catalog, chat surface — plus optional capabilities it may advertise by type assertion (`DeepLinker` for deep-link capture + fallback-open metadata, `ConnectingReporter` for the connecting pulse; ADR-0017). `claude-code` is the only MVP implementation and implements both. The **effective provider** of a spawn is resolved per spawn by three-level layering — per-spawn pick → repo override → global default, with symmetric AFK overrides — never a fixed per-repo stamp (ADR-0030).
 _Avoid_: backend, engine, vendor
 
+**Conformance suite**:
+The two-tier bar an `AgentProvider` adapter must pass before it ships: Tier 1, `providertest.Conformance` run in CI against every registered adapter (patterns dialect, seeding, scrub markers, catalogs, and more); Tier 2, four required live spikes (transcript identity, dialog/interrupt hazard-check, context-file discovery, incogni attribution ground truth) evidenced by a committed compat record at `internal/compat/<providerID>/compat.md` (ADR-0036). Passing both, not review alone, is the adapter's definition of done.
+_Avoid_: test suite, checklist (alone), acceptance criteria
+
 **Spawn options**:
 The provider-owned, provider-declared bag of spawn settings that sits beside the typed model/effort. The provider *declares* its schema (`SpawnOptions() []OptionSpec`), lab *stores, validates, and renders* the bag generically, and the provider *applies* it (never as positional argv). Validated against the resolving repo's provider schema exactly like model/effort — an unknown key or bad value is a 400. claude-code's only entry is the AFK-only `ultracode` boolean, applied by prepending a provider-owned directive to a non-empty initial prompt; a promptless manual spawn is a natural no-op. Future providers (#2 Codex, Gemini) declare their own — the typed core never churns (ADR-0021).
 _Avoid_: flags, provider config, params, feature toggles
