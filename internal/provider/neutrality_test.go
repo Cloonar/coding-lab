@@ -18,15 +18,16 @@
 // bug ADR-0033 fixed (a hardcoded claude-specific attribution literal baked
 // into a supposedly provider-neutral seam).
 //
-// Only two packages are exempted: internal/provider/claudecode (the
-// declaration these tokens describe — AgentProvider.SeedMeta().ScrubPatterns
-// — is not a leak, it is the contract) and internal/provider/providertest
-// (its fakes deliberately mirror claudecode's declared shape for tests).
+// Only the provider adapter packages — internal/provider/claudecode and
+// internal/provider/codex (the declarations these tokens describe —
+// AgentProvider.SeedMeta().ScrubPatterns — are not leaks, they are the
+// contract) — and internal/provider/providertest (its fakes deliberately
+// mirror claudecode's declared shape for tests) are exempted.
 // Every other package's non-test Go source is fair game, and *_test.go files
 // are exempt everywhere (fixture literals, per issue #75) — a test asserting
 // against a synthetic "Co-Authored-By" trailer is not a leak either.
 //
-// Like the SPA guard, there is deliberately NO allowlist beyond those two
+// Like the SPA guard, there is deliberately NO allowlist beyond those
 // exemptions: a hit anywhere else must be refactored into provider-declared
 // metadata (a registered AgentProvider's SeedMeta), never exempted in this
 // file. If this guard ever finds a real hit, the fix belongs to whichever
@@ -205,11 +206,15 @@ func moduleRoot(t *testing.T) string {
 }
 
 // exemptPackageDirs is the set of module-root-relative directories whose
-// non-test Go source is skipped entirely: the provider declaration itself
-// and its shared test fakes (issue #75 / ADR-0033 — see the package doc
-// comment for why these two, and only these two, are exempt).
+// non-test Go source is skipped entirely: the provider declarations
+// themselves and their shared test fakes (issue #75 / ADR-0033 — see the
+// package doc comment for why these, and only these, are exempt).
 var exemptPackageDirs = []string{
 	filepath.Join("internal", "provider", "claudecode"),
+	// Provider packages are where attribution-marker declarations legitimately
+	// live: the codex adapter (issue #87) declares its own ScrubPatterns as
+	// literals, exactly like claudecode.
+	filepath.Join("internal", "provider", "codex"),
 	filepath.Join("internal", "provider", "providertest"),
 }
 
@@ -270,9 +275,8 @@ func scanTree(t *testing.T, root string) (scanned []string, violations []violati
 
 // TestCoreAttributionNeutrality is the arch test itself (issue #75 /
 // ADR-0033's "Core neutrality made testable" decision): every non-test Go
-// file in the module, outside internal/provider/claudecode and
-// internal/provider/providertest, must be free of the four attribution-marker
-// tokens. Its two subtests mirror web/src/providerNeutral.test.ts's
+// file in the module, outside the exemptPackageDirs adapter/fake packages,
+// must be free of the four attribution-marker tokens. Its two subtests mirror web/src/providerNeutral.test.ts's
 // describe/it split — a sanity floor first (so a guard silently scanning
 // zero files can never read as a pass), then the actual neutrality
 // assertion — both run unconditionally so a sanity-floor regression and a
@@ -305,7 +309,7 @@ func TestCoreAttributionNeutrality(t *testing.T) {
 			return violations[i].pos.String() < violations[j].pos.String()
 		})
 		var b strings.Builder
-		fmt.Fprintf(&b, "found %d attribution-marker literal(s) outside internal/provider/claudecode and internal/provider/providertest (issue #75 / ADR-0033 — refactor into provider-declared metadata, do not exempt here):\n", len(violations))
+		fmt.Fprintf(&b, "found %d attribution-marker literal(s) outside the exempt adapter/fake packages %v (issue #75 / ADR-0033 — refactor into provider-declared metadata, do not exempt here):\n", len(violations), exemptPackageDirs)
 		for _, v := range violations {
 			fmt.Fprintf(&b, "  %s\n", v)
 		}

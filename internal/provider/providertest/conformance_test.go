@@ -292,6 +292,16 @@ func TestCheckAuthFlow_unknownKindFails(t *testing.T) {
 	wantError(t, checkAuthFlow(p), "auth-flow", `"carrier-pigeon"`)
 }
 
+// device-code (issue #87) is part of the declared vocabulary: a well-formed
+// adapter declaring it clears the auth-flow check.
+func TestCheckAuthFlow_deviceCodeKindPasses(t *testing.T) {
+	p := newMockProvider()
+	p.authFlow = provider.AuthFlow{Kind: provider.AuthFlowDeviceCode}
+	if errs := checkAuthFlow(p); len(errs) > 0 {
+		t.Errorf("device-code adapter failed auth-flow:\n%s", joinErrs(errs))
+	}
+}
+
 func TestCheckSeedingExcludeCoverage_uncoveredSeededFileListed(t *testing.T) {
 	p := newMockProvider()
 	p.seed = func(worktree string, _ provider.SeedOpts) error {

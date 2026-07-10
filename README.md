@@ -39,7 +39,7 @@ Verification status per definition-of-done item — including what is automated 
 │   ├─ AFKEngine          scheduler + reaper + claims (ported from v0)
 │   ├─ GitEngine          fetch/worktree/branch/teardown/sweep (ported from v0)
 │   ├─ TrackerRegistry    Tracker interface → forgejo | builtin   (github: #1)
-│   ├─ ProviderRegistry   AgentProvider interface → claude-code   (codex: #2)
+│   ├─ ProviderRegistry   AgentProvider interface → claude-code | codex
 │   ├─ SessionRunner      tmux wrapper (ported from v0) + prlimit cap
 │   ├─ Seeder             trust, settings, skills bundle, CLAUDE.local.md, incogni
 │   └─ Store              SQLite/Postgres repositories + goose migrations

@@ -7,6 +7,11 @@
 //     refetches on it, so the status flips live) — plus logout.
 //   - oauth-redirect: status + the descriptor's operator instructions (the
 //     login happens in a browser against the lab host) + logout.
+//   - device-code: start-login runs the CLI login in the background and
+//     returns a verification URL plus a short one-time code the operator
+//     enters ON THAT PAGE in any browser — there is no code paste-back into
+//     lab. Completion lands via provider.auth.changed exactly like
+//     oauth-code. The URL may be "" on a scrape miss; restarting re-scrapes.
 //   - api-key: status + a note that the vault credential is injected at spawn
 //     (schema-only for now — no form).
 //   - external: status only; the account is managed outside lab.
@@ -47,6 +52,7 @@ export default function ProviderAuthCard(props: { provider: Provider; activeRuns
   const [error, setError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [oauthUrl, setOauthUrl] = createSignal<string | null>(null);
+  const [userCode, setUserCode] = createSignal<string | null>(null);
   const [code, setCode] = createSignal('');
   const [waiting, setWaiting] = createSignal(false);
   const [confirmingLogout, setConfirmingLogout] = createSignal(false);
@@ -55,13 +61,15 @@ export default function ProviderAuthCard(props: { provider: Provider; activeRuns
   const kind = () => props.provider.auth.kind;
   // Logout exists only for the flows lab drives itself; api-key material lives
   // in the vault and external accounts are managed outside lab entirely.
-  const canLogout = () => kind() === 'oauth-code' || kind() === 'oauth-redirect';
+  const canLogout = () =>
+    kind() === 'oauth-code' || kind() === 'oauth-redirect' || kind() === 'device-code';
   const loggedIn = () => status()?.logged_in === true;
 
   // Login landed (SSE-driven refetch flipped the status): clear the flow.
   const resetFlowIfDone = (s: ProviderAuthStatus | undefined) => {
     if (s?.logged_in) {
       setOauthUrl(null);
+      setUserCode(null);
       setCode('');
       setWaiting(false);
     }
@@ -87,10 +95,16 @@ export default function ProviderAuthCard(props: { provider: Provider; activeRuns
     try {
       const res = await providerLoginStart(props.provider.id);
       setOauthUrl(res.oauth_url);
+      setUserCode(res.user_code ?? null);
       setCode('');
+      // A non-empty one-time code means the CLI login already runs in the
+      // background (device-code) — the card is waiting on the SSE completion
+      // from the moment the operator can see the code.
+      if ((res.user_code ?? '') !== '') setWaiting(true);
     } catch (err) {
       // 409 = already logged in — resync instead of surfacing an error.
       setOauthUrl(null);
+      setUserCode(null);
       setError(errorMessage(err));
       void refetch();
     } finally {
@@ -248,6 +262,64 @@ export default function ProviderAuthCard(props: { provider: Provider; activeRuns
                       </Show>
                     </div>
                   </form>
+                </div>
+              </Show>
+            </Match>
+            {/* device-code: start-login runs the CLI login in the background
+                and yields a verification URL + one-time code the operator
+                enters on that page (any browser) — no paste-back into lab.
+                Completion lands via provider.auth.changed like oauth-code. */}
+            <Match when={kind() === 'device-code'}>
+              <Show
+                when={oauthUrl() !== null}
+                fallback={
+                  <div class="card-actions">
+                    <button
+                      type="button"
+                      class="primary"
+                      onClick={() => void startLogin()}
+                      disabled={busy()}
+                    >
+                      {busy() ? 'Starting…' : `Log in to ${name()}`}
+                    </button>
+                  </div>
+                }
+              >
+                <div class="login-flow">
+                  <Show
+                    when={oauthUrl() !== ''}
+                    fallback={
+                      <p class="muted card-sub">
+                        The verification URL wasn't captured yet — restart the login to try again.
+                      </p>
+                    }
+                  >
+                    <p class="card-sub">
+                      1. Open the verification page:
+                      <br />
+                      <a href={oauthUrl()!} target="_blank" rel="noreferrer" class="oauth-link">
+                        Open the device authorization page ↗
+                      </a>
+                    </p>
+                  </Show>
+                  <Show when={userCode()}>
+                    <p class="card-sub">
+                      2. Enter this one-time code there — it expires in about 15 minutes:
+                      <br />
+                      <code class="mono device-user-code">{userCode()}</code>
+                    </p>
+                  </Show>
+                  <Show when={props.provider.auth.instructions}>
+                    <p class="card-sub auth-instructions">{props.provider.auth.instructions}</p>
+                  </Show>
+                  <div class="card-actions">
+                    <button type="button" onClick={() => void startLogin()} disabled={busy()}>
+                      Restart login
+                    </button>
+                    <Show when={waiting()}>
+                      <span class="muted pulse">waiting for {name()}…</span>
+                    </Show>
+                  </div>
                 </div>
               </Show>
             </Match>

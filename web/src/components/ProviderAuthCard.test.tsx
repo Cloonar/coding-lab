@@ -1,8 +1,10 @@
 // ProviderAuthCard behavioral contract (issue #51 decision 7):
 // - the card is descriptor-driven: oauth-code renders the full login flow
-//   (start → authorize link + code paste), oauth-redirect renders the
-//   descriptor's instructions (no code form), api-key renders the
-//   injected-at-spawn note, external renders status only;
+//   (start → authorize link + code paste), device-code renders the
+//   verification link + prominent one-time code with NO paste-back (issue
+//   #87), oauth-redirect renders the descriptor's instructions (no code
+//   form), api-key renders the injected-at-spawn note, external renders
+//   status only;
 // - logout exists only for the oauth flows, gated behind the confirm dialog
 //   that names the running-instance count and the AFK warning (issue #46);
 // - every string derives from the provider's display_name — nothing hardcodes
@@ -67,6 +69,8 @@ let authOnServer: ProviderAuthStatus;
 let logoutCalls: number;
 let codePosts: { code: string }[];
 let statusGets: number;
+/** login/start response body — device-code tests add user_code / blank urls. */
+let startBody: { oauth_url: string; user_code?: string };
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
 
@@ -96,7 +100,7 @@ function stubApi(id = 'claude-code'): void {
         return Promise.resolve(jsonResponse(200, authOnServer));
       }
       if (url === `/api/v1/providers/${id}/auth/login/start` && method === 'POST') {
-        return Promise.resolve(jsonResponse(200, { oauth_url: 'https://auth.example/oauth/x' }));
+        return Promise.resolve(jsonResponse(200, startBody));
       }
       if (url === `/api/v1/providers/${id}/auth/login/code` && method === 'POST') {
         codePosts.push(JSON.parse(String(init?.body)) as { code: string });
@@ -153,6 +157,7 @@ beforeEach(() => {
   logoutCalls = 0;
   codePosts = [];
   statusGets = 0;
+  startBody = { oauth_url: 'https://auth.example/oauth/x' };
   stubApi();
 });
 
@@ -294,6 +299,94 @@ describe('ProviderAuthCard descriptor-driven flows', () => {
     expect(container.querySelector('.card-title')?.textContent).toBe('Gemini CLI');
     expect(container.textContent).toContain('Log in to Gemini CLI');
     expect(container.textContent).not.toMatch(/claude/i);
+  });
+});
+
+describe('ProviderAuthCard device-code flow (issue #87)', () => {
+  const deviceProvider = () =>
+    provider({
+      id: 'acme-cli',
+      display_name: 'Acme CLI',
+      auth: { kind: 'device-code', instructions: 'Any browser works; the code is single-use.' },
+    });
+
+  it('start-login yields the verification link, the one-time code, the waiting indicator — and no paste-back', async () => {
+    authOnServer = LOGGED_OUT;
+    stubApi('acme-cli');
+    startBody = { oauth_url: 'https://auth.example/device', user_code: 'Y9HC-QKI85' };
+    await mountCard(deviceProvider());
+
+    buttonByText('Log in to Acme CLI')!.click();
+    await settle();
+
+    // Step 1: the verification link, same anchor affordance as oauth-code.
+    expect(container.querySelector('a.oauth-link')?.getAttribute('href')).toBe(
+      'https://auth.example/device',
+    );
+    // Step 2: the one-time code, prominent and selectable, with expiry copy.
+    expect(container.querySelector('code.device-user-code')?.textContent).toBe('Y9HC-QKI85');
+    expect(container.textContent).toContain('expires in about 15 minutes');
+    // The descriptor's instructions render below the steps.
+    expect(container.textContent).toContain('Any browser works; the code is single-use.');
+    // No code paste-back into lab — the operator enters it on the page.
+    expect(maybe('input[name="provider-login-code"]')).toBeNull();
+    expect(buttonByText('Submit code')).toBeUndefined();
+    // The CLI login already runs in the background: waiting immediately.
+    expect(container.textContent).toContain('waiting for Acme CLI…');
+    expect(buttonByText('Restart login')).not.toBeUndefined();
+  });
+
+  it('scrape miss (oauth_url "") shows the retry hint; Restart login re-scrapes', async () => {
+    authOnServer = LOGGED_OUT;
+    stubApi('acme-cli');
+    startBody = { oauth_url: '', user_code: '' };
+    await mountCard(deviceProvider());
+
+    buttonByText('Log in to Acme CLI')!.click();
+    await settle();
+
+    expect(container.textContent).toContain("The verification URL wasn't captured yet");
+    expect(maybe('a.oauth-link')).toBeNull();
+    expect(maybe('code.device-user-code')).toBeNull();
+    // No code yet → not waiting yet.
+    expect(container.textContent).not.toContain('waiting for Acme CLI…');
+
+    // Restart re-scrapes: the next start lands the URL and the code.
+    startBody = { oauth_url: 'https://auth.example/device', user_code: 'AAAA-BBBBB' };
+    buttonByText('Restart login')!.click();
+    await settle();
+
+    expect(container.querySelector('a.oauth-link')?.getAttribute('href')).toBe(
+      'https://auth.example/device',
+    );
+    expect(container.querySelector('code.device-user-code')?.textContent).toBe('AAAA-BBBBB');
+    expect(container.textContent).toContain('waiting for Acme CLI…');
+  });
+
+  it('logged-in flip via provider.auth.changed clears the flow and offers logout', async () => {
+    authOnServer = LOGGED_OUT;
+    stubApi('acme-cli');
+    startBody = { oauth_url: 'https://auth.example/device', user_code: 'Y9HC-QKI85' };
+    await mountCard(deviceProvider());
+
+    buttonByText('Log in to Acme CLI')!.click();
+    await settle();
+    expect(container.textContent).toContain('waiting for Acme CLI…');
+
+    // The adapter's background poll lands the login; SSE flips the card.
+    authOnServer = LOGGED_IN;
+    FakeEventSource.instances[0]?.emit('provider.auth.changed', {
+      type: 'provider.auth.changed',
+      provider: 'acme-cli',
+    });
+    await settle();
+
+    expect(container.textContent).toContain('logged in');
+    expect(maybe('a.oauth-link')).toBeNull();
+    expect(maybe('code.device-user-code')).toBeNull();
+    expect(container.textContent).not.toContain('waiting for Acme CLI…');
+    // device-code is a lab-driven flow: logout is offered.
+    expect(maybe('button.provider-logout')).not.toBeNull();
   });
 });
 

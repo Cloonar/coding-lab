@@ -83,6 +83,14 @@ const (
 	// Instructions carries the operator guidance (e.g. an SSH port-forward
 	// recipe for a headless host).
 	AuthFlowOAuthRedirect = "oauth-redirect"
+	// AuthFlowDeviceCode: device-code authorization — LoginStart launches the
+	// provider's login and returns the verification URL; the one-time user
+	// code is surfaced through the optional LoginCodeReporter capability and
+	// entered browser-side at that URL, never pasted back into lab.
+	// LoginSubmitCode returns ErrLoginCodeUnsupported; completion is
+	// provider-driven (the adapter polls its own status and publishes
+	// provider.auth.changed).
+	AuthFlowDeviceCode = "device-code"
 	// AuthFlowAPIKey: a vault credential reference injected at spawn via the
 	// existing materialization mechanism. SCHEMA ONLY in issue #51 — no
 	// implementation stands behind it yet.
@@ -518,6 +526,10 @@ var (
 	// provider's login timeout after the code was delivered; the stuck login
 	// attempt has been torn down. Maps to 504.
 	ErrLoginTimeout = errors.New("login did not complete in time — try again")
+	// ErrLoginCodeUnsupported is returned by LoginSubmitCode for flows
+	// (device-code) where the code travels operator→browser — entered at the
+	// verification URL, never pasted back into lab. Maps to 409.
+	ErrLoginCodeUnsupported = errors.New("provider: this login flow does not take a pasted code")
 )
 
 // ConnectingReporter is the optional render-state extension: a provider
@@ -525,6 +537,19 @@ var (
 // UI's "connecting…" state (pinned instances API field `connecting`).
 type ConnectingReporter interface {
 	Connecting(sessionName string) bool
+}
+
+// LoginCodeReporter is the optional device-code capability: a provider whose
+// auth flow is AuthFlowDeviceCode surfaces the pending login attempt's
+// one-time user code here, and httpapi echoes it in the login/start response
+// so the operator can enter it browser-side at the verification URL — the
+// code never travels back into lab. Advertised by type assertion at the call
+// site, exactly like ConnectingReporter and DeepLinker (ADR-0017).
+type LoginCodeReporter interface {
+	// PendingLoginCode returns the one-time user code of the login attempt
+	// currently pending ("" when no login is pending or the flow has no
+	// code).
+	PendingLoginCode() string
 }
 
 // OpenAffordance is a provider's generic "open the session on the web" hint,

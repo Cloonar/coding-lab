@@ -338,8 +338,13 @@ export interface ProviderOptionSpec {
   default: string;
 }
 
-/** The provider's auth-flow kinds (issue #51 decision 7). */
-export type ProviderAuthKind = 'oauth-code' | 'oauth-redirect' | 'api-key' | 'external';
+/**
+ * The provider's auth-flow kinds (issue #51 decision 7). 'device-code' (issue
+ * #87): start-login yields a verification URL plus a short one-time code the
+ * operator enters on that page — no code paste-back into lab.
+ */
+export type ProviderAuthKind =
+  'oauth-code' | 'oauth-redirect' | 'api-key' | 'device-code' | 'external';
 
 /**
  * Provider-declared auth flow descriptor (issue #51 decision 7): which login
@@ -387,9 +392,14 @@ export function providerAuthStatus(id: string, force = false): Promise<ProviderA
   );
 }
 
-/** 409s when already logged in — the caller refetches status instead. */
-export function providerLoginStart(id: string): Promise<{ oauth_url: string }> {
-  return request<{ oauth_url: string }>(
+/**
+ * 409s when already logged in — the caller refetches status instead.
+ * `user_code` arrives for device-code flows: a short one-time code (expires in
+ * ~15 minutes) the operator enters on the oauth_url page. `oauth_url` may be
+ * "" on a scrape miss — retry by starting again.
+ */
+export function providerLoginStart(id: string): Promise<{ oauth_url: string; user_code?: string }> {
+  return request<{ oauth_url: string; user_code?: string }>(
     'POST',
     `/providers/${encodeURIComponent(id)}/auth/login/start`,
   );
