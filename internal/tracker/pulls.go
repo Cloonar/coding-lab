@@ -14,29 +14,53 @@ package tracker
 // client and the built-in tracker only ever emit the three, so this is
 // defensive.
 func PullState(pulls []PullRef, head string) (string, bool) {
-	best := ""
+	best, rank := bestPull(pulls, head)
+	if rank == 0 {
+		return "", false
+	}
+	return best.State, true
+}
+
+// bestPull is the one collision loop both PullState and DonePull project from
+// — the highest-ranked head-matching pull plus its rank (0 = no recognizable
+// match) — so their notion of "the winning pull" can never diverge.
+func bestPull(pulls []PullRef, head string) (PullRef, int) {
+	var best PullRef
 	bestRank := 0
 	for _, p := range pulls {
 		if p.HeadBranch != head {
 			continue
 		}
 		if r := stateRank(p.State); r > bestRank {
-			bestRank, best = r, p.State
+			bestRank, best = r, p
 		}
 	}
-	if bestRank == 0 {
-		return "", false
+	return best, bestRank
+}
+
+// DonePull returns the head-matching pull that constitutes an AFK run's
+// done-signal — an open or merged PR/CR — or (PullRef{}, false) when none does.
+// Open beats merged on a same-head collision (stateRank), so a run whose branch
+// carries both a live re-opened PR and a stale merged one reports the live one;
+// a closed-unmerged pull (or an unrecognized state) never matches, so the run
+// fails on death/timeout instead of being falsely reaped as a success. The
+// whole three-state vocabulary exists for exactly this reading.
+func DonePull(pulls []PullRef, head string) (PullRef, bool) {
+	// The done floor is merged: a winning closed (rank 1) or unrecognized
+	// (rank 0) pull never matches, so a stale closed PR cannot mask a run.
+	best, rank := bestPull(pulls, head)
+	if rank < stateRank(PullMerged) {
+		return PullRef{}, false
 	}
 	return best, true
 }
 
 // PRPresent reports whether a head-matching PR counts as an AFK run's
-// done-signal: an open or merged PR ⇒ done; a closed-unmerged one (or none at
-// all) ⇒ not done, so the run fails on death/timeout instead of being falsely
-// reaped as a success. This is the whole point of the three-state vocabulary.
+// done-signal — the boolean projection of DonePull, so "is there a done-signal"
+// and "which pull is it" can never diverge.
 func PRPresent(pulls []PullRef, head string) bool {
-	state, ok := PullState(pulls, head)
-	return ok && (state == PullOpen || state == PullMerged)
+	_, ok := DonePull(pulls, head)
+	return ok
 }
 
 // stateRank orders the three-valued PR state for open-beats-merged-beats-closed

@@ -41,12 +41,15 @@ var clockTime = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 // fakeTracker is a scriptable tracker.Tracker: the ready queue and the pull
 // listing the engine reads, plus injectable errors and a Pulls call counter.
 type fakeTracker struct {
-	mu         sync.Mutex
-	ready      []tracker.Issue
-	pulls      []tracker.PullRef
-	readyErr   error
-	pullsErr   error
-	pullsCalls int
+	mu          sync.Mutex
+	ready       []tracker.Issue
+	pulls       []tracker.PullRef
+	readyErr    error
+	pullsErr    error
+	pullsCalls  int
+	pullTitles  map[int]string // Pull(n) detail title (done-signal notification body)
+	detailErr   error          // failPullDetail: Pull() error injection
+	detailCalls int
 }
 
 func (f *fakeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -72,8 +75,14 @@ func (f *fakeTracker) Pulls(context.Context) ([]tracker.PullRef, error) {
 	}
 	return append([]tracker.PullRef(nil), f.pulls...), nil
 }
-func (f *fakeTracker) Pull(context.Context, int) (tracker.PullDetail, error) {
-	return tracker.PullDetail{}, tracker.ErrNotFound
+func (f *fakeTracker) Pull(_ context.Context, n int) (tracker.PullDetail, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.detailCalls++
+	if f.detailErr != nil {
+		return tracker.PullDetail{}, f.detailErr
+	}
+	return tracker.PullDetail{Number: n, Title: f.pullTitles[n]}, nil
 }
 func (f *fakeTracker) Checks(context.Context, int) ([]tracker.Check, error) { return nil, nil }
 func (f *fakeTracker) CreatePull(context.Context, string, string, string, string) (tracker.PullRef, error) {
@@ -118,6 +127,27 @@ func (f *fakeTracker) pullsCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.pullsCalls
+}
+
+func (f *fakeTracker) setPullTitle(n int, title string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pullTitles == nil {
+		f.pullTitles = map[int]string{}
+	}
+	f.pullTitles[n] = title
+}
+
+func (f *fakeTracker) failPullDetail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.detailErr = err
+}
+
+func (f *fakeTracker) detailCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.detailCalls
 }
 
 // fakeResolver maps repo ids onto scripted trackers (the TrackerResolver
