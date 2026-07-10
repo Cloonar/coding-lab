@@ -8,8 +8,10 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -35,23 +37,43 @@ type instanceCreateRequest struct {
 	Provider string `json:"provider"` // optional per-spawn provider pick (issue #66); "" inherits
 	Model    string `json:"model"`
 	Effort   string `json:"effort"`
+	// FirstMessage is the operator's first chat message (issue #96), optional.
+	// When set it rides the spawn's trailing positional
+	// (provider.SpawnSpec.InitialPrompt) — present before the process starts,
+	// the same argv mechanism the AFK seed prompt uses, so there is no
+	// post-spawn keystroke and no cold-start TUI race. "" (or whitespace-only)
+	// means none.
+	FirstMessage string `json:"first_message"`
 }
 
 // handleInstanceCreate is POST /api/v1/repos/{id}/instances: 201 with the run,
 // or 409 (cap / logged out / repo not ready), 400 (unknown provider/model/
-// effort), 404 (unknown repo), 500 (worktree/spawn failure — the git cause
-// surfaces).
+// effort, or an oversized first_message), 404 (unknown repo), 500
+// (worktree/spawn failure — the git cause surfaces).
 func (s *Server) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 	req, ok := decodeOptionalJSON[instanceCreateRequest](w, r)
 	if !ok {
 		return
 	}
+	// Shape-only validation (ADR-0027, mirrored from the afk_prompt PATCH in
+	// settings.go): whitespace-only normalizes to "" = none; a real message is
+	// passed through VERBATIM — no trimming, since leading/trailing structure
+	// may be legitimate. The cap guards the spawn argv (same rationale as
+	// afkPromptMaxBytes: an unbounded value risks the OS ARG_MAX ceiling).
+	firstMessage := req.FirstMessage
+	if strings.TrimSpace(firstMessage) == "" {
+		firstMessage = ""
+	} else if len(firstMessage) > afkPromptMaxBytes {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("first_message must be at most %d bytes", afkPromptMaxBytes))
+		return
+	}
 	run, err := s.instances.Start(r.Context(), instance.StartParams{
-		RepoID:   r.PathValue("id"),
-		Label:    req.Label,
-		Provider: req.Provider,
-		Model:    req.Model,
-		Effort:   req.Effort,
+		RepoID:       r.PathValue("id"),
+		Label:        req.Label,
+		Provider:     req.Provider,
+		Model:        req.Model,
+		Effort:       req.Effort,
+		FirstMessage: firstMessage,
 	})
 	if err != nil {
 		s.writeInstanceError(w, "starting instance", err)

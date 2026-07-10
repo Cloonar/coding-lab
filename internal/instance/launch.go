@@ -44,11 +44,15 @@ type LaunchSpec struct {
 	BudgetDeadline *time.Time
 	TokenExpiry    *time.Time
 
-	// SeedPrompt, when non-empty, is the AFK seed prompt. It is carried into
-	// the spawn as claude's trailing positional argument (provider.SpawnArgv),
-	// the pinned v0 mechanism — so the prompt exists before the process and is
+	// SeedPrompt, when non-empty, is the initial prompt carried into the spawn
+	// as claude's trailing positional argument (provider.SpawnArgv), the
+	// pinned v0 mechanism — so the prompt exists before the process and is
 	// never lost to the cold-start TUI race that a post-spawn keystroke would
-	// hit. Manual runs leave it "" (no trailing argument).
+	// hit. For an AFK run it is the resolved AFK seed prompt (built-in
+	// template or afk_prompt override); for a manual run it is the operator's
+	// first chat message when given (issue #96), else "" (no trailing
+	// argument, the pre-#96 behavior). Either way the field carries no
+	// run-kind semantics of its own — Kind alone decides AFK vs. manual.
 	SeedPrompt string
 }
 
@@ -56,8 +60,9 @@ type LaunchSpec struct {
 // startguard.Mark → credential materialization → gitx.AddWorktree (fail-loud
 // fetch, no fallback base) → workspace seeding (provider trust/MCP, then
 // lab's skills bundle + CLAUDE.local.md) → runs row + run token → tmux
-// spawn (AFK seed prompt carried as the spawn argv's trailing positional) →
-// StampOpened → async deep-link capture → run.changed.
+// spawn (SeedPrompt, when set, carried as the spawn argv's trailing
+// positional — the AFK seed prompt or a manual run's first chat message,
+// issue #96) → StampOpened → async deep-link capture → run.changed.
 // Any failure after worktree creation rolls back to the exact pre-launch
 // state (session kill, RemoveWorktree, force DeleteBranch, run row/token
 // delete, credential cleanup); a failure before worktree creation rolls back
@@ -215,9 +220,10 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	}
 
 	// Spawn in the worktree (never the reference repo), prlimit-wrapped by the
-	// runner. The AFK seed prompt (spec.SeedPrompt) rides the spawn argv as
-	// claude's trailing positional (v0-pinned) — no post-spawn keystroke, so
-	// there is no cold-start TUI race to leave a run unseeded. A spawn failure
+	// runner. SeedPrompt (the AFK seed prompt, or a manual run's first chat
+	// message per issue #96) rides the spawn argv as claude's trailing
+	// positional (v0-pinned) — no post-spawn keystroke, so there is no
+	// cold-start TUI race to leave a run unseeded. A spawn failure
 	// rolls the whole launch back, releasing an AFK claim.
 	if err := s.runner.Start(ctx, name, wtPath, spawnArgv, extraEnv); err != nil {
 		rollback(true)

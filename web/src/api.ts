@@ -464,6 +464,13 @@ export interface StartInstanceRequest {
   provider?: string;
   model?: string;
   effort?: string;
+  /**
+   * The operator's first chat message (issue #96): delivered on the spawn argv,
+   * so it needs no post-spawn send — the queued-message hop (issue #41) that
+   * deadlocked on a lazily-created transcript is retired. Omitted for a plain
+   * spawn with an empty composer.
+   */
+  first_message?: string;
 }
 
 /** 201 run JSON | 409 (cap / provider logged out / repo not ready) | 400. */

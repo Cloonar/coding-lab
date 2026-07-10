@@ -45,7 +45,7 @@ A deliberately-broken fake adapter lives in the suite's own tests; failures name
 
 Held to the ADR-0008 live-verification bar: real CLI, real host, no credentials in CI. Evidenced by the committed compat record, not by a test that runs on every push.
 
-1. **transcript** — locate by cwd, read/map to the universal schema, confirm a NEW transcript identity on context clear (native rotation or a synthesized epoch — see `LocateTranscript`'s doc).
+1. **transcript** — locate by cwd, read/map to the universal schema, confirm a NEW transcript identity on context clear (native rotation or a synthesized epoch — see `LocateTranscript`'s doc); and confirm **when the transcript is born** — at session init, or lazily at the first turn (an idle interactive session may then have no transcript file at all, so nothing may gate first-message delivery on its existence — codex 0.133.0 is the precedent, issue #96).
 2. **reply / dialog-answer / interrupt** — hazard-check the send-keys recipes against the real TUI; double-Esc/Ctrl-C must never be able to kill the session.
 3. **context-file discovery** — prove the CLI actually READS the lab-owned context file (e.g. Codex ↔ `AGENTS.local.md` via project config).
 4. **incogni attribution ground truth** — capture what the CLI actually writes into commits/PRs and reconcile it against the adapter's `ScrubPatterns`; these live samples become `Fixture.AttributionSamples`.

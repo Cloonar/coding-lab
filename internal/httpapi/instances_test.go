@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,6 +230,61 @@ func TestAPI_InstanceStartProviderPick(t *testing.T) {
 	}
 	if got := len(b.SpawnSpecs()); got != 1 {
 		t.Errorf("provider B spawned %d times, want 1", got)
+	}
+}
+
+// Issue #96: POST /repos/{id}/instances {first_message} carries the operator's
+// first chat message into the spawn's trailing positional
+// (provider.SpawnSpec.InitialPrompt), verified via the fake provider's
+// recorded SpawnSpecs. Shape-only validation (ADR-0027): whitespace-only
+// normalizes to no prompt (spawn still succeeds); an oversized message is a
+// 400 that creates nothing.
+func TestAPI_InstanceStartFirstMessage(t *testing.T) {
+	x := newInstanceServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	// A real message reaches InitialPrompt verbatim.
+	resp := x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances",
+		map[string]any{"first_message": "fix the flaky test"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	_ = resp.Body.Close()
+	specs := x.prov.SpawnSpecs()
+	if got := len(specs); got != 1 {
+		t.Fatalf("SpawnArgv called %d times, want 1", got)
+	}
+	if specs[0].InitialPrompt != "fix the flaky test" {
+		t.Errorf("InitialPrompt = %q, want the first_message verbatim", specs[0].InitialPrompt)
+	}
+
+	// Whitespace-only first_message normalizes to "" (no trailing prompt);
+	// the spawn still succeeds (a second instance on the same repo).
+	resp = x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances",
+		map[string]any{"first_message": "   \n\t  ", "label": "ws"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	_ = resp.Body.Close()
+	specs = x.prov.SpawnSpecs()
+	if got := len(specs); got != 2 {
+		t.Fatalf("SpawnArgv called %d times, want 2", got)
+	}
+	if specs[1].InitialPrompt != "" {
+		t.Errorf("whitespace-only first_message → InitialPrompt = %q, want \"\"", specs[1].InitialPrompt)
+	}
+
+	// An oversized first_message is a 400; nothing is created or spawned.
+	resp = x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances",
+		map[string]any{"first_message": strings.Repeat("x", afkPromptMaxBytes+1), "label": "big"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); got["error"] == "" {
+		t.Error("oversized first_message 400 without error message")
+	}
+	if got := len(x.prov.SpawnSpecs()); got != 2 {
+		t.Errorf("SpawnArgv called %d times after the oversized rejection, want still 2 (nothing spawned)", got)
+	}
+	resp = x.do("GET", "/api/v1/instances", nil, nil)
+	list := decodeBody(t, resp)
+	items, _ := list["instances"].([]any)
+	if len(items) != 2 {
+		t.Errorf("instances after the rejected 400 = %d, want 2 (nothing created)", len(items))
 	}
 }
 

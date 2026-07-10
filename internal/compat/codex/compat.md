@@ -255,6 +255,19 @@ order). The first line of every rollout is a `session_meta` record whose
 scans date dirs newest-first, files per day by filename descending, and
 reads ONLY the first line of each candidate until the cwd matches. live.
 
+- **Lazy birth — WARNING**: the rollout file does not exist until the FIRST
+  TURN starts; codex creates nothing at session init. Live evidence (issue
+  #87's spike sweep, 2026-07-10): a session whose
+  `session_meta.payload.timestamp` read `01:25:38Z` had a file birth
+  (mtime) of `01:27:40Z` — the rollout appeared only when the first
+  message was sent, roughly two minutes after the TUI opened; a
+  30-minute-idle interactive instance had no rollout file at all and no
+  open rollout fd. `codex exec` has no such gap — its turn starts at once,
+  so its rollout is written immediately. **Consequence:
+  `LocateTranscript` misses forever for an idle TUI — nothing may ever
+  gate first-message delivery on transcript existence** (issue #96: the
+  operator's first message rides `SpawnSpec.InitialPrompt` on the spawn
+  argv instead of waiting for a locatable transcript). live.
 - **Local-time filename vs UTC payload — WARNING**: the *filename*
   timestamp is LOCAL time (`rollout-2026-07-10T03-18-27-…` on a
   Europe/Vienna host) while every *payload* timestamp is UTC
@@ -337,7 +350,11 @@ Pinned by `TestCompat_RolloutPlainFixture_maps`,
 `TestCompat_Live_locateTranscript`. When this breaks: capture a fresh
 rollout with a trivial `codex exec` run in a scratch dir, diff the record
 grammar, re-derive the fixtures (stub `base_instructions` again), and
-re-check `/new` rotation in a real TUI.
+re-check `/new` rotation in a real TUI. Re-check the lazy-birth timing too:
+spawn an idle TUI and confirm no rollout file appears until the first turn
+starts; if a future codex version writes the rollout at session init
+instead, this pin goes stale but harmless — first-message delivery must
+still never gate on transcript existence.
 
 ## 6. Reply + interrupt recipes — live (0.133.0)
 

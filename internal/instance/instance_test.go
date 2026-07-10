@@ -348,6 +348,39 @@ func TestStart_happyPath(t *testing.T) {
 	}
 }
 
+// Issue #96: a manual Start's StartParams.FirstMessage — the operator's first
+// chat message — rides the same SeedPrompt → spawn-argv mechanism as the AFK
+// seed prompt, present before the process starts as claude's trailing
+// positional. The injected per-run --settings flag (ADR-0020) still lands
+// among the flags, BEFORE that trailing prompt (mirrors
+// TestLaunch_seedPromptIsTrailingSpawnPositional / TestLaunch_
+// threadsOptionsAndKeepsSettingsBeforePrompt for the AFK path).
+func TestStart_firstMessageIsTrailingSpawnPositional(t *testing.T) {
+	f := newFixture(t)
+	const msg = "Please add a health-check endpoint."
+
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID, FirstMessage: msg})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	name := "proj~20260608-1530"
+	sess, live := f.runner.Session(name)
+	if !live {
+		t.Fatal("session not live after Start")
+	}
+	if last := sess.Argv[len(sess.Argv)-1]; last != msg {
+		t.Errorf("last spawn argv = %q, want the first message %q as one trailing positional", last, msg)
+	}
+	wantArgv := f.wantSpawnArgv(name, run.Model, run.Effort, msg, run.ID)
+	if strings.Join(sess.Argv, " ") != strings.Join(wantArgv, " ") {
+		t.Errorf("spawn argv = %v, want %v", sess.Argv, wantArgv)
+	}
+	// No post-spawn keystroke injection — same argv-only mechanism as AFK.
+	if sent := f.runner.Sent(name); len(sent) != 0 {
+		t.Errorf("first message sent via %d keystroke batches, want 0 (argv-only)", len(sent))
+	}
+}
+
 // The repo's incogni flag flows into the provider's SeedOpts (D15 §9
 // measure 1): an incogni repo's launch asks the provider to seed
 // attribution-off settings; a plain repo's launch does not.
