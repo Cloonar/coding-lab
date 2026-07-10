@@ -7,6 +7,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
@@ -49,6 +50,38 @@ var conformanceProviders = []struct {
 				CleanSamples: []string{
 					"Co-Authored-By: Alice <alice@example.com>",
 					"Docs generated with pandoc.",
+				},
+			}
+		},
+	},
+	{
+		name: "codex",
+		make: func(t *testing.T) (provider.AgentProvider, providertest.Fixture) {
+			p, err := codex.New(codex.Options{
+				CodexBin:    "codex-not-invoked", // the suite never spawns the CLI
+				ConfigPath:  filepath.Join(t.TempDir(), "config.toml"),
+				SessionsDir: filepath.Join(t.TempDir(), "sessions"),
+				AgentsFile:  filepath.Join(t.TempDir(), "AGENTS.md"),
+				LoginDir:    t.TempDir(),
+				Runner:      tmuxx.NewFake(),
+				Bus:         events.NewBus(),
+			})
+			if err != nil {
+				t.Fatalf("codex.New: %v", err)
+			}
+			// codex 0.133 writes NO attribution at the source (the
+			// codex_git_commit feature is off) — these are the DEFENSIVE marker
+			// shapes the declared ScrubPatterns must catch if a future version
+			// turns attribution on (issue #87 / ADR-0033).
+			return p, providertest.Fixture{
+				AttributionSamples: []string{
+					"Co-authored-by: Codex <noreply@openai.com>",
+					"Co-authored-by: ChatGPT Codex <bot@openai.com>",
+					"Generated with Codex",
+				},
+				CleanSamples: []string{
+					"Co-authored-by: Alice <alice@example.com>",
+					"The openai.com docs describe the responses API.",
 				},
 			}
 		},

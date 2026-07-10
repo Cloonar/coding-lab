@@ -468,12 +468,17 @@ func TestAPI_ProviderAuthStatusAndLogin(t *testing.T) {
 	resp = x.do("POST", base+"/login/start", map[string]any{}, h)
 	wantStatus(t, resp, http.StatusConflict)
 
-	// Logged out → 200 with the oauth url.
+	// Logged out → 200 with the oauth url. A provider without the
+	// LoginCodeReporter capability (the plain Fake) carries no user_code key.
 	x.prov.SetLoggedIn(false)
 	resp = x.do("POST", base+"/login/start", map[string]any{}, h)
 	wantStatus(t, resp, http.StatusOK)
-	if got := decodeBody(t, resp); got["oauth_url"] == "" {
+	got := decodeBody(t, resp)
+	if got["oauth_url"] == "" {
 		t.Errorf("oauth_url empty: %v", got)
+	}
+	if _, present := got["user_code"]; present {
+		t.Errorf("user_code present for a provider without LoginCodeReporter: %v", got)
 	}
 
 	// Code submit → 202.
@@ -504,6 +509,50 @@ func TestAPI_ProviderAuthStatusAndLogin(t *testing.T) {
 	wantStatus(t, resp, http.StatusNotFound)
 	resp = x.do("POST", nope+"/logout", map[string]any{}, h)
 	wantStatus(t, resp, http.StatusNotFound)
+}
+
+// codeReporterFake adds provider.LoginCodeReporter on top of the Fake — the
+// device-code capability the Fake itself does not implement — so the
+// login/start user_code passthrough has a provider to advertise it.
+type codeReporterFake struct {
+	*providertest.Fake
+	code string
+}
+
+func (f *codeReporterFake) PendingLoginCode() string { return f.code }
+
+// Device-code login support (issue #87): a provider implementing
+// provider.LoginCodeReporter gets its pending one-time user code echoed on
+// login/start (the operator enters it browser-side at the verification URL —
+// it never travels back into lab), and its LoginSubmitCode returning
+// provider.ErrLoginCodeUnsupported maps to 409.
+func TestAPI_ProviderLoginDeviceCode(t *testing.T) {
+	dev := providertest.New()
+	dev.SetID("fake-device")
+	dev.SetLoggedIn(false)
+	x := newInstanceServerWith(t, &codeReporterFake{Fake: dev, code: "WDJB-MJHT"})
+	h := csrfHeaders(x.ts.URL)
+	const base = "/api/v1/providers/fake-device/auth"
+
+	// login/start carries both the verification URL and the user code.
+	resp := x.do("POST", base+"/login/start", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got := decodeBody(t, resp)
+	if got["user_code"] != "WDJB-MJHT" {
+		t.Errorf("user_code = %v, want WDJB-MJHT", got["user_code"])
+	}
+	if got["oauth_url"] == "" {
+		t.Errorf("oauth_url empty alongside the user code: %v", got)
+	}
+
+	// A device-code flow takes no pasted code → 409 via the generic
+	// provider.ErrLoginCodeUnsupported sentinel.
+	dev.SetCodeError(provider.ErrLoginCodeUnsupported)
+	resp = x.do("POST", base+"/login/code", map[string]any{"code": "x"}, h)
+	wantStatus(t, resp, http.StatusConflict)
+	if body := decodeBody(t, resp); body["error"] == "" {
+		t.Error("409 returned no error message")
+	}
 }
 
 // Machine-wide logout (issue #46, per-id in issue #51 decision 7): the endpoint

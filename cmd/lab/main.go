@@ -33,6 +33,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
@@ -81,7 +82,7 @@ func run() int {
 	// providerIDs list validates the generic -provider-bin/-provider-config
 	// flags (issue #78 / ADR-0034). A future provider adds its ID here
 	// alongside its adapter construction below.
-	cfg, err := config.Parse(os.Args[1:], os.Getenv, []string{claudecode.ID})
+	cfg, err := config.Parse(os.Args[1:], os.Getenv, []string{claudecode.ID, codex.ID})
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(os.Stderr, usage)
 		return 0
@@ -204,7 +205,23 @@ func run() int {
 			logger.Error("building claude provider", "component", "main", "err", perr)
 			return 1
 		}
-		providerReg, err = provider.NewRegistry(claudeProvider)
+		// The codex adapter (issue #87) shares the runner/bus and derives its
+		// own path defaults from $CODEX_HOME / HOME/.codex (issue #78:
+		// adapter-owned defaults), so only the generic -provider-bin/-config
+		// overrides are threaded through.
+		codexProvider, perr := codex.New(codex.Options{
+			CodexBin:   cfg.ProviderBin[codex.ID],
+			ConfigPath: cfg.ProviderConfig[codex.ID],
+			LoginDir:   home,
+			Runner:     runner,
+			Bus:        bus,
+			Logger:     logger,
+		})
+		if perr != nil {
+			logger.Error("building codex provider", "component", "main", "err", perr)
+			return 1
+		}
+		providerReg, err = provider.NewRegistry(claudeProvider, codexProvider)
 		if err != nil {
 			logger.Error("building provider registry", "component", "main", "err", err)
 			return 1

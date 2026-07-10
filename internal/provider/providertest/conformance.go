@@ -313,11 +313,11 @@ func checkSpawnArgv(p provider.AgentProvider) []error {
 func checkAuthFlow(p provider.AgentProvider) []error {
 	kind := p.AuthFlow().Kind
 	switch kind {
-	case provider.AuthFlowOAuthCode, provider.AuthFlowOAuthRedirect, provider.AuthFlowAPIKey, provider.AuthFlowExternal:
+	case provider.AuthFlowOAuthCode, provider.AuthFlowOAuthRedirect, provider.AuthFlowDeviceCode, provider.AuthFlowAPIKey, provider.AuthFlowExternal:
 		return nil
 	}
-	return []error{fmt.Errorf("auth-flow: AuthFlow().Kind %q is not one of the declared kinds (%q, %q, %q, %q) — the SPA auth card renders from this vocabulary (issue #51 decision 7; issue #80)", kind,
-		provider.AuthFlowOAuthCode, provider.AuthFlowOAuthRedirect, provider.AuthFlowAPIKey, provider.AuthFlowExternal)}
+	return []error{fmt.Errorf("auth-flow: AuthFlow().Kind %q is not one of the declared kinds (%q, %q, %q, %q, %q) — the SPA auth card renders from this vocabulary (issue #51 decision 7; issue #80)", kind,
+		provider.AuthFlowOAuthCode, provider.AuthFlowOAuthRedirect, provider.AuthFlowDeviceCode, provider.AuthFlowAPIKey, provider.AuthFlowExternal)}
 }
 
 // providerIDPattern: the id lands inside tmux session names that are

@@ -1263,6 +1263,17 @@ details.start-instance form {
   overflow-wrap: anywhere;
 }
 
+/* The device-code one-time code: big and selectable — the operator reads it
+   off (or single-click selects it) to enter on the verification page. */
+.device-user-code {
+  display: inline-block;
+  margin-top: 0.25rem;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
 /* Parked ----------------------------------------------------------------------- */
 
 details.parked summary {

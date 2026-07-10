@@ -116,8 +116,10 @@ func (s *Server) handleProviderAuthStatus(w http.ResponseWriter, r *http.Request
 }
 
 // handleProviderLoginStart is POST /api/v1/providers/{id}/auth/login/start:
-// 200 {oauth_url} (the URL may be "" on a scrape miss — retry to re-scrape), or
-// 409 when already logged in.
+// 200 {oauth_url} (the URL may be "" on a scrape miss — retry to re-scrape),
+// plus user_code when the provider reports a pending device-code login
+// (provider.LoginCodeReporter — the operator enters the code browser-side at
+// the URL, it never comes back through lab), or 409 when already logged in.
 func (s *Server) handleProviderLoginStart(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.providerFromPath(w, r)
 	if !ok {
@@ -132,7 +134,13 @@ func (s *Server) handleProviderLoginStart(w http.ResponseWriter, r *http.Request
 		s.internalError(w, "starting login for "+p.ID(), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"oauth_url": url})
+	resp := map[string]string{"oauth_url": url}
+	if rep, ok := p.(provider.LoginCodeReporter); ok {
+		if code := rep.PendingLoginCode(); code != "" {
+			resp["user_code"] = code
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type loginCodeRequest struct {
@@ -140,9 +148,11 @@ type loginCodeRequest struct {
 }
 
 // handleProviderLoginCode is POST /api/v1/providers/{id}/auth/login/code
-// {code}: 202 on success, 400 for a rejected code, 504 on login timeout. The
-// error mapping is on the provider-generic sentinels (issue #51 decision 7), so
-// this file couples to no concrete provider's error types.
+// {code}: 202 on success, 400 for a rejected code, 409 for a flow that takes
+// no pasted code (device-code — the code is entered browser-side), 504 on
+// login timeout. The error mapping is on the provider-generic sentinels
+// (issue #51 decision 7), so this file couples to no concrete provider's
+// error types.
 func (s *Server) handleProviderLoginCode(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.providerFromPath(w, r)
 	if !ok {
@@ -158,6 +168,8 @@ func (s *Server) handleProviderLoginCode(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusAccepted)
 	case errors.Is(err, provider.ErrInvalidCode):
 		writeError(w, http.StatusBadRequest, "paste the code from the authorize page")
+	case errors.Is(err, provider.ErrLoginCodeUnsupported):
+		writeError(w, http.StatusConflict, "this provider's login does not take a code — finish it in the browser")
 	case errors.Is(err, provider.ErrLoginTimeout):
 		writeError(w, http.StatusGatewayTimeout, provider.ErrLoginTimeout.Error())
 	default:
