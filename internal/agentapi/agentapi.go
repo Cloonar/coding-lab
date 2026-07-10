@@ -19,6 +19,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
+	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
 // runTokenPrefix is the wire prefix of run tokens (ids.NewToken("run")).
@@ -33,6 +34,7 @@ type TrackerResolver interface {
 // Server carries the agent API's dependencies.
 type Server struct {
 	store    *store.Store
+	vault    *vault.Vault
 	trackers TrackerResolver
 	bus      *events.Bus
 	log      *slog.Logger
@@ -40,10 +42,13 @@ type Server struct {
 	scrub    []*regexp.Regexp
 }
 
-// New builds an agent API server. trackers resolves each repo's Tracker
-// (production: *tracker.Registry); bus carries the cr.changed event a builtin
-// PR create publishes (nil → no events, some unit tests run without a bus);
-// now is the injected clock for the token validity rule (nil → time.Now).
+// New builds an agent API server. vlt decrypts repo-secret blobs at exec time
+// for the POST /secrets/values endpoint (the store only ever sees ciphertext;
+// agentapi holds the only decrypt key on the agent surface). trackers resolves
+// each repo's Tracker (production: *tracker.Registry); bus carries the
+// cr.changed event a builtin PR create publishes (nil → no events, some unit
+// tests run without a bus); now is the injected clock for the token validity
+// rule (nil → time.Now).
 // scrub is the compiled cross-provider union of every registered provider's
 // declared attribution ScrubPatterns — the per-line predicate the incogni
 // body sanitizer runs (production: providerReg.ScrubRegexps(), ADR-0033).
@@ -51,14 +56,14 @@ type Server struct {
 // incogni bodies pass through unstripped — the same content-inert degradation
 // as the pre-push hook on an empty registry. agentapi takes plain compiled
 // regexps and never imports internal/provider, staying provider-agnostic.
-func New(st *store.Store, trackers TrackerResolver, bus *events.Bus, logger *slog.Logger, now func() time.Time, scrub []*regexp.Regexp) *Server {
+func New(st *store.Store, vlt *vault.Vault, trackers TrackerResolver, bus *events.Bus, logger *slog.Logger, now func() time.Time, scrub []*regexp.Regexp) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &Server{store: st, trackers: trackers, bus: bus, log: logger, now: now, scrub: scrub}
+	return &Server{store: st, vault: vlt, trackers: trackers, bus: bus, log: logger, now: now, scrub: scrub}
 }
 
 // Handler returns the /agent/v1 tree wrapped in run-token auth.
@@ -83,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agent/v1/prs/{n}", s.handlePRGet)
 	mux.HandleFunc("GET /agent/v1/prs/{n}/checks", s.handlePRChecks)
 	mux.HandleFunc("POST /agent/v1/prs/{n}/merge", s.handlePRMerge)
+	mux.HandleFunc("GET /agent/v1/secrets", s.handleSecretList)
+	mux.HandleFunc("POST /agent/v1/secrets/values", s.handleSecretValues)
 	mux.HandleFunc("/agent/v1/", func(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "not found")
 	})

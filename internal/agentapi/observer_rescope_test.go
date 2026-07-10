@@ -32,7 +32,7 @@ func TestCommentAttributionThroughObservedRegistry(t *testing.T) {
 	observed := 0
 	reg.SetObserver(func(string, string, bool) { observed++ })
 
-	srv := New(f.st, reg, nil, discard(), func() time.Time { return f.now }, nil)
+	srv := New(f.st, f.vlt, reg, nil, discard(), func() time.Time { return f.now }, nil)
 	rr := doJSON(t, srv.Handler(), "POST", "/agent/v1/issues/7/comments", token, `{"body":"working on it"}`)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())

@@ -29,6 +29,10 @@ var ErrReferenced = errors.New("credential is referenced")
 // repo write had not landed yet). The API answers 409.
 var ErrCredentialGone = errors.New("credential no longer exists")
 
+// ErrInvalidSecretName is the sentinel for a repo secret name that fails
+// ValidSecretName (design §12: repo_secrets.name must be shell/env-safe).
+var ErrInvalidSecretName = errors.New("store: invalid secret name")
+
 // ReferencedError is the concrete error DeleteCredential returns when refused:
 // it carries the number of referencing repos for the API's 409 body.
 // errors.Is(err, ErrReferenced) matches it; errors.As recovers the count.

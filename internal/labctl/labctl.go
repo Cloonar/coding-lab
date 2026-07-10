@@ -7,7 +7,11 @@
 // 2 usage/configuration error. The `pr checks` verb DELIBERATELY overrides
 // this (see runPRChecks): its 2 means exactly "checks are red", so every other
 // failure — usage, env, transport, API — folds into 1, and a still-pending run
-// is 3. No color, no spinner — output is for agents.
+// is 3. The `secret exec` verb ALSO deviates (see runSecretExec): it execs a
+// child and passes the child's exit code through VERBATIM, so 0/1/2 (or any
+// other code) may be the child's own — only a pre-exec failure is labctl's: a
+// bad NAME/`--`/command shape or missing env is 2, an API error or a command
+// that fails to start is 1. No color, no spinner — output is for agents.
 package labctl
 
 import (
@@ -39,6 +43,10 @@ Usage:
   labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
   labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
                                         pending (exit 0 green/none · 2 red · 3 still pending)
+  labctl secret list                    list the repo's secrets (name, description; never values)
+  labctl secret exec <NAME...> -- <cmd> [args...]
+                                        run cmd with each named secret injected as $NAME in its
+                                        env (values fetched at exec time; child's exit code passes through)
   labctl --version                      print version
 
 Environment:
@@ -75,6 +83,8 @@ func Run(args []string, env Env) int {
 		return runLabel(args[1:], env)
 	case "pr":
 		return runPR(args[1:], env)
+	case "secret":
+		return runSecret(args[1:], env)
 	default:
 		_, _ = fmt.Fprintf(env.Stderr, "labctl: unknown command %q\n\n%s", args[0], usage)
 		return 2

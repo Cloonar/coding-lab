@@ -149,9 +149,23 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
+	// The repo's secret INVENTORY (metadata only — names + descriptions, never
+	// values; issue #104) flows into the generic seeder so the generated
+	// context file can document how to use them. Fetched here rather than
+	// inside the seeder because the instance service already holds the store
+	// handle every other launch step uses; a fetch failure is treated exactly
+	// like the seed calls around it — nothing has been created past the
+	// worktree yet, so roll back the same way.
+	secrets, err := s.store.RepoSecrets(ctx, repo.ID)
+	if err != nil {
+		rollback(false)
+		return store.Run{}, &StartFailedError{cause: err}
+	}
 	// The generic seeder consumes the SAME provider's declared shapes (issue
-	// #51 decision 8): skills dir, context-file name, exclude entries.
-	if err := s.seeder.SeedWorkspace(wtPath, repo, spec.Provider.SeedMeta(), seeder.Opts{}); err != nil {
+	// #51 decision 8): skills dir, context-file name, exclude entries — plus
+	// the repo's secret inventory (issue #104) for the generated Secrets
+	// section.
+	if err := s.seeder.SeedWorkspace(wtPath, repo, spec.Provider.SeedMeta(), seeder.Opts{Secrets: secrets}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}

@@ -225,6 +225,39 @@ func (c *Client) LabelCreate(name, color, description string) (Label, error) {
 	return l, err
 }
 
+// SecretMeta is one row of the agent API's GET /secrets list: a repo secret's
+// name and description ONLY — the value is never listed (issue #104).
+type SecretMeta struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// SecretList lists the repo's secrets as metadata (never values).
+func (c *Client) SecretList() ([]SecretMeta, error) {
+	var resp struct {
+		Secrets []SecretMeta `json:"secrets"`
+	}
+	if err := c.do(http.MethodGet, "/agent/v1/secrets", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Secrets, nil
+}
+
+// SecretValues fetches the plaintext values of the named secrets (POST body
+// {names}) — the exec-time fetch behind `labctl secret exec`. The values feed
+// ONLY the child process env: the caller never prints or logs them. Any
+// unknown name is the API's 404 (its message names the missing, no values).
+func (c *Client) SecretValues(names []string) (map[string]string, error) {
+	var resp struct {
+		Values map[string]string `json:"values"`
+	}
+	if err := c.do(http.MethodPost, "/agent/v1/secrets/values",
+		map[string][]string{"names": names}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Values, nil
+}
+
 // do performs one request. Non-2xx answers become errors carrying the
 // server's {"error"} message (or "HTTP <status>" when the body is not the
 // envelope); out, when non-nil, receives the decoded 2xx body.

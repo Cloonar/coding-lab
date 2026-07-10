@@ -352,7 +352,7 @@ func run() int {
 	if providerReg != nil {
 		scrub = providerReg.ScrubRegexps()
 	}
-	agent := agentapi.New(st, trackerReg, bus, logger, time.Now, scrub)
+	agent := agentapi.New(st, vlt, trackerReg, bus, logger, time.Now, scrub)
 
 	// Seed the settings AFTER the provider registry exists: provider_default
 	// is seeded to the FIRST registered provider's ID (issue #66) so the store
