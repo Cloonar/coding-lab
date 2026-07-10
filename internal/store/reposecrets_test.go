@@ -241,3 +241,207 @@ func TestRepoSecretValues(t *testing.T) {
 		}
 	})
 }
+
+// TestAllRepoSecretValues covers the unfiltered fetch AllRepoSecretValues
+// feeds the tailer's redactor build: every blob in a repo, keyed by name,
+// and an empty map (not an error) for a repo with none.
+func TestAllRepoSecretValues(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 10, 13, 0, 0, 0, time.UTC)
+
+		repo := testRepo("zeta", now)
+		if _, err := s.CreateRepo(ctx, repo); err != nil {
+			t.Fatalf("create repo: %v", err)
+		}
+
+		// No secrets yet: empty map, not nil, not an error.
+		values, err := s.AllRepoSecretValues(ctx, repo.ID)
+		if err != nil {
+			t.Fatalf("AllRepoSecretValues empty repo: %v", err)
+		}
+		if len(values) != 0 {
+			t.Errorf("AllRepoSecretValues(empty repo) = %v, want empty map", values)
+		}
+
+		if _, err := s.CreateRepoSecret(ctx, ids.NewID("sec"), repo.ID, "ONE", "", []byte("one-value"), now); err != nil {
+			t.Fatalf("create ONE: %v", err)
+		}
+		if _, err := s.CreateRepoSecret(ctx, ids.NewID("sec"), repo.ID, "TWO", "", []byte("two-value"), now); err != nil {
+			t.Fatalf("create TWO: %v", err)
+		}
+
+		// Another repo's secret must never appear in this repo's fetch.
+		other := testRepo("eta", now)
+		if _, err := s.CreateRepo(ctx, other); err != nil {
+			t.Fatalf("create other repo: %v", err)
+		}
+		if _, err := s.CreateRepoSecret(ctx, ids.NewID("sec"), other.ID, "THREE", "", []byte("three-value"), now); err != nil {
+			t.Fatalf("create THREE in other repo: %v", err)
+		}
+
+		values, err = s.AllRepoSecretValues(ctx, repo.ID)
+		if err != nil {
+			t.Fatalf("AllRepoSecretValues: %v", err)
+		}
+		if len(values) != 2 {
+			t.Fatalf("AllRepoSecretValues length = %d, want 2", len(values))
+		}
+		if !bytes.Equal(values["ONE"], []byte("one-value")) {
+			t.Errorf("ONE value = %q, want one-value", values["ONE"])
+		}
+		if !bytes.Equal(values["TWO"], []byte("two-value")) {
+			t.Errorf("TWO value = %q, want two-value", values["TWO"])
+		}
+		if _, ok := values["THREE"]; ok {
+			t.Errorf("AllRepoSecretValues leaked another repo's secret THREE")
+		}
+	})
+}
+
+// TestMarkRepoSecretExposed covers the sticky first-writer-wins semantics:
+// the first Mark flips unset -> exposed and returns true; a second Mark
+// (same or different run) leaves the original exposure untouched and
+// returns false; an unknown name returns (false, nil), not ErrNotFound.
+func TestMarkRepoSecretExposed(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 10, 14, 0, 0, 0, time.UTC)
+
+		repo := testRepo("theta", now)
+		if _, err := s.CreateRepo(ctx, repo); err != nil {
+			t.Fatalf("create repo: %v", err)
+		}
+		if _, err := s.CreateRepoSecret(ctx, ids.NewID("sec"), repo.ID, "LEAKY", "", []byte("blob"), now); err != nil {
+			t.Fatalf("create secret: %v", err)
+		}
+
+		// Unknown name: false, nil — never ErrNotFound (concurrent-delete race).
+		flipped, err := s.MarkRepoSecretExposed(ctx, repo.ID, "MISSING", "run_first", now)
+		if err != nil {
+			t.Fatalf("MarkRepoSecretExposed unknown name: %v", err)
+		}
+		if flipped {
+			t.Error("MarkRepoSecretExposed(unknown name) = true, want false")
+		}
+
+		// First Mark: flips unset -> exposed.
+		flipped, err = s.MarkRepoSecretExposed(ctx, repo.ID, "LEAKY", "run_first", now)
+		if err != nil {
+			t.Fatalf("MarkRepoSecretExposed first: %v", err)
+		}
+		if !flipped {
+			t.Error("MarkRepoSecretExposed first call = false, want true")
+		}
+
+		secrets, err := s.RepoSecrets(ctx, repo.ID)
+		if err != nil {
+			t.Fatalf("RepoSecrets: %v", err)
+		}
+		if len(secrets) != 1 {
+			t.Fatalf("RepoSecrets length = %d, want 1", len(secrets))
+		}
+		leaky := secrets[0]
+		if leaky.ExposedRunID == nil || *leaky.ExposedRunID != "run_first" {
+			t.Errorf("ExposedRunID = %v, want run_first", leaky.ExposedRunID)
+		}
+		if leaky.ExposedAt == nil || !leaky.ExposedAt.Equal(now.Truncate(time.Millisecond)) {
+			t.Errorf("ExposedAt = %v, want %v", leaky.ExposedAt, now)
+		}
+
+		// Second Mark, different run and later time: sticky — original
+		// run/timestamp untouched, returns false.
+		later := now.Add(time.Hour)
+		flipped, err = s.MarkRepoSecretExposed(ctx, repo.ID, "LEAKY", "run_second", later)
+		if err != nil {
+			t.Fatalf("MarkRepoSecretExposed second: %v", err)
+		}
+		if flipped {
+			t.Error("MarkRepoSecretExposed second call = true, want false (sticky)")
+		}
+		secrets, err = s.RepoSecrets(ctx, repo.ID)
+		if err != nil {
+			t.Fatalf("RepoSecrets after second mark: %v", err)
+		}
+		leaky = secrets[0]
+		if leaky.ExposedRunID == nil || *leaky.ExposedRunID != "run_first" {
+			t.Errorf("ExposedRunID after second mark = %v, want unchanged run_first", leaky.ExposedRunID)
+		}
+		if leaky.ExposedAt == nil || !leaky.ExposedAt.Equal(now.Truncate(time.Millisecond)) {
+			t.Errorf("ExposedAt after second mark = %v, want unchanged %v", leaky.ExposedAt, now)
+		}
+
+		// Rotate clears both columns; Mark can flip unset -> exposed again.
+		rotated, err := s.RotateRepoSecret(ctx, leaky.ID, []byte("blob-rotated"), later)
+		if err != nil {
+			t.Fatalf("rotate: %v", err)
+		}
+		if rotated.ExposedRunID != nil || rotated.ExposedAt != nil {
+			t.Errorf("rotated ExposedRunID/ExposedAt = %v/%v, want both nil", rotated.ExposedRunID, rotated.ExposedAt)
+		}
+
+		afterRotate := later.Add(time.Hour)
+		flipped, err = s.MarkRepoSecretExposed(ctx, repo.ID, "LEAKY", "run_third", afterRotate)
+		if err != nil {
+			t.Fatalf("MarkRepoSecretExposed after rotate: %v", err)
+		}
+		if !flipped {
+			t.Error("MarkRepoSecretExposed after rotate = false, want true (new edge)")
+		}
+	})
+}
+
+// TestExposedSecretNamesForRun covers the run-scoped filter, name ordering,
+// and the empty-slice result for a run that has exposed nothing.
+func TestExposedSecretNamesForRun(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC)
+
+		repo := testRepo("iota", now)
+		if _, err := s.CreateRepo(ctx, repo); err != nil {
+			t.Fatalf("create repo: %v", err)
+		}
+		for _, name := range []string{"Z_KEY", "A_KEY", "M_KEY", "UNEXPOSED"} {
+			if _, err := s.CreateRepoSecret(ctx, ids.NewID("sec"), repo.ID, name, "", []byte("blob-"+name), now); err != nil {
+				t.Fatalf("create %s: %v", name, err)
+			}
+		}
+
+		// A run that has exposed nothing: empty slice, not nil, not an error.
+		names, err := s.ExposedSecretNamesForRun(ctx, "run_clean")
+		if err != nil {
+			t.Fatalf("ExposedSecretNamesForRun clean run: %v", err)
+		}
+		if len(names) != 0 {
+			t.Errorf("ExposedSecretNamesForRun(clean run) = %v, want empty", names)
+		}
+
+		if _, err := s.MarkRepoSecretExposed(ctx, repo.ID, "Z_KEY", "run_leaky", now); err != nil {
+			t.Fatalf("mark Z_KEY: %v", err)
+		}
+		if _, err := s.MarkRepoSecretExposed(ctx, repo.ID, "A_KEY", "run_leaky", now); err != nil {
+			t.Fatalf("mark A_KEY: %v", err)
+		}
+		// A different run's exposure must not leak into run_leaky's list.
+		if _, err := s.MarkRepoSecretExposed(ctx, repo.ID, "M_KEY", "run_other", now); err != nil {
+			t.Fatalf("mark M_KEY: %v", err)
+		}
+
+		names, err = s.ExposedSecretNamesForRun(ctx, "run_leaky")
+		if err != nil {
+			t.Fatalf("ExposedSecretNamesForRun: %v", err)
+		}
+		if len(names) != 2 || names[0] != "A_KEY" || names[1] != "Z_KEY" {
+			t.Errorf("ExposedSecretNamesForRun(run_leaky) = %v, want [A_KEY Z_KEY]", names)
+		}
+
+		namesOther, err := s.ExposedSecretNamesForRun(ctx, "run_other")
+		if err != nil {
+			t.Fatalf("ExposedSecretNamesForRun run_other: %v", err)
+		}
+		if len(namesOther) != 1 || namesOther[0] != "M_KEY" {
+			t.Errorf("ExposedSecretNamesForRun(run_other) = %v, want [M_KEY]", namesOther)
+		}
+	})
+}

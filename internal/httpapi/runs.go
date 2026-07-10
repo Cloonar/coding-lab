@@ -43,6 +43,15 @@ type runResponse struct {
 	EndedAt        *string `json:"ended_at"`
 	Outcome        string  `json:"outcome"`
 	FailureReason  *string `json:"failure_reason"`
+
+	// ExposedSecrets lists the names of this repo's secrets whose value has
+	// appeared in THIS run's transcript (issue #108's chat-header warning
+	// badge) — sorted, from store.ExposedSecretNamesForRun. Populated ONLY by
+	// handleRunGet, the chat header's source; runJSON leaves it nil for every
+	// other caller (the runs list, the title PATCH echo) so listing a repo's
+	// run history never pays for an exposure lookup per row. omitempty keeps
+	// the key entirely absent everywhere but the one response that sets it.
+	ExposedSecrets []string `json:"exposed_secrets,omitempty"`
 }
 
 func runJSON(r store.Run) runResponse {

@@ -774,6 +774,27 @@ function ChatHeader(props: {
     })();
   };
   const badge = () => stateBadge(props.state);
+  // The exposure warning badge (issue #108): props.run.exposed_secrets names
+  // this run's secrets whose value has surfaced in its own transcript — a
+  // sticky flag cleared only by rotating the secret in repo settings. Shares
+  // the state badge's dot(<640px)/chip(>=640px) rendering pattern below, but
+  // is not itself a StateBadge (it isn't conversational state), so it gets
+  // its own small label/title mapping rather than reusing stateBadge.
+  const exposedNames = () => props.run?.exposed_secrets ?? [];
+  const exposedBadge = (): { label: string; title: string } | null => {
+    const names = exposedNames();
+    if (names.length === 0) return null;
+    if (names.length === 1) {
+      return {
+        label: `${names[0]} exposed`,
+        title: `${names[0]} appeared in this run's transcript — rotate it in repo settings to clear`,
+      };
+    }
+    return {
+      label: `${names.length} secrets exposed`,
+      title: `Exposed in this run's transcript: ${names.join(', ')} — rotate them in repo settings to clear`,
+    };
+  };
   const live = () => props.run !== undefined && props.run.outcome === 'active';
   // The run's spawn-time model chip (issue #68): catalog pretty labels with the
   // raw id as fallback, hidden entirely for legacy rows with no model. A
@@ -906,6 +927,28 @@ function ChatHeader(props: {
         {(b) => (
           <span
             classList={{ chip: true, convo: true, 'chat-state-chip': true, [b().cls]: true }}
+            title={b().title}
+          >
+            {b().label}
+          </span>
+        )}
+      </Show>
+      {/* The exposure warning badge (issue #108) — same dot(<640px)/chip(>=640px)
+          split as the state badge above, styled as a destructive chip. */}
+      <Show when={exposedBadge()}>
+        {(b) => (
+          <span
+            classList={{ 'chat-state-dot': true, exposed: true }}
+            title={b().title}
+            aria-label={b().title}
+            role="img"
+          />
+        )}
+      </Show>
+      <Show when={exposedBadge()}>
+        {(b) => (
+          <span
+            classList={{ chip: true, 'chat-state-chip': true, exposed: true }}
             title={b().title}
           >
             {b().label}

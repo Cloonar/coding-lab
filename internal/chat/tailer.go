@@ -199,6 +199,14 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			// change (e.g. the file vanishing mid-rotation).
 			chat, err := prov.ReadChat(run.ID, s.runtimeDir, path)
 			if err == nil {
+				// Scan + mask FIRST — before setState and, critically, before
+				// gate.observe below: the needs-input push body is built from the
+				// dialog prompt or the newest assistant text (notifyBody), so a
+				// plaintext secret value in either must be masked before the gate
+				// snapshots its payload — issue #108's "no event payload carries
+				// the value" criterion. Scanning rides the read-happened branch
+				// only, so quiet no-change ticks stay stat-only (no per-tick cost).
+				s.scanAndRedact(ctx, run, &chat)
 				s.tailers.setState(run.SessionName, chat.State)
 				// Feed the state edge to the notify gate with the PREVIOUS state
 				// (lastState, before the reassignment below) so it edge-triggers on
