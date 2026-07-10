@@ -179,6 +179,8 @@ function stubApi(): void {
           description: String(body.description ?? ''),
           created_at: '2026-07-10T00:00:00.000Z',
           updated_at: '2026-07-10T00:00:00.000Z',
+          exposed_run_id: null,
+          exposed_at: null,
         };
         secretsOnServer = [...secretsOnServer, created];
         return Promise.resolve(jsonResponse(201, created));
@@ -188,9 +190,14 @@ function stubApi(): void {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         secretRequestBodies.push(body);
         const id = secretMatch[1];
+        // Rotate clears the exposure flag (RotateRepoSecret's job, issue #108) —
+        // the mock mirrors the real server so the refetch-clears-the-badge
+        // behavior is exercisable here.
         const updated: RepoSecret = {
           ...(secretsOnServer.find((s) => s.id === id) as RepoSecret),
           updated_at: '2026-07-10T01:00:00.000Z',
+          exposed_run_id: null,
+          exposed_at: null,
         };
         secretsOnServer = secretsOnServer.map((s) => (s.id === id ? updated : s));
         return Promise.resolve(jsonResponse(200, updated));
@@ -644,6 +651,8 @@ describe('RepoSettings secrets section', () => {
         description: 'third-party api',
         created_at: '2026-07-01T00:00:00.000Z',
         updated_at: '2026-07-02T00:00:00.000Z',
+        exposed_run_id: null,
+        exposed_at: null,
       },
     ];
     await mountSettings();
@@ -697,7 +706,7 @@ describe('RepoSettings secrets section', () => {
     expect(secretsSection().textContent).not.toContain('a-fresh-secret-value');
   });
 
-  it('rotate submits only the new value, never the name or id', async () => {
+  it('rotate submits only the new value, never the name or id, and clears an exposure badge', async () => {
     secretsOnServer = [
       {
         id: 'sec_1',
@@ -705,10 +714,20 @@ describe('RepoSettings secrets section', () => {
         description: '',
         created_at: '2026-07-01T00:00:00.000Z',
         updated_at: '2026-07-01T00:00:00.000Z',
+        // Exposed (issue #108): rotating is the remediation, so the refetch
+        // after a successful rotate should clear the badge below.
+        exposed_run_id: 'run_leaker',
+        exposed_at: '2026-07-05T00:00:00.000Z',
       },
     ];
     await mountSettings();
     await waitFor(() => secretsSection().querySelector('.card-title.mono'), 'secret row');
+
+    expect(secretsSection().querySelector('.chip.exposed')).not.toBeNull();
+    expect(secretsSection().textContent).toContain('Exposed in run');
+    expect(
+      secretsSection().querySelector<HTMLAnchorElement>('a[href="/runs/run_leaker"]'),
+    ).not.toBeNull();
 
     button('Rotate').click();
     await settle();
@@ -724,6 +743,10 @@ describe('RepoSettings secrets section', () => {
     // The row collapses back out of rotate mode and the list refreshes.
     expect(secretsSection().querySelector('input[name="secret-rotate-value"]')).toBeNull();
     expect(secretsSection().textContent).not.toContain('rotated-secret-value');
+    // The refetched row has null exposure fields (the mock's rotate handler
+    // mirrors RotateRepoSecret's clear-on-rotate) — the badge is gone.
+    expect(secretsSection().querySelector('.chip.exposed')).toBeNull();
+    expect(secretsSection().textContent).not.toContain('Exposed in run');
   });
 
   it('delete asks for confirmation before removing the secret', async () => {
@@ -734,6 +757,8 @@ describe('RepoSettings secrets section', () => {
         description: '',
         created_at: '2026-07-01T00:00:00.000Z',
         updated_at: '2026-07-01T00:00:00.000Z',
+        exposed_run_id: null,
+        exposed_at: null,
       },
     ];
     await mountSettings();

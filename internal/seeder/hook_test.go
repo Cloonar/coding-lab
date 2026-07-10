@@ -1,21 +1,43 @@
 package seeder
 
-// Incogni measure 7 tests against REAL git: the pre-push guard installed in
-// a bare reference repo (the shape lab clones — remote-tracking refspec
-// included) rejects poisoned pushes from a linked worktree naming the
-// offending commit, lets clean pushes through, and disappears on toggle-off
-// so the previously rejected push succeeds — the hook is lab's guard, not
-// the user's policy.
+// Pre-push guard tests against REAL git: the hook installed in a bare
+// reference repo (the shape lab clones — remote-tracking refspec included)
+// runs on pushes from a linked worktree. Incogni measure 7: poisoned pushes
+// are rejected naming the offending commit, clean pushes go through, and the
+// hook disappears on toggle-off so the previously rejected push succeeds —
+// the hook is lab's guard, not the user's policy. Secret leak scan (issue
+// #106): under a LAB_TOKEN the hook's `labctl secret scan <range>` call is
+// mandatory and fails closed; without one it is skipped with a warning.
 
 import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 )
+
+// labFilteredEnviron is os.Environ() minus LAB_TOKEN and LAB_URL. The test
+// process itself runs inside a lab session whose environment carries a REAL
+// token; a push inheriting it would take the hook's mandatory-scan path and
+// run the real labctl against the real lab server — nondeterministic and
+// wrong. Fixture pushes are therefore token-less by default; tests opt back
+// in per push via pushEnv.
+func labFilteredEnviron() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "LAB_TOKEN=") || strings.HasPrefix(kv, "LAB_URL=") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
+}
 
 // hookFixture is origin (bare remote) ← bare (lab's reference clone, hook
 // host) ← wt (a linked run worktree pushing through the shared hook).
@@ -31,7 +53,7 @@ func newHookFixture(t *testing.T) *hookFixture {
 	t.Helper()
 	testutil.RequireTool(t, "git")
 	root := t.TempDir()
-	env := append(os.Environ(), testutil.HermeticGitEnv(root)...)
+	env := append(labFilteredEnviron(), testutil.HermeticGitEnv(root)...)
 	f := &hookFixture{t: t, env: env}
 
 	// The remote: a bare repo with one commit on main.
@@ -77,12 +99,21 @@ func (f *hookFixture) commit(msg string, files map[string]string) string {
 	return git(f.t, f.env, "-C", f.wt, "rev-parse", "HEAD")
 }
 
-// push runs `git push origin issue-7` from the worktree and returns the
-// combined output and whether it succeeded.
+// push runs `git push origin issue-7` from the worktree with the fixture's
+// token-less environment and returns the combined output and whether it
+// succeeded.
 func (f *hookFixture) push() (string, bool) {
+	return f.pushEnv()
+}
+
+// pushEnv is push with extra environment entries appended for this one push
+// (os/exec dedupes on key, last wins — so "PATH=…" or "LAB_TOKEN=…" entries
+// override the fixture's). This is the opt-in for the hook's secret-scan
+// token path and for putting a stub labctl first on the child's PATH.
+func (f *hookFixture) pushEnv(extra ...string) (string, bool) {
 	f.t.Helper()
 	cmd := exec.Command("git", "-C", f.wt, "push", "origin", "issue-7")
-	cmd.Env = f.env
+	cmd.Env = append(slices.Clone(f.env), extra...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err == nil
 }
@@ -275,4 +306,208 @@ func TestPrePushHook_mergeCommitIntroducingSeededPathRejected(t *testing.T) {
 	git(f.t, f.env, "-C", f.wt, "commit", "-q", "-m", "merge with a seeded file snuck in")
 	sha := git(f.t, f.env, "-C", f.wt, "rev-parse", "HEAD")
 	f.mustReject(sha, "merge commit introducing a seeded path")
+}
+
+// stubLabctl writes an executable fake labctl into its own fresh dir and
+// returns that dir plus the file the stub appends its argv to (one argument
+// per line, invocations concatenated). exit is the stub's exit code: 0
+// simulates a clean scan, nonzero a leak / server failure.
+func stubLabctl(t *testing.T, exit int) (dir, record string) {
+	t.Helper()
+	dir = t.TempDir()
+	record = filepath.Join(dir, "argv")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '" + record + "'\nexit " + strconv.Itoa(exit) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "labctl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir, record
+}
+
+// pathWith returns a PATH env entry resolving dir first, with the ambient
+// PATH after it so sh and git stay resolvable for the push child.
+func pathWith(dir string) string {
+	return "PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// readArgv returns the stub's recorded argv, one argument per line.
+func readArgv(t *testing.T, record string) []string {
+	t.Helper()
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("stub labctl was never invoked: %v", err)
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+// tokenEnv is the opt-in for the hook's mandatory-scan path: a fake run
+// token and lab URL (never the session's real ones — labFilteredEnviron
+// stripped those).
+var tokenEnv = []string{"LAB_TOKEN=test-token", "LAB_URL=http://lab.invalid"}
+
+// Under a run token a clean scan (labctl exit 0) lets the push through, and
+// the hook hands labctl the outgoing range word-split, on both shapes: the
+// first push of a new branch passes the multi-word
+// `<local> --not --remotes=origin` range, a follow-up push the
+// `<remote>..<local>` form.
+func TestPrePushHook_secretScanCleanPushSucceeds(t *testing.T) {
+	f := newHookFixture(t)
+	if err := InstallPrePushHook(f.bare, nil, nil); err != nil {
+		t.Fatalf("InstallPrePushHook: %v", err)
+	}
+	dir, record := stubLabctl(t, 0)
+	env := append([]string{pathWith(dir)}, tokenEnv...)
+
+	// New-branch push: remote sha is all zeros, range is multi-word.
+	sha := f.commit("feat: one", map[string]string{"a.txt": "a\n"})
+	if out, ok := f.pushEnv(env...); !ok {
+		t.Fatalf("clean new-branch push refused:\n%s", out)
+	}
+	argv := readArgv(t, record)
+	want := []string{"secret", "scan", sha, "--not", "--remotes=origin"}
+	if !slices.Equal(argv, want) {
+		t.Errorf("new-branch stub argv = %q, want %q", argv, want)
+	}
+
+	// Known-remote-tip push: the two-dot range, a single word.
+	sha2 := f.commit("feat: two", map[string]string{"b.txt": "b\n"})
+	if out, ok := f.pushEnv(env...); !ok {
+		t.Fatalf("clean follow-up push refused:\n%s", out)
+	}
+	argv = readArgv(t, record)
+	want = append(want, "secret", "scan", sha+".."+sha2)
+	if !slices.Equal(argv, want) {
+		t.Errorf("follow-up stub argv = %q, want %q", argv, want)
+	}
+}
+
+// Under a run token the scan is mandatory: labctl exiting nonzero (a leak
+// finding — labctl prints the details itself) refuses the push with the
+// hook's one-line refusal, after invoking `labctl secret scan <range>`.
+func TestPrePushHook_secretScanLeakRefusesPush(t *testing.T) {
+	f := newHookFixture(t)
+	if err := InstallPrePushHook(f.bare, nil, nil); err != nil {
+		t.Fatalf("InstallPrePushHook: %v", err)
+	}
+	f.commit("feat: carries a secret", map[string]string{"a.txt": "a\n"})
+	dir, record := stubLabctl(t, 1)
+	out, ok := f.pushEnv(append([]string{pathWith(dir)}, tokenEnv...)...)
+	if ok {
+		t.Fatalf("push succeeded, want refusal on labctl exit 1:\n%s", out)
+	}
+	if !strings.Contains(out, "lab secret guard: refusing push") {
+		t.Errorf("refusal message missing:\n%s", out)
+	}
+	argv := readArgv(t, record)
+	if len(argv) < 3 || argv[0] != "secret" || argv[1] != "scan" {
+		t.Errorf("stub argv = %q, want secret scan <range...>", argv)
+	}
+}
+
+// Without a LAB_TOKEN the scan is skipped with a loud warning and the push
+// proceeds. The stub (which would refuse) IS on PATH, proving the token
+// check — not a missing binary — does the skipping, and it is never invoked.
+func TestPrePushHook_secretScanSkippedWithoutToken(t *testing.T) {
+	f := newHookFixture(t)
+	if err := InstallPrePushHook(f.bare, nil, nil); err != nil {
+		t.Fatalf("InstallPrePushHook: %v", err)
+	}
+	f.commit("feat: human work", map[string]string{"a.txt": "a\n"})
+	dir, record := stubLabctl(t, 1) // would refuse the push if it ran
+	out, ok := f.pushEnv(pathWith(dir))
+	if !ok {
+		t.Fatalf("token-less push refused:\n%s", out)
+	}
+	if !strings.Contains(out, "lab secret guard: no LAB_TOKEN in environment; skipping secret leak scan") {
+		t.Errorf("skip warning missing:\n%s", out)
+	}
+	if data, err := os.ReadFile(record); err == nil && len(data) > 0 {
+		t.Errorf("stub labctl was invoked on a token-less push: %q", data)
+	}
+}
+
+// shPath resolves a POSIX sh for tests: PATH first, then the absolute
+// /bin/sh the hook's shebang uses anyway — the lab sandbox's PATH carries
+// no sh, yet git runs the hooks fine through the shebang.
+func shPath(t *testing.T) string {
+	t.Helper()
+	if sh, err := exec.LookPath("sh"); err == nil {
+		return sh
+	}
+	const fallback = "/bin/sh"
+	if fi, err := os.Stat(fallback); err == nil && fi.Mode()&0o111 != 0 {
+		return fallback
+	}
+	t.Skipf("no sh on PATH and no %s", fallback)
+	return ""
+}
+
+// pathWithoutLabctl builds a PATH where sh and git resolve but labctl does
+// not: a symlink dir carrying just those two tools, then the ambient PATH
+// entries that do NOT contain a labctl binary (the lab session's own PATH
+// carries the real one).
+func pathWithoutLabctl(t *testing.T) string {
+	t.Helper()
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git not on PATH: %v", err)
+	}
+	bin := t.TempDir()
+	for tool, src := range map[string]string{"git": gitBin, "sh": shPath(t)} {
+		if err := os.Symlink(src, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keep := []string{bin}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if _, err := os.Stat(filepath.Join(dir, "labctl")); err == nil {
+			continue
+		}
+		keep = append(keep, dir)
+	}
+	return strings.Join(keep, string(os.PathListSeparator))
+}
+
+// Under a run token with NO labctl on the push child's PATH the scan cannot
+// run: command-not-found is nonzero, so the hook fails closed and refuses —
+// a run whose environment lost labctl must not push unscanned.
+func TestPrePushHook_secretScanFailsClosedWithoutLabctl(t *testing.T) {
+	f := newHookFixture(t)
+	if err := InstallPrePushHook(f.bare, nil, nil); err != nil {
+		t.Fatalf("InstallPrePushHook: %v", err)
+	}
+	f.commit("feat: unscannable", map[string]string{"a.txt": "a\n"})
+	out, ok := f.pushEnv(append([]string{"PATH=" + pathWithoutLabctl(t)}, tokenEnv...)...)
+	if ok {
+		t.Fatalf("push succeeded with labctl missing from PATH, want fail-closed refusal:\n%s", out)
+	}
+	if !strings.Contains(out, "lab secret guard: refusing push") {
+		t.Errorf("refusal message missing:\n%s", out)
+	}
+}
+
+// The two guards coexist: on an incogni repo a token-less push of an
+// attributed commit emits BOTH the secret-scan skip warning and the incogni
+// rejection naming the commit, is refused by the incogni scan alone, and
+// never touches labctl.
+func TestPrePushHook_incogniStillBlocksAlongsideSecretSkip(t *testing.T) {
+	f := newHookFixture(t)
+	if err := InstallPrePushHook(f.bare, claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns); err != nil {
+		t.Fatalf("InstallPrePushHook: %v", err)
+	}
+	sha := f.commit("fix: tweak\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+		map[string]string{"a.txt": "a\n"})
+	dir, record := stubLabctl(t, 0)
+	out, ok := f.pushEnv(pathWith(dir)) // no token
+	if ok {
+		t.Fatalf("attributed push succeeded, want incogni rejection:\n%s", out)
+	}
+	if !strings.Contains(out, "lab secret guard: no LAB_TOKEN in environment; skipping secret leak scan") {
+		t.Errorf("skip warning missing:\n%s", out)
+	}
+	if !strings.Contains(out, "lab incogni guard") || !strings.Contains(out, sha) {
+		t.Errorf("incogni rejection naming %s missing:\n%s", sha, out)
+	}
+	if data, err := os.ReadFile(record); err == nil && len(data) > 0 {
+		t.Errorf("stub labctl was invoked on a token-less push: %q", data)
+	}
 }

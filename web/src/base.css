@@ -1372,6 +1372,19 @@ details.parked summary {
   overflow-wrap: anywhere;
 }
 
+/* The repo-secret exposure warning line (issue #108) — same treatment as
+   .run-failure (err-text, same margin/size) plus the "Exposed" chip and the
+   affected run's link inline. */
+.secret-exposed {
+  margin: 0.55rem 0 0;
+  font-size: 0.85rem;
+  color: var(--err-text);
+  overflow-wrap: anywhere;
+}
+.secret-exposed .chip.exposed {
+  margin-right: 0.3rem;
+}
+
 .chip.outcome-active {
   background: var(--run-bg);
   color: var(--run-text);
@@ -2633,6 +2646,16 @@ h6.md-h {
 .chat-state-dot.needs-input,
 .chat-state-dot.question {
   background: var(--run-text);
+}
+/* The secret-exposure warning dot/chip (issue #108) — not a conversational
+   state, so it skips the `.convo` namespace and uses the err palette (same
+   destructive tokens as `.chip.status-error`) rather than the convo one. */
+.chat-state-dot.exposed {
+  background: var(--err-text);
+}
+.chip.exposed {
+  background: var(--err-bg);
+  color: var(--err-text);
 }
 
 /* The full text chip and the inline desktop cluster are the >=640px view. */

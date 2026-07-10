@@ -447,6 +447,13 @@ export interface Run {
   ended_at: string | null;
   outcome: RunOutcome;
   failure_reason: string | null;
+  /**
+   * Names of repo secrets this run's transcript has exposed (issue #108),
+   * sorted. Only GET /runs/{id} (the chat header's source) populates this —
+   * the runs list never does, to avoid an exposure lookup per row — so it is
+   * optional rather than nullable: absent everywhere but the chat header.
+   */
+  exposed_secrets?: string[];
 }
 
 /** The chat tailer's per-instance conversational state (issue #7). */
@@ -989,6 +996,13 @@ export interface RepoSecret {
   description: string;
   created_at: string;
   updated_at: string;
+  /**
+   * The sticky exposure flag (issue #108): both null means never exposed
+   * since creation or the last rotation; both set names the run whose
+   * transcript first surfaced the value and when. Rotating clears both.
+   */
+  exposed_run_id: string | null;
+  exposed_at: string | null;
 }
 
 /** GET /repos/{id}/secrets — metadata only, ordered by name; never a value. */

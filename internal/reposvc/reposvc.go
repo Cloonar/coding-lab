@@ -455,12 +455,13 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		return store.Repo{}, badRequestf("max_instances_override: must be at least 1 (null clears the override)")
 	}
 
-	// Incogni pre-push guard, toggle-on (D15 §9 measure 7): install BEFORE
-	// the row update, so a failed install never leaves an incogni row
-	// without its guard — the PATCH fails and the flag stays off. A repo
-	// whose bare dir does not exist yet (clone in flight or failed) is
-	// skipped: the clone-completion path re-reads the row and installs.
-	// Idempotent over an already-guarded repo.
+	// Incogni toggle-on (D15 §9 measure 7): re-render the guard WITH the
+	// incogni patterns BEFORE the row update, so a failed install never
+	// leaves an incogni row without its patterned guard — the PATCH fails
+	// and the flag stays off. A repo whose bare dir does not exist yet
+	// (clone in flight or failed) is skipped: the clone-completion path
+	// re-reads the row and renders the matching hook. Idempotent over an
+	// already-guarded repo.
 	bareExists := true
 	if u.Incogni.Set && u.Incogni.Value {
 		if _, err := os.Stat(s.bareDir(id)); err != nil {
@@ -470,7 +471,7 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 			bareExists = false // clone in flight/failed — clone completion installs
 		}
 		if bareExists {
-			if err := s.installIncogniHook(ctx, id); err != nil {
+			if err := s.installGuardHook(ctx, id, true); err != nil {
 				return store.Repo{}, fmt.Errorf("installing incogni pre-push hook: %w", err)
 			}
 		}
@@ -487,19 +488,25 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 	// now so whichever writer acted second still lands the guard.
 	if u.Incogni.Set && u.Incogni.Value && !bareExists {
 		if _, err := os.Stat(s.bareDir(id)); err == nil {
-			if err := s.installIncogniHook(ctx, id); err != nil {
+			if err := s.installGuardHook(ctx, id, true); err != nil {
 				s.log.Warn("installing incogni pre-push hook after clone race", "component", "reposvc", "repo", id, "err", err)
 			}
 		}
 	}
 
-	// Toggle-off: remove AFTER the row update — the guard is lab's, not the
-	// user's policy, and it must be gone once incogni is off. Ordered this
-	// way a removal failure leaves the repo over-protected, never leaky;
-	// the leftover is logged, not fatal.
+	// Toggle-off: RE-RENDER the hook WITHOUT the incogni patterns AFTER the
+	// row update — the guard itself stays on every repo (issue #106: the
+	// secret leak scan is per-repo, orthogonal to incogni), only its content
+	// changes, and core.hooksPath stays pinned. Ordered this way a re-render
+	// failure leaves the repo over-protected, never leaky: the stale incogni
+	// patterns linger until the next startup reconcile; the failure is
+	// logged, not fatal. A missing bare dir (clone in flight/failed) is
+	// skipped silently — clone completion installs the matching hook.
 	if u.Incogni.Set && !u.Incogni.Value {
-		if err := s.removeIncogniHook(ctx, id); err != nil {
-			s.log.Warn("removing incogni pre-push hook", "component", "reposvc", "repo", id, "err", err)
+		if _, err := os.Stat(s.bareDir(id)); err == nil {
+			if err := s.installGuardHook(ctx, id, false); err != nil {
+				s.log.Warn("re-rendering pre-push guard after incogni toggle-off", "component", "reposvc", "repo", id, "err", err)
+			}
 		}
 	}
 
@@ -638,28 +645,37 @@ func (s *Service) StartupHeal(ctx context.Context) error {
 		s.publishRepoChanged(id)
 	}
 
-	// Reconcile the incogni guard against the incogni flag on EVERY ready
-	// repo (D15 §9 measure 7): a crash between an incogni toggle and its hook
-	// install/remove, or the healed-clone case above, leaves the guard out of
-	// sync with the flag. Install-when-incogni / remove-when-not are both
+	// Converge the pre-push guard on EVERY ready repo: the hook exists
+	// unconditionally (the secret leak scan, issue #106) with content
+	// matching the incogni flag (D15 §9 measure 7 patterns in or out). A
+	// crash between an incogni toggle and its hook re-render, or the
+	// healed-clone case above, leaves the content out of sync, and a repo
+	// cloned by an older lab may lack the hook entirely — this pass is also
+	// how hook-content changes between lab versions roll out. Install is
 	// idempotent and safe on foreign hooks, so this converges every restart.
-	s.reconcileIncogniHooks(ctx)
+	s.reconcileGuardHooks(ctx)
 	if err := s.mat.CleanupAll(s.credentialKeep); err != nil {
 		s.log.Warn("sweeping runtime dir", "component", "reposvc", "err", err)
 	}
 	return nil
 }
 
-// installIncogniHook writes the pre-push guard AND pins the bare repo's local
+// installGuardHook writes the pre-push guard AND pins the bare repo's local
 // core.hooksPath to the absolute hooks dir, so a global/system core.hooksPath
-// (husky &c.) cannot route agent pushes past the guard (D15 §9 measure 7). The
-// guard's scrub + seeded-path patterns are the union of every registered
-// provider's declared patterns (ADR-0033), not just repo id's own — since
-// ADR-0030 made the agent CLI a per-spawn override, any registered provider
-// can push through this repo's guard in a given session, so a guard keyed to
-// one repo's provider would miss the others.
-func (s *Service) installIncogniHook(ctx context.Context, id string) error {
-	scrub, seededPaths := s.incogniPatterns()
+// (husky &c.) cannot route ANY agent push past the guard — the pin now
+// protects the secret scan on every repo, not just incogni ones. The guard is
+// two-part: the secret leak scan (issue #106) renders unconditionally, and
+// the incogni attribution/seeded-path scans (D15 §9 measure 7) render only
+// when incogni is set. When they do, the scrub + seeded-path patterns are the
+// union of every registered provider's declared patterns (ADR-0033), not just
+// repo id's own — since ADR-0030 made the agent CLI a per-spawn override, any
+// registered provider can push through this repo's guard in a given session,
+// so a guard keyed to one repo's provider would miss the others.
+func (s *Service) installGuardHook(ctx context.Context, id string, incogni bool) error {
+	var scrub, seededPaths []string
+	if incogni {
+		scrub, seededPaths = s.incogniPatterns()
+	}
 	bareDir := s.bareDir(id)
 	if err := seeder.InstallPrePushHook(bareDir, scrub, seededPaths); err != nil {
 		return err
@@ -685,35 +701,23 @@ func (s *Service) incogniPatterns() (scrub, seededPaths []string) {
 	return s.providers.UnionScrubPatterns(), s.providers.UnionSeededPathPatterns()
 }
 
-// removeIncogniHook removes lab's guard and unpins core.hooksPath, restoring
-// git's default hook resolution for a now-non-incogni repo.
-func (s *Service) removeIncogniHook(ctx context.Context, id string) error {
-	bareDir := s.bareDir(id)
-	if err := s.git.UnpinHooksPath(ctx, bareDir, s.gitEnv); err != nil {
-		return err
-	}
-	return seeder.RemovePrePushHook(bareDir)
-}
-
-// reconcileIncogniHooks converges every ready repo's guard with its incogni
-// flag (called at startup). Best-effort per repo — a failure is logged and
-// the others still reconcile.
-func (s *Service) reconcileIncogniHooks(ctx context.Context) {
+// reconcileGuardHooks converges the pre-push guard on every ready repo
+// (called at startup): the hook exists unconditionally, its content matches
+// the incogni flag — install-only, never remove. Best-effort per repo — a
+// failure (e.g. a foreign pre-push hook the seeder refuses to overwrite) is
+// logged and the others still reconcile.
+func (s *Service) reconcileGuardHooks(ctx context.Context) {
 	repos, err := s.store.Repos(ctx)
 	if err != nil {
-		s.log.Warn("reconciling incogni hooks: list repos", "component", "reposvc", "err", err)
+		s.log.Warn("reconciling pre-push guards: list repos", "component", "reposvc", "err", err)
 		return
 	}
 	for _, repo := range repos {
 		if repo.CloneStatus != store.CloneStatusReady {
 			continue
 		}
-		if repo.Incogni {
-			if err := s.installIncogniHook(ctx, repo.ID); err != nil {
-				s.log.Warn("reconciling incogni hook: install", "component", "reposvc", "repo", repo.ID, "err", err)
-			}
-		} else if err := s.removeIncogniHook(ctx, repo.ID); err != nil {
-			s.log.Warn("reconciling incogni hook: remove", "component", "reposvc", "repo", repo.ID, "err", err)
+		if err := s.installGuardHook(ctx, repo.ID, repo.Incogni); err != nil {
+			s.log.Warn("reconciling pre-push guard: install", "component", "reposvc", "repo", repo.ID, "err", err)
 		}
 	}
 }

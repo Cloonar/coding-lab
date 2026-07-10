@@ -695,6 +695,53 @@ func TestLabelIDsByName_errorClassification(t *testing.T) {
 	}
 }
 
+// TestOperatorWriteNotSecretScanned pins the run-token-only line of the #107
+// leak guard from the operator side: the secret scan wraps ONLY the resolver
+// handed to the agent API (secretscan.NewResolver in cmd/lab), so an operator
+// write carrying a repo secret's value is NOT second-guessed — it succeeds and
+// reaches the store byte-identical. The operator API resolves the bare registry
+// (Config{Tracker: trackerReg}); this test would fail if the scan ever leaked
+// onto that path.
+func TestOperatorWriteNotSecretScanned(t *testing.T) {
+	x, vlt := newTrackerServer(t, nil, nil)
+	repo := seedTrackerRepo(t, x, "proj", nil)
+	h := csrfHeaders(x.ts.URL)
+	base := "/api/v1/repos/" + repo.ID
+
+	// Seed a repo secret exactly as the operator's `secret set` would: the
+	// store only ever sees ciphertext, encrypted under the server's own vault.
+	const secretValue = "op-secret-do-not-scan-8842"
+	blob, err := vlt.Encrypt([]byte(secretValue))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if _, err := x.st.CreateRepoSecret(context.Background(), ids.NewID("sec"), repo.ID, "DEPLOY_KEY", "", blob, time.Now()); err != nil {
+		t.Fatalf("CreateRepoSecret: %v", err)
+	}
+
+	resp := x.do("POST", base+"/issues", map[string]any{"title": "deploy notes"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	_ = resp.Body.Close()
+
+	// The operator comment carries the secret verbatim — and is accepted, the
+	// value never scanned.
+	commentBody := "rolled out with " + secretValue
+	resp = x.do("POST", base+"/issues/1/comments", map[string]any{"body": commentBody}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	if got := decodeBody(t, resp); got["body"] != commentBody {
+		t.Fatalf("operator comment body = %q, want the value passed through verbatim", got["body"])
+	}
+
+	// It landed in the store unchanged — the operator path is not gated.
+	is, err := x.st.IssueByRepoNumber(context.Background(), repo.ID, 1)
+	if err != nil {
+		t.Fatalf("IssueByRepoNumber: %v", err)
+	}
+	if len(is.Comments) != 1 || is.Comments[0].Body != commentBody {
+		t.Fatalf("stored comments = %+v, want the operator write verbatim", is.Comments)
+	}
+}
+
 func TestTrackerUnknownRepo404(t *testing.T) {
 	x, _ := newTrackerServer(t, nil, nil)
 	h := csrfHeaders(x.ts.URL)

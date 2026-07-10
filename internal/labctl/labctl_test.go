@@ -91,6 +91,10 @@ func TestRunCommandSurface(t *testing.T) {
 		{"secret exec no names", []string{"secret", "exec", "--", "echo"}, agentEnv, 2, "", "at least one secret NAME"},
 		{"secret exec no cmd", []string{"secret", "exec", "FOO", "--"}, agentEnv, 2, "", "want a command after --"},
 		{"secret exec missing env", []string{"secret", "exec", "FOO", "--", "echo", "hi"}, nil, 2, "", "LAB_URL and LAB_TOKEN must be set"},
+		// `secret scan` deviates AFTER usage (any failure or finding is 1, fail
+		// closed), but its shape/env errors keep the binary-wide usage code 2.
+		{"secret scan no args", []string{"secret", "scan"}, agentEnv, 2, "", "want <rev-arg>"},
+		{"secret scan missing env", []string{"secret", "scan", "HEAD"}, nil, 2, "", "LAB_URL and LAB_TOKEN must be set"},
 
 		{"issue create missing title", []string{"issue", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
 		{"issue create missing body", []string{"issue", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},

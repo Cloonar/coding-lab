@@ -10,7 +10,7 @@ package labctl
 // the fetch happens per invocation, so nothing is ever cached.
 //
 // Broker output redaction (issue #105): the child's stdout and stderr are
-// each piped through their own secrets.Redactor, built from a Matcher over
+// each piped through their own secrets.RedactingWriter, built from a Matcher over
 // exactly the values injected for THIS exec, so every occurrence — in the
 // exact plaintext or any of its base64/hex/URL-encoded forms — reaches
 // env.Stdout/env.Stderr only as the literal token "[REDACTED:NAME]". A
@@ -19,7 +19,7 @@ package labctl
 // decision, issue #105). Because the redactors are not *os.File, os/exec runs
 // the child on pipes rather than inheriting the caller's stdout/stderr
 // directly — never a TTY. That is acceptable and intentional: agents don't
-// run interactive commands through the broker. Each Redactor also holds back
+// run interactive commands through the broker. Each RedactingWriter also holds back
 // a small trailing window of its stream (bounded by the longest derived
 // pattern), so the final bytes of a stream only reach the destination once
 // Flush runs at process exit — never mid-stream.
@@ -33,7 +33,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/secrets"
 )
 
-// runSecret dispatches `labctl secret list|exec`.
+// runSecret dispatches `labctl secret list|exec|scan`.
 func runSecret(args []string, env Env) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(env.Stderr, usage)
@@ -44,6 +44,8 @@ func runSecret(args []string, env Env) int {
 		return runSecretList(args[1:], env)
 	case "exec":
 		return runSecretExec(args[1:], env)
+	case "scan":
+		return runSecretScan(args[1:], env)
 	default:
 		_, _ = fmt.Fprintf(env.Stderr, "labctl secret: unknown subcommand %q\n\n%s", args[0], usage)
 		return 2
@@ -82,15 +84,15 @@ func runSecretList(args []string, env Env) int {
 // The fetched values feed ONLY cmd.Env — they are never placed in argv, never
 // exported via os.Setenv, never printed, and never logged.
 //
-// The child's stdout and stderr each run through their own secrets.Redactor
+// The child's stdout and stderr each run through their own secrets.RedactingWriter
 // (issue #105), so any of the fetched values reaching either stream — in any
 // derived form — is replaced with "[REDACTED:NAME]" before it reaches
 // env.Stdout/env.Stderr; a hit is quiet by design (no log, no alert). A
-// Matcher/Redactor is not safe for concurrent use, and os/exec copies stdout
+// Matcher/RedactingWriter is not safe for concurrent use, and os/exec copies stdout
 // and stderr from separate goroutines, so this builds one Matcher and one
-// Redactor per stream. cmd.Run waits for both copy goroutines to finish before
+// RedactingWriter per stream. cmd.Run waits for both copy goroutines to finish before
 // returning, so by the time it returns there is nothing left to feed — but
-// each Redactor still holds back a small trailing window that only Flush
+// each RedactingWriter still holds back a small trailing window that only Flush
 // releases. Flush runs on BOTH redactors unconditionally, even when cmd.Run
 // already failed and even when the first Flush errors, so a child that prints
 // part of a secret and then exits non-zero still gets its tail redacted and
@@ -144,13 +146,13 @@ func runSecretExec(args []string, env Env) int {
 	}
 	cmd.Stdin = os.Stdin
 
-	// One Matcher/Redactor per stream: neither type is safe for concurrent
+	// One Matcher/RedactingWriter per stream: neither type is safe for concurrent
 	// use, and os/exec copies stdout and stderr from separate goroutines.
 	// Assigning a non-*os.File Writer here is what makes os/exec run the
 	// child on pipes instead of handing it env.Stdout/env.Stderr directly —
 	// deliberate, see the file header.
-	stdoutRedactor := secrets.NewRedactor(env.Stdout, secrets.NewMatcher(values))
-	stderrRedactor := secrets.NewRedactor(env.Stderr, secrets.NewMatcher(values))
+	stdoutRedactor := secrets.NewRedactingWriter(env.Stdout, secrets.NewMatcher(values))
+	stderrRedactor := secrets.NewRedactingWriter(env.Stderr, secrets.NewMatcher(values))
 	cmd.Stdout = stdoutRedactor
 	cmd.Stderr = stderrRedactor
 

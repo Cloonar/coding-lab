@@ -30,6 +30,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/secrets"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -97,6 +98,14 @@ type Options struct {
 	// NotifyDebounce overrides the flap-debounce window; 0 → the 2s default.
 	// Tests shrink it to drive the loop-level path quickly.
 	NotifyDebounce time.Duration
+
+	// Secrets, when non-nil, returns the repo's current secret redactor — nil
+	// when the repo has no secrets (secrets.Source's zero-secret fast path, so
+	// a repo without secrets pays no per-message cost). Injected by cmd/lab as
+	// a closure over the secrets source so chat never touches the vault or an
+	// encrypted blob (issue #108). Nil → transcript scanning/masking is off
+	// (the feature is absent, like a nil Notify).
+	Secrets func(ctx context.Context, repoID string) (*secrets.Redactor, error)
 }
 
 // defaultPoll is the tailer's file-change poll cadence. It doubles as the
@@ -119,6 +128,10 @@ type Service struct {
 	// notifyDebounce is the gate's flap-debounce window.
 	notify         func(Notification)
 	notifyDebounce time.Duration
+
+	// secrets is the injected per-repo redactor seam (issue #108), nil when
+	// cmd/lab wired none — see Options.Secrets and redact.go.
+	secrets func(ctx context.Context, repoID string) (*secrets.Redactor, error)
 
 	tailers *tailerSet
 
@@ -192,9 +205,11 @@ func New(o Options) (*Service, error) {
 		now:        now,
 		runtimeDir: o.RuntimeDir,
 		// Store Notify verbatim (no nil-default, like reconcile's afkRunEnded): a
-		// nil closure stays nil and the tailer allocates no gate.
+		// nil closure stays nil and the tailer allocates no gate. Same for
+		// Secrets: nil stays nil and scanAndRedact returns before touching a run.
 		notify:         o.Notify,
 		notifyDebounce: notifyDebounce,
+		secrets:        o.Secrets,
 		tailers:        newTailerSet(),
 	}, nil
 }
@@ -255,6 +270,11 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
+	// Mask secret values before the view is built (issue #108): every HTTP
+	// read — GET /runs/{id}/messages — flows through here, including an ended
+	// run's history, so a disclosure that predates the exposure feature (or a
+	// tick the tailer missed) is still masked on render.
+	s.scanAndRedact(ctx, run, &chat)
 	// transcriptID("") is "" — the active-no-transcript case needs no branch:
 	// the view is exactly what ReadChat("", …) composed, with no identity yet.
 	view := View{Chat: chat, TranscriptID: transcriptID(path)}

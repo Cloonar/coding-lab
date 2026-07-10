@@ -1899,6 +1899,32 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-state-dot.needs-input')).not.toBeNull();
   });
 
+  // --- Secret exposure warning badge (issue #108) ---
+
+  it('omits the exposure badge for a run that has exposed nothing', async () => {
+    await mountChat(); // baseRun() carries no exposed_secrets
+    expect(container.querySelector('.chat-state-dot.exposed')).toBeNull();
+    expect(container.querySelector('.chip.exposed')).toBeNull();
+  });
+
+  it('renders a singular exposure badge naming the one exposed secret', async () => {
+    runOnServer = { ...baseRun(), exposed_secrets: ['API_KEY'] };
+    await mountChat();
+    expect(container.querySelector('.chat-state-dot.exposed')).not.toBeNull();
+    const chip = container.querySelector('.chip.exposed');
+    expect(chip?.textContent).toBe('API_KEY exposed');
+    expect(chip?.getAttribute('title')).toContain('API_KEY');
+  });
+
+  it('renders a plural exposure badge with a tooltip listing every exposed secret', async () => {
+    runOnServer = { ...baseRun(), exposed_secrets: ['ALPHA_KEY', 'ZEBRA_KEY'] };
+    await mountChat();
+    const chip = container.querySelector('.chip.exposed');
+    expect(chip?.textContent).toBe('2 secrets exposed');
+    expect(chip?.getAttribute('title')).toContain('ALPHA_KEY');
+    expect(chip?.getAttribute('title')).toContain('ZEBRA_KEY');
+  });
+
   // --- Header turn Interrupt (ADR-0029, issue #61) ---
   // The one-tap turn Interrupt relocated from the composer to the header, gated
   // on the LIVE run outcome (not the derived `working` state). jsdom loads no
