@@ -39,8 +39,8 @@ func (s stubProvider) Commands(context.Context, string) ([]CommandSpec, error) {
 func (s stubProvider) LocateTranscript(context.Context, string, string) (string, error) {
 	return "", nil
 }
-func (s stubProvider) ReadTranscript(string) (Chat, error)         { return Chat{}, nil }
-func (s stubProvider) Reply(context.Context, string, string) error { return nil }
+func (s stubProvider) ReadChat(string, string, string) (Chat, error) { return Chat{}, nil }
+func (s stubProvider) Reply(context.Context, string, string) error   { return nil }
 func (s stubProvider) AnswerDialog(context.Context, string, Dialog, DialogAnswer) error {
 	return nil
 }

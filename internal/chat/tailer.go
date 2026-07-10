@@ -1,8 +1,9 @@
 package chat
 
 // The tailer keeps one goroutine per active run, polling its transcript file
-// for changes and publishing a debounced run.messages.changed while deriving
-// the run's conversational state for the instance list. The set of tailers is
+// (and live-signal spool) for changes and publishing a debounced
+// run.messages.changed while tracking the run's adapter-composed
+// conversational state for the instance list. The set of tailers is
 // kept in sync with store.ActiveRuns: the service subscribes to the event bus
 // and re-syncs on run.changed, so a launch arms a tailer and a terminal
 // outcome disarms it — no wiring into instance/afk/reconcile is needed.
@@ -115,13 +116,12 @@ func (s *Service) arm(run store.Run) {
 // (following a /clear or /rewind rotation — locateActive, issue #34), then
 // re-stats the transcript AND the dialog spool (a pending dialog appears while
 // the transcript is byte-frozen — compat §5 — so watching only the file would
-// never notice it). On any change it recomputes the combined state (transcript +
-// spool + marker) and publishes run.messages.changed when the transcript changed
-// OR the derived state changed — the chat view refetches on both. On a rotation
-// it resets the file-change bookkeeping and forces a re-read + republish so the
-// fresh (cleared) transcript is served and the view resets its stream. The
-// transcript is re-parsed only when its file changed (cached across ticks); a
-// bare spool change reuses the last parse.
+// never notice it). On any change it re-reads through ReadChat — the adapter
+// composes transcript + live signals itself (issue #92) — and publishes
+// run.messages.changed when the transcript changed OR the composed state
+// changed; the chat view refetches on both. On a rotation it resets the
+// file-change bookkeeping and forces a re-read + republish so the fresh
+// (cleared) transcript is served and the view resets its stream.
 func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 	// Remove by handle identity, not bare session name: a disarmed goroutine
 	// can outlive its cancel by up to one tick, and session names are reused
@@ -142,7 +142,6 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		lastSz    int64
 		lastSig   string
 		lastState string
-		lastChat  = provider.Chat{State: provider.StateIdle}
 		first     = true
 	)
 	// Seed from the last-known persisted path (a re-adopted run already has one)
@@ -159,16 +158,19 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		path = s.locateActive(ctx, prov, run, path)
 		rotated := prev != "" && path != prev
 		if rotated {
-			// A fresh file: drop the old file's change bookkeeping and cached
-			// parse so this tick re-reads the new (cleared) transcript from
-			// scratch and republishes, even if the two files' stat coincides.
-			lastMod, lastSz, lastChat = time.Time{}, 0, provider.Chat{State: provider.StateIdle}
+			// A fresh file: drop the old file's change bookkeeping so this tick
+			// re-reads the new (cleared) transcript from scratch and republishes,
+			// even if the two files' stat coincides.
+			lastMod, lastSz = time.Time{}, 0
 		}
+		// Stat into staged values; they are committed only after a successful
+		// read, so a failed read tick re-detects the same change and retries.
 		transcriptChanged := rotated
+		mod, sz := lastMod, lastSz
 		if path != "" {
 			if fi, err := os.Stat(path); err == nil && (fi.ModTime() != lastMod || fi.Size() != lastSz) {
 				transcriptChanged = true
-				lastMod, lastSz = fi.ModTime(), fi.Size()
+				mod, sz = fi.ModTime(), fi.Size()
 			}
 		}
 		var sig string
@@ -176,20 +178,31 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			sig = signals.SpoolSig(run.ID, s.runtimeDir)
 		}
 		if first || transcriptChanged || sig != lastSig {
-			if transcriptChanged {
-				if chat, err := prov.ReadTranscript(path); err == nil {
-					lastChat = chat
+			// The tailer only ever tails ACTIVE runs, so it always passes the
+			// runtime dir — composition (spool dialog / blocked-state precedence)
+			// lives inside the adapter since issue #92. That move retired the
+			// core-side parse cache, so a spool-only flip re-reads the transcript
+			// too — a deliberate trade: spool flips are rare (a dialog opening or
+			// resolving), and the common no-change tick still costs only stats.
+			chat, err := prov.ReadChat(run.ID, s.runtimeDir, path)
+			if err != nil {
+				// Skip the tick with NO bookkeeping update (first/lastSig/lastState
+				// and the staged stat all stand), so the next tick retries the
+				// read instead of freezing on a half-observed change (e.g. the
+				// file vanishing mid-rotation).
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
 				}
+				continue
 			}
-			// The tailer only ever tails ACTIVE runs, so overlay the spool
-			// signals directly (no ended-state override to apply).
-			view := View{Chat: lastChat}
-			s.applyLiveSignals(&view, run, path)
-			s.tailers.setState(run.SessionName, view.State)
-			if first || transcriptChanged || view.State != lastState {
+			s.tailers.setState(run.SessionName, chat.State)
+			if first || transcriptChanged || chat.State != lastState {
 				s.publishMessagesChanged(run)
 			}
-			first, lastSig, lastState = false, sig, view.State
+			first, lastSig, lastState = false, sig, chat.State
+			lastMod, lastSz = mod, sz
 		}
 		select {
 		case <-ctx.Done():

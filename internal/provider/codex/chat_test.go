@@ -87,10 +87,27 @@ func TestLocateTranscript_misses(t *testing.T) {
 	}
 }
 
-func TestReadTranscript_gone(t *testing.T) {
+// ReadChat's argument contract (issue #92): an empty transcriptPath is the
+// pre-transcript read of an active run — an idle empty chat, never an error.
+// runID/runtimeDir are ignored (codex has no live-signal channel, ADR-0037),
+// so passing them populated must change nothing.
+func TestReadChat_emptyPathIsIdle(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
-	if _, err := p.ReadTranscript(filepath.Join(t.TempDir(), "vanished.jsonl")); !errors.Is(err, provider.ErrTranscriptGone) {
-		t.Errorf("ReadTranscript(missing) err = %v; want ErrTranscriptGone", err)
+	chat, err := p.ReadChat("run-1", t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("ReadChat(\"\") err = %v; want nil — an unlocated transcript is a fresh spawn, not a failure", err)
+	}
+	if chat.State != provider.StateIdle || len(chat.Messages) != 0 || chat.Cursor != 0 || chat.PendingDialog != nil {
+		t.Errorf("ReadChat(\"\") = %+v; want the idle empty chat", chat)
+	}
+}
+
+// A vanished non-empty path yields the ErrTranscriptGone sentinel — the
+// caller renders "transcript no longer available" from it (issue #92).
+func TestReadChat_gone(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	if _, err := p.ReadChat("run-1", "", filepath.Join(t.TempDir(), "vanished.jsonl")); !errors.Is(err, provider.ErrTranscriptGone) {
+		t.Errorf("ReadChat(missing) err = %v; want ErrTranscriptGone", err)
 	}
 }
 

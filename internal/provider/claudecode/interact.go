@@ -92,7 +92,7 @@ func (p *Provider) Interrupt(ctx context.Context, sessionName string) error {
 // unanswered), and pacing only exists BETWEEN ops.
 //
 // Once the recipe validates, the intended answer is recorded in the intent
-// registry (issue #51 decision 3, dialogintent.go) so ReadTranscript can
+// registry (issue #51 decision 3, dialogintent.go) so ReadChat can
 // verify the retro-flushed tool_result against it — recorded BEFORE the keys
 // play, deliberately: a send that dies mid-recipe leaves the picker in an
 // unknown state, which is exactly when the backstop warning earns its keep.

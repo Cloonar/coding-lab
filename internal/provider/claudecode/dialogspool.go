@@ -10,6 +10,13 @@ package claudecode
 // picker is about to show. The same mapper that reads the transcript
 // (dialogFromToolUse) maps the spooled tool_input — one mapper, two sources.
 //
+// Seam split (issue #92): the provider.LiveSignals capability carries only the
+// spool LIFECYCLE plumbing lab genuinely owns — Setup (arming the hooks at
+// spawn), SpoolSig (the tailer's change detector), SweepSpools (runtime-dir
+// GC). What the spooled signals MEAN — the pending dialog, the blocked marker
+// — is adapter-private: pendingDialog and blockedState below are the
+// composition inputs ReadChat consults, never read across the seam.
+//
 // Every exact string here is a fragile Claude Code coupling pinned in
 // internal/compat §9 (the hook payload shapes + the spool protocol), live-
 // verified against 2.1.198.
@@ -167,7 +174,7 @@ type spooledTool struct {
 }
 
 // DialogFromHookPayload maps a raw PreToolUse hook payload to a Dialog, the
-// pure mapper behind PendingDialog. It reports false when the payload is not a
+// pure mapper behind pendingDialog. It reports false when the payload is not a
 // recognised interactive dialog. Exported for the compat fixture test (its
 // sibling is ParseTranscript for the transcript source — one mapper, two
 // sources).
@@ -179,12 +186,13 @@ func DialogFromHookPayload(payload []byte) (provider.Dialog, bool) {
 	return dialogFromToolUse(tBlock{Name: s.ToolName, ID: s.ToolUseID, Input: s.ToolInput})
 }
 
-// PendingDialog implements provider.LiveSignals: read the dialog spool, map it
-// through the shared mapper, and suppress it once resolved or stale. A spool
-// whose tool_use_id is already present in the transcript is answered (the
+// pendingDialog reads the dialog spool, maps it through the shared mapper, and
+// suppresses it once resolved or stale — one of the two adapter-private
+// composition inputs ReadChat consults (issue #92; no longer a seam method). A
+// spool whose tool_use_id is already present in the transcript is answered (the
 // tool_use is flushed only on resolution) — return false so a stale spool never
 // re-opens an answered picker.
-func (p *Provider) PendingDialog(runID, dir, transcriptPath string) (provider.Dialog, bool) {
+func (p *Provider) pendingDialog(runID, dir, transcriptPath string) (provider.Dialog, bool) {
 	spool := dialogSpoolPath(dir, runID)
 	si, err := os.Stat(spool)
 	if err != nil {
@@ -255,11 +263,13 @@ type spooledNotification struct {
 	NotificationType string `json:"notification_type"`
 }
 
-// BlockedState implements provider.LiveSignals: a live Notification marker maps
-// any blocked notification_type to StateNeedsInput. The marker is stale — the
-// block resolved — once the transcript is written after it (next activity), so
-// a transcript mtime past the marker mtime suppresses it.
-func (p *Provider) BlockedState(runID, dir, transcriptPath string) (string, bool) {
+// blockedState maps a live Notification marker's blocked notification_type to
+// StateNeedsInput — ReadChat's other adapter-private composition input (issue
+// #92; no longer a seam method), consulted only when no dialog is pending. The
+// marker is stale — the block resolved — once the transcript is written after
+// it (next activity), so a transcript mtime past the marker mtime suppresses
+// it.
+func (p *Provider) blockedState(runID, dir, transcriptPath string) (string, bool) {
 	mi, err := os.Stat(markerPath(dir, runID))
 	if err != nil {
 		return "", false

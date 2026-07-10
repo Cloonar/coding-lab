@@ -356,7 +356,7 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
 
   **Post-resolve verification backstop (issue #51 decision 3).** AnswerDialog
   records the intended answer in-memory (per tool_use_id, bounded at 100,
-  oldest-evicted); `Provider.ReadTranscript` — NOT the pure `ParseTranscript`,
+  oldest-evicted); `Provider.ReadChat` — NOT the pure `ParseTranscript`,
   which compat fixtures drive — compares the recorded resolution against the
   intent and emits a lifecycle message with `Error=true` immediately after the
   tool result on a mismatch (wrong label, a denial lab did not intend, an

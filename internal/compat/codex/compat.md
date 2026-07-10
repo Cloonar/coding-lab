@@ -580,7 +580,7 @@ stays hermetic — the parent package's gating style, no build tags):
 - `TestCompat_Live_locateTranscript` — walks the real
   `$CODEX_HOME/sessions` date tree for a genuine rollout's
   `session_meta.cwd`, then drives the production `codex.New` (real path
-  defaults) `LocateTranscript` + `ReadTranscript` against it and asserts
+  defaults) `LocateTranscript` + `ReadChat` against it and asserts
   the located file belongs to that cwd and parses. Read-only; skips
   cleanly when codex or the sessions tree is absent.
 

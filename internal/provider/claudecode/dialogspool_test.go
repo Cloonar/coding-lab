@@ -27,7 +27,7 @@ func writeFileWithModTime(t *testing.T, path, body string, mod time.Time) {
 
 // prePayload is the Appendix PreToolUse payload (2.1.198), single-question.
 // session_id matches the transcript filename stem, as live payloads do — the
-// rotation-staleness key PendingDialog compares.
+// rotation-staleness key pendingDialog compares.
 const prePayload = `{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","session_id":"sess-live","transcript_path":"/projects/x/sess-live.jsonl","cwd":"c","permission_mode":"auto","tool_use_id":"toolu_ABC","tool_input":{"questions":[{"question":"Pick one?","header":"H","multiSelect":false,"options":[{"label":"A","description":"da"},{"label":"B","description":"db"}]}]}}`
 
 func spoolTestProvider(t *testing.T) *Provider {
@@ -96,9 +96,9 @@ func TestPendingDialog_readsAndSuppressesResolved(t *testing.T) {
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
 
 	// No transcript → the dialog is live.
-	d, ok := p.PendingDialog("run_1", dir, "")
+	d, ok := p.pendingDialog("run_1", dir, "")
 	if !ok {
-		t.Fatal("PendingDialog: want a live dialog")
+		t.Fatal("pendingDialog: want a live dialog")
 	}
 	if d.ToolID != "toolu_ABC" || !d.Answerable || len(d.Options) != 3 { // A, B, Other
 		t.Fatalf("dialog = %+v; want answerable A/B/Other with ToolID toolu_ABC", d)
@@ -121,14 +121,14 @@ func TestPendingDialog_readsAndSuppressesResolved(t *testing.T) {
 	// A transcript that already contains the tool_use_id (retro-flushed) →
 	// resolved → suppressed.
 	transcript := mkTranscript("a", `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ABC","name":"AskUserQuestion","input":{}}]}}`+"\n")
-	if _, ok := p.PendingDialog("run_1", dir, transcript); ok {
-		t.Error("PendingDialog: want suppressed once the tool_use_id is in the transcript")
+	if _, ok := p.pendingDialog("run_1", dir, transcript); ok {
+		t.Error("pendingDialog: want suppressed once the tool_use_id is in the transcript")
 	}
 
 	// A different tool_use_id in the transcript does NOT suppress.
 	other := mkTranscript("b", `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ZZZ","name":"Bash","input":{}}]}}`+"\n")
-	if _, ok := p.PendingDialog("run_1", dir, other); !ok {
-		t.Error("PendingDialog: an unrelated tool_use_id must not suppress the dialog")
+	if _, ok := p.pendingDialog("run_1", dir, other); !ok {
+		t.Error("pendingDialog: an unrelated tool_use_id must not suppress the dialog")
 	}
 }
 
@@ -154,12 +154,12 @@ func TestPendingDialog_survivesTranscriptWritesDuringPending(t *testing.T) {
 	// tool_use_id not present → still pending → still served.
 	transcript := filepath.Join(dir, "sess-live.jsonl")
 	writeFileWithModTime(t, transcript, `{"type":"queue-operation"}`+"\n", t0.Add(time.Minute))
-	if _, ok := p.PendingDialog("run_1", dir, transcript); !ok {
+	if _, ok := p.pendingDialog("run_1", dir, transcript); !ok {
 		t.Error("a same-session transcript write during the pending window must not suppress the dialog")
 	}
 }
 
-// PendingDialog rides the same mapper as the transcript (dialogFromToolUse),
+// pendingDialog rides the same mapper as the transcript (dialogFromToolUse),
 // so the shapes issue #51 made answerable — multi-question AskUserQuestion
 // and ExitPlanMode — are answerable through the spool with no spool-specific
 // code. Payloads mirror the live 2.1.198 hook/tool inputs (2026-07-08).
@@ -169,7 +169,7 @@ func TestPendingDialog_multiQuestionAndPlanAnswerable(t *testing.T) {
 
 	multiQ := `{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"toolu_MQ","tool_input":{"questions":[{"question":"Which color do you prefer?","header":"Color","multiSelect":false,"options":[{"label":"Red","description":"warm"},{"label":"Blue","description":"cool"}]},{"question":"Which fruits do you like?","header":"Fruits","multiSelect":true,"options":[{"label":"Apple"},{"label":"Banana"},{"label":"Cherry"}]}]}}`
 	writeSpool(t, dir, dialogsSubdir, "run_mq", multiQ)
-	d, ok := p.PendingDialog("run_mq", dir, "")
+	d, ok := p.pendingDialog("run_mq", dir, "")
 	if !ok || !d.Answerable || d.Kind != provider.DialogKindQuestion {
 		t.Fatalf("multi-question spool = %+v,%v; want an answerable question dialog", d, ok)
 	}
@@ -182,7 +182,7 @@ func TestPendingDialog_multiQuestionAndPlanAnswerable(t *testing.T) {
 
 	plan := `{"hook_event_name":"PreToolUse","tool_name":"ExitPlanMode","tool_use_id":"toolu_PL","tool_input":{"plan":"# Plan\n\n- do the thing\n","planFilePath":"/tmp/plan.md"}}`
 	writeSpool(t, dir, dialogsSubdir, "run_pl", plan)
-	d, ok = p.PendingDialog("run_pl", dir, "")
+	d, ok = p.pendingDialog("run_pl", dir, "")
 	if !ok || !d.Answerable || d.Kind != provider.DialogKindPlan {
 		t.Fatalf("plan spool = %+v,%v; want an answerable plan dialog", d, ok)
 	}
@@ -194,16 +194,16 @@ func TestPendingDialog_multiQuestionAndPlanAnswerable(t *testing.T) {
 func TestPendingDialog_missAndGarbage(t *testing.T) {
 	p := spoolTestProvider(t)
 	dir := t.TempDir()
-	if _, ok := p.PendingDialog("run_missing", dir, ""); ok {
+	if _, ok := p.pendingDialog("run_missing", dir, ""); ok {
 		t.Error("no spool → want false")
 	}
 	writeSpool(t, dir, dialogsSubdir, "run_g", "{not json")
-	if _, ok := p.PendingDialog("run_g", dir, ""); ok {
+	if _, ok := p.pendingDialog("run_g", dir, ""); ok {
 		t.Error("garbage spool → want false")
 	}
 	// A non-interactive tool name is not a dialog.
 	writeSpool(t, dir, dialogsSubdir, "run_b", `{"tool_name":"Bash","tool_use_id":"x","tool_input":{}}`)
-	if _, ok := p.PendingDialog("run_b", dir, ""); ok {
+	if _, ok := p.pendingDialog("run_b", dir, ""); ok {
 		t.Error("non-dialog tool → want false")
 	}
 }
@@ -227,7 +227,7 @@ func TestPendingDialog_staleAfterTranscriptRotation(t *testing.T) {
 	// Same session → the dialog shows.
 	same := filepath.Join(dir, "sess-live.jsonl")
 	writeFileWithModTime(t, same, "{}", t0.Add(-time.Minute))
-	if _, ok := p.PendingDialog("run_1", dir, same); !ok {
+	if _, ok := p.pendingDialog("run_1", dir, same); !ok {
 		t.Error("a spool for the current session must show the dialog")
 	}
 
@@ -237,7 +237,7 @@ func TestPendingDialog_staleAfterTranscriptRotation(t *testing.T) {
 	for _, mod := range []time.Time{t0.Add(time.Minute), t0.Add(-time.Minute)} {
 		rotated := filepath.Join(dir, "sess-rotated.jsonl")
 		writeFileWithModTime(t, rotated, "{}", mod)
-		if _, ok := p.PendingDialog("run_1", dir, rotated); ok {
+		if _, ok := p.pendingDialog("run_1", dir, rotated); ok {
 			t.Errorf("a spool for a rotated-out session must be suppressed as stale (transcript mtime %v)", mod)
 		}
 	}
@@ -259,12 +259,12 @@ func TestPendingDialog_legacyPayloadFallsBackToMtime(t *testing.T) {
 
 	older := filepath.Join(dir, "older.jsonl")
 	writeFileWithModTime(t, older, "{}", t0.Add(-time.Minute))
-	if _, ok := p.PendingDialog("run_1", dir, older); !ok {
+	if _, ok := p.pendingDialog("run_1", dir, older); !ok {
 		t.Error("legacy payload + older transcript → served")
 	}
 	newer := filepath.Join(dir, "newer.jsonl")
 	writeFileWithModTime(t, newer, "{}", t0.Add(time.Minute))
-	if _, ok := p.PendingDialog("run_1", dir, newer); ok {
+	if _, ok := p.pendingDialog("run_1", dir, newer); ok {
 		t.Error("legacy payload + newer transcript → suppressed (mtime backstop)")
 	}
 }
@@ -275,8 +275,8 @@ func TestBlockedState_markerAndStaleness(t *testing.T) {
 	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
 
 	// No transcript → the marker is current.
-	if st, ok := p.BlockedState("run_1", dir, ""); !ok || st != provider.StateNeedsInput {
-		t.Fatalf("BlockedState = (%q,%v); want (needs_input,true)", st, ok)
+	if st, ok := p.blockedState("run_1", dir, ""); !ok || st != provider.StateNeedsInput {
+		t.Fatalf("blockedState = (%q,%v); want (needs_input,true)", st, ok)
 	}
 
 	marker := markerPath(dir, "run_1")
@@ -285,14 +285,14 @@ func TestBlockedState_markerAndStaleness(t *testing.T) {
 	// A transcript written BEFORE the marker → still blocked.
 	older := filepath.Join(dir, "older.jsonl")
 	writeFileWithModTime(t, older, "x", mi.ModTime().Add(-time.Hour))
-	if _, ok := p.BlockedState("run_1", dir, older); !ok {
+	if _, ok := p.blockedState("run_1", dir, older); !ok {
 		t.Error("transcript older than the marker → still blocked")
 	}
 
 	// A transcript written AFTER the marker → the block resolved (next activity).
 	newer := filepath.Join(dir, "newer.jsonl")
 	writeFileWithModTime(t, newer, "x", mi.ModTime().Add(time.Hour))
-	if _, ok := p.BlockedState("run_1", dir, newer); ok {
+	if _, ok := p.blockedState("run_1", dir, newer); ok {
 		t.Error("transcript newer than the marker → stale, want not blocked")
 	}
 }
@@ -345,7 +345,7 @@ func TestHookCommands_endToEndThroughSh(t *testing.T) {
 	if _, err := os.Stat(dialogSpoolPath(dir, "run_e2e")); err != nil {
 		t.Fatalf("PreToolUse hook did not spool: %v", err)
 	}
-	d, ok := p.PendingDialog("run_e2e", dir, "")
+	d, ok := p.pendingDialog("run_e2e", dir, "")
 	if !ok || d.ToolID != "toolu_ABC" || !d.Answerable {
 		t.Fatalf("spooled-then-read dialog = %+v,%v; want an answerable dialog toolu_ABC", d, ok)
 	}
@@ -361,9 +361,9 @@ func TestHookCommands_endToEndThroughSh(t *testing.T) {
 		t.Errorf("PostToolUse hook did not clear the spool: %v", err)
 	}
 
-	// Notification: the marker spools and drives BlockedState.
+	// Notification: the marker spools and drives blockedState.
 	runSh(s.Hooks.Notification[0].Hooks[0].Command, `{"notification_type":"permission_prompt"}`)
-	if st, ok := p.BlockedState("run_e2e", dir, ""); !ok || st != provider.StateNeedsInput {
+	if st, ok := p.blockedState("run_e2e", dir, ""); !ok || st != provider.StateNeedsInput {
 		t.Errorf("Notification hook marker = (%q,%v); want (needs_input,true)", st, ok)
 	}
 }

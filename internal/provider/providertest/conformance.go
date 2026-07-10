@@ -46,14 +46,18 @@ type Fixture struct {
 // only its BRE sub-check when grep is absent; everything else always runs.
 //
 // The live-process seam methods — AuthStatus, LoginStart/LoginSubmitCode,
-// Logout, Commands, Reply, AnswerDialog, Interrupt, Locate/ReadTranscript —
-// are deliberately NOT exercised: each is an adapter-owned fragile CLI
-// coupling that must be live-verified per adapter (the ADR-0008 bar), never
-// hermetically. Tier-1 covers exactly the declarations lab's core consumes
-// blind: pattern dialect (issue #75 / ADR-0033), the lab-owned context file
-// (issue #79 / ADR-0035), defensive catalog/meta clones, spawn argv shape
-// (issue #19 / ADR-0021), the auth-flow vocabulary and login-session naming
-// (issue #77 / ADR-0034), and executable exclude/scrub coverage.
+// Logout, Commands, Reply, AnswerDialog, Interrupt, LocateTranscript, and
+// ReadChat's transcript GRAMMAR — are deliberately NOT exercised: each is an
+// adapter-owned fragile CLI coupling that must be live-verified per adapter
+// (the ADR-0008 bar, Tier-2), never hermetically. ReadChat's ARGUMENT
+// contract is the exception (issue #92): how an adapter treats an empty
+// transcriptPath and a vanished one is seam law core relies on blind, needs
+// no CLI, and is pinned here by read-chat. Tier-1 otherwise covers exactly
+// the declarations lab's core consumes blind: pattern dialect (issue #75 /
+// ADR-0033), the lab-owned context file (issue #79 / ADR-0035), defensive
+// catalog/meta clones, spawn argv shape (issue #19 / ADR-0021), the
+// auth-flow vocabulary and login-session naming (issue #77 / ADR-0034), and
+// executable exclude/scrub coverage.
 func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Helper()
 	report := func(t *testing.T, errs []error) {
@@ -69,6 +73,7 @@ func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Run("spawn-argv", func(t *testing.T) { report(t, checkSpawnArgv(p)) })
 	t.Run("auth-flow", func(t *testing.T) { report(t, checkAuthFlow(p)) })
 	t.Run("login-session", func(t *testing.T) { report(t, checkLoginSession(p)) })
+	t.Run("read-chat", func(t *testing.T) { report(t, checkReadChat(t, p)) })
 	t.Run("seeding-exclude-coverage", func(t *testing.T) { report(t, checkSeedingExcludeCoverage(t, p)) })
 	t.Run("seeding-incogni", func(t *testing.T) { report(t, checkSeedingIncogni(t, p)) })
 	t.Run("scrub-markers", func(t *testing.T) { report(t, checkScrubMarkers(t, p, fx)) })
@@ -340,6 +345,55 @@ func checkLoginSession(p provider.AgentProvider) []error {
 	}
 	if name := tmuxx.LoginSessionName(id); !tmuxx.IsLoginSession(name) {
 		errs = append(errs, fmt.Errorf("login-session: tmuxx.IsLoginSession(%q) = false for this provider's own login session — the cap/ownership/stop-all exclusions would miss it (issue #77 / ADR-0034)", name))
+	}
+	return errs
+}
+
+// checkReadChat pins ReadChat's ARGUMENT contract hermetically (issue #92) —
+// the transcript grammar and live-signal composition stay adapter-owned
+// Tier-2 couplings, but how an adapter treats the arguments core passes
+// blind is seam law with no CLI in it:
+//
+//   - transcriptPath "" is the pre-transcript read of an ACTIVE run, the
+//     window before LocateTranscript first hits: an idle empty chat, never
+//     an error — an adapter that errors here breaks every fresh spawn's
+//     chat view.
+//   - runtimeDir "" (signals off / transcript-only read) and a fresh empty
+//     runtime dir (signals armed, no spool yet — the common state seconds
+//     after spawn) must both yield that same idle read.
+//   - a non-empty transcriptPath that no longer exists must surface
+//     provider.ErrTranscriptGone: httpapi renders the graceful "transcript
+//     no longer available" state from that sentinel; a raw error would 500.
+func checkReadChat(tb testing.TB, p provider.AgentProvider) []error {
+	var errs []error
+	requireIdle := func(what string, chat provider.Chat, err error) {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("read-chat: %s returned error %v — an unlocated transcript is the normal pre-transcript state of an active run, never an error (provider.AgentProvider.ReadChat contract; issue #92)", what, err))
+			return
+		}
+		if chat.State != provider.StateIdle {
+			errs = append(errs, fmt.Errorf("read-chat: %s returned State %q; want %q — before any transcript exists the run has seen no assistant activity (issue #92)", what, chat.State, provider.StateIdle))
+		}
+		if len(chat.Messages) != 0 {
+			errs = append(errs, fmt.Errorf("read-chat: %s returned %d message(s); want none — the message stream is transcript-derived and no transcript exists yet (issue #92)", what, len(chat.Messages)))
+		}
+		if chat.Cursor != 0 {
+			errs = append(errs, fmt.Errorf("read-chat: %s returned Cursor %d; want 0 — a non-zero cursor on an empty chat would corrupt the API's seq windowing (issue #92)", what, chat.Cursor))
+		}
+		if chat.PendingDialog != nil {
+			errs = append(errs, fmt.Errorf("read-chat: %s returned a PendingDialog; want nil — no live signal was armed, so nothing can be pending (issue #92)", what))
+		}
+	}
+
+	chat, err := p.ReadChat("conformance-run-1", "", "")
+	requireIdle(`ReadChat(runID, "", "")`, chat, err)
+
+	chat, err = p.ReadChat("conformance-run-1", tb.TempDir(), "")
+	requireIdle(`ReadChat(runID, emptyRuntimeDir, "")`, chat, err)
+
+	gone := filepath.Join(tb.TempDir(), "gone.jsonl")
+	if _, err := p.ReadChat("conformance-run-1", "", gone); !errors.Is(err, provider.ErrTranscriptGone) {
+		errs = append(errs, fmt.Errorf("read-chat: ReadChat on a vanished transcript path returned %v; want provider.ErrTranscriptGone — httpapi renders the \"transcript no longer available\" state from that sentinel, and a raw error would 500 (issue #92)", err))
 	}
 	return errs
 }

@@ -14,6 +14,7 @@ package providertest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -40,6 +41,9 @@ type mockProvider struct {
 	spawnArgv func(spec provider.SpawnSpec) []string
 	// seed overrides the default no-op SeedWorkspace.
 	seed func(worktree string, opts provider.SeedOpts) error
+	// readChat overrides the default conforming ReadChat — the read-chat
+	// breakage hook (issue #92).
+	readChat func(transcriptPath string) (provider.Chat, error)
 }
 
 var _ provider.AgentProvider = (*mockProvider)(nil)
@@ -142,7 +146,9 @@ func (m *mockProvider) SeedWorkspace(worktree string, opts provider.SeedOpts) er
 }
 
 // Live-process seam methods: never called by the conformance suite (they need
-// a real CLI); trivial stubs satisfy the interface.
+// a real CLI); trivial stubs satisfy the interface. ReadChat below is the one
+// exception — its ARGUMENT contract is hermetic seam law (issue #92), so the
+// mock implements it for real.
 func (m *mockProvider) AuthStatus(context.Context, bool) (provider.AuthStatus, error) {
 	return provider.AuthStatus{}, nil
 }
@@ -155,8 +161,25 @@ func (m *mockProvider) Commands(context.Context, string) ([]provider.CommandSpec
 func (m *mockProvider) LocateTranscript(context.Context, string, string) (string, error) {
 	return "", nil
 }
-func (m *mockProvider) ReadTranscript(string) (provider.Chat, error) { return provider.Chat{}, nil }
-func (m *mockProvider) Reply(context.Context, string, string) error  { return nil }
+
+// ReadChat's default is conforming per the read-chat obligation (issue #92):
+// an empty transcriptPath is the idle pre-transcript read of an active run,
+// and a vanished non-empty path surfaces the ErrTranscriptGone sentinel via
+// the same os-stat route a real adapter's open takes. runID/runtimeDir are
+// ignored — the mock has no live-signal channel, the honest-degradation shape.
+func (m *mockProvider) ReadChat(_, _, transcriptPath string) (provider.Chat, error) {
+	if m.readChat != nil {
+		return m.readChat(transcriptPath)
+	}
+	if transcriptPath == "" {
+		return provider.Chat{State: provider.StateIdle}, nil
+	}
+	if _, err := os.Stat(transcriptPath); os.IsNotExist(err) {
+		return provider.Chat{}, provider.ErrTranscriptGone
+	}
+	return provider.Chat{State: provider.StateIdle}, nil
+}
+func (m *mockProvider) Reply(context.Context, string, string) error { return nil }
 func (m *mockProvider) AnswerDialog(context.Context, string, provider.Dialog, provider.DialogAnswer) error {
 	return nil
 }
@@ -207,6 +230,7 @@ func TestCheckFunctions_wellFormedProviderPasses(t *testing.T) {
 		{"spawn-argv", func(t *testing.T) []error { return checkSpawnArgv(p) }},
 		{"auth-flow", func(t *testing.T) []error { return checkAuthFlow(p) }},
 		{"login-session", func(t *testing.T) []error { return checkLoginSession(p) }},
+		{"read-chat", func(t *testing.T) []error { return checkReadChat(t, p) }},
 		{"seeding-exclude-coverage", func(t *testing.T) []error { return checkSeedingExcludeCoverage(t, p) }},
 		{"seeding-incogni", func(t *testing.T) []error { return checkSeedingIncogni(t, p) }},
 		{"scrub-markers", func(t *testing.T) []error { return checkScrubMarkers(t, p, mockFixture()) }},
@@ -330,4 +354,40 @@ func TestCheckScrubMarkers_overBroadPatternFails(t *testing.T) {
 	// The breakage: a pattern so broad it also catches human co-authors.
 	p.meta.ScrubPatterns = append(p.meta.ScrubPatterns, `co-authored-by:`)
 	wantError(t, checkScrubMarkers(t, p, mockFixture()), "scrub-markers", "Alice", "over-broad")
+}
+
+func TestCheckReadChat_emptyPathErrorFails(t *testing.T) {
+	p := newMockProvider()
+	p.readChat = func(transcriptPath string) (provider.Chat, error) {
+		if transcriptPath == "" {
+			// The breakage: treating the pre-transcript read of an active run
+			// as a failure instead of the idle empty chat (issue #92).
+			return provider.Chat{}, errors.New("no transcript located yet")
+		}
+		return provider.Chat{}, provider.ErrTranscriptGone
+	}
+	wantError(t, checkReadChat(t, p), "read-chat", "never an error")
+}
+
+func TestCheckReadChat_rawGoneErrorFails(t *testing.T) {
+	p := newMockProvider()
+	p.readChat = func(transcriptPath string) (provider.Chat, error) {
+		if transcriptPath == "" {
+			return provider.Chat{State: provider.StateIdle}, nil
+		}
+		// The breakage: a raw os-flavored error instead of the
+		// ErrTranscriptGone sentinel httpapi maps to the graceful state.
+		return provider.Chat{}, errors.New("open " + transcriptPath + ": no such file or directory")
+	}
+	wantError(t, checkReadChat(t, p), "read-chat", "ErrTranscriptGone")
+}
+
+func TestCheckReadChat_nilErrorForVanishedPathFails(t *testing.T) {
+	p := newMockProvider()
+	p.readChat = func(transcriptPath string) (provider.Chat, error) {
+		// The breakage: every read "succeeds" — a vanished transcript would
+		// render as an eternally empty idle chat instead of the gone state.
+		return provider.Chat{State: provider.StateIdle}, nil
+	}
+	wantError(t, checkReadChat(t, p), "read-chat", "ErrTranscriptGone")
 }

@@ -1,13 +1,17 @@
 // Package chat is the embedded-chat brain (issue #7 / ADR-0016): it reads an
-// instance's provider-native transcript through the AgentProvider seam into
+// instance's conversation through the AgentProvider seam (ReadChat) into
 // lab's universal message schema, drives replies / dialog answers / interrupts
-// back into the live session, and runs a per-live-instance tailer that derives
+// back into the live session, and runs a per-live-instance tailer that tracks
 // conversational state and publishes a debounced run.messages.changed so the
-// chat view refetches. Read-through only — no message table; the sole
-// persisted state is runs.transcript_path, captured by cwd-match exactly like
-// the deep link — and, for an active run, re-pointed when the live session
-// rotates its transcript (a /clear or /rewind starts a new sessionId →
-// transcript file, compat §5), so the chat follows the fresh session (issue #34).
+// chat view refetches. State COMPOSITION is adapter-owned (issue #92): the
+// provider folds its transcript and its own live signals (claude-code: the
+// hook spool, ADR-0020) inside ReadChat, and core never interprets a spool —
+// core owns run lifecycle only (the StateEnded override and the transcript
+// identity). Read-through only — no message table; the sole persisted state
+// is runs.transcript_path, captured by cwd-match exactly like the deep link —
+// and, for an active run, re-pointed when the live session rotates its
+// transcript (a /clear or /rewind starts a new sessionId → transcript file,
+// compat §5), so the chat follows the fresh session (issue #34).
 //
 // Intervention neutrality (issue #7 decision 12): a reply, dialog answer, or
 // interrupt goes through provider send-keys and never touches a run's budget
@@ -67,9 +71,12 @@ type Options struct {
 	Logger    *slog.Logger
 
 	// RuntimeDir is lab's runtime dir (<state>/runtime — the materializer dir),
-	// where a LiveSignals provider spools a run's pending dialog + blocked
-	// marker (ADR-0020). Empty disables the spool read/GC (the chat keeps
-	// transcript-only behavior); cmd/lab passes the materializer's Dir().
+	// where a LiveSignals provider spools its live signals (ADR-0020). Core
+	// never reads the spool itself (issue #92): it passes this dir through
+	// ReadChat for ACTIVE runs — the adapter composes its own signals there —
+	// and GCs ended runs' spools (SweepSpools). Empty disables both (every
+	// read degrades to transcript-only); cmd/lab passes the materializer's
+	// Dir().
 	RuntimeDir string
 
 	// Poll is the transcript poll/debounce cadence; nil → defaultPoll.
@@ -168,17 +175,16 @@ func New(o Options) (*Service, error) {
 	}, nil
 }
 
-// View is the chat service's combined read: the transcript-derived chat plus
-// the live spool signals a LiveSignals provider surfaces (ADR-0020). The
-// message stream (embedded provider.Chat) stays purely transcript-derived —
-// PendingDialog is a side-channel field, never a synthetic message, so seq
-// numbers remain reparse-stable when the real tool_use retro-flushes.
+// View is the chat service's read of one run: the adapter-composed
+// conversation (embedded provider.Chat — messages, state, cursor, and the
+// side-channel PendingDialog, issue #92) plus the core-owned transcript
+// identity. Core forwards the adapter's composition verbatim — including the
+// live dialog on Chat.PendingDialog, whose doc pins the seq-stability
+// invariant (issues #89/#90) — and owns only run lifecycle: a terminated
+// run's view is forced to StateEnded with no dialog, regardless of what the
+// adapter returned.
 type View struct {
 	provider.Chat
-	// PendingDialog is the run's live interactive dialog read from the
-	// PreToolUse spool (nil when none is pending). When set, State is
-	// StateQuestion.
-	PendingDialog *provider.Dialog
 	// TranscriptID is the opaque, provider-neutral identity of the transcript
 	// this view was read from — a stable hash of the resolved path (transcriptID)
 	// that changes exactly when the run's transcript rotates (a /clear or /rewind
@@ -191,80 +197,48 @@ type View struct {
 
 // Read returns the run's chat: it resolves the transcript path (using the
 // persisted one, else — for an active run — a best-effort locate that is
-// persisted on a hit), reads it through the provider, and stamps the
-// conversational state — StateEnded overrides the transcript-derived state for
-// a terminated run. An active run with no transcript yet returns an empty chat
-// in StateIdle (the chat view shows a "waiting for the transcript"
-// placeholder); an ended run that never captured one, like a retired
-// transcript file, returns provider.ErrTranscriptGone.
+// persisted on a hit) and reads through the provider's ReadChat, which
+// composes the conversational state from the transcript plus the adapter's
+// own live signals (issue #92 — composition is adapter-owned; core never
+// interprets a spool). Core contributes only run lifecycle:
+//
+//   - an ACTIVE run reads with the runtime dir, so the adapter's live signals
+//     apply — including the no-transcript-yet case (path ""), where the
+//     adapter must still consult them (a pending dialog can exist before
+//     LocateTranscript first hits) and otherwise yields an idle empty chat;
+//   - an ENDED run reads transcript-only (runtimeDir "") BY CONSTRUCTION, so
+//     no spool residue can leak into a terminal view, and is then forced to
+//     StateEnded with no pending dialog — terminal state is core-owned,
+//     whatever the adapter returned;
+//   - an ended run with no captured transcript (or a retired transcript file,
+//     via the adapter's own ErrTranscriptGone) is the "transcript no longer
+//     available" state.
 func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	prov, ok := s.providers.Get(run.Provider)
 	if !ok {
 		return View{}, fmt.Errorf("chat: unknown provider %q", run.Provider)
 	}
 	path := s.resolvePath(ctx, prov, run)
-	if path == "" {
-		if run.Outcome != store.RunOutcomeActive {
-			return View{}, provider.ErrTranscriptGone
-		}
-		// Active but no transcript located yet — still consult the spool: a
-		// pending dialog can exist before LocateTranscript first hits.
-		view := View{Chat: provider.Chat{State: provider.StateIdle}}
-		s.applyLiveSignals(&view, run, "")
-		return view, nil
+	active := run.Outcome == store.RunOutcomeActive
+	if path == "" && !active {
+		return View{}, provider.ErrTranscriptGone
 	}
-	chat, err := prov.ReadTranscript(path)
+	dir := ""
+	if active {
+		dir = s.runtimeDir
+	}
+	chat, err := prov.ReadChat(run.ID, dir, path)
 	if err != nil {
 		return View{}, err
 	}
+	// transcriptID("") is "" — the active-no-transcript case needs no branch:
+	// the view is exactly what ReadChat("", …) composed, with no identity yet.
 	view := View{Chat: chat, TranscriptID: transcriptID(path)}
-	if run.Outcome != store.RunOutcomeActive {
-		view.State = provider.StateEnded // a terminal run's state never comes from the spool
-		return view, nil
+	if !active {
+		view.State = provider.StateEnded
+		view.PendingDialog = nil // defensive: a transcript-only read composes none
 	}
-	s.applyLiveSignals(&view, run, path)
 	return view, nil
-}
-
-// applyLiveSignals overlays a LiveSignals provider's spool signals onto an
-// ACTIVE run's transcript-derived view (ADR-0020). Precedence: a live pending
-// dialog forces StateQuestion and is surfaced as View.PendingDialog (kept out
-// of the message stream — decision 5); else, when the transcript itself does
-// not already show a pending dialog (the dormant flushed-tool_use fallback), a
-// live blocked marker forces StateNeedsInput (decision 7). A provider without
-// the capability, or an empty RuntimeDir, is a no-op — transcript-only.
-func (s *Service) applyLiveSignals(view *View, run store.Run, path string) {
-	signals, ok := s.liveSignals(run.Provider)
-	if !ok {
-		return
-	}
-	if d, ok := signals.PendingDialog(run.ID, s.runtimeDir, path); ok {
-		view.State = provider.StateQuestion
-		dc := d
-		view.PendingDialog = &dc
-		return
-	}
-	if view.State == provider.StateQuestion {
-		return // a transcript-flushed dialog stands on its own (dormant fallback)
-	}
-	if st, ok := signals.BlockedState(run.ID, s.runtimeDir, path); ok {
-		view.State = st
-	}
-}
-
-// liveSignals resolves a provider id to its optional LiveSignals capability
-// (ADR-0020). (nil, false) when the provider is unregistered, lacks the
-// capability, or the runtime dir is unset.
-func (s *Service) liveSignals(providerID string) (provider.LiveSignals, bool) {
-	if s.runtimeDir == "" {
-		return nil, false
-	}
-	prov, ok := s.providers.Get(providerID)
-	if !ok {
-		return nil, false
-	}
-	ls, ok := prov.(provider.LiveSignals)
-	return ls, ok
 }
 
 // resolvePath returns the transcript path for run. An ENDED run returns its
@@ -392,11 +366,13 @@ func (s *Service) Interrupt(ctx context.Context, run store.Run) error {
 	return prov.Interrupt(ctx, run.SessionName)
 }
 
-// PendingDialog returns the run's currently pending dialog, if any. The live
-// PreToolUse spool is authoritative (ADR-0020) — Claude Code never flushes a
-// pending tool_use to the transcript, so the spool is the only live source;
-// the transcript-tail scan stays as the dormant fallback for a future provider
-// that does flush pending tool_use.
+// PendingDialog returns the run's currently pending dialog, if any. The
+// adapter's ReadChat composition is authoritative (issue #92): a live dialog
+// arrives on Chat.PendingDialog (claude-code reads its PreToolUse spool,
+// ADR-0020 — a pending tool_use never flushes to the transcript, so the
+// side-channel is the only live source); the transcript-tail scan stays as
+// the dormant fallback for a provider that DOES flush pending tool_use
+// (StateQuestion with a nil side-channel dialog).
 func (s *Service) PendingDialog(ctx context.Context, run store.Run) (provider.Dialog, bool) {
 	view, err := s.Read(ctx, run)
 	if err != nil {
@@ -430,7 +406,8 @@ func (s *Service) liveProvider(run store.Run) (provider.AgentProvider, error) {
 
 // dialogPending reports whether a dialog is pending for the run — the composer
 // lock (a free-text reply must not hit a focused picker). Keys off the same
-// server-side StateQuestion the spool drives (ADR-0020 decision 5).
+// server-side StateQuestion the adapter's ReadChat composition drives
+// (ADR-0020 decision 5; adapter-owned since issue #92).
 func (s *Service) dialogPending(ctx context.Context, run store.Run) bool {
 	view, err := s.Read(ctx, run)
 	if err != nil {
