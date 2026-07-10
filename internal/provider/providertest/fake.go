@@ -57,13 +57,16 @@ type Fake struct {
 	logouts      int      // Logout call count
 	captureCt    int      // CaptureDeepLink call count
 
-	// Chat surface (issue #7). transcriptPath is what LocateTranscript
-	// returns (""→miss); chat is what ReadTranscript returns; readErr forces
-	// a ReadTranscript error (e.g. provider.ErrTranscriptGone). Replies,
-	// answers, and interrupts are recorded for assertions.
+	// Chat surface (issue #7; adapter-owned composition since issue #92).
+	// transcriptPath is what LocateTranscript returns (""→miss); chat is the
+	// transcript-derived base ReadChat composes over; readErr forces a
+	// ReadChat error (e.g. provider.ErrTranscriptGone) for non-empty paths.
+	// readCalls records every ReadChat call's arguments. Replies, answers,
+	// and interrupts are recorded for assertions.
 	transcriptPath string
 	chat           provider.Chat
 	readErr        error
+	readCalls      []ReadCall
 	locateCt       int
 	replies        []string
 	answers        []provider.DialogAnswer
@@ -71,10 +74,11 @@ type Fake struct {
 	replyErr       error
 	interruptErr   error
 
-	// LiveSignals capability (issue #17 / ADR-0020, renamed in issue #51).
-	// hookArgs/hookSettings script Setup; pendingDialog/blocked/spoolSig
-	// script the spool reads; hookCalls records Setup runIDs and sweeps
-	// counts SweepSpools.
+	// LiveSignals lifecycle capability (issue #17 / ADR-0020, narrowed in
+	// issue #92). hookArgs/hookSettings script Setup; spoolSig scripts the
+	// change digest; pendingDialog/blocked script the live signals ReadChat
+	// composes (the fake's adapter-private state, like claudecode's spool);
+	// hookCalls records Setup runIDs and sweeps counts SweepSpools.
 	hookSettings  []byte
 	hookArgs      []string
 	pendingDialog *provider.Dialog
@@ -84,6 +88,15 @@ type Fake struct {
 	hookCalls     []string
 	sweeps        int
 	sweepErr      error
+}
+
+// ReadCall is one recorded ReadChat invocation — the assertion surface for
+// what core passes down the seam (issue #92: runtime dir only for active
+// runs, the resolved transcript path, the run id keying the spool).
+type ReadCall struct {
+	RunID          string
+	RuntimeDir     string
+	TranscriptPath string
 }
 
 var (
@@ -328,15 +341,51 @@ func (f *Fake) LocateTranscript(_ context.Context, _, _ string) (string, error) 
 	return f.transcriptPath, nil
 }
 
-// ReadTranscript returns the scripted chat, or the scripted read error
-// (e.g. provider.ErrTranscriptGone).
-func (f *Fake) ReadTranscript(string) (provider.Chat, error) {
+// ReadChat returns the scripted transcript base composed with the scripted
+// live signals, mirroring the adapter-owned precedence a real adapter applies
+// (issue #92): a scripted pending dialog → StateQuestion + Chat.PendingDialog;
+// else a scripted question state stands on its own (the dormant transcript
+// fallback); else a scripted blocked state overrides. transcriptPath "" is
+// the pre-transcript read (an idle empty base, never an error, per the seam
+// contract); runtimeDir "" turns the signals off (transcript-only). The
+// scripted readErr (e.g. provider.ErrTranscriptGone) fires only for a
+// non-empty path, like a real adapter's vanished-file open.
+func (f *Fake) ReadChat(runID, runtimeDir, transcriptPath string) (provider.Chat, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.readErr != nil {
+	f.readCalls = append(f.readCalls, ReadCall{RunID: runID, RuntimeDir: runtimeDir, TranscriptPath: transcriptPath})
+	var chat provider.Chat
+	switch {
+	case transcriptPath == "":
+		chat = provider.Chat{State: provider.StateIdle}
+	case f.readErr != nil:
 		return provider.Chat{}, f.readErr
+	default:
+		chat = f.chat
 	}
-	return f.chat, nil
+	if runtimeDir == "" {
+		return chat, nil
+	}
+	if f.pendingDialog != nil {
+		d := *f.pendingDialog
+		chat.State = provider.StateQuestion
+		chat.PendingDialog = &d
+		return chat, nil
+	}
+	if chat.State == provider.StateQuestion {
+		return chat, nil
+	}
+	if f.blockedOK {
+		chat.State = f.blocked
+	}
+	return chat, nil
+}
+
+// ReadCalls returns the arguments of every ReadChat call, in order.
+func (f *Fake) ReadCalls() []ReadCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ReadCall(nil), f.readCalls...)
 }
 
 // Reply records the reply text (or returns the scripted error).
@@ -369,7 +418,7 @@ func (f *Fake) Interrupt(_ context.Context, _ string) error {
 	return nil
 }
 
-// --- LiveSignals capability (issue #17 / ADR-0020, renamed in #51) --------
+// --- LiveSignals lifecycle capability (ADR-0020, narrowed in #92) ----------
 
 // Setup records the runID and returns the scripted settings/args (a
 // default --settings <dir>/settings.<runID>.json when unset).
@@ -389,23 +438,6 @@ func (f *Fake) Setup(runID, dir string) ([]byte, string, []string) {
 	return settings, path, args
 }
 
-// PendingDialog returns the scripted spool dialog (nil → none pending).
-func (f *Fake) PendingDialog(_, _, _ string) (provider.Dialog, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.pendingDialog == nil {
-		return provider.Dialog{}, false
-	}
-	return *f.pendingDialog, true
-}
-
-// BlockedState returns the scripted blocked marker state.
-func (f *Fake) BlockedState(_, _, _ string) (string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.blocked, f.blockedOK
-}
-
 // SpoolSig returns the scripted spool signature.
 func (f *Fake) SpoolSig(_, _ string) string {
 	f.mu.Lock()
@@ -421,14 +453,18 @@ func (f *Fake) SweepSpools(_ string, _ func(runID string) bool) error {
 	return f.sweepErr
 }
 
-// SetPendingDialog scripts the spool pending dialog (nil → none).
+// SetPendingDialog scripts the live pending dialog ReadChat composes when a
+// runtime dir is passed (nil → none) — the fake's stand-in for claudecode's
+// PreToolUse spool.
 func (f *Fake) SetPendingDialog(d *provider.Dialog) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pendingDialog = d
 }
 
-// SetBlockedState scripts the Notification-marker blocked state.
+// SetBlockedState scripts the blocked state ReadChat composes when a runtime
+// dir is passed and no dialog wins — the stand-in for claudecode's
+// Notification marker.
 func (f *Fake) SetBlockedState(state string, ok bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -543,14 +579,15 @@ func (f *Fake) SetTranscriptPath(path string) {
 	f.transcriptPath = path
 }
 
-// SetChat scripts what ReadTranscript returns.
+// SetChat scripts the transcript-derived base ReadChat composes over.
 func (f *Fake) SetChat(c provider.Chat) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.chat = c
 }
 
-// SetReadError scripts a ReadTranscript failure (e.g. provider.ErrTranscriptGone).
+// SetReadError scripts a ReadChat failure for non-empty transcript paths
+// (e.g. provider.ErrTranscriptGone).
 func (f *Fake) SetReadError(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

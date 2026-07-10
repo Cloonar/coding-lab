@@ -6,7 +6,7 @@ package claudecode
 // record an answer the operator never chose. The backstop closes that gap
 // after the fact: AnswerDialog records the INTENDED answer in-memory, keyed by
 // tool_use_id; when the dialog resolves and Claude Code retro-flushes the
-// tool_use + tool_result pair into the transcript (compat §5), ReadTranscript
+// tool_use + tool_result pair into the transcript (compat §5), ReadChat
 // compares the recorded outcome (the top-level toolUseResult /
 // toolDenialKind, live-verified shapes 2026-07-08 on 2.1.198 — compat §5)
 // against the intent and emits a LIFECYCLE message with Error=true right
@@ -59,7 +59,7 @@ type dialogIntent struct {
 }
 
 // intentRegistry is the bounded, concurrency-safe intent store on the
-// Provider. ReadTranscript runs from both the chat tailer and HTTP reads, so
+// Provider. ReadChat runs from both the chat tailer and HTTP reads, so
 // verify must be safe under concurrent parses of the same transcript; the
 // worst race outcome is one duplicate-suppressed warning, never corruption.
 type intentRegistry struct {

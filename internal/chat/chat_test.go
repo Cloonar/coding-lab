@@ -334,14 +334,22 @@ func TestReply_guards(t *testing.T) {
 	}
 }
 
-// --- live dialog spool (ADR-0020) ----------------------------------------
+// --- live signals through the seam (ADR-0020, adapter-owned since #92) -----
+//
+// State composition (spool dialog / blocked-state precedence) moved INTO the
+// adapters with issue #92 — the precedence itself is pinned by claudecode's
+// own tests and mirrored by the fake's ReadChat. The tests below are the
+// core-side forwarding guards: core must hand ReadChat the runtime dir for an
+// ACTIVE run (so the adapter's signals apply at all) and forward the composed
+// view — state, side-channel dialog, transcript-derived messages — unaltered.
 
 func TestRead_spoolDialogForcesQuestion(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
 	fake.SetTranscriptPath("/transcript.jsonl")
 	// The transcript derives 'working' and carries NO dialog message (Claude
-	// Code never flushes a pending tool_use) — the spool is the only live source.
+	// Code never flushes a pending tool_use) — the adapter's live signals are
+	// the only source, so this passes only if core passed the runtime dir.
 	fake.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
 		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "…"}}})
 	fake.SetPendingDialog(&provider.Dialog{ToolID: "t_spool", Kind: provider.DialogKindQuestion, Answerable: true,
@@ -358,7 +366,8 @@ func TestRead_spoolDialogForcesQuestion(t *testing.T) {
 		t.Errorf("PendingDialog = %+v; want the spool dialog t_spool", v.PendingDialog)
 	}
 	// The message stream stays transcript-derived — the spool dialog is a
-	// side-channel field, never injected as a message (seq stays reparse-stable).
+	// side-channel field, never injected as a message (seq stays reparse-stable,
+	// issues #89/#90).
 	if len(v.Messages) != 1 || v.Messages[0].Kind != provider.MessageText {
 		t.Errorf("messages = %+v; want only the transcript's one text message", v.Messages)
 	}
@@ -368,8 +377,9 @@ func TestRead_blockedMarkerForcesNeedsInput(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
 	fake.SetTranscriptPath("/transcript.jsonl")
-	// A tool is 'running' in the transcript, but a Notification marker says the
-	// agent is actually blocked (e.g. a permission prompt) → needs_input.
+	// A tool is 'running' in the transcript, but the adapter's blocked marker
+	// says the agent is actually waiting (e.g. a permission prompt) →
+	// needs_input, composed inside ReadChat and forwarded by core.
 	fake.SetChat(provider.Chat{State: provider.StateWorking})
 	fake.SetBlockedState(provider.StateNeedsInput, true)
 
@@ -399,6 +409,30 @@ func TestRead_pendingDialogBeatsBlockedMarker(t *testing.T) {
 	}
 }
 
+// A transcript-derived StateQuestion (the dormant flushed-tool_use fallback)
+// stands on its own: the adapter's blocked marker must not clobber it, and no
+// side-channel dialog is synthesized for it — the dialog stays in Messages.
+func TestRead_transcriptQuestionStandsOverMarker(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateQuestion, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{ToolID: "t_flushed"}},
+	}})
+	fake.SetBlockedState(provider.StateNeedsInput, true)
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.State != provider.StateQuestion || v.PendingDialog != nil {
+		t.Errorf("view = {state:%q dialog:%+v}; want the transcript question to stand with no side-channel dialog", v.State, v.PendingDialog)
+	}
+}
+
+// An ended run must never show spool residue: core reads it transcript-only BY
+// CONSTRUCTION — runtimeDir "" down the seam, so the adapter's live signals
+// are off — and then forces the core-owned terminal state (issue #92).
 func TestRead_endedRunIgnoresSpool(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeStopped)
@@ -415,6 +449,87 @@ func TestRead_endedRunIgnoresSpool(t *testing.T) {
 	}
 	if v.State != provider.StateEnded || v.PendingDialog != nil {
 		t.Errorf("ended run view = {state:%q dialog:%+v}; want ended with no spool dialog", v.State, v.PendingDialog)
+	}
+	// The by-construction guarantee: the ended read went down the seam with NO
+	// runtime dir — the residue was never even readable, not merely filtered.
+	calls := fake.ReadCalls()
+	if len(calls) != 1 {
+		t.Fatalf("ReadChat calls = %d; want 1", len(calls))
+	}
+	if calls[0].RuntimeDir != "" || calls[0].RunID != run.ID || calls[0].TranscriptPath != "/transcript.jsonl" {
+		t.Errorf("ended ReadChat call = %+v; want {RunID:%s RuntimeDir:\"\" TranscriptPath:/transcript.jsonl}", calls[0], run.ID)
+	}
+}
+
+// Core's side of the #92 seam contract for an ACTIVE run: ReadChat gets the
+// run id (keys the adapter's spool), the service's runtime dir (live signals
+// on), and the resolved transcript path.
+func TestRead_activeRunPassesSeamArgs(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+
+	if _, err := svc.Read(context.Background(), run); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	calls := fake.ReadCalls()
+	if len(calls) != 1 {
+		t.Fatalf("ReadChat calls = %d; want 1", len(calls))
+	}
+	want := providertest.ReadCall{RunID: run.ID, RuntimeDir: svc.runtimeDir, TranscriptPath: "/transcript.jsonl"}
+	if calls[0] != want {
+		t.Errorf("ReadChat call = %+v; want %+v", calls[0], want)
+	}
+}
+
+// Pre-transcript consult: an ACTIVE run with no transcript located yet still
+// reads through ReadChat("",…) with the runtime dir, so the adapter consults
+// its live signals — a pending dialog can exist before LocateTranscript first
+// hits (ADR-0020) — and otherwise composes an idle empty chat.
+func TestRead_preTranscriptConsultsLiveSignals(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("") // LocateTranscript misses; nothing persisted
+
+	// No dialog pending: the adapter's idle empty base stands, no identity yet.
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read (no dialog): %v", err)
+	}
+	if v.State != provider.StateIdle || len(v.Messages) != 0 || v.TranscriptID != "" {
+		t.Errorf("view = {state:%q msgs:%d id:%q}; want an idle empty chat with no transcript id", v.State, len(v.Messages), v.TranscriptID)
+	}
+
+	// The picker opens before any transcript exists: the dialog must surface.
+	fake.SetPendingDialog(&provider.Dialog{ToolID: "t_early", Answerable: true,
+		Options: []provider.DialogOption{{Label: "A"}}})
+	v, err = svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read (dialog pending): %v", err)
+	}
+	if v.State != provider.StateQuestion || v.PendingDialog == nil || v.PendingDialog.ToolID != "t_early" {
+		t.Errorf("view = {state:%q dialog:%+v}; want question with the early dialog t_early", v.State, v.PendingDialog)
+	}
+	// Both reads went down the seam with the runtime dir and an empty path.
+	for i, c := range fake.ReadCalls() {
+		if c.RunID != run.ID || c.RuntimeDir != svc.runtimeDir || c.TranscriptPath != "" {
+			t.Errorf("ReadChat call %d = %+v; want {RunID:%s RuntimeDir:%s TranscriptPath:\"\"}", i, c, run.ID, svc.runtimeDir)
+		}
+	}
+}
+
+// A ReadChat error passes through Read untouched — ErrTranscriptGone is the
+// adapter's vanished-file signal and httpapi keys the "transcript no longer
+// available" rendering on errors.Is against it.
+func TestRead_readErrorPassesThrough(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetReadError(provider.ErrTranscriptGone)
+
+	if _, err := svc.Read(context.Background(), run); !errors.Is(err, provider.ErrTranscriptGone) {
+		t.Fatalf("Read = %v; want ErrTranscriptGone passed through", err)
 	}
 }
 

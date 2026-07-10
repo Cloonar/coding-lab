@@ -124,13 +124,19 @@ func rolloutCwd(path string) string {
 	return rec.Payload.Cwd
 }
 
-// ReadTranscript implements provider.AgentProvider: read the rollout JSONL
-// at path and fold it into the universal schema. A vanished file yields
-// provider.ErrTranscriptGone; any other read error is returned as-is.
-// Malformed lines are skipped, never fatal — a rollout is appended live and
-// its tail can be a half-written line.
-func (p *Provider) ReadTranscript(path string) (provider.Chat, error) {
-	f, err := os.Open(path)
+// ReadChat implements provider.AgentProvider. runID and runtimeDir are
+// ignored — codex has no live-signal channel (no LiveSignals capability,
+// ADR-0037); the read is a pure rollout fold, so state composition needs
+// nothing beyond the transcript (issue #92). An empty transcriptPath is the
+// pre-transcript read of an active run: an idle empty chat, never an error.
+// A vanished non-empty transcriptPath yields provider.ErrTranscriptGone; any
+// other read error is returned as-is. Malformed lines are skipped, never
+// fatal — a rollout is appended live and its tail can be a half-written line.
+func (p *Provider) ReadChat(_, _, transcriptPath string) (provider.Chat, error) {
+	if transcriptPath == "" {
+		return provider.Chat{State: provider.StateIdle}, nil
+	}
+	f, err := os.Open(transcriptPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return provider.Chat{}, provider.ErrTranscriptGone

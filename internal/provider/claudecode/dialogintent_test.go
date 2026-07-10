@@ -6,7 +6,7 @@ package claudecode
 // transcript-*-live-2.1.198.jsonl; these are the load-bearing lines with the
 // bulky usage/uuid fields elided — field names and value shapes verbatim).
 // The flow under test is the production one: AnswerDialog records the intent
-// against a fake runner, ReadTranscript (the intent-aware parse) verifies the
+// against a fake runner, ReadChat (the intent-aware parse) verifies the
 // resolution and emits — or stays silent.
 
 import (
@@ -67,7 +67,8 @@ func resolvedTranscript(toolName, toolID, resolutionLine string) string {
 }
 
 // answerThenRead plays answer into dialog (recording the intent) and reads the
-// transcript back through the intent-aware ReadTranscript.
+// transcript back through the intent-aware ReadChat (a transcript-only read —
+// no run/runtime dir, so the live-signal overlay stays out of these fixtures).
 func answerThenRead(t *testing.T, dialog provider.Dialog, answer provider.DialogAnswer, transcript string) provider.Chat {
 	t.Helper()
 	p, f := armedRunner(t)
@@ -81,9 +82,9 @@ func answerThenRead(t *testing.T, dialog provider.Dialog, answer provider.Dialog
 	if err := os.WriteFile(path, []byte(transcript), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chat, err := p.ReadTranscript(path)
+	chat, err := p.ReadChat("", "", path)
 	if err != nil {
-		t.Fatalf("ReadTranscript: %v", err)
+		t.Fatalf("ReadChat: %v", err)
 	}
 	return chat
 }
@@ -228,7 +229,7 @@ func TestBackstop_planOutcomeFlips_warn(t *testing.T) {
 // A mismatch warning is deterministic across parses while the intent exists
 // (seq-stable re-reads), and a matched intent is cleared — the warning-free
 // parse stays warning-free. The restart caveat (intents are in-memory, so a
-// warning disappears after a lab restart) is documented on ReadTranscript and
+// warning disappears after a lab restart) is documented on ReadChat and
 // in compat §5; a fresh Provider parsing the same bytes is that case.
 func TestBackstop_deterministicPerParse_andRestartCaveat(t *testing.T) {
 	p, _ := armedRunner(t)
@@ -241,11 +242,11 @@ func TestBackstop_deterministicPerParse_andRestartCaveat(t *testing.T) {
 	if err := os.WriteFile(path, []byte(resolvedTranscript(toolAskUserQuestion, "toolu_det", answeredLine)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	first, err := p.ReadTranscript(path)
+	first, err := p.ReadChat("", "", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := p.ReadTranscript(path)
+	second, err := p.ReadChat("", "", path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +260,7 @@ func TestBackstop_deterministicPerParse_andRestartCaveat(t *testing.T) {
 	// A restarted lab (fresh Provider, empty registry) parses the same bytes
 	// without the warning — the documented advisory-only caveat.
 	fresh, _ := armedRunner(t)
-	chat, err := fresh.ReadTranscript(path)
+	chat, err := fresh.ReadChat("", "", path)
 	if err != nil {
 		t.Fatal(err)
 	}

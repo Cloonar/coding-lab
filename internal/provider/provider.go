@@ -367,13 +367,22 @@ type CommandSpec struct {
 	ChatSafe    bool   `json:"chat_safe"` // false: would strand the TUI in a picker lab cannot see
 }
 
-// Chat is a transcript read into the universal schema: the ordered messages,
-// the derived conversational state, and the cursor (the highest Seq present,
-// 0 when empty).
+// Chat is a conversation read through ReadChat into the universal schema: the
+// ordered transcript-derived messages, the adapter-composed conversational
+// state, and the cursor (the highest Seq present, 0 when empty).
 type Chat struct {
 	Messages []Message `json:"messages"`
 	State    string    `json:"state"`
 	Cursor   int64     `json:"cursor"`
+	// PendingDialog is the adapter's LIVE pending interactive dialog (issue
+	// #92; claude-code reads it from the PreToolUse spool, ADR-0020), nil when
+	// none is pending. A side-channel field, deliberately NOT a message in
+	// Messages: the message stream stays purely transcript-derived, so seq
+	// numbers remain reparse-stable when the real tool_use retro-flushes
+	// (issues #89/#90). When set, State is StateQuestion. A pending dialog the
+	// TRANSCRIPT itself shows (the dormant flushed-tool_use fallback) stays in
+	// Messages and does not populate this field.
+	PendingDialog *Dialog `json:"pending_dialog,omitempty"`
 }
 
 // AgentProvider is everything lab needs from a coding agent (design §4d).
@@ -468,13 +477,32 @@ type AgentProvider interface {
 	// an adapter whose CLI clears IN PLACE must synthesize a new epoch (e.g.
 	// an epoch-qualified path) so the identity still rotates.
 	LocateTranscript(ctx context.Context, sessionName, worktree string) (string, error)
-	// ReadTranscript reads and maps the transcript at path into the universal
-	// schema. A path that no longer exists returns ErrTranscriptGone so the
-	// caller can show the "transcript no longer available" state.
+	// ReadChat reads the run's conversation and composes its conversational
+	// state — the adapter owns "what state is my agent in", composed from
+	// whatever its agent's best signals are (issue #92): the transcript at
+	// transcriptPath plus any adapter-private live signals spooled under
+	// runtimeDir for runID (claude-code: the hook spool, compat §9; codex:
+	// nothing — a pure rollout fold). Core owns run lifecycle only (the
+	// StateEnded override, transcript identity) and never interprets an
+	// adapter's signals.
+	//
+	// transcriptPath may be "" — an active run whose transcript is not yet
+	// located: the adapter must still consult its live signals (a pending
+	// dialog can exist before LocateTranscript first hits) and otherwise
+	// returns an idle empty chat, never an error. runtimeDir may be "" — no
+	// runtime dir configured, or the caller wants a transcript-only read
+	// (core reads ENDED runs this way): live signals are off and the read
+	// degrades to the transcript alone. A non-empty transcriptPath that no
+	// longer exists returns ErrTranscriptGone so the caller can show the
+	// "transcript no longer available" state.
+	//
+	// A live pending dialog is surfaced on Chat.PendingDialog with State =
+	// StateQuestion — the side-channel field, never a synthetic message (its
+	// doc pins the seq-stability invariant, issues #89/#90).
 	// LocateTranscript's clear/epoch obligation applies here too: reading the
 	// post-clear identity yields the fresh conversation with seq restarted —
 	// a cleared conversation never continues an old seq stream.
-	ReadTranscript(path string) (Chat, error)
+	ReadChat(runID, runtimeDir, transcriptPath string) (Chat, error)
 	// Reply delivers a free-text operator reply to the live session (mid-
 	// session send-keys; the argv-only stance covers the initial prompt
 	// only).
@@ -500,7 +528,7 @@ type AgentProvider interface {
 	Interrupt(ctx context.Context, sessionName string) error
 }
 
-// ErrTranscriptGone is returned by ReadTranscript when the transcript file is
+// ErrTranscriptGone is returned by ReadChat when the transcript file is
 // no longer on disk (the provider retired it after the run ended). Callers
 // render a graceful "transcript no longer available" state.
 var ErrTranscriptGone = errors.New("provider: transcript no longer available")
@@ -563,25 +591,27 @@ type OpenAffordance struct {
 	Title string `json:"title"`
 }
 
-// LiveSignals is the optional live-signal capability (ADR-0020; renamed from
-// DialogHooker, provider-neutral, in issue #51 decision 6) that makes a
-// *pending* interactive dialog and a residual blocked state observable while
-// the transcript is silent — working around agents that do not flush a
-// pending tool_use to their transcript until it resolves (Claude Code:
-// compat §5). lab owns the runtime spool directory and its lifecycle (it
-// creates the dir, writes the per-run settings file, and GCs spools for
-// ended runs); the provider owns the settings shape and the spool file
-// protocol — for claude-code a fragile coupling pinned in compat §9.
-// Advertised structurally (a type assertion at the call site, exactly like
+// LiveSignals is the optional live-signal LIFECYCLE capability (ADR-0020;
+// renamed from DialogHooker in issue #51 decision 6; narrowed in issue #92):
+// the plumbing lab genuinely owns for an adapter whose agent spools live
+// signals under lab's runtime dir — arming the channel at spawn (Setup),
+// cheap change detection for the tailer (SpoolSig), and runtime-dir GC
+// (SweepSpools). What the signals MEAN is not a seam concept: the adapter
+// interprets its own spool inside ReadChat (issue #92 — state composition is
+// adapter-owned), so core never reads a dialog or blocked state from here.
+// lab owns the runtime spool directory and its lifecycle (it creates the
+// dir, writes the per-run settings file, and GCs spools for ended runs); the
+// provider owns the settings shape and the spool file protocol — for
+// claude-code a fragile coupling pinned in compat §9. Advertised
+// structurally (a type assertion at the call site, exactly like
 // ConnectingReporter and DeepLinker).
 //
 // Honest degradation (issue #51 decision 6): a provider WITHOUT a verified
 // structured signal channel simply omits the capability — the never-scrape
-// rule is universal, auto-approval spawn defaults keep dialogs rare, and a
-// residual blocked state degrades to StateNeedsInput plus the copyable tmux
-// attach affordance. lab then keeps the transcript-only behavior — the
-// messages-scan dialog path stays as a dormant fallback that lights up
-// automatically if a future provider flushes pending tool_use.
+// rule is universal, auto-approval spawn defaults keep dialogs rare, and its
+// ReadChat composes from the transcript alone — the messages-scan dialog
+// path stays as a dormant fallback that lights up automatically if a future
+// provider flushes pending tool_use.
 type LiveSignals interface {
 	// Setup builds the per-run settings/config payload that arms the agent's
 	// live signal channel (claude: the PreToolUse/PostToolUse/Notification
@@ -593,29 +623,6 @@ type LiveSignals interface {
 	// their subdirs, so a run whose dialog opens after a lab restart still
 	// spools with no re-arming.
 	Setup(runID, dir string) (settings []byte, settingsPath string, args []string)
-
-	// PendingDialog reports the run's live pending interactive dialog, read
-	// from the provider's dialog spool under dir (claude: the PreToolUse
-	// spool) and mapped through the same mapper as the transcript (one
-	// mapper, two sources). ok is false when no spool exists, it is
-	// unreadable, or the spooled dialog's tool id already appears in
-	// transcriptPath — a pending tool_use is flushed to the transcript only
-	// on resolution, so its presence there means the dialog is answered (the
-	// provider's own resolve-time spool delete is the primary clear; this
-	// resolved-in-transcript scan is the backstop for a missed hook / Esc /
-	// process death). transcriptPath "" skips the resolved check.
-	PendingDialog(runID, dir, transcriptPath string) (Dialog, bool)
-
-	// BlockedState reports a residual blocked conversational state derived
-	// from the provider's notification marker under dir (claude:
-	// permission_prompt / idle_prompt / agent_needs_input → StateNeedsInput)
-	// — the badge fix for blocked states that carry no structured dialog,
-	// including a plain tool-permission prompt and the post-decline "stuck on
-	// working" bug. ok is false when no marker exists or the transcript has
-	// advanced past it (transcriptPath written after the marker → next
-	// activity resolved the block). transcriptPath "" treats any marker as
-	// current.
-	BlockedState(runID, dir, transcriptPath string) (state string, ok bool)
 
 	// SpoolSig is a cheap change-detector over the run's spool + marker files
 	// (existence + mtime + size) so the tailer notices a dialog appearing while

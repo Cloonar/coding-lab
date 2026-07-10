@@ -1,8 +1,11 @@
 package claudecode
 
-// Transcript location (registry cwd-match → slug/sessionId path) and the
-// state-derivation edges the compat fixture doesn't cover. The full JSONL →
-// schema mapping is pinned in internal/compat against a captured fixture.
+// Transcript location (registry cwd-match → slug/sessionId path), the
+// state-derivation edges the compat fixture doesn't cover, and ReadChat's
+// adapter-owned conversational-state composition (issue #92) — the transcript
+// fold overlaid with the hook spool's live signals, the precedence core's
+// chat service used to apply. The full JSONL → schema mapping is pinned in
+// internal/compat against a captured fixture.
 
 import (
 	"context"
@@ -13,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -91,10 +95,180 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 	}
 }
 
-func TestReadTranscript_goneFile(t *testing.T) {
+// A non-empty transcriptPath that no longer exists is ErrTranscriptGone —
+// even when a live spool dialog exists (issue #92): the transcript read gates
+// the overlay, exactly as core returned the read error before applying
+// signals, so a gone transcript never resurrects as a dialog-only chat.
+func TestReadChat_goneFile(t *testing.T) {
 	p := chatProvider(t, t.TempDir(), t.TempDir())
-	if _, err := p.ReadTranscript(filepath.Join(t.TempDir(), "absent.jsonl")); err != provider.ErrTranscriptGone {
-		t.Errorf("ReadTranscript(absent) err = %v; want ErrTranscriptGone", err)
+	if _, err := p.ReadChat("", "", filepath.Join(t.TempDir(), "absent.jsonl")); err != provider.ErrTranscriptGone {
+		t.Errorf("ReadChat(absent) err = %v; want ErrTranscriptGone", err)
+	}
+	dir := t.TempDir()
+	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
+	if _, err := p.ReadChat("run_1", dir, filepath.Join(dir, "absent.jsonl")); err != provider.ErrTranscriptGone {
+		t.Errorf("ReadChat(absent, live spool dialog) err = %v; want ErrTranscriptGone", err)
+	}
+}
+
+// The composition core (issue #92): a live spool dialog wins over whatever the
+// transcript derives, surfaces on the side-channel Chat.PendingDialog with
+// StateQuestion, and NEVER enters Messages — the stream stays purely
+// transcript-derived so seq numbers are reparse-stable when the real tool_use
+// retro-flushes (issues #89/#90).
+func TestReadChat_spoolDialogOverridesTranscript(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
+	// A same-session transcript (filename stem = the spool's session_id, so the
+	// rotation-staleness check passes) whose tail alone would derive
+	// needs_input; the spool's tool_use_id is absent, so the dialog is pending.
+	transcript := filepath.Join(dir, "sess-live.jsonl")
+	if err := os.WriteFile(transcript,
+		[]byte(line(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := p.ReadChat("run_1", dir, transcript)
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateQuestion {
+		t.Errorf("state = %q; want %q (the live dialog wins)", chat.State, provider.StateQuestion)
+	}
+	if chat.PendingDialog == nil || chat.PendingDialog.ToolID != "toolu_ABC" {
+		t.Fatalf("PendingDialog = %+v; want the spool dialog toolu_ABC", chat.PendingDialog)
+	}
+	if len(chat.Messages) != 1 || chat.Messages[0].Kind != provider.MessageText {
+		t.Fatalf("messages = %+v; want only the transcript text — the live dialog must not leak into the stream", chat.Messages)
+	}
+}
+
+// A pending dialog can exist before LocateTranscript first hits (the hooks
+// spool the instant the picker is about to show), so a transcript-less read of
+// an active run still consults the spool; without one it is an idle empty
+// chat, never an error (issue #92).
+func TestReadChat_spoolDialogBeforeTranscriptLocated(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
+	chat, err := p.ReadChat("run_1", dir, "")
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateQuestion || chat.PendingDialog == nil {
+		t.Fatalf("chat = %+v; want StateQuestion with the pending dialog before the transcript is located", chat)
+	}
+	if len(chat.Messages) != 0 || chat.Cursor != 0 {
+		t.Errorf("base chat = %+v; want empty messages and cursor 0", chat)
+	}
+
+	// No spool either: the idle empty base, no error.
+	empty, err := p.ReadChat("run_none", dir, "")
+	if err != nil {
+		t.Fatalf("ReadChat(no transcript, no spool): %v", err)
+	}
+	if empty.State != provider.StateIdle || empty.PendingDialog != nil || len(empty.Messages) != 0 {
+		t.Errorf("chat = %+v; want an idle empty chat", empty)
+	}
+}
+
+// runtimeDir == "" is the transcript-only degradation (ended runs, or no
+// runtime dir configured — the same gate core's liveSignals() applied): spool
+// and marker files on disk are never consulted, state comes from the
+// transcript alone (issue #92).
+func TestReadChat_emptyRuntimeDirReadsTranscriptOnly(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
+	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
+	// A user-text tail derives working — distinct from both the dialog's
+	// question and the marker's needs_input, so any overlay would be visible.
+	transcript := filepath.Join(dir, "sess-live.jsonl")
+	if err := os.WriteFile(transcript,
+		[]byte(line(`{"type":"user","message":{"role":"user","content":"go"}}`)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := p.ReadChat("run_1", "", transcript)
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateWorking || chat.PendingDialog != nil {
+		t.Errorf("chat = %+v; want the transcript's working state with no dialog (signals off)", chat)
+	}
+}
+
+// The dormant fallback (issue #92, unchanged from core): a transcript whose
+// tail is a pending flushed tool_use derives StateQuestion on its own — the
+// dialog stays a MESSAGE and PendingDialog stays nil, so a provider (or
+// window) without a spool still surfaces the question in the stream.
+func TestReadChat_transcriptDialogDormantFallback(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir() // runtime dir armed, but no spool for the run
+	transcript := filepath.Join(dir, "t.jsonl")
+	if err := os.WriteFile(transcript, []byte(line(colorUseLine)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := p.ReadChat("run_1", dir, transcript)
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateQuestion {
+		t.Errorf("state = %q; want %q (transcript-derived question stands)", chat.State, provider.StateQuestion)
+	}
+	if chat.PendingDialog != nil {
+		t.Errorf("PendingDialog = %+v; want nil — a transcript-flushed dialog stays in Messages", chat.PendingDialog)
+	}
+	if len(chat.Messages) != 1 || chat.Messages[0].Kind != provider.MessageDialog {
+		t.Errorf("messages = %+v; want the dialog message in the stream", chat.Messages)
+	}
+}
+
+// Blocked-marker precedence (issue #92, decision 7 semantics unchanged): a
+// live marker forces needs_input over a non-question transcript state, but a
+// pending question — transcript-derived — outranks it (the marker is ignored,
+// never demoting a question the operator must answer).
+func TestReadChat_blockedMarkerPrecedence(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	t0 := time.Now().Add(-time.Hour)
+	// Marker + no dialog: the working tail is overridden to needs_input. The
+	// transcript is older than the marker so the marker is current.
+	working := filepath.Join(dir, "sess-live.jsonl")
+	writeFileWithModTime(t, working, line(`{"type":"user","message":{"role":"user","content":"go"}}`), t0)
+	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
+	chat, err := p.ReadChat("run_1", dir, working)
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateNeedsInput {
+		t.Errorf("marker over working tail: state = %q; want %q", chat.State, provider.StateNeedsInput)
+	}
+
+	// Marker while the transcript tail is a pending dialog: the question wins.
+	pending := filepath.Join(dir, "sess-pending.jsonl")
+	writeFileWithModTime(t, pending, line(colorUseLine), t0)
+	chat, err = p.ReadChat("run_1", dir, pending)
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateQuestion || chat.PendingDialog != nil {
+		t.Errorf("marker vs transcript question: chat = %+v; want StateQuestion with nil PendingDialog", chat)
+	}
+}
+
+// Spool dialog + blocked marker together: the dialog wins — first in the
+// composition order, exactly as core applied it (issue #92).
+func TestReadChat_spoolDialogWinsOverMarker(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
+	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
+	chat, err := p.ReadChat("run_1", dir, "")
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateQuestion || chat.PendingDialog == nil {
+		t.Errorf("chat = %+v; want the dialog (StateQuestion + PendingDialog) over the marker", chat)
 	}
 }
 

@@ -49,9 +49,11 @@ type messagesResponse struct {
 	State    string             `json:"state"`
 	Cursor   int64              `json:"cursor"`   // highest seq present (append cursor)
 	HasMore  bool               `json:"has_more"` // older messages exist before this window
-	// PendingDialog is the run's live interactive dialog from the PreToolUse
-	// spool (ADR-0020), nullable and top-level — NOT a message in the stream,
-	// so seq numbers stay reparse-stable. Present alongside state:"question".
+	// PendingDialog is the run's live interactive dialog as composed by its
+	// adapter's ReadChat (issue #92; claude-code reads it from the PreToolUse
+	// spool, ADR-0020), nullable and top-level — NOT a message in the stream,
+	// so seq numbers stay reparse-stable (issues #89/#90). Present alongside
+	// state:"question".
 	PendingDialog *provider.Dialog `json:"pending_dialog"`
 	Transcript    string           `json:"transcript"` // available|locating|gone
 	// TranscriptID is the opaque identity of the located transcript (issue #34):

@@ -112,8 +112,14 @@ func (f *NoLinkFake) SeedWorkspace(worktree string, _ provider.SeedOpts) error {
 func (f *NoLinkFake) LocateTranscript(context.Context, string, string) (string, error) {
 	return "", nil
 }
-func (f *NoLinkFake) ReadTranscript(string) (provider.Chat, error) { return provider.Chat{}, nil }
-func (f *NoLinkFake) Reply(context.Context, string, string) error  { return nil }
+
+// ReadChat is transcript-less: this fake never locates a transcript, so every
+// read is the pre-transcript idle chat (the issue #92 seam contract: an empty
+// transcriptPath yields an idle empty chat, never an error).
+func (f *NoLinkFake) ReadChat(string, string, string) (provider.Chat, error) {
+	return provider.Chat{State: provider.StateIdle}, nil
+}
+func (f *NoLinkFake) Reply(context.Context, string, string) error { return nil }
 func (f *NoLinkFake) AnswerDialog(context.Context, string, provider.Dialog, provider.DialogAnswer) error {
 	return nil
 }

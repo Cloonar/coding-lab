@@ -191,7 +191,7 @@ type Provider struct {
 
 	// intents is the post-resolve verification backstop's in-memory intent
 	// registry (issue #51 decision 3, dialogintent.go): AnswerDialog records
-	// what an answer was meant to be, ReadTranscript verifies the recorded
+	// what an answer was meant to be, ReadChat verifies the recorded
 	// resolution against it. Zero value ready; bounded internally.
 	intents intentRegistry
 }

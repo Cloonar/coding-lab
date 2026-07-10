@@ -1,7 +1,9 @@
 package claudecode
 
 // Chat surface: locate and read Claude Code's live JSONL transcript, mapped
-// into lab's provider-neutral universal schema (issue #7 / ADR-0016). Every
+// into lab's provider-neutral universal schema (issue #7 / ADR-0016), and
+// compose the run's conversational state from the transcript plus the hook
+// spool's live signals (issue #92 — composition is adapter-owned). Every
 // exact string here — the cwd→slug rule, the transcript path shape, and the
 // JSONL event field names — is a fragile Claude Code coupling pinned in
 // internal/compat (§5) against the installed version (2.1.198 at port time).
@@ -98,34 +100,75 @@ func sessionIDForDir(registryDir, dir string) string {
 	return best.SessionID
 }
 
-// ReadTranscript implements provider.AgentProvider: read the JSONL transcript
-// at path and fold it into the universal schema. A vanished file yields
-// provider.ErrTranscriptGone (the run ended and claude retired the file); any
-// other read error is returned as-is. Malformed lines are skipped, never fatal
-// — a transcript is appended live and its tail can be a half-written line.
+// ReadChat implements provider.AgentProvider: read the run's conversation and
+// compose its conversational state (issue #92 — "what state is my agent in"
+// is adapter-owned now; core keeps only the lifecycle StateEnded override).
 //
-// Unlike the pure ParseTranscript, this read is INTENT-AWARE (issue #51
+// Base read: the JSONL transcript at transcriptPath, folded into the
+// universal schema. transcriptPath == "" is an active run whose transcript is
+// not yet located — an idle empty chat, never an error, with the live
+// signals still consulted (a pending dialog can exist before
+// LocateTranscript first hits). A vanished file yields
+// provider.ErrTranscriptGone (the run ended and claude retired the file)
+// WITHOUT consulting the spool — a read error always precedes the overlay,
+// exactly as it did when core composed; any other open error is returned
+// as-is. Malformed lines are skipped, never fatal — a transcript is appended
+// live and its tail can be a half-written line.
+//
+// Unlike the pure ParseTranscript, the read is INTENT-AWARE (issue #51
 // decision 3): resolved dialog tools are verified against the answers lab
 // recorded at AnswerDialog time, and a mismatch emits a lifecycle warning
 // right after the tool result (dialogintent.go). The intent registry is
 // in-memory, so a warning present before a lab restart disappears from parses
 // after it — accepted, the backstop is advisory-only (compat §5).
-func (p *Provider) ReadTranscript(path string) (provider.Chat, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return provider.Chat{}, provider.ErrTranscriptGone
+//
+// Live-signal overlay (runtimeDir non-empty; "" degrades to the transcript
+// alone — ended runs, or no runtime dir configured), in the exact precedence
+// core's applyLiveSignals used to apply (ADR-0020): a live spool dialog
+// forces StateQuestion and rides Chat.PendingDialog — the side-channel field,
+// never a synthetic message, so seq numbers stay reparse-stable when the real
+// tool_use retro-flushes (issues #89/#90); else a pending dialog the
+// transcript itself shows stands on its own (the dormant flushed-tool_use
+// fallback); else a live blocked marker forces StateNeedsInput.
+func (p *Provider) ReadChat(runID, runtimeDir, transcriptPath string) (provider.Chat, error) {
+	chat := provider.Chat{State: provider.StateIdle}
+	if transcriptPath != "" {
+		f, err := os.Open(transcriptPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return provider.Chat{}, provider.ErrTranscriptGone
+			}
+			return provider.Chat{}, err
 		}
-		return provider.Chat{}, err
+		chat, err = parseTranscript(f, &p.intents)
+		_ = f.Close()
+		if err != nil {
+			return provider.Chat{}, err
+		}
 	}
-	defer func() { _ = f.Close() }()
-	return parseTranscript(f, &p.intents)
+	if runtimeDir == "" {
+		return chat, nil // signals off — the transcript-only read
+	}
+	if d, ok := p.pendingDialog(runID, runtimeDir, transcriptPath); ok {
+		dc := d
+		chat.State = provider.StateQuestion
+		chat.PendingDialog = &dc
+		return chat, nil
+	}
+	if chat.State == provider.StateQuestion {
+		return chat, nil // a transcript-flushed dialog stands on its own (dormant fallback)
+	}
+	if st, ok := p.blockedState(runID, runtimeDir, transcriptPath); ok {
+		chat.State = st
+	}
+	return chat, nil
 }
 
 // ParseTranscript folds the JSONL lines of r into the universal schema. It is
 // a pure function of the byte stream — exported so the compat test drives it
-// from a captured fixture (Provider.ReadTranscript adds the intent-aware
-// verification overlay on top). See the transcript grammar pinned in
+// from a captured fixture (Provider.ReadChat layers the intent-aware
+// verification and the live-signal state composition on top). See the
+// transcript grammar pinned in
 // compat.md §5. A scan error (a line beyond the buffer cap, an I/O failure)
 // is returned rather than swallowed: silently stopping mid-file would serve a
 // truncated chat — and a cursor that moves backwards — forever.

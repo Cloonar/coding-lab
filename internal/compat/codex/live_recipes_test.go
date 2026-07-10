@@ -85,7 +85,7 @@ func TestCompat_Live_loginStatusParses(t *testing.T) {
 // TestCompat_Live_locateTranscript re-verifies the §5 location coupling
 // against the real $CODEX_HOME/sessions date tree: pick a genuine rollout's
 // session_meta.cwd, then drive the production adapter (codex.New with its
-// real path defaults) through LocateTranscript + ReadTranscript and assert
+// real path defaults) through LocateTranscript + ReadChat and assert
 // the located file belongs to that cwd and parses. Read-only.
 func TestCompat_Live_locateTranscript(t *testing.T) {
 	if os.Getenv("LAB_COMPAT_LIVE") != "1" {
@@ -144,9 +144,12 @@ func TestCompat_Live_locateTranscript(t *testing.T) {
 	if got := rolloutMetaCwd(located); got != cwd {
 		t.Errorf("located %s has cwd %q; want %q", located, got, cwd)
 	}
-	chat, err := prov.ReadTranscript(located)
+	// runID/runtimeDir empty: codex's ReadChat is a pure rollout fold with no
+	// live-signal channel (issue #92 / ADR-0037), so the transcript-only read
+	// IS the production read.
+	chat, err := prov.ReadChat("", "", located)
 	if err != nil {
-		t.Fatalf("ReadTranscript(%s): %v", located, err)
+		t.Fatalf("ReadChat(%s): %v", located, err)
 	}
 	t.Logf("live locate: cwd=%q → %s (%d messages, state %s)", cwd, located, len(chat.Messages), chat.State)
 }

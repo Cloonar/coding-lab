@@ -276,10 +276,11 @@ func TestCompat_Live_askUserQuestionRecipe(t *testing.T) {
 		t.Errorf("fruits answer (sorted) = %q; want %q (full: %v)", got, "Apple, Cherry", rec.Answers)
 	}
 
-	// And the production read path maps the resolution onto the tool chip.
-	chat, err := rig.prov.ReadTranscript(rig.transcriptPath(t))
+	// And the production read path maps the resolution onto the tool chip — a
+	// transcript-only ReadChat: the live rig has no lab run or runtime dir.
+	chat, err := rig.prov.ReadChat("", "", rig.transcriptPath(t))
 	if err != nil {
-		t.Fatalf("ReadTranscript: %v", err)
+		t.Fatalf("ReadChat: %v", err)
 	}
 	found := false
 	for _, m := range chat.Messages {
@@ -288,7 +289,7 @@ func TestCompat_Live_askUserQuestionRecipe(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("ReadTranscript shows no AskUserQuestion chip with the recorded answers")
+		t.Error("ReadChat shows no AskUserQuestion chip with the recorded answers")
 	}
 }
 
@@ -335,9 +336,9 @@ func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 	if len(raw) == 0 {
 		t.Fatal("no plan approval recorded")
 	}
-	chat, err := rig.prov.ReadTranscript(rig.transcriptPath(t))
+	chat, err := rig.prov.ReadChat("", "", rig.transcriptPath(t))
 	if err != nil {
-		t.Fatalf("ReadTranscript: %v", err)
+		t.Fatalf("ReadChat: %v", err)
 	}
 	approved := false
 	for _, m := range chat.Messages {
@@ -346,6 +347,6 @@ func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 		}
 	}
 	if !approved {
-		t.Error("ReadTranscript shows no approved ExitPlanMode chip")
+		t.Error("ReadChat shows no approved ExitPlanMode chip")
 	}
 }
