@@ -258,6 +258,43 @@ func (c *Client) SecretValues(names []string) (map[string]string, error) {
 	return resp.Values, nil
 }
 
+// ScanFinding is one row of the agent API's POST /secrets/scan answer: a
+// secret value spotted in the outgoing diff, reported by NAME, file, and the
+// form it appeared in — the value itself never crosses back (issue #106).
+type ScanFinding struct {
+	Secret string `json:"secret"`
+	File   string `json:"file"`
+	Form   string `json:"form"`
+}
+
+// SecretScan streams a raw git patch (text/x-diff) to the server-side leak
+// scan and returns its findings; an empty slice is a clean pass. The request
+// is built by hand — do() is JSON-only — but the Bearer auth and the response
+// handling (envelope, bounds, proxy detection) match do() exactly.
+func (c *Client) SecretScan(diff io.Reader) ([]ScanFinding, error) {
+	req, err := http.NewRequest(http.MethodPost,
+		strings.TrimRight(c.BaseURL, "/")+"/agent/v1/secrets/scan", diff)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "text/x-diff")
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var out struct {
+		Findings []ScanFinding `json:"findings"`
+	}
+	if err := c.decodeResponse(resp, &out); err != nil {
+		return nil, err
+	}
+	return out.Findings, nil
+}
+
 // do performs one request. Non-2xx answers become errors carrying the
 // server's {"error"} message (or "HTTP <status>" when the body is not the
 // envelope); out, when non-nil, receives the decoded 2xx body.
@@ -279,16 +316,28 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	httpClient := c.HTTP
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: httpTimeout, CheckRedirect: noRedirect}
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	return c.decodeResponse(resp, out)
+}
 
+// httpClient returns the injected client (tests) or the default: a 60s
+// timeout and no redirect-following (see noRedirect).
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: httpTimeout, CheckRedirect: noRedirect}
+}
+
+// decodeResponse turns one agent-API response into out or an error, shared by
+// do() and the hand-built SecretScan request: a bounded body read, then the
+// redirect/HTML proxy detection, the non-2xx {"error"} envelope, and the 2xx
+// JSON decode.
+func (c *Client) decodeResponse(resp *http.Response, out any) error {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)

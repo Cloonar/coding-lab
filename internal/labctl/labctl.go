@@ -11,7 +11,11 @@
 // child and passes the child's exit code through VERBATIM, so 0/1/2 (or any
 // other code) may be the child's own — only a pre-exec failure is labctl's: a
 // bad NAME/`--`/command shape or missing env is 2, an API error or a command
-// that fails to start is 1. No color, no spinner — output is for agents.
+// that fails to start is 1. The `secret scan` verb deviates as well (see
+// runSecretScan): it backs the pre-push leak guard and fails CLOSED — findings
+// AND every failure (git, transport, non-2xx) exit 1; only no rev-args or
+// missing env is 2; a clean pass is a silent 0. No color, no spinner — output
+// is for agents.
 package labctl
 
 import (
@@ -47,6 +51,8 @@ Usage:
   labctl secret exec <NAME...> -- <cmd> [args...]
                                         run cmd with each named secret injected as $NAME in its
                                         env (values fetched at exec time; child's exit code passes through)
+  labctl secret scan <rev-arg>...       scan the outgoing diff (git log -p over the given revisions)
+                                        for secret values; findings or ANY failure exit 1 (fail closed)
   labctl --version                      print version
 
 Environment:

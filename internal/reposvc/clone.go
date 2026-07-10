@@ -154,12 +154,15 @@ func (s *Service) clone(ctx context.Context, repo store.Repo) error {
 		return fmt.Errorf("record default branch: %w", err)
 	}
 
-	// Incogni pre-push guard (D15 §9 measure 7): "installed at repo add"
-	// lands here — the bare dir only exists once the clone completes. The
-	// row is re-read so an incogni PATCH during the clone is honored (an
-	// in-flight clone makes the PATCH itself skip the install). Failure
-	// fails the clone BEFORE ready: an incogni repo never reaches ready
-	// unguarded, and Retry recreates dir + hook together.
+	// Pre-push guard: "installed at repo add" lands here — the bare dir only
+	// exists once the clone completes. EVERY repo gets the guard (the secret
+	// leak scan, issue #106, is unconditional); the incogni flag only decides
+	// the hook's CONTENT (D15 §9 measure 7 patterns in or out). The row is
+	// re-read so an incogni PATCH during the clone is honored — the re-read
+	// decides the content now, not the existence (an in-flight clone makes
+	// the PATCH itself skip its install/re-render). Failure fails the clone
+	// BEFORE ready: no repo reaches ready unguarded, and Retry recreates
+	// dir + hook together.
 	fresh, err := s.store.RepoByID(wctx, repo.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -167,10 +170,8 @@ func (s *Service) clone(ctx context.Context, repo store.Repo) error {
 		}
 		return fmt.Errorf("re-reading repo for hook install: %w", err)
 	}
-	if fresh.Incogni {
-		if err := s.installIncogniHook(wctx, repo.ID); err != nil {
-			return fmt.Errorf("installing incogni pre-push hook: %w", err)
-		}
+	if err := s.installGuardHook(wctx, repo.ID, fresh.Incogni); err != nil {
+		return fmt.Errorf("installing pre-push guard hook: %w", err)
 	}
 
 	if err := s.store.UpdateRepoCloneStatus(wctx, repo.ID, store.CloneStatusReady, ""); err != nil {

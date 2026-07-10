@@ -16,7 +16,7 @@ import (
 	"os/exec"
 )
 
-// runSecret dispatches `labctl secret list|exec`.
+// runSecret dispatches `labctl secret list|exec|scan`.
 func runSecret(args []string, env Env) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(env.Stderr, usage)
@@ -27,6 +27,8 @@ func runSecret(args []string, env Env) int {
 		return runSecretList(args[1:], env)
 	case "exec":
 		return runSecretExec(args[1:], env)
+	case "scan":
+		return runSecretScan(args[1:], env)
 	default:
 		_, _ = fmt.Fprintf(env.Stderr, "labctl secret: unknown subcommand %q\n\n%s", args[0], usage)
 		return 2

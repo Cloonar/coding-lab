@@ -1,12 +1,10 @@
 package seeder
 
-// Byte-identity proof for the incogni pre-push hook (issue #51 decision 8
-// acceptance: "the installed hook for claude-code must be byte-identical to
-// today"). testdata/pre-push-claude.golden is the exact script the hook
-// emitted BEFORE the seam split, when the patterns were package vars; this
-// test renders the generic prePushHookScript with claude-code's golden
-// patterns and asserts the bytes are unchanged. A refactor that reshapes the
-// script — even by a space — fails here.
+// Byte-identity proof for lab's pre-push hook. testdata/pre-push-claude.golden
+// pins the exact script rendered with claude-code's golden patterns (issue
+// #51 decision 8 established the pin; issue #106 refreshed it for the
+// unconditional secret leak scan). A refactor that reshapes the script —
+// even by a space — fails here.
 
 import (
 	_ "embed"
@@ -27,15 +25,26 @@ func TestPrePushHookScript_claudeGolden(t *testing.T) {
 	}
 }
 
-// Empty-pattern degradation (issue #51 decision 8): each scan is emitted only
-// when its pattern list is non-empty. A provider with no scrub markers keeps
-// the seeded-path guard; one with no seeded paths keeps the message scrub; one
-// with neither yields a hook that enumerates but rejects nothing on content.
-// The shebang, the lab marker, and the fail-closed enumeration are always
-// present so the hook stays installable and recognizable in every case.
+// Empty-pattern degradation (issue #51 decision 8, reshaped by issue #106):
+// each incogni scan is emitted only when its pattern list is non-empty, and
+// the fail-closed rev-list enumeration renders only when at least one scan
+// exists — it guards the incogni loop, nothing else. The secret leak scan,
+// the shebang, and the lab marker are UNCONDITIONAL: a provider with neither
+// pattern list (a plain repo's nil, nil) yields a secret-scan-only hook with
+// no enumeration and no per-commit loop at all, so a token-less human push
+// can never be refused by a rev-list failure that guards nothing.
 func TestPrePushHookScript_emptyPatternsDegrade(t *testing.T) {
 	const msgLine = "git log -1 --format=%B"
 	const pathLine = "git diff-tree -m --no-commit-id"
+	const revList = "git rev-list $range"
+
+	// The secret leak scan appears in EVERY rendering, patterns or not.
+	secretLines := []string{
+		`if [ -n "$LAB_TOKEN" ]; then`,
+		"labctl secret scan $range",
+		"lab secret guard: refusing push of $remote_ref",
+		"no LAB_TOKEN in environment; skipping secret leak scan",
+	}
 
 	scrubOnly := prePushHookScript(claudeGoldenMeta.ScrubPatterns, nil)
 	if !strings.Contains(scrubOnly, msgLine) {
@@ -43,6 +52,9 @@ func TestPrePushHookScript_emptyPatternsDegrade(t *testing.T) {
 	}
 	if strings.Contains(scrubOnly, pathLine) {
 		t.Error("scrub-only hook still emitted the path scan for an empty pattern list")
+	}
+	if !strings.Contains(scrubOnly, revList) {
+		t.Error("scrub-only hook dropped the fail-closed enumeration its scan needs")
 	}
 
 	pathOnly := prePushHookScript(nil, claudeGoldenMeta.SeededPathPatterns)
@@ -52,35 +64,52 @@ func TestPrePushHookScript_emptyPatternsDegrade(t *testing.T) {
 	if !strings.Contains(pathOnly, pathLine) {
 		t.Error("path-only hook dropped the path scan")
 	}
+	if !strings.Contains(pathOnly, revList) {
+		t.Error("path-only hook dropped the fail-closed enumeration its scan needs")
+	}
+
+	both := prePushHookScript(claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns)
+	if !strings.Contains(both, revList) {
+		t.Error("both-patterns hook dropped the fail-closed enumeration")
+	}
 
 	none := prePushHookScript(nil, nil)
 	if strings.Contains(none, msgLine) || strings.Contains(none, pathLine) {
 		t.Error("empty-meta hook emitted a content scan")
 	}
-	for _, want := range []string{"#!/bin/sh", hookMarker, "git rev-list $range"} {
+	for _, want := range append([]string{"#!/bin/sh", hookMarker}, secretLines...) {
 		if !strings.Contains(none, want) {
 			t.Errorf("empty-meta hook missing the always-present line %q", want)
 		}
 	}
-	// An empty-meta hook must still be a syntactically valid, installable
-	// shell script — no dangling `grep` with no pattern.
-	if strings.Contains(none, "grep") {
-		t.Error("empty-meta hook left a grep with no pattern (broken shell)")
+	// With no incogni scans there is nothing for the enumeration to feed:
+	// no rev-list (its fail-closed refusal is an incogni property), no
+	// per-commit loop, and no dangling `grep` with no pattern.
+	for _, gone := range []string{"git rev-list", "for commit", "grep"} {
+		if strings.Contains(none, gone) {
+			t.Errorf("empty-meta hook still contains %q; the incogni section must be omitted entirely", gone)
+		}
+	}
+
+	for name, script := range map[string]string{"scrubOnly": scrubOnly, "pathOnly": pathOnly, "both": both, "none": none} {
+		for _, want := range secretLines {
+			if !strings.Contains(script, want) {
+				t.Errorf("%s hook missing the unconditional secret-scan line %q", name, want)
+			}
+		}
 	}
 }
 
 // TestPrePushHookScript_parsesUnderSh proves every pattern combination renders
 // a script /bin/sh actually parses. The empty-meta case is the load-bearing
-// one: both scan blocks vanish, and an empty `for … do; done` body is a hard
-// shell syntax error that would make git abort EVERY push with a raw parse
-// error instead of the guard enumerating-but-rejecting-nothing. `sh -n` parses
-// without executing (no git needed), so this is the cheap guard that a string
-// check alone (the sibling test) cannot provide.
+// one: the incogni scans, the enumeration, and the whole `for` loop vanish
+// (an empty `for … do; done` body would be a hard shell syntax error, so the
+// section must disappear cleanly, not hollow out), and a parse error would
+// make git abort EVERY push raw. `sh -n` parses without executing (no git
+// needed), so this is the cheap guard that a string check alone (the sibling
+// test) cannot provide.
 func TestPrePushHookScript_parsesUnderSh(t *testing.T) {
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skipf("sh not on PATH: %v", err)
-	}
+	sh := shPath(t)
 	cases := map[string]string{
 		"both":      prePushHookScript(claudeGoldenMeta.ScrubPatterns, claudeGoldenMeta.SeededPathPatterns),
 		"scrubOnly": prePushHookScript(claudeGoldenMeta.ScrubPatterns, nil),
