@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,7 @@ type recFixture struct {
 	guard                                 *startguard.Guard
 	mat                                   *vault.Materializer
 	git                                   *gitx.Engine
+	bus                                   *events.Bus
 	home, reposDir, worktreeRoot, runtime string
 	env                                   []string
 	repo                                  store.Repo
@@ -81,10 +83,11 @@ func newRecFixture(t *testing.T) *recFixture {
 	}
 	runner := tmuxx.NewFake()
 	guard := startguard.New()
+	bus := events.NewBus()
 	var armed []store.Run
 	var afkEnded []afkEndedCall
 	svc, err := New(Options{
-		Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Bus: events.NewBus(),
+		Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Bus: bus,
 		ReposDir: reposDir, GitEnv: env, Now: func() time.Time { return recClock },
 		ArmCapture: func(r store.Run) { armed = append(armed, r) },
 		AFKRunEnded: func(kind, outcome string, d time.Duration) {
@@ -95,7 +98,7 @@ func newRecFixture(t *testing.T) *recFixture {
 		t.Fatalf("reconcile.New: %v", err)
 	}
 	return &recFixture{
-		t: t, svc: svc, st: st, runner: runner, guard: guard, mat: mat, git: git,
+		t: t, svc: svc, st: st, runner: runner, guard: guard, mat: mat, git: git, bus: bus,
 		home: home, reposDir: reposDir, worktreeRoot: worktreeRoot, runtime: runtime,
 		env: env, repo: repo, armed: &armed, afkEnded: &afkEnded,
 	}
@@ -372,6 +375,137 @@ func TestReadopt_liveWithDeepLink_notReArmed(t *testing.T) {
 	}
 	if len(*f.armed) != 0 {
 		t.Errorf("capture re-armed for a run that already has a deep link: %v", *f.armed)
+	}
+}
+
+// --- dead-session sweep (issue #93) --------------------------------------
+
+// runOutcome re-reads a run's current outcome/failure_reason from the store
+// (EndRun mutates in place; CreateRun's returned value is stale afterward).
+func (f *recFixture) runOutcome(id string) store.Run {
+	f.t.Helper()
+	hist, err := f.st.RunsByRepo(f.t.Context(), f.repo.ID, 0)
+	if err != nil {
+		f.t.Fatalf("RunsByRepo: %v", err)
+	}
+	for _, r := range hist {
+		if r.ID == id {
+			return r
+		}
+	}
+	f.t.Fatalf("run %s not found", id)
+	return store.Run{}
+}
+
+func TestSweepDeadSessions_deadManualReapedLiveManualKept(t *testing.T) {
+	f := newRecFixture(t)
+	live := f.activeRun("proj~live-20260608-1530", "lab/live-20260608-1530", nil)
+	dead := f.activeRun("proj~dead-20260608-1530", "lab/dead-20260608-1530", nil)
+	f.runner.AddLive("proj~live-20260608-1530")
+
+	f.svc.sweepDeadSessions(t.Context())
+
+	gotDead := f.runOutcome(dead.ID)
+	if gotDead.Outcome != store.RunOutcomeDeath {
+		t.Fatalf("dead manual run outcome = %v, want death", gotDead.Outcome)
+	}
+	if gotDead.FailureReason == nil || *gotDead.FailureReason != deathReasonSessionGone {
+		t.Errorf("failure reason = %v, want %q", gotDead.FailureReason, deathReasonSessionGone)
+	}
+	if deathReasonSessionGone == deathReasonAtStartup {
+		t.Fatal("deathReasonSessionGone must differ from deathReasonAtStartup")
+	}
+
+	gotLive := f.runOutcome(live.ID)
+	if gotLive.Outcome != store.RunOutcomeActive {
+		t.Errorf("live manual run outcome = %v, want still active", gotLive.Outcome)
+	}
+}
+
+func TestSweepDeadSessions_afkKindsUntouched(t *testing.T) {
+	f := newRecFixture(t)
+	manual := f.activeRunKind("proj~afk-manual-1", "afk/1", store.RunKindAFKManual, nil)
+	auto := f.activeRunKind("proj~afk-auto-2", "afk/2", store.RunKindAFKAuto, nil)
+	// Neither session is live in tmux.
+
+	f.svc.sweepDeadSessions(t.Context())
+
+	if got := f.runOutcome(manual.ID); got.Outcome != store.RunOutcomeActive {
+		t.Errorf("afk_manual run outcome = %v, want still active (sweep must never touch AFK kinds)", got.Outcome)
+	}
+	if got := f.runOutcome(auto.ID); got.Outcome != store.RunOutcomeActive {
+		t.Errorf("afk_auto run outcome = %v, want still active (sweep must never touch AFK kinds)", got.Outcome)
+	}
+}
+
+// TestSweepDeadSessions_startguardRace is the mid-Start race guard for the
+// runtime dead-session sweep, mirroring TestSweepProject_skipsStartingInstance:
+// a manual run's session absent from tmux but present in the starting set
+// must not be reaped until the guard clears it.
+func TestSweepDeadSessions_startguardRace(t *testing.T) {
+	f := newRecFixture(t)
+	name := "proj~starting-20260608-1530"
+	run := f.activeRun(name, "lab/starting-20260608-1530", nil)
+	f.guard.Mark(name)
+
+	f.svc.sweepDeadSessions(t.Context())
+	if got := f.runOutcome(run.ID); got.Outcome != store.RunOutcomeActive {
+		t.Fatalf("mid-Start run outcome = %v, want still active (the starting guard failed)", got.Outcome)
+	}
+
+	f.guard.Clear(name)
+	f.svc.sweepDeadSessions(t.Context())
+	got := f.runOutcome(run.ID)
+	if got.Outcome != store.RunOutcomeDeath {
+		t.Fatalf("run outcome after clearStarting = %v, want death", got.Outcome)
+	}
+	if got.FailureReason == nil || *got.FailureReason != deathReasonSessionGone {
+		t.Errorf("failure reason = %v, want %q", got.FailureReason, deathReasonSessionGone)
+	}
+}
+
+// TestSweepDeadSessions_listFailureReapsNothing pins the read-order safety
+// net: a tmux List error must never read as "every session is gone".
+func TestSweepDeadSessions_listFailureReapsNothing(t *testing.T) {
+	f := newRecFixture(t)
+	run := f.activeRun("proj~dead-20260608-1530", "lab/dead-20260608-1530", nil)
+	f.runner.FailList(errors.New("tmux boom"))
+
+	f.svc.sweepDeadSessions(t.Context())
+
+	if got := f.runOutcome(run.ID); got.Outcome != store.RunOutcomeActive {
+		t.Errorf("run outcome after a List failure = %v, want still active (nothing reaped)", got.Outcome)
+	}
+}
+
+// TestSweepDeadSessions_publishesRunChanged folds the run.changed assertion in
+// here (rather than test 1 above) so the death-outcome assertions above stay
+// uncluttered by bus plumbing.
+func TestSweepDeadSessions_publishesRunChanged(t *testing.T) {
+	f := newRecFixture(t)
+	f.activeRun("proj~dead-20260608-1530", "lab/dead-20260608-1530", nil)
+
+	evts, cancel := f.bus.Subscribe(t.Context())
+	defer cancel()
+
+	f.svc.sweepDeadSessions(t.Context())
+
+	select {
+	case e := <-evts:
+		if e.Type != EventRunChanged {
+			t.Fatalf("event type = %q, want %q", e.Type, EventRunChanged)
+		}
+		payload, ok := e.Payload.(repoScopedPayload)
+		if !ok || payload.RepoID != f.repo.ID {
+			t.Fatalf("event payload = %+v, want repoID %s", e.Payload, f.repo.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for run.changed")
+	}
+	select {
+	case e := <-evts:
+		t.Fatalf("unexpected second event: %+v (want exactly one run.changed)", e)
+	default:
 	}
 }
 
