@@ -9,13 +9,19 @@ import (
 )
 
 // StartParams is the manual-instance start input (pinned API: POST
-// /api/v1/repos/{id}/instances {label?, provider?, model?, effort?}).
+// /api/v1/repos/{id}/instances {label?, provider?, model?, effort?,
+// first_message?}).
 type StartParams struct {
 	RepoID   string
 	Label    string // optional user label; sanitized + timestamped into the instance label
 	Provider string // optional per-spawn provider pick (issue #66); "" → repo/settings default
 	Model    string // optional per-spawn override; "" → repo/settings default
 	Effort   string // optional per-spawn override; "" → repo/settings default
+	// FirstMessage is the operator's first chat message (issue #96), already
+	// shape-validated by the httpapi layer (whitespace-only normalized to "",
+	// size-capped). Threaded into LaunchSpec.SeedPrompt so it rides the spawn
+	// argv as the trailing positional; "" → no trailing argument.
+	FirstMessage string
 }
 
 // Start spawns a manual instance following the v0-pinned sequence with full
@@ -87,6 +93,11 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 		Model:        model,
 		Effort:       effort,
 		Options:      options,
+		// The operator's first chat message (issue #96), when given, rides the
+		// same SeedPrompt → spawn-argv trailing-positional mechanism the AFK
+		// seed prompt uses. "" (the common case) leaves the manual spawn with
+		// no trailing argument, unchanged from before #96.
+		SeedPrompt: p.FirstMessage,
 	})
 }
 

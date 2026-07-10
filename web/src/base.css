@@ -1940,7 +1940,7 @@ a.chip.cr-count:hover {
 /* Messages (issue #41 Phase 3): assistant text is bubble-less serif prose on
    the page; only the user reply keeps a bubble — a soft warm neutral, never
    accent (accent is reserved for actions/attention). Order matters: .thinking
-   and .pending follow .role-* so they win the equal-specificity overrides. */
+   follows .role-* so it wins the equal-specificity override. */
 .chat-msg {
   max-width: 100%;
   min-width: 0;
@@ -1988,13 +1988,6 @@ a.chip.cr-count:hover {
   font-style: italic;
   font-size: 14.5px;
   color: var(--muted);
-}
-/* Queued first message (Phase 2b, folded in here in Phase 3): a real user
-   bubble parked until the New-run composer's text auto-sends. Held dim with its
-   "Sends when Claude is ready" tag so it reads as deliberately pending, not
-   disabled. (Moved from the New-run composer section.) */
-.chat-msg.role-user.pending {
-  opacity: 0.7;
 }
 .chat-msg-tag {
   display: block;
@@ -2940,10 +2933,7 @@ h6.md-h {
 }
 
 /* New-run composer (issue #41, Phase 2b) ----------------------------------- */
-/* Appended section — expressed entirely in existing tokens. Note for Phase 3:
-   the queued-first-message bubble reuses .chat-msg.role-user + .chat-msg-tag;
-   the .chat-msg.pending modifier below (dim only) is additive and yours to fold
-   into the chat restyle. */
+/* Appended section — expressed entirely in existing tokens. */
 
 /* Centered composer surface. .page already centers a 760px column; the card
    sits narrower and drops in from the top for a roomy, chat-first Home. */
@@ -3277,10 +3267,6 @@ h6.md-h {
   min-height: 44px;
   padding: 0 0.7rem;
 }
-
-/* Queued-first-message pending bubble: its .chat-msg.role-user.pending styling
-   now lives with the chat message rules above (Phase 3 folded it into the
-   restyle) — see the "Queued first message" rule in the chat section. */
 
 /* <640px: the composer fills the width and the chip row wraps naturally. */
 @media (max-width: 639.98px) {

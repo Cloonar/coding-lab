@@ -1,11 +1,12 @@
 // New-run composer contract (issue #41, Phase 2b):
 // - with repos present, the composer renders (field, textarea, repo/model/
 //   effort chips) and NOT the empty state;
-// - Send spawns the selected repo with label/model/effort, queues the typed
-//   text as the run's first message, and navigates to /runs/:id;
-// - an empty box spawns a plain run and queues nothing;
+// - Send spawns the selected repo with label/model/effort and the typed text as
+//   first_message (issue #96 — one POST, no post-spawn queue hop), and navigates
+//   to /runs/:id;
+// - an empty box spawns a plain run with no first_message;
 // - a spawn failure keeps the text in the box, shows the server message
-//   verbatim, and never navigates or queues;
+//   verbatim, and never navigates;
 // - zero repos hides the composer and shows the exact "No repositories yet"
 //   empty state (the Playwright smoke + login/setup round-trip assert this on `/`);
 // - a logged-out provider surfaces the slim reconnect banner, named by the
@@ -16,7 +17,6 @@ import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Provider, ProviderAuthStatus, Repo } from '../api';
 import App from '../App';
-import { clearQueued, peekQueued } from '../lib/queuedMessage';
 import NewRun from './NewRun';
 
 class FakeEventSource {
@@ -263,8 +263,6 @@ afterEach(() => {
   container.remove();
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
-  clearQueued('run_new');
-  clearQueued('run_empty');
 });
 
 describe('NewRun composer', () => {
@@ -286,7 +284,7 @@ describe('NewRun composer', () => {
     expect(container.textContent).not.toContain('No repositories yet');
   });
 
-  it('spawns with label/model/effort, queues the typed text, and navigates', async () => {
+  it('spawns with label/model/effort and the typed text as first_message, and navigates', async () => {
     await mountHome();
 
     const input = container.querySelector('.composer-input') as HTMLTextAreaElement;
@@ -306,25 +304,30 @@ describe('NewRun composer', () => {
     startButton().click();
     await settle();
 
+    // The typed text rides the spawn as first_message (issue #96) — exactly one
+    // POST, no post-spawn queue hop.
     expect(instancePosts).toHaveLength(1);
-    expect(instancePosts[0]).toEqual({ label: 'debug', model: 'opus', effort: 'high' });
-    // The typed text is parked as the new run's first message…
-    expect(peekQueued('run_new')).toBe('do the thing');
+    expect(instancePosts[0]).toEqual({
+      label: 'debug',
+      model: 'opus',
+      effort: 'high',
+      first_message: 'do the thing',
+    });
     // …and the composer navigated to the chat.
     expect(container.textContent).toContain('run:run_new');
   });
 
-  it('spawns a plain run and queues nothing when the box is empty', async () => {
+  it('spawns a plain run with no first_message when the box is empty', async () => {
     await mountHome();
 
     startButton().click();
     await settle();
 
     expect(instancePosts).toHaveLength(1);
-    // No label (untouched); model/effort default to the first catalog option.
+    // No label (untouched); model/effort default to the first catalog option;
+    // an empty box sends NO first_message key (issue #96).
     expect(instancePosts[0]).toEqual({ model: 'sonnet', effort: 'low' });
-    // Nothing was queued for the spawned run (empty box).
-    expect(peekQueued('run_new')).toBeUndefined();
+    expect(instancePosts[0]).not.toHaveProperty('first_message');
     expect(container.textContent).toContain('run:run_new');
   });
 
@@ -340,13 +343,12 @@ describe('NewRun composer', () => {
     await settle();
 
     expect(instancePosts).toHaveLength(1);
-    // The banner shows the raw 409, the text stays, and nothing navigated/queued.
+    // The banner shows the raw 409, the text stays, and nothing navigated.
     expect(container.querySelector('.banner.error')?.textContent).toContain('cap reached (2/2)');
     expect((container.querySelector('.composer-input') as HTMLTextAreaElement).value).toBe(
       'try me',
     );
     expect(container.textContent).not.toContain('run:run_new');
-    expect(peekQueued('run_new')).toBeUndefined();
   });
 
   it('shows the exact zero-repos empty state and hides the composer', async () => {
@@ -380,7 +382,7 @@ describe('NewRun composer', () => {
 // spawn" here (today's Start-button behavior, pinned), so bare Enter needs
 // its own empty guard while Cmd/Ctrl+Enter keeps sending through.
 describe('NewRun composer keyboard send (issue #70)', () => {
-  it('fine-pointer: Shift+Enter never spawns; bare Enter spawns and queues the typed text', async () => {
+  it('fine-pointer: Shift+Enter never spawns; bare Enter spawns and sends the typed text as first_message', async () => {
     finePointer(true);
     await mountHome();
     typeText('do the thing');
@@ -400,7 +402,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
     composerInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await settle();
     expect(instancePosts).toHaveLength(1);
-    expect(peekQueued('run_new')).toBe('do the thing');
+    expect(instancePosts[0]).toMatchObject({ first_message: 'do the thing' });
     expect(container.textContent).toContain('run:run_new');
   });
 
@@ -415,7 +417,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
     );
     await settle();
     expect(instancePosts).toHaveLength(1);
-    expect(peekQueued('run_new')).toBe('ctrl spawn');
+    expect(instancePosts[0]).toMatchObject({ first_message: 'ctrl spawn' });
   });
 
   it('bare Enter never spawns without a fine pointer (no matchMedia, or a touch profile)', async () => {
@@ -433,7 +435,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
     );
     await settle();
     expect(instancePosts).toHaveLength(1);
-    expect(peekQueued('run_new')).toBe('no matchMedia here');
+    expect(instancePosts[0]).toMatchObject({ first_message: 'no matchMedia here' });
   });
 
   it('touch profile: bare Enter does not spawn; Cmd/Ctrl+Enter still does', async () => {
@@ -451,7 +453,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
     );
     await settle();
     expect(instancePosts).toHaveLength(1);
-    expect(peekQueued('run_new')).toBe('tap city');
+    expect(instancePosts[0]).toMatchObject({ first_message: 'tap city' });
   });
 
   it('fine-pointer: Enter fired mid-IME-composition does not spawn', async () => {
@@ -489,7 +491,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
     // Empty text is a valid "plain spawn" (today's Start-button behavior) —
     // Cmd/Ctrl+Enter keeps spawning it even under the new bare-Enter gate.
     expect(instancePosts).toHaveLength(1);
-    expect(peekQueued('run_new')).toBeUndefined();
+    expect(instancePosts[0]).not.toHaveProperty('first_message');
     expect(container.textContent).toContain('run:run_new');
   });
 

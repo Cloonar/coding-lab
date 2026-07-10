@@ -1,14 +1,17 @@
 // New run (Home, `/`) — the composer-first surface (issue #41, Phase 2b): a big
 // centered composer (repo · agent · model · effort chips, a `…` popover, an
 // autogrowing textarea, an accent circular send), an AFK strip for the selected
-// repo, and a slim logged-out banner. Send spawns an instance, queues any typed
-// text as the run's first message, and navigates to the chat. Never
-// auto-navigates on load. The agent chip appears only with ≥2 registered
-// providers; the per-spawn pick is ephemeral (ADR-0030).
+// repo, and a slim logged-out banner. Send spawns an instance carrying any typed
+// text as its first_message (issue #96 — delivered on the spawn argv, so the
+// chat needs no post-spawn send and never deadlocks on a lazily-created
+// transcript), then navigates to the chat. Never auto-navigates on load. The
+// agent chip appears only with ≥2 registered providers; the per-spawn pick is
+// ephemeral (ADR-0030).
 //
-// Manual spawn accepts ONLY label/provider/model/effort (internal/httpapi/
-// instances.go has no provider-options bag), so provider spawn options stay out
-// of the `…` popover here and issue #21 stays open.
+// Manual spawn accepts label/provider/model/effort plus the first_message
+// (issue #96); it has no provider-options bag (internal/httpapi/instances.go),
+// so provider spawn options stay out of the `…` popover here and issue #21
+// stays open.
 
 import { A, useNavigate } from '@solidjs/router';
 import {
@@ -42,7 +45,6 @@ import { isComposerSend } from '../lib/composerKeys';
 import { useEvents } from '../events';
 import { createLiveResource } from '../lib/liveResource';
 import { providerFor, resolveSpawnOption } from '../lib/spawn';
-import { setQueued } from '../lib/queuedMessage';
 import { resourceValue } from '../lib/resource';
 import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
 
@@ -250,11 +252,13 @@ function NewRunView() {
       if (providerPick() !== '') req.provider = providerPick();
       if (model() !== '') req.model = model();
       if (effort() !== '') req.effort = effort();
-      const run = await startInstance(repo.id, req);
-      // Only a SUCCESSFUL spawn queues the typed text (issue #41): the chat view
-      // auto-sends it once the transcript is ready. Empty text = a plain spawn.
+      // The typed text rides the spawn as first_message (issue #96): the backend
+      // delivers it on the agent's argv, so the chat needs no post-spawn send and
+      // the lazily-created transcript never deadlocks it. Empty text = a plain
+      // spawn with no first_message.
       const body = text().trim();
-      if (body !== '') setQueued(run.id, body);
+      if (body !== '') req.first_message = body;
+      const run = await startInstance(repo.id, req);
       navigate('/runs/' + run.id);
     } catch (err) {
       // 409 (cap / provider logged out / repo not ready) et al. surface

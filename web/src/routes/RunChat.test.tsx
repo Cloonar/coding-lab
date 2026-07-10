@@ -43,7 +43,6 @@ import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, Dialog, MessagesResponse, Provider, Run, RunCommand } from '../api';
 import App from '../App';
-import { clearQueued, peekQueued, setQueued } from '../lib/queuedMessage';
 import RunChat from './RunChat';
 
 const RUN_ID = 'run_1';
@@ -95,8 +94,8 @@ let messagesOnServer: MessagesResponse;
 let providersOnServer: Provider[];
 let commandsOnServer: RunCommand[];
 let replyPosts: { text: string }[];
-// Reply POST status — 204 by default; a test flips it to 409 to exercise the
-// queued-message auto-send failure path (draft seeding).
+// Reply POST status — 204 (success) by default. Kept as a knob so a reply-path
+// test can flip it to a 4xx without re-plumbing the fetch stub.
 let replyStatus: number;
 let answerPosts: Record<string, unknown>[];
 let interruptPosts: number;
@@ -350,9 +349,6 @@ afterEach(() => {
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
   Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
-  // The queued-message store is module-global — clear this run's entry so a
-  // test that queues never leaks into the next.
-  clearQueued(RUN_ID);
 });
 
 describe('RunChat', () => {
@@ -1941,11 +1937,14 @@ describe('RunChat', () => {
     expect(pillBtn.textContent).toContain('Latest');
   });
 
-  // --- Queued first message from the New-run composer (issue #41) ---
+  // --- Ready-to-start placeholder for an idle active run (issue #96) ---
 
-  it('renders the queued first message as a pending user bubble while it waits', async () => {
-    // A still-locating transcript means the run is not ready — the auto-send
-    // holds, so the pending bubble stays visible.
+  it('invites the first message for an active idle run whose transcript is not yet located', async () => {
+    // codex writes its transcript only at first-turn start (issue #96): an
+    // active run composed idle with no messages and an unlocated transcript
+    // trusts the adapter state (ADR-0038) over the transcript-derived
+    // placeholder and shows ready-to-start copy — the first_message spawn path
+    // means there is nothing to auto-send here.
     messagesOnServer = {
       messages: [],
       state: 'idle',
@@ -1954,53 +1953,52 @@ describe('RunChat', () => {
       transcript: 'locating',
       transcript_id: '',
     };
-    setQueued(RUN_ID, 'kick things off');
     await mountChat();
 
-    const bubble = container.querySelector('.chat-stream .chat-msg.role-user.pending');
-    expect(bubble).not.toBeNull();
-    expect(bubble?.textContent).toContain('kick things off');
-    expect(bubble?.textContent).toContain('Sends when Claude Code is ready');
-    // It is the LAST stream child — nearest the composer it collapses into.
-    expect(container.querySelector('.chat-stream')!.lastElementChild).toBe(bubble);
-    // Not sent yet (transcript still locating).
+    const empty = container.querySelector('.chat-stream .empty');
+    expect(empty?.textContent).toBe('Ready — your first message starts the conversation.');
+    expect(container.textContent).not.toContain('Waiting for the transcript');
+    // The composer is usable from this state — a first send must work, never
+    // wait on transcript availability.
+    expect(container.querySelector('.chat-input')).not.toBeNull();
     expect(replyPosts).toHaveLength(0);
   });
 
-  it('auto-sends the queued first message exactly once when the transcript is available', async () => {
-    withAssistantText('ready'); // needs_input + transcript available on a live run
-    setQueued(RUN_ID, 'queued opener');
+  it('keeps the transcript-locating placeholder before the first state is composed', async () => {
+    // state '' (no poll composed the adapter state yet) with a locating
+    // transcript is NOT the ready-to-start case — the transcript-derived
+    // placeholder still stands.
+    messagesOnServer = {
+      messages: [],
+      state: '',
+      cursor: 0,
+      has_more: false,
+      transcript: 'locating',
+      transcript_id: '',
+    };
     await mountChat();
 
-    // Fired once with the queued text; the pending bubble cleared.
-    expect(replyPosts).toHaveLength(1);
-    expect(replyPosts[0]?.text).toBe('queued opener');
-    expect(container.querySelector('.chat-msg.pending')).toBeNull();
-    expect(peekQueued(RUN_ID)).toBeUndefined();
-
-    // A later SSE refetch must NOT re-send — the entry was consumed before the POST.
-    emitMessagesChanged();
-    await settle();
-    expect(replyPosts).toHaveLength(1);
+    const empty = container.querySelector('.chat-stream .empty');
+    expect(empty?.textContent).toBe('Waiting for the transcript…');
+    expect(container.textContent).not.toContain('your first message starts');
   });
 
-  it('seeds the composer draft and shows an error when the auto-send fails', async () => {
-    withAssistantText('ready'); // live, needs_input → composer usable
-    replyStatus = 409;
-    setQueued(RUN_ID, 'seed me back');
+  it('does not show the ready-to-start copy for an ended run with the same idle chat state', async () => {
+    runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
+    messagesOnServer = {
+      messages: [],
+      state: 'idle',
+      cursor: 0,
+      has_more: false,
+      transcript: 'locating',
+      transcript_id: '',
+    };
     await mountChat();
 
-    // The single attempt failed: the error surfaces, the entry is gone (taken
-    // before the POST), and the text is handed to the composer as a draft.
-    expect(replyPosts).toHaveLength(1);
-    expect(peekQueued(RUN_ID)).toBeUndefined();
-    expect(container.querySelector('.banner.error')?.textContent).toContain(
-      'run is not accepting replies',
-    );
-    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe(
-      'seed me back',
-    );
-    expect(container.querySelector('.chat-msg.pending')).toBeNull();
+    // ended() gates the ready-to-start Match off; the locating placeholder shows.
+    expect(container.textContent).not.toContain('your first message starts');
+    const empty = container.querySelector('.chat-stream .empty');
+    expect(empty?.textContent).toBe('Waiting for the transcript…');
   });
 
   // --- Provider-neutral copy (issue #51 decision 9) ---

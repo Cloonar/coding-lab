@@ -69,7 +69,6 @@ import { stateBadge } from '../lib/conversation';
 import { openState, providerOpen, type OpenState } from '../lib/deepLink';
 import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
-import { clearQueued, peekQueued, queuedVersion, takeQueued } from '../lib/queuedMessage';
 import { resourceValue } from '../lib/resource';
 import { groupMessages, toolGroupSummary, type ToolGroup } from '../lib/toolGroups';
 import { useEvents } from '../events';
@@ -125,14 +124,6 @@ function RunChatView() {
   // stream.
   const [exhausted, setExhausted] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  // Auto-send of the queued first message (issue #41) waits for the first real
-  // server response before trusting transcript(): the signal defaults
-  // optimistically to 'available' before the initial fetch lands, and a reply
-  // sent pre-locate can be lost.
-  const [loaded, setLoaded] = createSignal(false);
-  // A failed auto-send hands its text to the composer as a draft seed (adopted
-  // only into an empty box — never clobbers active typing).
-  const [draftSeed, setDraftSeed] = createSignal<string | null>(null);
   // Tool-group open state, keyed by the first tool's seq (decision 12): the
   // group is a derived structure recomputed on every refetch, so native
   // <details> state alone would slam an expanded live group shut on the next
@@ -366,7 +357,6 @@ function RunChatView() {
       // plain bottom-follow.
       if (follow && newDialog) scrollToPendingCard();
       else if (follow) scrollToBottom();
-      setLoaded(true); // the server's transcript status is now trustworthy
     } catch (err) {
       if (token === fetchToken) setError(errorMessage(err));
     }
@@ -413,7 +403,6 @@ function RunChatView() {
     setExhausted(false);
     setError(null);
     setOpenGroups(new Set<number>());
-    setLoaded(false); // a fresh transcript is unconfirmed until the next refetch
   };
 
   // All chat state is keyed to the route param: navigating /runs/A → /runs/B
@@ -517,51 +506,6 @@ function RunChatView() {
     }
   };
 
-  // The queued first message parked by the New-run composer for THIS run
-  // (issue #41), or undefined. Reactive on the queue's version signal so the
-  // pending bubble appears/clears live.
-  const queuedText = () => {
-    queuedVersion();
-    return peekQueued(params.id);
-  };
-
-  // Auto-send the queued first message exactly once, when the transcript is
-  // confirmed available and the run is live. takeQueued() removes the entry
-  // BEFORE the POST, so any re-fire (transcript/state churn, the version bump
-  // from the take itself, even the transcript-rotation reset) sees no queued
-  // text and cannot double-send; the in-flight boolean is a second belt for the
-  // async gap. Keyed by run id, so navigating to another run just reads that
-  // run's (absent) entry — nothing to reset here.
-  let autoSending = false;
-  createEffect(() => {
-    queuedVersion(); // re-run when the queue mutates
-    const id = params.id;
-    const text = peekQueued(id);
-    if (text === undefined || autoSending) return;
-    if (!loaded()) return; // wait for the first real server response
-    if (ended() || transcript() === 'gone') {
-      // It can never send now — drop it and say so, rather than parking forever.
-      clearQueued(id);
-      setError(`Queued message not sent — the run ended before ${agentName()} was ready.`);
-      return;
-    }
-    if (transcript() !== 'available') return; // still locating — a later refetch retries
-    autoSending = true;
-    const body = takeQueued(id) ?? text;
-    void (async () => {
-      try {
-        await replyRun(id, body);
-        await refetchMessages();
-      } catch (err) {
-        // Hand the text to the composer as a draft seed and surface the error;
-        // the operator can retry or edit rather than lose it.
-        setError(errorMessage(err));
-        setDraftSeed(body);
-      } finally {
-        autoSending = false;
-      }
-    })();
-  });
   // The pending dialog: the server's top-level pending_dialog field is
   // authoritative (ADR-0020 — the live-signals spool). The messages-scan is
   // the dormant fallback for a future provider CLI that flushes a pending
@@ -635,6 +579,21 @@ function RunChatView() {
 
         <div class="chat-stream" role="log" aria-live="polite" ref={streamEl}>
           <Switch>
+            {/* An active run whose adapter-composed state is idle with no
+                messages and an unlocated transcript (codex writes its transcript
+                only at first-turn start — issue #96): trust the adapter state
+                (ADR-0038) over the transcript-derived placeholder and invite the
+                first message, which starts the conversation. */}
+            <Match
+              when={
+                !ended() &&
+                transcript() === 'locating' &&
+                state() === 'idle' &&
+                messages().length === 0
+              }
+            >
+              <p class="empty">Ready — your first message starts the conversation.</p>
+            </Match>
             <Match when={transcript() === 'locating' && messages().length === 0}>
               <p class="empty">Waiting for the transcript…</p>
             </Match>
@@ -720,18 +679,6 @@ function RunChatView() {
               {capitalize(agentName())} is waiting for your reply.
             </p>
           </Show>
-          {/* Queued first message (issue #41): the operator's message parked by
-              the New-run composer, shown as the LAST stream item — below the
-              needs-input note, nearest the composer it collapses into — as a
-              muted pending user bubble until the auto-send fires. Last-position
-              mirrors chat order: history, then the "waiting" status, then the
-              about-to-send message. The .pending hook is Phase 3's to restyle. */}
-          <Show when={queuedText() !== undefined}>
-            <div class="chat-msg role-user pending">
-              <span class="chat-msg-tag">Sends when {agentName()} is ready</span>
-              <Markdown source={queuedText() ?? ''} />
-            </div>
-          </Show>
         </div>
       </div>
 
@@ -741,7 +688,6 @@ function RunChatView() {
         ended={ended()}
         transcript={transcript()}
         dialog={pendingDialog()}
-        draftSeed={draftSeed()}
         commands={commands() ?? []}
         agentName={agentName()}
         openHint={openHint()}
@@ -1442,8 +1388,6 @@ function Composer(props: {
   ended: boolean;
   transcript: TranscriptStatus;
   dialog: Dialog | null;
-  /** A handed-down draft (a failed queued-message auto-send), or null. */
-  draftSeed: string | null;
   /** The run's chat-safe slash-command catalog (issue #51 decision 5). */
   commands: RunCommand[];
   /** The provider's display name ('the agent' while metadata loads). */
@@ -1459,19 +1403,6 @@ function Composer(props: {
   const [text, setText] = createSignal('');
   const [sending, setSending] = createSignal(false);
 
-  // Adopt a handed-down draft seed (issue #41: a failed auto-send's text) ONLY
-  // into an empty box, so it never clobbers what the operator is actively
-  // typing. `on`+defer reacts to seed CHANGES only, and reads text() untracked
-  // so keystrokes don't re-trigger the adoption.
-  createEffect(
-    on(
-      () => props.draftSeed,
-      (seed) => {
-        if (seed != null && seed !== '' && text().trim() === '') setText(seed);
-      },
-      { defer: true },
-    ),
-  );
   // Send is gated only on a non-empty box and no in-flight POST — never on the
   // run's derived state (ADR-0029, issue #61): the composer no longer morphs and
   // has no Interrupt of its own (that moved to the header).

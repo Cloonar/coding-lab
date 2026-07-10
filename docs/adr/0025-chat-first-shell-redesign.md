@@ -40,6 +40,9 @@ The decisions, pinned:
   backend change: the queue is an in-memory per-run map that survives SPA route
   changes and is lost on tab close — accepted and documented in code. Spawn
   failure returns the text to the composer with the server's 409 verbatim.
+  [Retired 2026-07-10 (#96): the client-side queued first message is gone —
+  the New-run composer text now rides `SpawnSpec.InitialPrompt` on the spawn
+  argv, so no message ever waits on transcript availability.]
   Dashboard pieces re-home: repo cards (clone status/progress, stop-all,
   parked) → `/repos`; ClaudeAuthCard → Credentials, plus a slim "Claude is
   logged out — reconnect" banner on the composer surface; the AFK machinery
