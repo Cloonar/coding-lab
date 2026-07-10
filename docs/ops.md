@@ -23,6 +23,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps lab's derived sqlite default **and** lets a `LAB_DB` entry in `environmentFile` take effect (precedence is flag > env > default — a `--db` flag would shadow `LAB_DB`). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
+| `vapidKeyFile` | `"${stateDir}/vapid.key"` | Passed as `--vapid-key-file`. P-256 VAPID key for Web Push (see [Push notifications](#push-notifications)) — lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content, same as `masterKeyFile`. |
 | `maxInstances` | `6` | Passed as `--max-instances`. Seeds the `max_instances` settings row on first start; thereafter the in-app setting wins. |
 | `sessionNofile` | `16384` | Passed as `--session-nofile`; RLIMIT_NOFILE prlimit cap per spawned session, 0 disables. A runaway session hits its own EMFILE and dies alone. |
 | `proxyAuth.enable` | `false` | Trust a reverse-proxy auth header as the authenticated username — only from `trustedProxies` peers. The module asserts that enabling it requires at least one trusted proxy. |
@@ -146,6 +147,7 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--state-dir` | `LAB_STATE_DIR` | `~/.local/state/lab` | State root (layout below). With no HOME and no value, lab refuses to start. |
 | `--db` | `LAB_DB` | `sqlite:<state-dir>/lab.db` | DSN. `sqlite:<path>` or `postgres://…` / `postgresql://…` switches backend. |
 | `--master-key-file` | `LAB_MASTER_KEY_FILE` | `<state-dir>/master.key` | Vault master key: 64 hex chars (32 bytes), 0600. Auto-generated when absent; loose perms or malformed content refuse startup. |
+| `--vapid-key-file` | `LAB_VAPID_KEY_FILE` | `<state-dir>/vapid.key` | P-256 VAPID key for Web Push: 64 hex chars (32 bytes), 0600. Auto-generated when absent; loose perms or malformed content refuse startup. |
 | `--provider-bin` | `LAB_PROVIDER_BIN_<ID>` | adapter default | Per-provider agent binary, **repeatable** as `id=path` keyed by provider ID (`--provider-bin claude-code=/usr/bin/claude`). The env `<ID>` is the provider ID uppercased with dashes → underscores (`claude-code` → `LAB_PROVIDER_BIN_CLAUDE_CODE`). An unknown ID in the flag is a boot error listing the registered IDs (env keys are only read for registered IDs — a typoed env var name is inert). With no entry the adapter fills its own default (claude-code: `claude` via PATH lookup). |
 | `--provider-config` | `LAB_PROVIDER_CONFIG_<ID>` | adapter default | Per-provider global config file, **repeatable** as `id=path` keyed by provider ID (`--provider-config claude-code=/var/lib/lab/.claude.json`); same `<ID>` env mapping. claude-code's config is the folder-trust seeding target — with no HOME and no configured claude-code config path, instance/AFK features stay unmounted and lab serves the rest with a loud warning. With no entry the adapter fills its own default (claude-code: `~/.claude.json` from HOME). |
 | `--claude` | — | (see `--provider-bin`) | **Deprecated alias** for `--provider-bin claude-code=<path>`. Prefer the generic flag. |
@@ -193,6 +195,7 @@ The flavor is the routing authority: an unrecognized host (a second Forgejo inst
 <state>/
   lab.db                     sqlite database (WAL mode; absent on postgres)
   master.key                 vault master key (64 hex chars, 0600)
+  vapid.key                  Web Push VAPID key (64 hex chars, 0600)
   repos/<repoID>.git/        bare reference clones (worktree parents)
   worktrees/<repo>-<label>/  instance worktrees (manual: -<label>, AFK: -<N>)
   runtime/                   0700 — materialized credential files, per-op
@@ -280,6 +283,24 @@ Alerting suggestions:
 - **Stuck instances**: `lab_instances_active` pinned at the cap for hours with no `lab_afk_runs_total` movement — agents running but never finishing.
 - **Clone health**: `increase(lab_clone_jobs_total{result="error"}[1h]) > 0`, or `lab_clones_in_flight > 0` sustained longer than your largest repo needs.
 - **Scrape source degraded**: `lab_instances_active` absent while the service is up (snapshot errors are deliberately silent per scrape).
+
+## Push notifications
+
+Standards Web Push (RFC 8292 VAPID) — no vendor account, no push-provider registration. lab signs every send with its own auto-generated VAPID keypair (`vapidKeyFile` / `--vapid-key-file` above) and talks directly to whichever gateway the operator's browser is subscribed through.
+
+Three requirements, all outside lab's control:
+
+- **The UI must be served over HTTPS.** `PushManager.subscribe()` only exists in a secure context; `baseUrl`/TLS termination (Deployment above) has to be in place first.
+- **Outbound HTTPS from the server** to whichever push gateways the enrolled browsers use: `web.push.apple.com` (Safari/iOS), `fcm.googleapis.com` (Chrome/Edge/Android), Mozilla's autopush (Firefox). No inbound ports, no allowlisting beyond normal egress.
+- **iOS needs 16.4+ with lab added to the Home Screen** and opened from there — Web Push on iOS only exists for an installed PWA, not the Safari tab. Enrolling always requires the enabling click itself: the browser only grants notification permission on a user gesture, so it can't be scripted or pre-provisioned.
+
+**Enrolling a device**: Settings → Notifications → "Enable notifications on this device". Each browser/device that enables shows up in the device list below the button; the list is device-level, not per-user — a subscription survives logout and is removed only explicitly (per-device Remove) or by lab itself when a gateway reports the endpoint gone.
+
+**Debugging**: each listed device has a Send test button. Delivery failure is deliberately silent in the UI (there is no user-facing error path for "the gateway rejected this") and loud in server logs (`component=push`) — check there first. A 404/410 from the gateway is expected lifecycle (lab reaps the row); anything else — including a gateway the server simply can't reach — logs and is dropped, nothing retries.
+
+**Airgapped / no outbound HTTPS**: sends degrade to error logs, silently from the operator's point of view — there is no notification source yet other than Send test, so this only shows up when a real trigger (a future slice) starts firing pushes.
+
+**Rotation consequence**: `vapid.key` carries the same never-overwrite contract as `master.key`, but replacing or deleting it (a restore from an older backup, a manual `rm`, key compromise) strands **every** subscription — the public key that signed them no longer matches, so pushes silently stop for all devices until each one re-enables from Settings.
 
 ## Incogni mode
 

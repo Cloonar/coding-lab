@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
-	"syscall"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/fsx"
 )
 
 // Load reads the master key file (design §6): exactly 64 hex characters
@@ -68,7 +68,7 @@ func Generate(path string) ([]byte, error) {
 		return nil, fmt.Errorf("master key file: random key: %w", err)
 	}
 	content := hex.EncodeToString(key) + "\n"
-	if err := writeFileExclusive(path, []byte(content), 0o600); err != nil {
+	if err := fsx.WriteFileExclusive(path, []byte(content), 0o600); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return nil, errKeyExists(path) // lost the race: another process published first
 		}
@@ -79,86 +79,4 @@ func Generate(path string) ([]byte, error) {
 
 func errKeyExists(path string) error {
 	return fmt.Errorf("master key file %s already exists; refusing to overwrite", path)
-}
-
-// writeFileAtomic writes content to path via a same-directory temp file,
-// an explicit chmod (independent of umask), fsync, rename, and an fsync
-// of the parent directory (without it a power loss can drop the rename
-// even though the file data was synced). Replaces an existing path —
-// the semantics re-materialization relies on. The temp file is removed
-// on any failure; os errors carry paths, never content.
-func writeFileAtomic(path string, content []byte, perm os.FileMode) error {
-	tmpName, err := writeTemp(path, content, perm)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed into place
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
-
-// writeFileExclusive is writeFileAtomic with first-writer-wins publish
-// semantics: the temp file is linked into place, and link(2) fails with
-// fs.ErrExist if path already exists — no stat-then-rename TOCTOU
-// window. Used by Generate; materialization keeps rename semantics.
-func writeFileExclusive(path string, content []byte, perm os.FileMode) error {
-	tmpName, err := writeTemp(path, content, perm)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmpName) }() // the temp name persists after link(2)
-	if err := os.Link(tmpName, path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
-
-// writeTemp writes content to a fresh same-directory temp file (chmod,
-// write, fsync, close) and returns its name. The caller publishes it via
-// rename or link and removes it afterwards; on error the temp is already
-// removed.
-func writeTemp(path string, content []byte, perm os.FileMode) (string, error) {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
-	if err != nil {
-		return "", err
-	}
-	tmpName := tmp.Name()
-	fail := func(err error) (string, error) {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return "", err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		return fail(err)
-	}
-	if _, err := tmp.Write(content); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return "", err
-	}
-	return tmpName, nil
-}
-
-// syncDir fsyncs a directory so a just-published directory entry (rename
-// or link) survives power loss. Filesystems that cannot fsync a
-// directory return EINVAL/ENOTSUP; those are ignored by convention —
-// there is nothing more the caller could do.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = d.Close() }()
-	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) {
-		return err
-	}
-	return nil
 }

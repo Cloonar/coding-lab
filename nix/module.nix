@@ -28,6 +28,12 @@
 #     systemd.services.lab.serviceConfig.LoadCredential = "master.key:/run/secrets/lab-master.key";
 #     services.lab.masterKeyFile = "/run/credentials/lab.service/master.key";
 #
+#   vapidKeyFile — the Web Push VAPID keypair (issue #98) follows the exact
+#   same contract (auto-generate 0600, refuse loose perms/malformed content,
+#   never overwritten) and takes the same sops-nix / LoadCredential patterns
+#   as masterKeyFile above. Rotating or deleting it strands every push
+#   subscription — each device must re-enable from its settings page.
+#
 #   Postgres DSN with a password: put LAB_DB=postgres://… into
 #   `environmentFile` and leave `db` at null — lab's precedence is
 #   flag > env > default, so a --db flag would shadow LAB_DB.
@@ -54,6 +60,8 @@ let
     cfg.stateDir
     "--master-key-file"
     cfg.masterKeyFile
+    "--vapid-key-file"
+    cfg.vapidKeyFile
     "--max-instances"
     (toString cfg.maxInstances)
     "--session-nofile"
@@ -268,6 +276,20 @@ in
         Vault master key file (--master-key-file). lab auto-generates it 0600
         when absent and refuses to start on loose permissions; see the header
         comment for the sops-nix / LoadCredential patterns.
+      '';
+    };
+
+    vapidKeyFile = lib.mkOption {
+      type = lib.types.str;
+      default = "${cfg.stateDir}/vapid.key";
+      defaultText = lib.literalExpression ''"''${config.services.lab.stateDir}/vapid.key"'';
+      description = ''
+        Web Push VAPID key file (--vapid-key-file). lab auto-generates it 0600
+        when absent and refuses to start on loose permissions; same
+        load-or-generate/refuse contract as {option}`masterKeyFile` (see the
+        header comment for the sops-nix / LoadCredential patterns). Rotating
+        or deleting it strands every push subscription — each device must
+        re-enable from its settings page.
       '';
     };
 

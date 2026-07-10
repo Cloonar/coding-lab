@@ -37,6 +37,7 @@ type Config struct {
 	StateDir      string // root of lab's state (db, master key, repos, worktrees, runtime)
 	DB            string // DSN: sqlite:<path> or postgres://…
 	MasterKeyFile string // path to the vault master key file
+	VAPIDKeyFile  string // path to the web push VAPID key file (RFC 8292)
 
 	// ProviderBin maps a provider id to a binary-path override. A missing
 	// entry means the adapter uses its own default (a PATH lookup); config.go
@@ -102,8 +103,8 @@ func (p *providerMapFlag) Set(value string) error {
 
 // Parse resolves args (flags without the program name) and environment into
 // a Config. Env overrides defaults, flags override env. Recognized env vars:
-// LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_PROVIDER_BIN_<ID>,
-// LAB_PROVIDER_CONFIG_<ID>, LAB_CLAUDE_CONFIG (a deprecated alias for
+// LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_VAPID_KEY_FILE,
+// LAB_PROVIDER_BIN_<ID>, LAB_PROVIDER_CONFIG_<ID>, LAB_CLAUDE_CONFIG (a deprecated alias for
 // LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_BASE_URL, LAB_AGENT_URL. providerIDs
 // is the caller's list of registered provider ids: the generic per-provider
 // flags are validated against it (an unknown id is a parse error), and the
@@ -117,6 +118,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		stateDir      = fs.String("state-dir", "", "state directory (default ~/.local/state/lab; env LAB_STATE_DIR)")
 		db            = fs.String("db", "", "database DSN: sqlite:<path> or postgres://… (default sqlite:<state-dir>/lab.db; env LAB_DB)")
 		masterKeyFile = fs.String("master-key-file", "", "vault master key file (default <state-dir>/master.key; env LAB_MASTER_KEY_FILE)")
+		vapidKeyFile  = fs.String("vapid-key-file", "", "web push VAPID key file (default <state-dir>/vapid.key; env LAB_VAPID_KEY_FILE)")
 
 		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
 		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
@@ -195,6 +197,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		return Config{}, fmt.Errorf("--db must not be empty")
 	}
 	cfg.MasterKeyFile = pick("master-key-file", *masterKeyFile, "LAB_MASTER_KEY_FILE", filepath.Join(sd, "master.key"))
+	cfg.VAPIDKeyFile = pick("vapid-key-file", *vapidKeyFile, "LAB_VAPID_KEY_FILE", filepath.Join(sd, "vapid.key"))
 
 	// Per-provider host overrides. For each map, generic env fills an entry
 	// for a registered id, then the generic flag overrides it (flag > env).

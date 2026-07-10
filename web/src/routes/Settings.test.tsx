@@ -7,7 +7,7 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Provider } from '../api';
+import type { Provider, PushDevice } from '../api';
 import App from '../App';
 import Settings from './Settings';
 
@@ -56,12 +56,15 @@ class FakeEventSource {
   close(): void {}
 }
 
-function jsonResponse(status: number, body: unknown) {
-  const text = JSON.stringify(body);
+function jsonResponse(status: number, body?: unknown) {
+  const text = body === undefined ? '' : JSON.stringify(body);
   return {
     ok: status >= 200 && status < 300,
     status,
-    json: () => Promise.resolve(JSON.parse(text) as unknown),
+    json: () =>
+      text === ''
+        ? Promise.reject(new SyntaxError('empty body'))
+        : Promise.resolve(JSON.parse(text) as unknown),
     text: () => Promise.resolve(text),
   };
 }
@@ -71,6 +74,13 @@ let providersOnServer: Provider[];
 let patchBodies: Record<string, unknown>[];
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
+
+// Web Push (issue #98) server state, exercised by the notifications suite.
+let pushKeyValue: string;
+let subsOnServer: PushDevice[];
+let createdSubBodies: Record<string, unknown>[];
+let deletedSubIDs: string[];
+let testedSubIDs: string[];
 
 function stubApi(): void {
   vi.stubGlobal('EventSource', FakeEventSource);
@@ -100,6 +110,40 @@ function stubApi(): void {
       // instance list for the ACTIVE rail + attention badge.
       if (url === '/api/v1/instances' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { instances: [] }));
+      }
+      // Web Push (issue #98).
+      if (url === '/api/v1/push/key' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { public_key: pushKeyValue }));
+      }
+      if (url === '/api/v1/push/subscriptions' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { subscriptions: subsOnServer }));
+      }
+      if (url === '/api/v1/push/subscriptions' && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        createdSubBodies.push(body);
+        const device: PushDevice = {
+          id: 'sub_new',
+          endpoint: String(body.endpoint),
+          label: 'This browser',
+          created_at: '2026-07-10T00:00:00.000Z',
+        };
+        subsOnServer = [...subsOnServer, device];
+        return Promise.resolve(jsonResponse(201, device));
+      }
+      if (
+        url.startsWith('/api/v1/push/subscriptions/') &&
+        url.endsWith('/test') &&
+        method === 'POST'
+      ) {
+        const id = url.slice('/api/v1/push/subscriptions/'.length, -'/test'.length);
+        testedSubIDs.push(id);
+        return Promise.resolve(jsonResponse(202));
+      }
+      if (url.startsWith('/api/v1/push/subscriptions/') && method === 'DELETE') {
+        const id = url.slice('/api/v1/push/subscriptions/'.length);
+        deletedSubIDs.push(id);
+        subsOnServer = subsOnServer.filter((s) => s.id !== id);
+        return Promise.resolve(jsonResponse(204));
       }
       return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
     }),
@@ -205,6 +249,17 @@ beforeEach(() => {
   settingsOnServer = {};
   providersOnServer = baseProviders();
   patchBodies = [];
+  // A valid base64url VAPID key (65 zero-ish bytes) so urlBase64ToUint8Array
+  // round-trips without throwing.
+  const keyBytes = new Uint8Array(65);
+  keyBytes[0] = 4; // uncompressed-point prefix
+  let bin = '';
+  for (const b of keyBytes) bin += String.fromCharCode(b);
+  pushKeyValue = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  subsOnServer = [];
+  createdSubBodies = [];
+  deletedSubIDs = [];
+  testedSubIDs = [];
   stubApi();
 });
 
@@ -424,5 +479,201 @@ describe('Settings agent defaults (issue #66)', () => {
     labels = optionRows().map((r) => r.textContent);
     expect(labels).toContain('GPT-5 Codex');
     expect(labels).not.toContain('Sonnet');
+  });
+});
+
+// Notifications block (Web Push, issue #98). The support gate is hard: without
+// a secure context, a service worker and the push/notification APIs the block
+// only renders a requirements note. When supported+registered it lists the
+// account's devices and enabling registers THIS browser's subscription.
+describe('Settings notifications (issue #98)', () => {
+  let localSubscription: {
+    endpoint: string;
+    toJSON: () => { endpoint: string; keys: { p256dh: string; auth: string } };
+    unsubscribe: () => Promise<boolean>;
+  } | null;
+  let subscribeCalls: { userVisibleOnly?: boolean; applicationServerKey?: unknown }[];
+  let requestPermissionCalls: number;
+  let requestPermissionResult: NotificationPermission;
+  let unsubscribeCalls: number;
+
+  function makeSub(endpoint: string, p256dh: string, auth: string) {
+    return {
+      endpoint,
+      toJSON: () => ({ endpoint, keys: { p256dh, auth } }),
+      unsubscribe: () => {
+        unsubscribeCalls += 1;
+        return Promise.resolve(true);
+      },
+    };
+  }
+
+  /** Stubs a supported, service-worker-registered browser. */
+  function installPushSupport(): void {
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('PushManager', class {});
+    vi.stubGlobal('Notification', {
+      permission: 'default',
+      requestPermission: () => {
+        requestPermissionCalls += 1;
+        return Promise.resolve(requestPermissionResult);
+      },
+    });
+    const pushManager = {
+      getSubscription: () => Promise.resolve(localSubscription),
+      subscribe: (opts: { userVisibleOnly?: boolean; applicationServerKey?: unknown }) => {
+        subscribeCalls.push(opts);
+        localSubscription = makeSub('https://push.example/new', 'p256dh-new', 'auth-new');
+        return Promise.resolve(localSubscription);
+      },
+    };
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: () => Promise.resolve({ pushManager }) },
+    });
+  }
+
+  beforeEach(() => {
+    localSubscription = null;
+    subscribeCalls = [];
+    requestPermissionCalls = 0;
+    requestPermissionResult = 'granted';
+    unsubscribeCalls = 0;
+  });
+
+  afterEach(() => {
+    // stubGlobal is reverted by the top-level afterEach; the defineProperty is
+    // not, so drop it here to leave navigator clean for the next test.
+    if (Object.getOwnPropertyDescriptor(navigator, 'serviceWorker')) {
+      delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+    }
+  });
+
+  function device(id: string, label: string, endpoint: string): PushDevice {
+    return { id, label, endpoint, created_at: '2026-07-01T00:00:00.000Z' };
+  }
+
+  it('renders the requirements note in an unsupported environment', async () => {
+    // No push support installed: jsdom has no secure context / SW / PushManager.
+    await mountSettings();
+    await waitFor(
+      () => (container.textContent?.includes('Notifications') ? true : null),
+      'Notifications block',
+    );
+
+    expect(container.textContent).toContain('need HTTPS');
+    expect(container.textContent).toContain('Home Screen');
+    // The enable button + device list only exist when supported.
+    expect(container.textContent).not.toContain('Enable notifications on this device');
+  });
+
+  it('lists the account devices and marks the current one "this device"', async () => {
+    installPushSupport();
+    subsOnServer = [
+      device('sub_1', 'Chrome on macOS', 'https://push.example/one'),
+      device('sub_2', 'Firefox on Linux', 'https://push.example/two'),
+    ];
+    localSubscription = makeSub('https://push.example/one', 'p', 'a');
+    await mountSettings();
+    await waitFor(
+      () => (container.textContent?.includes('Chrome on macOS') ? true : null),
+      'device list',
+    );
+
+    expect(container.textContent).toContain('Chrome on macOS');
+    expect(container.textContent).toContain('Firefox on Linux');
+    expect(container.textContent).toContain('this device');
+    expect(button('Enable notifications on this device')).toBeTruthy();
+  });
+
+  it('Remove calls deletePushDevice', async () => {
+    installPushSupport();
+    subsOnServer = [device('sub_1', 'Chrome on macOS', 'https://push.example/one')];
+    await mountSettings();
+    await waitFor(
+      () => (container.textContent?.includes('Chrome on macOS') ? true : null),
+      'device list',
+    );
+
+    button('Remove').click();
+    await settle();
+
+    expect(deletedSubIDs).toEqual(['sub_1']);
+  });
+
+  it('Remove also unsubscribes the local browser for this device', async () => {
+    installPushSupport();
+    subsOnServer = [device('sub_1', 'This laptop', 'https://push.example/one')];
+    localSubscription = makeSub('https://push.example/one', 'p', 'a');
+    await mountSettings();
+    await waitFor(
+      () => (container.textContent?.includes('This laptop') ? true : null),
+      'device list',
+    );
+
+    button('Remove').click();
+    await settle();
+
+    expect(deletedSubIDs).toEqual(['sub_1']);
+    expect(unsubscribeCalls).toBe(1);
+  });
+
+  it('Send test calls testPushDevice and confirms', async () => {
+    installPushSupport();
+    subsOnServer = [device('sub_1', 'Chrome on macOS', 'https://push.example/one')];
+    await mountSettings();
+    await waitFor(
+      () => (container.textContent?.includes('Chrome on macOS') ? true : null),
+      'device list',
+    );
+
+    button('Send test').click();
+    await settle();
+
+    expect(testedSubIDs).toEqual(['sub_1']);
+    expect(container.textContent).toContain('Test notification sent');
+  });
+
+  it('Enable requests permission, subscribes, then registers the device', async () => {
+    installPushSupport();
+    subsOnServer = [];
+    await mountSettings();
+    await waitFor(
+      () => (container.textContent?.includes('Enable notifications on this device') ? true : null),
+      'enable button',
+    );
+
+    button('Enable notifications on this device').click();
+    await settle();
+
+    // Permission is requested first, then the subscription, then the register.
+    expect(requestPermissionCalls).toBe(1);
+    expect(subscribeCalls).toHaveLength(1);
+    expect(subscribeCalls[0]?.userVisibleOnly).toBe(true);
+    expect(subscribeCalls[0]?.applicationServerKey).toBeInstanceOf(Uint8Array);
+    expect(createdSubBodies).toEqual([
+      {
+        endpoint: 'https://push.example/new',
+        keys: { p256dh: 'p256dh-new', auth: 'auth-new' },
+      },
+    ]);
+  });
+
+  it('a denied permission surfaces an error and never subscribes', async () => {
+    installPushSupport();
+    requestPermissionResult = 'denied';
+    await mountSettings();
+    await waitFor(
+      () => (container.textContent?.includes('Enable notifications on this device') ? true : null),
+      'enable button',
+    );
+
+    button('Enable notifications on this device').click();
+    await settle();
+
+    expect(requestPermissionCalls).toBe(1);
+    expect(subscribeCalls).toHaveLength(0);
+    expect(createdSubBodies).toEqual([]);
+    expect(container.textContent).toContain('permission was denied');
   });
 });

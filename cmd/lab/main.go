@@ -34,6 +34,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
+	"git.cloonar.com/Cloonar/coding-lab/internal/push"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
@@ -58,6 +59,7 @@ Flags (env overrides in parentheses; flag > env > default):
   -state-dir string        state directory (LAB_STATE_DIR; default ~/.local/state/lab)
   -db string               sqlite:<path> or postgres://… (LAB_DB; default sqlite:<state-dir>/lab.db)
   -master-key-file string  vault master key file (LAB_MASTER_KEY_FILE; default <state-dir>/master.key)
+  -vapid-key-file string   web push VAPID key file (LAB_VAPID_KEY_FILE; default <state-dir>/vapid.key)
   -provider-bin id=path    per-provider agent binary, repeatable (LAB_PROVIDER_BIN_<ID>; adapter default: PATH lookup)
   -provider-config id=path per-provider config file, repeatable (LAB_PROVIDER_CONFIG_<ID>; adapter default, claude-code: ~/.claude.json)
   -tmux, -git, -prlimit string
@@ -133,6 +135,22 @@ func run() int {
 		logger.Error("preparing runtime dir", "component", "main", "err", err)
 		return 1
 	}
+
+	// Web push (issue #98): load-or-generate the VAPID keypair with the same
+	// first-start bootstrap and key-file contract as the master key, then wire
+	// it straight into the sender. The log line stays — it's the operator's
+	// own copy of the non-secret public key, handy without hitting the API.
+	vapidKey, err := loadOrGenerateVAPIDKey(cfg.VAPIDKeyFile, logger)
+	if err != nil {
+		logger.Error("vapid key", "component", "main", "err", err)
+		return 1
+	}
+	logger.Info("web push vapid key loaded", "component", "main", "path", cfg.VAPIDKeyFile, "public_key", vapidKey.PublicKeyB64())
+	// Fire-and-forget by design (internal/push/sender.go): no Flush is wired
+	// into shutdown below. A Flush could block graceful shutdown for up to
+	// sendTimeout (30s) on an airgapped or unreachable gateway — worse than
+	// dropping whatever sends are still in flight when the process exits.
+	pushSender := push.NewSender(st, vapidKey, logger)
 
 	// Tracker registry (M4): resolves a repo-scoped Tracker per binding. The
 	// backend constructors are injected here — cmd/lab is the one place that
@@ -396,6 +414,7 @@ func run() int {
 		Providers:       providerReg,
 		Tracker:         trackerReg,
 		AFK:             afkSvc,
+		Push:            pushSender,
 		Git:             gitEngine,
 		Materializer:    mat,
 		ReposDir:        reposDir,
@@ -484,6 +503,22 @@ func loadOrGenerateMasterKey(path string, logger *slog.Logger) ([]byte, error) {
 		return key, nil
 	}
 	return vault.Load(path)
+}
+
+// loadOrGenerateVAPIDKey mirrors loadOrGenerateMasterKey for the web push
+// VAPID keypair (issue #98): stat-then-Generate — GenerateKey itself refuses
+// to overwrite an existing key file, so a lost race can never clobber one and
+// invalidate the subscriptions minted against the current public key.
+func loadOrGenerateVAPIDKey(path string, logger *slog.Logger) (push.Key, error) {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		key, genErr := push.GenerateKey(path)
+		if genErr != nil {
+			return push.Key{}, genErr
+		}
+		logger.Info("generated web push vapid key", "component", "main", "path", path)
+		return key, nil
+	}
+	return push.LoadKey(path)
 }
 
 // labURL is the LAB_URL handed to spawned sessions. Precedence: the dedicated
