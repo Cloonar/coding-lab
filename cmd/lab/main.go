@@ -44,6 +44,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/builtin"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/forgejo"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/github"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/secretscan"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
@@ -352,7 +353,17 @@ func run() int {
 	if providerReg != nil {
 		scrub = providerReg.ScrubRegexps()
 	}
-	agent := agentapi.New(st, vlt, trackerReg, bus, logger, time.Now, scrub)
+	// Secret-leak guard (issue #107): the agent surface — and ONLY the agent
+	// surface — resolves its trackers through secretscan.NewResolver, so every
+	// run-token PR/issue/comment create is scanned against the repo's own secret
+	// values and rejected (400, naming the secret) before it can reach the
+	// forge. This wrapping HERE is the whole run-token-only property: the
+	// operator API keeps the bare Config{Tracker: trackerReg} above, and the AFK
+	// engine keeps afk.Options{Trackers: trackerReg}, so operator writes and
+	// internal reaper reads never pay the scan. And because the wrap sits above
+	// the registry — the one seam both bindings resolve through — a single
+	// decorator covers the forge and builtin bindings identically.
+	agent := agentapi.New(st, vlt, secretscan.NewResolver(trackerReg, st, vlt), bus, logger, time.Now, scrub)
 
 	// Seed the settings AFTER the provider registry exists: provider_default
 	// is seeded to the FIRST registered provider's ID (issue #66) so the store

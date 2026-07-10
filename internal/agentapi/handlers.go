@@ -6,12 +6,14 @@ package agentapi
 // shapes mirror the operator API's issue JSON byte-for-byte (labctl and the
 // SPA speak one vocabulary); errors are the canonical {"error": …} envelope.
 //
-// Error mapping (pinned): upstream/store miss → 404; unknown label name →
-// 400 naming the label (a typo must fail loudly, never create a garbage
-// label); tracker configuration conflict (unsupported forge kind,
-// missing/wrong-kind credential, bad remote/host, unknown binding) → 409;
-// any other forge upstream failure → 502; builtin store failures → opaque
-// 500.
+// Error mapping (pinned): a write whose content matches a repo secret value →
+// 400 naming the secret (issue #107, reject-not-redact — the run-token scan
+// rejects the write rather than mangling it); upstream/store miss → 404;
+// unknown label name → 400 naming the label (a typo must fail loudly, never
+// create a garbage label); tracker configuration conflict (unsupported forge
+// kind, missing/wrong-kind credential, bad remote/host, unknown binding) →
+// 409; any other forge upstream failure → 502; builtin store failures →
+// opaque 500.
 
 import (
 	"context"
@@ -25,6 +27,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/secretscan"
 )
 
 // EventCRChanged is the SSE event name a builtin PR create publishes: the
@@ -191,14 +194,28 @@ func (s *Server) trackerFor(w http.ResponseWriter, r *http.Request, repo store.R
 	return tk, true
 }
 
-// writeTrackerError maps a tracker call failure: a miss is a 404 on either
-// binding (builtin wraps store.ErrNotFound, the forgejo client wraps
-// tracker.ErrNotFound around an upstream 404); an unknown label name is a
-// 400 carrying the name (strict resolution on both bindings — the caller's
-// typo, not an upstream failure); any other forge-bound failure is an
-// upstream error → 502 with the diagnostic (the forge client's errors never
-// carry the token); builtin store failures stay an opaque 500.
+// writeTrackerError maps a tracker call failure: a run-token write whose
+// content carries a repo secret value is a 400 whose message names the
+// matching secret/field/form (issue #107 — the secretscan decorator rejects
+// rather than redacts, and its error is safe to echo, carrying names only,
+// never a value in any encoding); a miss is a 404 on either binding (builtin
+// wraps store.ErrNotFound, the forgejo client wraps tracker.ErrNotFound around
+// an upstream 404); an unknown label name is a 400 carrying the name (strict
+// resolution on both bindings — the caller's typo, not an upstream failure);
+// any other forge-bound failure is an upstream error → 502 with the diagnostic
+// (the forge client's errors never carry the token); builtin store failures
+// stay an opaque 500.
 func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo store.Repo, err error) {
+	var blocked *secretscan.BlockedError
+	if errors.As(err, &blocked) {
+		// The message names the matched secret/field/form ONLY (secretscan
+		// never renders a value), so it is safe to echo verbatim and there is
+		// nothing diagnostic to log — mirror the ErrUnknownLabel branch. Placed
+		// FIRST, ahead of the forge-generic 502 fold and the builtin opaque-500
+		// fold, so a rejected leak is never miscoded as an upstream fault.
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if errors.Is(err, tracker.ErrUnknownLabel) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
