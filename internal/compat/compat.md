@@ -303,15 +303,20 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   "transcript no longer available" state.
 - **Flush-on-resolve (pending dialogs are invisible live)**: a pending
   `AskUserQuestion` / `ExitPlanMode` `tool_use` is **not** written to the JSONL
-  while it is pending — the transcript file does not change *at all* during the
-  pending window; the `tool_use` **and** its `tool_result` are flushed together,
-  retroactively (original timestamps), only when the dialog resolves. live
-  (2.1.198, 2026-07-07): a question sat pending in the TUI for minutes while the
-  transcript stayed byte-frozen at the user-prompt line. Consequence: the
-  transcript is not a live source for a pending dialog — see §9, which captures
-  it from a PreToolUse hook instead. The transcript-scan dialog path (an
-  unanswered `tool_use` in §5) stays as a dormant fallback for a future Claude
-  Code that flushes pending `tool_use`.
+  while it is pending; the `tool_use` **and** its `tool_result` are flushed
+  together, retroactively (original timestamps), only when the dialog resolves.
+  live (2.1.198, 2026-07-07): a question sat pending in the TUI for minutes
+  while the transcript stayed byte-frozen at the user-prompt line. **But the
+  file is NOT guaranteed byte-frozen during the pending window** — live
+  (2.1.198, 2026-07-10, grill transcript d4be520a): a message queued while the
+  picker was up (composer/claude.ai) appended `queue-operation` + `attachment`
+  entries mid-window. Consequences: the transcript is not a live source for a
+  pending dialog — see §9, which captures it from a PreToolUse hook instead —
+  and transcript mtime must never be used to judge a dialog spool stale (that
+  heuristic hid a genuinely pending dialog after a queued message; the spool's
+  own `session_id` is the staleness key, §9). The transcript-scan dialog path
+  (an unanswered `tool_use` in §5) stays as a dormant fallback for a future
+  Claude Code that flushes pending `tool_use`.
 - **Dialog resolution shapes (`toolUseResult` / `toolDenialKind`) + the 60s
   afkTimeout — live (2.1.198, 2026-07-08, the issue #51 verification runs;
   full transcripts in `testdata/transcript-{askuserquestion,exitplanmode,multiselect-timeout}-live-2.1.198.jsonl`,
@@ -706,14 +711,17 @@ the flag is never swallowed as prompt text. Hooks fire normally under
   `tool_use_id` appears in the transcript (the retro-flush landed = resolved);
   the PostToolUse hook is the primary spool delete, this scan the backstop. It
   is **also** suppressed when the transcript has rotated past it (a `/clear` or
-  `/rewind` re-point, §5): `PendingDialog` OR's a spool-older-than-transcript
-  mtime check with the tool-id check (mirroring the blocked-marker staleness
-  guard), so a pre-clear spool cannot keep the composer locked against the fresh
-  session (issue #34). Safe for the genuine pending case — the transcript stays
-  byte-frozen during a pending dialog (§5) while the spool is written after it,
-  so the spool is always the newer file. The chat GCs the three per-run files
-  once the run is no longer active (an active run's spool survives a lab restart
-  — the file persists).
+  `/rewind` re-point, §5): `PendingDialog` compares the spool payload's
+  `session_id` (falling back to its `transcript_path` stem) against the current
+  transcript's filename stem — a mismatch means the spool was captured against a
+  rotated-out session, so it cannot keep the composer locked against the fresh
+  one (issue #34). NEVER an mtime comparison: the transcript is not byte-frozen
+  during a pending window (`queue-operation`/`attachment` entries land live, §5)
+  — the former spool-older-than-transcript mtime rule suppressed a genuinely
+  pending dialog the moment the operator queued a message (found live
+  2026-07-10). A payload with no session identity degrades to the old mtime
+  backstop. The chat GCs the three per-run files once the run is no longer
+  active (an active run's spool survives a lab restart — the file persists).
 
 **Appendix payloads (2.1.198 live, ids/paths anonymized — the fixture ground
 truth):**

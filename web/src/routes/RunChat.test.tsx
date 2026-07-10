@@ -1336,6 +1336,93 @@ describe('RunChat', () => {
     expect(buttonByText('Submit')!.disabled).toBe(true); // stale picks dropped
   });
 
+  it('keeps in-progress picks, Other text and the input element across a refetch of the SAME dialog', async () => {
+    // Every response is a fresh JSON parse — the same pending dialog arrives
+    // as a new object each refetch. Neither the operator's picks, nor the
+    // half-typed Other text, nor the input ELEMENT (focus!) may churn on an
+    // SSE tick that changed nothing.
+    messagesOnServer = {
+      messages: [],
+      state: 'question',
+      cursor: 0,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_same',
+        dialog_kind: 'question',
+        prompt: 'Pick or type?',
+        answerable: true,
+        multi: true,
+        options: [{ label: 'One' }, { label: 'Two' }, { label: 'Other', is_other: true }],
+      },
+    };
+    await mountChat();
+
+    buttonByText('One')!.click();
+    buttonByText('Other')!.click();
+    await settle();
+    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
+    other.value = 'half-typed answer';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    emitMessagesChanged();
+    await settle();
+
+    const after = container.querySelector('.dialog-other-input') as HTMLInputElement;
+    expect(after).toBe(other); // same element — focus survives
+    expect(after.value).toBe('half-typed answer');
+    expect(buttonByText('One')!.getAttribute('aria-pressed')).toBe('true');
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+  });
+
+  it('keeps multi-question form answers across a refetch of the SAME dialog', async () => {
+    messagesOnServer = {
+      messages: [],
+      state: 'question',
+      cursor: 0,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_form',
+        dialog_kind: 'question',
+        prompt: '2 questions',
+        answerable: true,
+        questions: [
+          {
+            text: 'Pick a flavor?',
+            header: 'Flavor',
+            options: [{ label: 'Sweet' }, { label: 'Sour' }, { label: 'Other', is_other: true }],
+          },
+          {
+            text: 'Pick a size?',
+            header: 'Size',
+            options: [{ label: 'Small' }, { label: 'Large' }],
+          },
+        ],
+      },
+    };
+    await mountChat();
+
+    buttonByText('Other')!.click();
+    await settle();
+    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
+    other.value = 'umami';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    buttonByText('Large')!.click();
+    await settle();
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+
+    emitMessagesChanged();
+    await settle();
+
+    const after = container.querySelector('.dialog-other-input') as HTMLInputElement;
+    expect(after).toBe(other);
+    expect(after.value).toBe('umami');
+    expect(buttonByText('Large')!.getAttribute('aria-pressed')).toBe('true');
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+  });
+
   it('shows transcript-specific copy when the transcript is gone on a live run', async () => {
     messagesOnServer = {
       messages: [],

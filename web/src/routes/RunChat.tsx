@@ -333,7 +333,16 @@ function RunChatView() {
       const dialog = latest.pending_dialog ?? null;
       const newDialog = dialog !== null && dialog.tool_id !== seenDialogToolId;
       seenDialogToolId = dialog?.tool_id ?? null;
-      setPendingDialogField(dialog);
+      // Keep the dialog's OBJECT identity stable while the same dialog stays
+      // pending (a dialog's content is immutable for its tool_id — the hook
+      // spools it once). Each response is a fresh parse; adopting it would
+      // ripple a no-op change through every downstream computation — the
+      // option <For> would recreate its rows and the Other input would lose
+      // focus (and, before the identity-memo guards below, its text) under
+      // the operator's fingers on every SSE tick.
+      setPendingDialogField((prev) =>
+        prev !== null && dialog !== null && prev.tool_id === dialog.tool_id ? prev : dialog,
+      );
       setTranscript(latest.transcript);
       setTranscriptId(latest.transcript_id);
       // Writing transcript_id can synchronously run the rotation effect (Solid
@@ -1867,10 +1876,14 @@ function DialogPanel(props: {
 
   // Selection state is keyed to the dialog's identity: if the pending dialog
   // changes while the panel is mounted, stale picks must not carry over and
-  // answer the new dialog.
+  // answer the new dialog. The identity is MEMOIZED because every refetch
+  // delivers a fresh pending_dialog object for the same dialog, and `on` alone
+  // re-runs on any upstream write — without the equality-gating memo, each SSE
+  // tick wiped the operator's in-progress picks and half-typed Other text.
+  const dialogIdentity = createMemo(() => props.dialog.tool_id);
   createEffect(
     on(
-      () => props.dialog.tool_id,
+      dialogIdentity,
       () => {
         setSelected([]);
         setOtherText('');
@@ -2117,9 +2130,13 @@ function MultiQuestionForm(props: {
   const [picks, setPicks] = createSignal<ReadonlyMap<number, number[]>>(new Map());
   const [others, setOthers] = createSignal<ReadonlyMap<number, string>>(new Map());
 
+  // Memoized like DialogPanel's dialogIdentity: resetKey re-evaluates on every
+  // refetch (a fresh dialog object each response), and only a REAL identity
+  // change may drop the operator's in-progress answers.
+  const resetKey = createMemo(() => props.resetKey);
   createEffect(
     on(
-      () => props.resetKey,
+      resetKey,
       () => {
         setPicks(new Map());
         setOthers(new Map());
