@@ -80,7 +80,8 @@ func (s *Service) readopt(ctx context.Context) (map[string]bool, error) {
 
 // keptRunIDs returns the run ids whose active run is live in tmux right now —
 // the runtime credential keep-set (a lighter readopt used by the throttled
-// sweep, which never marks runs dead: startup owns that).
+// sweep, which never marks runs dead: startup readopt and the dead-session
+// sweep own that).
 func (s *Service) keptRunIDs(ctx context.Context) (map[string]bool, error) {
 	active, err := s.store.ActiveRuns(ctx)
 	if err != nil {

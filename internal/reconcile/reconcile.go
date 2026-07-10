@@ -15,6 +15,11 @@
 //   - Parked / Discard: the read-only view over guarded-rule-preserved work,
 //     and the ONE unguarded destroyer (kill session, force-remove worktree,
 //     force-delete branch) gated by a managed-branch check.
+//   - sweepDeadSessions / DeadSessionLoop (issue #93): a short-ticked,
+//     unthrottled runtime sibling of readopt — ends any active
+//     store.RunKindManual run whose tmux session is gone. AFK kinds are
+//     never touched here; that classification stays exclusively the AFK
+//     reaper's.
 //
 // Every guarded decision routes through gitx.TeardownGuarded (dirty always
 // wins; conservative keep on any unreadable status/merged check). Discard is
@@ -52,6 +57,11 @@ const (
 const (
 	sweepTick     = 30 * time.Second
 	sweepThrottle = 10 * time.Minute
+	// deadSessionTick drives DeadSessionLoop (issue #93) — its own short,
+	// unthrottled cadence in the same family as sweepTick, deliberately not
+	// tied to sweepThrottle/sweep_interval_minutes: a dead manual session
+	// should flip to ended within one tick, not wait out a GC-cadence throttle.
+	deadSessionTick = 30 * time.Second
 )
 
 type repoScopedPayload struct {

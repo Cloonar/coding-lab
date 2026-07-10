@@ -420,6 +420,13 @@ func run() int {
 		go afkSvc.ReaperLoop(ctx)
 		go afkSvc.SchedulerLoop(ctx)
 	}
+	// The reconcile-owned dead-session sweep (issue #93): ends active manual
+	// runs whose tmux session is gone — the runtime sibling of readopt. Its own
+	// short tick, not the throttled sweep_interval_minutes cadence, so a dead
+	// run flips to ended within seconds. AFK kinds stay the reaper's.
+	if reconcileSvc != nil {
+		go reconcileSvc.DeadSessionLoop(ctx)
+	}
 	// The chat tailer: one goroutine that keeps a per-live-instance transcript
 	// tailer set in sync with the active runs and publishes run.messages.changed.
 	if chatSvc != nil {
