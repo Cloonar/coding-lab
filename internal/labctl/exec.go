@@ -8,12 +8,29 @@ package labctl
 // process env (os.Setenv), never written to disk, and never printed or logged
 // — they live for one exec, in cmd.Env, and nowhere else. Rotation is live:
 // the fetch happens per invocation, so nothing is ever cached.
+//
+// Broker output redaction (issue #105): the child's stdout and stderr are
+// each piped through their own secrets.Redactor, built from a Matcher over
+// exactly the values injected for THIS exec, so every occurrence — in the
+// exact plaintext or any of its base64/hex/URL-encoded forms — reaches
+// env.Stdout/env.Stderr only as the literal token "[REDACTED:NAME]". A
+// contained redaction hit is deliberately quiet: no operator alert, no log
+// line, and the plaintext value appears nowhere in labctl's own output (grill
+// decision, issue #105). Because the redactors are not *os.File, os/exec runs
+// the child on pipes rather than inheriting the caller's stdout/stderr
+// directly — never a TTY. That is acceptable and intentional: agents don't
+// run interactive commands through the broker. Each Redactor also holds back
+// a small trailing window of its stream (bounded by the longest derived
+// pattern), so the final bytes of a stream only reach the destination once
+// Flush runs at process exit — never mid-stream.
 
 import (
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/secrets"
 )
 
 // runSecret dispatches `labctl secret list|exec`.
@@ -64,6 +81,20 @@ func runSecretList(args []string, env Env) int {
 //
 // The fetched values feed ONLY cmd.Env — they are never placed in argv, never
 // exported via os.Setenv, never printed, and never logged.
+//
+// The child's stdout and stderr each run through their own secrets.Redactor
+// (issue #105), so any of the fetched values reaching either stream — in any
+// derived form — is replaced with "[REDACTED:NAME]" before it reaches
+// env.Stdout/env.Stderr; a hit is quiet by design (no log, no alert). A
+// Matcher/Redactor is not safe for concurrent use, and os/exec copies stdout
+// and stderr from separate goroutines, so this builds one Matcher and one
+// Redactor per stream. cmd.Run waits for both copy goroutines to finish before
+// returning, so by the time it returns there is nothing left to feed — but
+// each Redactor still holds back a small trailing window that only Flush
+// releases. Flush runs on BOTH redactors unconditionally, even when cmd.Run
+// already failed and even when the first Flush errors, so a child that prints
+// part of a secret and then exits non-zero still gets its tail redacted and
+// emitted rather than silently dropped.
 func runSecretExec(args []string, env Env) int {
 	// Split on the first `--`: names before it, the command (and its args)
 	// after it. All three parts are required.
@@ -112,25 +143,60 @@ func runSecretExec(args []string, env Env) int {
 		cmd.Env = append(cmd.Env, name+"="+values[name])
 	}
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = env.Stdout
-	cmd.Stderr = env.Stderr
 
-	if err := cmd.Run(); err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			// The child ran and exited non-zero: pass its code through. A
-			// signal death reports ExitCode() == -1; map that to 1 so the
-			// caller always sees a real, non-negative code.
-			if code := ee.ExitCode(); code >= 0 {
-				return code
+	// One Matcher/Redactor per stream: neither type is safe for concurrent
+	// use, and os/exec copies stdout and stderr from separate goroutines.
+	// Assigning a non-*os.File Writer here is what makes os/exec run the
+	// child on pipes instead of handing it env.Stdout/env.Stderr directly —
+	// deliberate, see the file header.
+	stdoutRedactor := secrets.NewRedactor(env.Stdout, secrets.NewMatcher(values))
+	stderrRedactor := secrets.NewRedactor(env.Stderr, secrets.NewMatcher(values))
+	cmd.Stdout = stdoutRedactor
+	cmd.Stderr = stderrRedactor
+
+	runErr := cmd.Run()
+
+	// Flush BOTH redactors unconditionally — even if the first errors, even
+	// if cmd.Run itself failed — so a stream's held-back tail is never
+	// dropped: a child that prints a secret and then exits non-zero must
+	// still get that tail redacted and emitted.
+	stdoutFlushErr := stdoutRedactor.Flush()
+	stderrFlushErr := stderrRedactor.Flush()
+
+	var ee *exec.ExitError
+	if runErr == nil || errors.As(runErr, &ee) {
+		// The child ran to completion — either cleanly or with its own exit
+		// code, which passes through VERBATIM. A signal death reports
+		// ExitCode() == -1; map that to 1 so the caller always sees a real,
+		// non-negative code.
+		code := 0
+		if ee != nil {
+			if c := ee.ExitCode(); c >= 0 {
+				code = c
+			} else {
+				code = 1
 			}
-			return 1
 		}
-		// The child never started (command not found / not executable).
-		_, _ = fmt.Fprintf(env.Stderr, "labctl secret exec: %v\n", err)
-		return 1
+		flushErr := stdoutFlushErr
+		if flushErr == nil {
+			flushErr = stderrFlushErr
+		}
+		if flushErr != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl secret exec: %v\n", flushErr)
+			if code == 0 {
+				return 1
+			}
+			return code
+		}
+		return code
 	}
-	return 0
+
+	// The child never started (command not found / not executable), or an
+	// output copy failed. Either way runErr already names the failure — the
+	// Flush calls above return that same poisoning error, so do not print it
+	// again.
+	_, _ = fmt.Fprintf(env.Stderr, "labctl secret exec: %v\n", runErr)
+	return 1
 }
 
 // secretExecUsage reports a `secret exec` shape/env error: exit 2 with usage

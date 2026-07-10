@@ -3,10 +3,13 @@ package labctl
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -1061,35 +1064,47 @@ func TestSecretListOutput(t *testing.T) {
 	}
 }
 
-// TestSecretExecInjectsValue pins the core exec path: the named secret reaches
-// the child as $NAME and the child's stdout (the value it prints) surfaces
-// verbatim, exit 0.
+// TestSecretExecInjectsValue pins the core exec path: the named secret
+// reaches the child as $NAME. The value can no longer be proven by printing
+// it — output redaction (issue #105) means the plaintext never survives to
+// stdout — so injection is proven by an IN-CHILD comparison against the
+// expected value (passed as an argv operand, which is never scanned), and the
+// child also prints the value to prove the printed side arrives, by
+// contract, as the redaction token rather than the plaintext.
 func TestSecretExecInjectsValue(t *testing.T) {
 	f := newBuiltinFixture(t)
 	f.seedSecret(t, "FOO", "", "plaintext-injected")
 	sh := testShell(t)
 
-	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", `printf %s "$FOO"`}, f.env())
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--",
+		sh, "-c", `[ "$FOO" = "$1" ] && printf %s "$FOO"`, "sh", "plaintext-injected"}, f.env())
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr %q", code, stderr)
 	}
-	if stdout != "plaintext-injected" {
-		t.Errorf("stdout = %q, want the injected value", stdout)
+	if stdout != "[REDACTED:FOO]" {
+		t.Errorf("stdout = %q, want the redaction token", stdout)
 	}
 }
 
 // TestSecretExecLiveRotation pins that values are fetched per exec, never
 // cached: rotating the stored ciphertext (no client/fixture rebuild) changes
-// what the very next exec sees, with the same env.
+// what the very next exec sees, with the same env. Rotation can no longer be
+// observed by printing the value — both v1 and v2 would redact to the same
+// "[REDACTED:FOO]" token — so instead the child compares $FOO against an
+// expected literal given as an argv operand (never scanned) and prints only
+// "match"/"mismatch", never the value itself.
 func TestSecretExecLiveRotation(t *testing.T) {
 	f := newBuiltinFixture(t)
 	id := f.seedSecret(t, "FOO", "", "v1")
 	sh := testShell(t)
-	args := []string{"secret", "exec", "FOO", "--", sh, "-c", `printf %s "$FOO"`}
+	cmpScript := `if [ "$FOO" = "$1" ]; then printf match; else printf mismatch; fi`
+	argsFor := func(expect string) []string {
+		return []string{"secret", "exec", "FOO", "--", sh, "-c", cmpScript, "sh", expect}
+	}
 
-	code, stdout, stderr := run(t, args, f.env())
-	if code != 0 || stdout != "v1" {
-		t.Fatalf("first exec = %d %q, stderr %q, want 0 v1", code, stdout, stderr)
+	code, stdout, stderr := run(t, argsFor("v1"), f.env())
+	if code != 0 || stdout != "match" {
+		t.Fatalf("first exec (compare v1) = %d %q, stderr %q, want 0 match", code, stdout, stderr)
 	}
 
 	// Rotate the stored blob in place; no new client, no new server.
@@ -1101,9 +1116,14 @@ func TestSecretExecLiveRotation(t *testing.T) {
 		t.Fatalf("RotateRepoSecret: %v", err)
 	}
 
-	code, stdout, stderr = run(t, args, f.env())
-	if code != 0 || stdout != "v2" {
-		t.Fatalf("post-rotation exec = %d %q, stderr %q, want 0 v2", code, stdout, stderr)
+	code, stdout, stderr = run(t, argsFor("v1"), f.env())
+	if code != 0 || stdout != "mismatch" {
+		t.Fatalf("post-rotation exec (compare stale v1) = %d %q, stderr %q, want 0 mismatch", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = run(t, argsFor("v2"), f.env())
+	if code != 0 || stdout != "match" {
+		t.Fatalf("post-rotation exec (compare v2) = %d %q, stderr %q, want 0 match", code, stdout, stderr)
 	}
 }
 
@@ -1139,33 +1159,178 @@ func TestSecretExecUnknownName(t *testing.T) {
 	}
 }
 
-// TestSecretExecArgvIsExactCommand pins that the value reaches the child ONLY
-// through the environment: the child echoes its own argv ($0 then $@) and then
-// $FOO, and the value shows up exactly once — in the env line, never among the
-// argv lines.
+// TestSecretExecArgvIsExactCommand pins that argv is passed through EXACT and
+// value-free: the child echoes its own argv ($0 then $@) byte-identical (a
+// passthrough check, since none of those bytes match the secret), then proves
+// injection with an in-child comparison (never printing the value), then
+// prints $FOO itself — which by contract arrives as the redaction token, not
+// the plaintext.
 func TestSecretExecArgvIsExactCommand(t *testing.T) {
 	f := newBuiltinFixture(t)
 	f.seedSecret(t, "FOO", "", "smuggled-plain")
 	sh := testShell(t)
 
 	// `sh -c SCRIPT $0 $@`: with trailing operands "sh" "alpha" "beta", the
-	// child sees $0=sh, $@=(alpha beta) — exactly the argv we passed.
-	script := `printf '%s\n' "$0" "$@"; printf 'env=%s\n' "$FOO"`
-	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", script, "sh", "alpha", "beta"}, f.env())
+	// child sees $0=sh, $@=(alpha beta) — exactly the argv we passed. $2 below
+	// carries the expected value for the in-child comparison; it is an argv
+	// operand, never scanned, and never echoed.
+	script := `printf '%s\n' "$0" "$1" "$2"; [ "$FOO" = "$3" ] && printf 'match\n'; printf 'env=%s\n' "$FOO"`
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--",
+		sh, "-c", script, "sh", "alpha", "beta", "smuggled-plain"}, f.env())
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr %q", code, stderr)
 	}
-	want := "sh\nalpha\nbeta\nenv=smuggled-plain\n"
+	want := "sh\nalpha\nbeta\nmatch\nenv=[REDACTED:FOO]\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
-	// The value is present exactly once, and only in the env line.
-	if n := strings.Count(stdout, "smuggled-plain"); n != 1 {
-		t.Errorf("value appears %d times, want exactly once (env only)", n)
+	if strings.Contains(stdout, "smuggled-plain") || strings.Contains(stderr, "smuggled-plain") {
+		t.Errorf("plaintext value leaked: stdout %q, stderr %q", stdout, stderr)
 	}
-	for _, argvLine := range []string{"sh", "alpha", "beta"} {
-		if strings.Contains(argvLine, "smuggled-plain") {
-			t.Errorf("value leaked into argv line %q", argvLine)
+}
+
+// --- output redaction (issue #105) ------------------------------------------
+
+// TestSecretExecRedactsPrintedValue pins the headline behaviour: a child that
+// prints the injected value verbatim to stdout never gets it through — the
+// broker's redactor replaces it with the "[REDACTED:NAME]" token.
+func TestSecretExecRedactsPrintedValue(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "plaintext-injected")
+	sh := testShell(t)
+
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", `printf %s "$FOO"`}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "[REDACTED:FOO]" {
+		t.Errorf("stdout = %q, want [REDACTED:FOO]", stdout)
+	}
+}
+
+// TestSecretExecRedactsEncodedForms pins that redaction catches every derived
+// form the Matcher recognises, not just the exact plaintext: base64, hex, and
+// URL percent-encoding. The value is chosen so its encodings differ from the
+// plaintext and from each other (space, '+', '=', '!' all need escaping or
+// encoding). Each encoded string is passed as an argv operand — never
+// scanned — and the child prints it verbatim; the printed output must still
+// come out as the token, proving the Matcher derived and matched that form.
+func TestSecretExecRedactsEncodedForms(t *testing.T) {
+	f := newBuiltinFixture(t)
+	const value = "hello world+/=!"
+	f.seedSecret(t, "FOO", "", value)
+	sh := testShell(t)
+
+	forms := map[string]string{
+		"base64": base64.StdEncoding.EncodeToString([]byte(value)),
+		"hex":    hex.EncodeToString([]byte(value)),
+		"url":    url.QueryEscape(value),
+	}
+	for form, encoded := range forms {
+		t.Run(form, func(t *testing.T) {
+			code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", `printf %s "$1"`, "sh", encoded}, f.env())
+			if code != 0 {
+				t.Fatalf("exit = %d, stderr %q", code, stderr)
+			}
+			if stdout != "[REDACTED:FOO]" {
+				t.Errorf("stdout = %q, want [REDACTED:FOO] (form %s, encoded %q)", stdout, form, encoded)
+			}
+			if strings.Contains(stdout, value) || strings.Contains(stderr, value) {
+				t.Errorf("plaintext value leaked: stdout %q, stderr %q", stdout, stderr)
+			}
+			if strings.Contains(stdout, encoded) {
+				t.Errorf("encoded value leaked unredacted: stdout %q", stdout)
+			}
+		})
+	}
+}
+
+// TestSecretExecPrintenvShowsPlaceholder is the issue's literal acceptance
+// criterion: `labctl secret exec FOO -- printenv FOO` must print the
+// redaction placeholder, never the value.
+func TestSecretExecPrintenvShowsPlaceholder(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "plaintext-injected")
+
+	printenv, err := exec.LookPath("printenv")
+	if err != nil {
+		// Fall back to the shell's printenv utility (skip is inside testShell
+		// if even that is unavailable); printenv exists in this sandbox's
+		// coreutils, so this branch is not expected to run.
+		sh := testShell(t)
+		code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", "printenv FOO"}, f.env())
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr %q", code, stderr)
 		}
+		if stdout != "[REDACTED:FOO]\n" {
+			t.Fatalf("stdout = %q, want [REDACTED:FOO]\\n", stdout)
+		}
+		return
+	}
+
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", printenv, "FOO"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "[REDACTED:FOO]\n" {
+		t.Fatalf("stdout = %q, want [REDACTED:FOO]\\n", stdout)
+	}
+}
+
+// TestSecretExecStderrRedactedAndSeparate pins that redaction applies to
+// stderr independently of stdout, and that the two streams stay separate: a
+// stdout marker survives byte-identical while the value written to stderr
+// comes out only as the token.
+func TestSecretExecStderrRedactedAndSeparate(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "plaintext-injected")
+	sh := testShell(t)
+
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", `printf out-ok; printf %s "$FOO" >&2`}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "out-ok" {
+		t.Errorf("stdout = %q, want out-ok (byte-identical, no token, no value)", stdout)
+	}
+	if stderr != "[REDACTED:FOO]" {
+		t.Errorf("stderr = %q, want [REDACTED:FOO]", stderr)
+	}
+}
+
+// TestSecretExecRedactionPreservesExitCode pins flush-before-return on the
+// ExitError path: a child that prints the secret and then exits non-zero must
+// still get its output redacted (not dropped, not left raw) AND its exit code
+// passed through verbatim.
+func TestSecretExecRedactionPreservesExitCode(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "plaintext-injected")
+	sh := testShell(t)
+
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "--", sh, "-c", `printf %s "$FOO"; exit 5`}, f.env())
+	if code != 5 {
+		t.Fatalf("exit = %d, want the child's 5 (stderr %q)", code, stderr)
+	}
+	if stdout != "[REDACTED:FOO]" {
+		t.Errorf("stdout = %q, want [REDACTED:FOO]", stdout)
+	}
+}
+
+// TestSecretExecMultipleSecretsRedacted pins that every injected secret is
+// redacted under its own name in the same stream, and that surrounding
+// non-secret bytes (the marker) pass through byte-identical.
+func TestSecretExecMultipleSecretsRedacted(t *testing.T) {
+	f := newBuiltinFixture(t)
+	f.seedSecret(t, "FOO", "", "foo-value")
+	f.seedSecret(t, "BAR", "", "bar-value")
+	sh := testShell(t)
+
+	code, stdout, stderr := run(t, []string{"secret", "exec", "FOO", "BAR", "--", sh, "-c", `printf %s "$FOO"; printf MARKER; printf %s "$BAR"`}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	want := "[REDACTED:FOO]MARKER[REDACTED:BAR]"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }
