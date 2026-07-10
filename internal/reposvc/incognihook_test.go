@@ -1,8 +1,10 @@
 package reposvc
 
-// Incogni pre-push guard wiring (D15 §9 measure 7): installed by reposvc
-// when the incogni flag turns on — repo add (via clone completion) and
-// PATCH toggle-on — and removed on toggle-off.
+// Pre-push guard wiring (issue #106 + D15 §9 measure 7): reposvc installs
+// the guard on EVERY repo at clone completion — the secret leak scan is
+// unconditional — and the incogni flag only decides the hook's CONTENT:
+// toggling re-renders the attribution/seeded-path patterns in or out, never
+// removes the hook, and core.hooksPath stays pinned throughout.
 
 import (
 	"os"
@@ -17,6 +19,25 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 )
+
+// readHook returns bare's pre-push hook body, failing t when unreadable.
+func readHook(t *testing.T, bare string) string {
+	t.Helper()
+	body, err := os.ReadFile(seeder.PrePushHookPath(bare))
+	if err != nil {
+		t.Fatalf("read hook: %v", err)
+	}
+	return string(body)
+}
+
+// hooksPath reads bare's LOCAL core.hooksPath; "" when unset.
+func hooksPath(t *testing.T, home, bare string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", bare, "config", "--local", "--get", "core.hooksPath")
+	cmd.Env = append(os.Environ(), testutil.HermeticGitEnv(home)...)
+	out, _ := cmd.Output() // exit 1 when unset → ""
+	return strings.TrimSpace(string(out))
+}
 
 func TestIncogniPrePushHookAddAndToggle(t *testing.T) {
 	e := newTestEnv(t)
@@ -36,17 +57,22 @@ func TestIncogniPrePushHookAddAndToggle(t *testing.T) {
 	if fi, err := os.Stat(seeder.PrePushHookPath(bare)); err != nil || fi.Mode()&0o111 == 0 {
 		t.Fatalf("hook not executable: %v %v", fi, err)
 	}
-	// The guard's scrub patterns are the union of every registered
-	// provider's declared patterns (ADR-0033, issue #75); with a single
-	// registered provider (this env's default) the union degenerates to
-	// exactly that provider's SeedMeta, so hook content is unchanged here.
-	if body, err := os.ReadFile(seeder.PrePushHookPath(bare)); err != nil {
-		t.Fatalf("read hook: %v", err)
-	} else if !strings.Contains(string(body), `co-authored-by:[[:space:]]*claude`) {
+	// The guard is two-part: the secret leak scan on every repo (issue #106)
+	// plus the incogni scans, whose scrub patterns are the union of every
+	// registered provider's declared patterns (ADR-0033, issue #75); with a
+	// single registered provider (this env's default) the union degenerates
+	// to exactly that provider's SeedMeta.
+	body := readHook(t, bare)
+	if !strings.Contains(body, "labctl secret scan") {
+		t.Error("installed hook missing the secret leak scan (issue #106)")
+	}
+	if !strings.Contains(body, `co-authored-by:[[:space:]]*claude`) {
 		t.Error("installed hook missing the provider-declared scrub pattern; reposvc→provider→hook wiring broken")
 	}
 
-	// Toggle-off removes it; the flag flip persists.
+	// Toggle-off re-renders the hook WITHOUT the incogni patterns: the hook
+	// stays (the secret scan guards every repo), the patterns go, the pin
+	// stays, and the flag flip persists.
 	updated, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
 		Incogni: store.Set(false),
 	})
@@ -56,11 +82,21 @@ func TestIncogniPrePushHookAddAndToggle(t *testing.T) {
 	if updated.Incogni {
 		t.Error("incogni still true after toggle-off")
 	}
-	if seeder.PrePushHookInstalled(bare) {
-		t.Error("pre-push hook still installed after incogni toggle-off")
+	if !seeder.PrePushHookInstalled(bare) {
+		t.Fatal("pre-push hook gone after incogni toggle-off; the secret-scan guard must stay on every repo")
+	}
+	body = readHook(t, bare)
+	if !strings.Contains(body, "labctl secret scan") {
+		t.Error("secret leak scan missing after incogni toggle-off")
+	}
+	if strings.Contains(body, "co-authored-by") {
+		t.Error("incogni scrub patterns survived toggle-off")
+	}
+	if got := hooksPath(t, e.home, bare); got == "" {
+		t.Error("core.hooksPath unpinned by incogni toggle-off; the pin protects the secret scan on every repo")
 	}
 
-	// Toggle-on reinstalls it.
+	// Toggle-on renders the patterns back in.
 	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
 		Incogni: store.Set(true),
 	})
@@ -70,8 +106,8 @@ func TestIncogniPrePushHookAddAndToggle(t *testing.T) {
 	if !updated.Incogni {
 		t.Error("incogni still false after toggle-on")
 	}
-	if !seeder.PrePushHookInstalled(bare) {
-		t.Error("pre-push hook missing after incogni toggle-on")
+	if !strings.Contains(readHook(t, bare), `co-authored-by:[[:space:]]*claude`) {
+		t.Error("incogni scrub patterns missing after toggle-on")
 	}
 
 	// Toggle-on again: idempotent over lab's own hook.
@@ -85,9 +121,11 @@ func TestIncogniPrePushHookAddAndToggle(t *testing.T) {
 	}
 }
 
-// A non-incogni add stays unguarded, and toggling incogni while the repo
-// has no bare dir (clone failed) neither errors nor strands state: the
-// hook arrives with the retried clone's completion.
+// A non-incogni add is guarded too (issue #106: secrets are per-repo,
+// orthogonal to incogni): its hook carries the secret leak scan and none of
+// the incogni patterns. And toggling incogni either way while the repo has
+// no bare dir (clone failed) neither errors nor strands state: the hook
+// arrives with the retried clone's completion, content per the re-read row.
 func TestIncogniPrePushHookNonIncogniAndMissingBareDir(t *testing.T) {
 	e := newTestEnv(t)
 	origin := makeOrigin(t, e.home, "main", 1)
@@ -97,12 +135,23 @@ func TestIncogniPrePushHookNonIncogniAndMissingBareDir(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
-	if seeder.PrePushHookInstalled(e.svc.bareDir(repo.ID)) {
-		t.Error("pre-push hook installed on a non-incogni repo")
+	bare := e.svc.bareDir(repo.ID)
+	if !seeder.PrePushHookInstalled(bare) {
+		t.Fatal("pre-push hook missing on a non-incogni repo; the secret-scan guard must land with every clone")
+	}
+	body := readHook(t, bare)
+	if !strings.Contains(body, "labctl secret scan") {
+		t.Error("non-incogni hook missing the secret leak scan")
+	}
+	if strings.Contains(body, "co-authored-by") {
+		t.Error("non-incogni hook carries incogni scrub patterns")
+	}
+	if got := hooksPath(t, e.home, bare); got == "" {
+		t.Error("core.hooksPath not pinned on a non-incogni repo")
 	}
 
 	// A repo whose clone failed has no bare dir: the toggle-on PATCH must
-	// still succeed (skip the install — clone completion will do it).
+	// still succeed (skip the install — clone completion will do it) ...
 	broken, err := e.svc.Add(t.Context(), AddParams{RemoteURL: "file:///nonexistent/nowhere.git"})
 	if err != nil {
 		t.Fatalf("Add broken: %v", err)
@@ -118,6 +167,20 @@ func TestIncogniPrePushHookNonIncogniAndMissingBareDir(t *testing.T) {
 		t.Error("incogni not set on repo without bare dir")
 	}
 
+	// ... and so must the toggle-off PATCH (skip the re-render silently).
+	updated, err = e.svc.UpdateSettings(t.Context(), broken.ID, store.RepoSettingsUpdate{
+		Incogni: store.Set(false),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings toggle-off on repo without bare dir: %v", err)
+	}
+	if updated.Incogni {
+		t.Error("incogni not cleared on repo without bare dir")
+	}
+	if _, err := os.Stat(e.svc.bareDir(broken.ID)); !os.IsNotExist(err) {
+		t.Errorf("toggling incogni on a repo without a bare dir left something behind: %v", err)
+	}
+
 	// The retried clone completes the deferred install: re-point the row's
 	// remote at a real origin is not possible via UpdateSettings, so verify
 	// via the incogni Add path instead — Retry over a now-working remote is
@@ -127,9 +190,12 @@ func TestIncogniPrePushHookNonIncogniAndMissingBareDir(t *testing.T) {
 
 // Regression (M7 review): install pins the bare repo's LOCAL core.hooksPath
 // to the absolute hooks dir so a global/system core.hooksPath (husky &c.)
-// cannot route agent pushes past the guard; toggle-off unpins it; and
-// StartupHeal reconciles the guard against the incogni flag for every ready
-// repo (a crash between a toggle and its hook op leaves them out of sync).
+// cannot route ANY agent push past the guard — with the secret scan on every
+// repo (issue #106) the pin is permanent, never undone by an incogni toggle.
+// StartupHeal's reconcile converges the guard on every ready repo: the hook
+// exists unconditionally with content matching the incogni flag (a crash
+// between a toggle and its hook re-render leaves the content out of sync; a
+// repo cloned by an older lab lacks the hook entirely).
 func TestIncogniHookPinsHooksPathAndReconciles(t *testing.T) {
 	e := newTestEnv(t)
 	origin := makeOrigin(t, e.home, "main", 1)
@@ -140,42 +206,102 @@ func TestIncogniHookPinsHooksPathAndReconciles(t *testing.T) {
 	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
 	bare := e.svc.bareDir(repo.ID)
 
-	hooksPath := func() string {
-		cmd := exec.Command("git", "-C", bare, "config", "--local", "--get", "core.hooksPath")
-		cmd.Env = append(os.Environ(), testutil.HermeticGitEnv(e.home)...)
-		out, _ := cmd.Output() // exit 1 when unset → ""
-		return strings.TrimSpace(string(out))
-	}
-	if got := hooksPath(); got == "" {
-		t.Error("core.hooksPath not pinned after incogni install")
+	if got := hooksPath(t, e.home, bare); got == "" {
+		t.Error("core.hooksPath not pinned after guard install")
 	} else if !filepath.IsAbs(got) {
 		t.Errorf("core.hooksPath = %q, want an absolute path", got)
 	}
 
-	// Simulate a crash that flipped the row to non-incogni but never removed
-	// the guard: reconcile at startup must remove it.
+	// Simulate a crash that flipped the row to non-incogni but never
+	// re-rendered the hook: reconcile keeps the hook, strips the patterns,
+	// keeps the pin — never removes.
 	if _, err := e.st.UpdateRepoSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
 		Incogni: store.Set(false),
 	}); err != nil {
 		t.Fatalf("direct row update: %v", err)
 	}
-	e.svc.reconcileIncogniHooks(t.Context())
-	if seeder.PrePushHookInstalled(bare) {
-		t.Error("guard survived reconciliation after the flag went false")
+	e.svc.reconcileGuardHooks(t.Context())
+	if !seeder.PrePushHookInstalled(bare) {
+		t.Fatal("guard removed by reconciliation; it must exist on every ready repo")
 	}
-	if got := hooksPath(); got != "" {
-		t.Errorf("core.hooksPath still pinned after reconcile removal: %q", got)
+	body := readHook(t, bare)
+	if !strings.Contains(body, "labctl secret scan") {
+		t.Error("secret leak scan missing after reconcile with the flag false")
+	}
+	if strings.Contains(body, "co-authored-by") {
+		t.Error("incogni patterns survived reconcile with the flag false")
+	}
+	if got := hooksPath(t, e.home, bare); got == "" {
+		t.Error("core.hooksPath unpinned by reconcile; the pin stays on every repo")
 	}
 
-	// And the mirror: flag on, guard missing → reconcile installs it.
+	// A ready non-incogni repo with NO hook at all (cloned by an older lab):
+	// reconcile installs the secret-scan-only guard — this pass is also how
+	// hook-content changes between lab versions roll out.
+	if err := os.Remove(seeder.PrePushHookPath(bare)); err != nil {
+		t.Fatalf("remove hook: %v", err)
+	}
+	e.svc.reconcileGuardHooks(t.Context())
+	if !seeder.PrePushHookInstalled(bare) {
+		t.Fatal("reconcile did not install the guard on a ready non-incogni repo without one")
+	}
+	if body := readHook(t, bare); !strings.Contains(body, "labctl secret scan") {
+		t.Error("reconciled hook missing the secret leak scan")
+	} else if strings.Contains(body, "co-authored-by") {
+		t.Error("reconciled non-incogni hook carries incogni patterns")
+	}
+
+	// And the mirror: flag on, patterns missing → reconcile renders them in.
 	if _, err := e.st.UpdateRepoSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
 		Incogni: store.Set(true),
 	}); err != nil {
 		t.Fatalf("direct row update: %v", err)
 	}
-	e.svc.reconcileIncogniHooks(t.Context())
-	if !seeder.PrePushHookInstalled(bare) {
-		t.Error("guard not installed by reconciliation after the flag went true")
+	e.svc.reconcileGuardHooks(t.Context())
+	if !strings.Contains(readHook(t, bare), `co-authored-by:[[:space:]]*claude`) {
+		t.Error("incogni patterns not rendered by reconciliation after the flag went true")
+	}
+}
+
+// A ready repo carrying a FOREIGN pre-push hook (no lab marker): reconcile
+// must not overwrite it — seeder.InstallPrePushHook refuses, reconcile logs
+// and continues, and the remaining repos still converge.
+func TestReconcileGuardHooksForeignHookSkipped(t *testing.T) {
+	e := newTestEnv(t)
+	origin := makeOrigin(t, e.home, "main", 1)
+
+	// First repo (reconcile meets it first): its lab hook is replaced by a
+	// user's own pre-push hook after the clone.
+	foreign, err := e.svc.Add(t.Context(), AddParams{RemoteURL: "file://" + origin, Name: "foreign-hook"})
+	if err != nil {
+		t.Fatalf("Add foreign-hook repo: %v", err)
+	}
+	e.waitCloneStatus(t, foreign.ID, store.CloneStatusReady)
+	foreignHookPath := seeder.PrePushHookPath(e.svc.bareDir(foreign.ID))
+	const userHook = "#!/bin/sh\n# the user's own hook\nexit 0\n"
+	if err := os.WriteFile(foreignHookPath, []byte(userHook), 0o755); err != nil {
+		t.Fatalf("write foreign hook: %v", err)
+	}
+
+	// Second ready repo missing its guard: reconcile must reach it despite
+	// the foreign-hook failure on the first.
+	other, err := e.svc.Add(t.Context(), AddParams{RemoteURL: "file://" + origin, Name: "unguarded"})
+	if err != nil {
+		t.Fatalf("Add unguarded repo: %v", err)
+	}
+	e.waitCloneStatus(t, other.ID, store.CloneStatusReady)
+	otherBare := e.svc.bareDir(other.ID)
+	if err := os.Remove(seeder.PrePushHookPath(otherBare)); err != nil {
+		t.Fatalf("remove hook: %v", err)
+	}
+
+	e.svc.reconcileGuardHooks(t.Context())
+
+	if body, err := os.ReadFile(foreignHookPath); err != nil || string(body) != userHook {
+		t.Errorf("foreign pre-push hook not left byte-unchanged by reconcile: %q, %v", body, err)
+	}
+	if !seeder.PrePushHookInstalled(otherBare) {
+		t.Error("reconcile stopped at the foreign-hook failure; later repos left unguarded")
 	}
 }
 
@@ -227,11 +353,7 @@ func TestIncogniHookUnionsAllRegisteredProviders(t *testing.T) {
 	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
 
 	bare := e.svc.bareDir(repo.ID)
-	body, err := os.ReadFile(seeder.PrePushHookPath(bare))
-	if err != nil {
-		t.Fatalf("read hook: %v", err)
-	}
-	hook := string(body)
+	hook := readHook(t, bare)
 
 	for _, want := range []string{
 		// claude-code's declared scrub patterns (providertest.New defaults) —

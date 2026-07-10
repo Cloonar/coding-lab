@@ -90,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /agent/v1/prs/{n}/merge", s.handlePRMerge)
 	mux.HandleFunc("GET /agent/v1/secrets", s.handleSecretList)
 	mux.HandleFunc("POST /agent/v1/secrets/values", s.handleSecretValues)
+	mux.HandleFunc("POST /agent/v1/secrets/scan", s.handleSecretScan)
 	mux.HandleFunc("/agent/v1/", func(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "not found")
 	})

@@ -109,7 +109,11 @@ func appendSkillsIndex(buf *bytes.Buffer, skillsDir string, index []skillEntry) 
 //     (already name-sorted by RepoSecrets), name plus description when the
 //     operator gave one;
 //   - a pointer to `labctl secret list` for the live view, since the
-//     inventory above is a snapshot from spawn time and rotation is live.
+//     inventory above is a snapshot from spawn time and rotation is live;
+//   - the enforcement pointer (issue #106): pushes are scanned server-side
+//     against these values and a leaking push is refused naming secret +
+//     file — so an agent whose push is blocked knows what happened and that
+//     the fix is rewriting the offending commits, not retrying.
 //
 // Appended in Go for the same structural reason as appendSkillsIndex: a
 // secret-less repo's byte-identity is then guaranteed by the len(secrets) == 0
@@ -147,7 +151,10 @@ func appendSecretsSection(buf *bytes.Buffer, secrets []store.RepoSecret) {
 		}
 	}
 	buf.WriteString("\n`labctl secret list` shows the live inventory — rotation is live, and\n")
-	buf.WriteString("values are fetched at exec time.\n")
+	buf.WriteString("values are fetched at exec time.\n\n")
+	buf.WriteString("Every `git push` is scanned server-side against these values (plain or\n")
+	buf.WriteString("encoded); a push whose diff carries one is refused, naming the secret and\n")
+	buf.WriteString("file. Remove the value and rewrite the offending commits, then push again.\n")
 }
 
 // seedContextFile writes the rendered guide to <worktree>/<meta.ContextFileName>,
