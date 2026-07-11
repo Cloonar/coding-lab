@@ -79,6 +79,18 @@ let
     "--agent-url"
     cfg.agentUrl
   ]
+  ++ lib.optionals (cfg.seedUser != null) [
+    "--seed-user"
+    cfg.seedUser
+  ]
+  ++ lib.optionals (cfg.seedPasswordHash != null) [
+    "--seed-password-hash"
+    cfg.seedPasswordHash
+  ]
+  ++ lib.optionals (cfg.seedPasswordHashFile != null) [
+    "--seed-password-hash-file"
+    cfg.seedPasswordHashFile
+  ]
   ++ lib.optionals cfg.proxyAuth.enable [
     "--proxy-auth"
     "--proxy-auth-header"
@@ -128,6 +140,15 @@ let
   effectiveAgentPackages =
     cfg.agentPackages
     // lib.optionalAttrs (cfg.claudePackage != null) { "claude-code" = cfg.claudePackage; };
+
+  # Count of hash sources set, for the seedUser assertion below: lab itself
+  # only requires "at least one"; the assertion is stricter (exactly one) so
+  # a typo'd deploy (e.g. both options set, or neither) fails at eval time
+  # instead of at service start.
+  seedHashSourceCount = lib.count (x: x != null) [
+    cfg.seedPasswordHash
+    cfg.seedPasswordHashFile
+  ];
 in
 {
   options.services.lab = {
@@ -293,6 +314,50 @@ in
       '';
     };
 
+    seedUser = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "admin";
+      description = ''
+        Username of the initial operator user (--seed-user), reconciled on
+        every boot: the config, not the database, is this credential's source
+        of truth. On an empty database lab creates the user; on every later
+        boot it compares the stored hash against {option}`seedPasswordHash` /
+        {option}`seedPasswordHashFile` and updates it when they differ, so
+        changing the configured hash rotates the password on next restart
+        without logging out existing sessions. If the database already has
+        users and none of them is this one, lab refuses to start. Requires
+        exactly one of {option}`seedPasswordHash` or
+        {option}`seedPasswordHashFile` to be set.
+      '';
+    };
+
+    seedPasswordHash = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$...";
+      description = ''
+        PHC-encoded argon2id hash for {option}`seedUser` (--seed-password-hash),
+        generated with `lab hash-password`. Passed inline: a password hash is
+        deliberately safe to keep in world-readable config or the nix store —
+        that's the entire point of hashing the password rather than seeding it
+        as plaintext (issue #137). {option}`seedPasswordHashFile` wins over
+        this option when both are set.
+      '';
+    };
+
+    seedPasswordHashFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      example = "/run/secrets/lab-seed-password-hash";
+      description = ''
+        File containing a PHC-encoded argon2id hash for {option}`seedUser`
+        (--seed-password-hash-file), generated with `lab hash-password`. Wins
+        over {option}`seedPasswordHash` when both are set — LoadCredential-
+        friendly, same contract as {option}`environmentFile`.
+      '';
+    };
+
     maxInstances = lib.mkOption {
       type = lib.types.ints.positive;
       default = 6;
@@ -370,6 +435,10 @@ in
       {
         assertion = !(cfg.claudePackage != null && claudeCodeExplicitlySet);
         message = "services.lab.claudePackage (deprecated) and an explicit services.lab.agentPackages.\"claude-code\" are both set — the alias would silently override the explicit definition. Drop the deprecated services.lab.claudePackage and keep services.lab.agentPackages.\"claude-code\".";
+      }
+      {
+        assertion = (cfg.seedUser != null) == (seedHashSourceCount == 1);
+        message = "services.lab.seedUser must be set together with exactly one of services.lab.seedPasswordHash or services.lab.seedPasswordHashFile — not both, not neither. lab itself refuses to start on this mismatch; this assertion catches a typo'd deploy at `nixos-rebuild` eval instead of after the service has already restarted.";
       }
     ];
 

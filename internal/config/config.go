@@ -74,15 +74,18 @@ type Config struct {
 
 	// SeedUser is the username of the initial operator user to seed at
 	// startup. "" means no seeding. Must be set together with a seed password
-	// source (SeedPassword or SeedPasswordFile).
+	// hash source (SeedPasswordHash or SeedPasswordHashFile).
 	SeedUser string
-	// SeedPassword is the initial operator password, given inline. "" when
-	// unset.
-	SeedPassword string
-	// SeedPasswordFile is a path to a file holding the initial operator
-	// password. "" when unset. Parse stays pure (package doc comment): this
-	// file is read at seed time in cmd/lab, not here.
-	SeedPasswordFile string
+	// SeedPasswordHash is a PHC-encoded argon2id hash of the initial operator
+	// password, given inline. "" when unset. Inline is safe by design: a
+	// hash is not a secret (issue #137).
+	SeedPasswordHash string
+	// SeedPasswordHashFile is a path to a file holding the PHC-encoded
+	// argon2id hash of the initial operator password. "" when unset. Parse
+	// stays pure (package doc comment): this file is read at seed time in
+	// cmd/lab, not here. When both SeedPasswordHash and SeedPasswordHashFile
+	// are set, file-wins precedence is resolved at seed time, not here.
+	SeedPasswordHashFile string
 }
 
 // providerMapFlag is the flag.Value behind the repeatable -provider-bin and
@@ -118,7 +121,7 @@ func (p *providerMapFlag) Set(value string) error {
 // LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_VAPID_KEY_FILE,
 // LAB_PROVIDER_BIN_<ID>, LAB_PROVIDER_CONFIG_<ID>, LAB_CLAUDE_CONFIG (a deprecated alias for
 // LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_BASE_URL, LAB_AGENT_URL, LAB_SEED_USER,
-// LAB_SEED_PASSWORD, LAB_SEED_PASSWORD_FILE. providerIDs
+// LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE. providerIDs
 // is the caller's list of registered provider ids: the generic per-provider
 // flags are validated against it (an unknown id is a parse error), and the
 // LAB_PROVIDER_*_<ID> env forms are read only for ids it contains.
@@ -147,9 +150,9 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		baseURL  = fs.String("base-url", "", "external base URL, e.g. https://lab.example.com (env LAB_BASE_URL)")
 		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL; defaults to --base-url, else http://127.0.0.1:<port> (env LAB_AGENT_URL)")
 
-		seedUser         = fs.String("seed-user", "", "username of the initial operator user to seed at startup (env LAB_SEED_USER)")
-		seedPassword     = fs.String("seed-password", "", "initial operator password, given inline (env LAB_SEED_PASSWORD)")
-		seedPasswordFile = fs.String("seed-password-file", "", "path to a file holding the initial operator password (env LAB_SEED_PASSWORD_FILE)")
+		seedUser             = fs.String("seed-user", "", "username of the initial operator user to seed at startup (env LAB_SEED_USER)")
+		seedPasswordHash     = fs.String("seed-password-hash", "", "PHC-encoded argon2id hash of the initial operator password, given inline (env LAB_SEED_PASSWORD_HASH)")
+		seedPasswordHashFile = fs.String("seed-password-hash-file", "", "path to a file holding the PHC-encoded argon2id hash of the initial operator password (env LAB_SEED_PASSWORD_HASH_FILE)")
 	)
 
 	// Generic per-provider host overrides (issue #78): repeatable id=path
@@ -286,15 +289,17 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 	}
 
 	cfg.SeedUser = pick("seed-user", *seedUser, "LAB_SEED_USER", "")
-	cfg.SeedPassword = pick("seed-password", *seedPassword, "LAB_SEED_PASSWORD", "")
-	cfg.SeedPasswordFile = pick("seed-password-file", *seedPasswordFile, "LAB_SEED_PASSWORD_FILE", "")
-	// Half a seed = typo'd deploy (issue #134): a user with no password source
-	// silently never gets seeded, and a password source with no user is dead
-	// config. Both sources together (with a user) is valid — file-wins
-	// precedence is resolved at seed time in cmd/lab, not here.
-	hasPasswordSource := cfg.SeedPassword != "" || cfg.SeedPasswordFile != ""
-	if (cfg.SeedUser != "") != hasPasswordSource {
-		return Config{}, fmt.Errorf("--seed-user and a seed password source (--seed-password-file or --seed-password) must be set together")
+	cfg.SeedPasswordHash = pick("seed-password-hash", *seedPasswordHash, "LAB_SEED_PASSWORD_HASH", "")
+	cfg.SeedPasswordHashFile = pick("seed-password-hash-file", *seedPasswordHashFile, "LAB_SEED_PASSWORD_HASH_FILE", "")
+	// Half a seed = typo'd deploy (issue #134): a user with no password hash
+	// source silently never gets seeded, and a password hash source with no
+	// user is dead config. Both sources together (with a user) is valid —
+	// file-wins precedence is resolved at seed time in cmd/lab, not here.
+	// The hash itself is safe to pass inline: unlike a plaintext password, a
+	// PHC-encoded argon2id hash is not a secret (issue #137).
+	hasPasswordHashSource := cfg.SeedPasswordHash != "" || cfg.SeedPasswordHashFile != ""
+	if (cfg.SeedUser != "") != hasPasswordHashSource {
+		return Config{}, fmt.Errorf("--seed-user and a seed password hash source (--seed-password-hash-file or --seed-password-hash) must be set together")
 	}
 
 	return cfg, nil

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,11 +238,63 @@ func TestPasswordHashRoundTrip(t *testing.T) {
 	if ok, err := VerifyPassword(h, "wrong horse"); err != nil || ok {
 		t.Fatalf("verify wrong = (%v, %v)", ok, err)
 	}
-	if _, err := VerifyPassword("$2y$whatever", "x"); err == nil {
-		t.Fatal("malformed hash must error")
+	// VerifyPassword still verifies a fresh HashPassword output (production
+	// params, not the test-speed ones above).
+	prod := HashPassword("correct horse battery staple")
+	if ok, err := VerifyPassword(prod, "correct horse battery staple"); err != nil || !ok {
+		t.Fatalf("verify HashPassword output = (%v, %v)", ok, err)
 	}
-	if _, err := VerifyPassword("", "x"); err == nil {
-		t.Fatal("empty hash must error")
+	// A malformed hash still errors, and the error still names the caller
+	// ("verify password") even though the check itself now lives in
+	// parsePHC (issue #137).
+	if _, err := VerifyPassword("$2y$whatever", "x"); err == nil || !strings.Contains(err.Error(), "verify password") {
+		t.Fatalf("malformed hash err = %v, want error mentioning %q", err, "verify password")
+	}
+	if _, err := VerifyPassword("", "x"); err == nil || !strings.Contains(err.Error(), "verify password") {
+		t.Fatalf("empty hash err = %v, want error mentioning %q", err, "verify password")
+	}
+}
+
+// TestValidatePasswordHash pins parsePHC's tolerance and rejections via its
+// exported wrapper: ValidatePasswordHash is what startup seeding of a
+// pre-hashed user (issue #137) runs to catch a broken hash before it's ever
+// written to the users table, so every rejection here is a rejection the
+// seed path gets for free.
+func TestValidatePasswordHash(t *testing.T) {
+	valid := hashPasswordWith(testArgon, "some password")
+	parts := strings.Split(valid, "$")
+	// parts: ["", "argon2id", "v=19", "m=…,t=…,p=…", "<salt>", "<key>"]
+	if len(parts) != 6 {
+		t.Fatalf("test hash has %d parts, want 6: %q", len(parts), valid)
+	}
+	mutate := func(i int, v string) string {
+		p := append([]string(nil), parts...)
+		p[i] = v
+		return strings.Join(p, "$")
+	}
+
+	if err := ValidatePasswordHash(valid); err != nil {
+		t.Fatalf("ValidatePasswordHash(valid) = %v, want nil", err)
+	}
+
+	tests := []struct {
+		name string
+		hash string
+	}{
+		{"truncated", strings.Join(parts[:5], "$")},
+		{"wrong scheme argon2i", mutate(1, "argon2i")},
+		{"wrong scheme bcrypt", mutate(1, "bcrypt")},
+		{"wrong version", mutate(2, "v=1")},
+		{"bad base64 salt", mutate(4, "not-valid-base64!!!")},
+		{"bad base64 key", mutate(5, "not-valid-base64!!!")},
+		{"empty key", mutate(5, "")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidatePasswordHash(tt.hash); err == nil {
+				t.Fatalf("ValidatePasswordHash(%q) = nil, want error", tt.hash)
+			}
+		})
 	}
 }
 
