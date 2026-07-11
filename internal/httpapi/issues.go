@@ -388,10 +388,12 @@ func (s *Server) handleReadyList(w http.ResponseWriter, r *http.Request) {
 	}
 	claimable := len(issues)
 	if s.afk != nil {
-		// Filter the ALREADY-FETCHED ready queue by the repo's claim branches —
-		// no second tracker round-trip, and the count/list derive from one
-		// snapshot so they can never disagree.
-		if cs, cerr := s.afk.FilterClaimable(r.Context(), repo, issues); cerr != nil {
+		// Filter the ALREADY-FETCHED ready queue by the repo's claim branches:
+		// the claim filter needs no round-trip, and the blocked-by gate
+		// (ADR-0042) adds at most one lazy Issues(StateOpen) call — only when a
+		// claimable issue carries `## Blocked by` refs — so a repo not using the
+		// convention still derives count and list from the one ready snapshot.
+		if cs, cerr := s.afk.FilterClaimable(r.Context(), repo, tk, issues); cerr != nil {
 			s.log.Warn("counting claimable issues", "component", "httpapi", "repo", repo.ID, "err", cerr)
 		} else {
 			claimable = len(cs)

@@ -199,11 +199,12 @@ a.plain {
 /* App shell / side rail --------------------------------------------------- */
 /* Phase 1 structural shell (issue #41): a persistent 260px side rail beside the
    routed content at >=1024px; the SAME SideNav as a left overlay drawer below
-   that (hamburger or left-edge swipe to open; scrim/Escape/route-change/leftward
-   swipe to close). Everything is expressed in existing tokens (--card, --border,
-   --hover, --accent, --space-*) so Phase 2a can swap token VALUES with no edits
-   here — no hardcoded colors. Class map for later phases: .shell (root, carries
-   .drawer-open / .rail-collapsed), .shell-topstrip / .strip-hamburger / .attn-
+   that (hamburger or a follow-finger rightward drag from anywhere to open;
+   scrim/Escape/route-change/leftward drag to close — issue #140). Everything is
+   expressed in existing tokens (--card, --border, --hover, --accent, --space-*)
+   so Phase 2a can swap token VALUES with no edits here — no hardcoded colors.
+   Class map for later phases: .shell (root, carries .drawer-open / .rail-
+   collapsed / .drawer-dragging), .shell-topstrip / .strip-hamburger / .attn-
    badge (mobile), .shell-scrim, .shell-rail (drawer/persistent wrapper),
    .shell-content, .rail-reopen (collapsed chevron), and .rail-* inside SideNav. */
 
@@ -281,6 +282,17 @@ a.plain {
   transform: translateX(0);
   visibility: visible;
   transition: transform 0.24s ease;
+}
+
+/* Mid-drag (issue #140): AppShell pins the rail to the finger with an inline
+   transform and drives the scrim opacity from drag progress. Transitions are
+   off so the rail tracks 1:1, and visibility is forced on while a still-
+   "closed" drawer is dragged out. On release AppShell clears the inline
+   styles and flips .drawer-open in the same tick, so the transitions above
+   animate the settle from wherever the finger left off. */
+.shell.drawer-dragging .shell-rail {
+  visibility: visible;
+  transition: none;
 }
 
 /* Collapsed re-open chevron — desktop-only (see the >=1024 block). */
@@ -536,9 +548,15 @@ a.plain {
   }
 }
 
-/* prefers-reduced-motion: the drawer snaps rather than slides. */
+/* prefers-reduced-motion: the drawer snaps rather than slides. The drag
+   itself still tracks the finger 1:1 (user-driven motion, not an animation),
+   but the release settle — which is this transition — snaps instead of
+   sliding since it's set to none below. The .drawer-open selector is needed
+   too: that rule carries its own transition at higher specificity than bare
+   .shell-rail, so without it a settle INTO the open state would still slide. */
 @media (prefers-reduced-motion: reduce) {
-  .shell-rail {
+  .shell-rail,
+  .shell.drawer-open .shell-rail {
     transition: none;
   }
 }
@@ -3440,4 +3458,85 @@ main.page:has(> .auth-card) {
   width: 100%;
   max-width: 400px;
   margin: 0 auto;
+}
+
+/* Install sheet (issue #142) ------------------------------------------------- */
+/* The app's first modal primitive: a bottom sheet offering PWA install on
+   phones. Layering: above the drawer scrim (.shell-scrim z-index 25) and
+   rail (.shell-rail z-index 30), and above the toast (.toast z-index 20) —
+   an install prompt should never be hidden behind navigation chrome or a
+   passing status message. */
+
+.install-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.install-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  max-width: 480px;
+  margin: 0 auto;
+  background: var(--card);
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  box-shadow: var(--shadow);
+  padding: var(--space-5) var(--space-4) calc(var(--space-4) + env(safe-area-inset-bottom));
+  animation: install-sheet-up 0.2s ease-out;
+}
+
+@keyframes install-sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .install-sheet {
+    animation: none;
+  }
+}
+
+.install-sheet-heading {
+  margin: 0 0 var(--space-2);
+  font-size: 1.1rem;
+}
+
+.install-sheet-blurb {
+  margin: 0 0 var(--space-4);
+  color: var(--muted);
+}
+
+.install-sheet-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.install-steps {
+  list-style: none;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.install-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+}
+
+.install-step-icon {
+  flex: none;
+  color: var(--muted);
 }

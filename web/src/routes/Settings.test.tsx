@@ -736,3 +736,44 @@ describe('Settings notifications (issue #98)', () => {
     expect(container.textContent).toContain('permission was denied');
   });
 });
+
+// --- Install app row (issue #142) -------------------------------------------
+//
+// Drives the REAL module-scope install singleton through the wiring loop:
+// AppShell mounts the sheet, Settings owns the re-entry row, both read the
+// same signals. The singleton's stashed-event state flows forward across
+// tests, so this describe stays LAST in the file and relies on declaration
+// order: the hidden-by-default assertion must precede the dispatch. (The
+// eligibility truth table itself is unit-tested in lib/install.test.ts.)
+describe('Settings install app row (issue #142)', () => {
+  function installCard(): HTMLElement | null {
+    const headings = Array.from(container.querySelectorAll('section.card > h2'));
+    const h = headings.find((h) => h.textContent === 'Install app');
+    return (h?.closest('section.card') as HTMLElement | undefined) ?? null;
+  }
+
+  it('is hidden without a captured install event (jsdom: non-iOS UA, no event)', async () => {
+    await mountSettings();
+    expect(installCard()).toBeNull();
+  });
+
+  it('appears when beforeinstallprompt lands; the row opens the sheet; Not now persists', async () => {
+    await mountSettings();
+
+    window.dispatchEvent(new Event('beforeinstallprompt', { cancelable: true }));
+    await settle();
+    // Row is in hand, but no auto-show: jsdom reports no coarse pointer.
+    expect(installCard()).not.toBeNull();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+
+    button('Install app').click();
+    await settle();
+    const dialog = container.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Install lab');
+
+    button('Not now').click();
+    await settle();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(localStorage.getItem('lab.install-dismissed')).toBe('1');
+  });
+});
