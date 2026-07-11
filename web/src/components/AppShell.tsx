@@ -14,9 +14,11 @@ import { listInstances } from '../api';
 import { useAuth } from '../auth';
 import { useEvents } from '../events';
 import { createDrawerGesture, type GestureDecision } from '../lib/drawerGesture';
+import { install } from '../lib/install';
 import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 import Icon from './Icon';
+import InstallSheet from './InstallSheet';
 import SideNav from './SideNav';
 
 const COLLAPSED_KEY = 'lab.rail-collapsed';
@@ -334,6 +336,17 @@ function ShellFrame(props: ParentProps) {
       </Show>
 
       <div class="shell-content">{props.children}</div>
+
+      {/* PWA install sheet (issue #142): mounted post-auth so it can never show
+          on /login or /setup. Opening is reactive — on Android it appears when
+          the captured beforeinstallprompt lands (even seconds after mount), on
+          iOS when the platform gates pass — or manually from the Settings row. */}
+      <InstallSheet
+        open={install.open()}
+        variant={install.variant()}
+        onInstall={() => install.promptInstall()}
+        onDismiss={() => install.dismiss()}
+      />
     </div>
   );
 }

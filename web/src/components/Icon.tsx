@@ -35,7 +35,9 @@ export type IconName =
   | 'chevrons-left'
   | 'chevrons-right'
   | 'history'
-  | 'git-branch';
+  | 'git-branch'
+  | 'share'
+  | 'square-plus';
 
 // name -> the svg children for that glyph. Functions (not shared nodes) so a
 // glyph used in several places produces its own DOM each time. Each returned
@@ -167,6 +169,20 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
       <circle cx="18" cy="6" r="3" />
       <circle cx="6" cy="18" r="3" />
       <path d="M18 9a9 9 0 0 1-9 9" />
+    </>
+  ),
+  share: () => (
+    <>
+      <path d="M12 2v13" />
+      <path d="m16 6-4-4-4 4" />
+      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+    </>
+  ),
+  'square-plus': () => (
+    <>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d="M8 12h8" />
+      <path d="M12 8v8" />
     </>
   ),
 };

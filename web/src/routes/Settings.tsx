@@ -25,6 +25,7 @@ import {
 import Select, { type SelectOption } from '../components/Select';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
+import { install } from '../lib/install';
 import { providerFor } from '../lib/spawn';
 
 interface IntField {
@@ -129,6 +130,22 @@ function SettingsView() {
           )}
         </Match>
       </Switch>
+      {/* PWA install re-entry (issue #142) — device-local like notifications,
+          so it lives outside the settings PATCH. The sole way back after a
+          permanent "Not now": reopens the sheet AppShell mounts and clears the
+          dismissed flag. Hidden when running standalone; on iOS always shown
+          otherwise; on Android only while a captured beforeinstallprompt event
+          is in hand. Placed above Notifications because on iOS installing is
+          the prerequisite for enabling push at all. */}
+      <Show when={install.settingsRowVisible()}>
+        <section class="card">
+          <h2>Install app</h2>
+          <small class="hint hint-block">Add lab to your Home Screen for a full-screen app.</small>
+          <button type="button" class="primary" onClick={() => install.openFromSettings()}>
+            Install app
+          </button>
+        </section>
+      </Show>
       {/* Device-local, not part of the saved settings PATCH — its own card. */}
       <NotificationsSection />
     </main>
