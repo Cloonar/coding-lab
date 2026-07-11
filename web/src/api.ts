@@ -1195,6 +1195,13 @@ export const INT_SETTING_KEYS = [
   'afk_tick_seconds',
   'afk_schedule_seconds',
   'sweep_interval_minutes',
+  /**
+   * Auto-dismiss timeout (minutes) for manual-session dialogs (issue #124).
+   * Not seeded server-side: absent from GET means never set, and
+   * Settings.tsx renders that as a blank input rather than a 0. 0 itself is a
+   * valid, meaningful value ("never time out"), not a sentinel for unset.
+   */
+  'dialog_timeout_minutes',
 ] as const;
 
 export const TEXT_SETTING_KEYS = [

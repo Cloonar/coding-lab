@@ -1446,11 +1446,12 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-input')).toBeNull();
   });
 
-  it('titles the chat with the repo half and falls back to the provider web link', async () => {
+  it('titles the chat with the generated label and falls back to the provider web link', async () => {
     runOnServer = { ...baseRun(), deep_link_url: null };
     await mountChat();
 
-    expect(container.querySelector('.chat-title')?.textContent).toBe('proj · dom · 15:00');
+    expect(container.querySelector('.chat-title-text')?.textContent).toBe('dom · 15:00');
+    expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
     // ADR-0017: the fallback URL + tooltip come from the providers API, not a
     // hardcoded constant.
     const link = Array.from(container.querySelectorAll('a')).find((a) =>
@@ -1462,30 +1463,30 @@ describe('RunChat', () => {
 
   // --- Inline rename (issue #111) ---
 
-  it('shows a set title verbatim with the raw label · session as secondary text + tooltip', async () => {
+  it('shows a set title verbatim with the project name as secondary text + session tooltip', async () => {
     runOnServer = { ...baseRun(), title: 'Fix the flaky login test' };
     await mountChat();
 
     const btn = container.querySelector('button.chat-title')!;
     expect(btn.querySelector('.chat-title-text')?.textContent).toBe('Fix the flaky login test');
-    // The raw identity keeps the branch/worktree/tmux correlation visible.
-    expect(btn.querySelector('.chat-title-raw')?.textContent).toBe(
-      'dom-20260706-1500 · proj~dom-20260706-1500',
-    );
-    expect(btn.getAttribute('title')).toBe('dom-20260706-1500 · proj~dom-20260706-1500');
+    // The project name (not the old repeated label · session string) rides
+    // beside the title; the full session name — the branch/worktree/tmux
+    // correlation — is the tooltip.
+    expect(btn.querySelector('.chat-title-project')?.textContent).toBe('proj');
+    expect(btn.getAttribute('title')).toBe('proj~dom-20260706-1500');
   });
 
   it('renames inline: click the title, submit → PATCH {title}, refetch shows the new name', async () => {
     await mountChat();
-    // No title set: no secondary raw-identity text rides the generated title.
-    expect(container.querySelector('.chat-title-raw')).toBeNull();
+    // No title set: the project name still rides the generated title (issue #120).
+    expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
 
     (container.querySelector('button.chat-title') as HTMLButtonElement).click();
     await settle();
     const input = container.querySelector('.chat-title-input') as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.value).toBe(''); // seeded with run.title ?? ''
-    expect(input.placeholder).toBe('proj · dom · 15:00'); // the generated title
+    expect(input.placeholder).toBe('dom · 15:00'); // the generated title, repo-less
 
     input.value = '  Ship it  ';
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1532,8 +1533,18 @@ describe('RunChat', () => {
     buttonByLabel('Save title')!.click();
     await settle();
     expect(titlePatches).toEqual([{ title: null }]);
-    expect(container.querySelector('.chat-title-text')?.textContent).toBe('proj · dom · 15:00');
-    expect(container.querySelector('.chat-title-raw')).toBeNull();
+    expect(container.querySelector('.chat-title-text')?.textContent).toBe('dom · 15:00');
+    expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
+  });
+
+  it('falls back to the branch with no project span for a legacy no-~ session name', async () => {
+    runOnServer = { ...baseRun(), session_name: 'legacy-session', title: null };
+    await mountChat();
+
+    const btn = container.querySelector('button.chat-title')!;
+    expect(btn.querySelector('.chat-title-text')?.textContent).toBe(runOnServer.branch);
+    expect(btn.querySelector('.chat-title-project')).toBeNull();
+    expect(btn.getAttribute('title')).toBe('legacy-session');
   });
 
   it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {
@@ -2833,7 +2844,7 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-cmd-pop')).toBeNull();
   });
 
-  it('cycles with arrows, accepts with Enter (inserting "/name "), closes on Escape', async () => {
+  it('cycles with arrows, completes with Tab (inserting "/name "), closes on Escape', async () => {
     await mountChat();
     setComposerText('/');
     await settle();
@@ -2843,8 +2854,9 @@ describe('RunChat', () => {
     await settle();
     expect(popRows()[1]?.getAttribute('aria-selected')).toBe('true');
 
-    // Enter accepts the active command — no reply is sent, no newline typed.
-    composerKey('Enter');
+    // Tab completes the active command — no reply is sent (issue #122: Tab is
+    // the ONLY completion gesture; Enter never accepts the highlight).
+    composerKey('Tab');
     await settle();
     expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/compact ');
     expect(container.querySelector('.chat-cmd-pop')).toBeNull();
@@ -2858,7 +2870,7 @@ describe('RunChat', () => {
     await settle();
     expect(container.querySelector('.chat-cmd-pop')).toBeNull();
 
-    // Tab accepts too.
+    // Tab also completes a single filtered match.
     setComposerText('/dep');
     await settle();
     composerKey('Tab');
@@ -2866,34 +2878,130 @@ describe('RunChat', () => {
     expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/deploy ');
   });
 
-  it('accepts a command on click and sends it through the normal reply path', async () => {
+  it('ranks name matches above description matches (issue #122 tiered ranking)', async () => {
+    // The original bug: 'setup-matt-pocock-skills' sits before 'triage' in
+    // catalog order and its DESCRIPTION mentions triage, so the flat filter
+    // listed it first and the highlight (index 0) picked the wrong skill.
+    // Name tiers (exact, prefix, substring) now beat the description/arg-hint
+    // tier at every query length; discovery via description still works, it
+    // just never outranks a name match.
+    commandsOnServer = [
+      {
+        name: 'setup-matt-pocock-skills',
+        description: 'Vendor skills for planning and triage',
+        arg_hint: '',
+        source: 'project',
+        chat_safe: true,
+      },
+      {
+        name: 'triage',
+        description: 'Triage issues',
+        arg_hint: '',
+        source: 'project',
+        chat_safe: true,
+      },
+    ];
+    await mountChat();
+
+    // Exact-name tier wins over the earlier catalog entry's description match.
+    setComposerText('/triage');
+    await settle();
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toEqual([
+      '/triage',
+      '/setup-matt-pocock-skills',
+    ]);
+    expect(popRows()[0]?.getAttribute('aria-selected')).toBe('true');
+
+    // Name-prefix tier wins the same way mid-typing.
+    setComposerText('/tri');
+    await settle();
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toEqual([
+      '/triage',
+      '/setup-matt-pocock-skills',
+    ]);
+  });
+
+  it('sends the raw input on Enter while the popover is open — never the highlight (issue #122)', async () => {
+    // Reverses the issue #70 popover-precedence rule (ADR-0041): Enter no
+    // longer accepts the highlighted row; it falls through to the ordinary
+    // fine-pointer send gate and posts the box exactly as typed — partial
+    // text included (Tab first to complete is the user's responsibility).
+    finePointer(true);
     await mountChat();
     setComposerText('/cle');
     await settle();
+    expect(container.querySelector('.chat-cmd-pop')).not.toBeNull();
 
-    popRows()[0]!.click();
+    composerKey('Enter');
+    await settle();
+    expect(replyPosts).toEqual([{ text: '/cle' }]);
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+  });
+
+  it('sends a Tab-completed command as typed on Enter (fine-pointer)', async () => {
+    finePointer(true);
+    await mountChat();
+    setComposerText('/cle');
+    await settle();
+    composerKey('Tab');
     await settle();
     expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/clear ');
 
-    // Sending is the ordinary reply POST — no special casing for commands.
-    buttonByLabel('Send')!.click();
+    composerKey('Enter');
     await settle();
-    expect(replyPosts).toEqual([{ text: '/clear' }]);
+    expect(replyPosts).toEqual([{ text: '/clear' }]); // trimmed by the send path
   });
 
-  it('keeps popover-accept precedence over bare-Enter-send on a fine-pointer setup (issue #70)', async () => {
-    // With bare Enter now able to send on fine-pointer setups, the popover's
-    // own Enter-accepts precedence matters more — it must still win.
-    finePointer(true);
+  it('bare Enter with the popover open neither sends nor completes without a fine pointer', async () => {
+    // jsdom has no matchMedia → not fine-pointer, so bare Enter stays the
+    // browser-default newline; with Enter no longer captured by the popover
+    // there is nothing else it may do.
     await mountChat();
     setComposerText('/cle');
     await settle();
 
     composerKey('Enter');
     await settle();
-    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/clear ');
+    expect(replyPosts).toHaveLength(0);
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/cle');
+  });
+
+  it('Cmd/Ctrl+Enter still sends the raw text over an open popover', async () => {
+    await mountChat();
+    setComposerText('/cle');
+    await settle();
+
+    composerKey('Enter', { ctrlKey: true });
+    await settle();
+    expect(replyPosts).toEqual([{ text: '/cle' }]);
+  });
+
+  it('sends a no-argument command immediately on click (issue #122)', async () => {
+    await mountChat();
+    setComposerText('/cle');
+    await settle();
+
+    // /clear declares no arg_hint → the click IS the send: the ordinary reply
+    // POST fires, the box clears, and the popover goes with it.
+    popRows()[0]!.click();
+    await settle();
+    expect(replyPosts).toEqual([{ text: '/clear' }]);
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
     expect(container.querySelector('.chat-cmd-pop')).toBeNull();
-    expect(replyPosts).toHaveLength(0); // accepted the command, did not send a reply
+  });
+
+  it('completes a hinted command on click instead of sending (issue #122)', async () => {
+    await mountChat();
+    setComposerText('/comp');
+    await settle();
+
+    // /compact declares arg_hint 'instructions' → the click completes to
+    // "/name " and waits for the argument; nothing is posted.
+    popRows()[0]!.click();
+    await settle();
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/compact ');
+    expect(replyPosts).toHaveLength(0);
   });
 
   // --- No New conversation control anywhere (removed, issue #68) ---

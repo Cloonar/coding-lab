@@ -15,7 +15,7 @@ How to add a new `AgentProvider` adapter (Codex, Gemini, …) and prove it's don
 2. Declare `SeedMeta()`: context-file name (`.local`-suffixed), skills dir, exclude entries, and `ScrubPatterns`/`SeededPathPatterns` in the BRE∩RE2 common dialect (issue #75 / ADR-0033).
 3. Wire host config from the generic `-provider-bin`/`-provider-config` maps, with the adapter owning its own defaults (issue #78 / ADR-0034) — no provider-named field goes into `internal/config`.
 4. Add the one entry to the registration table in `internal/provider/conformance_test.go` (`TestConformance`, package `provider_test`), constructing the adapter hermetically (temp dirs, a fake runner) with its `providertest.Fixture`. Get Tier 1 green.
-5. Run the four Tier-2 live spikes below on a host with the real CLI.
+5. Run the Tier-2 live spikes below on a host with the real CLI (spikes 1–4 always; spike 5 where the adapter implements the override).
 6. Commit the compat record at `internal/compat/<providerID>/compat.md`.
 7. Verify core neutrality: `internal/provider/neutrality_test.go` and `web/src/providerNeutral.test.ts` must both stay clean.
 8. Register the provider in `cmd/lab/main.go`.
@@ -49,6 +49,7 @@ Held to the ADR-0008 live-verification bar: real CLI, real host, no credentials 
 2. **reply / dialog-answer / interrupt** — hazard-check the send-keys recipes against the real TUI; double-Esc/Ctrl-C must never be able to kill the session.
 3. **context-file discovery** — prove the CLI actually READS the lab-owned context file (e.g. Codex ↔ `AGENTS.local.md` via project config).
 4. **incogni attribution ground truth** — capture what the CLI actually writes into commits/PRs and reconcile it against the adapter's `ScrubPatterns`; these live samples become `Fixture.AttributionSamples`.
+5. **dialog auto-dismiss defeat** — conditional: only for adapters that override their CLI's unattended dialog timeout (claude: `CLAUDE_AFK_TIMEOUT_MS` via the per-run settings `env` block, compat §11; codex has no equivalent knob today). Live-verify the override actually reaches the dialog timer — a small value self-resolves an undriven dialog early — AND that the effectively-never max holds: the dialog survives well past the CLI's default, with no immediate-fire hazard at the cap.
 
 ## Compat record convention
 

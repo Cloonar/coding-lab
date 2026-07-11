@@ -68,7 +68,7 @@ import {
 import { isComposerSend } from '../lib/composerKeys';
 import { stateBadge } from '../lib/conversation';
 import { openState, providerOpen, type OpenState } from '../lib/deepLink';
-import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
+import { runDisplayTitle, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { resourceValue } from '../lib/resource';
 import { groupMessages, toolGroupSummary, type ToolGroup } from '../lib/toolGroups';
@@ -726,25 +726,19 @@ function ChatHeader(props: {
   const [titleMode, setTitleMode] = createSignal<'view' | 'edit'>('view');
   const [titleDraft, setTitleDraft] = createSignal('');
   const [titleSaving, setTitleSaving] = createSignal(false);
-  const customTitle = () => props.run?.title?.trim() ?? '';
-  // "repo · label" — the session name is `<repo>~<label>` and the label alone
-  // is ambiguous across repos.
+  // The edit-mode placeholder — what the title would be without an override.
+  // Force title: null through the shared runDisplayTitle fallback chain
+  // (label → branch) rather than re-deriving it here.
   const generatedTitle = () => {
     const r = props.run;
     if (r === undefined) return 'Chat';
-    const repo = sessionRepo(r.session_name);
-    const label = instanceTitle(sessionLabel(r.session_name));
-    if (label === '') return r.branch;
-    return repo === '' ? label : `${repo} · ${label}`;
+    return runDisplayTitle({ ...r, title: null });
   };
-  const title = () => (customTitle() === '' ? generatedTitle() : customTitle());
-  // Beside a set title, `label · session` keeps the branch/worktree/tmux
-  // correlation visible (the session name IS that identity).
-  const rawIdentity = () => {
-    const r = props.run;
-    if (r === undefined || customTitle() === '') return null;
-    return `${sessionLabel(r.session_name)} · ${r.session_name}`;
-  };
+  const title = () => (props.run === undefined ? 'Chat' : runDisplayTitle(props.run));
+  // The project name beside the title, titled or not — the session name is
+  // `<repo>~<label>`, and the label/generated title alone is ambiguous across
+  // repos. "" for legacy no-`~` sessions, which the view hides entirely.
+  const project = () => sessionRepo(props.run?.session_name ?? '');
   const startRename = () => {
     const r = props.run;
     if (r === undefined) return;
@@ -851,21 +845,23 @@ function ChatHeader(props: {
       <A href="/" class="crumb chat-back icon-btn" aria-label="Back to home" title="Back to home">
         <Icon name="arrow-left" />
       </A>
-      {/* View: a click-to-edit button (issue #111) — the set title verbatim
-          with the raw `label · session` identity beside it (and as tooltip),
-          or today's generated "repo · label" when no title is set. The pencil
-          fades in on hover/focus as the edit affordance. */}
+      {/* View: a click-to-edit button (issue #111) — the display title (custom
+          or generated, issue #120) always wins the space, with the project
+          name as muted secondary text beside it (titled or not). The full
+          session name — the branch/worktree/tmux identity — rides the
+          tooltip, not the row. The pencil fades in on hover/focus as the
+          edit affordance. */}
       <Switch>
         <Match when={titleMode() === 'view'}>
           <button
             type="button"
             class="chat-title"
-            title={rawIdentity() ?? 'Rename this instance'}
+            title={props.run === undefined ? 'Rename this instance' : props.run.session_name}
             aria-label={`Rename: ${title()}`}
             onClick={startRename}
           >
             <span class="chat-title-text">{title()}</span>
-            <Show when={rawIdentity()}>{(raw) => <span class="chat-title-raw">{raw()}</span>}</Show>
+            <Show when={project()}>{(p) => <span class="chat-title-project">{p()}</span>}</Show>
             <Icon name="pencil" size={13} class="chat-title-pencil" />
           </button>
         </Match>
@@ -1569,8 +1565,10 @@ function Composer(props: {
     autoGrow();
   });
 
-  const send = async () => {
-    const body = text().trim();
+  // `body` defaults to the box; the popover's click-to-send path passes the
+  // clicked command instead (issue #122) so both routes share one POST +
+  // clear-on-success.
+  const send = async (body = text().trim()) => {
     if (sending() || body === '') return;
     setSending(true);
     try {
@@ -1586,20 +1584,39 @@ function Composer(props: {
 
   // --- Slash-command autocomplete (issue #51 decision 5) --------------------
   // Prefix-only: the popover exists only while the WHOLE input starts with '/'
-  // (a mid-message slash never triggers it). The filter is a case-insensitive
-  // substring match across name, description and arg hint. Accepting inserts
-  // "/name " and keeps focus in the textarea; sending stays the NORMAL reply
-  // path — the backend renders the command echo as user text (issue #51
-  // decision 2), so nothing here special-cases a slash message.
+  // (a mid-message slash never triggers it). Matching is case-insensitive and
+  // TIERED (issue #122): exact name, then name prefix, then name substring,
+  // then description/arg-hint substring — catalog order within a tier — so a
+  // command whose description merely mentions the query can never outrank the
+  // command actually named after it. Tab completes "/name " into the box; a
+  // click sends the command outright unless it declares an arg hint (then it
+  // completes like Tab so the argument can be typed); Enter is NOT an accept
+  // gesture — it sends the box as typed. Sending stays the NORMAL reply path —
+  // the backend renders the command echo as user text (issue #51 decision 2),
+  // so nothing here special-cases a slash message.
   const [acDismissed, setAcDismissed] = createSignal(false); // Escape until the next keystroke
   const [acIndex, setAcIndex] = createSignal(0);
   const acMatches = (): RunCommand[] => {
     const value = text();
     if (!value.startsWith('/')) return [];
     const q = value.slice(1).toLowerCase();
-    return props.commands.filter((c) =>
-      [c.name, c.description ?? '', c.arg_hint ?? ''].some((f) => f.toLowerCase().includes(q)),
-    );
+    // Tier 0 exact name, 1 name prefix, 2 name substring, 3 description/arg-
+    // hint substring; 4 = no match, dropped. sort() is spec-stable, so catalog
+    // order survives within a tier — and the empty query (a bare "/") prefix-
+    // matches every name, listing the full catalog in catalog order as before.
+    const tier = (c: RunCommand): number => {
+      const name = c.name.toLowerCase();
+      if (name === q) return 0;
+      if (name.startsWith(q)) return 1;
+      if (name.includes(q)) return 2;
+      const meta = [c.description ?? '', c.arg_hint ?? ''];
+      return meta.some((f) => f.toLowerCase().includes(q)) ? 3 : 4;
+    };
+    return props.commands
+      .map((c) => ({ c, t: tier(c) }))
+      .filter((e) => e.t < 4)
+      .sort((a, b) => a.t - b.t)
+      .map((e) => e.c);
   };
   const acOpen = () => !acDismissed() && acMatches().length > 0;
   // Typing resets the highlight to the best (first) match and un-dismisses.
@@ -1610,27 +1627,30 @@ function Composer(props: {
     if (!acOpen()) return;
     document.getElementById(`chat-cmd-opt-${acIndex()}`)?.scrollIntoView?.({ block: 'nearest' });
   });
-  const acceptCommand = (cmd: RunCommand) => {
+  const completeCommand = (cmd: RunCommand) => {
     setText(`/${cmd.name} `);
-    // Dismiss until the next keystroke: once the pick landed, Enter goes back
-    // to the normal send gate (on fine-pointer setups it would send) —
-    // dismissal only stops the popover from re-capturing it (descriptions
-    // often still match "name ").
+    // Dismiss until the next keystroke: with the completion landed the picker
+    // has done its job — left open it would keep swallowing Tab and the
+    // arrows (descriptions often still match "name "). Enter needs no such
+    // care: it sends the box as typed whether or not the popover shows
+    // (issue #122).
     setAcDismissed(true);
     inputEl?.focus();
   };
 
   // The keyboard send works in every unlocked state (ADR-0029, issue #61) —
   // idle, needs_input, working — it never gates on `working`. Bare Enter
-  // now sends too, but only on fine-pointer (mouse/trackpad) setups (ADR-0031,
-  // issue #70); Shift+Enter and Alt+Enter stay an explicit newline, and
-  // Cmd/Ctrl+Enter keeps sending everywhere regardless of pointer type. Enter
-  // during IME composition is ignored (isComposerSend's isComposing/keyCode
-  // 229 guard) so committing composed text never fires a send. While the
-  // command popover is open, Up/Down cycle, Enter/Tab accept and Escape
-  // closes, taking precedence over the send gate below; Cmd/Ctrl+Enter still
-  // sends over it (existing `!(e.metaKey || e.ctrlKey)` gate on the popover
-  // branch).
+  // sends only on fine-pointer (mouse/trackpad) setups (ADR-0031, issue #70);
+  // Shift+Enter and Alt+Enter stay an explicit newline, and Cmd/Ctrl+Enter
+  // keeps sending everywhere regardless of pointer type. Enter during IME
+  // composition is ignored (isComposerSend's isComposing/keyCode 229 guard)
+  // so committing composed text never fires a send. While the command popover
+  // is open, Up/Down cycle, Tab completes and Escape closes — Enter is
+  // deliberately NOT captured (ADR-0041, issue #122, reversing ADR-0031's
+  // popover-precedence clause): it falls through to the send gate below and
+  // posts the box exactly as typed, so Enter never swaps the input for the
+  // highlighted row. Cmd/Ctrl+Enter still bypasses the popover branch
+  // entirely (the `!(e.metaKey || e.ctrlKey)` gate).
   const onKeyDown = (e: KeyboardEvent) => {
     if (acOpen() && !(e.metaKey || e.ctrlKey)) {
       const matches = acMatches();
@@ -1649,10 +1669,10 @@ function Composer(props: {
         setAcDismissed(true);
         return;
       }
-      if (e.key === 'Enter' || e.key === 'Tab') {
+      if (e.key === 'Tab') {
         e.preventDefault();
         const pick = matches[Math.min(acIndex(), matches.length - 1)];
-        if (pick !== undefined) acceptCommand(pick);
+        if (pick !== undefined) completeCommand(pick);
         return;
       }
     }
@@ -1725,7 +1745,10 @@ function Composer(props: {
               above the input like the jump pill; rows carry /name, the arg
               hint (dim), the description and a source badge. Keyboard runs
               through onKeyDown; mousedown is swallowed so a click never steals
-              the textarea's focus. */}
+              the textarea's focus. A click SENDS the command outright when it
+              declares no arg hint — hint presence is the one "expects more
+              text" signal — otherwise it completes to "/name " and leaves
+              focus in the textarea for the argument (issue #122). */}
           <Show when={acOpen()}>
             <div class="chat-cmd-pop" id="chat-cmd-pop" role="listbox" aria-label="Slash commands">
               <For each={acMatches()}>
@@ -1738,7 +1761,10 @@ function Composer(props: {
                     aria-selected={i() === acIndex()}
                     title={cmd.description}
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => acceptCommand(cmd)}
+                    onClick={() => {
+                      if (cmd.arg_hint) completeCommand(cmd);
+                      else void send(`/${cmd.name}`);
+                    }}
                   >
                     <span class="chat-cmd-name mono">/{cmd.name}</span>
                     <Show when={cmd.arg_hint}>
