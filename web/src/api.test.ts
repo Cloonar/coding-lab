@@ -963,6 +963,7 @@ describe('settings endpoints', () => {
         afk_budget_minutes: '120', // TEXT column tolerance
         afk_tick_seconds: 'thirty', // garbage → dropped
         sweep_interval_minutes: 2.5, // non-integer → dropped
+        dialog_timeout_minutes: '0', // TEXT column tolerance, and 0 is meaningful
         unknown_key: 'x',
       }),
     ).toEqual({
@@ -972,7 +973,13 @@ describe('settings endpoints', () => {
       spawn_effort_default: 'max',
       max_instances: 6,
       afk_budget_minutes: 120,
+      dialog_timeout_minutes: 0,
     });
+  });
+
+  it('normalizeSettings leaves dialog_timeout_minutes absent when not seeded (issue #124)', () => {
+    expect(normalizeSettings({ max_instances: 6 })).toEqual({ max_instances: 6 });
+    expect(normalizeSettings({ max_instances: 6 })).not.toHaveProperty('dialog_timeout_minutes');
   });
 
   it('normalizeSettings tolerates the {settings} envelope and non-objects', () => {

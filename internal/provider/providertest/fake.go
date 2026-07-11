@@ -78,7 +78,8 @@ type Fake struct {
 	// issue #92). hookArgs/hookSettings script Setup; spoolSig scripts the
 	// change digest; pendingDialog/blocked script the live signals ReadChat
 	// composes (the fake's adapter-private state, like claudecode's spool);
-	// hookCalls records Setup runIDs and sweeps counts SweepSpools.
+	// hookCalls records Setup runIDs, setupOpts its received opts (issue
+	// #124), and sweeps counts SweepSpools.
 	hookSettings  []byte
 	hookArgs      []string
 	pendingDialog *provider.Dialog
@@ -86,6 +87,7 @@ type Fake struct {
 	blockedOK     bool
 	spoolSig      string
 	hookCalls     []string
+	setupOpts     []provider.SetupOpts
 	sweeps        int
 	sweepErr      error
 }
@@ -420,12 +422,13 @@ func (f *Fake) Interrupt(_ context.Context, _ string) error {
 
 // --- LiveSignals lifecycle capability (ADR-0020, narrowed in #92) ----------
 
-// Setup records the runID and returns the scripted settings/args (a
+// Setup records the runID and opts and returns the scripted settings/args (a
 // default --settings <dir>/settings.<runID>.json when unset).
-func (f *Fake) Setup(runID, dir string) ([]byte, string, []string) {
+func (f *Fake) Setup(runID, dir string, opts provider.SetupOpts) ([]byte, string, []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hookCalls = append(f.hookCalls, runID)
+	f.setupOpts = append(f.setupOpts, opts)
 	path := filepath.Join(dir, "settings."+runID+".json")
 	settings := f.hookSettings
 	if settings == nil {
@@ -491,6 +494,15 @@ func (f *Fake) HookCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.hookCalls...)
+}
+
+// SetupOpts returns the opts of every Setup call, in order — the
+// dialog-timeout threading assertion (issue #124: run-kind policy reached the
+// adapter).
+func (f *Fake) SetupOpts() []provider.SetupOpts {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]provider.SetupOpts(nil), f.setupOpts...)
 }
 
 // Sweeps reports how many times SweepSpools ran.

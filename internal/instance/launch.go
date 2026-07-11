@@ -228,7 +228,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		Options:       spec.Options,
 		InitialPrompt: spec.SeedPrompt,
 	})
-	if extra, path := s.armDialogHooks(spec.Provider, runID); path != "" {
+	if extra, path := s.armDialogHooks(ctx, spec.Provider, runID, spec.Kind); path != "" {
 		dialogSettingsPath = path
 		spawnArgv = injectBeforePrompt(spawnArgv, extra, spec.SeedPrompt != "")
 	}
@@ -276,20 +276,51 @@ func injectBeforePrompt(argv, extra []string, hasPrompt bool) []string {
 
 // armDialogHooks writes the per-run dialog-capture settings file (ADR-0020) into
 // the runtime dir and returns the spawn args to append (--settings <path>) plus
-// the settings path (for rollback). A provider without the LiveSignals
-// capability contributes nothing. Best-effort: a write failure logs and returns
-// no args — the run still spawns, its chat just keeps transcript-only behavior.
-func (s *Service) armDialogHooks(prov provider.AgentProvider, runID string) (args []string, settingsPath string) {
+// the settings path (for rollback). The run kind resolves the dialog
+// auto-dismiss window folded into the settings payload (issue #124, via
+// dialogTimeout). A provider without the LiveSignals capability contributes
+// nothing. Best-effort: a write failure logs and returns no args — the run
+// still spawns, its chat just keeps transcript-only behavior.
+func (s *Service) armDialogHooks(ctx context.Context, prov provider.AgentProvider, runID, kind string) (args []string, settingsPath string) {
 	signals, ok := prov.(provider.LiveSignals)
 	if !ok {
 		return nil, ""
 	}
-	settings, path, extra := signals.Setup(runID, s.mat.Dir())
+	opts := provider.SetupOpts{DialogTimeout: s.dialogTimeout(ctx, kind)}
+	settings, path, extra := signals.Setup(runID, s.mat.Dir(), opts)
 	if err := writeFileAtomic0600(path, settings); err != nil {
 		s.log.Warn("arming dialog hooks", "component", "instance", "run", runID, "err", err)
 		return nil, ""
 	}
 	return extra, path
+}
+
+// dialogTimeout resolves the run's unattended-dialog auto-dismiss window
+// (issue #124), the local instance policy behind SetupOpts.DialogTimeout.
+// Manual runs get the dialog_timeout_minutes setting with never-by-default:
+// absent or 0 means "effectively never" (≈24.8 days), defeating the CLI's own
+// auto-dismiss for an attended session; N>0 means N minutes. AFK runs return
+// zero — pass nothing, keep the CLI's default — because unattended
+// auto-advance is a feature there. Values above the adapter's cap pass
+// through untouched: the adapter clamps, and the 2^31−1 rationale lives with
+// its clamp constant (claudecode.maxDialogTimeout). Best-effort like the rest
+// of dialog arming: a settings read failure logs and falls back to
+// effectively-never.
+func (s *Service) dialogTimeout(ctx context.Context, kind string) time.Duration {
+	if kind != store.RunKindManual {
+		return 0
+	}
+	// Raw GetInt with a 0 default: 0 is a meaningful stored value (never),
+	// never a hole to re-default.
+	minutes, err := s.store.GetInt(ctx, store.SettingDialogTimeoutMinutes, 0)
+	if err != nil {
+		s.log.Warn("reading dialog timeout", "component", "instance", "err", err)
+		minutes = 0
+	}
+	if minutes <= 0 {
+		return time.Duration(1<<31-1) * time.Millisecond // effectively never
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 // writeFileAtomic0600 writes data to path via a temp sibling + rename (0600), so

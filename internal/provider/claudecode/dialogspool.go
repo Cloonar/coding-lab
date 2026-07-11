@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,6 +63,22 @@ const (
 // (compat §9). Kept in lockstep with toolAskUserQuestion/toolExitPlanMode.
 const dialogMatcher = toolAskUserQuestion + "|" + toolExitPlanMode
 
+// envDialogTimeout is Claude Code's unattended-dialog auto-dismiss window: an
+// undocumented upstream integer env var (milliseconds, default 60000 — bundle
+// constant lZe) after which a pending AskUserQuestion/ExitPlanMode picker
+// self-resolves. Delivered via the per-run --settings file's env block;
+// live-verified against 2.1.198 (2026-07-10) and pinned in internal/compat
+// §11.
+const envDialogTimeout = "CLAUDE_AFK_TIMEOUT_MS"
+
+// maxDialogTimeout is the largest window Setup will ever emit: JS setTimeout
+// with a delay above 2^31−1 ms fires IMMEDIATELY, so a larger value would
+// re-enable instant auto-dismiss — the exact failure the knob exists to
+// defeat. Clamping keeps any caller-supplied value safe (2147483647 ms,
+// ≈24.8 days, live-verified to hold on 2.1.198: no immediate fire, no 60s
+// fire).
+const maxDialogTimeout = time.Duration(1<<31-1) * time.Millisecond
+
 func dialogSpoolPath(dir, runID string) string {
 	return filepath.Join(dir, dialogsSubdir, runID+spoolExt)
 }
@@ -75,10 +92,16 @@ func settingsFilePath(dir, runID string) string {
 }
 
 // hookSettings is the Claude Code settings.json subset lab injects per run
-// (compat §9). Only the hooks block is set; --settings merges it additively
-// over the repo-shipped .claude settings, so nothing else is disturbed.
+// (compat §9). Only the hooks block — plus, when a per-run knob is set, the
+// env block (compat §11) — is present; --settings merges it additively over
+// the repo-shipped .claude settings, so nothing else is disturbed.
 type hookSettings struct {
 	Hooks hookGroups `json:"hooks"`
+	// Env is the settings.json env block: per-run env vars for the spawned
+	// CLI (issue #124: the dialog auto-dismiss window). Omitted when no knob
+	// is set, so an AFK run's settings file stays byte-identical to the
+	// hooks-only payload.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 type hookGroups struct {
@@ -110,7 +133,12 @@ type hookCmd struct {
 //     question resolves by any route (TUI, chat send-keys, or claude.ai).
 //   - Notification: atomic-write stdin (carrying notification_type) to the
 //     blocked marker, so residual blocked states drive the badge (decision 7).
-func (p *Provider) Setup(runID, dir string) (settings []byte, settingsPath string, args []string) {
+//
+// When opts.DialogTimeout > 0 the payload additionally carries an env block
+// setting CLAUDE_AFK_TIMEOUT_MS (compat §11) — the picker's auto-dismiss
+// window, clamped to maxDialogTimeout; zero emits no env block, leaving the
+// CLI's own 60s default untouched (AFK runs).
+func (p *Provider) Setup(runID, dir string, opts provider.SetupOpts) (settings []byte, settingsPath string, args []string) {
 	spool := dialogSpoolPath(dir, runID)
 	marker := markerPath(dir, runID)
 	s := hookSettings{Hooks: hookGroups{
@@ -126,6 +154,10 @@ func (p *Provider) Setup(runID, dir string) (settings []byte, settingsPath strin
 			Hooks: []hookCmd{{Type: "command", Command: atomicWriteCmd(marker)}},
 		}},
 	}}
+	if opts.DialogTimeout > 0 {
+		d := min(opts.DialogTimeout, maxDialogTimeout)
+		s.Env = map[string]string{envDialogTimeout: strconv.FormatInt(d.Milliseconds(), 10)}
+	}
 	// Indented so an operator inspecting the runtime file can read it; the
 	// content is machine-generated and never re-parsed by lab.
 	b, _ := json.MarshalIndent(s, "", "  ")

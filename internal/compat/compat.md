@@ -8,10 +8,11 @@ provider-owned model/effort catalogs — is solved structurally in
 by issue #7 / ADR-0016 (transcript location + JSONL schema, the reply,
 dialog, and interrupt send-keys recipes), the hook contract §9 added by
 issue #17 / ADR-0020 (the PreToolUse/PostToolUse/Notification hook payloads +
-the spool protocol that captures a pending dialog live), and the builtin
+the spool protocol that captures a pending dialog live), the builtin
 slash-command catalog §10 added by issue #51 (which also live-re-verified §7
 against 2.1.198 on 2026-07-08, generalizing the dialog recipes to
-multi-question forms and plan approval and fixing three live recipe bugs). The
+multi-question forms and plan approval and fixing three live recipe bugs), and
+the dialog auto-dismiss timeout override §11 added by issue #124. The
 implementation of every coupling lives in `internal/provider/claudecode`;
 the probe tests in this package exercise the same code paths against
 captured fixtures in `testdata/`.
@@ -344,7 +345,10 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
     on its own (the answer-time tool_id re-read already turns a late answer
     into a 409); the backstop treats `afkTimeoutMs` + a recorded intent as
     "lab's answer did not land" (warn) — with no intent there is nothing to
-    verify (silent).
+    verify (silent). The 60s is only the env-tunable DEFAULT
+    (`CLAUDE_AFK_TIMEOUT_MS`), lab defeats it for manual runs, and the
+    message text + `afkTimeoutMs` echo the effective value — never match
+    "after 60s" (§11).
   - **`ExitPlanMode` approved**: `toolUseResult` is an OBJECT
     `{"plan":"…","isAgent":…,"filePath":"…","planWasEdited":…}`; content
     starts `"User has approved your plan."`.
@@ -625,7 +629,9 @@ Claude has written up a plan and is ready to execute. Would you like to proceed?
 
 **Timeout**: any of these pickers left unanswered resolves ITSELF after 60s
 (§5 afkTimeout) — an answer sent after that 409s on the tool_id re-read, and
-the §5 backstop warns if lab's keys were sent but the timeout landed.
+the §5 backstop warns if lab's keys were sent but the timeout landed. The
+60s is the env-tunable default (`CLAUDE_AFK_TIMEOUT_MS`); lab defeats it for
+manual runs, so in practice only AFK runs keep the 60s self-resolve (§11).
 
 **Unknown** interactive tools (and question shapes lab cannot render from
 the input, e.g. a question with no listed options) degrade to
@@ -669,7 +675,9 @@ file's `hooks` block **additively** over the repo-shipped `.claude` settings
 settings file under its runtime dir and appends `--settings <path>` to the spawn
 argv **before** the trailing prompt positional (`claude [options] [prompt]`), so
 the flag is never swallowed as prompt text. Hooks fire normally under
-`--remote-control <name> --permission-mode auto`.
+`--remote-control <name> --permission-mode auto`. Since issue #124 the same
+file also carries an `"env"` block (`CLAUDE_AFK_TIMEOUT_MS` — the dialog
+auto-dismiss override, §11), merged the same way.
 
 **Settings shape** (the block lab generates):
 
@@ -834,6 +842,77 @@ command/skill is a prompt template, claude runs it as a normal turn):
   alphabetically.
 
 Missing dirs are silently empty; only real I/O failures error.
+
+## 11. Dialog auto-dismiss timeout (CLAUDE_AFK_TIMEOUT_MS) — live (2.1.198, 2026-07-10)
+
+The 60s picker self-resolve (§5 afkTimeout, §7 Timeout) is the DEFAULT of an
+undocumented env knob, not a constant — and lab defeats it for manual runs
+(issue #124). Both directions were confirmed live on 2026-07-10 in two
+throwaway tmux sessions against real 2.1.198 (runs A and B below).
+
+- **The coupling — an undocumented integer env pair.**
+  `CLAUDE_AFK_TIMEOUT_MS` (default 60000; bundle constant `lZe`) is the
+  auto-advance timer itself: an undriven picker self-resolves after this
+  many ms. Its sibling `CLAUDE_AFK_COUNTDOWN_MS` (default 20000) is
+  TUI-display-only. lab overrides ONLY the timeout and never touches the
+  countdown.
+- **Delivery — the §9 per-run `--settings` file.** The same file that arms
+  the dialog-capture hooks gains an `"env"` block —
+  `{"env":{"CLAUDE_AFK_TIMEOUT_MS":"<ms>"}}` — merged over the repo-shipped
+  settings exactly like the hooks block. The adapter emits it in `Setup`
+  (`internal/provider/claudecode/dialogspool.go`; seam
+  `provider.LiveSignals`, `SetupOpts.DialogTimeout`).
+- **Policy — manual runs effectively never, AFK runs keep upstream's 60s.**
+  The DB setting `dialog_timeout_minutes` (floor 0, not seeded) resolves the
+  manual-run value: absent/0 → 2147483647 ms (2^31−1, ≈24.8 days —
+  effectively never); N>0 → N minutes. An AFK run passes NO entry, so
+  upstream's 60s auto-advance stays — unattended best-judgment progress is
+  the wanted behavior there.
+- **The 2^31−1 cap (run B).** The adapter clamps any resolved value above
+  2^31−1: a JS timer delay is a 32-bit signed int, and an overflowed delay
+  classically fires IMMEDIATELY — which would auto-dismiss every manual
+  dialog on arrival, the exact inversion of the intent. Run B pinned the cap
+  value safe live: `{"env":{"CLAUDE_AFK_TIMEOUT_MS":"2147483647"}}` left an
+  undriven picker rendered and byte-identical (pane captures) at
+  +30s/+62s/+92s, with ZERO `afkTimeoutMs` lines in the transcript — no
+  immediate-fire hazard at the cap on 2.1.198, and the 60s default is
+  defeated.
+- **The knob reaches the picker timer (run A).**
+  `{"env":{"CLAUDE_AFK_TIMEOUT_MS":"5000"}}` through `claude --model haiku
+  --settings <file>`: an undriven `AskUserQuestion` self-resolved **+5.033s**
+  after its `tool_use` (tool_use ts 2026-07-10T20:41:22.287Z → timeout event
+  20:41:27.320Z). The timeout event's `toolUseResult` was
+  `{"questions":[…],"answers":{},"annotations":{},"afkTimeoutMs":5000}`; the
+  `tool_result` content string, verbatim: "No response after 5s — the user
+  may be away from keyboard. Proceed using your best judgment based on the
+  context so far; you can re-ask this question later if it's still
+  relevant."
+- **The timeout message text SCALES with the value** ("No response after
+  **5s** — …"), so nothing may recognize a timeout by string-matching "after
+  60s" — the structural signals are `afkTimeoutMs` + `answers:{}` (§5).
+- **No countdown UI.** The picker renders no countdown at all — the footer
+  stays `Enter to select · ↑/↓ to navigate · Esc to cancel` until the
+  instant the timeout fires — so a pending manual dialog looks identical
+  whether it has 24 days or 5 seconds left. Lab-side timeout awareness must
+  come from the transcript, never the pane (the never-scrape rule holds).
+- **`afkTimeoutMs` echoes the EFFECTIVE value** (run A recorded 5000, not
+  60000). lab's readers are safe by construction — `dialogintent.go` keys
+  the backstop on `AfkTimeoutMs > 0` and `dialogoutcome.go` on `answers:{}`;
+  neither compares against 60000 (verified during the spike, no code change
+  needed). Anything new reading these shapes must keep that property.
+
+When a Claude Code upgrade breaks this (a manual dialog vanishes on its own
+again, or — worse — dialogs auto-dismiss on arrival), re-verify with the
+run-A/B recipe: in a throwaway dir under tmux, write a settings file
+`{"env":{"CLAUDE_AFK_TIMEOUT_MS":"5000"}}`, spawn `claude --model haiku
+--settings <file>`, prompt an `AskUserQuestion`, leave the picker undriven,
+and expect a ~5s self-resolve whose transcript event carries
+`afkTimeoutMs:5000` with `answers:{}`; then repeat with `2147483647` and
+confirm the picker holds byte-identical past 90s with no `afkTimeoutMs`
+line. The env name is undocumented bundle-internal surface (`lZe` on
+2.1.198) — on a rename, re-extract it from the shipped bundle (the §10
+strings-dump technique) — then update the adapter, the tests, and this
+section in one commit.
 
 ## Live re-verification
 
