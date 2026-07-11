@@ -66,5 +66,47 @@ func TestUsers(t *testing.T) {
 		if _, err := s.CreateUser(ctx, "admin", "otherhash"); err == nil {
 			t.Error("duplicate username accepted, want UNIQUE violation")
 		}
+
+		if err := s.UpdateUserPasswordHash(ctx, u.ID, "$argon2id$rotatedhash"); err != nil {
+			t.Fatalf("update password hash: %v", err)
+		}
+		rehashed, err := s.UserByUsername(ctx, "admin")
+		if err != nil {
+			t.Fatalf("by username after rehash: %v", err)
+		}
+		if rehashed.PasswordHash != "$argon2id$rotatedhash" {
+			t.Errorf("password hash after update = %q, want $argon2id$rotatedhash", rehashed.PasswordHash)
+		}
+
+		if err := s.UpdateUserPasswordHash(ctx, "usr_00000000000000000000000000000000", "whatever"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("update password hash for unknown id error = %v, want ErrNotFound", err)
+		}
+
+		if _, err := s.CreateUser(ctx, "bob", "$argon2id$bobhash"); err != nil {
+			t.Fatalf("create second user: %v", err)
+		}
+		names, err := s.Usernames(ctx)
+		if err != nil {
+			t.Fatalf("usernames: %v", err)
+		}
+		if want := []string{"admin", "bob"}; !equalStrings(names, want) {
+			t.Errorf("usernames = %v, want %v", names, want)
+		}
+	})
+}
+
+// TestUsersUsernamesEmpty covers Usernames on an empty table separately: the
+// main TestUsers flow always has at least one user by the time it would
+// check this.
+func TestUsersUsernamesEmpty(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		names, err := s.Usernames(ctx)
+		if err != nil {
+			t.Fatalf("usernames on empty: %v", err)
+		}
+		if len(names) != 0 {
+			t.Errorf("usernames on empty = %v, want empty", names)
+		}
 	})
 }

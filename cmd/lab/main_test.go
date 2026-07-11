@@ -31,20 +31,41 @@ func TestUsageDocumentsGenericProviderFlags(t *testing.T) {
 	}
 }
 
-// TestUsageDocumentsSeedFlags pins the issue #134 acceptance that `-help`
-// documents the startup seed flags and their env overrides, in the style of
-// TestUsageDocumentsGenericProviderFlags.
+// TestUsageDocumentsSeedFlags pins the issue #137 acceptance that `-help`
+// documents the reworked hash-based seed flags, their env overrides, and the
+// new `lab hash-password` subcommand, in the style of
+// TestUsageDocumentsGenericProviderFlags. It also pins that the pre-#137
+// plaintext-password spellings are gone.
 func TestUsageDocumentsSeedFlags(t *testing.T) {
 	for _, want := range []string{
 		"-seed-user",
-		"-seed-password-file",
-		"-seed-password",
+		"-seed-password-hash",
+		"-seed-password-hash-file",
 		"LAB_SEED_USER",
-		"LAB_SEED_PASSWORD_FILE",
-		"LAB_SEED_PASSWORD",
+		"LAB_SEED_PASSWORD_HASH",
+		"LAB_SEED_PASSWORD_HASH_FILE",
+		"hash-password",
 	} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("usage does not document %q", want)
+		}
+	}
+
+	// The old (#134) plaintext-password spellings must be gone. Plain
+	// Contains checks on the bare old forms would pass vacuously (they're
+	// prefixes of the new "-seed-password-hash"/"LAB_SEED_PASSWORD_HASH"
+	// spellings, so they're always "found" as substrings) or, for the
+	// "-file"/"_FILE" suffix forms, never actually distinguish old from new.
+	// Delimit each old form with the character that immediately follows it
+	// in the old usage text so it can only match the old spelling.
+	for _, gone := range []string{
+		"-seed-password ",        // old inline flag; trailing space rules out "-seed-password-hash"
+		"-seed-password-file",    // old file flag: "-hash-file" is the new one, so bare "-file" can't match it
+		"LAB_SEED_PASSWORD)",     // old inline env, closing paren rules out "LAB_SEED_PASSWORD_HASH"
+		"LAB_SEED_PASSWORD_FILE", // old file env: "_HASH_FILE" is the new one, so this can't match it
+	} {
+		if strings.Contains(usage, gone) {
+			t.Errorf("usage still documents the old (#134) spelling %q", gone)
 		}
 	}
 }

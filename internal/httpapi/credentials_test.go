@@ -347,3 +347,62 @@ func TestValidateNewCredentials(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateUsername exercises ValidateUsername directly: it is the
+// standalone half ValidateNewCredentials composes, and (per issue #137) the
+// one startup seeding of a pre-hashed user calls on its own.
+func TestValidateUsername(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		wantErr  string
+	}{
+		{"empty rejected", "", "username must be 1-64 characters"},
+		{"1-char ok", "u", ""},
+		{"64-char ok", strings.Repeat("u", 64), ""},
+		{"65-char rejected", strings.Repeat("u", 65), "username must be 1-64 characters"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateUsername(tt.username)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateUsername(%q) = %v, want nil", tt.username, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("ValidateUsername(%q) = %v, want %q", tt.username, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateNewPassword exercises ValidateNewPassword directly: it is the
+// standalone half ValidateNewCredentials composes, and (per issue #137) the
+// rule `lab hash-password` applies to the plaintext it hashes.
+func TestValidateNewPassword(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		wantErr  string
+	}{
+		{"7-char rejected", "1234567", "password must be at least 8 characters"},
+		{"8-char ok", "12345678", ""},
+		{"empty rejected", "", "password must be at least 8 characters"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateNewPassword(tt.password)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateNewPassword(%q) = %v, want nil", tt.password, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("ValidateNewPassword(%q) = %v, want %q", tt.password, err, tt.wantErr)
+			}
+		})
+	}
+}

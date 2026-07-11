@@ -24,6 +24,9 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
 | `vapidKeyFile` | `"${stateDir}/vapid.key"` | Passed as `--vapid-key-file`. P-256 VAPID key for Web Push (see [Push notifications](#push-notifications)) — lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content, same as `masterKeyFile`. |
+| `seedUser` | `null` | Passed as `--seed-user`. Username of the initial operator user, reconciled on every boot — config, not the database, is this credential's source of truth (see [Seeding the initial operator user](#seeding-the-initial-operator-user)). Requires exactly one of `seedPasswordHash` or `seedPasswordHashFile`. |
+| `seedPasswordHash` | `null` | Passed as `--seed-password-hash`. PHC-encoded argon2id hash for `seedUser`, generated with `lab hash-password`. Inline is safe in world-readable config — the NixOS `hashedPassword` model. `seedPasswordHashFile` wins when both are set. |
+| `seedPasswordHashFile` | `null` | Passed as `--seed-password-hash-file`. File containing the hash for `seedUser` (one trailing newline stripped). Wins over `seedPasswordHash` when both are set — `LoadCredential`-friendly, same contract as `environmentFile`. |
 | `maxInstances` | `6` | Passed as `--max-instances`. Seeds the `max_instances` settings row on first start; thereafter the in-app setting wins. |
 | `sessionNofile` | `16384` | Passed as `--session-nofile`; RLIMIT_NOFILE prlimit cap per spawned session, 0 disables. A runaway session hits its own EMFILE and dies alone. |
 | `proxyAuth.enable` | `false` | Trust a reverse-proxy auth header as the authenticated username — only from `trustedProxies` peers. The module asserts that enabling it requires at least one trusted proxy. |
@@ -148,6 +151,9 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--db` | `LAB_DB` | `sqlite:<state-dir>/lab.db` | DSN. `sqlite:<path>` or `postgres://…` / `postgresql://…` switches backend. |
 | `--master-key-file` | `LAB_MASTER_KEY_FILE` | `<state-dir>/master.key` | Vault master key: 64 hex chars (32 bytes), 0600. Auto-generated when absent; loose perms or malformed content refuse startup. |
 | `--vapid-key-file` | `LAB_VAPID_KEY_FILE` | `<state-dir>/vapid.key` | P-256 VAPID key for Web Push: 64 hex chars (32 bytes), 0600. Auto-generated when absent; loose perms or malformed content refuse startup. |
+| `--seed-user` | `LAB_SEED_USER` | (empty) | Username of the initial operator user, reconciled on every boot (see [Seeding the initial operator user](#seeding-the-initial-operator-user)). Must be set together with at least one hash source below, else lab refuses to start. |
+| `--seed-password-hash` | `LAB_SEED_PASSWORD_HASH` | (empty) | PHC-encoded argon2id hash for `--seed-user`, inline — generate it with `lab hash-password`. A hash is safe in world-readable config, same model as NixOS `hashedPassword`. |
+| `--seed-password-hash-file` | `LAB_SEED_PASSWORD_HASH_FILE` | (empty) | File holding the hash for `--seed-user`; exactly one trailing newline stripped. Wins over `--seed-password-hash` when both are set. |
 | `--provider-bin` | `LAB_PROVIDER_BIN_<ID>` | adapter default | Per-provider agent binary, **repeatable** as `id=path` keyed by provider ID (`--provider-bin claude-code=/usr/bin/claude`). The env `<ID>` is the provider ID uppercased with dashes → underscores (`claude-code` → `LAB_PROVIDER_BIN_CLAUDE_CODE`). An unknown ID in the flag is a boot error listing the registered IDs (env keys are only read for registered IDs — a typoed env var name is inert). With no entry the adapter fills its own default (claude-code: `claude` via PATH lookup). |
 | `--provider-config` | `LAB_PROVIDER_CONFIG_<ID>` | adapter default | Per-provider global config file, **repeatable** as `id=path` keyed by provider ID (`--provider-config claude-code=/var/lib/lab/.claude.json`); same `<ID>` env mapping. claude-code's config is the folder-trust seeding target — with no HOME and no configured claude-code config path, instance/AFK features stay unmounted and lab serves the rest with a loud warning. With no entry the adapter fills its own default (claude-code: `~/.claude.json` from HOME). |
 | `--claude` | — | (see `--provider-bin`) | **Deprecated alias** for `--provider-bin claude-code=<path>`. Prefer the generic flag. |
@@ -177,6 +183,29 @@ Runtime-mutable knobs live in the `settings` table (Settings UI / `PATCH /api/v1
 | `afk_schedule_seconds` | `45` | Scheduler loop interval (separate goroutine, v0 parity). |
 | `sweep_interval_minutes` | `10` | Throttled merged-sweep + runtime-credential sweep cadence. |
 | `git_author_name` / `git_author_email` | (blank) | Global git identity fallback for sessions and CR merges; per-repo overrides on the repo row. |
+
+## Seeding the initial operator user
+
+`--seed-user` / `--seed-password-hash` / `--seed-password-hash-file` (NixOS: `seedUser` / `seedPasswordHash` / `seedPasswordHashFile`, above) let a declarative deployment provision its operator account from config instead of the browser first-run wizard. Only a hash is ever accepted — there is no plaintext seed-password flag.
+
+Generate the hash with `lab hash-password`: it reads the password from stdin (a pipe) or prompts with echo off on a TTY, **never** as an argument (shell history and `ps` would leak it). It enforces the same ≥ 8 character rule as the setup page and prints the PHC `$argon2id$…` string on stdout, hashed with the same pinned parameters the login path itself uses.
+
+Boot semantics — this reconciles on **every** boot, before the HTTP listener opens, and the config is always the credential's source of truth, not the database:
+
+- Zero users exist: create the seeded user. No session is created — the SPA lands on the login page, not the setup wizard.
+- A user with that username exists and its stored hash differs byte-wise from the configured one: update it. Existing sessions stay valid, so rotating the password is edit config + restart, nothing more.
+- Users exist but none matches the seeded username: lab refuses to start, naming the existing username in the error.
+- The configured hash is malformed, or `--seed-password-hash-file` is unreadable: lab refuses to start.
+- Deployments that never set `--seed-user` are unaffected — the first-run setup page behaves exactly as before.
+
+```console
+$ lab hash-password
+Password: ********
+$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$eB1n6H...
+
+# services.lab.seedUser = "admin"; services.lab.seedPasswordHash = "$argon2id$...";
+# rotating later: edit the hash (or the file it points at) and restart the service.
+```
 
 ## Forge credentials
 

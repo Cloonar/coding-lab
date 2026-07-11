@@ -18,18 +18,39 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
-// ValidateNewCredentials enforces the username/password shape for a new
-// operator account. It is shared by the first-run setup endpoint and startup
-// seeding of the initial operator user (issue #134) so the two paths can
-// never drift apart on what counts as a valid username or password.
-func ValidateNewCredentials(username, password string) error {
+// ValidateUsername enforces the 1-64 character username rule. Split out of
+// ValidateNewCredentials (issue #137) because startup seeding of a
+// pre-hashed user validates a username on its own — a hash has already been
+// computed by the time seeding runs, so the password rule below can't apply
+// there. Also used, via ValidateNewCredentials, by first-run setup.
+func ValidateUsername(username string) error {
 	if len(username) < 1 || len(username) > 64 {
 		return errors.New("username must be 1-64 characters")
 	}
+	return nil
+}
+
+// ValidateNewPassword enforces the minimum-length rule for a new plaintext
+// password. Split out of ValidateNewCredentials (issue #137): after startup
+// seeding moved to taking a pre-hashed password, first-run setup and
+// `lab hash-password` are the only remaining places that ever see a
+// plaintext password, and both need this exact rule.
+func ValidateNewPassword(password string) error {
 	if len(password) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
 	return nil
+}
+
+// ValidateNewCredentials enforces the username/password shape for a new
+// operator account taken as plaintext, e.g. the first-run setup endpoint
+// (handleSetup). It composes ValidateUsername and ValidateNewPassword so
+// none of the three validators can drift on what counts as valid.
+func ValidateNewCredentials(username, password string) error {
+	if err := ValidateUsername(username); err != nil {
+		return err
+	}
+	return ValidateNewPassword(password)
 }
 
 // validateForgeHostShape enforces the flavor-aware host SHAPE of a forge_token

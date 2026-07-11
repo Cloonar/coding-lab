@@ -55,6 +55,7 @@ var version = "dev"
 const usage = `lab — phone-first control panel for Claude Code agents
 
 Usage: lab [flags]
+       lab hash-password   read a password from stdin (or prompt, echo off) and print its argon2id PHC hash
 
 Flags (env overrides in parentheses; flag > env > default):
   -addr string             listen address (LAB_ADDR; default ":8080")
@@ -62,9 +63,11 @@ Flags (env overrides in parentheses; flag > env > default):
   -db string               sqlite:<path> or postgres://… (LAB_DB; default sqlite:<state-dir>/lab.db)
   -master-key-file string  vault master key file (LAB_MASTER_KEY_FILE; default <state-dir>/master.key)
   -vapid-key-file string   web push VAPID key file (LAB_VAPID_KEY_FILE; default <state-dir>/vapid.key)
-  -seed-user string        seed the initial operator user at startup when no users exist (LAB_SEED_USER)
-  -seed-password-file path file holding the seed user's password; one trailing newline stripped (LAB_SEED_PASSWORD_FILE; wins over -seed-password)
-  -seed-password string    seed user's password inline, dev convenience (LAB_SEED_PASSWORD)
+  -seed-user string        initial operator user, reconciled at every startup (LAB_SEED_USER)
+  -seed-password-hash-file path
+                           file holding the seed user's PHC argon2id hash; one trailing newline stripped (LAB_SEED_PASSWORD_HASH_FILE; wins over -seed-password-hash)
+  -seed-password-hash string
+                           seed user's PHC argon2id hash inline, from lab hash-password (LAB_SEED_PASSWORD_HASH)
   -provider-bin id=path    per-provider agent binary, repeatable (LAB_PROVIDER_BIN_<ID>; adapter default: PATH lookup)
   -provider-config id=path per-provider config file, repeatable (LAB_PROVIDER_CONFIG_<ID>; adapter default, claude-code: ~/.claude.json)
   -tmux, -git, -prlimit string
@@ -81,6 +84,13 @@ Flags (env overrides in parentheses; flag > env > default):
 `
 
 func main() {
+	// The first subcommand on cmd/lab (issue #137). Dispatched on the literal
+	// first arg, BEFORE config.Parse (inside run()) ever sees os.Args, so it
+	// never collides with the server's own flag parsing and never needs a DB,
+	// vault, or any of the rest of the server bootstrap.
+	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
+		os.Exit(runHashPassword(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	os.Exit(run())
 }
 
@@ -120,9 +130,14 @@ func run() int {
 		}
 	}()
 
-	// Seed the initial operator user (issue #134) before the listener opens so
-	// a declarative deploy never shows the setup page; store.Open already ran
-	// migrations, and a non-empty DB is a no-op.
+	// Reconcile the initial operator user (issue #137) before the listener
+	// opens so a declarative deploy never shows the setup page; store.Open
+	// already ran migrations. This runs on EVERY boot, not just the first:
+	// on an empty DB it creates the seed user, on a DB that already has it
+	// the stored hash is rewritten when config changed (a no-op otherwise),
+	// and if the DB has other users but not the configured seed user it
+	// refuses to start rather than silently create a second account or leave
+	// a configured credential permanently dead.
 	if err := seedInitialUser(ctx, st, cfg, logger); err != nil {
 		logger.Error("seeding initial user", "component", "main", "err", err)
 		return 1
