@@ -13,7 +13,9 @@ The decisions, pinned:
 
 ## Status
 
-Accepted. Establishes the title overlay (`runs.title`, the PATCH endpoint, the shared fallback chain, and the chat-header affordance) as the one way an operator renames how an instance is displayed. Extends ADR-0008's session/worktree identity model rather than conflicting with it: ADR-0008 fixed the label as the immutable key for tmux, branch, and worktree naming, and this ADR adds a display-only layer strictly on top, touching none of that.
+Accepted. Amended by issue #120: the chat header's inline secondary text is the project name (`sessionRepo(session_name)`), not the raw `label · session` string — that string doubled the label (the session name already embeds it) and out-shrank the display title in the header's flex row. The raw session identity moved to the title button's tooltip, where the tmux/branch/worktree correlation stays reachable without competing with the title for width, and the layout is now one code path for titled and untitled runs alike. The decision itself stands: a title is a nickname beside identity that keeps working, never a replacement for it.
+
+Establishes the title overlay (`runs.title`, the PATCH endpoint, the shared fallback chain, and the chat-header affordance) as the one way an operator renames how an instance is displayed. Extends ADR-0008's session/worktree identity model rather than conflicting with it: ADR-0008 fixed the label as the immutable key for tmux, branch, and worktree naming, and this ADR adds a display-only layer strictly on top, touching none of that.
 
 ## Considered options
 

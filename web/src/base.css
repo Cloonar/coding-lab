@@ -1944,17 +1944,22 @@ button.chat-title {
 button.chat-title:hover {
   background: none;
 }
-/* Flex children ellipsize themselves (the container's clip can't reach them). */
+/* Flex children ellipsize themselves (the container's clip can't reach them);
+   the title's flex-shrink stays default (1) while the project span's is huge
+   (100000, below) so the project hits zero width before the title loses a
+   pixel. */
 .chat-title-text,
-.chat-title-raw {
+.chat-title-project {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 0 1 auto;
 }
-/* The raw `label · session` identity beside a set title — muted, secondary,
-   keeping the branch/worktree/tmux correlation visible. */
-.chat-title-raw {
+/* The project name beside the display title (titled or not, issue #120) —
+   muted, secondary, shrinks-to-zero-first per the rule above. */
+.chat-title-project {
+  flex: 0 100000 auto;
   font-weight: 400;
   font-size: 0.8rem;
   color: var(--muted);
