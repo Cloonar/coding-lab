@@ -39,6 +39,8 @@ These are canonical role names — the actual label strings used in the issue tr
 
 State transitions: an unlabeled issue normally goes to `needs-triage` first; from there it moves to `needs-info`, `ready-for-agent`, `ready-for-human`, or `wontfix`. `needs-info` returns to `needs-triage` once the reporter replies. The maintainer can override at any time — flag transitions that look unusual and ask before proceeding.
 
+`ready-for-agent` together with a live `## Blocked by` reference is a **valid** pairing — do not hold the label back waiting for blockers to merge. The AFK scheduler reads the `## Blocked by` section and handles ordering itself, so a labeled-but-blocked issue simply waits its turn behind its open blockers.
+
 ## Invocation
 
 The maintainer invokes `/triage` and describes what they want in natural language. Interpret the request and act. Examples:

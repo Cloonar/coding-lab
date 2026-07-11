@@ -1,6 +1,7 @@
 // Package afk is lab's unattended-run engine (brief D12, M5; afk-engine
-// port-spec): it selects the lowest-numbered claimable ready-for-agent
-// issue, claims it by creating the isolated worktree on the repo's rendered
+// port-spec): it selects the lowest-numbered claimable ready-for-agent issue
+// not held back by its `## Blocked by` blockers (ADR-0042), claims it by
+// creating the isolated worktree on the repo's rendered
 // claim branch (the branch existing IS the claim — ADR-0013, no tracker
 // label ever), launches a seeded remote-control session, reaps runs on the
 // afk_tick_seconds cadence (done-signal = an open/merged PR/CR whose head is

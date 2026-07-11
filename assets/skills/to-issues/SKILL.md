@@ -55,6 +55,8 @@ For each approved slice, publish a new issue to the issue tracker. Use the issue
 
 Publish issues in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field.
 
+The `## Blocked by` section is machine-read by the AFK scheduler, so write blockers as `#N` issue references. A prose-only blocker ("blocked by the auth work") does NOT block scheduling — the scheduler only sees `#N` refs. `None - can start immediately` (or any text without a `#N`) means unblocked. Cross-repo refs (`owner/repo#N`) are not evaluated.
+
 <issue-template>
 ## Parent
 
@@ -72,7 +74,7 @@ A concise description of this vertical slice. Describe the end-to-end behavior, 
 
 ## Blocked by
 
-- A reference to the blocking ticket (if any)
+- A `#N` reference to the blocking ticket (if any)
 
 Or "None - can start immediately" if no blockers.
 
