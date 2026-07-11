@@ -35,7 +35,7 @@ jobs:
           git clone "https://oauth2:${NIXOS_TOKEN}@git.cloonar.com/Cloonar/nixos.git" nixos
           cd nixos
           sed -i "s|rev = \"[0-9a-f]\{40\}\";|rev = \"${SHA}\";|" \
-            utils/modules/coding-lab/default.nix
+            hosts/dev-new/modules/coding-lab/default.nix
           git diff --quiet && { echo "pin already current"; exit 0; }
           ./scripts/test-configuration dev-new          # integration gate (needs nix)
           git config user.name  "coding-lab-bot"
