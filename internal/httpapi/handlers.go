@@ -37,12 +37,8 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &req) != nil {
 		return
 	}
-	if len(req.Username) < 1 || len(req.Username) > 64 {
-		writeError(w, http.StatusBadRequest, "username must be 1-64 characters")
-		return
-	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+	if err := ValidateNewCredentials(req.Username, req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

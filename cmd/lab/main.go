@@ -62,6 +62,9 @@ Flags (env overrides in parentheses; flag > env > default):
   -db string               sqlite:<path> or postgres://… (LAB_DB; default sqlite:<state-dir>/lab.db)
   -master-key-file string  vault master key file (LAB_MASTER_KEY_FILE; default <state-dir>/master.key)
   -vapid-key-file string   web push VAPID key file (LAB_VAPID_KEY_FILE; default <state-dir>/vapid.key)
+  -seed-user string        seed the initial operator user at startup when no users exist (LAB_SEED_USER)
+  -seed-password-file path file holding the seed user's password; one trailing newline stripped (LAB_SEED_PASSWORD_FILE; wins over -seed-password)
+  -seed-password string    seed user's password inline, dev convenience (LAB_SEED_PASSWORD)
   -provider-bin id=path    per-provider agent binary, repeatable (LAB_PROVIDER_BIN_<ID>; adapter default: PATH lookup)
   -provider-config id=path per-provider config file, repeatable (LAB_PROVIDER_CONFIG_<ID>; adapter default, claude-code: ~/.claude.json)
   -tmux, -git, -prlimit string
@@ -116,6 +119,14 @@ func run() int {
 			logger.Error("closing store", "component", "main", "err", err)
 		}
 	}()
+
+	// Seed the initial operator user (issue #134) before the listener opens so
+	// a declarative deploy never shows the setup page; store.Open already ran
+	// migrations, and a non-empty DB is a no-op.
+	if err := seedInitialUser(ctx, st, cfg, logger); err != nil {
+		logger.Error("seeding initial user", "component", "main", "err", err)
+		return 1
+	}
 
 	bus := events.NewBus()
 	m := metrics.New()
