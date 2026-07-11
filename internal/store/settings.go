@@ -23,6 +23,15 @@ const (
 	SettingGitAuthorName        = "git_author_name"
 	SettingGitAuthorEmail       = "git_author_email"
 
+	// Dialog auto-dismiss window (issue #124): how long a MANUAL session's
+	// dialog waits before auto-dismissing, in minutes. 0 or absent = never
+	// auto-dismiss — the adapter defeats upstream claude-code's 60s picker
+	// self-resolve (compat §5); 1 restores upstream parity. AFK runs ignore
+	// it: unattended auto-advance is a feature there. Deliberately NOT seeded
+	// by SeedDefaultSettings — like the AFK-override keys below, absent is a
+	// meaningful state (never), not a hole to fill.
+	SettingDialogTimeoutMinutes = "dialog_timeout_minutes"
+
 	// AFK-override spawn defaults (issue #19 / ADR-0021): the AFK-only layer
 	// that resolves BEFORE the base spawn_model_default/spawn_effort_default
 	// above. Empty (or absent) means inherit the base. spawn_options_afk holds

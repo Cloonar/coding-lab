@@ -1446,11 +1446,12 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-input')).toBeNull();
   });
 
-  it('titles the chat with the repo half and falls back to the provider web link', async () => {
+  it('titles the chat with the generated label and falls back to the provider web link', async () => {
     runOnServer = { ...baseRun(), deep_link_url: null };
     await mountChat();
 
-    expect(container.querySelector('.chat-title')?.textContent).toBe('proj · dom · 15:00');
+    expect(container.querySelector('.chat-title-text')?.textContent).toBe('dom · 15:00');
+    expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
     // ADR-0017: the fallback URL + tooltip come from the providers API, not a
     // hardcoded constant.
     const link = Array.from(container.querySelectorAll('a')).find((a) =>
@@ -1462,30 +1463,30 @@ describe('RunChat', () => {
 
   // --- Inline rename (issue #111) ---
 
-  it('shows a set title verbatim with the raw label · session as secondary text + tooltip', async () => {
+  it('shows a set title verbatim with the project name as secondary text + session tooltip', async () => {
     runOnServer = { ...baseRun(), title: 'Fix the flaky login test' };
     await mountChat();
 
     const btn = container.querySelector('button.chat-title')!;
     expect(btn.querySelector('.chat-title-text')?.textContent).toBe('Fix the flaky login test');
-    // The raw identity keeps the branch/worktree/tmux correlation visible.
-    expect(btn.querySelector('.chat-title-raw')?.textContent).toBe(
-      'dom-20260706-1500 · proj~dom-20260706-1500',
-    );
-    expect(btn.getAttribute('title')).toBe('dom-20260706-1500 · proj~dom-20260706-1500');
+    // The project name (not the old repeated label · session string) rides
+    // beside the title; the full session name — the branch/worktree/tmux
+    // correlation — is the tooltip.
+    expect(btn.querySelector('.chat-title-project')?.textContent).toBe('proj');
+    expect(btn.getAttribute('title')).toBe('proj~dom-20260706-1500');
   });
 
   it('renames inline: click the title, submit → PATCH {title}, refetch shows the new name', async () => {
     await mountChat();
-    // No title set: no secondary raw-identity text rides the generated title.
-    expect(container.querySelector('.chat-title-raw')).toBeNull();
+    // No title set: the project name still rides the generated title (issue #120).
+    expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
 
     (container.querySelector('button.chat-title') as HTMLButtonElement).click();
     await settle();
     const input = container.querySelector('.chat-title-input') as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.value).toBe(''); // seeded with run.title ?? ''
-    expect(input.placeholder).toBe('proj · dom · 15:00'); // the generated title
+    expect(input.placeholder).toBe('dom · 15:00'); // the generated title, repo-less
 
     input.value = '  Ship it  ';
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1532,8 +1533,18 @@ describe('RunChat', () => {
     buttonByLabel('Save title')!.click();
     await settle();
     expect(titlePatches).toEqual([{ title: null }]);
-    expect(container.querySelector('.chat-title-text')?.textContent).toBe('proj · dom · 15:00');
-    expect(container.querySelector('.chat-title-raw')).toBeNull();
+    expect(container.querySelector('.chat-title-text')?.textContent).toBe('dom · 15:00');
+    expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
+  });
+
+  it('falls back to the branch with no project span for a legacy no-~ session name', async () => {
+    runOnServer = { ...baseRun(), session_name: 'legacy-session', title: null };
+    await mountChat();
+
+    const btn = container.querySelector('button.chat-title')!;
+    expect(btn.querySelector('.chat-title-text')?.textContent).toBe(runOnServer.branch);
+    expect(btn.querySelector('.chat-title-project')).toBeNull();
+    expect(btn.getAttribute('title')).toBe('legacy-session');
   });
 
   it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {

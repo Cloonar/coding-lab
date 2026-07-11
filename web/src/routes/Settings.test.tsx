@@ -201,6 +201,16 @@ function button(text: string): HTMLButtonElement {
   return el;
 }
 
+/** The `section.card` whose `h2` matches, so a field's card placement
+ *  (issue #124: Spawn defaults vs. Capacity & AFK) can be asserted. */
+function cardByHeading(heading: string): HTMLElement {
+  const headings = Array.from(container.querySelectorAll('section.card > h2'));
+  const h = headings.find((h) => h.textContent === heading);
+  const card = h?.closest('section.card');
+  if (!card) throw new Error(`missing card ${JSON.stringify(heading)}`);
+  return card as HTMLElement;
+}
+
 function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
   el.value = value;
   el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -479,6 +489,55 @@ describe('Settings agent defaults (issue #66)', () => {
     labels = optionRows().map((r) => r.textContent);
     expect(labels).toContain('GPT-5 Codex');
     expect(labels).not.toContain('Sonnet');
+  });
+});
+
+// Dialog auto-dismiss timeout (issue #124): a typed-int setting that is NOT
+// seeded server-side (absent from GET = never set = blank input, not 0) and
+// renders in the Spawn defaults card rather than Capacity & AFK, where every
+// other int field lives. 0 ("never") must be an accepted, saveable value.
+describe('Settings dialog timeout (issue #124)', () => {
+  it('renders in the Spawn defaults card, blank when unset', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('input[name="dialog_timeout_minutes"]'),
+      'dialog timeout field',
+    );
+
+    const field = input('dialog_timeout_minutes');
+    expect(field.value).toBe('');
+    expect(cardByHeading('Spawn defaults').contains(field)).toBe(true);
+    expect(cardByHeading('Capacity & AFK').contains(field)).toBe(false);
+    expect(container.textContent).toContain('Dialog auto-dismiss (minutes)');
+  });
+
+  it('typing 0 and saving PATCHes dialog_timeout_minutes as 0 — 0 is not rejected', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('input[name="dialog_timeout_minutes"]'),
+      'dialog timeout field',
+    );
+
+    typeInto(input('dialog_timeout_minutes'), '0');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ dialog_timeout_minutes: 0 }]);
+  });
+
+  it('a non-numeric value shows the validation error and blocks the save', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('input[name="dialog_timeout_minutes"]'),
+      'dialog timeout field',
+    );
+
+    typeInto(input('dialog_timeout_minutes'), 'abc');
+    submitForm();
+    await settle();
+
+    expect(container.textContent).toContain('Enter a whole number.');
+    expect(patchBodies).toEqual([]);
   });
 });
 

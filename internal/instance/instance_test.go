@@ -594,6 +594,63 @@ func TestStart_dialogSettingsFileLifecycle(t *testing.T) {
 	}
 }
 
+// The dialog auto-dismiss window (issue #124) threads run-kind policy into
+// LiveSignals.Setup: a MANUAL run defeats claude-code's upstream 60s picker
+// self-resolve — no dialog_timeout_minutes row (it is deliberately unseeded)
+// means "effectively never" (the 2^31−1 ms value the adapter passes through
+// unclamped), N>0 means N minutes — while an AFK run passes zero so the CLI
+// keeps its own unattended auto-advance.
+func TestLaunch_dialogTimeoutByRunKind(t *testing.T) {
+	never := time.Duration(1<<31-1) * time.Millisecond
+
+	t.Run("manual, no setting row → effectively never", func(t *testing.T) {
+		f := newFixture(t)
+		if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		opts := f.prov.SetupOpts()
+		if len(opts) != 1 || opts[0].DialogTimeout != never {
+			t.Errorf("Setup opts = %+v; want one call with DialogTimeout %v", opts, never)
+		}
+	})
+
+	t.Run("manual, dialog_timeout_minutes=1 → a minute", func(t *testing.T) {
+		f := newFixture(t)
+		if err := f.st.SetSetting(t.Context(), store.SettingDialogTimeoutMinutes, "1"); err != nil {
+			t.Fatalf("SetSetting: %v", err)
+		}
+		if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		opts := f.prov.SetupOpts()
+		if len(opts) != 1 || opts[0].DialogTimeout != time.Minute {
+			t.Errorf("Setup opts = %+v; want one call with DialogTimeout %v", opts, time.Minute)
+		}
+	})
+
+	t.Run("AFK → zero, upstream auto-advance kept", func(t *testing.T) {
+		f := newFixture(t)
+		n := 42
+		if _, err := f.svc.Launch(t.Context(), LaunchSpec{
+			Repo:         f.repo,
+			Provider:     f.prov,
+			Kind:         store.RunKindAFKAuto,
+			IssueNumber:  &n,
+			SessionName:  "proj~afk-42",
+			Branch:       "afk/42",
+			WorktreePath: filepath.Join(f.worktreeRoot, "proj-42"),
+			Model:        "opus[1m]",
+			Effort:       "max",
+		}); err != nil {
+			t.Fatalf("Launch: %v", err)
+		}
+		opts := f.prov.SetupOpts()
+		if len(opts) != 1 || opts[0].DialogTimeout != 0 {
+			t.Errorf("Setup opts = %+v; want one call with DialogTimeout 0", opts)
+		}
+	})
+}
+
 func TestStart_rollbackOnSpawnFailure(t *testing.T) {
 	f := newFixture(t)
 	name := "proj~20260608-1530"

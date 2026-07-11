@@ -68,7 +68,7 @@ import {
 import { isComposerSend } from '../lib/composerKeys';
 import { stateBadge } from '../lib/conversation';
 import { openState, providerOpen, type OpenState } from '../lib/deepLink';
-import { instanceTitle, sessionLabel, sessionRepo } from '../lib/instanceLabel';
+import { runDisplayTitle, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { resourceValue } from '../lib/resource';
 import { groupMessages, toolGroupSummary, type ToolGroup } from '../lib/toolGroups';
@@ -726,25 +726,19 @@ function ChatHeader(props: {
   const [titleMode, setTitleMode] = createSignal<'view' | 'edit'>('view');
   const [titleDraft, setTitleDraft] = createSignal('');
   const [titleSaving, setTitleSaving] = createSignal(false);
-  const customTitle = () => props.run?.title?.trim() ?? '';
-  // "repo · label" — the session name is `<repo>~<label>` and the label alone
-  // is ambiguous across repos.
+  // The edit-mode placeholder — what the title would be without an override.
+  // Force title: null through the shared runDisplayTitle fallback chain
+  // (label → branch) rather than re-deriving it here.
   const generatedTitle = () => {
     const r = props.run;
     if (r === undefined) return 'Chat';
-    const repo = sessionRepo(r.session_name);
-    const label = instanceTitle(sessionLabel(r.session_name));
-    if (label === '') return r.branch;
-    return repo === '' ? label : `${repo} · ${label}`;
+    return runDisplayTitle({ ...r, title: null });
   };
-  const title = () => (customTitle() === '' ? generatedTitle() : customTitle());
-  // Beside a set title, `label · session` keeps the branch/worktree/tmux
-  // correlation visible (the session name IS that identity).
-  const rawIdentity = () => {
-    const r = props.run;
-    if (r === undefined || customTitle() === '') return null;
-    return `${sessionLabel(r.session_name)} · ${r.session_name}`;
-  };
+  const title = () => (props.run === undefined ? 'Chat' : runDisplayTitle(props.run));
+  // The project name beside the title, titled or not — the session name is
+  // `<repo>~<label>`, and the label/generated title alone is ambiguous across
+  // repos. "" for legacy no-`~` sessions, which the view hides entirely.
+  const project = () => sessionRepo(props.run?.session_name ?? '');
   const startRename = () => {
     const r = props.run;
     if (r === undefined) return;
@@ -851,21 +845,23 @@ function ChatHeader(props: {
       <A href="/" class="crumb chat-back icon-btn" aria-label="Back to home" title="Back to home">
         <Icon name="arrow-left" />
       </A>
-      {/* View: a click-to-edit button (issue #111) — the set title verbatim
-          with the raw `label · session` identity beside it (and as tooltip),
-          or today's generated "repo · label" when no title is set. The pencil
-          fades in on hover/focus as the edit affordance. */}
+      {/* View: a click-to-edit button (issue #111) — the display title (custom
+          or generated, issue #120) always wins the space, with the project
+          name as muted secondary text beside it (titled or not). The full
+          session name — the branch/worktree/tmux identity — rides the
+          tooltip, not the row. The pencil fades in on hover/focus as the
+          edit affordance. */}
       <Switch>
         <Match when={titleMode() === 'view'}>
           <button
             type="button"
             class="chat-title"
-            title={rawIdentity() ?? 'Rename this instance'}
+            title={props.run === undefined ? 'Rename this instance' : props.run.session_name}
             aria-label={`Rename: ${title()}`}
             onClick={startRename}
           >
             <span class="chat-title-text">{title()}</span>
-            <Show when={rawIdentity()}>{(raw) => <span class="chat-title-raw">{raw()}</span>}</Show>
+            <Show when={project()}>{(p) => <span class="chat-title-project">{p()}</span>}</Show>
             <Icon name="pencil" size={13} class="chat-title-pencil" />
           </button>
         </Match>

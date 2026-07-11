@@ -52,13 +52,23 @@ func writeSpool(t *testing.T, dir, sub, runID, body string) {
 func TestSetup_shapeAndArgs(t *testing.T) {
 	p := spoolTestProvider(t)
 	dir := t.TempDir()
-	settings, settingsPath, args := p.Setup("run_1", dir)
+	settings, settingsPath, args := p.Setup("run_1", dir, provider.SetupOpts{})
 
 	if settingsPath != filepath.Join(dir, "settings.run_1.json") {
 		t.Errorf("settingsPath = %q", settingsPath)
 	}
 	if len(args) != 2 || args[0] != "--settings" || args[1] != settingsPath {
 		t.Errorf("args = %v; want [--settings %s]", args, settingsPath)
+	}
+
+	// Zero opts → NO env block at all: an AFK run's settings file must stay
+	// byte-identical to the pre-#124 hooks-only payload.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(settings, &raw); err != nil {
+		t.Fatalf("settings not valid JSON: %v", err)
+	}
+	if _, ok := raw["env"]; ok {
+		t.Errorf(`settings for zero opts carry an "env" key: %s`, settings)
 	}
 
 	var s hookSettings
@@ -87,6 +97,49 @@ func TestSetup_shapeAndArgs(t *testing.T) {
 	// PostToolUse removes the same spool.
 	if post := s.Hooks.PostToolUse[0].Hooks[0].Command; !strings.Contains(post, "rm -f") || !strings.Contains(post, spool) {
 		t.Errorf("PostToolUse command = %q; want rm -f %q", post, spool)
+	}
+}
+
+// A DialogTimeout in the opts (issue #124) rides the settings env block as
+// CLAUDE_AFK_TIMEOUT_MS in milliseconds (compat §11), clamped to the JS
+// setTimeout hazard ceiling 2^31−1 — a larger delay would fire IMMEDIATELY,
+// re-enabling the instant auto-dismiss the knob exists to defeat. The hooks
+// block must be byte-identical to the zero-opts payload either way.
+func TestSetup_dialogTimeoutEnvBlock(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	baseline, _, _ := p.Setup("run_1", dir, provider.SetupOpts{})
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(baseline, &base); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		wantMs  string
+	}{
+		{"90s in milliseconds", 90 * time.Second, "90000"},
+		{"over the cap clamps to 2^31-1", 40 * 24 * time.Hour, "2147483647"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings, _, _ := p.Setup("run_1", dir, provider.SetupOpts{DialogTimeout: tc.timeout})
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(settings, &raw); err != nil {
+				t.Fatal(err)
+			}
+			var env map[string]string
+			if err := json.Unmarshal(raw["env"], &env); err != nil {
+				t.Fatalf(`no valid "env" block in %s: %v`, settings, err)
+			}
+			if len(env) != 1 || env["CLAUDE_AFK_TIMEOUT_MS"] != tc.wantMs {
+				t.Errorf(`env = %v; want exactly {"CLAUDE_AFK_TIMEOUT_MS":%q}`, env, tc.wantMs)
+			}
+			// The hooks block is untouched by the knob.
+			if string(raw["hooks"]) != string(base["hooks"]) {
+				t.Errorf("hooks block changed by DialogTimeout:\n got %s\nwant %s", raw["hooks"], base["hooks"])
+			}
+		})
 	}
 }
 
@@ -325,7 +378,7 @@ func TestHookCommands_endToEndThroughSh(t *testing.T) {
 	}
 	p := spoolTestProvider(t)
 	dir := t.TempDir()
-	settings, _, _ := p.Setup("run_e2e", dir)
+	settings, _, _ := p.Setup("run_e2e", dir, provider.SetupOpts{})
 
 	var s hookSettings
 	if err := json.Unmarshal(settings, &s); err != nil {

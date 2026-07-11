@@ -31,6 +31,15 @@ interface IntField {
   key: IntSettingKey;
   label: string;
   hint: string;
+  /** Minimum accepted value. Every existing operational field requires >=1;
+   *  dialog_timeout_minutes (issue #124) means "never" at 0, so it needs its
+   *  own floor. */
+  min: number;
+  /** Which card this field renders in. Most int fields live in "Capacity &
+   *  AFK"; dialog_timeout_minutes belongs in "Spawn defaults" instead
+   *  (issue #124) — buildPatch/intError/seedDraft still iterate INT_FIELDS as
+   *  one flat list regardless of placement. */
+  card: 'capacity' | 'spawn';
 }
 
 const INT_FIELDS: IntField[] = [
@@ -38,28 +47,50 @@ const INT_FIELDS: IntField[] = [
     key: 'max_instances',
     label: 'Max instances',
     hint: 'Global cap on live sessions across all repos (login session exempt).',
+    min: 1,
+    card: 'capacity',
   },
   {
     key: 'afk_budget_minutes',
     label: 'AFK budget (minutes)',
     hint: 'Wall-clock budget per AFK run before the reaper times it out.',
+    min: 1,
+    card: 'capacity',
   },
   {
     key: 'afk_tick_seconds',
     label: 'Reaper tick (seconds)',
     hint: 'How often AFK runs are classified (success / death / timeout).',
+    min: 1,
+    card: 'capacity',
   },
   {
     key: 'afk_schedule_seconds',
     label: 'Scheduler tick (seconds)',
     hint: 'How often auto-enabled repos are considered for a new AFK run.',
+    min: 1,
+    card: 'capacity',
   },
   {
     key: 'sweep_interval_minutes',
     label: 'Sweep interval (minutes)',
     hint: 'Throttle for the merged-worktree/branch GC sweep.',
+    min: 1,
+    card: 'capacity',
+  },
+  {
+    key: 'dialog_timeout_minutes',
+    label: 'Dialog auto-dismiss (minutes)',
+    hint: '0 = never. Applies to manual sessions at the next spawn; running sessions keep their spawn-time value.',
+    min: 0,
+    card: 'spawn',
   },
 ];
+
+/** INT_FIELDS partitioned by card — filtered once at module scope since the
+ *  split is static, not reactive. */
+const SPAWN_INT_FIELDS = INT_FIELDS.filter((f) => f.card === 'spawn');
+const CAPACITY_INT_FIELDS = INT_FIELDS.filter((f) => f.card === 'capacity');
 
 export default function Settings() {
   return (
@@ -161,12 +192,15 @@ function SettingsForm(props: {
 
   const intDirty = (key: IntSettingKey) => draft(key).trim() !== seedDraft(initial, key);
 
-  /** Per-field validation: only dirty int fields can be in error. */
+  /** Per-field validation: only dirty int fields can be in error. Each
+   *  field's own `min` gates it — dialog_timeout_minutes (issue #124) allows
+   *  0 ("never"), unlike the other int fields which require >=1. */
   const intError = (key: IntSettingKey): string | null => {
     if (!intDirty(key)) return null;
     const trimmed = draft(key).trim();
     if (!/^\d+$/.test(trimmed)) return 'Enter a whole number.';
-    if (Number(trimmed) < 1) return 'Must be at least 1.';
+    const min = INT_FIELDS.find((f) => f.key === key)?.min ?? 1;
+    if (Number(trimmed) < min) return `Must be at least ${min}.`;
     return null;
   };
 
@@ -229,6 +263,29 @@ function SettingsForm(props: {
     }
   };
 
+  // Shared row markup for every int field, regardless of which card it
+  // renders in (issue #124 needs one field split out of Capacity & AFK into
+  // Spawn defaults, with identical behavior).
+  const intFieldRow = (field: IntField) => (
+    <label class="field">
+      <span>{field.label}</span>
+      <input
+        type="text"
+        inputmode="numeric"
+        name={field.key}
+        autocomplete="off"
+        value={draft(field.key)}
+        onInput={(e) => setDraft(field.key, e.currentTarget.value)}
+        aria-invalid={intError(field.key) !== null}
+      />
+      <Show when={intError(field.key)} fallback={<small class="hint">{field.hint}</small>}>
+        <small class="field-error" role="alert">
+          {intError(field.key)}
+        </small>
+      </Show>
+    </label>
+  );
+
   return (
     <form onSubmit={(e) => void save(e)} class="stack">
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
@@ -276,6 +333,9 @@ function SettingsForm(props: {
             Provider catalog unavailable — only the stored values are offered.
           </small>
         </Show>
+        {/* Not seeded server-side (issue #124): absent from GET renders as a
+            blank input, distinct from an explicit 0 ("never"). */}
+        <For each={SPAWN_INT_FIELDS}>{intFieldRow}</For>
       </section>
 
       <section class="card">
@@ -351,27 +411,7 @@ function SettingsForm(props: {
 
       <section class="card">
         <h2>Capacity & AFK</h2>
-        <For each={INT_FIELDS}>
-          {(field) => (
-            <label class="field">
-              <span>{field.label}</span>
-              <input
-                type="text"
-                inputmode="numeric"
-                name={field.key}
-                autocomplete="off"
-                value={draft(field.key)}
-                onInput={(e) => setDraft(field.key, e.currentTarget.value)}
-                aria-invalid={intError(field.key) !== null}
-              />
-              <Show when={intError(field.key)} fallback={<small class="hint">{field.hint}</small>}>
-                <small class="field-error" role="alert">
-                  {intError(field.key)}
-                </small>
-              </Show>
-            </label>
-          )}
-        </For>
+        <For each={CAPACITY_INT_FIELDS}>{intFieldRow}</For>
       </section>
 
       <section class="card">

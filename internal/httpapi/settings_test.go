@@ -152,6 +152,71 @@ func TestAPI_SettingsPatchRoundtrip(t *testing.T) {
 	}
 }
 
+// The dialog auto-dismiss window (issue #124) is deliberately NOT seeded, so
+// its floor is 0 (not the >0 floors used by the AFK loop intervals): 0 itself
+// (never auto-dismiss) and a positive value both PATCH and persist.
+func TestAPI_SettingsDialogTimeoutRoundtrip(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingDialogTimeoutMinutes: 0,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingDialogTimeoutMinutes] != float64(0) {
+		t.Errorf("dialog_timeout_minutes = %v, want 0", got[store.SettingDialogTimeoutMinutes])
+	}
+	if n, err := x.st.GetInt(context.Background(), store.SettingDialogTimeoutMinutes, -1); err != nil || n != 0 {
+		t.Errorf("stored dialog_timeout_minutes = %d (%v), want 0", n, err)
+	}
+
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingDialogTimeoutMinutes: 5,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got = settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingDialogTimeoutMinutes] != float64(5) {
+		t.Errorf("dialog_timeout_minutes = %v, want 5", got[store.SettingDialogTimeoutMinutes])
+	}
+	if n, err := x.st.GetInt(context.Background(), store.SettingDialogTimeoutMinutes, -1); err != nil || n != 5 {
+		t.Errorf("stored dialog_timeout_minutes = %d (%v), want 5", n, err)
+	}
+
+	// Below the floor is a 400 with the exact operator-facing message (floor 0,
+	// unlike the AFK loop intervals' >0 floors).
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingDialogTimeoutMinutes: -1,
+	}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); body["error"] != "dialog_timeout_minutes must be at least 0" {
+		t.Errorf("error = %v, want %q", body["error"], "dialog_timeout_minutes must be at least 0")
+	}
+}
+
+// dialog_timeout_minutes is deliberately NOT seeded (issue #124): absent from
+// a fresh GET, but typed as a JSON number once PATCHed.
+func TestAPI_SettingsDialogTimeoutNotSeeded(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if _, present := got[store.SettingDialogTimeoutMinutes]; present {
+		t.Errorf("dialog_timeout_minutes present on a fresh seed = %v, want absent (not seeded)", got[store.SettingDialogTimeoutMinutes])
+	}
+
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingDialogTimeoutMinutes: 7,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got = settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingDialogTimeoutMinutes] != float64(7) {
+		t.Errorf("dialog_timeout_minutes after PATCH = %v (%T), want JSON number 7", got[store.SettingDialogTimeoutMinutes], got[store.SettingDialogTimeoutMinutes])
+	}
+}
+
 func TestAPI_SettingsPatchValidation(t *testing.T) {
 	x := newSettingsServer(t)
 	h := csrfHeaders(x.ts.URL)
@@ -166,6 +231,9 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		{"zero cap", map[string]any{"max_instances": 0}},
 		{"non-integer", map[string]any{"max_instances": "abc"}},
 		{"fractional", map[string]any{"afk_budget_minutes": 1.5}},
+		{"negative dialog timeout", map[string]any{"dialog_timeout_minutes": -1}},
+		{"fractional dialog timeout", map[string]any{"dialog_timeout_minutes": 1.5}},
+		{"non-integer dialog timeout", map[string]any{"dialog_timeout_minutes": "abc"}},
 		{"unknown model", map[string]any{"spawn_model_default": "gpt-9"}},
 		{"blank model", map[string]any{"spawn_model_default": ""}},
 		{"unknown effort", map[string]any{"spawn_effort_default": "ultra"}},
