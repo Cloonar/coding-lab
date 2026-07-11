@@ -5,7 +5,7 @@
 // off every issue (the confirm says so). Forge repos manage labels on the
 // forge. Label mutations emit issue.changed, which refetches here too.
 
-import { A, useParams } from '@solidjs/router';
+import { useParams } from '@solidjs/router';
 import { For, Match, Show, Switch, createEffect, createResource, createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import {
@@ -18,6 +18,7 @@ import {
   type Label,
   type LabelPatch,
 } from '../api';
+import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
@@ -66,6 +67,12 @@ function RepoLabelsView() {
     if (next !== undefined) setRows(reconcile(next, { key: 'id' }));
   });
 
+  const crumbs = (): Crumb[] => [
+    { label: 'Repos', href: '/repos' },
+    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Labels' },
+  ];
+
   const [error, setError] = createSignal<string | null>(null);
   const [editing, setEditing] = createSignal<string | null>(null); // label id
   const [creating, setCreating] = createSignal(false);
@@ -88,9 +95,7 @@ function RepoLabelsView() {
 
   return (
     <main class="page">
-      <p class="crumb">
-        <A href={`/repos/${params.id}/issues`}>← Issues</A>
-      </p>
+      <Crumbs segments={crumbs()} />
       <div class="section-head">
         <h2>{repoData()?.name ?? 'Repository'} · Labels</h2>
       </div>

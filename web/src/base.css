@@ -1917,9 +1917,21 @@ a.chip.cr-count:hover {
   /* sizing/centering come from .icon-btn; only neutralise .crumb's margin. */
   margin: 0;
 }
+/* The title area (issue #132): the title button/form plus the project name and
+   forge icon as siblings — a link inside a button is invalid nested-interactive
+   HTML. This wrapper is the header's flex item (mobile grower / desktop cap the
+   button used to carry); inside it the title shrinks last and the project first
+   (below). Baseline-aligned like the old in-button row. */
+.chat-titlebar {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1; /* <640px: grow + let children truncate so the row never wraps (§1) */
+}
 .chat-title {
   font-weight: 600;
-  flex: 1; /* <640px: shrink + truncate so the row never wraps (§1) */
+  flex: 0 1 auto; /* within .chat-titlebar: shrink, never grow past the project */
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1964,6 +1976,34 @@ button.chat-title:hover {
   font-size: 0.8rem;
   color: var(--muted);
 }
+/* As a link to the repo's issues page (issue #132) it keeps the muted look, with
+   a hover cue; the legacy no-`~` case still renders nothing at all. */
+a.chat-title-project {
+  text-decoration: none;
+}
+a.chat-title-project:hover,
+a.chat-title-project:focus-visible {
+  color: var(--text);
+  text-decoration: underline;
+}
+/* The forge git-icon link (issue #132) — a compact inline affordance beside the
+   project name, NOT a 44px .icon-btn: it rides the title row, so it centers
+   against the baseline-aligned text and only tints on hover. Hidden entirely
+   (never greyed) when there's no forge URL. */
+.chat-title-forge {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem;
+  color: var(--muted);
+  border-radius: var(--radius-control);
+  line-height: 0;
+}
+.chat-title-forge:hover,
+.chat-title-forge:focus-visible {
+  color: var(--text);
+}
 /* The pencil fades in on hover/focus as the edit affordance; the whole title
    is the button, so touch (no hover) loses nothing. */
 .chat-title-pencil {
@@ -1983,6 +2023,7 @@ button.chat-title:focus-visible .chat-title-pencil {
   display: flex;
   align-items: center;
   gap: 0.25rem;
+  flex: 1; /* fill .chat-titlebar in edit mode (the project/icon are hidden) */
   overflow: visible; /* don't clip the input's focus outline */
 }
 .chat-title-input {
@@ -3006,7 +3047,7 @@ h6.md-h {
   .chat-header {
     flex-wrap: wrap;
   }
-  .chat-title {
+  .chat-titlebar {
     flex: 0 1 auto;
     max-width: 40%;
   }

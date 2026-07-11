@@ -10,10 +10,11 @@
 // the error banner because it carries the actionable git/hook message.
 // cr.changed (scoped to this repo) refetches.
 
-import { A, useParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createMemo, createSignal } from 'solid-js';
-import { closeCR, errorMessage, getCR, mergeCR, type CRDetail as CR } from '../api';
+import { useParams } from '@solidjs/router';
+import { For, Match, Show, Switch, createMemo, createResource, createSignal } from 'solid-js';
+import { closeCR, errorMessage, getCR, getRepo, mergeCR, type CRDetail as CR } from '../api';
 import ClosesChips from '../components/ClosesChips';
+import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import { classifyDiff, groupDiffFiles, type DiffFileGroup } from '../lib/crs';
@@ -43,6 +44,21 @@ function CRDetailView() {
   );
   // Non-throwing accessor for reads outside the guarded <Match> branches.
   const crData = () => resourceValue(cr);
+  // The repo feeds the breadcrumb name only; a failed lookup must degrade to
+  // the placeholder, never blank the CR view — so it goes through the same
+  // non-throwing accessor.
+  const [repo] = createResource(
+    () => params.id,
+    (id) => getRepo(id),
+  );
+  const repoData = () => resourceValue(repo);
+
+  const crumbs = (): Crumb[] => [
+    { label: 'Repos', href: '/repos' },
+    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Change requests', href: `/repos/${params.id}/crs` },
+    { label: `#${crNumber()}` },
+  ];
 
   // Memoized: the classifier walks the (up to ~1MiB) diff text once per
   // fetched detail, not once per render.
@@ -88,9 +104,7 @@ function CRDetailView() {
 
   return (
     <main class="page">
-      <p class="crumb">
-        <A href={`/repos/${params.id}/crs`}>← Change requests</A>
-      </p>
+      <Crumbs segments={crumbs()} />
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={cr.error !== undefined}>

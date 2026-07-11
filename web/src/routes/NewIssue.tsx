@@ -3,9 +3,10 @@
 // repo gets the managed-on-the-forge note instead of the form — the server
 // would 409 the create anyway. Success navigates to the fresh issue.
 
-import { A, useNavigate, useParams } from '@solidjs/router';
+import { useNavigate, useParams } from '@solidjs/router';
 import { Match, Show, Switch, createResource, createSignal } from 'solid-js';
 import { createIssue, errorMessage, getRepo, listLabels, type CreateIssueRequest } from '../api';
+import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
@@ -44,6 +45,13 @@ function NewIssueView() {
   );
   const labelList = () => resourceValue(labels);
 
+  const crumbs = (): Crumb[] => [
+    { label: 'Repos', href: '/repos' },
+    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Issues', href: `/repos/${params.id}/issues` },
+    { label: 'New issue' },
+  ];
+
   const [title, setTitle] = createSignal('');
   const [body, setBody] = createSignal('');
   const [selected, setSelected] = createSignal<string[]>([]);
@@ -73,9 +81,7 @@ function NewIssueView() {
 
   return (
     <main class="page">
-      <p class="crumb">
-        <A href={`/repos/${params.id}/issues`}>← Issues</A>
-      </p>
+      <Crumbs segments={crumbs()} />
       <div class="section-head">
         <h2>{repoData()?.name ?? 'Repository'} · New issue</h2>
       </div>

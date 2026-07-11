@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { deriveRepoName, remoteHost, sanitizeName } from './repoName';
+import type { ForgeKind } from '../api';
+import { deriveRepoName, forgeWebUrl, remoteHost, sanitizeName } from './repoName';
 
 describe('deriveRepoName (preview of the server derivation)', () => {
   const rows: Array<[url: string, want: string]> = [
@@ -45,6 +46,39 @@ describe('remoteHost', () => {
   for (const [url, want] of rows) {
     it(`${JSON.stringify(url)} → ${JSON.stringify(want)}`, () => {
       expect(remoteHost(url)).toBe(want);
+    });
+  }
+});
+
+describe('forgeWebUrl', () => {
+  const rows: Array<[url: string, forgeKind: ForgeKind, want: string | null]> = [
+    [
+      'git@git.cloonar.com:Cloonar/coding-lab.git',
+      'forgejo',
+      'https://git.cloonar.com/Cloonar/coding-lab',
+    ],
+    ['host:owner/repo', 'forgejo', 'https://host/owner/repo'], // scp-like, no user
+    [
+      'ssh://git@git.cloonar.com:2222/Cloonar/coding-lab.git',
+      'forgejo',
+      'https://git.cloonar.com/Cloonar/coding-lab', // ssh port dropped
+    ],
+    [
+      'https://git.cloonar.com/Cloonar/coding-lab.git',
+      'forgejo',
+      'https://git.cloonar.com/Cloonar/coding-lab',
+    ],
+    ['https://github.com/foo/bar', 'github', 'https://github.com/foo/bar'],
+    ['http://localhost:3000/o/r.git', 'github', 'http://localhost:3000/o/r'], // http scheme+port preserved
+    ['https://git.cloonar.com/Cloonar/coding-lab.git', 'none', null],
+    ['not a url', 'forgejo', null],
+    ['', 'forgejo', null],
+    ['host-only', 'forgejo', null],
+  ];
+
+  for (const [url, forgeKind, want] of rows) {
+    it(`${JSON.stringify(url)}, ${forgeKind} → ${JSON.stringify(want)}`, () => {
+      expect(forgeWebUrl(url, forgeKind)).toBe(want);
     });
   }
 });

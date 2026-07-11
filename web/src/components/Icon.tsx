@@ -34,7 +34,8 @@ export type IconName =
   | 'chevron-down'
   | 'chevrons-left'
   | 'chevrons-right'
-  | 'history';
+  | 'history'
+  | 'git-branch';
 
 // name -> the svg children for that glyph. Functions (not shared nodes) so a
 // glyph used in several places produces its own DOM each time. Each returned
@@ -156,6 +157,16 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
       <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
       <path d="M3 3v5h5" />
       <path d="M12 7v5l4 2" />
+    </>
+  ),
+  'git-branch': () => (
+    <>
+      {/* <line> isn't in the known-tag list above, so the vertical stem is a
+          path (equivalent to Lucide's <line x1="6" x2="6" y1="3" y2="15" />). */}
+      <path d="M6 3v12" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
     </>
   ),
 };

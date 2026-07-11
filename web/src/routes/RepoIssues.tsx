@@ -16,6 +16,7 @@ import {
   type IssueStateFilter,
   type IssueSummary,
 } from '../api';
+import Crumbs, { type Crumb } from '../components/Crumbs';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
 import {
@@ -27,6 +28,7 @@ import {
 } from '../lib/issues';
 import { labelChipStyle } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
+import { forgeWebUrl } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
 
 const STATE_FILTERS: IssueStateFilter[] = ['open', 'closed', 'all'];
@@ -116,8 +118,24 @@ function RepoIssuesView() {
     return active === null ? `${base}.` : `${base} labeled "${active}".`;
   };
 
+  const crumbs = (): Crumb[] => [
+    { label: 'Repos', href: '/repos' },
+    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Issues' },
+  ];
+
+  // Only forge-bound repos show the note, and only when the remote parses into
+  // a web URL: otherwise the sentence stays plain text (no dead link).
+  const forgeIssuesUrl = (): string | null => {
+    const r = repoData();
+    if (r === undefined) return null;
+    const base = forgeWebUrl(r.remote_url, r.forge_kind);
+    return base === null ? null : `${base}/issues`;
+  };
+
   return (
     <main class="page">
+      <Crumbs segments={crumbs()} />
       <div class="section-head">
         <h2>{repoData()?.name ?? 'Repository'} · Issues</h2>
         <Show when={canMutate()}>
@@ -132,7 +150,18 @@ function RepoIssuesView() {
         </Show>
       </div>
       <Show when={pageData() !== undefined && !canMutate()}>
-        <p class="muted forge-note">Managed on the forge — lab shows a read-only view.</p>
+        <p class="muted forge-note">
+          <Show
+            when={forgeIssuesUrl()}
+            fallback="Managed on the forge — lab shows a read-only view."
+          >
+            {(href) => (
+              <a href={href()} target="_blank" rel="noreferrer">
+                Managed on the forge — lab shows a read-only view.
+              </a>
+            )}
+          </Show>
+        </p>
       </Show>
 
       <Show when={(readyData()?.length ?? 0) > 0}>

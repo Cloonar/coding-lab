@@ -78,6 +78,7 @@ let mergeError: string;
 let mergePosts: number;
 let closePosts: number;
 let crFetches: number;
+let repoFails: boolean;
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
 
@@ -101,6 +102,16 @@ function stubApi(): void {
       if (url === '/api/v1/auth/state' && method === 'GET') {
         return Promise.resolve(
           jsonResponse(200, { setup_required: false, authenticated: true, username: 'dominik' }),
+        );
+      }
+      // The breadcrumb's repo-name lookup — non-throwing: a failure degrades
+      // to the placeholder name, it must never blank the CR view.
+      if (url === `/api/v1/repos/${REPO_ID}` && method === 'GET') {
+        if (repoFails) {
+          return Promise.resolve(jsonResponse(500, { error: 'repo lookup failed' }));
+        }
+        return Promise.resolve(
+          jsonResponse(200, { id: REPO_ID, name: 'coding-lab', tracker_binding: 'builtin' }),
         );
       }
       if (url === `/api/v1/repos/${REPO_ID}/crs/${NUMBER}` && method === 'GET') {
@@ -176,6 +187,7 @@ beforeEach(() => {
   mergePosts = 0;
   closePosts = 0;
   crFetches = 0;
+  repoFails = false;
   stubApi();
 });
 
@@ -185,6 +197,33 @@ afterEach(() => {
   container.remove();
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
+});
+
+describe('CRDetail (breadcrumb)', () => {
+  it('renders the trail (Repos / <repo> / Change requests / #N), leaf inert', async () => {
+    await mountDetail();
+
+    const crumb = container.querySelector('p.crumb');
+    expect(crumb?.textContent).toBe('Repos / coding-lab / Change requests / #3');
+    expect(crumb?.querySelector('a[href="/repos"]')).not.toBeNull();
+    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/issues"]`)).not.toBeNull();
+    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/crs"]`)).not.toBeNull();
+    // The #3 leaf is the current page: inert text, not a link.
+    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/crs/${NUMBER}"]`)).toBeNull();
+  });
+
+  it('degrades to the placeholder name and keeps the CR readable when getRepo fails', async () => {
+    repoFails = true;
+    await mountDetail();
+
+    // The repo failure must not blank the loaded CR.
+    expect(container.textContent).toContain('CR #3');
+    expect(container.textContent).toContain('Add retry loop');
+    // The trail still renders, with the placeholder standing in for the name.
+    expect(container.querySelector('p.crumb')?.textContent).toBe(
+      'Repos / Repository / Change requests / #3',
+    );
+  });
 });
 
 describe('CRDetail (open CR)', () => {

@@ -7,7 +7,7 @@
 // badge, plus the desktop collapse state. Unauthenticated sessions render their
 // children bare — /login and /setup therefore never get the shell.
 
-import { useLocation } from '@solidjs/router';
+import { A, useLocation } from '@solidjs/router';
 import { Show, createEffect, createSignal, on, onCleanup, type ParentProps } from 'solid-js';
 import { listInstances } from '../api';
 import { useAuth } from '../auth';
@@ -176,9 +176,10 @@ function ShellFrame(props: ParentProps) {
       {/* Mobile top strip — hidden on the chat route; hidden >=1024 by CSS. */}
       <Show when={!isChat()}>
         <div class="shell-topstrip">
-          <span class="brand">
+          {/* Same brand-links-home affordance as the desktop rail (SideNav). */}
+          <A href="/" class="brand plain">
             lab<span class="brand-dot">.</span>
-          </span>
+          </A>
           <span class="spacer" />
           <span
             classList={{ 'live-dot': true, on: events.connected() }}
