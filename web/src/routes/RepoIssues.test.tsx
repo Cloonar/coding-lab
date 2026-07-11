@@ -9,7 +9,7 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { IssueSummary, Label, TrackerBinding } from '../api';
+import type { ForgeKind, IssueSummary, Label, TrackerBinding } from '../api';
 import App from '../App';
 import RepoIssues from './RepoIssues';
 
@@ -70,6 +70,8 @@ const LABELS: Label[] = [
 ];
 
 let binding: TrackerBinding;
+let forgeKind: ForgeKind;
+let remoteUrl: string;
 let issuesFail: boolean;
 let readyFail: boolean;
 let issuesFetches: string[]; // full issue-list URLs, in order
@@ -100,7 +102,13 @@ function stubApi(): void {
       }
       if (url === `/api/v1/repos/${REPO_ID}` && method === 'GET') {
         return Promise.resolve(
-          jsonResponse(200, { id: REPO_ID, name: 'coding-lab', tracker_binding: binding }),
+          jsonResponse(200, {
+            id: REPO_ID,
+            name: 'coding-lab',
+            tracker_binding: binding,
+            forge_kind: forgeKind,
+            remote_url: remoteUrl,
+          }),
         );
       }
       if (url.startsWith(`/api/v1/repos/${REPO_ID}/issues?`) && method === 'GET') {
@@ -179,6 +187,8 @@ function emitIssueChanged(repoID: string): void {
 
 beforeEach(() => {
   binding = 'builtin';
+  forgeKind = 'forgejo';
+  remoteUrl = 'git@git.cloonar.com:Cloonar/coding-lab.git';
   issuesFail = false;
   readyFail = false;
   issuesFetches = [];
@@ -194,6 +204,15 @@ afterEach(() => {
 });
 
 describe('RepoIssues (builtin repo)', () => {
+  it('renders the breadcrumb trail (Repos / <repo> / Issues), leaf inert', async () => {
+    await mountIssues();
+
+    const crumb = container.querySelector('p.crumb');
+    expect(crumb?.textContent).toBe('Repos / coding-lab / Issues');
+    expect(crumb?.querySelector('a[href="/repos"]')).not.toBeNull();
+    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/issues"]`)).not.toBeNull();
+  });
+
   it('shows the ready queue, the issue cards and the mutation entry points', async () => {
     await mountIssues();
 
@@ -292,5 +311,24 @@ describe('RepoIssues (forge repo)', () => {
     // Read views still work: cards and the ready queue render.
     expect(container.querySelectorAll('.issue-card')).toHaveLength(2);
     expect(container.textContent).toContain('Ready for agent (1)');
+  });
+
+  it('makes the forge note an outbound link to the forge issues page', async () => {
+    await mountIssues();
+
+    const link = container.querySelector<HTMLAnchorElement>('.forge-note a');
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('href')).toBe('https://git.cloonar.com/Cloonar/coding-lab/issues');
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noreferrer');
+    expect(link?.textContent).toContain('Managed on the forge');
+  });
+
+  it('keeps the note plain text when forge_kind is none (no forge URL)', async () => {
+    forgeKind = 'none';
+    await mountIssues();
+
+    expect(container.textContent).toContain('Managed on the forge');
+    expect(container.querySelector('.forge-note a')).toBeNull();
   });
 });

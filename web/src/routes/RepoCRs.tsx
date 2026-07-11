@@ -8,6 +8,7 @@ import { A, useParams, useSearchParams } from '@solidjs/router';
 import { For, Match, Switch, createResource } from 'solid-js';
 import { errorMessage, getRepo, listCRs, type CRStateFilter, type CRSummary } from '../api';
 import ClosesChips from '../components/ClosesChips';
+import Crumbs, { type Crumb } from '../components/Crumbs';
 import RequireAuth from '../components/RequireAuth';
 import { formatDateTime } from '../lib/issues';
 import { createLiveResource } from '../lib/liveResource';
@@ -50,8 +51,15 @@ function RepoCRsView() {
   const emptyText = () =>
     state() === 'all' ? 'No change requests.' : `No ${state()} change requests.`;
 
+  const crumbs = (): Crumb[] => [
+    { label: 'Repos', href: '/repos' },
+    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Change requests' },
+  ];
+
   return (
     <main class="page">
+      <Crumbs segments={crumbs()} />
       <div class="section-head">
         <h2>{repoData()?.name ?? 'Repository'} · Change requests</h2>
         <div class="head-actions">

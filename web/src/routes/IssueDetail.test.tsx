@@ -8,7 +8,7 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { IssueDetail as Issue, Label, TrackerBinding } from '../api';
+import type { ForgeKind, IssueDetail as Issue, Label, TrackerBinding } from '../api';
 import App from '../App';
 import IssueDetail from './IssueDetail';
 
@@ -29,6 +29,8 @@ const LABELS: Label[] = [
 ];
 
 let binding: TrackerBinding;
+let forgeKind: ForgeKind;
+let remoteUrl: string;
 let repoFails: boolean;
 let issueOnServer: Issue;
 let commentBodies: Record<string, unknown>[];
@@ -77,7 +79,13 @@ function stubApi(): void {
           return Promise.resolve(jsonResponse(500, { error: 'repo lookup failed' }));
         }
         return Promise.resolve(
-          jsonResponse(200, { id: REPO_ID, name: 'coding-lab', tracker_binding: binding }),
+          jsonResponse(200, {
+            id: REPO_ID,
+            name: 'coding-lab',
+            tracker_binding: binding,
+            forge_kind: forgeKind,
+            remote_url: remoteUrl,
+          }),
         );
       }
       if (url === `/api/v1/repos/${REPO_ID}/issues/${NUMBER}` && method === 'GET') {
@@ -158,6 +166,8 @@ function mustButton(text: string): HTMLButtonElement {
 
 beforeEach(() => {
   binding = 'builtin';
+  forgeKind = 'forgejo';
+  remoteUrl = 'git@git.cloonar.com:Cloonar/coding-lab.git';
   repoFails = false;
   issueOnServer = baseIssue();
   commentBodies = [];
@@ -175,6 +185,18 @@ afterEach(() => {
 });
 
 describe('IssueDetail (builtin repo)', () => {
+  it('renders the breadcrumb trail (Repos / <repo> / Issues / #N), leaf inert', async () => {
+    await mountDetail();
+
+    const crumb = container.querySelector('p.crumb');
+    expect(crumb?.textContent).toBe('Repos / coding-lab / Issues / #7');
+    expect(crumb?.querySelector('a[href="/repos"]')).not.toBeNull();
+    // The repo name and the "Issues" section both link to the issues list.
+    expect(crumb?.querySelectorAll(`a[href="/repos/${REPO_ID}/issues"]`)).toHaveLength(2);
+    // The #7 leaf is the current page: inert text, not a link.
+    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/issues/${NUMBER}"]`)).toBeNull();
+  });
+
   it('renders body, labels and comments with the mutation controls', async () => {
     await mountDetail();
 
@@ -280,5 +302,26 @@ describe('IssueDetail (forge repo)', () => {
     // The read view keeps working.
     expect(container.textContent).toContain('Steps to reproduce…');
     expect(container.textContent).toContain('first');
+  });
+
+  it('deep-links the forge note to this exact issue on the forge', async () => {
+    await mountDetail();
+
+    const link = container.querySelector<HTMLAnchorElement>('.forge-note a');
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('href')).toBe(
+      `https://git.cloonar.com/Cloonar/coding-lab/issues/${NUMBER}`,
+    );
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noreferrer');
+    expect(link?.textContent).toContain('Managed on the forge');
+  });
+
+  it('keeps the note plain text when forge_kind is none (no forge URL)', async () => {
+    forgeKind = 'none';
+    await mountDetail();
+
+    expect(container.textContent).toContain('Managed on the forge');
+    expect(container.querySelector('.forge-note a')).toBeNull();
   });
 });

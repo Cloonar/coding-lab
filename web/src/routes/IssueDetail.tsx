@@ -5,7 +5,7 @@
 // labels); on forge-bound repos those controls disappear behind a short
 // "managed on the forge" note while the read view keeps working.
 
-import { A, useParams } from '@solidjs/router';
+import { useParams } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
 import {
   createIssueComment,
@@ -18,6 +18,7 @@ import {
   type IssueDetail as Issue,
   type Label,
 } from '../api';
+import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import LabelChip from '../components/LabelChip';
 import LabelPicker from '../components/LabelPicker';
@@ -25,6 +26,7 @@ import RequireAuth from '../components/RequireAuth';
 import { canMutateTracker, formatDateTime } from '../lib/issues';
 import { sameLabelSet, toggleLabel } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
+import { forgeWebUrl } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
 
 export default function IssueDetail() {
@@ -74,6 +76,22 @@ function IssueDetailView() {
   const colorOf = (name: string): string | undefined =>
     labelList()?.find((label) => label.name === name)?.color;
 
+  const crumbs = (): Crumb[] => [
+    { label: 'Repos', href: '/repos' },
+    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Issues', href: `/repos/${params.id}/issues` },
+    { label: `#${issueNumber()}` },
+  ];
+
+  // The forge note deep-links to this exact issue when the remote parses; a
+  // remote that doesn't (or a missing repo) leaves the sentence plain text.
+  const forgeIssueUrl = (number: number): string | null => {
+    const r = repoData();
+    if (r === undefined) return null;
+    const base = forgeWebUrl(r.remote_url, r.forge_kind);
+    return base === null ? null : `${base}/issues/${number}`;
+  };
+
   const [error, setError] = createSignal<string | null>(null);
   const [stateBusy, setStateBusy] = createSignal(false);
 
@@ -94,9 +112,7 @@ function IssueDetailView() {
 
   return (
     <main class="page">
-      <p class="crumb">
-        <A href={`/repos/${params.id}/issues`}>← Issues</A>
-      </p>
+      <Crumbs segments={crumbs()} />
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Show when={repo.error !== undefined}>
         {/* The repo lookup failing must not blank a loaded issue: the view
@@ -124,7 +140,18 @@ function IssueDetailView() {
                 opened {formatDateTime(i().created_at)} · updated {formatDateTime(i().updated_at)}
               </p>
               <Show when={repoData() !== undefined && !canMutate()}>
-                <p class="muted forge-note">Managed on the forge — lab shows a read-only view.</p>
+                <p class="muted forge-note">
+                  <Show
+                    when={forgeIssueUrl(i().number)}
+                    fallback="Managed on the forge — lab shows a read-only view."
+                  >
+                    {(href) => (
+                      <a href={href()} target="_blank" rel="noreferrer">
+                        Managed on the forge — lab shows a read-only view.
+                      </a>
+                    )}
+                  </Show>
+                </p>
               </Show>
 
               <div class="stack">

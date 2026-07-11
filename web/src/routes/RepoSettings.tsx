@@ -27,10 +27,12 @@ import {
   type TrackerBinding,
 } from '../api';
 import Select, { type SelectOption } from '../components/Select';
+import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import { createLiveResource } from '../lib/liveResource';
 import { remoteHost } from '../lib/repoName';
+import { resourceValue } from '../lib/resource';
 import { providerFor } from '../lib/spawn';
 
 export default function RepoSettings() {
@@ -53,8 +55,17 @@ function RepoSettingsView() {
   // spawn_provider_default_afk) the catalogs below resolve against.
   const [settings] = createResource(() => getSettings());
 
+  // Non-throwing read: the crumb renders above the error <Match>, so a failed
+  // getRepo must degrade to the placeholder name, not re-throw and blank it.
+  const crumbs = (): Crumb[] => [
+    { label: 'Repos', href: '/repos' },
+    { label: resourceValue(repo)?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Settings' },
+  ];
+
   return (
     <main class="page">
+      <Crumbs segments={crumbs()} />
       <Switch>
         <Match when={repo.error !== undefined}>
           <div class="banner error" role="alert">
@@ -979,9 +990,6 @@ function DangerZone(props: { repo: Accessor<Repo> }) {
         <button type="button" class="danger" onClick={() => void remove()} disabled={busy()}>
           {busy() ? 'Deleting…' : 'Delete repository'}
         </button>
-        <A href="/" class="card-link">
-          Back to repos
-        </A>
       </div>
     </section>
   );

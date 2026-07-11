@@ -41,7 +41,15 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage, Dialog, MessagesResponse, Provider, Run, RunCommand } from '../api';
+import type {
+  ChatMessage,
+  Dialog,
+  MessagesResponse,
+  Provider,
+  Repo,
+  Run,
+  RunCommand,
+} from '../api';
 import App from '../App';
 import RunChat from './RunChat';
 
@@ -90,7 +98,46 @@ function baseRun(): Run {
   };
 }
 
+// The run's repo (issue #132) — the header fetches getRepo(repo_id) for the
+// forge git-icon link. A forgejo remote whose forgeWebUrl parses to a hosted
+// web page; tests override forge_kind to exercise the hidden-icon path.
+function baseRepo(): Repo {
+  return {
+    id: 'repo_1',
+    name: 'proj',
+    remote_url: 'https://git.cloonar.com/Cloonar/proj.git',
+    credential_id: null,
+    forge_credential_id: null,
+    tracker_binding: 'forge',
+    forge_kind: 'forgejo',
+    default_branch: 'main',
+    provider: null,
+    incogni: false,
+    model_default: null,
+    effort_default: null,
+    afk_provider_default: null,
+    afk_model_default: null,
+    afk_effort_default: null,
+    afk_options: null,
+    afk_prompt: null,
+    afk_prompt_effective: '',
+    git_author_name: null,
+    git_author_email: null,
+    afk_branch_pattern: '',
+    manual_branch_prefix: '',
+    afk_auto_enabled: false,
+    consecutive_failures: 0,
+    budget_minutes: null,
+    max_instances_override: null,
+    clone_status: 'ready',
+    clone_error: null,
+    created_at: '2026-07-01T00:00:00.000Z',
+    last_opened_at: null,
+  };
+}
+
 let runOnServer: Run;
+let repoOnServer: Repo;
 let messagesOnServer: MessagesResponse;
 let providersOnServer: Provider[];
 let commandsOnServer: RunCommand[];
@@ -156,6 +203,10 @@ function stubApi(): void {
       }
       if (url === `/api/v1/runs/${RUN_ID}` && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { ...runOnServer }));
+      }
+      // The header fetches the run's repo for the forge git-icon link (#132).
+      if (url === `/api/v1/repos/${runOnServer.repo_id}` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { ...repoOnServer }));
       }
       if (url === `/api/v1/runs/${RUN_ID}` && method === 'PATCH') {
         const patch = JSON.parse(String(init?.body)) as { title: string | null };
@@ -291,6 +342,7 @@ function emitMessagesChanged(runID: string = RUN_ID): void {
 
 beforeEach(() => {
   runOnServer = baseRun();
+  repoOnServer = baseRepo();
   providersOnServer = [
     {
       id: 'claude-code',
@@ -1061,6 +1113,8 @@ describe('RunChat', () => {
           return Promise.resolve(jsonResponse(200, { providers: providersOnServer }));
         if (url === `/api/v1/runs/${RUN_ID}` && method === 'GET')
           return Promise.resolve(jsonResponse(200, { ...runOnServer }));
+        if (url === `/api/v1/repos/${runOnServer.repo_id}` && method === 'GET')
+          return Promise.resolve(jsonResponse(200, { ...repoOnServer }));
         if (url.startsWith(`/api/v1/runs/${RUN_ID}/messages`)) {
           const after = Number(new URL(url, 'http://lab').searchParams.get('after') ?? '0');
           return Promise.resolve(jsonResponse(200, after === 2 ? aTail : bWindow));
@@ -1453,10 +1507,9 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-title-text')?.textContent).toBe('dom · 15:00');
     expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
     // ADR-0017: the fallback URL + tooltip come from the providers API, not a
-    // hardcoded constant.
-    const link = Array.from(container.querySelectorAll('a')).find((a) =>
-      a.getAttribute('aria-label')?.includes('Open'),
-    );
+    // hardcoded constant. Scope to the OpenAffordance link (a.card-link) so the
+    // header's forge git-icon link (issue #132) isn't mistaken for it.
+    const link = container.querySelector<HTMLAnchorElement>('a.card-link');
     expect(link?.getAttribute('href')).toBe('https://claude.ai/code');
     expect(link?.getAttribute('title')).toContain('claude.ai session picker');
   });
@@ -1470,9 +1523,11 @@ describe('RunChat', () => {
     const btn = container.querySelector('button.chat-title')!;
     expect(btn.querySelector('.chat-title-text')?.textContent).toBe('Fix the flaky login test');
     // The project name (not the old repeated label · session string) rides
-    // beside the title; the full session name — the branch/worktree/tmux
-    // correlation — is the tooltip.
-    expect(btn.querySelector('.chat-title-project')?.textContent).toBe('proj');
+    // beside the title — a SIBLING of the button now (issue #132), not inside
+    // it; the full session name — the branch/worktree/tmux correlation — is the
+    // button's tooltip.
+    expect(btn.querySelector('.chat-title-project')).toBeNull();
+    expect(container.querySelector('.chat-title-project')?.textContent).toBe('proj');
     expect(btn.getAttribute('title')).toBe('proj~dom-20260706-1500');
   });
 
@@ -1543,8 +1598,50 @@ describe('RunChat', () => {
 
     const btn = container.querySelector('button.chat-title')!;
     expect(btn.querySelector('.chat-title-text')?.textContent).toBe(runOnServer.branch);
-    expect(btn.querySelector('.chat-title-project')).toBeNull();
+    // No `~` in the session name → no project name at all (issue #132): neither
+    // the muted text/link nor the forge icon renders.
+    expect(container.querySelector('.chat-title-project')).toBeNull();
+    expect(container.querySelector('.chat-title-forge')).toBeNull();
     expect(btn.getAttribute('title')).toBe('legacy-session');
+  });
+
+  // --- Repo links in the header (issue #132) ---
+
+  it('renders the project name as a link to the repo issues page', async () => {
+    await mountChat();
+
+    const link = container.querySelector<HTMLAnchorElement>('a.chat-title-project');
+    expect(link).not.toBeNull();
+    expect(link!.textContent).toBe('proj');
+    // The issues page is the de-facto repo landing (no /repos/:id route).
+    expect(link!.getAttribute('href')).toBe('/repos/repo_1/issues');
+  });
+
+  it('renders the git-icon forge link (new tab) for a forgejo repo with a parseable remote', async () => {
+    await mountChat();
+
+    const forge = container.querySelector<HTMLAnchorElement>('a.chat-title-forge');
+    expect(forge).not.toBeNull();
+    // forgeWebUrl strips the .git suffix off the clone URL's path.
+    expect(forge!.getAttribute('href')).toBe('https://git.cloonar.com/Cloonar/proj');
+    expect(forge!.getAttribute('target')).toBe('_blank');
+    expect(forge!.getAttribute('rel')).toBe('noreferrer');
+    expect(forge!.getAttribute('aria-label')).toBe('Open on forge');
+    // The git-branch glyph (two circles), a deliberate choice over the
+    // external-link icon (three paths, no circles).
+    expect(forge!.querySelectorAll('svg circle')).toHaveLength(2);
+  });
+
+  it('hides the git-icon forge link when the repo has no forge (forge_kind none)', async () => {
+    repoOnServer = { ...baseRepo(), forge_kind: 'none' };
+    await mountChat();
+
+    // The forge icon is hidden entirely — not greyed — while the project name
+    // link still renders (it depends on repo_id, not the forge URL).
+    expect(container.querySelector('.chat-title-forge')).toBeNull();
+    expect(container.querySelector('a.chat-title-project')?.getAttribute('href')).toBe(
+      '/repos/repo_1/issues',
+    );
   });
 
   it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {
@@ -1561,11 +1658,10 @@ describe('RunChat', () => {
     ];
     await mountChat();
 
-    expect(
-      Array.from(container.querySelectorAll('a')).some((a) =>
-        a.getAttribute('aria-label')?.includes('Open'),
-      ),
-    ).toBe(false);
+    // No OpenAffordance web link (a.card-link) for a link-less provider; the
+    // header's forge git-icon link (issue #132) is a separate anchor and does
+    // not count here.
+    expect(container.querySelector('a.card-link')).toBeNull();
     const attach = container.querySelector('button.attach-copy');
     expect(attach?.textContent).toContain('Copy attach');
     expect(attach?.getAttribute('title')).toContain('tmux attach -t proj~dom-20260706-1500');

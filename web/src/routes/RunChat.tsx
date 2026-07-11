@@ -32,6 +32,7 @@ import {
   answerRun,
   errorMessage,
   fetchRunCommands,
+  getRepo,
   getRun,
   getRunMessages,
   interruptRun,
@@ -47,6 +48,7 @@ import {
   type Question,
   type QuestionAnswer,
   type QuestionResult,
+  type Repo,
   type Run,
   type RunCommand,
   type TranscriptStatus,
@@ -70,6 +72,7 @@ import { stateBadge } from '../lib/conversation';
 import { openState, providerOpen, type OpenState } from '../lib/deepLink';
 import { runDisplayTitle, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
+import { forgeWebUrl } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
 import { groupMessages, toolGroupSummary, type ToolGroup } from '../lib/toolGroups';
 import { useEvents } from '../events';
@@ -95,6 +98,19 @@ function RunChatView() {
   // Provider-owned open affordance (ADR-0017): the fallback web link + title,
   // or none for a link-less provider (then the header shows tmux-attach).
   const [providers] = createResource(() => listProviders());
+
+  // The run's repo, fetched once the run is loaded, for the header's repo links
+  // (issue #132): the git-icon's hosted forge URL. Gated on a loaded run with a
+  // non-empty repo_id (an undefined source skips the fetch). A failed fetch is
+  // read through resourceValue below, never onto the error banner — it just
+  // means no forge icon.
+  const [repo] = createResource(
+    () => {
+      const r = resourceValue(run);
+      return r !== undefined && r.repo_id !== '' ? r.repo_id : undefined;
+    },
+    (id) => getRepo(id),
+  );
 
   // The run's slash-command catalog (issue #51 decision 5): chat-safe commands
   // feeding the composer autocomplete. Worktree-dependent, hence per-run; the
@@ -569,6 +585,7 @@ function RunChatView() {
       <div class="chat-body">
         <ChatHeader
           run={runData()}
+          repo={resourceValue(repo)}
           providers={providers()}
           state={state()}
           onError={setError}
@@ -709,6 +726,8 @@ function capitalize(s: string): string {
 
 function ChatHeader(props: {
   run: Run | undefined;
+  /** The run's repo (issue #132), for the forge web link; undefined until loaded or on a failed fetch. */
+  repo: Repo | undefined;
   providers: Provider[] | undefined;
   state: ConversationState;
   onError: (message: string) => void;
@@ -739,6 +758,13 @@ function ChatHeader(props: {
   // `<repo>~<label>`, and the label/generated title alone is ambiguous across
   // repos. "" for legacy no-`~` sessions, which the view hides entirely.
   const project = () => sessionRepo(props.run?.session_name ?? '');
+  // The repo's hosted forge web URL for the git-icon link (issue #132), or null
+  // when the repo isn't loaded yet, has no forge, or its remote doesn't parse —
+  // the icon is hidden entirely in every null case, never greyed.
+  const forgeHref = (): string | null => {
+    const r = props.repo;
+    return r === undefined ? null : forgeWebUrl(r.remote_url, r.forge_kind);
+  };
   const startRename = () => {
     const r = props.run;
     if (r === undefined) return;
@@ -845,64 +871,106 @@ function ChatHeader(props: {
       <A href="/" class="crumb chat-back icon-btn" aria-label="Back to home" title="Back to home">
         <Icon name="arrow-left" />
       </A>
-      {/* View: a click-to-edit button (issue #111) — the display title (custom
-          or generated, issue #120) always wins the space, with the project
-          name as muted secondary text beside it (titled or not). The full
-          session name — the branch/worktree/tmux identity — rides the
-          tooltip, not the row. The pencil fades in on hover/focus as the
-          edit affordance. */}
-      <Switch>
-        <Match when={titleMode() === 'view'}>
-          <button
-            type="button"
-            class="chat-title"
-            title={props.run === undefined ? 'Rename this instance' : props.run.session_name}
-            aria-label={`Rename: ${title()}`}
-            onClick={startRename}
-          >
-            <span class="chat-title-text">{title()}</span>
-            <Show when={project()}>{(p) => <span class="chat-title-project">{p()}</span>}</Show>
-            <Icon name="pencil" size={13} class="chat-title-pencil" />
-          </button>
-        </Match>
-        <Match when={titleMode() === 'edit'}>
-          <form class="chat-title chat-title-form" onSubmit={saveTitle}>
-            <input
-              type="text"
-              class="chat-title-input"
-              value={titleDraft()}
-              placeholder={generatedTitle()}
-              maxlength={120}
-              aria-label="Instance title"
-              onInput={(e) => setTitleDraft(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') setTitleMode('view');
-              }}
-              // Refs run before insertion; defer the focus until mounted.
-              ref={(el) => setTimeout(() => el.focus())}
-            />
-            <button
-              type="submit"
-              class="icon-btn accent chat-title-save"
-              aria-label="Save title"
-              title="Save title (empty reverts to the generated title)"
-              disabled={titleSaving()}
-            >
-              <Icon name="check" />
-            </button>
+      {/* The title area (issue #132): the click-to-edit title button (or rename
+          form) with the project name and forge git-icon as SIBLINGS beside it,
+          NOT inside the button — a link nested in a button is invalid
+          interactive HTML. The .chat-titlebar wrapper carries the header's flex
+          sizing (mobile grower / desktop cap) the button used to hold, so the
+          title still dominates and the project shrinks first. */}
+      <div class="chat-titlebar">
+        {/* View: a click-to-edit button (issue #111) — the display title (custom
+            or generated, issue #120) always wins the space. The full session
+            name — the branch/worktree/tmux identity — rides the tooltip, not the
+            row. The pencil fades in on hover/focus as the edit affordance. */}
+        <Switch>
+          <Match when={titleMode() === 'view'}>
             <button
               type="button"
-              class="icon-btn chat-title-cancel"
-              aria-label="Cancel rename"
-              title="Cancel"
-              disabled={titleSaving()}
-              onClick={() => setTitleMode('view')}
+              class="chat-title"
+              title={props.run === undefined ? 'Rename this instance' : props.run.session_name}
+              aria-label={`Rename: ${title()}`}
+              onClick={startRename}
             >
-              <Icon name="x" />
+              <span class="chat-title-text">{title()}</span>
+              <Icon name="pencil" size={13} class="chat-title-pencil" />
             </button>
-          </form>
-        </Match>
-      </Switch>
+          </Match>
+          <Match when={titleMode() === 'edit'}>
+            <form class="chat-title chat-title-form" onSubmit={saveTitle}>
+              <input
+                type="text"
+                class="chat-title-input"
+                value={titleDraft()}
+                placeholder={generatedTitle()}
+                maxlength={120}
+                aria-label="Instance title"
+                onInput={(e) => setTitleDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setTitleMode('view');
+                }}
+                // Refs run before insertion; defer the focus until mounted.
+                ref={(el) => setTimeout(() => el.focus())}
+              />
+              <button
+                type="submit"
+                class="icon-btn accent chat-title-save"
+                aria-label="Save title"
+                title="Save title (empty reverts to the generated title)"
+                disabled={titleSaving()}
+              >
+                <Icon name="check" />
+              </button>
+              <button
+                type="button"
+                class="icon-btn chat-title-cancel"
+                aria-label="Cancel rename"
+                title="Cancel"
+                disabled={titleSaving()}
+                onClick={() => setTitleMode('view')}
+              >
+                <Icon name="x" />
+              </button>
+            </form>
+          </Match>
+        </Switch>
+        {/* The project name as muted secondary text beside the title (view mode
+            only — the edit form owns the row). A link to the repo's issues page
+            (the de-facto repo landing) only when both the project name and
+            repo_id are present; a legacy no-`~` session hides it entirely, and a
+            repo_id-less run keeps it as inert text. */}
+        <Show when={titleMode() === 'view' && project()}>
+          {(p) => (
+            <Show
+              when={props.run?.repo_id}
+              fallback={<span class="chat-title-project">{p()}</span>}
+            >
+              {(repoId) => (
+                <A href={`/repos/${repoId()}/issues`} class="chat-title-project">
+                  {p()}
+                </A>
+              )}
+            </Show>
+          )}
+        </Show>
+        {/* The git-icon link to the repo's hosted forge page (issue #132), new
+            tab — beside the project name (so it rides the same view-mode +
+            project-present gate), hidden entirely when there's no forge URL. The
+            git-branch glyph is a deliberate choice over external-link. */}
+        <Show when={titleMode() === 'view' && project() && forgeHref()}>
+          {(href) => (
+            <a
+              class="chat-title-forge"
+              href={href()}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open on forge"
+              title="Open on forge"
+            >
+              <Icon name="git-branch" size={15} />
+            </a>
+          )}
+        </Show>
+      </div>
 
       {/* <640px: the convo chip distilled to a colored dot beside the title. A
           labeled graphic (role=img), not a live region — an aria-label swap
