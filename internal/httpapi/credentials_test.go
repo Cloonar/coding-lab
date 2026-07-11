@@ -316,3 +316,34 @@ func TestCredentialDeleteReferenced(t *testing.T) {
 	wantStatus(t, resp, http.StatusNotFound)
 	_ = readBody(t, resp)
 }
+
+// TestValidateNewCredentials pins the username/password rules shared by
+// handleSetup and startup seeding (issue #134): drift here is drift there.
+func TestValidateNewCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+		wantErr  string
+	}{
+		{"empty username", "", "password123", "username must be 1-64 characters"},
+		{"64-char username ok", strings.Repeat("u", 64), "password123", ""},
+		{"65-char username rejected", strings.Repeat("u", 65), "password123", "username must be 1-64 characters"},
+		{"7-char password rejected", "op", "1234567", "password must be at least 8 characters"},
+		{"8-char password ok", "op", "12345678", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateNewCredentials(tt.username, tt.password)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateNewCredentials(%q, %q) = %v, want nil", tt.username, tt.password, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("ValidateNewCredentials(%q, %q) = %v, want %q", tt.username, tt.password, err, tt.wantErr)
+			}
+		})
+	}
+}

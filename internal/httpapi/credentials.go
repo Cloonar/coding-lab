@@ -18,6 +18,20 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
+// ValidateNewCredentials enforces the username/password shape for a new
+// operator account. It is shared by the first-run setup endpoint and startup
+// seeding of the initial operator user (issue #134) so the two paths can
+// never drift apart on what counts as a valid username or password.
+func ValidateNewCredentials(username, password string) error {
+	if len(username) < 1 || len(username) > 64 {
+		return errors.New("username must be 1-64 characters")
+	}
+	if len(password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	return nil
+}
+
 // validateForgeHostShape enforces the flavor-aware host SHAPE of a forge_token
 // payload at create/rotate time (ADR-0015): https-only, no userinfo/query, and
 // a path allowed only for the github flavor. It reuses tracker.NormalizeForgeHost

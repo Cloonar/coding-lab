@@ -31,6 +31,24 @@ func TestUsageDocumentsGenericProviderFlags(t *testing.T) {
 	}
 }
 
+// TestUsageDocumentsSeedFlags pins the issue #134 acceptance that `-help`
+// documents the startup seed flags and their env overrides, in the style of
+// TestUsageDocumentsGenericProviderFlags.
+func TestUsageDocumentsSeedFlags(t *testing.T) {
+	for _, want := range []string{
+		"-seed-user",
+		"-seed-password-file",
+		"-seed-password",
+		"LAB_SEED_USER",
+		"LAB_SEED_PASSWORD_FILE",
+		"LAB_SEED_PASSWORD",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("usage does not document %q", want)
+		}
+	}
+}
+
 // TestLabURL pins the session-facing LAB_URL precedence: the dedicated agent
 // URL wins over the external base URL, which wins over the loopback fallback
 // derived from --addr (issue #30).

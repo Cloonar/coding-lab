@@ -369,6 +369,78 @@ func TestParse(t *testing.T) {
 			args:    []string{"--agent-url", "127.0.0.1:8080"},
 			wantErr: "http(s)",
 		},
+		// --- seed user (issue #134) ---
+		{
+			name: "seed flags land in Config",
+			args: []string{"--seed-user", "admin", "--seed-password", "hunter2"},
+			want: with(func(c *Config) {
+				c.SeedUser = "admin"
+				c.SeedPassword = "hunter2"
+			}),
+		},
+		{
+			name: "seed env lands in Config",
+			env:  map[string]string{"LAB_SEED_USER": "admin", "LAB_SEED_PASSWORD_FILE": "/run/secrets/seed-pw"},
+			want: with(func(c *Config) {
+				c.SeedUser = "admin"
+				c.SeedPasswordFile = "/run/secrets/seed-pw"
+			}),
+		},
+		{
+			name: "seed-user flag beats env",
+			args: []string{"--seed-user", "flag-admin", "--seed-password", "x"},
+			env:  map[string]string{"LAB_SEED_USER": "env-admin"},
+			want: with(func(c *Config) {
+				c.SeedUser = "flag-admin"
+				c.SeedPassword = "x"
+			}),
+		},
+		{
+			name: "seed-password flag beats env",
+			args: []string{"--seed-user", "admin", "--seed-password", "flag-pw"},
+			env:  map[string]string{"LAB_SEED_PASSWORD": "env-pw"},
+			want: with(func(c *Config) {
+				c.SeedUser = "admin"
+				c.SeedPassword = "flag-pw"
+			}),
+		},
+		{
+			name: "seed-password-file flag beats env",
+			args: []string{"--seed-user", "admin", "--seed-password-file", "/flag/pw"},
+			env:  map[string]string{"LAB_SEED_PASSWORD_FILE": "/env/pw"},
+			want: with(func(c *Config) {
+				c.SeedUser = "admin"
+				c.SeedPasswordFile = "/flag/pw"
+			}),
+		},
+		{
+			name: "all seed values unset leaves all three empty",
+			want: defaults,
+		},
+		{
+			name:    "seed user without password source errors",
+			args:    []string{"--seed-user", "admin"},
+			wantErr: "--seed-user and a seed password source (--seed-password-file or --seed-password) must be set together",
+		},
+		{
+			name:    "seed password without user errors",
+			args:    []string{"--seed-password", "hunter2"},
+			wantErr: "--seed-user and a seed password source (--seed-password-file or --seed-password) must be set together",
+		},
+		{
+			name:    "seed password file without user errors",
+			args:    []string{"--seed-password-file", "/run/secrets/seed-pw"},
+			wantErr: "--seed-user and a seed password source (--seed-password-file or --seed-password) must be set together",
+		},
+		{
+			name: "seed user with both password sources is valid and keeps both",
+			args: []string{"--seed-user", "admin", "--seed-password", "hunter2", "--seed-password-file", "/run/secrets/seed-pw"},
+			want: with(func(c *Config) {
+				c.SeedUser = "admin"
+				c.SeedPassword = "hunter2"
+				c.SeedPasswordFile = "/run/secrets/seed-pw"
+			}),
+		},
 		{
 			name:    "empty addr rejected",
 			args:    []string{"--addr", ""},
