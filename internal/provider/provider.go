@@ -621,8 +621,10 @@ type LiveSignals interface {
 	// ["--settings", settingsPath]). lab writes the bytes at settingsPath and
 	// appends the args to the spawn argv. The spooling commands self-create
 	// their subdirs, so a run whose dialog opens after a lab restart still
-	// spools with no re-arming.
-	Setup(runID, dir string) (settings []byte, settingsPath string, args []string)
+	// spools with no re-arming. opts carries the per-run knobs Setup folds
+	// into the same payload (issue #124); the zero value yields the baseline
+	// payload.
+	Setup(runID, dir string, opts SetupOpts) (settings []byte, settingsPath string, args []string)
 
 	// SpoolSig is a cheap change-detector over the run's spool + marker files
 	// (existence + mtime + size) so the tailer notices a dialog appearing while
@@ -635,6 +637,16 @@ type LiveSignals interface {
 	// for a non-active run is garbage; one for an active run survives a lab
 	// restart, so keep the active set). A nil keep removes all.
 	SweepSpools(dir string, keep func(runID string) bool) error
+}
+
+// SetupOpts carries the per-run knobs LiveSignals.Setup folds into the
+// settings payload (issue #124). The zero value yields the baseline payload.
+type SetupOpts struct {
+	// DialogTimeout, when > 0, is the unattended-dialog auto-dismiss window
+	// the adapter should impose on its CLI (claude: CLAUDE_AFK_TIMEOUT_MS in
+	// the settings env block, compat §11). Zero leaves the CLI's own default
+	// untouched (AFK runs).
+	DialogTimeout time.Duration
 }
 
 // DeepLinker is the optional deep-link capability on the provider seam

@@ -38,12 +38,15 @@ const afkPromptDefaultKey = "afk_prompt_default"
 // settingsIntMin is the closed set of integer settings keys with each key's
 // minimum: a zero cap or budget would deadlock every spawn, and sub-5s ticks
 // would hammer tmux and the tracker (pinned: budget > 0, ticks >= 5s).
+// dialog_timeout_minutes (issue #124) is the one key with floor 0: 0/absent
+// means "never auto-dismiss", not a deadlock.
 var settingsIntMin = map[string]int{
 	store.SettingMaxInstances:         1,
 	store.SettingAFKBudgetMinutes:     1,
 	store.SettingAFKTickSeconds:       5,
 	store.SettingAFKScheduleSeconds:   5,
 	store.SettingSweepIntervalMinutes: 1,
+	store.SettingDialogTimeoutMinutes: 0,
 }
 
 // typedSettings renders a raw settings map with the integer keys as JSON
