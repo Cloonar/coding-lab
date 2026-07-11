@@ -102,15 +102,17 @@ func (s *Service) ScheduleOnce(ctx context.Context) {
 			s.log.Warn("afk scheduler: ready issues", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
-		claimed, err := s.claimedIssueSet(ctx, repo)
+		// The CLAIMABLE queue — ready issues minus existing claim branches
+		// minus issues held back by an open `## Blocked by` ref (ADR-0042) —
+		// not the raw ready count, so parked/in-flight/blocked issues read as
+		// zero and can never loop. A per-repo open-set fetch failure skips only
+		// THIS repo's tick (retried next tick), the same stance as every other
+		// per-repo error in the sweep.
+		claimable, err := s.FilterClaimable(ctx, repo, trk, issues)
 		if err != nil {
-			s.log.Warn("afk scheduler: claim branches", "component", "afk", "repo", repo.Name, "err", err)
+			s.log.Warn("afk scheduler: filter claimable", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
-		// The CLAIMABLE queue — ready issues without an existing claim
-		// branch — not the raw ready count, so parked/in-flight issues read
-		// as zero and can never loop.
-		claimable := ClaimableIssues(issues, claimed)
 
 		_, autoInFlight, err := s.store.ActiveAutoRunForRepo(ctx, repo.ID)
 		if err != nil {

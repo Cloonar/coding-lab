@@ -3,6 +3,8 @@ package afk
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
@@ -141,16 +143,19 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 	if len(issues) == 0 {
 		return store.Run{}, launchNoReady, nil
 	}
-	// Exclude any issue already claimed by a local claim branch (ADR-0013):
-	// a parked/failed run's surviving branch — or a run a concurrent launch
-	// just claimed — keeps its issue out of selection with no tracker label.
-	// This read under s.mu is the authoritative claim check; the scheduler's
-	// pre-tick one is only a hint.
-	claimed, err := s.claimedIssueSet(ctx, repo)
+	// Narrow to the claimable set through the shared choke point: exclude any
+	// issue already claimed by a local claim branch (ADR-0013) — a parked/failed
+	// run's surviving branch, or a run a concurrent launch just claimed, keeps
+	// its issue out of selection with no tracker label — and any issue held back
+	// by an open `## Blocked by` ref (ADR-0042, issue #136). This call under s.mu
+	// is the authoritative check for BOTH gates; the scheduler's pre-tick one is
+	// only a hint. A tracker failure comes back as *TrackerError, a claim-branch
+	// read failure raw — the error is returned as-is, preserving both surfaces.
+	claimable, err := s.FilterClaimable(ctx, repo, trk, issues)
 	if err != nil {
 		return store.Run{}, launchSpawned, err
 	}
-	issue, ok := PickLowestIssue(ClaimableIssues(issues, claimed))
+	issue, ok := PickLowestIssue(claimable)
 	if !ok {
 		return store.Run{}, launchNoReady, nil
 	}
@@ -243,26 +248,97 @@ func (s *Service) claimedIssueSet(ctx context.Context, repo store.Repo) (map[int
 }
 
 // FilterClaimable narrows an ALREADY-FETCHED ready queue to the currently
-// claimable set (ready issues minus the repo's claim branches), reading only
-// the bare clone's claim refs — no tracker round-trip. It is the
-// GET /repos/{id}/ready hint source when the caller already holds the ready
-// list (the operator handler fetches it once for the {issues} envelope), so the
-// count and the list derive from one snapshot. Unlocked and best-effort by
-// design, exactly like ClaimableIssuesFor.
-func (s *Service) FilterClaimable(ctx context.Context, repo store.Repo, ready []tracker.Issue) ([]tracker.Issue, error) {
+// claimable set and is the ONE choke point every "is this issue claimable?"
+// caller shares — the locked claim path (launch), the scheduler pre-tick,
+// ClaimableIssuesFor, and GET /repos/{id}/ready — so none of them can ever
+// disagree on the answer. It applies two gates in sequence:
+//
+//   - The claim gate: drop any issue with a local claim branch (ADR-0013 — the
+//     branch existing IS the claim), read from the bare clone's claim refs, no
+//     tracker round-trip. Claim refs come from the bare reference clone.
+//   - The blocked-by gate (ADR-0042, issue #136): drop any claimable issue held
+//     back by an open `## Blocked by` ref. Weighed only over the CLAIMABLE issues
+//     — an already-claimed issue must never drive a fetch — and lazily: the open
+//     set is fetched with a single Tracker.Issues(StateOpen) call ONLY when some
+//     claimable issue actually carries a local #<n> blocker ref, so a repo not
+//     using the convention pays ZERO forge calls. Cross-repo and full-URL refs
+//     are unevaluable per-repo, so they are logged (the only surface a genuine
+//     off-repo dependency has) and never themselves trigger the fetch.
+//
+// A tracker failure on the open-set fetch fails CLOSED — returned as
+// *TrackerError so the API answers 502 and no issue schedules on partial data —
+// while a dangling/closed ref merely fails OPEN, unblocking the issue (data
+// ambiguity favours progress). A claim-branch read failure returns raw.
+//
+// Called under the engine lock by launch it is authoritative; for the hint
+// callers (the scheduler pre-tick, ClaimableIssuesFor, the ready endpoint) it is
+// unlocked and best-effort — stale the moment it renders, re-checked inside the
+// locked claim path when a run actually starts.
+func (s *Service) FilterClaimable(ctx context.Context, repo store.Repo, trk tracker.Tracker, ready []tracker.Issue) ([]tracker.Issue, error) {
 	claimed, err := s.claimedIssueSet(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	return ClaimableIssues(ready, claimed), nil
+	claimable := ClaimableIssues(ready, claimed)
+
+	// One pass over the CLAIMABLE set: surface every unevaluable cross-repo/URL
+	// blocker, and note whether any local #<n> ref exists at all. Foreign refs
+	// alone never arm the open-set fetch — they cannot be resolved per-repo, so
+	// the Warn is their only surface against a silently-scheduled dependency.
+	anyLocal := false
+	for _, is := range claimable {
+		if len(ParseBlockedBy(is.Body)) > 0 {
+			anyLocal = true
+		}
+		if foreign := ForeignBlockedBy(is.Body); len(foreign) > 0 {
+			s.log.Warn("afk: unevaluable cross-repo blocker", "component", "afk",
+				"repo", repo.Name, "issue", fmt.Sprintf("#%d", is.Number),
+				"refs", strings.Join(foreign, " "))
+		}
+	}
+	if !anyLocal {
+		return claimable, nil // lazy: no local blocker refs → no forge call
+	}
+
+	open, err := trk.Issues(ctx, tracker.StateOpen)
+	if err != nil {
+		return nil, &TrackerError{cause: err} // fail closed on infrastructure
+	}
+	openSet := make(map[int]bool, len(open))
+	for _, is := range open {
+		openSet[is.Number] = true
+	}
+	unblocked, blocked := PartitionBlocked(claimable, openSet)
+	if len(blocked) > 0 {
+		s.log.Info("afk: skipped blocked issues", "component", "afk",
+			"repo", repo.Name, "skipped", formatBlockedSkips(blocked))
+	}
+	return unblocked, nil
+}
+
+// formatBlockedSkips renders PartitionBlocked's held-back issues into the one
+// structured skip line — "#87 (blocked by #74); #90 (blocked by #74 #91)" —
+// each issue paired with the open blockers still holding it, in the order
+// PartitionBlocked preserved.
+func formatBlockedSkips(blocked []BlockedIssue) string {
+	entries := make([]string, 0, len(blocked))
+	for _, b := range blocked {
+		refs := make([]string, 0, len(b.OpenBlockers))
+		for _, n := range b.OpenBlockers {
+			refs = append(refs, fmt.Sprintf("#%d", n))
+		}
+		entries = append(entries, fmt.Sprintf("#%d (blocked by %s)", b.Issue.Number, strings.Join(refs, " ")))
+	}
+	return strings.Join(entries, "; ")
 }
 
 // ClaimableIssuesFor returns a repo's currently claimable ready queue (open
-// ready-for-agent issues minus claimed branches) — the scheduler's pre-tick
-// hint. It fetches the ready queue then defers to FilterClaimable. Unlocked and
-// best-effort by design: the count is stale the moment it renders; the
-// authoritative check is remade inside the locked claim path when a run
-// actually starts.
+// ready-for-agent issues minus claimed branches minus blocked issues) — the
+// scheduler's pre-tick hint. It fetches the ready queue then defers to
+// FilterClaimable, inheriting both the claim gate and the blocked-by gate
+// (ADR-0042). Unlocked and best-effort by design: the count is stale the moment
+// it renders; the authoritative check is remade inside the locked claim path
+// when a run actually starts.
 func (s *Service) ClaimableIssuesFor(ctx context.Context, repo store.Repo) ([]tracker.Issue, error) {
 	trk, err := s.trackers.TrackerFor(ctx, repo)
 	if err != nil {
@@ -272,5 +348,5 @@ func (s *Service) ClaimableIssuesFor(ctx context.Context, repo store.Repo) ([]tr
 	if err != nil {
 		return nil, &TrackerError{cause: err}
 	}
-	return s.FilterClaimable(ctx, repo, issues)
+	return s.FilterClaimable(ctx, repo, trk, issues)
 }

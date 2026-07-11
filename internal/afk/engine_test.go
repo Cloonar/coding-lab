@@ -43,9 +43,12 @@ var clockTime = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 type fakeTracker struct {
 	mu          sync.Mutex
 	ready       []tracker.Issue
+	open        []tracker.Issue // the StateOpen set the blocked-by gate weighs (#136)
 	pulls       []tracker.PullRef
 	readyErr    error
+	issuesErr   error // failIssues: Issues() error injection (open-set fetch)
 	pullsErr    error
+	issuesCalls int
 	pullsCalls  int
 	pullTitles  map[int]string // Pull(n) detail title (done-signal notification body)
 	detailErr   error          // failPullDetail: Pull() error injection
@@ -61,7 +64,19 @@ func (f *fakeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
 	return append([]tracker.Issue(nil), f.ready...), nil
 }
 
-func (f *fakeTracker) Issues(context.Context, string) ([]tracker.Issue, error) { return nil, nil }
+// Issues serves the open-set the blocked-by gate weighs (#136). The engine only
+// ever asks for StateOpen, so the state param is ignored — a copy of the
+// scripted open set is returned, and the call is counted so a test can prove the
+// fetch stayed lazy.
+func (f *fakeTracker) Issues(context.Context, string) ([]tracker.Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issuesCalls++
+	if f.issuesErr != nil {
+		return nil, f.issuesErr
+	}
+	return append([]tracker.Issue(nil), f.open...), nil
+}
 func (f *fakeTracker) Issue(context.Context, int) (tracker.Issue, error) {
 	return tracker.Issue{}, tracker.ErrNotFound
 }
@@ -109,6 +124,38 @@ func (f *fakeTracker) setReady(ns ...int) {
 	for _, n := range ns {
 		f.ready = append(f.ready, tracker.Issue{Number: n, Title: fmt.Sprintf("issue %d", n)})
 	}
+}
+
+// setReadyIssue APPENDS one ready issue carrying a body — the `## Blocked by`
+// section the gate reads — leaving setReady's ref-less behaviour untouched so
+// every existing test keeps passing.
+func (f *fakeTracker) setReadyIssue(n int, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ready = append(f.ready, tracker.Issue{Number: n, Title: fmt.Sprintf("issue %d", n), Body: body})
+}
+
+// setOpen scripts the StateOpen set the blocked-by gate weighs a blocker ref
+// against (#136).
+func (f *fakeTracker) setOpen(ns ...int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open = f.open[:0]
+	for _, n := range ns {
+		f.open = append(f.open, tracker.Issue{Number: n, Title: fmt.Sprintf("issue %d", n)})
+	}
+}
+
+func (f *fakeTracker) failIssues(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issuesErr = err
+}
+
+func (f *fakeTracker) issuesCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.issuesCalls
 }
 
 func (f *fakeTracker) addPull(head, state string) {
@@ -1500,5 +1547,123 @@ func TestClaimableIssuesFor(t *testing.T) {
 	}
 	if strings.Join(ns, ",") != "7,9" {
 		t.Errorf("claimable = %v, want [7 9] (claimed 8 drained around)", ns)
+	}
+}
+
+// --- blocked-by gate (#136, ADR-0042) ----------------------------------------
+
+// The headline acceptance test: the scheduler holds back a lower-numbered ready
+// issue while an open `## Blocked by` ref keeps it blocked, claims the next
+// unblocked issue instead, and — once the blocker closes on a later sweep —
+// claims the previously-blocked issue.
+func TestSchedule_blockedIssueSkippedThenClaimedAfterBlockerCloses(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReadyIssue(87, "## Blocked by\n\n- #74\n")
+	f.trk.setReadyIssue(90, "Ready to go, no blockers here.\n")
+	f.trk.setOpen(74, 87, 90)
+	autoOn(f, f.repo)
+
+	// #87 is the LOWER number but its blocker #74 is open, so #90 is claimed.
+	f.svc.ScheduleOnce(t.Context())
+	active, _ := f.st.ActiveRuns(t.Context())
+	if len(active) != 1 {
+		t.Fatalf("scheduled %d runs, want 1 (#87 held back by open #74)", len(active))
+	}
+	run := active[0]
+	if run.IssueNumber == nil || *run.IssueNumber != 90 || run.Branch != "afk/90" {
+		t.Fatalf("claimed run = %+v, want issue 90 on afk/90 (the lower #87 was skipped)", run)
+	}
+	if f.branchExists(f.repo, "afk/87") {
+		t.Error("blocked issue #87 was claimed (a claim branch exists)")
+	}
+
+	// Complete the #90 run via a success reap so the serial auto gate releases:
+	// real work in the worktree + an open PR on the run branch (the done-signal).
+	f.commitInWorktree(run.WorktreePath)
+	f.trk.addPull("afk/90", tracker.PullOpen)
+	f.clock.Advance(10 * time.Minute)
+	f.svc.ReapOnce(t.Context(), f.clock.Now())
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeSuccess {
+		t.Fatalf("reap outcome = %q, want success (needed to release the serial auto gate)", got.Outcome)
+	}
+
+	// Blocker #74 has closed and #90 is done: only #87 remains ready, now
+	// unblocked. The next sweep claims it.
+	f.trk.setReady() // clear the queue…
+	f.trk.setReadyIssue(87, "## Blocked by\n\n- #74\n")
+	f.trk.setOpen(87) // …#74 no longer open
+	f.svc.ScheduleOnce(t.Context())
+	active, _ = f.st.ActiveRuns(t.Context())
+	if len(active) != 1 {
+		t.Fatalf("second sweep active = %d, want 1 (#87 unblocked once #74 closed)", len(active))
+	}
+	if active[0].IssueNumber == nil || *active[0].IssueNumber != 87 || active[0].Branch != "afk/87" {
+		t.Fatalf("second claim = %+v, want issue 87 on afk/87", active[0])
+	}
+}
+
+// An all-blocked queue is indistinguishable from an empty one: the auto sweep
+// launches nothing and never strikes the failure counter, and a manual start
+// returns the pinned empty-queue sentinel.
+func TestSchedule_allBlockedIsEmptyQueue(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReadyIssue(87, "## Blocked by\n\n- #74\n")
+	f.trk.setOpen(74, 87)
+
+	// (a) auto sweep: nothing launches AND the counter is untouched.
+	autoOn(f, f.repo)
+	f.svc.ScheduleOnce(t.Context())
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Fatalf("all-blocked sweep launched %d runs, want 0", len(active))
+	}
+	if n := f.failures(f.repo); n != 0 {
+		t.Errorf("failures = %d, want 0 (a blocked queue is not a failed run)", n)
+	}
+
+	// (b) manual start: the same empty-queue outcome, the pinned 409 sentinel.
+	if _, err := f.svc.StartManualAFK(t.Context(), f.repo.ID); !errors.Is(err, ErrNoReady) {
+		t.Fatalf("manual start = %v, want ErrNoReady (all-blocked ≡ empty)", err)
+	}
+}
+
+// The open-set fetch is lazy: neither the auto path nor the manual path issues a
+// Tracker.Issues(StateOpen) call when no claimable issue carries a blocker ref.
+func TestFilterClaimable_noOpenFetchWithoutRefs(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReady(7, 8) // setReady writes no Body → no `## Blocked by` refs
+	autoOn(f, f.repo)
+
+	f.svc.ScheduleOnce(t.Context()) // auto path filters (claims #7)
+	if _, err := f.svc.StartManualAFK(t.Context(), f.repo.ID); err != nil {
+		t.Fatalf("StartManualAFK: %v", err) // manual path filters too (claims #8)
+	}
+	if calls := f.trk.issuesCallCount(); calls != 0 {
+		t.Errorf("Issues(StateOpen) fired %d times with no blocker refs in the queue, want 0 (the fetch is lazy)", calls)
+	}
+}
+
+// The open-set fetch fails CLOSED: a Tracker.Issues error skips the repo's tick
+// (no launch, no strike) and surfaces as *TrackerError on a manual start.
+func TestFilterClaimable_openFetchFailureFailsClosed(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReadyIssue(87, "## Blocked by\n\n- #74\n") // a real local ref arms the fetch
+	f.trk.failIssues(errors.New("forge is down"))
+
+	// (a) auto sweep: skip the repo — no run, no panic, no failure strike (a
+	// fetch error is infrastructure, not a run outcome).
+	autoOn(f, f.repo)
+	f.svc.ScheduleOnce(t.Context())
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Fatalf("fetch-failed sweep launched %d runs, want 0 (fail closed)", len(active))
+	}
+	if n := f.failures(f.repo); n != 0 {
+		t.Errorf("failures = %d, want 0 (an open-set fetch error is not a run failure)", n)
+	}
+
+	// (b) manual start: the failure surfaces as *TrackerError (API → 502).
+	_, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	var te *TrackerError
+	if !errors.As(err, &te) {
+		t.Fatalf("manual start err = %v, want *TrackerError (fail closed on infra)", err)
 	}
 }
