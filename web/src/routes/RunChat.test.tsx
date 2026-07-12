@@ -1,7 +1,14 @@
 // RunChat behavioral contract (issue #7):
 // - the stream renders user/assistant text, tool chips, and lifecycle/errors;
-//   thinking is permanently dropped at paint — in the stream and inside
-//   expanded tool groups — with no toggle to reveal it (issue #68);
+//   thinking is permanently dropped at paint — in the stream and in the tool
+//   panel's list — with no toggle to reveal it (issue #68);
+// - tool chips and group summaries are buttons opening the tool detail panel
+//   (issue #145): a lone chip straight at its detail, a group at its list;
+//   nothing expands inline anymore. The selection is seq-keyed so the open
+//   panel resolves live across SSE refetches (decision 12), swaps in place on
+//   a retarget, closes via ✕ / desktop Esc (unless an inner editor consumed
+//   the key), clears on stream resets, and renders as a modal sheet (<1024px)
+//   or an in-flow sidebar (>=1024px) — a pure render switch on shared state;
 // - a run.messages.changed for THIS run refetches; other runs are ignored;
 //   run.changed for other repos is ignored too;
 // - a refetch tails with after=<cursor> (paginating past the window limit) so
@@ -299,26 +306,68 @@ function stubClipboard(): ReturnType<typeof vi.fn> {
   return writeText;
 }
 
-// jsdom has no window.matchMedia — install a fake that resolves ONLY the
-// fine-pointer query isComposerSend checks (ADR-0031, issue #70). Must match
-// query strings exactly and read `false` for anything else, since RunChat
-// also probes `(prefers-reduced-motion: reduce)` at mount. vi.stubGlobal ties
-// the mock's lifetime to the existing vi.unstubAllGlobals() in afterEach, so
-// no separate cleanup is needed here.
-function finePointer(matches: boolean): void {
+// The tool panel's desktop breakpoint (issue #145) — must byte-match the
+// query RunChat builds from its DESKTOP_MIN_PX (the shell rail width).
+const DESKTOP_QUERY = '(min-width: 1024px)';
+
+// jsdom has no window.matchMedia — install a fake resolving the queries the
+// app probes: isComposerSend's fine-pointer check (ADR-0031, issue #70) and
+// the tool panel's desktop breakpoint (issue #145). Each query gets ONE
+// persistent MediaQueryList whose `matches` flips via set() — dispatching
+// 'change' to whatever listeners the component registered — so a test can
+// cross the breakpoint live. Everything starts false (mobile, no fine
+// pointer; RunChat's `(prefers-reduced-motion: reduce)` probe reads false
+// too), keeping the untouched tests valid. vi.stubGlobal ties the mock's
+// lifetime to vi.unstubAllGlobals() in afterEach; the memo below is cleared
+// there alongside it.
+let mediaStub: { set: (query: string, matches: boolean) => void } | undefined;
+
+function stubMatchMedia(): { set: (query: string, matches: boolean) => void } {
+  if (mediaStub !== undefined) return mediaStub;
+  type Entry = { mql: { matches: boolean } & Record<string, unknown>; listeners: Set<() => void> };
+  const entries = new Map<string, Entry>();
+  const entry = (query: string): Entry => {
+    let e = entries.get(query);
+    if (e === undefined) {
+      const listeners = new Set<() => void>();
+      e = {
+        listeners,
+        mql: {
+          matches: false,
+          media: query,
+          addEventListener: (type: string, listener: () => void) => {
+            if (type === 'change') listeners.add(listener);
+          },
+          removeEventListener: (_type: string, listener: () => void) => {
+            listeners.delete(listener);
+          },
+          addListener: () => {},
+          removeListener: () => {},
+          onchange: null,
+          dispatchEvent: () => false,
+        },
+      };
+      entries.set(query, e);
+    }
+    return e;
+  };
   vi.stubGlobal(
     'matchMedia',
-    vi.fn((query: string) => ({
-      matches: matches && query === '(hover: hover) and (pointer: fine)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-      onchange: null,
-      dispatchEvent: () => false,
-    })),
+    vi.fn((query: string) => entry(query).mql),
   );
+  mediaStub = {
+    set: (query, matches) => {
+      const e = entry(query);
+      e.mql.matches = matches;
+      for (const listener of e.listeners) listener();
+    },
+  };
+  return mediaStub;
+}
+
+/** The fine-pointer profile isComposerSend checks (ADR-0031, issue #70). */
+function finePointer(matches: boolean): void {
+  stubMatchMedia().set('(hover: hover) and (pointer: fine)', matches);
 }
 
 /** Set the server's messages to a single assistant text message. */
@@ -411,6 +460,7 @@ afterEach(() => {
   container.remove();
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
+  mediaStub = undefined; // the stub it memoized is gone with unstubAllGlobals
   Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
 });
 
@@ -1772,7 +1822,7 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-tool-group')).toBeNull();
   });
 
-  it('drops folded-in thinking inside an opened tool group, permanently (issue #68)', async () => {
+  it('drops folded-in thinking from the group and its panel list, permanently (issue #68)', async () => {
     messagesOnServer = {
       messages: [
         { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok' } },
@@ -1788,20 +1838,15 @@ describe('RunChat', () => {
 
     // Thinking folds in (keeps the run together) but is never counted.
     expect(container.querySelector('.tool-group-count')?.textContent).toBe('2 tool calls');
-    expect(container.querySelector('.tool-group-body')?.textContent).not.toContain(
-      'secret group reasoning',
-    );
+    expect(container.textContent).not.toContain('secret group reasoning');
 
-    // Opening the group (a user tap) still never reveals it — there is no
-    // toggle left to flip.
-    const details = container.querySelector('.chat-tool-group') as HTMLDetailsElement;
-    details.open = true;
-    details.dispatchEvent(new Event('toggle'));
+    // Opening the panel list (a user tap) still never reveals it — one row
+    // per TOOL, and there is no toggle left to flip.
+    (container.querySelector('button.chat-tool-group') as HTMLButtonElement).click();
     await settle();
 
-    expect(container.querySelector('.tool-group-body')?.textContent).not.toContain(
-      'secret group reasoning',
-    );
+    expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(2);
+    expect(container.textContent).not.toContain('secret group reasoning');
     expect(buttonByText('Show thinking')).toBeNull();
   });
 
@@ -1822,10 +1867,13 @@ describe('RunChat', () => {
     expect(container.querySelector('.tool-group-running')?.textContent).toContain('running');
   });
 
-  it('keeps an expanded tool group open across an SSE refetch (decision 12)', async () => {
+  it('keeps the open panel live across an SSE refetch (decision 12)', async () => {
+    // The group is re-derived on every refetch; the panel selection is keyed
+    // by the first tool's immutable seq, so an SSE tick must neither close an
+    // open list nor reset a pushed detail — it only grows them.
     messagesOnServer = {
       messages: [
-        { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok' } },
+        { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok', output: 'one' } },
         { seq: 2, kind: 'tool', tool: { name: 'Bash', title: 'b', status: 'running' } },
       ],
       state: 'working',
@@ -1835,14 +1883,12 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    const details = container.querySelector('.chat-tool-group') as HTMLDetailsElement;
-    expect(details.open).toBe(false);
-    // Expand it as a user tap would.
-    details.open = true;
-    details.dispatchEvent(new Event('toggle'));
+    (container.querySelector('button.chat-tool-group') as HTMLButtonElement).click();
     await settle();
+    expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(2);
 
-    // An SSE tick appends another tool and re-derives the group.
+    // An SSE tick appends another tool and re-derives the group: the panel
+    // stays open and the list shows the new row.
     messagesOnServer = {
       ...messagesOnServer,
       messages: [
@@ -1853,10 +1899,245 @@ describe('RunChat', () => {
     };
     emitMessagesChanged();
     await settle();
-
-    const after = container.querySelector('.chat-tool-group') as HTMLDetailsElement;
-    expect(after.open).toBe(true); // survived the recompute — keyed by first tool seq
+    expect(container.querySelector('.tool-panel')).not.toBeNull();
+    expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(3);
     expect(container.querySelector('.tool-group-count')?.textContent).toBe('3 tool calls');
+
+    // Push into a detail, then grow ITS output on the next tick: the shown
+    // text grows in place (live resolution, never a captured message) and the
+    // page does not reset back to the list.
+    panelRow('a').click();
+    await settle();
+    expect(container.querySelector('.tool-panel .tool-body.tool-output')?.textContent).toBe('one');
+
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: messagesOnServer.messages.map((m) =>
+        m.seq === 1 ? { ...m, tool: { ...m.tool!, output: 'one\ntwo' } } : m,
+      ),
+    };
+    emitMessagesChanged();
+    await settle();
+    expect(container.querySelector('.tool-panel .tool-body.tool-output')?.textContent).toBe(
+      'one\ntwo',
+    );
+    expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(0); // still on detail
+    expect(buttonByLabel('Back to list')).not.toBeNull();
+  });
+
+  // --- Tool detail panel (issue #145) ---
+  // Chips and group summaries are buttons opening the panel; nothing expands
+  // inline anymore. The default all-false matchMedia stub (or none at all)
+  // reads as mobile → the modal sheet; DESKTOP_QUERY flips the same open
+  // panel to the in-flow sidebar.
+
+  function panelRow(title: string): HTMLButtonElement {
+    const row = Array.from(container.querySelectorAll<HTMLButtonElement>('.tool-panel-row')).find(
+      (r) => r.querySelector('.tool-title')?.textContent === title,
+    );
+    if (!row) throw new Error(`missing panel row "${title}"`);
+    return row;
+  }
+
+  /** A coalesced run (ls/read/grep — group key = seq 2) AND a separate lone
+   *  chip after a text break: both panel entry points side by side. */
+  function withToolRunAndLoneChip(): void {
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'text', role: 'assistant', text: 'on it' },
+        { seq: 2, kind: 'tool', tool: { name: 'Bash', title: 'ls', status: 'ok', output: 'a' } },
+        { seq: 3, kind: 'text', role: 'assistant', thinking: true, text: 'hmm' },
+        { seq: 4, kind: 'tool', tool: { name: 'Read', title: 'read', status: 'error' } },
+        { seq: 5, kind: 'tool', tool: { name: 'Bash', title: 'grep', status: 'ok' } },
+        { seq: 6, kind: 'text', role: 'assistant', text: 'between' },
+        {
+          seq: 7,
+          kind: 'tool',
+          tool: { name: 'Bash', title: 'lone', status: 'ok', output: 'solo out' },
+        },
+      ],
+      state: 'needs_input',
+      cursor: 7,
+      has_more: false,
+      transcript: 'available',
+    };
+  }
+
+  it('opens the panel straight at detail for a lone chip tap (mobile: modal sheet)', async () => {
+    await mountChat(); // default fixture: one lone tool, 'Ran ls', output 'a\nb'
+    expect(container.querySelector('.tool-panel')).toBeNull();
+
+    const chip = container.querySelector('button.chat-tool') as HTMLButtonElement;
+    chip.click();
+    await settle();
+
+    // Mobile: a modal bottom sheet.
+    const panel = container.querySelector('aside.tool-panel');
+    expect(panel).not.toBeNull();
+    expect(panel!.getAttribute('role')).toBe('dialog');
+    expect(panel!.classList.contains('tool-panel-sheet')).toBe(true);
+    // Straight at detail — the tool's output, and NO back affordance (a lone
+    // chip has no list to return to).
+    expect(panel!.querySelector('.tool-body.tool-output')?.textContent).toBe('a\nb');
+    expect(buttonByLabel('Back to list')).toBeNull();
+    // The chip wears the selected state…
+    expect(chip.classList.contains('selected')).toBe(true);
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    // …and nothing expanded inline: the stream carries no I/O pane.
+    expect(container.querySelector('.chat-stream .tool-body')).toBeNull();
+  });
+
+  it('opens the panel at the list page for a group tap, one row per tool', async () => {
+    withToolRunAndLoneChip();
+    await mountChat();
+
+    const group = container.querySelector('button.chat-tool-group') as HTMLButtonElement;
+    group.click();
+    await settle();
+
+    // The list page: the count heading and one row per TOOL (folded-in
+    // thinking is excluded).
+    expect(container.querySelector('.tool-panel-title')?.textContent).toBe('3 tool calls');
+    const rows = Array.from(container.querySelectorAll('.tool-panel-row .tool-title')).map(
+      (el) => el.textContent,
+    );
+    expect(rows).toEqual(['ls', 'read', 'grep']);
+    // The group line is marked as the panel's source.
+    expect(group.classList.contains('selected')).toBe(true);
+    expect(group.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('pushes a list row to its detail and returns via back', async () => {
+    withToolRunAndLoneChip();
+    await mountChat();
+    (container.querySelector('button.chat-tool-group') as HTMLButtonElement).click();
+    await settle();
+
+    panelRow('read').click();
+    await settle();
+    // Detail: the tool's title in the head, plus the back affordance (a group
+    // target entered at its list).
+    expect(container.querySelector('.tool-panel-title .tool-title')?.textContent).toBe('read');
+    const back = buttonByLabel('Back to list');
+    expect(back).not.toBeNull();
+
+    back!.click();
+    await settle();
+    expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(3);
+    expect(buttonByLabel('Back to list')).toBeNull();
+  });
+
+  it('swaps the panel in place when a different chip is tapped while open', async () => {
+    withToolRunAndLoneChip();
+    await mountChat();
+
+    const group = container.querySelector('button.chat-tool-group') as HTMLButtonElement;
+    group.click();
+    await settle();
+    expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(3);
+
+    // Tap the separate lone chip: ONE panel swaps to its detail (no
+    // close/reopen churn) and the selected highlight moves with it.
+    const chip = container.querySelector('button.chat-tool') as HTMLButtonElement;
+    chip.click();
+    await settle();
+    expect(container.querySelectorAll('.tool-panel')).toHaveLength(1);
+    expect(container.querySelector('.tool-panel .tool-body.tool-output')?.textContent).toBe(
+      'solo out',
+    );
+    expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(0);
+    expect(chip.classList.contains('selected')).toBe(true);
+    expect(group.classList.contains('selected')).toBe(false);
+  });
+
+  it('closes the panel and clears the selected highlight via ✕', async () => {
+    await mountChat();
+    const chip = container.querySelector('button.chat-tool') as HTMLButtonElement;
+    chip.click();
+    await settle();
+    expect(container.querySelector('.tool-panel')).not.toBeNull();
+
+    // The panel's own ✕ (the error banner's dismiss is labeled "Dismiss").
+    container.querySelector<HTMLButtonElement>('.tool-panel button[aria-label="Close"]')!.click();
+    await settle();
+    expect(container.querySelector('.tool-panel')).toBeNull();
+    expect(container.querySelector('.chat-tool.selected')).toBeNull();
+    expect(chip.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('resets the panel when the stream resets (transcript rotation)', async () => {
+    messagesOnServer = { ...messagesOnServer, transcript_id: 'sess-A' };
+    await mountChat();
+    (container.querySelector('button.chat-tool') as HTMLButtonElement).click();
+    await settle();
+    expect(container.querySelector('.tool-panel')).not.toBeNull();
+
+    // /clear rotates: the accumulated stream — and the seq-keyed panel
+    // selection with it — drops before the fresh transcript merges in (the
+    // same resetStream that clears on a route-param change).
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'user', text: 'fresh start' }],
+      state: 'needs_input',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      transcript_id: 'sess-B',
+      pending_dialog: null,
+    };
+    emitMessagesChanged();
+    await settle();
+    await settle();
+
+    expect(container.textContent).toContain('fresh start');
+    expect(container.querySelector('.tool-panel')).toBeNull();
+    expect(container.querySelector('.selected')).toBeNull();
+  });
+
+  it('keeps the panel open across the 1024px breakpoint, switching containers', async () => {
+    const media = stubMatchMedia(); // DESKTOP_QUERY reads false → mobile
+    await mountChat();
+    (container.querySelector('button.chat-tool') as HTMLButtonElement).click();
+    await settle();
+    expect(container.querySelector('aside.tool-panel')?.getAttribute('role')).toBe('dialog');
+    expect(container.querySelector('.tool-scrim')).not.toBeNull();
+
+    // Cross to desktop: shared state, pure render switch — the panel stays
+    // open with the same content, now the in-flow complementary sidebar (no
+    // dialog role, no scrim).
+    media.set(DESKTOP_QUERY, true);
+    await settle();
+    const side = container.querySelector('aside.tool-panel');
+    expect(side).not.toBeNull();
+    expect(side!.getAttribute('role')).toBeNull();
+    expect(side!.classList.contains('tool-panel-side')).toBe(true);
+    expect(container.querySelector('.tool-scrim')).toBeNull();
+    expect(side!.querySelector('.tool-body.tool-output')?.textContent).toBe('a\nb');
+  });
+
+  it('Esc closes the desktop panel unless an inner editor consumed it', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true); // desktop from mount
+    await mountChat();
+    (container.querySelector('button.chat-tool') as HTMLButtonElement).click();
+    await settle();
+    expect(container.querySelector('.tool-panel')).not.toBeNull();
+
+    // Esc while the rename input is up: its handler preventDefaults (and the
+    // panel's window listener skips consumed events), so only the rename
+    // exits — the panel survives.
+    (container.querySelector('button.chat-title') as HTMLButtonElement).click();
+    await settle();
+    const input = container.querySelector('.chat-title-input') as HTMLInputElement;
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    );
+    await settle();
+    expect(container.querySelector('.chat-title-input')).toBeNull(); // rename cancelled
+    expect(container.querySelector('.tool-panel')).not.toBeNull(); // panel intact
+
+    // A bare Esc that nothing consumed closes the panel.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await settle();
+    expect(container.querySelector('.tool-panel')).toBeNull();
   });
 
   // --- Copy-raw (issue #13) ---

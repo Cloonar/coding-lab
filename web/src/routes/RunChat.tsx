@@ -4,7 +4,10 @@
 // text, tool chips, the pending dialog as an interactive inline card (issue
 // #56), lifecycle/errors; thinking permanently hidden at paint — issue #68),
 // and a fixed bottom composer whose state follows the run — collapsed to a
-// waiting note while a dialog is pending, disabled for ended instances. Send is
+// waiting note while a dialog is pending, disabled for ended instances. Tool
+// chips and group summaries no longer expand inline: they are buttons that open
+// the tool detail panel (issue #145) — a right sidebar on desktop, a modal
+// bottom sheet on phones — while the pending-dialog card stays inline. Send is
 // ALWAYS available and fires immediately (ADR-0029, issue #61);
 // the one-tap turn Interrupt lives in the header next to Stop, gated on the live
 // outcome — not the derived `working` state, which can be a stale-transcript-tail
@@ -57,6 +60,7 @@ import ErrorBanner from '../components/ErrorBanner';
 import Icon from '../components/Icon';
 import OpenAffordance from '../components/OpenAffordance';
 import RequireAuth from '../components/RequireAuth';
+import ToolPanel, { toolStatusMark, type PanelTarget } from '../components/ToolPanel';
 import {
   anchoredScrollTop,
   isNearBottom,
@@ -78,6 +82,11 @@ import { groupMessages, toolGroupSummary, type ToolGroup } from '../lib/toolGrou
 import { useEvents } from '../events';
 
 const MESSAGE_LIMIT = 60;
+
+// Mirrors the app shell's rail breakpoint (AppShell.tsx DESKTOP_MIN_PX, not
+// exported): the tool panel flips sheet → sidebar at exactly the width the
+// persistent rail appears, so the page never mixes phone and desktop chrome.
+const DESKTOP_MIN_PX = 1024;
 
 export default function RunChat() {
   return (
@@ -141,18 +150,31 @@ function RunChatView() {
   // stream.
   const [exhausted, setExhausted] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  // Tool-group open state, keyed by the first tool's seq (decision 12): the
-  // group is a derived structure recomputed on every refetch, so native
-  // <details> state alone would slam an expanded live group shut on the next
-  // SSE tick. seq is the immutable cursor, so it survives the recompute.
-  const [openGroups, setOpenGroups] = createSignal<Set<number>>(new Set());
-  const setGroupOpen = (key: number, open: boolean) =>
-    setOpenGroups((prev) => {
-      const next = new Set(prev);
-      if (open) next.add(key);
-      else next.delete(key);
-      return next;
-    });
+  // What the tool detail panel is showing (issue #145, superseding the inline
+  // <details> expansion): a group (keyed by its first tool's seq — decision 12)
+  // or a lone chip (its seq). Identity by immutable seq, NOT by object: groups
+  // and messages are re-derived/replaced wholesale on every SSE refetch, and
+  // only seq survives the recompute. The panel never opens or retargets itself
+  // — every write goes through a chip/group tap or the close affordances.
+  const [panelSel, setPanelSel] = createSignal<
+    null | { kind: 'group'; key: number } | { kind: 'tool'; seq: number }
+  >(null);
+
+  // >=1024px renders the panel as the in-flow sidebar instead of the sheet — a
+  // pure render switch on shared state, so crossing the breakpoint while open
+  // keeps the panel open. Test stubs may hand back a bare MediaQueryList with
+  // no addEventListener, hence the optional calls.
+  const [desktopPanel, setDesktopPanel] = createSignal(false);
+  const desktopQuery =
+    typeof window !== 'undefined'
+      ? window.matchMedia?.(`(min-width: ${DESKTOP_MIN_PX}px)`)
+      : undefined;
+  if (desktopQuery !== undefined) {
+    setDesktopPanel(desktopQuery.matches === true);
+    const onBreakpoint = () => setDesktopPanel(desktopQuery.matches === true);
+    desktopQuery.addEventListener?.('change', onBreakpoint);
+    onCleanup(() => desktopQuery.removeEventListener?.('change', onBreakpoint));
+  }
 
   // The stream is the scroll container (.chat-page bounds the viewport).
   let streamEl: HTMLDivElement | undefined;
@@ -419,7 +441,9 @@ function RunChatView() {
     setHasMore(false);
     setExhausted(false);
     setError(null);
-    setOpenGroups(new Set<number>());
+    // Panel selection is stream state (it names a seq): route navigation and
+    // transcript rotation both come through here, so it resets for free.
+    setPanelSel(null);
   };
 
   // All chat state is keyed to the route param: navigating /runs/A → /runs/B
@@ -572,148 +596,210 @@ function RunChatView() {
   const renderItems = () => groupMessages(messages());
   const hiddenThinking = (m: ChatMessage) => m.kind === 'text' && m.thinking === true;
 
-  return (
-    <main class="page chat-page" ref={pageEl}>
-      {/* The banner sits above the body so the mobile overlay header (§2), which
-          is absolutely positioned within .chat-body, can never paint over it. */}
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+  // The panel's live target (issue #145), re-resolved from the CURRENT stream
+  // on every read: the panel must never hold captured message objects — a
+  // refetch replaces them wholesale, and a captured tool would freeze its
+  // output while the real one keeps growing. The `key` stays stable across
+  // refetches (it derives from panelSel's seq) so the panel's internal page
+  // state survives SSE ticks and only resets on a genuine retarget.
+  const panelTarget = (): PanelTarget | null => {
+    const sel = panelSel();
+    if (sel === null) return null;
+    if (sel.kind === 'group') {
+      const item = renderItems().find((i) => i.kind === 'toolGroup' && i.key === sel.key);
+      if (item === undefined || item.kind !== 'toolGroup') return null;
+      return {
+        key: `group:${sel.key}`,
+        entry: 'list',
+        // Thinking folds into the run for grouping but never renders (issue
+        // #68) — the panel gets tools only.
+        tools: item.items.filter((m) => m.kind === 'tool'),
+      };
+    }
+    // A lone chip resolves by seq from messages(), NOT from the render items:
+    // a chip that later coalesces into a group must keep its open detail
+    // working across the recompute.
+    const m = messages().find((x) => x.seq === sel.seq && x.kind === 'tool');
+    if (m === undefined) return null;
+    return { key: `tool:${sel.seq}`, entry: 'detail', tools: [m] };
+  };
+  // A dissolved target — e.g. load-earlier prepends tools and renumbers a
+  // group's first seq — must not leave a ghost selection behind a closed
+  // panel, or the "same" group could silently reopen later under a new shape.
+  createEffect(() => {
+    if (panelSel() !== null && panelTarget() === null) setPanelSel(null);
+  });
+  const groupSelected = (key: number) => {
+    const sel = panelSel();
+    return sel !== null && sel.kind === 'group' && sel.key === key;
+  };
+  const toolSelected = (m: ChatMessage) => {
+    const sel = panelSel();
+    return sel !== null && sel.kind === 'tool' && m.kind === 'tool' && sel.seq === m.seq;
+  };
 
-      {/* .chat-body is the positioning context for the quick-return header (§2):
+  return (
+    // .chat-page is a flex ROW (issue #145): the chat column plus, on desktop,
+    // the in-flow tool panel sidebar. panel-open widens the page cap so the
+    // column keeps its 760px where the viewport allows; closed, the layout is
+    // exactly the pre-panel single column.
+    <main class="page chat-page" classList={{ 'panel-open': panelTarget() !== null }} ref={pageEl}>
+      <div class="chat-column">
+        {/* The banner sits above the body so the mobile overlay header (§2), which
+          is absolutely positioned within .chat-body, can never paint over it. */}
+        <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+
+        {/* .chat-body is the positioning context for the quick-return header (§2):
           on mobile the header overlays the stream's top and slides via translateY
           while the stream reserves the header's band with padding-top, so hiding
           the header reclaims reading space with no reflow. */}
-      <div class="chat-body">
-        <ChatHeader
-          run={runData()}
-          repo={resourceValue(repo)}
-          providers={providers()}
-          state={state()}
-          onError={setError}
-          onChanged={() => void refetchRun()}
-          onInterrupted={() => void refetchMessages()}
-          hidden={!headerVisible()}
-          headerRef={(el) => (headerEl = el)}
-        />
+        <div class="chat-body">
+          <ChatHeader
+            run={runData()}
+            repo={resourceValue(repo)}
+            providers={providers()}
+            state={state()}
+            onError={setError}
+            onChanged={() => void refetchRun()}
+            onInterrupted={() => void refetchMessages()}
+            hidden={!headerVisible()}
+            headerRef={(el) => (headerEl = el)}
+          />
 
-        <div class="chat-stream" role="log" aria-live="polite" ref={streamEl}>
-          <Switch>
-            {/* An active run whose adapter-composed state is idle with no
+          <div class="chat-stream" role="log" aria-live="polite" ref={streamEl}>
+            <Switch>
+              {/* An active run whose adapter-composed state is idle with no
                 messages and an unlocated transcript (codex writes its transcript
                 only at first-turn start — issue #96): trust the adapter state
                 (ADR-0038) over the transcript-derived placeholder and invite the
                 first message, which starts the conversation. */}
-            <Match
-              when={
-                !ended() &&
-                transcript() === 'locating' &&
-                state() === 'idle' &&
-                messages().length === 0
-              }
-            >
-              <p class="empty">Ready — your first message starts the conversation.</p>
-            </Match>
-            <Match when={transcript() === 'locating' && messages().length === 0}>
-              <p class="empty">Waiting for the transcript…</p>
-            </Match>
-            <Match when={transcript() === 'gone'}>
-              <p class="empty">Transcript no longer available.</p>
-            </Match>
-            <Match when={messages().length === 0}>
-              <p class="empty">No messages yet.</p>
-            </Match>
-            <Match when={messages().length > 0}>
-              <Show when={hasMore()}>
-                <button type="button" class="seg chat-earlier" onClick={() => void loadEarlier()}>
-                  Load earlier
-                </button>
-              </Show>
-              <For each={renderItems()}>
-                {(item) => (
-                  <Switch>
-                    <Match when={item.kind === 'toolGroup' && item}>
-                      {(group) => (
-                        <ToolGroupView
-                          group={group()}
-                          open={openGroups().has(group().key)}
-                          onToggle={(o) => setGroupOpen(group().key, o)}
-                        />
-                      )}
-                    </Match>
-                    <Match when={item.kind === 'message' && item}>
-                      {(msg) => (
-                        // A dialog message matching the pending dialog renders
-                        // as the interactive card AT ITS TRANSCRIPT POSITION
-                        // (issue #56 decision 1) — never also as the inert
-                        // prompt line, and never a second time below.
-                        <Show
-                          when={pendingCardFor(msg().message)}
-                          fallback={
-                            <Show when={!hiddenThinking(msg().message)}>
-                              <MessageView message={msg().message} />
-                            </Show>
-                          }
-                        >
-                          {(d) => (
-                            <DialogCard
-                              runID={params.id}
-                              dialog={d()}
-                              openHint={openHint()}
-                              onError={setError}
-                              onAnswered={() => void refetchMessages()}
-                              cardRef={(el) => (dialogCardEl = el)}
-                            />
-                          )}
-                        </Show>
-                      )}
-                    </Match>
-                  </Switch>
-                )}
-              </For>
-            </Match>
-          </Switch>
-          {/* The pending dialog as an interactive stream card (issue #56
+              <Match
+                when={
+                  !ended() &&
+                  transcript() === 'locating' &&
+                  state() === 'idle' &&
+                  messages().length === 0
+                }
+              >
+                <p class="empty">Ready — your first message starts the conversation.</p>
+              </Match>
+              <Match when={transcript() === 'locating' && messages().length === 0}>
+                <p class="empty">Waiting for the transcript…</p>
+              </Match>
+              <Match when={transcript() === 'gone'}>
+                <p class="empty">Transcript no longer available.</p>
+              </Match>
+              <Match when={messages().length === 0}>
+                <p class="empty">No messages yet.</p>
+              </Match>
+              <Match when={messages().length > 0}>
+                <Show when={hasMore()}>
+                  <button type="button" class="seg chat-earlier" onClick={() => void loadEarlier()}>
+                    Load earlier
+                  </button>
+                </Show>
+                <For each={renderItems()}>
+                  {(item) => (
+                    <Switch>
+                      <Match when={item.kind === 'toolGroup' && item}>
+                        {(group) => (
+                          <ToolGroupView
+                            group={group()}
+                            selected={groupSelected(group().key)}
+                            onOpen={() => setPanelSel({ kind: 'group', key: group().key })}
+                          />
+                        )}
+                      </Match>
+                      <Match when={item.kind === 'message' && item}>
+                        {(msg) => (
+                          // A dialog message matching the pending dialog renders
+                          // as the interactive card AT ITS TRANSCRIPT POSITION
+                          // (issue #56 decision 1) — never also as the inert
+                          // prompt line, and never a second time below.
+                          <Show
+                            when={pendingCardFor(msg().message)}
+                            fallback={
+                              <Show when={!hiddenThinking(msg().message)}>
+                                <MessageView
+                                  message={msg().message}
+                                  toolSelected={toolSelected(msg().message)}
+                                  onOpenTool={() =>
+                                    setPanelSel({ kind: 'tool', seq: msg().message.seq })
+                                  }
+                                />
+                              </Show>
+                            }
+                          >
+                            {(d) => (
+                              <DialogCard
+                                runID={params.id}
+                                dialog={d()}
+                                openHint={openHint()}
+                                onError={setError}
+                                onAnswered={() => void refetchMessages()}
+                                cardRef={(el) => (dialogCardEl = el)}
+                              />
+                            )}
+                          </Show>
+                        )}
+                      </Match>
+                    </Switch>
+                  )}
+                </For>
+              </Match>
+            </Switch>
+            {/* The pending dialog as an interactive stream card (issue #56
               decision 1), appended after the last item when no transcript
               message carries its tool_id — the usual case: the spool-served
               dialog never reaches the transcript. When one does, the card
               renders at that message's position above instead. */}
-          <Show when={appendedDialog()}>
-            {(d) => (
-              <DialogCard
-                runID={params.id}
-                dialog={d()}
-                openHint={openHint()}
-                onError={setError}
-                onAnswered={() => void refetchMessages()}
-                cardRef={(el) => (dialogCardEl = el)}
-              />
-            )}
-          </Show>
-          {/* §3 — the needs-input note lives in the stream, not the composer: a
+            <Show when={appendedDialog()}>
+              {(d) => (
+                <DialogCard
+                  runID={params.id}
+                  dialog={d()}
+                  openHint={openHint()}
+                  onError={setError}
+                  onAnswered={() => void refetchMessages()}
+                  cardRef={(el) => (dialogCardEl = el)}
+                />
+              )}
+            </Show>
+            {/* §3 — the needs-input note lives in the stream, not the composer: a
             subtle centered status line (styled like .chat-lifecycle, not a
             bubble), the last stream child so it only shows at the bottom.
             Reactive on state(); slides off with the rest as you scroll up. */}
-          <Show when={state() === 'needs_input'}>
-            <p class="chat-lifecycle chat-needs-input">
-              {capitalize(agentName())} is waiting for your reply.
-            </p>
-          </Show>
+            <Show when={state() === 'needs_input'}>
+              <p class="chat-lifecycle chat-needs-input">
+                {capitalize(agentName())} is waiting for your reply.
+              </p>
+            </Show>
+          </div>
         </div>
-      </div>
 
-      <Composer
-        runID={params.id}
-        state={state()}
-        ended={ended()}
-        transcript={transcript()}
-        dialog={pendingDialog()}
-        commands={commands() ?? []}
-        agentName={agentName()}
-        openHint={openHint()}
-        jumpVisible={pill().visible}
-        jumpEmphasis={pill().emphasized}
-        onJump={jumpToLatest}
-        onError={setError}
-        onSent={() => void refetchMessages()}
+        <Composer
+          runID={params.id}
+          state={state()}
+          ended={ended()}
+          transcript={transcript()}
+          dialog={pendingDialog()}
+          commands={commands() ?? []}
+          agentName={agentName()}
+          openHint={openHint()}
+          jumpVisible={pill().visible}
+          jumpEmphasis={pill().emphasized}
+          onJump={jumpToLatest}
+          onError={setError}
+          onSent={() => void refetchMessages()}
+        />
+      </div>
+      {/* The tool detail panel (issue #145): a pure view over panelTarget —
+          resolved live above — mounted beside the column (the desktop sidebar
+          is in-flow; the phone sheet is position:fixed and escapes the row). */}
+      <ToolPanel
+        target={panelTarget()}
+        desktop={desktopPanel()}
+        onClose={() => setPanelSel(null)}
       />
     </main>
   );
@@ -906,7 +992,13 @@ function ChatHeader(props: {
                 aria-label="Instance title"
                 onInput={(e) => setTitleDraft(e.currentTarget.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Escape') setTitleMode('view');
+                  if (e.key === 'Escape') {
+                    // Consume it: the tool panel's window Esc-close (issue
+                    // #145) skips defaultPrevented events, so canceling the
+                    // rename never also closes an open panel.
+                    e.preventDefault();
+                    setTitleMode('view');
+                  }
                 }}
                 // Refs run before insertion; defer the focus until mounted.
                 ref={(el) => setTimeout(() => el.focus())}
@@ -1244,7 +1336,14 @@ function ChatMenu(props: {
   );
 }
 
-function MessageView(props: { message: ChatMessage }) {
+function MessageView(props: {
+  message: ChatMessage;
+  /** Panel wiring for a lone tool chip (issue #145): whether this chip is what
+   *  the panel shows, and the tap that opens/retargets it. Meaningful only for
+   *  kind 'tool'; the other kinds ignore both. */
+  toolSelected: boolean;
+  onOpenTool: () => void;
+}) {
   const m = () => props.message;
   // Copy-raw (decision 14) is assistant-only: user replies are already plain
   // and selectable, thinking is hidden noise.
@@ -1272,7 +1371,7 @@ function MessageView(props: { message: ChatMessage }) {
         </div>
       </Match>
       <Match when={m().kind === 'tool'}>
-        <ToolChip message={m()} />
+        <ToolChip message={m()} selected={props.toolSelected} onOpen={props.onOpenTool} />
       </Match>
       {/* An ANSWERED dialog stays in history as a compact, inert Q→A summary
           (issue #56 decision 3). Outcome PRESENCE is the answered signal —
@@ -1295,57 +1394,55 @@ function MessageView(props: { message: ChatMessage }) {
   );
 }
 
-// A single tool call: a one-line chip expanding on tap to its input/output.
-// Tool I/O stays literal <pre> — it is command I/O, not markdown (decision 3).
-function ToolChip(props: { message: ChatMessage }) {
+// A single tool call: a one-line chip button that opens the detail panel
+// (issue #145) — the I/O <pre>s live there now, nothing expands inline. One
+// element wears both the frame (.chat-tool) and the row (.tool-summary)
+// classes so the pre-panel look survives the <details> → <button> swap;
+// `selected` marks the chip whose content the panel is showing.
+function ToolChip(props: { message: ChatMessage; selected: boolean; onOpen: () => void }) {
   const t = () => props.message.tool;
   return (
-    <details class="chat-tool">
-      <summary classList={{ 'tool-summary': true, [`tool-${t()?.status ?? 'ok'}`]: true }}>
-        <span class="tool-title">{t()?.title}</span>
-        <span class="tool-status">{toolStatusMark(t()?.status)}</span>
-      </summary>
-      <Show when={t()?.input}>
-        <pre class="tool-body mono">{t()?.input}</pre>
-      </Show>
-      <Show when={t()?.output}>
-        <pre class="tool-body tool-output mono">{t()?.output}</pre>
-      </Show>
-    </details>
+    <button
+      type="button"
+      classList={{
+        'chat-tool': true,
+        'tool-summary': true,
+        [`tool-${t()?.status ?? 'ok'}`]: true,
+        selected: props.selected,
+      }}
+      aria-pressed={props.selected}
+      onClick={() => props.onOpen()}
+    >
+      <span class="tool-title">{t()?.title}</span>
+      <span class="tool-status">{toolStatusMark(t()?.status)}</span>
+    </button>
   );
 }
 
-// A run of 2+ tool calls behind one disclosure (decisions 8–11). The collapsed
-// summary counts tools only and rolls up any failure; the open state is
-// controlled by the parent so it survives SSE refetches (decision 12).
-function ToolGroupView(props: {
-  group: ToolGroup;
-  open: boolean;
-  onToggle: (open: boolean) => void;
-}) {
+// A run of 2+ tool calls behind one summary line (decisions 8–11): the count
+// plus rolled-up failure/liveness. Grouping is untouched; only the inline
+// <details> expansion is superseded (issue #145) — the line is a button
+// opening the panel at the group's LIST page.
+function ToolGroupView(props: { group: ToolGroup; selected: boolean; onOpen: () => void }) {
   const summary = () => toolGroupSummary(props.group);
-  // Folded-in thinking is dropped at paint (issue #68) — the group keeps its
-  // boundaries and counts, but thinking never renders.
-  const items = () => props.group.items.filter((m) => !(m.kind === 'text' && m.thinking));
   return (
-    <details
-      class="chat-tool-group"
-      open={props.open}
-      onToggle={(e) => props.onToggle(e.currentTarget.open)}
+    <button
+      type="button"
+      classList={{
+        'chat-tool-group': true,
+        'tool-group-summary': true,
+        'has-error': props.group.errorCount > 0,
+        selected: props.selected,
+      }}
+      aria-pressed={props.selected}
+      onClick={() => props.onOpen()}
     >
-      <summary classList={{ 'tool-group-summary': true, 'has-error': props.group.errorCount > 0 }}>
-        <span class="tool-group-count">{summary().label}</span>
-        <Show when={summary().failed}>
-          {(f) => <span class="tool-group-failed"> · {f()}</span>}
-        </Show>
-        <Show when={summary().running}>
-          <span class="tool-group-running"> · running…</span>
-        </Show>
-      </summary>
-      <div class="tool-group-body">
-        <For each={items()}>{(m) => <MessageView message={m} />}</For>
-      </div>
-    </details>
+      <span class="tool-group-count">{summary().label}</span>
+      <Show when={summary().failed}>{(f) => <span class="tool-group-failed"> · {f()}</span>}</Show>
+      <Show when={summary().running}>
+        <span class="tool-group-running"> · running…</span>
+      </Show>
+    </button>
   );
 }
 
@@ -1733,6 +1830,8 @@ function Composer(props: {
         return;
       }
       if (e.key === 'Escape') {
+        // preventDefault also keeps the tool panel's window Esc-close (issue
+        // #145, defaultPrevented-guarded) from firing on a popover dismissal.
         e.preventDefault();
         setAcDismissed(true);
         return;
@@ -2451,10 +2550,4 @@ function InterruptButton(props: {
       </Show>
     </button>
   );
-}
-
-function toolStatusMark(status: string | undefined): string {
-  if (status === 'ok') return '✓';
-  if (status === 'error') return '✕';
-  return '…';
 }
