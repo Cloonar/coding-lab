@@ -1895,15 +1895,17 @@ a.chip.cr-count:hover {
   color: var(--run-text);
 }
 
-/* The chat page is a BOUNDED flex column (height, not min-height): the
-   document never scrolls, .chat-stream is the scroll container, and the
-   composer stays pinned at the bottom. Inside the app shell (issue #41) the
-   rail sits BESIDE the chat (a width, never a height), and the mobile top
-   strip is hidden on /runs/:id, so this 100dvh fill still equals the viewport
-   at every breakpoint — a flex/height chain, no magic offset for chrome above. */
+/* The chat page is a BOUNDED flex row (height, not min-height): the document
+   never scrolls, .chat-stream is the scroll container, and the composer stays
+   pinned at the bottom of .chat-column — the column wrapper that carries the
+   old page-as-column layout now that the tool panel sidebar (issue #145) can
+   sit beside it. Inside the app shell (issue #41) the rail sits BESIDE the
+   chat (a width, never a height), and the mobile top strip is hidden on
+   /runs/:id, so this 100dvh fill still equals the viewport at every
+   breakpoint — a flex/height chain, no magic offset for chrome above. */
 .chat-page {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: 100vh;
   height: 100dvh;
   padding-bottom: 0;
@@ -2151,8 +2153,10 @@ button.chat-title:focus-visible .chat-title-pencil {
   overflow-wrap: anywhere;
 }
 
-/* Tool activity (issue #41 Phase 3): a quiet bordered mono row — a transparent
-   outline expanding on tap. No accent; only an error tints the text red. */
+/* Tool activity (issue #41 Phase 3): a quiet bordered mono row. No accent;
+   only an error tints the text red. Since issue #145 the chip is a <button>
+   wearing BOTH classes (frame + row) that opens the detail panel — the
+   button-element resets live in the panel section at the end. */
 .chat-tool {
   align-self: flex-start;
   max-width: 100%;
@@ -2184,7 +2188,9 @@ button.chat-title:focus-visible .chat-title-pencil {
 .tool-status {
   font-weight: 600;
 }
-/* Expanded I/O: a subtly recessed mono panel under the summary. */
+/* Tool I/O: a subtly recessed mono pane. Rendered only inside the detail
+   panel since issue #145 (the chat chip stopped expanding inline); the 40vh
+   cap is lifted there by the panel section below. */
 .tool-body {
   margin: 0;
   padding: 0.4rem 0.6rem;
@@ -2645,8 +2651,10 @@ h6.md-h {
 
 /* --- Coalesced tool-call runs (issue #13) ------------------------------- */
 
-/* The outer "N tool calls" disclosure that wraps a run of chips — the same
-   quiet transparent-outline treatment as a lone chip (Phase 3). */
+/* The "N tool calls" summary line for a run of chips — the same quiet
+   transparent-outline treatment as a lone chip (Phase 3). A single <button>
+   since issue #145 (frame + summary classes on one element), opening the
+   detail panel at the group's list page. */
 .chat-tool-group {
   align-self: flex-start;
   width: 100%;
@@ -2678,15 +2686,6 @@ h6.md-h {
 .tool-group-running {
   color: var(--muted);
   font-weight: 500;
-}
-/* The expanded run: the individual chips (and any interleaved thinking) stack
-   vertically, indented slightly from the group frame. The chips keep the shared
-   transparent outline — no nested fill now the frame itself is transparent. */
-.tool-group-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  padding: 0 0.5rem 0.5rem;
 }
 
 /* --- Chat UI redesign (issue #35) --------------------------------------- */
@@ -2847,8 +2846,9 @@ h6.md-h {
 
 /* The error banner outranks the header so that when the mobile overlay header
    hides (translateY(-100%)) it slides BEHIND the (opaque) banner rather than
-   parking over it — the banner is the first child of .chat-page, above .chat-body. */
-.chat-page > .banner {
+   parking over it — the banner is the first child of .chat-column (issue #145
+   moved the column chain there), above .chat-body. */
+.chat-column > .banner {
   position: relative;
   z-index: 3;
 }
@@ -3539,4 +3539,211 @@ main.page:has(> .auth-card) {
 .install-step-icon {
   flex: none;
   color: var(--muted);
+}
+
+/* Tool detail panel (issue #145) -------------------------------------------- */
+/* Tool-call detail lifted out of the chat column into a dedicated surface: a
+   modal bottom sheet on phones (<1024px) and an in-flow right sidebar on
+   desktop (>=1024px). One component renders both containers; this section
+   styles them. The sheet rides the install-sheet layering ladder (issue #142)
+   — scrim z-index 40, sheet 41 — since the two never show at once. Phone-first:
+   the base rules are the sheet; .tool-panel-side is the desktop override. */
+
+.tool-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* Chrome shared by both containers. */
+.tool-panel {
+  background: var(--card);
+  color: var(--text);
+}
+
+/* Phone: a modal bottom sheet. */
+.tool-panel-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  max-height: 82dvh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  box-shadow: var(--shadow);
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: tool-panel-up 0.2s ease-out;
+  /* Drag-to-dismiss hooks (issue #140 conventions, bound in ToolPanel): the
+     settle transition eases the sheet back to rest after a released drag;
+     .tool-panel-dragging kills it so the sheet tracks the finger 1:1 mid-drag. */
+  transition: transform 0.24s ease;
+}
+.tool-panel-dragging {
+  transition: none;
+}
+
+@keyframes tool-panel-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-panel-sheet {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Desktop: an in-flow complementary sidebar. Height comes from the parent flex
+   row (.chat-page) stretching it. */
+.tool-panel-side {
+  width: clamp(320px, 30vw, 480px);
+  flex: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+/* The pure-CSS grab pill atop the sheet. */
+.tool-panel-grabber {
+  flex: none;
+  width: 36px;
+  height: 4px;
+  margin: var(--space-2) auto 0;
+  border-radius: var(--radius-pill);
+  background: var(--border);
+}
+
+/* Header row: the title truncates with an ellipsis; the icon buttons never
+   shrink. */
+.tool-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.tool-panel-head .tool-panel-btn {
+  flex: none;
+}
+.tool-panel-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.tool-panel-title .tool-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-panel-title .tool-status {
+  flex: none;
+}
+
+/* The scrollable body — the list of rows or the detail's I/O panes. */
+.tool-panel-content {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+/* One list row per tool call: a full-width, left-aligned mono button (like the
+   chip summary). An error tints the text red, reusing the chip vocabulary. */
+.tool-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.3rem 0.6rem;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.tool-panel-row:hover {
+  background: var(--hover);
+}
+.tool-panel-row .tool-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-panel-row.tool-error {
+  color: var(--err-text);
+}
+
+/* The panel supersedes the 40vh chip cap — I/O gets the panel's own scroll.
+   Horizontal overflow still scrolls inside each <pre> (from .tool-body). */
+.tool-panel .tool-body {
+  max-height: none;
+}
+
+/* --- Chat-side wiring (the RunChat half of issue #145) --- */
+
+/* The column wrapper carrying the pre-panel page layout (banner + body +
+   composer) now that .chat-page is a row. flex 1 1 auto + min-width 0 is the
+   squeeze: the column yields to the fixed-width sidebar before overflowing. */
+.chat-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+/* Desktop, panel open: widen the .page cap by exactly the sidebar's width so
+   the chat column keeps its 760px where the viewport allows and squeezes
+   (flex, above) where it doesn't. Closed — no .panel-open — nothing here
+   applies and the layout is byte-identical to the pre-panel page. */
+@media (min-width: 1024px) {
+  .chat-page.panel-open {
+    max-width: calc(760px + clamp(320px, 30vw, 480px));
+  }
+}
+
+/* Chips and group summaries are <button>s now (they open the panel; nothing
+   expands inline). The row look still comes from .chat-tool/.tool-summary and
+   .chat-tool-group/.tool-group-summary — worn by ONE element each — so only
+   the UA/button-element defaults those classes never set need neutralising:
+   centered text, and the global button:hover fill (the old <summary> rows had
+   no hover state; equal-specificity would let it through). */
+button.chat-tool,
+button.chat-tool-group {
+  text-align: left;
+}
+button.chat-tool:hover,
+button.chat-tool-group:hover {
+  background: transparent;
+}
+
+/* The chip/group line whose content the panel is showing — the dialog-option
+   selected vocabulary (accent border + subtle tint), cleared on close. Beats
+   the hover reset above on specificity. */
+.tool-summary.selected,
+.tool-group-summary.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
 }
