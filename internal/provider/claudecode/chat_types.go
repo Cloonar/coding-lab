@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/unidiff"
 )
 
 type tItem struct {
@@ -87,7 +88,10 @@ type tBlock struct {
 func (b tBlock) textField() string { return b.Text }
 
 // toolInfo maps a tool_use block to a chip: a friendly one-line Title plus the
-// truncated raw input, status "running" until the result back-patches it.
+// truncated raw input, status "running" until the result back-patches it. The
+// rich View (issue #146) is attached from the same decoded input, so a tool
+// this mapper does not recognize simply carries no View and the client falls
+// back to the chip's raw Input/Output.
 func toolInfo(b tBlock) *provider.ToolInfo {
 	in := decodeToolInput(b.Input)
 	return &provider.ToolInfo{
@@ -95,20 +99,70 @@ func toolInfo(b tBlock) *provider.ToolInfo {
 		Title:  toolTitle(b.Name, in),
 		Input:  truncate(toolInputText(b.Name, in, b.Input), truncateLimit),
 		Status: "running",
+		View:   toolView(b.Name, in),
+	}
+}
+
+// toolView is the ONLY place Claude Code's tool-input shapes are known — the
+// mapping from a tool_use's name + decoded input to the provider-neutral
+// ToolView union (issue #146). Every other package (the httpapi layer, the
+// SPA) renders by ToolView.Kind alone, never by tool name, so a new tool this
+// function does not recognize degrades cleanly to no view rather than a
+// half-guessed one.
+//
+// in is nil for a partial mid-stream input (the tool_use line arrived before
+// its JSON input finished streaming) — every branch below is a plain map
+// lookup that reads "" from a nil map, so a partial input yields no view
+// exactly like an unmapped tool, never a panic.
+func toolView(name string, in map[string]any) *provider.ToolView {
+	switch name {
+	case "Edit":
+		// A find/replace edit: old_string/new_string is the whole edit, so a
+		// line-level diff against them is exact — no need to read the file.
+		path, old, newS := str(in["file_path"]), str(in["old_string"]), str(in["new_string"])
+		if path == "" || (old == "" && newS == "") {
+			return nil
+		}
+		return &provider.ToolView{Kind: provider.ToolViewDiff, Path: path, Text: provider.TruncateDetail(unidiff.Unified(old, newS))}
+	case "NotebookEdit":
+		// The input carries only the new cell source, never the old one, so
+		// this renders as an all-added diff (oldText ""). edit_mode=delete has
+		// no new_source and correctly gets no view — there is nothing to show.
+		path, src := str(in["notebook_path"]), str(in["new_source"])
+		if path == "" || src == "" {
+			return nil
+		}
+		return &provider.ToolView{Kind: provider.ToolViewDiff, Path: path, Text: provider.TruncateDetail(unidiff.Unified("", src))}
+	case "Write":
+		path, content := str(in["file_path"]), str(in["content"])
+		if path == "" {
+			return nil
+		}
+		return &provider.ToolView{Kind: provider.ToolViewWrite, Path: path, Text: provider.TruncateDetail(content)}
+	case "Bash":
+		cmd := str(in["command"])
+		if cmd == "" {
+			return nil
+		}
+		return &provider.ToolView{Kind: provider.ToolViewCommand, Command: provider.TruncateDetail(cmd)}
+	default:
+		return nil
 	}
 }
 
 // patchToolResult back-patches a tool chip when its tool_result lands: the
-// truncated output text and a terminal status. Claude marks errors via the
-// is_error flag on the tool_result block itself (content is most often a plain
-// string); absent that, a result is "ok".
+// detail-sized output text (issue #146 — the panel body, capped at
+// DetailTruncateLimit with an explicit in-text marker, NOT the 2000-byte
+// chip cap the Title/Input fields keep) and a terminal status. Claude marks
+// errors via the is_error flag on the tool_result block itself (content is
+// most often a plain string); absent that, a result is "ok".
 func patchToolResult(t *provider.ToolInfo, b tBlock) {
 	if t == nil {
 		return
 	}
 	out, isErr := decodeToolResult(b.Result)
 	isErr = isErr || b.IsError
-	t.Output = truncate(out, truncateLimit)
+	t.Output = provider.TruncateDetail(out)
 	if isErr {
 		t.Status = "error"
 	} else {

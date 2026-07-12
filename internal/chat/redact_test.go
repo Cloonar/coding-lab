@@ -350,6 +350,57 @@ func TestReadRedact_nilSecretsSeamIsAbsent(t *testing.T) {
 	}
 }
 
+// 7b. A secret inside a tool's rich View union (#146) — its Path/Text/Command
+// are operator-visible free-form strings — is masked field-for-field, and the
+// hit reports the secret by name (the exposure edge fires) exactly like the
+// chip's Input/Output.
+func TestReadRedact_masksToolView(t *testing.T) {
+	cn := &captureNotifier{}
+	svc, st, fake, _ := newSecretService(t, cn.notify, time.Minute)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	seedSecret(t, st, run.RepoID, testSecretName, testSecretValue)
+	fake.SetTranscriptPath("/t.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageTool, Tool: &provider.ToolInfo{
+			Name: "Bash", Title: "Ran a command", Status: "ok",
+			View: &provider.ToolView{
+				Kind:    provider.ToolViewCommand,
+				Path:    "/tmp/" + testSecretValue + ".env",
+				Text:    "wrote token " + testSecretValue + " to disk",
+				Command: "deploy --token " + testSecretValue,
+			}}}}})
+
+	view, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if js := viewJSON(t, view); strings.Contains(js, testSecretValue) {
+		t.Error("plaintext value survived in a tool View")
+	}
+	gv := view.Messages[0].Tool.View
+	if want := "/tmp/" + testPlaceholder + ".env"; gv.Path != want {
+		t.Errorf("View.Path = %q; want %q", gv.Path, want)
+	}
+	if want := "wrote token " + testPlaceholder + " to disk"; gv.Text != want {
+		t.Errorf("View.Text = %q; want %q", gv.Text, want)
+	}
+	if want := "deploy --token " + testPlaceholder; gv.Command != want {
+		t.Errorf("View.Command = %q; want %q", gv.Command, want)
+	}
+	// The View hit reports the secret by name: exactly one exposure push, its
+	// pinned title, and never the value.
+	if n := cn.count(); n != 1 {
+		t.Fatalf("notifications = %d; want exactly 1 (the View hit reports the name)", n)
+	}
+	got := cn.last()
+	if got.Title != "Secret "+testSecretName+" exposed" {
+		t.Errorf("notification Title = %q; want the exposure for %s", got.Title, testSecretName)
+	}
+	if strings.Contains(got.Title+got.Body+got.Tag+got.Route, testSecretValue) {
+		t.Error("the exposure notification carries the plaintext value")
+	}
+}
+
 // --- loop-level integration tests ------------------------------------------
 
 // 8. needs-input body masking: the tailer masks BEFORE the notify gate

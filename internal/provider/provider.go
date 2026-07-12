@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -237,11 +238,64 @@ type Message struct {
 // tap to the truncated Input/Output. Status moves running→ok|error when the
 // tool result lands.
 type ToolInfo struct {
-	Name   string `json:"name"`             // Bash, Edit, Skill, …
-	Title  string `json:"title"`            // chip text: "Edit main.go", "Ran go test"
-	Input  string `json:"input,omitempty"`  // truncated tool input
-	Output string `json:"output,omitempty"` // truncated tool result
-	Status string `json:"status"`           // running|ok|error
+	Name   string    `json:"name"`             // Bash, Edit, Skill, …
+	Title  string    `json:"title"`            // chip text: "Edit main.go", "Ran go test"
+	Input  string    `json:"input,omitempty"`  // truncated tool input
+	Output string    `json:"output,omitempty"` // truncated tool result
+	Status string    `json:"status"`           // running|ok|error
+	View   *ToolView `json:"view,omitempty"`   // optional provider-neutral rich view (#146)
+}
+
+// Rich tool-view kinds (ToolView.Kind, issue #146). Provider-neutral: each
+// kind names a rendering the web client already knows how to draw — no more.
+const (
+	ToolViewDiff    = "diff"    // Path + Text: a unified-diff body for an edit
+	ToolViewCommand = "command" // Command: a shell command line
+	ToolViewWrite   = "write"   // Path + Text: a file's written content
+)
+
+// ToolView is the optional provider-neutral rich view of a tool call (issue
+// #146): the structured, panel-sized companion to ToolInfo's one-line chip.
+// Each provider's chat mapper PRODUCES it from that provider's native tool
+// payload; the web client RENDERS it purely by Kind, so no tool-name knowledge
+// ever leaks into the SPA — a "diff" view draws identically whether it came
+// from claude-code's Edit or codex's apply_patch. Absent (View nil) the client
+// falls back to the raw Input/Output chip fields, so a tool the mapper does not
+// recognize still renders. Path travels BESIDE the body text (a unified diff
+// here carries no ---/+++ file header — see internal/unidiff), and the fields a
+// given Kind does not use stay empty (see the kind constants above).
+type ToolView struct {
+	Kind    string `json:"kind"`              // ToolView* (diff|command|write)
+	Path    string `json:"path,omitempty"`    // diff, write: the file path
+	Text    string `json:"text,omitempty"`    // diff: unified-diff text; write: file content
+	Command string `json:"command,omitempty"` // command: the shell command line
+}
+
+// DetailTruncateLimit bounds a rich view's panel-sized body (ToolView.Text,
+// issue #146). It is an order of magnitude above the 2000-byte chip-facing
+// Input/Output cap on purpose: a chip is a one-line glance, a panel shows the
+// whole edit.
+const DetailTruncateLimit = 20000
+
+// TruncateDetail caps s at DetailTruncateLimit bytes for a rich-view panel,
+// making the cut EXPLICIT — never a silent truncation. When it must cut, it
+// backs up to a UTF-8 rune boundary (so the cut never splits a sequence) and
+// appends a marker naming the ORIGINAL size, rounded up to whole KB; the marker
+// rides IN the returned text so the client renders it with zero extra logic.
+// Cutting the TAIL of a unified diff leaves a valid, renderable head (hunks are
+// independent and read from the top), which is what makes a plain length cap
+// safe here. Returns s unchanged when it already fits.
+func TruncateDetail(s string) string {
+	if len(s) <= DetailTruncateLimit {
+		return s
+	}
+	n := DetailTruncateLimit
+	// Back up to a rune boundary so the cut never splits a UTF-8 sequence.
+	for n > 0 && s[n]&0xC0 == 0x80 {
+		n--
+	}
+	kb := (len(s) + 1023) / 1024
+	return s[:n] + "\n… truncated (" + strconv.Itoa(kb) + " KB total)"
 }
 
 // Dialog kinds (Dialog.Kind). A provider maps each interactive prompt it

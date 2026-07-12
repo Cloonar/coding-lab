@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -210,6 +211,12 @@ func TestParseTranscript_patchFixture(t *testing.T) {
 	if !strings.Contains(patch.Input, "*** Begin Patch") {
 		t.Errorf("patch.Input = %q; want the raw patch body", patch.Input)
 	}
+	// The rich diff view (issue #146): the V4A envelope normalized to
+	// unified-diff text, first file in Path.
+	if patch.View == nil || patch.View.Kind != provider.ToolViewDiff ||
+		patch.View.Path != "hello.txt" || patch.View.Text != "--- /dev/null\n+++ b/hello.txt\n+hi" {
+		t.Errorf("patch.View = %+v; want a diff view of hello.txt", patch.View)
+	}
 
 	exec := chat.Messages[2].Tool
 	if exec == nil || exec.Title != "Ran git status --porcelain" {
@@ -217,6 +224,11 @@ func TestParseTranscript_patchFixture(t *testing.T) {
 	}
 	if exec.Status != "running" || exec.Output != "" {
 		t.Errorf("unresolved exec chip = status %q output %q; want running/empty", exec.Status, exec.Output)
+	}
+	// exec_command carries a command view of the parsed cmd (issue #146).
+	if exec.View == nil || exec.View.Kind != provider.ToolViewCommand ||
+		exec.View.Command != "git status --porcelain" {
+		t.Errorf("exec.View = %+v; want a command view of the git status", exec.View)
 	}
 
 	if chat.State != provider.StateWorking {
@@ -335,5 +347,164 @@ func TestParseTranscript_reasoningSummaries(t *testing.T) {
 	m := chat.Messages[0]
 	if !m.Thinking || m.Role != "assistant" || m.Text != "first\nsecond" {
 		t.Errorf("thinking msg = %+v; want concatenated summary_text items", m)
+	}
+}
+
+// normalizePatch turns codex's V4A apply_patch envelope into unified-diff
+// text (issue #146): envelope verbs become ---/+++ file headers, the body's
+// prefix-shaped lines pass through verbatim, an unknown *** verb is dropped,
+// and the output never ends on a blank line.
+func TestNormalizePatch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch string
+		want  string
+	}{
+		{
+			"single-file update: headers plus verbatim body",
+			"*** Begin Patch\n*** Update File: main.go\n@@ func main()\n-\told := 1\n+\tnew := 2\n \tkeep := 3\n*** End Patch\n",
+			"--- a/main.go\n+++ b/main.go\n@@ func main()\n-\told := 1\n+\tnew := 2\n \tkeep := 3",
+		},
+		{
+			"add file: the real fixture body",
+			"*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch\n",
+			"--- /dev/null\n+++ b/hello.txt\n+hi",
+		},
+		{
+			"delete file",
+			"*** Begin Patch\n*** Delete File: gone.txt\n-bye\n*** End Patch\n",
+			"--- a/gone.txt\n+++ /dev/null\n-bye",
+		},
+		{
+			"move to: a rename consumes the following line",
+			"*** Begin Patch\n*** Update File: old.go\n*** Move to: new.go\n@@\n-a\n+b\n*** End Patch\n",
+			"--- a/old.go\n+++ b/new.go\n@@\n-a\n+b",
+		},
+		{
+			"multi-file: two update sections, both header pairs, bodies in order",
+			"*** Begin Patch\n*** Update File: a.txt\n@@\n-old a\n+new a\n*** Update File: b.txt\n@@\n-old b\n+new b\n*** End Patch\n",
+			"--- a/a.txt\n+++ b/a.txt\n@@\n-old a\n+new a\n--- a/b.txt\n+++ b/b.txt\n@@\n-old b\n+new b",
+		},
+		{
+			"an unknown envelope verb is dropped, not leaked",
+			"*** Begin Patch\n*** Frobnicate: whatever\n*** Update File: c.txt\n+x\n*** End Patch\n",
+			"--- a/c.txt\n+++ b/c.txt\n+x",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizePatch(tc.patch); got != tc.want {
+				t.Errorf("normalizePatch =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
+	}
+}
+
+// functionCallInfo attaches a command ToolView for codex's two exec shapes
+// (issue #146): exec_command's {"cmd":…} and shell's {"command":…} — string,
+// the two interpreter wrappers, or a bare argv array. The shell shape is
+// defensive (no live fixture), so it is pinned here rather than by a rollout.
+func TestFunctionCallInfo_commandView(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload tPayload
+		title   string
+		view    *provider.ToolView
+	}{
+		{
+			"exec_command parses to a command view",
+			tPayload{Name: "exec_command", Arguments: `{"cmd":"git status --porcelain","workdir":"/w"}`},
+			"Ran git status --porcelain",
+			&provider.ToolView{Kind: provider.ToolViewCommand, Command: "git status --porcelain"},
+		},
+		{
+			"exec_command with unparseable arguments has no view",
+			tPayload{Name: "exec_command", Arguments: "not json"},
+			"exec_command",
+			nil,
+		},
+		{
+			"shell string form",
+			tPayload{Name: "shell", Arguments: `{"command":"echo hi"}`},
+			"shell",
+			&provider.ToolView{Kind: provider.ToolViewCommand, Command: "echo hi"},
+		},
+		{
+			"shell bash -lc wrapper unwraps to the script",
+			tPayload{Name: "shell", Arguments: `{"command":["bash","-lc","make test"]}`},
+			"shell",
+			&provider.ToolView{Kind: provider.ToolViewCommand, Command: "make test"},
+		},
+		{
+			"shell sh -c wrapper unwraps to the script",
+			tPayload{Name: "shell", Arguments: `{"command":["sh","-c","echo done"]}`},
+			"shell",
+			&provider.ToolView{Kind: provider.ToolViewCommand, Command: "echo done"},
+		},
+		{
+			"shell non-wrapper array joins with single spaces",
+			tPayload{Name: "shell", Arguments: `{"command":["ls","-la","/tmp"]}`},
+			"shell",
+			&provider.ToolView{Kind: provider.ToolViewCommand, Command: "ls -la /tmp"},
+		},
+		{
+			"shell with unparseable arguments has no view",
+			tPayload{Name: "shell", Arguments: "not json"},
+			"shell",
+			nil,
+		},
+		{
+			"a non-exec function_call has no view",
+			tPayload{Name: "update_plan", Arguments: `{"steps":[]}`},
+			"update_plan",
+			nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := functionCallInfo(tc.payload)
+			if got.Title != tc.title {
+				t.Errorf("title = %q; want %q", got.Title, tc.title)
+			}
+			if !reflect.DeepEqual(got.View, tc.view) {
+				t.Errorf("view = %+v; want %+v", got.View, tc.view)
+			}
+		})
+	}
+}
+
+// customToolCallInfo attaches a diff ToolView for apply_patch (Kind/Path/Text)
+// and leaves every other custom tool viewless (issue #146).
+func TestCustomToolCallInfo_views(t *testing.T) {
+	patch := customToolCallInfo(tPayload{Name: "apply_patch", Input: "*** Begin Patch\n*** Add File: hi.txt\n+yo\n*** End Patch\n"})
+	if patch.View == nil || patch.View.Kind != provider.ToolViewDiff ||
+		patch.View.Path != "hi.txt" || patch.View.Text != "--- /dev/null\n+++ b/hi.txt\n+yo" {
+		t.Errorf("apply_patch view = %+v; want a diff view of hi.txt", patch.View)
+	}
+
+	// A custom tool lab does not recognize gets no rich view.
+	if other := customToolCallInfo(tPayload{Name: "mystery_tool", Input: "whatever"}); other.View != nil {
+		t.Errorf("mystery_tool view = %+v; want nil", other.View)
+	}
+}
+
+// patchToolOutput sizes tool output for the detail panel (issue #146): the
+// 20KB cap with an explicit marker, an order of magnitude above the 2000-byte
+// chip cap; short output rides through untouched.
+func TestPatchToolOutput_detailSized(t *testing.T) {
+	big := &provider.ToolInfo{Status: "running"}
+	patchToolOutput(big, strings.Repeat("x", provider.DetailTruncateLimit+500))
+	if big.Status != "ok" {
+		t.Errorf("status = %q; want ok", big.Status)
+	}
+	if !strings.Contains(big.Output, "truncated (") {
+		t.Errorf("output missing the truncation marker (len=%d)", len(big.Output))
+	}
+	if len(big.Output) <= truncateLimit {
+		t.Errorf("output len = %d; want detail-sized (well above the %d chip cap)", len(big.Output), truncateLimit)
+	}
+
+	short := &provider.ToolInfo{Status: "running"}
+	patchToolOutput(short, "Exit code: 0")
+	if short.Output != "Exit code: 0" {
+		t.Errorf("short output = %q; want it unchanged", short.Output)
 	}
 }
