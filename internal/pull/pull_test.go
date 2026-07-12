@@ -380,17 +380,43 @@ func TestPullBase_conflictTypedErrorWorktreeUntouched(t *testing.T) {
 	f.wantNoEvent(evts)
 }
 
-func TestPullBase_noAuthorIdentityRefusedBeforeGit(t *testing.T) {
+func TestPullBase_noIdentityFastForwardSucceeds(t *testing.T) {
 	f := newFixture(t, func(r *store.Repo) { r.GitAuthorName, r.GitAuthorEmail = nil, nil })
+	// origin moved and the worktree has NOT diverged → the pull fast-forwards,
+	// which authors no commit and so needs no identity anywhere (#151). The old
+	// up-front refusal would have blocked this pull outright.
 	f.advanceOrigin("base.txt", "base\n")
-	head := f.worktreeHead()
+	oldHead := f.worktreeHead()
+
+	res, err := f.svc.PullBase(t.Context(), f.run)
+	if err != nil {
+		t.Fatalf("identity-free fast-forward PullBase: %v", err)
+	}
+	if res.UpToDate || !res.FastForward {
+		t.Errorf("UpToDate=%v FastForward=%v, want false/true", res.UpToDate, res.FastForward)
+	}
+	if res.OldHead != oldHead || res.NewHead == oldHead {
+		t.Errorf("OldHead/NewHead = %s/%s, want %s and a moved head", res.OldHead, res.NewHead, oldHead)
+	}
+	if res.Digest == "" {
+		t.Error("Digest is empty for a fast-forward that moved HEAD")
+	}
+}
+
+func TestPullBase_noIdentityDivergedRefused(t *testing.T) {
+	f := newFixture(t, func(r *store.Repo) { r.GitAuthorName, r.GitAuthorEmail = nil, nil })
+	// A diverged worktree forces a merge commit, which has nobody to author it
+	// with no identity anywhere → ErrNoAuthorIdentity (mapped from gitx's
+	// ErrAuthorIdentityRequired), worktree untouched (#151).
+	localSHA := f.commitWorktree("local.txt", "local\n", "local work")
+	f.advanceOrigin("base.txt", "base\n") // disjoint files → would merge cleanly, but for the missing identity
 
 	_, err := f.svc.PullBase(t.Context(), f.run)
 	if !errors.Is(err, ErrNoAuthorIdentity) {
 		t.Fatalf("err = %v, want ErrNoAuthorIdentity", err)
 	}
-	if h := f.worktreeHead(); h != head {
-		t.Errorf("worktree HEAD = %s after refusal, want unchanged %s", h, head)
+	if h := f.worktreeHead(); h != localSHA {
+		t.Errorf("worktree HEAD = %s after refusal, want unchanged %s", h, localSHA)
 	}
 }
 
