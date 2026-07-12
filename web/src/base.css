@@ -3701,6 +3701,51 @@ main.page:has(> .auth-card) {
   max-height: none;
 }
 
+/* Rich detail views (issue #146) -------------------------------------------- */
+/* The detail body switches on view.kind (diff / write / command); these dress
+   the three shapes. Tints are theme-var mixes over transparent, so they sit on
+   the .tool-body surface and adapt to light/dark on their own — never hex. */
+
+/* The file-path header above a diff / write body: small, dim, monospace, and
+   its own horizontal scroll so a deep path never widens the panel. */
+.tool-view-path {
+  padding: var(--space-2) var(--space-3) 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* One <span> per diff line inside the .tool-body <pre>. display:block gives the
+   tint the full line width; width:max-content + min-width:100% carries the tint
+   across a line wider than the panel while it scrolls; min-height keeps a blank
+   context line occupying its row. No trailing newline in the text — the block
+   boundary is the line break, so a copied selection stays a valid diff. */
+.tool-diff span {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  min-height: 1.35em;
+}
+/* Added / removed get a subtle background tint (green / red); the file-and-hunk
+   header lines (+++ / --- / @@) read as dim structure, not content. */
+.tool-diff-add {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.tool-diff-del {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.tool-diff-hunk {
+  color: var(--muted);
+}
+
+/* A shell command: a dim, unselectable `$ ` prompt ahead of the command text,
+   so a copied selection grabs the command without the prompt. */
+.tool-cmd-prompt {
+  color: var(--muted);
+  user-select: none;
+}
+
 /* --- Chat-side wiring (the RunChat half of issue #145) --- */
 
 /* The column wrapper carrying the pre-panel page layout (banner + body +

@@ -10,7 +10,7 @@
 import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage } from '../api';
+import type { ChatMessage, ToolView } from '../api';
 import ToolPanel, { toolStatusMark, type PanelTarget, type ToolPanelProps } from './ToolPanel';
 
 let dispose: (() => void) | undefined;
@@ -23,13 +23,20 @@ function tool(
   io?: {
     input?: string;
     output?: string;
+    view?: ToolView;
   },
 ): ChatMessage {
   return {
     seq,
     kind: 'tool',
-    tool: { name: title, title, status, input: io?.input, output: io?.output },
+    tool: { name: title, title, status, input: io?.input, output: io?.output, view: io?.view },
   };
+}
+
+/** A lone-chip target (entry 'detail') around one tool — opens straight at the
+ *  detail page, the shortest path to exercising the rich-view renderers. */
+function detailTarget(t: ChatMessage): PanelTarget {
+  return { key: `tool:${t.seq}`, entry: 'detail', tools: [t] };
 }
 
 function groupTarget(): PanelTarget {
@@ -89,6 +96,22 @@ function backBtn(): HTMLButtonElement | null {
 }
 function closeBtn(): HTMLButtonElement | null {
   return container.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
+}
+// --- Rich-view (issue #146) queries ----------------------------------------
+function pathHeader(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('.tool-view-path');
+}
+function diffSpans(): HTMLSpanElement[] {
+  return Array.from(container.querySelectorAll<HTMLSpanElement>('pre.tool-diff span'));
+}
+function spanFor(text: string): HTMLSpanElement | undefined {
+  return diffSpans().find((s) => s.textContent === text);
+}
+function cmdPre(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('pre.tool-cmd');
+}
+function outputPre(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('pre.tool-output');
 }
 function pressEscape(defaultPrevented = false): void {
   const e = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
@@ -200,6 +223,125 @@ describe('ToolPanel lone chip (detail entry)', () => {
     expect(backBtn()).toBeNull();
     expect(heading()?.textContent).toContain('bash ls');
     expect(pres().map((p) => p.textContent)).toEqual(['ls -la', 'total 0']);
+  });
+});
+
+// --- Rich detail views (issue #146) ----------------------------------------
+// The detail body switches on view.kind; the panel stays provider-blind (it
+// never inspects the tool name). No view → the raw input/output fallback, which
+// the lone-chip / group tests above already cover; one absence test here pins
+// that the switch didn't swallow it.
+
+describe('ToolPanel diff view', () => {
+  const diffText = [
+    '--- a/foo.ts',
+    '+++ b/foo.ts',
+    '@@ -1,3 +1,3 @@',
+    ' unchanged',
+    '-was here',
+    '+is here',
+  ].join('\n');
+
+  it('renders a path header and styles lines by prefix (headers beat +/-)', () => {
+    const t = tool(5, 'edit foo.ts', 'ok', {
+      view: { kind: 'diff', path: 'foo.ts', text: diffText },
+      output: 'file updated',
+    });
+    mountPanel({ target: detailTarget(t), desktop: false });
+
+    expect(pathHeader()?.textContent).toBe('foo.ts');
+
+    // Single-char markers.
+    expect(spanFor('+is here')?.classList.contains('tool-diff-add')).toBe(true);
+    expect(spanFor('-was here')?.classList.contains('tool-diff-del')).toBe(true);
+    // Hunk marker.
+    expect(spanFor('@@ -1,3 +1,3 @@')?.classList.contains('tool-diff-hunk')).toBe(true);
+    // The precedence trap: +++/--- file headers are HUNK, never add/removed.
+    const plus = spanFor('+++ b/foo.ts');
+    expect(plus?.classList.contains('tool-diff-hunk')).toBe(true);
+    expect(plus?.classList.contains('tool-diff-add')).toBe(false);
+    const minus = spanFor('--- a/foo.ts');
+    expect(minus?.classList.contains('tool-diff-hunk')).toBe(true);
+    expect(minus?.classList.contains('tool-diff-del')).toBe(false);
+    // A context line carries neither.
+    expect(spanFor(' unchanged')?.classList.contains('tool-diff-ctx')).toBe(true);
+  });
+
+  it('hides the output block on ok but shows it on error', () => {
+    const ok = tool(5, 'edit foo.ts', 'ok', {
+      view: { kind: 'diff', path: 'foo.ts', text: diffText },
+      output: 'file updated',
+    });
+    const { setTarget } = mountPanel({ target: detailTarget(ok), desktop: false });
+    expect(outputPre()).toBeNull(); // success output is noise
+
+    const failed = tool(6, 'edit foo.ts', 'error', {
+      view: { kind: 'diff', path: 'foo.ts', text: diffText },
+      output: 'patch does not apply',
+    });
+    setTarget(detailTarget(failed));
+    expect(outputPre()?.textContent).toBe('patch does not apply');
+  });
+
+  it('re-renders grown diff text on a same-key refetch (liveness)', () => {
+    const running = tool(8, 'edit big.ts', 'running', {
+      view: { kind: 'diff', path: 'big.ts', text: '@@ -1 +1 @@\n+first' },
+    });
+    const { setTarget } = mountPanel({ target: detailTarget(running), desktop: false });
+    expect(spanFor('+first')).not.toBeUndefined();
+    expect(spanFor('+second')).toBeUndefined();
+
+    // Same seq → same key → no page reset; message replaced wholesale.
+    const done = tool(8, 'edit big.ts', 'ok', {
+      view: { kind: 'diff', path: 'big.ts', text: '@@ -1 +2 @@\n+first\n+second' },
+    });
+    setTarget(detailTarget(done));
+    expect(spanFor('+second')).not.toBeUndefined();
+  });
+});
+
+describe('ToolPanel write view', () => {
+  it('renders a path header with every line styled as added', () => {
+    const t = tool(7, 'create baz.ts', 'ok', {
+      view: { kind: 'write', path: 'baz.ts', text: 'line one\n-not a deletion\n@@ not a hunk' },
+      output: 'file created',
+    });
+    mountPanel({ target: detailTarget(t), desktop: false });
+
+    expect(pathHeader()?.textContent).toBe('baz.ts');
+    const spans = diffSpans();
+    expect(spans).toHaveLength(3);
+    // A new file is an all-insert diff: even a line that looks like a deletion
+    // or a hunk header is added, never mistyped by prefix.
+    expect(spans.every((s) => s.classList.contains('tool-diff-add'))).toBe(true);
+    expect(outputPre()).toBeNull(); // ok write: output suppressed
+  });
+});
+
+describe('ToolPanel command view', () => {
+  it('renders a $-prefixed command and its output below', () => {
+    const t = tool(9, 'run build', 'ok', {
+      view: { kind: 'command', command: 'npm run build' },
+      output: 'built in 2s',
+    });
+    mountPanel({ target: detailTarget(t), desktop: false });
+
+    const cmd = cmdPre();
+    expect(cmd?.querySelector('.tool-cmd-prompt')?.textContent).toBe('$ ');
+    expect(cmd?.textContent).toContain('npm run build');
+    expect(outputPre()?.textContent).toBe('built in 2s'); // shown regardless of status
+  });
+});
+
+describe('ToolPanel absent view (fallback)', () => {
+  it('renders the raw input/output panes when no view is present', () => {
+    const t = tool(10, 'read notes', 'ok', { input: 'path: notes.md', output: 'hello' });
+    mountPanel({ target: detailTarget(t), desktop: false });
+
+    expect(pathHeader()).toBeNull();
+    expect(diffSpans()).toHaveLength(0);
+    expect(cmdPre()).toBeNull();
+    expect(pres().map((p) => p.textContent)).toEqual(['path: notes.md', 'hello']);
   });
 });
 

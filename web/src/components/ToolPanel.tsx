@@ -60,7 +60,7 @@ import {
   onCleanup,
   type JSX,
 } from 'solid-js';
-import type { ChatMessage } from '../api';
+import type { ChatMessage, ToolView } from '../api';
 import { createSheetGesture } from '../lib/sheetGesture';
 import Icon from './Icon';
 
@@ -70,6 +70,51 @@ export function toolStatusMark(status?: 'running' | 'ok' | 'error'): string {
   if (status === 'ok') return '✓';
   if (status === 'error') return '✕';
   return '…';
+}
+
+// --- Rich detail views (issue #146) ----------------------------------------
+// The server tags a tool call with a `view` union; the detail page renders by
+// kind and stays provider-blind (no tool-name logic, no brand token). These
+// readers each re-derive the typed variant from a message resolved LIVE — the
+// caller passes tool() at render time, never a captured object, so an SSE
+// refetch that grows view.text flows straight through (same rule the whole
+// panel lives by, see the header note). A missing/unknown view falls back to
+// the raw input/output <pre> blocks.
+
+type DiffKind = Extract<ToolView, { kind: 'diff' | 'write' }>;
+
+/** A path-carrying view (diff or write) or undefined. */
+function pathView(m: ChatMessage): DiffKind | undefined {
+  const v = m.tool?.view;
+  return v?.kind === 'diff' || v?.kind === 'write' ? v : undefined;
+}
+
+/** The command view or undefined. */
+function commandView(m: ChatMessage): Extract<ToolView, { kind: 'command' }> | undefined {
+  const v = m.tool?.view;
+  return v?.kind === 'command' ? v : undefined;
+}
+
+type DiffLine = { text: string; cls: string };
+
+/** Split diff/write text into per-line class assignments. Prefix precedence is
+ *  load-bearing: the multi-char file/hunk headers (`+++`, `---`, `@@`) MUST be
+ *  tested before the single-char `+`/`-` markers, or a `+++ b/foo` header would
+ *  read as an added line. `forceAdd` paints every line added for the write view
+ *  — a new file is, in effect, an all-insert diff — and short-circuits the
+ *  prefix test so raw content that happens to start with `-`/`@@` isn't mistyped.
+ *  Empty lines are kept (blank context lines carry diff alignment); the CSS
+ *  gives each line span a min-height so a blank one still occupies a row. */
+function diffLines(text: string, forceAdd = false): DiffLine[] {
+  return text.split('\n').map((line) => {
+    let cls = 'tool-diff-ctx';
+    if (forceAdd) cls = 'tool-diff-add';
+    else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@'))
+      cls = 'tool-diff-hunk';
+    else if (line.startsWith('+')) cls = 'tool-diff-add';
+    else if (line.startsWith('-')) cls = 'tool-diff-del';
+    return { text: line, cls };
+  });
 }
 
 /** What the panel is showing. Owned by RunChat; the panel is a pure view. */
@@ -334,13 +379,60 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
                   </h2>
                   {closeButton()}
                 </div>
+                {/* Detail body renders by view.kind (issue #146). Every read
+                    goes through tool() so an SSE refetch's grown text flows in;
+                    a missing view falls back to the raw input/output panes,
+                    byte-for-byte the pre-#146 behaviour. */}
                 <div class="tool-panel-content">
-                  <Show when={tool().tool?.input}>
-                    <pre class="tool-body mono">{tool().tool?.input}</pre>
-                  </Show>
-                  <Show when={tool().tool?.output}>
-                    <pre class="tool-body tool-output mono">{tool().tool?.output}</pre>
-                  </Show>
+                  <Switch
+                    fallback={
+                      <>
+                        <Show when={tool().tool?.input}>
+                          <pre class="tool-body mono">{tool().tool?.input}</pre>
+                        </Show>
+                        <Show when={tool().tool?.output}>
+                          <pre class="tool-body tool-output mono">{tool().tool?.output}</pre>
+                        </Show>
+                      </>
+                    }
+                  >
+                    {/* diff / write: a path header over a line-styled body. Write
+                        forces every line to the added style (a new file is an
+                        all-insert diff). The raw output block rides below ONLY on
+                        error — a successful edit's "file updated" line is noise,
+                        but a failed one must still surface its error text. */}
+                    <Match when={pathView(tool())}>
+                      {(view) => (
+                        <>
+                          <div class="tool-view-path mono">{view().path}</div>
+                          <pre class="tool-body mono tool-diff">
+                            <For each={diffLines(view().text, view().kind === 'write')}>
+                              {(ln) => <span class={ln.cls}>{ln.text}</span>}
+                            </For>
+                          </pre>
+                          <Show when={tool().tool?.status === 'error' && tool().tool?.output}>
+                            <pre class="tool-body tool-output mono">{tool().tool?.output}</pre>
+                          </Show>
+                        </>
+                      )}
+                    </Match>
+                    {/* command: a $-prefixed command line, then its output as
+                        terminal text below (shown whenever non-empty, any
+                        status — a command speaks through its stdout). */}
+                    <Match when={commandView(tool())}>
+                      {(view) => (
+                        <>
+                          <pre class="tool-body mono tool-cmd">
+                            <span class="tool-cmd-prompt">$ </span>
+                            {view().command}
+                          </pre>
+                          <Show when={tool().tool?.output}>
+                            <pre class="tool-body tool-output mono">{tool().tool?.output}</pre>
+                          </Show>
+                        </>
+                      )}
+                    </Match>
+                  </Switch>
                 </div>
               </>
             )}

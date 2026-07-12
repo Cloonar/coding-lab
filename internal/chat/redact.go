@@ -105,7 +105,10 @@ func (s *Service) scanAndRedact(ctx context.Context, run store.Run, chat *provid
 // into; provider-controlled vocabulary — message Kind/Role, Tool.Name/Status,
 // timestamps, the state string — is left alone, since a secret can only ride
 // free text. Lifecycle summaries ride Message.Text, so the Text sweep covers
-// every message kind.
+// every message kind. A tool's rich View union (#146), when present, carries
+// the same operator-visible free-form content — a file path, a diff or write
+// body, a shell command line — so its Path/Text/Command are masked field-for-
+// field beside the chip's Input/Output.
 func redactChat(red *secrets.Redactor, chat *provider.Chat) []string {
 	hit := map[string]struct{}{}
 	mask := func(p *string) {
@@ -125,6 +128,11 @@ func redactChat(red *secrets.Redactor, chat *provider.Chat) []string {
 			mask(&m.Tool.Title)
 			mask(&m.Tool.Input)
 			mask(&m.Tool.Output)
+			if m.Tool.View != nil {
+				mask(&m.Tool.View.Path)
+				mask(&m.Tool.View.Text)
+				mask(&m.Tool.View.Command)
+			}
 		}
 		if m.Dialog != nil {
 			redactDialog(mask, m.Dialog)

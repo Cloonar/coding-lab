@@ -531,12 +531,24 @@ export function updateRun(id: string, patch: RunPatch): Promise<Run> {
 
 export type MessageKind = 'text' | 'tool' | 'dialog' | 'lifecycle';
 
+/** Rich view union (issue #146): produced server-side by each provider's chat
+ *  mapper; the client renders purely by kind and stays provider-blind. Absent
+ *  view → raw input/output fallback. */
+export type ToolView =
+  | { kind: 'diff'; path: string; text: string }
+  | { kind: 'command'; command: string }
+  | { kind: 'write'; path: string; text: string };
+
 export interface ToolInfo {
   name: string;
   title: string;
   input?: string;
   output?: string;
   status: 'running' | 'ok' | 'error';
+  /** Rich render hint (issue #146). The server truncates `view.text` (and
+   *  `output`) at ~20KB with an in-text marker line, so the client renders it
+   *  as-is — no client-side truncation. */
+  view?: ToolView;
 }
 
 export interface DialogOption {
