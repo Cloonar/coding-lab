@@ -209,4 +209,21 @@ describe('SideNav ACTIVE list', () => {
     expect(byHref('/runs/run_afk').textContent).toMatch(/left/);
     expect(byHref('/runs/run_manual').textContent).not.toMatch(/left/);
   });
+
+  it('shows the "N behind" chip only for a row with commits_behind > 0, and folds it into the accessible name (issue #149)', async () => {
+    mount([
+      instance({ id: 'run_behind', session_name: 'proj~a-20260706-1500', commits_behind: 2 }),
+      instance({ id: 'run_current', session_name: 'proj~b-20260706-1501', commits_behind: 0 }),
+      instance({ id: 'run_unset', session_name: 'proj~c-20260706-1502' }),
+    ]);
+    await settle();
+    const byHref = (href: string) => railRows().find((r) => r.getAttribute('href') === href)!;
+
+    const behindRow = byHref('/runs/run_behind');
+    expect(behindRow.querySelector('.rail-behind-chip')?.textContent).toBe('2 behind');
+    expect(behindRow.getAttribute('aria-label')).toBe('a · 15:00 — proj — 2 behind');
+
+    expect(byHref('/runs/run_current').querySelector('.rail-behind-chip')).toBeNull();
+    expect(byHref('/runs/run_unset').querySelector('.rail-behind-chip')).toBeNull();
+  });
 });

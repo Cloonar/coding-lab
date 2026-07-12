@@ -89,10 +89,25 @@ func (s *Server) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "listing instances", err)
 		return
 	}
+	// One repos query for the whole page (issue #149): instance.InstanceView
+	// carries only the repo NAME, not its default branch, so commits_behind
+	// needs its own lookup — a single Repos() call mapped by id keeps this
+	// O(1) queries, not N+1 (mirrors instance.List's own repoName map).
+	repos, err := s.store.Repos(r.Context())
+	if err != nil {
+		s.internalError(w, "listing instances", err)
+		return
+	}
+	defaultBranch := make(map[string]string, len(repos))
+	for _, repo := range repos {
+		defaultBranch[repo.ID] = repo.DefaultBranch
+	}
 	items := make([]instanceResponse, 0, len(views))
 	for _, v := range views {
+		run := runJSON(v.Run)
+		run.CommitsBehind = s.commitsBehind(r.Context(), v.Run, defaultBranch[v.Run.RepoID])
 		items = append(items, instanceResponse{
-			runResponse: runJSON(v.Run),
+			runResponse: run,
 			RepoName:    v.RepoName,
 			Live:        v.Live,
 			Connecting:  v.Connecting,

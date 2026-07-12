@@ -220,6 +220,17 @@ func (e *Engine) CommitsAhead(ctx context.Context, bareDir, branch, defaultBranc
 	return e.revListCount(ctx, bareDir, "origin/"+defaultBranch+".."+branch, extraEnv)
 }
 
+// CommitsBehind counts the commits the LOCAL origin/<defaultBranch> ref
+// carries that branch does not — `git rev-list --count <br>..origin/<def>` —
+// the "N behind mainline" mirror of CommitsAhead, the number the pull-base
+// flow shows before offering to pull. Like CommitsAhead it reads the local
+// remote-tracking ref and never fetches: freshness is the caller's business,
+// and a stale ref just yields a stale count until the next Fetch refreshes
+// it.
+func (e *Engine) CommitsBehind(ctx context.Context, bareDir, branch, defaultBranch string, extraEnv []string) (int, error) {
+	return e.revListCount(ctx, bareDir, branch+"..origin/"+defaultBranch, extraEnv)
+}
+
 // UnpushedCount counts the commits on branch not yet on its origin
 // counterpart — the commits a Discard would destroy unrecoverably. When
 // refs/remotes/origin/<branch> resolves it is `origin/<br>..<br>`; a

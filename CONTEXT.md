@@ -37,8 +37,12 @@ The chat tailer's per-instance signal derived from the transcript tail — *work
 _Avoid_: status, activity, progress
 
 **Slash-command catalog**:
-The provider's slash commands, surfaced in the Chat composer as autocomplete the moment the input starts with `/` (filtered as you type by name, description, and argument hint). Served per instance — project- and user-level commands are discovered relative to the worktree — and curated to **chat-safe** commands only: one that would strand the agent's TUI in a picker lab cannot see is withheld. The entry tagged `role=clear` (Claude Code's `/clear`) also backs a **New conversation** action that clears the instance's context in place; every command executes down the ordinary reply path as pasted text, never a dedicated endpoint.
+The provider's slash commands plus lab's own **lab commands**, surfaced in the Chat composer as autocomplete the moment the input starts with `/` (filtered as you type by name, description, and argument hint). Served per instance — project- and user-level commands are discovered relative to the worktree — and curated to **chat-safe** commands only: one that would strand the agent's TUI in a picker lab cannot see is withheld. The entry tagged `role=clear` (Claude Code's `/clear`) also backs a **New conversation** action that clears the instance's context in place; a provider command executes down the ordinary reply path as pasted text, never a dedicated endpoint, while a **lab command** is intercepted by the server and never reaches the provider.
 _Avoid_: command palette, quick switcher, command menu
+
+**Lab command**:
+A composer slash command the server intercepts and executes itself, never forwarded to the provider — surfaced in the **slash-command catalog** alongside provider commands (source `lab`) for every instance, AFK runs included. `/pull-base` is the first: it fetches the **reference repo**, merges `origin/<base>` into the instance's worktree (aborting with the worktree untouched on conflict), and repairs the context layer by injecting a digest of what changed down the ordinary reply path.
+_Avoid_: server command, built-in command, magic command
 
 **Reference repo**:
 The lab-owned bare clone at `<state>/repos/<id>.git` — the worktree parent and host for all fetch/branch/worktree git ops, never an instance's cwd. (v0 meant the human's main checkout; bare means structurally never dirty.)

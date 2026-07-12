@@ -5,9 +5,11 @@ package httpapi
 // listing embeds.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -52,6 +54,19 @@ type runResponse struct {
 	// run history never pays for an exposure lookup per row. omitempty keeps
 	// the key entirely absent everywhere but the one response that sets it.
 	ExposedSecrets []string `json:"exposed_secrets,omitempty"`
+
+	// CommitsBehind is commits on origin/<base> not yet on this run's branch
+	// (the "N behind" badge, issue #149) — read from the bare reference
+	// clone's already-fetched local refs via gitx.CommitsBehind, no fetch in
+	// the request path; freshness rides the existing fetch cadence.
+	// Populated ONLY by handleRunGet (the run detail view) and
+	// handleInstanceList (the instances dashboard rows) via
+	// Server.commitsBehind; runJSON leaves it 0 for every other caller (the
+	// runs list, the title PATCH echo) so listing a repo's run history never
+	// pays for a git subprocess per row. omitempty hides the key when 0 or
+	// uncomputable (an ended run, a broken/not-yet-cloned repo). base is the
+	// repo's default branch until per-run bases (issue #130) exist.
+	CommitsBehind int `json:"commits_behind,omitempty"`
 }
 
 func runJSON(r store.Run) runResponse {
@@ -81,6 +96,32 @@ func runJSON(r store.Run) runResponse {
 		resp.EndedAt = &t
 	}
 	return resp
+}
+
+// commitsBehind is the commits_behind badge source (issue #149):
+// origin/<defaultBranch> commits absent from run's branch, read against the
+// bare reference clone's local refs (gitx.CommitsBehind never fetches).
+// Computed only for a run that can still receive a pull — outcome active,
+// the same predicate ActiveRuns filters on — since an ended run's worktree
+// and branch may already be torn down and a badge on a dead run would
+// mislead. s.git/s.reposDir unset (some test servers) and any git error
+// (no bare clone yet, a gone branch) both degrade to 0 rather than failing
+// the run/instance response; logged at debug since 0 is an expected,
+// routine outcome (e.g. before a repo's first clone completes).
+func (s *Server) commitsBehind(ctx context.Context, run store.Run, defaultBranch string) int {
+	if run.Outcome != store.RunOutcomeActive {
+		return 0
+	}
+	if s.git == nil || s.reposDir == "" {
+		return 0
+	}
+	bareDir := filepath.Join(s.reposDir, run.RepoID+".git")
+	n, err := s.git.CommitsBehind(ctx, bareDir, run.Branch, defaultBranch, s.gitEnv)
+	if err != nil {
+		s.log.Debug("commits behind", "component", "httpapi", "repo", run.RepoID, "branch", run.Branch, "err", err)
+		return 0
+	}
+	return n
 }
 
 // handleRunsList is GET /api/v1/runs?repo=<id>&limit=50 — a repo's run history,

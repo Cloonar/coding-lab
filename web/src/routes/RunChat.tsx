@@ -150,6 +150,10 @@ function RunChatView() {
   // stream.
   const [exhausted, setExhausted] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // A reply's informational notice (issue #149) — e.g. "already up to date
+  // with origin/main". Never an error: its own dismissible banner, separate
+  // signal, neutral styling (ErrorBanner's `notice` variant).
+  const [notice, setNotice] = createSignal<string | null>(null);
   // What the tool detail panel is showing (issue #145, superseding the inline
   // <details> expansion): a group (keyed by its first tool's seq — decision 12)
   // or a lone chip (its seq). Identity by immutable seq, NOT by object: groups
@@ -645,9 +649,10 @@ function RunChatView() {
     // exactly the pre-panel single column.
     <main class="page chat-page" classList={{ 'panel-open': panelTarget() !== null }} ref={pageEl}>
       <div class="chat-column">
-        {/* The banner sits above the body so the mobile overlay header (§2), which
-          is absolutely positioned within .chat-body, can never paint over it. */}
+        {/* The banners sit above the body so the mobile overlay header (§2), which
+          is absolutely positioned within .chat-body, can never paint over them. */}
         <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+        <ErrorBanner message={notice()} onDismiss={() => setNotice(null)} variant="notice" />
 
         {/* .chat-body is the positioning context for the quick-return header (§2):
           on mobile the header overlays the stream's top and slides via translateY
@@ -790,6 +795,7 @@ function RunChatView() {
           jumpEmphasis={pill().emphasized}
           onJump={jumpToLatest}
           onError={setError}
+          onNotice={setNotice}
           onSent={() => void refetchMessages()}
         />
       </div>
@@ -902,6 +908,11 @@ function ChatHeader(props: {
     };
   };
   const live = () => props.run !== undefined && props.run.outcome === 'active';
+  // The "N behind" chip (issue #149): commits on origin/<base> not yet in this
+  // run's branch. Absent/0 hides the chip entirely — a countless dot would be
+  // useless, so unlike the state/exposed badges above this rides at ALL
+  // widths, not just >=640px (chat-behind-chip skips their display:none gate).
+  const behindCount = () => props.run?.commits_behind ?? 0;
   // The run's spawn-time model chip (issue #68): catalog pretty labels with the
   // raw id as fallback, hidden entirely for legacy rows with no model. A
   // mid-session /model switch is knowingly not reflected — spawn-time truth only.
@@ -1119,6 +1130,16 @@ function ChatHeader(props: {
             {info()}
           </span>
         )}
+      </Show>
+      {/* ALL widths (issue #149): commits on origin/<base> not yet in this
+          run's branch, from /pull-base. Hidden entirely at 0/absent. */}
+      <Show when={behindCount() > 0}>
+        <span
+          class="chip chat-behind-chip"
+          title={`${behindCount()} commit${behindCount() === 1 ? '' : 's'} behind the base branch`}
+        >
+          {behindCount()} behind
+        </span>
       </Show>
 
       <span class="spacer" />
@@ -1701,6 +1722,8 @@ function Composer(props: {
   jumpEmphasis: boolean;
   onJump: () => void;
   onError: (message: string) => void;
+  /** A reply's informational notice (issue #149) — never an error. */
+  onNotice: (message: string) => void;
   onSent: () => void;
 }) {
   const [text, setText] = createSignal('');
@@ -1737,8 +1760,11 @@ function Composer(props: {
     if (sending() || body === '') return;
     setSending(true);
     try {
-      await replyRun(props.runID, body);
+      const result = await replyRun(props.runID, body);
       setText('');
+      // 200 with a `notice` body is informational (issue #149), not an error
+      // — 204 (the common case) carries none.
+      if (result?.notice) props.onNotice(result.notice);
     } catch (err) {
       props.onError(errorMessage(err));
     } finally {

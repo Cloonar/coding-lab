@@ -8,6 +8,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
+	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -40,6 +42,16 @@ type instTestServer struct {
 	chatSvc      *chat.Service
 	repo         store.Repo
 	worktreeRoot string
+	// home, origin, reposDir, eng and env expose the fixture's git topology
+	// (issue #149's commits_behind tests): origin is the non-bare fixture
+	// remote makeRepoOrigin built (commit straight into it to advance),
+	// reposDir/repo.ID+".git" is the lab bare reference clone commits_behind
+	// reads, and eng/env are what fetches it.
+	home     string
+	origin   string
+	reposDir string
+	eng      *gitx.Engine
+	env      []string
 }
 
 // firstSessionName is the deterministic session an unlabelled Start yields
@@ -54,6 +66,13 @@ func newInstanceServer(t *testing.T) *instTestServer {
 // newInstanceServerWith registers extraProvs AFTER the primary claude-code
 // fake (issue #66: multi-provider registries for the provider-pick tests).
 func newInstanceServerWith(t *testing.T, extraProvs ...provider.AgentProvider) *instTestServer {
+	t.Helper()
+	return newInstanceServerMod(t, nil, extraProvs...)
+}
+
+// newInstanceServerMod additionally lets a test rewrite the assembled Options
+// after the fixture wiring completed (issue #149: the no-pull-service server).
+func newInstanceServerMod(t *testing.T, mod func(*Options), extraProvs ...provider.AgentProvider) *instTestServer {
 	t.Helper()
 	testutil.RequireTool(t, "git")
 	home := t.TempDir()
@@ -137,10 +156,26 @@ func newInstanceServerWith(t *testing.T, extraProvs ...provider.AgentProvider) *
 		o.Reconcile = rec
 		o.Providers = reg
 		o.Chat = cs
+		// Wires commits_behind's git dependency (issue #149): the real engine
+		// + this fixture's reposDir/env, same as instance's own Start/List.
+		o.Git = git
+		o.ReposDir = reposDir
+		o.GitEnv = env
+		// The /pull-base lab command (issue #149): the same real-git service
+		// production wires, on this fixture's bare/worktree topology. Vault/
+		// Materializer stay nil — the file:// origin needs no credential.
+		o.Pull = pull.New(pull.Options{
+			Store: st, Git: git, Bus: o.Bus, ReposDir: reposDir, GitEnv: env,
+			Logger: logx.New(io.Discard),
+		})
+		if mod != nil {
+			mod(o)
+		}
 	})
 	x.setup("op", "password123")
 	return &instTestServer{
 		testServer: x, runner: runner, prov: prov, chatSvc: chatSvc, repo: repo, worktreeRoot: worktreeRoot,
+		home: home, origin: origin, reposDir: reposDir, eng: git, env: env,
 	}
 }
 
@@ -437,6 +472,88 @@ func TestAPI_ParkedAndDiscard(t *testing.T) {
 	}
 	if !sawEvent(log, "parked.changed") {
 		t.Error("no parked.changed event on discard")
+	}
+}
+
+// hasKey reports whether the decoded JSON body carries key at all — the
+// omitempty contract commits_behind relies on means "uncomputable" must be
+// entirely ABSENT from the wire body, not merely zero-valued, so assertions
+// read the raw decoded map rather than a Go struct (which always has the
+// field, zero or not).
+func hasKey(m map[string]any, key string) bool {
+	_, ok := m[key]
+	return ok
+}
+
+// TestAPI_RunCommitsBehind pins the commits_behind badge (issue #149) on both
+// surfaces that render it — run detail and the instances list row — and its
+// omitempty contract: absent while uncomputable/zero, present with the exact
+// rev-list count once the bare reference clone has fetched an advanced
+// origin, and absent again once the run ends (its branch may already be gone).
+func TestAPI_RunCommitsBehind(t *testing.T) {
+	x := newInstanceServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	run := decodeBody(t, resp)
+	runID, _ := run["id"].(string)
+	if runID == "" {
+		t.Fatalf("run id missing from create response: %v", run)
+	}
+
+	// Origin not advanced beyond the branch's fork point: commits_behind is
+	// entirely absent, not a present 0.
+	resp = x.do("GET", "/api/v1/runs/"+runID, nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if got := decodeBody(t, resp); hasKey(got, "commits_behind") {
+		t.Errorf("commits_behind present before origin advances: %v", got["commits_behind"])
+	}
+
+	// Advance the fixture origin's main by 3 commits directly (it is the
+	// non-bare working repo makeRepoOrigin built), then fetch the lab bare
+	// reference clone — the one refresh commits_behind is allowed to read,
+	// never a fetch of its own.
+	for i := 0; i < 3; i++ {
+		writeFile(t, filepath.Join(x.origin, fmt.Sprintf("adv%d.txt", i)), "advance")
+		repoGitCmd(t, x.home, x.origin, "add", ".")
+		repoGitCmd(t, x.home, x.origin, "commit", "-q", "-m", fmt.Sprintf("advance %d", i))
+	}
+	bareDir := filepath.Join(x.reposDir, x.repo.ID+".git")
+	if err := x.eng.Fetch(context.Background(), bareDir, x.env); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	resp = x.do("GET", "/api/v1/runs/"+runID, nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if got := decodeBody(t, resp); got["commits_behind"] != float64(3) {
+		t.Errorf("run detail commits_behind = %v, want 3", got["commits_behind"])
+	}
+
+	// The instances list row carries the same value under the same
+	// conditions (handleInstanceList's own O(1)-query enrichment).
+	resp = x.do("GET", "/api/v1/instances", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	list := decodeBody(t, resp)
+	items, _ := list["instances"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("instances = %v, want 1", list)
+	}
+	if inst := items[0].(map[string]any); inst["commits_behind"] != float64(3) {
+		t.Errorf("instance commits_behind = %v, want 3", inst["commits_behind"])
+	}
+
+	// An ended run never carries the badge — Stop moves its outcome off
+	// active, and the origin is still measurably ahead, so this proves the
+	// active-only predicate rather than a coincidental zero.
+	resp = x.do("DELETE", "/api/v1/instances/"+firstSessionName, nil, h)
+	wantStatus(t, resp, http.StatusOK)
+	_ = resp.Body.Close()
+
+	resp = x.do("GET", "/api/v1/runs/"+runID, nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if got := decodeBody(t, resp); hasKey(got, "commits_behind") {
+		t.Errorf("commits_behind present on an ended run: %v", got["commits_behind"])
 	}
 }
 
