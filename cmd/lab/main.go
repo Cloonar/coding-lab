@@ -34,6 +34,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
+	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
@@ -218,6 +219,21 @@ func run() int {
 		Logger:       logger,
 	})
 	trackerReg.SetCRMerger(mergeSvc)
+
+	// /pull-base lab command service (issue #149): merges origin/<base> into a
+	// run's LIVE worktree and renders the agent-facing digest; the HTTP reply
+	// path intercepts the command and delegates here. Same store/git/vault/
+	// materializer/bus plumbing as crmerge — the two are siblings on the bare
+	// reference clones.
+	pullSvc := pull.New(pull.Options{
+		Store:        st,
+		Git:          gitEngine,
+		Vault:        vlt,
+		Materializer: mat,
+		Bus:          bus,
+		ReposDir:     reposDir,
+		Logger:       logger,
+	})
 
 	// M3 instance/AFK stack. The claude-code adapter derives its default global
 	// config path from HOME (issue #78 / ADR-0034), so with HOME unset AND no
@@ -477,6 +493,7 @@ func run() int {
 		Materializer:    mat,
 		ReposDir:        reposDir,
 		CRMerge:         mergeSvc,
+		Pull:            pullSvc,
 		BaseURL:         cfg.BaseURL,
 		ProxyAuth:       cfg.ProxyAuth,
 		ProxyAuthHeader: cfg.ProxyAuthHeader,

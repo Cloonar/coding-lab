@@ -152,6 +152,9 @@ let replyPosts: { text: string }[];
 // Reply POST status — 204 (success) by default. Kept as a knob so a reply-path
 // test can flip it to a 4xx without re-plumbing the fetch stub.
 let replyStatus: number;
+// The 200 status's {notice} body (issue #149) — null leaves replyStatus:200
+// untouched by any test that doesn't set it.
+let replyNotice: string | null;
 let answerPosts: Record<string, unknown>[];
 let interruptPosts: number;
 // Inline rename PATCHes (issue #111); the stub applies them to runOnServer so
@@ -230,11 +233,15 @@ function stubApi(): void {
       }
       if (url === `/api/v1/runs/${RUN_ID}/reply` && method === 'POST') {
         replyPosts.push(JSON.parse(String(init?.body)) as { text: string });
-        return Promise.resolve(
-          replyStatus >= 400
-            ? jsonResponse(replyStatus, { error: 'run is not accepting replies' })
-            : jsonResponse(replyStatus, ''),
-        );
+        if (replyStatus >= 400) {
+          return Promise.resolve(
+            jsonResponse(replyStatus, { error: 'run is not accepting replies' }),
+          );
+        }
+        if (replyStatus === 200) {
+          return Promise.resolve(jsonResponse(200, { notice: replyNotice }));
+        }
+        return Promise.resolve(jsonResponse(replyStatus, ''));
       }
       if (url === `/api/v1/runs/${RUN_ID}/answer` && method === 'POST') {
         answerPosts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -448,6 +455,7 @@ beforeEach(() => {
   };
   replyPosts = [];
   replyStatus = 204;
+  replyNotice = null;
   answerPosts = [];
   interruptPosts = 0;
   titlePatches = [];
@@ -489,6 +497,43 @@ describe('RunChat', () => {
     expect(replyPosts).toHaveLength(1);
     expect(replyPosts[0]?.text).toBe('keep going');
     expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('shows a 200 reply notice as an informational banner, never the error banner (issue #149)', async () => {
+    replyStatus = 200;
+    replyNotice = 'already up to date with origin/main';
+    await mountChat();
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.value = 'ping';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    buttonByLabel('Send')!.click();
+    await settle();
+
+    const notice = container.querySelector('.banner.notice');
+    expect(notice?.textContent).toContain('already up to date with origin/main');
+    expect(notice?.getAttribute('role')).toBe('status');
+    expect(container.querySelector('.banner.error')).toBeNull();
+    // The composer still clears on a 200, same as a 204.
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('keeps a reply error on the error banner, never the notice banner', async () => {
+    replyStatus = 409;
+    await mountChat();
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    input.value = 'ping';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    buttonByLabel('Send')!.click();
+    await settle();
+
+    expect(container.querySelector('.banner.error')?.textContent).toContain(
+      'run is not accepting replies',
+    );
+    expect(container.querySelector('.banner.notice')).toBeNull();
   });
 
   it('bare Enter sends on fine-pointer; Shift+Enter stays a newline; Cmd/Ctrl+Enter always sends', async () => {
@@ -3432,5 +3477,29 @@ describe('RunChat', () => {
     await mountChat();
 
     expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m]');
+  });
+
+  // --- "N behind" chip (issue #149) ---
+
+  it('renders the "N behind" chip when commits_behind is positive', async () => {
+    runOnServer = { ...baseRun(), commits_behind: 3 };
+    await mountChat();
+
+    const chip = container.querySelector('.chat-behind-chip');
+    expect(chip?.textContent).toBe('3 behind');
+    expect(chip?.getAttribute('title')).toBe('3 commits behind the base branch');
+  });
+
+  it('hides the "N behind" chip when commits_behind is 0', async () => {
+    runOnServer = { ...baseRun(), commits_behind: 0 };
+    await mountChat();
+
+    expect(container.querySelector('.chat-behind-chip')).toBeNull();
+  });
+
+  it('hides the "N behind" chip when commits_behind is absent', async () => {
+    await mountChat(); // baseRun() carries no commits_behind
+
+    expect(container.querySelector('.chat-behind-chip')).toBeNull();
   });
 });

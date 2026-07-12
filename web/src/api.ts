@@ -454,6 +454,15 @@ export interface Run {
    * optional rather than nullable: absent everywhere but the chat header.
    */
   exposed_secrets?: string[];
+  /**
+   * Commits on origin/<base> not yet in this run's branch (issue #149), from
+   * GET /runs/{id} and GET /instances rows (which embed the run shape).
+   * Omitted — not zero — whenever there's nothing to report: no commits
+   * behind, the run has ended, or the count couldn't be computed, so absence
+   * is the "hide the chip" signal throughout the UI, same convention as
+   * `exposed_secrets`.
+   */
+  commits_behind?: number;
 }
 
 /** The chat tailer's per-instance conversational state (issue #7). */
@@ -682,9 +691,23 @@ export function getRunMessages(
   );
 }
 
-/** Free-text reply. 409 for an ended run or a pending dialog; 400 for empty. */
-export function replyRun(id: string, text: string): Promise<void> {
-  return request<void>('POST', `/runs/${encodeURIComponent(id)}/reply`, { text });
+/**
+ * The reply endpoint's 200 response body (issue #149): an operator-facing
+ * informational `notice` — e.g. "already up to date with origin/main", or
+ * "base not pulled (agent is busy); the conversation was cleared on the old
+ * base" — never an error (errors keep the existing `{"error"}` envelope and
+ * a non-2xx status). The common 204 (no notice) still parses to undefined.
+ */
+export interface ReplyResult {
+  notice?: string;
+}
+
+/** Free-text reply. 409 for an ended run or a pending dialog; 400 for empty.
+ *  200 with a `notice` body is informational (issue #149), not an error. */
+export function replyRun(id: string, text: string): Promise<ReplyResult | undefined> {
+  return request<ReplyResult | undefined>('POST', `/runs/${encodeURIComponent(id)}/reply`, {
+    text,
+  });
 }
 
 /**

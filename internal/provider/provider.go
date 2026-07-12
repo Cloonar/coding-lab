@@ -416,7 +416,7 @@ type CommandSpec struct {
 	Name        string `json:"name"` // bare name WITHOUT the leading slash, e.g. "clear"
 	Description string `json:"description,omitempty"`
 	ArgHint     string `json:"arg_hint,omitempty"`
-	Source      string `json:"source"` // builtin|project|user
+	Source      string `json:"source"` // builtin|project|user, or "lab" for a server-owned lab command
 	Role        string `json:"role,omitempty"`
 	ChatSafe    bool   `json:"chat_safe"` // false: would strand the TUI in a picker lab cannot see
 }

@@ -5,11 +5,16 @@ package httpapi
 // dialog), driven through the fake provider's scriptable chat.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
@@ -242,8 +247,8 @@ func TestAPI_RunCommands(t *testing.T) {
 	resp := x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
 	wantStatus(t, resp, http.StatusOK)
 	cmds := commandsOf(t, decodeBody(t, resp))
-	if len(cmds) != 2 {
-		t.Fatalf("commands = %v; want 2 chat-safe (login curated out)", cmds)
+	if len(cmds) != 3 {
+		t.Fatalf("commands = %v; want 2 chat-safe (login curated out) + lab pull-base", cmds)
 	}
 	if cmds[0]["name"] != "clear" || cmds[0]["role"] != provider.CommandRoleClear || cmds[1]["name"] != "compact" {
 		t.Errorf("commands = %v; want clear(role=clear)+compact", cmds)
@@ -257,8 +262,8 @@ func TestAPI_RunCommands(t *testing.T) {
 	// A second read is served from cache — the provider scan ran exactly once.
 	resp = x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
 	wantStatus(t, resp, http.StatusOK)
-	if got := commandsOf(t, decodeBody(t, resp)); len(got) != 2 {
-		t.Errorf("cached read commands = %v; want 2", got)
+	if got := commandsOf(t, decodeBody(t, resp)); len(got) != 3 {
+		t.Errorf("cached read commands = %v; want 3", got)
 	}
 	if n := len(x.prov.CommandsCalls()); n != 1 {
 		t.Errorf("Commands called %d times across two reads; want 1 (cached)", n)
@@ -266,9 +271,10 @@ func TestAPI_RunCommands(t *testing.T) {
 }
 
 // No chat-safe commands still serves a non-null empty array (the SPA renders
-// "no commands", never crashes on null).
+// "no commands", never crashes on null). Pinned on a server without a pull
+// service — with one wired the lab-owned pull-base entry always shows.
 func TestAPI_RunCommands_noneChatSafeIsNonNullArray(t *testing.T) {
-	x := newInstanceServer(t)
+	x := newInstanceServerMod(t, func(o *Options) { o.Pull = nil })
 	runID, _ := startRun(t, x)
 	x.prov.SetCommands([]provider.CommandSpec{
 		{Name: "login", Source: "builtin", ChatSafe: false},
@@ -430,4 +436,352 @@ func TestAPI_ChatMessages_unknownRun404(t *testing.T) {
 	x := newInstanceServer(t)
 	resp := x.do("GET", "/api/v1/runs/run_missing/messages", nil, nil)
 	wantStatus(t, resp, http.StatusNotFound)
+}
+
+// --- /pull-base lab command (issue #149) -----------------------------------
+
+// pullIdentity configures the global git author identity every real pull
+// requires (pull.Service refuses to author a merge commit as nobody).
+func pullIdentity(t *testing.T, x *instTestServer) {
+	t.Helper()
+	ctx := context.Background()
+	if err := x.st.SetSetting(ctx, store.SettingGitAuthorName, "Lab Operator"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.st.SetSetting(ctx, store.SettingGitAuthorEmail, "op@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// advanceOrigin lands one commit (name/content/subject) on the fixture
+// origin's main. gitx.PullBase does its own fail-loud fetch, so no bare-clone
+// refresh is needed here (unlike the commits_behind fixture dance).
+func advanceOrigin(t *testing.T, x *instTestServer, name, content, subject string) {
+	t.Helper()
+	writeFile(t, filepath.Join(x.origin, name), content)
+	repoGitCmd(t, x.home, x.origin, "add", ".")
+	repoGitCmd(t, x.home, x.origin, "commit", "-q", "-m", subject)
+}
+
+// runWorktree resolves the run's live worktree path from the store.
+func runWorktree(t *testing.T, x *instTestServer, runID string) string {
+	t.Helper()
+	run, err := x.st.RunByID(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run.WorktreePath
+}
+
+// worktreeHead is the worktree's current HEAD sha (the merged/unchanged probe).
+func worktreeHead(t *testing.T, x *instTestServer, wt string) string {
+	t.Helper()
+	return repoGitCmd(t, x.home, wt, "rev-parse", "HEAD")
+}
+
+// postReply POSTs text to the run's reply endpoint.
+func postReply(t *testing.T, x *instTestServer, runID, text string) *http.Response {
+	t.Helper()
+	return x.do("POST", "/api/v1/runs/"+runID+"/reply", map[string]any{"text": text}, csrfHeaders(x.ts.URL))
+}
+
+// clearCatalog scripts the provider catalog with a role=clear entry (mirrors
+// TestAPI_RunCommands) plus a plain chat-safe /compact.
+func clearCatalog(x *instTestServer) {
+	x.prov.SetCommands([]provider.CommandSpec{
+		{Name: "clear", Description: "Clear the conversation", Source: "builtin", Role: provider.CommandRoleClear, ChatSafe: true},
+		{Name: "compact", Source: "builtin", ChatSafe: true},
+	}, nil)
+}
+
+// The commands catalog carries the lab-owned pull-base entry (issue #149):
+// appended after the provider's chat-safe entries with source "lab", still
+// present on the cached second read (without re-hitting the provider), and
+// absent entirely when no pull service is wired.
+func TestAPI_RunCommands_labPullBaseEntry(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetCommands([]provider.CommandSpec{
+		{Name: "clear", Source: "builtin", Role: provider.CommandRoleClear, ChatSafe: true},
+	}, nil)
+
+	for _, read := range []string{"fresh", "cached"} {
+		resp := x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
+		wantStatus(t, resp, http.StatusOK)
+		cmds := commandsOf(t, decodeBody(t, resp))
+		if len(cmds) != 2 {
+			t.Fatalf("%s read: commands = %v; want provider clear + lab pull-base", read, cmds)
+		}
+		last := cmds[len(cmds)-1]
+		if last["name"] != "pull-base" || last["source"] != "lab" || last["chat_safe"] != true {
+			t.Errorf("%s read: lab entry = %v; want pull-base/lab/chat-safe", read, last)
+		}
+	}
+	if n := len(x.prov.CommandsCalls()); n != 1 {
+		t.Errorf("Commands called %d times across two reads; want 1 (the lab entry never invalidates the cache)", n)
+	}
+
+	// Without the pull service the entry vanishes from the catalog.
+	y := newInstanceServerMod(t, func(o *Options) { o.Pull = nil })
+	yRunID, _ := startRun(t, y)
+	y.prov.SetCommands([]provider.CommandSpec{{Name: "compact", Source: "builtin", ChatSafe: true}}, nil)
+	resp := y.do("GET", "/api/v1/runs/"+yRunID+"/commands", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	for _, c := range commandsOf(t, decodeBody(t, resp)) {
+		if c["name"] == "pull-base" {
+			t.Errorf("pull-base present without a pull service: %v", c)
+		}
+	}
+}
+
+// The /pull-base happy path: the lab command merges the advanced origin into
+// the run's worktree and pastes exactly one agent message — the digest,
+// carrying the sha range, an incoming subject and a filename — while the raw
+// command never reaches the provider.
+func TestAPI_PullBase_happyPath(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	advanceOrigin(t, x, "feature.txt", "feature", "add feature x")
+	wt := runWorktree(t, x, runID)
+	oldHead := worktreeHead(t, x, wt)
+
+	resp := postReply(t, x, runID, "/pull-base")
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+
+	newHead := worktreeHead(t, x, wt)
+	if newHead == oldHead {
+		t.Fatal("worktree HEAD unchanged; the pull did not land")
+	}
+	if _, err := os.Stat(filepath.Join(wt, "feature.txt")); err != nil {
+		t.Errorf("merged file missing from the worktree: %v", err)
+	}
+	replies := x.prov.Replies()
+	if len(replies) != 1 {
+		t.Fatalf("replies = %v; want exactly one (the digest)", replies)
+	}
+	digest := replies[0]
+	if digest == "/pull-base" {
+		t.Fatal("the raw /pull-base command reached the provider")
+	}
+	wantRange := oldHead[:12] + ".." + newHead[:12]
+	for _, part := range []string{wantRange, "add feature x", "feature.txt"} {
+		if !strings.Contains(digest, part) {
+			t.Errorf("digest missing %q:\n%s", part, digest)
+		}
+	}
+}
+
+// /pull-base takes no arguments: any argument form is a 400 that forwards
+// nothing to the provider.
+func TestAPI_PullBase_argsRejected(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+
+	resp := postReply(t, x, runID, "/pull-base now")
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); body["error"] != "pull-base takes no arguments" {
+		t.Errorf("error = %v; want the no-arguments refusal", body["error"])
+	}
+	if got := x.prov.Replies(); len(got) != 0 {
+		t.Errorf("replies = %v; want none", got)
+	}
+}
+
+// Without a pull service the lab command is refused (503) — and still never
+// forwarded: the never-reaches-the-provider guarantee holds even unwired.
+func TestAPI_PullBase_unavailableWithoutService(t *testing.T) {
+	x := newInstanceServerMod(t, func(o *Options) { o.Pull = nil })
+	runID, _ := startRun(t, x)
+
+	resp := postReply(t, x, runID, "/pull-base")
+	wantStatus(t, resp, http.StatusServiceUnavailable)
+	if body := decodeBody(t, resp); body["error"] != "pull-base is not available" {
+		t.Errorf("error = %v; want the unavailable refusal", body["error"])
+	}
+	if got := x.prov.Replies(); len(got) != 0 {
+		t.Errorf("replies = %v; want none", got)
+	}
+}
+
+// A POSITIVELY working agent refuses the pull (409 busy): nothing merges and
+// nothing reaches the provider.
+func TestAPI_PullBase_busyAgent(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	advanceOrigin(t, x, "feature.txt", "feature", "add feature x")
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking})
+	wt := runWorktree(t, x, runID)
+	oldHead := worktreeHead(t, x, wt)
+
+	resp := postReply(t, x, runID, "/pull-base")
+	wantStatus(t, resp, http.StatusConflict)
+	if body := decodeBody(t, resp); !strings.Contains(fmt.Sprint(body["error"]), "busy") {
+		t.Errorf("error = %v; want a busy message", body["error"])
+	}
+	if got := x.prov.Replies(); len(got) != 0 {
+		t.Errorf("replies = %v; want none", got)
+	}
+	if worktreeHead(t, x, wt) != oldHead {
+		t.Error("worktree HEAD moved despite the busy refusal")
+	}
+}
+
+// A conflicting local commit → 409 naming the conflicted file, worktree HEAD
+// untouched (gitx aborts the merge), nothing forwarded.
+func TestAPI_PullBase_conflict(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	wt := runWorktree(t, x, runID)
+	// The run commits clash.txt locally; origin lands different content at
+	// the same path — an add/add conflict.
+	writeFile(t, filepath.Join(wt, "clash.txt"), "local side")
+	repoGitCmd(t, x.home, wt, "add", ".")
+	repoGitCmd(t, x.home, wt, "commit", "-q", "-m", "local clash")
+	advanceOrigin(t, x, "clash.txt", "origin side", "origin clash")
+	oldHead := worktreeHead(t, x, wt)
+
+	resp := postReply(t, x, runID, "/pull-base")
+	wantStatus(t, resp, http.StatusConflict)
+	if body := decodeBody(t, resp); !strings.Contains(fmt.Sprint(body["error"]), "clash.txt") {
+		t.Errorf("conflict error does not name the file: %v", body["error"])
+	}
+	if worktreeHead(t, x, wt) != oldHead {
+		t.Error("worktree HEAD moved despite the conflict abort")
+	}
+	if got := x.prov.Replies(); len(got) != 0 {
+		t.Errorf("replies = %v; want none", got)
+	}
+}
+
+// Nothing to pull → 200 with the up-to-date notice and NO agent message.
+func TestAPI_PullBase_upToDate(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+
+	resp := postReply(t, x, runID, "/pull-base")
+	wantStatus(t, resp, http.StatusOK)
+	if body := decodeBody(t, resp); body["notice"] != "Already up to date with origin/main." {
+		t.Errorf("notice = %v; want the exact up-to-date wording", body["notice"])
+	}
+	if got := x.prov.Replies(); len(got) != 0 {
+		t.Errorf("replies = %v; want none (no digest when nothing came in)", got)
+	}
+}
+
+// A dialog racing in between the merge and the digest paste degrades to a 200
+// notice: the merge is real (worktree updated), only the context repair
+// failed — never an error.
+func TestAPI_PullBase_digestUndelivered(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	advanceOrigin(t, x, "feature.txt", "feature", "add feature x")
+	x.prov.SetPendingDialog(&provider.Dialog{ToolID: "toolu_1", Kind: provider.DialogKindQuestion,
+		Answerable: true, Prompt: "Pick?", Options: []provider.DialogOption{{Label: "A"}}})
+	wt := runWorktree(t, x, runID)
+
+	resp := postReply(t, x, runID, "/pull-base")
+	wantStatus(t, resp, http.StatusOK)
+	notice, _ := decodeBody(t, resp)["notice"].(string)
+	if !strings.Contains(notice, "not delivered") {
+		t.Errorf("notice = %q; want the undelivered-digest wording", notice)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "feature.txt")); err != nil {
+		t.Errorf("merge did not land despite the notice: %v", err)
+	}
+	if got := x.prov.Replies(); len(got) != 0 {
+		t.Errorf("replies = %v; want none (the digest was refused by the dialog gate)", got)
+	}
+}
+
+// A role=clear reply pulls the base BEFORE forwarding the clear: worktree
+// updated, the clear forwarded verbatim, and NO digest (post-clear nothing is
+// stale) — plain 204.
+func TestAPI_ClearHook_pullsBeforeClear(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	clearCatalog(x)
+	advanceOrigin(t, x, "feature.txt", "feature", "add feature x")
+	wt := runWorktree(t, x, runID)
+
+	resp := postReply(t, x, runID, "/clear")
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+
+	if _, err := os.Stat(filepath.Join(wt, "feature.txt")); err != nil {
+		t.Errorf("pull did not land before the clear: %v", err)
+	}
+	if got := x.prov.Replies(); len(got) != 1 || got[0] != "/clear" {
+		t.Errorf("replies = %v; want exactly [/clear] (forwarded, no digest)", got)
+	}
+}
+
+// A working agent never blocks its clear: the pull is skipped, the clear
+// forwards, and the operator learns via the 200 notice.
+func TestAPI_ClearHook_busySkipsPull(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	clearCatalog(x)
+	advanceOrigin(t, x, "feature.txt", "feature", "add feature x")
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking})
+	wt := runWorktree(t, x, runID)
+	oldHead := worktreeHead(t, x, wt)
+
+	resp := postReply(t, x, runID, "/clear")
+	wantStatus(t, resp, http.StatusOK)
+	notice, _ := decodeBody(t, resp)["notice"].(string)
+	if !strings.Contains(notice, "agent is busy") {
+		t.Errorf("notice = %q; want the busy wording", notice)
+	}
+	if worktreeHead(t, x, wt) != oldHead {
+		t.Error("worktree updated despite the busy skip")
+	}
+	if got := x.prov.Replies(); len(got) != 1 || got[0] != "/clear" {
+		t.Errorf("replies = %v; want exactly [/clear]", got)
+	}
+}
+
+// A failing pull is loud (200 notice) but never blocks the clear.
+func TestAPI_ClearHook_pullFailureStillClears(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	clearCatalog(x)
+	// Break the fetch: the bare reference clone's origin points nowhere.
+	bareDir := filepath.Join(x.reposDir, x.repo.ID+".git")
+	repoGitCmd(t, x.home, bareDir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone"))
+
+	resp := postReply(t, x, runID, "/clear")
+	wantStatus(t, resp, http.StatusOK)
+	notice, _ := decodeBody(t, resp)["notice"].(string)
+	if !strings.Contains(notice, "Base not pulled") {
+		t.Errorf("notice = %q; want 'Base not pulled …'", notice)
+	}
+	if got := x.prov.Replies(); len(got) != 1 || got[0] != "/clear" {
+		t.Errorf("replies = %v; want exactly [/clear]", got)
+	}
+}
+
+// A non-clear command forwards verbatim with a 204, byte-for-byte like before
+// lab commands existed (plain text is covered by TestAPI_ChatReplyAndInterrupt).
+func TestAPI_ChatReply_nonClearCommandForwards(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	clearCatalog(x)
+
+	resp := postReply(t, x, runID, "/compact")
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+	if got := x.prov.Replies(); len(got) != 1 || got[0] != "/compact" {
+		t.Errorf("replies = %v; want exactly [/compact]", got)
+	}
 }

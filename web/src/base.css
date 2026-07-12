@@ -414,10 +414,28 @@ a.plain {
   line-height: 1.25;
 }
 
+/* Title plus the optional "N behind" chip (issue #149) on one line. */
+.rail-row-top {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
 .rail-row-title {
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Small and muted — metadata, not a call to action (issue #149). */
+.rail-behind-chip {
+  flex: none;
+  font-size: 0.68rem;
+  padding: 0.05rem 0.4rem;
+  color: var(--muted);
 }
 
 .rail-row-repo {
@@ -1013,6 +1031,15 @@ textarea:focus-visible {
   background: var(--run-bg);
   border: 1px solid color-mix(in srgb, var(--run-text) 30%, var(--run-bg));
   color: var(--run-text);
+}
+
+/* Informational, non-error banner (issue #149) — e.g. a reply's `notice`
+   body. Neutral/amber, distinct from both the error and success palettes;
+   shares the "in progress" tone already used for .chip.status-cloning. */
+.banner.notice {
+  background: var(--banner-bg);
+  border: 1px solid color-mix(in srgb, var(--banner-text) 30%, var(--banner-bg));
+  color: var(--banner-text);
 }
 
 .banner-text {
@@ -2733,6 +2760,14 @@ h6.md-h {
    mobile instead. Muted so it reads as metadata, not an interactive control. */
 .chat-model-chip {
   display: none;
+  color: var(--muted);
+  font-weight: 500;
+}
+/* The "N behind" chip (issue #149) — unlike the model chip above, this rides
+   at ALL widths (a countless dot would be useless), so it skips the
+   >=640px-only display gate entirely; `.chip` already keeps it
+   display:inline-block. Same muted metadata look as the model chip. */
+.chat-behind-chip {
   color: var(--muted);
   font-weight: 500;
 }

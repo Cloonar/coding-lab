@@ -162,12 +162,17 @@ function RailRow(props: { instance: Instance; now: number; onNavigate?: () => vo
   const afk = () => parseAFKLabel(sessionLabel(props.instance.session_name));
   const budget = () =>
     afk() === null ? null : budgetRemaining(props.instance.budget_deadline, props.now);
+  // The "N behind" chip (issue #149): commits on origin/<base> not yet in
+  // this run's branch. Absent/0 hides it — same convention as the chat
+  // header's chip.
+  const behind = () => props.instance.commits_behind ?? 0;
   // The dot is color-only, so the link's accessible name carries the state
   // word a screen reader would otherwise miss.
   const ariaLabel = () => {
     const base = `${title()} — ${props.instance.repo_name}`;
     const b = badge();
-    return b === null ? base : `${base} — ${b.label}`;
+    const withBadge = b === null ? base : `${base} — ${b.label}`;
+    return behind() > 0 ? `${withBadge} — ${behind()} behind` : withBadge;
   };
   return (
     <li>
@@ -188,7 +193,17 @@ function RailRow(props: { instance: Instance; now: number; onNavigate?: () => vo
           title={badge()?.title}
         />
         <span class="rail-row-body">
-          <span class="rail-row-title">{title()}</span>
+          <span class="rail-row-top">
+            <span class="rail-row-title">{title()}</span>
+            <Show when={behind() > 0}>
+              <span
+                class="chip rail-behind-chip"
+                title={`${behind()} commit${behind() === 1 ? '' : 's'} behind the base branch`}
+              >
+                {behind()} behind
+              </span>
+            </Show>
+          </span>
           <span class="rail-row-repo">
             {props.instance.repo_name}
             <Show when={budget()}>

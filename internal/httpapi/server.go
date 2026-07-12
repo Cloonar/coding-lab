@@ -24,6 +24,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
@@ -100,6 +101,11 @@ type Options struct {
 	// the per-credential env. Production leaves it nil; tests pass
 	// testutil.HermeticGitEnv (the reposvc convention).
 	GitEnv []string
+	// Pull is the /pull-base lab-command service (issue #149): the reply path
+	// intercepts the command and merges origin/<base> into the run's live
+	// worktree. Nil leaves the lab command unavailable (a 503 refusal — never
+	// a forward to the provider) and out of the commands catalog.
+	Pull *pull.Service
 
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
@@ -141,6 +147,7 @@ type Server struct {
 	reposDir  string
 	gitEnv    []string
 	crmerge   *crmerge.Service
+	pull      *pull.Service
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -229,6 +236,7 @@ func New(o Options) (*Server, error) {
 		reposDir:      o.ReposDir,
 		gitEnv:        o.GitEnv,
 		crmerge:       o.CRMerge,
+		pull:          o.Pull,
 		proxyAuth:     o.ProxyAuth,
 		proxyHeader:   o.ProxyAuthHeader,
 		trusted:       o.TrustedProxies,

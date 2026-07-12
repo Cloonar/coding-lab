@@ -13,16 +13,24 @@ package httpapi
 // file translates JSON ⇄ service calls and maps typed errors onto status
 // codes. Intervention is budget/claim/strike neutral — none of these touch a
 // run's outcome.
+//
+// The reply path additionally intercepts LAB COMMANDS (issue #149): composer
+// slash commands the server executes itself instead of forwarding to the
+// provider. /pull-base is the first — see handleRunReply.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
@@ -38,7 +46,11 @@ const (
 // handlers, this one also enriches the response with exposed_secrets (issue
 // #108): the chat header is the only surface that needs to warn "this run's
 // transcript leaked a secret", so the lookup happens exactly here rather than
-// inside the shared runJSON, keeping list pages N+1-free.
+// inside the shared runJSON, keeping list pages N+1-free. It also populates
+// commits_behind (issue #149) for the same reason — one extra RepoByID here
+// (for the repo's default branch) is fine on a single-run endpoint; a RepoByID
+// failure just leaves commits_behind uncomputed rather than failing the whole
+// run detail.
 func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -52,6 +64,9 @@ func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := runJSON(run)
 	resp.ExposedSecrets = exposed
+	if repo, err := s.store.RepoByID(r.Context(), run.RepoID); err == nil {
+		resp.CommitsBehind = s.commitsBehind(r.Context(), run, repo.DefaultBranch)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -185,6 +200,18 @@ type commandsResponse struct {
 	Commands []provider.CommandSpec `json:"commands"`
 }
 
+// pullBaseCommand is the lab-owned /pull-base catalog entry (issue #149): the
+// composer autocompletes it like any provider command, but the reply path
+// intercepts and executes it server-side — it never reaches the provider.
+// Source "lab" tells the client who owns it. Appended to the commands
+// response at build time only, never stored into the provider-commands cache.
+var pullBaseCommand = provider.CommandSpec{
+	Name:        "pull-base",
+	Description: "Pull the base branch into the worktree and brief the agent (lab command)",
+	Source:      "lab",
+	ChatSafe:    true,
+}
+
 // handleRunCommands is GET /api/v1/runs/{id}/commands — the composer's
 // slash-command autocomplete source (issue #51 decision 5). Worktree-dependent
 // (project/user commands are discovered relative to the run's worktree), hence
@@ -193,27 +220,53 @@ type commandsResponse struct {
 // a command that would strand the TUI in a picker lab cannot see ships
 // ChatSafe=false and is curated out by the adapter. The chat-safe slice is
 // cached per run for commandsCacheTTL (Commands is a filesystem scan); a scan
-// error is a 500 and is never cached.
+// error is a 500 and is never cached. Lab-owned commands (issue #149) join
+// the response after the provider entries.
 func (s *Server) handleRunCommands(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.writeRunError(w, "listing commands", err)
 		return
 	}
-	if cmds, ok := s.cachedCommands(run.ID); ok {
-		writeJSON(w, http.StatusOK, commandsResponse{Commands: cmds})
-		return
-	}
-	prov, ok := s.providerForRun(w, run)
-	if !ok {
-		return
-	}
-	all, err := prov.Commands(r.Context(), run.WorktreePath)
+	cmds, err := s.chatSafeCommands(r.Context(), run)
 	if err != nil {
 		s.internalError(w, "listing commands", err)
 		return
 	}
-	// Serve only chat-safe entries; always a non-null array, even when none
+	// Lab-owned entries are appended onto a fresh slice at response-build
+	// time: the cache stays purely provider-derived, and a shared cached
+	// backing array must never grow under a concurrent reader.
+	out := make([]provider.CommandSpec, 0, len(cmds)+1)
+	out = append(out, cmds...)
+	if s.pull != nil {
+		out = append(out, pullBaseCommand)
+	}
+	writeJSON(w, http.StatusOK, commandsResponse{Commands: out})
+}
+
+// chatSafeCommands resolves run's chat-safe provider command catalog: the
+// memoized slice when fresh, otherwise a provider scan whose result is cached
+// for commandsCacheTTL (errors never are — a transient failure stays
+// retryable). Shared by the commands endpoint and the reply path's clear-hook
+// detection, so both see the same catalog under the same cache clock.
+func (s *Server) chatSafeCommands(ctx context.Context, run store.Run) ([]provider.CommandSpec, error) {
+	if cmds, ok := s.cachedCommands(run.ID); ok {
+		return cmds, nil
+	}
+	// An existing run always names a registered provider, so a miss (or an
+	// unwired registry) is a server-side inconsistency — the caller's 500.
+	if s.providers == nil {
+		return nil, fmt.Errorf("provider registry not configured")
+	}
+	prov, ok := s.providers.Get(run.Provider)
+	if !ok {
+		return nil, fmt.Errorf("run %s: unknown provider %q", run.ID, run.Provider)
+	}
+	all, err := prov.Commands(ctx, run.WorktreePath)
+	if err != nil {
+		return nil, err
+	}
+	// Keep only chat-safe entries; always a non-null slice, even when none
 	// survive curation (the SPA renders "no commands", never a null crash).
 	cmds := make([]provider.CommandSpec, 0, len(all))
 	for _, c := range all {
@@ -222,7 +275,7 @@ func (s *Server) handleRunCommands(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.storeCommands(run.ID, cmds)
-	writeJSON(w, http.StatusOK, commandsResponse{Commands: cmds})
+	return cmds, nil
 }
 
 // cachedCommands returns a run's memoized chat-safe command catalog when the
@@ -244,29 +297,33 @@ func (s *Server) storeCommands(runID string, cmds []provider.CommandSpec) {
 	s.commandsCache[runID] = commandsCacheEntry{commands: cmds, at: s.now()}
 }
 
-// providerForRun resolves the AgentProvider that ran run from the registry
-// (issue #51 decision 5/7). An existing run always names a registered provider,
-// so a miss (or an unwired registry) is a server-side inconsistency answered
-// with a 500 — distinct from the unknown-RUN 404 the caller already handled.
-func (s *Server) providerForRun(w http.ResponseWriter, run store.Run) (provider.AgentProvider, bool) {
-	if s.providers == nil {
-		s.internalError(w, "resolving run provider", fmt.Errorf("provider registry not configured"))
-		return nil, false
-	}
-	prov, ok := s.providers.Get(run.Provider)
-	if !ok {
-		s.internalError(w, "resolving run provider", fmt.Errorf("run %s: unknown provider %q", run.ID, run.Provider))
-		return nil, false
-	}
-	return prov, true
-}
-
 type replyRequest struct {
 	Text string `json:"text"`
 }
 
+// noticeResponse is a 200 reply-path body for an outcome the operator must be
+// told about that is NOT an error (issue #149): nothing to pull, a merge that
+// landed without its digest, a clear that went through unpulled. Plain
+// success stays 204.
+type noticeResponse struct {
+	Notice string `json:"notice"`
+}
+
 // handleRunReply is POST /api/v1/runs/{id}/reply — a free-text reply to a live
 // instance. 409 for an ended run or a pending dialog; 400 for empty/oversize.
+// Two shapes of text divert from the verbatim forward (issue #149):
+//
+//   - "/pull-base" is the first lab command: the server executes it itself
+//     (merge origin/<base> into the run's worktree, then inject the digest as
+//     an agent message) and it NEVER reaches the provider — unwired it is
+//     refused (503), never forwarded, and an argument form is a 400.
+//   - the provider's role=clear command (e.g. claude's /clear) pulls the base
+//     BEFORE the clear is forwarded, so the fresh conversation starts on the
+//     fresh base. The hook applies only to active runs with a pull service
+//     wired; a catalog hiccup reads as "not a clear" (the forward must never
+//     block on a scan).
+//
+// Everything else forwards byte-for-byte as before.
 func (s *Server) handleRunReply(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -277,11 +334,164 @@ func (s *Server) handleRunReply(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &req) != nil {
 		return
 	}
+	cmd := strings.TrimSpace(req.Text)
+	switch {
+	case cmd == "/pull-base":
+		s.handlePullBase(w, r, run)
+		return
+	case strings.HasPrefix(cmd, "/pull-base "):
+		writeError(w, http.StatusBadRequest, "pull-base takes no arguments")
+		return
+	}
+	if s.pull != nil && run.Outcome == store.RunOutcomeActive && s.isClearCommand(r.Context(), run, cmd) {
+		s.handleClearWithPull(w, r, run, req.Text)
+		return
+	}
 	if err := s.chat.Reply(r.Context(), run, req.Text); err != nil {
 		s.writeChatActionError(w, "replying", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// isClearCommand reports whether cmd (already whitespace-trimmed) is exactly
+// the provider's role=clear command — "/"+spec.Name, no arguments — per the
+// run's chat-safe catalog (the same cached view the commands endpoint serves,
+// under the same 30s clock). Plain text skips the catalog scan entirely, and
+// a resolve error reads as "not a clear": a catalog hiccup must never block a
+// clear from going through as an ordinary reply.
+func (s *Server) isClearCommand(ctx context.Context, run store.Run, cmd string) bool {
+	if !strings.HasPrefix(cmd, "/") {
+		return false
+	}
+	cmds, err := s.chatSafeCommands(ctx, run)
+	if err != nil {
+		return false
+	}
+	for _, c := range cmds {
+		if c.Role == provider.CommandRoleClear && cmd == "/"+c.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// handlePullBase executes the /pull-base lab command (issue #149): merge the
+// current origin/<base> into the run's live worktree and paste the rendered
+// digest to the agent as a chat message. Guard rails, in order:
+//
+//   - no pull service wired → 503 (refused, never forwarded to the provider);
+//   - an ended run → the same 409 an ordinary reply gets;
+//   - a POSITIVELY working agent → 409 busy. The gate is a fresh synchronous
+//     chat read and only StateWorking refuses — idle/needs-input/question and
+//     even a failed read all proceed, because the merge itself is safe in any
+//     state; the gate only avoids yanking files out from under a mid-turn
+//     agent.
+//
+// Success is 204 when the digest landed; 200 {"notice"} when there was
+// nothing to pull (no agent message — decision: an up-to-date pull says
+// nothing); and 200 {"notice"} when the merge landed but the digest could not
+// be delivered (a dialog raced in, or the session died mid-pull) — the merge
+// is real and must not read as an error, only the context repair failed, and
+// the notice says so.
+func (s *Server) handlePullBase(w http.ResponseWriter, r *http.Request, run store.Run) {
+	if s.pull == nil {
+		writeError(w, http.StatusServiceUnavailable, "pull-base is not available")
+		return
+	}
+	if run.Outcome != store.RunOutcomeActive {
+		s.writeChatActionError(w, "pulling base", chat.ErrRunEnded)
+		return
+	}
+	if view, err := s.chat.Read(r.Context(), run); err == nil && view.State == provider.StateWorking {
+		writeError(w, http.StatusConflict, "agent is busy — retry when idle")
+		return
+	}
+	res, err := s.pull.PullBase(r.Context(), run)
+	if err != nil {
+		s.writePullError(w, err)
+		return
+	}
+	if res.UpToDate {
+		writeJSON(w, http.StatusOK, noticeResponse{Notice: fmt.Sprintf("Already up to date with origin/%s.", res.Base)})
+		return
+	}
+	if err := s.chat.Reply(r.Context(), run, res.Digest); err != nil {
+		writeJSON(w, http.StatusOK, noticeResponse{Notice: fmt.Sprintf(
+			"Pulled origin/%s (%s..%s) but the digest was not delivered: %s. The agent may still assume the old base.",
+			res.Base, short12(res.OldHead), short12(res.NewHead), err)})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleClearWithPull is the clear-hook (issue #149): a reply that is the
+// provider's role=clear command pulls the base BEFORE the clear is forwarded,
+// so the fresh conversation starts on the fresh base. The clear is sacrosanct
+// — it ALWAYS goes through: a working agent skips the pull (a clear must
+// never block on the busy gate), a failed pull is reported loudly but not
+// fatally, and a successful pull (including already-up-to-date) forwards
+// silently with no digest — post-clear there is no stale context to repair.
+// Only the forward itself failing is an error, and it wins over any pending
+// notice.
+func (s *Server) handleClearWithPull(w http.ResponseWriter, r *http.Request, run store.Run, text string) {
+	notice := ""
+	if view, err := s.chat.Read(r.Context(), run); err == nil && view.State == provider.StateWorking {
+		notice = "Base not pulled (agent is busy); the new conversation starts on the old base."
+	} else if _, err := s.pull.PullBase(r.Context(), run); err != nil {
+		notice = fmt.Sprintf("Base not pulled (%s); the new conversation starts on the old base.", shortPullReason(err))
+	}
+	if err := s.chat.Reply(r.Context(), run, text); err != nil {
+		s.writeChatActionError(w, "replying", err)
+		return
+	}
+	if notice != "" {
+		writeJSON(w, http.StatusOK, noticeResponse{Notice: notice})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writePullError maps a PullBase failure onto a status code — deliberately
+// local to the pull flows; writeChatActionError keeps its existing mappings
+// untouched. A conflict and the author-identity refusal are 409s (operator-
+// fixable conditions, mirroring how the CR-merge surface maps gitx refusals
+// and crmerge.ErrNoAuthorIdentity); everything else — fetch failures, git's
+// dirty-clobber refusal — is a 502: an upstream/worktree condition rather
+// than a server bug, with git's verbatim text preserved for the operator.
+func (s *Server) writePullError(w http.ResponseWriter, err error) {
+	var conflict *gitx.ConflictError
+	switch {
+	case errors.As(err, &conflict):
+		msg := err.Error()
+		if len(conflict.Files) > 0 {
+			msg = "merge conflict — worktree unchanged; conflicting files: " + strings.Join(conflict.Files, ", ")
+		}
+		writeError(w, http.StatusConflict, msg)
+	case errors.Is(err, pull.ErrNoAuthorIdentity):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeError(w, http.StatusBadGateway, "pull failed: "+err.Error())
+	}
+}
+
+// shortPullReason compresses a PullBase failure for the clear-hook notice: a
+// conflict names its files, anything else keeps the error text.
+func shortPullReason(err error) string {
+	var conflict *gitx.ConflictError
+	if errors.As(err, &conflict) && len(conflict.Files) > 0 {
+		return "merge conflict in " + strings.Join(conflict.Files, ", ")
+	}
+	return err.Error()
+}
+
+// short12 is the notices' sha abbreviation: the first 12 characters, the same
+// width the pull digest itself uses.
+func short12(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 type answerRequest struct {

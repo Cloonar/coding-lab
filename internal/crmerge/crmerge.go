@@ -37,10 +37,15 @@ import (
 // Event names published on a CR mutation — the same wire strings the operator
 // API and agent API use ({type, repoID} envelope), so any client already
 // refetching on cr.changed/issue.changed keeps working whichever surface
-// drove the merge.
+// drove the merge. EventRunChanged mirrors reconcile.EventRunChanged /
+// instance.EventRunChanged (issue #149): a merge that advances the repo's
+// base branch makes every run forked off it more behind, so the SPA's
+// commits_behind badges need the same refetch signal a run mutation gives
+// them.
 const (
 	EventCRChanged    = "cr.changed"
 	EventIssueChanged = "issue.changed"
+	EventRunChanged   = "run.changed"
 )
 
 // NoAuthorIdentityMessage answers a merge attempted before any git author
@@ -127,8 +132,8 @@ func New(cfg Config) *Service {
 //     ErrMergeConflict) → that typed error, verbatim; nothing is recorded, so
 //     the CR stays open and a retry converges.
 //   - success → the merged CR (state merged, merge_commit/merged_at stamped,
-//     every Closes #N issue best-effort closed, cr.changed/issue.changed
-//     published).
+//     every Closes #N issue best-effort closed, cr.changed/issue.changed/
+//     run.changed published).
 //
 // Everything from the decision to merge onward runs on a cancellation-immune
 // context: a caller (a phone, a labctl process) dropping the connection after
@@ -208,6 +213,11 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 		s.publish(EventIssueChanged, repoID)
 	}
 	s.publish(EventCRChanged, repoID)
+	// Every run forked off this base just became more behind (issue #149):
+	// the SPA refetches instances/run detail on run.changed to refresh their
+	// commits_behind badges instantly, without waiting for the next fetch
+	// cadence.
+	s.publish(EventRunChanged, repoID)
 	return merged, nil
 }
 

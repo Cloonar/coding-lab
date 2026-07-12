@@ -21,6 +21,7 @@ import {
   fetchRunCommands,
   getCR,
   getIssue,
+  getRun,
   getSettings,
   getSpawnDefaults,
   listClaimableIssues,
@@ -44,6 +45,7 @@ import {
   providerLoginCode,
   providerLoginStart,
   providerLogout,
+  replyRun,
   resetAFK,
   retryClone,
   setAFKAuto,
@@ -523,6 +525,41 @@ describe('run command + answer endpoints (issue #51)', () => {
       tool_id: 'toolu_1',
       answers: [{ index: 1 }, { selected: [0, 2] }, { index: 3, other_text: 'custom' }],
     });
+  });
+});
+
+describe('base-pull chip + reply notice (issue #149)', () => {
+  it('GET /runs/{id} passes commits_behind through when present', async () => {
+    stubFetch(jsonResponse(200, { id: 'run_1', outcome: 'active', commits_behind: 3 }));
+
+    const result = await getRun('run_1');
+
+    expect(result.commits_behind).toBe(3);
+  });
+
+  it('GET /runs/{id} leaves commits_behind undefined (not zero) when the server omits it', async () => {
+    stubFetch(jsonResponse(200, { id: 'run_1', outcome: 'active' }));
+
+    const result = await getRun('run_1');
+
+    expect(result.commits_behind).toBeUndefined();
+  });
+
+  it('POST /runs/{id}/reply parses the 200 {notice} body', async () => {
+    const mock = stubFetch(jsonResponse(200, { notice: 'already up to date with origin/main' }));
+
+    await expect(replyRun('run_1', 'ping')).resolves.toEqual({
+      notice: 'already up to date with origin/main',
+    });
+    expect(fetchCall(mock)[0]).toBe('/api/v1/runs/run_1/reply');
+    expect(requestInit(mock).method).toBe('POST');
+    expect(JSON.parse(requestInit(mock).body as string)).toEqual({ text: 'ping' });
+  });
+
+  it('POST /runs/{id}/reply on 204 resolves undefined, as before', async () => {
+    stubFetch(jsonResponse(204));
+
+    await expect(replyRun('run_1', 'ping')).resolves.toBeUndefined();
   });
 });
 
