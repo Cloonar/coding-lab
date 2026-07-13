@@ -62,10 +62,13 @@ func TestCompat_SpawnArgvEffortAlwaysExplicit(t *testing.T) {
 }
 
 // Model/effort catalogs against the trimmed `codex debug models` fixture
-// (compat.md §1, cli extraction): the adapter's catalog must be exactly the
-// visibility=="list" entries (the internal codex-auto-review is "hide" and
-// filtered), and the pinned efforts must match the default model's
-// supported_reasoning_levels with medium as its default.
+// (compat.md §1, cli extraction): the adapter's ENRICHED catalog (issue #156)
+// must be exactly the visibility=="list" entries (the internal
+// codex-auto-review is "hide" and filtered), each carrying that model's OWN
+// supported_reasoning_levels (mapped through the adapter's pinned effort
+// labels) and its default_reasoning_level; the pinned union efforts must
+// match the default model's supported_reasoning_levels with medium as its
+// default.
 func TestCompat_ModelCatalog_matchesDebugModelsFixture(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("testdata", "models-0.133.0.json"))
 	if err != nil {
@@ -86,12 +89,28 @@ func TestCompat_ModelCatalog_matchesDebugModelsFixture(t *testing.T) {
 		t.Fatalf("models fixture does not parse: %v", err)
 	}
 
-	var wantModels []provider.Option
+	// The adapter's pinned effort labels (codex reports no display names for
+	// reasoning levels, so the labels are adapter-owned and pinned here).
+	effortLabels := map[string]string{
+		"low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high",
+	}
+	var wantModels []provider.ModelOption
 	for _, m := range doc.Models {
 		if m.Visibility != "list" {
 			continue // codex-auto-review et al: not operator-selectable
 		}
-		wantModels = append(wantModels, provider.Option{Value: m.Slug, Label: m.DisplayName})
+		mo := provider.ModelOption{
+			Option:        provider.Option{Value: m.Slug, Label: m.DisplayName},
+			DefaultEffort: m.DefaultReasoningLevel,
+		}
+		for _, l := range m.SupportedLevels {
+			label, ok := effortLabels[l.Effort]
+			if !ok {
+				t.Fatalf("fixture reports reasoning level %q with no pinned adapter label — extend the codex effort catalog", l.Effort)
+			}
+			mo.Efforts = append(mo.Efforts, provider.Option{Value: l.Effort, Label: label})
+		}
+		wantModels = append(wantModels, mo)
 	}
 	p := &codex.Provider{}
 	if got := p.Models(); !reflect.DeepEqual(got, wantModels) {

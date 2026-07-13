@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
@@ -80,6 +81,58 @@ func TestCompat_Live_loginStatusParses(t *testing.T) {
 			st.LoggedIn, loggedIn, exitOK)
 	}
 	t.Logf("live status: logged_in=%v method=%q exit_ok=%v", st.LoggedIn, st.Method, exitOK)
+}
+
+// TestCompat_Live_debugModelsProbe re-verifies the `codex debug models`
+// catalog probe (issue #156) against the installed binary: the probe must
+// run, parse, and yield a well-formed catalog — non-empty values and labels,
+// per-model efforts present, every non-empty DefaultEffort a member of its
+// model's own list, and every per-model effort covered by the union (the
+// invariants the conformance suite pins on the served catalog). Read-only.
+func TestCompat_Live_debugModelsProbe(t *testing.T) {
+	if os.Getenv("LAB_COMPAT_LIVE") != "1" {
+		t.Skip("set LAB_COMPAT_LIVE=1 to probe the installed codex binary")
+	}
+	bin, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skipf("codex not on PATH: %v", err)
+	}
+
+	models, efforts, err := codex.ProbeModels(context.Background(), bin)
+	if err != nil {
+		t.Fatalf("ProbeModels: %v", err)
+	}
+	if len(models) == 0 {
+		t.Fatal("ProbeModels returned no models; want at least one listed model")
+	}
+	union := make(map[string]bool, len(efforts))
+	for _, e := range efforts {
+		if e.Value == "" || e.Label == "" {
+			t.Errorf("union effort %+v has an empty value or label", e)
+		}
+		union[e.Value] = true
+	}
+	for _, m := range models {
+		if m.Value == "" || m.Label == "" {
+			t.Errorf("model %+v has an empty value or label", m.Option)
+		}
+		if len(m.Efforts) == 0 {
+			t.Errorf("model %q has no efforts", m.Value)
+		}
+		if m.DefaultEffort != "" && !provider.HasOption(m.Efforts, m.DefaultEffort) {
+			t.Errorf("model %q DefaultEffort %q is not in its own effort list %+v", m.Value, m.DefaultEffort, m.Efforts)
+		}
+		for _, e := range m.Efforts {
+			if !union[e.Value] {
+				t.Errorf("model %q effort %q missing from the union catalog %+v", m.Value, e.Value, efforts)
+			}
+		}
+	}
+	names := make([]string, 0, len(models))
+	for _, m := range models {
+		names = append(names, m.Value)
+	}
+	t.Logf("live probe: %d models %v, %d union efforts %v", len(models), names, len(efforts), efforts)
 }
 
 // TestCompat_Live_locateTranscript re-verifies the §5 location coupling

@@ -44,7 +44,7 @@ import { createToast } from '../components/Toast';
 import { isComposerSend } from '../lib/composerKeys';
 import { useEvents } from '../events';
 import { createLiveResource } from '../lib/liveResource';
-import { providerFor, resolveSpawnOption } from '../lib/spawn';
+import { providerFor, resolveEffortOption, resolveSpawnOption } from '../lib/spawn';
 import { resourceValue } from '../lib/resource';
 import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
 
@@ -147,7 +147,6 @@ function NewRunView() {
     return providerFor(providerList(), providerPick(), repo.provider, defaultsValue().provider);
   };
   const models = () => provider()?.models ?? [];
-  const efforts = () => provider()?.efforts ?? [];
   const providerOptions = (): SelectOption[] =>
     providerList().map((p) => ({ value: p.id, label: p.display_name }));
 
@@ -183,10 +182,35 @@ function NewRunView() {
     modelPick() !== ''
       ? modelPick()
       : resolveSpawnOption(models(), selectedRepo()?.model_default, defaultsValue().model);
+  // The RESOLVED model entry — explicit pick or layered default. The composer
+  // always sends the resolved effort, so the effort catalog must follow the
+  // model that actually rides the spawn (issue #156): effort support varies
+  // per model and codex does not clamp, so an unsupported combo would 400.
+  const selectedModel = () => models().find((m) => m.value === model());
+  const efforts = () => selectedModel()?.efforts ?? [];
+  // When the resolved model changes and the explicit effort pick is not in
+  // the new model's catalog, drop it — mirrors the server's skip-layer
+  // resolution so a stale pick can never 400 a spawn. With no stored defaults
+  // this displays/sends the new model's default (the issue's "snap to the
+  // model's default effort"); a still-valid pick is kept.
+  createEffect(
+    on(
+      () => model(),
+      () => {
+        const pick = effortPick();
+        if (pick !== '' && !efforts().some((o) => o.value === pick)) setEffortPick('');
+      },
+      { defer: true },
+    ),
+  );
   const effort = () =>
     effortPick() !== ''
       ? effortPick()
-      : resolveSpawnOption(efforts(), selectedRepo()?.effort_default, defaultsValue().effort);
+      : resolveEffortOption(
+          selectedModel(),
+          selectedRepo()?.effort_default,
+          defaultsValue().effort,
+        );
 
   const [label, setLabel] = createSignal('');
   const [text, setText] = createSignal('');

@@ -19,7 +19,7 @@ type NoLinkFake struct {
 	mu sync.Mutex
 
 	id      string
-	models  []provider.Option
+	models  []provider.ModelOption
 	efforts []provider.Option
 
 	seeded []string // worktrees passed to SeedWorkspace, in order
@@ -34,15 +34,21 @@ var _ provider.AgentProvider = (*NoLinkFake)(nil)
 // register in one registry.
 func NewNoLink() *NoLinkFake {
 	return &NoLinkFake{
-		id:      "codex-fake",
-		models:  []provider.Option{{Value: "gpt-5-codex", Label: "GPT-5 Codex"}},
+		id: "codex-fake",
+		// Codex-shaped enrichment (issue #156): the one model carries its own
+		// effort list and a reported default effort.
+		models: []provider.ModelOption{{
+			Option:        provider.Option{Value: "gpt-5-codex", Label: "GPT-5 Codex"},
+			Efforts:       []provider.Option{{Value: "medium", Label: "medium"}},
+			DefaultEffort: "medium",
+		}},
 		efforts: []provider.Option{{Value: "medium", Label: "medium"}},
 	}
 }
 
-func (f *NoLinkFake) ID() string                 { return f.id }
-func (f *NoLinkFake) Models() []provider.Option  { return f.models }
-func (f *NoLinkFake) Efforts() []provider.Option { return f.efforts }
+func (f *NoLinkFake) ID() string                     { return f.id }
+func (f *NoLinkFake) Models() []provider.ModelOption { return f.models }
+func (f *NoLinkFake) Efforts() []provider.Option     { return f.efforts }
 
 // DisplayName is a fixed human name distinct from the claude-code Fake's, so
 // provider-neutral-copy tests can tell the two apart (issue #51 decision 9).

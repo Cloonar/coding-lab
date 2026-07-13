@@ -3,7 +3,10 @@
 // trust seeding, and the rollout-transcript chat surface. It is lab's entire
 // coupling surface to the Codex CLI's machine-local state — every exact
 // string here is a fragile Codex coupling, live-verified against the
-// installed codex-cli 0.133.0 (issue #87 spikes, 2026-07-10).
+// installed codex-cli 0.133.0 (issue #87 spikes, 2026-07-10). The model
+// catalog is probed from `codex debug models` at construction, with the
+// 0.133.0-pinned list as the fallback (probe schema live-verified on
+// 0.144.1, issue #156).
 //
 // Structure mirrors internal/provider/claudecode file for file; deltas are
 // codex-shaped: device-code auth (no pasted code), a global config.toml trust
@@ -45,6 +48,7 @@ const (
 	defaultLoginPoll      = 3 * time.Second  // completion poller's forced-refresh gap
 	defaultLoginWindow    = 15 * time.Minute // device codes expire in 15 minutes (live 0.133.0)
 	defaultLogoutTimeout  = 20 * time.Second // defensive cap on `codex logout` (non-interactive)
+	defaultProbeTimeout   = 10 * time.Second // boot-time `codex debug models` catalog probe (issue #156)
 
 	// defaultKeyDelay paces the reply recipe: the settling gap between the
 	// bracketed paste and its committing Enter (mirrors claudecode's
@@ -58,17 +62,27 @@ const (
 	pollInterval = 200 * time.Millisecond
 )
 
-// models is the provider-owned model catalog, pinned from `codex debug
-// models` on 0.133.0. The internal `codex-auto-review` model is deliberately
-// filtered out — it is not an operator-selectable spawn model. First entry
-// is the spawn default.
-var models = []provider.Option{
-	{Value: "gpt-5.5", Label: "GPT-5.5"},
-	{Value: "gpt-5.4-mini", Label: "GPT-5.4-Mini"},
+// fallbackModels is the compiled-in pinned FALLBACK model catalog (issue
+// #156): served when the boot probe fails, and the zero-value Provider's
+// catalog; pinned from `codex debug models` on 0.133.0. The internal
+// `codex-auto-review` model is deliberately filtered out — it is not an
+// operator-selectable spawn model (the probe expresses the same rule as the
+// visibility=="list" filter). First entry is the spawn default. Each model
+// carries its own supported_reasoning_levels (the full four-entry list on
+// both) and its reported default_reasoning_level (medium on both, per the
+// compat fixture) — codex does NOT clamp unsupported combos, so the
+// enrichment is what lets the spawn path 400 them.
+var fallbackModels = []provider.ModelOption{
+	{Option: provider.Option{Value: "gpt-5.5", Label: "GPT-5.5"}, Efforts: fallbackEfforts, DefaultEffort: defaultEffort},
+	{Option: provider.Option{Value: "gpt-5.4-mini", Label: "GPT-5.4-Mini"}, Efforts: fallbackEfforts, DefaultEffort: defaultEffort},
 }
 
-// efforts is the provider-owned reasoning-effort catalog (pinned 0.133.0).
-var efforts = []provider.Option{
+// fallbackEfforts is the compiled-in pinned FALLBACK reasoning-effort
+// catalog (issue #156): served when the boot probe fails, and the zero-value
+// Provider's catalog; pinned from `codex debug models` on 0.133.0. The
+// labels follow effortLabel — the one adapter-owned label rule shared with
+// the probe path.
+var fallbackEfforts = []provider.Option{
 	{Value: "low", Label: "Low"},
 	{Value: "medium", Label: "Medium"},
 	{Value: "high", Label: "High"},
@@ -77,7 +91,9 @@ var efforts = []provider.Option{
 
 // defaultEffort is injected when a spawn spec carries no effort: `codex exec`
 // defaults the reasoning effort to NONE, not medium, so spawns must always
-// pass it explicitly (pinned spike finding, 0.133.0).
+// pass it explicitly (pinned spike finding, 0.133.0). A last-resort argv
+// default for direct SpawnArgv callers — lab's spawn resolution always
+// passes an effort resolved against the (possibly probed) catalog.
 const defaultEffort = "medium"
 
 // Options configures a Provider. LoginDir, Runner, and Bus are required;
@@ -133,6 +149,16 @@ type Provider struct {
 	loginWindow    time.Duration // device-code validity window (poller lifetime)
 	logoutTimeout  time.Duration // defensive cap on the non-interactive `codex logout`
 	keyDelay       time.Duration // paste→Enter settling gap in the reply recipe
+	probeTimeout   time.Duration // boot-time `codex debug models` catalog probe budget
+
+	// catModels/catEfforts hold the catalog probed from `codex debug models`
+	// at construction (issue #156). nil = the probe never succeeded — the
+	// accessors serve the compiled-in fallback then, which is also why the
+	// zero-value Provider (compat fixture test) keeps serving the pinned
+	// catalog. Probed ONCE, cached for the process lifetime — no TTL, no
+	// refresh: the binary is nix-pinned, a new binary implies a restart.
+	catModels  []provider.ModelOption
+	catEfforts []provider.Option
 
 	// authMu guards the lazy login-status cache (v0/claudecode discipline:
 	// the status command runs while holding it; accepted for a single-user
@@ -194,7 +220,7 @@ func New(o Options) (*Provider, error) {
 	if agentsFile == "" {
 		agentsFile = filepath.Join(codexHomeDir(o.LoginDir), "AGENTS.md")
 	}
-	return &Provider{
+	p := &Provider{
 		codexBin:       codexBin,
 		configPath:     configPath,
 		sessionsDir:    sessionsDir,
@@ -210,7 +236,13 @@ func New(o Options) (*Provider, error) {
 		loginWindow:    defaultLoginWindow,
 		logoutTimeout:  defaultLogoutTimeout,
 		keyDelay:       defaultKeyDelay,
-	}, nil
+		probeTimeout:   defaultProbeTimeout,
+	}
+	// Boot probe (issue #156): discover the live model catalog ONCE,
+	// synchronously. A probe failure NEVER errors New — the accessors fall
+	// back to the compiled-in pinned catalog (loudly logged in probeCatalog).
+	p.probeCatalog()
+	return p, nil
 }
 
 // codexHomeDir resolves codex's state home the way the codex binary does:
@@ -282,11 +314,26 @@ func (p *Provider) SeedMeta() provider.SeedMeta {
 	return m
 }
 
-// Models returns a copy of the model catalog, in dropdown order.
-func (p *Provider) Models() []provider.Option { return slices.Clone(models) }
+// Models returns a deep copy of the enriched model catalog, in dropdown
+// order (issue #156: entries can share one efforts backing array, so a
+// shallow clone would let a caller poison every model's list at once). The
+// probed catalog when the boot probe succeeded, else the compiled-in
+// fallback — a zero-value Provider therefore serves the pinned fallback.
+func (p *Provider) Models() []provider.ModelOption {
+	if p.catModels != nil {
+		return provider.CloneModelOptions(p.catModels)
+	}
+	return provider.CloneModelOptions(fallbackModels)
+}
 
-// Efforts returns a copy of the effort catalog, in dropdown order.
-func (p *Provider) Efforts() []provider.Option { return slices.Clone(efforts) }
+// Efforts returns a copy of the effort catalog, in dropdown order: the
+// probed union when the boot probe succeeded, else the compiled-in fallback.
+func (p *Provider) Efforts() []provider.Option {
+	if p.catEfforts != nil {
+		return slices.Clone(p.catEfforts)
+	}
+	return slices.Clone(fallbackEfforts)
+}
 
 // SpawnOptions implements provider.AgentProvider: codex declares no generic
 // spawn options (issue #19 / ADR-0021).

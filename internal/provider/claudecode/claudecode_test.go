@@ -96,17 +96,32 @@ func TestCatalogs_pinnedValuesAndCopies(t *testing.T) {
 		{Value: "fable", Label: "Fable"},
 		{Value: "haiku", Label: "Haiku"},
 	}
+	wantEfforts := []string{"low", "medium", "high", "xhigh", "max"}
 	gotModels := p.Models()
 	if len(gotModels) != len(wantModels) {
 		t.Fatalf("Models() = %+v; want %+v", gotModels, wantModels)
 	}
 	for i := range wantModels {
-		if gotModels[i] != wantModels[i] {
-			t.Errorf("Models()[%d] = %+v; want %+v", i, gotModels[i], wantModels[i])
+		if gotModels[i].Option != wantModels[i] {
+			t.Errorf("Models()[%d] = %+v; want %+v", i, gotModels[i].Option, wantModels[i])
+		}
+		// Issue #156 enrichment: claude clamps unsupported combos itself, so
+		// EVERY model offers the full five-entry effort list, and none reports
+		// a per-model default (first-entry keeps "low" as the all-unset
+		// fallback).
+		if len(gotModels[i].Efforts) != len(wantEfforts) {
+			t.Fatalf("Models()[%d].Efforts = %+v; want values %v", i, gotModels[i].Efforts, wantEfforts)
+		}
+		for j, w := range wantEfforts {
+			if gotModels[i].Efforts[j].Value != w {
+				t.Errorf("Models()[%d].Efforts[%d].Value = %q; want %q", i, j, gotModels[i].Efforts[j].Value, w)
+			}
+		}
+		if gotModels[i].DefaultEffort != "" {
+			t.Errorf("Models()[%d].DefaultEffort = %q; want \"\" (claude reports no per-model default)", i, gotModels[i].DefaultEffort)
 		}
 	}
 
-	wantEfforts := []string{"low", "medium", "high", "xhigh", "max"}
 	gotEfforts := p.Efforts()
 	if len(gotEfforts) != len(wantEfforts) {
 		t.Fatalf("Efforts() = %+v; want values %v", gotEfforts, wantEfforts)
@@ -119,15 +134,25 @@ func TestCatalogs_pinnedValuesAndCopies(t *testing.T) {
 
 	// The settings defaults (opus[1m] / max) must be members of the
 	// catalogs, so the unset → defaults path always yields a valid spawn.
-	if !provider.HasOption(gotModels, "opus[1m]") || !provider.HasOption(gotEfforts, "max") {
+	if !provider.HasModelOption(gotModels, "opus[1m]") || !provider.HasOption(gotEfforts, "max") {
 		t.Error("settings defaults opus[1m]/max missing from the catalogs")
 	}
 
-	// Returned slices are copies — a caller mutation must not poison the
+	// Returned slices are DEEP copies (issue #156) — mutating a returned
+	// model's value, nested Efforts, or DefaultEffort must not poison the
 	// catalog.
 	gotModels[0].Value = "mutated"
-	if p.Models()[0].Value != "opus[1m]" {
+	gotModels[0].Efforts[0].Value = "mutated"
+	gotModels[0].DefaultEffort = "mutated"
+	fresh := p.Models()
+	if fresh[0].Value != "opus[1m]" {
 		t.Error("Models() exposed internal catalog storage")
+	}
+	if fresh[0].Efforts[0].Value != "low" || fresh[1].Efforts[0].Value != "low" {
+		t.Error("Models() exposed the shared per-model Efforts storage")
+	}
+	if fresh[0].DefaultEffort != "" {
+		t.Error("Models() exposed internal DefaultEffort storage")
 	}
 }
 

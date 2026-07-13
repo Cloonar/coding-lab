@@ -70,12 +70,16 @@ const (
 
 // models is the provider-owned model catalog (pinned: v0 spawn.go). Family
 // aliases, not pinned ids, so the list tracks the latest of each family;
-// [1m] only where the 1M-context variant is included on the plan.
-var models = []provider.Option{
-	{Value: "opus[1m]", Label: "Opus (1M)"},
-	{Value: "sonnet", Label: "Sonnet"},
-	{Value: "fable", Label: "Fable"},
-	{Value: "haiku", Label: "Haiku"},
+// [1m] only where the 1M-context variant is included on the plan. Enriched
+// per issue #156: every model carries the FULL shared efforts list — Claude
+// Code clamps unsupported model+effort combos itself, so every level is
+// offered on every model — and no DefaultEffort (claude reports no per-model
+// default; the first-entry rule keeps "low" as the all-unset fallback).
+var models = []provider.ModelOption{
+	{Option: provider.Option{Value: "opus[1m]", Label: "Opus (1M)"}, Efforts: efforts},
+	{Option: provider.Option{Value: "sonnet", Label: "Sonnet"}, Efforts: efforts},
+	{Option: provider.Option{Value: "fable", Label: "Fable"}, Efforts: efforts},
+	{Option: provider.Option{Value: "haiku", Label: "Haiku"}, Efforts: efforts},
 }
 
 // efforts is the provider-owned effort catalog (pinned). Claude Code clamps
@@ -324,8 +328,10 @@ func (p *Provider) SeedMeta() provider.SeedMeta {
 	return m
 }
 
-// Models returns a copy of the model catalog, in dropdown order.
-func (p *Provider) Models() []provider.Option { return slices.Clone(models) }
+// Models returns a deep copy of the enriched model catalog, in dropdown
+// order (issue #156: the entries share one efforts backing array, so a
+// shallow clone would let a caller poison every model's list at once).
+func (p *Provider) Models() []provider.ModelOption { return provider.CloneModelOptions(models) }
 
 // Efforts returns a copy of the effort catalog, in dropdown order.
 func (p *Provider) Efforts() []provider.Option { return slices.Clone(efforts) }

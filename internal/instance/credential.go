@@ -141,34 +141,68 @@ func strOrEmpty(p *string) string {
 // — then falls back to the same base (repo base → global base). A DEFAULT-layer
 // value the provider's catalog does not carry is treated as unset and falls
 // through (a claude-shaped global default must not 400 a spawn on another
-// provider); only the explicit request stays strict (unknown → 400). With every
-// layer unset or foreign the catalog's first entry wins; an EMPTY catalog (a
-// provider without that knob) resolves to "" — the CLI flag is omitted.
-// Exported for the M5 AFK engine, whose spawns resolve through the same rule.
+// provider); only the explicit request stays strict (unknown → 400).
+//
+// The effort pass runs against the RESOLVED MODEL's own effort list (issue
+// #156): an explicit effort the resolved model does not support is the
+// unsupported-combo 400 even when the union Efforts() carries it, and a
+// stored effort default outside the model's list skip-layers like any other
+// foreign value (a model-independent stored default is fine — it just falls
+// through when the model doesn't support it). With every layer unset or
+// foreign the model's reported DefaultEffort wins when it declares one, else
+// the catalog's first entry; an EMPTY catalog (a provider without that knob)
+// resolves to "" — the CLI flag is omitted. Exported for the M5 AFK engine,
+// whose spawns resolve through the same rule.
 func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, kind, reqModel, reqEffort string) (model, effort string, err error) {
 	afk := isAFKKind(kind)
-	if model, err = s.layerSpawnDefault(ctx, prov.Models(), afk, reqModel, repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault, "model"); err != nil {
+	models := prov.Models()
+	if model, err = s.layerSpawnDefault(ctx, modelOptions(models), "", afk, reqModel, repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault, "model"); err != nil {
 		return "", "", err
 	}
-	if effort, err = s.layerSpawnDefault(ctx, prov.Efforts(), afk, reqEffort, repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault, "effort"); err != nil {
+	// The effort catalog is the resolved model's OWN list (issue #156). A ""
+	// model is only possible when the model catalog itself is empty (the model
+	// pass returns members or ""), so the miss branch falls back to the union
+	// Efforts() with no reported default — a model-less provider keeps the
+	// pre-#156 union semantics.
+	effortCatalog, reportedDefault := prov.Efforts(), ""
+	if m, ok := provider.FindModelOption(models, model); ok {
+		effortCatalog, reportedDefault = m.Efforts, m.DefaultEffort
+	}
+	if effort, err = s.layerSpawnDefault(ctx, effortCatalog, reportedDefault, afk, reqEffort, repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault, "effort"); err != nil {
 		return "", "", err
 	}
 	return model, effort, nil
 }
 
+// modelOptions projects the enriched model catalog onto its embedded Options
+// — the model pass of layerSpawnDefault stays on the plain Option catalog
+// (issue #156 enriched only the effort side of the resolution).
+func modelOptions(models []provider.ModelOption) []provider.Option {
+	opts := make([]provider.Option, len(models))
+	for i, m := range models {
+		opts[i] = m.Option
+	}
+	return opts
+}
+
 // layerSpawnDefault resolves one spawn default (model or effort) through the
 // D12d + issue-#19 layering with issue-#66 skip-layer semantics: the explicit
 // per-spawn request is STRICT (a non-empty value outside catalog — including
-// any non-empty value against an empty catalog — is a 400); every default
-// layer counts only when its value is non-empty AND present in the effective
-// provider's catalog, else it is treated as unset and falls through. For an
-// AFK run the AFK-override layer (repo override column, then the global
-// AFK-override setting) is consulted first; then every run type falls back to
-// the base layer (repo base column, then the global base setting), and finally
-// the catalog's first entry — or "" for a provider whose catalog is empty
-// (the flag is omitted at spawn). req is always "" for AFK (the start is
-// bodyless). knob names the field in the 400 message ("model"/"effort").
-func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Option, afk bool, req string, repoAFK, repoBase *string, afkKey, baseKey, knob string) (string, error) {
+// any non-empty value against an empty catalog — is a 400; for efforts the
+// catalog is the resolved model's own list, so this is the issue-#156
+// unsupported-combo rejection); every default layer counts only when its
+// value is non-empty AND present in the catalog, else it is treated as unset
+// and falls through. For an AFK run the AFK-override layer (repo override
+// column, then the global AFK-override setting) is consulted first; then
+// every run type falls back to the base layer (repo base column, then the
+// global base setting), and finally reportedDefault — the provider's reported
+// per-model default effort (issue #156), honored when non-empty AND a catalog
+// member (defensive; conformance pins membership), "" for the model pass and
+// for models reporting none — else the catalog's first entry, or "" for a
+// provider whose catalog is empty (the flag is omitted at spawn). req is
+// always "" for AFK (the start is bodyless). knob names the field in the 400
+// message ("model"/"effort").
+func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Option, reportedDefault string, afk bool, req string, repoAFK, repoBase *string, afkKey, baseKey, knob string) (string, error) {
 	if req != "" {
 		if !provider.HasOption(catalog, req) {
 			return "", badRequestf("unknown %s %q", knob, req)
@@ -200,6 +234,9 @@ func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Opti
 	}
 	if len(catalog) == 0 {
 		return "", nil
+	}
+	if reportedDefault != "" && provider.HasOption(catalog, reportedDefault) {
+		return reportedDefault, nil
 	}
 	return catalog[0].Value, nil
 }

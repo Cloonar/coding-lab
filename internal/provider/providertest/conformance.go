@@ -172,11 +172,22 @@ func checkSeedMetaClone(p provider.AgentProvider) []error {
 	}
 
 	optionSentinel := provider.Option{Value: mutationSentinel, Label: mutationSentinel}
+	modelSentinel := provider.ModelOption{Option: optionSentinel}
 	models := p.Models()
-	origModels := slices.Clone(models)
-	_ = corrupt(models, optionSentinel)
-	if !slices.Equal(p.Models(), origModels) {
+	origModels := provider.CloneModelOptions(models)
+	_ = corrupt(models, modelSentinel)
+	if !modelOptionsEqual(p.Models(), origModels) {
 		errs = append(errs, aliased("Models()"))
+	}
+	// Nested per-model Efforts (issue #156): a shallow outer clone still
+	// aliases each entry's effort list — corrupting a returned model's
+	// Efforts must not poison the catalog either.
+	nested := p.Models()
+	for i := range nested {
+		_ = corrupt(nested[i].Efforts, optionSentinel)
+	}
+	if !modelOptionsEqual(p.Models(), origModels) {
+		errs = append(errs, aliased("Models() per-model Efforts"))
 	}
 	efforts := p.Efforts()
 	origEfforts := slices.Clone(efforts)
@@ -193,17 +204,47 @@ func checkSeedMetaClone(p provider.AgentProvider) []error {
 	return errs
 }
 
+// modelOptionsEqual is slices.Equal for the enriched model catalog —
+// ModelOption carries a nested slice, so it is not comparable.
+func modelOptionsEqual(a, b []provider.ModelOption) bool {
+	return slices.EqualFunc(a, b, func(x, y provider.ModelOption) bool {
+		return x.Option == y.Option && x.DefaultEffort == y.DefaultEffort && slices.Equal(x.Efforts, y.Efforts)
+	})
+}
+
 // checkCatalogs: Models()/Efforts() must be non-empty and well-formed — the
-// spawn default resolution falls back to catalog[0]
-// (internal/instance/credential.go layerSpawnDefault), so a non-empty catalog
-// of unique, non-empty values IS the "defaults are members" guarantee.
+// spawn default resolution falls back to the model's reported default, then
+// catalog[0] (internal/instance/credential.go layerSpawnDefault), so a
+// non-empty catalog of unique, non-empty values IS the "defaults are members"
+// guarantee. Per model (issue #156): Efforts non-empty/unique/labelled like a
+// top-level catalog, a non-empty DefaultEffort must be a member of the
+// model's own list (the all-unset fallback resolves it verbatim), and every
+// per-model effort value must appear in the union Efforts() — the defaults
+// pickers render the union, so it must cover the per-model lists.
 // SpawnOptions() may be empty, but every declared spec needs a unique
 // non-empty Key, a recognized Type, and a Default its own type accepts
 // (issue #19 / ADR-0021).
 func checkCatalogs(p provider.AgentProvider) []error {
 	var errs []error
-	errs = append(errs, checkOptionCatalog("Models()", p.Models())...)
-	errs = append(errs, checkOptionCatalog("Efforts()", p.Efforts())...)
+	models := p.Models()
+	union := p.Efforts()
+	modelOpts := make([]provider.Option, len(models))
+	for i, m := range models {
+		modelOpts[i] = m.Option
+	}
+	errs = append(errs, checkOptionCatalog("Models()", modelOpts)...)
+	errs = append(errs, checkOptionCatalog("Efforts()", union)...)
+	for _, m := range models {
+		errs = append(errs, checkOptionCatalog(fmt.Sprintf("Models() %q Efforts", m.Value), m.Efforts)...)
+		if m.DefaultEffort != "" && !provider.HasOption(m.Efforts, m.DefaultEffort) {
+			errs = append(errs, fmt.Errorf("catalogs: Models() %q declares DefaultEffort %q outside its own Efforts — the all-unset spawn fallback resolves the reported default verbatim (internal/instance/credential.go layerSpawnDefault; issue #156)", m.Value, m.DefaultEffort))
+		}
+		for _, e := range m.Efforts {
+			if !provider.HasOption(union, e.Value) {
+				errs = append(errs, fmt.Errorf("catalogs: Models() %q effort %q is missing from the union Efforts() — the repo/global defaults pickers render the union, so it must cover every per-model list (issue #156)", m.Value, e.Value))
+			}
+		}
+	}
 
 	seen := map[string]int{}
 	for i, spec := range p.SpawnOptions() {
@@ -226,7 +267,7 @@ func checkCatalogs(p provider.AgentProvider) []error {
 func checkOptionCatalog(what string, opts []provider.Option) []error {
 	var errs []error
 	if len(opts) == 0 {
-		errs = append(errs, fmt.Errorf("catalogs: %s is empty — spawn default resolution falls back to the catalog's first entry, so a well-formed catalog is the \"defaults are members\" guarantee (internal/instance/credential.go layerSpawnDefault; issue #80)", what))
+		errs = append(errs, fmt.Errorf("catalogs: %s is empty — spawn default resolution falls back to the model's reported default, then the catalog's first entry, so a well-formed catalog is the \"defaults are members\" guarantee (internal/instance/credential.go layerSpawnDefault; issue #80, issue #156)", what))
 	}
 	seen := map[string]int{}
 	for i, o := range opts {
@@ -262,8 +303,13 @@ func checkSpawnArgv(p provider.AgentProvider) []error {
 	var model, effort string
 	if m := p.Models(); len(m) > 0 {
 		model = m[0].Value
-	}
-	if e := p.Efforts(); len(e) > 0 {
+		// The probe effort comes from the probe MODEL's own list (issue
+		// #156) — the spawn path never pairs a model with an effort outside
+		// its list, so neither does the conformance probe.
+		if len(m[0].Efforts) > 0 {
+			effort = m[0].Efforts[0].Value
+		}
+	} else if e := p.Efforts(); len(e) > 0 {
 		effort = e[0].Value
 	}
 	spec := provider.SpawnSpec{SessionName: "lab-conformance-1", Model: model, Effort: effort}

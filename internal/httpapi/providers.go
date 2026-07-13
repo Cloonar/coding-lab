@@ -28,9 +28,14 @@ type providerResponse struct {
 	// renders it instead of hardcoding any provider's name, so all user-facing
 	// copy ("<name> is waiting for your reply", the auth card title) is data-
 	// driven. Always present.
-	DisplayName string            `json:"display_name"`
-	Models      []provider.Option `json:"models"`
-	Efforts     []provider.Option `json:"efforts"`
+	DisplayName string `json:"display_name"`
+	// Models is the enriched model catalog (issue #156): each entry carries
+	// the model's own efforts list and, when the provider reports one, its
+	// default_effort — the SPA scopes the effort picker to the selected
+	// model from it. Efforts stays the model-independent UNION the repo/
+	// global defaults pickers render.
+	Models  []provider.ModelOption `json:"models"`
+	Efforts []provider.Option      `json:"efforts"`
 	// Options is the provider's declared spawn-options schema (issue #19 /
 	// ADR-0021) — always present (may be []), driving the schema-rendered "AFK
 	// defaults" section in the settings UIs.
@@ -49,9 +54,9 @@ type providerResponse struct {
 
 // handleProvidersList is GET /api/v1/providers — every provider's id, human
 // display name (issue #51 decision 9), model/effort catalogs (provider-owned
-// data, D14), spawn-options schema (issue #19), auth-flow descriptor (issue #51
-// decision 7), and fallback-open metadata when it has a web surface (ADR-0017),
-// in registration order.
+// data, D14; models per-model-enriched since issue #156), spawn-options schema
+// (issue #19), auth-flow descriptor (issue #51 decision 7), and fallback-open
+// metadata when it has a web surface (ADR-0017), in registration order.
 func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 	provs := s.providers.List()
 	items := make([]providerResponse, 0, len(provs))

@@ -24,6 +24,22 @@ type Option struct {
 	Label string `json:"label"`
 }
 
+// ModelOption is one entry of the model catalog (issue #156): the model's
+// Option pair plus the model's OWN effort list and reported default effort —
+// effort support varies per model and some CLIs (codex) do not clamp, so an
+// unsupported model+effort combo is a hard 400 at the provider's API.
+// Pinned API shape: {"value","label","efforts":[{value,label}...],
+// "default_effort"?} — the embedded Option inlines value/label.
+type ModelOption struct {
+	Option
+	// Efforts is this model's supported effort list, in provider order.
+	Efforts []Option `json:"efforts"`
+	// DefaultEffort is the model's reported default effort, "" when the
+	// provider reports none (the first-entry fallback rule applies then).
+	// Non-empty values are always members of Efforts (conformance-pinned).
+	DefaultEffort string `json:"default_effort,omitempty"`
+}
+
 // OptionSpec declares one provider-owned spawn option (issue #19 / ADR-0021):
 // the generic, extensible seam beside the typed model/effort. The provider
 // DECLARES its options (this schema); lab STORES/VALIDATES/RENDERS the bag
@@ -451,7 +467,12 @@ type AgentProvider interface {
 	// (issue #51 decision 9).
 	DisplayName() string
 	// Models and Efforts are the provider-owned catalogs, in dropdown order.
-	Models() []Option
+	// Models entries carry each model's OWN effort list + reported default
+	// (issue #156) — the spawn path validates efforts against the resolved
+	// model's list; Efforts stays the model-independent UNION catalog the
+	// repo/global defaults pickers render (it must cover every per-model
+	// list, conformance-pinned).
+	Models() []ModelOption
 	Efforts() []Option
 	// SpawnOptions is the provider-owned catalog of generic spawn options
 	// (issue #19 / ADR-0021) — the declared schema lab renders and validates
@@ -731,6 +752,41 @@ func HasOption(opts []Option, value string) bool {
 		}
 	}
 	return false
+}
+
+// HasModelOption reports whether the enriched model catalog contains value —
+// HasOption's sibling on []ModelOption (issue #156).
+func HasModelOption(models []ModelOption, value string) bool {
+	_, ok := FindModelOption(models, value)
+	return ok
+}
+
+// FindModelOption returns the catalog entry whose Value is value, or false —
+// the lookup behind per-model effort resolution (issue #156: the spawn path
+// validates efforts against the RESOLVED model's Efforts list).
+func FindModelOption(models []ModelOption, value string) (ModelOption, bool) {
+	for _, m := range models {
+		if m.Value == value {
+			return m, true
+		}
+	}
+	return ModelOption{}, false
+}
+
+// CloneModelOptions deep-clones an enriched model catalog: the outer slice
+// AND each entry's nested Efforts slice (issue #156). Adapters return it from
+// their Models() accessors so a caller can never mutate the shared catalog —
+// a shallow slices.Clone would still alias the per-model effort lists.
+func CloneModelOptions(models []ModelOption) []ModelOption {
+	if models == nil {
+		return nil
+	}
+	out := make([]ModelOption, len(models))
+	for i, m := range models {
+		m.Efforts = append([]Option(nil), m.Efforts...)
+		out[i] = m
+	}
+	return out
 }
 
 // FindSpawnOption returns the OptionSpec declaring key, or false — the lookup

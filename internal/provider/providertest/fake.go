@@ -22,7 +22,7 @@ type Fake struct {
 
 	id          string
 	displayName string
-	models      []provider.Option
+	models      []provider.ModelOption
 	efforts     []provider.Option
 	options     []provider.OptionSpec
 	authFlow    provider.AuthFlow
@@ -133,12 +133,21 @@ func New() *Fake {
 				`claude-session:`,
 			},
 		},
-		models: []provider.Option{
-			{Value: "opus[1m]", Label: "Opus (1M)"},
-			{Value: "sonnet", Label: "Sonnet"},
-			{Value: "fable", Label: "Fable"},
-			{Value: "haiku", Label: "Haiku"},
-		},
+		// Claude-shaped enriched catalog (issue #156): every model carries
+		// the full shared efforts list and no reported default, mirroring
+		// claudecode's clamp-itself posture.
+		models: uniformModelOptions(
+			[]provider.Option{
+				{Value: "opus[1m]", Label: "Opus (1M)"},
+				{Value: "sonnet", Label: "Sonnet"},
+				{Value: "fable", Label: "Fable"},
+				{Value: "haiku", Label: "Haiku"},
+			},
+			[]provider.Option{
+				{Value: "low", Label: "low"}, {Value: "medium", Label: "medium"},
+				{Value: "high", Label: "high"}, {Value: "xhigh", Label: "xhigh"}, {Value: "max", Label: "max"},
+			},
+		),
 		efforts: []provider.Option{
 			{Value: "low", Label: "low"}, {Value: "medium", Label: "medium"},
 			{Value: "high", Label: "high"}, {Value: "xhigh", Label: "xhigh"}, {Value: "max", Label: "max"},
@@ -195,8 +204,8 @@ func (f *Fake) Commands(_ context.Context, worktree string) ([]provider.CommandS
 	return append([]provider.CommandSpec(nil), f.commands...), nil
 }
 
-func (f *Fake) Models() []provider.Option  { return f.models }
-func (f *Fake) Efforts() []provider.Option { return f.efforts }
+func (f *Fake) Models() []provider.ModelOption { return f.models }
+func (f *Fake) Efforts() []provider.Option     { return f.efforts }
 
 // SetID rebrands the fake under another provider id (issue #66: multi-provider
 // registries need a second, differently-named fake). Call before the fake is
@@ -210,11 +219,36 @@ func (f *Fake) SetID(id string) {
 // SetCatalogs replaces the model/effort catalogs (issue #66: a foreign
 // provider whose catalog does not carry the claude-shaped defaults; an empty
 // — non-nil or nil — efforts slice models a provider without that knob).
-// Call before the fake is handed to concurrent code; Models/Efforts are
-// read without locking, mirroring their construction-time contract.
+// UNIFORM per issue #156: every given model gets the given efforts list and
+// no reported default, so pre-#156 call sites keep their semantics — use
+// SetModels for per-model effort lists. Call before the fake is handed to
+// concurrent code; Models/Efforts are read without locking, mirroring their
+// construction-time contract.
 func (f *Fake) SetCatalogs(models, efforts []provider.Option) {
-	f.models = models
+	f.models = uniformModelOptions(models, efforts)
 	f.efforts = efforts
+}
+
+// SetModels replaces the enriched model catalog verbatim (issue #156: a
+// provider whose models carry differing effort lists / reported defaults).
+// The union efforts catalog is left alone — pair with SetCatalogs when the
+// union must change too.
+func (f *Fake) SetModels(models []provider.ModelOption) {
+	f.models = models
+}
+
+// uniformModelOptions builds the claude-shaped enrichment: each model carries
+// the SAME efforts list and no reported default (issue #156). nil models stay
+// nil so SetCatalogs(nil, …) still means "no model catalog".
+func uniformModelOptions(models, efforts []provider.Option) []provider.ModelOption {
+	if models == nil {
+		return nil
+	}
+	out := make([]provider.ModelOption, len(models))
+	for i, m := range models {
+		out[i] = provider.ModelOption{Option: m, Efforts: efforts}
+	}
+	return out
 }
 
 // SpawnOptions returns the declared spawn-options schema (issue #19); the New

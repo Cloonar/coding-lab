@@ -78,29 +78,47 @@ func TestSpawnArgv(t *testing.T) {
 	}
 }
 
-func TestCatalogs_pinnedValuesAndCopies(t *testing.T) {
+// TestFallbackCatalogs_pinnedValuesAndCopies pins the compiled-in FALLBACK
+// catalog (issue #156): testProvider's CodexBin is a missing binary, so the
+// boot probe fails and the accessors must serve exactly the 0.133.0-pinned
+// values. The probed-catalog path is covered in catalog_test.go.
+func TestFallbackCatalogs_pinnedValuesAndCopies(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 
 	wantModels := []provider.Option{
 		{Value: "gpt-5.5", Label: "GPT-5.5"},
 		{Value: "gpt-5.4-mini", Label: "GPT-5.4-Mini"},
 	}
-	gotModels := p.Models()
-	if len(gotModels) != len(wantModels) {
-		t.Fatalf("Models() = %+v; want %+v", gotModels, wantModels)
-	}
-	for i := range wantModels {
-		if gotModels[i] != wantModels[i] {
-			t.Errorf("Models()[%d] = %+v; want %+v", i, gotModels[i], wantModels[i])
-		}
-	}
-
 	wantEfforts := []provider.Option{
 		{Value: "low", Label: "Low"},
 		{Value: "medium", Label: "Medium"},
 		{Value: "high", Label: "High"},
 		{Value: "xhigh", Label: "Extra high"},
 	}
+	gotModels := p.Models()
+	if len(gotModels) != len(wantModels) {
+		t.Fatalf("Models() = %+v; want %+v", gotModels, wantModels)
+	}
+	for i := range wantModels {
+		if gotModels[i].Option != wantModels[i] {
+			t.Errorf("Models()[%d] = %+v; want %+v", i, gotModels[i].Option, wantModels[i])
+		}
+		// Issue #156 enrichment, pinned from the debug-models fixture: both
+		// models support the full four-entry list and report medium as their
+		// default_reasoning_level.
+		if len(gotModels[i].Efforts) != len(wantEfforts) {
+			t.Fatalf("Models()[%d].Efforts = %+v; want %+v", i, gotModels[i].Efforts, wantEfforts)
+		}
+		for j := range wantEfforts {
+			if gotModels[i].Efforts[j] != wantEfforts[j] {
+				t.Errorf("Models()[%d].Efforts[%d] = %+v; want %+v", i, j, gotModels[i].Efforts[j], wantEfforts[j])
+			}
+		}
+		if gotModels[i].DefaultEffort != defaultEffort {
+			t.Errorf("Models()[%d].DefaultEffort = %q; want %q (pinned default_reasoning_level)", i, gotModels[i].DefaultEffort, defaultEffort)
+		}
+	}
+
 	gotEfforts := p.Efforts()
 	if len(gotEfforts) != len(wantEfforts) {
 		t.Fatalf("Efforts() = %+v; want %+v", gotEfforts, wantEfforts)
@@ -121,11 +139,21 @@ func TestCatalogs_pinnedValuesAndCopies(t *testing.T) {
 		t.Errorf("SpawnOptions() = %+v; want none declared", opts)
 	}
 
-	// Returned slices are copies — a caller mutation must not poison the
+	// Returned slices are DEEP copies (issue #156) — mutating a returned
+	// model's value, nested Efforts, or DefaultEffort must not poison the
 	// catalog.
 	gotModels[0].Value = "mutated"
-	if p.Models()[0].Value != "gpt-5.5" {
+	gotModels[0].Efforts[0].Value = "mutated"
+	gotModels[0].DefaultEffort = "mutated"
+	fresh := p.Models()
+	if fresh[0].Value != "gpt-5.5" {
 		t.Error("Models() exposed internal catalog storage")
+	}
+	if fresh[0].Efforts[0].Value != "low" || fresh[1].Efforts[0].Value != "low" {
+		t.Error("Models() exposed the shared per-model Efforts storage")
+	}
+	if fresh[0].DefaultEffort != defaultEffort {
+		t.Error("Models() exposed internal DefaultEffort storage")
 	}
 }
 

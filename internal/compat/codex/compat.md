@@ -3,7 +3,11 @@
 Pinned version: **codex-cli 0.133.0** — live probes on the lab host,
 2026-07-10 (issue #87's Tier-2 spike sweep, all eleven live-spike questions,
 recorded in the issue's Amendment 2; fixture captures re-run the same day
-while writing this record). This is the committed Tier-2 compat record
+while writing this record). One pin rides newer: the §1 model-catalog
+probe SCHEMA is additionally live-verified against codex-cli **0.144.1**
+(2026-07-13, issue #156 / ADR-0043) — the catalog *values* are no longer
+pinned at all; they are probed from the binary at boot. Every recipe and
+every other pin remains 0.133.0. This is the committed Tier-2 compat record
 ADR-0036 requires for a new adapter (`docs/agents/provider-authoring.md`):
 the four mandatory spikes — transcript, reply/interrupt recipes,
 context-file discovery, incogni attribution ground truth — plus the wider
@@ -74,24 +78,74 @@ Provenance legend:
   on it. live.
 - `spec.SessionName` is unused — codex has no `--remote-control`
   equivalent (no deep link, §preamble).
-- Model/effort catalogs are pinned from `codex debug models`, not TUI
-  scraping (cli extraction): `gpt-5.5` (default; `default_reasoning_level`
-  medium) and `gpt-5.4-mini`, efforts low/medium/high/xhigh (no `minimal`
-  tier), the internal `codex-auto-review` entry filtered by its
-  `visibility: "hide"`. `gpt-5.6-terra`/`-luna` exist server-side but 0.133
-  rejects them ("requires a newer version of Codex"); `gpt-5.6-sol` and
-  `gpt-5.1-codex` are rejected outright. Trimmed catalog fixture:
-  `testdata/models-0.133.0.json` (operator-relevant fields only; the
-  multi-KB `base_instructions` blobs are deliberately not committed).
+- Model/effort catalogs are **PROBED at provider construction**, not
+  pinned (issue #156 / ADR-0043, superseding the ADR-0037 pinned list):
+  `New` runs `codex debug models` exactly once, synchronously, via
+  `exec.CommandContext` on the configured CodexBin — hard timeout 10s
+  (`defaultProbeTimeout`, one budget shared with the best-effort
+  `codex --version` capture), stdout capped at 8 MiB (`probeOutputCap`;
+  the real 0.144.1 output is ~174 KB). Process-lifetime cache: no TTL, no
+  background refresh — the binary is nix-pinned, a new binary implies a
+  restart. cli extraction.
+- **The fragile coupling is now the probe SCHEMA, not the catalog
+  values.** Pinned fields (all else — `base_instructions` et al. —
+  ignored): `slug`, `display_name` (→ Label; defensively the slug when
+  empty), `visibility` (only `"list"`
+  entries are served — this filter replaces the pinned-era hardcoded
+  `codex-auto-review` slug filter; that entry is `"hide"`), `priority`
+  (ascending order; FIRST entry = spawn default — on 0.144.1 the bare
+  default becomes `gpt-5.6-terra`), `default_reasoning_level` (the model's
+  DefaultEffort, sanitized to "" when not a member of its own list), and
+  `supported_reasoning_levels[].effort` (the model's OWN efforts, binary
+  order). The union effort catalog (`Efforts()`, the repo/global defaults
+  pickers) is first-seen order across the sorted listed models. cli
+  extraction (schema live-verified on 0.144.1, 2026-07-13).
+- **Per-model efforts are load-bearing — codex does NOT clamp**: an
+  unsupported model+effort combo passes through the CLI and 400s at the
+  API (live-verified on 0.144.1: `gpt-5.5` + `ultra` → 400). Explicit
+  spawn effort therefore validates against the RESOLVED model's list
+  (`internal/instance` — 400 at lab's boundary instead of a session that
+  fails on its first turn); stored defaults skip-layer as usual. live
+  (0.144.1).
+- **Effort labels are lab-side** — codex reports no display names for
+  reasoning levels: pinned map low → Low, medium → Medium, high → High,
+  xhigh → "Extra high", with a title-case fallback for unknown values
+  (max → "Max", ultra → "Ultra").
+- **On ANY probe failure** — binary missing, timeout, nonzero exit,
+  bad/oversize JSON, zero listed models, a listed model with an empty
+  slug or empty effort list, duplicate slugs — the compiled-in
+  **0.133.0 catalog is served as
+  the fallback** (`fallbackModels`/`fallbackEfforts` in source: `gpt-5.5`
+  + `gpt-5.4-mini`, efforts low/medium/high/xhigh — no `minimal` tier —
+  default medium) and ONE loud structured Warn carries the probe error.
+  No status surface, no metric; the boot log records the catalog source
+  (probe vs fallback) and the binary version (best-effort
+  `codex --version`).
+- Fixtures: `testdata/models-0.133.0.json` (this package,
+  operator-relevant fields only; the multi-KB `base_instructions` blobs
+  are deliberately not committed) pins the FALLBACK catalog; the trimmed
+  0.144.1 capture at `internal/provider/codex/testdata/models-0.144.1.json`
+  (same trimming convention) pins the probe schema. 0.133-era observations
+  kept for the record: `gpt-5.6-terra`/`-luna` existed server-side but
+  0.133 rejects them ("requires a newer version of Codex"); `gpt-5.6-sol`
+  and `gpt-5.1-codex` are rejected outright.
 
 Pinned by `TestCompat_SpawnArgvSnapshot`,
 `TestCompat_SpawnArgvSeedPromptSnapshot`,
 `TestCompat_SpawnArgvEffortAlwaysExplicit`, and
-`TestCompat_ModelCatalog_matchesDebugModelsFixture` (plus the codex package's
-`TestSpawnArgv`/`TestCatalogs_pinnedValuesAndCopies`). When this breaks:
-re-run `codex debug models` and a real spawn on the new binary, re-pin the
-argv and the catalog fixture, and re-check the three sandbox traps before
-ever softening the full-access posture.
+`TestCompat_ModelCatalog_matchesDebugModelsFixture` (which now pins the
+FALLBACK catalog — a zero-value `Provider` that never probed — against
+`models-0.133.0.json`); plus the codex package's `TestSpawnArgv`,
+`TestFallbackCatalogs_pinnedValuesAndCopies` (the fallback pins) and the
+`catalog_test.go` probe/parse tests against `models-0.144.1.json`; live
+re-verification `TestCompat_Live_debugModelsProbe`. When this breaks: a
+binary bump **no longer requires re-pinning the catalog values** — the
+probe carries those. Re-verify the probe SCHEMA pins instead (field
+names/shapes, `visibility` semantics, `priority` ordering, that the first
+listed entry is still the intended spawn default) via
+`TestCompat_Live_debugModelsProbe` and a fresh trimmed capture if the
+schema moved; re-run a real spawn for the argv; and re-check the three
+sandbox traps before ever softening the full-access posture.
 
 ## 2. Auth status + device-code login — live (0.133.0)
 
@@ -585,7 +639,7 @@ the recipes.
 
 ## Live re-verification
 
-Two opt-in probes run against the installed binary and the real
+Three opt-in probes run against the installed binary and the real
 `$CODEX_HOME` when `LAB_COMPAT_LIVE=1` is set (skipped otherwise, so CI
 stays hermetic — the parent package's gating style, no build tags):
 
@@ -600,6 +654,14 @@ stays hermetic — the parent package's gating style, no build tags):
   defaults) `LocateTranscript` + `ReadChat` against it and asserts
   the located file belongs to that cwd and parses. Read-only; skips
   cleanly when codex or the sessions tree is absent.
+- `TestCompat_Live_debugModelsProbe` — runs the exported
+  `codex.ProbeModels` against the installed binary and asserts the §1
+  probe schema still yields a well-formed catalog: the output parses, at
+  least one `visibility: "list"` model survives the filter, values and
+  labels are non-empty, every model carries a non-empty effort list,
+  every non-empty DefaultEffort is a member of its model's own list, and
+  the union covers every per-model effort (the same invariants the
+  conformance suite pins on the served catalog). Read-only.
 
 Use them after a Codex upgrade before trusting any §1–§7 pin; the §6
 hazard checks and the §3/§4 seeding legs still need a by-hand scratch-TUI
