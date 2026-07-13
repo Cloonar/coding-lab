@@ -785,3 +785,70 @@ func TestAPI_ChatReply_nonClearCommandForwards(t *testing.T) {
 		t.Errorf("replies = %v; want exactly [/compact]", got)
 	}
 }
+
+// An arg-bearing clear (claude's /clear carries ArgHint "[name]", and the
+// autocomplete gesture model invites typing one) is still THE clear command:
+// isClearCommand must match on the command word, not the whole string, or the
+// pull silently never happens (issue #151 — the bug #149 was meant to close).
+// The argument survives into the forward untouched.
+func TestAPI_ClearHook_argBearingClearPulls(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	clearCatalog(x)
+	advanceOrigin(t, x, "feature.txt", "feature", "add feature x")
+	wt := runWorktree(t, x, runID)
+
+	resp := postReply(t, x, runID, "/clear my-session")
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+
+	if _, err := os.Stat(filepath.Join(wt, "feature.txt")); err != nil {
+		t.Errorf("pull did not land before the clear: %v", err)
+	}
+	if got := x.prov.Replies(); len(got) != 1 || got[0] != "/clear my-session" {
+		t.Errorf("replies = %v; want exactly [/clear my-session] (argument preserved, no digest)", got)
+	}
+}
+
+// A prefix-confusion guard: "/clearx" is not "/clear" plus an argument — its
+// command word is "/clearx" whole — so it must NOT trip the clear hook. Pins
+// that commandWord's whitespace cut, not a HasPrefix, is what isClearCommand
+// matches on.
+func TestAPI_ClearHook_prefixIsNotClear(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	pullIdentity(t, x)
+	clearCatalog(x)
+	advanceOrigin(t, x, "feature.txt", "feature", "add feature x")
+	wt := runWorktree(t, x, runID)
+	oldHead := worktreeHead(t, x, wt)
+
+	resp := postReply(t, x, runID, "/clearx")
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+
+	if worktreeHead(t, x, wt) != oldHead {
+		t.Error("worktree HEAD moved; /clearx wrongly matched the clear hook")
+	}
+	if got := x.prov.Replies(); len(got) != 1 || got[0] != "/clearx" {
+		t.Errorf("replies = %v; want exactly [/clearx]", got)
+	}
+}
+
+// /pull-base takes no arguments regardless of which whitespace separates the
+// command word from the argument — a tab must 400 exactly like a space does,
+// since commandWord (not a literal " " split) is what dispatch matches on.
+func TestAPI_PullBase_tabArgRejected(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+
+	resp := postReply(t, x, runID, "/pull-base\targ")
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); body["error"] != "pull-base takes no arguments" {
+		t.Errorf("error = %v; want the no-arguments refusal", body["error"])
+	}
+	if got := x.prov.Replies(); len(got) != 0 {
+		t.Errorf("replies = %v; want none", got)
+	}
+}

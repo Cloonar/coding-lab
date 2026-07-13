@@ -13,12 +13,23 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
 )
+
+// ErrAuthorIdentityRequired marks a pull that would author a merge commit —
+// the diverged, non-fast-forwardable path — attempted with an empty
+// authorName/authorEmail. A fast-forward moves the ref without committing and
+// needs no identity, so the ff-ness (unknowable before the fetch) is what
+// decides: only a diverged pull is refused, and only after the fetch but
+// BEFORE the merge touches the worktree, leaving it untouched (#151). The
+// pull service re-flags this as its own ErrNoAuthorIdentity for the HTTP
+// layer; it is the pull-time sibling of the CR-merge author-identity refusal.
+var ErrAuthorIdentityRequired = errors.New("pull would author a merge commit but no author identity was given")
 
 // PullResult describes one PullBase outcome. OldHead is the worktree's HEAD
 // sha before the pull, NewHead after it. UpToDate means origin/<base> was
@@ -67,10 +78,16 @@ func (ce *ConflictError) Is(target error) bool { return target == ErrMergeConfli
 //     (the bare repo and its worktrees share refs, so the freshly-fetched
 //     remote-tracking ref is visible there). Git fast-forwards on its own
 //     exactly when HEAD is an ancestor of origin/<base>; that condition is
-//     computed up front and reported as FastForward. A merge commit is
-//     authored and committed as authorName/authorEmail via
+//     computed up front and reported as FastForward. A fast-forward authors
+//     NO commit, so an empty authorName/authorEmail is fine on that path. A
+//     DIVERGED pull authors a merge commit as authorName/authorEmail via
 //     GIT_AUTHOR_*/GIT_COMMITTER_* entries appended AFTER extraEnv (last
-//     duplicate wins) — the repo's configured real identity (D15 measure 5).
+//     duplicate wins) — the repo's configured real identity (D15 measure 5);
+//     an empty identity there has nobody to author that commit, so a diverged
+//     pull with an empty authorName/authorEmail is refused with
+//     ErrAuthorIdentityRequired before the merge runs, the worktree untouched
+//     (only the harmless bare-repo fetch happened) — the ff-ness that gates
+//     this is unknowable before the fetch (#151).
 //
 // Failure contract — the worktree ends byte-identical to how the call found
 // it: a CONFLICT collects the conflicted paths, aborts the merge under a
@@ -109,6 +126,14 @@ func (e *Engine) PullBase(ctx context.Context, bareDir, worktreePath, base, auth
 	ffable, err := e.isAncestor(ctx, bareDir, oldHead, baseSHA, extraEnv)
 	if err != nil {
 		return PullResult{}, err
+	}
+	// A fast-forward authors no commit; a diverged pull authors a merge commit
+	// under the passed identity. Only the diverged path needs one, and ff-ness
+	// is unknowable until here — so refuse an identity-free diverged pull now,
+	// after the harmless bare-repo fetch but BEFORE runPullMerge touches the
+	// worktree, leaving it untouched (#151).
+	if !ffable && (authorName == "" || authorEmail == "") {
+		return PullResult{}, ErrAuthorIdentityRequired
 	}
 
 	// Author entries come AFTER extraEnv so they win the os/exec

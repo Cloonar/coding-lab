@@ -176,6 +176,49 @@ func TestPullBase_fastForward(t *testing.T) {
 	f.requireClean("after fast-forward pull")
 }
 
+func TestPullBase_fastForwardEmptyIdentity(t *testing.T) {
+	f := newPullFixture(t)
+	baseSHA := f.advanceOrigin("base.txt", "base content\n")
+
+	// A fast-forward authors NO commit, so an empty identity is fine (#151) —
+	// the up-front refusal this replaces would have blocked a pull that needs
+	// no identity at all.
+	res, err := f.eng.PullBase(t.Context(), f.bare, f.wt, "main", "", "", f.env)
+	if err != nil {
+		t.Fatalf("PullBase with empty identity on a fast-forward: %v", err)
+	}
+	if !res.FastForward {
+		t.Error("FastForward = false for a pure fast-forward pull")
+	}
+	if res.NewHead != baseSHA {
+		t.Errorf("NewHead = %s, want origin/main %s (a fast-forward must not create a commit)", res.NewHead, baseSHA)
+	}
+	if got := readFileT(t, filepath.Join(f.wt, "base.txt")); got != "base content\n" {
+		t.Errorf("pulled file content = %q, want %q", got, "base content\n")
+	}
+	f.requireClean("after empty-identity fast-forward pull")
+}
+
+func TestPullBase_divergedEmptyIdentityRefused(t *testing.T) {
+	f := newPullFixture(t)
+	localSHA := f.commitWorktree("local.txt", "local\n", "local work")
+	f.advanceOrigin("base.txt", "base\n") // disjoint files → would merge cleanly, but there is no identity to author it
+
+	_, err := f.eng.PullBase(t.Context(), f.bare, f.wt, "main", "", "", f.env)
+	if !errors.Is(err, ErrAuthorIdentityRequired) {
+		t.Fatalf("err = %v, want ErrAuthorIdentityRequired", err)
+	}
+	// Refused after the fetch but BEFORE the merge: HEAD unchanged, no merge in
+	// progress, worktree clean.
+	if h := f.worktreeHead(); h != localSHA {
+		t.Errorf("worktree HEAD = %s after refusal, want unchanged %s", h, localSHA)
+	}
+	if f.mergeHeadExists() {
+		t.Error("MERGE_HEAD exists after an identity refusal — the merge must never have started")
+	}
+	f.requireClean("after identity refusal")
+}
+
 func TestPullBase_mergeCommit(t *testing.T) {
 	f := newPullFixture(t)
 	localSHA := f.commitWorktree("local.txt", "local\n", "local work")

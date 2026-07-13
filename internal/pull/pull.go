@@ -33,12 +33,15 @@ import (
 // shared coupling).
 const EventRunChanged = "run.changed"
 
-// NoAuthorIdentityMessage answers a pull attempted before any git author
-// identity exists. A diverged pull authors a merge commit with the repo's
-// configured REAL identity (D15 measure 5), never a fallback bot — so with
-// neither the repo fields nor the global settings set there is nothing lab
-// may author as; refusing up front beats an opaque git failure halfway
-// through the merge.
+// NoAuthorIdentityMessage answers a DIVERGED pull that has no git author
+// identity to commit its merge under. A diverged pull authors a merge commit
+// with the repo's configured REAL identity (D15 measure 5), never a fallback
+// bot — so with neither the repo fields nor the global settings set there is
+// nothing lab may author as, and the merge is refused rather than committing
+// as nobody. A fast-forward or up-to-date pull authors no commit, so this
+// refusal fires ONLY when that merge commit would actually be authored
+// (#151) — and a clear refusal beats git's opaque "empty ident name" failure
+// mid-merge.
 const NoAuthorIdentityMessage = "git author identity is not configured; set git_author_name and git_author_email in settings (or on the repository)"
 
 // ErrNoAuthorIdentity marks that refusal (message: NoAuthorIdentityMessage).
@@ -132,7 +135,11 @@ type Result struct {
 // digests what came in. The contract the chat/HTTP layer relies on:
 //
 //   - unknown repo → store.ErrNotFound (nothing is done).
-//   - no git author identity → ErrNoAuthorIdentity, before any git runs.
+//   - a DIVERGED pull with no git author identity → ErrNoAuthorIdentity (the
+//     merge commit has nobody to author it). Up-to-date and fast-forward
+//     pulls author no commit and need no identity (#151); ff-ness is
+//     unknowable before the fetch, so this refusal necessarily lands AFTER
+//     the fetch — still before the merge touches the worktree.
 //   - git refuses the pull (fetch failure, dirty-clobber refusal, or a
 //     conflict as *gitx.ConflictError matching gitx.ErrMergeConflict) → that
 //     error, verbatim; gitx guarantees the worktree is left as it found it.
@@ -162,12 +169,14 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 	// Not abortable once we commit to it (see the doc comment).
 	ctx = context.WithoutCancel(ctx)
 
+	// Resolve the identity a merge commit would be authored under, but do NOT
+	// refuse an empty result up front: a fast-forward pull authors no commit
+	// and needs no identity, and ff-ness is unknowable before the fetch. gitx
+	// makes that call after the fetch (#151); an empty identity only bites on
+	// the diverged path, mapped below.
 	name, email, err := s.authorIdentity(ctx, repo)
 	if err != nil {
 		return Result{}, err
-	}
-	if name == "" || email == "" {
-		return Result{}, ErrNoAuthorIdentity
 	}
 
 	credEnv, cleanup, err := s.credentialEnv(ctx, repo, "pull-"+run.ID)
@@ -179,9 +188,16 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 	env := append(append([]string{}, s.gitEnv...), credEnv...)
 	pr, err := s.git.PullBase(ctx, s.bareDir(run.RepoID), run.WorktreePath, base, name, email, env)
 	if err != nil {
-		// gitx's typed refusals pass through verbatim; the chat/HTTP layer
-		// classifies *gitx.ConflictError / ErrMergeConflict itself. The
-		// worktree is untouched (gitx's failure contract).
+		// A diverged pull with no author identity comes back as
+		// gitx.ErrAuthorIdentityRequired (the merge commit had nobody to
+		// author it) — re-flag it as this package's ErrNoAuthorIdentity, the
+		// sentinel the HTTP layer maps to a 409 (#151). Every other typed
+		// refusal passes through verbatim; the chat/HTTP layer classifies
+		// *gitx.ConflictError / ErrMergeConflict itself. The worktree is
+		// untouched (gitx's failure contract).
+		if errors.Is(err, gitx.ErrAuthorIdentityRequired) {
+			return Result{}, ErrNoAuthorIdentity
+		}
 		return Result{}, err
 	}
 	res := Result{
@@ -264,8 +280,10 @@ func (s *Service) bareDir(repoID string) string {
 // authorIdentity resolves the merge commit's author/committer identity: the
 // repo's git_author_name/email override the global settings pair,
 // field-by-field (the same layering as crmerge and the spawned-session
-// authorEnv in internal/instance). Empty results mean "not configured" — the
-// caller refuses the pull rather than authoring as nobody or as a bot.
+// authorEnv in internal/instance). Empty results mean "not configured" —
+// harmless for a fast-forward (no commit is authored), but a diverged pull is
+// refused rather than authoring as nobody or as a bot (gitx makes that call
+// after the fetch — #151).
 func (s *Service) authorIdentity(ctx context.Context, repo store.Repo) (name, email string, err error) {
 	if repo.GitAuthorName != nil {
 		name = strings.TrimSpace(*repo.GitAuthorName)
