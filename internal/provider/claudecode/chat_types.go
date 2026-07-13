@@ -21,13 +21,18 @@ import (
 var lineNumPrefix = regexp.MustCompile(`^\s*\d+\t`)
 
 type tItem struct {
-	Type              string    `json:"type"`      // user|assistant|system|attachment|…
-	Subtype           string    `json:"subtype"`   // system: bridge_status|turn_duration|…
-	Content           string    `json:"content"`   // system bridge_status text
-	Timestamp         string    `json:"timestamp"` // ISO-8601
-	IsMeta            bool      `json:"isMeta"`
-	IsApiErrorMessage bool      `json:"isApiErrorMessage"`
-	Message           *tMessage `json:"message"`
+	Type    string `json:"type"`    // user|assistant|system|attachment|queue-operation|…
+	Subtype string `json:"subtype"` // system: bridge_status|turn_duration|…
+	// Content is system bridge_status text AND a queue-operation's queued
+	// payload: a task-notification enqueue/dequeue/remove carries the full
+	// "<task-notification>…" text here (issue #159, compat §5 — mined live
+	// from 2.1.198–2.1.206; a payload-less dequeue leaves it empty).
+	Content           string       `json:"content"`
+	Timestamp         string       `json:"timestamp"` // ISO-8601
+	IsMeta            bool         `json:"isMeta"`
+	IsApiErrorMessage bool         `json:"isApiErrorMessage"`
+	Message           *tMessage    `json:"message"`
+	Attachment        *tAttachment `json:"attachment"` // type:"attachment" events only
 	// ToolUseResult / ToolDenialKind are the top-level resolution ground truth
 	// claude stamps onto the user event that carries a tool_result block —
 	// the verification-backstop source (issue #51 decision 3, compat §5, live
@@ -38,6 +43,52 @@ type tItem struct {
 	// proceed…"); ToolDenialKind is "user-rejected" on a decline.
 	ToolUseResult  json.RawMessage `json:"toolUseResult"`
 	ToolDenialKind string          `json:"toolDenialKind"`
+}
+
+// tAttachment is the mid-turn injection envelope on type:"attachment" events.
+// The only shape lab reads is the delivered task notification —
+// type:"queued_command" with commandMode:"task-notification", payload in
+// prompt (issue #159, compat §5; mined live from 2.1.198–2.1.206). Other
+// attachment types ("task_reminder", "edited_text_file", …) and other
+// commandModes (operator-queued messages) are ignored and state-neutral by
+// construction: foldTranscript matches on CommandMode alone.
+type tAttachment struct {
+	Type        string `json:"type"`        // queued_command|task_reminder|edited_text_file|…
+	CommandMode string `json:"commandMode"` // "task-notification" for delivered task payloads
+	Prompt      string `json:"prompt"`      // the "<task-notification>…" payload text
+}
+
+// pendingWorkResult is the slice of a top-level toolUseResult that marks
+// background work (issue #159, compat §5; shapes mined live from
+// 2.1.198–2.1.206). The add rule is STRUCTURAL, never prose:
+// status=="async_launched" is stamped only on async Agent launches (agentId)
+// and Workflow launches (taskId — the id notifications reference, never the
+// wf_… runId). That gate excludes background Bash by construction — its
+// result carries backgroundTaskId and no status, and a dev server never
+// exits, so admitting it would pin `working` forever and suppress every
+// push — as well as Monitor ({taskId,timeoutMs} — no status) and SYNCHRONOUS
+// Agent calls (status "completed" + totalDurationMs). ResumedAgentID is
+// SendMessage's re-activation stamp: messaging a stopped agent resumes it in
+// the background, so the id re-enters the pending set.
+type pendingWorkResult struct {
+	Status         string `json:"status"`
+	AgentID        string `json:"agentId"`
+	TaskID         string `json:"taskId"`
+	ResumedAgentID string `json:"resumedAgentId"`
+}
+
+// decodePendingWork tolerantly decodes an event's top-level toolUseResult
+// into the pending-work slice. toolUseResult is an OBJECT on tool results but
+// a plain STRING on denials ("User rejected tool use" — see the
+// tItem.ToolUseResult contract), so a non-object yields the zero value — no
+// marker, never a panic.
+func decodePendingWork(raw json.RawMessage) pendingWorkResult {
+	var r pendingWorkResult
+	if len(raw) == 0 || raw[0] != '{' {
+		return r
+	}
+	_ = json.Unmarshal(raw, &r) // best-effort: unknown shapes carry no marker
+	return r
 }
 
 type tMessage struct {

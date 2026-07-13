@@ -44,6 +44,67 @@ func resolutionLine(toolUseResult string, denial bool) string {
 	return l + `}`
 }
 
+// Pending-work marker lines (issue #159), mined live from 2.1.198–2.1.206
+// transcripts (long values shortened, structure and key sets intact): the
+// async Agent and Workflow launch pairs that ADD to the pending set, their
+// structural foils that must NOT (background Bash — backgroundTaskId, no
+// status; a synchronous Agent call — status "completed" + totalDurationMs),
+// and the TaskStop / SendMessage pairs that remove and re-add. Ids are
+// consistent across lines so launches pair with their notifications.
+const (
+	pendingAgentID = "a66020d7eda3c3c35"
+
+	agentUseLine         = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_A1","name":"Agent","input":{"description":"bg probe","prompt":"Implement the export backend feature.","subagent_type":"general-purpose","model":"opus"},"caller":{"type":"direct"}}]}}`
+	agentAsyncResultLine = `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_A1","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully. agentId: a66020d7eda3c3c35 (internal ID). The agent is working in the background."}]}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a66020d7eda3c3c35","description":"bg probe","resolvedModel":"claude-opus-4-8[1m]","prompt":"Implement the export backend feature."}}`
+
+	workflowUseLine         = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_W1","name":"Workflow","input":{"script":"export const meta = { name: 'fixture-probe' }"},"caller":{"type":"direct"}}]}}`
+	workflowAsyncResultLine = `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_W1","type":"tool_result","content":"Workflow launched in background. Task ID: we3dnh19f","is_error":false}]},"toolUseResult":{"status":"async_launched","taskId":"we3dnh19f","taskType":"local_workflow","workflowName":"fixture-probe","runId":"wf_490e165a-e59","summary":"probe"}}`
+
+	bashBgUseLine    = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_B1","name":"Bash","input":{"command":"go test ./...","description":"Run test baseline","run_in_background":true},"caller":{"type":"direct"}}]}}`
+	bashBgResultLine = `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_B1","type":"tool_result","content":"Command running in background with ID: b07izrfyc. You will be notified when it completes.","is_error":false}]},"toolUseResult":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"backgroundTaskId":"b07izrfyc"}}`
+
+	syncAgentUseLine    = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_S1","name":"Agent","input":{"description":"Explore the fold","prompt":"Find the fold.","subagent_type":"Explore"},"caller":{"type":"direct"}}]}}`
+	syncAgentResultLine = `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_S1","type":"tool_result","content":[{"type":"text","text":"final report"}]}]},"toolUseResult":{"status":"completed","agentId":"ad53a61667af00037","agentType":"Explore","resolvedModel":"claude-opus-4-8[1m]","totalDurationMs":244268,"totalTokens":100132,"totalToolUseCount":28,"prompt":"Find the fold."}}`
+
+	taskStopUseLine    = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_T1","name":"TaskStop","input":{"task_id":"a66020d7eda3c3c35"},"caller":{"type":"direct"}}]}}`
+	taskStopResultLine = `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_T1","type":"tool_result","content":"{\"message\":\"Successfully stopped task: a66020d7eda3c3c35 (bg probe)\"}"}]},"toolUseResult":{"message":"Successfully stopped task: a66020d7eda3c3c35 (bg probe)","task_id":"a66020d7eda3c3c35","task_type":"local_agent","command":"bg probe"}}`
+
+	sendMessageUseLine    = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_M1","name":"SendMessage","input":{"to":"a66020d7eda3c3c35","summary":"probe resume","message":"Reply with exactly: ok"},"caller":{"type":"direct"}}]}}`
+	sendMessageResultLine = `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_M1","type":"tool_result","content":[{"type":"text","text":"resumed"}]}]},"toolUseResult":{"success":true,"message":"Agent \"a66020d7eda3c3c35\" was stopped (completed); resumed it in the background with your message.","resumedAgentId":"a66020d7eda3c3c35","pin":{"id":"a66020d7eda3c3c35","name":"a66020d7eda3c3c35","ref":"197887"}}}`
+
+	turnEndTextLine = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Launched; reporting status."}]}}`
+	apiErrorLine    = `{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: 529 overloaded"}]}}`
+)
+
+// taskNotification renders the payload every notification carrier shares
+// (live shapes: statuses completed|failed|killed; the escaped \n and \" are
+// JSON-string escapes, exactly as claude writes them). status "" renders the
+// Monitor interim <event> form, which carries NO <status> tag — the shape
+// that must never remove a pending id.
+func taskNotification(id, status string) string {
+	if status == "" {
+		return `<task-notification>\n<task-id>` + id + `</task-id>\n<summary>Monitor event: \"probe\"</summary>\n<event>PROBE_UP</event>\n</task-notification>`
+	}
+	return `<task-notification>\n<task-id>` + id + `</task-id>\n<tool-use-id>toolu_A1</tool-use-id>\n<status>` + status + `</status>\n<summary>Agent \"bg probe\" finished</summary>\n</task-notification>`
+}
+
+// The three notification carriers (issue #159, compat §5): the queue-operation
+// bookkeeping that always precedes delivery, the between-turns standalone user
+// message (plain-string content, origin task-notification, no isMeta), and
+// the mid-turn attachment injection (queued_command, commandMode
+// task-notification).
+func enqueueLine(payload string) string {
+	return `{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-11T09:49:25.949Z","sessionId":"sess","content":"` + payload + `"}`
+}
+
+func userNotifyLine(payload string) string {
+	return `{"type":"user","message":{"role":"user","content":"` + payload + `"},"origin":{"kind":"task-notification"},"promptSource":"system"}`
+}
+
+func attachNotifyLine(payload string) string {
+	return `{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"` + payload + `","timestamp":"2026-07-12T02:59:20.258Z"}}`
+}
+
 func chatProvider(t *testing.T, registryDir, projectsDir string) *Provider {
 	t.Helper()
 	p, err := New(Options{
@@ -330,6 +391,244 @@ func TestParseTranscript_stateEdges(t *testing.T) {
 		if got.State != c.want {
 			t.Errorf("%s: state = %q; want %q", name, got.State, c.want)
 		}
+	}
+}
+
+// The pending-work hold (issue #159): async agents/workflows this session
+// spawned keep the run `working` past the assistant's turn-ending text — the
+// CLI re-invokes the model when they complete, so needs_input (and its push)
+// would be spurious — while the structurally excluded shapes (background
+// Bash, sync Agent calls) must not hold, terminal notifications and TaskStop
+// release, and an API error outranks the hold.
+func TestParseTranscript_pendingWorkStateEdges(t *testing.T) {
+	launch := line(agentUseLine) + line(agentAsyncResultLine)
+	bashBg := line(bashBgUseLine) + line(bashBgResultLine) + line(turnEndTextLine)
+	cases := map[string]struct {
+		lines string
+		want  string
+	}{
+		// THE hold: an async Agent launch, then the model ends its turn.
+		"async agent launch holds working": {
+			launch + line(turnEndTextLine), provider.StateWorking,
+		},
+		// Workflows are always async; the pending id is taskId (w…), not runId.
+		"workflow launch holds working": {
+			line(workflowUseLine) + line(workflowAsyncResultLine) + line(turnEndTextLine),
+			provider.StateWorking,
+		},
+		// Background Bash must NOT hold — its result has backgroundTaskId and
+		// no status, so it never enters the set (a dev server never exits and
+		// would pin `working` forever, suppressing every push).
+		"background bash never holds": {bashBg, provider.StateNeedsInput},
+		// Its completion notification removes nothing (the id was never added)
+		// but the carrier itself still bumps working…
+		"bash completion notification bumps working": {
+			bashBg + line(enqueueLine(taskNotification("b07izrfyc", "completed"))),
+			provider.StateWorking,
+		},
+		// …and the model's next ended turn is a real needs_input again.
+		"bash notification then text needs input": {
+			bashBg + line(enqueueLine(taskNotification("b07izrfyc", "completed"))) + line(turnEndTextLine),
+			provider.StateNeedsInput,
+		},
+		// A SYNCHRONOUS Agent call resolves in-turn: status "completed" +
+		// totalDurationMs, never async_launched — no add, no hold.
+		"sync agent call never holds": {
+			line(syncAgentUseLine) + line(syncAgentResultLine) + line(turnEndTextLine),
+			provider.StateNeedsInput,
+		},
+		// Any non-empty terminal status releases exactly like completed.
+		"failed notification releases": {
+			launch + line(turnEndTextLine) +
+				line(enqueueLine(taskNotification(pendingAgentID, "failed"))) + line(turnEndTextLine),
+			provider.StateNeedsInput,
+		},
+		"killed notification releases": {
+			launch + line(turnEndTextLine) +
+				line(enqueueLine(taskNotification(pendingAgentID, "killed"))) + line(turnEndTextLine),
+			provider.StateNeedsInput,
+		},
+		// The status-tag gate: a status-less payload (Monitor-style <event>)
+		// naming a pending id must NOT remove it — the hold stands.
+		"status-less payload keeps the hold": {
+			launch + line(enqueueLine(taskNotification(pendingAgentID, ""))) + line(turnEndTextLine),
+			provider.StateWorking,
+		},
+		// Duplicate notifications for one id are real (SendMessage resume,
+		// Monitor per-event); a second delivery after removal is a no-op.
+		"duplicate notification is idempotent": {
+			launch + line(turnEndTextLine) +
+				line(userNotifyLine(taskNotification(pendingAgentID, "completed"))) +
+				line(userNotifyLine(taskNotification(pendingAgentID, "completed"))) +
+				line(turnEndTextLine),
+			provider.StateNeedsInput,
+		},
+		// Errors must surface past pending work: needs_input unconditionally.
+		"api error outranks the hold": {
+			launch + line(apiErrorLine), provider.StateNeedsInput,
+		},
+	}
+	for name, c := range cases {
+		got, err := ParseTranscript(strings.NewReader(c.lines))
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", name, err)
+		}
+		if got.State != c.want {
+			t.Errorf("%s: state = %q; want %q", name, got.State, c.want)
+		}
+	}
+}
+
+// The full async-agent roundtrip (issue #159, from the mined m125 lifecycle),
+// asserted at EVERY cumulative prefix: no prefix anywhere inside the pending
+// window may read needs_input — the push-gate acceptance in unit form. The
+// enqueue both removes the id AND bumps working itself, closing the
+// micro-window between enqueue and delivery.
+func TestParseTranscript_pendingWorkTrajectory(t *testing.T) {
+	steps := []struct{ name, add, want string }{
+		{"launch tool_use", line(agentUseLine), provider.StateWorking},
+		{"async_launched result", line(agentAsyncResultLine), provider.StateWorking},
+		{"turn-ending text is held", line(turnEndTextLine), provider.StateWorking},
+		{"completion enqueue", line(enqueueLine(taskNotification(pendingAgentID, "completed"))), provider.StateWorking},
+		{"user-form delivery", line(userNotifyLine(taskNotification(pendingAgentID, "completed"))), provider.StateWorking},
+		{"final text needs input", line(turnEndTextLine), provider.StateNeedsInput},
+	}
+	var lines strings.Builder
+	for _, s := range steps {
+		lines.WriteString(s.add)
+		got, err := ParseTranscript(strings.NewReader(lines.String()))
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", s.name, err)
+		}
+		if got.State != s.want {
+			t.Errorf("%s: state = %q; want %q", s.name, got.State, s.want)
+		}
+	}
+}
+
+// The attachment delivery variant (issue #159): a mid-turn injected
+// queued_command/task-notification releases the pending id and itself derives
+// working; only the model's NEXT ended turn reads needs_input. Other
+// attachment types stay state-neutral (the stateEdges cases above never see
+// them because foldTranscript skips them wholesale).
+func TestParseTranscript_pendingWorkAttachmentDelivery(t *testing.T) {
+	delivered := line(agentUseLine) + line(agentAsyncResultLine) + line(turnEndTextLine) +
+		line(enqueueLine(taskNotification(pendingAgentID, "completed"))) +
+		line(attachNotifyLine(taskNotification(pendingAgentID, "completed")))
+
+	got, err := ParseTranscript(strings.NewReader(delivered))
+	if err != nil {
+		t.Fatalf("ParseTranscript(attachment tail): %v", err)
+	}
+	if got.State != provider.StateWorking {
+		t.Errorf("attachment as last event: state = %q; want %q (delivery means the model is about to resume)", got.State, provider.StateWorking)
+	}
+
+	got, err = ParseTranscript(strings.NewReader(delivered + line(turnEndTextLine)))
+	if err != nil {
+		t.Fatalf("ParseTranscript(attachment+text): %v", err)
+	}
+	if got.State != provider.StateNeedsInput {
+		t.Errorf("text after attachment delivery: state = %q; want %q (the id was released)", got.State, provider.StateNeedsInput)
+	}
+}
+
+// TaskStop releases the pending id immediately (issue #159) — no notification
+// line needed at all, and the removal is order-tolerant (live transcripts
+// show the killed enqueue sometimes BEFORE the TaskStop line in file order).
+func TestParseTranscript_pendingWorkTaskStop(t *testing.T) {
+	steps := []struct{ name, add, want string }{
+		{"launch", line(agentUseLine) + line(agentAsyncResultLine), provider.StateWorking},
+		{"held text", line(turnEndTextLine), provider.StateWorking},
+		{"TaskStop pair", line(taskStopUseLine) + line(taskStopResultLine), provider.StateWorking},
+		{"text after stop needs input", line(turnEndTextLine), provider.StateNeedsInput},
+	}
+	var lines strings.Builder
+	for _, s := range steps {
+		lines.WriteString(s.add)
+		got, err := ParseTranscript(strings.NewReader(lines.String()))
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", s.name, err)
+		}
+		if got.State != s.want {
+			t.Errorf("%s: state = %q; want %q", s.name, got.State, s.want)
+		}
+	}
+}
+
+// SendMessage to a stopped agent resumes it in the background (live-verified:
+// the result carries resumedAgentId), so the id RE-ENTERS the pending set and
+// the hold re-arms until its second notification (issue #159).
+func TestParseTranscript_pendingWorkSendMessageResume(t *testing.T) {
+	steps := []struct{ name, add, want string }{
+		{"launch", line(agentUseLine) + line(agentAsyncResultLine), provider.StateWorking},
+		{"first completion delivered", line(userNotifyLine(taskNotification(pendingAgentID, "completed"))), provider.StateWorking},
+		{"text after completion needs input", line(turnEndTextLine), provider.StateNeedsInput},
+		{"SendMessage resume pair", line(sendMessageUseLine) + line(sendMessageResultLine), provider.StateWorking},
+		{"text after resume is held again", line(turnEndTextLine), provider.StateWorking},
+		{"second completion delivered", line(userNotifyLine(taskNotification(pendingAgentID, "completed"))), provider.StateWorking},
+		{"final text needs input", line(turnEndTextLine), provider.StateNeedsInput},
+	}
+	var lines strings.Builder
+	for _, s := range steps {
+		lines.WriteString(s.add)
+		got, err := ParseTranscript(strings.NewReader(lines.String()))
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", s.name, err)
+		}
+		if got.State != s.want {
+			t.Errorf("%s: state = %q; want %q", s.name, got.State, s.want)
+		}
+	}
+}
+
+// Structured live signals break through the pending-work hold (issue #159):
+// the hold only softens the transcript's assistant-text edge — a live spool
+// dialog still forces StateQuestion + PendingDialog, and a live blocked
+// marker still forces StateNeedsInput, in ReadChat's unchanged composition
+// order. A waiting permission prompt or question must never hide behind
+// "working on background tasks".
+func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
+	p := spoolTestProvider(t)
+	dir := t.TempDir()
+	t0 := time.Now().Add(-time.Hour)
+	// A transcript tail that holds working: async launch + turn-ending text.
+	// Named sess-live to match prePayload's session_id (dialog staleness key),
+	// and older than the spool files so the blocked marker reads as current.
+	transcript := filepath.Join(dir, "sess-live.jsonl")
+	writeFileWithModTime(t, transcript,
+		line(agentUseLine)+line(agentAsyncResultLine)+line(turnEndTextLine), t0)
+
+	chat, err := p.ReadChat("run_1", dir, transcript)
+	if err != nil {
+		t.Fatalf("ReadChat(no signals): %v", err)
+	}
+	if chat.State != provider.StateWorking {
+		t.Fatalf("no signals: state = %q; want %q (the pending hold)", chat.State, provider.StateWorking)
+	}
+
+	// A live spool dialog wins over the hold.
+	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
+	chat, err = p.ReadChat("run_1", dir, transcript)
+	if err != nil {
+		t.Fatalf("ReadChat(spool dialog): %v", err)
+	}
+	if chat.State != provider.StateQuestion || chat.PendingDialog == nil {
+		t.Errorf("spool dialog over hold: chat = %+v; want StateQuestion with PendingDialog", chat)
+	}
+
+	// Dialog gone, blocked marker present (newer than the transcript): the
+	// marker's needs_input wins over the hold too.
+	if err := os.Remove(filepath.Join(dir, dialogsSubdir, "run_1.json")); err != nil {
+		t.Fatal(err)
+	}
+	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
+	chat, err = p.ReadChat("run_1", dir, transcript)
+	if err != nil {
+		t.Fatalf("ReadChat(blocked marker): %v", err)
+	}
+	if chat.State != provider.StateNeedsInput {
+		t.Errorf("blocked marker over hold: state = %q; want %q", chat.State, provider.StateNeedsInput)
 	}
 }
 

@@ -732,6 +732,120 @@ func TestCompat_LiveTranscripts_resolutionShapes(t *testing.T) {
 	}
 }
 
+// Async background-task fixtures (compat.md §5 async-task subsection, issue
+// #159): three captured transcripts — an async Agent roundtrip (wild 2.1.204,
+// mengenkauf-125), a Workflow roundtrip and a background Bash roundtrip (live
+// 2.1.206) — drive ParseTranscript at cumulative prefixes as the conformance
+// canary for the pending-work hold. The full add/remove/exclusion state matrix
+// is unit-pinned in claudecode (TestParseTranscript_pendingWork*); THIS test
+// pins the real on-disk shapes those inline lines were distilled from: the
+// top-level toolUseResult.status=="async_launched" gate with agentId/taskId,
+// and the three <task-notification> carriers. A future CLI that renames the
+// status, moves agentId/taskId, or reshapes a carrier fails HERE first — the
+// live failure mode is silent (a stuck `working` badge with suppressed pushes,
+// or the spurious turn-end pushes returning), so don't wait for a field report.
+//
+// The workflow and bash files carry ONE hand-added turn-end assistant text
+// line right after the launch result (marked in compat.md §5): in both live
+// captures the work completed mid-turn, before any turn-ending text, so the
+// verbatim order alone could never show the hold (workflow) or the no-hold
+// (bash) — the enqueue would already have spoken. Marker lines are verbatim.
+func TestCompat_AsyncTaskFixtures(t *testing.T) {
+	readLines := func(name string, wantLines int) []string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+		if len(lines) != wantLines {
+			t.Fatalf("%s has %d lines; want %d (prefix indices below key off the pinned layout)", name, len(lines), wantLines)
+		}
+		return lines
+	}
+	parsePrefix := func(name string, lines []string, n int) provider.Chat {
+		t.Helper()
+		chat, err := claudecode.ParseTranscript(strings.NewReader(strings.Join(lines[:n], "\n") + "\n"))
+		if err != nil {
+			t.Fatalf("%s[:%d]: ParseTranscript: %v", name, n, err)
+		}
+		return chat
+	}
+
+	// Async Agent: launch → async_launched result (agentId) → turn-end text →
+	// enqueue → dequeue → user-form delivery → resume text.
+	name := "transcript-asyncagent-live-2.1.204.jsonl"
+	lines := readLines(name, 7)
+	// THE hold — the issue #159 drift canary: the turn ended but the launched
+	// agent is pending, so the tail derives working, never needs_input. A CLI
+	// that renames status "async_launched" or moves agentId flips this to
+	// needs_input (the spurious push returns).
+	if chat := parsePrefix(name, lines, 3); chat.State != provider.StateWorking {
+		t.Errorf("agent launch + turn-end prefix: state = %q; want %q (the async-agent pending hold)", chat.State, provider.StateWorking)
+	}
+	chat := parsePrefix(name, lines, len(lines))
+	// Full file: the completion notification released the id, so the resume
+	// text is a real turn end again.
+	if chat.State != provider.StateNeedsInput {
+		t.Errorf("agent full file: state = %q; want %q (notification released the hold)", chat.State, provider.StateNeedsInput)
+	}
+	// Carrier 2 reaches the fold with rendering unchanged: the between-turns
+	// standalone user message (plain-string content, origin task-notification,
+	// no isMeta) stays a VISIBLE user text message carrying the raw payload.
+	if len(chat.Messages) != 4 {
+		t.Fatalf("agent full file mapped %d messages; want 4 (chip, turn-end text, delivery, resume text)", len(chat.Messages))
+	}
+	if d := chat.Messages[2]; d.Kind != provider.MessageText || d.Role != "user" ||
+		!strings.Contains(d.Text, "<task-notification>") ||
+		!strings.Contains(d.Text, "<task-id>a66020d7eda3c3c35</task-id>") {
+		t.Errorf("agent delivery msg = %+v; want visible user text carrying the <task-notification> payload with its <task-id>", d)
+	}
+
+	// Workflow: launch → async_launched result (taskId, no isAsync) →
+	// [hand-added turn-end text] → enqueue → mined mid-turn text → queue
+	// remove → attachment delivery → resume thinking (captured signature-only,
+	// empty thinking body).
+	name = "transcript-asyncworkflow-live-2.1.206.jsonl"
+	lines = readLines(name, 8)
+	// The taskId hold: notifications reference toolUseResult.taskId (w…),
+	// never the wf_… runId — a CLI that moves or renames it flips this.
+	if chat := parsePrefix(name, lines, 3); chat.State != provider.StateWorking {
+		t.Errorf("workflow launch + turn-end prefix: state = %q; want %q (the taskId pending hold)", chat.State, provider.StateWorking)
+	}
+	// The wild enqueue payload (<task-id> + <status>completed</status> in the
+	// queue-operation's content — carrier 1) released the taskId, so the mined
+	// mid-turn text derives needs_input. Pins the release against the real
+	// payload shape: if the CLI reshapes the tags or moves the content field,
+	// the id stays held and this flips to working.
+	if chat := parsePrefix(name, lines, 5); chat.State != provider.StateNeedsInput {
+		t.Errorf("workflow post-enqueue text prefix: state = %q; want %q (carrier 1 released the taskId)", chat.State, provider.StateNeedsInput)
+	}
+	// Full file: the tail is the attachment delivery (carrier 3) — a
+	// working-deriving key, the model is about to resume — followed by the
+	// empty-thinking line, which emits nothing.
+	if chat := parsePrefix(name, lines, len(lines)); chat.State != provider.StateWorking {
+		t.Errorf("workflow full file: state = %q; want %q (attachment delivery tail)", chat.State, provider.StateWorking)
+	}
+
+	// Background Bash: launch (run_in_background) → backgroundTaskId result →
+	// [hand-added turn-end text] → enqueue → remove → attachment completion →
+	// next tool_use.
+	name = "transcript-asyncbash-live-2.1.206.jsonl"
+	lines = readLines(name, 7)
+	// The exclusion canary: backgroundTaskId with NO status never enters the
+	// pending set, so the turn end is a genuine needs_input. A CLI that starts
+	// stamping async_launched onto Bash results flips this to working — the
+	// dev-server-never-exits trap (working pinned forever, pushes suppressed).
+	if chat := parsePrefix(name, lines, 3); chat.State != provider.StateNeedsInput {
+		t.Errorf("bash launch + turn-end prefix: state = %q; want %q (background Bash must never hold)", chat.State, provider.StateNeedsInput)
+	}
+	// Full file: the tail is the model's next tool_use after the completion
+	// attachment — ordinary working.
+	if chat := parsePrefix(name, lines, len(lines)); chat.State != provider.StateWorking {
+		t.Errorf("bash full file: state = %q; want %q (next tool_use tail)", chat.State, provider.StateWorking)
+	}
+}
+
 // Builtin slash-command table pin (compat.md §10, bundle-extracted 2.1.198):
 // /clear's exact row (description verbatim, the role=clear tag, its arg
 // hint), pinned-order builtins-first, and the exact chat-safe set — the

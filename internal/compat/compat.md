@@ -11,8 +11,10 @@ issue #17 / ADR-0020 (the PreToolUse/PostToolUse/Notification hook payloads +
 the spool protocol that captures a pending dialog live), the builtin
 slash-command catalog §10 added by issue #51 (which also live-re-verified §7
 against 2.1.198 on 2026-07-08, generalizing the dialog recipes to
-multi-question forms and plan approval and fixing three live recipe bugs), and
-the dialog auto-dismiss timeout override §11 added by issue #124. The
+multi-question forms and plan approval and fixing three live recipe bugs), the
+dialog auto-dismiss timeout override §11 added by issue #124, and the async
+background-task markers + task-notification carriers (§5, the pending-work
+hold) added by issue #159. The
 implementation of every coupling lives in `internal/provider/claudecode`;
 the probe tests in this package exercise the same code paths against
 captured fixtures in `testdata/`.
@@ -389,6 +391,89 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   is absent from the new file), so `PendingDialog` also treats a spool older than
   the current transcript as stale (§9). `/compact` keeps the **same** sessionId
   and appends to the same file, so it is **unaffected** (issue #34).
+- **Async background tasks (Agent/Workflow) + task-notification delivery —
+  live (2.1.206, 2026-07-13; wild-verified 2.1.198/2.1.204; issue #159).**
+  Claude Code runs background work whose completion re-invokes the model, so
+  an assistant turn ending while such work pends must NOT read as the
+  operator's turn — a needs_input (and its push) there is spurious. Two
+  structural marker families, both mined from real transcripts across three
+  CLI versions (markers identical; only the delivery form varies, by session
+  state, never by version):
+
+  - **Add markers** — the top-level `toolUseResult` of the user event carrying
+    the launch's `tool_result` block. `status == "async_launched"` is the ONE
+    add gate; never parse the tool_result's prose text ("Async agent
+    launched…"). An async Agent launch carries `agentId` (17-hex, `a…`) plus
+    `isAsync:true`; a Workflow launch (always async in the transcript)
+    carries `taskId` (9-base36, `w…`), `taskType:"local_workflow"`, and NO
+    `isAsync` — and the id its notifications reference is `taskId`, **never
+    the `wf_…` `runId`** (that appears only inside result/diagnostics prose).
+    The same gate excludes by construction: a SYNCHRONOUS Agent call
+    (`status:"completed"` + `totalDurationMs`/`totalTokens` — resolved
+    in-turn, nothing pending), background Bash (`run_in_background:true` →
+    `toolUseResult` carries `backgroundTaskId` and NO `status`), and Monitor
+    (`{taskId,timeoutMs}`, NO `status`). **Bash must never hold**: a dev
+    server never exits, so admitting `backgroundTaskId` would pin `working`
+    forever and suppress every needs-you push — the exact inversion of the
+    hold's purpose. (Bash and Monitor completions still arrive as
+    task-notifications; ids never added are ignored for free.)
+  - **Remove markers** — three carriers of one `<task-notification>` payload;
+    a payload removes its `<task-id>` only when a non-empty `<status>` tag
+    accompanies it (`completed|failed|killed` all observed, ANY value
+    terminal). Carrier 1: `queue-operation` events carry the payload in
+    top-level `content` — every notification writes an `enqueue` first (the
+    earliest signal), then a `dequeue` (between-turns path) or `remove`
+    (mid-turn path) repeats the same content, handled identically (the
+    operation field is deliberately not read; a payload-less dequeue is
+    skipped). Carrier 2: between turns the payload becomes a STANDALONE user
+    message — `message.content` a plain string prefixed `<task-notification>`,
+    `origin.kind:"task-notification"`, `promptSource:"system"`, NO `isMeta`
+    (classified by trimmed prefix, exactly like the command echoes above; it
+    still renders as a visible user text message). Carrier 3: mid-turn it
+    rides an `attachment` event — `attachment.type:"queued_command"`,
+    `commandMode:"task-notification"`, payload in `attachment.prompt`; other
+    attachment types/commandModes stay ignored and state-neutral. A
+    status-less payload is a Monitor interim `<event>` and must NOT remove.
+    Duplicates per id are REAL: SendMessage to a stopped agent resumes it in
+    the background (its result's `resumedAgentId` re-adds the id; the
+    re-notification's `<tool-use-id>` is the SendMessage's own, so tie by
+    `<task-id>`), and Monitor notifies per event. TaskStop removes via its
+    `input.task_id` (belt-and-braces with the `killed` notification it also
+    triggers) — and that killed enqueue can precede the TaskStop line in FILE
+    order (line order ≠ causal order around queue-operations), so removal is
+    order-tolerant set-delete, never an error.
+  - **Lab's consumption** (`foldTranscript` pending set → `deriveState`,
+    issue #159): while the set is non-empty, an assistant-text tail derives
+    `working`, not `needs_input` — only that one edge is softened; an API
+    error stays needs_input unconditionally (errors surface past pending
+    work). Every carrier also sets a working-deriving lastKey — an enqueued
+    or delivered notification means the CLI is about to re-invoke the model,
+    the same "(about to be) working" philosophy user:text encodes — closing
+    the needs_input micro-window between enqueue and delivery. Break-through
+    stays STRUCTURED-ONLY: a live spool dialog or blocked marker (§9, via
+    `ReadChat`'s overlay) outranks the hold, so a waiting permission prompt
+    or question never hides behind "working on background tasks".
+  - **Provenance + canary.** Captured fixtures — field names, key sets, ids,
+    and event order verbatim, long values elided:
+    `transcript-asyncagent-live-2.1.204.jsonl` (wild, mined from a real
+    2.1.204 session), `transcript-asyncworkflow-live-2.1.206.jsonl` (live
+    probe, 2026-07-13) and `transcript-asyncbash-live-2.1.206.jsonl` (wild
+    2.1.206, 2026-07-12). In the workflow and bash files ONE turn-end
+    assistant text line is hand-added right after the launch result for the
+    state assertion (marker lines verbatim) — in both captures the work
+    completed mid-turn, before any turn-ending text, so the verbatim order
+    alone could not show the hold/no-hold edge; the agent file is fully
+    verbatim. Probe: `TestCompat_AsyncTaskFixtures` (the agent hold, the
+    workflow taskId hold + enqueue release, the Bash no-hold exclusion, and
+    carrier 2's rendered user message); the full state matrix is unit-pinned
+    by `claudecode`'s `TestParseTranscript_pendingWork*` with inline lines
+    distilled from the same mining. **When a Claude Code upgrade renames
+    `async_launched`, moves `agentId`/`taskId`, or reshapes any carrier,
+    these fixtures and tests are the FIRST thing to re-verify live** — the
+    failure mode is silent (a stuck `working` badge with suppressed pushes,
+    or the spurious turn-end pushes returning), so re-capture a launch +
+    notification roundtrip, then update the port, the fixtures, the tests,
+    and this section in one commit.
 
 ## 6. Reply send-keys — live (2.1.198, 2026-07-08)
 
