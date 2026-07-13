@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -106,6 +107,41 @@ func TestUnauthenticatedMutationsSkipCSRF(t *testing.T) {
 		map[string]any{"username": "op", "password": "password123"}, nil)
 	wantStatus(t, resp, http.StatusOK)
 	_ = resp.Body.Close()
+}
+
+func TestCSRFPresenceBeaconWaivesHeader(t *testing.T) {
+	// The presence beacon (issue #160) cannot set X-Lab-Csrf — sendBeacon
+	// allows no headers — so the header requirement is waived for exactly this
+	// endpoint while the Origin checks stay in force.
+	x := newTestServer(t, nil)
+	x.setup("op", "password123")
+
+	// Matching Origin, NO X-Lab-Csrf header: the carve-out lets it through to
+	// the handler (204), not the usual 403 a header-less mutation earns.
+	resp := x.do("POST", "/api/v1/presence",
+		map[string]any{"conn": "c1", "device": strings.Repeat("ab", 32), "visible": true},
+		map[string]string{"Origin": x.ts.URL})
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+
+	// A cross-origin beacon is still rejected: the header is waived, the
+	// Origin check is not.
+	resp = x.do("POST", "/api/v1/presence",
+		map[string]any{"conn": "c1", "device": strings.Repeat("ab", 32), "visible": true},
+		map[string]string{"Origin": "https://evil.example"})
+	wantStatus(t, resp, http.StatusForbidden)
+	if got := decodeBody(t, resp); got["error"] != "origin not allowed" {
+		t.Fatalf("error = %q", got["error"])
+	}
+
+	// The carve-out is exact: another mutating endpoint without the header is
+	// still a 403, proving the waiver did not widen to the whole surface.
+	resp = x.do("POST", "/api/v1/tokens",
+		map[string]any{"name": "t"}, map[string]string{"Origin": x.ts.URL})
+	wantStatus(t, resp, http.StatusForbidden)
+	if got := decodeBody(t, resp); got["error"] != "missing X-Lab-Csrf header" {
+		t.Fatalf("error = %q", got["error"])
+	}
 }
 
 func TestCanonicalOrigin(t *testing.T) {

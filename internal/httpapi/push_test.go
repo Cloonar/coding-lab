@@ -34,7 +34,7 @@ func newPushTestServer(t *testing.T) (*testServer, *push.Sender) {
 		if err != nil {
 			t.Fatalf("GenerateKey: %v", err)
 		}
-		sender = push.NewSender(o.Store, key, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		sender = push.NewSender(o.Store, key, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		o.Push = sender
 	})
 	x.setup("op", "password123")

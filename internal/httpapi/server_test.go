@@ -16,6 +16,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 )
@@ -25,12 +26,13 @@ import (
 var testArgon = argonParams{time: 1, memoryKiB: 1024, threads: 1, keyLen: 32, saltLen: 16}
 
 type testServer struct {
-	t      *testing.T
-	srv    *Server
-	st     *store.Store
-	bus    *events.Bus
-	ts     *httptest.Server
-	client *http.Client // cookie-jar client (the "browser")
+	t        *testing.T
+	srv      *Server
+	st       *store.Store
+	bus      *events.Bus
+	presence *presence.Registry // the wired registry (nil when mod clears it)
+	ts       *httptest.Server
+	client   *http.Client // cookie-jar client (the "browser")
 }
 
 func newTestServer(t *testing.T, mod func(*Options)) *testServer {
@@ -42,6 +44,9 @@ func newTestServer(t *testing.T, mod func(*Options)) *testServer {
 		Bus:               bus,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		HeartbeatInterval: time.Hour, // tests that want heartbeats override
+		// Presence tracking is on by default so tests reach the registry
+		// directly via x.presence; a test needing the nil case clears it in mod.
+		Presence: presence.NewRegistry(),
 	}
 	if mod != nil {
 		mod(&o)
@@ -59,7 +64,7 @@ func newTestServer(t *testing.T, mod func(*Options)) *testServer {
 	if err != nil {
 		t.Fatalf("cookiejar: %v", err)
 	}
-	return &testServer{t: t, srv: srv, st: st, bus: bus, ts: ts, client: &http.Client{Jar: jar}}
+	return &testServer{t: t, srv: srv, st: st, bus: bus, presence: o.Presence, ts: ts, client: &http.Client{Jar: jar}}
 }
 
 // do sends a request through the cookie-jar client. body non-nil is sent as
