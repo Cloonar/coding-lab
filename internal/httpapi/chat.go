@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
@@ -309,19 +310,41 @@ type noticeResponse struct {
 	Notice string `json:"notice"`
 }
 
+// commandWord extracts the first whitespace-delimited token from cmd (already
+// trimmed of leading/trailing whitespace by the caller) — the command name a
+// reply dispatches on, discarding any argument. Both lab-command dispatch
+// (/pull-base, below) and the clear-hook (isClearCommand) must recognise a
+// command by its word, not the whole string: claude's /clear carries ArgHint
+// "[name]" and the autocomplete gesture model (issue #122) actively invites
+// typing one, so "/clear my-session" is still the clear command, argument and
+// all — matching the whole string missed this and let an arg-bearing clear
+// slip past the hook unpulled (issue #151). unicode.IsSpace, not a literal
+// " " check: a tab separates a command from its argument just as well.
+func commandWord(cmd string) string {
+	if i := strings.IndexFunc(cmd, unicode.IsSpace); i >= 0 {
+		return cmd[:i]
+	}
+	return cmd
+}
+
 // handleRunReply is POST /api/v1/runs/{id}/reply — a free-text reply to a live
 // instance. 409 for an ended run or a pending dialog; 400 for empty/oversize.
-// Two shapes of text divert from the verbatim forward (issue #149):
+// Two shapes of text divert from the verbatim forward (issue #149), both
+// recognised by their COMMAND WORD (commandWord, issue #151) rather than the
+// whole string, so the two dispatch paths agree on what counts as "the same
+// command with an argument trailing it":
 //
 //   - "/pull-base" is the first lab command: the server executes it itself
 //     (merge origin/<base> into the run's worktree, then inject the digest as
 //     an agent message) and it NEVER reaches the provider — unwired it is
-//     refused (503), never forwarded, and an argument form is a 400.
+//     refused (503), never forwarded, and any argument (space- or
+//     tab-separated) is a 400, since pull-base takes none.
 //   - the provider's role=clear command (e.g. claude's /clear) pulls the base
 //     BEFORE the clear is forwarded, so the fresh conversation starts on the
-//     fresh base. The hook applies only to active runs with a pull service
-//     wired; a catalog hiccup reads as "not a clear" (the forward must never
-//     block on a scan).
+//     fresh base — arguments allowed and forwarded verbatim, because an
+//     arg-bearing clear must still pull (issue #151). The hook applies only
+//     to active runs with a pull service wired; a catalog hiccup reads as
+//     "not a clear" (the forward must never block on a scan).
 //
 // Everything else forwards byte-for-byte as before.
 func (s *Server) handleRunReply(w http.ResponseWriter, r *http.Request) {
@@ -335,11 +358,11 @@ func (s *Server) handleRunReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cmd := strings.TrimSpace(req.Text)
-	switch {
-	case cmd == "/pull-base":
-		s.handlePullBase(w, r, run)
-		return
-	case strings.HasPrefix(cmd, "/pull-base "):
+	if commandWord(cmd) == "/pull-base" {
+		if cmd == "/pull-base" {
+			s.handlePullBase(w, r, run)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "pull-base takes no arguments")
 		return
 	}
@@ -354,11 +377,16 @@ func (s *Server) handleRunReply(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// isClearCommand reports whether cmd (already whitespace-trimmed) is exactly
-// the provider's role=clear command — "/"+spec.Name, no arguments — per the
+// isClearCommand reports whether cmd's command word (already whitespace-
+// trimmed by the caller, then cut at the next run of whitespace by
+// commandWord) is the provider's role=clear command — "/"+spec.Name — per the
 // run's chat-safe catalog (the same cached view the commands endpoint serves,
-// under the same 30s clock). Plain text skips the catalog scan entirely, and
-// a resolve error reads as "not a clear": a catalog hiccup must never block a
+// under the same 30s clock). Arguments are allowed and ignored for the match:
+// claude's /clear carries ArgHint "[name]" and the autocomplete gesture model
+// (issue #122) actively invites typing one, so "/clear my-session" is still a
+// clear that must pull before it forwards (issue #151) — comparing the whole
+// string missed this. Plain text skips the catalog scan entirely, and a
+// resolve error reads as "not a clear": a catalog hiccup must never block a
 // clear from going through as an ordinary reply.
 func (s *Server) isClearCommand(ctx context.Context, run store.Run, cmd string) bool {
 	if !strings.HasPrefix(cmd, "/") {
@@ -368,8 +396,9 @@ func (s *Server) isClearCommand(ctx context.Context, run store.Run, cmd string) 
 	if err != nil {
 		return false
 	}
+	word := commandWord(cmd)
 	for _, c := range cmds {
-		if c.Role == provider.CommandRoleClear && cmd == "/"+c.Name {
+		if c.Role == provider.CommandRoleClear && word == "/"+c.Name {
 			return true
 		}
 	}
