@@ -1,9 +1,10 @@
 package httpapi
 
 // Settings surface (pinned M5 contract): GET returns every settings row with
-// typed values (the integer knobs as JSON numbers); PATCH validates the whole
-// body first — unknown keys, non-integers, out-of-range intervals, and spawn
-// defaults outside the provider catalogs are 400s that write NOTHING — then
+// typed values (the integer knobs as JSON numbers, the boolean knobs as JSON
+// bools); PATCH validates the whole body first — unknown keys, non-integers,
+// non-booleans, out-of-range intervals, and spawn defaults outside the provider
+// catalogs are 400s that write NOTHING — then
 // upserts and returns the updated map. No event is published and no restart
 // is needed: the runtime loops re-read settings every tick (D12c), and spawn
 // paths read them per call.
@@ -49,8 +50,25 @@ var settingsIntMin = map[string]int{
 	store.SettingDialogTimeoutMinutes: 0,
 }
 
+// settingsBoolNullable is the closed set of BOOLEAN settings keys (issue #163 —
+// the first non-string, non-integer knobs on this surface), each mapped to
+// whether JSON null is a legal value for it. The store speaks key → string, so
+// these are persisted as "true"/"false" (and "" for the AFK inherit state) and
+// typed back to real JSON bools on the way out.
+//
+// The base key is a plain bool: false is a VALUE (never remote), not an absence.
+// The AFK override is tri-state — null (stored "") means inherit the base chain,
+// mirroring how the string _afk keys use "" — because `false`-means-inherit would
+// be a lie for a boolean knob (the trap ResolveRemote's doc calls out).
+var settingsBoolNullable = map[string]bool{
+	store.SettingSpawnRemoteDefault:    false,
+	store.SettingSpawnRemoteDefaultAFK: true,
+}
+
 // typedSettings renders a raw settings map with the integer keys as JSON
-// numbers. A garbled stored value (unparseable int) is passed through as the
+// numbers and the boolean keys as JSON bools (a nullable boolean key stored ""
+// renders as JSON null — inherit). A garbled stored value (an unparseable int,
+// a boolean row holding neither "true" nor "false") is passed through as the
 // raw string — visible to the operator rather than silently rewritten.
 func typedSettings(all map[string]string) map[string]any {
 	out := make(map[string]any, len(all))
@@ -59,6 +77,21 @@ func typedSettings(all map[string]string) map[string]any {
 			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 				out[k] = n
 				continue
+			}
+		}
+		if nullable, isBool := settingsBoolNullable[k]; isBool {
+			switch strings.TrimSpace(v) {
+			case "true":
+				out[k] = true
+				continue
+			case "false":
+				out[k] = false
+				continue
+			case "":
+				if nullable {
+					out[k] = nil
+					continue
+				}
 			}
 		}
 		out[k] = v
@@ -110,6 +143,15 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates[key] = strconv.Itoa(n)
+			continue
+		}
+		if nullable, isBool := settingsBoolNullable[key]; isBool {
+			v, err := parseSettingBool(raw, key, nullable)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			updates[key] = v
 			continue
 		}
 		switch key {
@@ -253,6 +295,30 @@ func parseSettingInt(raw json.RawMessage) (int, error) {
 		return strconv.Atoi(strings.TrimSpace(str))
 	}
 	return 0, fmt.Errorf("not an integer")
+}
+
+// parseSettingBool reads a BOOLEAN settings value (issue #163) and returns the
+// canonical string the store holds ("true"/"false", or "" for the accepted null).
+// STRICT by design, unlike parseSettingInt's string tolerance: only a JSON bool
+// (and, for a nullable key, JSON null) is accepted — "true", "yes" and 1 are all
+// 400s. A boolean knob whose wire type is loose invites exactly the confusion the
+// tri-state exists to prevent (is "" off, or unset?), so the wire type is pinned.
+func parseSettingBool(raw json.RawMessage, key string, nullable bool) (string, error) {
+	must := fmt.Errorf("%s must be a boolean", key)
+	if nullable {
+		must = fmt.Errorf("%s must be a boolean or null", key)
+	}
+	var v *bool
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", must
+	}
+	if v == nil {
+		if !nullable {
+			return "", must
+		}
+		return "", nil // null = inherit the base layer (stored as the blank row)
+	}
+	return strconv.FormatBool(*v), nil
 }
 
 func parseSettingString(raw json.RawMessage) (string, error) {

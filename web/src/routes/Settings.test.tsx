@@ -17,6 +17,7 @@ function baseProviders(): Provider[] {
     {
       id: 'claude-code',
       display_name: 'Claude Code',
+      supports_remote: true,
       auth: { kind: 'oauth-code' },
       models: [
         { value: 'opus[1m]', label: 'Opus (1M)', efforts: [] },
@@ -44,6 +45,7 @@ function baseProviders(): Provider[] {
 const CODEX: Provider = {
   id: 'codex',
   display_name: 'Codex',
+  supports_remote: false,
   auth: { kind: 'api-key' },
   models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: [] }],
   efforts: [{ value: 'medium', label: 'medium' }],
@@ -353,6 +355,85 @@ describe('Settings AFK defaults', () => {
 
     // Empty is allowed for the AFK key — it clears back to the base default.
     expect(patchBodies).toEqual([{ spawn_model_default_afk: '' }]);
+  });
+});
+
+// Remote control (issue #163): a plain on/off checkbox at the BASE scope (there
+// is nothing above it to inherit from) and a 3-state override in the AFK card,
+// both PATCHed as JSON bools — with null for "same as default".
+describe('Settings remote control', () => {
+  const remoteBox = () => input('spawn_remote_default');
+
+  it('seeds the base checkbox from the stored bool and the AFK override to inherit', async () => {
+    settingsOnServer = { spawn_remote_default: true };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
+      'spawn defaults section',
+    );
+
+    expect(remoteBox().type).toBe('checkbox');
+    expect(remoteBox().checked).toBe(true);
+    expect(selectedLabel('spawn_remote_default_afk')).toBe('Same as default');
+    // The base control lives in the base spawn-defaults card, the override in AFK.
+    expect(
+      cardByHeading('Spawn defaults').querySelector('input[name="spawn_remote_default"]'),
+    ).not.toBeNull();
+    expect(
+      cardByHeading('AFK defaults').querySelector('button[name="spawn_remote_default_afk"]'),
+    ).not.toBeNull();
+  });
+
+  it('PATCHes the base bool and an explicit AFK off', async () => {
+    settingsOnServer = { spawn_remote_default: false };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
+      'spawn defaults section',
+    );
+    expect(remoteBox().checked).toBe(false);
+
+    toggleCheckbox(remoteBox(), true);
+    await chooseFromSelect('spawn_remote_default_afk', 'Off');
+    submitForm();
+    await settle();
+
+    // Both go as JSON bools — `false` is a value here, never an omission.
+    expect(patchBodies).toEqual([{ spawn_remote_default: true, spawn_remote_default_afk: false }]);
+  });
+
+  it('clears an AFK override back to inherit as null, and never sends an untouched field', async () => {
+    settingsOnServer = { spawn_remote_default: true, spawn_remote_default_afk: false };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
+      'spawn defaults section',
+    );
+    // The stored explicit off shows as Off — NOT as the inherit row.
+    expect(selectedLabel('spawn_remote_default_afk')).toBe('Off');
+    expect(remoteBox().checked).toBe(true);
+
+    await chooseFromSelect('spawn_remote_default_afk', 'Same as default');
+    submitForm();
+    await settle();
+
+    // Only the AFK key: the untouched base checkbox stays out of the patch.
+    expect(patchBodies).toEqual([{ spawn_remote_default_afk: null }]);
+  });
+
+  it('disables both controls with a note when the resolved provider has no remote knob', async () => {
+    providersOnServer = [...baseProviders(), CODEX];
+    settingsOnServer = { provider_default: 'codex' };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
+      'spawn defaults section',
+    );
+
+    expect(remoteBox().disabled).toBe(true);
+    expect(selectTrigger('spawn_remote_default_afk').disabled).toBe(true);
+    // Named by the provider's display_name, never a hardcoded brand.
+    expect(container.textContent).toContain('Codex ignores this.');
   });
 });
 

@@ -37,6 +37,13 @@ type instanceCreateRequest struct {
 	Provider string `json:"provider"` // optional per-spawn provider pick (issue #66); "" inherits
 	Model    string `json:"model"`
 	Effort   string `json:"effort"`
+	// Remote is the optional per-spawn remote-control pick (issue #163). A
+	// POINTER, unlike its string siblings, because the knob is boolean: absent
+	// or null = no pick (the server resolves repo → settings → false), while an
+	// explicit false is a real answer that must beat a global true. Passed on
+	// untouched — httpapi never resolves the layers itself (instance.
+	// ResolveRemote owns the chain AND the provider-capability clamp).
+	Remote *bool `json:"remote"`
 	// FirstMessage is the operator's first chat message (issue #96), optional.
 	// When set it rides the spawn's trailing positional
 	// (provider.SpawnSpec.InitialPrompt) — present before the process starts,
@@ -73,6 +80,7 @@ func (s *Server) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 		Provider:     req.Provider,
 		Model:        req.Model,
 		Effort:       req.Effort,
+		Remote:       req.Remote,
 		FirstMessage: firstMessage,
 	})
 	if err != nil {

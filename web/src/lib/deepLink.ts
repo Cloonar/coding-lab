@@ -5,6 +5,10 @@
 // API — never hardcoded here). A provider with no web surface (no fallback)
 // instead offers a copyable `tmux attach` command, since its session is driven
 // from a terminal on the lab host.
+//
+// On top of that sits the remote-control gate (issue #163): a run of a
+// remote-capable provider that spawned WITHOUT remote control has no web session
+// at all, so it gets no affordance whatsoever — see openState below.
 
 import type { Provider, ProviderFallbackOpen } from '../api';
 
@@ -36,10 +40,50 @@ export function providerOpen(
   return providers.find((p) => p.id === providerID)?.fallback_open ?? null;
 }
 
+/**
+ * Whether the run's provider HAS a remote-control knob (issue #163), as the
+ * same tri-state providerOpen uses: false = loaded and it has no such knob;
+ * undefined = the providers list has not loaded, so nothing is known yet. An
+ * unknown provider id reads as false — no knob we can prove, so nothing to gate.
+ */
+export function providerSupportsRemote(
+  providers: Provider[] | undefined,
+  providerID: string,
+): boolean | undefined {
+  if (providers === undefined) return undefined;
+  return providers.find((p) => p.id === providerID)?.supports_remote ?? false;
+}
+
+/**
+ * The open affordance for one instance/run, or null for "render nothing".
+ *
+ * The remote-control gate (issue #163). The exact deep link exists only because
+ * a remote-controlled session registered itself with the provider's web bridge;
+ * with remote control off there IS no such session, so neither the link nor the
+ * provider's generic web fallback may be offered — the fallback would point the
+ * operator at a session that does not exist.
+ *
+ * The gate is CAPABILITY-SCOPED, never a bare `!remote`: a provider without the
+ * knob (supports_remote false) has its runs' `remote` clamped to false by the
+ * server, so a bare check would silently strip the tmux-attach affordance that
+ * is such a provider's only way in. Hence:
+ *
+ *   hide the affordance  ⟺  supportsRemote && !instance.remote
+ *
+ * `supportsRemote` undefined (providers still loading) hides nothing — the same
+ * "never guess" rule the `unknown` state below follows.
+ */
 export function openState(
-  instance: { connecting: boolean; deep_link_url: string | null; session_name: string },
+  instance: {
+    connecting: boolean;
+    deep_link_url: string | null;
+    session_name: string;
+    remote: boolean;
+  },
   fallback: ProviderFallbackOpen | null | undefined,
-): OpenState {
+  supportsRemote: boolean | undefined,
+): OpenState | null {
+  if (supportsRemote === true && !instance.remote) return null;
   // A captured URL beats a still-set connecting flag: the capture wrote the
   // link the moment it landed, the flag clears a beat later. Neither this nor
   // the connecting pulse depends on the providers list.

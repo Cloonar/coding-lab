@@ -67,7 +67,7 @@ The existence of the run's branch (rendered from the repo's `afk_branch_pattern`
 _Avoid_: `in-progress` label, lock, assignment, claim row/flag in the DB
 
 **Done-signal**:
-A PR or change request whose head branch equals the run's branch (state open or merged) — session exit is never the done-signal, because `--remote-control` idles after finishing.
+A PR or change request whose head branch equals the run's branch (state open or merged) — session exit is never the done-signal, because the agent CLI idles at its composer after finishing, remote control on or off. The old reasoning ("because `--remote-control` idles") was wrong about the cause, not the conclusion: a live A/B against claude 2.1.206 (compat §12, the issue #163 spike) found a session spawned WITHOUT `--remote-control` still sleeping at its prompt ~12 minutes past turn end, exactly like the remote control arm. Session death without a PR is a failure, never a completion.
 _Avoid_: session exit, exit code, completion event
 
 **Ready queue**:
@@ -174,7 +174,7 @@ _Avoid_: forge link-out, completion email, per-outcome alerts
 ## Example dialogue
 
 > **Dev:** "When an **AFK run** finishes its issue, do we mark the run done when the session exits?"
-> **Domain expert:** "Never — `--remote-control` idles after opening the PR. The **done-signal** is a PR or **change request** whose head branch equals the run's branch. Session death *without* that PR is a failure."
+> **Domain expert:** "Never — the agent idles at its composer after opening the PR, with or without remote control; an interactive CLI doesn't quit when a turn ends. The **done-signal** is a PR or **change request** whose head branch equals the run's branch. Session death *without* that PR is a failure."
 >
 > **Dev:** "And the failed run's branch — should the reaper delete it so the issue re-enters the queue?"
 > **Domain expert:** "No. **Guarded teardown** keeps unmerged branches, which parks the issue. Requeue is a human decision: the **unguarded Discard** in the Parked view deletes the branch, and only that releases the **claim**. Auto-requeue is the runaway-cost nightmare we rejected twice."

@@ -552,6 +552,48 @@ func TestStartManualAFK_repoOverrideReachesSeedPrompt(t *testing.T) {
 	}
 }
 
+// The AFK launch path resolves the remote-control knob through the instance
+// service (issue #163) and carries it OPAQUELY into the spawn: the afk package
+// never reads the value — it neither branches on it nor spawns differently
+// because of it, exactly as it carries the ultracode options bag. Here the
+// AFK-override layer (spawn_remote_default_afk) turns it on for unattended runs
+// and the resolved bool must land in BOTH places lab later reads it: the
+// provider's SpawnSpec and the persisted run row (the deep-link gate's source of
+// truth across a restart).
+func TestStartManualAFK_remoteOverrideReachesSpawnAndRunRow(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReady(7)
+	// The base stays "false" (seeded) — only the AFK override says true, so this
+	// also pins that the AFK layer resolves BEFORE the base.
+	if err := f.st.SetSetting(t.Context(), store.SettingSpawnRemoteDefaultAFK, "true"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+
+	run, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK: %v", err)
+	}
+	specs := f.prov.SpawnSpecs()
+	if len(specs) != 1 || !specs[0].Remote {
+		t.Fatalf("SpawnSpecs = %+v, want one spec with Remote=true", specs)
+	}
+	if !run.Remote || !f.runRow(run.ID).Remote {
+		t.Errorf("run.Remote = %v / persisted %v, want true on both (the row is what survives a restart)",
+			run.Remote, f.runRow(run.ID).Remote)
+	}
+
+	// And with no override anywhere, an AFK run inherits the seeded false base.
+	f2 := newFixture(t)
+	f2.trk.setReady(7)
+	run2, err := f2.svc.StartManualAFK(t.Context(), f2.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK (no override): %v", err)
+	}
+	if run2.Remote || f2.runRow(run2.ID).Remote {
+		t.Error("an AFK run with no remote layers set recorded remote=true, want the false floor")
+	}
+}
+
 func TestStartManualAFK_branchPatternFlowsEverywhere(t *testing.T) {
 	f := newFixtureWithPattern(t, "issue-<N>")
 	f.trk.setReady(7)

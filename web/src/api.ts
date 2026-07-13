@@ -207,10 +207,18 @@ export interface Repo {
   incogni: boolean;
   model_default: string | null;
   effort_default: string | null;
+  /**
+   * Remote-control override for manual spawns (issue #163). TRI-STATE: null =
+   * inherit the global spawn_remote_default; `false` is an explicit "off", NOT
+   * an absent value — never collapse it into the inherit branch.
+   */
+  remote_default: boolean | null;
   /** AFK-run overrides (null = inherit the global AFK default). */
   afk_provider_default: string | null;
   afk_model_default: string | null;
   afk_effort_default: string | null;
+  /** Remote-control override for AFK runs (null = inherit); tri-state as above. */
+  afk_remote_default: boolean | null;
   /** Provider spawn-option bag for AFK runs (null = inherit global). */
   afk_options: Record<string, string> | null;
   /** AFK seed-prompt override (issue #52); null = inherit afk_prompt_effective. */
@@ -261,10 +269,14 @@ export interface RepoPatch {
   provider?: string | null;
   model_default?: string | null;
   effort_default?: string | null;
+  /** Remote control for manual spawns; null clears back to spawn_remote_default. */
+  remote_default?: boolean | null;
   /** AFK-run overrides; null or "" clears back to the global AFK default. */
   afk_provider_default?: string | null;
   afk_model_default?: string | null;
   afk_effort_default?: string | null;
+  /** Remote control for AFK runs; null clears back to the global AFK default. */
+  afk_remote_default?: boolean | null;
   afk_options?: Record<string, string> | null;
   /** null/""/whitespace-only clears back to afk_prompt_effective. */
   afk_prompt?: string | null;
@@ -378,6 +390,15 @@ export interface Provider {
   efforts: ProviderOption[];
   /** Declared spawn options (always present; may be empty). */
   options: ProviderOptionSpec[];
+  /**
+   * Whether the provider has a remote-control knob at all (issue #163): a
+   * session that registers itself with the provider's web bridge, which is what
+   * produces the exact deep link. The ONLY thing the UI may key remote-control
+   * behavior on — a provider without it ignores the setting entirely (the
+   * server clamps its runs' `remote` to false), and its rows/affordances must
+   * stay exactly as they are.
+   */
+  supports_remote: boolean;
   auth: ProviderAuthFlow;
   fallback_open?: ProviderFallbackOpen;
 }
@@ -453,6 +474,14 @@ export interface Run {
   title: string | null;
   model: string;
   effort: string;
+  /**
+   * Whether this run spawned with remote control on (issue #163) — the RESOLVED
+   * value, stamped at launch, never re-read from the layers afterwards. Always
+   * false for a provider whose supports_remote is false (the server clamps it),
+   * so `remote` alone never says "the Open affordance is gone": that gate is
+   * `provider.supports_remote && !run.remote` (see lib/deepLink.ts).
+   */
+  remote: boolean;
   deep_link_url: string | null;
   started_at: string;
   budget_deadline: string | null;
@@ -494,6 +523,13 @@ export interface StartInstanceRequest {
   provider?: string;
   model?: string;
   effort?: string;
+  /**
+   * Per-spawn remote-control pick (issue #163). OMITTED = let the server
+   * resolve the layers (repo.remote_default → spawn_remote_default → false);
+   * `false` is a real, explicit pick, so it must ride the request whenever the
+   * operator turned an inherited-on default off.
+   */
+  remote?: boolean;
   /**
    * The operator's first chat message (issue #96): delivered on the spawn argv,
    * so it needs no post-spawn send — the queued-message hop (issue #41) that
@@ -824,6 +860,12 @@ export interface SpawnDefaults {
   provider?: string;
   model?: string;
   effort?: string;
+  /**
+   * The base remote-control default (issue #163). Absent = the key is unset;
+   * `false` is a real value, so the composer must key "unset" on absence, never
+   * on falsiness.
+   */
+  remote?: boolean;
 }
 
 /**
@@ -843,6 +885,8 @@ export function extractSpawnDefaults(raw: unknown): SpawnDefaults {
   if (typeof model === 'string' && model !== '') out.model = model;
   const effort = map['spawn_effort_default'];
   if (typeof effort === 'string' && effort !== '') out.effort = effort;
+  const remote = coerceBool(map['spawn_remote_default']);
+  if (typeof remote === 'boolean') out.remote = remote;
   return out;
 }
 
@@ -1285,8 +1329,21 @@ export const TEXT_SETTING_KEYS = [
   'afk_prompt_default',
 ] as const;
 
+/**
+ * The boolean settings (issue #163) — the first of their kind, hence their own
+ * key list beside the int/text ones.
+ *
+ * `spawn_remote_default` is the base remote-control default (seeded false, so
+ * always present on GET). `spawn_remote_default_afk` is the AFK OVERRIDE and is
+ * therefore TRI-STATE: `null` means "inherit the base", distinct from an
+ * explicit `false`. That is why these cannot reuse the text keys' ''-as-unset
+ * convention — `false` is a legal value, so only null/absent can mean unset.
+ */
+export const BOOL_SETTING_KEYS = ['spawn_remote_default', 'spawn_remote_default_afk'] as const;
+
 export type IntSettingKey = (typeof INT_SETTING_KEYS)[number];
 export type TextSettingKey = (typeof TEXT_SETTING_KEYS)[number];
+export type BoolSettingKey = (typeof BOOL_SETTING_KEYS)[number];
 
 /**
  * The runtime-mutable settings (§3a keys). All fields optional: GET returns
@@ -1298,10 +1355,30 @@ export type TextSettingKey = (typeof TEXT_SETTING_KEYS)[number];
  *
  * `afk_prompt_default` is read-only (see TEXT_SETTING_KEYS above) — present on
  * every GET, must never be sent back in a PATCH.
+ *
+ * The bool keys carry `null` as a first-class value (an AFK override cleared
+ * back to inherit), so their type is `boolean | null`, not just `boolean`.
  */
-export type Settings = Partial<Record<IntSettingKey, number> & Record<TextSettingKey, string>> & {
+export type Settings = Partial<
+  Record<IntSettingKey, number> &
+    Record<TextSettingKey, string> &
+    Record<BoolSettingKey, boolean | null>
+> & {
   spawn_options_afk?: Record<string, string>;
 };
+
+/**
+ * A settings bool: a real JSON boolean, or the "true"/"false" text the settings
+ * table stores (same TEXT-store tolerance the int keys get below). Anything
+ * else — including null — is not a boolean and yields undefined, leaving the
+ * caller to distinguish inherit (null) from garbage itself.
+ */
+function coerceBool(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return undefined;
+}
 
 /**
  * Normalizes a settings payload: tolerates both a flat {key: value} object
@@ -1318,6 +1395,18 @@ export function normalizeSettings(raw: unknown): Settings {
   for (const key of TEXT_SETTING_KEYS) {
     const value = map[key];
     if (typeof value === 'string') out[key] = value;
+  }
+  // Bool keys carry null THROUGH (issue #163): for the AFK override null is the
+  // inherit state, not a missing value, so it must survive the round trip —
+  // dropping it would make an explicit `false` and an inherit indistinguishable.
+  for (const key of BOOL_SETTING_KEYS) {
+    const value = map[key];
+    if (value === null) {
+      out[key] = null;
+      continue;
+    }
+    const coerced = coerceBool(value);
+    if (coerced !== undefined) out[key] = coerced;
   }
   for (const key of INT_SETTING_KEYS) {
     const value = map[key];

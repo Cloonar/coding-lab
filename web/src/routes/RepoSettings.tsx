@@ -33,7 +33,13 @@ import RequireAuth from '../components/RequireAuth';
 import { createLiveResource } from '../lib/liveResource';
 import { remoteHost } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
-import { providerFor } from '../lib/spawn';
+import { providerFor, resolveRemote } from '../lib/spawn';
+
+/** The explicit picks of a tri-state override; Select prepends the inherit row. */
+const REMOTE_OPTIONS: SelectOption[] = [
+  { value: 'true', label: 'On' },
+  { value: 'false', label: 'Off' },
+];
 
 export default function RepoSettings() {
   return (
@@ -113,6 +119,27 @@ function normText(value: string): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+/**
+ * '' ↔ null for the nullable BOOLEAN columns (issue #163). The tri-state
+ * override rides the Select as a string: '' = inherit (null on the wire),
+ * 'true'/'false' = an explicit pick. `false` is a value, never a sentinel — the
+ * 2-state-checkbox-over-a-3-state-model bug (issue #21) is impossible by
+ * construction here.
+ */
+function normBool(value: string): boolean | null {
+  return value === '' ? null : value === 'true';
+}
+
+/** The inverse: a stored boolean|null column → its tri-state select value. */
+function boolDraft(value: boolean | null): string {
+  return value === null ? '' : String(value);
+}
+
+/** Operator-facing name of an effective on/off state (the inherit row's hint). */
+function onOff(value: boolean): string {
+  return value ? 'on' : 'off';
+}
+
 /** '' ↔ null for nullable integer columns. Returns undefined on garbage. */
 function normInt(value: string): number | null | undefined {
   const trimmed = value.trim();
@@ -165,9 +192,11 @@ function SettingsForm(props: {
   const [provider, setProvider] = createSignal(initial.provider ?? '');
   const [model, setModel] = createSignal(initial.model_default ?? '');
   const [effort, setEffort] = createSignal(initial.effort_default ?? '');
+  const [remote, setRemote] = createSignal(boolDraft(initial.remote_default));
   const [afkProvider, setAfkProvider] = createSignal(initial.afk_provider_default ?? '');
   const [afkModel, setAfkModel] = createSignal(initial.afk_model_default ?? '');
   const [afkEffort, setAfkEffort] = createSignal(initial.afk_effort_default ?? '');
+  const [afkRemote, setAfkRemote] = createSignal(boolDraft(initial.afk_remote_default));
   const [afkPrompt, setAfkPrompt] = createSignal(initial.afk_prompt ?? '');
 
   // Effective providers, resolved LIVE against the DRAFT values (skip-layer,
@@ -186,6 +215,26 @@ function SettingsForm(props: {
       provider(),
       props.settings.provider_default,
     );
+
+  // What "inherit" currently MEANS for each remote-control select (issue #163),
+  // resolved LIVE against the drafts + the global settings — the same skip-layer
+  // walk the server does, so the inherit row can name the effective value
+  // instead of leaving the operator to guess it.
+  //   manual: repo.remote_default → spawn_remote_default → false
+  //   AFK:    repo.afk_remote_default → spawn_remote_default_afk
+  //             → repo.remote_default → spawn_remote_default → false
+  const inheritedRemote = () => resolveRemote(props.settings.spawn_remote_default);
+  const inheritedAfkRemote = () =>
+    resolveRemote(
+      props.settings.spawn_remote_default_afk,
+      normBool(remote()),
+      props.settings.spawn_remote_default,
+    );
+  // Remote control is a provider CAPABILITY: a provider that has no such knob
+  // ignores the field, so it renders disabled and says so in that provider's own
+  // words (display_name) — never a hardcoded brand.
+  const remoteBlocker = (provider: Provider | null): string | null =>
+    provider !== null && !provider.supports_remote ? provider.display_name : null;
 
   // Per-key checkbox state for the provider's bool options (null bag = inherit,
   // seeded to all-unchecked). Once any checkbox differs from the seed, the full
@@ -238,9 +287,11 @@ function SettingsForm(props: {
         resync(provider, setProvider, (r) => r.provider ?? '', fresh);
         resync(model, setModel, (r) => r.model_default ?? '', fresh);
         resync(effort, setEffort, (r) => r.effort_default ?? '', fresh);
+        resync(remote, setRemote, (r) => boolDraft(r.remote_default), fresh);
         resync(afkProvider, setAfkProvider, (r) => r.afk_provider_default ?? '', fresh);
         resync(afkModel, setAfkModel, (r) => r.afk_model_default ?? '', fresh);
         resync(afkEffort, setAfkEffort, (r) => r.afk_effort_default ?? '', fresh);
+        resync(afkRemote, setAfkRemote, (r) => boolDraft(r.afk_remote_default), fresh);
         resync(afkPrompt, setAfkPrompt, (r) => r.afk_prompt ?? '', fresh);
         // afk_options is an object, so resync it by value: an untouched draft
         // (still equal to the seed, or already caught up with fresh) follows
@@ -305,6 +356,9 @@ function SettingsForm(props: {
     if (normText(provider()) !== current.provider) patch.provider = normText(provider());
     if (normText(model()) !== current.model_default) patch.model_default = normText(model());
     if (normText(effort()) !== current.effort_default) patch.effort_default = normText(effort());
+    // Tri-state (issue #163): null clears back to inherit, false is an explicit
+    // off — both are values, so the dirty check is a plain !== against the seed.
+    if (normBool(remote()) !== current.remote_default) patch.remote_default = normBool(remote());
 
     if (normText(afkProvider()) !== current.afk_provider_default) {
       patch.afk_provider_default = normText(afkProvider());
@@ -314,6 +368,9 @@ function SettingsForm(props: {
     }
     if (normText(afkEffort()) !== current.afk_effort_default) {
       patch.afk_effort_default = normText(afkEffort());
+    }
+    if (normBool(afkRemote()) !== current.afk_remote_default) {
+      patch.afk_remote_default = normBool(afkRemote());
     }
     if (normText(afkPrompt()) !== current.afk_prompt) patch.afk_prompt = normText(afkPrompt());
     // Send the full declared bag once any bool option differs from its seed.
@@ -545,6 +602,30 @@ function SettingsForm(props: {
           inheritLabel="Inherit global default"
           onChange={setEffort}
         />
+        {/* Remote control (issue #163): a 3-way Inherit / On / Off over a
+            tri-state column — the inherit row names what it currently resolves
+            to, so "inherit" is never a guess. */}
+        <Select
+          skin="field"
+          label="Remote control"
+          name="remote_default"
+          value={remote()}
+          options={REMOTE_OPTIONS}
+          inheritLabel={`Inherit global default — currently ${onOff(inheritedRemote())}`}
+          disabled={remoteBlocker(baseProvider()) !== null}
+          onChange={setRemote}
+        />
+        <Show
+          when={remoteBlocker(baseProvider())}
+          fallback={
+            <small class="hint hint-block">
+              Registers the session with the agent's web app so it can be opened and driven from
+              there.
+            </small>
+          }
+        >
+          {(name) => <small class="hint hint-block">{name()} ignores this.</small>}
+        </Show>
       </section>
 
       <section class="card">
@@ -580,6 +661,22 @@ function SettingsForm(props: {
           inheritLabel="Inherit global AFK default"
           onChange={setAfkEffort}
         />
+        {/* The AFK remote override (issue #163): inherit here walks the AFK
+            chain — global AFK override, then this repo's own manual default
+            above, then the global base — which is what the row reports. */}
+        <Select
+          skin="field"
+          label="Remote control"
+          name="afk_remote_default"
+          value={afkRemote()}
+          options={REMOTE_OPTIONS}
+          inheritLabel={`Inherit global AFK default — currently ${onOff(inheritedAfkRemote())}`}
+          disabled={remoteBlocker(afkEffectiveProvider()) !== null}
+          onChange={setAfkRemote}
+        />
+        <Show when={remoteBlocker(afkEffectiveProvider())}>
+          {(name) => <small class="hint hint-block">{name()} ignores this.</small>}
+        </Show>
         <For each={boolOptions()}>
           {(option) => (
             <label class="check">

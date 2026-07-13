@@ -76,7 +76,7 @@ import {
 } from '../lib/chatStream';
 import { isComposerSend } from '../lib/composerKeys';
 import { stateBadge } from '../lib/conversation';
-import { openState, providerOpen, type OpenState } from '../lib/deepLink';
+import { openState, providerOpen, providerSupportsRemote, type OpenState } from '../lib/deepLink';
 import { runDisplayTitle, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { forgeWebUrl } from '../lib/repoName';
@@ -980,12 +980,21 @@ function ChatHeader(props: {
   // The open affordance (ADR-0017): the exact deep link when captured, else the
   // provider's generic web fallback, else a tmux-attach for a link-less
   // provider — same source of truth as the dashboard rows, never hardcoded.
+  // Nothing at all for a remote-capable provider's run that spawned with remote
+  // control off (issue #163): openState resolves that gate and answers null,
+  // which the <Show>s on open() already render as nothing.
   const open = () => {
     const r = props.run;
     if (r === undefined) return null;
     return openState(
-      { connecting: false, deep_link_url: r.deep_link_url, session_name: r.session_name },
+      {
+        connecting: false,
+        deep_link_url: r.deep_link_url,
+        session_name: r.session_name,
+        remote: r.remote,
+      },
       providerOpen(props.providers, r.provider),
+      providerSupportsRemote(props.providers, r.provider),
     );
   };
 

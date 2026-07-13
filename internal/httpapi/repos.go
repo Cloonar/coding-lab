@@ -36,6 +36,13 @@ type repoResponse struct {
 	Incogni       bool    `json:"incogni"`
 	ModelDefault  *string `json:"model_default"`
 	EffortDefault *string `json:"effort_default"`
+	// RemoteDefault is the repo's remote-control override (issue #163) — the
+	// layer between the per-spawn pick and the global spawn_remote_default.
+	// A POINTER, and never omitempty: the knob is boolean, so `false` is a real
+	// VALUE ("this repo never spawns remote", which must beat a global true) and
+	// only JSON null means inherit. Collapsing the two would silently turn an
+	// explicit off into an on.
+	RemoteDefault *bool `json:"remote_default"`
 	// AFK-override spawn defaults (issue #19 / ADR-0021; provider issue #66).
 	// Nullable: null means inherit the base default. AFKOptions renders as a
 	// JSON object (or null when unset); a nil map marshals to null (no
@@ -44,6 +51,10 @@ type repoResponse struct {
 	AFKEffortDefault   *string           `json:"afk_effort_default"`
 	AFKProviderDefault *string           `json:"afk_provider_default"`
 	AFKOptions         map[string]string `json:"afk_options"`
+	// AFKRemoteDefault is the AFK-override remote-control layer (issue #163),
+	// resolved before remote_default for an unattended run. Same tri-state as
+	// RemoteDefault: null = inherit, false = an explicit off.
+	AFKRemoteDefault *bool `json:"afk_remote_default"`
 	// AFK seed-prompt override (issue #52 / ADR-0027). AFKPrompt is the repo's
 	// own override (null = inherit). AFKPromptEffective is read-only and computed:
 	// what the repo WOULD use if its own override were empty — the global
@@ -85,10 +96,12 @@ func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
 		Incogni:              r.Incogni,
 		ModelDefault:         r.ModelDefault,
 		EffortDefault:        r.EffortDefault,
+		RemoteDefault:        r.RemoteDefault,
 		AFKModelDefault:      r.AFKModelDefault,
 		AFKEffortDefault:     r.AFKEffortDefault,
 		AFKProviderDefault:   r.AFKProviderDefault,
 		AFKOptions:           r.AFKOptions,
+		AFKRemoteDefault:     r.AFKRemoteDefault,
 		AFKPrompt:            r.AFKPrompt,
 		AFKPromptEffective:   afkPromptEffective,
 		GitAuthorName:        r.GitAuthorName,
@@ -284,6 +297,13 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			u.AFKModelDefault, err = patchNullableString(raw, key)
 		case "afk_effort_default":
 			u.AFKEffortDefault, err = patchNullableString(raw, key)
+		case "remote_default":
+			// The tri-state boolean knob (issue #163): null clears to NULL
+			// (inherit the global spawn_remote_default), true/false PIN the repo
+			// — including false, which must beat a global true.
+			u.RemoteDefault, err = patchNullableBool(raw, key)
+		case "afk_remote_default":
+			u.AFKRemoteDefault, err = patchNullableBool(raw, key)
 		case "afk_options":
 			u.AFKOptions, err = patchOptionsBag(raw, key)
 		case "afk_prompt":
@@ -388,6 +408,24 @@ func patchNullableInt(raw json.RawMessage, field string) (store.Opt[*int], error
 	var v *int
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return store.Opt[*int]{}, fmt.Errorf("field %s must be an integer or null", field)
+	}
+	return store.Set(v), nil
+}
+
+// patchNullableBool reads a nullable-boolean PATCH field (issue #163): null
+// clears the column to NULL (inherit the layer below), true/false pin it.
+//
+// The tri-state is the whole point, and it is why this cannot reuse
+// patchNullableString's shape: THAT decoder collapses "" into nil because no
+// string knob has a legal empty value, but `false` IS a legal boolean value —
+// "this repo never spawns remote" — and must survive as one. Absent key →
+// Opt.Set == false (untouched); null → Set with a nil value (inherit); false →
+// Set with a pinned false that beats a true from any lower layer. Anything else
+// (a string, a number) is a 400 — a boolean column takes booleans.
+func patchNullableBool(raw json.RawMessage, field string) (store.Opt[*bool], error) {
+	var v *bool
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return store.Opt[*bool]{}, fmt.Errorf("field %s must be a boolean or null", field)
 	}
 	return store.Set(v), nil
 }

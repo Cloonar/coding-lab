@@ -50,13 +50,22 @@ type providerResponse struct {
 	// render a copyable tmux-attach affordance instead. Additive to the pinned
 	// M3 providers shape.
 	FallbackOpen *provider.OpenAffordance `json:"fallback_open,omitempty"`
+	// SupportsRemote reports whether the provider honors lab's remote-control
+	// knob (issue #163) — the same structural question the deep-link call sites
+	// ask (ADR-0017: lab asks WHETHER, never HOW), answered by the
+	// provider.RemoteCapable assertion. A provider that does not implement it
+	// (codex) is false, and the SPA hides the remote toggle wherever this
+	// provider is the effective one: no operator sees a switch their CLI would
+	// ignore. Always present.
+	SupportsRemote bool `json:"supports_remote"`
 }
 
 // handleProvidersList is GET /api/v1/providers — every provider's id, human
 // display name (issue #51 decision 9), model/effort catalogs (provider-owned
 // data, D14; models per-model-enriched since issue #156), spawn-options schema
-// (issue #19), auth-flow descriptor (issue #51 decision 7), and fallback-open
-// metadata when it has a web surface (ADR-0017), in registration order.
+// (issue #19), auth-flow descriptor (issue #51 decision 7), fallback-open
+// metadata when it has a web surface (ADR-0017), and remote-control capability
+// (issue #163), in registration order.
 func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 	provs := s.providers.List()
 	items := make([]providerResponse, 0, len(provs))
@@ -75,6 +84,9 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 		if dl, ok := p.(provider.DeepLinker); ok {
 			fo := dl.FallbackOpen()
 			resp.FallbackOpen = &fo
+		}
+		if rc, ok := p.(provider.RemoteCapable); ok {
+			resp.SupportsRemote = rc.SupportsRemoteControl()
 		}
 		items = append(items, resp)
 	}

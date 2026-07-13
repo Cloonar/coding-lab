@@ -106,6 +106,7 @@ var (
 	_ provider.ConnectingReporter = (*Fake)(nil)
 	_ provider.DeepLinker         = (*Fake)(nil)
 	_ provider.LiveSignals        = (*Fake)(nil)
+	_ provider.RemoteCapable      = (*Fake)(nil)
 )
 
 // New returns a logged-in fake with the claude-code id, display name,
@@ -260,17 +261,30 @@ func (f *Fake) SpawnOptions() []provider.OptionSpec {
 	return append([]provider.OptionSpec(nil), f.options...)
 }
 
+// SupportsRemoteControl implements provider.RemoteCapable (issue #163): this
+// fake stands in for claude-code, so it advertises the capability AND honors
+// spec.Remote in SpawnArgv below — a fake that advertised without honoring
+// would fail the suite's own spawn-remote obligation.
+func (f *Fake) SupportsRemoteControl() bool { return true }
+
 // SpawnArgv mirrors the pinned claude argv shape so tests can assert the
 // recorded tmux argv, including the seed prompt carried as the trailing
 // positional (non-empty InitialPrompt) — manual spawns pass "" and get none.
-// It records the whole spec so tests can assert the resolved Options bag was
-// threaded through (issue #19); it does NOT apply ultracode itself — that is a
-// claude-code coupling exercised by the compat snapshot, not the fake.
+// The remote-control flag and its session-name argument ride on spec.Remote,
+// mirroring claude's shape (issue #163), so a lab-side test can assert the
+// resolved knob reached the spawn command. It records the whole spec so tests
+// can assert the resolved Options bag was threaded through (issue #19); it does
+// NOT apply ultracode itself — that is a claude-code coupling exercised by the
+// compat snapshot, not the fake.
 func (f *Fake) SpawnArgv(spec provider.SpawnSpec) []string {
 	f.mu.Lock()
 	f.spawnSpecs = append(f.spawnSpecs, spec)
 	f.mu.Unlock()
-	argv := []string{"claude", "--remote-control", spec.SessionName, "--permission-mode", "auto"}
+	argv := []string{"claude"}
+	if spec.Remote {
+		argv = append(argv, "--remote-control", spec.SessionName)
+	}
+	argv = append(argv, "--permission-mode", "auto")
 	if spec.Model != "" {
 		argv = append(argv, "--model", spec.Model)
 	}

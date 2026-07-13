@@ -16,6 +16,7 @@ import {
   pushKey,
   testPushDevice,
   updateSettings,
+  type BoolSettingKey,
   type IntSettingKey,
   type Provider,
   type PushDevice,
@@ -27,6 +28,12 @@ import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import { install } from '../lib/install';
 import { providerFor } from '../lib/spawn';
+
+/** The AFK remote override's explicit picks; the inherit row is Select's own. */
+const REMOTE_OPTIONS: SelectOption[] = [
+  { value: 'true', label: 'On' },
+  { value: 'false', label: 'Off' },
+];
 
 interface IntField {
   key: IntSettingKey;
@@ -152,10 +159,17 @@ function SettingsView() {
   );
 }
 
-/** String draft of one settings value ('' for an absent key). */
-function seedDraft(initial: SettingsPayload, key: IntSettingKey | TextSettingKey): string {
+/**
+ * String draft of one settings value ('' for an absent key). Bool keys (issue
+ * #163) draft as 'true'/'false', and null — the AFK override's inherit state —
+ * drafts as '' exactly like an absent key: both mean "no explicit pick here".
+ */
+function seedDraft(
+  initial: SettingsPayload,
+  key: IntSettingKey | TextSettingKey | BoolSettingKey,
+): string {
   const value = initial[key];
-  return value === undefined ? '' : String(value);
+  return value === undefined || value === null ? '' : String(value);
 }
 
 function SettingsForm(props: {
@@ -171,9 +185,11 @@ function SettingsForm(props: {
     provider_default: seedDraft(initial, 'provider_default'),
     spawn_model_default: seedDraft(initial, 'spawn_model_default'),
     spawn_effort_default: seedDraft(initial, 'spawn_effort_default'),
+    spawn_remote_default: seedDraft(initial, 'spawn_remote_default'),
     spawn_provider_default_afk: seedDraft(initial, 'spawn_provider_default_afk'),
     spawn_model_default_afk: seedDraft(initial, 'spawn_model_default_afk'),
     spawn_effort_default_afk: seedDraft(initial, 'spawn_effort_default_afk'),
+    spawn_remote_default_afk: seedDraft(initial, 'spawn_remote_default_afk'),
     git_author_name: seedDraft(initial, 'git_author_name'),
     git_author_email: seedDraft(initial, 'git_author_email'),
     afk_prompt: seedDraft(initial, 'afk_prompt'),
@@ -203,6 +219,12 @@ function SettingsForm(props: {
   const boolOptions = () => (afkProvider()?.options ?? []).filter((o) => o.type === 'bool');
   const optionsDirty = () => boolOptions().some((o) => optionChecked(o.key) !== seedChecked(o.key));
 
+  // Remote control (issue #163) is a provider CAPABILITY, not a spawn option:
+  // a provider without it ignores the setting, so the control is disabled and
+  // says so — in the provider's own words (display_name), never a brand name.
+  const remoteBlocker = (provider: Provider | null): string | null =>
+    provider !== null && !provider.supports_remote ? provider.display_name : null;
+
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [note, setNote] = createSignal<string | null>(null);
@@ -223,6 +245,11 @@ function SettingsForm(props: {
 
   const textDirty = (key: TextSettingKey) => draft(key).trim() !== seedDraft(initial, key).trim();
 
+  const boolDirty = (key: BoolSettingKey) => draft(key) !== seedDraft(initial, key);
+  /** The drafted tri-state: '' = inherit/unset (null on the wire), else the pick. */
+  const boolValue = (key: BoolSettingKey): boolean | null =>
+    draft(key) === '' ? null : draft(key) === 'true';
+
   const buildPatch = (): SettingsPayload | null => {
     const patch: SettingsPayload = {};
     for (const key of [
@@ -239,6 +266,11 @@ function SettingsForm(props: {
       // afk_prompt_default is deliberately absent from this list: it is a
       // read-only, server-injected key (issue #52) that must never be PATCHed.
       if (textDirty(key)) patch[key] = draft(key).trim();
+    }
+    // Bool keys (issue #163): dirty-only, like every other field — an untouched
+    // remote toggle is never sent, and `false` is a value, not an omission.
+    for (const key of ['spawn_remote_default', 'spawn_remote_default_afk'] as BoolSettingKey[]) {
+      if (boolDirty(key)) patch[key] = boolValue(key);
     }
     for (const field of INT_FIELDS) {
       if (!intDirty(field.key)) continue;
@@ -350,6 +382,32 @@ function SettingsForm(props: {
             Provider catalog unavailable — only the stored values are offered.
           </small>
         </Show>
+        {/* Remote control (issue #163): the BASE default every other layer
+            falls back to, hence a plain on/off checkbox — there is nothing
+            above it to inherit from. Off unless the operator turns it on. */}
+        <label class="check">
+          <input
+            type="checkbox"
+            name="spawn_remote_default"
+            checked={draft('spawn_remote_default') === 'true'}
+            disabled={remoteBlocker(baseProvider()) !== null}
+            onChange={(e) =>
+              setDraft('spawn_remote_default', e.currentTarget.checked ? 'true' : 'false')
+            }
+          />
+          <span>Remote control</span>
+        </label>
+        <Show
+          when={remoteBlocker(baseProvider())}
+          fallback={
+            <small class="hint hint-block">
+              Registers the session with the agent's web app so it can be opened and driven from
+              there.
+            </small>
+          }
+        >
+          {(name) => <small class="hint hint-block">{name()} ignores this.</small>}
+        </Show>
         {/* Not seeded server-side (issue #124): absent from GET renders as a
             blank input, distinct from an explicit 0 ("never"). */}
         <For each={SPAWN_INT_FIELDS}>{intFieldRow}</For>
@@ -388,6 +446,22 @@ function SettingsForm(props: {
           inheritLabel="Same as default"
           onChange={(value) => setDraft('spawn_effort_default_afk', value)}
         />
+        {/* The AFK remote OVERRIDE (issue #163) — three distinct states, so a
+            checkbox would be a lie: "Same as default" (null), On and Off. `false`
+            here is an explicit off that beats an on base default. */}
+        <Select
+          skin="field"
+          label="Remote control"
+          name="spawn_remote_default_afk"
+          value={draft('spawn_remote_default_afk')}
+          options={REMOTE_OPTIONS}
+          inheritLabel="Same as default"
+          disabled={remoteBlocker(afkProvider()) !== null}
+          onChange={(value) => setDraft('spawn_remote_default_afk', value)}
+        />
+        <Show when={remoteBlocker(afkProvider())}>
+          {(name) => <small class="hint hint-block">{name()} ignores this.</small>}
+        </Show>
         <For each={boolOptions()}>
           {(option) => (
             <label class="check">

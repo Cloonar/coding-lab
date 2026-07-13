@@ -413,10 +413,17 @@ func (s *Service) Interrupt(ctx context.Context, run store.Run) error {
 // PendingDialog returns the run's currently pending dialog, if any. The
 // adapter's ReadChat composition is authoritative (issue #92): a live dialog
 // arrives on Chat.PendingDialog (claude-code reads its PreToolUse spool,
-// ADR-0020 — a pending tool_use never flushes to the transcript, so the
-// side-channel is the only live source); the transcript-tail scan stays as
-// the dormant fallback for a provider that DOES flush pending tool_use
-// (StateQuestion with a nil side-channel dialog).
+// ADR-0020); the transcript-tail scan below is the fallback for a session that
+// DOES flush a pending tool_use (StateQuestion with a nil side-channel dialog).
+//
+// That fallback is NOT dead code — since issue #163 it is the LIVE path for
+// every non-remote run. The flush-on-resolve behavior the spool relies on turns
+// out to be a REMOTE-CONTROL behavior: spawned without --remote-control, claude
+// flushes a pending tool_use to the transcript immediately (compat §12, live
+// A/B on 2.1.206), so the spool overlay self-suppresses (the tool id already
+// reads as resolved) and the dialog surfaces here instead. Answering through
+// this path is live-verified. Deleting it would break dialogs on every
+// remote-off run.
 func (s *Service) PendingDialog(ctx context.Context, run store.Run) (provider.Dialog, bool) {
 	view, err := s.Read(ctx, run)
 	if err != nil {

@@ -22,6 +22,7 @@ function baseProviders(): Provider[] {
     {
       id: 'claude-code',
       display_name: 'Claude Code',
+      supports_remote: true,
       auth: { kind: 'oauth-code' },
       models: [
         { value: 'opus[1m]', label: 'Opus (1M)', efforts: [] },
@@ -45,6 +46,7 @@ function baseProviders(): Provider[] {
 const CODEX: Provider = {
   id: 'codex',
   display_name: 'Codex',
+  supports_remote: false,
   auth: { kind: 'api-key' },
   models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: [] }],
   efforts: [{ value: 'medium', label: 'medium' }],
@@ -93,9 +95,11 @@ function baseRepo(): Repo {
     incogni: false,
     model_default: null,
     effort_default: null,
+    remote_default: null,
     afk_provider_default: null,
     afk_model_default: null,
     afk_effort_default: null,
+    afk_remote_default: null,
     afk_options: null,
     afk_prompt: null,
     afk_prompt_effective: 'Resolve issue #<N> on branch <BRANCH>, then open a PR.',
@@ -636,6 +640,75 @@ describe('RepoSettings agent selection (issue #66)', () => {
     // (skip-layer makes it harmless at spawn; flipping back restores it).
     expect(patchBodies).toEqual([{ provider: 'codex' }]);
     expect(repoOnServer.model_default).toBe('weird-model');
+  });
+});
+
+// Remote control (issue #163): a 3-way Inherit / On / Off select at BOTH scopes
+// over a tri-state column — the reference implementation for a nullable bool
+// override (it sidesteps issue #21's 2-state-checkbox-over-a-3-state-model bug
+// by construction). The inherit row names what it currently resolves to.
+describe('RepoSettings remote control', () => {
+  it('offers Inherit / On / Off at both scopes, naming the effective inherited value', async () => {
+    settingsOnServer = { provider_default: 'claude-code', spawn_remote_default: true };
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="remote_default"]'), 'remote select');
+
+    expect(selectedLabel('remote_default')).toBe('Inherit global default — currently on');
+    expect(selectedLabel('afk_remote_default')).toBe('Inherit global AFK default — currently on');
+
+    selectTrigger('remote_default').click();
+    await settle();
+    expect(optionRows().map((r) => r.querySelector('.select-option-label')?.textContent)).toEqual([
+      'Inherit global default — currently on',
+      'On',
+      'Off',
+    ]);
+  });
+
+  it('an explicit repo off PATCHes false, and the AFK inherit row follows the draft live', async () => {
+    settingsOnServer = { provider_default: 'claude-code', spawn_remote_default: true };
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="remote_default"]'), 'remote select');
+
+    await chooseFromSelect('remote_default', 'Off');
+    // The AFK chain walks through the repo's manual default, so the (unsaved)
+    // draft already changes what AFK inherit means.
+    expect(selectedLabel('afk_remote_default')).toBe('Inherit global AFK default — currently off');
+
+    submitForm();
+    await settle();
+
+    // `false` is an explicit off, not an omission — it must reach the server.
+    expect(patchBodies).toEqual([{ remote_default: false }]);
+    expect(repoOnServer.remote_default).toBe(false);
+  });
+
+  it('seeds a stored AFK override and clears it back to inherit as null', async () => {
+    repoOnServer = { ...baseRepo(), afk_remote_default: true };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('button[name="afk_remote_default"]'),
+      'AFK remote select',
+    );
+    expect(selectedLabel('afk_remote_default')).toBe('On');
+
+    await chooseFromSelect('afk_remote_default', 'Inherit global AFK default — currently off');
+    submitForm();
+    await settle();
+
+    // Only the AFK key — the untouched base select stays out of the patch.
+    expect(patchBodies).toEqual([{ afk_remote_default: null }]);
+  });
+
+  it('disables both selects with a note when the resolved provider has no remote knob', async () => {
+    providersOnServer = [...baseProviders(), CODEX];
+    repoOnServer = { ...baseRepo(), provider: 'codex' };
+    await mountSettings();
+    await waitFor(() => container.querySelector('button[name="remote_default"]'), 'remote select');
+
+    expect(selectTrigger('remote_default').disabled).toBe(true);
+    expect(selectTrigger('afk_remote_default').disabled).toBe(true);
+    expect(container.textContent).toContain('Codex ignores this.');
   });
 });
 

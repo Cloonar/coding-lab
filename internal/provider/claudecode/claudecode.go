@@ -203,6 +203,7 @@ type Provider struct {
 var _ provider.AgentProvider = (*Provider)(nil)
 var _ provider.ConnectingReporter = (*Provider)(nil)
 var _ provider.DeepLinker = (*Provider)(nil)
+var _ provider.RemoteCapable = (*Provider)(nil)
 
 // New validates o and returns a Provider with the pinned production
 // timeouts. ClaudeBin/ConfigPath are the two fields issue #78 made
@@ -340,9 +341,21 @@ func (p *Provider) Efforts() []provider.Option { return slices.Clone(efforts) }
 // render order.
 func (p *Provider) SpawnOptions() []provider.OptionSpec { return slices.Clone(spawnOptions) }
 
+// SupportsRemoteControl implements provider.RemoteCapable (issue #163):
+// claude-code honors SpawnSpec.Remote — it is the provider whose sessions the
+// knob was named after, and the claude.ai deep link is a byproduct of the flag
+// SpawnArgv emits for it. Lab reads only this yes/no; the mechanism stays here.
+func (p *Provider) SupportsRemoteControl() bool { return true }
+
 // SpawnArgv builds the pinned instance spawn command:
 //
-//	{claude} --remote-control <session> --permission-mode auto [--model M] [--effort E] [prompt]
+//	{claude} [--remote-control <session>] --permission-mode auto [--model M] [--effort E] [prompt]
+//
+// The remote-control flag AND its session-name argument ride on spec.Remote
+// (issue #163) — both present when it is set, both absent otherwise, never a
+// stray flag or an empty positional. A non-remote session registers nothing
+// with claude's session registry, so it has no deep link to capture; lab gates
+// that on the same knob (it never learns the flag).
 //
 // Empty model/effort omit the flag (defaults resolve from settings before
 // the call, so production always passes both). A non-empty InitialPrompt is
@@ -359,7 +372,11 @@ func (p *Provider) SpawnArgv(spec provider.SpawnSpec) []string {
 // SpawnArgv is the pure spawn-argv builder behind Provider.SpawnArgv,
 // exported for the compat snapshot test.
 func SpawnArgv(claudeBin string, spec provider.SpawnSpec) []string {
-	argv := []string{claudeBin, "--remote-control", spec.SessionName, "--permission-mode", "auto"}
+	argv := []string{claudeBin}
+	if spec.Remote {
+		argv = append(argv, "--remote-control", spec.SessionName)
+	}
+	argv = append(argv, "--permission-mode", "auto")
 	if spec.Model != "" {
 		argv = append(argv, "--model", spec.Model)
 	}

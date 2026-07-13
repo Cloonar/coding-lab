@@ -44,7 +44,7 @@ import { createToast } from '../components/Toast';
 import { isComposerSend } from '../lib/composerKeys';
 import { useEvents } from '../events';
 import { createLiveResource } from '../lib/liveResource';
-import { providerFor, resolveEffortOption, resolveSpawnOption } from '../lib/spawn';
+import { providerFor, resolveEffortOption, resolveRemote, resolveSpawnOption } from '../lib/spawn';
 import { resourceValue } from '../lib/resource';
 import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
 
@@ -131,10 +131,18 @@ function NewRunView() {
   // resets on repo change (below) and on page load; the repo override and the
   // global default are the durable levers.
   const [providerPick, setProviderPick] = createSignal('');
+  // Per-spawn remote-control pick (issue #163). null = untouched — NOT false:
+  // `false` is a real pick here (an operator turning an inherited-on default
+  // off), so only null can mean "let the layers decide". Both picks belong to
+  // the repo they were made against, so both reset when the repo changes.
+  const [remotePick, setRemotePick] = createSignal<boolean | null>(null);
   createEffect(
     on(
       () => selectedRepo()?.id,
-      () => setProviderPick(''),
+      () => {
+        setProviderPick('');
+        setRemotePick(null);
+      },
       { defer: true },
     ),
   );
@@ -212,6 +220,22 @@ function NewRunView() {
           defaultsValue().effort,
         );
 
+  // Remote control (issue #163), mirroring the server's manual chain:
+  // per-spawn pick → repo.remote_default → spawn_remote_default → false. The
+  // toggle shows the RESOLVED value, so it is pre-filled with what would be sent
+  // if the operator never opened the popover.
+  const resolvedRemote = () =>
+    resolveRemote(selectedRepo()?.remote_default, defaultsValue().remote);
+  const remote = () =>
+    resolveRemote(remotePick(), selectedRepo()?.remote_default, defaultsValue().remote);
+  // A provider without the knob ignores remote control entirely (its runs are
+  // clamped to off server-side): the toggle is disabled and says so, named by
+  // display_name — never a hardcoded brand.
+  const remoteBlocker = (): string | null => {
+    const p = provider();
+    return p !== null && !p.supports_remote ? p.display_name : null;
+  };
+
   const [label, setLabel] = createSignal('');
   const [text, setText] = createSignal('');
   const [busy, setBusy] = createSignal(false);
@@ -276,6 +300,12 @@ function NewRunView() {
       if (providerPick() !== '') req.provider = providerPick();
       if (model() !== '') req.model = model();
       if (effort() !== '') req.effort = effort();
+      // Same discipline for remote control (issue #163): only a value that
+      // DIFFERS from the resolved default rides the request — an untouched
+      // toggle (or one toggled back to what the layers already say) sends
+      // nothing and leaves the resolution to the server. A provider that has no
+      // remote knob never sends the key at all.
+      if (remoteBlocker() === null && remote() !== resolvedRemote()) req.remote = remote();
       // The typed text rides the spawn as first_message (issue #96): the backend
       // delivers it on the agent's argv, so the chat needs no post-spawn send and
       // the lazily-created transcript never deadlocks it. Empty text = a plain
@@ -402,6 +432,9 @@ function NewRunView() {
                 <MoreChip
                   label={label()}
                   onLabel={setLabel}
+                  remote={remote()}
+                  onRemote={setRemotePick}
+                  remoteBlocker={remoteBlocker()}
                   open={pop() === 'more'}
                   onToggle={() => setPop((p) => (p === 'more' ? null : 'more'))}
                 />
@@ -455,11 +488,17 @@ function repoStatus(repo: Repo, progress: CloneProgress | null): string | undefi
   return undefined;
 }
 
-// The `…` popover: the optional label only (≤32 chars). Manual spawn accepts no
-// provider-options bag, so nothing else belongs here (issue #21 stays open).
+// The `…` popover: the optional label (≤32 chars) and the per-spawn remote
+// control toggle (issue #163). Manual spawn accepts no provider-options bag, so
+// nothing else belongs here (issue #21 stays open).
 function MoreChip(props: {
   label: string;
   onLabel: (value: string) => void;
+  /** The RESOLVED remote-control value — the pre-filled state of the toggle. */
+  remote: boolean;
+  onRemote: (value: boolean) => void;
+  /** Display name of a provider with no remote knob, else null: disables the toggle. */
+  remoteBlocker: string | null;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -489,6 +528,19 @@ function MoreChip(props: {
               autocomplete="off"
             />
           </label>
+          <label class="check">
+            <input
+              type="checkbox"
+              name="remote"
+              checked={props.remote}
+              disabled={props.remoteBlocker !== null}
+              onChange={(e) => props.onRemote(e.currentTarget.checked)}
+            />
+            <span>Remote control</span>
+          </label>
+          <Show when={props.remoteBlocker}>
+            {(name) => <small class="hint hint-block">{name()} ignores this.</small>}
+          </Show>
         </div>
       </Show>
     </div>

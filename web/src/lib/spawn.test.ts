@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Provider, ProviderModelOption } from '../api';
-import { providerFor, resolveEffortOption, resolveSpawnOption } from './spawn';
+import { providerFor, resolveEffortOption, resolveRemote, resolveSpawnOption } from './spawn';
 
 const MODELS: ProviderModelOption[] = [
   { value: 'opus[1m]', label: 'Opus (1M)', efforts: [] },
@@ -83,6 +83,45 @@ describe('resolveEffortOption', () => {
   });
 });
 
+// Remote-control resolution (issue #163): the same skip-layer walk, but over a
+// BOOLEAN. Unlike every other knob here, `false` is a legal value — so "unset"
+// is null/undefined, and an explicit false is a real answer that ends the walk.
+describe('resolveRemote', () => {
+  it('an explicit false EARLIER in the chain beats a true later', () => {
+    // The whole point of the tri-state: a repo that turned remote control off
+    // must not be overridden by an on global default.
+    expect(resolveRemote(false, true)).toBe(false);
+    expect(resolveRemote(null, false, true)).toBe(false);
+    expect(resolveRemote(undefined, null, false, true, true)).toBe(false);
+  });
+
+  it('the first non-null layer wins', () => {
+    expect(resolveRemote(true, false)).toBe(true);
+    expect(resolveRemote(null, true, false)).toBe(true);
+  });
+
+  it('skips null and undefined layers (the only "unset" spellings)', () => {
+    expect(resolveRemote(null, undefined, true)).toBe(true);
+    expect(resolveRemote(undefined, undefined, false)).toBe(false);
+  });
+
+  it('defaults OFF when nothing is set anywhere', () => {
+    expect(resolveRemote()).toBe(false);
+    expect(resolveRemote(null, undefined, null)).toBe(false);
+  });
+
+  it('mirrors the AFK chain: repo AFK → global AFK → repo base → global base', () => {
+    // Global base on, everything else inherit → on.
+    expect(resolveRemote(null, null, null, true)).toBe(true);
+    // The repo's own AFK override wins over an on global base.
+    expect(resolveRemote(false, null, null, true)).toBe(false);
+    // The global AFK override wins over the repo's manual default.
+    expect(resolveRemote(null, true, false, false)).toBe(true);
+    // Nothing AFK-specific → the manual layers decide.
+    expect(resolveRemote(null, null, true, false)).toBe(true);
+  });
+});
+
 describe('providerFor', () => {
   const auth = { kind: 'oauth-code' } as const;
   const providers: Provider[] = [
@@ -92,9 +131,18 @@ describe('providerFor', () => {
       models: MODELS,
       efforts: [],
       options: [],
+      supports_remote: true,
       auth,
     },
-    { id: 'other', display_name: 'Other', models: [], efforts: [], options: [], auth },
+    {
+      id: 'other',
+      display_name: 'Other',
+      models: [],
+      efforts: [],
+      options: [],
+      supports_remote: false,
+      auth,
+    },
   ];
 
   it('finds the repo provider by id', () => {

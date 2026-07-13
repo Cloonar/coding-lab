@@ -47,6 +47,7 @@ function provider(overrides: Partial<Provider> = {}): Provider {
     models: [],
     efforts: [],
     options: [],
+    supports_remote: true,
     auth: { kind: 'oauth-code' },
     ...overrides,
   };

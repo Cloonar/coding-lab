@@ -13,41 +13,58 @@ func TestSpawnArgv(t *testing.T) {
 	for _, tc := range []struct {
 		name                        string
 		session, model, eff, prompt string
+		remote                      bool // spec.Remote — the lab-level knob (issue #163)
 		options                     map[string]string
 		want                        string
 		wantLast                    string // expected trailing positional ("" → none)
 	}{
 		{
-			// Pinned M3 constant: {claude} --remote-control <session>
-			// --permission-mode auto [--model M] [--effort E].
-			name: "full", session: "repo~dom-20260706-0910", model: "opus[1m]", eff: "max",
+			// Pinned M3 constant, now gated on the remote knob: {claude}
+			// --remote-control <session> --permission-mode auto [--model M]
+			// [--effort E].
+			name: "full", session: "repo~dom-20260706-0910", model: "opus[1m]", eff: "max", remote: true,
 			want: "claude --remote-control repo~dom-20260706-0910 --permission-mode auto --model opus[1m] --effort max",
 		},
 		{
-			name: "empty model omitted", session: "r~x", model: "", eff: "max",
+			name: "empty model omitted", session: "r~x", model: "", eff: "max", remote: true,
 			want: "claude --remote-control r~x --permission-mode auto --effort max",
 		},
 		{
-			name: "empty effort omitted", session: "r~x", model: "sonnet", eff: "",
+			name: "empty effort omitted", session: "r~x", model: "sonnet", eff: "", remote: true,
 			want: "claude --remote-control r~x --permission-mode auto --model sonnet",
 		},
 		{
 			// AFK seed prompt: pinned v0 mechanism — trailing positional AFTER
 			// the --model/--effort flags, present before the process starts (no
 			// post-spawn keystroke race). One argv element even with spaces.
-			name: "seed prompt is the trailing positional", session: "r~afk-7", model: "sonnet", eff: "high", prompt: "resolve issue 7 and open a PR",
+			name: "seed prompt is the trailing positional", session: "r~afk-7", model: "sonnet", eff: "high", prompt: "resolve issue 7 and open a PR", remote: true,
 			want:     "claude --remote-control r~afk-7 --permission-mode auto --model sonnet --effort high resolve issue 7 and open a PR",
 			wantLast: "resolve issue 7 and open a PR",
 		},
 		{
 			// Manual spawns pass "" — no trailing argument at all.
-			name: "empty prompt omitted", session: "r~x", model: "sonnet", eff: "high",
+			name: "empty prompt omitted", session: "r~x", model: "sonnet", eff: "high", remote: true,
 			want: "claude --remote-control r~x --permission-mode auto --model sonnet --effort high",
+		},
+		{
+			// Remote OFF (issue #163, the lab default): the flag AND its
+			// session-name argument both vanish — never a bare flag, never a
+			// stray empty positional. Everything else is byte-identical to the
+			// remote argv above.
+			name: "remote off drops the flag and its session argument", session: "r~x", model: "sonnet", eff: "high",
+			want: "claude --permission-mode auto --model sonnet --effort high",
+		},
+		{
+			// Remote OFF with a seed prompt: the prompt is still the trailing
+			// positional — the knob touches nothing but its own flag pair.
+			name: "remote off keeps the seed prompt trailing", session: "r~afk-7", model: "sonnet", eff: "high", prompt: "resolve #7",
+			want:     "claude --permission-mode auto --model sonnet --effort high resolve #7",
+			wantLast: "resolve #7",
 		},
 		{
 			// ultracode on + a non-empty prompt: the directive line is prepended
 			// to the seed prompt, still ONE trailing positional (issue #19).
-			name: "ultracode prepends the directive to the seed prompt", session: "r~afk-7", model: "opus[1m]", eff: "max",
+			name: "ultracode prepends the directive to the seed prompt", session: "r~afk-7", model: "opus[1m]", eff: "max", remote: true,
 			prompt: "resolve #7", options: map[string]string{"ultracode": "true"},
 			want:     "claude --remote-control r~afk-7 --permission-mode auto --model opus[1m] --effort max " + ultracodeDirective + "\n\nresolve #7",
 			wantLast: ultracodeDirective + "\n\nresolve #7",
@@ -55,13 +72,13 @@ func TestSpawnArgv(t *testing.T) {
 		{
 			// ultracode on but an EMPTY prompt (manual): natural no-op — no
 			// trailing positional at all (ultracode is AFK-only).
-			name: "ultracode no-op on empty prompt", session: "r~x", model: "sonnet", eff: "high",
+			name: "ultracode no-op on empty prompt", session: "r~x", model: "sonnet", eff: "high", remote: true,
 			options: map[string]string{"ultracode": "true"},
 			want:    "claude --remote-control r~x --permission-mode auto --model sonnet --effort high",
 		},
 		{
 			// ultracode explicitly off leaves the seed prompt untouched.
-			name: "ultracode false leaves the prompt untouched", session: "r~afk-7", model: "sonnet", eff: "high",
+			name: "ultracode false leaves the prompt untouched", session: "r~afk-7", model: "sonnet", eff: "high", remote: true,
 			prompt: "resolve #7", options: map[string]string{"ultracode": "false"},
 			want:     "claude --remote-control r~afk-7 --permission-mode auto --model sonnet --effort high resolve #7",
 			wantLast: "resolve #7",
@@ -72,6 +89,7 @@ func TestSpawnArgv(t *testing.T) {
 				SessionName:   tc.session,
 				Model:         tc.model,
 				Effort:        tc.eff,
+				Remote:        tc.remote,
 				Options:       tc.options,
 				InitialPrompt: tc.prompt,
 			})
@@ -83,7 +101,26 @@ func TestSpawnArgv(t *testing.T) {
 			if tc.wantLast != "" && argv[len(argv)-1] != tc.wantLast {
 				t.Errorf("last argv element = %q; want %q as one positional", argv[len(argv)-1], tc.wantLast)
 			}
+			for i, arg := range argv {
+				if arg == "" {
+					t.Errorf("argv[%d] is the empty string; a dropped flag must take its argument with it (issue #163): %q", i, argv)
+				}
+			}
 		})
+	}
+}
+
+// SupportsRemoteControl is claude-code's answer to lab's remote knob (issue
+// #163): it honors it, so it advertises provider.RemoteCapable — the type
+// assertion lab's UI and deep-link gate make. The argv half is pinned above.
+func TestSupportsRemoteControl(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	rc, ok := any(p).(provider.RemoteCapable)
+	if !ok {
+		t.Fatal("claude-code does not implement provider.RemoteCapable; lab would disable a toggle its argv honors")
+	}
+	if !rc.SupportsRemoteControl() {
+		t.Error("SupportsRemoteControl() = false; want true — SpawnArgv acts on spec.Remote")
 	}
 }
 

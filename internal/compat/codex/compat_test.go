@@ -46,6 +46,26 @@ func TestCompat_SpawnArgvSeedPromptSnapshot(t *testing.T) {
 	}
 }
 
+// Remote is received and IGNORED (issue #163): codex declares no
+// provider.RemoteCapable, so lab's remote knob must not reach its argv at all —
+// byte-identical for both values, prompt included. (0.133's `codex
+// remote-control` is a host-level app-server daemon, not a per-session flag;
+// nothing here to honor.)
+func TestCompat_SpawnArgvIgnoresRemote(t *testing.T) {
+	spec := provider.SpawnSpec{
+		SessionName: "repo~afk-87", Model: "gpt-5.5", Effort: "medium", InitialPrompt: "resolve #87",
+	}
+	off := codex.SpawnArgv("codex", spec)
+	spec.Remote = true
+	on := codex.SpawnArgv("codex", spec)
+	if !reflect.DeepEqual(off, on) {
+		t.Errorf("spec.Remote leaked into the codex argv:\n Remote:false %q\n Remote:true  %q", off, on)
+	}
+	if _, ok := any((*codex.Provider)(nil)).(provider.RemoteCapable); ok {
+		t.Error("codex implements provider.RemoteCapable; it ignores the knob, so it must not advertise it (issue #163)")
+	}
+}
+
 // Effort is ALWAYS explicit (compat.md §1): `codex exec` defaults the
 // reasoning effort to NONE (the TUI to medium), so an empty spec.Effort
 // injects medium instead of omitting the flag; an empty model IS omitted

@@ -92,6 +92,57 @@ func TestSettingsTypedHelpers(t *testing.T) {
 	})
 }
 
+// TestSettingsGetBool pins GetBool's discipline (issue #163). It is GetInt's
+// rules with the boolean trap spelled out: blank/missing → the default, but a
+// stored "false" is a VALUE, not an absence, and garbage is a loud error — for
+// a boolean, silently coercing a typo to false would be indistinguishable from
+// an operator's deliberate off.
+func TestSettingsGetBool(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+
+		// Missing key -> default, either way.
+		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefault, true); err != nil || !v {
+			t.Errorf("GetBool missing = %v, %v; want true, nil", v, err)
+		}
+		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefault, false); err != nil || v {
+			t.Errorf("GetBool missing = %v, %v; want false, nil", v, err)
+		}
+
+		// Blank value -> default (blank, not "false", is the unset spelling).
+		if err := s.SetSetting(ctx, SettingSpawnRemoteDefault, ""); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefault, true); err != nil || !v {
+			t.Errorf("GetBool blank = %v, %v; want default true, nil", v, err)
+		}
+
+		// Present values win over the default — false included.
+		if err := s.SetSetting(ctx, SettingSpawnRemoteDefault, "false"); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefault, true); err != nil || v {
+			t.Errorf("GetBool false = %v, %v; want stored false, nil", v, err)
+		}
+		if err := s.SetSetting(ctx, SettingSpawnRemoteDefault, "true"); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefault, false); err != nil || !v {
+			t.Errorf("GetBool true = %v, %v; want stored true, nil", v, err)
+		}
+
+		// Malformed non-blank value fails loud, never silently coerces.
+		for _, bad := range []string{"yes", "1", "TRUE", "off"} {
+			if err := s.SetSetting(ctx, SettingSpawnRemoteDefault, bad); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.GetBool(ctx, SettingSpawnRemoteDefault, false); err == nil {
+				t.Errorf("GetBool on %q succeeded, want error", bad)
+			}
+		}
+	})
+}
+
 func TestSeedDefaultSettings(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
@@ -106,6 +157,7 @@ func TestSeedDefaultSettings(t *testing.T) {
 		want := map[string]string{
 			SettingSpawnModelDefault:    "opus[1m]",
 			SettingSpawnEffortDefault:   "max",
+			SettingSpawnRemoteDefault:   "false",
 			SettingProviderDefault:      "claude-code",
 			SettingMaxInstances:         "6",
 			SettingAFKBudgetMinutes:     "120",
@@ -127,6 +179,33 @@ func TestSeedDefaultSettings(t *testing.T) {
 			if got != v {
 				t.Errorf("seeded %s = %q, want %q", k, got, v)
 			}
+		}
+
+		// The AFK overrides are deliberately unseeded — absent = inherit the base
+		// (issue #163 for the remote pair, #19/#66 for the rest). A seeded
+		// spawn_remote_default_afk row would pin every AFK run to the base value
+		// and make "inherit" unspellable.
+		for _, k := range []string{
+			SettingSpawnRemoteDefaultAFK,
+			SettingSpawnModelDefaultAFK,
+			SettingSpawnEffortDefaultAFK,
+			SettingSpawnProviderDefaultAFK,
+			SettingSpawnOptionsAFK,
+			SettingAFKPrompt,
+			SettingDialogTimeoutMinutes,
+		} {
+			if v, ok := all[k]; ok {
+				t.Errorf("seeded %s = %q, want the key absent (inherit)", k, v)
+			}
+		}
+
+		// The seeded base reads back through GetBool as a real false, and the
+		// unseeded AFK key falls back to whatever default the resolver passes.
+		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefault, true); err != nil || v {
+			t.Errorf("GetBool(spawn_remote_default) = %v, %v; want seeded false, nil", v, err)
+		}
+		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefaultAFK, true); err != nil || !v {
+			t.Errorf("GetBool(spawn_remote_default_afk) = %v, %v; want the caller's default true, nil", v, err)
 		}
 	})
 }

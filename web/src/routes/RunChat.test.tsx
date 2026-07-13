@@ -103,6 +103,7 @@ function baseRun(): Run {
     title: null,
     model: 'opus[1m]',
     effort: 'max',
+    remote: true,
     deep_link_url: 'https://claude.ai/code/session_1',
     started_at: '2026-07-06T15:00:00.000Z',
     budget_deadline: null,
@@ -129,9 +130,11 @@ function baseRepo(): Repo {
     incogni: false,
     model_default: null,
     effort_default: null,
+    remote_default: null,
     afk_provider_default: null,
     afk_model_default: null,
     afk_effort_default: null,
+    afk_remote_default: null,
     afk_options: null,
     afk_prompt: null,
     afk_prompt_effective: '',
@@ -410,6 +413,7 @@ beforeEach(() => {
     {
       id: 'claude-code',
       display_name: 'Claude Code',
+      supports_remote: true,
       auth: { kind: 'oauth-code' },
       models: [],
       efforts: [],
@@ -1747,11 +1751,15 @@ describe('RunChat', () => {
   });
 
   it('shows a copyable tmux-attach for a link-less provider (no web fallback)', async () => {
-    runOnServer = { ...baseRun(), provider: 'codex', deep_link_url: null };
+    // A provider with no remote-control knob is ALWAYS remote:false (the server
+    // clamps it) — its attach affordance must survive the remote gate untouched
+    // (issue #163), which a bare `if (!run.remote)` check would have killed.
+    runOnServer = { ...baseRun(), provider: 'codex', remote: false, deep_link_url: null };
     providersOnServer = [
       {
         id: 'codex',
         display_name: 'Codex CLI',
+        supports_remote: false,
         auth: { kind: 'external' },
         models: [],
         efforts: [],
@@ -1767,6 +1775,20 @@ describe('RunChat', () => {
     const attach = container.querySelector('button.attach-copy');
     expect(attach?.textContent).toContain('Copy attach');
     expect(attach?.getAttribute('title')).toContain('tmux attach -t proj~dom-20260706-1500');
+  });
+
+  it('hides the Open affordance entirely for a remote-capable run spawned without remote control', async () => {
+    // Remote control off = no session was registered with the provider's web
+    // app, so the deep link AND its fallback picker link would both point at
+    // nothing (issue #163): render nothing at all, not even the connecting pulse.
+    runOnServer = { ...baseRun(), remote: false, deep_link_url: null };
+    await mountChat();
+
+    expect(container.querySelector('a.card-link')).toBeNull();
+    expect(container.querySelector('button.attach-copy')).toBeNull();
+    expect(container.querySelector('.chip.connecting')).toBeNull();
+    // The rest of the header is unaffected — this is not an error state.
+    expect(container.querySelector('.chat-title-text')?.textContent).toBe('dom · 15:00');
   });
 
   it('does not resurrect Load earlier after paging up hit the beginning', async () => {

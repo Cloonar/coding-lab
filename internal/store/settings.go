@@ -14,6 +14,7 @@ import (
 const (
 	SettingSpawnModelDefault    = "spawn_model_default"
 	SettingSpawnEffortDefault   = "spawn_effort_default"
+	SettingSpawnRemoteDefault   = "spawn_remote_default"
 	SettingProviderDefault      = "provider_default"
 	SettingMaxInstances         = "max_instances"
 	SettingAFKBudgetMinutes     = "afk_budget_minutes"
@@ -49,6 +50,20 @@ const (
 	// like the other AFK overrides it is intentionally NOT seeded by
 	// SeedDefaultSettings.
 	SettingSpawnProviderDefaultAFK = "spawn_provider_default_afk"
+
+	// Remote-control spawn defaults (issue #163): does a session launch with the
+	// provider's remote-control surface (claude's --remote-control, until now
+	// hardcoded on)? spawn_remote_default above is the base layer under
+	// repos.remote_default; spawn_remote_default_afk is its AFK-only override,
+	// resolved FIRST for unattended runs and — like every other _afk key —
+	// intentionally NOT seeded, because absent = inherit the base.
+	//
+	// The base key breaks the pattern of the ones above in one way: it IS seeded
+	// (to "false"). It has to be. Every knob so far reads "" as unset, which is
+	// safe only because "" is not a legal model/effort/provider id — but false IS
+	// a legal remote value, so "unset" can never be spelled false. Hence the
+	// layers below store NULL for inherit, and both keys are read through GetBool.
+	SettingSpawnRemoteDefaultAFK = "spawn_remote_default_afk"
 
 	// AFK seed-prompt override (issue #52 / ADR-0027): the global layer between
 	// repos.afk_prompt and the built-in template (afk.SeedPromptTemplate).
@@ -144,16 +159,41 @@ func (s *Store) GetInt(ctx context.Context, key string, def int) (int, error) {
 	return n, nil
 }
 
+// GetBool returns the value for key as a bool, falling back to def when the key
+// is missing or blank. A present, non-blank value that is not exactly "true" or
+// "false" is an error (fail loud, never silently coerce a typo to false — for a
+// boolean knob false is a real answer, so a wrong one is indistinguishable from
+// an intended one). Blank — not "false" — remains the "unset" spelling.
+func (s *Store) GetBool(ctx context.Context, key string, def bool) (bool, error) {
+	v, err := s.GetString(ctx, key, "")
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(v) {
+	case "":
+		return def, nil
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("setting %q: not a boolean: %q", key, v)
+}
+
 // SeedDefaultSettings inserts the design §3a defaults for every missing key
 // and never overwrites an existing row (--max-instances seeds the row on
 // first start; thereafter settings wins). defaultProvider seeds the
 // provider_default row (issue #66) — the caller passes the first registered
 // provider's ID so the store stays provider-agnostic; "" seeds an
-// empty-means-inherit row (the degraded no-provider boot).
+// empty-means-inherit row (the degraded no-provider boot). spawn_remote_default
+// seeds "false" (issue #163): a boolean knob has no blank-means-unset spelling,
+// so the base layer must state the default out loud — its AFK override stays
+// unseeded, like the other _afk keys.
 func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defaultProvider string) error {
 	defaults := map[string]string{
 		SettingSpawnModelDefault:    "opus[1m]",
 		SettingSpawnEffortDefault:   "max",
+		SettingSpawnRemoteDefault:   "false",
 		SettingProviderDefault:      defaultProvider,
 		SettingMaxInstances:         strconv.Itoa(maxInstances),
 		SettingAFKBudgetMinutes:     "120",

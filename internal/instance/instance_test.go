@@ -314,11 +314,22 @@ func TestStart_happyPath(t *testing.T) {
 	if info.RunID != run.ID || info.Outcome != store.RunOutcomeActive || info.ExpiresAt != nil {
 		t.Errorf("token info = %+v", info)
 	}
-	// The async capture persists the real deep link and re-publishes.
-	waitFor(t, "deep link captured", func() bool {
-		r, err := f.st.RunBySession(t.Context(), name)
-		return err == nil && r.DeepLinkURL != nil && *r.DeepLinkURL == "https://claude.ai/code/session_real"
-	})
+	// The default manual start is NOT remote (issue #163: the seeded
+	// spawn_remote_default is "false" and nothing overrides it here), so the row
+	// records remote=false, the spawn argv carries no remote-control flag (asserted
+	// above via wantSpawnArgv), and NO deep-link capture arms — a non-remote session
+	// registers nothing to capture. The remote counterpart, where capture does land
+	// the link, is TestStart_remote_spawnsRemoteAndCapturesDeepLink.
+	if got.Remote {
+		t.Error("default manual run recorded remote=true, want false (seeded spawn_remote_default=false)")
+	}
+	time.Sleep(50 * time.Millisecond) // give any wrongly-armed capture goroutine a beat
+	if r, err := f.st.RunBySession(t.Context(), name); err != nil || r.DeepLinkURL != nil {
+		t.Errorf("deep_link_url = %v (err %v), want NULL — capture must not arm for a non-remote run", r.DeepLinkURL, err)
+	}
+	if f.prov.CaptureCount() != 0 {
+		t.Errorf("CaptureDeepLink ran %d times for a non-remote run, want 0", f.prov.CaptureCount())
+	}
 
 	// Lab-side seeding ran (D13, every spawn): the skills bundle landed under
 	// .claude/skills/ with the embedded content, CLAUDE.local.md carries the

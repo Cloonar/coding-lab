@@ -38,16 +38,23 @@ const (
 
 // Run is one row of runs — every §3a column. Nil pointers are NULL.
 type Run struct {
-	ID             string
-	RepoID         string
-	Kind           string // manual|afk_manual|afk_auto
-	Provider       string
-	IssueNumber    *int
-	Branch         string
-	WorktreePath   string
-	SessionName    string
-	Model          string
-	Effort         string
+	ID           string
+	RepoID       string
+	Kind         string // manual|afk_manual|afk_auto
+	Provider     string
+	IssueNumber  *int
+	Branch       string
+	WorktreePath string
+	SessionName  string
+	Model        string
+	Effort       string
+	// Remote is the resolved remote-control value stamped at launch (issue
+	// #163) — a plain bool, like Model/Effort/Provider, because a run row is the
+	// history of what was actually resolved, not a layer that can inherit. It is
+	// persisted rather than re-derived because deep-link capture arms at boot
+	// re-adoption too: after a restart this column is all lab has to tell it
+	// whether a live session was spawned remote.
+	Remote         bool
 	DeepLinkURL    *string
 	TranscriptPath *string // provider-native transcript file the chat reads through (ADR-0016)
 	StartedAt      time.Time
@@ -74,7 +81,7 @@ func (r Run) DisplayName() string {
 // scanRun reads.
 const runColumns = `id, repo_id, kind, provider, issue_number, branch,
 	worktree_path, session_name, model, effort, deep_link_url, transcript_path,
-	started_at, budget_deadline, ended_at, outcome, failure_reason, title`
+	started_at, budget_deadline, ended_at, outcome, failure_reason, title, remote`
 
 // CreateRun inserts r exactly as given (the caller has derived every field:
 // session name, branch, worktree path, resolved model/effort). Timestamps are
@@ -94,11 +101,11 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	}
 	_, err := s.db.ExecContext(ctx, s.rebind(
 		`INSERT INTO runs (`+runColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.RepoID, r.Kind, r.Provider, r.IssueNumber, r.Branch,
 		r.WorktreePath, r.SessionName, r.Model, r.Effort, r.DeepLinkURL,
 		r.TranscriptPath, fmtTime(r.StartedAt), fmtNullTime(r.BudgetDeadline),
-		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason, r.Title)
+		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason, r.Title, r.Remote)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return Run{}, fmt.Errorf("create run %q: %w", r.SessionName, ErrNotFound)
@@ -295,7 +302,8 @@ func scanRun(scan func(dest ...any) error) (Run, error) {
 	)
 	if err := scan(&r.ID, &r.RepoID, &r.Kind, &r.Provider, &issueN, &r.Branch,
 		&r.WorktreePath, &r.SessionName, &r.Model, &r.Effort, &deepLink,
-		&transcript, &started, &budget, &ended, &r.Outcome, &failure, &title); err != nil {
+		&transcript, &started, &budget, &ended, &r.Outcome, &failure, &title,
+		&r.Remote); err != nil {
 		return Run{}, err
 	}
 	r.IssueNumber = nullInt(issueN)
