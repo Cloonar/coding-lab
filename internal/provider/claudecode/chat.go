@@ -217,12 +217,35 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		seq     int64
 		byTool  = map[string]int{} // tool_use id → index into msgs (result back-patch)
 		lastKey string             // classification of the last content-bearing event
+		// pending tracks async background work this session spawned — agent /
+		// workflow ids added structurally from toolUseResult markers, removed on
+		// their terminal task-notification or TaskStop (issue #159). While
+		// non-empty, an assistant text tail derives `working`, not needs_input:
+		// the CLI will re-invoke the model when the work completes, so pushing
+		// the operator at turn end would be spurious. Session rotation (/clear,
+		// /rewind) needs no reset — folding restarts on the fresh transcript.
+		pending = map[string]struct{}{}
 	)
 	emit := func(m provider.Message) int {
 		seq++
 		m.Seq = seq
 		msgs = append(msgs, m)
 		return len(msgs) - 1
+	}
+	// resolveNotification applies a task-notification payload to the pending
+	// set: the <task-id> leaves the set only when a non-empty <status> tag
+	// (wild: completed|failed|killed — any value is terminal) accompanies it; a
+	// status-less payload is a Monitor interim <event> and must not remove.
+	// Idempotent by construction — duplicate notifications for one id are real
+	// (SendMessage resume re-notifies, Monitor notifies per event), and a
+	// TaskStop's killed enqueue can precede the TaskStop line in file order, so
+	// removal is order-tolerant set-delete, never an error.
+	resolveNotification := func(payload string) {
+		id := tagContent(payload, "task-id")
+		if id == "" || strings.TrimSpace(tagContent(payload, "status")) == "" {
+			return
+		}
+		delete(pending, id)
 	}
 
 	for _, b := range lines {
@@ -236,13 +259,58 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 				emit(provider.Message{Kind: provider.MessageLifecycle, Time: it.Timestamp, Text: it.Content})
 			}
 			continue
+		case "queue-operation":
+			// Task-notification carrier 1 (issue #159): every notification
+			// writes an enqueue first, so this is the earliest removal signal;
+			// dequeue/remove repeat the same content and are handled identically
+			// (the operation field is deliberately not read). A payload-carrying
+			// queue-operation also bumps lastKey: an enqueued notification means
+			// the CLI is about to re-invoke the model — the same "(about to be)
+			// working" philosophy user:text encodes — closing the needs_input
+			// micro-window between enqueue and delivery. Emits no message.
+			if payload := strings.TrimSpace(it.Content); strings.HasPrefix(payload, "<task-notification>") {
+				resolveNotification(payload)
+				lastKey = "task-notification"
+			}
+			continue
+		case "attachment":
+			// Task-notification carrier 3 (issue #159): mid-turn delivery rides
+			// an attachment{type:"queued_command",commandMode:"task-notification"}
+			// with the payload in prompt. Other attachment types and commandModes
+			// (task_reminder, edited_text_file, operator-queued messages) stay
+			// ignored and state-neutral. Emits no message.
+			if it.Attachment != nil && it.Attachment.CommandMode == "task-notification" {
+				resolveNotification(strings.TrimSpace(it.Attachment.Prompt))
+				lastKey = "task-notification"
+			}
+			continue
 		case "user", "assistant":
 			// handled below
 		default:
-			continue // attachment / ai-title / mode / queue-operation / … are not chat
+			continue // ai-title / mode / … are not chat
 		}
 		if it.Message == nil {
 			continue
+		}
+		// Pending-work markers on the event's top-level toolUseResult (issue
+		// #159, structural — never message-content prose): an async launch
+		// (status "async_launched") adds the agent's id (agentId for Agent,
+		// taskId for Workflow — the id its notifications will reference); a
+		// SendMessage resume (resumedAgentId) re-adds a stopped agent it just
+		// re-activated. See pendingWorkResult for what the status gate excludes
+		// (background Bash, Monitor, synchronous Agent calls).
+		if it.Type == "user" {
+			r := decodePendingWork(it.ToolUseResult)
+			if r.Status == "async_launched" {
+				if id := r.AgentID; id != "" {
+					pending[id] = struct{}{}
+				} else if r.TaskID != "" {
+					pending[r.TaskID] = struct{}{}
+				}
+			}
+			if r.ResumedAgentID != "" {
+				pending[r.ResumedAgentID] = struct{}{}
+			}
 		}
 		// Synthetic API-error assistant lines: always-surface, never hidden.
 		if it.IsApiErrorMessage {
@@ -271,6 +339,20 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 					}
 					continue
 				}
+				// Task-notification carrier 2 (issue #159): between-turns
+				// delivery is a standalone user message whose plain-string
+				// content leads with <task-notification> (no isMeta on these
+				// events — compat §5; classified by trimmed prefix, exactly
+				// like commandEcho above). Rendering is unchanged — it stays a
+				// visible user text message — but it resolves the pending id
+				// and takes the task-notification key, which derives working
+				// just as user:text did before.
+				if strings.HasPrefix(text, "<task-notification>") {
+					emit(provider.Message{Kind: provider.MessageText, Role: it.Message.Role, Time: it.Timestamp, Text: text})
+					resolveNotification(text)
+					lastKey = "task-notification"
+					continue
+				}
 				emit(provider.Message{Kind: provider.MessageText, Role: it.Message.Role, Time: it.Timestamp, Text: text})
 				lastKey = it.Message.Role + ":text"
 			case "thinking":
@@ -290,6 +372,18 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 				// as its demoted chip did — and is NOT registered in byTool:
 				// its Outcome is derived up front from the first pass, there
 				// is no chip to back-patch when its tool_result event follows.
+				// TaskStop removes its target from the pending set immediately
+				// (issue #159) — belt-and-braces with the killed notification
+				// that also arrives, sometimes enqueued BEFORE this line in
+				// file order (line order ≠ causal order around
+				// queue-operations), which set-delete tolerates either way.
+				// Everything else about the TaskStop chip — emission, byTool
+				// back-patch, lastKey — stays the ordinary tool path below.
+				if blk.Name == "TaskStop" {
+					if id := str(decodeToolInput(blk.Input)["task_id"]); id != "" {
+						delete(pending, id)
+					}
+				}
 				if d, ok := dialogFromToolUse(blk); ok {
 					if res, resolved := resolutions[blk.ID]; resolved {
 						d.Outcome = outcomeFor(d, res)
@@ -326,7 +420,7 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		}
 	}
 
-	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey), Cursor: seq}, nil
+	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey, len(pending) > 0), Cursor: seq}, nil
 }
 
 // commandEcho classifies (and parses) Claude Code's local-command breadcrumbs:
@@ -388,7 +482,16 @@ func tagContent(s, tag string) string {
 // content-bearing event decides: the assistant's own prose ends its turn
 // (needs input), while a just-sent user message, a running tool, or a fresh
 // tool result mean the agent is (about to be) working.
-func deriveState(msgs []provider.Message, lastKey string) string {
+//
+// pendingWork (issue #159) is the async hold: while background agents or
+// workflows this session spawned are still running, the assistant's ended
+// turn does NOT mean the operator's turn — the CLI re-invokes the model when
+// the work completes — so assistant:text derives working instead of
+// needs_input and no spurious push fires. Only that one edge is softened: an
+// API error stays needs_input unconditionally (errors must surface past
+// pending work), and structured live signals (spool dialog, blocked marker —
+// ReadChat's overlay) already outrank whatever the transcript derives.
+func deriveState(msgs []provider.Message, lastKey string, pendingWork bool) string {
 	if len(msgs) == 0 {
 		return provider.StateIdle
 	}
@@ -404,8 +507,11 @@ func deriveState(msgs []provider.Message, lastKey string) string {
 	}
 	switch lastKey {
 	case "assistant:text":
+		if pendingWork {
+			return provider.StateWorking
+		}
 		return provider.StateNeedsInput
-	case "user:text", "tool_use", "tool_result", "assistant:thinking":
+	case "user:text", "tool_use", "tool_result", "assistant:thinking", "task-notification":
 		return provider.StateWorking
 	case "dialog":
 		return provider.StateQuestion
