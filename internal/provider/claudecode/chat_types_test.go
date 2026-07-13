@@ -7,6 +7,7 @@ package claudecode
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -122,6 +123,36 @@ func TestToolView_bashNoCommandNoView(t *testing.T) {
 	}
 }
 
+// TestToolView_read pins Path from file_path with Text left empty — the
+// excerpt only exists once the tool_result lands (patchToolResult fills it
+// in), not at tool_use time.
+func TestToolView_read(t *testing.T) {
+	v := toolView("Read", map[string]any{"file_path": "a.txt"})
+	if v == nil {
+		t.Fatal("View = nil; want a read view")
+	}
+	if v.Kind != provider.ToolViewRead {
+		t.Errorf("Kind = %q; want %q", v.Kind, provider.ToolViewRead)
+	}
+	if v.Path != "a.txt" {
+		t.Errorf("Path = %q; want %q", v.Path, "a.txt")
+	}
+	if v.Text != "" {
+		t.Errorf("Text = %q; want empty at tool_use time", v.Text)
+	}
+}
+
+// TestToolView_readNoPathNoView: a missing/empty file_path (a partial or
+// degenerate input) yields no view.
+func TestToolView_readNoPathNoView(t *testing.T) {
+	if v := toolView("Read", map[string]any{}); v != nil {
+		t.Errorf("View = %+v; want nil", v)
+	}
+	if v := toolView("Read", map[string]any{"file_path": ""}); v != nil {
+		t.Errorf("View = %+v; want nil", v)
+	}
+}
+
 // TestToolView_notebookEditAllAdded: NotebookEdit's input carries only the
 // new cell source, never the old one, so the view is an all-added diff
 // (oldText "") — pinned against unidiff's documented pure-insertion header
@@ -153,11 +184,11 @@ func TestToolView_notebookEditDeleteNoView(t *testing.T) {
 	}
 }
 
-// TestToolView_unmappedTool: a tool this mapper does not know about — Read
+// TestToolView_unmappedTool: a tool this mapper does not know about — Glob
 // included, since it is the paradigm case the client's raw Input/Output
 // fallback exists for — gets no view.
 func TestToolView_unmappedTool(t *testing.T) {
-	for _, name := range []string{"Read", "Grep", "Glob", "Task", "Skill", "AskUserQuestion", "SomeFutureTool"} {
+	for _, name := range []string{"Grep", "Glob", "Task", "Skill", "AskUserQuestion", "SomeFutureTool"} {
 		if v := toolView(name, map[string]any{"file_path": "x", "command": "y"}); v != nil {
 			t.Errorf("%s: View = %+v; want nil", name, v)
 		}
@@ -271,5 +302,75 @@ func TestPatchToolResult_errorStatus(t *testing.T) {
 	}
 	if tool.Output != "boom" {
 		t.Errorf("Output = %q; want %q", tool.Output, "boom")
+	}
+}
+
+// TestPatchToolResult_readView pins the read view's Text contract: a cat -n
+// formatted result has its line-number prefixes stripped and a trailing
+// <system-reminder> block dropped.
+func TestPatchToolResult_readView(t *testing.T) {
+	raw, _ := json.Marshal("     1\tpackage main\n     2\t\n     3\tfunc main() {}\n\n<system-reminder>\nsome note\n</system-reminder>")
+	tool := &provider.ToolInfo{View: &provider.ToolView{Kind: provider.ToolViewRead, Path: "a.go"}}
+	patchToolResult(tool, tBlock{Result: json.RawMessage(raw)})
+	want := "package main\n\nfunc main() {}"
+	if tool.View == nil {
+		t.Fatal("View = nil; want the read view to survive an ok result")
+	}
+	if tool.View.Text != want {
+		t.Errorf("View.Text = %q; want %q", tool.View.Text, want)
+	}
+	if tool.View.Kind != provider.ToolViewRead || tool.View.Path != "a.go" {
+		t.Errorf("View = %+v; want Kind/Path untouched", tool.View)
+	}
+}
+
+// TestPatchToolResult_readViewUnrecognizedShape: when at least one non-empty
+// line does not match the cat -n prefix, readExcerpt is conservative and
+// passes the text through unmodified rather than mangle an unexpected shape.
+func TestPatchToolResult_readViewUnrecognizedShape(t *testing.T) {
+	out := "     1\tpackage main\nnot a numbered line"
+	raw, _ := json.Marshal(out)
+	tool := &provider.ToolInfo{View: &provider.ToolView{Kind: provider.ToolViewRead, Path: "a.go"}}
+	patchToolResult(tool, tBlock{Result: json.RawMessage(raw)})
+	if tool.View == nil || tool.View.Text != out {
+		t.Errorf("View = %+v; want Text unchanged from %q", tool.View, out)
+	}
+}
+
+// TestPatchToolResult_readViewError: an error result is not file content, so
+// the read view is cleared entirely — the client falls back to the raw
+// Output chip.
+func TestPatchToolResult_readViewError(t *testing.T) {
+	raw, _ := json.Marshal("ENOENT: no such file")
+	tool := &provider.ToolInfo{View: &provider.ToolView{Kind: provider.ToolViewRead, Path: "missing.go"}}
+	patchToolResult(tool, tBlock{Result: json.RawMessage(raw), IsError: true})
+	if tool.View != nil {
+		t.Errorf("View = %+v; want nil on an error result", tool.View)
+	}
+	if tool.Status != "error" {
+		t.Errorf("Status = %q; want error", tool.Status)
+	}
+}
+
+// TestPatchToolResult_readViewDetailSizing confirms the read view's Text
+// goes through the same 20000-byte TruncateDetail cap as the write/diff
+// views (TestPatchToolResult_detailSizing's sizing approach), keyed off the
+// cat -n line count so the excerpt still exceeds the limit after stripping.
+func TestPatchToolResult_readViewDetailSizing(t *testing.T) {
+	line := strings.Repeat("x", 100)
+	var b strings.Builder
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&b, "%6d\t%s\n", i, line)
+	}
+	out := b.String()
+	raw, _ := json.Marshal(out)
+	tool := &provider.ToolInfo{View: &provider.ToolView{Kind: provider.ToolViewRead, Path: "big.go"}}
+	patchToolResult(tool, tBlock{Result: json.RawMessage(raw)})
+	want := provider.TruncateDetail(readExcerpt(out))
+	if tool.View.Text != want {
+		t.Errorf("View.Text = %q; want provider.TruncateDetail(readExcerpt(out))", tool.View.Text)
+	}
+	if !strings.Contains(tool.View.Text, "truncated (") {
+		t.Errorf("View.Text does not carry the truncation marker: %q", tool.View.Text[len(tool.View.Text)-60:])
 	}
 }

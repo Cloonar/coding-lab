@@ -10,11 +10,15 @@ package claudecode
 import (
 	"encoding/json"
 	"path"
+	"regexp"
 	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/unidiff"
 )
+
+// lineNumPrefix matches a Read result's cat -n line-number prefix ("     1\t").
+var lineNumPrefix = regexp.MustCompile(`^\s*\d+\t`)
 
 type tItem struct {
 	Type              string    `json:"type"`      // user|assistant|system|attachment|…
@@ -145,6 +149,14 @@ func toolView(name string, in map[string]any) *provider.ToolView {
 			return nil
 		}
 		return &provider.ToolView{Kind: provider.ToolViewCommand, Command: provider.TruncateDetail(cmd)}
+	case "Read":
+		// Text stays empty here — the excerpt only exists once the tool_result
+		// lands (patchToolResult fills it in).
+		path := str(in["file_path"])
+		if path == "" {
+			return nil
+		}
+		return &provider.ToolView{Kind: provider.ToolViewRead, Path: path}
 	default:
 		return nil
 	}
@@ -168,6 +180,43 @@ func patchToolResult(t *provider.ToolInfo, b tBlock) {
 	} else {
 		t.Status = "ok"
 	}
+	if t.View != nil && t.View.Kind == provider.ToolViewRead {
+		if isErr {
+			// An error message is not file content — fall back to the raw
+			// Output chip rather than render it as an excerpt.
+			t.View = nil
+		} else {
+			t.View.Text = provider.TruncateDetail(readExcerpt(out))
+		}
+	}
+}
+
+// readExcerpt cleans a Read tool_result into a plain file excerpt. Claude
+// Code renders Read results cat -n style (right-aligned line number + tab +
+// content) and sometimes appends a trailing <system-reminder>…</system-reminder>
+// block that is not part of the file.
+func readExcerpt(s string) string {
+	if i := strings.Index(s, "\n<system-reminder>"); i >= 0 {
+		s = strings.TrimRight(s[:i], " \t\n")
+	} else if strings.HasPrefix(s, "<system-reminder>") {
+		s = ""
+	}
+	lines := strings.Split(s, "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		if !lineNumPrefix.MatchString(line) {
+			return s // not every line matches — conservative, return as-is
+		}
+	}
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		lines[i] = lineNumPrefix.ReplaceAllString(line, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // toolTitle renders the chat chip label from the tool name and decoded input:
