@@ -401,6 +401,45 @@ func TestReadRedact_masksToolView(t *testing.T) {
 	}
 }
 
+// 7c. A secret inside a "read" kind ToolView (issue #154 §3) — the newest
+// member of the union — is masked field-for-field exactly like the other
+// kinds tested above; redact.go masks Path/Text/Command generically by field,
+// not by Kind, so this pins that the new kind rides the same path rather than
+// re-testing the masking mechanism itself.
+func TestReadRedact_masksToolView_readKind(t *testing.T) {
+	cn := &captureNotifier{}
+	svc, st, fake, _ := newSecretService(t, cn.notify, time.Minute)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	seedSecret(t, st, run.RepoID, testSecretName, testSecretValue)
+	fake.SetTranscriptPath("/t.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageTool, Tool: &provider.ToolInfo{
+			Name: "Read", Title: "Read secret.env", Status: "ok",
+			View: &provider.ToolView{
+				Kind: provider.ToolViewRead,
+				Path: "/tmp/" + testSecretValue + ".env",
+				Text: "token=" + testSecretValue,
+			}}}}})
+
+	view, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if js := viewJSON(t, view); strings.Contains(js, testSecretValue) {
+		t.Error("plaintext value survived in a read-kind tool View")
+	}
+	gv := view.Messages[0].Tool.View
+	if gv.Kind != provider.ToolViewRead {
+		t.Fatalf("Kind = %q; want %q", gv.Kind, provider.ToolViewRead)
+	}
+	if want := "/tmp/" + testPlaceholder + ".env"; gv.Path != want {
+		t.Errorf("View.Path = %q; want %q", gv.Path, want)
+	}
+	if want := "token=" + testPlaceholder; gv.Text != want {
+		t.Errorf("View.Text = %q; want %q", gv.Text, want)
+	}
+}
+
 // --- loop-level integration tests ------------------------------------------
 
 // 8. needs-input body masking: the tailer masks BEFORE the notify gate

@@ -252,6 +252,7 @@ const (
 	ToolViewDiff    = "diff"    // Path + Text: a unified-diff body for an edit
 	ToolViewCommand = "command" // Command: a shell command line
 	ToolViewWrite   = "write"   // Path + Text: a file's written content
+	ToolViewRead    = "read"    // Path + Text: a file excerpt that was read
 )
 
 // ToolView is the optional provider-neutral rich view of a tool call (issue
@@ -265,9 +266,9 @@ const (
 // here carries no ---/+++ file header — see internal/unidiff), and the fields a
 // given Kind does not use stay empty (see the kind constants above).
 type ToolView struct {
-	Kind    string `json:"kind"`              // ToolView* (diff|command|write)
-	Path    string `json:"path,omitempty"`    // diff, write: the file path
-	Text    string `json:"text,omitempty"`    // diff: unified-diff text; write: file content
+	Kind    string `json:"kind"`              // ToolView* (diff|command|write|read)
+	Path    string `json:"path,omitempty"`    // diff, write, read: the file path
+	Text    string `json:"text,omitempty"`    // diff: unified-diff text; write/read: file content/excerpt
 	Command string `json:"command,omitempty"` // command: the shell command line
 }
 

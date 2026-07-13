@@ -2,13 +2,20 @@
 // - the stream renders user/assistant text, tool chips, and lifecycle/errors;
 //   thinking is permanently dropped at paint — in the stream and in the tool
 //   panel's list — with no toggle to reveal it (issue #68);
-// - tool chips and group summaries are buttons opening the tool detail panel
-//   (issue #145): a lone chip straight at its detail, a group at its list;
-//   nothing expands inline anymore. The selection is seq-keyed so the open
-//   panel resolves live across SSE refetches (decision 12), swaps in place on
-//   a retarget, closes via ✕ / desktop Esc (unless an inner editor consumed
-//   the key), clears on stream resets, and renders as a modal sheet (<1024px)
-//   or an in-flow sidebar (>=1024px) — a pure render switch on shared state;
+// - tool chips and group summaries are buttons whose click branches on the
+//   1024px breakpoint (issue #154): on desktop they toggle a RICH inline
+//   expansion in place (a lone chip its ToolViewBody, a group its member chips,
+//   each independently expandable); on mobile they open the tool detail sheet
+//   (issue #145) — a lone chip straight at its detail, a group at its list. On
+//   desktop a FILE chip (diff/write/read) also carries an "open in sidebar"
+//   affordance opening the flush-right, file-detail-only sidebar (§2);
+//   command/fallback chips and group summary rows never get one, and mobile
+//   gets none anywhere. Both the panel selection (seq-keyed, resolving live
+//   across SSE refetches — decision 12; swaps in place on a retarget, closes via
+//   ✕/Esc) and the desktop expansions (seq-keyed too) survive refetches and
+//   clear on stream resets; the sheet flips to the in-flow sidebar when the
+//   viewport crosses to >=1024px, and a non-file (group / command) selection
+//   clears on that crossing since the desktop sidebar shows files only;
 // - a run.messages.changed for THIS run refetches; other runs are ignored;
 //   run.changed for other repos is ignored too;
 // - a refetch tails with after=<cursor> (paginating past the window limit) so
@@ -1887,7 +1894,7 @@ describe('RunChat', () => {
 
     // Opening the panel list (a user tap) still never reveals it — one row
     // per TOOL, and there is no toggle left to flip.
-    (container.querySelector('button.chat-tool-group') as HTMLButtonElement).click();
+    (container.querySelector('button.tool-group-summary') as HTMLButtonElement).click();
     await settle();
 
     expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(2);
@@ -1928,7 +1935,7 @@ describe('RunChat', () => {
     };
     await mountChat();
 
-    (container.querySelector('button.chat-tool-group') as HTMLButtonElement).click();
+    (container.querySelector('button.tool-group-summary') as HTMLButtonElement).click();
     await settle();
     expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(2);
 
@@ -1970,11 +1977,11 @@ describe('RunChat', () => {
     expect(buttonByLabel('Back to list')).not.toBeNull();
   });
 
-  // --- Tool detail panel (issue #145) ---
-  // Chips and group summaries are buttons opening the panel; nothing expands
-  // inline anymore. The default all-false matchMedia stub (or none at all)
-  // reads as mobile → the modal sheet; DESKTOP_QUERY flips the same open
-  // panel to the in-flow sidebar.
+  // --- Tool detail panel: mobile sheet (issue #145) ---
+  // On mobile (the default all-false matchMedia stub, or none at all) a chip /
+  // group click opens the modal bottom sheet; crossing to DESKTOP_QUERY flips an
+  // already-open panel to the in-flow sidebar. A desktop click itself expands
+  // inline instead (issue #154, covered below), never opening the panel.
 
   function panelRow(title: string): HTMLButtonElement {
     const row = Array.from(container.querySelectorAll<HTMLButtonElement>('.tool-panel-row')).find(
@@ -2012,7 +2019,7 @@ describe('RunChat', () => {
     await mountChat(); // default fixture: one lone tool, 'Ran ls', output 'a\nb'
     expect(container.querySelector('.tool-panel')).toBeNull();
 
-    const chip = container.querySelector('button.chat-tool') as HTMLButtonElement;
+    const chip = container.querySelector('button.tool-summary') as HTMLButtonElement;
     chip.click();
     await settle();
 
@@ -2028,15 +2035,17 @@ describe('RunChat', () => {
     // The chip wears the selected state…
     expect(chip.classList.contains('selected')).toBe(true);
     expect(chip.getAttribute('aria-pressed')).toBe('true');
-    // …and nothing expanded inline: the stream carries no I/O pane.
+    // …and nothing expanded inline (issue #154 is desktop-only): the stream
+    // carries no I/O pane and no inline body.
     expect(container.querySelector('.chat-stream .tool-body')).toBeNull();
+    expect(container.querySelector('.tool-inline-body')).toBeNull();
   });
 
   it('opens the panel at the list page for a group tap, one row per tool', async () => {
     withToolRunAndLoneChip();
     await mountChat();
 
-    const group = container.querySelector('button.chat-tool-group') as HTMLButtonElement;
+    const group = container.querySelector('button.tool-group-summary') as HTMLButtonElement;
     group.click();
     await settle();
 
@@ -2050,12 +2059,14 @@ describe('RunChat', () => {
     // The group line is marked as the panel's source.
     expect(group.classList.contains('selected')).toBe(true);
     expect(group.getAttribute('aria-pressed')).toBe('true');
+    // Nothing expanded inline on mobile (issue #154 is desktop-only).
+    expect(container.querySelector('.tool-group-body')).toBeNull();
   });
 
   it('pushes a list row to its detail and returns via back', async () => {
     withToolRunAndLoneChip();
     await mountChat();
-    (container.querySelector('button.chat-tool-group') as HTMLButtonElement).click();
+    (container.querySelector('button.tool-group-summary') as HTMLButtonElement).click();
     await settle();
 
     panelRow('read').click();
@@ -2076,14 +2087,14 @@ describe('RunChat', () => {
     withToolRunAndLoneChip();
     await mountChat();
 
-    const group = container.querySelector('button.chat-tool-group') as HTMLButtonElement;
+    const group = container.querySelector('button.tool-group-summary') as HTMLButtonElement;
     group.click();
     await settle();
     expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(3);
 
     // Tap the separate lone chip: ONE panel swaps to its detail (no
     // close/reopen churn) and the selected highlight moves with it.
-    const chip = container.querySelector('button.chat-tool') as HTMLButtonElement;
+    const chip = container.querySelector('button.tool-summary') as HTMLButtonElement;
     chip.click();
     await settle();
     expect(container.querySelectorAll('.tool-panel')).toHaveLength(1);
@@ -2097,7 +2108,7 @@ describe('RunChat', () => {
 
   it('closes the panel and clears the selected highlight via ✕', async () => {
     await mountChat();
-    const chip = container.querySelector('button.chat-tool') as HTMLButtonElement;
+    const chip = container.querySelector('button.tool-summary') as HTMLButtonElement;
     chip.click();
     await settle();
     expect(container.querySelector('.tool-panel')).not.toBeNull();
@@ -2113,7 +2124,7 @@ describe('RunChat', () => {
   it('resets the panel when the stream resets (transcript rotation)', async () => {
     messagesOnServer = { ...messagesOnServer, transcript_id: 'sess-A' };
     await mountChat();
-    (container.querySelector('button.chat-tool') as HTMLButtonElement).click();
+    (container.querySelector('button.tool-summary') as HTMLButtonElement).click();
     await settle();
     expect(container.querySelector('.tool-panel')).not.toBeNull();
 
@@ -2138,16 +2149,36 @@ describe('RunChat', () => {
     expect(container.querySelector('.selected')).toBeNull();
   });
 
-  it('keeps the panel open across the 1024px breakpoint, switching containers', async () => {
+  it('keeps a FILE panel open across the 1024px breakpoint, switching containers', async () => {
     const media = stubMatchMedia(); // DESKTOP_QUERY reads false → mobile
+    // A file tool: only a FILE selection survives the crossing to desktop (the
+    // sidebar is file-only — a command/group selection clears, tested below).
+    messagesOnServer = {
+      messages: [
+        {
+          seq: 1,
+          kind: 'tool',
+          tool: {
+            name: 'Edit',
+            title: 'edit foo.ts',
+            status: 'ok',
+            view: { kind: 'diff', path: 'foo.ts', text: '@@ -1 +1 @@\n+x' },
+          },
+        },
+      ],
+      state: 'needs_input',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+    };
     await mountChat();
-    (container.querySelector('button.chat-tool') as HTMLButtonElement).click();
+    (container.querySelector('button.tool-summary') as HTMLButtonElement).click();
     await settle();
     expect(container.querySelector('aside.tool-panel')?.getAttribute('role')).toBe('dialog');
     expect(container.querySelector('.tool-scrim')).not.toBeNull();
 
     // Cross to desktop: shared state, pure render switch — the panel stays
-    // open with the same content, now the in-flow complementary sidebar (no
+    // open with the same file, now the in-flow complementary sidebar (no
     // dialog role, no scrim).
     media.set(DESKTOP_QUERY, true);
     await settle();
@@ -2156,33 +2187,342 @@ describe('RunChat', () => {
     expect(side!.getAttribute('role')).toBeNull();
     expect(side!.classList.contains('tool-panel-side')).toBe(true);
     expect(container.querySelector('.tool-scrim')).toBeNull();
-    expect(side!.querySelector('.tool-body.tool-output')?.textContent).toBe('a\nb');
+    expect(side!.querySelector('.tool-view-path-text')?.textContent).toBe('foo.ts');
   });
 
-  it('Esc closes the desktop panel unless an inner editor consumed it', async () => {
-    stubMatchMedia().set(DESKTOP_QUERY, true); // desktop from mount
+  // (A desktop chip-BODY click no longer opens the panel — it expands inline
+  // (below). The desktop panel is now reached by a file chip's "open in sidebar"
+  // affordance instead, and its Escape-close is covered by the desktop file
+  // sidebar tests further below (issue #154 §2).)
+
+  // --- Desktop inline expansion (issue #154) ---
+  // At >=1024px (DESKTOP_QUERY true) a chip / group click toggles a rich inline
+  // body in place instead of opening the panel. The mobile sheet flow above is
+  // pinned unchanged.
+
+  it('expands a lone chip inline on desktop; a second click collapses it (issue #154)', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    await mountChat(); // default fixture: one lone tool, 'Ran ls', output 'a\nb'
+    const chip = container.querySelector('button.tool-summary') as HTMLButtonElement;
+    expect(chip.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.tool-inline-body')).toBeNull();
+
+    chip.click();
+    await settle();
+    // The rich body renders inline under the stream — no sidebar / sheet panel.
+    const body = container.querySelector('.chat-stream .tool-inline-body');
+    expect(body).not.toBeNull();
+    expect(body!.querySelector('.tool-body.tool-output')?.textContent).toBe('a\nb');
+    expect(container.querySelector('aside.tool-panel')).toBeNull();
+    expect(container.querySelector('.tool-panel-side')).toBeNull();
+    expect(chip.getAttribute('aria-expanded')).toBe('true');
+    // Desktop expansion never touches the sheet-selection state.
+    expect(chip.getAttribute('aria-pressed')).toBe('false');
+    expect(container.querySelector('.chat-tool.selected')).toBeNull();
+
+    chip.click();
+    await settle();
+    expect(container.querySelector('.tool-inline-body')).toBeNull();
+    expect(chip.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('expands a group inline on desktop, each member chip independently (issue #154)', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    withToolRunAndLoneChip();
     await mountChat();
-    (container.querySelector('button.chat-tool') as HTMLButtonElement).click();
-    await settle();
-    expect(container.querySelector('.tool-panel')).not.toBeNull();
+    const group = container.querySelector('button.tool-group-summary') as HTMLButtonElement;
+    expect(group.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.tool-group-body')).toBeNull();
 
-    // Esc while the rename input is up: its handler preventDefaults (and the
-    // panel's window listener skips consumed events), so only the rename
-    // exits — the panel survives.
-    (container.querySelector('button.chat-title') as HTMLButtonElement).click();
+    group.click();
     await settle();
-    const input = container.querySelector('.chat-title-input') as HTMLInputElement;
-    input.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    const body = container.querySelector('.tool-group-body');
+    expect(body).not.toBeNull();
+    // One chip per TOOL, folded-in thinking excluded: ls, read, grep.
+    const titles = Array.from(body!.querySelectorAll('.chat-tool .tool-title')).map(
+      (el) => el.textContent,
     );
-    await settle();
-    expect(container.querySelector('.chat-title-input')).toBeNull(); // rename cancelled
-    expect(container.querySelector('.tool-panel')).not.toBeNull(); // panel intact
+    expect(titles).toEqual(['ls', 'read', 'grep']);
+    expect(group.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('aside.tool-panel')).toBeNull();
 
-    // A bare Esc that nothing consumed closes the panel.
+    // A member chip expands its OWN inline body, independent of the group.
+    const lsChip = Array.from(
+      body!.querySelectorAll<HTMLButtonElement>('button.tool-summary'),
+    ).find((b) => b.querySelector('.tool-title')?.textContent === 'ls')!;
+    lsChip.click();
+    await settle();
+    expect(lsChip.getAttribute('aria-expanded')).toBe('true');
+    // The summary sits inside a .tool-summary-row now (issue #154 split it so a
+    // sidebar affordance can be its sibling), so reach the body via the frame.
+    const inline = lsChip.closest('.chat-tool')!.querySelector('.tool-inline-body');
+    expect(inline).not.toBeNull();
+    expect(inline!.querySelector('.tool-body.tool-output')?.textContent).toBe('a');
+  });
+
+  it('keeps an inline expansion open across an SSE refetch, keyed by seq (issue #154)', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    await mountChat(); // lone tool at seq 3, output 'a\nb'
+    (container.querySelector('button.tool-summary') as HTMLButtonElement).click();
+    await settle();
+    expect(container.querySelector('.tool-inline-body .tool-body.tool-output')?.textContent).toBe(
+      'a\nb',
+    );
+
+    // An SSE tick replaces the messages array wholesale and grows the output:
+    // the seq-keyed expansion neither closes (native <details> would) nor
+    // freezes (a captured message would) — it grows in place.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: messagesOnServer.messages.map((m) =>
+        m.seq === 3 ? { ...m, tool: { ...m.tool!, output: 'a\nb\nc' } } : m,
+      ),
+    };
+    emitMessagesChanged();
+    await settle();
+    const body = container.querySelector('.tool-inline-body');
+    expect(body).not.toBeNull();
+    expect(body!.querySelector('.tool-body.tool-output')?.textContent).toBe('a\nb\nc');
+    // The freshly re-rendered summary button still reads expanded.
+    expect(
+      (container.querySelector('button.tool-summary') as HTMLButtonElement).getAttribute(
+        'aria-expanded',
+      ),
+    ).toBe('true');
+  });
+
+  // --- Desktop file sidebar affordance (issue #154 §1/§2) ---
+  // On desktop a FILE chip (diff/write/read) gets an "open in sidebar" icon
+  // button; its click opens the flush-right file sidebar. Command/fallback chips
+  // and group summary rows never get one, and mobile gets none anywhere.
+
+  /** Two lone FILE chips (diffs on foo.ts / bar.ts, split by text so they don't
+   *  coalesce) plus a lone COMMAND chip — only the two files get the affordance. */
+  function withFileChips(): void {
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'text', role: 'assistant', text: 'editing' },
+        {
+          seq: 2,
+          kind: 'tool',
+          tool: {
+            name: 'Edit',
+            title: 'edit foo.ts',
+            status: 'ok',
+            view: { kind: 'diff', path: 'foo.ts', text: '@@ -1 +1 @@\n-old\n+new-foo' },
+          },
+        },
+        { seq: 3, kind: 'text', role: 'assistant', text: 'and' },
+        {
+          seq: 4,
+          kind: 'tool',
+          tool: {
+            name: 'Edit',
+            title: 'edit bar.ts',
+            status: 'ok',
+            view: { kind: 'diff', path: 'bar.ts', text: '@@ -1 +1 @@\n+new-bar' },
+          },
+        },
+        { seq: 5, kind: 'text', role: 'assistant', text: 'then' },
+        {
+          seq: 6,
+          kind: 'tool',
+          tool: {
+            name: 'Bash',
+            title: 'run tests',
+            status: 'ok',
+            view: { kind: 'command', command: 'npm test' },
+            output: 'passed',
+          },
+        },
+      ],
+      state: 'needs_input',
+      cursor: 6,
+      has_more: false,
+      transcript: 'available',
+    };
+  }
+
+  /** The .chat-tool frame of the chip whose summary title matches. */
+  function chipFrame(title: string): HTMLElement {
+    const summary = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button.tool-summary'),
+    ).find((b) => b.querySelector('.tool-title')?.textContent === title);
+    if (!summary) throw new Error(`missing chip "${title}"`);
+    return summary.closest('.chat-tool') as HTMLElement;
+  }
+  /** The affordance in a chip's COLLAPSED row (not the expanded body's copy). */
+  function rowAffordance(frame: HTMLElement): HTMLButtonElement | null {
+    return frame.querySelector<HTMLButtonElement>(
+      ':scope > .tool-summary-row button[aria-label="Open in sidebar"]',
+    );
+  }
+
+  it('shows the open-in-sidebar affordance on desktop file chips only (issue #154)', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    withFileChips();
+    await mountChat();
+
+    // The two file chips carry the affordance in their collapsed row…
+    expect(rowAffordance(chipFrame('edit foo.ts'))).not.toBeNull();
+    expect(rowAffordance(chipFrame('edit bar.ts'))).not.toBeNull();
+    // …the command chip never does.
+    expect(rowAffordance(chipFrame('run tests'))).toBeNull();
+  });
+
+  it('never shows the affordance on a group summary row, only its member chips (issue #154)', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    // A run of file edits coalesces into a group.
+    messagesOnServer = {
+      messages: [
+        {
+          seq: 1,
+          kind: 'tool',
+          tool: {
+            name: 'Edit',
+            title: 'edit a.ts',
+            status: 'ok',
+            view: { kind: 'diff', path: 'a.ts', text: '@@ -1 +1 @@\n+a' },
+          },
+        },
+        {
+          seq: 2,
+          kind: 'tool',
+          tool: {
+            name: 'Edit',
+            title: 'edit b.ts',
+            status: 'ok',
+            view: { kind: 'diff', path: 'b.ts', text: '@@ -1 +1 @@\n+b' },
+          },
+        },
+      ],
+      state: 'needs_input',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    const groupFrame = container.querySelector('.chat-tool-group') as HTMLElement;
+    const groupSummary = groupFrame.querySelector('button.tool-group-summary') as HTMLButtonElement;
+    // Collapsed group: no affordance anywhere in the frame (the summary row is
+    // not a file chip).
+    expect(groupFrame.querySelector('button[aria-label="Open in sidebar"]')).toBeNull();
+
+    // Expanded: each member chip carries its own affordance (via the recursion).
+    groupSummary.click();
+    await settle();
+    expect(
+      groupFrame.querySelectorAll('.tool-group-body button[aria-label="Open in sidebar"]'),
+    ).toHaveLength(2);
+  });
+
+  it('opens the file sidebar from a chip affordance, replaces on a second file, Escape closes (issue #154)', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    withFileChips();
+    await mountChat();
+
+    const fooFrame = chipFrame('edit foo.ts');
+    rowAffordance(fooFrame)!.click();
+    await settle();
+
+    // The in-flow desktop sidebar shows foo.ts, and the chip is selected/pressed.
+    const side = container.querySelector('aside.tool-panel.tool-panel-side');
+    expect(side).not.toBeNull();
+    expect(side!.querySelector('.tool-view-path-text')?.textContent).toBe('foo.ts');
+    expect(fooFrame.classList.contains('selected')).toBe(true);
+    expect(
+      (fooFrame.querySelector('button.tool-summary') as HTMLButtonElement).getAttribute(
+        'aria-pressed',
+      ),
+    ).toBe('true');
+
+    // Opening a second file replaces the content in place — one panel, new path.
+    rowAffordance(chipFrame('edit bar.ts'))!.click();
+    await settle();
+    expect(container.querySelectorAll('aside.tool-panel')).toHaveLength(1);
+    const side2 = container.querySelector('aside.tool-panel-side')!;
+    expect(side2.querySelector('.tool-view-path-text')?.textContent).toBe('bar.ts');
+    expect(side2.textContent).not.toContain('foo.ts');
+    expect(fooFrame.classList.contains('selected')).toBe(false);
+    expect(chipFrame('edit bar.ts').classList.contains('selected')).toBe(true);
+
+    // Escape closes the sidebar and clears the highlight.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await settle();
-    expect(container.querySelector('.tool-panel')).toBeNull();
+    expect(container.querySelector('aside.tool-panel')).toBeNull();
+    expect(container.querySelector('.chat-tool.selected')).toBeNull();
+  });
+
+  it('carries the affordance in the expanded inline path header too (issue #154)', async () => {
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    withFileChips();
+    await mountChat();
+
+    const fooFrame = chipFrame('edit foo.ts');
+    // A body (summary) click toggles inline expansion — not the sidebar.
+    (fooFrame.querySelector('button.tool-summary') as HTMLButtonElement).click();
+    await settle();
+
+    const inline = fooFrame.querySelector('.tool-inline-body');
+    expect(inline).not.toBeNull();
+    expect(
+      inline!.querySelector('.tool-view-path button[aria-label="Open in sidebar"]'),
+    ).not.toBeNull();
+    // The body click opened no sidebar/sheet.
+    expect(container.querySelector('aside.tool-panel')).toBeNull();
+  });
+
+  it('shows no open-in-sidebar affordance anywhere on mobile (issue #154)', async () => {
+    withFileChips();
+    await mountChat(); // no matchMedia stub → mobile
+
+    expect(container.querySelector('button[aria-label="Open in sidebar"]')).toBeNull();
+
+    // Opening a file chip's sheet adds none either (the sheet has no affordance).
+    (chipFrame('edit foo.ts').querySelector('button.tool-summary') as HTMLButtonElement).click();
+    await settle();
+    expect(container.querySelector('aside.tool-panel')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Open in sidebar"]')).toBeNull();
+  });
+
+  it('closes an open group sheet when the viewport crosses to desktop (file-only sidebar) (issue #154)', async () => {
+    const media = stubMatchMedia(); // mobile
+    messagesOnServer = {
+      messages: [
+        { seq: 1, kind: 'tool', tool: { name: 'Bash', title: 'a', status: 'ok' } },
+        { seq: 2, kind: 'tool', tool: { name: 'Bash', title: 'b', status: 'ok' } },
+      ],
+      state: 'needs_input',
+      cursor: 2,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    (container.querySelector('button.tool-group-summary') as HTMLButtonElement).click();
+    await settle();
+    expect(container.querySelector('aside.tool-panel')).not.toBeNull();
+
+    // Cross to desktop: the sidebar shows file details only, so a group
+    // selection clears — the panel closes rather than showing a list.
+    media.set(DESKTOP_QUERY, true);
+    await settle();
+    expect(container.querySelector('aside.tool-panel')).toBeNull();
+  });
+
+  it('closes an open command-tool sheet when crossing to desktop (issue #154)', async () => {
+    const media = stubMatchMedia(); // mobile
+    await mountChat(); // default fixture: lone Bash 'Ran ls', no file view
+
+    (container.querySelector('button.tool-summary') as HTMLButtonElement).click();
+    await settle();
+    expect(container.querySelector('aside.tool-panel')).not.toBeNull();
+
+    // A non-file tool selection clears when the sidebar (file-only) takes over.
+    media.set(DESKTOP_QUERY, true);
+    await settle();
+    expect(container.querySelector('aside.tool-panel')).toBeNull();
   });
 
   // --- Copy-raw (issue #13) ---

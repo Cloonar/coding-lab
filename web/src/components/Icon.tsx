@@ -37,7 +37,8 @@ export type IconName =
   | 'history'
   | 'git-branch'
   | 'share'
-  | 'square-plus';
+  | 'square-plus'
+  | 'panel-right';
 
 // name -> the svg children for that glyph. Functions (not shared nodes) so a
 // glyph used in several places produces its own DOM each time. Each returned
@@ -183,6 +184,14 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
       <rect width="18" height="18" x="3" y="3" rx="2" />
       <path d="M8 12h8" />
       <path d="M12 8v8" />
+    </>
+  ),
+  // A panel with a divider near its right edge — the "open in the right sidebar"
+  // affordance for file tools (issue #154 §1).
+  'panel-right': () => (
+    <>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d="M15 3v18" />
     </>
   ),
 };

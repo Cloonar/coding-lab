@@ -546,7 +546,8 @@ export type MessageKind = 'text' | 'tool' | 'dialog' | 'lifecycle';
 export type ToolView =
   | { kind: 'diff'; path: string; text: string }
   | { kind: 'command'; command: string }
-  | { kind: 'write'; path: string; text: string };
+  | { kind: 'write'; path: string; text: string }
+  | { kind: 'read'; path: string; text: string };
 
 export interface ToolInfo {
   name: string;

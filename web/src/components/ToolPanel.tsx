@@ -12,19 +12,26 @@
 //   - Desktop (>=1024px, desktop): an in-flow right SIDEBAR — a bare <aside>,
 //     which is an implicit `complementary` landmark, so it takes NO dialog role
 //     and NO aria-modal (the sidebar is a complementary region, not modal). The
-//     parent page supplies the flex row that stretches it to full height; our
-//     CSS only fixes its width and the left border.
+//     parent page supplies the flex row that stretches it to full height and
+//     sits it flush against the window's right edge; our CSS fixes its width,
+//     left border, and a left-edge drag handle to resize it (issue #154 §3/§4).
 // It stays ONE <aside> in the JSX (attributes vary by `props.desktop`); only
 // the scrim lives in its own <Show>, so the internal `detailSeq` signal is not
 // torn down when the breakpoint flips.
 //
-// TWO pages, driven by the internal `detailSeq` signal:
+// PAGES (mobile only, driven by the internal `detailSeq` signal):
 //   - List: one row per tool call (title + status mark), for a group target.
 //   - Detail: the chip expansion, roomier (the 40vh chip cap is dropped) — the
 //     input and output <pre> blocks, reusing the chat chip's classes.
 // A group target (`entry: 'list'`) opens at the list and pushes to detail on a
 // row tap (with a back affordance); a lone chip (`entry: 'detail'`) opens
 // straight at detail and never shows a back button.
+//
+// DESKTOP is file-detail ONLY (issue #154 §2): the sidebar shows a single file's
+// detail — never the list, never a back button, never a command. RunChat only
+// ever targets it with one file tool, so desktop ignores `entry`/`detailSeq`
+// entirely and always renders `tools[0]`. Opening another file just retargets
+// (a new key); the content replaces and the sidebar stays open.
 //
 // RESET-ON-KEY: `detailSeq` resets to null whenever `props.target.key` changes
 // (a genuinely different target), via createEffect(on(key, …)). It must NOT
@@ -60,9 +67,47 @@ import {
   onCleanup,
   type JSX,
 } from 'solid-js';
-import type { ChatMessage, ToolView } from '../api';
+import type { ChatMessage } from '../api';
 import { createSheetGesture } from '../lib/sheetGesture';
 import Icon from './Icon';
+import ToolViewBody from './ToolViews';
+
+// Drag-to-resize (issue #154 §4). The desktop sidebar is flush to the window's
+// right edge, so a drag's width is `window.innerWidth - clientX`; this pins it
+// to a sane band. A single global localStorage key seeds the width on the next
+// mount (AppShell's try/catch pattern — private-mode safe).
+const WIDTH_KEY = 'lab.tool-panel-width';
+const MIN_WIDTH_PX = 320;
+
+/** Clamp a dragged/stored sidebar width to [320px, 60vw] against the given
+ *  viewport width (issue #154 §4). A huge stored value can never exceed 60vw at
+ *  render time; on a viewport too narrow for the 320px floor the 60vw cap wins.
+ *  Pure — unit-tested in ToolPanel.test.tsx. */
+export function clampPanelWidth(width: number, viewportWidth: number): number {
+  const max = Math.round(viewportWidth * 0.6);
+  return Math.min(Math.max(width, MIN_WIDTH_PX), max);
+}
+
+/** The stored sidebar width, or null for a first-time user (then the CSS default
+ *  clamp(320px, 30vw, 480px) applies). Guards a garbage/zero value to null. */
+function readStoredWidth(): number | null {
+  try {
+    const raw = localStorage.getItem(WIDTH_KEY);
+    if (raw === null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredWidth(width: number): void {
+  try {
+    localStorage.setItem(WIDTH_KEY, String(width));
+  } catch {
+    // Private mode / storage disabled — the in-memory width still applies.
+  }
+}
 
 /** The status mark for a tool call. Moved here from RunChat for issue #145 —
  *  the chat chips and the panel both render it. */
@@ -70,51 +115,6 @@ export function toolStatusMark(status?: 'running' | 'ok' | 'error'): string {
   if (status === 'ok') return '✓';
   if (status === 'error') return '✕';
   return '…';
-}
-
-// --- Rich detail views (issue #146) ----------------------------------------
-// The server tags a tool call with a `view` union; the detail page renders by
-// kind and stays provider-blind (no tool-name logic, no brand token). These
-// readers each re-derive the typed variant from a message resolved LIVE — the
-// caller passes tool() at render time, never a captured object, so an SSE
-// refetch that grows view.text flows straight through (same rule the whole
-// panel lives by, see the header note). A missing/unknown view falls back to
-// the raw input/output <pre> blocks.
-
-type DiffKind = Extract<ToolView, { kind: 'diff' | 'write' }>;
-
-/** A path-carrying view (diff or write) or undefined. */
-function pathView(m: ChatMessage): DiffKind | undefined {
-  const v = m.tool?.view;
-  return v?.kind === 'diff' || v?.kind === 'write' ? v : undefined;
-}
-
-/** The command view or undefined. */
-function commandView(m: ChatMessage): Extract<ToolView, { kind: 'command' }> | undefined {
-  const v = m.tool?.view;
-  return v?.kind === 'command' ? v : undefined;
-}
-
-type DiffLine = { text: string; cls: string };
-
-/** Split diff/write text into per-line class assignments. Prefix precedence is
- *  load-bearing: the multi-char file/hunk headers (`+++`, `---`, `@@`) MUST be
- *  tested before the single-char `+`/`-` markers, or a `+++ b/foo` header would
- *  read as an added line. `forceAdd` paints every line added for the write view
- *  — a new file is, in effect, an all-insert diff — and short-circuits the
- *  prefix test so raw content that happens to start with `-`/`@@` isn't mistyped.
- *  Empty lines are kept (blank context lines carry diff alignment); the CSS
- *  gives each line span a min-height so a blank one still occupies a row. */
-function diffLines(text: string, forceAdd = false): DiffLine[] {
-  return text.split('\n').map((line) => {
-    let cls = 'tool-diff-ctx';
-    if (forceAdd) cls = 'tool-diff-add';
-    else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@'))
-      cls = 'tool-diff-hunk';
-    else if (line.startsWith('+')) cls = 'tool-diff-add';
-    else if (line.startsWith('-')) cls = 'tool-diff-del';
-    return { text: line, cls };
-  });
 }
 
 /** What the panel is showing. Owned by RunChat; the panel is a pure view. */
@@ -152,13 +152,15 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
   createEffect(on(targetKey, () => setDetailSeq(null)));
 
   // The tool message to show in detail, resolved LIVE through props.target.tools
-  // (never captured). null means show the list. A lone chip (entry 'detail')
-  // always shows tools[0]; a group resolves the pushed seq and falls back to the
-  // list if it no longer resolves after a refetch.
+  // (never captured). null means show the list. DESKTOP is file-detail only
+  // (issue #154 §2): it ignores entry/detailSeq and always shows tools[0] — the
+  // single file RunChat's guard guarantees. A lone chip (entry 'detail') also
+  // shows tools[0]; a group resolves the pushed seq and falls back to the list
+  // if it no longer resolves after a refetch.
   const detailTool = (): ChatMessage | null => {
     const t = props.target;
     if (!t) return null;
-    if (t.entry === 'detail') return t.tools[0] ?? null;
+    if (props.desktop || t.entry === 'detail') return t.tools[0] ?? null;
     const seq = detailSeq();
     if (seq === null) return null;
     return t.tools.find((m) => m.seq === seq) ?? null;
@@ -313,6 +315,52 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
     });
   };
 
+  // --- desktop drag-to-resize (issue #154 §4) -------------------------------
+  // The sidebar is flush to the window's right edge, so a drag's target width is
+  // the distance from the pointer to that edge; clamp to [320px, 60vw]. Width is
+  // seeded from localStorage and applied inline ONLY in the desktop variant when
+  // a value exists — a first-time user keeps the CSS default clamp. Persisted on
+  // release (pointerup), never per move. Pointer events, no lib; setPointerCapture
+  // is optional-chained (jsdom lacks it). Listeners ride the drag, added on
+  // pointerdown and dropped on up/cancel (and on unmount, belt-and-suspenders).
+  const [width, setWidth] = createSignal<number | null>(readStoredWidth());
+  const [resizing, setResizing] = createSignal(false);
+
+  // The inline width for the desktop aside: null (first-time) leaves the CSS
+  // default; a stored/dragged value is re-clamped against the CURRENT viewport
+  // at render, so a huge stored value can never exceed 60vw on this screen.
+  const panelWidth = (): string | undefined => {
+    if (!props.desktop) return undefined;
+    const w = width();
+    return w === null ? undefined : `${clampPanelWidth(w, window.innerWidth)}px`;
+  };
+
+  const onResizeMove = (e: PointerEvent): void => {
+    setWidth(clampPanelWidth(window.innerWidth - e.clientX, window.innerWidth));
+  };
+  const endResize = (): void => {
+    if (!resizing()) return;
+    setResizing(false);
+    window.removeEventListener('pointermove', onResizeMove);
+    window.removeEventListener('pointerup', endResize);
+    window.removeEventListener('pointercancel', endResize);
+    const w = width();
+    if (w !== null) writeStoredWidth(w); // persist on release, not per move
+  };
+  const onResizeStart = (e: PointerEvent): void => {
+    e.preventDefault();
+    setResizing(true);
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    window.addEventListener('pointermove', onResizeMove);
+    window.addEventListener('pointerup', endResize);
+    window.addEventListener('pointercancel', endResize);
+  };
+  onCleanup(() => {
+    window.removeEventListener('pointermove', onResizeMove);
+    window.removeEventListener('pointerup', endResize);
+    window.removeEventListener('pointercancel', endResize);
+  });
+
   const closeButton = () => (
     <button
       type="button"
@@ -346,11 +394,25 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
           'tool-panel': true,
           'tool-panel-sheet': !props.desktop,
           'tool-panel-side': props.desktop,
+          'tool-panel-resizing': resizing(),
         }}
+        style={{ width: panelWidth() }}
         role={props.desktop ? undefined : 'dialog'}
         aria-modal={props.desktop ? undefined : 'true'}
         aria-labelledby={headingId}
       >
+        {/* Desktop drag-to-resize handle (issue #154 §4): a thin separator over
+            the sidebar's left border. Pointer events only; touch-action:none so
+            a touch-drag here never scrolls the page. Desktop-only. */}
+        <Show when={props.desktop}>
+          <div
+            class="tool-panel-resize"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize panel"
+            onPointerDown={onResizeStart}
+          />
+        </Show>
         {/* Pure-CSS drag pill — a bottom-sheet affordance, phone only. */}
         <Show when={!props.desktop}>
           <div class="tool-panel-grabber" aria-hidden="true" />
@@ -361,9 +423,11 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
             {(tool) => (
               <>
                 <div class="tool-panel-head">
-                  {/* Back only for a group (entry 'list'); a lone chip has no
-                      list to return to. */}
-                  <Show when={props.target?.entry === 'list'}>
+                  {/* Back only for a group (entry 'list') on MOBILE; a lone chip
+                      has no list to return to, and the desktop sidebar is
+                      file-detail only — never a list, so never a back button
+                      (issue #154 §2). */}
+                  <Show when={!props.desktop && props.target?.entry === 'list'}>
                     <button
                       type="button"
                       class="icon-btn tool-panel-btn"
@@ -379,60 +443,13 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
                   </h2>
                   {closeButton()}
                 </div>
-                {/* Detail body renders by view.kind (issue #146). Every read
-                    goes through tool() so an SSE refetch's grown text flows in;
-                    a missing view falls back to the raw input/output panes,
-                    byte-for-byte the pre-#146 behaviour. */}
+                {/* Detail body renders by view.kind — extracted to ToolViews.tsx
+                    (issue #154) so a second surface can reuse it. `tool()` is
+                    passed live (never captured) so an SSE refetch's grown text
+                    flows straight through; a missing view falls back to the raw
+                    input/output panes, byte-for-byte the pre-#146 behaviour. */}
                 <div class="tool-panel-content">
-                  <Switch
-                    fallback={
-                      <>
-                        <Show when={tool().tool?.input}>
-                          <pre class="tool-body mono">{tool().tool?.input}</pre>
-                        </Show>
-                        <Show when={tool().tool?.output}>
-                          <pre class="tool-body tool-output mono">{tool().tool?.output}</pre>
-                        </Show>
-                      </>
-                    }
-                  >
-                    {/* diff / write: a path header over a line-styled body. Write
-                        forces every line to the added style (a new file is an
-                        all-insert diff). The raw output block rides below ONLY on
-                        error — a successful edit's "file updated" line is noise,
-                        but a failed one must still surface its error text. */}
-                    <Match when={pathView(tool())}>
-                      {(view) => (
-                        <>
-                          <div class="tool-view-path mono">{view().path}</div>
-                          <pre class="tool-body mono tool-diff">
-                            <For each={diffLines(view().text, view().kind === 'write')}>
-                              {(ln) => <span class={ln.cls}>{ln.text}</span>}
-                            </For>
-                          </pre>
-                          <Show when={tool().tool?.status === 'error' && tool().tool?.output}>
-                            <pre class="tool-body tool-output mono">{tool().tool?.output}</pre>
-                          </Show>
-                        </>
-                      )}
-                    </Match>
-                    {/* command: a $-prefixed command line, then its output as
-                        terminal text below (shown whenever non-empty, any
-                        status — a command speaks through its stdout). */}
-                    <Match when={commandView(tool())}>
-                      {(view) => (
-                        <>
-                          <pre class="tool-body mono tool-cmd">
-                            <span class="tool-cmd-prompt">$ </span>
-                            {view().command}
-                          </pre>
-                          <Show when={tool().tool?.output}>
-                            <pre class="tool-body tool-output mono">{tool().tool?.output}</pre>
-                          </Show>
-                        </>
-                      )}
-                    </Match>
-                  </Switch>
+                  <ToolViewBody message={tool()} />
                 </div>
               </>
             )}
