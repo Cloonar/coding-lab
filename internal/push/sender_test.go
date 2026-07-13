@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -140,10 +142,22 @@ func (c *collector) find(level slog.Level, msg string) *logRecord {
 	return nil
 }
 
+// newTestSender builds a Sender with nil presence — proving the "nil never
+// suppresses" contract for every test in this file that doesn't care about
+// presence at all.
 func newTestSender(t *testing.T, st *store.Store) (*Sender, *collector) {
 	t.Helper()
 	c := newCollector()
-	s := NewSender(st, testKey(t), slog.New(c))
+	s := NewSender(st, testKey(t), nil, slog.New(c))
+	return s, c
+}
+
+// newTestSenderWithPresence is newTestSender plus an explicit PresenceView,
+// for the suppression tests below.
+func newTestSenderWithPresence(t *testing.T, st *store.Store, presence PresenceView) (*Sender, *collector) {
+	t.Helper()
+	c := newCollector()
+	s := NewSender(st, testKey(t), presence, slog.New(c))
 	return s, c
 }
 
@@ -189,6 +203,25 @@ func (g *captureGateway) snapshot() []capturedRequest {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]capturedRequest{}, g.requests...)
+}
+
+// --- fake presence -----------------------------------------------------
+
+// fakePresence stands in for internal/presence.Registry: visible maps a
+// device hash to whether the app is currently visible there. queried records
+// every hash Visible was asked about, so a test can assert Broadcast queries
+// the right key (issue #160: hex(sha256(endpoint)), never the raw endpoint).
+type fakePresence struct {
+	mu      sync.Mutex
+	visible map[string]bool
+	queried []string
+}
+
+func (p *fakePresence) Visible(deviceHash string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.queried = append(p.queried, deviceHash)
+	return p.visible[deviceHash]
 }
 
 // --- tests -----------------------------------------------------------------
@@ -398,6 +431,110 @@ func TestSendSingleTarget(t *testing.T) {
 	}
 	if reqs[0].Path != "/ep/target" {
 		t.Errorf("Send hit path %q, want /ep/target", reqs[0].Path)
+	}
+}
+
+//  7. Broadcast suppresses only the subscription whose device is visible: the
+//     other still reaches the gateway, the suppressed row is untouched
+//     (suppression never reaps), and a Debug record names the suppressed
+//     subscription.
+func TestBroadcastSuppressesVisibleDevice(t *testing.T) {
+	gw := &captureGateway{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gw.record(r)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	st := testStore(t)
+	visible := seedSub(t, st, srv.URL+"/ep/visible", "visible-device")
+	seedSub(t, st, srv.URL+"/ep/hidden", "hidden-device")
+
+	presence := &fakePresence{visible: map[string]bool{
+		endpointDeviceHash(visible.Endpoint): true,
+	}}
+	s, c := newTestSenderWithPresence(t, st, presence)
+	s.Broadcast(samplePayload())
+	s.Flush()
+
+	reqs := gw.snapshot()
+	if len(reqs) != 1 {
+		t.Fatalf("gateway received %d requests, want exactly 1", len(reqs))
+	}
+	if reqs[0].Path != "/ep/hidden" {
+		t.Errorf("gateway hit path %q, want /ep/hidden (the non-visible device)", reqs[0].Path)
+	}
+
+	// Suppression never reaps: both rows remain, including the visible one.
+	subs, err := st.PushSubscriptions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs) != 2 {
+		t.Errorf("after a suppressed broadcast %d rows remain, want 2", len(subs))
+	}
+
+	rec := c.find(slog.LevelDebug, "web push suppressed: app visible on device")
+	if rec == nil {
+		t.Fatal("no Debug 'web push suppressed: app visible on device' record")
+	}
+	if rec.Attrs["subscription"] != visible.ID {
+		t.Errorf("suppressed record subscription = %v, want %s", rec.Attrs["subscription"], visible.ID)
+	}
+}
+
+//  8. Send — the Settings "send test" path — BYPASSES presence entirely: even
+//     though the target device is marked visible, the send still lands.
+func TestSendBypassesPresence(t *testing.T) {
+	gw := &captureGateway{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gw.record(r)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	st := testStore(t)
+	target := seedSub(t, st, srv.URL+"/ep/target", "target")
+
+	presence := &fakePresence{visible: map[string]bool{
+		endpointDeviceHash(target.Endpoint): true,
+	}}
+	s, _ := newTestSenderWithPresence(t, st, presence)
+	s.Send(target, samplePayload())
+	s.Flush()
+
+	if got := gw.count(); got != 1 {
+		t.Fatalf("gateway received %d requests, want exactly 1 (Send must bypass presence)", got)
+	}
+}
+
+//  9. Broadcast queries presence with hex(sha256(endpoint)) — the same device
+//     key the browser derives from its live subscription via crypto.subtle —
+//     never the raw endpoint URL.
+func TestBroadcastQueriesHashedEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	st := testStore(t)
+	sub := seedSub(t, st, srv.URL+"/ep/hashed", "hashed-device")
+
+	presence := &fakePresence{visible: map[string]bool{}}
+	s, _ := newTestSenderWithPresence(t, st, presence)
+	s.Broadcast(samplePayload())
+	s.Flush()
+
+	sum := sha256.Sum256([]byte(sub.Endpoint))
+	want := hex.EncodeToString(sum[:])
+
+	presence.mu.Lock()
+	defer presence.mu.Unlock()
+	if len(presence.queried) != 1 {
+		t.Fatalf("presence queried %d times, want 1", len(presence.queried))
+	}
+	if presence.queried[0] != want {
+		t.Errorf("presence queried key %q, want hex(sha256(endpoint)) = %q", presence.queried[0], want)
 	}
 }
 

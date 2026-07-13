@@ -30,6 +30,17 @@
 // peeks don't thrash the socket. It is deliberately stricter than the 65s
 // STALE_MS watchdog, which stays the silent-death backstop for streams no
 // wake event touched.
+//
+// Presence heartbeat: each open() mints a fresh `crypto.randomUUID()` and
+// appends it as the `conn` query param, and the `connID` signal publishes that
+// id to the presence reporter (issue #160). The SSE connection IS the presence
+// heartbeat — the server registers a conn's presence when the stream opens and
+// deletes it on disconnect — so a NEW UUID per connection is load-bearing: a
+// reused id could resurrect a presence entry the server already reaped for the
+// dead socket, defeating push suppression. connID goes non-null only once THAT
+// source's onopen fires (server-side registration is guaranteed only after the
+// headers went out), and back to null the instant the current source dies or
+// the stream is closed for good.
 
 import { createSignal, type Accessor } from 'solid-js';
 
@@ -77,6 +88,13 @@ export interface EventsConnection {
   /** Solid signal: true while the stream is open, false while reconnecting. */
   connected: Accessor<boolean>;
   /**
+   * Solid signal: the current connection's `conn` UUID while its stream is open
+   * (set on that source's onopen, when server-side presence registration is
+   * guaranteed), null before the first open and whenever the source dies or the
+   * stream is closed (issue #160). The presence reporter keys its reports on it.
+   */
+  connID: Accessor<string | null>;
+  /**
    * Registers a handler for one event type; returns an unsubscribe fn. The
    * client-only `resync` pseudo-event fires on every reconnect (see header) so
    * views can refetch state lost while the socket was down.
@@ -102,6 +120,7 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
     options.newEventSource ?? ((u: string) => new EventSource(u) as unknown as EventSourceLike);
 
   const [connected, setConnected] = createSignal(false);
+  const [connID, setConnID] = createSignal<string | null>(null);
   const handlers = new Map<LabEventType | 'resync', Set<LabEventHandler>>();
 
   let source: EventSourceLike | null = null;
@@ -144,6 +163,7 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
     source = null;
     clearWatchdog();
     setConnected(false);
+    setConnID(null); // the current conn's presence entry dies with the socket
     if (closed) return;
     if (immediate) {
       open();
@@ -167,13 +187,21 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
   };
 
   const open = (): void => {
-    const es = newEventSource(url);
+    // A fresh UUID per connection: the server keys presence on it and reaps the
+    // entry on disconnect, so a reused id could resurrect a dead one (see header).
+    const connUUID = crypto.randomUUID();
+    const sep = url.includes('?') ? '&' : '?';
+    const es = newEventSource(`${url}${sep}conn=${connUUID}`);
     source = es;
     let gotEvent = false;
     es.onopen = () => {
       setConnected(true);
       lastEventAt = Date.now();
       armWatchdog();
+      // Publish the conn id only for the live source, and only now: the server
+      // registers this conn's presence as the stream opens (once the headers
+      // are out), so onopen is the earliest a report can't be dropped as stale.
+      if (source === es) setConnID(connUUID);
       // Reconnect = a gap in the fire-and-forget bus, so nudge subscribers to
       // refetch. The session's first open is skipped: views fetch their initial
       // state on mount, and a resync there would just double-fetch every view.
@@ -226,6 +254,7 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
 
   return {
     connected,
+    connID,
     subscribe(type, handler) {
       let set = handlers.get(type);
       if (!set) {
@@ -252,6 +281,7 @@ export function connectEvents(options: ConnectOptions = {}): EventsConnection {
       source = null;
       es?.close();
       setConnected(false);
+      setConnID(null);
     },
   };
 }

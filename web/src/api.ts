@@ -1227,6 +1227,16 @@ export function deletePushDevice(id: string): Promise<void> {
 }
 
 /**
+ * Presence report for push suppression (issue #160) — fetch path. Tells the
+ * server whether this `conn`'s app is visible so broadcast Web Push to `device`
+ * (the SHA-256 of the push-subscription endpoint) is suppressed while the tab
+ * is in front of the operator. 204; an unknown conn is silently ignored. The
+ * synchronous close path uses navigator.sendBeacon instead (no headers). */
+export function reportPresence(conn: string, device: string, visible: boolean): Promise<void> {
+  return request<void>('POST', '/presence', { conn, device, visible });
+}
+
+/**
  * Fires a real test notification through the sender (202). Push delivery is
  * otherwise silent server-side, so this is the self-hoster's way to confirm
  * HTTPS and egress actually reach the push service.

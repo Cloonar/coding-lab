@@ -15,7 +15,9 @@ const csrfHeader = "X-Lab-Csrf"
 //   - only ambient-credential requests (session cookie, proxy header) are
 //     guarded — Bearer requests bypass, unauthenticated requests (login,
 //     setup) carry no ambient credential to ride on;
-//   - the custom header is required;
+//   - the custom header is required — EXCEPT for the presence beacon (issue
+//     #160), which cannot set it (navigator.sendBeacon allows no headers);
+//     the Origin checks below still guard that endpoint in full;
 //   - Origin, when present, must equal the configured origin (--base-url,
 //     else scheme://Host); an ABSENT Origin is rejected — browsers always
 //     send it on non-GET fetch, so its absence means a non-browser client
@@ -32,7 +34,16 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get(csrfHeader) != "1" {
+		// The presence beacon (issue #160) is the one mutating endpoint that
+		// cannot carry the custom header: navigator.sendBeacon(...) allows no
+		// header control. Waiving ONLY the header check is safe because the
+		// Origin checks below still apply in full — a cross-site page cannot
+		// forge a matching Origin, so browser CSRF stays impossible; the custom
+		// header is redundant defense here, not the defense. The worst
+		// forgeable outcome is a wrong presence bit (an extra or a suppressed
+		// notification), never a data change.
+		beacon := r.Method == http.MethodPost && r.URL.Path == "/api/v1/presence"
+		if !beacon && r.Header.Get(csrfHeader) != "1" {
 			writeError(w, http.StatusForbidden, "missing X-Lab-Csrf header")
 			return
 		}

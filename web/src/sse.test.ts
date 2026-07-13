@@ -48,6 +48,14 @@ function last(instances: FakeEventSource[]): FakeEventSource {
   return instances[instances.length - 1]!;
 }
 
+// v4 UUID shape (crypto.randomUUID); case-insensitive on the hex.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** The `conn` query param of a stream URL (relative → parsed against a stub base). */
+function connOf(url: string): string {
+  return new URL(url, 'http://lab.test').searchParams.get('conn') ?? '';
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
 });
@@ -62,7 +70,8 @@ describe('connectEvents backoff', () => {
     const conn = connectEvents({ newEventSource: factory });
 
     expect(instances).toHaveLength(1);
-    expect(instances[0]!.url).toBe('/api/v1/events');
+    expect(instances[0]!.url).toMatch(/^\/api\/v1\/events\?conn=/);
+    expect(connOf(instances[0]!.url)).toMatch(UUID_RE);
 
     // Walk the doubling schedule: each error schedules the next attempt.
     const schedule = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000];
@@ -487,6 +496,76 @@ describe('connectEvents subscriptions', () => {
     instances[1]!.open();
     instances[1]!.emit('cr.changed', '{"type":"cr.changed","repoID":"repo_x"}');
     expect(seen).toEqual([{ type: 'cr.changed', repoID: 'repo_x' }]);
+
+    conn.close();
+  });
+});
+
+describe('connectEvents presence conn (issue #160)', () => {
+  it('appends a UUID conn param and gives every reconnect a different one', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    const first = connOf(instances[0]!.url);
+    expect(first).toMatch(UUID_RE);
+
+    // Drop and reconnect: the fresh source carries a NEW conn (a reused id could
+    // resurrect a presence entry the server already reaped for the dead socket).
+    instances[0]!.error();
+    vi.advanceTimersByTime(1_000);
+    expect(instances).toHaveLength(2);
+    const second = connOf(instances[1]!.url);
+    expect(second).toMatch(UUID_RE);
+    expect(second).not.toBe(first);
+
+    conn.close();
+  });
+
+  it('tracks connID: null before open, the UUID after, null after error, fresh UUID next open', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    // Registration is guaranteed server-side only once the headers are out, so
+    // connID stays null until THIS source's onopen fires.
+    expect(conn.connID()).toBeNull();
+
+    instances[0]!.open();
+    const firstID = conn.connID();
+    expect(firstID).toMatch(UUID_RE);
+    expect(firstID).toBe(connOf(instances[0]!.url)); // the id on the wire, exactly
+
+    // The source dies: presence for it is gone, so connID drops back to null.
+    instances[0]!.error();
+    expect(conn.connID()).toBeNull();
+
+    // The reconnect open publishes the new source's own (different) conn.
+    vi.advanceTimersByTime(1_000);
+    instances[1]!.open();
+    const secondID = conn.connID();
+    expect(secondID).toMatch(UUID_RE);
+    expect(secondID).toBe(connOf(instances[1]!.url));
+    expect(secondID).not.toBe(firstID);
+
+    conn.close();
+  });
+
+  it('resets connID to null on close()', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ newEventSource: factory });
+
+    instances[0]!.open();
+    expect(conn.connID()).not.toBeNull();
+
+    conn.close();
+    expect(conn.connID()).toBeNull();
+  });
+
+  it('appends with & when the configured url already carries a query string', () => {
+    const { instances, factory } = makeFactory();
+    const conn = connectEvents({ url: '/api/v1/events?tenant=acme', newEventSource: factory });
+
+    expect(instances[0]!.url).toMatch(/^\/api\/v1\/events\?tenant=acme&conn=/);
+    expect(connOf(instances[0]!.url)).toMatch(UUID_RE);
 
     conn.close();
   });

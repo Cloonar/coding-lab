@@ -46,6 +46,7 @@ import {
   providerLoginStart,
   providerLogout,
   replyRun,
+  reportPresence,
   resetAFK,
   retryClone,
   setAFKAuto,
@@ -1151,6 +1152,24 @@ describe('change request endpoints', () => {
     const err = await closeCR('repo_1', 3).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).message).toBe('repository uses a forge tracker');
+  });
+});
+
+describe('presence endpoint (issue #160)', () => {
+  it('POST /presence sends {conn, device, visible} with the CSRF header and tolerates 204', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    await expect(reportPresence('conn-1', 'devhash', true)).resolves.toBeUndefined();
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/presence');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(JSON.parse(init.body as string)).toEqual({
+      conn: 'conn-1',
+      device: 'devhash',
+      visible: true,
+    });
   });
 });
 

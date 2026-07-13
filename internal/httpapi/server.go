@@ -23,6 +23,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
@@ -107,6 +108,13 @@ type Options struct {
 	// a forward to the provider) and out of the commands catalog.
 	Pull *pull.Service
 
+	// Presence is the live-tab presence registry (issue #160): the SSE handler
+	// registers each ?conn=<uuid> stream and the presence beacon endpoint
+	// updates its device/visibility, feeding push-suppression at broadcast
+	// time. Nil disables presence tracking and leaves POST /api/v1/presence
+	// unmounted.
+	Presence *presence.Registry
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -148,6 +156,7 @@ type Server struct {
 	gitEnv    []string
 	crmerge   *crmerge.Service
 	pull      *pull.Service
+	presence  *presence.Registry
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -237,6 +246,7 @@ func New(o Options) (*Server, error) {
 		gitEnv:        o.GitEnv,
 		crmerge:       o.CRMerge,
 		pull:          o.Pull,
+		presence:      o.Presence,
 		proxyAuth:     o.ProxyAuth,
 		proxyHeader:   o.ProxyAuthHeader,
 		trusted:       o.TrustedProxies,
@@ -403,6 +413,14 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("POST /api/v1/push/subscriptions", s.requireAuth(s.handlePushSubscriptionCreate))
 		api.HandleFunc("DELETE /api/v1/push/subscriptions/{id}", s.requireAuth(s.handlePushSubscriptionDelete))
 		api.HandleFunc("POST /api/v1/push/subscriptions/{id}/test", s.requireAuth(s.handlePushSubscriptionTest))
+	}
+
+	// Presence beacon (issue #160): the SSE handler registers each stream by
+	// its ?conn=<uuid>; this endpoint updates that stream's device/visibility
+	// so the push sender can suppress broadcasts to an already-visible tab.
+	// Mounted only when the registry was wired.
+	if s.presence != nil {
+		api.HandleFunc("POST /api/v1/presence", s.requireAuth(s.handlePresence))
 	}
 
 	// Unknown API paths get JSON 404s, not the SPA shell.

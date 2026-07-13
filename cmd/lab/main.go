@@ -31,6 +31,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
@@ -179,7 +180,13 @@ func run() int {
 	// into shutdown below. A Flush could block graceful shutdown for up to
 	// sendTimeout (30s) on an airgapped or unreachable gateway — worse than
 	// dropping whatever sends are still in flight when the process exits.
-	pushSender := push.NewSender(st, vapidKey, logger)
+	//
+	// Presence-based suppression (issue #160): one in-memory registry, fed by
+	// the SSE handler + presence beacon (httpapi) and read by Broadcast, so a
+	// device with the app visible is skipped at send time. In-memory on
+	// purpose — a restart empties it and everyone is notified again.
+	presenceReg := presence.NewRegistry()
+	pushSender := push.NewSender(st, vapidKey, presenceReg, logger)
 
 	// Tracker registry (M4): resolves a repo-scoped Tracker per binding. The
 	// backend constructors are injected here — cmd/lab is the one place that
@@ -489,6 +496,7 @@ func run() int {
 		Tracker:         trackerReg,
 		AFK:             afkSvc,
 		Push:            pushSender,
+		Presence:        presenceReg,
 		Git:             gitEngine,
 		Materializer:    mat,
 		ReposDir:        reposDir,

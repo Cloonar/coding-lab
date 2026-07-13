@@ -143,6 +143,30 @@ func TestSSEStreamClosesOnShutdown(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
+func TestSSERegistersPresenceForLifetimeOfStream(t *testing.T) {
+	x := newTestServer(t, nil)
+	x.setup("op", "password123")
+
+	// Registration happens-before the 200: the moment x.do returns with the
+	// stream's headers, Connect has already run for this conn.
+	resp := x.do("GET", "/api/v1/events?conn=conn-lifecycle", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if !x.presence.Connected("conn-lifecycle") {
+		t.Fatal("conn not registered by the time the stream's 200 arrived")
+	}
+
+	// Closing the stream ends the handler, whose deferred Disconnect deletes
+	// the presence entry — the whole liveness design in one poll.
+	_ = resp.Body.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for x.presence.Connected("conn-lifecycle") {
+		if time.Now().After(deadline) {
+			t.Fatal("presence entry not cleaned up after stream close")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestSSERequiresAuth(t *testing.T) {
 	x := newTestServer(t, nil)
 	resp := doWith(t, http.DefaultClient, x.ts.URL, "GET", "/api/v1/events", nil, nil)

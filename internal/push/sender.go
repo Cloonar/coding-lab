@@ -13,9 +13,19 @@ package push
 // timeout, an airgapped unreachable gateway — is logged loudly and dropped.
 // Endpoint URLs are never logged: an endpoint path is a bearer capability for
 // that push channel, so errors name only the gateway host (url.Host).
+//
+// Broadcast additionally consults a PresenceView (issue #160): a subscription
+// whose device currently has the app visible is dropped rather than sent —
+// the live SSE-driven UI already is the notification, so a push would be a
+// redundant (and sometimes startling) duplicate. Send, the Settings page's
+// "send test" path, deliberately BYPASSES presence and always delivers, so
+// an operator testing their setup gets a result even while looking at the
+// app.
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -56,28 +66,41 @@ type Payload struct {
 	Route string `json:"route"`
 }
 
+// PresenceView is the sender's read-only window onto live device presence
+// (issue #160): Visible reports whether the app is currently visible in some
+// browser whose push subscription endpoint hashes (SHA-256, lowercase hex)
+// to deviceHash. Implemented by internal/presence.Registry.
+type PresenceView interface {
+	Visible(deviceHash string) bool
+}
+
 // Sender delivers Web Push notifications asynchronously. Construct it with
 // NewSender; it is safe for concurrent use.
 type Sender struct {
-	st     *store.Store
-	key    Key
-	logger *slog.Logger
-	client *http.Client // shared; webpush-go POSTs through it
-	wg     sync.WaitGroup
+	st       *store.Store
+	key      Key
+	presence PresenceView
+	logger   *slog.Logger
+	client   *http.Client // shared; webpush-go POSTs through it
+	wg       sync.WaitGroup
 }
 
 // NewSender wires a Sender to the subscription store, the VAPID key it signs
-// with, and a logger (tagged component=push). The one shared http.Client
-// carries a hard timeout as a backstop to the per-send context deadline.
-func NewSender(st *store.Store, key Key, logger *slog.Logger) *Sender {
+// with, a PresenceView for Broadcast's send-time suppression (issue #160),
+// and a logger (tagged component=push). presence may be nil — meaning "no
+// presence knowledge" — in which case Broadcast never suppresses; tests and
+// any caller that opts out pass nil. The one shared http.Client carries a
+// hard timeout as a backstop to the per-send context deadline.
+func NewSender(st *store.Store, key Key, presence PresenceView, logger *slog.Logger) *Sender {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Sender{
-		st:     st,
-		key:    key,
-		logger: logger.With("component", "push"),
-		client: &http.Client{Timeout: sendTimeout},
+		st:       st,
+		key:      key,
+		presence: presence,
+		logger:   logger.With("component", "push"),
+		client:   &http.Client{Timeout: sendTimeout},
 	}
 }
 
@@ -87,10 +110,15 @@ func (s *Sender) PublicKeyB64() string {
 	return s.key.PublicKeyB64()
 }
 
-// Broadcast delivers p to every stored subscription. It returns immediately;
-// the store read and all sends run on background goroutines. A read failure is
-// logged and the broadcast is abandoned — a missed notification is never worth
-// blocking or failing a caller over.
+// Broadcast delivers p to every stored subscription EXCEPT one whose device
+// currently has the app visible (issue #160, PresenceView — nil presence
+// means never suppress). A suppressed subscription is simply dropped: no
+// queue, no retry, no replacement, and its row is untouched — the live
+// SSE-driven UI already told that device, so the push would be redundant.
+// Broadcast returns immediately; the store read, the presence check, and all
+// sends run on background goroutines. A read failure is logged and the
+// broadcast is abandoned — a missed notification is never worth blocking or
+// failing a caller over.
 func (s *Sender) Broadcast(p Payload) {
 	s.wg.Add(1)
 	go func() {
@@ -108,8 +136,15 @@ func (s *Sender) Broadcast(p Payload) {
 		// Each send is its own goroutine so one slow gateway cannot delay
 		// delivery to the others; dispatch adds to the WaitGroup before this
 		// coordinator goroutine returns, so Flush never sees a premature zero.
+		// Each goroutine gets its OWN copy of body: webpush-go wraps the slice
+		// it is handed in a bytes.Buffer and writes padding into it in place,
+		// so two sends sharing one backing array race on that write.
 		for _, sub := range subs {
-			s.dispatch(sub, body)
+			if s.presence != nil && s.presence.Visible(endpointDeviceHash(sub.Endpoint)) {
+				s.logger.Debug("web push suppressed: app visible on device", "subscription", sub.ID)
+				continue
+			}
+			s.dispatch(sub, append([]byte(nil), body...))
 		}
 	}()
 }
@@ -209,4 +244,14 @@ func endpointHost(endpoint string) string {
 		return "unknown"
 	}
 	return u.Host
+}
+
+// endpointDeviceHash is the device key shared with the browser (issue #160):
+// SHA-256 hex of the push subscription endpoint. The client computes the same
+// hash from its live subscription via crypto.subtle, so the capability URL
+// itself never travels in presence traffic or logs; hashing here (rather than
+// storing a hash column) self-heals when the browser rotates the endpoint.
+func endpointDeviceHash(endpoint string) string {
+	sum := sha256.Sum256([]byte(endpoint))
+	return hex.EncodeToString(sum[:])
 }
