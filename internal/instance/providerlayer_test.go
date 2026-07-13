@@ -179,6 +179,127 @@ func TestResolveModelEffort_explicitRequestAgainstEmptyCatalog(t *testing.T) {
 	}
 }
 
+// newPerModelProvider builds provider C (issue #156): PER-MODEL effort lists
+// — "m-a" supports only low; "m-b" supports low+high and reports high as its
+// default. The union Efforts() carries low+high, so a union-valid effort can
+// still be unsupported on the resolved model.
+func newPerModelProvider() *providertest.Fake {
+	c := providertest.New()
+	c.SetID("fake-c")
+	low := provider.Option{Value: "low", Label: "low"}
+	high := provider.Option{Value: "high", Label: "high"}
+	c.SetCatalogs(nil, []provider.Option{low, high}) // the union; models come from SetModels
+	c.SetModels([]provider.ModelOption{
+		{Option: provider.Option{Value: "m-a", Label: "M A"}, Efforts: []provider.Option{low}},
+		{Option: provider.Option{Value: "m-b", Label: "M B"}, Efforts: []provider.Option{low, high}, DefaultEffort: "high"},
+	})
+	return c
+}
+
+// The issue-#156 per-model effort resolution: the explicit effort validates
+// against the RESOLVED MODEL's list (the unsupported-combo 400), stored
+// defaults skip-layer against that same list, and the all-unset fallback is
+// the model's reported default when it declares one, else the FIRST entry of
+// the model's own list. The fixture's seeded global base (opus[1m]/max) is
+// foreign to provider C and always falls through.
+func TestResolveModelEffort_perModelEfforts(t *testing.T) {
+	c := newPerModelProvider()
+	f := newFixtureWith(t, fixtureOpts{extraProvs: []provider.AgentProvider{c}})
+	ctx := context.Background()
+
+	cases := []struct {
+		name                  string
+		kind                  string
+		repo                  store.Repo
+		globalBaseEffort      string // "" keeps the seeded foreign "max"
+		reqModel, reqEffort   string
+		wantModel, wantEffort string
+		wantErr               bool
+	}{
+		{
+			// THE new rejection: "high" is in the union (and in m-b's list)
+			// but NOT in the resolved model m-a's list → 400, where pre-#156
+			// union validation would have accepted the combo.
+			name: "explicit effort in the union but not the resolved model's list is a bad request",
+			kind: store.RunKindManual, reqModel: "m-a", reqEffort: "high", wantErr: true,
+		},
+		{
+			// A stored effort default outside the resolved model's list is
+			// SKIPPED (never a 400) — resolution falls to the model's own
+			// fallback: m-a reports no default, so its first entry low.
+			name: "stored effort default unsupported by the model skips to the model fallback",
+			kind: store.RunKindManual, repo: store.Repo{ModelDefault: strptr("m-a")},
+			globalBaseEffort: "high", wantModel: "m-a", wantEffort: "low",
+		},
+		{
+			// The same stored default IS supported by m-b — it wins there,
+			// proving the skip above is per-model, not per-provider.
+			name: "stored effort default supported by the model wins",
+			kind: store.RunKindManual, repo: store.Repo{ModelDefault: strptr("m-b")},
+			globalBaseEffort: "high", wantModel: "m-b", wantEffort: "high",
+		},
+		{
+			// All layers unset/foreign + a model with a reported default →
+			// the reported default, NOT the first entry (m-b's list starts
+			// with low).
+			name: "all unset resolves the model's reported default effort",
+			kind: store.RunKindManual, repo: store.Repo{ModelDefault: strptr("m-b")},
+			wantModel: "m-b", wantEffort: "high",
+		},
+		{
+			// All layers unset/foreign + a model WITHOUT a reported default →
+			// the first entry of the MODEL's list (the pre-#156 rule).
+			name: "all unset without a reported default falls to the model's first entry",
+			kind: store.RunKindManual, repo: store.Repo{ModelDefault: strptr("m-a")},
+			wantModel: "m-a", wantEffort: "low",
+		},
+		{
+			// An explicit effort in the resolved model's list is accepted even
+			// when the model itself came from a default layer.
+			name: "explicit effort in the defaulted model's list is accepted",
+			kind: store.RunKindManual, repo: store.Repo{ModelDefault: strptr("m-b")},
+			reqEffort: "high", wantModel: "m-b", wantEffort: "high",
+		},
+		{
+			// Model catalog first-entry fallback + per-model effort list: with
+			// nothing stored at all, the model resolves to m-a and the effort
+			// to m-a's only entry.
+			name:      "everything unset resolves first model and its first effort",
+			kind:      store.RunKindAFKAuto,
+			wantModel: "m-a", wantEffort: "low",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The AFK overrides stay unset; the base globals stay the seeded
+			// claude-shaped values unless the case pins an effort (both are
+			// foreign to provider C and skip-layer).
+			setGlobal(t, f, store.SettingSpawnModelDefaultAFK, "")
+			setGlobal(t, f, store.SettingSpawnEffortDefaultAFK, "")
+			baseEffort := tc.globalBaseEffort
+			if baseEffort == "" {
+				baseEffort = "max"
+			}
+			setGlobal(t, f, store.SettingSpawnEffortDefault, baseEffort)
+
+			model, effort, err := f.svc.ResolveModelEffort(ctx, c, tc.repo, tc.kind, tc.reqModel, tc.reqEffort)
+			if tc.wantErr {
+				var bad *BadRequestError
+				if !errors.As(err, &bad) {
+					t.Fatalf("err = %v, want *BadRequestError", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveModelEffort: %v", err)
+			}
+			if model != tc.wantModel || effort != tc.wantEffort {
+				t.Errorf("= %q/%q, want %q/%q", model, effort, tc.wantModel, tc.wantEffort)
+			}
+		})
+	}
+}
+
 // The manual Start path threads the per-spawn provider pick end to end
 // (issue #66): the run row records the RESOLVED provider and the skip-layer
 // model/effort, and the spawn argv is provider B's.

@@ -30,13 +30,17 @@ import (
 type mockProvider struct {
 	id       string
 	meta     provider.SeedMeta
-	models   []provider.Option
+	models   []provider.ModelOption
 	efforts  []provider.Option
 	options  []provider.OptionSpec
 	authFlow provider.AuthFlow
 	// aliasReturns makes SeedMeta/Models/Efforts/SpawnOptions return the
 	// internal slices without cloning — the seedmeta-clone breakage.
 	aliasReturns bool
+	// aliasNestedEfforts makes Models() clone only the OUTER slice, leaving
+	// each entry's Efforts aliased — the issue-#156 nested-clone breakage a
+	// shallow slices.Clone discipline would ship.
+	aliasNestedEfforts bool
 	// spawnArgv overrides the default well-formed argv builder.
 	spawnArgv func(spec provider.SpawnSpec) []string
 	// seed overrides the default no-op SeedWorkspace.
@@ -65,7 +69,14 @@ func newMockProvider() *mockProvider {
 				`mockagent-session:`,
 			},
 		},
-		models:   []provider.Option{{Value: "mock-large", Label: "Mock Large"}, {Value: "mock-small", Label: "Mock Small"}},
+		// Enriched per issue #156: mock-large carries both efforts and
+		// reports high as its default (the codex shape); mock-small supports
+		// only low and reports none (the first-entry-fallback shape). The
+		// union below covers both lists.
+		models: []provider.ModelOption{
+			{Option: provider.Option{Value: "mock-large", Label: "Mock Large"}, Efforts: []provider.Option{{Value: "low", Label: "low"}, {Value: "high", Label: "high"}}, DefaultEffort: "high"},
+			{Option: provider.Option{Value: "mock-small", Label: "Mock Small"}, Efforts: []provider.Option{{Value: "low", Label: "low"}}},
+		},
 		efforts:  []provider.Option{{Value: "low", Label: "low"}, {Value: "high", Label: "high"}},
 		options:  []provider.OptionSpec{{Key: "turbo", Label: "Turbo", Type: provider.OptionTypeBool, Default: "false"}},
 		authFlow: provider.AuthFlow{Kind: provider.AuthFlowExternal},
@@ -98,7 +109,18 @@ func retSlice[T any](alias bool, s []T) []T {
 func (m *mockProvider) ID() string          { return m.id }
 func (m *mockProvider) DisplayName() string { return "Mock Agent" }
 
-func (m *mockProvider) Models() []provider.Option  { return retSlice(m.aliasReturns, m.models) }
+// Models returns the enriched catalog deep-cloned (the conforming shape), or
+// with the scripted aliasing breakages: aliasReturns hands out the internal
+// slice itself; aliasNestedEfforts clones only the outer slice (issue #156).
+func (m *mockProvider) Models() []provider.ModelOption {
+	switch {
+	case m.aliasReturns:
+		return m.models
+	case m.aliasNestedEfforts:
+		return slices.Clone(m.models)
+	}
+	return provider.CloneModelOptions(m.models)
+}
 func (m *mockProvider) Efforts() []provider.Option { return retSlice(m.aliasReturns, m.efforts) }
 func (m *mockProvider) SpawnOptions() []provider.OptionSpec {
 	return retSlice(m.aliasReturns, m.options)
@@ -294,6 +316,33 @@ func TestCheckCatalogs_malformedCatalogsFail(t *testing.T) {
 	wantError(t, errs, "catalogs", "Models()", "empty")
 	wantError(t, errs, "catalogs", "Efforts()", `"high"`, "duplicates")
 	wantError(t, errs, "catalogs", `"turbo"`, `"yes"`)
+}
+
+// The issue-#156 per-model obligations: an empty per-model effort list, a
+// reported default outside the model's own list, and a per-model effort the
+// union Efforts() does not cover each fail with the model named.
+func TestCheckCatalogs_perModelEffortViolationsFail(t *testing.T) {
+	p := newMockProvider()
+	p.models = []provider.ModelOption{
+		// Empty per-model efforts.
+		{Option: provider.Option{Value: "mock-large", Label: "Mock Large"}},
+		// DefaultEffort outside the model's own list (it IS in the union).
+		{Option: provider.Option{Value: "mock-small", Label: "Mock Small"}, Efforts: []provider.Option{{Value: "low", Label: "low"}}, DefaultEffort: "high"},
+		// A per-model effort value the union does not carry.
+		{Option: provider.Option{Value: "mock-mini", Label: "Mock Mini"}, Efforts: []provider.Option{{Value: "turbo", Label: "turbo"}}},
+	}
+	errs := checkCatalogs(p)
+	wantError(t, errs, "catalogs", `"mock-large"`, "Efforts", "empty")
+	wantError(t, errs, "catalogs", `"mock-small"`, "DefaultEffort", `"high"`, "issue #156")
+	wantError(t, errs, "catalogs", `"mock-mini"`, `"turbo"`, "union Efforts()", "issue #156")
+}
+
+// Nested per-model Efforts aliasing (issue #156): an outer-only clone leaves
+// the effort lists shared, and the extended seedmeta-clone probe catches it.
+func TestCheckSeedMetaClone_nestedEffortsAliasingFails(t *testing.T) {
+	p := newMockProvider()
+	p.aliasNestedEfforts = true
+	wantError(t, checkSeedMetaClone(p), "seedmeta-clone", "Models() per-model Efforts")
 }
 
 func TestCheckSpawnArgv_promptNotTrailingFails(t *testing.T) {

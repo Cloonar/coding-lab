@@ -265,19 +265,24 @@ func parseSettingString(raw json.RawMessage) (string, error) {
 
 // spawnDefaultAllowed validates a spawn default against the provider-owned
 // catalogs (D14: nothing outside a provider hardcodes model/effort values):
-// the value must exist in at least one registered provider's catalog. With no
-// provider registry (an instance-less lab) there is no catalog to check
-// against, so the value passes — the spawn path re-validates on every start.
+// the value must exist in at least one registered provider's catalog. Efforts
+// deliberately check the model-independent UNION Efforts() — write-time
+// settings validation stays model-independent (issue #156 pins this; the
+// spawn path enforces the per-model list). With no provider registry (an
+// instance-less lab) there is no catalog to check against, so the value
+// passes — the spawn path re-validates on every start.
 func (s *Server) spawnDefaultAllowed(value string, model bool) bool {
 	if s.providers == nil {
 		return true
 	}
 	for _, p := range s.providers.List() {
-		opts := p.Efforts()
 		if model {
-			opts = p.Models()
+			if provider.HasModelOption(p.Models(), value) {
+				return true
+			}
+			continue
 		}
-		if provider.HasOption(opts, value) {
+		if provider.HasOption(p.Efforts(), value) {
 			return true
 		}
 	}

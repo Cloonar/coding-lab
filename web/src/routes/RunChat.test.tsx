@@ -3795,7 +3795,7 @@ describe('RunChat', () => {
   });
 
   it('renders the desktop model chip with catalog pretty labels when they match', async () => {
-    providersOnServer[0]!.models = [{ value: 'opus[1m]', label: 'Opus 4.6 [1m]' }];
+    providersOnServer[0]!.models = [{ value: 'opus[1m]', label: 'Opus 4.6 [1m]', efforts: [] }];
     providersOnServer[0]!.efforts = [{ value: 'max', label: 'Max' }];
     await mountChat();
 

@@ -24,9 +24,10 @@ function baseProviders(): Provider[] {
       display_name: 'Claude Code',
       auth: { kind: 'oauth-code' },
       models: [
-        { value: 'opus[1m]', label: 'Opus (1M)' },
-        { value: 'sonnet', label: 'Sonnet' },
+        { value: 'opus[1m]', label: 'Opus (1M)', efforts: [] },
+        { value: 'sonnet', label: 'Sonnet', efforts: [] },
       ],
+      // The settings pickers consume the provider-level UNION (issue #156).
       efforts: [{ value: 'high', label: 'high' }],
       options: [
         {
@@ -45,7 +46,7 @@ const CODEX: Provider = {
   id: 'codex',
   display_name: 'Codex',
   auth: { kind: 'api-key' },
-  models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex' }],
+  models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: [] }],
   efforts: [{ value: 'medium', label: 'medium' }],
   options: [],
 };

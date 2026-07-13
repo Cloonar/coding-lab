@@ -4,7 +4,7 @@
 // a candidate counts only when the catalog actually offers it (a stale
 // persisted value must not pre-select something the form can't submit).
 
-import type { Provider, ProviderOption } from '../api';
+import type { Provider, ProviderModelOption, ProviderOption } from '../api';
 
 /**
  * Skip-layer provider resolution (ADR-0030): the first candidate id that is a
@@ -37,4 +37,31 @@ export function resolveSpawnOption(
     }
   }
   return options[0]?.value ?? '';
+}
+
+/**
+ * Client-side mirror of the server's per-model effort pass in layerSpawnDefault
+ * (internal/instance/credential.go): the effort catalog belongs to the SELECTED
+ * MODEL (issue #156) — effort support varies per model and codex does not
+ * clamp, so an unsupported combo must never reach a spawn. The first candidate
+ * present in the model's efforts wins; none matching falls back to the model's
+ * reported default_effort when it is itself a member, else the first effort;
+ * no efforts (or no model at all) resolves ''.
+ */
+export function resolveEffortOption(
+  model: ProviderModelOption | undefined,
+  ...candidates: (string | null | undefined)[]
+): string {
+  if (model === undefined) return '';
+  const efforts = model.efforts ?? [];
+  for (const candidate of candidates) {
+    if (candidate != null && candidate !== '' && efforts.some((o) => o.value === candidate)) {
+      return candidate;
+    }
+  }
+  const reported = model.default_effort;
+  if (reported != null && reported !== '' && efforts.some((o) => o.value === reported)) {
+    return reported;
+  }
+  return efforts[0]?.value ?? '';
 }

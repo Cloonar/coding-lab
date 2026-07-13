@@ -414,7 +414,16 @@ describe('provider endpoints', () => {
     const provider = {
       id: 'claude-code',
       display_name: 'Claude Code',
-      models: [{ value: 'opus[1m]', label: 'Opus (1M)' }],
+      // Model entries carry their own effort list + reported default
+      // (issue #156); provider-level efforts stays the union.
+      models: [
+        {
+          value: 'opus[1m]',
+          label: 'Opus (1M)',
+          efforts: [{ value: 'max', label: 'max' }],
+          default_effort: 'max',
+        },
+      ],
       efforts: [{ value: 'max', label: 'max' }],
       options: [],
       auth: { kind: 'oauth-code' },

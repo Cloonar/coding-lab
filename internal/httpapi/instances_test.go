@@ -581,13 +581,16 @@ func TestAPI_RunsHistory(t *testing.T) {
 }
 
 func TestAPI_Providers(t *testing.T) {
-	x := newInstanceServer(t)
+	// A second, codex-shaped provider (NoLinkFake: per-model efforts + a
+	// reported default effort) rides along so the enriched model catalog
+	// (issue #156) is asserted in both shapes.
+	x := newInstanceServerWith(t, providertest.NewNoLink())
 
 	resp := x.do("GET", "/api/v1/providers", nil, nil)
 	wantStatus(t, resp, http.StatusOK)
 	body := decodeBody(t, resp)
 	provs, _ := body["providers"].([]any)
-	if len(provs) != 1 {
+	if len(provs) != 2 {
 		t.Fatalf("providers = %v", body)
 	}
 	p := provs[0].(map[string]any)
@@ -608,8 +611,24 @@ func TestAPI_Providers(t *testing.T) {
 	if auth["kind"] != provider.AuthFlowOAuthCode {
 		t.Errorf("auth.kind = %v, want %q", auth["kind"], provider.AuthFlowOAuthCode)
 	}
-	if models, _ := p["models"].([]any); len(models) != 4 {
-		t.Errorf("models = %v, want 4", p["models"])
+	// Models are per-model enriched (issue #156): every claude-shaped entry
+	// carries its own five-entry efforts list and NO default_effort key
+	// (claude reports none; omitempty drops it from the wire).
+	models, _ := p["models"].([]any)
+	if len(models) != 4 {
+		t.Fatalf("models = %v, want 4", p["models"])
+	}
+	for i, raw := range models {
+		m := raw.(map[string]any)
+		if m["value"] == "" || m["label"] == "" {
+			t.Errorf("models[%d] = %v, want inlined value/label", i, m)
+		}
+		if efforts, _ := m["efforts"].([]any); len(efforts) != 5 {
+			t.Errorf("models[%d].efforts = %v, want the full five-entry list", i, m["efforts"])
+		}
+		if _, present := m["default_effort"]; present {
+			t.Errorf("models[%d] carries default_effort %v, want the key absent for a model reporting none", i, m["default_effort"])
+		}
 	}
 	// A DeepLinker provider (the Fake) exposes fallback-open metadata (ADR-0017)
 	// so the SPA needs no hardcoded provider URL/title.
@@ -619,6 +638,27 @@ func TestAPI_Providers(t *testing.T) {
 	}
 	if fo["url"] != "https://claude.ai/code" || fo["title"] == "" {
 		t.Errorf("fallback_open = %v, want the claude.ai picker url + a title", fo)
+	}
+
+	// The codex-shaped provider serves its per-model efforts AND the reported
+	// default_effort (issue #156).
+	q := provs[1].(map[string]any)
+	if q["id"] != "codex-fake" {
+		t.Fatalf("second provider id = %v, want codex-fake", q["id"])
+	}
+	qModels, _ := q["models"].([]any)
+	if len(qModels) != 1 {
+		t.Fatalf("codex-fake models = %v, want 1", q["models"])
+	}
+	qm := qModels[0].(map[string]any)
+	if qm["value"] != "gpt-5-codex" {
+		t.Errorf("codex-fake model value = %v", qm["value"])
+	}
+	if efforts, _ := qm["efforts"].([]any); len(efforts) != 1 {
+		t.Errorf("codex-fake model efforts = %v, want [medium]", qm["efforts"])
+	}
+	if qm["default_effort"] != "medium" {
+		t.Errorf("codex-fake default_effort = %v, want medium", qm["default_effort"])
 	}
 }
 

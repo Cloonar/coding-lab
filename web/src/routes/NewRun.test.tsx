@@ -63,33 +63,77 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
   };
 }
 
+// Both claude-shaped models share one effort catalog and report NO
+// default_effort — the first-entry rule keeps resolving "low", as before
+// issue #156 enriched the model entries.
+const CLAUDE_EFFORTS = [
+  { value: 'low', label: 'Low' },
+  { value: 'high', label: 'High' },
+];
+
 const PROVIDERS: Provider[] = [
   {
     id: 'claude-code',
     display_name: 'Claude Code',
     auth: { kind: 'oauth-code' },
     models: [
-      { value: 'sonnet', label: 'Sonnet' },
-      { value: 'opus', label: 'Opus' },
+      { value: 'sonnet', label: 'Sonnet', efforts: CLAUDE_EFFORTS },
+      { value: 'opus', label: 'Opus', efforts: CLAUDE_EFFORTS },
     ],
-    efforts: [
-      { value: 'low', label: 'Low' },
-      { value: 'high', label: 'High' },
-    ],
+    efforts: CLAUDE_EFFORTS,
     options: [],
   },
 ];
 
-/** A second provider WITHOUT an effort knob (empty efforts catalog). */
+/** A second provider WITHOUT an effort knob (empty efforts catalogs). */
 const CODEX: Provider = {
   id: 'codex',
   display_name: 'Codex',
   auth: { kind: 'api-key' },
   models: [
-    { value: 'gpt-5-codex', label: 'GPT-5 Codex' },
-    { value: 'gpt-5', label: 'GPT-5' },
+    { value: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: [] },
+    { value: 'gpt-5', label: 'GPT-5', efforts: [] },
   ],
   efforts: [],
+  options: [],
+};
+
+// A provider whose models carry DIFFERENT effort catalogs + reported defaults
+// (issue #156): terra offers the full ladder up to ultra, luna stops at high.
+// The provider-level `efforts` stays the union — the settings pickers' list,
+// which the composer must NOT use.
+const TERRA_EFFORTS = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'X-High' },
+  { value: 'max', label: 'Max' },
+  { value: 'ultra', label: 'Ultra' },
+];
+const LUNA_EFFORTS = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+];
+const GPT: Provider = {
+  id: 'gpt',
+  display_name: 'GPT',
+  auth: { kind: 'api-key' },
+  models: [
+    {
+      value: 'gpt-5.6-terra',
+      label: 'GPT-5.6-Terra',
+      efforts: TERRA_EFFORTS,
+      default_effort: 'medium',
+    },
+    {
+      value: 'gpt-5.6-luna',
+      label: 'GPT-5.6-Luna',
+      efforts: LUNA_EFFORTS,
+      default_effort: 'medium',
+    },
+  ],
+  efforts: TERRA_EFFORTS,
   options: [],
 };
 
@@ -207,6 +251,19 @@ function startButton(): HTMLButtonElement {
 function chipLabel(label: string): string | null {
   const chip = container.querySelector(`button[aria-label="${label}"] .composer-chip-label`);
   return chip === null ? null : chip.textContent;
+}
+
+/** Opens a composer Select chip, reads its option labels, and closes it. */
+async function chipOptionLabels(label: string): Promise<string[]> {
+  const trigger = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+  trigger.click();
+  await settle();
+  const labels = Array.from(container.querySelectorAll('[role="option"] .select-option-label')).map(
+    (el) => el.textContent ?? '',
+  );
+  trigger.click(); // the trigger toggles: a second click closes the panel
+  await settle();
+  return labels;
 }
 
 // jsdom has no window.matchMedia — install a fake that resolves ONLY the
@@ -595,5 +652,99 @@ describe('NewRun composer agent chip (multi-provider)', () => {
     expect(authRequests).toContain('codex');
     // …and the banner copy flows from its display_name.
     expect(container.querySelector('.newrun-warn')?.textContent).toContain('Codex is logged out');
+  });
+});
+
+// Per-model efforts (issue #156): the composer's effort chip catalogs the
+// SELECTED MODEL, not the provider union — effort support varies per model
+// and codex does not clamp, so an unsupported model+effort combo would 400
+// at spawn. A stale pick snaps to the new model's reported default; a
+// still-valid pick is kept.
+describe('NewRun composer per-model efforts (issue #156)', () => {
+  beforeEach(() => {
+    providersOnServer = [GPT];
+    reposOnServer = [repoFixture({ provider: 'gpt' })];
+  });
+
+  it('catalogs the effort chip from the selected model and re-catalogs on a model switch', async () => {
+    await mountHome();
+
+    // Terra (the resolved default model) offers the full ladder…
+    expect(await chipOptionLabels('Effort')).toEqual([
+      'Low',
+      'Medium',
+      'High',
+      'X-High',
+      'Max',
+      'Ultra',
+    ]);
+
+    await chooseFromChip('Model', 'GPT-5.6-Luna');
+
+    // …luna only its own list: Ultra (and the rest of the union) is gone.
+    expect(await chipOptionLabels('Effort')).toEqual(['Low', 'Medium', 'High']);
+  });
+
+  it("snaps a stale effort pick to the new model's default_effort on the POST", async () => {
+    await mountHome();
+
+    await chooseFromChip('Effort', 'Ultra');
+    await chooseFromChip('Model', 'GPT-5.6-Luna');
+
+    // Luna has no "ultra": the chip already shows the snapped default…
+    expect(chipLabel('Effort')).toBe('Medium');
+
+    startButton().click();
+    await settle();
+
+    // …and the POST carries luna's reported default, never the stale pick.
+    expect(instancePosts).toEqual([{ model: 'gpt-5.6-luna', effort: 'medium' }]);
+  });
+
+  it('keeps a still-valid effort pick across a model switch', async () => {
+    await mountHome();
+
+    await chooseFromChip('Effort', 'High');
+    await chooseFromChip('Model', 'GPT-5.6-Luna');
+
+    // Luna supports "high" too: the explicit pick survives the switch…
+    expect(chipLabel('Effort')).toBe('High');
+
+    startButton().click();
+    await settle();
+
+    // …and rides the POST.
+    expect(instancePosts).toEqual([{ model: 'gpt-5.6-luna', effort: 'high' }]);
+  });
+
+  it("an untouched composer sends the model's reported default_effort, not the first entry", async () => {
+    await mountHome();
+
+    startButton().click();
+    await settle();
+
+    // Terra's efforts START at "low" but report "medium" as the default —
+    // the reported default beats the first-entry rule.
+    expect(instancePosts).toEqual([{ model: 'gpt-5.6-terra', effort: 'medium' }]);
+  });
+
+  it('a global default effort valid for the model beats the model default', async () => {
+    settingsOnServer = { spawn_effort_default: 'xhigh' };
+    await mountHome();
+
+    startButton().click();
+    await settle();
+
+    expect(instancePosts).toEqual([{ model: 'gpt-5.6-terra', effort: 'xhigh' }]);
+  });
+
+  it('skips a global default effort the model does not support; the model default rides', async () => {
+    settingsOnServer = { spawn_effort_default: 'turbo' };
+    await mountHome();
+
+    startButton().click();
+    await settle();
+
+    expect(instancePosts).toEqual([{ model: 'gpt-5.6-terra', effort: 'medium' }]);
   });
 });

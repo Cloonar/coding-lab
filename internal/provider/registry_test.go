@@ -17,7 +17,7 @@ type stubProvider struct {
 
 func (s stubProvider) ID() string                   { return s.id }
 func (s stubProvider) DisplayName() string          { return s.id }
-func (s stubProvider) Models() []Option             { return nil }
+func (s stubProvider) Models() []ModelOption        { return nil }
 func (s stubProvider) Efforts() []Option            { return nil }
 func (s stubProvider) SpawnOptions() []OptionSpec   { return nil }
 func (s stubProvider) SpawnArgv(SpawnSpec) []string { return nil }

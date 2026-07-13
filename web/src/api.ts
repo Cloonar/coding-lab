@@ -315,6 +315,15 @@ export interface ProviderOption {
   label: string;
 }
 
+/** One model entry of a provider catalog (issue #156): the option pair plus
+ *  the model's own effort list and reported default — effort support varies
+ *  per model and codex does not clamp, so the composer must never send an
+ *  unsupported combo. */
+export interface ProviderModelOption extends ProviderOption {
+  efforts: ProviderOption[];
+  default_effort?: string;
+}
+
 /**
  * A provider's generic "open on the web" affordance (ADR-0017): the URL to
  * open when no exact deep link was captured, plus the tooltip explaining it.
@@ -362,7 +371,10 @@ export interface Provider {
   id: string;
   /** Human name driving all UI copy (issue #51 decision 9) — never hardcode it. */
   display_name: string;
-  models: ProviderOption[];
+  models: ProviderModelOption[];
+  /** The model-independent UNION of every model's efforts (issue #156) — the
+   *  flat list the settings default pickers offer; the composer follows the
+   *  selected model's own `efforts` instead. */
   efforts: ProviderOption[];
   /** Declared spawn options (always present; may be empty). */
   options: ProviderOptionSpec[];
