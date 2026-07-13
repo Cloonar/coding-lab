@@ -11,7 +11,12 @@ import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, ToolView } from '../api';
-import ToolPanel, { toolStatusMark, type PanelTarget, type ToolPanelProps } from './ToolPanel';
+import ToolPanel, {
+  clampPanelWidth,
+  toolStatusMark,
+  type PanelTarget,
+  type ToolPanelProps,
+} from './ToolPanel';
 
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
@@ -51,6 +56,13 @@ function groupTarget(): PanelTarget {
   };
 }
 
+/** A lone file tool (a diff), for the desktop file-sidebar / resize tests. */
+function fileTool(seq = 5): ChatMessage {
+  return tool(seq, 'edit foo.ts', 'ok', {
+    view: { kind: 'diff', path: 'foo.ts', text: '@@ -1 +1 @@\n+x' },
+  });
+}
+
 /** Mount with a live `target` and `desktop` signal so a test can drive prop
  *  changes (retarget, refetch, breakpoint flip) after mount. */
 function mountPanel(init: Partial<ToolPanelProps> = {}): {
@@ -74,6 +86,7 @@ afterEach(() => {
   dispose?.();
   dispose = undefined;
   container?.remove();
+  localStorage.clear(); // the resize width persists under lab.tool-panel-width
 });
 
 function aside(): HTMLElement | null {
@@ -163,6 +176,22 @@ function stubHeight(el: HTMLElement, px: number): void {
 
 function hasDragging(el: HTMLElement | null): boolean {
   return el?.classList.contains('tool-panel-dragging') ?? false;
+}
+
+// --- Pointer event fabrication (issue #154 resize) --------------------------
+// jsdom ships a PointerEvent via its MouseEvent fallback in recent versions;
+// where it doesn't, a bubbling MouseEvent carries the one field the drag reads
+// (clientX). setPointerCapture is optional-chained in the component (jsdom lacks
+// it), and pointerId is read loosely, so either constructor suffices.
+function pointerEvt(type: string, clientX: number): Event {
+  if (typeof PointerEvent === 'function') {
+    return new PointerEvent(type, { bubbles: true, cancelable: true, clientX, pointerId: 1 });
+  }
+  return new MouseEvent(type, { bubbles: true, cancelable: true, clientX });
+}
+
+function resizeHandle(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('.tool-panel-resize');
 }
 
 describe('ToolPanel closed', () => {
@@ -333,6 +362,29 @@ describe('ToolPanel command view', () => {
   });
 });
 
+describe('ToolPanel read view', () => {
+  it('renders a path header and the excerpt text, with no diff coloring', () => {
+    const t = tool(11, 'read config.ts', 'ok', {
+      view: { kind: 'read', path: 'config.ts', text: 'export const x = 1;' },
+    });
+    mountPanel({ target: detailTarget(t), desktop: false });
+
+    expect(pathHeader()?.textContent).toBe('config.ts');
+    expect(diffSpans()).toHaveLength(0);
+    expect(pres().map((p) => p.textContent)).toEqual(['export const x = 1;']);
+  });
+
+  it('a still-running read with an empty excerpt shows the header but no body pre', () => {
+    const t = tool(12, 'read config.ts', 'running', {
+      view: { kind: 'read', path: 'config.ts', text: '' },
+    });
+    mountPanel({ target: detailTarget(t), desktop: false });
+
+    expect(pathHeader()?.textContent).toBe('config.ts');
+    expect(pres()).toHaveLength(0);
+  });
+});
+
 describe('ToolPanel absent view (fallback)', () => {
   it('renders the raw input/output panes when no view is present', () => {
     const t = tool(10, 'read notes', 'ok', { input: 'path: notes.md', output: 'hello' });
@@ -352,9 +404,11 @@ describe('ToolPanel close affordance', () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it('the ✕ button fires onClose on the detail page (desktop)', () => {
+  it('the ✕ button fires onClose on the desktop detail sidebar', () => {
     const { onClose } = mountPanel({ target: groupTarget(), desktop: true });
-    rows()[0]?.click();
+    // Desktop is file-detail only (issue #154 §2): no list, no rows to push —
+    // the ✕ is right there on the detail head.
+    expect(rows()).toHaveLength(0);
     closeBtn()?.click();
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -474,19 +528,21 @@ describe('ToolPanel liveness (same-key refetch)', () => {
 });
 
 describe('ToolPanel breakpoint flip', () => {
-  it('keeps the pushed detail page while swapping the chrome', () => {
+  it('swaps mobile detail chrome for the desktop file sidebar (no back button)', () => {
     const { setDesktop } = mountPanel({ target: groupTarget(), desktop: false });
-    rows()[0]?.click();
+    rows()[0]?.click(); // mobile: push tools[0] "read foo.ts" to detail, with back
     expect(aside()?.getAttribute('role')).toBe('dialog');
     expect(scrim()).not.toBeNull();
+    expect(backBtn()).not.toBeNull();
     expect(heading()?.textContent).toContain('read foo.ts');
 
     setDesktop(true);
 
-    // Same detail page, other chrome: dialog role and scrim gone.
+    // Desktop chrome: dialog role and scrim gone. It is file-detail only
+    // (issue #154 §2) — tools[0], and no back button (never a list to return to).
     expect(aside()?.hasAttribute('role')).toBe(false);
     expect(scrim()).toBeNull();
-    expect(backBtn()).not.toBeNull();
+    expect(backBtn()).toBeNull();
     expect(heading()?.textContent).toContain('read foo.ts');
   });
 });
@@ -598,5 +654,110 @@ describe('ToolPanel drag-to-dismiss (mobile sheet)', () => {
 
     expect(hasDragging(el)).toBe(false);
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+// --- Desktop file-detail-only contract (issue #154 §2) ---------------------
+// The desktop sidebar shows ONE file's detail: never a list, never a back
+// button. RunChat only ever targets it with a single file tool, but the panel
+// itself renders tools[0] defensively regardless of entry.
+
+describe('ToolPanel desktop file detail', () => {
+  it('shows the detail of tools[0] with no list and no back button', () => {
+    // Even handed a group-shaped target (entry list, many tools), desktop shows
+    // the first tool's detail — never the list page.
+    mountPanel({ target: groupTarget(), desktop: true });
+    expect(rows()).toHaveLength(0);
+    expect(backBtn()).toBeNull();
+    expect(heading()?.textContent).toContain('read foo.ts'); // tools[0]
+    expect(pres().map((p) => p.textContent)).toEqual(['path: foo.ts', 'file contents']);
+  });
+
+  it('replaces the content in place when retargeted to another file', () => {
+    const { setTarget } = mountPanel({ target: detailTarget(fileTool()), desktop: true });
+    expect(pathHeader()?.textContent).toBe('foo.ts');
+
+    setTarget(
+      detailTarget(
+        tool(6, 'edit bar.ts', 'ok', {
+          view: { kind: 'diff', path: 'bar.ts', text: '@@ -1 +1 @@\n+y' },
+        }),
+      ),
+    );
+    // The sidebar stays open; only the shown file changes.
+    expect(aside()).not.toBeNull();
+    expect(pathHeader()?.textContent).toBe('bar.ts');
+  });
+});
+
+// --- Desktop drag-to-resize (issue #154 §4) --------------------------------
+
+describe('ToolPanel resize', () => {
+  it('renders the resize handle only on desktop', () => {
+    const { setDesktop } = mountPanel({ target: detailTarget(fileTool()), desktop: false });
+    expect(resizeHandle()).toBeNull(); // mobile sheet: no handle
+    setDesktop(true);
+    const handle = resizeHandle();
+    expect(handle).not.toBeNull();
+    expect(handle?.getAttribute('role')).toBe('separator');
+    expect(handle?.getAttribute('aria-orientation')).toBe('vertical');
+  });
+
+  it('resizes the aside within [320px, 60vw] on a pointer drag', () => {
+    // jsdom's window.innerWidth is 1024, so width = 1024 - clientX, clamped to
+    // [320, round(1024*0.6)=614].
+    mountPanel({ target: detailTarget(fileTool()), desktop: true });
+    const el = aside()!;
+    const handle = resizeHandle()!;
+
+    handle.dispatchEvent(pointerEvt('pointerdown', 600));
+    window.dispatchEvent(pointerEvt('pointermove', 500)); // 1024-500 = 524
+    expect(el.style.width).toBe('524px');
+    expect(el.classList.contains('tool-panel-resizing')).toBe(true);
+
+    window.dispatchEvent(pointerEvt('pointermove', 900)); // 1024-900 = 124 → floor 320
+    expect(el.style.width).toBe('320px');
+
+    window.dispatchEvent(pointerEvt('pointermove', 40)); // 1024-40 = 984 → 60vw 614
+    expect(el.style.width).toBe('614px');
+
+    window.dispatchEvent(pointerEvt('pointerup', 40));
+    expect(el.classList.contains('tool-panel-resizing')).toBe(false);
+  });
+
+  it('persists the width on pointerup and seeds the next mount', () => {
+    mountPanel({ target: detailTarget(fileTool()), desktop: true });
+    resizeHandle()!.dispatchEvent(pointerEvt('pointerdown', 600));
+    window.dispatchEvent(pointerEvt('pointermove', 500)); // 524
+    window.dispatchEvent(pointerEvt('pointerup', 500));
+    expect(localStorage.getItem('lab.tool-panel-width')).toBe('524');
+
+    // Remount: the stored width seeds the aside's inline width.
+    dispose?.();
+    dispose = undefined;
+    container.remove();
+    mountPanel({ target: detailTarget(fileTool()), desktop: true });
+    expect(aside()?.style.width).toBe('524px');
+  });
+
+  it('re-clamps a stored width beyond 60vw at apply time', () => {
+    localStorage.setItem('lab.tool-panel-width', '5000');
+    mountPanel({ target: detailTarget(fileTool()), desktop: true });
+    // 60vw of the 1024 jsdom viewport = round(1024*0.6) = 614, never 5000.
+    expect(aside()?.style.width).toBe('614px');
+  });
+
+  it('applies no inline width for a first-time user (CSS default stands)', () => {
+    mountPanel({ target: detailTarget(fileTool()), desktop: true });
+    expect(aside()?.style.width).toBe('');
+  });
+});
+
+describe('clampPanelWidth', () => {
+  it('clamps a width to [320px, 60vw] of the viewport', () => {
+    expect(clampPanelWidth(524, 1024)).toBe(524); // in band
+    expect(clampPanelWidth(100, 1024)).toBe(320); // below the floor
+    expect(clampPanelWidth(5000, 1024)).toBe(614); // above 60vw (rounded)
+    expect(clampPanelWidth(400, 2000)).toBe(400); // wider viewport, same floor
   });
 });

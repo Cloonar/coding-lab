@@ -5,9 +5,11 @@
 // #56), lifecycle/errors; thinking permanently hidden at paint — issue #68),
 // and a fixed bottom composer whose state follows the run — collapsed to a
 // waiting note while a dialog is pending, disabled for ended instances. Tool
-// chips and group summaries no longer expand inline: they are buttons that open
-// the tool detail panel (issue #145) — a right sidebar on desktop, a modal
-// bottom sheet on phones — while the pending-dialog card stays inline. Send is
+// chips and group summaries are buttons whose click branches on the breakpoint
+// (issue #154): on desktop (>=1024px) they toggle a RICH inline expansion in
+// place (a lone chip reveals its ToolViewBody, a group reveals its member
+// chips); on phones they open the tool detail bottom sheet exactly as before
+// (issue #145) — while the pending-dialog card stays inline. Send is
 // ALWAYS available and fires immediately (ADR-0029, issue #61);
 // the one-tap turn Interrupt lives in the header next to Stop, gated on the live
 // outcome — not the derived `working` state, which can be a stale-transcript-tail
@@ -61,6 +63,7 @@ import Icon from '../components/Icon';
 import OpenAffordance from '../components/OpenAffordance';
 import RequireAuth from '../components/RequireAuth';
 import ToolPanel, { toolStatusMark, type PanelTarget } from '../components/ToolPanel';
+import ToolViewBody, { isFileView } from '../components/ToolViews';
 import {
   anchoredScrollTop,
   isNearBottom,
@@ -163,6 +166,27 @@ function RunChatView() {
   const [panelSel, setPanelSel] = createSignal<
     null | { kind: 'group'; key: number } | { kind: 'tool'; seq: number }
   >(null);
+
+  // Desktop inline expansion state (issue #154), the controlled successor to the
+  // pre-#145 uncontrolled <details>: a group is a derived structure recomputed
+  // on every refetch and a lone chip's message is replaced wholesale, so native
+  // <details> state would slam an expanded run shut on the next SSE tick. seq is
+  // the immutable cursor that survives the recompute — groups key by their first
+  // tool's seq (decision 12), lone chips by their own. Both are stream state,
+  // reset alongside panelSel below. Mobile never writes them (its click opens
+  // the sheet); the group/chip bodies only render when desktopPanel() is true.
+  const [openGroups, setOpenGroups] = createSignal<Set<number>>(new Set());
+  const [openTools, setOpenTools] = createSignal<Set<number>>(new Set());
+  const toggleInSet = (set: Set<number>, key: number) => {
+    const next = new Set(set);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  };
+  const groupOpen = (key: number) => openGroups().has(key);
+  const toggleGroup = (key: number) => setOpenGroups((prev) => toggleInSet(prev, key));
+  const toolExpanded = (seq: number) => openTools().has(seq);
+  const toggleTool = (seq: number) => setOpenTools((prev) => toggleInSet(prev, seq));
 
   // >=1024px renders the panel as the in-flow sidebar instead of the sheet — a
   // pure render switch on shared state, so crossing the breakpoint while open
@@ -445,9 +469,12 @@ function RunChatView() {
     setHasMore(false);
     setExhausted(false);
     setError(null);
-    // Panel selection is stream state (it names a seq): route navigation and
-    // transcript rotation both come through here, so it resets for free.
+    // Panel selection AND the desktop inline expansions are stream state (they
+    // name a seq): route navigation and transcript rotation both come through
+    // here, so they reset for free.
     setPanelSel(null);
+    setOpenGroups(new Set<number>());
+    setOpenTools(new Set<number>());
   };
 
   // All chat state is keyed to the route param: navigating /runs/A → /runs/B
@@ -633,6 +660,21 @@ function RunChatView() {
   createEffect(() => {
     if (panelSel() !== null && panelTarget() === null) setPanelSel(null);
   });
+  // Desktop sidebar shows FILE details only (issue #154 §2): never a list, never
+  // a command. A group selection, or a non-file tool selection, is reachable by
+  // opening the sheet on mobile and then crossing the breakpoint — clear it so
+  // the sidebar can't be asked to render something it doesn't show.
+  createEffect(() => {
+    if (!desktopPanel()) return;
+    const sel = panelSel();
+    if (sel === null) return;
+    if (sel.kind === 'group') {
+      setPanelSel(null);
+      return;
+    }
+    const m = messages().find((x) => x.seq === sel.seq && x.kind === 'tool');
+    if (m === undefined || !isFileView(m)) setPanelSel(null);
+  });
   const groupSelected = (key: number) => {
     const sel = panelSel();
     return sel !== null && sel.kind === 'group' && sel.key === key;
@@ -710,8 +752,15 @@ function RunChatView() {
                         {(group) => (
                           <ToolGroupView
                             group={group()}
+                            desktop={desktopPanel()}
                             selected={groupSelected(group().key)}
                             onOpen={() => setPanelSel({ kind: 'group', key: group().key })}
+                            open={groupOpen(group().key)}
+                            onToggle={() => toggleGroup(group().key)}
+                            toolExpanded={toolExpanded}
+                            onToggleTool={toggleTool}
+                            toolSelected={toolSelected}
+                            onOpenTool={(seq) => setPanelSel({ kind: 'tool', seq })}
                           />
                         )}
                       </Match>
@@ -727,10 +776,13 @@ function RunChatView() {
                               <Show when={!hiddenThinking(msg().message)}>
                                 <MessageView
                                   message={msg().message}
+                                  desktop={desktopPanel()}
                                   toolSelected={toolSelected(msg().message)}
                                   onOpenTool={() =>
                                     setPanelSel({ kind: 'tool', seq: msg().message.seq })
                                   }
+                                  toolExpanded={toolExpanded(msg().message.seq)}
+                                  onToggleTool={() => toggleTool(msg().message.seq)}
                                 />
                               </Show>
                             }
@@ -1359,11 +1411,19 @@ function ChatMenu(props: {
 
 function MessageView(props: {
   message: ChatMessage;
+  /** Desktop (>=1024px): the chip's click toggles inline expansion; mobile: it
+   *  opens the sheet. Threaded through the group-body recursion too, which only
+   *  renders on desktop. Meaningful only for kind 'tool'. */
+  desktop: boolean;
   /** Panel wiring for a lone tool chip (issue #145): whether this chip is what
-   *  the panel shows, and the tap that opens/retargets it. Meaningful only for
-   *  kind 'tool'; the other kinds ignore both. */
+   *  the sheet shows on mobile, and the tap that opens/retargets it. Meaningful
+   *  only for kind 'tool'; the other kinds ignore both. */
   toolSelected: boolean;
   onOpenTool: () => void;
+  /** Desktop inline expansion (issue #154): whether this chip's rich body is
+   *  open, and the tap that toggles it. */
+  toolExpanded: boolean;
+  onToggleTool: () => void;
 }) {
   const m = () => props.message;
   // Copy-raw (decision 14) is assistant-only: user replies are already plain
@@ -1392,7 +1452,14 @@ function MessageView(props: {
         </div>
       </Match>
       <Match when={m().kind === 'tool'}>
-        <ToolChip message={m()} selected={props.toolSelected} onOpen={props.onOpenTool} />
+        <ToolChip
+          message={m()}
+          desktop={props.desktop}
+          selected={props.toolSelected}
+          onOpen={props.onOpenTool}
+          expanded={props.toolExpanded}
+          onToggle={props.onToggleTool}
+        />
       </Match>
       {/* An ANSWERED dialog stays in history as a compact, inert Q→A summary
           (issue #56 decision 3). Outcome PRESENCE is the answered signal —
@@ -1415,55 +1482,141 @@ function MessageView(props: {
   );
 }
 
-// A single tool call: a one-line chip button that opens the detail panel
-// (issue #145) — the I/O <pre>s live there now, nothing expands inline. One
-// element wears both the frame (.chat-tool) and the row (.tool-summary)
-// classes so the pre-panel look survives the <details> → <button> swap;
-// `selected` marks the chip whose content the panel is showing.
-function ToolChip(props: { message: ChatMessage; selected: boolean; onOpen: () => void }) {
+// A single tool call: a summary-row button inside a .chat-tool frame. The click
+// branches on the breakpoint (issue #154) — desktop toggles the rich inline
+// body (ToolViewBody) in place, mobile opens the detail sheet (issue #145). The
+// frame class (.chat-tool) is the wrapper div, the row class (.tool-summary) the
+// inner button, split from the single pre-#154 button so the body can hang below
+// the row without native <details> fighting the breakpoint branch.
+//
+// On DESKTOP a FILE tool (diff/write/read — isFileView) also gets an "open in
+// sidebar" affordance (issue #154 §2): a small icon-button as the summary's
+// SIBLING inside the row wrapper (never nested — a button in a button is invalid
+// HTML), and the SAME button as ToolViewBody's pathAction in the expanded body.
+// Its click opens/retargets the file sidebar (onOpen); the summary click still
+// toggles inline expansion. Command/fallback tools, and every chip on mobile,
+// get no affordance anywhere. `selected` (the sidebar's source on desktop, the
+// sheet's on mobile) rides the wrapper for the highlight and the summary button
+// for its aria-pressed; `aria-expanded` reflects the desktop inline state.
+function ToolChip(props: {
+  message: ChatMessage;
+  desktop: boolean;
+  selected: boolean;
+  onOpen: () => void;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const t = () => props.message.tool;
-  return (
+  // Desktop file tools only: the sidebar accepts diff/write/read, nothing else.
+  const showAffordance = () => props.desktop && isFileView(props.message);
+  const sidebarButton = () => (
     <button
       type="button"
-      classList={{
-        'chat-tool': true,
-        'tool-summary': true,
-        [`tool-${t()?.status ?? 'ok'}`]: true,
-        selected: props.selected,
-      }}
-      aria-pressed={props.selected}
+      class="icon-btn tool-open-sidebar"
+      aria-label="Open in sidebar"
+      title="Open in sidebar"
       onClick={() => props.onOpen()}
     >
-      <span class="tool-title">{t()?.title}</span>
-      <span class="tool-status">{toolStatusMark(t()?.status)}</span>
+      <Icon name="panel-right" size={16} />
     </button>
+  );
+  return (
+    <div classList={{ 'chat-tool': true, selected: props.selected }}>
+      {/* wrapper > row: the summary button (flex:1) plus, on desktop file tools,
+          the sidebar affordance as a SIBLING — never nested. */}
+      <div class="tool-summary-row">
+        <button
+          type="button"
+          classList={{
+            'tool-summary': true,
+            [`tool-${t()?.status ?? 'ok'}`]: true,
+            selected: props.selected,
+          }}
+          aria-pressed={props.selected}
+          aria-expanded={props.desktop && props.expanded}
+          onClick={() => (props.desktop ? props.onToggle() : props.onOpen())}
+        >
+          <span class="tool-title">{t()?.title}</span>
+          <span class="tool-status">{toolStatusMark(t()?.status)}</span>
+        </button>
+        <Show when={showAffordance()}>{sidebarButton()}</Show>
+      </div>
+      {/* Desktop only: the rich body in place. props.message is passed live (a
+          JSX getter, never a captured snapshot) so a refetch that grows the
+          tool output flows straight through — see ToolViews' liveness note. A
+          file tool's path header carries the same sidebar affordance
+          (pathAction); the sheet and the sidebar itself never get one. */}
+      <Show when={props.desktop && props.expanded}>
+        <div class="tool-inline-body">
+          <ToolViewBody
+            message={props.message}
+            pathAction={showAffordance() ? sidebarButton() : undefined}
+          />
+        </div>
+      </Show>
+    </div>
   );
 }
 
 // A run of 2+ tool calls behind one summary line (decisions 8–11): the count
-// plus rolled-up failure/liveness. Grouping is untouched; only the inline
-// <details> expansion is superseded (issue #145) — the line is a button
-// opening the panel at the group's LIST page.
-function ToolGroupView(props: { group: ToolGroup; selected: boolean; onOpen: () => void }) {
+// plus rolled-up failure/liveness. The click branches on the breakpoint (issue
+// #154) — desktop toggles the run open in place (member chips stack in the
+// body, each independently expandable), mobile opens the panel at the group's
+// LIST page (issue #145). Folded-in thinking is dropped at paint (issue #68).
+function ToolGroupView(props: {
+  group: ToolGroup;
+  desktop: boolean;
+  selected: boolean;
+  onOpen: () => void;
+  open: boolean;
+  onToggle: () => void;
+  toolExpanded: (seq: number) => boolean;
+  onToggleTool: (seq: number) => void;
+  toolSelected: (m: ChatMessage) => boolean;
+  onOpenTool: (seq: number) => void;
+}) {
   const summary = () => toolGroupSummary(props.group);
+  const items = () => props.group.items.filter((m) => !(m.kind === 'text' && m.thinking));
   return (
-    <button
-      type="button"
-      classList={{
-        'chat-tool-group': true,
-        'tool-group-summary': true,
-        'has-error': props.group.errorCount > 0,
-        selected: props.selected,
-      }}
-      aria-pressed={props.selected}
-      onClick={() => props.onOpen()}
-    >
-      <span class="tool-group-count">{summary().label}</span>
-      <Show when={summary().failed}>{(f) => <span class="tool-group-failed"> · {f()}</span>}</Show>
-      <Show when={summary().running}>
-        <span class="tool-group-running"> · running…</span>
+    <div classList={{ 'chat-tool-group': true, selected: props.selected }}>
+      <button
+        type="button"
+        classList={{
+          'tool-group-summary': true,
+          'has-error': props.group.errorCount > 0,
+          selected: props.selected,
+        }}
+        aria-pressed={props.selected}
+        aria-expanded={props.desktop && props.open}
+        onClick={() => (props.desktop ? props.onToggle() : props.onOpen())}
+      >
+        <span class="tool-group-count">{summary().label}</span>
+        <Show when={summary().failed}>
+          {(f) => <span class="tool-group-failed"> · {f()}</span>}
+        </Show>
+        <Show when={summary().running}>
+          <span class="tool-group-running"> · running…</span>
+        </Show>
+      </button>
+      {/* Desktop only: the expanded run recurses into MessageView per non-thinking
+          item, each chip an independently expandable body of its own. */}
+      <Show when={props.desktop && props.open}>
+        <div class="tool-group-body">
+          <For each={items()}>
+            {(m) => (
+              <MessageView
+                message={m}
+                desktop={props.desktop}
+                toolSelected={props.toolSelected(m)}
+                onOpenTool={() => props.onOpenTool(m.seq)}
+                toolExpanded={props.toolExpanded(m.seq)}
+                onToggleTool={() => props.onToggleTool(m.seq)}
+              />
+            )}
+          </For>
+        </div>
       </Show>
-    </button>
+    </div>
   );
 }
 
