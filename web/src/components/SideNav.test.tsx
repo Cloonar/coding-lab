@@ -43,6 +43,7 @@ function instance(overrides: Partial<Instance>): Instance {
     title: null,
     model: 'opus[1m]',
     effort: 'max',
+    remote: true,
     deep_link_url: null,
     started_at: '2026-07-06T15:00:00.000Z',
     budget_deadline: null,

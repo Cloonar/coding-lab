@@ -76,7 +76,13 @@ import {
 } from '../lib/chatStream';
 import { isComposerSend } from '../lib/composerKeys';
 import { stateBadge } from '../lib/conversation';
-import { openState, providerOpen, type OpenState } from '../lib/deepLink';
+import {
+  openState,
+  providerOpen,
+  providerSupportsRemote,
+  remoteGated,
+  type OpenState,
+} from '../lib/deepLink';
 import { runDisplayTitle, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { forgeWebUrl } from '../lib/repoName';
@@ -568,8 +574,18 @@ function RunChatView() {
   // Where to answer when lab can't: the provider's web surface host when it
   // has one (fallback_open), else the generic session wording for a
   // terminal-only provider (whose header offers the tmux attach).
+  //
+  // A remote-off run of a remote-capable provider has NO web session (issue
+  // #163), so it takes the generic wording too: the very same gate that hides
+  // the Open affordance must mute this prose, or the hint names a web session
+  // that was never registered. These degraded branches are exactly where a
+  // non-remote run LANDS — without remote control the agent flushes its pending
+  // tool_use, so the dialog arrives by transcript scan rather than the spool.
   const openHint = () => {
-    const fb = runProvider()?.fallback_open;
+    const r = runData();
+    const p = runProvider();
+    if (r !== undefined && remoteGated(r, p?.supports_remote)) return 'open the session';
+    const fb = p?.fallback_open;
     if (fb === undefined || fb.url === '') return 'open the session';
     try {
       return `open it at ${new URL(fb.url).host}`;
@@ -980,12 +996,21 @@ function ChatHeader(props: {
   // The open affordance (ADR-0017): the exact deep link when captured, else the
   // provider's generic web fallback, else a tmux-attach for a link-less
   // provider — same source of truth as the dashboard rows, never hardcoded.
+  // Nothing at all for a remote-capable provider's run that spawned with remote
+  // control off (issue #163): openState resolves that gate and answers null,
+  // which the <Show>s on open() already render as nothing.
   const open = () => {
     const r = props.run;
     if (r === undefined) return null;
     return openState(
-      { connecting: false, deep_link_url: r.deep_link_url, session_name: r.session_name },
+      {
+        connecting: false,
+        deep_link_url: r.deep_link_url,
+        session_name: r.session_name,
+        remote: r.remote,
+      },
       providerOpen(props.providers, r.provider),
+      providerSupportsRemote(props.providers, r.provider),
     );
   };
 

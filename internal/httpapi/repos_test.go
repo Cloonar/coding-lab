@@ -617,6 +617,112 @@ func TestRepoProviderOverride(t *testing.T) {
 	}
 }
 
+// TestRepoRemoteDefaults pins the issue-#163 repo surface — the tri-state a
+// BOOLEAN override needs, and the trap it exists to avoid. Both keys are always
+// present (null when unset = inherit); true pins on; FALSE pins OFF and must
+// come back as false, not null, because a repo's explicit "never remote" has to
+// beat a global true; null clears back to inherit. A non-boolean is a 400 that
+// leaves the row untouched.
+func TestRepoRemoteDefaults(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+
+	resp := x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	repo := decodeBody(t, resp)
+	id := repo["id"].(string)
+
+	keys := []string{"remote_default", "afk_remote_default"}
+	for _, key := range keys {
+		v, present := repo[key]
+		if !present {
+			t.Fatalf("repo JSON missing %s (nullable keys are always present)", key)
+		}
+		if v != nil {
+			t.Errorf("%s = %v on a fresh repo, want null (inherit)", key, v)
+		}
+	}
+
+	// true pins remote ON at repo scope.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
+		"remote_default": true, "afk_remote_default": true,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	for _, key := range keys {
+		if repo[key] != true {
+			t.Errorf("%s = %v (%T) after PATCH true, want true", key, repo[key], repo[key])
+		}
+	}
+
+	// THE TRAP: false is a VALUE, not "unset". It must round-trip as false —
+	// never collapse into null the way an empty string does for the string knobs.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
+		"remote_default": false, "afk_remote_default": false,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	for _, key := range keys {
+		v, present := repo[key]
+		if !present {
+			t.Fatalf("repo JSON missing %s after PATCH false", key)
+		}
+		if v == nil {
+			t.Errorf("%s = null after PATCH false, want false — an explicit off must not read as inherit", key)
+			continue
+		}
+		if b, ok := v.(bool); !ok || b {
+			t.Errorf("%s = %v (%T) after PATCH false, want the JSON bool false", key, v, v)
+		}
+	}
+	// Persisted as a PINNED false (non-nil pointer), not NULL — this is what
+	// ResolveRemote reads to beat a global true.
+	row, err := x.st.RepoByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("RepoByID: %v", err)
+	}
+	if row.RemoteDefault == nil || *row.RemoteDefault {
+		t.Errorf("stored remote_default = %v, want a non-nil pointer to false", row.RemoteDefault)
+	}
+	if row.AFKRemoteDefault == nil || *row.AFKRemoteDefault {
+		t.Errorf("stored afk_remote_default = %v, want a non-nil pointer to false", row.AFKRemoteDefault)
+	}
+
+	// null clears both back to inherit (a NULL column, not a stored false).
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
+		"remote_default": nil, "afk_remote_default": nil,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["remote_default"] != nil || repo["afk_remote_default"] != nil {
+		t.Errorf("cleared remotes = %v/%v, want nulls", repo["remote_default"], repo["afk_remote_default"])
+	}
+	if row, err = x.st.RepoByID(context.Background(), id); err != nil {
+		t.Fatalf("RepoByID: %v", err)
+	}
+	if row.RemoteDefault != nil || row.AFKRemoteDefault != nil {
+		t.Errorf("stored remotes = %v/%v after PATCH null, want NULL columns", row.RemoteDefault, row.AFKRemoteDefault)
+	}
+
+	// A non-boolean is a 400 on either knob; the row stays at inherit.
+	for _, patch := range []map[string]any{
+		{"remote_default": "on"},
+		{"remote_default": 3},
+		{"afk_remote_default": "off"},
+		{"afk_remote_default": 0},
+	} {
+		resp = x.do("PATCH", "/api/v1/repos/"+id, patch, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if got := decodeBody(t, resp); got["error"] == "" {
+			t.Fatalf("non-boolean %v 400 without error message", patch)
+		}
+	}
+	if repo = x.getRepo(t, id); repo["remote_default"] != nil || repo["afk_remote_default"] != nil {
+		t.Errorf("row changed by a rejected PATCH: %v/%v", repo["remote_default"], repo["afk_remote_default"])
+	}
+}
+
 func TestRepoDeleteMatrix(t *testing.T) {
 	x := newRepoTestServer(t)
 	h := csrfHeaders(x.ts.URL)

@@ -65,6 +65,16 @@ type SpawnSpec struct {
 	SessionName string
 	Model       string // "" omits the --model flag
 	Effort      string // "" omits the --effort flag
+	// Remote is the resolved lab-level remote-control knob (issue #163) — the
+	// fourth TYPED spawn knob beside provider/model/effort, deliberately NOT an
+	// entry in the Options bag below: that bag is provider-DECLARED and
+	// provider-FILTERED (two providers declaring it = two keys; a provider
+	// declaring nothing = the setting silently vanishes), whereas this is ONE
+	// lab setting every provider receives — and lab itself must act on the value
+	// (deep-link gating), which is ADR-0021's own criterion for a lab-domain
+	// field. Providers that honor it advertise RemoteCapable; the rest receive
+	// it and ignore it. Lab never learns the mechanism.
+	Remote bool
 	// Options is the resolved provider-owned spawn-options bag (issue #19),
 	// already filtered + validated to this provider's declared schema by the
 	// caller. The provider applies it however it sees fit (claude-code prepends
@@ -742,6 +752,19 @@ type DeepLinker interface {
 	// the provider so no core code or SPA hardcodes a provider URL.
 	FallbackOpen() OpenAffordance
 }
+
+// RemoteCapable is implemented by providers that honor SpawnSpec.Remote
+// (issue #163) — the FIFTH optional capability on this seam, advertised
+// structurally by a type assertion at the call site exactly like
+// ConnectingReporter, DeepLinker, LiveSignals, and LoginCodeReporter
+// (ADR-0017). It answers WHETHER a provider acts on the knob, never WHAT it
+// does with it: claude-code adds/omits its remote-control flag, a headless CLI
+// receives the bool and ignores it. Lab surfaces the answer so the UI can
+// disable a toggle the resolved provider would silently drop, and the Tier-1
+// conformance suite holds an implementer to it (spawn-remote: an advertised
+// capability must actually change the argv, and a provider that omits it must
+// produce an identical argv for both values).
+type RemoteCapable interface{ SupportsRemoteControl() bool }
 
 // HasOption reports whether a catalog contains value — the validation
 // helper for spawn requests against Models()/Efforts().

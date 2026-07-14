@@ -25,8 +25,9 @@ type NoLinkFake struct {
 	seeded []string // worktrees passed to SeedWorkspace, in order
 }
 
-// Only the mandatory seam — deliberately NOT DeepLinker/ConnectingReporter, so
-// a type assertion for either capability fails (the link-less path).
+// Only the mandatory seam — deliberately NOT DeepLinker/ConnectingReporter, and
+// (issue #163) NOT RemoteCapable either, so a type assertion for any of those
+// capabilities fails (the link-less, remote-less path).
 var _ provider.AgentProvider = (*NoLinkFake)(nil)
 
 // NewNoLink returns a logged-in link-less fake with the id "codex-fake" and a
@@ -82,8 +83,12 @@ func (f *NoLinkFake) Commands(context.Context, string) ([]provider.CommandSpec, 
 // always empty.
 func (f *NoLinkFake) SpawnOptions() []provider.OptionSpec { return nil }
 
-// SpawnArgv mirrors a minimal headless-CLI argv (no --remote-control, no web
-// bridge). The seed prompt still rides as the trailing positional.
+// SpawnArgv mirrors a minimal headless-CLI argv (no remote-control flag, no web
+// bridge). The seed prompt still rides as the trailing positional. spec.Remote
+// is deliberately NOT read (issue #163): this fake advertises no RemoteCapable,
+// so its argv must be byte-identical for both values of the knob — the
+// receive-and-ignore half of the seam, and what the suite's spawn-remote
+// obligation pins for a provider like codex.
 func (f *NoLinkFake) SpawnArgv(spec provider.SpawnSpec) []string {
 	argv := []string{"codex", "run", spec.SessionName}
 	if spec.Model != "" {

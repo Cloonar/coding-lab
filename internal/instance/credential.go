@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -239,6 +240,82 @@ func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Opti
 		return reportedDefault, nil
 	}
 	return catalog[0].Value, nil
+}
+
+// ResolveRemote resolves the EFFECTIVE remote-control knob for a spawn of the
+// given kind (issue #163) — the fourth typed spawn knob, layered on the same
+// ADR-0030 skip-layer model as provider/model/effort, with ONE difference that
+// governs the whole implementation: this knob is a BOOLEAN, so `false` is a
+// legal VALUE and can never double as the "unset" sentinel the string knobs get
+// for free ("" is not a legal model or effort id, so `""`-means-inherit is safe
+// there; `false`-means-inherit would be a lie here). Every layer is therefore
+// tri-state — *bool for the request and for the repo columns, an ABSENT-or-blank
+// row for the settings layer (GetString(key,"") == "" is the inherit test;
+// GetBool only speaks once the row is known non-blank) — and a layer that is
+// present-and-false WINS over any lower layer that is true. Without that, "remote
+// explicitly OFF at repo scope" would silently inherit a global true.
+//
+// MANUAL: explicit per-spawn request → repo.remote_default → spawn_remote_default
+// → false. AFK has no per-spawn request (the start is bodyless); it consults its
+// OVERRIDE layer first — repo.afk_remote_default → spawn_remote_default_afk —
+// then falls through to the same base chain, exactly as layerSpawnDefault does
+// with afk=true. spawn_remote_default is seeded ("false"); the _afk key is not,
+// because absent = inherit.
+//
+// The layered answer is then CLAMPED by the provider's capability: a provider
+// that does not implement provider.RemoteCapable — or that reports
+// SupportsRemoteControl() == false — resolves to false no matter what every
+// layer says. That clamp is what makes prov load-bearing here: the run row must
+// TRUTHFULLY record whether a session is remote-controlled, because lab itself
+// reads that stored bool — ArmCapture gates deep-link capture on it, and the SPA
+// gates its Open affordance on it. A codex run is never remote, so it must never
+// be recorded as one. The check is the same structural type assertion (ADR-0017)
+// the deep-linker call sites use — lab asks WHETHER, never HOW.
+func (s *Service) ResolveRemote(ctx context.Context, prov provider.AgentProvider, repo store.Repo, kind string, req *bool) (bool, error) {
+	rc, ok := prov.(provider.RemoteCapable)
+	if !ok || !rc.SupportsRemoteControl() {
+		return false, nil // capability clamp — no layer can make this run remote
+	}
+	if req != nil {
+		return *req, nil // an explicit per-spawn pick (true OR false) beats every layer
+	}
+	if isAFKKind(kind) {
+		if repo.AFKRemoteDefault != nil {
+			return *repo.AFKRemoteDefault, nil
+		}
+		if v, set, err := s.settingBool(ctx, store.SettingSpawnRemoteDefaultAFK); err != nil || set {
+			return v, err
+		}
+	}
+	if repo.RemoteDefault != nil {
+		return *repo.RemoteDefault, nil
+	}
+	// The base setting is the last layer: absent or blank means the seeded row is
+	// missing, and the floor for this knob is false (never remote by accident).
+	v, _, err := s.settingBool(ctx, store.SettingSpawnRemoteDefault)
+	return v, err
+}
+
+// settingBool reads a BOOLEAN settings row as a tri-state: a present, non-blank
+// row yields its parsed value with set=true; an absent or blank row yields
+// set=false — inherit. The two-step read is the whole point: GetBool's own def
+// parameter flattens "absent" into a value, which is exactly what a boolean knob
+// must not do (false is an answer, not a hole). Probing blankness with
+// GetString(key, "") FIRST keeps the sentinel out of the value space; a present
+// non-boolean value still fails loud through GetBool (never coerced to false).
+func (s *Service) settingBool(ctx context.Context, key string) (val, set bool, err error) {
+	raw, err := s.store.GetString(ctx, key, "")
+	if err != nil {
+		return false, false, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return false, false, nil
+	}
+	v, err := s.store.GetBool(ctx, key, false)
+	if err != nil {
+		return false, false, err
+	}
+	return v, true, nil
 }
 
 // ResolveSpawnOptions resolves the provider-owned spawn-options bag for a launch

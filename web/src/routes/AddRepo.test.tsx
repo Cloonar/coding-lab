@@ -13,6 +13,7 @@ const PROVIDERS: Provider[] = [
   {
     id: 'claude-code',
     display_name: 'Claude Code',
+    supports_remote: true,
     auth: { kind: 'oauth-code' },
     models: [{ value: 'sonnet', label: 'Sonnet', efforts: [] }],
     efforts: [{ value: 'high', label: 'high' }],
@@ -21,6 +22,7 @@ const PROVIDERS: Provider[] = [
   {
     id: 'codex',
     display_name: 'Codex',
+    supports_remote: false,
     auth: { kind: 'api-key' },
     models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: [] }],
     efforts: [],

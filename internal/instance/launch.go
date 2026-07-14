@@ -31,6 +31,13 @@ type LaunchSpec struct {
 	WorktreePath string
 	Model        string
 	Effort       string
+	// Remote is the RESOLVED remote-control value (issue #163) — already layered
+	// and capability-clamped by ResolveRemote, so a plain bool here (unlike the
+	// *bool of the request layers) carries no "unset" state left to interpret.
+	// Launch spends it twice: into provider.SpawnSpec (the provider decides what
+	// remote control means) and onto the runs row, which is the ONLY thing that
+	// still knows after a restart — the deep-link capture gate reads it there.
+	Remote bool
 	// Options is the resolved provider-owned spawn-options bag (issue #19 /
 	// ADR-0021), already filtered + validated to the provider's schema by
 	// ResolveSpawnOptions. Empty for manual runs; for AFK runs it carries the
@@ -181,6 +188,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		SessionName:    name,
 		Model:          spec.Model,
 		Effort:         spec.Effort,
+		Remote:         spec.Remote,
 		StartedAt:      s.now(),
 		BudgetDeadline: spec.BudgetDeadline,
 		Outcome:        store.RunOutcomeActive,
@@ -225,6 +233,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		SessionName:   name,
 		Model:         spec.Model,
 		Effort:        spec.Effort,
+		Remote:        spec.Remote,
 		Options:       spec.Options,
 		InitialPrompt: spec.SeedPrompt,
 	})

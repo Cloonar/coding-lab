@@ -56,7 +56,8 @@ type Fixture struct {
 // the declarations lab's core consumes blind: pattern dialect (issue #75 /
 // ADR-0033), the lab-owned context file (issue #79 / ADR-0035), defensive
 // catalog/meta clones, spawn argv shape (issue #19 / ADR-0021), the
-// auth-flow vocabulary and login-session naming (issue #77 / ADR-0034), and
+// auth-flow vocabulary and login-session naming (issue #77 / ADR-0034), the
+// remote-control knob's advertise-or-ignore contract (issue #163), and
 // executable exclude/scrub coverage.
 func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Helper()
@@ -71,6 +72,7 @@ func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Run("seedmeta-clone", func(t *testing.T) { report(t, checkSeedMetaClone(p)) })
 	t.Run("catalogs", func(t *testing.T) { report(t, checkCatalogs(p)) })
 	t.Run("spawn-argv", func(t *testing.T) { report(t, checkSpawnArgv(p)) })
+	t.Run("spawn-remote", func(t *testing.T) { report(t, checkSpawnRemote(p)) })
 	t.Run("auth-flow", func(t *testing.T) { report(t, checkAuthFlow(p)) })
 	t.Run("login-session", func(t *testing.T) { report(t, checkLoginSession(p)) })
 	t.Run("read-chat", func(t *testing.T) { report(t, checkReadChat(t, p)) })
@@ -300,19 +302,7 @@ const conformancePrompt = "providertest-conformance-prompt-3f9c1a"
 // because prompt-scoped options (claude-code's ultracode) are legal.
 func checkSpawnArgv(p provider.AgentProvider) []error {
 	var errs []error
-	var model, effort string
-	if m := p.Models(); len(m) > 0 {
-		model = m[0].Value
-		// The probe effort comes from the probe MODEL's own list (issue
-		// #156) — the spawn path never pairs a model with an effort outside
-		// its list, so neither does the conformance probe.
-		if len(m[0].Efforts) > 0 {
-			effort = m[0].Efforts[0].Value
-		}
-	} else if e := p.Efforts(); len(e) > 0 {
-		effort = e[0].Value
-	}
-	spec := provider.SpawnSpec{SessionName: "lab-conformance-1", Model: model, Effort: effort}
+	spec := spawnProbeSpec(p)
 
 	base := p.SpawnArgv(spec)
 	if len(base) == 0 {
@@ -356,6 +346,65 @@ func checkSpawnArgv(p provider.AgentProvider) []error {
 		}
 	}
 	return errs
+}
+
+// spawnProbeSpec is the well-formed spec the spawn checks drive an adapter
+// with: a session name plus the first model paired with one of that MODEL's OWN
+// efforts (issue #156 — the spawn path never pairs a model with an effort
+// outside its list, so neither does the conformance probe). Model/effort stay
+// empty for an adapter that declares no catalog; checkCatalogs owns that
+// violation.
+func spawnProbeSpec(p provider.AgentProvider) provider.SpawnSpec {
+	var model, effort string
+	if m := p.Models(); len(m) > 0 {
+		model = m[0].Value
+		if len(m[0].Efforts) > 0 {
+			effort = m[0].Efforts[0].Value
+		}
+	} else if e := p.Efforts(); len(e) > 0 {
+		effort = e[0].Value
+	}
+	return provider.SpawnSpec{SessionName: "lab-conformance-1", Model: model, Effort: effort}
+}
+
+// checkSpawnRemote pins the honesty contract of the lab-level remote knob
+// (issue #163). SpawnSpec.Remote is ONE setting every provider receives;
+// provider.RemoteCapable is the provider's own answer to "do I act on it", and
+// argv is the only place that answer is observable. lab reads the answer
+// (a type assertion plus SupportsRemoteControl, ADR-0017) to decide whether the
+// toggle is live and whether to arm deep-link capture — so the answer and the
+// argv must agree, in both directions:
+//
+//   - a provider that honors the knob must produce a DIFFERENT argv for
+//     Remote:true than for Remote:false. An adapter that advertises and then
+//     drops the value strands every operator who ticks the box, and lab would
+//     gate capture on a knob its CLI never saw.
+//   - a provider that does NOT honor it (the interface omitted — the
+//     receive-and-ignore degradation) must produce an IDENTICAL argv for both
+//     values. A silent difference is an undeclared coupling: lab disables a
+//     toggle the CLI actually obeys.
+//
+// Probed with a non-empty prompt, so an adapter that folded the knob into the
+// seed prompt instead of argv is caught too.
+func checkSpawnRemote(p provider.AgentProvider) []error {
+	off := spawnProbeSpec(p)
+	off.InitialPrompt = conformancePrompt
+	on := off
+	on.Remote = true
+	offArgv, onArgv := p.SpawnArgv(off), p.SpawnArgv(on)
+	differs := !slices.Equal(offArgv, onArgv)
+
+	rc, advertised := p.(provider.RemoteCapable)
+	honors := advertised && rc.SupportsRemoteControl()
+	switch {
+	case honors && !differs:
+		return []error{fmt.Errorf("spawn-remote: this provider advertises provider.RemoteCapable (SupportsRemoteControl() = true) but SpawnArgv is identical for Remote:true and Remote:false (%q) — an honored knob must be observable in the spawn command; lab arms deep-link capture on this answer (issue #163)", onArgv)}
+	case !honors && differs && advertised:
+		return []error{fmt.Errorf("spawn-remote: SupportsRemoteControl() reports false, yet SpawnArgv(Remote:true) = %q differs from SpawnArgv(Remote:false) = %q — lab's toggle and its deep-link gate read that report, so an adapter that acts on the knob must report true (issue #163)", onArgv, offArgv)}
+	case !honors && differs:
+		return []error{fmt.Errorf("spawn-remote: SpawnArgv(Remote:true) = %q differs from SpawnArgv(Remote:false) = %q, but this provider does not implement provider.RemoteCapable — a provider that acts on the knob must ADVERTISE it (the ADR-0017 type assertion), or lab disables a toggle its CLI actually honors (issue #163)", onArgv, offArgv)}
+	}
+	return nil
 }
 
 // checkAuthFlow: the declared Kind must come from the AuthFlow* vocabulary —

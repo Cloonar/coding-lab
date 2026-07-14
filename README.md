@@ -1,6 +1,6 @@
 # lab
 
-`lab` is a self-hosted server with a phone-first web interface for managing remote coding agents against git repositories. The operator adds repositories and credentials in the UI, then starts **manual instances** (interactive `claude --remote-control` sessions reached via claude.ai deep links) or **AFK runs** (unattended sessions that resolve one `ready-for-agent` issue and open a PR) — from any device. Repos without a usable forge tracker get a built-in issue tracker with lab-internal change requests, reviewable and mergeable from the phone.
+`lab` is a self-hosted server with a phone-first web interface for managing remote coding agents against git repositories. The operator adds repositories and credentials in the UI, then starts **manual instances** (interactive agent sessions, driven from lab's own chat — and optionally spawned with the provider's remote control, which for claude-code adds a claude.ai deep link) or **AFK runs** (unattended sessions that resolve one `ready-for-agent` issue and open a PR) — from any device. Repos without a usable forge tracker get a built-in issue tracker with lab-internal change requests, reviewable and mergeable from the phone.
 
 This is the production rewrite of the `lab` prototype vendored read-only at [`docs/reference/lab-v0/`](docs/reference/lab-v0/README.md), which serves as the behavioral specification for the session/worktree/AFK core.
 

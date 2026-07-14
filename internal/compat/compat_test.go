@@ -78,14 +78,37 @@ func TestCompat_AuthStatusFixture_parses(t *testing.T) {
 }
 
 // Spawn argv snapshot (compat.md §1, pinned M3 constant). Manual spawn: no
-// seed prompt, so no trailing positional.
+// seed prompt, so no trailing positional. Remote:true — since issue #163 the
+// remote-control flag rides the resolved lab knob, and this snapshot pins the
+// argv the CLI was live-verified against.
 func TestCompat_SpawnArgvSnapshot(t *testing.T) {
 	got := strings.Join(claudecode.SpawnArgv("claude", provider.SpawnSpec{
-		SessionName: "repo~dom-20260706-0910", Model: "opus[1m]", Effort: "max",
+		SessionName: "repo~dom-20260706-0910", Model: "opus[1m]", Effort: "max", Remote: true,
 	}), " ")
 	want := "claude --remote-control repo~dom-20260706-0910 --permission-mode auto --model opus[1m] --effort max"
 	if got != want {
 		t.Errorf("spawn argv drifted:\n got  %q\n want %q", got, want)
+	}
+}
+
+// Remote OFF (issue #163): the second pinned spawn shape. `claude` without
+// --remote-control is a plain local TUI session — the flag and its session-name
+// argument leave TOGETHER, and no empty positional is left behind (an empty
+// argv element would reach the CLI as a stray bare argument through tmux, which
+// passes argv verbatim).
+func TestCompat_SpawnArgvNoRemoteSnapshot(t *testing.T) {
+	argv := claudecode.SpawnArgv("claude", provider.SpawnSpec{
+		SessionName: "repo~dom-20260706-0910", Model: "opus[1m]", Effort: "max",
+	})
+	got := strings.Join(argv, " ")
+	want := "claude --permission-mode auto --model opus[1m] --effort max"
+	if got != want {
+		t.Errorf("non-remote spawn argv drifted:\n got  %q\n want %q", got, want)
+	}
+	for i, arg := range argv {
+		if arg == "" {
+			t.Errorf("argv[%d] is the empty string — the dropped flag must take its session-name argument with it: %q", i, argv)
+		}
 	}
 }
 
@@ -94,7 +117,7 @@ func TestCompat_SpawnArgvSnapshot(t *testing.T) {
 // carried at spawn, never injected post-spawn.
 func TestCompat_SpawnArgvSeedPromptSnapshot(t *testing.T) {
 	got := strings.Join(claudecode.SpawnArgv("claude", provider.SpawnSpec{
-		SessionName: "repo~afk-7", Model: "opus[1m]", Effort: "max", InitialPrompt: "resolve #7",
+		SessionName: "repo~afk-7", Model: "opus[1m]", Effort: "max", Remote: true, InitialPrompt: "resolve #7",
 	}), " ")
 	want := "claude --remote-control repo~afk-7 --permission-mode auto --model opus[1m] --effort max resolve #7"
 	if got != want {
@@ -109,7 +132,7 @@ func TestCompat_SpawnArgvSeedPromptSnapshot(t *testing.T) {
 // prompt makes it a natural no-op (covered by TestSpawnArgv).
 func TestCompat_SpawnArgvUltracodeSnapshot(t *testing.T) {
 	argv := claudecode.SpawnArgv("claude", provider.SpawnSpec{
-		SessionName: "repo~afk-7", Model: "opus[1m]", Effort: "max",
+		SessionName: "repo~afk-7", Model: "opus[1m]", Effort: "max", Remote: true,
 		Options: map[string]string{"ultracode": "true"}, InitialPrompt: "resolve #7",
 	})
 	// The directive rides as the single trailing positional (never split).

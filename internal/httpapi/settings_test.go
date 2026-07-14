@@ -251,6 +251,17 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		{"unknown spawn option key", map[string]any{"spawn_options_afk": map[string]any{"warp_drive": "true"}}},
 		{"bad spawn option value", map[string]any{"spawn_options_afk": map[string]any{"ultracode": "maybe"}}},
 		{"spawn options not an object", map[string]any{"spawn_options_afk": "nope"}},
+		// The boolean keys (issue #163) take a JSON bool and NOTHING else — a
+		// stringy "yes"/"true" or a 1/0 would leave "is it set?" ambiguous for a
+		// knob whose whole design turns on telling false apart from unset.
+		{"remote default as string", map[string]any{"spawn_remote_default": "yes"}},
+		{"remote default as bool string", map[string]any{"spawn_remote_default": "true"}},
+		{"remote default as number", map[string]any{"spawn_remote_default": 1}},
+		// null is inherit — legal for the AFK override, but the base key has no
+		// lower layer to inherit from, so null is a 400 there.
+		{"remote default null", map[string]any{"spawn_remote_default": nil}},
+		{"afk remote default as string", map[string]any{"spawn_remote_default_afk": "true"}},
+		{"afk remote default as number", map[string]any{"spawn_remote_default_afk": 0}},
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
@@ -277,6 +288,105 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 	// Nothing above changed the tick either.
 	if n, err := x.st.GetInt(context.Background(), store.SettingAFKTickSeconds, 0); err != nil || n != 30 {
 		t.Errorf("afk_tick_seconds = %d (%v), want the seeded 30", n, err)
+	}
+
+	// All-or-nothing holds for the boolean keys too (issue #163): a bad bool
+	// must 400 BEFORE any SetSetting runs, so its valid sibling — and the seeded
+	// remote default itself — are untouched.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		"git_author_email":     "half@applied.test",
+		"spawn_remote_default": "yes",
+	}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	_ = resp.Body.Close()
+	if v, err := x.st.GetString(context.Background(), store.SettingGitAuthorEmail, ""); err != nil || v != "" {
+		t.Errorf("git_author_email = %q (%v) after a PATCH rejected on the bool, want empty", v, err)
+	}
+	if v, err := x.st.GetBool(context.Background(), store.SettingSpawnRemoteDefault, true); err != nil || v {
+		t.Errorf("spawn_remote_default = %v (%v) after the rejected PATCH, want the seeded false", v, err)
+	}
+}
+
+// The remote-control spawn defaults (issue #163) are the FIRST boolean settings
+// keys: the base renders as a real JSON bool (never the string "true"), and the
+// AFK override is TRI-STATE on the wire — null (inherit) and false (an explicit
+// off that beats a base true) are different answers, which is exactly what a
+// boolean knob cannot express with a string sentinel.
+func TestAPI_SettingsRemoteDefaultsRoundtrip(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	// The seeded base arrives as JSON false; the AFK override is NOT seeded, so
+	// it is absent — absent = inherit.
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if v, ok := got[store.SettingSpawnRemoteDefault].(bool); !ok || v {
+		t.Errorf("seeded spawn_remote_default = %v (%T), want the JSON bool false",
+			got[store.SettingSpawnRemoteDefault], got[store.SettingSpawnRemoteDefault])
+	}
+	if _, present := got[store.SettingSpawnRemoteDefaultAFK]; present {
+		t.Errorf("spawn_remote_default_afk present on a fresh seed = %v, want absent (not seeded = inherit)",
+			got[store.SettingSpawnRemoteDefaultAFK])
+	}
+
+	// PATCH true → a real bool comes back (not "true"), and it lands where
+	// ResolveRemote reads it.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingSpawnRemoteDefault: true}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got = settingsOf(t, decodeBody(t, resp))
+	if v, ok := got[store.SettingSpawnRemoteDefault].(bool); !ok || !v {
+		t.Errorf("patched spawn_remote_default = %v (%T), want the JSON bool true",
+			got[store.SettingSpawnRemoteDefault], got[store.SettingSpawnRemoteDefault])
+	}
+	if v, err := x.st.GetBool(context.Background(), store.SettingSpawnRemoteDefault, false); err != nil || !v {
+		t.Errorf("stored spawn_remote_default = %v (%v), want true", v, err)
+	}
+	resp = x.do("GET", "/api/v1/settings", nil, nil)
+	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingSpawnRemoteDefault] != true {
+		t.Errorf("GET after PATCH = %v (%T), want true", got[store.SettingSpawnRemoteDefault], got[store.SettingSpawnRemoteDefault])
+	}
+
+	// The AFK override PATCHed to FALSE is a stored value — an explicit "never
+	// remote for unattended runs", which must NOT render as null.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingSpawnRemoteDefaultAFK: false}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got = settingsOf(t, decodeBody(t, resp))
+	v, present := got[store.SettingSpawnRemoteDefaultAFK]
+	if !present {
+		t.Fatal("spawn_remote_default_afk absent after PATCH false")
+	}
+	if v == nil {
+		t.Error("spawn_remote_default_afk = null after PATCH false, want false (a boolean's false is a VALUE, not an absence)")
+	}
+	if b, ok := v.(bool); !ok || b {
+		t.Errorf("spawn_remote_default_afk = %v (%T), want the JSON bool false", v, v)
+	}
+	if s, err := x.st.GetString(context.Background(), store.SettingSpawnRemoteDefaultAFK, ""); err != nil || s != "false" {
+		t.Errorf("stored spawn_remote_default_afk = %q (%v), want %q", s, err, "false")
+	}
+
+	// PATCHed to null it renders as null and stores the blank row = inherit —
+	// the state the false above is deliberately distinct from.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingSpawnRemoteDefaultAFK: nil}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got = settingsOf(t, decodeBody(t, resp))
+	v, present = got[store.SettingSpawnRemoteDefaultAFK]
+	if !present || v != nil {
+		t.Errorf("spawn_remote_default_afk = %v (present=%v) after PATCH null, want the key present and null (inherit)", v, present)
+	}
+	// Read the RAW row (GetString folds a blank value into its default, which is
+	// precisely the inherit semantics ResolveRemote's settingBool relies on):
+	// the row exists and holds "".
+	if s, err := x.st.GetSetting(context.Background(), store.SettingSpawnRemoteDefaultAFK); err != nil || s != "" {
+		t.Errorf("stored spawn_remote_default_afk = %q (%v), want the blank inherit row", s, err)
+	}
+
+	// And true round-trips on the override too.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingSpawnRemoteDefaultAFK: true}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingSpawnRemoteDefaultAFK] != true {
+		t.Errorf("spawn_remote_default_afk = %v, want true", got[store.SettingSpawnRemoteDefaultAFK])
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 )
 
 // StartParams is the manual-instance start input (pinned API: POST
-// /api/v1/repos/{id}/instances {label?, provider?, model?, effort?,
+// /api/v1/repos/{id}/instances {label?, provider?, model?, effort?, remote?,
 // first_message?}).
 type StartParams struct {
 	RepoID   string
@@ -17,6 +17,11 @@ type StartParams struct {
 	Provider string // optional per-spawn provider pick (issue #66); "" → repo/settings default
 	Model    string // optional per-spawn override; "" → repo/settings default
 	Effort   string // optional per-spawn override; "" → repo/settings default
+	// Remote is the optional per-spawn remote-control pick (issue #163). A
+	// POINTER because the knob is boolean: nil = no explicit pick (inherit the
+	// repo/settings layers), &false = an explicit "off" that must beat a global
+	// "on" — a plain bool could not tell those two apart.
+	Remote *bool
 	// FirstMessage is the operator's first chat message (issue #96), already
 	// shape-validated by the httpapi layer (whitespace-only normalized to "",
 	// size-capped). Threaded into LaunchSpec.SeedPrompt so it rides the spawn
@@ -51,6 +56,15 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 	model, effort, err := s.ResolveModelEffort(ctx, prov, repo, store.RunKindManual, p.Model, p.Effort)
 	if err != nil {
 		return store.Run{}, err // BadRequestError → 400 (or a store error)
+	}
+	// The remote-control knob (issue #163), resolved against the SAME effective
+	// provider: request → repo.remote_default → spawn_remote_default → false, then
+	// clamped to false for a provider that does not honor it. The resolved bool is
+	// both spawned on (SpawnSpec.Remote) and STAMPED on the run row — the deep-link
+	// capture gate reads it back, including after a restart.
+	remote, err := s.ResolveRemote(ctx, prov, repo, store.RunKindManual, p.Remote)
+	if err != nil {
+		return store.Run{}, err
 	}
 	// Manual runs carry no provider options (the operator types keywords like
 	// ultracode into the Start prompt themselves); ResolveSpawnOptions returns
@@ -92,6 +106,7 @@ func (s *Service) Start(ctx context.Context, p StartParams) (store.Run, error) {
 		WorktreePath: s.worktreePath(repo.Name, label),
 		Model:        model,
 		Effort:       effort,
+		Remote:       remote,
 		Options:      options,
 		// The operator's first chat message (issue #96), when given, rides the
 		// same SeedPrompt → spawn-argv trailing-positional mechanism the AFK

@@ -41,9 +41,11 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
     incogni: false,
     model_default: null,
     effort_default: null,
+    remote_default: null,
     afk_provider_default: null,
     afk_model_default: null,
     afk_effort_default: null,
+    afk_remote_default: null,
     afk_options: null,
     afk_prompt: null,
     afk_prompt_effective: 'Resolve issue #<N> on branch <BRANCH>, then open a PR.',
@@ -75,6 +77,7 @@ const PROVIDERS: Provider[] = [
   {
     id: 'claude-code',
     display_name: 'Claude Code',
+    supports_remote: true,
     auth: { kind: 'oauth-code' },
     models: [
       { value: 'sonnet', label: 'Sonnet', efforts: CLAUDE_EFFORTS },
@@ -89,6 +92,9 @@ const PROVIDERS: Provider[] = [
 const CODEX: Provider = {
   id: 'codex',
   display_name: 'Codex',
+  // The remote-control knob is claude-only (issue #163): codex ignores it, so
+  // the composer's toggle must render disabled with a note naming THIS provider.
+  supports_remote: false,
   auth: { kind: 'api-key' },
   models: [
     { value: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: [] },
@@ -118,6 +124,7 @@ const LUNA_EFFORTS = [
 const GPT: Provider = {
   id: 'gpt',
   display_name: 'GPT',
+  supports_remote: true,
   auth: { kind: 'api-key' },
   models: [
     {
@@ -746,5 +753,98 @@ describe('NewRun composer per-model efforts (issue #156)', () => {
     await settle();
 
     expect(instancePosts).toEqual([{ model: 'gpt-5.6-terra', effort: 'medium' }]);
+  });
+});
+
+// Remote control in the `…` popover (issue #163): pre-filled from the RESOLVED
+// default (repo override → global default → off) and sent ONLY when the
+// operator's value differs from it — `false` included, since an explicit off
+// over an inherited on is a real pick, not an omission.
+describe('NewRun composer remote control', () => {
+  /** Opens the `…` popover and hands back its remote checkbox. */
+  async function remoteBox(): Promise<HTMLInputElement> {
+    container.querySelector<HTMLButtonElement>('button[aria-label="More options"]')!.click();
+    await settle();
+    const box = container.querySelector<HTMLInputElement>('input[name="remote"]');
+    if (box === null) throw new Error('missing remote checkbox in the … popover');
+    return box;
+  }
+
+  function setChecked(el: HTMLInputElement, checked: boolean): void {
+    el.checked = checked;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  it('defaults off and sends no remote key when untouched', async () => {
+    await mountHome();
+
+    expect((await remoteBox()).checked).toBe(false);
+    startButton().click();
+    await settle();
+
+    expect(instancePosts).toEqual([{ model: 'sonnet', effort: 'low' }]);
+    expect(instancePosts[0]).not.toHaveProperty('remote');
+  });
+
+  it('turning it on sends remote:true', async () => {
+    await mountHome();
+
+    setChecked(await remoteBox(), true);
+    startButton().click();
+    await settle();
+
+    expect(instancePosts).toEqual([{ model: 'sonnet', effort: 'low', remote: true }]);
+  });
+
+  it('pre-fills from the global default; an untouched inherited-on sends nothing', async () => {
+    settingsOnServer = { spawn_remote_default: true };
+    await mountHome();
+
+    expect((await remoteBox()).checked).toBe(true);
+    startButton().click();
+    await settle();
+
+    // The resolved default is the server's to walk — nothing to say here.
+    expect(instancePosts[0]).not.toHaveProperty('remote');
+  });
+
+  it('pre-fills from the repo override and sends an explicit false when turned off', async () => {
+    // The tri-state's whole point: `false` must ride the request, or the server
+    // would re-resolve the inherited ON and ignore the operator.
+    reposOnServer = [repoFixture({ remote_default: true })];
+    settingsOnServer = { spawn_remote_default: false };
+    await mountHome();
+
+    const box = await remoteBox();
+    expect(box.checked).toBe(true);
+    setChecked(box, false);
+    startButton().click();
+    await settle();
+
+    expect(instancePosts).toEqual([{ model: 'sonnet', effort: 'low', remote: false }]);
+  });
+
+  it('a repo override beats the global default in the pre-fill', async () => {
+    reposOnServer = [repoFixture({ remote_default: false })];
+    settingsOnServer = { spawn_remote_default: true };
+    await mountHome();
+
+    expect((await remoteBox()).checked).toBe(false);
+  });
+
+  it('disables the toggle with a note for a provider with no remote knob', async () => {
+    providersOnServer = [...PROVIDERS, CODEX];
+    reposOnServer = [repoFixture({ provider: 'codex' })];
+    await mountHome();
+
+    const box = await remoteBox();
+    expect(box.disabled).toBe(true);
+    // Named by display_name (issue #51 decision 9) — never a hardcoded brand.
+    expect(container.querySelector('.more-pop')?.textContent).toContain('Codex ignores this.');
+
+    startButton().click();
+    await settle();
+
+    expect(instancePosts[0]).not.toHaveProperty('remote');
   });
 });

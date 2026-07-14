@@ -2,11 +2,16 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
+
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/migrations"
 )
 
 // seedRepoForRuns creates a minimal ready repo so runs (FK repo_id) can be
@@ -136,6 +141,141 @@ func TestUpdateRunTitle(t *testing.T) {
 
 	if err := st.UpdateRunTitle(ctx, "run_missing", &title); !errors.Is(err, ErrNotFound) {
 		t.Errorf("unknown id err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRunRemoteRoundTrip pins runs.remote (issue #163): the resolved value the
+// launcher stamped, read back verbatim in both directions. It is a plain bool,
+// not a tri-state — a run row records what WAS resolved, so there is nothing to
+// inherit — but false must still survive the NOT NULL DEFAULT FALSE column
+// without being confused for "the column was never written".
+func TestRunRemoteRoundTrip(t *testing.T) {
+	st := openTestSQLite(t)
+	ctx := context.Background()
+	repo := seedRepoForRuns(t, st)
+	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+
+	remote := manualRun(repo.ID, "proj~remote", "lab/remote", now)
+	remote.Remote = true
+	if _, err := st.CreateRun(ctx, remote); err != nil {
+		t.Fatalf("CreateRun remote: %v", err)
+	}
+	local := manualRun(repo.ID, "proj~local", "lab/local", now.Add(time.Minute))
+	local.Remote = false
+	if _, err := st.CreateRun(ctx, local); err != nil {
+		t.Fatalf("CreateRun local: %v", err)
+	}
+
+	got, err := st.RunByID(ctx, remote.ID)
+	if err != nil {
+		t.Fatalf("RunByID remote: %v", err)
+	}
+	if !got.Remote {
+		t.Error("remote run read back Remote=false")
+	}
+	// Every read path scans the same column list, so check the re-adoption one
+	// too: it is the reader that arms deep-link capture after a restart.
+	if got, err = st.RunBySession(ctx, "proj~local"); err != nil {
+		t.Fatalf("RunBySession local: %v", err)
+	}
+	if got.Remote {
+		t.Error("non-remote run read back Remote=true")
+	}
+	active, err := st.ActiveRuns(ctx)
+	if err != nil || len(active) != 2 {
+		t.Fatalf("ActiveRuns = %v (err %v), want 2", active, err)
+	}
+	for _, r := range active {
+		want := r.SessionName == "proj~remote"
+		if r.Remote != want {
+			t.Errorf("ActiveRuns %s Remote = %v, want %v", r.SessionName, r.Remote, want)
+		}
+	}
+}
+
+// TestRunRemoteBackfill is the migration proof the DoD asks for: rows written
+// under the PRE-0011 schema — when every run was spawned with a hardcoded
+// --remote-control — must come out of the migration with remote = TRUE, or
+// their claude.ai "Open" deep links would go dead. It exercises the real thing:
+// goose up to 0010, insert a run through the old schema, then apply 0011 and
+// read the row back through the normal store accessors.
+func TestRunRemoteBackfill(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "lab.db")
+	db, err := sql.Open("sqlite", "file:"+path+
+		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+
+	p, err := goose.NewProvider(goose.DialectSQLite3, db, migrations.SQLite)
+	if err != nil {
+		t.Fatalf("goose provider: %v", err)
+	}
+
+	// The schema as it stood before this issue: no runs.remote column at all.
+	if _, err := p.UpTo(ctx, 10); err != nil {
+		t.Fatalf("migrate to 0010: %v", err)
+	}
+	var hasRemote int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'remote'`).Scan(&hasRemote); err != nil {
+		t.Fatalf("inspect pre-migration runs table: %v", err)
+	}
+	if hasRemote != 0 {
+		t.Fatalf("runs.remote already exists at version 0010 — the fixture is not pre-migration")
+	}
+
+	repoID, runID := ids.NewID("repo"), ids.NewID("run")
+	const deepLink = "https://claude.ai/code/session_legacy"
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO repos (id, name, remote_url, tracker_binding, forge_kind,
+		     afk_branch_pattern, manual_branch_prefix, clone_status, created_at)
+		 VALUES (?, ?, ?, 'builtin', 'none', 'afk/<N>', 'lab/', 'ready', ?)`,
+		repoID, "legacy", "/tmp/legacy", fmtTime(time.Now())); err != nil {
+		t.Fatalf("insert pre-migration repo: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO runs (id, repo_id, kind, provider, branch, worktree_path,
+		     session_name, model, effort, deep_link_url, started_at, outcome)
+		 VALUES (?, ?, 'manual', 'claude-code', 'lab/legacy', '/wt/legacy',
+		     'legacy~1200', 'opus[1m]', 'max', ?, ?, 'active')`,
+		runID, repoID, deepLink, fmtTime(time.Now())); err != nil {
+		t.Fatalf("insert pre-migration run: %v", err)
+	}
+
+	// Apply 0011: the ALTER adds remote with DEFAULT FALSE, the backfill UPDATE
+	// then tells the truth about how that run was actually spawned.
+	if _, err := p.Up(ctx); err != nil {
+		t.Fatalf("migrate to head: %v", err)
+	}
+
+	st := &Store{db: db, dia: dialectSQLite, log: discardLogger(), Now: time.Now}
+	got, err := st.RunByID(ctx, runID)
+	if err != nil {
+		t.Fatalf("RunByID after migration: %v", err)
+	}
+	if !got.Remote {
+		t.Error("pre-migration run has Remote=false after 0011: the backfill did not run, " +
+			"and its claude.ai Open link is now dead")
+	}
+	if got.DeepLinkURL == nil || *got.DeepLinkURL != deepLink {
+		t.Errorf("deep link after migration = %v, want %q", got.DeepLinkURL, deepLink)
+	}
+
+	// The DEFAULT FALSE that the ALTER needed must not leak into new rows: they
+	// carry whatever the resolver stamped, false included.
+	fresh := manualRun(repoID, "legacy~1300", "lab/fresh", time.Now())
+	if _, err := st.CreateRun(ctx, fresh); err != nil {
+		t.Fatalf("CreateRun after migration: %v", err)
+	}
+	if got, err = st.RunByID(ctx, fresh.ID); err != nil {
+		t.Fatalf("RunByID fresh: %v", err)
+	}
+	if got.Remote {
+		t.Error("a run created with Remote=false after the migration read back true")
 	}
 }
 

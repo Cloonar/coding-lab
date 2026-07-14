@@ -65,3 +65,27 @@ export function resolveEffortOption(
   }
   return efforts[0]?.value ?? '';
 }
+
+/**
+ * Client-side mirror of the server's remote-control resolution (issue #163) —
+ * the skip-layer walk the other resolvers above do, over a BOOLEAN knob:
+ *
+ *   manual: request → repo.remote_default → spawn_remote_default → false
+ *   AFK:    repo.afk_remote_default → spawn_remote_default_afk
+ *             → repo.remote_default → spawn_remote_default → false
+ *
+ * Callers pass the layers in that order; this only mirrors the server so the UI
+ * can DISPLAY the effective value and know which picks are redundant to send.
+ *
+ * The trap this exists to avoid: every other knob here spells "unset" as ''
+ * because '' is never a legal model/effort/provider id. `false` IS a legal value
+ * for this one, so unset can only be null/undefined — a layer that is present
+ * and `false` is an explicit OFF and WINS over any `true` further down the
+ * chain. Nothing set anywhere resolves to false (remote control defaults off).
+ */
+export function resolveRemote(...candidates: (boolean | null | undefined)[]): boolean {
+  for (const candidate of candidates) {
+    if (candidate != null) return candidate;
+  }
+  return false;
+}

@@ -31,6 +31,7 @@ func testRepo(name string, createdAt time.Time) Repo {
 
 func strPtr(s string) *string { return &s }
 func intPtr(n int) *int       { return &n }
+func boolPtr(b bool) *bool    { return &b }
 
 func TestCreateRepoRoundTrip(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
@@ -431,6 +432,120 @@ func TestRepoProviderColumnsRoundTrip(t *testing.T) {
 		}
 		if updated.Provider != nil || updated.AFKProviderDefault != nil {
 			t.Errorf("cleared provider columns = %v/%v, want nil/nil", updated.Provider, updated.AFKProviderDefault)
+		}
+	})
+}
+
+// The nullable remote-control columns (issue #163). This is the tri-state
+// proof: NULL (inherit), true, and — the state no other spawn knob has —
+// explicit false, which must survive create, read, and patch as a VALUE and
+// never collapse back into "unset". A bare bool field would lose exactly this
+// distinction.
+func TestRepoRemoteColumnsRoundTrip(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+
+		// Create with both set (base true, AFK override explicitly false — the
+		// mixed pair a repo that wants remote manual runs but headless AFK runs
+		// would hold).
+		full := testRepo("remotefull", now)
+		full.RemoteDefault = boolPtr(true)
+		full.AFKRemoteDefault = boolPtr(false)
+		created, err := s.CreateRepo(ctx, full)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		got, err := s.RepoByID(ctx, full.ID)
+		if err != nil {
+			t.Fatalf("by id: %v", err)
+		}
+		if !reflect.DeepEqual(got, created) {
+			t.Errorf("remote columns round trip mismatch:\n got %+v\nwant %+v", got, created)
+		}
+		if got.RemoteDefault == nil || !*got.RemoteDefault {
+			t.Errorf("RemoteDefault = %v, want true", got.RemoteDefault)
+		}
+		if got.AFKRemoteDefault == nil || *got.AFKRemoteDefault {
+			t.Errorf("AFKRemoteDefault = %v, want an explicit false (not nil)", got.AFKRemoteDefault)
+		}
+
+		// A minimal repo has both NULL: unset, inheriting the globals.
+		min := testRepo("remotemin", now)
+		if _, err := s.CreateRepo(ctx, min); err != nil {
+			t.Fatalf("create minimal: %v", err)
+		}
+		gotMin, err := s.RepoByID(ctx, min.ID)
+		if err != nil {
+			t.Fatalf("by id minimal: %v", err)
+		}
+		if gotMin.RemoteDefault != nil || gotMin.AFKRemoteDefault != nil {
+			t.Errorf("minimal repo remote columns = %v/%v, want nil/nil (inherit)",
+				gotMin.RemoteDefault, gotMin.AFKRemoteDefault)
+		}
+
+		// Patch: nil → explicit false. The read-back must be a non-nil false —
+		// "remote off for this repo", which is NOT the same row state as inherit.
+		updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			RemoteDefault:    Set(boolPtr(false)),
+			AFKRemoteDefault: Set(boolPtr(false)),
+		})
+		if err != nil {
+			t.Fatalf("update to false: %v", err)
+		}
+		if updated.RemoteDefault == nil || *updated.RemoteDefault ||
+			updated.AFKRemoteDefault == nil || *updated.AFKRemoteDefault {
+			t.Errorf("patched remote columns = %v/%v, want explicit false/false",
+				updated.RemoteDefault, updated.AFKRemoteDefault)
+		}
+
+		// Patch: false → true.
+		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			RemoteDefault:    Set(boolPtr(true)),
+			AFKRemoteDefault: Set(boolPtr(true)),
+		})
+		if err != nil {
+			t.Fatalf("update to true: %v", err)
+		}
+		if updated.RemoteDefault == nil || !*updated.RemoteDefault ||
+			updated.AFKRemoteDefault == nil || !*updated.AFKRemoteDefault {
+			t.Errorf("patched remote columns = %v/%v, want true/true",
+				updated.RemoteDefault, updated.AFKRemoteDefault)
+		}
+
+		// Patch: clear back to NULL (inherit) — distinct from the false above.
+		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			RemoteDefault:    Set[*bool](nil),
+			AFKRemoteDefault: Set[*bool](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		if updated.RemoteDefault != nil || updated.AFKRemoteDefault != nil {
+			t.Errorf("cleared remote columns = %v/%v, want nil/nil",
+				updated.RemoteDefault, updated.AFKRemoteDefault)
+		}
+
+		// An unrelated patch leaves a stored false alone (the Opt zero value is
+		// "don't touch", never "write false").
+		if _, err := s.UpdateRepoSettings(ctx, full.ID, RepoSettingsUpdate{
+			RemoteDefault: Set(boolPtr(false)),
+		}); err != nil {
+			t.Fatalf("set false: %v", err)
+		}
+		untouched, err := s.UpdateRepoSettings(ctx, full.ID, RepoSettingsUpdate{
+			DefaultBranch: Set("trunk"),
+		})
+		if err != nil {
+			t.Fatalf("unrelated patch: %v", err)
+		}
+		if untouched.RemoteDefault == nil || *untouched.RemoteDefault {
+			t.Errorf("RemoteDefault after unrelated patch = %v, want the stored false",
+				untouched.RemoteDefault)
+		}
+		if untouched.AFKRemoteDefault == nil || *untouched.AFKRemoteDefault {
+			t.Errorf("AFKRemoteDefault after unrelated patch = %v, want the stored false",
+				untouched.AFKRemoteDefault)
 		}
 	})
 }

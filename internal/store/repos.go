@@ -62,6 +62,16 @@ type Repo struct {
 	// the provider an unattended run resolves FIRST, before the global
 	// spawn_provider_default_afk and the base Provider chain. Nil = inherit.
 	AFKProviderDefault *string
+	// RemoteDefault / AFKRemoteDefault are the repo layer of the remote-control
+	// knob (issue #163), the base and AFK-override pair that sit under the
+	// spawn_remote_default / spawn_remote_default_afk globals. They are *bool,
+	// not bool, and nil / NULL means inherit: false is a LEGAL value here, so
+	// unlike the string knobs above, "unset" has no in-band spelling of its own.
+	// The names carry the "Default" suffix on purpose — RemoteURL right at the
+	// top of this struct is the git clone URL, and a bare Remote field would sit
+	// beside it as a trap.
+	RemoteDefault    *bool
+	AFKRemoteDefault *bool
 	// AFKPrompt is the repo-level AFK seed-prompt override (issue #52 /
 	// ADR-0027). Nil / NULL means inherit the next layer (the global afk_prompt
 	// setting, then the built-in template). A non-empty value REPLACES the whole
@@ -94,7 +104,7 @@ const repoColumns = `id, name, remote_url, credential_id, forge_credential_id,
 	clone_status, clone_error, next_issue_number, next_cr_number,
 	created_at, last_opened_at,
 	afk_model_default, afk_effort_default, afk_options, afk_prompt,
-	afk_provider_default`
+	afk_provider_default, remote_default, afk_remote_default`
 
 // triageLabels are the five canonical triage labels seeded per repo at
 // creation (design §3a colors; docs/agents/triage-labels.md meanings).
@@ -130,7 +140,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 	}
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO repos (`+repoColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.Name, r.RemoteURL, r.CredentialID, r.ForgeCredentialID,
 		r.TrackerBinding, r.ForgeKind, r.DefaultBranch, r.Provider, r.ModelDefault,
 		r.EffortDefault, r.Incogni, r.GitAuthorName, r.GitAuthorEmail,
@@ -139,7 +149,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 		r.CloneStatus, r.CloneError, r.NextIssueNumber, r.NextCRNumber,
 		fmtTime(r.CreatedAt), fmtNullTime(r.LastOpenedAt),
 		r.AFKModelDefault, r.AFKEffortDefault, afkOptions, r.AFKPrompt,
-		r.AFKProviderDefault)
+		r.AFKProviderDefault, r.RemoteDefault, r.AFKRemoteDefault)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Repo{}, fmt.Errorf("create repo %q: %w", r.Name, ErrNameTaken)
@@ -246,6 +256,8 @@ type RepoSettingsUpdate struct {
 	AFKModelDefault      Opt[*string]
 	AFKEffortDefault     Opt[*string]
 	AFKProviderDefault   Opt[*string]           // AFK-override provider (issue #66); nil clears (NULL = inherit)
+	RemoteDefault        Opt[*bool]             // remote-control override (issue #163); nil clears (NULL = inherit), false is a value
+	AFKRemoteDefault     Opt[*bool]             // AFK-override remote-control (issue #163); same tri-state
 	AFKOptions           Opt[map[string]string] // nil map clears (NULL); a present map (even empty) is stored as JSON
 	AFKPrompt            Opt[*string]           // AFK seed-prompt override (issue #52 / ADR-0027); nil clears (NULL = inherit)
 	Incogni              Opt[bool]
@@ -302,6 +314,12 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 	}
 	if u.AFKProviderDefault.Set {
 		add("afk_provider_default", u.AFKProviderDefault.Value)
+	}
+	if u.RemoteDefault.Set {
+		add("remote_default", u.RemoteDefault.Value)
+	}
+	if u.AFKRemoteDefault.Set {
+		add("afk_remote_default", u.AFKRemoteDefault.Value)
 	}
 	if u.AFKOptions.Set {
 		v, err := marshalOptions(u.AFKOptions.Value)
@@ -480,6 +498,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		afkModelDef, afkEffortDef         sql.NullString
 		afkOptions, afkPrompt             sql.NullString
 		afkProviderDef                    sql.NullString
+		remoteDef, afkRemoteDef           sql.NullBool
 	)
 	if err := scan(&r.ID, &r.Name, &r.RemoteURL, &credID, &forgeCredID,
 		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &providerCol, &modelDef,
@@ -489,7 +508,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		&r.CloneStatus, &cloneErr, &r.NextIssueNumber, &r.NextCRNumber,
 		&created, &lastOpened,
 		&afkModelDef, &afkEffortDef, &afkOptions, &afkPrompt,
-		&afkProviderDef); err != nil {
+		&afkProviderDef, &remoteDef, &afkRemoteDef); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
@@ -506,6 +525,8 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.AFKEffortDefault = nullStr(afkEffortDef)
 	r.AFKPrompt = nullStr(afkPrompt)
 	r.AFKProviderDefault = nullStr(afkProviderDef)
+	r.RemoteDefault = nullBool(remoteDef)
+	r.AFKRemoteDefault = nullBool(afkRemoteDef)
 
 	var err error
 	if r.AFKOptions, err = unmarshalOptions(afkOptions); err != nil {
@@ -562,5 +583,15 @@ func nullInt(ni sql.NullInt64) *int {
 		return nil
 	}
 	v := int(ni.Int64)
+	return &v
+}
+
+// nullBool converts a scanned nullable BOOLEAN column (issue #163): NULL → nil
+// (inherit), and a present false stays a real false — never folded into nil.
+func nullBool(nb sql.NullBool) *bool {
+	if !nb.Valid {
+		return nil
+	}
+	v := nb.Bool
 	return &v
 }

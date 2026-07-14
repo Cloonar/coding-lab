@@ -28,17 +28,23 @@ const (
 // runResponse is the pinned run JSON shape. Nullable columns render as JSON
 // null (no omitempty) so the SPA always sees every key.
 type runResponse struct {
-	ID             string  `json:"id"`
-	RepoID         string  `json:"repo_id"`
-	Kind           string  `json:"kind"`
-	Provider       string  `json:"provider"`
-	IssueNumber    *int    `json:"issue_number"`
-	Branch         string  `json:"branch"`
-	WorktreePath   string  `json:"worktree_path"`
-	SessionName    string  `json:"session_name"`
-	Model          string  `json:"model"`
-	Effort         string  `json:"effort"`
-	DeepLinkURL    *string `json:"deep_link_url"`
+	ID           string  `json:"id"`
+	RepoID       string  `json:"repo_id"`
+	Kind         string  `json:"kind"`
+	Provider     string  `json:"provider"`
+	IssueNumber  *int    `json:"issue_number"`
+	Branch       string  `json:"branch"`
+	WorktreePath string  `json:"worktree_path"`
+	SessionName  string  `json:"session_name"`
+	Model        string  `json:"model"`
+	Effort       string  `json:"effort"`
+	DeepLinkURL  *string `json:"deep_link_url"`
+	// Remote is the resolved remote-control value stamped on the run at launch
+	// (issue #163) — layered, then clamped by the provider's capability, so it
+	// is the TRUTH about this session, not a request echo. The SPA gates its
+	// Open affordance on it: a non-remote run never captures a deep link, so
+	// deep_link_url stays null forever and no Open button should promise one.
+	Remote         bool    `json:"remote"`
 	Title          *string `json:"title"` // user-set display overlay (issue #111)
 	StartedAt      string  `json:"started_at"`
 	BudgetDeadline *string `json:"budget_deadline"`
@@ -82,6 +88,7 @@ func runJSON(r store.Run) runResponse {
 		Model:         r.Model,
 		Effort:        r.Effort,
 		DeepLinkURL:   r.DeepLinkURL,
+		Remote:        r.Remote,
 		Title:         r.Title,
 		StartedAt:     store.FormatTime(r.StartedAt),
 		Outcome:       r.Outcome,

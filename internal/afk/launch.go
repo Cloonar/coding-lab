@@ -194,6 +194,18 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 	if err != nil {
 		return store.Run{}, launchSpawned, err
 	}
+	// The AFK remote-control knob (issue #163): repo.afk_remote_default → global
+	// spawn_remote_default_afk → repo.remote_default → global spawn_remote_default
+	// → false, clamped to false for a provider that cannot honor it. There is no
+	// per-spawn request on this path (the start is bodyless) — hence the nil. Like
+	// the options bag, this value is OPAQUE here: the afk package never branches on
+	// it, never spawns differently because of it. It carries the bool to
+	// instance.Launch, which spends it (SpawnSpec + the runs row); what remote
+	// control MEANS stays with the provider and the deep-link gate.
+	remote, err := s.instances.ResolveRemote(ctx, prov, repo, kind, nil)
+	if err != nil {
+		return store.Run{}, launchSpawned, err
+	}
 	// The AFK seed-prompt override (issue #52 / ADR-0027): repo.afk_prompt ??
 	// the global afk_prompt setting, "" = the built-in template. Resolved on
 	// this same locked launch path as model/effort/options so both AFK kinds
@@ -225,6 +237,7 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 		WorktreePath:   s.worktreePath(repo.Name, n),
 		Model:          model,
 		Effort:         effort,
+		Remote:         remote,
 		Options:        options,
 		BudgetDeadline: &deadline,
 		TokenExpiry:    &tokenExpiry,

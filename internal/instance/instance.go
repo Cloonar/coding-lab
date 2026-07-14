@@ -287,10 +287,23 @@ func (s *Service) runCapture(run store.Run, dl provider.DeepLinker) {
 
 // ArmCapture (re-)starts deep-link capture for a live run whose deep_link_url
 // is still NULL — used at Start and by the reconcile re-adoption hook (design
-// §3b). No goroutine ever arms when the run's provider does not implement the
-// optional DeepLinker capability (ADR-0017); capture is idempotent per session
-// inside providers that do.
+// §3b). No goroutine ever arms when the run is not remote (issue #163) or when
+// the run's provider does not implement the optional DeepLinker capability
+// (ADR-0017); capture is idempotent per session inside providers that do.
+//
+// This is the ONE choke point where the remote gate belongs: both arming call
+// sites — Launch at spawn time and reconcile's readopt after a restart — pass
+// through here, and the run row is the only thing that still knows a session's
+// remote-ness once the process that spawned it is gone. Hence runs.remote is a
+// persisted NOT NULL column, not a launch-time-only decision.
 func (s *Service) ArmCapture(run store.Run) {
+	if !run.Remote {
+		// A non-remote session registers nothing to capture; arming here would log
+		// ADR-0017's loud capture-miss on every run — the miss that decision
+		// deliberately made loud precisely so a genuinely missing link is never
+		// silent. Gating here keeps that alarm meaningful.
+		return
+	}
 	if run.DeepLinkURL != nil && *run.DeepLinkURL != "" {
 		return
 	}

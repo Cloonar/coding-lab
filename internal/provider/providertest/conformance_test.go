@@ -137,11 +137,25 @@ func (m *mockProvider) SeedMeta() provider.SeedMeta {
 // SpawnArgv mirrors the pinned argv contract: flags first, the prompt as the
 // trailing positional, and the turbo option applied prompt-scoped (like
 // claude-code's ultracode) so the options round-trip has a real knob to see.
+// The default builder IGNORES spec.Remote — the plain mock advertises no
+// RemoteCapable, so its argv must be identical for both values (issue #163's
+// receive-and-ignore half, the codex shape).
 func (m *mockProvider) SpawnArgv(spec provider.SpawnSpec) []string {
 	if m.spawnArgv != nil {
 		return m.spawnArgv(spec)
 	}
-	argv := []string{"mockagent", "--session", spec.SessionName}
+	return mockArgv(spec, false)
+}
+
+// mockArgv is the mock's conforming argv shape, with remote deciding whether
+// the session flag pair (the flag AND its argument, claude's shape) is emitted
+// at all. Both spawn-remote branches are built from it: remote=false is the
+// ignoring provider, remote=spec.Remote the honoring one.
+func mockArgv(spec provider.SpawnSpec, remote bool) []string {
+	argv := []string{"mockagent"}
+	if remote {
+		argv = append(argv, "--session", spec.SessionName)
+	}
 	if spec.Model != "" {
 		argv = append(argv, "--model", spec.Model)
 	}
@@ -156,6 +170,32 @@ func (m *mockProvider) SpawnArgv(spec provider.SpawnSpec) []string {
 		argv = append(argv, prompt)
 	}
 	return argv
+}
+
+// honorRemote is the conforming remote-honoring argv builder (the spawnArgv
+// override a RemoteCapable adapter must ship).
+func honorRemote(spec provider.SpawnSpec) []string { return mockArgv(spec, spec.Remote) }
+
+// remoteMock is a mockProvider that ADVERTISES provider.RemoteCapable (issue
+// #163) — the plain mock deliberately does not, so the capability half of
+// spawn-remote needs this wrapper. Whether it HONORS the knob depends on the
+// wrapped mock's argv builder, which is exactly the mismatch spawn-remote
+// exists to catch.
+type remoteMock struct{ *mockProvider }
+
+var (
+	_ provider.AgentProvider = remoteMock{}
+	_ provider.RemoteCapable = remoteMock{}
+)
+
+func (remoteMock) SupportsRemoteControl() bool { return true }
+
+// newRemoteMock returns a CONFORMING remote-capable mock: it advertises the
+// capability and honors spec.Remote in argv.
+func newRemoteMock() remoteMock {
+	m := newMockProvider()
+	m.spawnArgv = honorRemote
+	return remoteMock{m}
 }
 
 func (m *mockProvider) AuthFlow() provider.AuthFlow { return m.authFlow }
@@ -250,6 +290,7 @@ func TestCheckFunctions_wellFormedProviderPasses(t *testing.T) {
 		{"seedmeta-clone", func(t *testing.T) []error { return checkSeedMetaClone(p) }},
 		{"catalogs", func(t *testing.T) []error { return checkCatalogs(p) }},
 		{"spawn-argv", func(t *testing.T) []error { return checkSpawnArgv(p) }},
+		{"spawn-remote", func(t *testing.T) []error { return checkSpawnRemote(p) }},
 		{"auth-flow", func(t *testing.T) []error { return checkAuthFlow(p) }},
 		{"login-session", func(t *testing.T) []error { return checkLoginSession(p) }},
 		{"read-chat", func(t *testing.T) []error { return checkReadChat(t, p) }},
@@ -269,6 +310,15 @@ func TestCheckFunctions_wellFormedProviderPasses(t *testing.T) {
 // The *testing.T front-end passes the well-formed mock end to end.
 func TestConformance_wellFormedProvider(t *testing.T) {
 	Conformance(t, newMockProvider(), mockFixture())
+}
+
+// spawn-remote has TWO green paths (issue #163), and the suite must pass both:
+// the plain mock above is the ignoring provider (no RemoteCapable, identical
+// argv), this one the honoring provider (advertises the capability, argv
+// differs). A suite that only ever saw one of them would pass an adapter that
+// picked the wrong half.
+func TestConformance_wellFormedRemoteCapableProvider(t *testing.T) {
+	Conformance(t, newRemoteMock(), mockFixture())
 }
 
 // --- broken adapters ---------------------------------------------------------
@@ -357,6 +407,24 @@ func TestCheckSpawnArgv_promptNotTrailingFails(t *testing.T) {
 		return argv
 	}
 	wantError(t, checkSpawnArgv(p), "spawn-argv", "trailing positional")
+}
+
+// The advertise-without-honoring breakage (issue #163): the adapter implements
+// RemoteCapable — so lab lights up the toggle and arms deep-link capture for it
+// — while its argv drops spec.Remote on the floor. The default mock builder IS
+// that breakage; only the capability wrapper is added.
+func TestCheckSpawnRemote_advertisedButArgvIdenticalFails(t *testing.T) {
+	p := remoteMock{newMockProvider()}
+	wantError(t, checkSpawnRemote(p), "spawn-remote", "advertises provider.RemoteCapable", "identical", "issue #163")
+}
+
+// The honor-without-advertising breakage (issue #163): the adapter acts on
+// spec.Remote but implements no RemoteCapable, so lab would report the knob
+// unsupported and disable a toggle its CLI actually obeys.
+func TestCheckSpawnRemote_unadvertisedButArgvDiffersFails(t *testing.T) {
+	p := newMockProvider()
+	p.spawnArgv = honorRemote
+	wantError(t, checkSpawnRemote(p), "spawn-remote", "does not implement provider.RemoteCapable", "issue #163")
 }
 
 func TestCheckAuthFlow_unknownKindFails(t *testing.T) {

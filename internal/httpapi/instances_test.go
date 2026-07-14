@@ -323,6 +323,78 @@ func TestAPI_InstanceStartFirstMessage(t *testing.T) {
 	}
 }
 
+// The per-spawn remote-control pick (issue #163): POST /repos/{id}/instances
+// {remote} reaches the provider's SpawnSpec and is STAMPED on the run row. The
+// knob is boolean, so the tri-state is what is actually under test — an absent
+// pick inherits (the seeded spawn_remote_default is false, so a plain start is
+// NOT remote and, capturing nothing, keeps deep_link_url null), an explicit true
+// turns it on, and an explicit FALSE beats a global true rather than reading as
+// "no pick".
+func TestAPI_InstanceStartRemotePick(t *testing.T) {
+	x := newInstanceServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	// Absent pick → the seeded base default (false): the run is off the remote
+	// surface, and ArmCapture never runs, so the deep link stays null.
+	resp := x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	run := decodeBody(t, resp)
+	if v, ok := run["remote"].(bool); !ok || v {
+		t.Errorf("inherited remote = %v (%T), want JSON false (the seeded spawn_remote_default)", run["remote"], run["remote"])
+	}
+	if run["deep_link_url"] != nil {
+		t.Errorf("deep_link_url = %v on a non-remote run, want null", run["deep_link_url"])
+	}
+	specs := x.prov.SpawnSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("SpawnArgv called %d times, want 1", len(specs))
+	}
+	if specs[0].Remote {
+		t.Error("SpawnSpec.Remote = true for an inherited-off start")
+	}
+
+	// An explicit true reaches the provider's SpawnSpec and the run row.
+	resp = x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances",
+		map[string]any{"remote": true, "label": "on"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	if run = decodeBody(t, resp); run["remote"] != true {
+		t.Errorf("run.remote = %v after {\"remote\":true}, want true", run["remote"])
+	}
+	specs = x.prov.SpawnSpecs()
+	if len(specs) != 2 {
+		t.Fatalf("SpawnArgv called %d times, want 2", len(specs))
+	}
+	if !specs[1].Remote {
+		t.Error("SpawnSpec.Remote = false though the request asked for remote:true")
+	}
+
+	// With the global flipped ON, an explicit false still wins — the boolean
+	// trap: false is a PICK, not an absence.
+	if err := x.st.SetSetting(context.Background(), store.SettingSpawnRemoteDefault, "true"); err != nil {
+		t.Fatal(err)
+	}
+	resp = x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances",
+		map[string]any{"remote": false, "label": "off"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	if run = decodeBody(t, resp); run["remote"] != false {
+		t.Errorf("run.remote = %v for {\"remote\":false} under a global true, want false", run["remote"])
+	}
+	specs = x.prov.SpawnSpecs()
+	if len(specs) != 3 {
+		t.Fatalf("SpawnArgv called %d times, want 3", len(specs))
+	}
+	if specs[2].Remote {
+		t.Error("SpawnSpec.Remote = true though the request explicitly asked for remote:false")
+	}
+
+	// …while an ABSENT pick now inherits that same global true.
+	resp = x.do("POST", "/api/v1/repos/"+x.repo.ID+"/instances", map[string]any{"label": "inherit"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	if run = decodeBody(t, resp); run["remote"] != true {
+		t.Errorf("inherited remote = %v under a global true, want true", run["remote"])
+	}
+}
+
 func TestAPI_InstanceStartRollbackOnSpawnFailure(t *testing.T) {
 	x := newInstanceServer(t)
 	h := csrfHeaders(x.ts.URL)
@@ -639,12 +711,25 @@ func TestAPI_Providers(t *testing.T) {
 	if fo["url"] != "https://claude.ai/code" || fo["title"] == "" {
 		t.Errorf("fallback_open = %v, want the claude.ai picker url + a title", fo)
 	}
+	// supports_remote is the provider.RemoteCapable assertion (issue #163) —
+	// always present, and true for this claude-shaped fake: the SPA renders the
+	// remote toggle only where the CLI would honor it.
+	if v, ok := p["supports_remote"].(bool); !ok || !v {
+		t.Errorf("supports_remote = %v (%T) for a RemoteCapable provider, want true", p["supports_remote"], p["supports_remote"])
+	}
 
 	// The codex-shaped provider serves its per-model efforts AND the reported
 	// default_effort (issue #156).
 	q := provs[1].(map[string]any)
 	if q["id"] != "codex-fake" {
 		t.Fatalf("second provider id = %v, want codex-fake", q["id"])
+	}
+	// It implements NEITHER DeepLinker NOR RemoteCapable: no fallback_open, and
+	// supports_remote is present-and-false (never absent — the SPA reads the key,
+	// not its absence) so the toggle disappears wherever it is the effective
+	// provider.
+	if v, ok := q["supports_remote"].(bool); !ok || v {
+		t.Errorf("supports_remote = %v (%T) for a link-less, remote-less provider, want false", q["supports_remote"], q["supports_remote"])
 	}
 	qModels, _ := q["models"].([]any)
 	if len(qModels) != 1 {

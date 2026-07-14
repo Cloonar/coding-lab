@@ -364,6 +364,13 @@ func (p *Provider) SpawnArgv(spec provider.SpawnSpec) []string {
 //     error under --strict-config); attribution is absent at source anyway
 //     (the codex_git_commit feature is off/removed in 0.133).
 //   - spec.SessionName is unused — codex has no --remote-control equivalent.
+//   - spec.Remote is unused too, and codex deliberately does NOT implement
+//     provider.RemoteCapable (issue #163): it receives lab's remote knob and
+//     ignores it, so this argv is byte-identical for both values. (0.133's
+//     `codex remote-control start|stop|pair` is a HOST-level app-server daemon
+//     with a pairing code, not a per-session spawn flag — nothing to honor
+//     here. Wiring it later would mean implementing the capability, with zero
+//     change to core.)
 //   - A non-empty InitialPrompt rides as the single trailing positional (the
 //     AFK seed prompt, present before the process so it never races the
 //     cold-start TUI); an empty prompt appends nothing.
