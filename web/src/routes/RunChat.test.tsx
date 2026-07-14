@@ -2948,6 +2948,28 @@ describe('RunChat', () => {
     );
   });
 
+  it('does not name the web host in the locked-question hint for a remote-off run', async () => {
+    // Issue #163: with remote control off no claude.ai session was ever
+    // registered, so naming that host sends the operator to a page that cannot
+    // exist — the same reason the Open affordance is hidden. The hint must fall
+    // back to the generic wording, and this branch is exactly where a non-remote
+    // run lands (claude without --remote-control flushes its pending tool_use,
+    // so the dialog arrives by transcript scan rather than the spool).
+    runOnServer = { ...baseRun(), remote: false, deep_link_url: null };
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'thinking…' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    const note = container.querySelector('.chat-composer-note')?.textContent;
+    expect(note).toBe('Claude Code needs input — open the session to respond.');
+    expect(note).not.toContain('claude.ai');
+  });
+
   // --- Multi-question dialogs (issue #51 decision 3) ---
 
   const multiQuestionDialog = () => ({
@@ -3228,6 +3250,31 @@ describe('RunChat', () => {
       "This dialog can't be answered here — open it at claude.ai to respond.",
     );
     expect(container.querySelector('button.dialog-option')).toBeNull();
+  });
+
+  it('does not name the web host in the unanswerable-dialog note for a remote-off run', async () => {
+    // The other half of the same gate (issue #163): an unanswerable shape on a
+    // remote-off run must not point at a claude.ai session that was never
+    // registered — the operator's real recourse is Interrupt.
+    runOnServer = { ...baseRun(), remote: false, deep_link_url: null };
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'thinking…' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: {
+        tool_id: 'toolu_odd',
+        dialog_kind: 'question',
+        prompt: 'A shape lab cannot drive',
+        answerable: false,
+      },
+    };
+    await mountChat();
+
+    const note = container.querySelector('.chat-dialog-card .chat-composer-note')?.textContent;
+    expect(note).toBe("This dialog can't be answered here — open the session to respond.");
+    expect(note).not.toContain('claude.ai');
   });
 
   // --- Answered Q→A summaries in the stream (issue #56 decision 3) ---

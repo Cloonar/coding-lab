@@ -9,7 +9,13 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Provider } from '../api';
-import { ATTACH_TITLE, openState, providerOpen, providerSupportsRemote } from './deepLink';
+import {
+  ATTACH_TITLE,
+  openState,
+  providerOpen,
+  providerSupportsRemote,
+  remoteGated,
+} from './deepLink';
 
 const claudeFallback = {
   url: 'https://claude.ai/code',
@@ -217,5 +223,30 @@ describe('providerOpen', () => {
     // Nothing provable → nothing gated; undefined keeps the "never guess" rule.
     expect(providerSupportsRemote(providers, 'nope')).toBe(false);
     expect(providerSupportsRemote(undefined, 'claude-code')).toBeUndefined();
+  });
+});
+
+// The gate is exported on its own because the Open affordance is not its only
+// consumer: RunChat's "answer it elsewhere" hint names the provider's web host
+// in prose, and a hint reading "open it at claude.ai" beside a hidden Open
+// button is the same broken promise spelled in words. Pinning it here keeps the
+// two surfaces from drifting.
+describe('remoteGated', () => {
+  it('gates a remote-capable provider run that spawned with remote control off', () => {
+    expect(remoteGated({ remote: false }, true)).toBe(true);
+  });
+
+  it('does not gate a remote-controlled run', () => {
+    expect(remoteGated({ remote: true }, true)).toBe(false);
+  });
+
+  it('never gates a provider without the knob, whose runs are always remote:false', () => {
+    // The capability scope: a bare !remote here would strip codex's tmux-attach
+    // affordance and mute its hint, for a feature codex does not participate in.
+    expect(remoteGated({ remote: false }, false)).toBe(false);
+  });
+
+  it('gates nothing while the providers list is still loading', () => {
+    expect(remoteGated({ remote: false }, undefined)).toBe(false);
   });
 });
