@@ -2343,9 +2343,12 @@ button.chat-title:focus-visible .chat-title-pencil {
 }
 /* Composer Send + the locked-state Interrupt escape hatch: icon-only accent
    squares sharing one slot style (ADR-0029). .chat-send is the always-present
-   composer Send; .chat-interrupt now serves only the two locked-state escape
-   hatches (dialog-pending, degraded question). The extra .icon-btn is ONLY on
-   these composer buttons, never on the dialog Submit/Send buttons. */
+   composer Send; .chat-interrupt now serves only the degraded question-state
+   locked branch (issue #165 item 3 dropped it from the dialog-pending branch —
+   an accent square in Send's slot next to a live interactive card drew
+   miss-taps; the header/ChatMenu Interrupt covers that state instead). The
+   extra .icon-btn is ONLY on these composer buttons, never on the dialog
+   Submit/Send buttons. */
 .chat-send.icon-btn,
 .chat-interrupt.icon-btn {
   min-width: 44px;

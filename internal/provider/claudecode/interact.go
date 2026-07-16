@@ -101,7 +101,7 @@ func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog 
 	if err != nil {
 		return err
 	}
-	p.intents.record(dialog, answer)
+	p.intents.record(sessionName, dialog, answer, ops)
 	for i, op := range ops {
 		if i > 0 && p.keyDelay > 0 {
 			if !sleepOrDone(ctx, p.keyDelay) {

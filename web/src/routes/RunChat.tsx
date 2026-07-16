@@ -2083,16 +2083,18 @@ function Composer(props: {
         </Match>
         {/* A dialog is pending: the interactive card lives in the STREAM
             (issue #56 decision 1), so the composer collapses to a slim
-            waiting note pointing up at it plus the Interrupt escape hatch —
-            no textarea, free text can't answer a focused picker (decision 2).
-            Mirrors the degraded question-state branch below. */}
+            waiting note pointing up at it — no textarea, free text can't
+            answer a focused picker (decision 2). No Interrupt here (issue
+            #165 item 3): an accent square in Send's slot, right next to a
+            live interactive card, drew muscle-memory "send" taps that
+            declined the focused picker instead. The escape hatch stays
+            reachable via the sticky header's turn Interrupt (desktop) and
+            the ••• ChatMenu (mobile) — both gated on `live()`, which holds
+            while a dialog pends. */}
         <Match when={props.dialog}>
-          <div class="chat-dialog">
-            <p class="chat-composer-note">
-              {capitalize(props.agentName)} is waiting on your answer — see the question above.
-            </p>
-            <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onSent} />
-          </div>
+          <p class="chat-composer-note">
+            {capitalize(props.agentName)} is waiting on your answer — see the question above.
+          </p>
         </Match>
         {/* state 'question' with no structured dialog (a dormant transcript
             flush, or a shape lab can't render): the composer stays locked — a
@@ -2332,6 +2334,21 @@ function AnswerLine(props: { result: QuestionResult }) {
   );
 }
 
+// Enter-to-submit for a dialog's free-text "Other" input (issue #165): one
+// rule shared by all three Other inputs (single-select, flat multi-select,
+// multi-question form) so Enter is exactly equivalent to clicking the
+// adjacent Send/Submit button — same enabled guard, same action — never a
+// shortcut around it. isComposing is guarded so committing IME (CJK)
+// composition never fires an early submit.
+function submitOnEnter(canSubmit: () => boolean, submit: () => void) {
+  return (e: KeyboardEvent) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    if (!canSubmit()) return;
+    e.preventDefault();
+    submit();
+  };
+}
+
 function DialogPanel(props: {
   runID: string;
   dialog: Dialog;
@@ -2450,13 +2467,22 @@ function DialogPanel(props: {
                       onToggle={() => toggle(i())}
                     />
                     <Show when={opt.is_other && selected().includes(i())}>
+                      {/* eslint-disable solid/reactivity -- submitOnEnter's returned closure
+                          only calls these thunks at keydown time, same as the plain onClick
+                          handler below; the indirection through the helper just isn't visible
+                          to the static check (issue #165). */}
                       <input
                         class="chat-input dialog-other-input"
                         placeholder="Type your answer…"
                         aria-label="Other — type your answer"
                         value={otherText()}
                         onInput={(e) => setOtherText(e.currentTarget.value)}
+                        onKeyDown={submitOnEnter(
+                          () => !busy() && multiAnswerReady(),
+                          () => void answer(multiPayload()),
+                        )}
                       />
+                      {/* eslint-enable solid/reactivity */}
                     </Show>
                   </li>
                 )}
@@ -2489,6 +2515,10 @@ function DialogPanel(props: {
                             aria-label="Other — type your answer"
                             value={otherText()}
                             onInput={(e) => setOtherText(e.currentTarget.value)}
+                            onKeyDown={submitOnEnter(
+                              () => !busy() && otherText().trim() !== '',
+                              () => void answer({ index: i(), other_text: otherText() }),
+                            )}
                           />
                           <button
                             type="button"
@@ -2694,13 +2724,19 @@ function MultiQuestionForm(props: {
                         onToggle={() => togglePick(qi(), entry.idx, q.multi_select === true)}
                       />
                       <Show when={entry.opt.is_other && isPicked(qi(), entry.idx)}>
+                        {/* eslint-disable solid/reactivity -- submitOnEnter's returned closure
+                            only calls these thunks at keydown time, same as the plain onClick
+                            Submit handler below; the indirection through the helper just isn't
+                            visible to the static check (issue #165). */}
                         <input
                           class="chat-input dialog-other-input"
                           placeholder="Type your answer…"
                           aria-label={`Other answer for: ${q.text}`}
                           value={otherText(qi())}
                           onInput={(e) => setOther(qi(), e.currentTarget.value)}
+                          onKeyDown={submitOnEnter(() => !props.busy && complete(), submit)}
                         />
+                        {/* eslint-enable solid/reactivity */}
                       </Show>
                     </li>
                   )}
@@ -2721,11 +2757,14 @@ function MultiQuestionForm(props: {
 // One-tap Interrupt escape hatch (ADR-0029, superseding ADR-0016's confirm tap):
 // an accent `pause` icon-button that fires interruptRun (Escape) immediately, no
 // confirmation — interrupt is non-destructive (the agent survives, idles, and is
-// re-promptable), so a confirm tap is friction. Rendered in the composer's two
-// locked branches — dialog-pending waiting note (issue #56 decision 2) and the
-// degraded question state (decision 5) — so exactly one always-visible escape
-// hatch exists however far the stream card scrolls. It shares the `pause` glyph
-// with the header's turn Interrupt (the composer Send no longer morphs — ADR-0029),
+// re-promptable), so a confirm tap is friction. Rendered in the composer's
+// degraded question-state branch (issue #56 decision 5) only — there it's the
+// primary action, with no interactive card above to draw a miss-tap. The
+// dialog-pending branch dropped it (issue #165 item 3): an accent square in
+// Send's slot, next to a live interactive card, drew muscle-memory "send" taps
+// that declined the focused picker instead; the header's turn Interrupt and the
+// ••• ChatMenu keep the hatch reachable there. It shares the `pause` glyph with
+// the header's turn Interrupt (the composer Send no longer morphs — ADR-0029),
 // and stays distinct from the danger `square` Stop, which is two-step (destructive
 // teardown, ADR-0019).
 function InterruptButton(props: {
