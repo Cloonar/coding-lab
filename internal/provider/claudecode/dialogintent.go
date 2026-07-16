@@ -20,10 +20,22 @@ package claudecode
 // parses (later messages shift down one seq). Accepted: the backstop is
 // advisory-only, and persisting intents would buy a rare warning's permanence
 // with a whole new storage surface.
+//
+// Forensic logging (issue #165 item 1): a live investigation (2026-07-16)
+// failed to reproduce the suspected paste/Enter desync — 24/24 production-
+// recipe trials landed cleanly through tmux's serialized pane-input queue,
+// even at 0ms inter-op gap, a 90k-char paste, and heavy load. So this lands
+// as PASSIVE INSTRUMENTATION ONLY (zero behavior change: same warnings, same
+// seq stability, same return values everywhere): on first detection of a
+// mismatched intent, verify logs the intent, the exact keystroke recipe
+// (ops), and a pane snapshot taken at that moment — ONCE per intent, never
+// on a re-parse's repeat warning — so the next real production occurrence
+// hands us the mechanism instead of another unreproduced report.
 
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -56,6 +68,18 @@ type dialogIntent struct {
 	// the denial string after "the user said:\n" — live 2026-07-08).
 	approve  bool
 	feedback string
+
+	// Forensics for the one-shot mismatch log (issue #165 item 1). session is
+	// the tmux session AnswerDialog played the recipe into (the pane-capture
+	// target); ops is the exact recipe, kept verbatim rather than
+	// re-derived — verify must log what actually got sent, not what a fresh
+	// DialogKeystrokes call would build from the same inputs today. logged
+	// flags that the forensic log has already fired for this toolID; it does
+	// NOT affect the operator-facing warning, which still re-emits on every
+	// re-parse per the determinism note above.
+	session string
+	ops     []KeyOp
+	logged  bool
 }
 
 // intentRegistry is the bounded, concurrency-safe intent store on the
@@ -66,16 +90,29 @@ type intentRegistry struct {
 	mu    sync.Mutex
 	byID  map[string]dialogIntent
 	order []string // insertion order, for oldest-first cap eviction
+
+	// log and capture wire the forensic backstop (issue #165 item 1) into the
+	// registry. Both optional: nil silently disables that half of
+	// instrumentation, so the zero-value registry (every bare test
+	// construction, and any future caller that never sets them) keeps
+	// verifying and warning exactly as before — only the log line is gated.
+	// capture is called OUTSIDE r.mu (see verify) with whatever bounded
+	// context it closes over; the registry itself never builds one.
+	log     *slog.Logger
+	capture func(sessionName string) (string, error)
 }
 
-// record stores the intent behind a validated dialog answer. Best-effort by
+// record stores the intent behind a validated dialog answer, plus the
+// forensics (sessionName, ops) a later mismatch log needs. Best-effort by
 // design: an answer shape record cannot derive an expectation from is skipped
 // (no intent → no warning), never an error — the recipe already validated.
-func (r *intentRegistry) record(d provider.Dialog, a provider.DialogAnswer) {
+func (r *intentRegistry) record(sessionName string, d provider.Dialog, a provider.DialogAnswer, ops []KeyOp) {
 	in, ok := intentFor(d, a)
 	if !ok || d.ToolID == "" {
 		return
 	}
+	in.session = sessionName
+	in.ops = ops
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.byID == nil {
@@ -99,11 +136,19 @@ func (r *intentRegistry) record(d provider.Dialog, a provider.DialogAnswer) {
 // intents emit nothing, ever). A non-empty warn is the operator-facing
 // mismatch text; the intent stays recorded so every re-parse emits the same
 // warning deterministically (seq stability — see the package comment).
+//
+// On a mismatch's FIRST detection (logged still false), it also fires the
+// forensic log (issue #165 item 1) — but only after releasing r.mu: the log
+// call's pane capture shells out to tmux, and holding a mutex across that
+// exec would serialize every concurrent ReadChat behind one slow capture.
+// The logged flip itself happens under the lock (the intent stays in the
+// map either way, so a lost race there just means the rare double-log this
+// package comment already accepts as worst-effort).
 func (r *intentRegistry) verify(toolID string, res resolvedTool) (warn string, ok bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	in, exists := r.byID[toolID]
 	if !exists {
+		r.mu.Unlock()
 		return "", false
 	}
 	warn = mismatch(in, res)
@@ -115,6 +160,18 @@ func (r *intentRegistry) verify(toolID string, res resolvedTool) (warn string, o
 				break
 			}
 		}
+		r.mu.Unlock()
+		return warn, true
+	}
+	fireLog := r.log != nil && !in.logged
+	if fireLog {
+		in.logged = true
+		r.byID[toolID] = in
+	}
+	log, capture := r.log, r.capture
+	r.mu.Unlock()
+	if fireLog {
+		logMismatch(log, capture, toolID, in, warn)
 	}
 	return warn, true
 }
@@ -309,4 +366,106 @@ func mismatch(in dialogIntent, res resolvedTool) string {
 		return prefix + fmt.Sprintf("%d answers recorded, %d intended", len(rec.Answers), len(in.answers))
 	}
 	return ""
+}
+
+// Forensic log (issue #165 item 1). logMismatch renders and emits the
+// one-shot Warn line: the intent (what lab meant), the ops (what lab
+// actually sent), and — when capture is wired — a pane snapshot at
+// detection time. capture runs here, already outside r.mu (see verify).
+
+// paneSnapshotMaxLines and paneSnapshotMaxBytes bound the captured pane
+// text carried in the log line: CapturePane's `-S -` pulls the WHOLE
+// scrollback, and a mismatch is a tail-of-pane question (what does the
+// picker look like right now), not a full-session one — an unbounded
+// snapshot would bloat every log line for no diagnostic gain.
+const (
+	paneSnapshotMaxLines = 40
+	paneSnapshotMaxBytes = 4096
+)
+
+// logMismatch fires the forensic Warn line for a first-detected mismatch.
+// log is never nil here (verify gates fireLog on it); capture may be —
+// skipped entirely rather than logging a synthetic "capture unavailable"
+// (issue #165 item 1 design: nil capture silently turns off that half of
+// instrumentation).
+func logMismatch(log *slog.Logger, capture func(sessionName string) (string, error), toolID string, in dialogIntent, warn string) {
+	attrs := []any{
+		"tool_id", toolID,
+		"session", in.session,
+		"warn", warn,
+		"intent", renderIntent(in),
+		"ops", renderOps(in.ops),
+	}
+	if capture != nil {
+		if pane, err := capture(in.session); err != nil {
+			attrs = append(attrs, "pane_error", err.Error())
+		} else {
+			attrs = append(attrs, "pane", truncatePane(pane))
+		}
+	}
+	log.Warn("dialog answer mismatch", attrs...)
+}
+
+// renderIntent renders what lab MEANT the answer to be, in one readable
+// line — the counterpart to warn, which already carries what the transcript
+// actually recorded. Question-kind answers are sorted for deterministic log
+// output (map iteration order is not).
+func renderIntent(in dialogIntent) string {
+	if in.kind == provider.DialogKindPlan {
+		switch {
+		case in.approve:
+			return "plan approve"
+		case in.feedback != "":
+			return fmt.Sprintf("plan reject feedback=%q", in.feedback)
+		default:
+			return "plan reject"
+		}
+	}
+	parts := make([]string, 0, len(in.answers))
+	for q, a := range in.answers {
+		parts = append(parts, fmt.Sprintf("%q=%q", q, a))
+	}
+	slices.Sort(parts)
+	return "question " + strings.Join(parts, ", ")
+}
+
+// renderOps renders a keystroke recipe COMPACTLY for the log: named keys
+// verbatim, a paste op as Paste(<n>ch) — never the pasted text itself. The
+// expected text already rides the intent (renderIntent); the recipe line
+// exists to answer "what did lab actually send", not to re-carry the
+// content, so it stays one short, greppable string (e.g. "Down Down
+// Paste(17ch) Enter").
+func renderOps(ops []KeyOp) string {
+	parts := make([]string, 0, len(ops))
+	for _, op := range ops {
+		if op.Text != "" {
+			parts = append(parts, fmt.Sprintf("Paste(%dch)", len(op.Text)))
+			continue
+		}
+		parts = append(parts, strings.Join(op.Named, "+"))
+	}
+	return strings.Join(parts, " ")
+}
+
+// truncatePane trims a captured pane to its tail — the last
+// paneSnapshotMaxLines lines, then the last paneSnapshotMaxBytes bytes of
+// that — prefixing a marker when either bound cut something. The mismatch
+// is diagnosed from the pane's state AT DETECTION TIME, which capture
+// already pins; only the tail is ever relevant to what a picker currently
+// shows.
+func truncatePane(pane string) string {
+	lines := strings.Split(pane, "\n")
+	truncated := len(lines) > paneSnapshotMaxLines
+	if truncated {
+		lines = lines[len(lines)-paneSnapshotMaxLines:]
+	}
+	out := strings.Join(lines, "\n")
+	if len(out) > paneSnapshotMaxBytes {
+		truncated = true
+		out = out[len(out)-paneSnapshotMaxBytes:]
+	}
+	if truncated {
+		out = "…(truncated)…\n" + out
+	}
+	return out
 }

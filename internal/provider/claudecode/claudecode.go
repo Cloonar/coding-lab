@@ -66,6 +66,14 @@ const (
 	// pollInterval is the cadence of both the registry poll and the pane
 	// scrape (v0-pinned 200ms).
 	pollInterval = 200 * time.Millisecond
+
+	// defaultForensicCaptureTimeout bounds the mismatch backstop's diagnostic
+	// pane snapshot (issue #165 item 1). ReadChat has no caller ctx to thread
+	// through the capture closure, so it owns a fixed background timeout
+	// instead: long enough for a tmux capture-pane round trip, short enough
+	// that a wedged pane never hangs a chat read waiting on forensics nobody
+	// will ever look at synchronously.
+	defaultForensicCaptureTimeout = 5 * time.Second
 )
 
 // models is the provider-owned model catalog (pinned: v0 spawn.go). Family
@@ -254,7 +262,7 @@ func New(o Options) (*Provider, error) {
 	if userCommandsDir == "" {
 		userCommandsDir = filepath.Join(filepath.Dir(o.RegistryDir), "commands")
 	}
-	return &Provider{
+	p := &Provider{
 		claudeBin:       claudeBin,
 		configPath:      configPath,
 		registryDir:     o.RegistryDir,
@@ -273,7 +281,20 @@ func New(o Options) (*Provider, error) {
 		logoutTimeout:   defaultLogoutTimeout,
 		keyDelay:        defaultDialogKeyDelay,
 		capturing:       map[string]bool{},
-	}, nil
+	}
+	// Wire the mismatch backstop's forensic instrumentation (issue #165 item
+	// 1) onto the intent registry: p.intents is a plain zero-value struct
+	// field, so it starts life with both log and capture nil (instrumentation
+	// off) until set here. The capture closure owns its own bounded
+	// background context — see defaultForensicCaptureTimeout — since ReadChat
+	// has no per-call ctx to thread through the registry.
+	p.intents.log = logger
+	p.intents.capture = func(sessionName string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultForensicCaptureTimeout)
+		defer cancel()
+		return p.runner.CapturePane(ctx, sessionName)
+	}
+	return p, nil
 }
 
 // ID implements provider.AgentProvider.

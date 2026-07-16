@@ -10,7 +10,11 @@ package claudecode
 // resolution and emits — or stays silent.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -287,12 +291,236 @@ func TestBackstop_pureParseUnaffected_andBounded(t *testing.T) {
 	// evicts oldest-first.
 	for i := 0; i < maxDialogIntents+20; i++ {
 		di := planTestDialog("toolu_cap_" + strconv.Itoa(i))
-		p.intents.record(di, provider.DialogAnswer{Index: 0})
+		p.intents.record(chatSession, di, provider.DialogAnswer{Index: 0}, nil)
 	}
 	if n := len(p.intents.byID); n != maxDialogIntents {
 		t.Errorf("registry size = %d; want the %d cap", n, maxDialogIntents)
 	}
 	if _, ok := p.intents.byID["toolu_cap_0"]; ok {
 		t.Error("oldest intent survived past the cap")
+	}
+}
+
+// --- Forensic logging (issue #165 item 1) -----------------------------
+//
+// Passive instrumentation only: every assertion above this point still
+// holds unchanged (warnings, seq stability, return values). These tests
+// cover the ADDITIONAL, orthogonal one-shot log line a mismatch now fires,
+// wired via p.intents.log / p.intents.capture — production sets both from
+// New (claudecode.go); these override them per test the way New itself
+// would, so the fakes stay under test control.
+
+// logAttr pulls one key's value out of a slog TextHandler line (key=value,
+// value double-quoted whenever it contains a space) — precise enough to
+// assert on a single attribute without a substring match spilling over into
+// a neighboring one (e.g. "ops" content bleeding from/into "intent").
+func logAttr(line, key string) string {
+	idx := strings.Index(line, key+"=")
+	if idx == -1 {
+		return ""
+	}
+	rest := line[idx+len(key)+1:]
+	if !strings.HasPrefix(rest, `"`) {
+		if end := strings.IndexByte(rest, ' '); end != -1 {
+			return rest[:end]
+		}
+		return rest
+	}
+	end := strings.IndexByte(rest[1:], '"')
+	if end == -1 {
+		return rest[1:]
+	}
+	return rest[1 : 1+end]
+}
+
+// TestBackstop_logsForensicsOnFirstMismatch: a mismatch with instrumentation
+// wired logs exactly once — tool_id, the compact ops rendering (Paste(<n>ch),
+// never the pasted text), and the captured pane content — and a re-parse of
+// the same toolID returns the same warning but neither logs nor captures
+// again (the logged flip in verify).
+func TestBackstop_logsForensicsOnFirstMismatch(t *testing.T) {
+	p, _ := armedRunner(t)
+	var buf bytes.Buffer
+	p.intents.log = slog.New(slog.NewTextHandler(&buf, nil))
+	captureCalls := 0
+	p.intents.capture = func(sessionName string) (string, error) {
+		captureCalls++
+		if sessionName != chatSession {
+			t.Errorf("capture session = %q; want %q", sessionName, chatSession)
+		}
+		return "scripted pane line 1\nscripted pane line 2", nil
+	}
+
+	d := provider.Dialog{
+		ToolID: "toolu_forensic", Kind: provider.DialogKindQuestion, Prompt: "Favorite dish?", Answerable: true,
+		Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, {Label: "Other", IsOther: true}},
+	}
+	if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Index: 2, OtherText: "great pasta"}); err != nil {
+		t.Fatalf("AnswerDialog: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(path, []byte(resolvedTranscript(toolAskUserQuestion, "toolu_forensic", declinedLine)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ReadChat("", "", path); err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+
+	logged := buf.String()
+	if n := strings.Count(logged, "dialog answer mismatch"); n != 1 {
+		t.Fatalf("log lines after first mismatch = %d; want 1: %s", n, logged)
+	}
+	for _, want := range []string{"toolu_forensic", "scripted pane line 1"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log lacks %q: %s", want, logged)
+		}
+	}
+	// The intent field legitimately carries the expected answer text (that IS
+	// the point of the comparison) — the no-leak rule is specifically about
+	// the ops rendering, which must show Paste(<n>ch), never the content.
+	opsValue := logAttr(logged, "ops")
+	if !strings.Contains(opsValue, "Paste(") {
+		t.Errorf("ops value %q lacks Paste(", opsValue)
+	}
+	if strings.Contains(opsValue, "great pasta") {
+		t.Errorf("ops rendering leaked the pasted text: %q", opsValue)
+	}
+	if captureCalls != 1 {
+		t.Errorf("capture calls = %d; want 1", captureCalls)
+	}
+
+	// Re-parse: the warning still returns (unchanged existing behavior — see
+	// TestBackstop_deterministicPerParse_andRestartCaveat), but no second log
+	// or capture.
+	chat, err := p.ReadChat("", "", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backstopWarnings(chat)) != 1 {
+		t.Fatalf("re-parse warnings = %d; want 1 (still deterministic)", len(backstopWarnings(chat)))
+	}
+	if n := strings.Count(buf.String(), "dialog answer mismatch"); n != 1 {
+		t.Errorf("log lines after re-parse = %d; want still 1 (fire-once)", n)
+	}
+	if captureCalls != 1 {
+		t.Errorf("capture calls after re-parse = %d; want still 1 (fire-once)", captureCalls)
+	}
+}
+
+// TestBackstop_matchedIntent_noLog: a matched intent stays silent on both the
+// existing warning channel AND the new forensic log — mirrors
+// TestBackstop_answeredAsIntended_silent's assertion plus the log/capture
+// side.
+func TestBackstop_matchedIntent_noLog(t *testing.T) {
+	p, _ := armedRunner(t)
+	var buf bytes.Buffer
+	p.intents.log = slog.New(slog.NewTextHandler(&buf, nil))
+	captureCalls := 0
+	p.intents.capture = func(string) (string, error) { captureCalls++; return "", nil }
+
+	d := twoQuestionDialog("toolu_match")
+	answer := provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 0}, {Selected: []int{0, 2}}}}
+	if err := p.AnswerDialog(context.Background(), chatSession, d, answer); err != nil {
+		t.Fatalf("AnswerDialog: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(path, []byte(resolvedTranscript(toolAskUserQuestion, "toolu_match", answeredLine)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := p.ReadChat("", "", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backstopWarnings(chat)) != 0 {
+		t.Errorf("matched intent emitted warnings: %+v", chat.Messages)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("matched intent logged forensics: %s", buf.String())
+	}
+	if captureCalls != 0 {
+		t.Errorf("matched intent captured the pane: %d calls", captureCalls)
+	}
+	if _, exists := p.intents.byID["toolu_match"]; exists {
+		t.Error("matched intent not cleared from the registry")
+	}
+}
+
+// TestIntentRegistry_zeroValueInstrumentation_noPanic: a bare intentRegistry
+// (log and capture both nil — every existing test's construction pattern,
+// e.g. the cap-eviction loop above) verifies a mismatch without panicking
+// and still returns the warning; instrumentation being off must never touch
+// the existing return-value contract.
+func TestIntentRegistry_zeroValueInstrumentation_noPanic(t *testing.T) {
+	var r intentRegistry
+	d := planTestDialog("toolu_zero")
+	r.record("sess", d, provider.DialogAnswer{Index: 1}, []KeyOp{{Named: []string{"Down"}}, {Named: []string{"Enter"}}})
+
+	res := resolvedTool{toolUseResult: json.RawMessage(`"User rejected tool use"`), denialKind: "user-rejected"}
+	warn, ok := r.verify("toolu_zero", res)
+	if !ok || warn == "" {
+		t.Fatalf("verify on a zero-value registry = %q, %v; want a non-empty warning", warn, ok)
+	}
+	// Re-verify: still no panic, same deterministic warning (the mismatched
+	// intent stays recorded — logged never gets a chance to matter when log
+	// is nil).
+	warn2, ok2 := r.verify("toolu_zero", res)
+	if !ok2 || warn2 != warn {
+		t.Errorf("second verify = %q, %v; want the same warning %q, true", warn2, ok2, warn)
+	}
+}
+
+// TestBackstop_captureError_loggedNotPanicked: a capture failure (the pane
+// scrape itself errors — e.g. the session died between the mismatch and the
+// log call) is carried in the log line as an error string, never panics,
+// and never suppresses the log line itself.
+func TestBackstop_captureError_loggedNotPanicked(t *testing.T) {
+	p, _ := armedRunner(t)
+	var buf bytes.Buffer
+	p.intents.log = slog.New(slog.NewTextHandler(&buf, nil))
+	wantErr := errors.New("tmux capture-pane: no such session")
+	p.intents.capture = func(string) (string, error) { return "", wantErr }
+
+	d := planTestDialog("toolu_capfail")
+	if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Index: 1}); err != nil {
+		t.Fatalf("AnswerDialog: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(path, []byte(resolvedTranscript(toolExitPlanMode, "toolu_capfail", planRejectedLine)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := p.ReadChat("", "", path)
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if len(backstopWarnings(chat)) != 1 {
+		t.Fatalf("warnings = %d; want 1 (a capture failure must not suppress the operator warning)", len(backstopWarnings(chat)))
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "dialog answer mismatch") {
+		t.Fatalf("log missing the mismatch line: %s", logged)
+	}
+	if !strings.Contains(logged, wantErr.Error()) {
+		t.Errorf("log lacks the capture error: %s", logged)
+	}
+}
+
+// TestRenderOps_pasteShowsLengthNotText: the ops rendering used by the
+// forensic log shows a paste's length, never its content — the intent
+// (renderIntent) already carries the expected text; a leaked paste would
+// duplicate potentially sensitive free-text answers into the log stream.
+func TestRenderOps_pasteShowsLengthNotText(t *testing.T) {
+	ops := []KeyOp{
+		{Named: []string{"Down"}},
+		{Named: []string{"Down"}},
+		{Text: "no anchovies"},
+		{Named: []string{"Enter"}},
+	}
+	got := renderOps(ops)
+	want := "Down Down Paste(12ch) Enter"
+	if got != want {
+		t.Errorf("renderOps = %q; want %q", got, want)
+	}
+	if strings.Contains(got, "anchovies") {
+		t.Errorf("renderOps leaked the pasted text: %q", got)
 	}
 }
