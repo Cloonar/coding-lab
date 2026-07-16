@@ -883,7 +883,7 @@ describe('RunChat', () => {
     options: [{ label: 'Option A' }, { label: 'Option B' }],
   });
 
-  it('collapses the composer to a waiting note + Interrupt while the card is pending', async () => {
+  it('collapses the composer to a bare waiting note, with no composer Interrupt, while the card is pending', async () => {
     messagesOnServer = {
       messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
       state: 'question',
@@ -899,27 +899,23 @@ describe('RunChat', () => {
     expect(card).not.toBeNull();
     expect(card?.querySelector('.chat-dialog-prompt')?.textContent).toBe('Pick a flavor?');
 
-    // The composer: one-line waiting note pointing up at the card, plus the
-    // Interrupt escape hatch — no textarea, no Send (decision 2).
+    // The composer: one-line waiting note pointing up at the card — no
+    // textarea, no Send (decision 2).
     expect(container.querySelector('.chat-composer-row')).toBeNull();
     expect(container.querySelector('.chat-input')).toBeNull();
     expect(buttonByLabel('Send')).toBeNull();
     expect(container.querySelector('.chat-composer .chat-composer-note')?.textContent).toBe(
       'Claude Code is waiting on your answer — see the question above.',
     );
-    // Exactly ONE escape-hatch `.chat-interrupt`, in the composer — always
-    // visible however far the stream card scrolls, and the card carries none.
-    // (The live header's turn Interrupt is class `chat-turn-interrupt`, which
-    // does not match `.chat-interrupt`, so it is intentionally not counted here.)
-    const hatch = container.querySelector<HTMLButtonElement>('.chat-composer .chat-interrupt');
-    expect(hatch).not.toBeNull();
-    expect(container.querySelectorAll('.chat-interrupt')).toHaveLength(1);
-    expect(card?.querySelector('.chat-interrupt')).toBeNull();
-    // Scope the click to the escape hatch: buttonByLabel('Interrupt') would hit
-    // the header turn Interrupt first in DOM order on this live run.
-    hatch!.click();
-    await settle();
-    expect(interruptPosts).toBe(1); // one tap, no confirm
+    // No composer Interrupt in this branch anymore (issue #165 item 3): an
+    // accent square in Send's slot, right next to the live interactive card
+    // above, drew muscle-memory "send" taps that declined the focused picker.
+    // Neither the composer nor the card carries a `.chat-interrupt`.
+    expect(container.querySelectorAll('.chat-interrupt')).toHaveLength(0);
+    // The escape hatch survives elsewhere: the sticky header's turn Interrupt
+    // (class `chat-turn-interrupt`) is gated on `live()`, which is true while
+    // a dialog pends on this live run.
+    expect(container.querySelector('.chat-turn-interrupt')).not.toBeNull();
   });
 
   it('renders the dialog exactly once when a stream message and pending_dialog share a tool_id', async () => {
@@ -1009,6 +1005,100 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-dialog-card')).toBeNull();
     expect(container.querySelector('.chat-composer-row')).not.toBeNull();
     expect(container.querySelector('.chat-input')).not.toBeNull();
+  });
+
+  // --- Enter-to-submit on dialog "Other" free-text inputs (issue #165) ---
+  // Enter must be exactly equivalent to clicking the adjacent Send/Submit
+  // button: same disabled guard, same payload, never a shortcut around it.
+
+  const singleSelectOtherDialog = (toolID = 'toolu_solo_other') => ({
+    tool_id: toolID,
+    dialog_kind: 'question' as const,
+    prompt: 'Which fix?',
+    answerable: true,
+    options: [{ label: 'Revert' }, { label: 'Other', is_other: true }],
+  });
+
+  it('single-select Other: Enter submits exactly like clicking Send', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: singleSelectOtherDialog(),
+    };
+    await mountChat();
+
+    const other = container.querySelector('.dialog-other input') as HTMLInputElement;
+    other.value = 'roll it back manually';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Send')!.disabled).toBe(false);
+
+    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_solo_other',
+      index: 1,
+      other_text: 'roll it back manually',
+    });
+  });
+
+  it('single-select Other: Enter no-ops on empty or whitespace-only text, matching disabled Send', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: singleSelectOtherDialog(),
+    };
+    await mountChat();
+
+    const other = container.querySelector('.dialog-other input') as HTMLInputElement;
+    expect(buttonByText('Send')!.disabled).toBe(true);
+    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(answerPosts).toHaveLength(0);
+
+    other.value = '   ';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Send')!.disabled).toBe(true);
+    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(answerPosts).toHaveLength(0);
+  });
+
+  it('single-select Other: ignores Enter fired mid-IME-composition even with valid text', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: singleSelectOtherDialog(),
+    };
+    await mountChat();
+
+    const other = container.querySelector('.dialog-other input') as HTMLInputElement;
+    other.value = 'still composing';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Send')!.disabled).toBe(false);
+
+    other.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await settle();
+    expect(answerPosts).toHaveLength(0);
   });
 
   // --- Arrival auto-scroll (issue #56 decision 5) ---
@@ -3161,6 +3251,46 @@ describe('RunChat', () => {
     });
   });
 
+  it('multi-question form Other: Enter no-ops while incomplete, then fires the atomic submit once complete (issue #165)', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: multiQuestionDialog(),
+    };
+    await mountChat();
+
+    questionOption(0, 'Other').click();
+    await settle();
+    const other = questionEl(0).querySelector('.dialog-other-input') as HTMLInputElement;
+    other.value = 'ship a hotfix';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    // Question 1 (Scope) is still unanswered — the form is incomplete, so
+    // Enter in question 0's Other input must no-op exactly like the disabled
+    // Submit button.
+    expect(buttonByText('Submit')!.disabled).toBe(true);
+    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(answerPosts).toHaveLength(0);
+
+    questionOption(1, 'Frontend').click();
+    await settle();
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+
+    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    // Same atomic payload clicking Submit would send.
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_mq',
+      answers: [{ index: 2, other_text: 'ship a hotfix' }, { selected: [0] }],
+    });
+  });
+
   // --- Plan approval + generic approval kind (issue #51 decision 3) ---
 
   it('renders a plan dialog as markdown with real approve/reject buttons answering flat', async () => {
@@ -3611,6 +3741,44 @@ describe('RunChat', () => {
       tool_id: 'toolu_flat_multi',
       selected: [],
       other_text: 'docs only',
+    });
+  });
+
+  it('flat multi-select Other: Enter no-ops until ready, then submits exactly like clicking Submit (issue #165)', async () => {
+    messagesOnServer = {
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: flatMultiDialog(),
+    };
+    await mountChat();
+
+    optionCard('Backend').click();
+    optionCard('Other').click();
+    await settle();
+    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
+
+    // Other toggled but still empty → not ready, Enter no-ops like the
+    // disabled Submit.
+    expect(buttonByText('Submit')!.disabled).toBe(true);
+    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(answerPosts).toHaveLength(0);
+
+    other.value = 'the CI pipeline';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Submit')!.disabled).toBe(false);
+
+    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(answerPosts).toHaveLength(1);
+    expect(answerPosts[0]).toEqual({
+      tool_id: 'toolu_flat_multi',
+      selected: [1],
+      other_text: 'the CI pipeline',
     });
   });
 
