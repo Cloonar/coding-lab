@@ -2,6 +2,8 @@
 
 An agent brief is a structured comment posted on a GitHub issue when it moves to `ready-for-agent`. It is the authoritative specification that an AFK agent will work from. The original issue body and discussion are context — the agent brief is the contract.
 
+One exception: dependencies on other issues do not belong in the brief. The AFK scheduler reads the `## Blocked by` section of the **issue body** only — a blocker stated in a brief comment never gates scheduling — so record any dependency discovered while writing the brief as a `#N` ref in the body's `## Blocked by` section.
+
 ## Principles
 
 ### Durability over precision
