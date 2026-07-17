@@ -27,6 +27,7 @@ const (
 	OpMergePull         = "merge_pull"
 	OpCloseIssue        = "close"
 	OpCreateIssue       = "create_issue"
+	OpEditIssue         = "edit_issue"
 	OpAddIssueLabels    = "label_add"
 	OpRemoveIssueLabels = "label_remove"
 	OpLabels            = "labels"
@@ -140,6 +141,12 @@ func (o *observed) CloseIssue(ctx context.Context, number int) error {
 func (o *observed) CreateIssue(ctx context.Context, title, body string, labels []string) (Issue, error) {
 	issue, err := o.t.CreateIssue(ctx, title, body, labels)
 	o.report(OpCreateIssue, err)
+	return issue, err
+}
+
+func (o *observed) EditIssue(ctx context.Context, number int, edit IssueEdit) (Issue, error) {
+	issue, err := o.t.EditIssue(ctx, number, edit)
+	o.report(OpEditIssue, err)
 	return issue, err
 }
 

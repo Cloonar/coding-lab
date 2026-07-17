@@ -262,6 +262,77 @@ func TestBuiltin_CloseIssue(t *testing.T) {
 	}
 }
 
+// TestBuiltin_EditIssue pins the title/body patch riding store.UpdateIssue: a
+// nil pointer leaves the field untouched, a non-nil one replaces it, a non-nil
+// empty Body clears the body — on any issue, open OR closed — and an unknown
+// number surfaces store.ErrNotFound. The returned issue is LIST shape (Comments
+// nil, CommentsCount from the store).
+func TestBuiltin_EditIssue(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	str := func(v string) *string { return &v }
+	is, _ := s.CreateIssue(ctx, repo.ID, "old title", "old body", fixedNow)
+
+	// Title only: body untouched.
+	got, err := tr.EditIssue(ctx, is.Number, tracker.IssueEdit{Title: str("new title")})
+	if err != nil {
+		t.Fatalf("EditIssue title: %v", err)
+	}
+	if got.Title != "new title" || got.Body != "old body" {
+		t.Errorf("after title edit = %q/%q, want new title/old body", got.Title, got.Body)
+	}
+	if got.Comments != nil {
+		t.Errorf("returned issue carries a comment thread = %+v, want LIST shape (nil)", got.Comments)
+	}
+
+	// Body only: title untouched.
+	got, err = tr.EditIssue(ctx, is.Number, tracker.IssueEdit{Body: str("new body")})
+	if err != nil {
+		t.Fatalf("EditIssue body: %v", err)
+	}
+	if got.Title != "new title" || got.Body != "new body" {
+		t.Errorf("after body edit = %q/%q, want new title/new body", got.Title, got.Body)
+	}
+
+	// Both at once.
+	got, err = tr.EditIssue(ctx, is.Number, tracker.IssueEdit{Title: str("t2"), Body: str("b2")})
+	if err != nil {
+		t.Fatalf("EditIssue both: %v", err)
+	}
+	if got.Title != "t2" || got.Body != "b2" {
+		t.Errorf("after both edit = %q/%q, want t2/b2", got.Title, got.Body)
+	}
+
+	// Clear body with a non-nil empty string.
+	got, err = tr.EditIssue(ctx, is.Number, tracker.IssueEdit{Body: str("")})
+	if err != nil {
+		t.Fatalf("EditIssue clear body: %v", err)
+	}
+	if got.Title != "t2" || got.Body != "" {
+		t.Errorf("after clear body = %q/%q, want t2/empty", got.Title, got.Body)
+	}
+
+	// Editing a CLOSED issue succeeds — no guard on state.
+	if err := tr.CloseIssue(ctx, is.Number); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+	got, err = tr.EditIssue(ctx, is.Number, tracker.IssueEdit{Title: str("edited while closed")})
+	if err != nil {
+		t.Fatalf("EditIssue on closed issue: %v", err)
+	}
+	if got.Title != "edited while closed" || got.State != tracker.StateClosed {
+		t.Errorf("after edit-while-closed = %q/%q, want edited title still closed", got.Title, got.State)
+	}
+
+	// Unknown number surfaces store.ErrNotFound.
+	if _, err := tr.EditIssue(ctx, 999, tracker.IssueEdit{Title: str("x")}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("EditIssue(999) err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestBuiltin_Pulls_stateMappingAndPRPresent pins the builtin done-signal
 // (M6): Pulls returns every CR across ALL states mapped onto the tracker's PR
 // vocabulary, and tracker.PRPresent over that result treats open|merged as

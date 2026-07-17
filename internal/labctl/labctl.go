@@ -34,6 +34,8 @@ Usage:
   labctl issue list                     list open issues (number, state, created, labels, title)
   labctl issue create --title T --body B [--labels a,b]
                                         file a new issue, labels attached at creation
+  labctl issue edit <n> [--title T] [--body B]
+                                        edit issue n's title and/or body (omitted flag untouched)
   labctl issue comment <n> <body>       comment on issue n
   labctl issue label add <n> <a,b>      add labels (comma-separated) to issue n
   labctl issue label remove <n> <a,b>   remove labels from issue n
@@ -174,6 +176,59 @@ func runIssue(args []string, env Env) int {
 				return err
 			}
 			_, _ = fmt.Fprintf(env.Stdout, "%d\n", is.Number)
+			return nil
+		})
+	case "edit":
+		// `labctl issue edit <n> [--title T] [--body B]`: n first, flags after.
+		// Presence — not value — decides which fields patch: fs.Visit reports a
+		// SET flag, so `--body ""` legally clears the body while an omitted flag
+		// leaves the field untouched. At least one flag is required (an empty
+		// patch is a server-side no-op, but the CLI wants a usage exit, not a
+		// silent round-trip); a set-but-empty --title is rejected here for the
+		// usage exit code (the server enforces it too).
+		if len(args) < 2 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl issue edit: want <n> [--title T] [--body B]")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl issue edit: issue number %q is not an integer\n", args[1])
+			return 2
+		}
+		fs := flag.NewFlagSet("labctl issue edit", flag.ContinueOnError)
+		fs.SetOutput(env.Stderr)
+		title := fs.String("title", "", "new issue title")
+		body := fs.String("body", "", "new issue body (empty string clears it)")
+		if err := fs.Parse(args[2:]); err != nil {
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl issue edit: unexpected arguments")
+			return 2
+		}
+		var titleArg, bodyArg *string
+		fs.Visit(func(fl *flag.Flag) {
+			switch fl.Name {
+			case "title":
+				titleArg = title
+			case "body":
+				bodyArg = body
+			}
+		})
+		if titleArg == nil && bodyArg == nil {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl issue edit: want at least one of --title or --body")
+			return 2
+		}
+		if titleArg != nil && strings.TrimSpace(*titleArg) == "" {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl issue edit: title must not be empty")
+			return 2
+		}
+		return withClient(env, "issue edit", func(c *Client) error {
+			is, err := c.IssueEdit(n, titleArg, bodyArg)
+			if err != nil {
+				return err
+			}
+			printIssue(env.Stdout, is)
 			return nil
 		})
 	case "label":

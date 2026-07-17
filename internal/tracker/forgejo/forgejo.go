@@ -422,6 +422,26 @@ func (c *Client) CreateIssue(ctx context.Context, title, body string, labels []s
 	return toIssue(fj, nil), nil
 }
 
+// EditIssue applies a title/body patch via PATCH /issues/{n}. Only the set
+// fields go on the wire: *string with omitempty omits a nil pointer but keeps a
+// non-nil pointer to "" (a cleared body reaches Forgejo as `"body":""`), so a
+// title-only edit sends no body key and a body-only edit no title key. The
+// forge judges nothing about emptiness — title-non-empty is the API layer's
+// guard; a 404 (unknown issue) unwraps to tracker.ErrNotFound like every
+// single-subject call. The response maps through toIssue in LIST shape (no
+// comments), matching CreateIssue.
+func (c *Client) EditIssue(ctx context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
+	req := struct {
+		Title *string `json:"title,omitempty"`
+		Body  *string `json:"body,omitempty"`
+	}{Title: edit.Title, Body: edit.Body}
+	var fj fjIssue
+	if err := c.do(ctx, http.MethodPatch, c.issuePath(number), nil, req, &fj); err != nil {
+		return tracker.Issue{}, err
+	}
+	return toIssue(fj, nil), nil
+}
+
 // AddIssueLabels attaches the named labels to an issue in one POST, after the
 // same strict client-side name resolution as CreateIssue.
 func (c *Client) AddIssueLabels(ctx context.Context, number int, labels []string) error {

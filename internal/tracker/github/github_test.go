@@ -809,6 +809,77 @@ func TestCloseIssue(t *testing.T) {
 	}
 }
 
+// --- EditIssue -------------------------------------------------------------
+
+// strPtr is a *string literal helper for the patch cases.
+func strPtr(s string) *string { return &s }
+
+// TestEditIssue pins the title/body patch: PATCH /issues/{n} carrying ONLY the
+// set fields (a nil pointer is omitted from the wire, so a title-only edit
+// sends no body key and a body-only edit no title key; a non-nil empty Body is
+// still sent, clearing it), the response mapped in LIST shape, and the request
+// values matching the patch.
+func TestEditIssue(t *testing.T) {
+	cases := []struct {
+		name       string
+		edit       tracker.IssueEdit
+		absentKeys []string
+	}{
+		{"title only", tracker.IssueEdit{Title: strPtr("new title")}, []string{"body"}},
+		{"body only", tracker.IssueEdit{Body: strPtr("new body")}, []string{"title"}},
+		{"both", tracker.IssueEdit{Title: strPtr("t"), Body: strPtr("b")}, nil},
+		{"clear body", tracker.IssueEdit{Body: strPtr("")}, []string{"title"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotMethod, gotPath string
+			var gotBody map[string]any
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath = r.Method, r.URL.Path
+				gotBody = decodeBody(t, r)
+				_, _ = io.WriteString(w, `{"number":62,"title":"new title","body":"new body","state":"open",
+				  "comments":3,"created_at":"2026-07-06T00:00:00Z","updated_at":"2026-07-07T00:00:00Z"}`)
+			})
+
+			is, err := c.EditIssue(context.Background(), 62, tc.edit)
+			if err != nil {
+				t.Fatalf("EditIssue: %v", err)
+			}
+			if gotMethod != http.MethodPatch || gotPath != apiPrefix+"/issues/62" {
+				t.Errorf("request = %s %s; want PATCH %s/issues/62", gotMethod, gotPath, apiPrefix)
+			}
+			for _, k := range tc.absentKeys {
+				if _, ok := gotBody[k]; ok {
+					t.Errorf("request body carried unset key %q: %v", k, gotBody)
+				}
+			}
+			if tc.edit.Title != nil && gotBody["title"] != *tc.edit.Title {
+				t.Errorf("wire title = %v; want %q", gotBody["title"], *tc.edit.Title)
+			}
+			if tc.edit.Body != nil && gotBody["body"] != *tc.edit.Body {
+				t.Errorf("wire body = %v; want %q", gotBody["body"], *tc.edit.Body)
+			}
+			// LIST shape: no comment thread, count carried from `comments`.
+			if is.Number != 62 || is.Comments != nil || is.CommentsCount != 3 {
+				t.Errorf("edited issue = %+v; want #62 LIST shape (nil comments, count 3)", is)
+			}
+		})
+	}
+}
+
+// TestEditIssue_notFound: an unknown number's 404 unwraps to ErrNotFound.
+func TestEditIssue_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+	})
+
+	_, err := c.EditIssue(context.Background(), 999, tracker.IssueEdit{Title: strPtr("x")})
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 // --- labels / triage surface -----------------------------------------------
 
 // labelsJSON is the fixture label set: GitHub emits colors WITHOUT the leading

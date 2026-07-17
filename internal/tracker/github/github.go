@@ -459,6 +459,26 @@ func (c *Client) CreateIssue(ctx context.Context, title, body string, labels []s
 	return toIssue(gh, nil), nil
 }
 
+// EditIssue applies a title/body patch via PATCH /issues/{n} (GitHub's issue
+// edit endpoint). Only the set fields go on the wire: *string with omitempty
+// omits a nil pointer but keeps a non-nil pointer to "" (a cleared body), so a
+// title-only edit sends no body key and a body-only edit no title key. GitHub
+// judges nothing about emptiness — title-non-empty is the API layer's guard. A
+// 404 unwraps to tracker.ErrNotFound and a throttled 403/429 to
+// tracker.ErrRateLimited, like every other call on this client. The response
+// maps through toIssue in LIST shape (no comments), matching CreateIssue.
+func (c *Client) EditIssue(ctx context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
+	req := struct {
+		Title *string `json:"title,omitempty"`
+		Body  *string `json:"body,omitempty"`
+	}{Title: edit.Title, Body: edit.Body}
+	var gh ghIssue
+	if _, err := c.do(ctx, http.MethodPatch, c.issuePath(number), nil, req, &gh); err != nil {
+		return tracker.Issue{}, err
+	}
+	return toIssue(gh, nil), nil
+}
+
 // AddIssueLabels attaches the named labels to an issue in one POST, after the
 // same strict client-side name resolution as CreateIssue.
 func (c *Client) AddIssueLabels(ctx context.Context, number int, labels []string) error {

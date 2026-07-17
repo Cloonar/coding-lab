@@ -99,6 +99,11 @@ func TestRunCommandSurface(t *testing.T) {
 		{"issue create missing title", []string{"issue", "create", "--body", "b"}, agentEnv, 2, "", "--title is required"},
 		{"issue create missing body", []string{"issue", "create", "--title", "t"}, agentEnv, 2, "", "--body is required"},
 		{"issue create stray args", []string{"issue", "create", "--title", "t", "--body", "b", "x"}, agentEnv, 2, "", "unexpected arguments"},
+		{"issue edit missing n", []string{"issue", "edit"}, agentEnv, 2, "", "want <n>"},
+		{"issue edit bad n", []string{"issue", "edit", "one", "--title", "t"}, agentEnv, 2, "", "not an integer"},
+		{"issue edit no flags", []string{"issue", "edit", "1"}, agentEnv, 2, "", "want at least one of --title or --body"},
+		{"issue edit empty title", []string{"issue", "edit", "1", "--title", ""}, agentEnv, 2, "", "title must not be empty"},
+		{"issue edit stray args", []string{"issue", "edit", "1", "--title", "t", "x"}, agentEnv, 2, "", "unexpected arguments"},
 		{"issue label no op", []string{"issue", "label"}, agentEnv, 2, "", "want add|remove"},
 		{"issue label bad op", []string{"issue", "label", "toggle", "1", "bug"}, agentEnv, 2, "", "want add|remove"},
 		{"issue label add missing labels", []string{"issue", "label", "add", "1"}, agentEnv, 2, "", "want <n> <labels>"},
@@ -218,6 +223,9 @@ func (f *fakeForge) MergePull(_ context.Context, number int) (tracker.PullRef, e
 }
 func (f *fakeForge) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeForge) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
+	return tracker.Issue{}, nil
+}
+func (f *fakeForge) EditIssue(context.Context, int, tracker.IssueEdit) (tracker.Issue, error) {
 	return tracker.Issue{}, nil
 }
 func (f *fakeForge) AddIssueLabels(context.Context, int, []string) error    { return nil }
@@ -535,6 +543,74 @@ func TestIssueCreateFilesRunAttributedIssue(t *testing.T) {
 		"--title", "doomed", "--body", "b", "--labels", "no-such"}, f.env())
 	if code != 1 || !strings.Contains(stderr, "no-such") {
 		t.Fatalf("unknown label: exit = %d, stderr %q, want 1 naming the label", code, stderr)
+	}
+}
+
+// TestIssueEditCommand drives `labctl issue edit` against the builtin store: a
+// title-only patch and a body-only patch each print the updated issue through
+// printIssue and leave the omitted field untouched, `--body ""` clears the body
+// (a follow-up view shows it empty), and an unknown issue number surfaces the
+// API's 404 as exit 1.
+func TestIssueEditCommand(t *testing.T) {
+	f := newBuiltinFixture(t)
+	ctx := context.Background()
+
+	// Title only: printIssue renders the renamed issue; the seeded body stays.
+	code, stdout, stderr := run(t, []string{"issue", "edit", "1", "--title", "Renamed"}, f.env())
+	if code != 0 {
+		t.Fatalf("title edit: exit = %d, stderr %q", code, stderr)
+	}
+	if !strings.HasPrefix(stdout, "#1 Renamed\n") || !strings.Contains(stdout, "It wobbles.") {
+		t.Errorf("stdout = %q, want the renamed issue with the kept body", stdout)
+	}
+	is, _ := f.st.IssueByRepoNumber(ctx, f.repoID(t), 1)
+	if is.Title != "Renamed" || is.Body != "It wobbles." {
+		t.Errorf("stored = title %q body %q, want Renamed / It wobbles.", is.Title, is.Body)
+	}
+
+	// Body only: the title from the prior edit is kept.
+	code, stdout, stderr = run(t, []string{"issue", "edit", "1", "--body", "Now settled."}, f.env())
+	if code != 0 {
+		t.Fatalf("body edit: exit = %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "Now settled.") {
+		t.Errorf("stdout = %q, want the new body", stdout)
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, f.repoID(t), 1)
+	if is.Title != "Renamed" || is.Body != "Now settled." {
+		t.Errorf("stored = title %q body %q, want Renamed / Now settled.", is.Title, is.Body)
+	}
+
+	// Clear the body with --body "": a follow-up view shows an empty body.
+	code, _, stderr = run(t, []string{"issue", "edit", "1", "--body", ""}, f.env())
+	if code != 0 {
+		t.Fatalf("clear body: exit = %d, stderr %q", code, stderr)
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, f.repoID(t), 1)
+	if is.Body != "" || is.Title != "Renamed" {
+		t.Errorf("after clear = title %q body %q, want body cleared and title kept", is.Title, is.Body)
+	}
+	code, stdout, stderr = run(t, []string{"issue", "view", "1"}, f.env())
+	if code != 0 {
+		t.Fatalf("view after clear: exit = %d, stderr %q", code, stderr)
+	}
+	// Empty body renders as the blank region between the labels line and the
+	// seeded operator comment (printIssue's "\n%s\n" over ""); the old body text
+	// is gone.
+	if !strings.HasPrefix(stdout, "#1 Renamed\nstate: open\nlabels: ready-for-agent\n\n\n") {
+		t.Errorf("view after clear = %q, want the renamed issue with an empty body", stdout)
+	}
+	if strings.Contains(stdout, "It wobbles.") || strings.Contains(stdout, "Now settled.") {
+		t.Errorf("view after clear = %q, still carries an old body", stdout)
+	}
+
+	// Unknown issue number → the API's 404 → exit 1 with the message.
+	code, stdout, stderr = run(t, []string{"issue", "edit", "99", "--title", "x"}, f.env())
+	if code != 1 || stdout != "" {
+		t.Fatalf("unknown issue: exit = %d, stdout %q, want 1 with empty stdout", code, stdout)
+	}
+	if !strings.Contains(stderr, "not found") {
+		t.Errorf("stderr = %q, want the not-found message", stderr)
 	}
 }
 

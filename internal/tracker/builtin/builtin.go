@@ -272,6 +272,29 @@ func (t *Tracker) CreateIssue(ctx context.Context, title, body string, labels []
 	return toTrackerIssue(is), nil
 }
 
+// EditIssue applies a title/body patch by riding store.UpdateIssue — the same
+// accessor CloseIssue and the operator PATCH use. A nil pointer leaves the
+// column untouched; a non-nil one is store.Set, so a non-nil empty Body clears
+// the body. State is never touched here (title/body only). Last-write-wins on
+// any issue, open or closed; an unknown number surfaces store.ErrNotFound,
+// consistent with the package's other single-issue methods. The result maps
+// through toTrackerIssue (Comments nil, CommentsCount from the store) — the
+// LIST shape CreateIssue returns.
+func (t *Tracker) EditIssue(ctx context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
+	var u store.IssueUpdate
+	if edit.Title != nil {
+		u.Title = store.Set(*edit.Title)
+	}
+	if edit.Body != nil {
+		u.Body = store.Set(*edit.Body)
+	}
+	is, err := t.store.UpdateIssue(ctx, t.repoID, number, u, t.now())
+	if err != nil {
+		return tracker.Issue{}, fmt.Errorf("builtin edit issue %d: %w", number, err)
+	}
+	return toTrackerIssue(is), nil
+}
+
 // AddIssueLabels attaches the named labels to an issue. All names resolve
 // strictly BEFORE the first attach (tracker.ErrUnknownLabel on a miss — never
 // an implicit create); attaching an already attached label is the store's

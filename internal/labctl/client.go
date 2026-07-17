@@ -187,6 +187,24 @@ func (c *Client) IssueCreate(title, body string, labels []string) (Issue, error)
 	return is, err
 }
 
+// IssueEdit patches issue n's title and/or body and returns the updated issue.
+// The request carries ONLY the set fields — a nil pointer is omitted so the
+// server leaves that field untouched, while a non-nil pointer (including a
+// pointer to "") is sent, so `--body ""` serializes as `"body":""` and clears
+// the body. An empty patch (both nil) is a legal existence-verifying no-op.
+func (c *Client) IssueEdit(n int, title, body *string) (Issue, error) {
+	patch := make(map[string]string, 2)
+	if title != nil {
+		patch["title"] = *title
+	}
+	if body != nil {
+		patch["body"] = *body
+	}
+	var is Issue
+	err := c.do(http.MethodPatch, "/agent/v1/issues/"+strconv.Itoa(n), patch, &is)
+	return is, err
+}
+
 // IssueLabelAdd attaches labels to issue n.
 func (c *Client) IssueLabelAdd(n int, labels []string) error {
 	return c.do(http.MethodPost, "/agent/v1/issues/"+strconv.Itoa(n)+"/labels",

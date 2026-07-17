@@ -124,6 +124,17 @@ type Issue struct {
 	UpdatedAt     time.Time
 }
 
+// IssueEdit is a patch over an issue's editable content: a nil pointer leaves
+// that field untouched, a non-nil pointer fully replaces it — and a non-nil
+// pointer to "" legally CLEARS the field (only nil means "leave alone"). It is
+// title/body only: state is CloseIssue's, never an edit's (the open↔closed
+// transition owns closed_at). It carries no run/author identity — an edit
+// re-writes existing content, it does not re-author the issue.
+type IssueEdit struct {
+	Title *string
+	Body  *string
+}
+
 // PullRef is one pull request (forge) or change request (built-in) reduced to
 // what the reaper matches on: its number, head branch, three-valued state
 // (PullOpen|PullMerged|PullClosed), and web URL. Head is the bare branch name
@@ -261,6 +272,19 @@ type Tracker interface {
 	// each). Labels are names; any name the repo does not define wraps
 	// ErrUnknownLabel and nothing is created.
 	CreateIssue(ctx context.Context, title, body string, labels []string) (Issue, error)
+
+	// EditIssue applies a title/body patch (IssueEdit) to an issue and returns
+	// the updated issue. Last write wins: no guard, no concurrency token — an
+	// issue open or closed, claimed or not, edits the same way, and the forge's
+	// own edit history is the audit trail. The seam does NOT validate title
+	// non-emptiness; that guard is the API layer's (it mirrors the operator
+	// PATCH in internal/httpapi/issues.go), so backends pass the patch straight
+	// through. An unknown number wraps ErrNotFound (the builtin backend surfaces
+	// store.ErrNotFound, like Issue/Pull). The returned Issue is in LIST shape —
+	// Comments nil, CommentsCount populated the way the backend's list mapping
+	// does it — because an edit is a write, not a thread read (CreateIssue's
+	// shape convention).
+	EditIssue(ctx context.Context, number int, edit IssueEdit) (Issue, error)
 
 	// AddIssueLabels attaches the named labels to an issue. Names are
 	// resolved strictly BEFORE anything is applied: an unknown name wraps
