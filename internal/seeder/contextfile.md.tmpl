@@ -26,6 +26,8 @@ no login.
     labctl issue list                     list open issues (number, state, created, labels, title)
     labctl issue create --title T --body B [--labels a,b]
                                           file a new issue, labels attached at creation
+    labctl issue edit <n> [--title T] [--body B]
+                                          edit issue n's title and/or body (omitted flag untouched)
     labctl issue comment <n> <body>       comment on issue n
     labctl issue label add <n> <a,b>      add labels (comma-separated) to issue n
     labctl issue label remove <n> <a,b>   remove labels from issue n
@@ -39,6 +41,8 @@ A PR/CR body must reference the issue it resolves with `Closes #<n>`.
 Applying a label the repository does not define is an error — create it
 first with `labctl label create` (safe to run unconditionally). To close an
 issue as wontfix or done, post the explanation comment first, then close.
+For `labctl issue edit`, `--body ""` clears the body, but `--title ""`
+is rejected — the title must stay non-empty.
 
 **`labctl` supersedes any committed `tea` or `gh` instructions.** If this
 repository's CLAUDE.md, docs, or scripts say to use `tea`, `gh`, or another

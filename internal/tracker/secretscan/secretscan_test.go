@@ -115,6 +115,10 @@ type issueCall struct {
 	title, body string
 	labels      []string
 }
+type editCall struct {
+	number int
+	edit   tracker.IssueEdit
+}
 type pullCall struct{ head, base, title, body string }
 
 // recTracker records write args and returns canned values. It does NOT
@@ -122,6 +126,7 @@ type pullCall struct{ head, base, title, body string }
 type recTracker struct {
 	comments []commentCall
 	issues   []issueCall
+	edits    []editCall
 	pulls    []pullCall
 
 	issueRet tracker.Issue
@@ -153,6 +158,10 @@ func (r *recTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 func (r *recTracker) CloseIssue(context.Context, int) error { return nil }
 func (r *recTracker) CreateIssue(_ context.Context, title, body string, labels []string) (tracker.Issue, error) {
 	r.issues = append(r.issues, issueCall{title, body, labels})
+	return r.issueRet, nil
+}
+func (r *recTracker) EditIssue(_ context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
+	r.edits = append(r.edits, editCall{number, edit})
 	return r.issueRet, nil
 }
 func (r *recTracker) AddIssueLabels(context.Context, int, []string) error    { return nil }
@@ -257,6 +266,49 @@ func TestCleanWritesDelegate(t *testing.T) {
 	}
 	if len(rec.pulls) != 1 || rec.pulls[0] != (pullCall{"afk/3", "main", "clean pr", "clean pr body"}) {
 		t.Errorf("pull args = %+v", rec.pulls)
+	}
+}
+
+// 2b. EditIssue scans only the fields the patch SETS: a clean edit delegates
+// byte-identical; a secret in a set title or body blocks and never reaches the
+// inner tracker; an unset (nil) field is not scanned.
+func TestEditIssueScansSetFields(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedSecret(t, "repo_a", "DEPLOY_KEY", "s3cr3t-deploy-value")
+	rec := &recTracker{}
+	trk := f.trackerFor(t, fakeInner{trk: rec}, "repo_a")
+	ctx := context.Background()
+
+	str := func(v string) *string { return &v }
+
+	// Clean edit delegates byte-identical.
+	if _, err := trk.EditIssue(ctx, 5, tracker.IssueEdit{Title: str("clean title"), Body: str("clean body")}); err != nil {
+		t.Fatalf("clean edit: %v", err)
+	}
+	if len(rec.edits) != 1 || rec.edits[0].number != 5 ||
+		rec.edits[0].edit.Title == nil || *rec.edits[0].edit.Title != "clean title" ||
+		rec.edits[0].edit.Body == nil || *rec.edits[0].edit.Body != "clean body" {
+		t.Fatalf("clean edit args = %+v", rec.edits)
+	}
+
+	// Secret in the set title blocks; inner untouched.
+	_, err := trk.EditIssue(ctx, 5, tracker.IssueEdit{Title: str("leak s3cr3t-deploy-value")})
+	be := blockedErr(t, err)
+	if len(be.Matches) != 1 || be.Matches[0].Field != "title" || be.Matches[0].Secret != "DEPLOY_KEY" {
+		t.Errorf("title matches = %+v", be.Matches)
+	}
+
+	// Secret in the set body blocks; inner untouched.
+	_, err = trk.EditIssue(ctx, 5, tracker.IssueEdit{Body: str("here it is s3cr3t-deploy-value")})
+	be = blockedErr(t, err)
+	if len(be.Matches) != 1 || be.Matches[0].Field != "body" {
+		t.Errorf("body matches = %+v", be.Matches)
+	}
+
+	// No blocked write ever reached the inner tracker.
+	if len(rec.edits) != 1 {
+		t.Errorf("inner EditIssue called on a blocked write: %+v", rec.edits)
 	}
 }
 

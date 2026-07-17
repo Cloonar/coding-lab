@@ -110,6 +110,9 @@ func (f *fakeTracker) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
 	return tracker.Issue{}, errors.New("not implemented")
 }
+func (f *fakeTracker) EditIssue(context.Context, int, tracker.IssueEdit) (tracker.Issue, error) {
+	return tracker.Issue{}, errors.New("not implemented")
+}
 func (f *fakeTracker) AddIssueLabels(context.Context, int, []string) error    { return nil }
 func (f *fakeTracker) RemoveIssueLabels(context.Context, int, []string) error { return nil }
 func (f *fakeTracker) Labels(context.Context) ([]tracker.Label, error)        { return nil, nil }

@@ -142,6 +142,35 @@ func TestSecretScan_IssueBase64TitleBlocked(t *testing.T) {
 	}
 }
 
+// TestSecretScan_IssueEditBlocked (criteria b, f): the PATCH edit path is a
+// scanned write too — a secret's plaintext in an edited body is a 400 naming
+// the secret, the value never echoes back, and the tracker's EditIssue is never
+// reached (the decorator scans the patch's SET fields ahead of delegation).
+func TestSecretScan_IssueEditBlocked(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+	const value = "sk-live-4f8a2b9c1d3e5f70"
+	f.seedSecret(t, "repo_f", "DEPLOY_KEY", "", value)
+
+	fk := &fakeTracker{}
+	handler := f.scanForgeServer(fk).Handler()
+
+	body := mustJSON(t, map[string]string{"body": "Now deploying with " + value})
+	rr := doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, body)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "DEPLOY_KEY") {
+		t.Errorf("400 body = %s, want it to name DEPLOY_KEY", rr.Body.String())
+	}
+	assertNoLeak(t, rr.Body.String(), value)
+	if len(fk.editedIssues) != 0 {
+		t.Errorf("EditIssue reached the tracker despite the rejected leak: %+v", fk.editedIssues)
+	}
+}
+
 // TestSecretScan_CommentURLEncodedBlocked (criteria c, f): a URL-encoded secret
 // (value chosen so its QueryEscape differs — it carries a slash and a space) in
 // a comment body is a 400 naming the secret; no CreateComment.

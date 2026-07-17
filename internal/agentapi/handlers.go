@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -37,7 +38,7 @@ import (
 const EventCRChanged = "cr.changed"
 
 // EventIssueChanged is the SSE event name every builtin issue/label mutation
-// publishes (create, label add/remove, close, label ensure), exactly like
+// publishes (create, edit, label add/remove, close, label ensure), exactly like
 // the operator API's builtin mutations: the operator UI refetches on event.
 // Forge-bound mutations publish nothing — the forge is the source of truth
 // and the operator UI reads it on navigation.
@@ -433,6 +434,85 @@ func (s *Server) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishIssueChanged(repo)
 	writeJSON(w, http.StatusCreated, issueListJSON(is))
+}
+
+// patchString reads a required-string PATCH field (null rejected), mirroring
+// the operator API's helper (internal/httpapi/repos.go) so the two issue-edit
+// surfaces reject a non-string value with byte-identical wording.
+func patchString(raw json.RawMessage, field string) (string, error) {
+	var v *string
+	if err := json.Unmarshal(raw, &v); err != nil || v == nil {
+		return "", fmt.Errorf("field %s must be a string", field)
+	}
+	return *v, nil
+}
+
+// handleIssueEdit is PATCH /agent/v1/issues/{n}: apply a title/body patch to
+// issue n and answer 200 with the updated issue (list shape — an edit is a
+// write, not a thread read). A patch KEY's presence means "replace this field",
+// its absence "leave it untouched", so the body decodes into
+// map[string]json.RawMessage to tell absent from empty — the operator PATCH's
+// contract (internal/httpapi/issues.go). "title" is a string that must not be
+// whitespace-only (the seam does NOT guard this — the API does, mirroring the
+// operator), "body" any string (""=clear), a non-string value a 400 in
+// patchString's wording, any other key a 400 naming it. The body passes the
+// incogni sanitizer (ADR-0014: no unsanitized agent write path); the title does
+// not (mirrors create). An empty patch {} is a legal existence-verifying no-op
+// (store.UpdateIssue documents it; a forge PATCH {} is a harmless no-op) — the
+// ≥1-flag rule is labctl's client-side check. No runScope: an edit re-writes
+// existing content and carries no author identity (see tracker.IssueEdit).
+func (s *Server) handleIssueEdit(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var patch map[string]json.RawMessage
+	if !decodeJSON(w, r, &patch) {
+		return
+	}
+	var edit tracker.IssueEdit
+	for key, raw := range patch {
+		switch key {
+		case "title":
+			title, err := patchString(raw, key)
+			if err != nil {
+				jsonError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if strings.TrimSpace(title) == "" {
+				jsonError(w, http.StatusBadRequest, "title must not be empty")
+				return
+			}
+			edit.Title = &title
+		case "body":
+			body, err := patchString(raw, key)
+			if err != nil {
+				jsonError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			body = s.sanitizeBody(repo, body)
+			edit.Body = &body
+		default:
+			jsonError(w, http.StatusBadRequest, fmt.Sprintf("unknown field %q", key))
+			return
+		}
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	is, err := tk.EditIssue(r.Context(), n, edit)
+	if err != nil {
+		s.writeTrackerError(w, "editing issue", repo, err)
+		return
+	}
+	s.publishIssueChanged(repo)
+	writeJSON(w, http.StatusOK, issueListJSON(is))
 }
 
 type issueLabelsRequest struct {

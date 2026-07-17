@@ -36,6 +36,7 @@ type fakeTracker struct {
 	checks       []tracker.Check // returned by Checks (with f.err)
 	comments     []commentArgs
 	createdIssue *issueArgs
+	editedIssues []editArgs
 	labelAdds    []labelsArgs
 	labelRemoves []labelsArgs
 	ensured      []tracker.Label
@@ -50,6 +51,10 @@ type commentArgs struct {
 type issueArgs struct {
 	title, body string
 	labels      []string
+}
+type editArgs struct {
+	number int
+	edit   tracker.IssueEdit
 }
 type labelsArgs struct {
 	number int
@@ -130,6 +135,22 @@ func (f *fakeTracker) CreateIssue(_ context.Context, title, body string, labels 
 	}
 	f.createdIssue = &issueArgs{title: title, body: body, labels: labels}
 	return tracker.Issue{Number: 101, Title: title, Body: body, State: tracker.StateOpen, Labels: labels}, nil
+}
+func (f *fakeTracker) EditIssue(_ context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
+	if f.err != nil {
+		return tracker.Issue{}, f.err
+	}
+	f.editedIssues = append(f.editedIssues, editArgs{number: number, edit: edit})
+	// LIST shape (Comments nil), reflecting the patched fields — the backend's
+	// EditIssue return contract.
+	is := tracker.Issue{Number: number, State: tracker.StateOpen}
+	if edit.Title != nil {
+		is.Title = *edit.Title
+	}
+	if edit.Body != nil {
+		is.Body = *edit.Body
+	}
+	return is, nil
 }
 func (f *fakeTracker) AddIssueLabels(_ context.Context, number int, labels []string) error {
 	if f.err != nil {
@@ -412,6 +433,212 @@ func TestIssueCreate_validation(t *testing.T) {
 	}
 	if len(labels) != 1 {
 		t.Errorf("labels after rejected create = %+v — the typo must not become a label", labels)
+	}
+}
+
+// TestIssueEdit_builtin drives PATCH /agent/v1/issues/{n} end-to-end on a
+// builtin repo: a title-only patch keeps the body, a body-only patch keeps the
+// title, a both-fields patch replaces both, `""` legally clears the body, and
+// an empty patch {} is a no-op that still answers 200 — each 200 carries the
+// list-shape updated issue and persists (a follow-up store read reflects it),
+// and the first edit publishes issue.changed for the operator UI.
+func TestIssueEdit_builtin(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedIssue(t, "iss7", "repo_a", 7, "Old title", "Old body.")
+	f.seedRun(t, "run_afk", "repo_a", "active")
+	token := f.seedToken(t, "run_afk", nil)
+
+	bus := events.NewBus()
+	ch, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	s := New(f.st, f.vlt, builtinResolver(f.st), bus, discard(), func() time.Time { return f.now }, nil)
+	handler := s.Handler()
+	ctx := context.Background()
+
+	// Title only: the response reflects the new title and the KEPT body.
+	rr := doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"title":"New title"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("title edit: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got issueResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Number != 7 || got.Title != "New title" || got.Body != "Old body." || got.State != "open" {
+		t.Errorf("response = %+v, want title replaced and body kept", got)
+	}
+	select {
+	case e := <-ch:
+		if e.Type != EventIssueChanged {
+			t.Errorf("event type = %q, want %q", e.Type, EventIssueChanged)
+		}
+	default:
+		t.Error("no issue.changed published on edit")
+	}
+
+	// Body only: title from the prior edit stays; a store read confirms both.
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"body":"New body."}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("body edit: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	is, _ := f.st.IssueByRepoNumber(ctx, "repo_a", 7)
+	if is.Title != "New title" || is.Body != "New body." {
+		t.Errorf("stored = title %q body %q, want New title / New body.", is.Title, is.Body)
+	}
+
+	// Both fields at once.
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"title":"T2","body":"B2"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("both edit: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, "repo_a", 7)
+	if is.Title != "T2" || is.Body != "B2" {
+		t.Errorf("stored after both = title %q body %q, want T2 / B2", is.Title, is.Body)
+	}
+
+	// Clear the body with "": the body is emptied, the title untouched.
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"body":""}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("clear body: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, "repo_a", 7)
+	if is.Body != "" || is.Title != "T2" {
+		t.Errorf("after clear = title %q body %q, want body cleared and title kept", is.Title, is.Body)
+	}
+
+	// Empty patch {}: a no-op that still verifies existence and answers 200.
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("empty patch: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	is, _ = f.st.IssueByRepoNumber(ctx, "repo_a", 7)
+	if is.Title != "T2" || is.Body != "" {
+		t.Errorf("empty patch mutated the issue: title %q body %q", is.Title, is.Body)
+	}
+}
+
+// TestIssueEdit_validation pins the 400/404 contract: a whitespace-only title
+// and a non-string value are 400s (the latter in patchString's shared wording),
+// an unknown field is a 400 naming it, an unknown issue is a 404, and a
+// non-integer or non-positive {n} names no issue → 404. On every rejection the
+// stored issue is untouched.
+func TestIssueEdit_validation(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedIssue(t, "iss7", "repo_a", 7, "Keep me", "Keep body.")
+	f.seedRun(t, "run_afk", "repo_a", "active")
+	token := f.seedToken(t, "run_afk", nil)
+	handler := f.server().Handler()
+
+	rr := doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"title":"   "}`)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "title must not be empty") {
+		t.Fatalf("blank title: status = %d, body %q", rr.Code, rr.Body.String())
+	}
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"title":123}`)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "field title must be a string") {
+		t.Fatalf("non-string title: status = %d, body %q", rr.Code, rr.Body.String())
+	}
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"state":"closed"}`)
+	if rr.Code != http.StatusBadRequest ||
+		!strings.Contains(rr.Body.String(), "unknown field") || !strings.Contains(rr.Body.String(), "state") {
+		t.Fatalf("unknown field: status = %d, body %q, want 400 naming it", rr.Code, rr.Body.String())
+	}
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/999", token, `{"title":"x"}`)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown issue: status = %d, want 404", rr.Code)
+	}
+	for _, path := range []string{"/agent/v1/issues/0", "/agent/v1/issues/abc"} {
+		rr = doJSON(t, handler, "PATCH", path, token, `{"title":"x"}`)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("PATCH %s: status = %d, want 404", path, rr.Code)
+		}
+	}
+
+	is, _ := f.st.IssueByRepoNumber(context.Background(), "repo_a", 7)
+	if is.Title != "Keep me" || is.Body != "Keep body." {
+		t.Errorf("issue mutated by a rejected edit: title %q body %q", is.Title, is.Body)
+	}
+}
+
+// TestIssueEdit_forgePassthrough pins binding symmetry: on a forge-bound repo
+// the patch forwards through the seam as an IssueEdit whose pointers mirror the
+// keys PRESENT — a body-only patch leaves Title nil (absent = untouched) — and
+// the tracker's returned issue is the response.
+func TestIssueEdit_forgePassthrough(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{}
+	handler := f.forgeServer(fk).Handler()
+
+	rr := doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"title":"new","body":"nb"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("edit: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if len(fk.editedIssues) != 1 {
+		t.Fatalf("forwarded edits = %+v, want 1", fk.editedIssues)
+	}
+	e := fk.editedIssues[0]
+	if e.number != 7 || e.edit.Title == nil || *e.edit.Title != "new" || e.edit.Body == nil || *e.edit.Body != "nb" {
+		t.Errorf("forwarded edit = %+v", e)
+	}
+	if !strings.Contains(rr.Body.String(), `"title":"new"`) || !strings.Contains(rr.Body.String(), `"body":"nb"`) {
+		t.Errorf("response = %s, want the tracker's edited issue", rr.Body.String())
+	}
+
+	// Body-only patch: Title pointer stays nil (the key is absent).
+	rr = doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, `{"body":"only"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("body-only edit: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	e = fk.editedIssues[1]
+	if e.edit.Title != nil {
+		t.Errorf("Title pointer = %q, want nil (absent = untouched)", *e.edit.Title)
+	}
+	if e.edit.Body == nil || *e.edit.Body != "only" {
+		t.Errorf("Body = %v, want 'only'", e.edit.Body)
+	}
+}
+
+// TestIssueEditSanitizesIncogniBody mirrors the create-path incogni contract on
+// the edit path (ADR-0014: no unsanitized agent write path): an edited body on
+// an incogni repo has attribution lines stripped before reaching the tracker;
+// a non-incogni repo forwards the bytes verbatim. The title is never sanitized.
+func TestIssueEditSanitizesIncogniBody(t *testing.T) {
+	poisoned := "Rewrote it.\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+	tests := []struct {
+		name     string
+		incogni  bool
+		wantBody string
+	}{
+		{"incogni stripped", true, "Rewrote it."},
+		{"non-incogni passthrough", false, poisoned},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.seedRepoIncogni(t, "repo_f", "forge", "forgejo", tt.incogni)
+			f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+			token := f.seedToken(t, "run_f", nil)
+
+			fk := &fakeTracker{}
+			handler := f.forgeServer(fk).Handler()
+
+			payload, _ := json.Marshal(map[string]string{"body": poisoned})
+			rr := doJSON(t, handler, "PATCH", "/agent/v1/issues/7", token, string(payload))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+			}
+			if len(fk.editedIssues) != 1 || fk.editedIssues[0].edit.Body == nil {
+				t.Fatalf("forwarded edits = %+v", fk.editedIssues)
+			}
+			if got := *fk.editedIssues[0].edit.Body; got != tt.wantBody {
+				t.Errorf("tracker received edited body %q, want %q", got, tt.wantBody)
+			}
+		})
 	}
 }
 

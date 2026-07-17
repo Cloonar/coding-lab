@@ -34,6 +34,9 @@ func (stubTracker) CloseIssue(context.Context, int) error           { return nil
 func (stubTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
 	return Issue{}, nil
 }
+func (stubTracker) EditIssue(context.Context, int, IssueEdit) (Issue, error) {
+	return Issue{}, nil
+}
 func (stubTracker) AddIssueLabels(context.Context, int, []string) error    { return nil }
 func (stubTracker) RemoveIssueLabels(context.Context, int, []string) error { return nil }
 func (stubTracker) Labels(context.Context) ([]Label, error)                { return nil, nil }

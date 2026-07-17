@@ -349,6 +349,9 @@ func (s *stubForgeTracker) CloseIssue(context.Context, int) error { return nil }
 func (s *stubForgeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
 	return tracker.Issue{}, nil
 }
+func (s *stubForgeTracker) EditIssue(context.Context, int, tracker.IssueEdit) (tracker.Issue, error) {
+	return tracker.Issue{}, nil
+}
 func (s *stubForgeTracker) AddIssueLabels(context.Context, int, []string) error    { return nil }
 func (s *stubForgeTracker) RemoveIssueLabels(context.Context, int, []string) error { return nil }
 func (s *stubForgeTracker) Labels(context.Context) ([]tracker.Label, error)        { return nil, nil }

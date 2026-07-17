@@ -1,8 +1,8 @@
 // Package secretscan is the server-side leak guard on the Tracker write path:
 // every content-bearing write arriving through a run token — a PR/change-request
-// create, an issue create, an issue comment — is scanned against the repo's own
-// secret values before it reaches the backend, and a write that carries a
-// secret (in plaintext or any of the encodings a secret most often leaks
+// create, an issue create, an issue edit, an issue comment — is scanned against
+// the repo's own secret values before it reaches the backend, and a write that
+// carries a secret (in plaintext or any of the encodings a secret most often leaks
 // through: base64, hex, URL-encoding) is REJECTED with an error naming the
 // matching secret. Nothing is silently rewritten.
 //
@@ -213,6 +213,23 @@ func (s *scanner) CreatePull(ctx context.Context, head, base, title, body string
 		return tracker.PullRef{}, err
 	}
 	return s.inner.CreatePull(ctx, head, base, title, body)
+}
+
+func (s *scanner) EditIssue(ctx context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
+	// An edit is a content-bearing write through a run token, so its set fields
+	// are scanned before delegating — but only the fields the patch actually
+	// sets: a nil (untouched) Title or Body carries no new content to leak.
+	var fields []field
+	if edit.Title != nil {
+		fields = append(fields, field{fieldTitle, *edit.Title})
+	}
+	if edit.Body != nil {
+		fields = append(fields, field{fieldBody, *edit.Body})
+	}
+	if err := s.scan(ctx, fields...); err != nil {
+		return tracker.Issue{}, err
+	}
+	return s.inner.EditIssue(ctx, number, edit)
 }
 
 // --- everything else: pure delegation ---
