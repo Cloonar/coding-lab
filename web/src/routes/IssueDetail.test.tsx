@@ -1,7 +1,11 @@
 // IssueDetail behavioral contract:
-// - builtin repos expose the add-comment box, the open/close toggle and the
-//   label editor; forge-bound repos hide all three behind the managed-on-the-
-//   forge note while body and comments stay readable;
+// - title and body are editable on every binding through the Edit affordance,
+//   which sends one PATCH carrying only the changed fields ({title} and/or
+//   {body}, never state) — the server routes it through the tracker seam;
+// - state, labels and comments stay builtin-only: the add-comment box, the
+//   open/close toggle and the label editor appear on builtin repos and hide on
+//   forge-bound repos behind the managed-on-the-forge note (a deep link when
+//   the remote parses);
 // - the comment form POSTs {body}; the state toggle PATCHes {state}; the
 //   label editor PUTs the replaced set built with the toggle algebra.
 
@@ -164,6 +168,13 @@ function mustButton(text: string): HTMLButtonElement {
   return el;
 }
 
+function setValue(selector: string, value: string): void {
+  const el = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+  if (!el) throw new Error(`missing field ${selector}`);
+  el.value = value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 beforeEach(() => {
   binding = 'builtin';
   forgeKind = 'forgejo';
@@ -207,7 +218,9 @@ describe('IssueDetail (builtin repo)', () => {
     expect(container.querySelector('textarea[name="comment"]')).not.toBeNull();
     expect(buttonByText('Close issue')).not.toBeNull();
     expect(buttonByText('Edit labels')).not.toBeNull();
-    expect(container.textContent).not.toContain('Managed on the forge');
+    // Title/body edit is available on builtin too.
+    expect(buttonByText('Edit')).not.toBeNull();
+    expect(container.textContent).not.toContain('managed on the forge');
   });
 
   it('POSTs the comment body and shows the refreshed thread', async () => {
@@ -259,6 +272,34 @@ describe('IssueDetail (builtin repo)', () => {
 
     expect(labelPuts).toEqual([{ labels: ['bug', 'ui'] }]);
   });
+
+  it('PATCHes the changed title and body from the editor', async () => {
+    await mountDetail();
+
+    mustButton('Edit').click();
+    await settle();
+
+    // Seeded with the current values; Save disabled until something differs.
+    expect(container.querySelector<HTMLInputElement>('input[name="issue-title"]')?.value).toBe(
+      'Fix login',
+    );
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[name="issue-body"]')?.value).toBe(
+      'Steps to reproduce…',
+    );
+    expect(mustButton('Save').disabled).toBe(true);
+
+    setValue('input[name="issue-title"]', 'Fix login flow');
+    // An empty body is a legal change (clears it).
+    setValue('textarea[name="issue-body"]', '');
+    await settle();
+
+    mustButton('Save').click();
+    await settle();
+
+    expect(patches).toEqual([{ title: 'Fix login flow', body: '' }]);
+    expect(container.textContent).toContain('Fix login flow');
+    expect(container.textContent).toContain('No description.');
+  });
 });
 
 describe('IssueDetail (repo fetch fails)', () => {
@@ -283,7 +324,9 @@ describe('IssueDetail (repo fetch fails)', () => {
     expect(container.querySelector('textarea[name="comment"]')).toBeNull();
     expect(buttonByText('Close issue')).toBeNull();
     expect(buttonByText('Edit labels')).toBeNull();
-    expect(container.textContent).not.toContain('Managed on the forge');
+    // The binding is unknown, so even the title/body Edit affordance is hidden.
+    expect(buttonByText('Edit')).toBeNull();
+    expect(container.textContent).not.toContain('managed on the forge');
   });
 });
 
@@ -295,13 +338,83 @@ describe('IssueDetail (forge repo)', () => {
   it('hides comment box, state toggle and label editor behind the forge note', async () => {
     await mountDetail();
 
-    expect(container.textContent).toContain('Managed on the forge');
+    expect(container.textContent).toContain('managed on the forge');
     expect(container.querySelector('textarea[name="comment"]')).toBeNull();
     expect(buttonByText('Close issue')).toBeNull();
     expect(buttonByText('Edit labels')).toBeNull();
     // The read view keeps working.
     expect(container.textContent).toContain('Steps to reproduce…');
     expect(container.textContent).toContain('first');
+  });
+
+  it('exposes the title/body Edit affordance and PATCHes both fields at once', async () => {
+    await mountDetail();
+
+    // The Edit affordance renders even though the builtin controls do not.
+    expect(buttonByText('Edit')).not.toBeNull();
+    expect(container.querySelector('textarea[name="comment"]')).toBeNull();
+    expect(buttonByText('Close issue')).toBeNull();
+    expect(buttonByText('Edit labels')).toBeNull();
+
+    mustButton('Edit').click();
+    await settle();
+
+    setValue('input[name="issue-title"]', 'Fix login flow');
+    setValue('textarea[name="issue-body"]', 'Reworded steps');
+    await settle();
+
+    mustButton('Save').click();
+    await settle();
+
+    // Exactly one PATCH, carrying both changed fields and never state.
+    expect(patches).toEqual([{ title: 'Fix login flow', body: 'Reworded steps' }]);
+    // The reworded forge note still renders and still deep-links.
+    expect(container.textContent).toContain('managed on the forge');
+    const link = container.querySelector<HTMLAnchorElement>('.forge-note a');
+    expect(link?.getAttribute('href')).toBe(
+      `https://git.cloonar.com/Cloonar/coding-lab/issues/${NUMBER}`,
+    );
+  });
+
+  it('sends only the changed field when the body is untouched', async () => {
+    await mountDetail();
+
+    mustButton('Edit').click();
+    await settle();
+
+    setValue('input[name="issue-title"]', 'Fix login flow');
+    await settle();
+
+    mustButton('Save').click();
+    await settle();
+
+    // No body key — only the title travelled.
+    expect(patches).toEqual([{ title: 'Fix login flow' }]);
+  });
+
+  it('disables Save for a whitespace title or when nothing changed', async () => {
+    await mountDetail();
+
+    mustButton('Edit').click();
+    await settle();
+
+    // Nothing differs yet.
+    expect(mustButton('Save').disabled).toBe(true);
+
+    // Whitespace-only title stays blocked.
+    setValue('input[name="issue-title"]', '   ');
+    await settle();
+    expect(mustButton('Save').disabled).toBe(true);
+
+    // A real edit enables it…
+    setValue('input[name="issue-title"]', 'Fix login flow');
+    await settle();
+    expect(mustButton('Save').disabled).toBe(false);
+
+    // …and reverting back to the original disables it again.
+    setValue('input[name="issue-title"]', 'Fix login');
+    await settle();
+    expect(mustButton('Save').disabled).toBe(true);
   });
 
   it('deep-links the forge note to this exact issue on the forge', async () => {
@@ -314,14 +427,14 @@ describe('IssueDetail (forge repo)', () => {
     );
     expect(link?.getAttribute('target')).toBe('_blank');
     expect(link?.getAttribute('rel')).toBe('noreferrer');
-    expect(link?.textContent).toContain('Managed on the forge');
+    expect(link?.textContent).toContain('managed on the forge');
   });
 
   it('keeps the note plain text when forge_kind is none (no forge URL)', async () => {
     forgeKind = 'none';
     await mountDetail();
 
-    expect(container.textContent).toContain('Managed on the forge');
+    expect(container.textContent).toContain('managed on the forge');
     expect(container.querySelector('.forge-note a')).toBeNull();
   });
 });

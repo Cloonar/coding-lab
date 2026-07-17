@@ -1007,7 +1007,11 @@ export function createIssue(repoID: string, req: CreateIssueRequest): Promise<Is
   return request<IssueDetail>('POST', `/repos/${encodeURIComponent(repoID)}/issues`, req);
 }
 
-/** Builtin only. Sends only the given fields (title/body/state). */
+/**
+ * Sends only the given fields. `title`/`body` patch on either binding — the
+ * server routes them through the tracker seam. `state` is builtin-only; a
+ * forge-bound repo answers 400.
+ */
 export function updateIssue(
   repoID: string,
   number: number,

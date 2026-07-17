@@ -2,10 +2,15 @@ package httpapi
 
 // Issue surface (pinned M4 contract). Read views answer for BOTH tracker
 // bindings through the tracker registry: a builtin-bound repo reads lab's own
-// store, a forge-bound one proxies the Forgejo REST client. Mutations are
-// builtin-only — on a forge-bound repo issues are managed on the forge, so
-// every mutation answers the pinned 409. Every builtin mutation publishes
-// issue.changed on the bus (clients refetch on event, design §5).
+// store, a forge-bound one proxies the Forgejo REST client. Mutations are no
+// longer all builtin-only: a title/body PATCH rides the Tracker.EditIssue seam
+// on EITHER binding (ADR-0046), so a forge-bound repo edits its issues on the
+// forge. Every OTHER mutation — issue create, state change, label set, comment
+// create — stays builtin-only and answers the pinned 409 on a forge-bound repo
+// (a state change has the sibling pinned 400, forgeStateMessage, because it is
+// understood but names a field this binding cannot patch). Every builtin
+// mutation publishes issue.changed on the bus (clients refetch on event, design
+// §5); a forge-bound edit publishes nothing.
 
 import (
 	"context"
@@ -28,6 +33,14 @@ const EventIssueChanged = "issue.changed"
 // forgeTrackerMessage is the pinned 409 body for builtin-only mutations
 // attempted on a forge-bound repo.
 const forgeTrackerMessage = "repository uses a forge tracker; manage issues on the forge"
+
+// forgeStateMessage is the pinned 400 body for an issue STATE change attempted
+// on a forge-bound repo. Unlike title/body, state has no EditIssue seam op — the
+// Tracker exposes CloseIssue but no reopen — so a forge state change cannot ride
+// the seam and is refused. It is a 400, not the 409 sibling: the request is
+// understood, it just names a field this binding cannot patch. (The missing
+// reopen op is a known, deliberately-unfiled follow-up; issue #168 pins this gap.)
+const forgeStateMessage = "repository uses a forge tracker; issue state is managed on the forge"
 
 // publishIssueChanged emits issue.changed for repoID. Same envelope shape as
 // every repo-scoped event ({type, repoID}).
@@ -461,15 +474,32 @@ func (s *Server) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, storeIssueDetailJSON(is))
 }
 
-// handleIssueUpdate is PATCH /api/v1/repos/{id}/issues/{n} (builtin only):
-// title/body/state, with closed_at stamped on close and cleared on reopen
-// (in the store accessor).
+// handleIssueUpdate is PATCH /api/v1/repos/{id}/issues/{n}: a title/body/state
+// patch. Field validation runs FIRST on every binding — decode into raw fields,
+// patchString per key, whitespace-only title and a non-enum state both 400 with
+// the pinned wording — so an invalid state value is refused with the enum
+// message before any binding check, whatever the binding. After validation the
+// patch splits by what it touches:
+//
+//   - A STATE change stays store-routed and builtin-only. The tracker seam has
+//     no state op (it carries CloseIssue but no reopen — see forgeStateMessage),
+//     so the store owns the open↔closed transition and its closed_at stamp; a
+//     forge-bound state change is a 400 (not the 409 sibling: the request is
+//     understood, it just names a field this binding cannot patch). On builtin
+//     the whole patch — title/body ride along in the same transaction — goes
+//     through store.UpdateIssue verbatim, exactly as before the seam split.
+//   - A TITLE/BODY-only patch (including the legal empty-patch existence-verifying
+//     no-op) rides Tracker.EditIssue on EITHER binding (ADR-0046). Last write
+//     wins: no concurrency token, mirroring the seam contract and the agent
+//     PATCH. EditIssue answers the LIST shape ("an edit is a write, not a thread
+//     read"), but this endpoint's pinned response is the DETAIL shape, so a
+//     follow-up tk.Issue read supplies the comment thread — on builtin that JSON
+//     is byte-identical to the pre-seam storeIssueDetailJSON. issue.changed is
+//     published ONLY for a builtin-bound repo; a forge-bound edit publishes
+//     nothing (agentapi's publishIssueChanged convention).
 func (s *Server) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
-		return
-	}
-	if !s.requireBuiltinTracker(w, repo) {
 		return
 	}
 	n, ok := issueNumber(r)
@@ -505,17 +535,58 @@ func (s *Server) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	is, err := s.store.UpdateIssue(r.Context(), repo.ID, n, u, s.now())
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not found")
+
+	// A state change owns closed_at and has no seam op, so it stays store-routed
+	// and builtin-only; title/body may ride along in the one store transaction.
+	if u.State.Set {
+		if repo.TrackerBinding != store.TrackerBindingBuiltin {
+			writeError(w, http.StatusBadRequest, forgeStateMessage)
 			return
 		}
-		s.internalError(w, "updating issue", err)
+		is, err := s.store.UpdateIssue(r.Context(), repo.ID, n, u, s.now())
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			s.internalError(w, "updating issue", err)
+			return
+		}
+		s.publishIssueChanged(repo.ID)
+		writeJSON(w, http.StatusOK, storeIssueDetailJSON(is))
 		return
 	}
-	s.publishIssueChanged(repo.ID)
-	writeJSON(w, http.StatusOK, storeIssueDetailJSON(is))
+
+	// Title/body-only patch: ride the seam on either binding. A non-nil empty
+	// Body clears the body — that already works through EditIssue.
+	tk, ok := s.trackerForRepo(w, r, repo)
+	if !ok {
+		return
+	}
+	var edit tracker.IssueEdit
+	if u.Title.Set {
+		edit.Title = &u.Title.Value
+	}
+	if u.Body.Set {
+		edit.Body = &u.Body.Value
+	}
+	if _, err := tk.EditIssue(r.Context(), n, edit); err != nil {
+		s.writeTrackerError(w, "editing issue", repo, err)
+		return
+	}
+	// EditIssue answers the LIST shape by seam contract; re-read for the pinned
+	// DETAIL response (the comment thread the endpoint has always returned).
+	is, err := tk.Issue(r.Context(), n)
+	if err != nil {
+		s.writeTrackerError(w, "loading issue", repo, err)
+		return
+	}
+	// Only a builtin-bound mutation emits issue.changed; a forge-bound edit
+	// publishes nothing (agentapi convention).
+	if repo.TrackerBinding == store.TrackerBindingBuiltin {
+		s.publishIssueChanged(repo.ID)
+	}
+	writeJSON(w, http.StatusOK, trackerIssueDetailJSON(is))
 }
 
 type commentCreateRequest struct {

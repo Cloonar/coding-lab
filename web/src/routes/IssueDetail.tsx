@@ -1,9 +1,9 @@
 // Issue detail (/repos/:id/issues/:number): title, state badge, pre-wrapped
 // body (no markdown engine — no heavy deps), label chips, and the comments
-// thread (author · time · body). On builtin repos the operator can comment,
-// toggle open/closed and edit the label set (multi-select from the repo's
-// labels); on forge-bound repos those controls disappear behind a short
-// "managed on the forge" note while the read view keeps working.
+// thread (author · time · body). Title and body are editable on both bindings
+// — the server routes the patch through the tracker seam. State, labels and
+// comments stay builtin-only: their controls disappear on forge-bound repos
+// behind a short managed-on-the-forge note while the read view keeps working.
 
 import { useParams } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
@@ -16,6 +16,7 @@ import {
   setIssueLabels,
   updateIssue,
   type IssueDetail as Issue,
+  type IssuePatch,
   type Label,
 } from '../api';
 import Crumbs, { type Crumb } from '../components/Crumbs';
@@ -143,11 +144,12 @@ function IssueDetailView() {
                 <p class="muted forge-note">
                   <Show
                     when={forgeIssueUrl(i().number)}
-                    fallback="Managed on the forge — lab shows a read-only view."
+                    fallback="State, labels and comments are managed on the forge; title and body are editable here."
                   >
                     {(href) => (
                       <a href={href()} target="_blank" rel="noreferrer">
-                        Managed on the forge — lab shows a read-only view.
+                        State, labels and comments are managed on the forge; title and body are
+                        editable here.
                       </a>
                     )}
                   </Show>
@@ -170,6 +172,16 @@ function IssueDetailView() {
                       <span class="muted issue-meta">No labels</span>
                     </Show>
                   </div>
+                  <Show when={repoData() !== undefined}>
+                    <TitleBodyEditor
+                      repoID={params.id}
+                      number={i().number}
+                      title={i().title}
+                      body={i().body}
+                      onError={setError}
+                      onSaved={() => void refetch()}
+                    />
+                  </Show>
                   <Show when={canMutate()}>
                     <LabelEditor
                       repoID={params.id}
@@ -231,6 +243,97 @@ function IssueDetailView() {
         </Match>
       </Switch>
     </main>
+  );
+}
+
+/**
+ * Title/body editor: seeds both fields from the issue on open and sends a
+ * single PATCH carrying only the fields that actually changed ({title} and/or
+ * {body}, never state). Available on every binding — the server routes the
+ * patch through the tracker seam. An empty body is legal (clears it); Save
+ * stays disabled while the trimmed title is empty or nothing differs.
+ */
+function TitleBodyEditor(props: {
+  repoID: string;
+  number: number;
+  title: string;
+  body: string;
+  onError: (message: string) => void;
+  onSaved: () => void;
+}) {
+  const [editing, setEditing] = createSignal(false);
+  const [title, setTitle] = createSignal('');
+  const [body, setBody] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+
+  const open = () => {
+    setTitle(props.title);
+    setBody(props.body);
+    setEditing(true);
+  };
+  const titleChanged = () => title().trim() !== props.title;
+  const bodyChanged = () => body() !== props.body;
+  const dirty = () => titleChanged() || bodyChanged();
+
+  const save = async () => {
+    const patch: IssuePatch = {};
+    if (titleChanged()) patch.title = title().trim();
+    if (bodyChanged()) patch.body = body();
+    setBusy(true);
+    try {
+      await updateIssue(props.repoID, props.number, patch);
+      setEditing(false);
+    } catch (err) {
+      props.onError(errorMessage(err));
+    } finally {
+      setBusy(false);
+      props.onSaved();
+    }
+  };
+
+  return (
+    <Show
+      when={editing()}
+      fallback={
+        <div class="card-actions">
+          <button type="button" class="small" onClick={open}>
+            Edit
+          </button>
+        </div>
+      }
+    >
+      <label class="field">
+        <span>Title</span>
+        <input
+          type="text"
+          name="issue-title"
+          value={title()}
+          onInput={(e) => setTitle(e.currentTarget.value)}
+        />
+      </label>
+      <label class="field">
+        <span>Description</span>
+        <textarea
+          name="issue-body"
+          rows="6"
+          value={body()}
+          onInput={(e) => setBody(e.currentTarget.value)}
+        />
+      </label>
+      <div class="card-actions">
+        <button
+          type="button"
+          class="primary"
+          disabled={busy() || title().trim() === '' || !dirty()}
+          onClick={() => void save()}
+        >
+          {busy() ? 'Saving…' : 'Save'}
+        </button>
+        <button type="button" onClick={() => setEditing(false)} disabled={busy()}>
+          Cancel
+        </button>
+      </div>
+    </Show>
   );
 }
 
