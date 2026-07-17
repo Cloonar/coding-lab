@@ -18,7 +18,7 @@ The mechanics, pinned:
 
 ## Status
 
-Accepted. Revises the operator/engine-write sentence of ADR-0009 (which gains a status pointer here); everything else in ADR-0009 stands. The GitHub REST binding (fast-follow, #1) must implement the new seam ops when it lands.
+Accepted. Revises the operator/engine-write sentence of ADR-0009 (which gains a status pointer here); everything else in ADR-0009 stands. The GitHub REST binding (fast-follow, #1) must implement the new seam ops when it lands. The "operator mutations remain builtin-only" sentence is itself revised by [ADR-0046](0046-operator-issue-edit-through-the-seam.md): operator title/body edits now flow through `Tracker.EditIssue` on every binding — everything else (create, state, labels, comments) stays builtin-only.
 
 ## Considered options
 

@@ -303,6 +303,7 @@ type stubForgeTracker struct {
 	issues   []tracker.Issue
 	details  map[int]tracker.Issue
 	gotState string
+	gotEdits []tracker.IssueEdit
 }
 
 func (s *stubForgeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -349,8 +350,34 @@ func (s *stubForgeTracker) CloseIssue(context.Context, int) error { return nil }
 func (s *stubForgeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
 	return tracker.Issue{}, nil
 }
-func (s *stubForgeTracker) EditIssue(context.Context, int, tracker.IssueEdit) (tracker.Issue, error) {
-	return tracker.Issue{}, nil
+func (s *stubForgeTracker) EditIssue(_ context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
+	s.gotEdits = append(s.gotEdits, edit)
+	is, ok := s.details[number]
+	if !ok {
+		// Shaped like the real client's upstream-404: operation context, never
+		// the token, wrapping the typed tracker.ErrNotFound sentinel.
+		return tracker.Issue{}, fmt.Errorf("forgejo PATCH /repos/o/r/issues/%d: unexpected status 404: not found: %w", number, tracker.ErrNotFound)
+	}
+	if edit.Title != nil {
+		is.Title = *edit.Title
+	}
+	if edit.Body != nil {
+		is.Body = *edit.Body
+	}
+	s.details[number] = is
+	// Keep the list entry in sync so a follow-up list read agrees with detail.
+	for i := range s.issues {
+		if s.issues[i].Number == number {
+			s.issues[i].Title = is.Title
+			s.issues[i].Body = is.Body
+		}
+	}
+	// Return the updated issue in LIST shape (an edit is a write, not a thread
+	// read): no comment bodies, the count carried through the vocabulary.
+	list := is
+	list.Comments = nil
+	list.CommentsCount = len(is.Comments)
+	return list, nil
 }
 func (s *stubForgeTracker) AddIssueLabels(context.Context, int, []string) error    { return nil }
 func (s *stubForgeTracker) RemoveIssueLabels(context.Context, int, []string) error { return nil }
@@ -455,13 +482,14 @@ func TestForgeBoundRepo(t *testing.T) {
 		t.Fatalf("forge miss error = %q, want opaque not found", got["error"])
 	}
 
-	// Every builtin-only mutation answers the pinned 409.
+	// Every builtin-only mutation (issue create, comment, label ops) answers the
+	// pinned 409. The title/body PATCH is deliberately NOT here — it rides the
+	// tracker seam on every binding (ADR-0046); see TestForgeBoundIssueEdit.
 	for _, tt := range []struct {
 		method, path string
 		body         any
 	}{
 		{"POST", base + "/issues", map[string]any{"title": "t"}},
-		{"PATCH", base + "/issues/7", map[string]any{"title": "t"}},
 		{"POST", base + "/issues/7/comments", map[string]any{"body": "b"}},
 		{"PUT", base + "/issues/7/labels", map[string]any{"labels": []string{}}},
 		{"POST", base + "/labels", map[string]any{"name": "x"}},
@@ -480,6 +508,120 @@ func TestForgeBoundRepo(t *testing.T) {
 	wantStatus(t, resp, http.StatusOK)
 	if got := decodeBody(t, resp); len(got["labels"].([]any)) != 5 {
 		t.Fatalf("forge repo labels = %v", got["labels"])
+	}
+}
+
+// TestForgeBoundIssueEdit pins the operator title/body PATCH riding
+// Tracker.EditIssue on a FORGE-bound repo (ADR-0046): the edit reaches the seam,
+// the pinned response is the DETAIL shape via the follow-up read, and a STATE
+// change is refused with the pinned 400 because the seam has no state op. Same
+// seeding shape as TestForgeBoundRepo, in a fresh server so gotEdits starts empty.
+func TestForgeBoundIssueEdit(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	stub := &stubForgeTracker{
+		issues: []tracker.Issue{
+			{Number: 7, Title: "forge issue", State: "open", Labels: []string{"bug"}, CommentsCount: 1, CreatedAt: now, UpdatedAt: now},
+		},
+		details: map[int]tracker.Issue{
+			7: {Number: 7, Title: "forge issue", Body: "b", State: "open", Labels: []string{"bug"},
+				Comments:  []tracker.Comment{{Author: "alice", Body: "from the forge", CreatedAt: now}},
+				CreatedAt: now, UpdatedAt: now},
+		},
+	}
+	x, vlt := newTrackerServer(t, func(tracker.ForgejoConfig) tracker.Tracker { return stub }, nil)
+	blob, err := vlt.EncryptPayload(vault.ForgeTokenPayload{Host: "forge.example.com", Token: "sekret-tok"})
+	if err != nil {
+		t.Fatalf("EncryptPayload: %v", err)
+	}
+	credID := ids.NewID("cred")
+	if _, err := x.st.CreateCredential(context.Background(), credID, "forge", store.CredentialKindForgeToken, blob, time.Now()); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	repo := seedTrackerRepo(t, x, "forged", func(r *store.Repo) {
+		r.TrackerBinding = store.TrackerBindingForge
+		r.ForgeKind = "forgejo"
+		r.ForgeCredentialID = &credID
+	})
+	h := csrfHeaders(x.ts.URL)
+	base := "/api/v1/repos/" + repo.ID
+
+	// A title+body edit rides the seam and answers 200 with the DETAIL shape:
+	// the new title/body AND the comment thread from the follow-up read.
+	resp := x.do("PATCH", base+"/issues/7", map[string]any{"title": "renamed", "body": "nb"}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got := decodeBody(t, resp)
+	if got["title"] != "renamed" || got["body"] != "nb" {
+		t.Fatalf("edited issue = %v", got)
+	}
+	cs := got["comments"].([]any)
+	if len(cs) != 1 || cs[0].(map[string]any)["author"] != "alice" {
+		t.Fatalf("edit response thread = %v, want alice's comment from the follow-up read", cs)
+	}
+	if len(stub.gotEdits) != 1 {
+		t.Fatalf("seam saw %d edits, want 1", len(stub.gotEdits))
+	}
+	if e := stub.gotEdits[0]; e.Title == nil || *e.Title != "renamed" || e.Body == nil || *e.Body != "nb" {
+		t.Fatalf("seam saw edit = %+v, want Title and Body pointers both set", e)
+	}
+
+	// A body-only clear: non-nil empty Body reaches the seam, Title stays nil.
+	resp = x.do("PATCH", base+"/issues/7", map[string]any{"body": ""}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got := decodeBody(t, resp); got["body"] != "" {
+		t.Fatalf("body after clear = %v, want empty", got["body"])
+	}
+	if e := stub.gotEdits[len(stub.gotEdits)-1]; e.Title != nil || e.Body == nil || *e.Body != "" {
+		t.Fatalf("clear edit = %+v, want nil Title and non-nil empty Body", e)
+	}
+
+	// A state change has no seam op → the pinned 400, and nothing reaches the seam.
+	edits := len(stub.gotEdits)
+	resp = x.do("PATCH", base+"/issues/7", map[string]any{"state": "closed"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); body["error"] != forgeStateMessage {
+		t.Fatalf("forge state PATCH error = %q, want pinned forgeStateMessage", body["error"])
+	}
+	if len(stub.gotEdits) != edits {
+		t.Fatalf("state PATCH reached the seam (%d→%d edits)", edits, len(stub.gotEdits))
+	}
+
+	// A mixed title+state patch is refused whole — the state clause wins, and
+	// the title is NOT edited.
+	resp = x.do("PATCH", base+"/issues/7", map[string]any{"title": "t", "state": "closed"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); body["error"] != forgeStateMessage {
+		t.Fatalf("mixed PATCH error = %q, want pinned forgeStateMessage", body["error"])
+	}
+	if len(stub.gotEdits) != edits {
+		t.Fatalf("mixed PATCH reached the seam (%d→%d edits)", edits, len(stub.gotEdits))
+	}
+
+	// Field validation runs before the binding split: on the forge binding too a
+	// whitespace title and an unknown field are 400s with the pinned wording,
+	// and neither reaches the seam.
+	for _, tt := range []struct {
+		name string
+		body any
+		want string
+	}{
+		{"whitespace title", map[string]any{"title": "  "}, "title must not be empty"},
+		{"unknown field", map[string]any{"bogus": "x"}, `unknown field "bogus"`},
+	} {
+		resp := x.do("PATCH", base+"/issues/7", tt.body, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if body := decodeBody(t, resp); body["error"] != tt.want {
+			t.Fatalf("%s: error = %q, want %q", tt.name, body["error"], tt.want)
+		}
+	}
+	if len(stub.gotEdits) != edits {
+		t.Fatalf("a validation-rejected PATCH reached the seam")
+	}
+
+	// An edit on an unknown issue number is a 404 — the seam's typed not-found.
+	resp = x.do("PATCH", base+"/issues/404", map[string]any{"title": "x"}, h)
+	wantStatus(t, resp, http.StatusNotFound)
+	if body := decodeBody(t, resp); body["error"] != "not found" {
+		t.Fatalf("unknown-issue edit error = %q, want opaque not found", body["error"])
 	}
 }
 
