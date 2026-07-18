@@ -136,10 +136,7 @@ describe('reconcileRenderItems (issue #175)', () => {
     const prev = groupMessages(msgs); // [message, toolGroup(key=running.seq), message]
     // The running tool flips ok: a NEW message object at the same seq.
     const flipped: ChatMessage = { ...running, tool: { ...running.tool!, status: 'ok' } };
-    const out = reconcileRenderItems(
-      prev,
-      groupMessages([msgs[0]!, flipped, msgs[2]!, msgs[3]!]),
-    );
+    const out = reconcileRenderItems(prev, groupMessages([msgs[0]!, flipped, msgs[2]!, msgs[3]!]));
     expect(out).not.toBe(prev);
     expect(out[0]).toBe(prev[0]); // neighbor reused
     expect(out[2]).toBe(prev[2]); // neighbor reused

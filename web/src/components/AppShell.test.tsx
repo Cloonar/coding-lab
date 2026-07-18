@@ -205,8 +205,7 @@ function emitRunChanged(payload: Record<string, unknown> = {}): void {
 }
 
 const attnBadge = () => document.querySelector('.attn-badge');
-const railDot = (id: string) =>
-  document.querySelector(`a[href="/runs/${id}"] .rail-row-dot`);
+const railDot = (id: string) => document.querySelector(`a[href="/runs/${id}"] .rail-row-dot`);
 
 beforeEach(() => {
   instancesFetchCount = 0;
