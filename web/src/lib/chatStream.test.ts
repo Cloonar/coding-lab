@@ -1,7 +1,9 @@
 // Chat-stream helper contracts (issue #7 / ADR-0016): merge-by-seq with
 // later-window-wins (the after=-cursor refetch relies on it to back-patch
-// tool status flips and answered dialogs), the append cursor, and the scroll
-// math the view applies manually because jsdom can't do real scrolling.
+// tool status flips and answered dialogs) — identity-stable when equal
+// content_hashes prove a message unchanged (issue #175) — the append cursor,
+// and the scroll math the view applies manually because jsdom can't do real
+// scrolling.
 
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../api';
@@ -25,6 +27,12 @@ const msg = (seq: number, text: string): ChatMessage => ({
   text,
 });
 
+/** A hashed message (issue #175): equal content ⇒ equal (derived) hash. */
+const hmsg = (seq: number, text: string, hash = `h:${seq}:${text}`): ChatMessage => ({
+  ...msg(seq, text),
+  content_hash: hash,
+});
+
 describe('mergeMessages', () => {
   it('unions windows sorted by seq', () => {
     const merged = mergeMessages([msg(3, 'c'), msg(1, 'a')], [msg(2, 'b'), msg(4, 'd')]);
@@ -45,6 +53,49 @@ describe('mergeMessages', () => {
     const merged = mergeMessages([msg(1, 'a'), running], [done]);
     expect(merged).toHaveLength(2);
     expect(merged[1]?.tool?.status).toBe('ok');
+  });
+
+  // --- Identity-stable merge (issue #175) ---
+
+  it('returns the prev ARRAY itself when an identical window merges again', () => {
+    const prev = [hmsg(1, 'a'), hmsg(2, 'b')];
+    // Fresh parses of the same content — new objects, same hashes.
+    expect(mergeMessages(prev, [hmsg(1, 'a'), hmsg(2, 'b')])).toBe(prev);
+  });
+
+  it('keeps the PREV element on an equal-hash collision', () => {
+    const prev = [hmsg(1, 'a'), hmsg(2, 'b')];
+    const merged = mergeMessages(prev, [hmsg(2, 'b'), hmsg(3, 'c')]);
+    expect(merged).not.toBe(prev); // seq 3 appended
+    expect(merged.map((m) => m.seq)).toEqual([1, 2, 3]);
+    expect(merged[1]).toBe(prev[1]); // same object, not just equal content
+  });
+
+  it('replaces the message when the hash differs', () => {
+    const prev = [hmsg(2, 'running…', 'h-old')];
+    const incoming = [hmsg(2, 'done', 'h-new')];
+    expect(mergeMessages(prev, incoming)[0]).toBe(incoming[0]);
+  });
+
+  it('falls back to later-wins when either side lacks a hash (older servers)', () => {
+    // Neither hashed.
+    const bare = [msg(2, 'old')];
+    const bareIncoming = [msg(2, 'new')];
+    expect(mergeMessages(bare, bareIncoming)[0]).toBe(bareIncoming[0]);
+    // Prev hashed, incoming not — still later-wins, never a stale keep.
+    const hashedPrev = [hmsg(2, 'old')];
+    const unhashedIncoming = [msg(2, 'new')];
+    expect(mergeMessages(hashedPrev, unhashedIncoming)[0]).toBe(unhashedIncoming[0]);
+  });
+
+  it('mixed window: new array, unchanged elements keep identity, the changed one is replaced', () => {
+    const prev = [hmsg(1, 'a'), hmsg(2, 'b', 'h-b1'), hmsg(3, 'c')];
+    const incoming = [hmsg(1, 'a'), hmsg(2, 'b2', 'h-b2'), hmsg(3, 'c')];
+    const merged = mergeMessages(prev, incoming);
+    expect(merged).not.toBe(prev);
+    expect(merged[0]).toBe(prev[0]);
+    expect(merged[1]).toBe(incoming[1]);
+    expect(merged[2]).toBe(prev[2]);
   });
 });
 
@@ -68,6 +119,18 @@ describe('mergeRefetch', () => {
   it('keeps accumulated history the latest window no longer covers', () => {
     const merged = mergeRefetch([msg(1, 'old')], [msg(5, 'new')], [msg(5, 'new')]);
     expect(merged.map((m) => m.seq)).toEqual([1, 5]);
+  });
+
+  it('inherits identity stability from mergeMessages by composition (issue #175)', () => {
+    const prev = [hmsg(1, 'a'), hmsg(2, 'b')];
+    // A no-op refetch (tail re-delivers, latest matches) → the prev ARRAY itself.
+    expect(mergeRefetch(prev, [hmsg(2, 'b')], [hmsg(1, 'a'), hmsg(2, 'b')])).toBe(prev);
+    // A changed latest replaces exactly that element; the rest keep identity.
+    const latest = [hmsg(1, 'a'), hmsg(2, 'B!', 'h-b-new')];
+    const merged = mergeRefetch(prev, [], latest);
+    expect(merged).not.toBe(prev);
+    expect(merged[0]).toBe(prev[0]);
+    expect(merged[1]).toBe(latest[1]);
   });
 });
 

@@ -57,11 +57,14 @@ const (
 	maxFiles    = 50
 )
 
-// repoScopedPayload is the {type, repoID} SSE envelope run.changed carries —
-// the same shape reconcile/instance publish.
+// repoScopedPayload is the SSE envelope run.changed carries — the same shape
+// reconcile/instance publish (duplicated per package by design, brief §8.1).
+// RunID names the one run the event concerns (issue #175): a pull always
+// lands in exactly one run's worktree, so both publish sites carry it.
 type repoScopedPayload struct {
 	Type   string `json:"type"`
 	RepoID string `json:"repoID"`
+	RunID  string `json:"runID,omitempty"`
 }
 
 // Options is everything the service needs. Store, Git and ReposDir are
@@ -216,12 +219,12 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 	if err != nil {
 		// The merge already landed in the worktree — publish so the badge
 		// refreshes even though the digest is lost, and say so in the error.
-		s.publishRunChanged(run.RepoID)
+		s.publishRunChanged(run.RepoID, run.ID)
 		return Result{}, fmt.Errorf("pull of origin/%s landed %s..%s but digesting the range failed: %w",
 			base, shortSHA(pr.OldHead), shortSHA(pr.NewHead), err)
 	}
 	res.Digest = renderDigest(res, sum)
-	s.publishRunChanged(run.RepoID)
+	s.publishRunChanged(run.RepoID, run.ID)
 	return res, nil
 }
 
@@ -360,13 +363,13 @@ func (s *Service) credentialEnv(ctx context.Context, repo store.Repo, opID strin
 	}
 }
 
-// publishRunChanged emits the repo-scoped run.changed on the bus. A nil bus
-// (some tests) is a no-op.
-func (s *Service) publishRunChanged(repoID string) {
+// publishRunChanged emits run.changed naming the one run the pull landed in
+// (issue #175). A nil bus (some tests) is a no-op.
+func (s *Service) publishRunChanged(repoID, runID string) {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Publish(events.Event{Type: EventRunChanged, Payload: repoScopedPayload{Type: EventRunChanged, RepoID: repoID}})
+	s.bus.Publish(events.Event{Type: EventRunChanged, Payload: repoScopedPayload{Type: EventRunChanged, RepoID: repoID, RunID: runID}})
 }
 
 // keyedMutex is a per-key mutual exclusion helper: lock(key) blocks while

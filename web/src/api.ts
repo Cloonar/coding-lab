@@ -691,6 +691,16 @@ export interface ChatMessage {
   error?: boolean;
   tool?: ToolInfo;
   dialog?: Dialog;
+  /**
+   * Server-computed FNV-64a hash over the rendered message (issue #175) — the
+   * identity-stable-merge key. Identical rendered content yields an identical
+   * hash; any change (a tool status flip, output growth, a dialog outcome)
+   * yields a different one, so the chat's merge keeps the previous message
+   * OBJECT — and its settled DOM — when a refetch redelivers unchanged
+   * content. Optional because older servers omit it; an absent hash falls
+   * back to later-window-wins.
+   */
+  content_hash?: string;
 }
 
 /** transcript: whether the file is readable yet. */

@@ -1,24 +1,47 @@
 // Chat-stream accumulation and scroll math for RunChat (issue #7 / ADR-0016).
-// Pure helpers: merging message windows by seq (later window wins, so tool
-// status flips and answered dialogs back-patch in place), the append cursor
-// for after=<seq> tail fetches, and the scroll bookkeeping jsdom can't
-// exercise — follow-bottom slack and manual prepend anchoring (iOS Safari has
-// no overflow-anchor, so "Load earlier" restores the position by hand).
+// Pure helpers: merging message windows by seq — later window wins per seq
+// UNLESS matching content_hashes prove a message unchanged, in which case the
+// previous OBJECT (and, for a fully unchanged window, the previous ARRAY)
+// keeps its identity so refetches never rebuild settled DOM (issue #175) —
+// the append cursor for after=<seq> tail fetches, and the scroll bookkeeping
+// jsdom can't exercise — follow-bottom slack and manual prepend anchoring
+// (iOS Safari has no overflow-anchor, so "Load earlier" restores the position
+// by hand).
 
 import type { ChatMessage } from '../api';
 
-/** Merge windows by seq (later window wins per seq → in-place tool updates). */
+/**
+ * Merge windows by seq. A colliding seq takes the LATER window's message —
+ * that's how tool status flips and answered dialogs back-patch in place —
+ * EXCEPT when both sides carry a content_hash and they are equal (issue
+ * #175): identical rendered content keeps the PREV object, so Solid's
+ * reference-keyed <For> leaves that subtree (markdown parse included) alone.
+ * An absent hash on either side falls back to later-wins. When the merged
+ * result is element-for-element identical to prev, the PREV ARRAY itself is
+ * returned, so a no-op refetch propagates nothing through a
+ * reference-equality signal.
+ */
 export function mergeMessages(prev: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
   const bySeq = new Map<number, ChatMessage>();
   for (const m of prev) bySeq.set(m.seq, m);
-  for (const m of incoming) bySeq.set(m.seq, m);
-  return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  for (const m of incoming) {
+    const old = bySeq.get(m.seq);
+    // Equal DEFINED hashes ⇒ identical rendered content ⇒ keep the old object.
+    if (old !== undefined && old.content_hash !== undefined && old.content_hash === m.content_hash)
+      continue;
+    bySeq.set(m.seq, m);
+  }
+  const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  return merged.length === prev.length && merged.every((m, i) => m === prev[i]) ? prev : merged;
 }
 
 /**
  * One refetch's application: the accumulated stream, then the after=<cursor>
  * tail batches (gap-free appends), then the latest window (back-patched
- * mutations near the tail) — later response wins per seq.
+ * mutations near the tail) — later response wins per seq, with mergeMessages'
+ * identity stability inherited by composition (issue #175): an unchanged
+ * message keeps its object, and a refetch that changes nothing returns `prev`
+ * itself.
  */
 export function mergeRefetch(
   prev: ChatMessage[],

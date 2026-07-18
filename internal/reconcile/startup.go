@@ -73,7 +73,7 @@ func (s *Service) readopt(ctx context.Context) (map[string]bool, error) {
 			s.log.Warn("marking dead run at startup", "component", "reconcile", "run", run.ID, "err", err)
 			continue
 		}
-		s.publishRunChanged(run.RepoID)
+		s.publishRunChanged(run.RepoID, run.ID)
 	}
 	return keep, nil
 }

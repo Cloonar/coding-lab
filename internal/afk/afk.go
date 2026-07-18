@@ -224,13 +224,27 @@ func (s *Service) worktreePath(repoName string, n int) string {
 	return filepath.Join(s.worktreeRoot, gitx.WorktreeDir(repoName, fmt.Sprintf("%d", n)))
 }
 
+// repoScopedPayload deliberately mirrors its siblings in instance/reconcile/
+// pull key-for-key (brief §8.1 — duplicated per package by design). RunID
+// names the one run a run.changed concerns (issue #175); it stays empty
+// (omitted) on repo-scoped emits — the reaper's end-of-pass publish covers
+// however many runs a tick reaped — and on repo/parked events, which are
+// never run-scoped.
 type repoScopedPayload struct {
 	Type   string `json:"type"`
 	RepoID string `json:"repoID"`
+	RunID  string `json:"runID,omitempty"`
 }
 
 func (s *Service) publish(eventType, repoID string) {
-	s.bus.Publish(events.Event{Type: eventType, Payload: repoScopedPayload{Type: eventType, RepoID: repoID}})
+	s.publishRun(eventType, repoID, "")
+}
+
+// publishRun is publish carrying the one run the event concerns (issue #175):
+// the neutral Stop's run.changed names its run so the SPA refetches that run
+// alone. "" degrades to the plain 2-field envelope via omitempty.
+func (s *Service) publishRun(eventType, repoID, runID string) {
+	s.bus.Publish(events.Event{Type: eventType, Payload: repoScopedPayload{Type: eventType, RepoID: repoID, RunID: runID}})
 }
 
 // settingSeconds/settingMinutes read a runtime-mutable interval each tick

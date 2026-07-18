@@ -16,11 +16,16 @@
 //   clear on stream resets; the sheet flips to the in-flow sidebar when the
 //   viewport crosses to >=1024px, and a non-file (group / command) selection
 //   clears on that crossing since the desktop sidebar shows files only;
-// - a run.messages.changed for THIS run refetches; other runs are ignored;
-//   run.changed for other repos is ignored too;
+// - a run.messages.changed for THIS run coalesces on a 300ms trailing debounce
+//   and then refetches LIGHT (issue #175): tail pages only, from
+//   after=min(cursor, backpatchSeq-1), no latest-window request; other runs are
+//   ignored; run.changed for other repos — or carrying a SIBLING runID — is
+//   ignored too; a FULL refetch absorbs a queued backpatchSeq, and a tick that
+//   leaves `working` escalates to FULL — the turn-settle self-heal (ADR-0047);
 // - a refetch tails with after=<cursor> (paginating past the window limit) so
 //   appends accumulate gap-free, and a stale in-flight response never applies
-//   over a newer one (request-token guard);
+//   over a newer one (request-token guard); unchanged content (equal
+//   content_hash) keeps message/DOM identity across refetches;
 // - the composer replies (POST /reply) and clears; Cmd/Ctrl+Enter sends, bare
 //   Enter does not; Send is ALWAYS present in the unlocked states and enabled
 //   with text even while working (ADR-0029, issue #61), POSTing /reply
@@ -387,10 +392,21 @@ function finePointer(matches: boolean): void {
   stubMatchMedia().set('(hover: hover) and (pointer: fine)', matches);
 }
 
+/** issue #175: the server-computed content_hash mimic — any author-controlled
+ *  string works, as long as equal rendered content derives an equal hash and
+ *  any mutation (status flip, output growth) derives a different one. Tests
+ *  that mutate a message in place re-derive via `hashed` so the hash flips. */
+function hashed(m: ChatMessage): ChatMessage {
+  return {
+    ...m,
+    content_hash: `h:${m.seq}:${m.text ?? ''}:${m.tool?.status ?? ''}:${m.tool?.output ?? ''}`,
+  };
+}
+
 /** Set the server's messages to a single assistant text message. */
 function withAssistantText(text: string): void {
   messagesOnServer = {
-    messages: [{ seq: 1, kind: 'text', role: 'assistant', text }],
+    messages: [hashed({ seq: 1, kind: 'text', role: 'assistant', text })],
     state: 'needs_input',
     cursor: 1,
     has_more: false,
@@ -398,12 +414,38 @@ function withAssistantText(text: string): void {
   };
 }
 
-function emitMessagesChanged(runID: string = RUN_ID): void {
+function emitMessagesChanged(
+  runID: string = RUN_ID,
+  extra: { state?: string; backpatchSeq?: number } = {},
+): void {
   FakeEventSource.instances[0]?.emit('run.messages.changed', {
     type: 'run.messages.changed',
     repoID: 'repo_1',
     runID,
+    ...extra,
   });
+}
+
+// Mirror of RunChat's MESSAGES_DEBOUNCE_MS (issue #175): run.messages.changed
+// coalesces on this trailing edge before its light refetch fires.
+const MESSAGES_DEBOUNCE_MS = 300;
+
+/**
+ * Emit run.messages.changed and ride out the trailing debounce (issue #175):
+ * fake timers around the emit make the 300ms advance instant (the refetch's
+ * promise chain flushes inside advanceTimersByTimeAsync — the settle()-style
+ * setTimeout(0) hops advance under fake timers too), then a real-timer settle
+ * drains whatever the refetch scheduled after the flush.
+ */
+async function emitMessagesChangedSettled(
+  runID: string = RUN_ID,
+  extra: { state?: string; backpatchSeq?: number } = {},
+): Promise<void> {
+  vi.useFakeTimers();
+  emitMessagesChanged(runID, extra);
+  await vi.advanceTimersByTimeAsync(MESSAGES_DEBOUNCE_MS + 100);
+  vi.useRealTimers();
+  await settle();
 }
 
 beforeEach(() => {
@@ -458,7 +500,7 @@ beforeEach(() => {
         tool: { name: 'Bash', title: 'Ran ls', status: 'ok', output: 'a\nb' },
       },
       { seq: 4, kind: 'text', role: 'assistant', text: 'all done' },
-    ],
+    ].map((m) => hashed(m as ChatMessage)),
     state: 'needs_input',
     cursor: 4,
     has_more: false,
@@ -474,6 +516,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers(); // a debounce test that failed mid-fake must not leak fake timers
   dispose?.();
   dispose = undefined;
   container.remove();
@@ -731,8 +774,7 @@ describe('RunChat', () => {
     // The agent returns to needs_input: the draft survives the state flip and
     // sending it posts the retained text.
     messagesOnServer = { ...messagesOnServer, state: 'needs_input' };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     const preserved = container.querySelector('.chat-input') as HTMLTextAreaElement;
     expect(preserved.value).toBe('draft thought');
@@ -776,27 +818,233 @@ describe('RunChat', () => {
     expect(replyPosts[1]?.text).toBe('another mid-turn thought');
   });
 
-  it('refetches only for this run on run.messages.changed', async () => {
+  it('refetches only for this run on run.messages.changed (past the debounce)', async () => {
     await mountChat();
     const before = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
 
-    FakeEventSource.instances[0]?.emit('run.messages.changed', {
-      type: 'run.messages.changed',
+    // Another run's tick never refetches — not even after the debounce window
+    // (the filter runs before any timer is scheduled).
+    await emitMessagesChangedSettled('run_other');
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before);
+
+    await emitMessagesChangedSettled();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+      before,
+    );
+  });
+
+  // --- Debounced light refetch (issue #175) ---
+  // While an agent streams, run.messages.changed fires ~1/s; the chat now
+  // coalesces a burst on a 300ms trailing edge and refetches LIGHT: tail pages
+  // only, from after=min(cursor, backpatchSeq-1), never the latest window —
+  // and unchanged content (equal content_hash) keeps message AND DOM identity.
+
+  /** This run's /messages request URLs, in call order. */
+  function messagesUrls(): string[] {
+    return (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes(`/runs/${RUN_ID}/messages`));
+  }
+
+  it('coalesces a burst into ONE tail request and never fetches a latest window (issue #175)', async () => {
+    await mountChat(); // seq 1..4 accumulated, cursor 4
+    const before = messagesUrls().length;
+
+    // The server gains an append mid-burst.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: [
+        ...messagesOnServer.messages,
+        hashed({ seq: 5, kind: 'text', role: 'assistant', text: 'streamed line 5' }),
+      ],
+      cursor: 5,
+    };
+
+    // Three ticks inside one trailing window, then the flush.
+    vi.useFakeTimers();
+    emitMessagesChanged();
+    await vi.advanceTimersByTimeAsync(100);
+    emitMessagesChanged();
+    await vi.advanceTimersByTimeAsync(100);
+    emitMessagesChanged();
+    await vi.advanceTimersByTimeAsync(MESSAGES_DEBOUNCE_MS + 100);
+    vi.useRealTimers();
+    await settle();
+
+    const urls = messagesUrls().slice(before);
+    expect(urls).toHaveLength(1); // ONE request for the whole burst
+    expect(urls[0]).toContain('after=4&'); // the append cursor
+    // No request without a cursor param (no latest window) after the initial load.
+    expect(urls.every((u) => u.includes('after='))).toBe(true);
+    expect(container.textContent).toContain('streamed line 5');
+  });
+
+  it('reaches a back-patched mutation via after=backpatchSeq-1 and renders the flip (issue #175)', async () => {
+    await mountChat(); // hashed fixture: the seq-3 tool is status ok
+    expect(container.querySelector('.tool-summary.tool-ok')).not.toBeNull();
+    const before = messagesUrls().length;
+
+    // The seq-3 tool flips ok → error on the server: its content_hash
+    // re-derives and the tailer announces backpatchSeq 3.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: messagesOnServer.messages.map((m) =>
+        m.seq === 3 ? hashed({ ...m, tool: { ...m.tool!, status: 'error' as const } }) : m,
+      ),
+    };
+    await emitMessagesChangedSettled(RUN_ID, { backpatchSeq: 3 });
+
+    const urls = messagesUrls().slice(before);
+    expect(urls).toHaveLength(1); // still a single fetch
+    expect(urls[0]).toContain('after=2&'); // min(cursor 4, backpatchSeq - 1)
+    expect(container.querySelector('.tool-summary.tool-error')).not.toBeNull();
+    expect(container.querySelector('.tool-summary.tool-ok')).toBeNull();
+  });
+
+  it('keeps the rendered DOM node when a light refetch redelivers unchanged content (issue #175)', async () => {
+    await mountChat(); // hashed fixture
+    const node = Array.from(container.querySelectorAll('.chat-msg')).find((el) =>
+      el.textContent?.includes('all done'),
+    );
+    expect(node).toBeDefined();
+
+    // backpatchSeq 2 redelivers seq 2..4 as FRESH parses with UNCHANGED
+    // hashes: the merge keeps every prev object — and the array identity —
+    // so no signal fires and the settled DOM survives by reference.
+    await emitMessagesChangedSettled(RUN_ID, { backpatchSeq: 2 });
+
+    expect(node!.isConnected).toBe(true); // never torn down
+    expect(
+      Array.from(container.querySelectorAll('.chat-msg')).find((el) =>
+        el.textContent?.includes('all done'),
+      ),
+    ).toBe(node); // the SAME node object, not an equal re-render
+  });
+
+  it('a FULL refetch inside the debounce window absorbs the queued backpatchSeq (ADR-0047)', async () => {
+    // 70 hashed messages with the ONLY tool at seq 2 — after paging up, the
+    // accumulated stream reaches below what any latest window (newest 60) can
+    // re-deliver, so a discarded announcement would leave seq 2 stale forever.
+    messagesOnServer = {
+      messages: [
+        hashed({ seq: 1, kind: 'text', role: 'user', text: 'kick off' }),
+        hashed({
+          seq: 2,
+          kind: 'tool',
+          tool: { name: 'Bash', title: 'long task', status: 'running' as const },
+        }),
+        ...Array.from({ length: 68 }, (_, i) =>
+          hashed({
+            seq: i + 3,
+            kind: 'text' as const,
+            role: 'assistant' as const,
+            text: `progress ${i + 3}`,
+          }),
+        ),
+      ],
+      state: 'needs_input',
+      cursor: 70,
+      has_more: true,
+      transcript: 'available',
+    };
+    await mountChat(); // latest window seq 11..70
+    buttonByText('Load earlier')!.click();
+    await settle(); // accumulated 1..70; the seq-2 tool renders as running
+    expect(container.querySelector('.tool-summary.tool-ok')).toBeNull();
+    const before = messagesUrls().length;
+
+    // The seq-2 tool completes; the tailer announces backpatchSeq 2 — but a
+    // repo-scoped run.changed lands INSIDE the 300ms window and forces a FULL
+    // refetch. The FULL must absorb the queued seq into its tail start:
+    // backpatchSeq is a delta the server never re-sends, and seq 2 is beyond
+    // the latest window's reach.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: messagesOnServer.messages.map((m) =>
+        m.seq === 2
+          ? hashed({ ...m, tool: { ...m.tool!, status: 'ok' as const, output: 'PASS' } })
+          : m,
+      ),
+    };
+    vi.useFakeTimers();
+    emitMessagesChanged(RUN_ID, { backpatchSeq: 2 });
+    await vi.advanceTimersByTimeAsync(100); // still inside the debounce window
+    FakeEventSource.instances[0]?.emit('run.changed', { type: 'run.changed', repoID: 'repo_1' });
+    await vi.advanceTimersByTimeAsync(MESSAGES_DEBOUNCE_MS + 100);
+    vi.useRealTimers();
+    await settle();
+
+    // Tail from min(cursor 70, backpatchSeq − 1) = 1, paged past the window
+    // limit, plus the latest window — and NO third fetch (the queued light
+    // flush was superseded, its seq absorbed rather than re-scheduled).
+    const urls = messagesUrls().slice(before);
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toContain('after=1&');
+    expect(urls[1]).toContain('after=61&');
+    expect(urls[2]).not.toContain('after=');
+    expect(container.querySelector('.tool-summary.tool-ok')).not.toBeNull();
+  });
+
+  it('escalates to a FULL refetch when the envelope state leaves working (ADR-0047)', async () => {
+    await mountChat(); // hashed fixture: the seq-3 tool is status ok
+    // Mid-turn tick: the light path, no latest-window request.
+    await emitMessagesChangedSettled(RUN_ID, { state: 'working' });
+    let urls = messagesUrls();
+    expect(urls[urls.length - 1]).toContain('after=4&');
+    const before = urls.length;
+
+    // The seq-3 flip's announcement is LOST — the bus drops events for slow
+    // subscribers, and a dropped backpatchSeq is never re-sent. The server
+    // mutated; no tick names the seq.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: messagesOnServer.messages.map((m) =>
+        m.seq === 3 ? hashed({ ...m, tool: { ...m.tool!, status: 'error' as const } }) : m,
+      ),
+    };
+
+    // The settle tick (working → needs_input) must escalate to FULL — the
+    // latest-window re-read is the turn-cadence self-heal for whatever the
+    // lost announcements failed to name.
+    await emitMessagesChangedSettled(RUN_ID, { state: 'needs_input' });
+
+    urls = messagesUrls().slice(before);
+    expect(urls.some((u) => !u.includes('after='))).toBe(true);
+    expect(container.querySelector('.tool-summary.tool-error')).not.toBeNull();
+    expect(container.querySelector('.tool-summary.tool-ok')).toBeNull();
+  });
+
+  it('ignores run.changed carrying a SIBLING runID; a repo-scoped one still refetches (issue #175)', async () => {
+    await mountChat();
+    const before = messagesUrls().length;
+
+    // Same repo, different run: filtered before the repo check.
+    FakeEventSource.instances[0]?.emit('run.changed', {
+      type: 'run.changed',
       repoID: 'repo_1',
       runID: 'run_other',
     });
     await settle();
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before);
+    expect(messagesUrls().length).toBe(before);
 
-    FakeEventSource.instances[0]?.emit('run.messages.changed', {
-      type: 'run.messages.changed',
-      repoID: 'repo_1',
-      runID: RUN_ID,
-    });
+    // No runID = genuinely repo-scoped (stop-all, AFK reaper, CR merge):
+    // the conservative full refetch stays.
+    FakeEventSource.instances[0]?.emit('run.changed', { type: 'run.changed', repoID: 'repo_1' });
     await settle();
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
-      before,
-    );
+    expect(messagesUrls().length).toBeGreaterThan(before);
+  });
+
+  it('makes zero requests while the chat idles with no events (issue #175)', async () => {
+    await mountChat();
+    const total = () => (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    const before = total();
+
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(5_000);
+    vi.useRealTimers();
+    await settle();
+
+    expect(total()).toBe(before); // no polling, no stray debounce flush
   });
 
   it('locks the composer and answers a pending dialog by option index', async () => {
@@ -999,8 +1247,7 @@ describe('RunChat', () => {
       transcript: 'available',
       pending_dialog: null,
     };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     expect(container.querySelector('.chat-dialog-card')).toBeNull();
     expect(container.querySelector('.chat-composer-row')).not.toBeNull();
@@ -1135,8 +1382,7 @@ describe('RunChat', () => {
         state: 'question',
         pending_dialog: singleSelectDialog('toolu_scroll'),
       };
-      emitMessagesChanged();
-      await settle();
+      await emitMessagesChangedSettled();
 
       const card = container.querySelector('.chat-dialog-card');
       expect(card).not.toBeNull();
@@ -1145,8 +1391,7 @@ describe('RunChat', () => {
       expect(scrolls.calls[0]?.arg).toEqual({ block: 'start' });
 
       // The SAME dialog on the next tick is not new — no re-yank.
-      emitMessagesChanged();
-      await settle();
+      await emitMessagesChangedSettled();
       expect(scrolls.calls).toHaveLength(1);
     } finally {
       scrolls.restore();
@@ -1169,8 +1414,7 @@ describe('RunChat', () => {
         state: 'question',
         pending_dialog: singleSelectDialog('toolu_up'),
       };
-      emitMessagesChanged();
-      await settle();
+      await emitMessagesChangedSettled();
 
       // The card rendered, but the position was preserved — the jump pill is
       // the scrolled-up reader's affordance (untouched by issue #56).
@@ -1238,8 +1482,7 @@ describe('RunChat', () => {
       transcript_id: 'sess-B',
       pending_dialog: null,
     };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
     await settle();
 
     // The whole pre-clear stream is dropped (no stale seq-2 tail, no stale
@@ -1253,13 +1496,15 @@ describe('RunChat', () => {
   });
 
   it('does not leak a stale high-seq tail when a rotation straddles a refetch', async () => {
-    // The hard case: a rotation lands BETWEEN the two fetches of one refetch.
-    // Accumulated stream on transcript A is [seq1, seq2]. A refetch fires
-    // because A gained seq3; its after=2 tail GET still sees A (returns seq3),
-    // then /clear rotates and the latest GET (and every later GET) sees the
-    // fresh transcript B (seq1). Writing transcript_id resets the stream and
-    // fires a superseding refetch mid-function; the stale outer refetch must not
-    // merge its seq3 A-line back in — a seq that B (max seq 1) never overwrites
+    // The hard case: a rotation lands BETWEEN two pages of one refetch's tail
+    // loop (issue #175 made the SSE path tail-only, so the straddle now sits
+    // between paging GETs). Accumulated stream on transcript A is [seq1,
+    // seq2]. The light refetch's after=2 page still sees A (a FULL window,
+    // seq 3..62, so the loop pages on); then /clear rotates and the NEXT page
+    // (and every later GET) sees the fresh transcript B (seq1). Applying the
+    // final page's transcript_id resets the stream and fires a superseding
+    // full refetch mid-function; the stale outer refetch must not merge its
+    // seq 3..62 A-lines back in — seqs that B (max seq 1) never overwrites
     // would otherwise persist forever (issue #34).
     messagesOnServer = {
       messages: [
@@ -1277,9 +1522,15 @@ describe('RunChat', () => {
     expect(container.textContent).toContain('A-two');
 
     const aTail: MessagesResponse = {
-      messages: [{ seq: 3, kind: 'text', role: 'assistant', text: 'A-stale-three' }],
+      // A full window (60 = the page limit), so the tail loop pages again.
+      messages: Array.from({ length: 60 }, (_, i) => ({
+        seq: 3 + i,
+        kind: 'text' as const,
+        role: 'assistant' as const,
+        text: `A-stale-${3 + i}`,
+      })),
       state: 'working',
-      cursor: 3,
+      cursor: 62,
       has_more: true,
       transcript: 'available',
       transcript_id: 'sess-A',
@@ -1294,7 +1545,7 @@ describe('RunChat', () => {
       transcript_id: 'sess-B',
       pending_dialog: null,
     };
-    // The after=2 tail GET sees A; the latest GET (after=0) and all later GETs
+    // The after=2 page sees A; the next page (after=62) and all later GETs
     // see rotated B — forcing the rotation to land inside a single refetch.
     vi.stubGlobal(
       'fetch',
@@ -1324,13 +1575,12 @@ describe('RunChat', () => {
       }),
     );
 
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
     await settle();
 
-    // Only the fresh transcript B shows; the stale seq-3 A tail is gone.
+    // Only the fresh transcript B shows; every stale A tail line is gone.
     expect(container.textContent).toContain('B-fresh-one');
-    expect(container.textContent).not.toContain('A-stale-three');
+    expect(container.textContent).not.toContain('A-stale-');
     expect(container.textContent).not.toContain('A-two');
   });
 
@@ -1363,8 +1613,7 @@ describe('RunChat', () => {
       transcript: 'available',
       transcript_id: 'sess-A',
     };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     expect(container.textContent).toContain('located content');
     // Exactly one refetch cycle (the SSE-driven one); a spurious rotation reset
@@ -1445,8 +1694,7 @@ describe('RunChat', () => {
       cursor: 65,
     };
 
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     const urls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
     expect(urls.some((u) => u.includes('after=4&'))).toBe(true);
@@ -1480,23 +1728,16 @@ describe('RunChat', () => {
       }),
     );
 
-    emitMessagesChanged(); // refetch A — its after= request is held[0]
-    await settle();
-    emitMessagesChanged(); // refetch B — its after= request is held[1]
-    await settle();
+    // Two debounce windows, so each emit flushes into its OWN light refetch
+    // (a single window would coalesce them — that's the burst test's job).
+    await emitMessagesChangedSettled(); // refetch A — its after=4 page is held[0]
+    await emitMessagesChangedSettled(); // refetch B — its after=4 page is held[1]
     expect(held).toHaveLength(2);
 
-    // B finishes first: empty tail, then a latest window with the fresh state.
+    // B finishes first: its tail page carries the fresh seq-5 content, and the
+    // light path applies the FINAL tail response's envelope (issue #175 — no
+    // latest-window request follows).
     held[1]!({
-      messages: [],
-      state: 'needs_input',
-      cursor: 4,
-      has_more: false,
-      transcript: 'available',
-    });
-    await settle();
-    expect(held).toHaveLength(3);
-    held[2]!({
       messages: [{ seq: 5, kind: 'text', role: 'assistant', text: 'fresh tail' }],
       state: 'needs_input',
       cursor: 5,
@@ -1520,7 +1761,9 @@ describe('RunChat', () => {
     // State stayed needs_input (the stale 'working' tail was dropped): the
     // needs-input status line is still in the stream, not reverted away.
     expect(container.querySelector('.chat-needs-input')).not.toBeNull();
-    expect(held).toHaveLength(3); // A never proceeded to its latest-window fetch
+    // One tail GET per refetch and nothing more: the light path never fetched
+    // a latest window, and stale A stopped at its token check.
+    expect(held).toHaveLength(2);
   });
 
   it('keeps the composer unlocked when a dialog message exists but state is not question', async () => {
@@ -1586,8 +1829,7 @@ describe('RunChat', () => {
       ],
       cursor: 2,
     };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     expect(container.textContent).toContain('Second question?');
     expect(buttonByText('Submit')!.disabled).toBe(true); // stale picks dropped
@@ -1623,8 +1865,7 @@ describe('RunChat', () => {
     other.dispatchEvent(new Event('input', { bubbles: true }));
     await settle();
 
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     const after = container.querySelector('.dialog-other-input') as HTMLInputElement;
     expect(after).toBe(other); // same element — focus survives
@@ -1670,8 +1911,7 @@ describe('RunChat', () => {
     await settle();
     expect(buttonByText('Submit')!.disabled).toBe(false);
 
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     const after = container.querySelector('.dialog-other-input') as HTMLInputElement;
     expect(after).toBe(other);
@@ -1904,8 +2144,7 @@ describe('RunChat', () => {
 
     // A refetch's latest window says has_more (it talks about ITS window) —
     // the button must stay gone.
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
     expect(buttonByText('Load earlier')).toBeNull();
   });
 
@@ -2061,8 +2300,7 @@ describe('RunChat', () => {
       ],
       cursor: 3,
     };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
     expect(container.querySelector('.tool-panel')).not.toBeNull();
     expect(container.querySelectorAll('.tool-panel-row')).toHaveLength(3);
     expect(container.querySelector('.tool-group-count')?.textContent).toBe('3 tool calls');
@@ -2080,8 +2318,9 @@ describe('RunChat', () => {
         m.seq === 1 ? { ...m, tool: { ...m.tool!, output: 'one\ntwo' } } : m,
       ),
     };
-    emitMessagesChanged();
-    await settle();
+    // A back-patch below the cursor rides the event's backpatchSeq (issue
+    // #175) so the light refetch reaches back to it.
+    await emitMessagesChangedSettled(RUN_ID, { backpatchSeq: 1 });
     expect(container.querySelector('.tool-panel .tool-body.tool-output')?.textContent).toBe(
       'one\ntwo',
     );
@@ -2252,8 +2491,7 @@ describe('RunChat', () => {
       transcript_id: 'sess-B',
       pending_dialog: null,
     };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
     await settle();
 
     expect(container.textContent).toContain('fresh start');
@@ -2381,17 +2619,17 @@ describe('RunChat', () => {
       'a\nb',
     );
 
-    // An SSE tick replaces the messages array wholesale and grows the output:
-    // the seq-keyed expansion neither closes (native <details> would) nor
-    // freezes (a captured message would) — it grows in place.
+    // An SSE tick grows the output at seq 3 — a back-patch below the cursor,
+    // so its content_hash flips (re-derived) and the event names backpatchSeq
+    // (issue #175). The seq-keyed expansion neither closes (native <details>
+    // would) nor freezes (a captured message would) — it grows in place.
     messagesOnServer = {
       ...messagesOnServer,
       messages: messagesOnServer.messages.map((m) =>
-        m.seq === 3 ? { ...m, tool: { ...m.tool!, output: 'a\nb\nc' } } : m,
+        m.seq === 3 ? hashed({ ...m, tool: { ...m.tool!, output: 'a\nb\nc' } }) : m,
       ),
     };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled(RUN_ID, { backpatchSeq: 3 });
     const body = container.querySelector('.tool-inline-body');
     expect(body).not.toBeNull();
     expect(body!.querySelector('.tool-body.tool-output')?.textContent).toBe('a\nb\nc');
@@ -2688,8 +2926,7 @@ describe('RunChat', () => {
     expect(container.querySelector('.chat-needs-input')).not.toBeNull();
 
     messagesOnServer = { ...messagesOnServer, state: 'working' };
-    emitMessagesChanged();
-    await settle();
+    await emitMessagesChangedSettled();
 
     // The needs-input line clears. The composer no longer reacts to `working`
     // (ADR-0029): no working hint element exists, and Send stays present.

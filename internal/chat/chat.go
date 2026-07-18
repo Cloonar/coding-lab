@@ -62,6 +62,24 @@ type messagesChangedPayload struct {
 	Type   string `json:"type"`
 	RepoID string `json:"repoID"`
 	RunID  string `json:"runID"`
+	// State is the run's adapter-composed conversational state as of this tick
+	// (issue #175): carrying it in the envelope lets the SPA update its state
+	// chips without a refetch when nothing else changed. Still an envelope, not
+	// state duplication in the ADR-0005 sense — one enumerated scalar the
+	// tailer already holds at the publish site, carved out by the issue #175
+	// maintainer decision.
+	State string `json:"state"`
+	// BackpatchSeq is the LOWEST seq whose rendered content changed relative
+	// to the tailer's previous successful read of the same transcript file
+	// (issue #175) — a tool status flipping running→ok, output growth, a
+	// dialog gaining an outcome. Omitted (0) when the tick was append-only.
+	// A seq rather than a bool so the client fetches after=min(cursor,
+	// BackpatchSeq-1): ONE tail fetch covers both the appends and the
+	// back-patch, replacing the old unconditional latest-window refetch. New
+	// seqs are appends by definition and never set this; a rotation tick
+	// (fresh transcript, seq restarts at 1) never sets it either — the client
+	// resets its stream via transcript_id then.
+	BackpatchSeq int64 `json:"backpatchSeq,omitempty"`
 }
 
 // Options configures a Service. Store, Providers, and Bus are required.
@@ -275,6 +293,12 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	// run's history, so a disclosure that predates the exposure feature (or a
 	// tick the tailer missed) is still masked on render.
 	s.scanAndRedact(ctx, run, &chat)
+	// Stamp per-message content hashes AFTER redaction (issue #175), in core
+	// rather than the adapters so every provider gets them for free and the
+	// hash always covers the SERVED (masked) content — a pre-redaction hash
+	// would differ between this path and the tailer's. The tailer read is the
+	// only other stamping site.
+	provider.HashMessages(chat.Messages)
 	// transcriptID("") is "" — the active-no-transcript case needs no branch:
 	// the view is exactly what ReadChat("", …) composed, with no identity yet.
 	view := View{Chat: chat, TranscriptID: transcriptID(path)}

@@ -120,7 +120,7 @@ func (s *Service) sweepDeadSessions(ctx context.Context) {
 			s.log.Warn("dead-session sweep: end run", "component", "reconcile", "run", run.ID, "err", err)
 			continue
 		}
-		s.publishRunChanged(run.RepoID)
+		s.publishRunChanged(run.RepoID, run.ID)
 	}
 }
 

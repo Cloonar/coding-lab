@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -688,8 +689,159 @@ func TestTailer_derivesStateAndPublishes(t *testing.T) {
 		return ok && st == provider.StateNeedsInput
 	}, "tailer to derive needs_input state")
 
-	if !drainFor(sub, EventMessagesChanged, 2*time.Second) {
-		t.Error("no run.messages.changed published")
+	// The envelope carries the composed state beside the run identity (issue
+	// #175), and a first tick — no baseline yet — never claims a backpatch.
+	p, ok := drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no run.messages.changed published")
+	}
+	if p.Type != EventMessagesChanged || p.RepoID != run.RepoID || p.RunID != run.ID {
+		t.Errorf("payload identity = %+v; want {%s %s %s}", p, EventMessagesChanged, run.RepoID, run.ID)
+	}
+	if p.State != provider.StateNeedsInput {
+		t.Errorf("payload State = %q; want %q (the tick's composed state)", p.State, provider.StateNeedsInput)
+	}
+	if p.BackpatchSeq != 0 {
+		t.Errorf("first-tick BackpatchSeq = %d; want 0 (no baseline yet)", p.BackpatchSeq)
+	}
+}
+
+// backpatchMessages builds a fresh transcript base for the backpatch test —
+// fresh per read because the fake's ReadChat shares its Messages backing array
+// and the tailer stamps hashes in place. toolDone flips the seq-2 tool from
+// running to ok with output (the back-patch under test); extra appends that
+// many trailing text messages after it.
+func backpatchMessages(toolDone bool, extra int) provider.Chat {
+	tool := &provider.ToolInfo{Name: "Bash", Title: "go test", Status: "running"}
+	if toolDone {
+		tool = &provider.ToolInfo{Name: "Bash", Title: "go test", Status: "ok", Output: "PASS"}
+	}
+	msgs := []provider.Message{
+		{Seq: 1, Kind: provider.MessageText, Role: "user", Text: "run the tests"},
+		{Seq: 2, Kind: provider.MessageTool, Tool: tool},
+	}
+	for i := range extra {
+		msgs = append(msgs, provider.Message{Seq: int64(3 + i), Kind: provider.MessageText,
+			Role: "assistant", Text: fmt.Sprintf("progress %d", i)})
+	}
+	return provider.Chat{State: provider.StateWorking, Cursor: msgs[len(msgs)-1].Seq, Messages: msgs}
+}
+
+// The backpatchSeq semantics on run.messages.changed (issue #175): append-only
+// growth publishes without one; growth that re-renders an earlier message (a
+// tool_result completing a prior tool_use) publishes the LOWEST changed seq;
+// and a rotation tick publishes none even when the fresh file's restarted seqs
+// carry different content — the baseline resets with the file.
+func TestTailer_backpatchSeq(t *testing.T) {
+	svc, st, fake, bus := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	dir := t.TempDir()
+	pathA := dir + "/a.jsonl"
+	writeFile(t, pathA, "1")
+	fake.SetTranscriptPath(pathA)
+	fake.SetChat(backpatchMessages(false, 0))
+
+	sub, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go svc.Run(ctx)
+
+	// First tick: no baseline yet — never a backpatch.
+	p, ok := drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no initial run.messages.changed")
+	}
+	if p.RunID != run.ID || p.BackpatchSeq != 0 {
+		t.Errorf("first tick payload = %+v; want runID %s with no BackpatchSeq", p, run.ID)
+	}
+
+	// (1) Append-only growth: a new seq 3 lands, nothing prior re-renders.
+	// Chat is set BEFORE the file write (the stat trigger), so the tailer can
+	// never read an intermediate mix.
+	fake.SetChat(backpatchMessages(false, 1))
+	writeFile(t, pathA, "12")
+	p, ok = drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no run.messages.changed on the append-only tick")
+	}
+	if p.BackpatchSeq != 0 {
+		t.Errorf("append-only BackpatchSeq = %d; want 0 (new seqs are appends, never backpatch)", p.BackpatchSeq)
+	}
+
+	// (2) The tool_result lands: seq 2 flips running→ok (with output) while
+	// seq 4 appends — the envelope names the back-patched seq, not the append.
+	fake.SetChat(backpatchMessages(true, 2))
+	writeFile(t, pathA, "123")
+	p, ok = drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no run.messages.changed on the backpatch tick")
+	}
+	if p.BackpatchSeq != 2 {
+		t.Errorf("backpatch tick BackpatchSeq = %d; want 2 (the completed tool message's seq)", p.BackpatchSeq)
+	}
+
+	// (3) Rotation: a fresh file whose restarted seq 1 carries DIFFERENT
+	// content than the old seq 1 — without the baseline reset this would read
+	// as backpatchSeq 1. The client resets its stream via transcript_id.
+	pathB := dir + "/b.jsonl"
+	writeFile(t, pathB, "{}")
+	fake.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "fresh conversation"},
+	}})
+	fake.SetTranscriptPath(pathB)
+	p, ok = drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no run.messages.changed on the rotation tick")
+	}
+	if p.BackpatchSeq != 0 {
+		t.Errorf("rotation tick BackpatchSeq = %d; want 0 (baseline reset before comparing)", p.BackpatchSeq)
+	}
+}
+
+// A sig-only tick can still observe a back-patch: the read races the agent's
+// writer, so content can change between a tick's stat (unchanged) and its
+// ReadChat. The publish gate must fire on the backpatch alone — the baseline
+// advances after every successful read, so a swallowed announcement is never
+// re-derived and the seq would stay stale on every client until navigation
+// (ADR-0047's delta-loss leg).
+func TestTailer_publishesBackpatchOnSigOnlyTick(t *testing.T) {
+	svc, st, fake, bus := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	path := t.TempDir() + "/t.jsonl"
+	writeFile(t, path, "{}") // frozen: the stat never changes again
+	fake.SetTranscriptPath(path)
+	fake.SetChat(backpatchMessages(false, 0))
+
+	sub, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go svc.Run(ctx)
+
+	// Baseline tick: seq 1..2 read, the seq-2 tool still running.
+	p, ok := drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no initial run.messages.changed")
+	}
+	if p.BackpatchSeq != 0 {
+		t.Errorf("first-tick BackpatchSeq = %d; want 0 (no baseline yet)", p.BackpatchSeq)
+	}
+
+	// The seq-2 tool flips running→ok while the transcript file stays frozen
+	// (same stat) and the state stays working: only the spool signature flips,
+	// so the read gate opens while the stat and state legs of the publish gate
+	// are both closed. Chat is set BEFORE the sig (the read trigger), so the
+	// tailer can never read an intermediate mix.
+	fake.SetChat(backpatchMessages(true, 0))
+	fake.SetSpoolSig("dialogs/run1.json:1:200;")
+
+	p, ok = drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no run.messages.changed on the sig-only backpatch tick")
+	}
+	if p.RunID != run.ID || p.BackpatchSeq != 2 {
+		t.Errorf("sig-only tick payload = %+v; want runID %s with BackpatchSeq 2 (the flipped tool's seq)", p, run.ID)
 	}
 }
 
@@ -766,6 +918,25 @@ func drainFor(sub <-chan events.Event, typ string, d time.Duration) bool {
 			}
 		case <-deadline:
 			return false
+		}
+	}
+}
+
+// drainPayloadFor is drainFor returning the matched event's decoded
+// run.messages.changed payload — the issue #175 envelope assertions.
+func drainPayloadFor(sub <-chan events.Event, typ string, d time.Duration) (messagesChangedPayload, bool) {
+	deadline := time.After(d)
+	for {
+		select {
+		case e := <-sub:
+			if e.Type != typ {
+				continue
+			}
+			if p, ok := e.Payload.(messagesChangedPayload); ok {
+				return p, true
+			}
+		case <-deadline:
+			return messagesChangedPayload{}, false
 		}
 	}
 }

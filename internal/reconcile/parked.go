@@ -149,7 +149,9 @@ func (s *Service) Discard(ctx context.Context, repoID, branch string) error {
 	}
 
 	s.publishParkedChanged(repoID)
-	s.publishRunChanged(repoID)
+	// Repo-scoped, no runID (issue #175): a discard is keyed by branch — any
+	// run it incidentally terminated is not what the event is about.
+	s.publishRunChanged(repoID, "")
 	return nil
 }
 

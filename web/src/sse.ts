@@ -58,6 +58,16 @@ export const EVENT_TYPES = [
 
 export type LabEventType = (typeof EVENT_TYPES)[number];
 
+/**
+ * One SSE envelope. Beyond `type`/`repoID`, event types carry small scoping
+ * fields read through the index signature: `run.messages.changed` carries
+ * `runID`, the run's conversational `state`, and — when a tailer read
+ * back-patched earlier content — `backpatchSeq`, the LOWEST seq whose content
+ * changed since the previous read (absent on pure appends, state-only flips,
+ * the first tick, and rotation ticks — issue #175); `run.changed` carries
+ * `runID` when the event concerns exactly one run and omits it for genuinely
+ * repo-scoped transitions (stop-all, AFK reaper, CR merge, parked cleanup).
+ */
 export interface LabEvent {
   type: LabEventType | 'resync';
   repoID?: string;

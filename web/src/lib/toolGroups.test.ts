@@ -5,7 +5,12 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ChatMessage, ToolInfo } from '../api';
-import { groupMessages, toolGroupSummary, type ToolGroup } from './toolGroups';
+import {
+  groupMessages,
+  reconcileRenderItems,
+  toolGroupSummary,
+  type ToolGroup,
+} from './toolGroups';
 
 let seq = 0;
 const tool = (status: ToolInfo['status']): ChatMessage => ({
@@ -97,5 +102,46 @@ describe('groupMessages', () => {
 
   it('is a no-op on an empty list', () => {
     expect(groupMessages([])).toEqual([]);
+  });
+});
+
+// The render-item reconciler (issue #175): groupMessages builds fresh wrapper
+// objects per call, so RunChat's memo reuses the previous run's items — by
+// message reference for wrappers, by key + member identity for groups — and
+// returns the prev ARRAY itself for a no-op regroup.
+describe('reconcileRenderItems (issue #175)', () => {
+  it('returns the prev array itself when nothing changed', () => {
+    const msgs = [text('a'), tool('ok'), tool('ok'), text('b')];
+    const prev = groupMessages(msgs);
+    const next = groupMessages(msgs); // fresh wrappers over the SAME messages
+    expect(next).not.toBe(prev);
+    expect(next[1]).not.toBe(prev[1]); // the group wrapper churned…
+    expect(reconcileRenderItems(prev, next)).toBe(prev); // …but reconcile hides it
+  });
+
+  it('reuses untouched wrappers when a message is appended', () => {
+    const msgs = [text('a'), tool('ok'), tool('ok')];
+    const prev = groupMessages(msgs); // [message, toolGroup]
+    const out = reconcileRenderItems(prev, groupMessages([...msgs, text('b')]));
+    expect(out).not.toBe(prev);
+    expect(out).toHaveLength(3);
+    expect(out[0]).toBe(prev[0]); // the text wrapper survives
+    expect(out[1]).toBe(prev[1]); // the untouched group survives
+    expect(out[2]!.kind).toBe('message'); // only the append is new
+  });
+
+  it('rebuilds only the group whose member changed, reusing the neighbors', () => {
+    const running = tool('running');
+    const msgs = [text('a'), running, tool('ok'), text('b')];
+    const prev = groupMessages(msgs); // [message, toolGroup(key=running.seq), message]
+    // The running tool flips ok: a NEW message object at the same seq.
+    const flipped: ChatMessage = { ...running, tool: { ...running.tool!, status: 'ok' } };
+    const out = reconcileRenderItems(prev, groupMessages([msgs[0]!, flipped, msgs[2]!, msgs[3]!]));
+    expect(out).not.toBe(prev);
+    expect(out[0]).toBe(prev[0]); // neighbor reused
+    expect(out[2]).toBe(prev[2]); // neighbor reused
+    expect(out[1]).not.toBe(prev[1]); // the group rebuilt around the new member
+    expect((out[1] as ToolGroup).running).toBe(false);
+    expect((prev[1] as ToolGroup).running).toBe(true); // prev untouched (pure)
   });
 });

@@ -440,6 +440,41 @@ func TestReadRedact_masksToolView_readKind(t *testing.T) {
 	}
 }
 
+// 7d. Hash-after-redaction ordering (issue #175): a served message's
+// content_hash is computed over the SERVED (masked) content, never the raw
+// transcript content — a pre-redaction hash would differ between the HTTP and
+// tailer paths and churn whenever masking toggled.
+func TestReadRedact_hashCoversMaskedContent(t *testing.T) {
+	cn := &captureNotifier{}
+	svc, st, fake, _ := newSecretService(t, cn.notify, time.Minute)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	seedSecret(t, st, run.RepoID, testSecretName, testSecretValue)
+	fake.SetTranscriptPath("/t.jsonl")
+	fake.SetChat(secretChat(testSecretValue))
+
+	view, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	served := view.Messages[0]
+	if want := "the token is " + testPlaceholder + " ok"; served.Text != want {
+		t.Fatalf("served Text = %q; want the masked %q (precondition)", served.Text, want)
+	}
+	// Recompute over the SERVED message: same hash (HashMessages is idempotent
+	// — it clears ContentHash before hashing).
+	recomputed := []provider.Message{served}
+	provider.HashMessages(recomputed)
+	if served.ContentHash == "" || recomputed[0].ContentHash != served.ContentHash {
+		t.Errorf("served hash %q != recomputed-over-served %q", served.ContentHash, recomputed[0].ContentHash)
+	}
+	// And NOT the hash of the raw (unmasked) message.
+	raw := secretChat(testSecretValue).Messages[:1]
+	provider.HashMessages(raw)
+	if raw[0].ContentHash == served.ContentHash {
+		t.Error("served hash equals the raw pre-redaction hash; hashing must run AFTER scanAndRedact")
+	}
+}
+
 // --- loop-level integration tests ------------------------------------------
 
 // 8. needs-input body masking: the tailer masks BEFORE the notify gate
@@ -539,8 +574,10 @@ func TestTailerRedact_tickHitNotifiesAndPublishesRunChanged(t *testing.T) {
 	mu.Lock()
 	first := changed[0]
 	mu.Unlock()
-	if first.Type != eventRunChanged || first.RepoID != run.RepoID {
-		t.Errorf("run.changed payload = %+v; want {%s %s}", first, eventRunChanged, run.RepoID)
+	// The exposure run.changed names the one run whose transcript leaked
+	// (issue #175) beside the repo scope.
+	if first.Type != eventRunChanged || first.RepoID != run.RepoID || first.RunID != run.ID {
+		t.Errorf("run.changed payload = %+v; want {%s %s %s}", first, eventRunChanged, run.RepoID, run.ID)
 	}
 	// The flag stuck via the tick path too.
 	after, err := st.RepoSecrets(context.Background(), run.RepoID)

@@ -3,14 +3,28 @@
 // drawer below that, opened by the mobile top strip's hamburger or a
 // follow-finger rightward drag from anywhere (issue #140) and closed by
 // scrim / Escape / route change / leftward drag. Owns the SINGLE
-// listInstances resource (refetched on run.changed, debounced on
-// run.messages.changed) shared by the rail rows and the hamburger's attention
+// listInstances resource shared by the rail rows and the hamburger's attention
 // badge, plus the desktop collapse state. Unauthenticated sessions render their
 // children bare — /login and /setup therefore never get the shell.
+//
+// Refetch policy (issue #175): run.changed (spawn/stop/outcome — rows added,
+// removed, or their outcome flips) still refetches the whole list via
+// createLiveResource. run.messages.changed is different: it fires roughly once
+// per second per streaming agent, but can only ever flip ONE run's
+// conversational-state dot — refetching the entire GET /api/v1/instances list
+// for that would re-render every rail row every second while any agent is
+// streaming. So it's handled separately, below: mutateInstances patches just
+// that row's `state` in place, and every other row keeps its exact object
+// identity so SideNav (which keys its rows by reference) never rebuilds them.
+// An event whose runID isn't found (already stopped, out-of-order) or whose
+// state already matches is a no-op — never a fetch. This stays safe under
+// loss: createLiveResource's resync/run.changed refetch still replaces the
+// whole list, so a missed or dropped patch self-heals on the next
+// spawn/stop/reconnect.
 
 import { A, useLocation } from '@solidjs/router';
 import { Show, batch, createEffect, createSignal, on, onCleanup, type ParentProps } from 'solid-js';
-import { listInstances } from '../api';
+import { listInstances, type ConversationState } from '../api';
 import { useAuth } from '../auth';
 import { useEvents } from '../events';
 import { createDrawerGesture, type GestureDecision } from '../lib/drawerGesture';
@@ -22,9 +36,6 @@ import InstallSheet from './InstallSheet';
 import SideNav from './SideNav';
 
 const COLLAPSED_KEY = 'lab.rail-collapsed';
-// run.messages.changed only flips conversational state (a dot color), so its
-// refetch is debounced; run.changed (spawn/stop) refetches immediately.
-const MESSAGES_DEBOUNCE_MS = 250;
 const DESKTOP_MIN_PX = 1024; // >= this: persistent rail, no drawer/gestures
 
 export default function AppShell(props: ParentProps) {
@@ -43,10 +54,34 @@ function ShellFrame(props: ParentProps) {
   const location = useLocation();
 
   // The single shell-wide instances resource (spec pin): rail rows and the
-  // mobile attention badge both read this one list.
-  const [instances] = createLiveResource(
+  // mobile attention badge both read this one list. run.changed is the only
+  // spec here — it's the only event that can add/remove/reorder rows;
+  // run.messages.changed is handled below by patching in place instead.
+  const [instances, { mutate: mutateInstances }] = createLiveResource(
     () => listInstances(),
-    [{ type: 'run.changed' }, { type: 'run.messages.changed', debounceMs: MESSAGES_DEBOUNCE_MS }],
+    [{ type: 'run.changed' }],
+  );
+
+  // run.messages.changed patch-in-place (issue #175): see the file header for
+  // why this bypasses createLiveResource's refetch-the-whole-list path. Never
+  // calls refetch — only mutateInstances, and only when the event actually
+  // changes something.
+  onCleanup(
+    events.subscribe('run.messages.changed', (event) => {
+      if (typeof event.runID !== 'string' || typeof event.state !== 'string') return;
+      const runID = event.runID;
+      const state = event.state as ConversationState;
+      mutateInstances((prev) => {
+        if (prev === undefined) return prev;
+        const idx = prev.findIndex((row) => row.id === runID);
+        if (idx === -1) return prev;
+        const row = prev[idx]!;
+        if (row.state === state) return prev;
+        const next = prev.slice();
+        next[idx] = { ...row, state };
+        return next;
+      });
+    }),
   );
 
   const all = () => resourceValue(instances) ?? [];

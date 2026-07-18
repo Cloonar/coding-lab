@@ -219,8 +219,9 @@ func (f *fixture) worktreeHead() string {
 	return gitCmd(f.t, f.home, f.wt, "rev-parse", "HEAD")
 }
 
-// wantRunChanged asserts exactly one run.changed for the fixture repo is on
-// the subscription, then nothing else.
+// wantRunChanged asserts exactly one run.changed for the fixture repo — and,
+// since a pull always concerns exactly one run, carrying that run's identity
+// (issue #175) — is on the subscription, then nothing else.
 func (f *fixture) wantRunChanged(evts <-chan events.Event) {
 	f.t.Helper()
 	select {
@@ -229,8 +230,8 @@ func (f *fixture) wantRunChanged(evts <-chan events.Event) {
 			f.t.Fatalf("event type = %q, want %q", e.Type, EventRunChanged)
 		}
 		payload, ok := e.Payload.(repoScopedPayload)
-		if !ok || payload.RepoID != f.repo.ID || payload.Type != EventRunChanged {
-			f.t.Fatalf("event payload = %+v, want {%s %s}", e.Payload, EventRunChanged, f.repo.ID)
+		if !ok || payload.RepoID != f.repo.ID || payload.Type != EventRunChanged || payload.RunID != f.run.ID {
+			f.t.Fatalf("event payload = %+v, want {%s %s %s}", e.Payload, EventRunChanged, f.repo.ID, f.run.ID)
 		}
 	case <-time.After(time.Second):
 		f.t.Fatal("timed out waiting for run.changed")
