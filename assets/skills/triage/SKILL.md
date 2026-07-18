@@ -41,6 +41,8 @@ State transitions: an unlabeled issue normally goes to `needs-triage` first; fro
 
 `ready-for-agent` together with a live `## Blocked by` reference is a **valid** pairing — do not hold the label back waiting for blockers to merge. The AFK scheduler reads the `## Blocked by` section and handles ordering itself, so a labeled-but-blocked issue simply waits its turn behind its open blockers.
 
+The `## Blocked by` section is machine-read from the **issue body only** — comments are invisible to the scheduler. Blockers must be written as `#N` issue references: a prose-only blocker ("blocked by the auth work") does not block scheduling, and cross-repo refs (`owner/repo#N`) are not evaluated. When a dependency is established during triage — in grilling, in a comment thread, or while writing the brief — record it by editing the issue body's `## Blocked by` section (append the section if the body lacks one). A blocker that exists only in a comment does not exist to the scheduler.
+
 ## Invocation
 
 The maintainer invokes `/triage` and describes what they want in natural language. Interpret the request and act. Examples:
@@ -71,7 +73,7 @@ Show counts and a one-line summary per issue. Let the maintainer pick.
 4. **Grill (if needed).** If the issue needs fleshing out, run a `/grill-with-docs` session.
 
 5. **Apply the outcome.** Always post the comment (brief / notes / explanation) **before** applying the state label — the label announces that the contract is in place, so it must never precede the comment it points to. An AFK agent polling `ready-for-agent` could otherwise claim an issue whose brief doesn't exist yet. When you're *creating* an issue that is already agent-ready, create it plain (or as `needs-triage`), post the brief, then add `ready-for-agent` last — don't fold the state label into the create call.
-   - `ready-for-agent` — post an agent brief comment ([AGENT-BRIEF.md](AGENT-BRIEF.md)), then apply the label.
+   - `ready-for-agent` — post an agent brief comment ([AGENT-BRIEF.md](AGENT-BRIEF.md)), make sure every established dependency is a `#N` ref in the issue body's `## Blocked by` section (edit the body if needed), then apply the label.
    - `ready-for-human` — post the same structure as an agent brief, noting why it can't be delegated (judgment calls, external access, design decisions, manual testing), then apply the label.
    - `needs-info` — post triage notes (template below), then apply the label.
    - `wontfix` (bug) — polite explanation, then close.
