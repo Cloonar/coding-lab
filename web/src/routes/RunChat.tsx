@@ -13,10 +13,15 @@
 // ALWAYS available and fires immediately (ADR-0029, issue #61);
 // the one-tap turn Interrupt lives in the header next to Stop, gated on the live
 // outcome — not the derived `working` state, which can be a stale-transcript-tail
-// false positive (issue #38). Reads through GET /runs/:id/messages and refetches
-// on run.messages.changed; replies / answers / interrupts POST back. Every string
-// that names the agent derives from the provider's display metadata (issue #51
-// decision 9). Phone-first, v0 design language.
+// false positive (issue #38). Reads through GET /runs/:id/messages; the tailer's
+// ~1/s run.messages.changed ticks coalesce on a trailing debounce into a LIGHT
+// tail-only refetch (after=min(cursor, backpatchSeq-1) — issue #175, no
+// per-second latest-window re-merge), while route changes, transcript rotation,
+// resync, run.changed (sibling-run events filtered by runID) and the POST
+// callbacks (send/answer/interrupt) take the FULL protocol; replies / answers /
+// interrupts POST back. Every string that names the agent derives from the
+// provider's display metadata (issue #51 decision 9). Phone-first, v0 design
+// language.
 
 import { A, useParams } from '@solidjs/router';
 import { Dynamic, Portal } from 'solid-js/web';
@@ -49,6 +54,7 @@ import {
   type ConversationState,
   type Dialog,
   type DialogOption,
+  type MessagesResponse,
   type Provider,
   type Question,
   type QuestionAnswer,
@@ -87,10 +93,22 @@ import { runDisplayTitle, sessionRepo } from '../lib/instanceLabel';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { forgeWebUrl } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
-import { groupMessages, toolGroupSummary, type ToolGroup } from '../lib/toolGroups';
+import {
+  groupMessages,
+  reconcileRenderItems,
+  toolGroupSummary,
+  type RenderItem,
+  type ToolGroup,
+} from '../lib/toolGroups';
 import { useEvents } from '../events';
 
 const MESSAGE_LIMIT = 60;
+
+// run.messages.changed fires ~1/s while an agent streams (issue #175): the
+// chat coalesces a burst on this trailing edge (mirroring liveResource's
+// debounceMs pattern) before its light tail refetch, instead of refetching
+// per event.
+const MESSAGES_DEBOUNCE_MS = 300;
 
 // Mirrors the app shell's rail breakpoint (AppShell.tsx DESKTOP_MIN_PX, not
 // exported): the tool panel flips sheet → sidebar at exactly the width the
@@ -364,59 +382,110 @@ function RunChatView() {
 
   // Monotonic fetch token: only the newest in-flight fetch may apply its
   // result, so a slow stale response can't revert an answered dialog to
-  // pending and re-lock the composer.
+  // pending and re-lock the composer. Shared by BOTH refetch modes below (and
+  // loadEarlier), so a full refetch supersedes an in-flight light one and
+  // vice versa.
   let fetchToken = 0;
 
-  // Refetch protocol (ADR-0016): after=<cursor> tail batches make appends
-  // gap-free even when >limit messages land between refetches; the latest
-  // window is fetched too for back-patched mutations near the tail (tool
-  // status flips, answered dialogs). Merged by seq, later response wins.
-  // First load (no cursor yet) is just the latest window.
+  // The run.messages.changed trailing debounce (issue #175): the pending
+  // flush accumulates the MINIMUM backpatchSeq announced across the burst —
+  // the lowest seq whose content changed — so one light refetch covers every
+  // mutation the burst named. Cleared by any full refetch (which supersedes a
+  // queued light one — that covers route change, rotation, resync,
+  // run.changed and the POST callbacks) and on unmount.
+  let messagesDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingBackpatchSeq: number | undefined;
+  const clearMessagesDebounce = () => {
+    clearTimeout(messagesDebounceTimer);
+    messagesDebounceTimer = undefined;
+    pendingBackpatchSeq = undefined;
+  };
+  onCleanup(clearMessagesDebounce);
+
+  // One response envelope's non-window state, applied identically by both
+  // refetch modes: conversational state, the pending dialog, transcript
+  // status and the rotation id. Returns null when this refetch was superseded
+  // mid-application (see the transcript_id re-guard), otherwise whether the
+  // response brought a pending dialog this client hasn't shown yet.
+  const applyEnvelope = (res: MessagesResponse, token: number): { newDialog: boolean } | null => {
+    setState(res.state);
+    // Does this response bring a pending dialog this client hasn't shown
+    // yet? Decided BEFORE the tracking id updates, and tracked regardless of
+    // follow — a scrolled-up reader is never yanked (the jump pill covers
+    // them), and their card doesn't become "new" again later.
+    const dialog = res.pending_dialog ?? null;
+    const newDialog = dialog !== null && dialog.tool_id !== seenDialogToolId;
+    seenDialogToolId = dialog?.tool_id ?? null;
+    // Keep the dialog's OBJECT identity stable while the same dialog stays
+    // pending (a dialog's content is immutable for its tool_id — the hook
+    // spools it once). Each response is a fresh parse; adopting it would
+    // ripple a no-op change through every downstream computation — the
+    // option <For> would recreate its rows and the Other input would lose
+    // focus (and, before the identity-memo guards below, its text) under
+    // the operator's fingers on every SSE tick.
+    setPendingDialogField((prev) =>
+      prev !== null && dialog !== null && prev.tool_id === dialog.tool_id ? prev : dialog,
+    );
+    setTranscript(res.transcript);
+    setTranscriptId(res.transcript_id);
+    // Writing transcript_id can synchronously run the rotation effect (Solid
+    // flushes user effects on a signal write), which resets the stream and
+    // fires a superseding refetch — bumping fetchToken. If that happened, the
+    // caller must NOT merge its pre-rotation tail back over the reset: a
+    // transcript-A tail line whose seq exceeds B's would survive the
+    // seq-keyed merge and leak forever (issue #34). Re-guard so the newer
+    // refetch owns the stream.
+    return token === fetchToken ? { newDialog } : null;
+  };
+
+  // The shared after=<start> tail pager: gap-free appends even when >limit
+  // messages land between refetches. Returns null when a newer refetch
+  // superseded this one mid-loop; `last` is the final page's envelope
+  // (undefined only for start <= 0, which neither caller passes).
+  const fetchTail = async (
+    start: number,
+    token: number,
+  ): Promise<{ tail: ChatMessage[]; last: MessagesResponse | undefined } | null> => {
+    const tail: ChatMessage[] = [];
+    let last: MessagesResponse | undefined;
+    let after = start;
+    while (after > 0) {
+      const res = await getRunMessages(params.id, { after, limit: MESSAGE_LIMIT });
+      if (token !== fetchToken) return null;
+      last = res;
+      tail.push(...res.messages);
+      const top = maxSeq(res.messages);
+      // A short window is the whole remaining tail; a stuck seq would loop.
+      if (res.messages.length < MESSAGE_LIMIT || top <= after) break;
+      after = top;
+    }
+    return { tail, last };
+  };
+
+  // Refetch protocol (ADR-0016, reshaped by issue #175): two modes over the
+  // shared token guard and tail pager.
+  //
+  // FULL — after=<cursor> tail batches for gap-free appends, PLUS the latest
+  // window for back-patched mutations near the tail (the only way to see them
+  // when the trigger can't name what changed, or on a server predating
+  // backpatchSeq). Merged by seq, later response wins — except unchanged
+  // content, which keeps its identity (chatStream.ts). First load (no cursor
+  // yet) is just the latest window. Used by first load, route change,
+  // transcript rotation, resync, run.changed, and the send/answer/interrupt
+  // callbacks.
   const refetchMessages = async () => {
+    // A full refetch supersedes a queued light one: drop the pending debounce
+    // so the burst doesn't schedule a redundant tail fetch behind this.
+    clearMessagesDebounce();
     const token = ++fetchToken;
     const cursor = maxSeq(messages());
     try {
-      const tail: ChatMessage[] = [];
-      let after = cursor;
-      while (after > 0) {
-        const res = await getRunMessages(params.id, { after, limit: MESSAGE_LIMIT });
-        if (token !== fetchToken) return;
-        tail.push(...res.messages);
-        const top = maxSeq(res.messages);
-        // A short window is the whole remaining tail; a stuck seq would loop.
-        if (res.messages.length < MESSAGE_LIMIT || top <= after) break;
-        after = top;
-      }
+      const paged = await fetchTail(cursor, token);
+      if (paged === null) return;
       const latest = await getRunMessages(params.id, { limit: MESSAGE_LIMIT });
       if (token !== fetchToken) return;
-      setState(latest.state);
-      // Does this response bring a pending dialog this client hasn't shown
-      // yet? Decided BEFORE the tracking id updates, and tracked regardless of
-      // follow — a scrolled-up reader is never yanked (the jump pill covers
-      // them), and their card doesn't become "new" again later.
-      const dialog = latest.pending_dialog ?? null;
-      const newDialog = dialog !== null && dialog.tool_id !== seenDialogToolId;
-      seenDialogToolId = dialog?.tool_id ?? null;
-      // Keep the dialog's OBJECT identity stable while the same dialog stays
-      // pending (a dialog's content is immutable for its tool_id — the hook
-      // spools it once). Each response is a fresh parse; adopting it would
-      // ripple a no-op change through every downstream computation — the
-      // option <For> would recreate its rows and the Other input would lose
-      // focus (and, before the identity-memo guards below, its text) under
-      // the operator's fingers on every SSE tick.
-      setPendingDialogField((prev) =>
-        prev !== null && dialog !== null && prev.tool_id === dialog.tool_id ? prev : dialog,
-      );
-      setTranscript(latest.transcript);
-      setTranscriptId(latest.transcript_id);
-      // Writing transcript_id can synchronously run the rotation effect (Solid
-      // flushes user effects on a signal write), which resets the stream and
-      // fires a superseding refetch — bumping fetchToken. If that happened, this
-      // now-stale refetch must NOT merge its pre-rotation tail/latest back over
-      // the reset: a transcript-A tail line whose seq exceeds B's would survive
-      // the seq-keyed merge and leak forever (issue #34). Re-guard so the newer
-      // refetch owns the stream.
-      if (token !== fetchToken) return;
+      const applied = applyEnvelope(latest, token);
+      if (applied === null) return;
       if (!exhausted()) setHasMore(latest.has_more);
       // A first window that already covers the whole transcript means there
       // is nothing older to load — ever (messages only append).
@@ -424,11 +493,43 @@ function RunChatView() {
       // Follow-bottom only when the reader is already at/near the bottom (or
       // on the initial window), so reading history isn't yanked down.
       const follow = cursor === 0 || (streamEl !== undefined && isNearBottom(streamEl));
-      setMessages((prev) => mergeRefetch(prev, tail, latest.messages));
+      setMessages((prev) => mergeRefetch(prev, paged.tail, latest.messages));
       // A just-arrived dialog retargets the follow scroll from the stream's
       // bottom to its card's top (issue #56 decision 5); otherwise today's
       // plain bottom-follow.
-      if (follow && newDialog) scrollToPendingCard();
+      if (follow && applied.newDialog) scrollToPendingCard();
+      else if (follow) scrollToBottom();
+    } catch (err) {
+      if (token === fetchToken) setError(errorMessage(err));
+    }
+  };
+
+  // LIGHT — the run.messages.changed path (issue #175): tail pages only, from
+  // after=min(cursor, backpatchSeq - 1), so appends AND every announced
+  // back-patch arrive in one paging pass with NO latest-window request — the
+  // per-second stream tick no longer re-downloads (and re-merges) a window of
+  // unchanged messages. hasMore/exhausted are deliberately not written:
+  // appends can never change whether OLDER history exists. Falls back to FULL
+  // before the first window (cursor 0) and for a backpatch at seq 1 (after=0
+  // means "latest window" on the wire, not "everything").
+  const refetchMessagesLight = async (backpatchSeq?: number) => {
+    const cursor = maxSeq(messages());
+    const start = backpatchSeq !== undefined ? Math.min(cursor, backpatchSeq - 1) : cursor;
+    if (start <= 0) {
+      await refetchMessages();
+      return;
+    }
+    const token = ++fetchToken;
+    try {
+      const paged = await fetchTail(start, token);
+      if (paged === null || paged.last === undefined) return;
+      // Same envelope post-processing as FULL, from the FINAL tail response:
+      // dialog identity tracking, rotation re-guard, follow-bottom/newDialog.
+      const applied = applyEnvelope(paged.last, token);
+      if (applied === null) return;
+      const follow = streamEl !== undefined && isNearBottom(streamEl);
+      setMessages((prev) => mergeMessages(prev, paged.tail));
+      if (follow && applied.newDialog) scrollToPendingCard();
       else if (follow) scrollToBottom();
     } catch (err) {
       if (token === fetchToken) setError(errorMessage(err));
@@ -524,18 +625,40 @@ function RunChatView() {
     ),
   );
 
-  // Refetch on the tailer's envelope (this run only) and on run.changed
-  // (outcome flips → composer state). run.changed is repo-scoped on the wire
-  // (no runID), so filter by the run's repo — fleet-quiet, at worst
-  // sibling-run noise.
+  // The tailer's envelope (this run only) coalesces on a trailing debounce
+  // (issue #175): while an agent streams it fires ~1/s, and refetching per
+  // event rebuilt the view every second. The flush takes the LIGHT path with
+  // the burst's minimum backpatchSeq. run.changed (outcome flips → composer
+  // state) refetches FULL: it carries runID when the event concerns exactly
+  // one run — a sibling run's flip is ignored — and an event WITHOUT runID
+  // stays a conservative repo-filtered refetch (stop-all, AFK reaper, CR
+  // merge, parked cleanup are genuinely repo-scoped).
   /* eslint-disable solid/reactivity -- handlers re-read params.id / the run fresh per SSE event */
   onCleanup(
     events.subscribe('run.messages.changed', (event) => {
-      if (event.runID === params.id) void refetchMessages();
+      if (event.runID !== params.id) return;
+      // event.state rides the envelope too; this view keeps reading state
+      // from the refetch responses so one source of truth feeds the composer.
+      if (typeof event.backpatchSeq === 'number') {
+        pendingBackpatchSeq =
+          pendingBackpatchSeq === undefined
+            ? event.backpatchSeq
+            : Math.min(pendingBackpatchSeq, event.backpatchSeq);
+      }
+      clearTimeout(messagesDebounceTimer);
+      messagesDebounceTimer = setTimeout(() => {
+        messagesDebounceTimer = undefined;
+        const seq = pendingBackpatchSeq;
+        pendingBackpatchSeq = undefined;
+        void refetchMessagesLight(seq);
+      }, MESSAGES_DEBOUNCE_MS);
     }),
   );
   onCleanup(
     events.subscribe('run.changed', (event) => {
+      // runID present = the event names exactly one run (issue #175): a
+      // sibling run's flip must not refetch this open chat.
+      if (typeof event.runID === 'string' && event.runID !== params.id) return;
       const r = resourceValue(run);
       if (r !== undefined && event.repoID !== undefined && event.repoID !== r.repo_id) return;
       void refetchRun();
@@ -640,7 +763,16 @@ function RunChatView() {
   // permanently dropped at paint (issue #68) — never shown, transcripts on
   // disk keep everything — while grouping still runs on the FULL list
   // (including thinking) so tool-run boundaries and seq keys stay stable.
-  const renderItems = () => groupMessages(messages());
+  // Memoized WITH reconciliation (issue #175): groupMessages builds fresh
+  // wrapper objects per call, which would tear down every rendered item even
+  // when the underlying messages kept identity — and panelTarget below reads
+  // renderItems repeatedly, which used to re-group on every read. The memo
+  // reuses the previous run's items (message wrappers by reference, groups by
+  // key + member identity) so the reference-keyed <For> leaves settled DOM
+  // alone.
+  const renderItems = createMemo<RenderItem[]>((prev = []) =>
+    reconcileRenderItems(prev, groupMessages(messages())),
+  );
   const hiddenThinking = (m: ChatMessage) => m.kind === 'text' && m.thinking === true;
 
   // The panel's live target (issue #145), re-resolved from the CURRENT stream

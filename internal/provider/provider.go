@@ -10,8 +10,10 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"time"
 )
@@ -258,6 +260,50 @@ type Message struct {
 	Error    bool      `json:"error,omitempty"`    // always-surface: this event is an error
 	Tool     *ToolInfo `json:"tool,omitempty"`     // tool kind
 	Dialog   *Dialog   `json:"dialog,omitempty"`   // dialog kind
+	// ContentHash is the cheap, non-cryptographic identity of this message's
+	// FINAL rendered content (issue #175): FNV-64a over the message's canonical
+	// JSON with ContentHash itself cleared, "%016x"-formatted — the transcriptID
+	// precedent (internal/chat). Stamped by CORE (internal/chat) after
+	// redaction, never by an adapter, so the same rendered content hashes
+	// identically on the HTTP and tailer paths, and ANY rendered change — a
+	// tool status flip, output growth, a dialog gaining an outcome, redaction
+	// masking — changes it. The SPA keys its skip-unchanged-render and the
+	// tailer keys its backpatch detection on it.
+	ContentHash string `json:"content_hash,omitempty"`
+}
+
+// HashMessages stamps ContentHash on every message in place (issue #175).
+// Call sites live in CORE (internal/chat) — exactly once per read path, AFTER
+// scanAndRedact — never in an adapter: a pre-redaction hash would differ
+// between the tailer and HTTP paths and churn on the leak flag. Idempotent:
+// contentHash clears the field before hashing, so re-stamping already-hashed
+// messages (the providertest fake shares its Messages backing array across
+// reads) yields the same values.
+func HashMessages(msgs []Message) {
+	for i := range msgs {
+		msgs[i].ContentHash = msgs[i].contentHash()
+	}
+}
+
+// contentHash is one message's ContentHash: FNV-64a over the canonical JSON
+// serialization with ContentHash cleared. Deterministic because the Message
+// struct tree (ToolInfo, ToolView, Dialog, Question, DialogOption,
+// DialogOutcome, QuestionResult) contains no maps — encoding/json emits
+// struct fields in declaration order — a property any future field addition
+// to that tree must preserve. The value receiver makes the clear local, so
+// hashing never mutates the caller's message.
+func (m Message) contentHash() string {
+	m.ContentHash = ""
+	b, err := json.Marshal(m)
+	if err != nil {
+		// Unreachable for the map-free Message tree (plain structs, strings,
+		// slices, and bools cannot fail Marshal); "" rather than a panic keeps
+		// a hypothetical failure from minting a fake identity.
+		return ""
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(b)
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 // ToolInfo is the tool-kind payload: a one-line chip (Title) that expands on

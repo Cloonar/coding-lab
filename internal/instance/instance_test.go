@@ -878,6 +878,68 @@ func TestStop_dirtyParks(t *testing.T) {
 	}
 }
 
+// drainRunChanged pulls buffered events off sub (Publish is synchronous, so
+// by the time the service call returned everything is buffered) and returns
+// every run.changed payload seen.
+func drainRunChanged(sub <-chan events.Event) []repoScopedPayload {
+	var got []repoScopedPayload
+	for {
+		select {
+		case e := <-sub:
+			if p, ok := e.Payload.(repoScopedPayload); ok && e.Type == EventRunChanged {
+				got = append(got, p)
+			}
+		default:
+			return got
+		}
+	}
+}
+
+// run.changed identity (issue #175): a single Stop names the one run it ended
+// (RunID), while StopAll — genuinely repo-scoped, many runs at once — omits
+// it, so the SPA falls back to the whole-list refetch exactly there.
+func TestStop_runChangedCarriesRunID(t *testing.T) {
+	f := newFixture(t)
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sub, cancel := f.bus.Subscribe(t.Context()) // after Start: its own run.changed stays out
+	defer cancel()
+	if _, err := f.svc.Stop(t.Context(), run.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	got := drainRunChanged(sub)
+	if len(got) != 1 {
+		t.Fatalf("run.changed events = %+v, want exactly 1", got)
+	}
+	if got[0].RepoID != f.repo.ID || got[0].RunID != run.ID {
+		t.Errorf("payload = %+v, want {%s %s %s}", got[0], EventRunChanged, f.repo.ID, run.ID)
+	}
+}
+
+func TestStopAll_runChangedStaysRepoScoped(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID, Label: "a"}); err != nil {
+		t.Fatalf("Start a: %v", err)
+	}
+	if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID, Label: "b"}); err != nil {
+		t.Fatalf("Start b: %v", err)
+	}
+	sub, cancel := f.bus.Subscribe(t.Context())
+	defer cancel()
+	if _, err := f.svc.StopAll(t.Context(), f.repo.ID); err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
+	got := drainRunChanged(sub)
+	if len(got) != 1 {
+		t.Fatalf("run.changed events = %+v, want exactly 1 (one publish for the whole sweep)", got)
+	}
+	if got[0].RepoID != f.repo.ID || got[0].RunID != "" {
+		t.Errorf("payload = %+v, want repo-scoped {%s %s} with no runID", got[0], EventRunChanged, f.repo.ID)
+	}
+}
+
 func TestStop_afkRefused(t *testing.T) {
 	f := newFixture(t)
 	// A live AFK run (M5 territory): Stop must refuse.

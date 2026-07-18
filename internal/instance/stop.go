@@ -58,7 +58,7 @@ func (s *Service) Stop(ctx context.Context, session string) (string, error) {
 		return "", err
 	}
 	removed := s.teardownManualRun(ctx, run, repo)
-	s.publishRunChanged(run.RepoID)
+	s.publishRunChanged(run.RepoID, run.ID)
 	s.publishParkedChanged(run.RepoID)
 	if removed {
 		return OutcomeRemoved, nil
@@ -112,7 +112,9 @@ func (s *Service) StopAll(ctx context.Context, repoID string) (int, error) {
 		stopped++
 	}
 	if stopped > 0 {
-		s.publishRunChanged(repoID)
+		// Genuinely repo-scoped: many runs ended at once, so no runID (issue
+		// #175) — the SPA refetches the repo's whole run list, as before.
+		s.publishRunChanged(repoID, "")
 		s.publishParkedChanged(repoID)
 	}
 	return stopped, nil

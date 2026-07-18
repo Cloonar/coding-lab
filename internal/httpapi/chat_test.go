@@ -67,6 +67,95 @@ func TestAPI_ChatMessages_window(t *testing.T) {
 	}
 }
 
+// isHex16 reports whether s is exactly 16 lowercase hex chars — the pinned
+// content_hash format (issue #175, "%016x" over FNV-64a).
+func isHex16(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// messageHashes GETs the run's messages and returns seq → content_hash,
+// failing if any served message lacks a well-formed hash.
+func messageHashes(t *testing.T, x *instTestServer, runID string) map[int64]string {
+	t.Helper()
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	msgs, ok := decodeBody(t, resp)["messages"].([]any)
+	if !ok {
+		t.Fatal("messages is not a JSON array")
+	}
+	out := make(map[int64]string, len(msgs))
+	for _, e := range msgs {
+		m := e.(map[string]any)
+		seq := int64(m["seq"].(float64))
+		h, _ := m["content_hash"].(string)
+		if !isHex16(h) {
+			t.Fatalf("seq %d content_hash = %q; want 16 lowercase hex chars", seq, h)
+		}
+		out[seq] = h
+	}
+	return out
+}
+
+// hashChat builds the content_hash fixture FRESH per scripting call (the fake
+// shares its Messages backing array across reads and the server stamps hashes
+// in place): three messages, the middle one a tool whose result has landed
+// (running→ok with output) when done is true.
+func hashChat(done bool) provider.Chat {
+	tool := &provider.ToolInfo{Name: "Bash", Title: "go test", Status: "running"}
+	if done {
+		tool = &provider.ToolInfo{Name: "Bash", Title: "go test", Status: "ok", Output: "PASS"}
+	}
+	return provider.Chat{State: provider.StateWorking, Cursor: 3, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageText, Role: "user", Text: "run the tests"},
+		{Seq: 2, Kind: provider.MessageTool, Tool: tool},
+		{Seq: 3, Kind: provider.MessageText, Role: "assistant", Text: "running them now"},
+	}}
+}
+
+// Every served message carries a content_hash (issue #175): 16 hex chars,
+// identical across identical reads, and the tool_result landing (a status
+// flip on one message) changes ONLY that message's hash — the property the
+// SPA's skip-unchanged-render and the tailer's backpatch detection rely on.
+func TestAPI_ChatMessages_contentHash(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(hashChat(false))
+
+	first := messageHashes(t, x, runID)
+	if len(first) != 3 {
+		t.Fatalf("hashes = %v; want 3 hashed messages", first)
+	}
+
+	// An identical second read serves identical hashes.
+	x.prov.SetChat(hashChat(false))
+	for seq, h := range messageHashes(t, x, runID) {
+		if first[seq] != h {
+			t.Errorf("seq %d hash changed across identical reads: %q → %q", seq, first[seq], h)
+		}
+	}
+
+	// The tool_result lands: seq 2 flips running→ok. Only its hash changes.
+	x.prov.SetChat(hashChat(true))
+	third := messageHashes(t, x, runID)
+	if third[2] == first[2] {
+		t.Error("seq 2 hash unchanged after the tool status flip")
+	}
+	for _, seq := range []int64{1, 3} {
+		if third[seq] != first[seq] {
+			t.Errorf("seq %d hash changed (%q → %q) though its content did not", seq, first[seq], third[seq])
+		}
+	}
+}
+
 // The live PreToolUse spool (ADR-0020) surfaces as the top-level pending_dialog
 // field alongside state:"question" — NOT as a message in the stream.
 func TestAPI_ChatMessages_pendingDialog(t *testing.T) {

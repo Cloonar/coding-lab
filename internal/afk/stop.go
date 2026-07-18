@@ -63,7 +63,7 @@ func (s *Service) StopAFK(ctx context.Context, session string) error {
 		s.log.Warn("afk stop: repo for credential cleanup", "component", "afk", "run", run.ID, "err", err)
 	}
 
-	s.publish(EventRunChanged, run.RepoID)
+	s.publishRun(EventRunChanged, run.RepoID, run.ID)
 	s.publish(EventParkedChanged, run.RepoID)
 	return nil
 }

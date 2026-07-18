@@ -29,10 +29,14 @@ import (
 
 // repoScopedPayload is the run.changed envelope (mirrors instance's
 // repoScopedPayload — envelopes, not state, brief §8.1): the SPA refetches the
-// run on it, so the chat-header exposure badge appears live.
+// run on it, so the chat-header exposure badge appears live. RunID names the
+// one run the event concerns (issue #175 — an exposure is always detected on a
+// specific run's transcript), so the SPA refetches that run instead of every
+// run of the repo.
 type repoScopedPayload struct {
 	Type   string `json:"type"`
 	RepoID string `json:"repoID"`
+	RunID  string `json:"runID,omitempty"`
 }
 
 // scanAndRedact masks every operator-visible string of the composed chat in
@@ -93,9 +97,10 @@ func (s *Service) scanAndRedact(ctx context.Context, run store.Run, chat *provid
 			})
 		}
 		// run.changed (not run.messages.changed): the exposure badge hangs off
-		// the RUN resource, so the SPA must refetch the run itself.
+		// the RUN resource, so the SPA must refetch the run itself — and with
+		// the run identity in the envelope (issue #175), only that run.
 		s.bus.Publish(events.Event{Type: eventRunChanged,
-			Payload: repoScopedPayload{Type: eventRunChanged, RepoID: run.RepoID}})
+			Payload: repoScopedPayload{Type: eventRunChanged, RepoID: run.RepoID, RunID: run.ID}})
 	}
 }
 

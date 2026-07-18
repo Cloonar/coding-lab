@@ -165,11 +165,13 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 const runTitleMaxRunes = 120
 
 // runChangedPayload mirrors instance's repoScopedPayload key-for-key ("type",
-// "repoID") so a title PATCH looks like any other run mutation to the SSE
-// rails' refetch.
+// "repoID", optional "runID") so a title PATCH looks like any other run
+// mutation to the SSE rails' refetch. A rename concerns exactly one run, so
+// it names it (issue #175) — the open chat skips sibling-run events.
 type runChangedPayload struct {
 	Type   string `json:"type"`
 	RepoID string `json:"repoID"`
+	RunID  string `json:"runID,omitempty"`
 }
 
 // handleRunUpdate is PATCH /api/v1/runs/{id}. The only known field is title —
@@ -223,7 +225,7 @@ func (s *Server) handleRunUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if setTitle {
 		s.bus.Publish(events.Event{Type: instance.EventRunChanged,
-			Payload: runChangedPayload{Type: instance.EventRunChanged, RepoID: run.RepoID}})
+			Payload: runChangedPayload{Type: instance.EventRunChanged, RepoID: run.RepoID, RunID: run.ID}})
 	}
 	writeJSON(w, http.StatusOK, runJSON(run))
 }

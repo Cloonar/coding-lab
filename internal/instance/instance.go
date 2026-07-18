@@ -43,9 +43,16 @@ const (
 	EventParkedChanged = "parked.changed"
 )
 
+// repoScopedPayload deliberately mirrors its siblings in afk/reconcile/pull
+// key-for-key (brief §8.1 — duplicated per package by design, never shared).
+// RunID names the one run a run.changed concerns (issue #175), so the SPA can
+// refetch that run alone instead of the repo's whole run list; it stays empty
+// (omitted) on genuinely repo-scoped emits — stop-all — and on parked.changed,
+// which is never run-scoped.
 type repoScopedPayload struct {
 	Type   string `json:"type"`
 	RepoID string `json:"repoID"`
+	RunID  string `json:"runID,omitempty"`
 }
 
 // WorkspaceSeeder is the lab-side worktree seeding seam (design §1
@@ -212,8 +219,11 @@ func (s *Service) worktreePath(repoName, label string) string {
 	return filepath.Join(s.worktreeRoot, gitx.WorktreeDir(repoName, label))
 }
 
-func (s *Service) publishRunChanged(repoID string) {
-	s.bus.Publish(events.Event{Type: EventRunChanged, Payload: repoScopedPayload{Type: EventRunChanged, RepoID: repoID}})
+// publishRunChanged emits run.changed. runID is the one run the event
+// concerns (issue #175) — "" for a genuinely repo-scoped emit (stop-all),
+// which omitempty serializes back to the plain 2-field envelope.
+func (s *Service) publishRunChanged(repoID, runID string) {
+	s.bus.Publish(events.Event{Type: EventRunChanged, Payload: repoScopedPayload{Type: EventRunChanged, RepoID: repoID, RunID: runID}})
 }
 
 func (s *Service) publishParkedChanged(repoID string) {
@@ -282,7 +292,7 @@ func (s *Service) runCapture(run store.Run, dl provider.DeepLinker) {
 			"run", run.ID, "session", run.SessionName, "err", err)
 		return
 	}
-	s.publishRunChanged(run.RepoID)
+	s.publishRunChanged(run.RepoID, run.ID)
 }
 
 // ArmCapture (re-)starts deep-link capture for a live run whose deep_link_url

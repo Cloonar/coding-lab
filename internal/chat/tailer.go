@@ -152,6 +152,16 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		lastSig   string
 		lastState string
 		first     = true
+		// baseline maps seq → content hash of the previous SUCCESSFUL read —
+		// the backpatch detector (issue #175). Owned by this one goroutine and
+		// dying with it, like the notify gate: a re-armed tailer starts with no
+		// baseline and its first tick simply reports no backpatch. Replaced
+		// after every successful read — even when the publish gate doesn't fire
+		// (a read without a publish only happens on a sig-only flip, whose
+		// content is unchanged, so nothing is lost) — and reset to nil on a
+		// rotation BEFORE comparing, so a fresh transcript's restarted seqs
+		// never read as back-patches of the old file's.
+		baseline map[int64]string
 	)
 	// Seed from the last-known persisted path (a re-adopted run already has one)
 	// so the first tick's locateActive is a no-op when nothing rotated, rather
@@ -207,6 +217,20 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 				// the value" criterion. Scanning rides the read-happened branch
 				// only, so quiet no-change ticks stay stat-only (no per-tick cost).
 				s.scanAndRedact(ctx, run, &chat)
+				// Hash AFTER redaction (issue #175) — the same order Service.Read
+				// applies, so the two paths agree on every hash — then diff this
+				// read's hashes against the previous read's to spot a back-patch:
+				// an earlier message re-rendering under growth (a tool_result
+				// completing a prior tool_use). A rotation drops the baseline
+				// first — the fresh file restarts seq at 1, so cross-file
+				// comparison is meaningless and the client resets its stream via
+				// transcript_id anyway.
+				provider.HashMessages(chat.Messages)
+				if rotated {
+					baseline = nil
+				}
+				backpatch := lowestBackpatchSeq(baseline, chat.Messages)
+				baseline = hashesBySeq(chat.Messages)
 				s.tailers.setState(run.SessionName, chat.State)
 				// Feed the state edge to the notify gate with the PREVIOUS state
 				// (lastState, before the reassignment below) so it edge-triggers on
@@ -215,7 +239,7 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 					gate.observe(lastState, chat)
 				}
 				if first || transcriptChanged || chat.State != lastState {
-					s.publishMessagesChanged(run)
+					s.publishMessagesChanged(run, chat.State, backpatch)
 				}
 				first, lastSig, lastState = false, sig, chat.State
 				lastMod, lastSz = mod, sz
@@ -242,11 +266,42 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 	}
 }
 
-func (s *Service) publishMessagesChanged(run store.Run) {
+// publishMessagesChanged emits the run.messages.changed envelope with the
+// tick's composed state and backpatch seq (issue #175 — see
+// messagesChangedPayload for the field semantics; backpatch 0 = append-only).
+func (s *Service) publishMessagesChanged(run store.Run, state string, backpatch int64) {
 	s.bus.Publish(events.Event{
-		Type:    EventMessagesChanged,
-		Payload: messagesChangedPayload{Type: EventMessagesChanged, RepoID: run.RepoID, RunID: run.ID},
+		Type: EventMessagesChanged,
+		Payload: messagesChangedPayload{Type: EventMessagesChanged, RepoID: run.RepoID, RunID: run.ID,
+			State: state, BackpatchSeq: backpatch},
 	})
+}
+
+// hashesBySeq snapshots one successful read's per-seq content hashes — the
+// tailer's next backpatch baseline (issue #175).
+func hashesBySeq(msgs []provider.Message) map[int64]string {
+	m := make(map[int64]string, len(msgs))
+	for _, msg := range msgs {
+		m[msg.Seq] = msg.ContentHash
+	}
+	return m
+}
+
+// lowestBackpatchSeq returns the lowest seq present in BOTH the baseline and
+// msgs whose content hash changed — 0 when nothing already-seen re-rendered.
+// A seq absent from the baseline is an append, never a backpatch (issue #175).
+func lowestBackpatchSeq(baseline map[int64]string, msgs []provider.Message) int64 {
+	var lowest int64
+	for _, msg := range msgs {
+		prev, ok := baseline[msg.Seq]
+		if !ok || prev == msg.ContentHash {
+			continue
+		}
+		if lowest == 0 || msg.Seq < lowest {
+			lowest = msg.Seq
+		}
+	}
+	return lowest
 }
 
 // tailerHandle identifies one tailer goroutine's registration. remove

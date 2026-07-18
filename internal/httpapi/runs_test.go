@@ -83,7 +83,8 @@ func TestAPI_RunTitlePatchValidation(t *testing.T) {
 }
 
 // A successful title PATCH publishes run.changed with the pinned SSE payload
-// keys (type/repoID) so other tabs' rails refetch.
+// keys (type/repoID/runID — a rename concerns exactly one run, issue #175) so
+// other tabs' rails refetch and sibling-run chats can skip it.
 func TestAPI_RunTitlePatchPublishesRunChanged(t *testing.T) {
 	x := newInstanceServer(t)
 	h := csrfHeaders(x.ts.URL)
@@ -99,7 +100,7 @@ func TestAPI_RunTitlePatchPublishesRunChanged(t *testing.T) {
 	for time.Now().Before(deadline) {
 		for _, ev := range log.snapshot() {
 			if p, ok := ev.Payload.(runChangedPayload); ok &&
-				p.Type == "run.changed" && p.RepoID == x.repo.ID {
+				p.Type == "run.changed" && p.RepoID == x.repo.ID && p.RunID == runID {
 				return
 			}
 		}

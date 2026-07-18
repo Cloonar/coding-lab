@@ -71,6 +71,42 @@ export function groupMessages(messages: ChatMessage[]): RenderItem[] {
   return items;
 }
 
+/**
+ * Reconcile a fresh groupMessages() result against the previous one (issue
+ * #175). groupMessages builds new wrapper objects on every call, so even
+ * messages whose identity survived chatStream's hash merge would re-key
+ * Solid's reference-keyed <For> and tear the settled DOM down on every SSE
+ * tick. A prev item is reused when it is EQUIVALENT: a message wrapper
+ * carrying the SAME message reference, or a group with the same key, the same
+ * items length, and every items[i] reference-equal (the count/error/running
+ * rollups derive from those same members, so they cannot differ). Matching is
+ * keyed (message seq / group key), not positional, so a prepend ("Load
+ * earlier") still reuses the untouched tail. When every position reuses
+ * prev's item and the lengths match, the PREV ARRAY itself is returned, so a
+ * no-op regroup propagates nothing.
+ */
+export function reconcileRenderItems(prev: RenderItem[], next: RenderItem[]): RenderItem[] {
+  const prevMessages = new Map<number, Extract<RenderItem, { kind: 'message' }>>();
+  const prevGroups = new Map<number, ToolGroup>();
+  for (const item of prev) {
+    if (item.kind === 'message') prevMessages.set(item.message.seq, item);
+    else prevGroups.set(item.key, item);
+  }
+  const out = next.map((item): RenderItem => {
+    if (item.kind === 'message') {
+      const p = prevMessages.get(item.message.seq);
+      return p !== undefined && p.message === item.message ? p : item;
+    }
+    const p = prevGroups.get(item.key);
+    return p !== undefined &&
+      p.items.length === item.items.length &&
+      item.items.every((m, i) => p.items[i] === m)
+      ? p
+      : item;
+  });
+  return out.length === prev.length && out.every((item, i) => item === prev[i]) ? prev : out;
+}
+
 /** The collapsed summary line: "N tool calls[ · M failed][ · running…]". */
 export function toolGroupSummary(group: ToolGroup): {
   label: string;

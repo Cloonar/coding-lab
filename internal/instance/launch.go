@@ -259,7 +259,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		s.log.Warn("stamping repo opened", "component", "instance", "repo", repo.ID, "err", err)
 	}
 	s.ArmCapture(created)
-	s.publishRunChanged(repo.ID)
+	s.publishRunChanged(repo.ID, created.ID)
 	return created, nil
 }
 

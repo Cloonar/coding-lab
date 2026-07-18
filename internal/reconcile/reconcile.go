@@ -64,9 +64,16 @@ const (
 	deadSessionTick = 30 * time.Second
 )
 
+// repoScopedPayload deliberately mirrors its siblings in instance/afk/pull
+// key-for-key (brief §8.1 — duplicated per package by design). RunID names
+// the one run a run.changed concerns (issue #175) — the dead-session sweep
+// and startup readopt end one specific run per publish; it stays empty
+// (omitted) on repo-scoped emits (a parked-branch discard, whose run — if
+// any — is incidental) and on parked.changed.
 type repoScopedPayload struct {
 	Type   string `json:"type"`
 	RepoID string `json:"repoID"`
+	RunID  string `json:"runID,omitempty"`
 }
 
 // Options configures a Service. Everything except Logger, GitEnv, ArmCapture,
@@ -171,8 +178,11 @@ func (s *Service) bareDir(repoID string) string {
 	return filepath.Join(s.reposDir, repoID+".git")
 }
 
-func (s *Service) publishRunChanged(repoID string) {
-	s.bus.Publish(events.Event{Type: EventRunChanged, Payload: repoScopedPayload{Type: EventRunChanged, RepoID: repoID}})
+// publishRunChanged emits run.changed. runID is the one run the event
+// concerns (issue #175) — "" for a repo-scoped emit, which omitempty
+// serializes back to the plain 2-field envelope.
+func (s *Service) publishRunChanged(repoID, runID string) {
+	s.bus.Publish(events.Event{Type: EventRunChanged, Payload: repoScopedPayload{Type: EventRunChanged, RepoID: repoID, RunID: runID}})
 }
 
 func (s *Service) publishParkedChanged(repoID string) {

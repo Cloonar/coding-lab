@@ -483,7 +483,7 @@ func TestSweepDeadSessions_listFailureReapsNothing(t *testing.T) {
 // uncluttered by bus plumbing.
 func TestSweepDeadSessions_publishesRunChanged(t *testing.T) {
 	f := newRecFixture(t)
-	f.activeRun("proj~dead-20260608-1530", "lab/dead-20260608-1530", nil)
+	run := f.activeRun("proj~dead-20260608-1530", "lab/dead-20260608-1530", nil)
 
 	evts, cancel := f.bus.Subscribe(t.Context())
 	defer cancel()
@@ -496,8 +496,10 @@ func TestSweepDeadSessions_publishesRunChanged(t *testing.T) {
 			t.Fatalf("event type = %q, want %q", e.Type, EventRunChanged)
 		}
 		payload, ok := e.Payload.(repoScopedPayload)
-		if !ok || payload.RepoID != f.repo.ID {
-			t.Fatalf("event payload = %+v, want repoID %s", e.Payload, f.repo.ID)
+		// The sweep ends one specific run per publish, so the envelope names it
+		// (issue #175) beside the repo scope.
+		if !ok || payload.RepoID != f.repo.ID || payload.RunID != run.ID {
+			t.Fatalf("event payload = %+v, want repoID %s runID %s", e.Payload, f.repo.ID, run.ID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for run.changed")
