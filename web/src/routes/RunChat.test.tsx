@@ -20,7 +20,8 @@
 //   and then refetches LIGHT (issue #175): tail pages only, from
 //   after=min(cursor, backpatchSeq-1), no latest-window request; other runs are
 //   ignored; run.changed for other repos — or carrying a SIBLING runID — is
-//   ignored too;
+//   ignored too; a FULL refetch absorbs a queued backpatchSeq, and a tick that
+//   leaves `working` escalates to FULL — the turn-settle self-heal (ADR-0047);
 // - a refetch tails with after=<cursor> (paginating past the window limit) so
 //   appends accumulate gap-free, and a stale in-flight response never applies
 //   over a newer one (request-token guard); unchanged content (equal
@@ -918,6 +919,99 @@ describe('RunChat', () => {
         el.textContent?.includes('all done'),
       ),
     ).toBe(node); // the SAME node object, not an equal re-render
+  });
+
+  it('a FULL refetch inside the debounce window absorbs the queued backpatchSeq (ADR-0047)', async () => {
+    // 70 hashed messages with the ONLY tool at seq 2 — after paging up, the
+    // accumulated stream reaches below what any latest window (newest 60) can
+    // re-deliver, so a discarded announcement would leave seq 2 stale forever.
+    messagesOnServer = {
+      messages: [
+        hashed({ seq: 1, kind: 'text', role: 'user', text: 'kick off' }),
+        hashed({
+          seq: 2,
+          kind: 'tool',
+          tool: { name: 'Bash', title: 'long task', status: 'running' as const },
+        }),
+        ...Array.from({ length: 68 }, (_, i) =>
+          hashed({
+            seq: i + 3,
+            kind: 'text' as const,
+            role: 'assistant' as const,
+            text: `progress ${i + 3}`,
+          }),
+        ),
+      ],
+      state: 'needs_input',
+      cursor: 70,
+      has_more: true,
+      transcript: 'available',
+    };
+    await mountChat(); // latest window seq 11..70
+    buttonByText('Load earlier')!.click();
+    await settle(); // accumulated 1..70; the seq-2 tool renders as running
+    expect(container.querySelector('.tool-summary.tool-ok')).toBeNull();
+    const before = messagesUrls().length;
+
+    // The seq-2 tool completes; the tailer announces backpatchSeq 2 — but a
+    // repo-scoped run.changed lands INSIDE the 300ms window and forces a FULL
+    // refetch. The FULL must absorb the queued seq into its tail start:
+    // backpatchSeq is a delta the server never re-sends, and seq 2 is beyond
+    // the latest window's reach.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: messagesOnServer.messages.map((m) =>
+        m.seq === 2
+          ? hashed({ ...m, tool: { ...m.tool!, status: 'ok' as const, output: 'PASS' } })
+          : m,
+      ),
+    };
+    vi.useFakeTimers();
+    emitMessagesChanged(RUN_ID, { backpatchSeq: 2 });
+    await vi.advanceTimersByTimeAsync(100); // still inside the debounce window
+    FakeEventSource.instances[0]?.emit('run.changed', { type: 'run.changed', repoID: 'repo_1' });
+    await vi.advanceTimersByTimeAsync(MESSAGES_DEBOUNCE_MS + 100);
+    vi.useRealTimers();
+    await settle();
+
+    // Tail from min(cursor 70, backpatchSeq − 1) = 1, paged past the window
+    // limit, plus the latest window — and NO third fetch (the queued light
+    // flush was superseded, its seq absorbed rather than re-scheduled).
+    const urls = messagesUrls().slice(before);
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toContain('after=1&');
+    expect(urls[1]).toContain('after=61&');
+    expect(urls[2]).not.toContain('after=');
+    expect(container.querySelector('.tool-summary.tool-ok')).not.toBeNull();
+  });
+
+  it('escalates to a FULL refetch when the envelope state leaves working (ADR-0047)', async () => {
+    await mountChat(); // hashed fixture: the seq-3 tool is status ok
+    // Mid-turn tick: the light path, no latest-window request.
+    await emitMessagesChangedSettled(RUN_ID, { state: 'working' });
+    let urls = messagesUrls();
+    expect(urls[urls.length - 1]).toContain('after=4&');
+    const before = urls.length;
+
+    // The seq-3 flip's announcement is LOST — the bus drops events for slow
+    // subscribers, and a dropped backpatchSeq is never re-sent. The server
+    // mutated; no tick names the seq.
+    messagesOnServer = {
+      ...messagesOnServer,
+      messages: messagesOnServer.messages.map((m) =>
+        m.seq === 3 ? hashed({ ...m, tool: { ...m.tool!, status: 'error' as const } }) : m,
+      ),
+    };
+
+    // The settle tick (working → needs_input) must escalate to FULL — the
+    // latest-window re-read is the turn-cadence self-heal for whatever the
+    // lost announcements failed to name.
+    await emitMessagesChangedSettled(RUN_ID, { state: 'needs_input' });
+
+    urls = messagesUrls().slice(before);
+    expect(urls.some((u) => !u.includes('after='))).toBe(true);
+    expect(container.querySelector('.tool-summary.tool-error')).not.toBeNull();
+    expect(container.querySelector('.tool-summary.tool-ok')).toBeNull();
   });
 
   it('ignores run.changed carrying a SIBLING runID; a repo-scoped one still refetches (issue #175)', async () => {

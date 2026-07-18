@@ -156,11 +156,14 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		// the backpatch detector (issue #175). Owned by this one goroutine and
 		// dying with it, like the notify gate: a re-armed tailer starts with no
 		// baseline and its first tick simply reports no backpatch. Replaced
-		// after every successful read — even when the publish gate doesn't fire
-		// (a read without a publish only happens on a sig-only flip, whose
-		// content is unchanged, so nothing is lost) — and reset to nil on a
-		// rotation BEFORE comparing, so a fresh transcript's restarted seqs
-		// never read as back-patches of the old file's.
+		// after every successful read — safe only because the publish gate
+		// below fires whenever the diff found a backpatch: the read races the
+		// agent's writer, so even a sig-only tick can observe content the stat
+		// never announced, and a baseline advanced past an unpublished change
+		// would silence that seq forever (backpatchSeq is a delta — no later
+		// tick re-derives it). Reset to nil on a rotation BEFORE comparing, so
+		// a fresh transcript's restarted seqs never read as back-patches of
+		// the old file's.
 		baseline map[int64]string
 	)
 	// Seed from the last-known persisted path (a re-adopted run already has one)
@@ -238,7 +241,13 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 				if gate != nil {
 					gate.observe(lastState, chat)
 				}
-				if first || transcriptChanged || chat.State != lastState {
+				// The backpatch leg matters even though stat and state legs look
+				// exhaustive: the ReadChat above is not synchronized with the
+				// agent's writer, so a tick whose read gate opened on a spool
+				// sig flip alone can still read a mid-tick mutation the stat
+				// predates. Skipping the publish would strand it — the baseline
+				// advances regardless, so no future tick names this seq again.
+				if first || transcriptChanged || chat.State != lastState || backpatch != 0 {
 					s.publishMessagesChanged(run, chat.State, backpatch)
 				}
 				first, lastSig, lastState = false, sig, chat.State

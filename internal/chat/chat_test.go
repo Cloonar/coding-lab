@@ -799,6 +799,52 @@ func TestTailer_backpatchSeq(t *testing.T) {
 	}
 }
 
+// A sig-only tick can still observe a back-patch: the read races the agent's
+// writer, so content can change between a tick's stat (unchanged) and its
+// ReadChat. The publish gate must fire on the backpatch alone — the baseline
+// advances after every successful read, so a swallowed announcement is never
+// re-derived and the seq would stay stale on every client until navigation
+// (ADR-0047's delta-loss leg).
+func TestTailer_publishesBackpatchOnSigOnlyTick(t *testing.T) {
+	svc, st, fake, bus := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	path := t.TempDir() + "/t.jsonl"
+	writeFile(t, path, "{}") // frozen: the stat never changes again
+	fake.SetTranscriptPath(path)
+	fake.SetChat(backpatchMessages(false, 0))
+
+	sub, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go svc.Run(ctx)
+
+	// Baseline tick: seq 1..2 read, the seq-2 tool still running.
+	p, ok := drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no initial run.messages.changed")
+	}
+	if p.BackpatchSeq != 0 {
+		t.Errorf("first-tick BackpatchSeq = %d; want 0 (no baseline yet)", p.BackpatchSeq)
+	}
+
+	// The seq-2 tool flips running→ok while the transcript file stays frozen
+	// (same stat) and the state stays working: only the spool signature flips,
+	// so the read gate opens while the stat and state legs of the publish gate
+	// are both closed. Chat is set BEFORE the sig (the read trigger), so the
+	// tailer can never read an intermediate mix.
+	fake.SetChat(backpatchMessages(true, 0))
+	fake.SetSpoolSig("dialogs/run1.json:1:200;")
+
+	p, ok = drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no run.messages.changed on the sig-only backpatch tick")
+	}
+	if p.RunID != run.ID || p.BackpatchSeq != 2 {
+		t.Errorf("sig-only tick payload = %+v; want runID %s with BackpatchSeq 2 (the flipped tool's seq)", p, run.ID)
+	}
+}
+
 func TestTailerSet_removeIsGenerationAware(t *testing.T) {
 	ts := newTailerSet()
 	h1 := &tailerHandle{cancel: func() {}}

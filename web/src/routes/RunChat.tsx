@@ -390,11 +390,15 @@ function RunChatView() {
   // The run.messages.changed trailing debounce (issue #175): the pending
   // flush accumulates the MINIMUM backpatchSeq announced across the burst —
   // the lowest seq whose content changed — so one light refetch covers every
-  // mutation the burst named. Cleared by any full refetch (which supersedes a
-  // queued light one — that covers route change, rotation, resync,
-  // run.changed and the POST callbacks) and on unmount.
+  // mutation the burst named. A full refetch supersedes a queued light one
+  // (route change, rotation, resync, run.changed and the POST callbacks all
+  // route there) but ABSORBS the queued seq into its own tail start rather
+  // than discarding it — backpatchSeq is a delta the server never re-sends
+  // (ADR-0047). lastTickState tracks the envelope state across ticks for the
+  // turn-settle escalation below.
   let messagesDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingBackpatchSeq: number | undefined;
+  let lastTickState: string | undefined;
   const clearMessagesDebounce = () => {
     clearTimeout(messagesDebounceTimer);
     messagesDebounceTimer = undefined;
@@ -474,13 +478,17 @@ function RunChatView() {
   // transcript rotation, resync, run.changed, and the send/answer/interrupt
   // callbacks.
   const refetchMessages = async () => {
-    // A full refetch supersedes a queued light one: drop the pending debounce
-    // so the burst doesn't schedule a redundant tail fetch behind this.
+    // A full refetch supersedes a queued light one — absorbing, never
+    // discarding, its queued backpatchSeq: the latest window below only
+    // reaches the newest 60 messages, so dropping a deeper announced seq
+    // would leave it stale until navigation (ADR-0047).
+    const pendingSeq = pendingBackpatchSeq;
     clearMessagesDebounce();
     const token = ++fetchToken;
     const cursor = maxSeq(messages());
+    const start = pendingSeq === undefined ? cursor : Math.min(cursor, pendingSeq - 1);
     try {
-      const paged = await fetchTail(cursor, token);
+      const paged = await fetchTail(start, token);
       if (paged === null) return;
       const latest = await getRunMessages(params.id, { limit: MESSAGE_LIMIT });
       if (token !== fetchToken) return;
@@ -582,6 +590,9 @@ function RunChatView() {
     setPanelSel(null);
     setOpenGroups(new Set<number>());
     setOpenTools(new Set<number>());
+    // The settle-escalation tracker is stream state too: run A's `working`
+    // must not read as a turn ending on run B's first tick.
+    lastTickState = undefined;
   };
 
   // All chat state is keyed to the route param: navigating /runs/A → /runs/B
@@ -628,7 +639,9 @@ function RunChatView() {
   // The tailer's envelope (this run only) coalesces on a trailing debounce
   // (issue #175): while an agent streams it fires ~1/s, and refetching per
   // event rebuilt the view every second. The flush takes the LIGHT path with
-  // the burst's minimum backpatchSeq. run.changed (outcome flips → composer
+  // the burst's minimum backpatchSeq; a tick that leaves `working` skips the
+  // wait and escalates to FULL — the turn-settle self-heal (ADR-0047).
+  // run.changed (outcome flips → composer
   // state) refetches FULL: it carries runID when the event concerns exactly
   // one run — a sibling run's flip is ignored — and an event WITHOUT runID
   // stays a conservative repo-filtered refetch (stop-all, AFK reaper, CR
@@ -644,6 +657,21 @@ function RunChatView() {
           pendingBackpatchSeq === undefined
             ? event.backpatchSeq
             : Math.min(pendingBackpatchSeq, event.backpatchSeq);
+      }
+      // Turn-settle escalation (ADR-0047): the bus drops events for slow
+      // subscribers and a dropped backpatchSeq is never re-sent, so a tick
+      // that LEAVES `working` escalates to one FULL refetch — the
+      // latest-window re-read the per-tick loop no longer does — repairing
+      // whatever a lost announcement failed to name, at turn cadence instead
+      // of tick cadence. Accumulate-then-escalate order matters: the FULL
+      // absorbs the seq queued above, so an announcement riding this very
+      // tick survives the escalation too.
+      const settled =
+        lastTickState === 'working' && typeof event.state === 'string' && event.state !== 'working';
+      if (typeof event.state === 'string') lastTickState = event.state;
+      if (settled) {
+        void refetchMessages();
+        return;
       }
       clearTimeout(messagesDebounceTimer);
       messagesDebounceTimer = setTimeout(() => {

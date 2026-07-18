@@ -23,8 +23,14 @@ The decisions, pinned:
   when an already-served message mutated). `run.changed` grows `runID`
   (omitempty), present when the event concerns exactly one run. No payload
   carries message content, titles, or anything a client could render without a
-  fetch — the API remains the single source of truth, a dropped event still
-  costs staleness-until-next-event, never wrongness. Anything bigger than a
+  fetch — the API remains the single source of truth. The two scalars differ
+  in loss behavior, and the protocol accounts for it: `state` is a level (the
+  next event re-carries the current value), so a dropped event costs
+  staleness-until-next-event, never wrongness; `backpatchSeq` is a delta
+  against a baseline that advances with every read, so a lost announcement is
+  never re-sent — which is why a non-zero backpatch forces a publish, a full
+  refetch absorbs a queued one, and leaving `working` re-reads the latest
+  window (the turn-settle self-heal, both below). Anything bigger than a
   scalar hint remains a refetchable resource.
 
 - **Steady streaming costs one small tail fetch per event burst — the
@@ -37,14 +43,25 @@ The decisions, pinned:
   endpoint already returns everything newer than `after`. Explicit actions
   (send, answer, interrupt), `resync`, rotation, and `run.changed` keep the
   full tail+latest protocol: they are rare, human-paced, and some of them
-  (reconnect) genuinely cannot trust a cursor-relative signal.
+  (reconnect) genuinely cannot trust a cursor-relative signal. A full refetch
+  landing inside the debounce window ABSORBS the queued `backpatchSeq` into
+  its own tail start instead of discarding it. And a tick whose `state` leaves
+  `working` escalates to the full protocol immediately — the turn-settle
+  self-heal: the event bus drops events for slow subscribers by design, so a
+  turn's lost announcements are repaired by one latest-window re-read at the
+  turn boundary — pre-#175 healing coverage at turn cadence instead of tick
+  cadence.
 
 - **`backpatchSeq` is computed where the change is observed: the tailer.** The
   per-run tailer goroutine keeps the previous successful read's per-seq hashes
   (in memory, dying with the goroutine) and publishes the lowest seq whose hash
   changed. A rotation resets the baseline and publishes no `backpatchSeq` — the
   client's `transcript_id` reset already owns that case. First tick likewise.
-  The publish gate itself is unchanged.
+  The publish gate gains one leg: a non-zero backpatch forces a publish even
+  when stat and state saw nothing, because the read races the agent's writer —
+  a tick whose read gate opened on a spool-sig flip alone can still observe a
+  mid-tick mutation the stat predates — and the baseline advances with every
+  read, so an unpublished backpatch would be silenced forever.
 
 - **Message identity is a server-computed content hash, not client deep
   equality.** Every served message carries `content_hash`: FNV-64a (the
