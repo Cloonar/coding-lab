@@ -628,6 +628,31 @@ describe('ToolPanel drag-to-dismiss (mobile sheet)', () => {
     expect(scrim()?.style.opacity).toBe('');
   });
 
+  it('recovers when the touched node detaches mid-drag (unheard touchend)', () => {
+    const { onClose } = mountPanel({ target: groupTarget(), desktop: false });
+    const el = aside()!;
+    stubHeight(el, 400);
+
+    // A claimed drag whose finger went down on a node that a re-render then
+    // detached (streaming tool output): the touchend dispatches on the
+    // detached node and never bubbles to the sheet — the tracked id and the
+    // drag styles are left pinned. Simulated by simply never delivering it.
+    el.dispatchEvent(touchEvent('touchstart', { x: 50, y: 100 }, { t: 0, target: el }));
+    el.dispatchEvent(touchEvent('touchmove', { x: 50, y: 250 }, { t: 50, target: el }));
+    expect(hasDragging(el)).toBe(true);
+
+    // The next touch self-heals at touchstart (the helper's fixed identifier
+    // exercises the identifier-reuse branch), clearing the pinned styles…
+    el.dispatchEvent(touchEvent('touchstart', { x: 50, y: 100 }, { t: 1000, target: el }));
+    expect(hasDragging(el)).toBe(false);
+    expect(el.style.transform).toBe('');
+
+    // …and the fresh sequence works end-to-end: past half-height dismisses.
+    el.dispatchEvent(touchEvent('touchmove', { x: 50, y: 400 }, { t: 1050, target: el }));
+    el.dispatchEvent(touchEvent('touchend', { x: 50, y: 400 }, { t: 1500, target: el }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it('touchstart on the sheet does not reach a window-level listener', () => {
     mountPanel({ target: groupTarget(), desktop: false });
     const el = aside()!;

@@ -209,6 +209,19 @@ function ShellFrame(props: ParentProps) {
 
   const onTouchStart = (e: TouchEvent): void => {
     if (window.innerWidth >= DESKTOP_MIN_PX) return;
+    // Self-heal a leaked sequence: touch events fire at the element the finger
+    // went DOWN on, so when a re-render (SSE-driven chat/rail updates) detaches
+    // that node mid-touch, its touchend/touchcancel dispatch on the detached
+    // node and never bubble to window — the tracked id would pin forever, and a
+    // claimed drag would pin the scrim over the whole viewport. The tracked
+    // finger is gone if e.touches (every finger currently down) no longer holds
+    // it, or if it re-appears in changedTouches (a finger can't go down twice —
+    // Android reuses identifiers, so "our" id starting again means the old
+    // sequence ended unheard). Either way: settle as cancelled, start fresh.
+    if (activeTouchId !== null && (findActive(e.changedTouches) || !findActive(e.touches))) {
+      activeTouchId = null;
+      settle(gesture.cancel());
+    }
     if (activeTouchId !== null) return; // extra fingers ignored; first touch keeps tracking
     if (e.touches.length !== 1) return; // multi-touch: ignore, as before
     const t = e.changedTouches[0]!;
@@ -252,15 +265,25 @@ function ShellFrame(props: ParentProps) {
     activeTouchId = null;
     settle(gesture.cancel());
   };
+  // iOS can background the PWA mid-touch (app switcher, notification pull)
+  // without delivering a touchcancel; reset on hide so a drag can't outlive
+  // the touch — otherwise the first tap after returning only self-heals.
+  const onVisibilityHidden = (): void => {
+    if (document.visibilityState !== 'hidden' || activeTouchId === null) return;
+    activeTouchId = null;
+    settle(gesture.cancel());
+  };
   window.addEventListener('touchstart', onTouchStart, { passive: true });
   window.addEventListener('touchmove', onTouchMove, { passive: false });
   window.addEventListener('touchend', onTouchEnd, { passive: true });
   window.addEventListener('touchcancel', onTouchCancel, { passive: true });
+  document.addEventListener('visibilitychange', onVisibilityHidden);
   onCleanup(() => {
     window.removeEventListener('touchstart', onTouchStart);
     window.removeEventListener('touchmove', onTouchMove);
     window.removeEventListener('touchend', onTouchEnd);
     window.removeEventListener('touchcancel', onTouchCancel);
+    document.removeEventListener('visibilitychange', onVisibilityHidden);
   });
 
   return (
