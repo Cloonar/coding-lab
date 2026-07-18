@@ -250,6 +250,12 @@ func (s *scanner) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
 	return s.inner.Pulls(ctx)
 }
 
+func (s *scanner) PullsForHead(ctx context.Context, head, base string) ([]tracker.PullRef, error) {
+	// A read; head/base are server-derived branch names and a PullRef carries
+	// no body — nothing to scan (CreatePull's head/base rationale).
+	return s.inner.PullsForHead(ctx, head, base)
+}
+
 func (s *scanner) Pull(ctx context.Context, number int) (tracker.PullDetail, error) {
 	return s.inner.Pull(ctx, number)
 }

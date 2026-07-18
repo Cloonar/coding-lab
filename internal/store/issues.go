@@ -238,6 +238,58 @@ func (s *Store) IssuesByRepo(ctx context.Context, repoID, state string) ([]Issue
 	return issues, nil
 }
 
+// RecentClosedIssuesByRepo lists the repo's `limit` most recently closed
+// issues, newest number first, in the same list shape as IssuesByRepo (label
+// names and comment count loaded, comments not). Number-desc approximates
+// close recency in this monotonically numbered store: numbers only grow, so
+// a higher-numbered closed issue is usually the more recently closed one (a
+// reopened-then-reclosed old issue sorts by its number, an accepted
+// approximation) — the same recency-window semantic the forge backends
+// answer with their recentupdate/updated-desc sorts (issue #176). The
+// builtin tracker's closed/all Issues views compose this window onto the
+// open set for contract uniformity with the forge backends; the local store
+// itself is cheap, so the bound is about the seam contract, not perf.
+func (s *Store) RecentClosedIssuesByRepo(ctx context.Context, repoID string, limit int) ([]Issue, error) {
+	query := `SELECT ` + issueColumns + `,
+		(SELECT COUNT(*) FROM issue_comments c WHERE c.issue_id = i.id) AS comment_count
+		FROM issues i WHERE i.repo_id = ? AND i.state = ?
+		ORDER BY i.number DESC LIMIT ?`
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), repoID, IssueStateClosed, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent closed issues by repo %q: %w", repoID, err)
+	}
+	issues := make([]Issue, 0)
+	for rows.Next() {
+		is, cc, err := scanIssueWithCount(rows.Scan)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("recent closed issues by repo %q: %w", repoID, err)
+		}
+		is.CommentCount = cc
+		is.Labels = []string{}
+		issues = append(issues, is)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("recent closed issues by repo %q: %w", repoID, err)
+	}
+	// Close before the label query: the sqlite store holds a single connection
+	// (design §3a), so a second query must not run while these rows are open.
+	_ = rows.Close()
+
+	byID, err := s.labelNamesByIssue(ctx, repoID)
+	if err != nil {
+		return nil, fmt.Errorf("recent closed issues by repo %q: %w", repoID, err)
+	}
+	for i := range issues {
+		if names := byID[issues[i].ID]; names != nil {
+			issues[i].Labels = names
+		}
+	}
+	return issues, nil
+}
+
 // IssueByRepoNumber returns one issue with its label names and full comment
 // list (the detail view). ErrNotFound when no such (repo, number) exists.
 func (s *Store) IssueByRepoNumber(ctx context.Context, repoID string, number int) (Issue, error) {

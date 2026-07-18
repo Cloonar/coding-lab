@@ -190,6 +190,18 @@ func (f *fakeForge) Pulls(context.Context) ([]tracker.PullRef, error) {
 	}
 	return f.pulls, nil
 }
+
+// PullsForHead filters the scripted pulls by head; the rows carry no base, so
+// base always matches.
+func (f *fakeForge) PullsForHead(_ context.Context, head, _ string) ([]tracker.PullRef, error) {
+	out := make([]tracker.PullRef, 0, len(f.pulls))
+	for _, p := range f.pulls {
+		if p.HeadBranch == head {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
 func (f *fakeForge) Pull(_ context.Context, number int) (tracker.PullDetail, error) {
 	if f.pullDetail != nil && f.pullDetail.Number == number {
 		return *f.pullDetail, nil
@@ -823,7 +835,10 @@ func TestPRViewOutput(t *testing.T) {
 }
 
 // TestPRListOutput pins the one-row-per-PR list: number, state, head, url —
-// across all states, tab-separated like every labctl list.
+// tab-separated like every labctl list. The rows are whatever Pulls()
+// answers (since issue #176: the open set plus the recent-closed window; the
+// bound lives in the tracker backends, so the fake's rows render verbatim) —
+// the row format is agent-parsed API surface and must not change.
 func TestPRListOutput(t *testing.T) {
 	fk := &fakeForge{pulls: []tracker.PullRef{
 		{Number: 12, HeadBranch: "afk/7", State: tracker.PullOpen, URL: "https://forge.example/pr/12"},

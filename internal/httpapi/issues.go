@@ -288,7 +288,11 @@ func filterTrackerIssuesByLabel(issues []tracker.Issue, label string) []tracker.
 // handleIssueList is GET /api/v1/repos/{id}/issues?state=open|closed|all&label=<name>.
 // Builtin repos read the store (real comment counts); forge repos proxy the
 // REST client with the label filter applied client-side. state defaults to
-// open (the list view).
+// open (the list view). On a forge binding the closed and all views carry
+// the tracker's bounded recent window — the full open set plus the
+// tracker.RecentClosedWindow most recently updated closed issues, not full
+// closed history (issue #176); the builtin path reads the store directly
+// and stays unbounded, a local read being cheap.
 func (s *Server) handleIssueList(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {

@@ -168,7 +168,8 @@ func (c *Client) PRChecks(n int) (PRChecksReport, error) {
 	return rep, err
 }
 
-// PRList lists the repo's PRs across all states.
+// PRList lists the repo's PRs: every open one plus the recent-closed window
+// (~50 newest-closed — the tracker's bounded list view, issue #176).
 func (c *Client) PRList() ([]PRRef, error) {
 	var resp struct {
 		PRs []PRRef `json:"prs"`

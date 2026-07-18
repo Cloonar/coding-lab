@@ -297,6 +297,28 @@ func (f *cycleForge) handler() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
+	// Forgejo's by-base-head lookup — the fast path behind PullsForHead, the
+	// ONE bounded request the reaper now makes per run per tick (#176).
+	// Branch names carrying '/' arrive %2F-escaped as a single segment;
+	// ServeMux matches the escaped path and unescapes the wildcard values.
+	// No matching pull is Forgejo's 404, which the real client reads as "no
+	// pull" (empty result), never as an error.
+	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{base}/{head}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		base, head := r.PathValue("base"), r.PathValue("head")
+		for i := len(st.pulls) - 1; i >= 0; i-- {
+			if p := st.pulls[i]; p.Head == head && p.Base == base {
+				writeJSON(w, http.StatusOK, f.pullJSON(r.PathValue("owner"), r.PathValue("repo"), p))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
 	mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()

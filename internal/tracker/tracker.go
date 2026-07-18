@@ -89,6 +89,18 @@ const (
 	StateAll    = "all"
 )
 
+// RecentClosedWindow is the number of most-recently-closed items a bounded
+// listing carries beyond the full open set: Pulls() and the Issues()
+// closed/all views return the complete OPEN set (capped by the working set,
+// which stays small) plus at most this many recently closed items. The window
+// exists to bound forge round-trips (issue #176): a full-history state=all
+// walk costs O(every item the repo ever had) requests per call — measured
+// 6.7s for ~174 PRs on the live forge, growing forever — for list views whose
+// consumers only ever need the working set plus a recency view. 50 is one
+// page on either forge flavor (Forgejo's limit, GitHub's per_page), so the
+// window always costs exactly ONE extra request.
+const RecentClosedWindow = 50
+
 // ReadyLabel is the queue label ReadyIssues filters on: an open issue carrying
 // it is fully specified and waiting for an AFK agent. lab never writes it — an
 // AFK run's claim is its local afk/<N> branch, not a tracker label (ADR-0013),
@@ -212,8 +224,13 @@ type Tracker interface {
 	// scheduler claims the lowest-numbered issue from. Comments are not loaded.
 	ReadyIssues(ctx context.Context) ([]Issue, error)
 
-	// Issues lists issues by state (StateOpen|StateClosed|StateAll). Open
-	// issues in the list view carry no comments (a list is not a thread read).
+	// Issues lists issues by state (StateOpen|StateClosed|StateAll). The open
+	// view is the full open set; the closed and all views carry a BOUNDED
+	// recent window — the RecentClosedWindow most recently updated closed
+	// issues — instead of the full closed history (issue #176), with the all
+	// view listing the open set first (the states are disjoint, so no
+	// dedupe). Issues in the list view carry no comments (a list is not a
+	// thread read); Issue(n) remains the unbounded-by-number single read.
 	Issues(ctx context.Context, state string) ([]Issue, error)
 
 	// Issue returns one issue in full, including its comment thread.
@@ -222,11 +239,54 @@ type Tracker interface {
 	// CreateComment posts a comment on an issue.
 	CreateComment(ctx context.Context, number int, body string) error
 
-	// Pulls lists every pull request / change request on the repo across ALL
-	// states, so the reaper can match a run's head branch client-side. Listing
-	// only open PRs silently breaks the M5 done-signal (a merged afk/<N> PR is
-	// no longer open) — all states is required.
+	// Pulls lists the repo's pull/change requests as a BOUNDED view: all OPEN
+	// pulls, plus the RecentClosedWindow most recently closed (merged or not)
+	// pulls — the open set first in the backend's native list order, then the
+	// recent-closed window newest-closed-first. This is the operator/agent
+	// list view (labctl pr list), bounded by design (issue #176): the open
+	// set is capped by the working set while closed/merged history grows
+	// forever, so listing every PR across all states cost O(history) requests
+	// per call. The reaper's done-signal no longer reads through this method
+	// — it reads PullsForHead, which inherited the old "state=all is required
+	// for the done-signal" rationale — and a merged run PR still appears here
+	// while recent; Pull(n) (labctl pr view) remains the unbounded-by-number
+	// single read for anything older.
 	Pulls(ctx context.Context) ([]PullRef, error)
+
+	// PullsForHead lists the pull/change requests whose head branch is head
+	// AND base branch is base, across ALL states, with a request count
+	// bounded independent of repo history (issue #176): the reaper's
+	// done-signal question — "does an open-or-merged PR exist for this run's
+	// branch?" — must not cost O(every PR the repo ever had) per tick, which
+	// is what answering it through the old full-history Pulls() walk did
+	// (Pulls itself is a bounded open+recent-closed view now, and its closed
+	// window may age a run's merged PR out — this method is the read that
+	// never does). This method only ENUMERATES
+	// candidates; callers project the winner with the existing pure functions
+	// (DonePull / PullState), so a head-reuse collision may legally return
+	// several refs. Semantic pins:
+	//
+	//   - No match is ([]PullRef{}, nil) — an empty non-nil slice, success,
+	//     the seam's "empty result is success" convention.
+	//   - Every returned ref's HeadBranch equals the queried head VERBATIM.
+	//     Forgejo renders a merged pull whose head branch was since deleted
+	//     with a synthetic head.ref of refs/pull/N/head (verified live on
+	//     lab's forge); the by-name query key is authoritative, so a backend
+	//     fills HeadBranch from the queried branch, never a rendered ref.
+	//   - A backend that can only resolve ONE candidate cheaply must never
+	//     answer a closed-unmerged pull while an open or merged sibling
+	//     exists on the same head+base: closed-unmerged is the one state the
+	//     done-signal reads as absence (DonePull's floor), so a shadowed
+	//     live pull would falsely fail a run. The forgejo client handles
+	//     this with a rare-case fallback walk.
+	//   - The contract covers LIVE head branches only: the reaper queries
+	//     branches of ACTIVE runs (the branch outlives the run), so a
+	//     merged-and-since-deleted branch is not required to be findable —
+	//     backends may still find one, but callers must not rely on it.
+	//   - A pull from head onto a DIFFERENT base does not match: the read is
+	//     base-scoped by design — the reaper passes the repo default branch,
+	//     the base the agent API pins for every lab-created PR.
+	PullsForHead(ctx context.Context, head, base string) ([]PullRef, error)
 
 	// Pull returns one pull request / change request in full detail,
 	// including its body — the agent read surface behind labctl pr view. An

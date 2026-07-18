@@ -847,8 +847,12 @@ func (s *Server) handlePRChecks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePRList is GET /agent/v1/prs: the repo's PRs/CRs across ALL states —
-// what `labctl pr list` renders (the reader counterpart to POST /prs).
+// handlePRList is GET /agent/v1/prs: the repo's PRs/CRs as the tracker's
+// bounded list view — every OPEN one plus the tracker.RecentClosedWindow
+// most recently closed (issue #176), open first — what `labctl pr list`
+// renders (the reader counterpart to POST /prs). The handler maps 1:1 over
+// Pulls(); the bound lives in the backends, so a merged run PR still shows
+// while recent and `labctl pr view <n>` reads anything older by number.
 func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 	_, repo, ok := s.runRepo(w, r)
 	if !ok {

@@ -52,11 +52,15 @@ func (s *Service) ReapOnce(ctx context.Context, now time.Time) {
 
 // reapActiveRuns classifies the persisted active AFK runs (D12a/b: the runs
 // table IS the budget clock — no in-memory stamps, so a restart never resets
-// a budget). Each repo's pulls are fetched once per tick, UNLOCKED (the slow
-// part); the per-run decision is remade under runsMu from a fresh row read
-// and fresh liveness — never from this loop's snapshot. A repo whose tracker
-// can't be read this tick is skipped (its runs are reclassified next tick;
-// NEVER classified on missing data) rather than failing the whole sweep.
+// a budget). Each run's done-signal is one bounded PullsForHead read,
+// UNLOCKED (the slow part) — O(active runs) tracker requests per tick,
+// independent of repo history (issue #176: the old once-per-repo Pulls call
+// walked the ENTIRE PR history, growing a page per 50 merged PRs); the
+// per-run decision is remade under runsMu from a fresh row read and fresh
+// liveness — never from this loop's snapshot. A run whose tracker can't be
+// read this tick is skipped (it is reclassified next tick; NEVER classified
+// on missing data) rather than failing its repo's other runs or the whole
+// sweep.
 func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 	runs, err := s.store.ActiveAFKRuns(ctx)
 	if err != nil {
@@ -89,17 +93,26 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			s.log.Warn("afk watcher: tracker", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
-		pulls, err := trk.Pulls(ctx)
-		if err != nil {
-			s.log.Warn("afk watcher: list pulls", "component", "afk", "repo", repo.Name, "err", err)
-			continue
-		}
 		for _, run := range byRepo[repoID] {
 			// The done-signal: an open or merged PR/CR whose head is the
 			// run's branch (closed-unmerged deliberately does NOT count —
-			// tracker.DonePull). Matched client-side against the one pull
-			// listing; donePull is the winning pull, meaningful only when the
-			// outcome is success (it feeds the done-signal notification).
+			// tracker.DonePull). Read as one bounded per-branch lookup, never
+			// a history walk (issue #176). Base is repo.DefaultBranch because
+			// that is the base the agent API pins for EVERY lab-created PR
+			// (agentapi handlePRCreate: head is always the run's branch, base
+			// the repo's default branch — the caller names neither).
+			pulls, err := trk.PullsForHead(ctx, run.Branch, repo.DefaultBranch)
+			if err != nil {
+				// Per-run isolation (tighter than the old per-repo skip): a
+				// run whose tracker can't be read this tick is never
+				// classified on missing data — it is reclassified next tick.
+				// Only this run waits; its repo's other runs still get their
+				// own reads this tick.
+				s.log.Warn("afk watcher: pulls for head", "component", "afk", "repo", repo.Name, "session", run.SessionName, "err", err)
+				continue
+			}
+			// donePull is the winning pull, meaningful only when the outcome
+			// is success (it feeds the done-signal notification).
 			donePull, prPresent := tracker.DonePull(pulls, run.Branch)
 			outcome, alive, claimed := s.classifyAndClaim(ctx, run, prPresent, now)
 			if claimed {

@@ -120,17 +120,28 @@ func TestBuiltin_IssuesByState(t *testing.T) {
 	if len(open) != 1 || open[0].Number != 1 || open[0].State != tracker.StateOpen {
 		t.Errorf("open issues = %+v, want only #1 open", open)
 	}
+	closed, err := tr.Issues(ctx, tracker.StateClosed)
+	if err != nil {
+		t.Fatalf("Issues closed: %v", err)
+	}
+	if len(closed) != 1 || closed[0].Number != 2 || closed[0].State != tracker.StateClosed {
+		t.Errorf("closed issues = %+v, want only #2 closed (the recent-closed window)", closed)
+	}
+	// all = open set first, then the recent-closed window (issue #176).
 	all, err := tr.Issues(ctx, tracker.StateAll)
 	if err != nil {
 		t.Fatalf("Issues all: %v", err)
 	}
-	if len(all) != 2 {
-		t.Errorf("all issues = %d, want 2", len(all))
+	if len(all) != 2 || all[0].Number != 1 || all[1].Number != 2 {
+		t.Errorf("all issues = %+v, want [#1 open, #2 closed] open-first", all)
 	}
 	for _, is := range all {
 		if is.Comments != nil {
 			t.Errorf("list view issue #%d carried comments, want nil", is.Number)
 		}
+	}
+	if _, err := tr.Issues(ctx, "bogus"); err == nil {
+		t.Error("Issues(bogus) err = nil, want the invalid-filter error")
 	}
 }
 
@@ -333,10 +344,12 @@ func TestBuiltin_EditIssue(t *testing.T) {
 	}
 }
 
-// TestBuiltin_Pulls_stateMappingAndPRPresent pins the builtin done-signal
-// (M6): Pulls returns every CR across ALL states mapped onto the tracker's PR
-// vocabulary, and tracker.PRPresent over that result treats open|merged as
-// done and closed-unmerged (or absent) as no PR — identical to a forge repo.
+// TestBuiltin_Pulls_stateMappingAndPRPresent pins the bounded list view
+// (issue #176): Pulls returns the open CRs plus the recent-closed window
+// (which covers every closed CR here) mapped onto the tracker's PR
+// vocabulary, open set first, and tracker.PRPresent over that result treats
+// open|merged as done and closed-unmerged (or absent) as no PR — identical
+// to a forge repo. (The reaper's own done-signal reads PullsForHead.)
 func TestBuiltin_Pulls_stateMappingAndPRPresent(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
@@ -365,7 +378,13 @@ func TestBuiltin_Pulls_stateMappingAndPRPresent(t *testing.T) {
 		t.Fatalf("Pulls: %v", err)
 	}
 	if len(pulls) != 3 {
-		t.Fatalf("Pulls = %d refs, want 3 (all states)", len(pulls))
+		t.Fatalf("Pulls = %d refs, want 3 (open + the recent-closed window covers all of them)", len(pulls))
+	}
+	// Bounded-view order (issue #176): the open set first, then the
+	// recent-closed window newest number first.
+	if pulls[0].Number != 1 || pulls[1].Number != 3 || pulls[2].Number != 2 {
+		t.Errorf("Pulls order = [#%d #%d #%d], want [#1 open, #3, #2] (open first, then closed newest-first)",
+			pulls[0].Number, pulls[1].Number, pulls[2].Number)
 	}
 	byNumber := map[int]tracker.PullRef{}
 	for _, p := range pulls {
@@ -396,6 +415,137 @@ func TestBuiltin_Pulls_stateMappingAndPRPresent(t *testing.T) {
 		if got := tracker.PRPresent(pulls, head); got != want {
 			t.Errorf("PRPresent(%q) = %v, want %v", head, got, want)
 		}
+	}
+}
+
+// TestBuiltin_Pulls_windowAgesOutOldClosed pins the REAL window at the
+// tracker level (issue #176): with tracker.RecentClosedWindow+1 closed CRs,
+// Pulls returns the open set plus exactly the window — the oldest closed CR
+// (lowest number ≈ least recently closed in the monotonically numbered
+// store) ages out, while every open CR survives regardless of the window.
+func TestBuiltin_Pulls_windowAgesOutOldClosed(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	// #1..#(window+1) closed, then one open CR on top.
+	for i := 1; i <= tracker.RecentClosedWindow+1; i++ {
+		if _, err := s.CreateCR(ctx, repo.ID, fmt.Sprintf("closed %d", i), "", fmt.Sprintf("afk/%d", i), "main", nil, fixedNow); err != nil {
+			t.Fatalf("CreateCR #%d: %v", i, err)
+		}
+		if _, err := s.CloseCR(ctx, repo.ID, i, fixedNow); err != nil {
+			t.Fatalf("CloseCR #%d: %v", i, err)
+		}
+	}
+	openCR, err := s.CreateCR(ctx, repo.ID, "still open", "", "afk/open", "main", nil, fixedNow)
+	if err != nil {
+		t.Fatalf("CreateCR open: %v", err)
+	}
+
+	pulls, err := tr.Pulls(ctx)
+	if err != nil {
+		t.Fatalf("Pulls: %v", err)
+	}
+	if want := 1 + tracker.RecentClosedWindow; len(pulls) != want {
+		t.Fatalf("Pulls = %d refs, want %d (1 open + the %d-row window)", len(pulls), want, tracker.RecentClosedWindow)
+	}
+	if pulls[0].Number != openCR.Number || pulls[0].State != tracker.PullOpen {
+		t.Errorf("pulls[0] = %+v, want the open CR #%d first", pulls[0], openCR.Number)
+	}
+	// The window is newest-number-first and #1 has aged out.
+	for i, p := range pulls[1:] {
+		if want := tracker.RecentClosedWindow + 1 - i; p.Number != want {
+			t.Fatalf("window[%d] = #%d, want #%d (newest closed first)", i, p.Number, want)
+		}
+	}
+	for _, p := range pulls {
+		if p.Number == 1 {
+			t.Errorf("closed CR #1 still listed; want it aged out of the %d-row window", tracker.RecentClosedWindow)
+		}
+	}
+}
+
+// TestBuiltin_PullsForHead_doneSignalConformance is the shared done-signal
+// table (the same cases run against all three backends): PullsForHead only
+// enumerates the head+base candidates, and tracker.DonePull projects the same
+// verdict it would from a full Pulls() walk. CRs are seeded at the store
+// level (bypassing CreatePull's one-open-per-head guard) so the table can
+// carry a same-head+base collision and a same-head different-base CR.
+func TestBuiltin_PullsForHead_doneSignalConformance(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	// #1 open afk/1→main; #2 merged afk/2→main; #3 closed-unmerged afk/3→main;
+	// #4 open afk/1→dev (same head, other base); #5 closed + #6 open afk/5→main
+	// (head-reuse collision).
+	seedCR := func(title, head, base string) store.CR {
+		t.Helper()
+		cr, err := s.CreateCR(ctx, repo.ID, title, "", head, base, nil, fixedNow)
+		if err != nil {
+			t.Fatalf("CreateCR %s: %v", title, err)
+		}
+		return cr
+	}
+	seedCR("open one", "afk/1", "main")
+	seedCR("merged one", "afk/2", "main")
+	seedCR("closed one", "afk/3", "main")
+	seedCR("other base", "afk/1", "dev")
+	seedCR("closed then reused", "afk/5", "main")
+	if _, err := s.MergeCR(ctx, repo.ID, 2, "abc1234", fixedNow); err != nil {
+		t.Fatalf("MergeCR #2: %v", err)
+	}
+	if _, err := s.CloseCR(ctx, repo.ID, 3, fixedNow); err != nil {
+		t.Fatalf("CloseCR #3: %v", err)
+	}
+	if _, err := s.CloseCR(ctx, repo.ID, 5, fixedNow); err != nil {
+		t.Fatalf("CloseCR #5: %v", err)
+	}
+	seedCR("reopened on reused head", "afk/5", "main") // #6, open
+
+	for _, tc := range []struct {
+		name        string
+		head, base  string
+		wantNumbers map[int]bool
+		wantDone    bool
+		wantDoneNum int
+	}{
+		{"open CR is the done-signal", "afk/1", "main", map[int]bool{1: true}, true, 1},
+		{"merged CR is the done-signal", "afk/2", "main", map[int]bool{2: true}, true, 2},
+		{"closed-unmerged only is no done-signal", "afk/3", "main", map[int]bool{3: true}, false, 0},
+		{"no CR at all is empty success", "afk/9", "main", map[int]bool{}, false, 0},
+		{"CR onto a different base does not match", "afk/1", "dev", map[int]bool{4: true}, true, 4},
+		{"head-reuse collision returns both, open wins", "afk/5", "main", map[int]bool{5: true, 6: true}, true, 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refs, err := tr.PullsForHead(ctx, tc.head, tc.base)
+			if err != nil {
+				t.Fatalf("PullsForHead: %v", err)
+			}
+			if refs == nil {
+				t.Fatalf("PullsForHead returned nil; want a non-nil slice (empty result is success)")
+			}
+			if len(refs) != len(tc.wantNumbers) {
+				t.Fatalf("got %d refs (%+v); want %d", len(refs), refs, len(tc.wantNumbers))
+			}
+			for _, r := range refs {
+				if !tc.wantNumbers[r.Number] {
+					t.Errorf("unexpected ref #%d in %+v", r.Number, refs)
+				}
+				if r.HeadBranch != tc.head {
+					t.Errorf("ref #%d HeadBranch = %q; want the queried %q", r.Number, r.HeadBranch, tc.head)
+				}
+			}
+			done, ok := tracker.DonePull(refs, tc.head)
+			if ok != tc.wantDone {
+				t.Fatalf("DonePull ok = %v; want %v", ok, tc.wantDone)
+			}
+			if ok && done.Number != tc.wantDoneNum {
+				t.Errorf("DonePull = #%d; want #%d", done.Number, tc.wantDoneNum)
+			}
+		})
 	}
 }
 

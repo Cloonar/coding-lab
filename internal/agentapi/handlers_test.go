@@ -94,6 +94,19 @@ func (f *fakeTracker) Pulls(context.Context) ([]tracker.PullRef, error) {
 	}
 	return f.pulls, nil
 }
+func (f *fakeTracker) PullsForHead(_ context.Context, head, _ string) ([]tracker.PullRef, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	// Scripted pulls carry no base branch, so base always matches.
+	out := make([]tracker.PullRef, 0, len(f.pulls))
+	for _, p := range f.pulls {
+		if p.HeadBranch == head {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
 func (f *fakeTracker) Pull(_ context.Context, number int) (tracker.PullDetail, error) {
 	if f.err != nil {
 		return tracker.PullDetail{}, f.err

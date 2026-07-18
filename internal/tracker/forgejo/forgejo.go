@@ -5,11 +5,12 @@
 // the tracker-contract semantics that must survive: the ready queue is open
 // issues carrying the ready-for-agent label; the issues endpoint is queried
 // with type=issues so Forgejo does not fold PRs into the list; pulls are
-// listed across ALL states with the three-valued open|merged|closed state
-// derived from Forgejo's state+merged fields (a merged afk/<N> PR is the M5
-// done-signal and is no longer "open"); a tracker call either yields the full
-// result or an error carrying operation context — never partial data, and
-// never the forge token.
+// listed as the bounded open + recent-closed view (issue #176) with the
+// three-valued open|merged|closed state derived from Forgejo's state+merged
+// fields (the M5 done-signal — a merged afk/<N> PR is no longer "open" —
+// reads PullsForHead, never this listing); a tracker call either yields the
+// full result or an error carrying operation context — never partial data,
+// and never the forge token.
 package forgejo
 
 import (
@@ -38,8 +39,8 @@ const (
 
 	// pageLimit is the page size for list endpoints. Forgejo paginates issues
 	// and pulls; a non-paginating client would silently drop everything past
-	// the first page — the exact "state=all silently breaks the done-signal"
-	// failure the contract warns against. We loop until an empty page (see
+	// the first page — exactly the silent truncation the done-signal contract
+	// (PullsForHead's fallback walk) warns against. We loop until an empty page (see
 	// fetchPages — a short page proves nothing, because the server silently
 	// clamps limit to its own max_response_items).
 	pageLimit = 50
@@ -129,6 +130,7 @@ type fjPull struct {
 	State   string     `json:"state"`
 	Merged  bool       `json:"merged"`
 	Head    fjPullHead `json:"head"`
+	Base    fjPullHead `json:"base"` // PullsForHead's fallback filters on it (issue #176)
 	HTMLURL string     `json:"html_url"`
 }
 
@@ -196,14 +198,42 @@ func fjHasLabel(fj fjIssue, name string) bool {
 }
 
 // Issues returns the issues in the given state (open|closed|all) for the
-// operator list view. type=issues excludes PRs; no comments are loaded.
+// operator list view, with bounded reads (issue #176): the OPEN view walks
+// the full open set (the working set caps it), while the closed view is ONE
+// request for the tracker.RecentClosedWindow most recently UPDATED closed
+// issues — Forgejo's issue sort enum carries recentupdate but no recentclose
+// (that sort is pulls-only), and closing an issue bumps updated_at, so
+// recentupdate approximates recently-closed; a later comment bumping an old
+// closed issue into the window is harmless, the window being a recency view
+// rather than a completeness contract. The all view is the open walk plus
+// the closed window, open first (the states are disjoint — no dedupe). Any
+// other filter is a loud error: the param now fans out into distinct reads,
+// so an unrecognized value must not silently misquery. type=issues excludes
+// PRs; no comments are loaded.
 func (c *Client) Issues(ctx context.Context, state string) ([]tracker.Issue, error) {
-	q := url.Values{}
-	q.Set("type", "issues")
-	q.Set("state", state)
-	fjs, err := fetchPages[fjIssue](ctx, c, c.issuesPath(), q)
-	if err != nil {
-		return nil, err
+	switch state {
+	case tracker.StateOpen, tracker.StateClosed, tracker.StateAll:
+	default:
+		return nil, fmt.Errorf("forgejo issues: invalid state filter %q", state)
+	}
+	var fjs []fjIssue
+	if state != tracker.StateClosed {
+		q := url.Values{}
+		q.Set("type", "issues")
+		q.Set("state", tracker.StateOpen)
+		open, err := fetchPages[fjIssue](ctx, c, c.issuesPath(), q)
+		if err != nil {
+			return nil, err
+		}
+		fjs = append(fjs, open...)
+	}
+	if state != tracker.StateOpen {
+		closed, err := recentClosedWindow[fjIssue](ctx, c, c.issuesPath(),
+			url.Values{"type": {"issues"}, "sort": {"recentupdate"}})
+		if err != nil {
+			return nil, err
+		}
+		fjs = append(fjs, closed...)
 	}
 	return mapIssues(fjs), nil
 }
@@ -239,20 +269,103 @@ func (c *Client) CreateComment(ctx context.Context, number int, body string) err
 	return c.do(ctx, http.MethodPost, c.issuePath(number)+"/comments", nil, req, nil)
 }
 
-// Pulls returns every pull request on the repo across all states. state=all is
-// required: a merged afk/<N> PR is the success signal and is no longer "open",
-// and the reaper still needs to see it. Matching to a run is client-side by
-// head branch; the three-valued state is derived from Forgejo's state+merged.
+// Pulls returns the repo's OPEN pulls plus the tracker.RecentClosedWindow
+// most recently closed ones (merged or not), open set first — the bounded
+// list view of issue #176. The old state=all walk cost one request per
+// pageLimit of repo HISTORY plus the empty-page probe (6.7s for ~174 PRs
+// measured on the live forge, growing forever) for a listing whose consumers
+// (labctl pr list, the operator surface) only need the working set plus a
+// recency view; the done-signal read that once justified state=all lives on
+// PullsForHead now, and a merged run PR still appears here while recent. Two
+// request shapes:
+//
+//   - the open walk: fetchPages with state=open — bounded by the open set,
+//     pagination kept because open counts can legitimately exceed one page.
+//   - the closed window: exactly ONE request via recentClosedWindow with
+//     sort=recentclose (in this forge's swagger sort enum for pulls,
+//     verified against the live Forgejo 15.0.5), newest-closed-first;
+//     state=closed covers merged and closed-unmerged alike, the three-valued
+//     state still derived from state+merged per row.
 func (c *Client) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
+	q := url.Values{}
+	q.Set("state", tracker.StateOpen)
+	fjs, err := fetchPages[fjPull](ctx, c, c.pullsPath(), q)
+	if err != nil {
+		return nil, err
+	}
+	closed, err := recentClosedWindow[fjPull](ctx, c, c.pullsPath(),
+		url.Values{"sort": {"recentclose"}})
+	if err != nil {
+		return nil, err
+	}
+	fjs = append(fjs, closed...)
+	out := make([]tracker.PullRef, 0, len(fjs))
+	for _, fj := range fjs {
+		out = append(out, toPullRef(fj))
+	}
+	return out, nil
+}
+
+// PullsForHead lists the pulls whose head branch is head AND base branch is
+// base, across all states, in a bounded number of requests (issue #176) —
+// the reaper's per-branch done-signal read, replacing the O(history) Pulls
+// walk. The fast path is Forgejo's by-base-head lookup
+// (GET /pulls/{base}/{head}), which resolves the three hot reaper states in
+// ONE request each:
+//
+//   - 404 → no pull for that head+base: empty non-nil slice, success (the
+//     seam's "empty result is success" convention).
+//   - An open or merged answer is definitive — it IS a done-signal, and the
+//     only reason not to trust a single row (a closed one shadowing a live
+//     sibling, below) cannot apply — so it returns as the one candidate.
+//     Its HeadBranch is the QUERIED name, never the response's rendered
+//     head.ref: Forgejo renders a merged pull whose head branch was since
+//     deleted with a synthetic refs/pull/N/head (verified live on lab's
+//     forge), and the by-name query key is authoritative (the seam pin).
+//   - A closed-unmerged answer is the RARE case that cannot be trusted
+//     alone: Forgejo's GetPullRequestByBaseHeadInfo fetches its row with a
+//     plain xorm .Get() — NO ORDER BY — so when several pulls share
+//     base+head (a branch re-used after a closed-unmerged PR) the returned
+//     row is unspecified, and the closed one may shadow a live open or
+//     merged sibling. Closed-unmerged is exactly the state the done-signal
+//     reads as absence (DonePull's floor), so answering it blind would
+//     falsely fail a run. Only this answer pays for the full state=all walk
+//     (the one unbounded listing left in this client — Pulls itself is the
+//     bounded open+recent-closed view now), filtered client-side to the head+base
+//     pair — possibly returning the closed pull among the matches, possibly
+//     none at all when every colliding branch was deleted and the rendered
+//     refs no longer match; DonePull answers false either way.
+//
+// Any non-404 error surfaces as-is — no partial data (the seam convention).
+func (c *Client) PullsForHead(ctx context.Context, head, base string) ([]tracker.PullRef, error) {
+	var fj fjPull
+	err := c.do(ctx, http.MethodGet, c.pullByBaseHeadPath(base, head), nil, nil, &fj)
+	switch {
+	case errors.Is(err, tracker.ErrNotFound):
+		return []tracker.PullRef{}, nil
+	case err != nil:
+		return nil, err
+	}
+	if state := derivePullState(fj.State, fj.Merged); state != tracker.PullClosed {
+		return []tracker.PullRef{{
+			Number:     fj.Number,
+			HeadBranch: head, // the queried name, never the rendered head.ref (see above)
+			State:      state,
+			URL:        fj.HTMLURL,
+		}}, nil
+	}
+	// Closed-unmerged: the rare fallback walk (see the doc comment).
 	q := url.Values{}
 	q.Set("state", tracker.StateAll)
 	fjs, err := fetchPages[fjPull](ctx, c, c.pullsPath(), q)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]tracker.PullRef, 0, len(fjs))
-	for _, fj := range fjs {
-		out = append(out, toPullRef(fj))
+	out := make([]tracker.PullRef, 0, 1)
+	for _, p := range fjs {
+		if p.Head.Ref == head && p.Base.Ref == base {
+			out = append(out, toPullRef(p))
+		}
 	}
 	return out, nil
 }
@@ -593,6 +706,15 @@ func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
 func (c *Client) pullPath(n int) string  { return c.repoPath("/pulls/" + strconv.Itoa(n)) }
 
+// pullByBaseHeadPath is Forgejo's by-base-head pull lookup for one base/head
+// branch pair (PullsForHead's fast path). Branch names may carry '/'
+// (afk/63), so each name is escaped as ONE path segment — url.PathEscape
+// turns the '/' into %2F, which Forgejo requires to keep the branch from
+// splitting into extra segments (verified against the live forge, 15.0.5).
+func (c *Client) pullByBaseHeadPath(base, head string) string {
+	return c.repoPath("/pulls/" + url.PathEscape(base) + "/" + url.PathEscape(head))
+}
+
 // commitStatusPath is the combined-status endpoint for one commit SHA. The
 // SHA comes from the forge's own Pull response rather than operator input,
 // but it is escaped like every other path segment built from server data.
@@ -747,6 +869,31 @@ func fetchPages[T any](ctx context.Context, c *Client, path string, base url.Val
 		}
 		all = append(all, chunk...)
 	}
+}
+
+// recentClosedWindow performs the ONE bounded request every recent-closed
+// window shares (issue #176): state=closed&page=1&limit=RecentClosedWindow
+// plus the caller's endpoint-specific params (the pulls sort=recentclose, the
+// issues type=issues&sort=recentupdate). Deliberately a single do(), NEVER
+// fetchPages: pagination — and its guaranteed empty-page probe — is exactly
+// the O(history) request growth the window exists to remove, so a full page
+// is a full window, not an invitation to fetch page=2. May return nil on zero
+// results (callers re-slice through make(), the fetchPages convention).
+func recentClosedWindow[T any](ctx context.Context, c *Client, path string, extra url.Values) ([]T, error) {
+	q := url.Values{}
+	for k, vs := range extra {
+		for _, v := range vs {
+			q.Add(k, v)
+		}
+	}
+	q.Set("state", tracker.StateClosed)
+	q.Set("page", "1")
+	q.Set("limit", strconv.Itoa(tracker.RecentClosedWindow))
+	var chunk []T
+	if err := c.do(ctx, http.MethodGet, path, q, nil, &chunk); err != nil {
+		return nil, err
+	}
+	return chunk, nil
 }
 
 // do performs one REST call: it applies the per-request timeout, sets the

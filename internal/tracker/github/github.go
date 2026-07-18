@@ -2,7 +2,8 @@
 // seam (ADR-0015). It is a structural twin of internal/tracker/forgejo — same
 // one-do()-transport shape, same tracker-contract semantics that must survive
 // (the ready queue is open issues carrying the ready-for-agent label; pulls
-// are listed across ALL states with the three-valued open|merged|closed state;
+// are listed as the bounded open + recent-closed view (issue #176) with the
+// three-valued open|merged|closed state, the done-signal reading PullsForHead;
 // a call either yields the full result or an error carrying operation context,
 // never partial data and never the forge token) — differing only where
 // GitHub's API differs from Forgejo's:
@@ -147,6 +148,7 @@ type ghPull struct {
 	State    string     `json:"state"`
 	MergedAt *time.Time `json:"merged_at"` // non-nil ⇒ merged (the list endpoint has no `merged` bool)
 	Head     ghPullHead `json:"head"`
+	Base     ghPullHead `json:"base"` // PullsForHead re-filters on it (issue #176)
 	HTMLURL  string     `json:"html_url"`
 }
 
@@ -227,14 +229,39 @@ func ghHasLabel(gh ghIssue, name string) bool {
 }
 
 // Issues returns the issues in the given state (open|closed|all) for the
-// operator list view. PRs folded into GitHub's /issues are dropped; no
-// comments are loaded.
+// operator list view, with bounded reads (issue #176): the OPEN view walks
+// the full open set (the working set caps it), while the closed view is ONE
+// request for the tracker.RecentClosedWindow most recently updated closed
+// issues via recentClosedWindow (GitHub has no recently-closed sort;
+// updated-desc approximates it — see the helper). The all view is the open
+// walk plus the closed window, open first (disjoint states — no dedupe). Any
+// other filter is a loud error: the param now fans out into distinct reads,
+// so an unrecognized value must not silently misquery. PRs folded into
+// GitHub's /issues are dropped from BOTH sets — so the closed window carries
+// up to the window of rows, fewer after the PR filtering — and no comments
+// are loaded.
 func (c *Client) Issues(ctx context.Context, state string) ([]tracker.Issue, error) {
-	q := url.Values{}
-	q.Set("state", state)
-	ghs, err := fetchPages[ghIssue](ctx, c, c.issuesPath(), q)
-	if err != nil {
-		return nil, err
+	switch state {
+	case tracker.StateOpen, tracker.StateClosed, tracker.StateAll:
+	default:
+		return nil, fmt.Errorf("github issues: invalid state filter %q", state)
+	}
+	var ghs []ghIssue
+	if state != tracker.StateClosed {
+		q := url.Values{}
+		q.Set("state", tracker.StateOpen)
+		open, err := fetchPages[ghIssue](ctx, c, c.issuesPath(), q)
+		if err != nil {
+			return nil, err
+		}
+		ghs = append(ghs, open...)
+	}
+	if state != tracker.StateOpen {
+		closed, err := recentClosedWindow[ghIssue](ctx, c, c.issuesPath())
+		if err != nil {
+			return nil, err
+		}
+		ghs = append(ghs, closed...)
 	}
 	out := make([]tracker.Issue, 0, len(ghs))
 	for _, gh := range ghs {
@@ -275,20 +302,68 @@ func (c *Client) CreateComment(ctx context.Context, number int, body string) err
 	return err
 }
 
-// Pulls returns every pull request on the repo across all states. state=all is
-// required: a merged afk/<N> PR is the success signal and is no longer "open",
-// and the reaper still needs to see it. Matching to a run is client-side by
-// head branch; the three-valued state is derived from state+merged_at.
+// Pulls returns the repo's OPEN pulls plus the tracker.RecentClosedWindow
+// most recently closed ones (merged or not), open set first — the bounded
+// list view of issue #176 (the Forgejo sibling documents the O(history) cost
+// the old state=all walk paid). The open walk keeps Link-header pagination
+// (open counts can legitimately exceed one page); the closed window is
+// exactly ONE request via recentClosedWindow, which deliberately ignores any
+// Link header. The done-signal read that once justified state=all lives on
+// PullsForHead now; the three-valued state is still derived from
+// state+merged_at per row, so merged pulls in the window map to
+// tracker.PullMerged.
 func (c *Client) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
 	q := url.Values{}
+	q.Set("state", tracker.StateOpen)
+	ghs, err := fetchPages[ghPull](ctx, c, c.pullsPath(), q)
+	if err != nil {
+		return nil, err
+	}
+	closed, err := recentClosedWindow[ghPull](ctx, c, c.pullsPath())
+	if err != nil {
+		return nil, err
+	}
+	ghs = append(ghs, closed...)
+	out := make([]tracker.PullRef, 0, len(ghs))
+	for _, gh := range ghs {
+		out = append(out, toPullRef(gh))
+	}
+	return out, nil
+}
+
+// PullsForHead lists the pulls whose head branch is head AND base branch is
+// base, across all states, in a bounded number of requests (issue #176) —
+// the reaper's per-branch done-signal read, replacing the O(history) Pulls
+// walk. GitHub's list endpoint filters server-side, so this is the plain
+// pulls listing with head/base/state params: the head filter REQUIRES the
+// owner: prefix (head=<owner>:<branch> — a bare branch name is silently
+// IGNORED and the listing degenerates into the very unbounded walk this
+// method exists to avoid; this is the syntax difference vs Forgejo's
+// by-base-head path lookup). The response is re-filtered client-side on
+// head+base defensively — a filter the server silently dropped must not
+// leak foreign pulls into a done-signal — and pagination follows the Link
+// header like every list (in practice one page: a single branch pair rarely
+// accumulates 100 pulls). HeadBranch is normalized to the QUERIED name for
+// seam uniformity (the pin every backend shares); on GitHub that is a no-op
+// in practice, since it preserves the branch label on merged pulls. No
+// match is an empty non-nil slice, success.
+func (c *Client) PullsForHead(ctx context.Context, head, base string) ([]tracker.PullRef, error) {
+	q := url.Values{}
 	q.Set("state", tracker.StateAll)
+	q.Set("head", c.owner+":"+head)
+	q.Set("base", base)
 	ghs, err := fetchPages[ghPull](ctx, c, c.pullsPath(), q)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]tracker.PullRef, 0, len(ghs))
 	for _, gh := range ghs {
-		out = append(out, toPullRef(gh))
+		if gh.Head.Ref != head || gh.Base.Ref != base {
+			continue
+		}
+		ref := toPullRef(gh)
+		ref.HeadBranch = head // the queried name — the seam's uniformity pin
+		out = append(out, ref)
 	}
 	return out, nil
 }
@@ -833,6 +908,30 @@ func fetchNested[P any, T any](ctx context.Context, c *Client, path string, rows
 			return all, nil
 		}
 	}
+}
+
+// recentClosedWindow performs the ONE bounded request every recent-closed
+// window shares (issue #176): state=closed&sort=updated&direction=desc&
+// per_page=RecentClosedWindow, deliberately IGNORING any Link header on the
+// response — following rel="next" would resurrect the exact O(history) walk
+// the window exists to remove, so a full page is a full window, never an
+// invitation to fetch page 2. GitHub has no recently-closed sort (Forgejo's
+// recentclose has no equivalent in the pulls/issues sort enums), so
+// updated-desc approximates it: closing bumps updated_at, and a later
+// comment bumping an old closed item into the window is harmless — the
+// window is a recency view, not a completeness contract. May return nil on
+// zero results (callers re-slice through make(), the fetchPages convention).
+func recentClosedWindow[T any](ctx context.Context, c *Client, path string) ([]T, error) {
+	q := url.Values{}
+	q.Set("state", tracker.StateClosed)
+	q.Set("sort", "updated")
+	q.Set("direction", "desc")
+	q.Set("per_page", strconv.Itoa(tracker.RecentClosedWindow))
+	var chunk []T
+	if _, err := c.do(ctx, http.MethodGet, path, q, nil, &chunk); err != nil {
+		return nil, err
+	}
+	return chunk, nil
 }
 
 // hasNextLink reports whether a GitHub Link header advertises a rel="next"

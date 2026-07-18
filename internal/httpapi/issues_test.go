@@ -331,6 +331,10 @@ func (s *stubForgeTracker) Pulls(context.Context) ([]tracker.PullRef, error) {
 	return []tracker.PullRef{}, nil
 }
 
+func (s *stubForgeTracker) PullsForHead(context.Context, string, string) ([]tracker.PullRef, error) {
+	return []tracker.PullRef{}, nil
+}
+
 func (s *stubForgeTracker) Pull(_ context.Context, number int) (tracker.PullDetail, error) {
 	return tracker.PullDetail{}, fmt.Errorf("forgejo GET /repos/o/r/pulls/%d: unexpected status 404: not found: %w", number, tracker.ErrNotFound)
 }

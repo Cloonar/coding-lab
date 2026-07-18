@@ -39,20 +39,23 @@ var clockTime = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 // --- fakes -----------------------------------------------------------------
 
 // fakeTracker is a scriptable tracker.Tracker: the ready queue and the pull
-// listing the engine reads, plus injectable errors and a Pulls call counter.
+// rows the engine reads — the reaper through bounded PullsForHead lookups
+// (#176), never a Pulls listing — plus injectable errors and call counters.
 type fakeTracker struct {
-	mu          sync.Mutex
-	ready       []tracker.Issue
-	open        []tracker.Issue // the StateOpen set the blocked-by gate weighs (#136)
-	pulls       []tracker.PullRef
-	readyErr    error
-	issuesErr   error // failIssues: Issues() error injection (open-set fetch)
-	pullsErr    error
-	issuesCalls int
-	pullsCalls  int
-	pullTitles  map[int]string // Pull(n) detail title (done-signal notification body)
-	detailErr   error          // failPullDetail: Pull() error injection
-	detailCalls int
+	mu                sync.Mutex
+	ready             []tracker.Issue
+	open              []tracker.Issue // the StateOpen set the blocked-by gate weighs (#136)
+	pulls             []tracker.PullRef
+	readyErr          error
+	issuesErr         error // failIssues: Issues() error injection (open-set fetch)
+	issuesCalls       int
+	pullsCalls        int            // pullsCallCount: must stay ZERO across reaper ticks (#176)
+	pullsForHeadErr   error          // failPullsForHead: PullsForHead() error injection
+	pullsForHeadCalls int            // pullsForHeadCallCount: the bounded-read counter (#176)
+	pullsForHeadArgs  [][2]string    // recorded (head, base) per PullsForHead call
+	pullTitles        map[int]string // Pull(n) detail title (done-signal notification body)
+	detailErr         error          // failPullDetail: Pull() error injection
+	detailCalls       int
 }
 
 func (f *fakeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -85,10 +88,29 @@ func (f *fakeTracker) Pulls(context.Context) ([]tracker.PullRef, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pullsCalls++
-	if f.pullsErr != nil {
-		return nil, f.pullsErr
-	}
 	return append([]tracker.PullRef(nil), f.pulls...), nil
+}
+
+// PullsForHead serves the scripted pulls filtered by head — the reaper's
+// bounded done-signal read (#176). addPull rows carry no base branch, so base
+// always matches — but the (head, base) pair is recorded and the call
+// counted, so the reaper tests can assert what was asked and how often,
+// mirroring the pullsCalls/pullsCallCount pattern.
+func (f *fakeTracker) PullsForHead(_ context.Context, head, base string) ([]tracker.PullRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pullsForHeadCalls++
+	f.pullsForHeadArgs = append(f.pullsForHeadArgs, [2]string{head, base})
+	if f.pullsForHeadErr != nil {
+		return nil, f.pullsForHeadErr
+	}
+	out := make([]tracker.PullRef, 0, len(f.pulls))
+	for _, p := range f.pulls {
+		if p.HeadBranch == head {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 func (f *fakeTracker) Pull(_ context.Context, n int) (tracker.PullDetail, error) {
 	f.mu.Lock()
@@ -167,16 +189,29 @@ func (f *fakeTracker) addPull(head, state string) {
 	f.pulls = append(f.pulls, tracker.PullRef{Number: len(f.pulls) + 1, HeadBranch: head, State: state})
 }
 
-func (f *fakeTracker) failPulls(err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.pullsErr = err
-}
-
 func (f *fakeTracker) pullsCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.pullsCalls
+}
+
+func (f *fakeTracker) failPullsForHead(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pullsForHeadErr = err
+}
+
+func (f *fakeTracker) pullsForHeadCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pullsForHeadCalls
+}
+
+// pullsForHeadCallArgs snapshots the recorded (head, base) pairs.
+func (f *fakeTracker) pullsForHeadCallArgs() [][2]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][2]string(nil), f.pullsForHeadArgs...)
 }
 
 func (f *fakeTracker) setPullTitle(n int, title string) {
@@ -846,12 +881,66 @@ func TestReap_successCycle(t *testing.T) {
 		t.Errorf("still %d active runs after reap", len(runs))
 	}
 
-	// A second sweep is a total no-op: the run is terminal, so no pulls are
-	// even listed.
-	before := f.trk.pullsCallCount()
+	// The done-signal was read via the bounded per-branch lookup — the reaper
+	// NEVER lists the repo's pull history (#176).
+	if n := f.trk.pullsCallCount(); n != 0 {
+		t.Errorf("reaper listed pulls %d times; want 0 (bounded PullsForHead only — #176)", n)
+	}
+
+	// A second sweep is a total no-op: the run is terminal, so not even the
+	// bounded per-branch read happens.
+	before := f.trk.pullsForHeadCallCount()
 	f.svc.ReapOnce(t.Context(), f.clock.Now())
-	if f.trk.pullsCallCount() != before {
-		t.Error("second sweep re-listed pulls for a reaped run")
+	if f.trk.pullsForHeadCallCount() != before {
+		t.Error("second sweep re-read pulls for a reaped run")
+	}
+}
+
+// TestReap_boundedPullReadsPerRun pins the issue #176 acceptance criterion:
+// one reaper tick over N active runs on one repo makes exactly N PullsForHead
+// calls — one per run, each asking (run.Branch, repo.DefaultBranch), the base
+// the agent API pins for every lab-created PR — and ZERO Pulls calls; the
+// request count is O(active runs), independent of how many merged PRs the
+// repo has accumulated. A second tick pays the same bounded price again (the
+// read is per tick, never memoized — a PR can appear at any moment).
+func TestReap_boundedPullReadsPerRun(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReady(7, 8, 9)
+
+	var runs []store.Run
+	for range 3 {
+		run, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, run)
+	}
+
+	// All alive, under budget, no PRs: the tick classifies nothing, but every
+	// run got exactly one bounded done-signal read.
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if n := f.trk.pullsCallCount(); n != 0 {
+		t.Errorf("tick listed pulls %d times; want 0 (bounded PullsForHead only — #176)", n)
+	}
+	if n := f.trk.pullsForHeadCallCount(); n != len(runs) {
+		t.Errorf("tick made %d PullsForHead calls; want %d (one per active run)", n, len(runs))
+	}
+	args := f.trk.pullsForHeadCallArgs()
+	if len(args) != len(runs) {
+		t.Fatalf("recorded %d arg pairs; want %d", len(args), len(runs))
+	}
+	// Runs come back sorted by session name, so the tick is deterministic and
+	// the args line up run-for-run.
+	for i, run := range runs {
+		if want := [2]string{run.Branch, f.repo.DefaultBranch}; args[i] != want {
+			t.Errorf("call %d args = %v; want %v (head = run branch, base = repo default)", i, args[i], want)
+		}
+	}
+
+	// Still-active runs are re-read next tick at the same bounded price.
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(2*time.Minute))
+	if n := f.trk.pullsForHeadCallCount(); n != 2*len(runs) {
+		t.Errorf("after two ticks %d PullsForHead calls; want %d", n, 2*len(runs))
 	}
 }
 
@@ -1004,14 +1093,16 @@ func TestReap_trackerErrorSkipsRunThisTick(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.runner.Kill(run.SessionName)
-	f.trk.failPulls(errors.New("forge is down"))
+	f.trk.failPullsForHead(errors.New("forge is down"))
 
+	// The bounded per-head read failed: the run is never classified on
+	// missing tracker data — it stays active and waits for the next tick.
 	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
 	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeActive {
 		t.Fatalf("outcome = %q — classified on missing tracker data", got.Outcome)
 	}
 	// Next tick, tracker healthy again → real death.
-	f.trk.failPulls(nil)
+	f.trk.failPullsForHead(nil)
 	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(2*time.Minute))
 	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeDeath {
 		t.Errorf("outcome = %q, want death once the tracker answers", got.Outcome)
@@ -1205,11 +1296,11 @@ func TestNeutralStop_parksAndNeverReclassifies(t *testing.T) {
 	}
 
 	// A later over-budget sweep must NOT reclassify the stopped run — it
-	// does not even list pulls for it (no candidates).
-	before := f.trk.pullsCallCount()
+	// does not even read pulls for it (no candidates).
+	before := f.trk.pullsForHeadCallCount()
 	f.svc.ReapOnce(t.Context(), clockTime.Add(500*time.Minute))
-	if f.trk.pullsCallCount() != before {
-		t.Error("sweep listed pulls for a stopped run")
+	if f.trk.pullsForHeadCallCount() != before {
+		t.Error("sweep read pulls for a stopped run")
 	}
 	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeStopped {
 		t.Errorf("stopped run reclassified to %q", got.Outcome)
