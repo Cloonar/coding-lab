@@ -244,6 +244,16 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
     // JSX onTouchStart; click-dismiss is a separate event and still fires.)
     e.stopPropagation();
     if (props.desktop) return; // desktop is a non-modal sidebar, not a sheet
+    // Self-heal a leaked sequence (mirrors AppShell): touch events fire at the
+    // element the finger went DOWN on, so if a re-render detaches that node
+    // mid-touch (streaming tool output), its touchend/touchcancel never bubble
+    // to the sheet and the tracked id — plus a claimed drag's inline styles —
+    // would pin until the sheet unmounts. Gone from e.touches, or "back" in
+    // changedTouches (identifier reuse): the old sequence ended unheard.
+    if (activeTouchId !== null && (findActive(e.changedTouches) || !findActive(e.touches))) {
+      activeTouchId = null;
+      if (gesture.cancel().kind === 'cancel-reset') clearDragStyles();
+    }
     if (activeTouchId !== null) return; // one finger tracked at a time
     if (e.touches.length !== 1) return; // multi-touch: ignore
     const t = e.changedTouches[0]!;
