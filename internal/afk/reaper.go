@@ -29,10 +29,12 @@ func (s *Service) ReaperLoop(ctx context.Context) {
 		}
 		now := s.now()
 		s.ReapOnce(ctx, now)
-		// The autoland poller rides the same tick, AFTER the reap — ordering is
-		// load-bearing: the reap frees the authoring AFK run's row first, so a
-		// fresh PR gets its lander within one tick (issue #181 AC #2).
-		s.AutolandOnce(ctx)
+		// The spawn pass rides the same tick, AFTER the reap — ordering is
+		// load-bearing, and since issue #185 drain-then-fill is literal: the
+		// reap frees run rows and cap slots first, then the ONE pass spends
+		// them highest-stage-first, so a fresh PR gets its lander within one
+		// tick (issue #181 AC #2) and never loses the slot to new work.
+		s.SpawnOnce(ctx)
 		if s.sweep == nil {
 			continue
 		}
@@ -284,14 +286,23 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done bool
 // issue stays parked), delete the run's tokens and credential files, update
 // the repo's consecutive-failure counter, and publish the events.
 //
-// This is the ONLY place the run lifecycle writes the failure counter: a
-// success reap resets it (re-arming a three-strikes pause), a death or
-// timeout increments it; at PauseThreshold the auto scheduler stops
-// launching and manual starts 409 until reset. The counter is kind-agnostic
-// — manual and auto AFK runs both feed it. A neutral Stop never reaches
-// here (classifyAndClaim refuses a stopped run under runsMu). now is the
-// tick time the claim stamped as ended_at, so the metrics duration below is
-// exactly started_at→ended_at.
+// This is the ONLY place the run lifecycle writes the failure counter, and
+// since issue #185 ONLY the two AFK kinds (manual, auto) feed it: a success
+// reap resets it (re-arming a three-strikes pause), a death or timeout
+// increments it; at PauseThreshold the auto scheduler stops launching and
+// manual starts 409 until reset. A lander outcome moves the counter in
+// NEITHER direction — the switch below used to be kind-agnostic and it ran
+// backwards both ways. A flaky lander's death/timeout would increment the
+// counter and pause the repo's UNRELATED AFK loop (and 409 its manual
+// starts); and a lander correctly posting `reject` reaps as OutcomeSuccess,
+// which would RESET the counter — clearing the strikes broken AFK runs earned
+// and re-arming the very brake that evidence should trip (a reject is evidence
+// FOR the pause, not against it). The counter is AFK-run health alone, so a
+// lander gets no counter at all (decided in #185); only the failure counter
+// separates — the budget clock stays deliberately shared. A neutral Stop never
+// reaches here (classifyAndClaim refuses a stopped run under runsMu). now is
+// the tick time the claim stamped as ended_at, so the metrics duration below
+// is exactly started_at→ended_at.
 //
 // This chokepoint is also where the done-signal push fires — beside the
 // metrics report, once per success reap. trk and donePull are meaningful only
@@ -328,24 +339,29 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 	}
 	s.cleanupCredential(repo, run.ID)
 
-	switch outcome {
-	case OutcomeSuccess:
-		changed, err := s.store.ResetRepoFailures(ctx, repo.ID)
-		if err != nil {
-			s.log.Warn("afk reap: reset failures", "component", "afk", "repo", repo.Name, "err", err)
-		} else if changed {
-			s.publish(EventRepoChanged, repo.ID)
-		}
-	case OutcomeDeath, OutcomeTimeout:
-		n, err := s.store.IncrementRepoFailures(ctx, repo.ID)
-		if err != nil {
-			s.log.Warn("afk reap: increment failures", "component", "afk", "repo", repo.Name, "err", err)
-		} else {
-			if n >= PauseThreshold {
-				s.log.Warn("afk auto loop paused after consecutive failures — reset from the UI to re-arm",
-					"component", "afk", "repo", repo.Name, "failures", n)
+	// Issue #185: only the two AFK kinds move the shared failure counter — a
+	// lander outcome feeds it in NEITHER direction (mirrors the done-signal
+	// push guard above). See the doc comment for why both directions are wrong.
+	if run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto {
+		switch outcome {
+		case OutcomeSuccess:
+			changed, err := s.store.ResetRepoFailures(ctx, repo.ID)
+			if err != nil {
+				s.log.Warn("afk reap: reset failures", "component", "afk", "repo", repo.Name, "err", err)
+			} else if changed {
+				s.publish(EventRepoChanged, repo.ID)
 			}
-			s.publish(EventRepoChanged, repo.ID)
+		case OutcomeDeath, OutcomeTimeout:
+			n, err := s.store.IncrementRepoFailures(ctx, repo.ID)
+			if err != nil {
+				s.log.Warn("afk reap: increment failures", "component", "afk", "repo", repo.Name, "err", err)
+			} else {
+				if n >= PauseThreshold {
+					s.log.Warn("afk auto loop paused after consecutive failures — reset from the UI to re-arm",
+						"component", "afk", "repo", repo.Name, "failures", n)
+				}
+				s.publish(EventRepoChanged, repo.ID)
+			}
 		}
 	}
 

@@ -28,9 +28,9 @@ package afk_test
 //     keeps the unmerged branch, failures reset to 0, run tokens 401.
 //  2. three strikes: a doomed run (fake claude sleeps; 1-minute repo budget
 //     override + clock advance to the inclusive boundary) times out three
-//     times → repo paused: the scheduler skips it and a manual start is
+//     times → repo paused: the spawn pass skips it and a manual start is
 //     refused (ErrRepoPaused — the operator API's 409); reset re-arms and
-//     the next ScheduleOnce launches an auto run.
+//     the next SpawnOnce launches an auto run.
 //  3. neutral Stop mid-run through the instance.Stop delegation seam:
 //     outcome stopped, counter untouched, worktree + branch survive and the
 //     parked listing (reconcile.Parked) shows the branch; an over-budget
@@ -1032,7 +1032,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 		}
 
 		// Paused: the scheduler skips the repo entirely...
-		w.svc.ScheduleOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		if w.alive("doom~afk-auto-1") {
 			t.Fatal("scheduler launched on a paused repo")
 		}
@@ -1046,7 +1046,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 		if changed, err := w.st.ResetRepoFailures(w.ctx, doom.ID); err != nil || !changed {
 			t.Fatalf("ResetRepoFailures: changed=%v err=%v", changed, err)
 		}
-		w.svc.ScheduleOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		run, err := w.st.RunBySession(w.ctx, "doom~afk-auto-1")
 		if err != nil {
 			t.Fatalf("no auto run after reset: %v", err)
@@ -1828,9 +1828,9 @@ func waitCycleStatus(t *testing.T, out string) {
 // forgejo REST client against the stateful fake forge, the real agent API,
 // and the real labctl verdict verbs driven by fake claude scripts. Each
 // scenario gets its own forge-bound repo with autoland enabled (the settings
-// live on the repos row); the poller is driven by explicit AutolandOnce
-// sweeps and the reaper by explicit ReapOnce ticks, exactly what ReaperLoop
-// runs per tick. The suppression sweep runs LAST: its seeded active-run row
+// live on the repos row); the lander gather is driven by explicit SpawnOnce
+// passes and the reaper by explicit ReapOnce ticks, exactly what ReaperLoop
+// runs per tick (#185). The suppression sweep runs LAST: its seeded active-run row
 // has no live session and must never be exposed to a ReapOnce.
 func TestAutolandCycleIntegration(t *testing.T) {
 	w := newCycleWorld(t)
@@ -1849,7 +1849,7 @@ func TestAutolandCycleIntegration(t *testing.T) {
 	})
 
 	ok := t.Run("clean PASS with auto_merge merges", func(t *testing.T) {
-		w.svc.AutolandOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		run, err := w.st.RunBySession(w.ctx, "landa~lander-1")
 		if err != nil {
 			t.Fatalf("no lander run after the sweep: %v", err)
@@ -1866,7 +1866,7 @@ func TestAutolandCycleIntegration(t *testing.T) {
 			t.Fatal("lander session not live")
 		}
 		// A second sweep while the lander lives is idempotent by state.
-		w.svc.AutolandOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		if runs, err := w.st.ActiveRunsByRepo(w.ctx, landa.ID); err != nil || len(runs) != 1 {
 			t.Fatalf("active runs after the second sweep = %d (err %v), want still 1", len(runs), err)
 		}
@@ -1918,7 +1918,7 @@ func TestAutolandCycleIntegration(t *testing.T) {
 	})
 
 	t.Run("auto_merge off ends approved and unmerged", func(t *testing.T) {
-		w.svc.AutolandOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		run, err := w.st.RunBySession(w.ctx, "landb~lander-1")
 		if err != nil {
 			t.Fatalf("no lander run after the sweep: %v", err)
@@ -1955,7 +1955,7 @@ func TestAutolandCycleIntegration(t *testing.T) {
 	})
 
 	t.Run("FAIL ends rejected with the findings", func(t *testing.T) {
-		w.svc.AutolandOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		run, err := w.st.RunBySession(w.ctx, "landc~lander-1")
 		if err != nil {
 			t.Fatalf("no lander run after the sweep: %v", err)
@@ -1982,9 +1982,15 @@ func TestAutolandCycleIntegration(t *testing.T) {
 		}
 	})
 
-	// --- scenario e: a lander death feeds the three-strikes pause -------------
+	// --- scenario e: a lander death does NOT strike; a paused repo still stops
+	// spawning landers (issue #185) --------------------------------------------
 	// The script idles long enough to pass the post-spawn liveness check, then
-	// dies without any forge-observable action — a real lander crash.
+	// dies without any forge-observable action — a real lander crash. Its death
+	// is a terminal FAILURE outcome, but it must NOT move the AFK counter:
+	// lander flakiness may never pause a repo's unrelated AFK work. The pause
+	// itself is still real — a repo paused by genuine AFK strikes stops spawning
+	// landers too — so this half is seeded directly through IncrementRepoFailures,
+	// the AFK-run path the counter actually belongs to, NOT through the death.
 	scriptE := writeCycleScript(t, "claude-lander-death.sh", "#!/bin/sh\nsleep 3\nexit 0\n")
 	lande, originE := w.addRepo("lande", scriptE, func(r *store.Repo) {
 		r.AutolandEnabled = true
@@ -1995,8 +2001,8 @@ func TestAutolandCycleIntegration(t *testing.T) {
 		Number: 1, Head: "afk/1", Base: "main", Title: "resolve", State: "open",
 	})
 
-	t.Run("lander death strikes and a paused repo stops spawning", func(t *testing.T) {
-		w.svc.AutolandOnce(w.ctx)
+	t.Run("lander death does not strike and a paused repo stops spawning", func(t *testing.T) {
+		w.svc.SpawnOnce(w.ctx)
 		run, err := w.st.RunBySession(w.ctx, "lande~lander-1")
 		if err != nil {
 			t.Fatalf("no lander run after the sweep: %v", err)
@@ -2009,24 +2015,27 @@ func TestAutolandCycleIntegration(t *testing.T) {
 			t.Fatal("lander session never died")
 		}
 
-		// Dead without a done-signal (PR open, no verdict): a real death.
+		// Dead without a done-signal (PR open, no verdict): a real death — but a
+		// lander death leaves the AFK counter untouched (issue #185).
 		w.svc.ReapOnce(w.ctx, w.clock.Now())
 		got := w.run(lande, run.ID)
 		if got.Outcome != store.RunOutcomeDeath {
 			t.Fatalf("outcome = %s, want death", got.Outcome)
 		}
-		if f := w.failures(lande); f != 1 {
-			t.Fatalf("consecutive_failures = %d, want 1 (a lander death feeds the pause)", f)
+		if f := w.failures(lande); f != 0 {
+			t.Fatalf("consecutive_failures = %d, want 0 (a lander death never strikes, #185)", f)
 		}
 
-		// At the threshold the poller stops spawning: the same open, verdict-
-		// less, run-less PR is left alone until a human resets.
-		for i := 0; i < afk.PauseThreshold-1; i++ {
+		// Seed a genuine AFK-run pause directly, then confirm the poller stops
+		// spawning: the same open, verdict-less, run-less PR is left alone until
+		// a human resets. (The death above contributed nothing, so the whole
+		// threshold is seeded here.)
+		for i := 0; i < afk.PauseThreshold; i++ {
 			if _, err := w.st.IncrementRepoFailures(w.ctx, lande.ID); err != nil {
 				t.Fatalf("IncrementRepoFailures: %v", err)
 			}
 		}
-		w.svc.AutolandOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		if runs, err := w.st.ActiveRunsByRepo(w.ctx, lande.ID); err != nil || len(runs) != 0 {
 			t.Errorf("paused repo spawned %d runs (err %v), want 0", len(runs), err)
 		}
@@ -2066,7 +2075,7 @@ func TestAutolandCycleIntegration(t *testing.T) {
 	}
 
 	t.Run("suppression sweep spawns nothing", func(t *testing.T) {
-		w.svc.AutolandOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		for _, repo := range []store.Repo{landoff, landd} {
 			runs, err := w.st.RunsByRepo(w.ctx, repo.ID, 0)
 			if err != nil {

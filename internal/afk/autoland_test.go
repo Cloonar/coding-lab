@@ -1,10 +1,11 @@
 package afk
 
-// Autoland poller + lander-reaping engine tests (issue #181): the same fixture
-// as engine_test.go — fakes for tmux/tracker/provider, a REAL store, REAL git
-// fixtures. The store does not police the (binding, autoland) pair — that is
-// reposvc's API guard — so the fixture's fake-tracker repo can be re-bound
-// "forge" to satisfy the poller's forge-only gate.
+// Autoland gather + lander-reaping engine tests (issue #181; the gather now
+// feeds the spawn pass, #185): the same fixture as engine_test.go — fakes for
+// tmux/tracker/provider, a REAL store, REAL git fixtures. The store does not
+// police the (binding, autoland) pair — that is reposvc's API guard — so the
+// fixture's fake-tracker repo can be re-bound "forge" to satisfy the
+// gather's forge-only gate.
 
 import (
 	"context"
@@ -52,18 +53,18 @@ func landerRuns(f *fixture, repo store.Repo) []store.Run {
 	return out
 }
 
-// --- the poller ----------------------------------------------------------------
+// --- the lander gather through the spawn pass ------------------------------------
 
 // The headline: a virgin claim PR on an autoland-enabled repo gets its lander
-// within one sweep — and a second sweep while it lives spawns nothing (the
-// runs-store gate makes the poller idempotent by state, not by memory).
-func TestAutolandOnce_spawnsLanderOnVirginClaimPR(t *testing.T) {
+// within one spawn pass — and a second pass while it lives spawns nothing (the
+// runs-store gate makes the gather idempotent by state, not by memory).
+func TestSpawnOnce_spawnsLanderOnVirginClaimPR(t *testing.T) {
 	f := newFixture(t)
 	autolandOn(f, f.repo)
 	originClaimBranch(f, f.repo, "afk/7")
 	f.trk.addPull("afk/7", tracker.PullOpen) // pull #1, no reviews, no comments
 
-	f.svc.AutolandOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 
 	runs := landerRuns(f, f.repo)
 	if len(runs) != 1 {
@@ -81,15 +82,17 @@ func TestAutolandOnce_spawnsLanderOnVirginClaimPR(t *testing.T) {
 	}
 
 	// Idempotent: the live lander occupies the branch, nothing else spawns.
-	f.svc.AutolandOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	if runs := landerRuns(f, f.repo); len(runs) != 1 {
-		t.Errorf("second sweep grew the lander count to %d, want still 1", len(runs))
+		t.Errorf("second pass grew the lander count to %d, want still 1", len(runs))
 	}
 }
 
-// The poller's suppressions at the wiring level (the predicate rows live in
-// TestShouldSpawnLander; these prove the sweep gathers the right facts).
-func TestAutolandOnce_suppressions(t *testing.T) {
+// The lander suppressions at the wiring level (the predicate rows live in
+// TestShouldSpawnLander; these prove the gather assembles the right facts —
+// and, for the at-cap row, that the pass enforces what the predicate no
+// longer weighs, #185).
+func TestSpawnOnce_landerSuppressions(t *testing.T) {
 	t.Run("autoland disabled never reads the tracker", func(t *testing.T) {
 		f := newFixture(t)
 		// Forge-bound but NOT enabled: the cheap pre-filter must veto before
@@ -100,7 +103,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.trk.addPull("afk/7", tracker.PullOpen)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
 			t.Error("disabled repo spawned a lander")
 		}
@@ -117,7 +120,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.trk.addPull("afk/7", tracker.PullOpen)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
 			t.Error("builtin-bound repo spawned a lander (the poller cannot read its verdict state)")
 		}
@@ -127,7 +130,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 		autolandOn(f, f.repo)
 		f.setFailures(f.repo, PauseThreshold)
 		f.trk.addPull("afk/7", tracker.PullOpen)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
 			t.Error("paused repo spawned a lander")
 		}
@@ -136,7 +139,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 		f := newFixture(t)
 		autolandOn(f, f.repo)
 		f.trk.addPull("fix/typo", tracker.PullOpen)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
 			t.Error("human-branch PR spawned a lander")
 		}
@@ -147,7 +150,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 		originClaimBranch(f, f.repo, "afk/7")
 		f.trk.addPull("afk/7", tracker.PullOpen)
 		f.trk.addReview(1, tracker.ReviewCommented, false)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
 			t.Fatal("PR with a live review spawned a lander")
 		}
@@ -155,7 +158,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 		f.trk.mu.Lock()
 		f.trk.reviews[1][0].Dismissed = true
 		f.trk.mu.Unlock()
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 1 {
 			t.Error("dismissed-only review still suppressed the spawn")
 		}
@@ -165,7 +168,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 		autolandOn(f, f.repo)
 		f.trk.addPull("afk/7", tracker.PullOpen)
 		f.trk.addPullComment(1, tracker.VerdictFixDone)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
 			t.Error("PR with verdict state spawned a #181 lander (that PR is the fix-forward loop's, #182)")
 		}
@@ -178,7 +181,7 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 			t.Fatalf("StartManualAFK: %v", err)
 		}
 		f.trk.addPull("afk/7", tracker.PullOpen) // the authoring run's own PR
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
 			t.Error("lander spawned while the authoring AFK run still idles on the branch")
 		}
@@ -191,9 +194,9 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.runner.AddLive("other~existing")
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
-			t.Error("at-cap sweep spawned a lander")
+			t.Error("at-cap pass spawned a lander")
 		}
 	})
 	t.Run("logged out does not spawn", func(t *testing.T) {
@@ -201,9 +204,9 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 		autolandOn(f, f.repo)
 		f.trk.addPull("afk/7", tracker.PullOpen)
 		f.prov.SetLoggedIn(false)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
-			t.Error("logged-out sweep spawned a lander doomed at the login wall")
+			t.Error("logged-out pass spawned a lander doomed at the login wall")
 		}
 	})
 	t.Run("comment read failure fails closed", func(t *testing.T) {
@@ -212,15 +215,15 @@ func TestAutolandOnce_suppressions(t *testing.T) {
 		originClaimBranch(f, f.repo, "afk/7")
 		f.trk.addPull("afk/7", tracker.PullOpen)
 		f.trk.failPullComments(errors.New("forge is down"))
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 0 {
-			t.Fatal("sweep spawned on unreadable verdict state (must fail closed)")
+			t.Fatal("pass spawned on unreadable verdict state (must fail closed)")
 		}
-		// Next tick the forge answers: the same PR spawns.
+		// Next pass the forge answers: the same PR spawns.
 		f.trk.failPullComments(nil)
-		f.svc.AutolandOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if len(landerRuns(f, f.repo)) != 1 {
-			t.Error("recovered sweep did not spawn")
+			t.Error("recovered pass did not spawn")
 		}
 	})
 }
@@ -297,9 +300,10 @@ func TestReap_landerFixDoneIsNotItsDoneSignal(t *testing.T) {
 }
 
 // A PullComments failure skips the run this tick — never classified on
-// missing data; a dead lander without a done-signal is then a real death that
-// feeds the three-strikes pause (issue #181 AC: landers count toward it).
-func TestReap_landerCommentsErrorSkipsThenDeathStrikes(t *testing.T) {
+// missing data; a dead lander without a done-signal is then a real death. That
+// death is a terminal failure outcome, but a lander outcome never moves the
+// AFK counter (issue #185): the strike stays at zero.
+func TestReap_landerCommentsErrorSkipsThenDeath(t *testing.T) {
 	f := newFixture(t)
 	run := launchLanderFixture(f)
 	f.trk.addPull("afk/7", tracker.PullOpen)
@@ -316,8 +320,74 @@ func TestReap_landerCommentsErrorSkipsThenDeathStrikes(t *testing.T) {
 	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeDeath {
 		t.Fatalf("outcome = %q, want death (session gone, no verdict, PR not merged)", got.Outcome)
 	}
-	if n := f.failures(f.repo); n != 1 {
-		t.Errorf("failures = %d, want 1 (a lander death feeds the three-strikes pause)", n)
+	if n := f.failures(f.repo); n != 0 {
+		t.Errorf("failures = %d, want 0 (a lander death never strikes the AFK counter, #185)", n)
+	}
+}
+
+// Issue #185, the counter separation. A lander death is a terminal FAILURE
+// outcome, yet it must move the shared AFK counter in NEITHER direction —
+// lander flakiness may never pause a repo's unrelated AFK work. Seeded both
+// non-zero (the "not 0==0" proof) and zero.
+func TestReap_landerDeathDoesNotStrike(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed int
+	}{
+		{"seeded non-zero stays put", 1},
+		{"zero stays zero", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.setFailures(f.repo, tc.seed)
+			run := launchLanderFixture(f)
+			f.trk.addPull("afk/7", tracker.PullOpen)
+			f.runner.Kill(run.SessionName)
+
+			f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+			if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeDeath {
+				t.Fatalf("outcome = %q, want death (session gone, PR open, no verdict)", got.Outcome)
+			}
+			if n := f.failures(f.repo); n != tc.seed {
+				t.Errorf("failures = %d, want %d unchanged (a lander death never increments the AFK counter, #185)", n, tc.seed)
+			}
+		})
+	}
+}
+
+// Issue #185, the backwards half. A lander posting `reject` reaps as SUCCESS,
+// yet must NOT reset the counter — the strikes broken AFK runs earned stand,
+// because a reject is evidence FOR the pause, not against it. Seeded 2, still 2.
+func TestReap_landerRejectDoesNotResetCounter(t *testing.T) {
+	f := newFixture(t)
+	f.setFailures(f.repo, 2) // strikes from broken AFK runs — the reject must not clear them
+	run := launchLanderFixture(f)
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings: broken tests")
+
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeSuccess {
+		t.Fatalf("outcome = %q, want success (a reject verdict completes the lander)", got.Outcome)
+	}
+	if n := f.failures(f.repo); n != 2 {
+		t.Errorf("failures = %d, want 2 unchanged (a lander reject must not re-arm the brake, #185)", n)
+	}
+}
+
+// Issue #185: the same non-reset rule for a lander that succeeds by MERGE —
+// the merged PR is the done-signal, and it too leaves the AFK counter alone.
+func TestReap_landerMergeDoesNotResetCounter(t *testing.T) {
+	f := newFixture(t)
+	f.setFailures(f.repo, 2)
+	run := launchLanderFixture(f)
+	f.trk.addPull("afk/7", tracker.PullMerged)
+
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeSuccess {
+		t.Fatalf("outcome = %q, want success off the merged PR", got.Outcome)
+	}
+	if n := f.failures(f.repo); n != 2 {
+		t.Errorf("failures = %d, want 2 unchanged (a lander merge-success must not reset the AFK counter, #185)", n)
 	}
 }
 
@@ -361,9 +431,10 @@ func TestReap_landerSuccessDoesNotNotify(t *testing.T) {
 	}
 }
 
-// The reaper tick carries the poller (ReaperLoop wiring): a virgin claim PR
-// gets its lander within one tick of the loop, with no scheduler involved.
-func TestReaperLoop_carriesAutolandSweep(t *testing.T) {
+// The reaper tick carries the spawn pass (ReaperLoop wiring, #185): a virgin
+// claim PR gets its lander within one tick of the loop, with no scheduler
+// involved.
+func TestReaperLoop_carriesSpawnPass(t *testing.T) {
 	f := newFixture(t)
 	autolandOn(f, f.repo)
 	originClaimBranch(f, f.repo, "afk/7")
