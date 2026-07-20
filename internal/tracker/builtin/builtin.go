@@ -2,8 +2,9 @@
 // seam (design §4d, D11). It answers the same vocabulary as the Forgejo REST
 // client from lab's own database, so a repo with tracker_binding=builtin gets
 // the identical issue/comment/PR contract without any forge. Change requests
-// (M6) stand in for pull requests: Pulls lists them across all states — the
-// reaper's done-signal for builtin repos — and CreatePull opens one.
+// (M6) stand in for pull requests: Pulls lists the bounded open + recent-
+// closed view (issue #176), PullsForHead answers the reaper's done-signal
+// for builtin repos, and CreatePull opens one.
 package builtin
 
 import (
@@ -85,11 +86,35 @@ func (t *Tracker) ReadyIssues(ctx context.Context) ([]tracker.Issue, error) {
 	return out, nil
 }
 
-// Issues lists issues by state (a list view: no comments loaded).
+// Issues lists issues by state (a list view: no comments loaded). The open
+// view is the full open set; the closed and all views carry the
+// tracker.RecentClosedWindow most recently closed issues instead of the full
+// closed history, open first on all — contract uniformity with the forge
+// backends (issue #176), not perf: the local store is cheap, but the seam
+// promises ONE bounded-listing vocabulary whatever the binding. "" keeps its
+// store meaning (all, like IssuesByRepo); an unknown filter stays the
+// store's loud error, reproduced here because the closed/all fan-out no
+// longer passes the raw filter through.
 func (t *Tracker) Issues(ctx context.Context, state string) ([]tracker.Issue, error) {
-	issues, err := t.store.IssuesByRepo(ctx, t.repoID, state)
-	if err != nil {
-		return nil, fmt.Errorf("builtin issues: %w", err)
+	switch state {
+	case tracker.StateOpen, tracker.StateClosed, tracker.StateAll, "":
+	default:
+		return nil, fmt.Errorf("builtin issues: invalid state filter %q", state)
+	}
+	var issues []store.Issue
+	if state != tracker.StateClosed {
+		open, err := t.store.IssuesByRepo(ctx, t.repoID, store.IssueStateOpen)
+		if err != nil {
+			return nil, fmt.Errorf("builtin issues: %w", err)
+		}
+		issues = append(issues, open...)
+	}
+	if state != tracker.StateOpen {
+		closed, err := t.store.RecentClosedIssuesByRepo(ctx, t.repoID, tracker.RecentClosedWindow)
+		if err != nil {
+			return nil, fmt.Errorf("builtin issues: %w", err)
+		}
+		issues = append(issues, closed...)
 	}
 	out := make([]tracker.Issue, 0, len(issues))
 	for _, is := range issues {
@@ -129,19 +154,51 @@ func (t *Tracker) CreateComment(ctx context.Context, number int, body string) er
 	return nil
 }
 
-// Pulls lists ALL of the repo's change requests, across all three states —
-// THE reaper done-signal for builtin repos: a CR's state maps 1:1 onto the
-// tracker's PR vocabulary (open|merged|closed are the same strings), so
-// tracker.PRPresent treats an open or merged CR whose head matches a run's
-// branch as done, and a closed-unmerged one as "no PR", exactly like a forge.
+// Pulls lists the repo's OPEN change requests plus the
+// tracker.RecentClosedWindow most recently closed ones (merged or not), open
+// set first — the bounded list view of issue #176. Honesty note: the local
+// store is cheap and could list everything; the window here is contract
+// UNIFORMITY with the forge backends — one Pulls() vocabulary whatever the
+// binding — not perf. A CR's state maps 1:1 onto the tracker's PR vocabulary
+// (open|merged|closed are the same strings); the reaper's done-signal reads
+// PullsForHead, never this list.
 func (t *Tracker) Pulls(ctx context.Context) ([]tracker.PullRef, error) {
-	crs, err := t.store.CRsByRepo(ctx, t.repoID, store.CRStateAll)
+	open, err := t.store.CRsByRepo(ctx, t.repoID, store.CRStateOpen)
 	if err != nil {
 		return nil, fmt.Errorf("builtin pulls: %w", err)
 	}
-	out := make([]tracker.PullRef, 0, len(crs))
-	for _, cr := range crs {
+	closed, err := t.store.RecentClosedCRsByRepo(ctx, t.repoID, tracker.RecentClosedWindow)
+	if err != nil {
+		return nil, fmt.Errorf("builtin pulls: %w", err)
+	}
+	out := make([]tracker.PullRef, 0, len(open)+len(closed))
+	for _, cr := range open {
 		out = append(out, toPullRef(cr))
+	}
+	for _, cr := range closed {
+		out = append(out, toPullRef(cr))
+	}
+	return out, nil
+}
+
+// PullsForHead lists the change requests whose head branch is head AND base
+// branch is base, across all states — the reaper's per-branch done-signal
+// read (issue #176). The builtin store is lab's own local DB: CRsByRepo is
+// one cheap query already bounded by the repo's own CR count, so no
+// dedicated store accessor (and no migration) is warranted — the head+base
+// filter runs in memory over the same rows Pulls maps. No match is an empty
+// non-nil slice, success; HeadBranch is trivially the queried name (the
+// store keeps the bare branch, nothing renders synthetic refs here).
+func (t *Tracker) PullsForHead(ctx context.Context, head, base string) ([]tracker.PullRef, error) {
+	crs, err := t.store.CRsByRepo(ctx, t.repoID, store.CRStateAll)
+	if err != nil {
+		return nil, fmt.Errorf("builtin pulls for head %q: %w", head, err)
+	}
+	out := make([]tracker.PullRef, 0, 1)
+	for _, cr := range crs {
+		if cr.HeadBranch == head && cr.BaseBranch == base {
+			out = append(out, toPullRef(cr))
+		}
 	}
 	return out, nil
 }

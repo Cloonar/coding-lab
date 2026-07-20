@@ -21,6 +21,7 @@ const (
 	OpIssue             = "issue"
 	OpCreateComment     = "comment"
 	OpPulls             = "pulls"
+	OpPullsForHead      = "pulls_for_head"
 	OpPull              = "pull"
 	OpChecks            = "checks"
 	OpCreatePull        = "create_pull"
@@ -109,6 +110,12 @@ func (o *observed) CreateComment(ctx context.Context, number int, body string) e
 func (o *observed) Pulls(ctx context.Context) ([]PullRef, error) {
 	pulls, err := o.t.Pulls(ctx)
 	o.report(OpPulls, err)
+	return pulls, err
+}
+
+func (o *observed) PullsForHead(ctx context.Context, head, base string) ([]PullRef, error) {
+	pulls, err := o.t.PullsForHead(ctx, head, base)
+	o.report(OpPullsForHead, err)
 	return pulls, err
 }
 

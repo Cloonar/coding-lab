@@ -24,8 +24,11 @@ func (stubTracker) Issues(context.Context, string) ([]Issue, error)  { return ni
 func (stubTracker) Issue(context.Context, int) (Issue, error)        { return Issue{}, nil }
 func (stubTracker) CreateComment(context.Context, int, string) error { return nil }
 func (stubTracker) Pulls(context.Context) ([]PullRef, error)         { return nil, nil }
-func (stubTracker) Pull(context.Context, int) (PullDetail, error)    { return PullDetail{}, nil }
-func (stubTracker) Checks(context.Context, int) ([]Check, error)     { return nil, nil }
+func (stubTracker) PullsForHead(context.Context, string, string) ([]PullRef, error) {
+	return nil, nil
+}
+func (stubTracker) Pull(context.Context, int) (PullDetail, error) { return PullDetail{}, nil }
+func (stubTracker) Checks(context.Context, int) ([]Check, error)  { return nil, nil }
 func (stubTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, nil
 }

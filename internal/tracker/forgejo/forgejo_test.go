@@ -181,34 +181,140 @@ func TestReadyIssues_emptyAfterFilterIsNonNil(t *testing.T) {
 
 // --- Issues(state) ---------------------------------------------------------
 
-func TestIssues_stateForwardedAndMapped(t *testing.T) {
-	for _, state := range []string{"open", "closed", "all"} {
-		t.Run(state, func(t *testing.T) {
-			var gotState, gotType string
-			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Query().Get("page") != "1" {
-					_, _ = io.WriteString(w, `[]`) // paginate-until-empty probe
-					return
-				}
-				gotState = r.URL.Query().Get("state")
-				gotType = r.URL.Query().Get("type")
-				_, _ = io.WriteString(w, `[{"number":3,"title":"x","state":"open",
-				  "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}]`)
-			})
-			issues, err := c.Issues(context.Background(), state)
-			if err != nil {
-				t.Fatalf("Issues(%q): %v", state, err)
+// issueRows renders n sequential fjIssue rows in the given state, numbered
+// downward from start (the newest-first order Forgejo lists in), as one JSON
+// page — the bulk generator behind the request-count pins.
+func issueRows(start, n int, state string) string {
+	rows := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		num := start - i
+		rows = append(rows, fmt.Sprintf(
+			`{"number":%d,"title":"t%d","state":%q,"created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}`,
+			num, num, state))
+	}
+	return "[" + strings.Join(rows, ",") + "]"
+}
+
+// TestIssues_openWalkUnchanged pins the open view's shape after issue #176:
+// still the full fetchPages walk (state=open, type=issues, paginate until
+// empty) — the open set is bounded by the working set, so it did not need
+// the window.
+func TestIssues_openWalkUnchanged(t *testing.T) {
+	var gotState, gotType string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") != "1" {
+			_, _ = io.WriteString(w, `[]`) // paginate-until-empty probe
+			return
+		}
+		gotState = r.URL.Query().Get("state")
+		gotType = r.URL.Query().Get("type")
+		_, _ = io.WriteString(w, `[{"number":3,"title":"x","state":"open",
+		  "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}]`)
+	})
+	issues, err := c.Issues(context.Background(), "open")
+	if err != nil {
+		t.Fatalf("Issues(open): %v", err)
+	}
+	if gotState != "open" {
+		t.Errorf("state param = %q; want open", gotState)
+	}
+	if gotType != "issues" {
+		t.Errorf("type param = %q; want issues (excludes PRs)", gotType)
+	}
+	if len(issues) != 1 || issues[0].Number != 3 || issues[0].Comments != nil {
+		t.Errorf("mapping mismatch: %+v", issues)
+	}
+}
+
+// TestIssues_closedIsOneRecentUpdateWindow pins the closed view's request
+// math (issue #176): exactly ONE request — type=issues&state=closed&
+// sort=recentupdate&page=1&limit=50 — and NO page=2 even though the window
+// comes back completely full: a full window is a full window, not an
+// invitation to paginate. (sort=recentupdate because Forgejo's issue sort
+// enum has no recentclose; closing bumps updated_at.)
+func TestIssues_closedIsOneRecentUpdateWindow(t *testing.T) {
+	var requests int
+	var gotQuery url.Values
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotQuery = r.URL.Query()
+		// A FULL window page: 50 rows, the strongest bait for a page=2 probe.
+		_, _ = io.WriteString(w, issueRows(500, tracker.RecentClosedWindow, "closed"))
+	})
+	issues, err := c.Issues(context.Background(), "closed")
+	if err != nil {
+		t.Fatalf("Issues(closed): %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("closed view made %d requests; want exactly 1 (never a page=2 probe)", requests)
+	}
+	for k, want := range map[string]string{
+		"type":  "issues",
+		"state": "closed",
+		"sort":  "recentupdate",
+		"page":  "1",
+		"limit": strconv.Itoa(tracker.RecentClosedWindow),
+	} {
+		if got := gotQuery.Get(k); got != want {
+			t.Errorf("closed query %s = %q; want %q", k, got, want)
+		}
+	}
+	if len(issues) != tracker.RecentClosedWindow {
+		t.Errorf("got %d issues; want the %d-row window", len(issues), tracker.RecentClosedWindow)
+	}
+}
+
+// TestIssues_allIsOpenWalkPlusClosedWindow pins the all view (issue #176):
+// the open walk (1 page + 1 empty probe here) plus the one-request closed
+// window = 3 requests, open rows first.
+func TestIssues_allIsOpenWalkPlusClosedWindow(t *testing.T) {
+	var requests, closedRequests int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Query().Get("state") {
+		case "open":
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = io.WriteString(w, `[]`) // paginate-until-empty probe
+				return
 			}
-			if gotState != state {
-				t.Errorf("state param = %q; want %q", gotState, state)
+			_, _ = io.WriteString(w, issueRows(7, 1, "open"))
+		case "closed":
+			closedRequests++
+			if got := r.URL.Query().Get("sort"); got != "recentupdate" {
+				t.Errorf("closed sort = %q; want recentupdate", got)
 			}
-			if gotType != "issues" {
-				t.Errorf("type param = %q; want issues (excludes PRs)", gotType)
-			}
-			if len(issues) != 1 || issues[0].Number != 3 || issues[0].Comments != nil {
-				t.Errorf("mapping mismatch: %+v", issues)
-			}
-		})
+			_, _ = io.WriteString(w, issueRows(5, 2, "closed"))
+		default:
+			t.Errorf("unexpected state param %q", r.URL.Query().Get("state"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+	issues, err := c.Issues(context.Background(), "all")
+	if err != nil {
+		t.Fatalf("Issues(all): %v", err)
+	}
+	if requests != 3 || closedRequests != 1 {
+		t.Errorf("all view = %d requests (%d closed); want 3 total, 1 closed", requests, closedRequests)
+	}
+	wantNumbers := []int{7, 5, 4} // open first, then the window newest-first
+	if len(issues) != len(wantNumbers) {
+		t.Fatalf("got %d issues (%+v); want %d", len(issues), issues, len(wantNumbers))
+	}
+	for i, n := range wantNumbers {
+		if issues[i].Number != n {
+			t.Errorf("issues[%d].Number = %d; want %d (open set first, then the closed window)", i, issues[i].Number, n)
+		}
+	}
+}
+
+// An unrecognized state filter fails loud instead of silently misquerying —
+// the filter fans out into distinct reads since issue #176.
+func TestIssues_invalidStateIsError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s", r.URL)
+	})
+	if _, err := c.Issues(context.Background(), "bogus"); err == nil {
+		t.Fatal("Issues(bogus) err = nil; want the invalid-filter error")
 	}
 }
 
@@ -367,39 +473,62 @@ func TestCreateComment(t *testing.T) {
 
 // --- Pulls -----------------------------------------------------------------
 
-func TestPulls_stateMappingAndHeads(t *testing.T) {
-	var gotState string
+// pullRows renders n sequential fjPull rows in the given state (closed rows
+// unmerged), numbered downward from start, as one JSON page — the bulk
+// generator behind the request-count pins.
+func pullRows(start, n int, state string) string {
+	rows := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		num := start - i
+		rows = append(rows, fmt.Sprintf(
+			`{"number":%d,"state":%q,"merged":false,"head":{"ref":"afk/%d"},"html_url":"u%d"}`,
+			num, state, num, num))
+	}
+	return "[" + strings.Join(rows, ",") + "]"
+}
+
+// TestPulls_openPlusRecentClosedWindow pins the bounded contract (issue
+// #176): the open walk concatenated with the one-page recent-closed window
+// (state=closed&sort=recentclose), open rows first, the three-valued state
+// still derived from state+merged per row — a merged pull in the window maps
+// to "merged". #9 and #80 share head afk/7 across the two sets; the client
+// returns BOTH (open-beats-closed precedence when heads collide is the
+// tracker package's pure PullState fn, not this client's job).
+func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("page") != "1" {
-			_, _ = io.WriteString(w, `[]`) // paginate-until-empty probe
-			return
+		switch r.URL.Query().Get("state") {
+		case "open":
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = io.WriteString(w, `[]`) // paginate-until-empty probe
+				return
+			}
+			_, _ = io.WriteString(w, `[
+			  {"number":72,"state":"open","merged":false,"head":{"ref":"afk/63"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/72"},
+			  {"number":80,"state":"open","merged":false,"head":{"ref":"afk/7"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/80"}
+			]`)
+		case "closed":
+			if got := r.URL.Query().Get("sort"); got != "recentclose" {
+				t.Errorf("closed sort = %q; want recentclose", got)
+			}
+			_, _ = io.WriteString(w, `[
+			  {"number":40,"state":"closed","merged":true,"head":{"ref":"afk/12"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/40"},
+			  {"number":9,"state":"closed","merged":false,"head":{"ref":"afk/7"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/9"}
+			]`)
+		default:
+			t.Errorf("unexpected state param %q (state=all is the walk #176 removed)", r.URL.Query().Get("state"))
+			w.WriteHeader(http.StatusBadRequest)
 		}
-		gotState = r.URL.Query().Get("state")
-		// #9 and #80 share head afk/7 — one closed-unmerged, one open. The client
-		// returns BOTH; open-beats-closed precedence when heads collide is the
-		// tracker package's pure PullState fn, not this client's job.
-		_, _ = io.WriteString(w, `[
-		  {"number":72,"state":"open","merged":false,"head":{"ref":"afk/63"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/72"},
-		  {"number":40,"state":"closed","merged":true,"head":{"ref":"afk/12"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/40"},
-		  {"number":9,"state":"closed","merged":false,"head":{"ref":"afk/7"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/9"},
-		  {"number":80,"state":"open","merged":false,"head":{"ref":"afk/7"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/80"}
-		]`)
 	})
 
 	pulls, err := c.Pulls(context.Background())
 	if err != nil {
 		t.Fatalf("Pulls: %v", err)
 	}
-	// state=all is required: a merged afk PR is no longer "open" but the reaper
-	// must still see it.
-	if gotState != "all" {
-		t.Errorf("state param = %q; want all", gotState)
-	}
 	want := []tracker.PullRef{
 		{Number: 72, HeadBranch: "afk/63", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/72"},
+		{Number: 80, HeadBranch: "afk/7", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/80"},
 		{Number: 40, HeadBranch: "afk/12", State: "merged", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/40"},
 		{Number: 9, HeadBranch: "afk/7", State: "closed", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/9"},
-		{Number: 80, HeadBranch: "afk/7", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/80"},
 	}
 	if len(pulls) != len(want) {
 		t.Fatalf("got %d pulls; want %d", len(pulls), len(want))
@@ -408,6 +537,282 @@ func TestPulls_stateMappingAndHeads(t *testing.T) {
 		if pulls[i] != want[i] {
 			t.Errorf("pull[%d] = %+v; want %+v", i, pulls[i], want[i])
 		}
+	}
+}
+
+// TestPulls_requestCountBounded is the request math of issue #176 on a repo
+// with 60 open and arbitrarily many closed PRs: 2 open pages + 1 empty probe
+// + 1 closed page = exactly 4 requests, independent of how deep the closed
+// history goes. The closed page carries state=closed&sort=recentclose&
+// page=1&limit=50 and is NEVER followed by a page=2 — even though it comes
+// back completely full.
+func TestPulls_requestCountBounded(t *testing.T) {
+	var requests, closedRequests int
+	var closedQuery url.Values
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		q := r.URL.Query()
+		switch q.Get("state") {
+		case "open":
+			switch q.Get("page") {
+			case "1":
+				_, _ = io.WriteString(w, pullRows(60, 50, "open"))
+			case "2":
+				_, _ = io.WriteString(w, pullRows(10, 10, "open"))
+			default:
+				_, _ = io.WriteString(w, `[]`) // the one empty-page probe
+			}
+		case "closed":
+			closedRequests++
+			closedQuery = q
+			// A FULL window: 50 rows, the strongest bait for a page=2 probe.
+			_, _ = io.WriteString(w, pullRows(1000, tracker.RecentClosedWindow, "closed"))
+		default:
+			t.Errorf("unexpected state param %q", q.Get("state"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+
+	pulls, err := c.Pulls(context.Background())
+	if err != nil {
+		t.Fatalf("Pulls: %v", err)
+	}
+	if requests != 4 {
+		t.Errorf("Pulls made %d requests; want exactly 4 (2 open pages + 1 probe + 1 closed page)", requests)
+	}
+	if closedRequests != 1 {
+		t.Errorf("closed window fetched %d times; want exactly 1 (a full page is not followed by page=2)", closedRequests)
+	}
+	for k, want := range map[string]string{
+		"state": "closed",
+		"sort":  "recentclose",
+		"page":  "1",
+		"limit": strconv.Itoa(tracker.RecentClosedWindow),
+	} {
+		if got := closedQuery.Get(k); got != want {
+			t.Errorf("closed query %s = %q; want %q", k, got, want)
+		}
+	}
+	if wantLen := 60 + tracker.RecentClosedWindow; len(pulls) != wantLen {
+		t.Errorf("got %d pulls; want %d (60 open + the %d-row window)", len(pulls), wantLen, tracker.RecentClosedWindow)
+	}
+}
+
+// --- PullsForHead ----------------------------------------------------------
+
+// pullsForHeadPath is the escaped by-base-head lookup the fast path must hit
+// for head afk/9 onto main: the '/' in the branch name reaches the forge as
+// %2F, one path segment per branch (verified against the live forge).
+const pullsForHeadPath = apiPrefix + "/pulls/main/afk%2F9"
+
+// TestPullsForHead_doneSignalConformance is the shared done-signal table (the
+// same cases run against all three backends): PullsForHead only enumerates
+// candidates, and tracker.DonePull projects the same verdict it would from a
+// full Pulls() walk. The closed-unmerged case exercises the fallback listing;
+// the different-base case is Forgejo's own 404 (the by-base-head lookup is
+// base-scoped server-side, so a pull onto another base simply is not there).
+func TestPullsForHead_doneSignalConformance(t *testing.T) {
+	const head, base = "afk/9", "main"
+	for _, tc := range []struct {
+		name        string
+		lookupCode  int    // by-base-head answer status
+		lookupBody  string // by-base-head answer (when 200)
+		listBody    string // state=all fallback page 1; "" ⇒ the walk must not run
+		wantNumbers []int
+		wantDone    bool
+		wantDoneNum int
+	}{
+		{
+			name:        "open pull is the done-signal",
+			lookupCode:  200,
+			lookupBody:  `{"number":80,"state":"open","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/80"}`,
+			wantNumbers: []int{80}, wantDone: true, wantDoneNum: 80,
+		},
+		{
+			name:        "merged pull is the done-signal",
+			lookupCode:  200,
+			lookupBody:  `{"number":40,"state":"closed","merged":true,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/40"}`,
+			wantNumbers: []int{40}, wantDone: true, wantDoneNum: 40,
+		},
+		{
+			name:        "closed-unmerged only is no done-signal",
+			lookupCode:  200,
+			lookupBody:  `{"number":9,"state":"closed","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/9"}`,
+			listBody:    `[{"number":9,"state":"closed","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/9"}]`,
+			wantNumbers: []int{9}, wantDone: false,
+		},
+		{
+			name:        "no pull at all is empty success",
+			lookupCode:  404,
+			wantNumbers: nil, wantDone: false,
+		},
+		{
+			// A pull from afk/9 onto dev does not answer for base main: the
+			// by-base-head lookup is base-scoped, so the forge 404s.
+			name:        "pull onto a different base does not match",
+			lookupCode:  404,
+			wantNumbers: nil, wantDone: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.EscapedPath() == pullsForHeadPath:
+					if tc.lookupCode != 200 {
+						w.WriteHeader(tc.lookupCode)
+						return
+					}
+					_, _ = io.WriteString(w, tc.lookupBody)
+				case r.URL.Path == apiPrefix+"/pulls":
+					if tc.listBody == "" {
+						t.Errorf("fallback walk ran (%s), want the fast path only", r.URL)
+					}
+					if r.URL.Query().Get("state") != "all" {
+						t.Errorf("fallback state = %q; want all", r.URL.Query().Get("state"))
+					}
+					if r.URL.Query().Get("page") != "1" {
+						_, _ = io.WriteString(w, `[]`) // paginate-until-empty probe
+						return
+					}
+					_, _ = io.WriteString(w, tc.listBody)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+
+			refs, err := c.PullsForHead(context.Background(), head, base)
+			if err != nil {
+				t.Fatalf("PullsForHead: %v", err)
+			}
+			if refs == nil {
+				t.Fatalf("PullsForHead returned nil; want a non-nil slice (empty result is success)")
+			}
+			if len(refs) != len(tc.wantNumbers) {
+				t.Fatalf("got %d refs (%+v); want %d", len(refs), refs, len(tc.wantNumbers))
+			}
+			for i, n := range tc.wantNumbers {
+				if refs[i].Number != n {
+					t.Errorf("refs[%d].Number = %d; want %d", i, refs[i].Number, n)
+				}
+				if refs[i].HeadBranch != head {
+					t.Errorf("refs[%d].HeadBranch = %q; want the queried %q", i, refs[i].HeadBranch, head)
+				}
+			}
+			done, ok := tracker.DonePull(refs, head)
+			if ok != tc.wantDone {
+				t.Fatalf("DonePull ok = %v; want %v", ok, tc.wantDone)
+			}
+			if ok && done.Number != tc.wantDoneNum {
+				t.Errorf("DonePull = #%d; want #%d", done.Number, tc.wantDoneNum)
+			}
+		})
+	}
+}
+
+// TestPullsForHead_fastPathIsOneEscapedRequest pins the bounded read (#176):
+// an open answer costs exactly ONE forge request, and that request's path
+// carries the branch names escaped as single segments (afk%2F9, never a bare
+// afk/9 that would split the branch into two path segments).
+func TestPullsForHead_fastPathIsOneEscapedRequest(t *testing.T) {
+	var requests int
+	var gotEscaped string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotEscaped = r.URL.EscapedPath()
+		_, _ = io.WriteString(w, `{"number":80,"state":"open","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/80"}`)
+	})
+
+	refs, err := c.PullsForHead(context.Background(), "afk/9", "main")
+	if err != nil {
+		t.Fatalf("PullsForHead: %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("fast path made %d requests; want exactly 1", requests)
+	}
+	if gotEscaped != pullsForHeadPath {
+		t.Errorf("request path = %q; want %q", gotEscaped, pullsForHeadPath)
+	}
+	if len(refs) != 1 || refs[0].Number != 80 || refs[0].State != tracker.PullOpen {
+		t.Errorf("refs = %+v; want [#80 open]", refs)
+	}
+}
+
+// TestPullsForHead_syntheticHeadRefUsesQueriedBranch is the merged-and-branch-
+// deleted regression: Forgejo renders such a pull's head.ref as a synthetic
+// refs/pull/N/head (verified live: PR 178 for the deleted afk/175). The
+// by-name query key is authoritative — the returned ref must carry the
+// QUERIED branch, or the caller's DonePull match against the run branch
+// silently fails on the exact pull that proves the run succeeded.
+func TestPullsForHead_syntheticHeadRefUsesQueriedBranch(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"number":178,"state":"closed","merged":true,"head":{"ref":"refs/pull/178/head"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/coding-lab/pulls/178"}`)
+	})
+
+	refs, err := c.PullsForHead(context.Background(), "afk/175", "main")
+	if err != nil {
+		t.Fatalf("PullsForHead: %v", err)
+	}
+	if len(refs) != 1 || refs[0].HeadBranch != "afk/175" || refs[0].State != tracker.PullMerged {
+		t.Fatalf("refs = %+v; want [#178 merged HeadBranch afk/175]", refs)
+	}
+	if done, ok := tracker.DonePull(refs, "afk/175"); !ok || done.Number != 178 {
+		t.Errorf("DonePull = (%+v, %v); want (#178, true)", done, ok)
+	}
+}
+
+// TestPullsForHead_closedAnswerFallbackFindsOpenSibling pins the rare-case
+// walk: the by-base-head lookup answers with NO ORDER BY, so a closed pull
+// may shadow a live sibling on a re-used branch. A closed answer must trigger
+// the state=all listing, matches filter on head AND base client-side, and the
+// open sibling wins DonePull — never the shadowing closed one.
+func TestPullsForHead_closedAnswerFallbackFindsOpenSibling(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.EscapedPath() == pullsForHeadPath:
+			// The unordered lookup happened to return the closed pull.
+			_, _ = io.WriteString(w, `{"number":9,"state":"closed","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/9"}`)
+		default:
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = io.WriteString(w, `[]`) // paginate-until-empty probe
+				return
+			}
+			// #77 shares the head but targets dev; #72 shares the base but not
+			// the head — both must be filtered out client-side.
+			_, _ = io.WriteString(w, `[
+			  {"number":9,"state":"closed","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/9"},
+			  {"number":80,"state":"open","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/80"},
+			  {"number":77,"state":"open","merged":false,"head":{"ref":"afk/9"},"base":{"ref":"dev"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/77"},
+			  {"number":72,"state":"open","merged":false,"head":{"ref":"afk/63"},"base":{"ref":"main"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/72"}
+			]`)
+		}
+	})
+
+	refs, err := c.PullsForHead(context.Background(), "afk/9", "main")
+	if err != nil {
+		t.Fatalf("PullsForHead: %v", err)
+	}
+	if len(refs) != 2 || refs[0].Number != 9 || refs[1].Number != 80 {
+		t.Fatalf("refs = %+v; want [#9 closed, #80 open]", refs)
+	}
+	if done, ok := tracker.DonePull(refs, "afk/9"); !ok || done.Number != 80 {
+		t.Errorf("DonePull = (%+v, %v); want the live sibling (#80, true)", done, ok)
+	}
+}
+
+// TestPullsForHead_serverErrorSurfaces: only a 404 means "no pull"; any other
+// forge failure surfaces as an error with no partial data (seam convention).
+func TestPullsForHead_serverErrorSurfaces(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	refs, err := c.PullsForHead(context.Background(), "afk/9", "main")
+	if err == nil {
+		t.Fatalf("PullsForHead on 500 = %+v, nil; want an error", refs)
+	}
+	if refs != nil {
+		t.Errorf("refs = %+v; want nil alongside the error (no partial data)", refs)
 	}
 }
 
@@ -1475,6 +1880,9 @@ func genIssuesJSON(start, n int) string {
 // clamps limit to its [api].MAX_RESPONSE_ITEMS, so a server clamped below our
 // pageLimit serves nothing but short pages even when more exist. The client
 // must follow a short page with one more request and stop only on [].
+// (The pagination vehicle is the OPEN walk — since issue #176 that is the
+// listing that still rides fetchPages; the closed view is a one-request
+// window with no pagination to pin.)
 func TestPagination_walksUntilEmptyPage(t *testing.T) {
 	var pages []string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1493,7 +1901,7 @@ func TestPagination_walksUntilEmptyPage(t *testing.T) {
 		}
 	})
 
-	issues, err := c.Issues(context.Background(), "all")
+	issues, err := c.Issues(context.Background(), "open")
 	if err != nil {
 		t.Fatalf("Issues: %v", err)
 	}
@@ -1525,7 +1933,7 @@ func TestPagination_clampedServerNotTruncated(t *testing.T) {
 		}
 	})
 
-	issues, err := c.Issues(context.Background(), "all")
+	issues, err := c.Issues(context.Background(), "open")
 	if err != nil {
 		t.Fatalf("Issues: %v", err)
 	}
@@ -1555,7 +1963,7 @@ func TestPagination_pageCapIsExplicitError(t *testing.T) {
 		_, _ = io.WriteString(w, genIssuesJSON((requests-1)*pageLimit+1, pageLimit)) // always a full page
 	})
 
-	_, err := c.Issues(context.Background(), "all")
+	_, err := c.Issues(context.Background(), "open")
 	if err == nil {
 		t.Fatal("expected an explicit error once the page cap is exceeded")
 	}
@@ -1589,14 +1997,14 @@ func TestRequestPathsEscapeOwnerRepo(t *testing.T) {
 	t.Cleanup(srv.Close)
 	c := New(srv.Client(), srv.URL+"/api/v1", testToken, "evil?owner", "re#po/../x")
 
-	if _, err := c.Issues(context.Background(), "all"); err != nil {
+	if _, err := c.Issues(context.Background(), "open"); err != nil {
 		t.Fatalf("Issues: %v", err)
 	}
 	if want := "/api/v1/repos/evil%3Fowner/re%23po%2F..%2Fx/issues"; gotEscaped != want {
 		t.Errorf("escaped path = %q; want %q", gotEscaped, want)
 	}
-	if gotState != "all" {
-		t.Errorf("state param = %q; want %q (query must survive a hostile owner/repo)", gotState, "all")
+	if gotState != "open" {
+		t.Errorf("state param = %q; want %q (query must survive a hostile owner/repo)", gotState, "open")
 	}
 }
 

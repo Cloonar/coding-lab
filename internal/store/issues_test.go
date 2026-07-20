@@ -133,6 +133,81 @@ func TestIssuesByRepo_stateFilterOrderingAndCounts(t *testing.T) {
 	})
 }
 
+// TestRecentClosedIssuesByRepo pins the recent-closed window accessor behind
+// the builtin tracker's bounded closed/all Issues views (issue #176): limit
+// honored, newest numbers first (number-desc ≈ close recency in the
+// monotonically numbered store), open rows excluded, and the IssuesByRepo
+// list shape intact — label names and comment counts loaded, comments not.
+func TestRecentClosedIssuesByRepo(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		repo := seedRepoForRuns(t, s)
+		now := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+
+		// #1, #3, #4 closed; #2 stays open. A label on #3, a comment on #4.
+		var created []Issue
+		for i := 1; i <= 4; i++ {
+			is, err := s.CreateIssue(ctx, repo.ID, fmt.Sprintf("t%d", i), "", now)
+			if err != nil {
+				t.Fatalf("CreateIssue #%d: %v", i, err)
+			}
+			created = append(created, is)
+		}
+		for _, n := range []int{1, 3, 4} {
+			if _, err := s.UpdateIssue(ctx, repo.ID, n, IssueUpdate{State: Set(IssueStateClosed)}, now); err != nil {
+				t.Fatalf("close #%d: %v", n, err)
+			}
+		}
+		labels, err := s.LabelsByRepo(ctx, repo.ID)
+		if err != nil {
+			t.Fatalf("LabelsByRepo: %v", err)
+		}
+		if err := s.AddIssueLabel(ctx, created[2].ID, labelID(t, labels, "ready-for-agent"), now); err != nil {
+			t.Fatalf("AddIssueLabel: %v", err)
+		}
+		if _, err := s.CreateIssueComment(ctx, created[3].ID, CommentAuthorOperator, nil, "c", now); err != nil {
+			t.Fatalf("CreateIssueComment: %v", err)
+		}
+
+		// limit 2 → [4,3]: newest numbers first, #1 aged out, open #2 excluded.
+		window, err := s.RecentClosedIssuesByRepo(ctx, repo.ID, 2)
+		if err != nil {
+			t.Fatalf("RecentClosedIssuesByRepo(2): %v", err)
+		}
+		if got := numbersOf(window); !equalInts(got, []int{4, 3}) {
+			t.Errorf("window numbers = %v, want [4 3]", got)
+		}
+		if window[0].CommentCount != 1 || window[0].Comments != nil {
+			t.Errorf("issue #4 = count %d comments %v, want count 1 and nil comments (list shape)",
+				window[0].CommentCount, window[0].Comments)
+		}
+		if !equalStrings(window[1].Labels, []string{"ready-for-agent"}) {
+			t.Errorf("issue #3 labels = %v, want [ready-for-agent]", window[1].Labels)
+		}
+		if !equalStrings(window[0].Labels, []string{}) {
+			t.Errorf("issue #4 labels = %v, want empty non-nil", window[0].Labels)
+		}
+
+		// A limit beyond the closed set returns all of it, open still excluded.
+		all, err := s.RecentClosedIssuesByRepo(ctx, repo.ID, 50)
+		if err != nil {
+			t.Fatalf("RecentClosedIssuesByRepo(50): %v", err)
+		}
+		if got := numbersOf(all); !equalInts(got, []int{4, 3, 1}) {
+			t.Errorf("full window numbers = %v, want [4 3 1] (open #2 excluded)", got)
+		}
+
+		// No closed issues is success: a non-nil empty slice.
+		empty, err := s.RecentClosedIssuesByRepo(ctx, seedRepoForRuns(t, s).ID, 50)
+		if err != nil {
+			t.Fatalf("RecentClosedIssuesByRepo empty repo: %v", err)
+		}
+		if empty == nil || len(empty) != 0 {
+			t.Errorf("empty window = %#v, want non-nil empty slice", empty)
+		}
+	})
+}
+
 // TestIssueByRepoNumber_detailWithCommentsAndLabels covers the detail read.
 func TestIssueByRepoNumber_detailWithCommentsAndLabels(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {

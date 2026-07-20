@@ -175,6 +175,54 @@ func (s *Store) CRsByRepo(ctx context.Context, repoID, state string) ([]CR, erro
 	return crs, nil
 }
 
+// RecentClosedCRsByRepo lists the repo's `limit` most recently closed change
+// requests — merged and closed-unmerged alike — newest number first, each
+// carrying its closes list like every CR read. Number-desc stands in for
+// close recency: CR numbers are allocated monotonically and state only ever
+// moves forward from open (reopen is out of scope), so a higher number is a
+// newer CR and approximates a more recent close — the same recency-window
+// semantic the forge backends answer with their recentclose/updated-desc
+// sorts (issue #176). The builtin tracker's Pulls composes this window onto
+// the open set for contract uniformity with the forge backends; the local
+// store itself is cheap, so the bound is about the seam contract, not perf.
+func (s *Store) RecentClosedCRsByRepo(ctx context.Context, repoID string, limit int) ([]CR, error) {
+	query := `SELECT ` + crColumns + ` FROM change_requests
+	 WHERE repo_id = ? AND state IN (?, ?) ORDER BY number DESC LIMIT ?`
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), repoID, CRStateMerged, CRStateClosed, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent closed CRs by repo %q: %w", repoID, err)
+	}
+	crs := make([]CR, 0)
+	for rows.Next() {
+		cr, err := scanCR(rows.Scan)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("recent closed CRs by repo %q: %w", repoID, err)
+		}
+		cr.Closes = []int{}
+		crs = append(crs, cr)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("recent closed CRs by repo %q: %w", repoID, err)
+	}
+	// Close before the closes query: the sqlite store holds a single connection
+	// (design §3a), so a second query must not run while these rows are open.
+	_ = rows.Close()
+
+	byID, err := s.closesByCR(ctx, repoID)
+	if err != nil {
+		return nil, fmt.Errorf("recent closed CRs by repo %q: %w", repoID, err)
+	}
+	for i := range crs {
+		if nums := byID[crs[i].ID]; nums != nil {
+			crs[i].Closes = nums
+		}
+	}
+	return crs, nil
+}
+
 // CRByRepoNumber returns one change request with its closes list.
 // ErrNotFound when no such (repo, number) exists.
 func (s *Store) CRByRepoNumber(ctx context.Context, repoID string, number int) (CR, error) {

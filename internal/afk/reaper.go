@@ -58,11 +58,16 @@ func (s *Service) ReapOnce(ctx context.Context, now time.Time) {
 
 // reapActiveRuns classifies the persisted active AFK runs (D12a/b: the runs
 // table IS the budget clock — no in-memory stamps, so a restart never resets
-// a budget). Each repo's pulls are fetched once per tick, UNLOCKED (the slow
-// part); the per-run decision is remade under runsMu from a fresh row read
-// and fresh liveness — never from this loop's snapshot. A repo whose tracker
-// can't be read this tick is skipped (its runs are reclassified next tick;
-// NEVER classified on missing data) rather than failing the whole sweep.
+// a budget). Each run's done-signal is one bounded PullsForHead read (the
+// verdict kinds add one bounded PullComments read — verdictDoneSignal),
+// UNLOCKED (the slow part) — O(active runs) tracker requests per tick,
+// independent of repo history (issue #176: the old once-per-repo Pulls call
+// walked the ENTIRE PR history, growing a page per 50 merged PRs); the
+// per-run decision is remade under runsMu from a fresh row read and fresh
+// liveness — never from this loop's snapshot. A run whose tracker can't be
+// read this tick is skipped (it is reclassified next tick; NEVER classified
+// on missing data) rather than failing its repo's other runs or the whole
+// sweep.
 func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 	runs, err := s.store.ActiveAFKRuns(ctx)
 	if err != nil {
@@ -95,11 +100,6 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			s.log.Warn("afk watcher: tracker", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
-		pulls, err := trk.Pulls(ctx)
-		if err != nil {
-			s.log.Warn("afk watcher: list pulls", "component", "afk", "repo", repo.Name, "err", err)
-			continue
-		}
 		for _, run := range byRepo[repoID] {
 			// The done-signal, derived per kind and fed into the ONE Classify
 			// table. AFK kinds: an open or merged PR/CR whose head is the
@@ -108,10 +108,29 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			// verdict kinds (lander/fix/escalate, issue #182): their PR
 			// pre-exists the run, so presence alone would success-reap on the
 			// first tick — the done-signal is the marker state the run
-			// PRODUCED (verdictDoneSignal, one reading per kind). Matched
-			// client-side against the one pull listing; donePull is the
-			// winning pull, meaningful only at a success/escalated outcome
-			// (it feeds the done-signal and escalation notifications).
+			// PRODUCED (verdictDoneSignal, one reading per kind). Candidates
+			// come from one bounded per-branch lookup, never a history walk
+			// (issue #176) — sound for the verdict kinds too: their
+			// pre-existing PR was created by the same agentapi handlePRCreate
+			// (head = the run's branch, base = the repo default branch), and
+			// its head branch outlives the run (MergePull never deletes the
+			// head branch, and reap-time teardown runs only after this read),
+			// so PullsForHead's LIVE-branch contract holds for every kind.
+			// Base is repo.DefaultBranch because that is the base the agent
+			// API pins for EVERY lab-created PR (the caller names neither).
+			pulls, err := trk.PullsForHead(ctx, run.Branch, repo.DefaultBranch)
+			if err != nil {
+				// Per-run isolation (tighter than the old per-repo skip): a
+				// run whose tracker can't be read this tick is never
+				// classified on missing data — it is reclassified next tick.
+				// Only this run waits; its repo's other runs still get their
+				// own reads this tick.
+				s.log.Warn("afk watcher: pulls for head", "component", "afk", "repo", repo.Name, "session", run.SessionName, "err", err)
+				continue
+			}
+			// donePull is the winning pull, meaningful only at a success/
+			// escalated outcome (it feeds the done-signal and escalation
+			// notifications).
 			donePull, prPresent := tracker.DonePull(pulls, run.Branch)
 			done, escalated := prPresent, false
 			switch run.Kind {
@@ -210,7 +229,7 @@ func (s *Service) drainZombies(ctx context.Context) {
 // active run per tick, made only when the PR exists and is not merged; a
 // read failure returns readable=false — the run is skipped and re-derived
 // next tick, never classified on missing data (the same stance as a failed
-// pull listing).
+// PullsForHead read).
 func (s *Service) verdictDoneSignal(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, pull tracker.PullRef, prPresent bool) (done, escalated, readable bool) {
 	var verdicts []string
 	if prPresent && pull.State != tracker.PullMerged {

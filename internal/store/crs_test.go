@@ -177,6 +177,79 @@ func TestCRsByRepo_stateFilterAndOrdering(t *testing.T) {
 	})
 }
 
+// TestRecentClosedCRsByRepo pins the recent-closed window accessor behind
+// the builtin tracker's bounded Pulls (issue #176): limit honored, newest
+// numbers first (number-desc ≈ close recency in the monotonically numbered
+// store), open rows excluded whatever their number, merged and
+// closed-unmerged both included, closes-join intact.
+func TestRecentClosedCRsByRepo(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		repo := seedRepoForRuns(t, s)
+		now := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+
+		// #1 closed (with closes), #2 merged, #3 open, #4 closed (with closes).
+		for i := 1; i <= 4; i++ {
+			var closes []int
+			if i == 1 || i == 4 {
+				closes = []int{i, 7}
+			}
+			if _, err := s.CreateCR(ctx, repo.ID, fmt.Sprintf("t%d", i), "", fmt.Sprintf("afk/%d", i), "main", closes, now); err != nil {
+				t.Fatalf("CreateCR #%d: %v", i, err)
+			}
+		}
+		if _, err := s.CloseCR(ctx, repo.ID, 1, now); err != nil {
+			t.Fatalf("CloseCR #1: %v", err)
+		}
+		if _, err := s.MergeCR(ctx, repo.ID, 2, "deadbeef", now); err != nil {
+			t.Fatalf("MergeCR #2: %v", err)
+		}
+		if _, err := s.CloseCR(ctx, repo.ID, 4, now); err != nil {
+			t.Fatalf("CloseCR #4: %v", err)
+		}
+
+		// limit 2 → [4,2]: newest numbers first, open #3 excluded even though
+		// its number sits inside the range, merged #2 included.
+		window, err := s.RecentClosedCRsByRepo(ctx, repo.ID, 2)
+		if err != nil {
+			t.Fatalf("RecentClosedCRsByRepo(2): %v", err)
+		}
+		if got := crNumbersOf(window); !equalInts(got, []int{4, 2}) {
+			t.Errorf("window numbers = %v, want [4 2]", got)
+		}
+		if got := window[0].Closes; !equalInts(got, []int{4, 7}) {
+			t.Errorf("CR #4 closes in window = %v, want [4 7] (closes-join intact)", got)
+		}
+		if got := window[1].Closes; got == nil || len(got) != 0 {
+			t.Errorf("CR #2 closes in window = %v, want empty non-nil", got)
+		}
+		if window[1].State != CRStateMerged || window[1].MergeCommit == nil {
+			t.Errorf("CR #2 in window = state %q merge_commit %v, want merged with commit", window[1].State, window[1].MergeCommit)
+		}
+
+		// A limit beyond the closed set returns all of it — never the open row.
+		all, err := s.RecentClosedCRsByRepo(ctx, repo.ID, 50)
+		if err != nil {
+			t.Fatalf("RecentClosedCRsByRepo(50): %v", err)
+		}
+		if got := crNumbersOf(all); !equalInts(got, []int{4, 2, 1}) {
+			t.Errorf("full window numbers = %v, want [4 2 1] (open #3 excluded)", got)
+		}
+		if got := all[2].Closes; !equalInts(got, []int{1, 7}) {
+			t.Errorf("CR #1 closes = %v, want [1 7]", got)
+		}
+
+		// No closed CRs is success: a non-nil empty slice.
+		empty, err := s.RecentClosedCRsByRepo(ctx, seedRepoForRuns(t, s).ID, 50)
+		if err != nil {
+			t.Fatalf("RecentClosedCRsByRepo empty repo: %v", err)
+		}
+		if empty == nil || len(empty) != 0 {
+			t.Errorf("empty window = %#v, want non-nil empty slice", empty)
+		}
+	})
+}
+
 // TestMergeCR_transitionGuards pins the open→merged transition: merged_at,
 // merge_commit and updated_at stamped; any non-open start state (merged or
 // closed) is refused with ErrCRNotOpen; a missing CR is ErrNotFound.

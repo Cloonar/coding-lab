@@ -166,30 +166,117 @@ func TestReadyIssues_emptyIsNonNil(t *testing.T) {
 
 // --- Issues(state) ---------------------------------------------------------
 
-func TestIssues_stateForwardedAndPRsFiltered(t *testing.T) {
-	for _, state := range []string{"open", "closed", "all"} {
-		t.Run(state, func(t *testing.T) {
-			var gotState string
-			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-				gotState = r.URL.Query().Get("state")
-				_, _ = io.WriteString(w, `[
-				  {"number":3,"title":"an issue","state":"open",
-				   "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"},
-				  {"number":4,"title":"a PR","state":"open","pull_request":{"url":"u"},
-				   "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}
-				]`)
-			})
-			issues, err := c.Issues(context.Background(), state)
-			if err != nil {
-				t.Fatalf("Issues(%q): %v", state, err)
-			}
-			if gotState != state {
-				t.Errorf("state param = %q; want %q", gotState, state)
-			}
-			if len(issues) != 1 || issues[0].Number != 3 {
-				t.Errorf("issues = %+v; want only #3 (PR filtered)", issues)
-			}
-		})
+// TestIssues_openWalkUnchangedAndPRsFiltered pins the open view's shape after
+// issue #176: still the full Link-following walk (state=open), with GitHub's
+// folded-in PRs dropped client-side.
+func TestIssues_openWalkUnchangedAndPRsFiltered(t *testing.T) {
+	var gotState string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotState = r.URL.Query().Get("state")
+		_, _ = io.WriteString(w, `[
+		  {"number":3,"title":"an issue","state":"open",
+		   "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"},
+		  {"number":4,"title":"a PR","state":"open","pull_request":{"url":"u"},
+		   "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}
+		]`)
+	})
+	issues, err := c.Issues(context.Background(), "open")
+	if err != nil {
+		t.Fatalf("Issues(open): %v", err)
+	}
+	if gotState != "open" {
+		t.Errorf("state param = %q; want open", gotState)
+	}
+	if len(issues) != 1 || issues[0].Number != 3 {
+		t.Errorf("issues = %+v; want only #3 (PR filtered)", issues)
+	}
+}
+
+// TestIssues_closedWindowSingleRequestLinkIgnored pins the closed view's
+// request math (issue #176): exactly ONE request — state=closed&sort=updated&
+// direction=desc&per_page=50 (GitHub has no recently-closed sort;
+// updated-desc approximates it) — whose Link rel="next" header is
+// deliberately NOT followed, and whose folded-in PRs are still dropped (up to
+// the window of rows, fewer after the PR filtering).
+func TestIssues_closedWindowSingleRequestLinkIgnored(t *testing.T) {
+	var requests int
+	var gotQuery url.Values
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotQuery = r.URL.Query()
+		setNextLink(w, r) // the bait: a next page that must never be fetched
+		_, _ = io.WriteString(w, `[
+		  {"number":9,"title":"newest closed","state":"closed",
+		   "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-03T00:00:00Z"},
+		  {"number":8,"title":"a closed PR","state":"closed","pull_request":{"url":"u"},
+		   "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T12:00:00Z"},
+		  {"number":5,"title":"older closed","state":"closed",
+		   "created_at":"2026-02-01T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}
+		]`)
+	})
+	issues, err := c.Issues(context.Background(), "closed")
+	if err != nil {
+		t.Fatalf("Issues(closed): %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("closed view made %d requests; want exactly 1 (the Link header must be ignored)", requests)
+	}
+	for k, want := range map[string]string{
+		"state":     "closed",
+		"sort":      "updated",
+		"direction": "desc",
+		"per_page":  strconv.Itoa(tracker.RecentClosedWindow),
+	} {
+		if got := gotQuery.Get(k); got != want {
+			t.Errorf("closed query %s = %q; want %q", k, got, want)
+		}
+	}
+	if len(issues) != 2 || issues[0].Number != 9 || issues[1].Number != 5 {
+		t.Errorf("issues = %+v; want [#9 #5] (the folded PR #8 filtered out)", issues)
+	}
+}
+
+// TestIssues_allIsOpenWalkPlusClosedWindow pins the all view (issue #176):
+// the Link-following open walk plus the one-request closed window, open rows
+// first.
+func TestIssues_allIsOpenWalkPlusClosedWindow(t *testing.T) {
+	var requests, closedRequests int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Query().Get("state") {
+		case "open":
+			_, _ = io.WriteString(w, `[{"number":7,"title":"open one","state":"open",
+			  "created_at":"2026-02-02T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}]`)
+		case "closed":
+			closedRequests++
+			setNextLink(w, r) // must be ignored
+			_, _ = io.WriteString(w, `[{"number":5,"title":"closed one","state":"closed",
+			  "created_at":"2026-02-01T00:00:00Z","updated_at":"2026-02-02T00:00:00Z"}]`)
+		default:
+			t.Errorf("unexpected state param %q", r.URL.Query().Get("state"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+	issues, err := c.Issues(context.Background(), "all")
+	if err != nil {
+		t.Fatalf("Issues(all): %v", err)
+	}
+	if requests != 2 || closedRequests != 1 {
+		t.Errorf("all view = %d requests (%d closed); want 2 total, 1 closed", requests, closedRequests)
+	}
+	if len(issues) != 2 || issues[0].Number != 7 || issues[1].Number != 5 {
+		t.Errorf("issues = %+v; want [#7 open, #5 closed] (open set first)", issues)
+	}
+}
+
+// An unrecognized state filter fails loud instead of silently misquerying —
+// the filter fans out into distinct reads since issue #176.
+func TestIssues_invalidStateIsError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s", r.URL)
+	})
+	if _, err := c.Issues(context.Background(), "bogus"); err == nil {
+		t.Fatal("Issues(bogus) err = nil; want the invalid-filter error")
 	}
 }
 
@@ -320,37 +407,187 @@ func TestCreateComment(t *testing.T) {
 
 // --- Pulls -----------------------------------------------------------------
 
-func TestPulls_stateMappingMergedAtAndHeads(t *testing.T) {
-	var gotState string
+// TestPulls_openPlusRecentClosedWindow pins the bounded contract (issue
+// #176) and its request math: the open walk still follows Link (2 pages
+// here), the closed window is exactly ONE request — state=closed&
+// sort=updated&direction=desc&per_page=50 — whose Link rel="next" header is
+// deliberately NOT followed (the bait is served and must rot). Open rows come
+// first; the merged state still derives from merged_at per row (no `merged`
+// bool on the list), so a merged pull in the window maps to "merged".
+func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
+	var requests, closedRequests int
+	var closedQuery url.Values
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		gotState = r.URL.Query().Get("state")
-		// merged state derives from merged_at (no `merged` bool on the list).
-		_, _ = io.WriteString(w, `[
-		  {"number":72,"state":"open","merged_at":null,"head":{"ref":"afk/63"},"html_url":"https://github.com/octocat/hello-world/pull/72"},
-		  {"number":40,"state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"ref":"afk/12"},"html_url":"https://github.com/octocat/hello-world/pull/40"},
-		  {"number":9,"state":"closed","merged_at":null,"head":{"ref":"afk/7"},"html_url":"https://github.com/octocat/hello-world/pull/9"}
-		]`)
+		requests++
+		q := r.URL.Query()
+		switch q.Get("state") {
+		case "open":
+			if q.Get("page") == "1" {
+				setNextLink(w, r) // the open walk DOES follow Link
+				_, _ = io.WriteString(w, `[{"number":72,"state":"open","merged_at":null,"head":{"ref":"afk/63"},"html_url":"https://github.com/octocat/hello-world/pull/72"}]`)
+				return
+			}
+			// page 2, no Link → the walk stops.
+			_, _ = io.WriteString(w, `[{"number":80,"state":"open","merged_at":null,"head":{"ref":"afk/7"},"html_url":"https://github.com/octocat/hello-world/pull/80"}]`)
+		case "closed":
+			closedRequests++
+			closedQuery = q
+			setNextLink(w, r) // the bait: the window must NOT follow it
+			_, _ = io.WriteString(w, `[
+			  {"number":40,"state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"ref":"afk/12"},"html_url":"https://github.com/octocat/hello-world/pull/40"},
+			  {"number":9,"state":"closed","merged_at":null,"head":{"ref":"afk/7"},"html_url":"https://github.com/octocat/hello-world/pull/9"}
+			]`)
+		default:
+			t.Errorf("unexpected state param %q (state=all is the walk #176 removed)", q.Get("state"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
 	})
 
 	pulls, err := c.Pulls(context.Background())
 	if err != nil {
 		t.Fatalf("Pulls: %v", err)
 	}
-	if gotState != "all" {
-		t.Errorf("state param = %q; want all", gotState)
+	if requests != 3 {
+		t.Errorf("Pulls made %d requests; want exactly 3 (2 open pages + 1 closed page)", requests)
+	}
+	if closedRequests != 1 {
+		t.Errorf("closed window fetched %d times; want exactly 1 (its Link header must be ignored)", closedRequests)
+	}
+	for k, want := range map[string]string{
+		"state":     "closed",
+		"sort":      "updated",
+		"direction": "desc",
+		"per_page":  strconv.Itoa(tracker.RecentClosedWindow),
+	} {
+		if got := closedQuery.Get(k); got != want {
+			t.Errorf("closed query %s = %q; want %q", k, got, want)
+		}
 	}
 	want := []tracker.PullRef{
 		{Number: 72, HeadBranch: "afk/63", State: "open", URL: "https://github.com/octocat/hello-world/pull/72"},
+		{Number: 80, HeadBranch: "afk/7", State: "open", URL: "https://github.com/octocat/hello-world/pull/80"},
 		{Number: 40, HeadBranch: "afk/12", State: "merged", URL: "https://github.com/octocat/hello-world/pull/40"},
 		{Number: 9, HeadBranch: "afk/7", State: "closed", URL: "https://github.com/octocat/hello-world/pull/9"},
 	}
 	if len(pulls) != len(want) {
-		t.Fatalf("got %d pulls; want %d", len(pulls), len(want))
+		t.Fatalf("got %d pulls (%+v); want %d", len(pulls), pulls, len(want))
 	}
 	for i := range want {
 		if pulls[i] != want[i] {
 			t.Errorf("pull[%d] = %+v; want %+v", i, pulls[i], want[i])
 		}
+	}
+}
+
+// --- PullsForHead ----------------------------------------------------------
+
+// TestPullsForHead_doneSignalConformance is the shared done-signal table (the
+// same cases run against all three backends): PullsForHead only enumerates
+// candidates, and tracker.DonePull projects the same verdict it would from a
+// full Pulls() walk. Every case also pins the GitHub request shape: the head
+// filter MUST carry the owner: prefix (a bare branch name is silently ignored
+// and the listing degenerates into the unbounded walk #176 exists to kill),
+// alongside base and state=all. The different-base case plays a misfiltering
+// server (rows for another base and another head) to prove the defensive
+// client-side re-filter.
+func TestPullsForHead_doneSignalConformance(t *testing.T) {
+	const head, base = "afk/9", "main"
+	for _, tc := range []struct {
+		name        string
+		body        string
+		wantNumbers []int
+		wantDone    bool
+		wantDoneNum int
+	}{
+		{
+			name:        "open pull is the done-signal",
+			body:        `[{"number":80,"state":"open","merged_at":null,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://github.com/octocat/hello-world/pull/80"}]`,
+			wantNumbers: []int{80}, wantDone: true, wantDoneNum: 80,
+		},
+		{
+			name:        "merged pull is the done-signal",
+			body:        `[{"number":40,"state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://github.com/octocat/hello-world/pull/40"}]`,
+			wantNumbers: []int{40}, wantDone: true, wantDoneNum: 40,
+		},
+		{
+			name:        "closed-unmerged only is no done-signal",
+			body:        `[{"number":9,"state":"closed","merged_at":null,"head":{"ref":"afk/9"},"base":{"ref":"main"},"html_url":"https://github.com/octocat/hello-world/pull/9"}]`,
+			wantNumbers: []int{9}, wantDone: false,
+		},
+		{
+			name:        "no pull at all is empty success",
+			body:        `[]`,
+			wantNumbers: nil, wantDone: false,
+		},
+		{
+			// A server that ignored the filters: a pull from afk/9 onto dev and
+			// one from another head onto main — both re-filtered out client-side.
+			name: "pull onto a different base does not match",
+			body: `[
+			  {"number":77,"state":"open","merged_at":null,"head":{"ref":"afk/9"},"base":{"ref":"dev"},"html_url":"https://github.com/octocat/hello-world/pull/77"},
+			  {"number":72,"state":"open","merged_at":null,"head":{"ref":"afk/63"},"base":{"ref":"main"},"html_url":"https://github.com/octocat/hello-world/pull/72"}
+			]`,
+			wantNumbers: nil, wantDone: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotQuery url.Values
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				gotQuery = r.URL.Query()
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			refs, err := c.PullsForHead(context.Background(), head, base)
+			if err != nil {
+				t.Fatalf("PullsForHead: %v", err)
+			}
+			for k, want := range map[string]string{
+				"state": "all",
+				"head":  "octocat:afk/9", // owner-qualified, or GitHub ignores the filter
+				"base":  "main",
+			} {
+				if got := gotQuery.Get(k); got != want {
+					t.Errorf("query %s = %q; want %q", k, got, want)
+				}
+			}
+			if refs == nil {
+				t.Fatalf("PullsForHead returned nil; want a non-nil slice (empty result is success)")
+			}
+			if len(refs) != len(tc.wantNumbers) {
+				t.Fatalf("got %d refs (%+v); want %d", len(refs), refs, len(tc.wantNumbers))
+			}
+			for i, n := range tc.wantNumbers {
+				if refs[i].Number != n {
+					t.Errorf("refs[%d].Number = %d; want %d", i, refs[i].Number, n)
+				}
+				if refs[i].HeadBranch != head {
+					t.Errorf("refs[%d].HeadBranch = %q; want the queried %q", i, refs[i].HeadBranch, head)
+				}
+			}
+			done, ok := tracker.DonePull(refs, head)
+			if ok != tc.wantDone {
+				t.Fatalf("DonePull ok = %v; want %v", ok, tc.wantDone)
+			}
+			if ok && done.Number != tc.wantDoneNum {
+				t.Errorf("DonePull = #%d; want #%d", done.Number, tc.wantDoneNum)
+			}
+		})
+	}
+}
+
+// TestPullsForHead_serverErrorSurfaces: an upstream failure surfaces as an
+// error with no partial data (seam convention).
+func TestPullsForHead_serverErrorSurfaces(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	refs, err := c.PullsForHead(context.Background(), "afk/9", "main")
+	if err == nil {
+		t.Fatalf("PullsForHead on 500 = %+v, nil; want an error", refs)
+	}
+	if refs != nil {
+		t.Errorf("refs = %+v; want nil alongside the error (no partial data)", refs)
 	}
 }
 
@@ -1511,7 +1748,9 @@ func setNextLink(w http.ResponseWriter, r *http.Request) {
 
 // TestPagination_followsLinkNext: the client walks pages while Link advertises
 // rel="next" and stops on the page that omits it — a short-but-nonempty page
-// with a next link keeps going, one without stops.
+// with a next link keeps going, one without stops. (The pagination vehicle is
+// the OPEN walk — since issue #176 that is the listing that still rides
+// fetchPages; the closed view is a one-request window that ignores Link.)
 func TestPagination_followsLinkNext(t *testing.T) {
 	var pages []string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1532,7 +1771,7 @@ func TestPagination_followsLinkNext(t *testing.T) {
 		}
 	})
 
-	issues, err := c.Issues(context.Background(), "all")
+	issues, err := c.Issues(context.Background(), "open")
 	if err != nil {
 		t.Fatalf("Issues: %v", err)
 	}
@@ -1562,7 +1801,7 @@ func TestPagination_pageCapIsExplicitError(t *testing.T) {
 		_, _ = io.WriteString(w, genIssuesJSON((requests-1)*pageLimit+1, pageLimit))
 	})
 
-	_, err := c.Issues(context.Background(), "all")
+	_, err := c.Issues(context.Background(), "open")
 	if err == nil {
 		t.Fatal("expected an explicit error once the page cap is exceeded")
 	}
@@ -1586,14 +1825,14 @@ func TestRequestPathsEscapeOwnerRepo(t *testing.T) {
 	t.Cleanup(srv.Close)
 	c := New(srv.Client(), srv.URL, testToken, "evil?owner", "re#po/../x")
 
-	if _, err := c.Issues(context.Background(), "all"); err != nil {
+	if _, err := c.Issues(context.Background(), "open"); err != nil {
 		t.Fatalf("Issues: %v", err)
 	}
 	if want := "/repos/evil%3Fowner/re%23po%2F..%2Fx/issues"; gotEscaped != want {
 		t.Errorf("escaped path = %q; want %q", gotEscaped, want)
 	}
-	if gotState != "all" {
-		t.Errorf("state param = %q; want all (query must survive a hostile owner/repo)", gotState)
+	if gotState != "open" {
+		t.Errorf("state param = %q; want open (query must survive a hostile owner/repo)", gotState)
 	}
 }
 

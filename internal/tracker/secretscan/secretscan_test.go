@@ -145,6 +145,9 @@ func (r *recTracker) CreateComment(_ context.Context, number int, body string) e
 	return nil
 }
 func (r *recTracker) Pulls(context.Context) ([]tracker.PullRef, error) { return nil, nil }
+func (r *recTracker) PullsForHead(context.Context, string, string) ([]tracker.PullRef, error) {
+	return nil, nil
+}
 func (r *recTracker) Pull(context.Context, int) (tracker.PullDetail, error) {
 	return tracker.PullDetail{}, nil
 }

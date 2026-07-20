@@ -45,7 +45,7 @@ Usage:
                                         create the label if missing (idempotent)
   labctl pr create --title T --body B   open a PR/CR for the current branch
   labctl pr view <n>                    show PR n (number, title, state, head, url, body)
-  labctl pr list                        list the repo's PRs across all states (number, state, head, url)
+  labctl pr list                        list open PRs plus the ~50 most recently closed (number, state, head, url)
   labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
   labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
                                         pending (exit 0 green/none · 2 red · 3 still pending)
