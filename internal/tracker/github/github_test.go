@@ -787,6 +787,244 @@ func TestMergePull_rateLimitedNotRejected(t *testing.T) {
 	}
 }
 
+// --- Reviews ---------------------------------------------------------------
+
+// TestReviews_stateMappingAndDismissed pins the read: GitHub review states map
+// onto lab's Review* vocabulary, DISMISSED sets Dismissed=true with state
+// "dismissed", and an unknown state passes through lowercased.
+func TestReviews_stateMappingAndDismissed(t *testing.T) {
+	var gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `[
+		  {"user":{"login":"alice"},"state":"APPROVED","body":"lgtm"},
+		  {"user":{"login":"bob"},"state":"CHANGES_REQUESTED","body":"fix this"},
+		  {"user":{"login":"carol"},"state":"COMMENTED","body":"nit"},
+		  {"user":{"login":"dave"},"state":"DISMISSED","body":"was blocking"},
+		  {"user":{"login":"erin"},"state":"PENDING","body":""},
+		  {"user":{"login":"frank"},"state":"WEIRD","body":"?"}
+		]`)
+	})
+
+	reviews, err := c.Reviews(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("Reviews: %v", err)
+	}
+	if gotPath != apiPrefix+"/pulls/42/reviews" {
+		t.Errorf("path = %q; want %q", gotPath, apiPrefix+"/pulls/42/reviews")
+	}
+	want := []tracker.Review{
+		{Reviewer: "alice", State: tracker.ReviewApproved, Body: "lgtm"},
+		{Reviewer: "bob", State: tracker.ReviewChangesRequested, Body: "fix this"},
+		{Reviewer: "carol", State: tracker.ReviewCommented, Body: "nit"},
+		{Reviewer: "dave", State: "dismissed", Body: "was blocking", Dismissed: true},
+		{Reviewer: "erin", State: "pending"},
+		{Reviewer: "frank", State: "weird", Body: "?"},
+	}
+	if len(reviews) != len(want) {
+		t.Fatalf("got %d reviews; want %d", len(reviews), len(want))
+	}
+	for i, r := range reviews {
+		if r != want[i] {
+			t.Errorf("review[%d] = %+v; want %+v", i, r, want[i])
+		}
+	}
+}
+
+func TestReviews_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+	})
+	if _, err := c.Reviews(context.Background(), 999); !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- RerequestReview -------------------------------------------------------
+
+// TestRerequestReview_postsChangesRequestedReviewers pins the latest-per-
+// reviewer reduction: alice's latest is an approval (drops out), carol's
+// changes-request is DISMISSED (skipped), dave's changes-request is followed by
+// a PENDING that is skipped (so dave still counts). The POST carries exactly
+// [bob, dave] in first-seen order.
+func TestRerequestReview_postsChangesRequestedReviewers(t *testing.T) {
+	var gotReqMethod, gotReqPath string
+	var gotReqBody map[string]any
+	postCalled := false
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/reviews"):
+			_, _ = io.WriteString(w, `[
+			  {"user":{"login":"alice"},"state":"CHANGES_REQUESTED"},
+			  {"user":{"login":"bob"},"state":"CHANGES_REQUESTED"},
+			  {"user":{"login":"alice"},"state":"APPROVED"},
+			  {"user":{"login":"carol"},"state":"DISMISSED"},
+			  {"user":{"login":"dave"},"state":"CHANGES_REQUESTED"},
+			  {"user":{"login":"dave"},"state":"PENDING"}
+			]`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/requested_reviewers"):
+			postCalled = true
+			gotReqMethod, gotReqPath = r.Method, r.URL.Path
+			gotReqBody = decodeBody(t, r)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	if err := c.RerequestReview(context.Background(), 42); err != nil {
+		t.Fatalf("RerequestReview: %v", err)
+	}
+	if !postCalled {
+		t.Fatal("RerequestReview did not POST requested_reviewers")
+	}
+	if gotReqMethod != http.MethodPost || gotReqPath != apiPrefix+"/pulls/42/requested_reviewers" {
+		t.Errorf("request = %s %s; want POST %s/pulls/42/requested_reviewers", gotReqMethod, gotReqPath, apiPrefix)
+	}
+	raw, ok := gotReqBody["reviewers"].([]any)
+	if !ok {
+		t.Fatalf("reviewers field = %v; want a JSON array", gotReqBody["reviewers"])
+	}
+	got := make([]string, len(raw))
+	for i, v := range raw {
+		got[i], _ = v.(string)
+	}
+	if len(got) != 2 || got[0] != "bob" || got[1] != "dave" {
+		t.Errorf("reviewers = %v; want [bob dave] (alice approved, carol dismissed)", got)
+	}
+}
+
+// TestRerequestReview_noChangesRequestedIsNoOp: with nobody currently
+// requesting changes, the re-request is a convergent no-op — no POST, nil error.
+func TestRerequestReview_noChangesRequestedIsNoOp(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			t.Fatalf("unexpected POST %s; want a no-op", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `[
+		  {"user":{"login":"alice"},"state":"APPROVED"},
+		  {"user":{"login":"bob"},"state":"COMMENTED"}
+		]`)
+	})
+
+	if err := c.RerequestReview(context.Background(), 42); err != nil {
+		t.Fatalf("RerequestReview no-op: %v", err)
+	}
+}
+
+// TestRerequestReview_nonVerdictRowsDoNotClearVerdict pins the fold rule that
+// only verdict-bearing rows (APPROVED/CHANGES_REQUESTED) update a reviewer's
+// latest verdict: alice's CHANGES_REQUESTED followed by a COMMENTED reply
+// leaves her still in the POSTed set — GitHub's review decision is likewise
+// unaffected by COMMENTED reviews, so a reviewer who replied in the thread is
+// still requesting changes.
+func TestRerequestReview_nonVerdictRowsDoNotClearVerdict(t *testing.T) {
+	var gotReqBody map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/reviews"):
+			_, _ = io.WriteString(w, `[
+			  {"user":{"login":"alice"},"state":"CHANGES_REQUESTED"},
+			  {"user":{"login":"alice"},"state":"COMMENTED"}
+			]`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/requested_reviewers"):
+			gotReqBody = decodeBody(t, r)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	if err := c.RerequestReview(context.Background(), 42); err != nil {
+		t.Fatalf("RerequestReview: %v", err)
+	}
+	raw, ok := gotReqBody["reviewers"].([]any)
+	if !ok {
+		t.Fatalf("reviewers field = %v; want a JSON array (the POST must happen)", gotReqBody["reviewers"])
+	}
+	if len(raw) != 1 || raw[0] != "alice" {
+		t.Errorf("reviewers = %v; want [alice] — a COMMENTED reply must not clear the verdict", raw)
+	}
+}
+
+// TestRerequestReview_refusalSurfacesGitHubWordsVerbatim: a GitHub refusal of
+// the /requested_reviewers POST becomes tracker.ErrReviewRejected carrying
+// GitHub's own words — never the token.
+func TestRerequestReview_refusalSurfacesGitHubWordsVerbatim(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `[{"user":{"login":"alice"},"state":"CHANGES_REQUESTED"}]`)
+			return
+		}
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"message":"Review cannot be requested from pull request author"}`)
+	})
+
+	err := c.RerequestReview(context.Background(), 42)
+	if !errors.Is(err, tracker.ErrReviewRejected) {
+		t.Fatalf("err = %v, want ErrReviewRejected", err)
+	}
+	if !strings.Contains(err.Error(), "cannot be requested from pull request author") {
+		t.Fatalf("err = %q, want GitHub's own words verbatim", err.Error())
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestRerequestReview_rateLimitedNotRejected: a throttled /requested_reviewers
+// POST stays tracker.ErrRateLimited (a transient upstream throttle), NOT
+// ErrReviewRejected — GitHub's secondary limits target mutating requests, so
+// the caller must come back later, not treat the pull as un-re-requestable.
+func TestRerequestReview_rateLimitedNotRejected(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `[{"user":{"login":"alice"},"state":"CHANGES_REQUESTED"}]`)
+			return
+		}
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1783500000")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"You have exceeded a secondary rate limit"}`)
+	})
+
+	err := c.RerequestReview(context.Background(), 42)
+	if !errors.Is(err, tracker.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited (a throttle, not a refusal)", err)
+	}
+	if errors.Is(err, tracker.ErrReviewRejected) {
+		t.Fatalf("throttle mislabeled as a review refusal: %v", err)
+	}
+}
+
+// --- CommentPull -----------------------------------------------------------
+
+// TestCommentPull posts a plain comment on the PR's shared issue-comment
+// endpoint.
+func TestCommentPull(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotBody = decodeBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"body":"a note","user":{"login":"bot"},"created_at":"2026-04-01T00:00:00Z"}`)
+	})
+
+	if err := c.CommentPull(context.Background(), 42, "a note"); err != nil {
+		t.Fatalf("CommentPull: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != apiPrefix+"/issues/42/comments" {
+		t.Errorf("request = %s %s; want POST %s/issues/42/comments", gotMethod, gotPath, apiPrefix)
+	}
+	if gotBody["body"] != "a note" {
+		t.Errorf("request body = %v; want {body: a note}", gotBody)
+	}
+}
+
 // --- CloseIssue ------------------------------------------------------------
 
 func TestCloseIssue(t *testing.T) {

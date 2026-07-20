@@ -106,6 +106,13 @@ func (f *fakeTracker) CreatePull(context.Context, string, string, string, string
 func (f *fakeTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 	return tracker.PullRef{}, errors.New("not implemented")
 }
+func (f *fakeTracker) Reviews(context.Context, int) ([]tracker.Review, error) { return nil, nil }
+func (f *fakeTracker) RerequestReview(context.Context, int) error {
+	return errors.New("not implemented")
+}
+func (f *fakeTracker) CommentPull(context.Context, int, string) error {
+	return errors.New("not implemented")
+}
 func (f *fakeTracker) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
 	return tracker.Issue{}, errors.New("not implemented")

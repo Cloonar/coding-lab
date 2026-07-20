@@ -345,6 +345,11 @@ func (s *stubForgeTracker) CreatePull(context.Context, string, string, string, s
 func (s *stubForgeTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 	return tracker.PullRef{}, nil
 }
+func (s *stubForgeTracker) Reviews(context.Context, int) ([]tracker.Review, error) {
+	return nil, nil
+}
+func (s *stubForgeTracker) RerequestReview(context.Context, int) error     { return nil }
+func (s *stubForgeTracker) CommentPull(context.Context, int, string) error { return nil }
 
 func (s *stubForgeTracker) CloseIssue(context.Context, int) error { return nil }
 func (s *stubForgeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
