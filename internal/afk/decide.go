@@ -174,36 +174,55 @@ func LiveReview(reviews []tracker.Review) bool {
 	return false
 }
 
+// SpawnStage is a spawn candidate's pipeline rank (issue #185) — the ONE
+// sort key of the fleet spawn pass. Lower means further down the pipeline
+// and launches first: drain the pipeline before filling it. A lander
+// finishes work already claimed and PR'd; a fix run repairs work already
+// validated-and-rejected; new AFK work fills the pipeline from the top.
+// Without the ordering a repo at cap could spend every slot opening new PRs
+// while validated-but-unlanded ones queued behind them. Priority is DATA on
+// the candidate, not control flow spread across loops — that is what makes
+// #182 an addition (a producer emitting StageFix) instead of a third racer.
+type SpawnStage int
+
+const (
+	StageLander  SpawnStage = iota // validate an open claim PR — furthest down the pipeline
+	StageFix                       // repair a rejected claim PR — issue #182's reserved rank; no producer emits it yet
+	StageNewWork                   // start a fresh ready issue — fills the pipeline
+)
+
 // AutoDecision holds the facts the auto-launch predicate weighs for one repo
-// on one scheduler tick (v0 afkAutoDecision, verbatim).
+// on one spawn pass (v0 afkAutoDecision minus its under-cap term — issue
+// #185 moved cap enforcement into the single spawn pass, the cap's sole
+// consumer, so no per-repo predicate weighs it any more).
 type AutoDecision struct {
 	AutoEnabled  bool // the per-repo toggle is on
-	UnderCap     bool // lab is below its live-instance cap
 	AutoInFlight bool // this repo already has an auto run live
 	ReadyExists  bool // a CLAIMABLE ready-for-agent issue exists (not raw ready)
 	Paused       bool // consecutive_failures >= PauseThreshold
 }
 
-// ShouldLaunchAuto decides whether the scheduler launches an auto AFK run
-// for a repo this tick (v0 shouldLaunchAuto, verbatim): toggle on, under the
-// cap, no auto run already in flight, a claimable issue waiting, not paused.
-// Every term is load-bearing — flipping exactly one blocks the launch.
+// ShouldLaunchAuto decides whether a repo yields a new-work spawn candidate
+// this pass (v0 shouldLaunchAuto, cap term relocated to the spawn pass —
+// #185): toggle on, no auto run already in flight, a claimable issue
+// waiting, not paused. Every remaining term is load-bearing — flipping
+// exactly one blocks the launch.
 func ShouldLaunchAuto(d AutoDecision) bool {
-	return d.AutoEnabled && d.UnderCap && !d.AutoInFlight && d.ReadyExists && !d.Paused
+	return d.AutoEnabled && !d.AutoInFlight && d.ReadyExists && !d.Paused
 }
 
 // LanderSpawnDecision holds the facts the lander-spawn predicate weighs for
-// one pull on one autoland tick (issue #181 / ADR-0048) — AutoDecision's
-// sibling: AutolandOnce gathers the facts, this decides. The repo half
-// (enabled/binding/ready/paused/cap) and the pull half (open/claim-branch/
+// one pull on one spawn pass (issue #181 / ADR-0048) — AutoDecision's
+// sibling: landerCandidates gathers the facts, this decides. The repo half
+// (enabled/binding/ready/paused) and the pull half (open/claim-branch/
 // review/verdict/run) live in one struct so the whole spawn rule is one
-// table-tested predicate.
+// table-tested predicate. Like AutoDecision, the under-cap term is gone
+// (issue #185): cap enforcement moved to the single spawn pass.
 type LanderSpawnDecision struct {
 	AutolandEnabled bool // the per-repo opt-in is on (default off — never by upgrade)
 	ForgeBound      bool // tracker_binding is forge — builtin has no PR comments to poll (ADR-0048)
 	RepoReady       bool // clone_status is ready
 	Paused          bool // consecutive_failures >= PauseThreshold (three-strikes pauses lander spawns too)
-	UnderCap        bool // lab is below the repo's effective live-instance cap
 	PullOpen        bool // the pull is state open (a merged or closed PR needs no validation)
 	ClaimBranch     bool // head matches the repo's claim-branch pattern — human-branch PRs are never touched
 	ReviewPresent   bool // any non-dismissed native review exists (conservative "no review"; the hybrid fold is #182's)
@@ -211,13 +230,13 @@ type LanderSpawnDecision struct {
 	RunOnBranch     bool // an active run of ANY kind works the branch (the authoring AFK run idling, or a lander already on it)
 }
 
-// ShouldSpawnLander decides whether the autoland poller spawns a lander run
-// for a pull this tick: opted in, forge-bound, ready, not paused, under the
-// cap, and the pull is an open, review-less, verdict-less claim PR nobody is
-// working. Every term is load-bearing — flipping exactly one blocks the
-// spawn.
+// ShouldSpawnLander decides whether a pull yields a lander spawn candidate
+// this pass (cap term relocated to the spawn pass — #185): opted in,
+// forge-bound, ready, not paused, and the pull is an open, review-less,
+// verdict-less claim PR nobody is working. Every remaining term is
+// load-bearing — flipping exactly one blocks the spawn.
 func ShouldSpawnLander(d LanderSpawnDecision) bool {
-	return d.AutolandEnabled && d.ForgeBound && d.RepoReady && !d.Paused && d.UnderCap &&
+	return d.AutolandEnabled && d.ForgeBound && d.RepoReady && !d.Paused &&
 		d.PullOpen && d.ClaimBranch && !d.ReviewPresent && !d.VerdictPresent && !d.RunOnBranch
 }
 

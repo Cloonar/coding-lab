@@ -67,10 +67,33 @@ func TestOutcomeStrings(t *testing.T) {
 	}
 }
 
-// TestShouldLaunchAuto transcribes the complete v0 table (port spec §2.6):
-// base is all-go; flipping exactly one term blocks the launch.
+// TestSpawnStageOrder pins the pipeline ranks as a table so #182 cannot
+// accidentally reorder them: lower launches first (drain before fill), and
+// the fix rank sits strictly between lander and new work.
+func TestSpawnStageOrder(t *testing.T) {
+	tests := []struct {
+		name          string
+		lower, higher SpawnStage
+	}{
+		{"lander outranks fix", StageLander, StageFix},
+		{"fix outranks new work", StageFix, StageNewWork},
+		{"lander outranks new work", StageLander, StageNewWork},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.lower >= tt.higher {
+				t.Errorf("stage order broken: %d must sort before %d", tt.lower, tt.higher)
+			}
+		})
+	}
+}
+
+// TestShouldLaunchAuto transcribes the v0 table (port spec §2.6) minus its
+// cap row — cap enforcement moved to the single spawn pass (#185), so the
+// predicate no longer weighs it: base is all-go; flipping exactly one term
+// blocks the launch.
 func TestShouldLaunchAuto(t *testing.T) {
-	base := AutoDecision{AutoEnabled: true, UnderCap: true, AutoInFlight: false, ReadyExists: true, Paused: false}
+	base := AutoDecision{AutoEnabled: true, AutoInFlight: false, ReadyExists: true, Paused: false}
 	tests := []struct {
 		name   string
 		mutate func(*AutoDecision)
@@ -78,7 +101,6 @@ func TestShouldLaunchAuto(t *testing.T) {
 	}{
 		{"all conditions go", func(*AutoDecision) {}, true},
 		{"toggle off vetoes", func(d *AutoDecision) { d.AutoEnabled = false }, false},
-		{"at cap vetoes", func(d *AutoDecision) { d.UnderCap = false }, false},
 		{"auto already in flight vetoes", func(d *AutoDecision) { d.AutoInFlight = true }, false},
 		{"no ready issue vetoes", func(d *AutoDecision) { d.ReadyExists = false }, false},
 		{"paused vetoes", func(d *AutoDecision) { d.Paused = true }, false},
@@ -175,12 +197,13 @@ func TestLiveReview(t *testing.T) {
 
 // TestShouldSpawnLander mirrors TestShouldLaunchAuto: base is all-go;
 // flipping exactly one term blocks the spawn — every suppression the issue
-// pins (disabled, non-forge, not-ready, paused, over cap, closed PR,
-// non-matching head, review present, marker present, live run on branch) is
-// one row.
+// pins (disabled, non-forge, not-ready, paused, closed PR, non-matching
+// head, review present, marker present, live run on branch) is one row. The
+// old at-cap row is gone with the term: cap enforcement moved to the single
+// spawn pass (#185).
 func TestShouldSpawnLander(t *testing.T) {
 	base := LanderSpawnDecision{
-		AutolandEnabled: true, ForgeBound: true, RepoReady: true, Paused: false, UnderCap: true,
+		AutolandEnabled: true, ForgeBound: true, RepoReady: true, Paused: false,
 		PullOpen: true, ClaimBranch: true, ReviewPresent: false, VerdictPresent: false, RunOnBranch: false,
 	}
 	tests := []struct {
@@ -193,7 +216,6 @@ func TestShouldSpawnLander(t *testing.T) {
 		{"non-forge binding vetoes", func(d *LanderSpawnDecision) { d.ForgeBound = false }, false},
 		{"repo not ready vetoes", func(d *LanderSpawnDecision) { d.RepoReady = false }, false},
 		{"three-strikes pause vetoes", func(d *LanderSpawnDecision) { d.Paused = true }, false},
-		{"at cap vetoes", func(d *LanderSpawnDecision) { d.UnderCap = false }, false},
 		{"closed/merged pull vetoes", func(d *LanderSpawnDecision) { d.PullOpen = false }, false},
 		{"non-matching head vetoes", func(d *LanderSpawnDecision) { d.ClaimBranch = false }, false},
 		{"live review vetoes", func(d *LanderSpawnDecision) { d.ReviewPresent = true }, false},

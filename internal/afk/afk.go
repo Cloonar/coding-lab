@@ -8,7 +8,11 @@
 // the run's branch; death and timeout are failures feeding the three-strikes
 // pause), and schedules automatic runs per repo on the afk_schedule_seconds
 // cadence — one auto run per repo, manual runs additive, all under the
-// live-instance cap.
+// live-instance cap. Every fleet spawn — lander, fix (#182), new AFK work —
+// goes through the ONE priority-ordered spawn pass (SpawnOnce, issue #185),
+// invoked from both loops and from the HTTP kicks: it is the sole consumer
+// of the live-instance cap and drains the pipeline before filling it
+// (lander > fix > new work).
 //
 // The port keeps v0's two-lock shape: mu single-flights the ENTIRE
 // select→claim→spawn (one claim path, shared by the manual start and the
@@ -149,9 +153,18 @@ type Service struct {
 	now          func() time.Time
 
 	// mu single-flights the entire select→claim→spawn in launch — the ONE
-	// claim path (manual starts, scheduler ticks, toggle-on kicks); v0's
+	// claim path (manual starts, spawn-pass launches, toggle-on kicks); v0's
 	// afkMu.
 	mu sync.Mutex
+
+	// spawnMu serializes the fleet spawn pass (SpawnOnce) — issue #185: two
+	// loops racing one bounded resource (the live-instance cap) was a race
+	// by construction, so the pass is the cap's ONE consumer and concurrent
+	// scheduler/reaper ticks (and HTTP kicks) queue here instead of
+	// interleaving their snapshots. The locked per-launch cap guards in
+	// launch/LaunchLander stay as the authoritative backstop on this same
+	// path.
+	spawnMu sync.Mutex
 
 	// runsMu serializes the neutral Stop against the reap decision (§4c);
 	// v0's afkRunsMu. Stop moves the run to outcome 'stopped' and kills the
