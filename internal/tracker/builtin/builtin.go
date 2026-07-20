@@ -249,26 +249,20 @@ func (t *Tracker) MergePull(ctx context.Context, number int) (tracker.PullRef, e
 // empty result. Reviews are forge-observable state; a lab-internal change
 // request has no review model, so the built-in binding defers them (a harmless
 // empty read, like Checks). It does NOT look the CR up: an empty review list is
-// the honest answer for any number, and the reject → re-queue loop that reads
-// reviews is a forge-binding concern.
+// the honest answer for any number, and the autoland loop's human-review read
+// is a forge-binding concern (ADR-0048).
 func (t *Tracker) Reviews(ctx context.Context, number int) ([]tracker.Review, error) {
 	return nil, nil
 }
 
-// RejectPull, ApprovePull, RerequestReview, and CommentPull are the review
-// WRITE verbs the built-in binding deliberately does not implement: a
-// lab-internal change request has no forge review model to write to, so rather
-// than fake a result each wraps tracker.ErrUnsupported with a short message
-// naming the verb (the API layer answers "not supported on this tracker" —
-// distinct from a forge failure). Reviews defer to the forge binding.
-func (t *Tracker) RejectPull(ctx context.Context, number int, body string) (tracker.Review, error) {
-	return tracker.Review{}, fmt.Errorf("%w: reject pull review on the built-in tracker", tracker.ErrUnsupported)
-}
-
-func (t *Tracker) ApprovePull(ctx context.Context, number int, body string) (tracker.Review, error) {
-	return tracker.Review{}, fmt.Errorf("%w: approve pull review on the built-in tracker", tracker.ErrUnsupported)
-}
-
+// RerequestReview and CommentPull are the review-adjacent WRITE verbs the
+// built-in binding deliberately does not implement yet: a lab-internal change
+// request has no forge review model to ping and no PR comment thread to write
+// to, so rather than fake a result each wraps tracker.ErrUnsupported with a
+// short message naming the verb (the API layer answers "not supported on this
+// tracker" — distinct from a forge failure). CommentPull is the gate on
+// builtin autoland: once the built-in tracker grows CR comments, the verdict
+// verbs composed over it work here with zero further changes (ADR-0048).
 func (t *Tracker) RerequestReview(ctx context.Context, number int) error {
 	return fmt.Errorf("%w: re-request review on the built-in tracker", tracker.ErrUnsupported)
 }

@@ -107,12 +107,6 @@ func (f *fakeTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 	return tracker.PullRef{}, errors.New("not implemented")
 }
 func (f *fakeTracker) Reviews(context.Context, int) ([]tracker.Review, error) { return nil, nil }
-func (f *fakeTracker) RejectPull(context.Context, int, string) (tracker.Review, error) {
-	return tracker.Review{}, errors.New("not implemented")
-}
-func (f *fakeTracker) ApprovePull(context.Context, int, string) (tracker.Review, error) {
-	return tracker.Review{}, errors.New("not implemented")
-}
 func (f *fakeTracker) RerequestReview(context.Context, int) error {
 	return errors.New("not implemented")
 }

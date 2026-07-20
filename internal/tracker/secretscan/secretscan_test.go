@@ -128,8 +128,6 @@ type recTracker struct {
 	issues       []issueCall
 	edits        []editCall
 	pulls        []pullCall
-	rejects      []commentCall // RejectPull(number, body)
-	approves     []commentCall // ApprovePull(number, body)
 	pullComments []commentCall // CommentPull(number, body)
 
 	issueRet tracker.Issue
@@ -159,15 +157,7 @@ func (r *recTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 	return tracker.PullRef{}, nil
 }
 func (r *recTracker) Reviews(context.Context, int) ([]tracker.Review, error) { return nil, nil }
-func (r *recTracker) RejectPull(_ context.Context, number int, body string) (tracker.Review, error) {
-	r.rejects = append(r.rejects, commentCall{number, body})
-	return tracker.Review{}, nil
-}
-func (r *recTracker) ApprovePull(_ context.Context, number int, body string) (tracker.Review, error) {
-	r.approves = append(r.approves, commentCall{number, body})
-	return tracker.Review{}, nil
-}
-func (r *recTracker) RerequestReview(context.Context, int) error { return nil }
+func (r *recTracker) RerequestReview(context.Context, int) error             { return nil }
 func (r *recTracker) CommentPull(_ context.Context, number int, body string) error {
 	r.pullComments = append(r.pullComments, commentCall{number, body})
 	return nil
@@ -348,10 +338,10 @@ func TestCommentExactBlocks(t *testing.T) {
 	}
 }
 
-// 3b. Review-write bodies (RejectPull/ApprovePull/CommentPull) are content-
-// bearing writes: a clean body delegates byte-identical; a body carrying the
-// secret blocks and never reaches the inner tracker. RerequestReview (no body)
-// delegates untouched.
+// 3b. PR comment bodies (CommentPull — the seam the verdict verbs compose
+// over, ADR-0048) are content-bearing writes: a clean body delegates
+// byte-identical; a body carrying the secret blocks and never reaches the
+// inner tracker. RerequestReview (no body) delegates untouched.
 func TestReviewWritesScanBody(t *testing.T) {
 	f := newFixture(t)
 	f.seedRepo(t, "repo_a")
@@ -360,43 +350,25 @@ func TestReviewWritesScanBody(t *testing.T) {
 	trk := f.trackerFor(t, fakeInner{trk: rec}, "repo_a")
 	ctx := context.Background()
 
-	// Clean review writes delegate byte-identical.
-	if _, err := trk.RejectPull(ctx, 4, "please fix the thing"); err != nil {
-		t.Fatalf("clean reject: %v", err)
-	}
-	if _, err := trk.ApprovePull(ctx, 4, "looks good"); err != nil {
-		t.Fatalf("clean approve: %v", err)
-	}
+	// A clean PR comment delegates byte-identical.
 	if err := trk.CommentPull(ctx, 4, "a discussion note"); err != nil {
 		t.Fatalf("clean pull comment: %v", err)
 	}
 	if err := trk.RerequestReview(ctx, 4); err != nil {
 		t.Fatalf("rerequest: %v", err)
 	}
-	if len(rec.rejects) != 1 || rec.rejects[0] != (commentCall{4, "please fix the thing"}) {
-		t.Errorf("reject args = %+v", rec.rejects)
-	}
-	if len(rec.approves) != 1 || rec.approves[0] != (commentCall{4, "looks good"}) {
-		t.Errorf("approve args = %+v", rec.approves)
-	}
 	if len(rec.pullComments) != 1 || rec.pullComments[0] != (commentCall{4, "a discussion note"}) {
 		t.Errorf("pull comment args = %+v", rec.pullComments)
 	}
 
-	// A secret in each review-write body blocks; inner never called for it.
-	_, err := trk.RejectPull(ctx, 4, "root cause: s3cr3t-deploy-value leaked")
+	// A secret in the comment body blocks; inner never called for it.
+	err := trk.CommentPull(ctx, 4, "fyi s3cr3t-deploy-value")
 	be := blockedErr(t, err)
 	if len(be.Matches) != 1 || be.Matches[0].Field != "body" || be.Matches[0].Secret != "DEPLOY_KEY" {
-		t.Errorf("reject matches = %+v", be.Matches)
+		t.Errorf("pull comment matches = %+v", be.Matches)
 	}
-	_, err = trk.ApprovePull(ctx, 4, "ok but s3cr3t-deploy-value")
-	_ = blockedErr(t, err)
-	err = trk.CommentPull(ctx, 4, "fyi s3cr3t-deploy-value")
-	_ = blockedErr(t, err)
-
-	if len(rec.rejects) != 1 || len(rec.approves) != 1 || len(rec.pullComments) != 1 {
-		t.Errorf("a blocked review write reached the inner tracker: rejects=%+v approves=%+v pullComments=%+v",
-			rec.rejects, rec.approves, rec.pullComments)
+	if len(rec.pullComments) != 1 {
+		t.Errorf("a blocked pull comment reached the inner tracker: %+v", rec.pullComments)
 	}
 }
 

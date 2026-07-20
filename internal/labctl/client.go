@@ -76,16 +76,20 @@ type PRReview struct {
 	Dismissed bool   `json:"dismissed"`
 }
 
-// PRReviewed is the agent API's POST /prs/{n}/reject and /approve answer: the
-// PR's number and the submitted review's state.
-type PRReviewed struct {
-	Number int    `json:"number"`
-	State  string `json:"state"`
+// PRVerdict is the agent API's POST /prs/{n}/reject and /approve answer: the
+// PR the verdict landed on. How the server records the verdict is its own
+// concern (ADR-0048) — the client speaks verbs only.
+type PRVerdict struct {
+	Number int `json:"number"`
 }
 
-// PRRerequested is the agent API's POST /prs/{n}/rerequest answer.
+// PRRerequested is the agent API's POST /prs/{n}/rerequest answer. Warning,
+// when set, reports a non-fatal failure of the native reviewer ping (the
+// done-signal itself landed) — the command prints it to stderr and still
+// exits 0.
 type PRRerequested struct {
-	Number int `json:"number"`
+	Number  int    `json:"number"`
+	Warning string `json:"warning"`
 }
 
 // PRRef is one row of the agent API's GET /prs list (no title/body).
@@ -184,29 +188,29 @@ func (c *Client) PRMerge(n int) (PRMerged, error) {
 	return pm, err
 }
 
-// PRReject posts a changes-requested review on PR/CR n with body as the
-// findings (required non-empty; the server 400s a blank body) and returns the
-// submitted review's state.
-func (c *Client) PRReject(n int, body string) (PRReviewed, error) {
-	var pr PRReviewed
+// PRReject records a rejection verdict on PR/CR n with body as the findings
+// (required non-empty; the server 400s a blank body).
+func (c *Client) PRReject(n int, body string) (PRVerdict, error) {
+	var pr PRVerdict
 	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/reject",
 		map[string]string{"body": body}, &pr)
 	return pr, err
 }
 
-// PRApprove posts an approving review on PR/CR n; body may be empty. Always
-// sends a JSON body — an approval with no words is still a real request, not
+// PRApprove records a validation-passed verdict on PR/CR n; body may be empty.
+// Always sends a JSON body — a pass with no words is still a real request, not
 // an absent one.
-func (c *Client) PRApprove(n int, body string) (PRReviewed, error) {
-	var pr PRReviewed
+func (c *Client) PRApprove(n int, body string) (PRVerdict, error) {
+	var pr PRVerdict
 	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/approve",
 		map[string]string{"body": body}, &pr)
 	return pr, err
 }
 
-// PRRerequest re-requests review from every reviewer whose latest verdict
-// requested changes on PR/CR n; no such reviewer is a convergent no-op
-// success.
+// PRRerequest signals fix-done on PR/CR n and asks the server to re-request
+// review from every reviewer whose latest verdict requested changes; no such
+// reviewer is a convergent no-op success. A failed reviewer ping comes back as
+// Warning on a success answer, never an error.
 func (c *Client) PRRerequest(n int) (PRRerequested, error) {
 	var pr PRRerequested
 	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/rerequest", nil, &pr)

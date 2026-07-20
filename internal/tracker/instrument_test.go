@@ -29,15 +29,9 @@ func (f failingTracker) CreatePull(context.Context, string, string, string, stri
 }
 func (f failingTracker) MergePull(context.Context, int) (PullRef, error) { return PullRef{}, f.err }
 func (f failingTracker) Reviews(context.Context, int) ([]Review, error)  { return nil, f.err }
-func (f failingTracker) RejectPull(context.Context, int, string) (Review, error) {
-	return Review{}, f.err
-}
-func (f failingTracker) ApprovePull(context.Context, int, string) (Review, error) {
-	return Review{}, f.err
-}
-func (f failingTracker) RerequestReview(context.Context, int) error     { return f.err }
-func (f failingTracker) CommentPull(context.Context, int, string) error { return f.err }
-func (f failingTracker) CloseIssue(context.Context, int) error          { return f.err }
+func (f failingTracker) RerequestReview(context.Context, int) error      { return f.err }
+func (f failingTracker) CommentPull(context.Context, int, string) error  { return f.err }
+func (f failingTracker) CloseIssue(context.Context, int) error           { return f.err }
 func (f failingTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
 	return Issue{}, f.err
 }
@@ -97,8 +91,6 @@ func driveAll(t *testing.T, trk Tracker) {
 	_, _ = trk.CreatePull(ctx, "afk/1", "main", "t", "b")
 	_, _ = trk.MergePull(ctx, 1)
 	_, _ = trk.Reviews(ctx, 1)
-	_, _ = trk.RejectPull(ctx, 1, "body")
-	_, _ = trk.ApprovePull(ctx, 1, "body")
 	_ = trk.RerequestReview(ctx, 1)
 	_ = trk.CommentPull(ctx, 1, "body")
 	_ = trk.CloseIssue(ctx, 1)
@@ -112,7 +104,7 @@ func driveAll(t *testing.T, trk Tracker) {
 
 // opOrder mirrors driveAll.
 var opOrder = []string{OpReadyIssues, OpIssues, OpIssue, OpCreateComment, OpPulls, OpPull, OpChecks, OpCreatePull,
-	OpMergePull, OpReviews, OpRejectPull, OpApprovePull, OpRerequestReview, OpCommentPull,
+	OpMergePull, OpReviews, OpRerequestReview, OpCommentPull,
 	OpCloseIssue, OpCreateIssue, OpEditIssue, OpAddIssueLabels, OpRemoveIssueLabels, OpLabels, OpEnsureLabel}
 
 func TestObserverReportsEveryOp(t *testing.T) {

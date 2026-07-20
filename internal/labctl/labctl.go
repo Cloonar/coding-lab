@@ -49,9 +49,10 @@ Usage:
   labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
   labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
                                         pending (exit 0 green/none · 2 red · 3 still pending)
-  labctl pr reject <n> <body>           post a changes-requested review on PR n with body as the findings
-  labctl pr approve <n> [body]          post an approving review on PR n (body optional)
-  labctl pr rerequest <n>               re-request review from reviewers whose latest verdict requested changes
+  labctl pr reject <n> <body>           record a rejection verdict on PR n with body as the findings
+  labctl pr approve <n> [body]          record a validation-passed verdict on PR n (body optional)
+  labctl pr rerequest <n>               signal fix-done on PR n and re-request review from reviewers
+                                        whose latest verdict requested changes
   labctl pr comment <n> <body>          post a plain discussion comment on PR n (no Closes # injection)
   labctl secret list                    list the repo's secrets (name, description; never values)
   labctl secret exec <NAME...> -- <cmd> [args...]
@@ -459,7 +460,7 @@ func runPR(args []string, env Env) int {
 			if err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\n", pr.Number, pr.State)
+			_, _ = fmt.Fprintf(env.Stdout, "#%d\trejected\n", pr.Number)
 			return nil
 		})
 	case "approve":
@@ -482,7 +483,7 @@ func runPR(args []string, env Env) int {
 			if err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\n", pr.Number, pr.State)
+			_, _ = fmt.Fprintf(env.Stdout, "#%d\tapproved\n", pr.Number)
 			return nil
 		})
 	case "rerequest":
@@ -499,6 +500,11 @@ func runPR(args []string, env Env) int {
 			pr, err := c.PRRerequest(n)
 			if err != nil {
 				return err
+			}
+			// A failed native reviewer ping is non-fatal — the done-signal
+			// landed. Warn on stderr, keep the success output and exit 0.
+			if pr.Warning != "" {
+				_, _ = fmt.Fprintf(env.Stderr, "labctl pr rerequest: warning: %s\n", pr.Warning)
 			}
 			_, _ = fmt.Fprintf(env.Stdout, "#%d\trerequested\n", pr.Number)
 			return nil

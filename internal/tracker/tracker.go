@@ -57,25 +57,24 @@ var ErrUnknownLabel = errors.New("tracker: unknown label")
 // agent surface). The agent API answers 409 with the message.
 var ErrMergeRejected = errors.New("tracker: merge rejected")
 
-// ErrReviewRejected marks a review write the forge refused: an ApprovePull or
-// RejectPull the forge declined (e.g. "you cannot approve your own pull
-// request"), or a RerequestReview it would not accept. It mirrors
-// ErrMergeRejected exactly — reviewability is the backend's call, never
-// reasoned about agent-side: lab attempts the write and, if the forge refuses,
-// wraps this sentinel around the refusal's OWN words verbatim (the forge's
-// error body), because that text is what the agent needs to read to know why
-// the write did not take (ADR-0024's verbatim-refusal pattern). The forge
-// token never appears in the wrapped message. The agent API answers 409 with
-// it.
+// ErrReviewRejected marks a review operation the forge refused: a
+// RerequestReview it would not accept. It mirrors ErrMergeRejected exactly —
+// reviewability is the backend's call, never reasoned about agent-side: lab
+// attempts the write and, if the forge refuses, wraps this sentinel around the
+// refusal's OWN words verbatim (the forge's error body), because that text is
+// what the caller needs to read to know why the write did not take (ADR-0024's
+// verbatim-refusal pattern). The forge token never appears in the wrapped
+// message. The rerequest handler surfaces it as a non-fatal warning
+// (ADR-0048: the native re-request ping is best-effort).
 var ErrReviewRejected = errors.New("tracker: review rejected")
 
 // ErrUnsupported marks an operation a tracker backend does not implement — the
-// built-in binding's review WRITE verbs (RejectPull, ApprovePull,
-// RerequestReview, CommentPull). Reviews are forge-observable state a
-// lab-internal change request has no model for, so the built-in tracker defers
-// the writes rather than faking a result; the wrapping error names the verb.
-// Callers errors.Is-detect it to answer "not supported on this tracker"
-// distinctly from a forge failure.
+// built-in binding's review-adjacent write verbs (RerequestReview,
+// CommentPull). Reviews are forge-observable state a lab-internal change
+// request has no model for, so the built-in tracker defers the writes rather
+// than faking a result; the wrapping error names the verb. Callers
+// errors.Is-detect it to answer "not supported on this tracker" distinctly
+// from a forge failure.
 var ErrUnsupported = errors.New("tracker: operation not supported by this tracker backend")
 
 // ErrRateLimited marks a forge call throttled by the upstream rate limiter
@@ -317,34 +316,21 @@ type Tracker interface {
 	MergePull(ctx context.Context, number int) (PullRef, error)
 
 	// Reviews lists the submitted reviews on pull number, oldest first — the
-	// read behind the reject → re-queue loop. An unknown number wraps
-	// ErrNotFound. The built-in binding has no forge reviews to report and
-	// answers an empty list (reviews are forge-observable state a lab-internal
-	// change request has no model for), never an error.
+	// read behind the human half of the autoland loop's hybrid rejected-state
+	// (ADR-0048). An unknown number wraps ErrNotFound. The built-in binding has
+	// no forge reviews to report and answers an empty list (reviews are
+	// forge-observable state a lab-internal change request has no model for),
+	// never an error.
 	Reviews(ctx context.Context, number int) ([]Review, error)
 
-	// RejectPull posts a changes-requested review on pull number with body as
-	// the findings, returning the submitted Review. Reviewability is the
-	// backend's call, never reasoned about agent-side: a forge that refuses the
-	// write (e.g. reviewing one's own pull) wraps ErrReviewRejected around the
-	// refusal's own words verbatim; an unknown number wraps ErrNotFound. On a
-	// forge binding the write is a server-credentialed call — no forge token
-	// reaches the agent session (ADR-0014). Body validation (non-empty) is the
-	// API layer's job, not the seam's. The built-in binding wraps ErrUnsupported.
-	RejectPull(ctx context.Context, number int, body string) (Review, error)
-
-	// ApprovePull posts an approving review on pull number; body may be empty.
-	// It returns the submitted Review. A refusal wraps ErrReviewRejected with
-	// the forge's own words; an unknown number wraps ErrNotFound; the built-in
-	// binding wraps ErrUnsupported. Server-credentialed on a forge binding, like
-	// RejectPull.
-	ApprovePull(ctx context.Context, number int, body string) (Review, error)
-
 	// RerequestReview re-requests review from every reviewer whose latest
-	// non-dismissed review requests changes; no such reviewer is a convergent
-	// no-op success (nothing to re-request), mirroring MergePull's already-merged
-	// no-op. A forge refusal wraps ErrReviewRejected with its own words; an
-	// unknown number wraps ErrNotFound; the built-in binding wraps ErrUnsupported.
+	// verdict-bearing (approved or changes-requested), non-dismissed review
+	// requests changes; no such reviewer is a convergent no-op success (nothing
+	// to re-request), mirroring MergePull's already-merged no-op. Non-verdict
+	// review rows (commented, review_requested, pending, unknown) neither set
+	// nor clear a reviewer's verdict. A forge refusal wraps ErrReviewRejected
+	// with its own words; an unknown number wraps ErrNotFound; the built-in
+	// binding wraps ErrUnsupported.
 	RerequestReview(ctx context.Context, number int) error
 
 	// CommentPull posts a plain discussion comment on pull number (a PR shares

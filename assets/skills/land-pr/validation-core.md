@@ -97,10 +97,15 @@ yourself).
 
 What each verdict leads to:
 
-- **`PASS`** → the merge path: approve the PR (`labctl pr approve`), then merge
-  on whatever confirmation the invoking mode requires — the interactive skill
-  waits for the human's free-text go-ahead; an autoland lander merges only on a
-  clean `PASS` with `auto_merge` on, and otherwise stops at the approve.
-- **blocking `CONCERNS`, or `FAIL`** → **reject** with the findings as the review
-  body (`labctl pr reject`). The PR stays open in *changes-requested* for the
-  author (or an AFK re-run) to fix; re-invoke later.
+- **`PASS`** → the merge path: record the pass (`labctl pr approve`, CONCERNS in
+  the body when present), then merge on whatever confirmation the invoking mode
+  requires — the interactive skill waits for the human's free-text go-ahead; an
+  autoland lander merges directly only on a clean `PASS` with `auto_merge` on,
+  and otherwise stops at the approve ("validated, awaiting confirm").
+- **blocking `CONCERNS`, or `FAIL`** → mode-dependent. The **interactive skill**
+  reports the findings in the session and makes no forge write — the human it
+  is talking to is the audience, and an operator who wants autoland to take the
+  rejection up posts their own *changes requested* review in the forge UI. An
+  **autoland lander** records the rejection with the findings
+  (`labctl pr reject`); the PR stays open for a fix run (or the author) to fix
+  and hand back (`labctl pr rerequest`).

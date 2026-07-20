@@ -841,120 +841,6 @@ func TestReviews_notFound(t *testing.T) {
 	}
 }
 
-// --- RejectPull / ApprovePull ----------------------------------------------
-
-// TestRejectPull_success: POST /pulls/{n}/reviews carrying the exact
-// {event: REQUEST_CHANGES, body} JSON; the mapped Review comes back
-// changes-requested.
-func TestRejectPull_success(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody map[string]any
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		gotBody = decodeBody(t, r)
-		_, _ = io.WriteString(w, `{"user":{"login":"reviewer-bot"},"state":"CHANGES_REQUESTED","body":"needs work"}`)
-	})
-
-	rev, err := c.RejectPull(context.Background(), 42, "needs work")
-	if err != nil {
-		t.Fatalf("RejectPull: %v", err)
-	}
-	if gotMethod != http.MethodPost || gotPath != apiPrefix+"/pulls/42/reviews" {
-		t.Errorf("request = %s %s; want POST %s/pulls/42/reviews", gotMethod, gotPath, apiPrefix)
-	}
-	if gotBody["event"] != "REQUEST_CHANGES" || gotBody["body"] != "needs work" {
-		t.Errorf("request body = %v; want {event: REQUEST_CHANGES, body: needs work}", gotBody)
-	}
-	if len(gotBody) != 2 {
-		t.Errorf("request body = %v; want exactly event + body", gotBody)
-	}
-	want := tracker.Review{Reviewer: "reviewer-bot", State: tracker.ReviewChangesRequested, Body: "needs work"}
-	if rev != want {
-		t.Errorf("Review = %+v; want %+v", rev, want)
-	}
-}
-
-// TestApprovePull_successEmptyBody: an approval with an empty body posts
-// {event: APPROVE, body: ""} (GitHub's APPROVE, not Forgejo's APPROVED).
-func TestApprovePull_successEmptyBody(t *testing.T) {
-	var gotBody map[string]any
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		gotBody = decodeBody(t, r)
-		_, _ = io.WriteString(w, `{"user":{"login":"reviewer-bot"},"state":"APPROVED","body":""}`)
-	})
-
-	rev, err := c.ApprovePull(context.Background(), 42, "")
-	if err != nil {
-		t.Fatalf("ApprovePull: %v", err)
-	}
-	if gotBody["event"] != "APPROVE" {
-		t.Errorf("event = %v; want APPROVE (GitHub spelling)", gotBody["event"])
-	}
-	if gotBody["body"] != "" {
-		t.Errorf("body = %v; want empty", gotBody["body"])
-	}
-	if rev.State != tracker.ReviewApproved || rev.Reviewer != "reviewer-bot" {
-		t.Errorf("Review = %+v; want approved by reviewer-bot", rev)
-	}
-}
-
-// TestReviewWrite_refusalSurfacesGitHubWordsVerbatim: a 422 refusal becomes
-// tracker.ErrReviewRejected carrying GitHub's own words — never the token.
-func TestReviewWrite_refusalSurfacesGitHubWordsVerbatim(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = io.WriteString(w, `{"message":"Can not approve your own pull request"}`)
-	})
-
-	_, err := c.ApprovePull(context.Background(), 42, "")
-	if !errors.Is(err, tracker.ErrReviewRejected) {
-		t.Fatalf("err = %v, want ErrReviewRejected", err)
-	}
-	if !strings.Contains(err.Error(), "approve your own pull request") {
-		t.Fatalf("err = %q, want GitHub's own words verbatim", err.Error())
-	}
-	if strings.Contains(err.Error(), testToken) {
-		t.Fatalf("token leaked into error: %q", err.Error())
-	}
-}
-
-// TestRejectPull_notFound: an unknown number's 404 stays ErrNotFound.
-func TestRejectPull_notFound(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
-	})
-
-	_, err := c.RejectPull(context.Background(), 999, "x")
-	if !errors.Is(err, tracker.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
-	if errors.Is(err, tracker.ErrReviewRejected) {
-		t.Fatalf("404 mislabeled as a review rejection: %v", err)
-	}
-}
-
-// TestReviewWrite_rateLimitedNotRejected: a throttled review POST stays
-// tracker.ErrRateLimited (a transient upstream throttle), NOT ErrReviewRejected
-// — GitHub's secondary limits target mutating requests, so the agent must
-// retry, not treat the pull as un-reviewable.
-func TestReviewWrite_rateLimitedNotRejected(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-RateLimit-Remaining", "0")
-		w.Header().Set("X-RateLimit-Reset", "1783500000")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"message":"You have exceeded a secondary rate limit"}`)
-	})
-
-	_, err := c.RejectPull(context.Background(), 42, "needs work")
-	if !errors.Is(err, tracker.ErrRateLimited) {
-		t.Fatalf("err = %v, want ErrRateLimited (a throttle, not a refusal)", err)
-	}
-	if errors.Is(err, tracker.ErrReviewRejected) {
-		t.Fatalf("throttle mislabeled as a review refusal: %v", err)
-	}
-}
-
 // --- RerequestReview -------------------------------------------------------
 
 // TestRerequestReview_postsChangesRequestedReviewers pins the latest-per-
@@ -1025,6 +911,92 @@ func TestRerequestReview_noChangesRequestedIsNoOp(t *testing.T) {
 
 	if err := c.RerequestReview(context.Background(), 42); err != nil {
 		t.Fatalf("RerequestReview no-op: %v", err)
+	}
+}
+
+// TestRerequestReview_nonVerdictRowsDoNotClearVerdict pins the fold rule that
+// only verdict-bearing rows (APPROVED/CHANGES_REQUESTED) update a reviewer's
+// latest verdict: alice's CHANGES_REQUESTED followed by a COMMENTED reply
+// leaves her still in the POSTed set — GitHub's review decision is likewise
+// unaffected by COMMENTED reviews, so a reviewer who replied in the thread is
+// still requesting changes.
+func TestRerequestReview_nonVerdictRowsDoNotClearVerdict(t *testing.T) {
+	var gotReqBody map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/reviews"):
+			_, _ = io.WriteString(w, `[
+			  {"user":{"login":"alice"},"state":"CHANGES_REQUESTED"},
+			  {"user":{"login":"alice"},"state":"COMMENTED"}
+			]`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/requested_reviewers"):
+			gotReqBody = decodeBody(t, r)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	if err := c.RerequestReview(context.Background(), 42); err != nil {
+		t.Fatalf("RerequestReview: %v", err)
+	}
+	raw, ok := gotReqBody["reviewers"].([]any)
+	if !ok {
+		t.Fatalf("reviewers field = %v; want a JSON array (the POST must happen)", gotReqBody["reviewers"])
+	}
+	if len(raw) != 1 || raw[0] != "alice" {
+		t.Errorf("reviewers = %v; want [alice] — a COMMENTED reply must not clear the verdict", raw)
+	}
+}
+
+// TestRerequestReview_refusalSurfacesGitHubWordsVerbatim: a GitHub refusal of
+// the /requested_reviewers POST becomes tracker.ErrReviewRejected carrying
+// GitHub's own words — never the token.
+func TestRerequestReview_refusalSurfacesGitHubWordsVerbatim(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `[{"user":{"login":"alice"},"state":"CHANGES_REQUESTED"}]`)
+			return
+		}
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"message":"Review cannot be requested from pull request author"}`)
+	})
+
+	err := c.RerequestReview(context.Background(), 42)
+	if !errors.Is(err, tracker.ErrReviewRejected) {
+		t.Fatalf("err = %v, want ErrReviewRejected", err)
+	}
+	if !strings.Contains(err.Error(), "cannot be requested from pull request author") {
+		t.Fatalf("err = %q, want GitHub's own words verbatim", err.Error())
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestRerequestReview_rateLimitedNotRejected: a throttled /requested_reviewers
+// POST stays tracker.ErrRateLimited (a transient upstream throttle), NOT
+// ErrReviewRejected — GitHub's secondary limits target mutating requests, so
+// the caller must come back later, not treat the pull as un-re-requestable.
+func TestRerequestReview_rateLimitedNotRejected(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `[{"user":{"login":"alice"},"state":"CHANGES_REQUESTED"}]`)
+			return
+		}
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1783500000")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"You have exceeded a secondary rate limit"}`)
+	})
+
+	err := c.RerequestReview(context.Background(), 42)
+	if !errors.Is(err, tracker.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited (a throttle, not a refusal)", err)
+	}
+	if errors.Is(err, tracker.ErrReviewRejected) {
+		t.Fatalf("throttle mislabeled as a review refusal: %v", err)
 	}
 }
 

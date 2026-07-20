@@ -26,8 +26,6 @@ const (
 	OpCreatePull        = "create_pull"
 	OpMergePull         = "merge_pull"
 	OpReviews           = "reviews"
-	OpRejectPull        = "reject_pull"
-	OpApprovePull       = "approve_pull"
 	OpRerequestReview   = "rerequest_review"
 	OpCommentPull       = "comment_pull"
 	OpCloseIssue        = "close"
@@ -141,18 +139,6 @@ func (o *observed) Reviews(ctx context.Context, number int) ([]Review, error) {
 	reviews, err := o.t.Reviews(ctx, number)
 	o.report(OpReviews, err)
 	return reviews, err
-}
-
-func (o *observed) RejectPull(ctx context.Context, number int, body string) (Review, error) {
-	review, err := o.t.RejectPull(ctx, number, body)
-	o.report(OpRejectPull, err)
-	return review, err
-}
-
-func (o *observed) ApprovePull(ctx context.Context, number int, body string) (Review, error) {
-	review, err := o.t.ApprovePull(ctx, number, body)
-	o.report(OpApprovePull, err)
-	return review, err
 }
 
 func (o *observed) RerequestReview(ctx context.Context, number int) error {

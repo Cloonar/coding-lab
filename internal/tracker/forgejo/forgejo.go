@@ -398,7 +398,8 @@ func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, er
 }
 
 // Reviews lists the submitted reviews on pull `number`, oldest first — the read
-// behind the reject → re-queue loop. Forgejo returns them submission-ordered;
+// behind the human half of the autoland loop's hybrid rejected-state
+// (ADR-0048). Forgejo returns them submission-ordered;
 // each review's user login is the Reviewer, its state normalized onto lab's
 // Review* vocabulary (an unrecognized state passes through lowercased), and its
 // `dismissed` flag carried through. The endpoint paginates like every list
@@ -418,53 +419,20 @@ func (c *Client) Reviews(ctx context.Context, number int) ([]tracker.Review, err
 	return out, nil
 }
 
-// RejectPull posts a changes-requested review on pull `number` with body as the
-// findings, returning the submitted review. The forge — not lab — judges
-// whether the write is allowed: a refusal (e.g. Forgejo's 422 "you cannot
-// approve your own pull request") becomes tracker.ErrReviewRejected carrying the
-// forge's own words verbatim; an unknown number stays tracker.ErrNotFound. The
-// write is authorized by this client's server-side forge token, so no forge
-// credential reaches the agent session (ADR-0014).
-func (c *Client) RejectPull(ctx context.Context, number int, body string) (tracker.Review, error) {
-	return c.submitReview(ctx, number, "REQUEST_CHANGES", body)
-}
-
-// ApprovePull posts an approving review on pull `number` (body may be empty),
-// returning the submitted review — same refusal/not-found handling as
-// RejectPull. The event word is Forgejo/Gitea's APPROVED, NOT GitHub's APPROVE.
-func (c *Client) ApprovePull(ctx context.Context, number int, body string) (tracker.Review, error) {
-	return c.submitReview(ctx, number, "APPROVED", body)
-}
-
-// submitReview POSTs a review event to pull `number`'s /reviews and maps the
-// created review. Shared by RejectPull (REQUEST_CHANGES) and ApprovePull
-// (APPROVED), which differ only in the event word. A 404 stays
-// tracker.ErrNotFound; any other non-2xx is the forge's refusal, wrapped in
-// tracker.ErrReviewRejected with its body verbatim (the exact MergePull
-// pattern — the forge's words, never the token).
-func (c *Client) submitReview(ctx context.Context, number int, event, body string) (tracker.Review, error) {
-	req := struct {
-		Event string `json:"event"`
-		Body  string `json:"body"`
-	}{Event: event, Body: body}
-	var fj fjReview
-	if err := c.do(ctx, http.MethodPost, c.pullPath(number)+"/reviews", nil, req, &fj); err != nil {
-		if errors.Is(err, tracker.ErrNotFound) {
-			return tracker.Review{}, err
-		}
-		return tracker.Review{}, fmt.Errorf("%w: %s", tracker.ErrReviewRejected, err.Error())
-	}
-	return toReview(fj), nil
-}
-
 // RerequestReview re-requests review from every reviewer whose LATEST
-// non-dismissed review requests changes. It GETs the reviews, reduces them to
-// the latest state per reviewer (submission order, last wins; PENDING and
-// dismissed reviews skipped), and if any reviewer's latest is changes-requested
-// POSTs their logins to /requested_reviewers. No such reviewer is a convergent
-// no-op success — nothing to re-request — mirroring MergePull's already-merged
-// no-op. A forge refusal wraps tracker.ErrReviewRejected with its own words; an
-// unknown number stays tracker.ErrNotFound.
+// verdict-bearing, non-dismissed review requests changes. It GETs the reviews,
+// reduces them to the latest verdict per reviewer (submission order, last
+// verdict wins; only APPROVED/REQUEST_CHANGES rows carry a verdict — dismissed
+// reviews and non-verdict rows like COMMENT, REQUEST_REVIEW, or PENDING are
+// skipped), and if any reviewer's latest verdict is changes-requested POSTs
+// their logins to /requested_reviewers. No such reviewer is a convergent no-op
+// success — nothing to re-request — mirroring MergePull's already-merged
+// no-op. Accepted consequence: a successful re-request does not change the
+// reviewer's latest verdict (they ARE still changes-requested until they
+// re-review), so a repeated call re-POSTs the same reviewers instead of
+// no-opping — faithful, and the forge handles a duplicate request
+// idempotently. A forge refusal wraps tracker.ErrReviewRejected with its own
+// words; an unknown number stays tracker.ErrNotFound.
 func (c *Client) RerequestReview(ctx context.Context, number int) error {
 	reviews, err := c.Reviews(ctx, number)
 	if err != nil {
@@ -816,19 +784,26 @@ func mapReviewState(state string) string {
 }
 
 // changesRequestedReviewers returns the reviewer logins whose LATEST
-// non-dismissed, non-pending review requests changes, in first-seen order.
-// Reviews arrive oldest-first, so the last state seen per reviewer is their
-// latest verdict; a dismissed review does not count (the forge cleared it) and
-// a still-pending review is not a submitted verdict. A reviewer who later
-// approves therefore drops out of the set. Operates on the already-normalized
-// tracker.Review vocabulary (Reviews() maps it), so "pending" is the lowercased
-// PENDING state and changes-requested is tracker.ReviewChangesRequested.
+// verdict-bearing, non-dismissed review requests changes, in first-seen order.
+// Reviews arrive oldest-first, so the last VERDICT seen per reviewer is their
+// latest verdict: only approved/changes-requested rows carry one — the forge's
+// own rule (Forgejo's preparePullReviewType recognizes only
+// APPROVED/REQUEST_CHANGES as verdict events), so a later comment or
+// re-request-review row neither sets nor clears a reviewer's verdict (a
+// reviewer who requested changes and then replied in the thread is STILL
+// requesting changes). A dismissed review does not count (the forge cleared
+// it); a reviewer whose latest verdict is an approval drops out of the set.
+// Operates on the already-normalized tracker.Review vocabulary (Reviews()
+// maps it).
 func changesRequestedReviewers(reviews []tracker.Review) []string {
 	latest := make(map[string]string, len(reviews))
 	order := make([]string, 0, len(reviews))
 	for _, r := range reviews {
-		if r.Reviewer == "" || r.Dismissed || r.State == "pending" {
+		if r.Reviewer == "" || r.Dismissed {
 			continue
+		}
+		if r.State != tracker.ReviewApproved && r.State != tracker.ReviewChangesRequested {
+			continue // non-verdict row: commented/review_requested/pending/unknown
 		}
 		if _, seen := latest[r.Reviewer]; !seen {
 			order = append(order, r.Reviewer)

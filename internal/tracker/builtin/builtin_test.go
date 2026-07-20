@@ -902,21 +902,16 @@ func TestBuiltin_Reviews_empty(t *testing.T) {
 	}
 }
 
-// TestBuiltin_ReviewWrites_unsupported: each review WRITE verb wraps
+// TestBuiltin_ReviewWrites_unsupported: each review-adjacent WRITE verb wraps
 // tracker.ErrUnsupported (reviews are forge-observable state a lab-internal CR
-// has no model for), and names the verb rather than faking a result.
+// has no model for, and CRs have no comment thread yet), and names the verb
+// rather than faking a result.
 func TestBuiltin_ReviewWrites_unsupported(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 	repo := seedRepo(t, s)
 	tr := newTracker(s, repo.ID)
 
-	if _, err := tr.RejectPull(ctx, 1, "body"); !errors.Is(err, tracker.ErrUnsupported) {
-		t.Errorf("RejectPull err = %v, want ErrUnsupported", err)
-	}
-	if _, err := tr.ApprovePull(ctx, 1, "body"); !errors.Is(err, tracker.ErrUnsupported) {
-		t.Errorf("ApprovePull err = %v, want ErrUnsupported", err)
-	}
 	if err := tr.RerequestReview(ctx, 1); !errors.Is(err, tracker.ErrUnsupported) {
 		t.Errorf("RerequestReview err = %v, want ErrUnsupported", err)
 	}
