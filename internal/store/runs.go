@@ -19,11 +19,14 @@ import (
 
 // Run kinds (design §3a). M3 creates only 'manual'; the two afk kinds are
 // written by the M5 engine but recognised here so re-adoption and the Stop
-// AFK-seam can classify any row.
+// AFK-seam can classify any row. 'lander' is the Autoland validation run
+// (issue #181 / ADR-0048) — unattended and reaper-owned like the AFK kinds,
+// but adopting an EXISTING PR head branch instead of forking a fresh claim.
 const (
 	RunKindManual    = "manual"
 	RunKindAFKManual = "afk_manual"
 	RunKindAFKAuto   = "afk_auto"
+	RunKindLander    = "lander"
 )
 
 // Run outcomes (design §3a). 'active' is the only non-terminal value; the
@@ -40,7 +43,7 @@ const (
 type Run struct {
 	ID           string
 	RepoID       string
-	Kind         string // manual|afk_manual|afk_auto
+	Kind         string // manual|afk_manual|afk_auto|lander
 	Provider     string
 	IssueNumber  *int
 	Branch       string

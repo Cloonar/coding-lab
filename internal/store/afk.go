@@ -14,15 +14,16 @@ import (
 	"fmt"
 )
 
-// ActiveAFKRuns lists every outcome='active' run of the two AFK kinds,
+// ActiveAFKRuns lists every outcome='active' run of the unattended kinds —
+// the two AFK kinds plus lander (the reaper owns lander classification too) —
 // ordered by session name so a reaper tick is deterministic (v0
 // trackAFKRuns returned runs sorted by name).
 func (s *Store) ActiveAFKRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, s.rebind(
 		`SELECT `+runColumns+` FROM runs
-		 WHERE outcome = ? AND kind IN (?, ?)
+		 WHERE outcome = ? AND kind IN (?, ?, ?)
 		 ORDER BY session_name`),
-		RunOutcomeActive, RunKindAFKManual, RunKindAFKAuto)
+		RunOutcomeActive, RunKindAFKManual, RunKindAFKAuto, RunKindLander)
 	if err != nil {
 		return nil, fmt.Errorf("active afk runs: %w", err)
 	}
@@ -61,6 +62,23 @@ func (s *Store) ActiveAutoRunForRepo(ctx context.Context, repoID string) (Run, b
 		return Run{}, false, fmt.Errorf("active auto run for repo %q: %w", repoID, err)
 	}
 	return r, true, nil
+}
+
+// ActiveRunOnBranch reports whether any outcome='active' run — ANY kind —
+// works branch in the repo: the autoland poller's runs-store gate (issue
+// #181). The authoring AFK run still idling on its claim and a lander already
+// validating it both suppress a lander spawn; the store answers with one
+// count query (idx_runs_outcome narrows it), never a client-side scan.
+func (s *Store) ActiveRunOnBranch(ctx context.Context, repoID, branch string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT COUNT(*) FROM runs
+		 WHERE outcome = ? AND repo_id = ? AND branch = ?`),
+		RunOutcomeActive, repoID, branch).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("active run on branch %q for repo %q: %w", branch, repoID, err)
+	}
+	return n > 0, nil
 }
 
 // IncrementRepoFailures adds one to a repo's consecutive-failure counter and

@@ -162,6 +162,9 @@ func (r *recTracker) CommentPull(_ context.Context, number int, body string) err
 	r.pullComments = append(r.pullComments, commentCall{number, body})
 	return nil
 }
+func (r *recTracker) PullComments(context.Context, int) ([]tracker.Comment, error) {
+	return nil, nil
+}
 func (r *recTracker) CloseIssue(context.Context, int) error { return nil }
 func (r *recTracker) CreateIssue(_ context.Context, title, body string, labels []string) (tracker.Issue, error) {
 	r.issues = append(r.issues, issueCall{title, body, labels})

@@ -16,8 +16,9 @@ import (
 // M5 engine's; M3 needs only the inverse parse for ownership.
 
 const (
-	afkLabelPrefix = "afk-"
-	afkAutoMarker  = "auto-"
+	afkLabelPrefix    = "afk-"
+	afkAutoMarker     = "auto-"
+	landerLabelPrefix = "lander-"
 )
 
 // parseAFKLabel is the strict inverse of the fixed AFK label format: cut the
@@ -41,13 +42,33 @@ func parseAFKLabel(label string) (n int, auto, ok bool) {
 	return n, auto, true
 }
 
+// parseLanderLabel is the strict inverse of the lander label format
+// (lander-<N>, issue #181): cut the "lander-" prefix, require a positive
+// integer — the same reject rules as parseAFKLabel.
+func parseLanderLabel(label string) (n int, ok bool) {
+	rest, found := strings.CutPrefix(label, landerLabelPrefix)
+	if !found {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
+}
+
 // instanceBranch is the branch an instance labelled label of a repo occupies:
-// an AFK label (afk-<N> / afk-auto-<N>) → the repo's afk_branch_pattern rendered
-// with N (the claim branch — auto and manual AFK share it); any other label →
-// the repo's manual_branch_prefix + label. This is identical to Start's branch
-// derivation, so the owned set can never drift from what Start created.
+// an AFK label (afk-<N> / afk-auto-<N>) or a lander label (lander-<N>, issue
+// #181 — the lander adopts issue N's claim branch) → the repo's
+// afk_branch_pattern rendered with N (the claim branch — all three share it);
+// any other label → the repo's manual_branch_prefix + label. This is
+// identical to Start's branch derivation, so the owned set can never drift
+// from what Start created.
 func instanceBranch(afkPattern, manualPrefix, label string) string {
 	if n, _, ok := parseAFKLabel(label); ok {
+		return gitx.RenderBranch(afkPattern, n)
+	}
+	if n, ok := parseLanderLabel(label); ok {
 		return gitx.RenderBranch(afkPattern, n)
 	}
 	return manualPrefix + label

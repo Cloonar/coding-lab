@@ -150,6 +150,9 @@ func (f *fakeTracker) CommentPull(_ context.Context, number int, body string) er
 	f.pullComments = append(f.pullComments, commentArgs{number: number, body: body})
 	return nil
 }
+func (f *fakeTracker) PullComments(context.Context, int) ([]tracker.Comment, error) {
+	return nil, f.err
+}
 func (f *fakeTracker) CloseIssue(_ context.Context, number int) error {
 	if f.err != nil {
 		return f.err

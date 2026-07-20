@@ -137,6 +137,117 @@ func TestAddWorktree_failsLoudWithoutUsableOrigin(t *testing.T) {
 	}
 }
 
+// AddWorktreeExisting is the lander's adopt-branch checkout (issue #181):
+// the matrix covers the fresh-local-branch fork from origin/<branch>, the
+// existing-local-branch checkout, the checked-out-elsewhere refusal, the
+// missing-remote-branch refusal, and the hard alignment of a diverged local
+// branch back to origin/<branch>.
+func TestAddWorktreeExisting_realGitMatrix(t *testing.T) {
+	const branch = "afk/7"
+
+	// pushBranch publishes branch on the fixture origin with one commit past
+	// main and returns its tip SHA — the PR-head shape a lander adopts.
+	pushBranch := func(t *testing.T, f *wtFixture) string {
+		t.Helper()
+		gitCmd(t, f.home, f.origin, "branch", branch, "main")
+		gitCmd(t, f.home, f.origin, "checkout", "-q", branch)
+		gitCmd(t, f.home, f.origin, "commit", "-q", "--allow-empty", "-m", "claim work")
+		sha := gitCmd(t, f.home, f.origin, "rev-parse", branch)
+		gitCmd(t, f.home, f.origin, "checkout", "-q", "main")
+		return sha
+	}
+
+	t.Run("no local branch forks from origin and aligns", func(t *testing.T) {
+		f := newWtFixture(t)
+		want := pushBranch(t, f) // pushed AFTER the clone — the fetch must see it
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		if err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env); err != nil {
+			t.Fatalf("AddWorktreeExisting: %v", err)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s; want the freshly-fetched origin/%s tip %s", got, branch, want)
+		}
+		if got := gitCmd(t, f.home, wt, "symbolic-ref", "HEAD"); got != "refs/heads/"+branch {
+			t.Errorf("worktree on %q; want refs/heads/%s", got, branch)
+		}
+		if !f.branchExists(branch) {
+			t.Errorf("local branch %s not created", branch)
+		}
+	})
+
+	t.Run("existing local branch is checked out where it stands", func(t *testing.T) {
+		f := newWtFixture(t)
+		want := pushBranch(t, f)
+		gitCmd(t, f.home, f.bare, "fetch", "-q", "origin")
+		gitCmd(t, f.home, f.bare, "branch", branch, "origin/"+branch)
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		if err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env); err != nil {
+			t.Fatalf("AddWorktreeExisting: %v", err)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s; want origin/%s tip %s", got, branch, want)
+		}
+		if got := gitCmd(t, f.home, wt, "symbolic-ref", "HEAD"); got != "refs/heads/"+branch {
+			t.Errorf("worktree on %q; want refs/heads/%s", got, branch)
+		}
+	})
+
+	t.Run("branch checked out elsewhere is a clear error", func(t *testing.T) {
+		f := newWtFixture(t)
+		pushBranch(t, f)
+		gitCmd(t, f.home, f.bare, "fetch", "-q", "origin")
+		parked := filepath.Join(f.wtRoot, "repo-7")
+		gitCmd(t, f.home, f.bare, "worktree", "add", "-q", "--track", "-b", branch, parked, "origin/"+branch)
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env)
+		if err == nil {
+			t.Fatal("AddWorktreeExisting adopted a branch another worktree has checked out")
+		}
+		if !strings.Contains(err.Error(), "already checked out at "+parked) {
+			t.Errorf("error = %v; want the parked worktree named", err)
+		}
+		if dirExists(wt) {
+			t.Errorf("failed adopt left worktree dir %s behind", wt)
+		}
+	})
+
+	t.Run("missing remote branch is a clear error", func(t *testing.T) {
+		f := newWtFixture(t)
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env)
+		if err == nil {
+			t.Fatal("AddWorktreeExisting succeeded without origin/" + branch)
+		}
+		if !strings.Contains(err.Error(), "origin/"+branch+" does not exist after fetch") {
+			t.Errorf("error = %v; want the missing origin/%s named", err, branch)
+		}
+		if dirExists(wt) || f.branchExists(branch) {
+			t.Error("failed adopt left a worktree or branch behind")
+		}
+	})
+
+	t.Run("local branch ahead of origin is hard-reset to origin", func(t *testing.T) {
+		f := newWtFixture(t)
+		want := pushBranch(t, f)
+		gitCmd(t, f.home, f.bare, "fetch", "-q", "origin")
+		// The local branch drifts one commit past origin/<branch> (a stale
+		// parked claim): the lander must validate what the forge sees, so the
+		// adopt hard-resets it back.
+		drift := filepath.Join(f.wtRoot, "repo-drift")
+		gitCmd(t, f.home, f.bare, "worktree", "add", "-q", "--track", "-b", branch, drift, "origin/"+branch)
+		gitCmd(t, f.home, drift, "commit", "-q", "--allow-empty", "-m", "local drift")
+		gitCmd(t, f.home, f.bare, "worktree", "remove", "--force", drift)
+
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		if err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env); err != nil {
+			t.Fatalf("AddWorktreeExisting: %v", err)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s; want origin/%s tip %s (local drift must be reset away)", got, branch, want)
+		}
+	})
+}
+
 // BranchMerged's exit-code trichotomy: exit 0 → (true,nil); exit 1 →
 // (false,nil), a definite "keep", not an error; any other failure (here an
 // unresolvable ref, exit 128) → (false, err) the caller treats

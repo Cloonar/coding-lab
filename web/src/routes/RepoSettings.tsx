@@ -255,6 +255,21 @@ function SettingsForm(props: {
   const [authorEmail, setAuthorEmail] = createSignal(initial.git_author_email ?? '');
   const [incogni, setIncogni] = createSignal(initial.incogni);
 
+  // Autoland (issue #181 / ADR-0048), per-repo and default off. maxFixAttempts
+  // is a plain (non-nullable) integer draft, same shape as budget/maxInstances
+  // above but without the blank-means-inherit escape hatch. landerProvider
+  // rides a Select like the other provider knobs: '' ↔ null (inherit THIS
+  // repo's own provider chain, not a global).
+  const [autolandEnabled, setAutolandEnabled] = createSignal(initial.autoland_enabled);
+  const [autoMerge, setAutoMerge] = createSignal(initial.auto_merge);
+  const [maxFixAttempts, setMaxFixAttempts] = createSignal(String(initial.max_fix_attempts));
+  const [landerProvider, setLanderProvider] = createSignal(initial.lander_provider ?? '');
+  // Autoland is forge-only (ADR-0048): the poller reads PR comments for
+  // lander verdicts, and the builtin binding has no comment listing to read.
+  // Resolved LIVE against the tracker-binding draft so flipping binding in
+  // the same edit session updates this immediately, before save.
+  const autolandBlocked = () => binding() !== 'forge';
+
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [note, setNote] = createSignal<string | null>(null);
@@ -319,6 +334,10 @@ function SettingsForm(props: {
         resync(authorName, setAuthorName, (r) => r.git_author_name ?? '', fresh);
         resync(authorEmail, setAuthorEmail, (r) => r.git_author_email ?? '', fresh);
         resync(incogni, setIncogni, (r) => r.incogni, fresh);
+        resync(autolandEnabled, setAutolandEnabled, (r) => r.autoland_enabled, fresh);
+        resync(autoMerge, setAutoMerge, (r) => r.auto_merge, fresh);
+        resync(maxFixAttempts, setMaxFixAttempts, (r) => String(r.max_fix_attempts), fresh);
+        resync(landerProvider, setLanderProvider, (r) => r.lander_provider ?? '', fresh);
         seed = fresh;
       },
       { defer: true },
@@ -400,6 +419,20 @@ function SettingsForm(props: {
       patch.git_author_email = normText(authorEmail());
     }
     if (incogni() !== current.incogni) patch.incogni = incogni();
+
+    if (autolandEnabled() !== current.autoland_enabled) {
+      patch.autoland_enabled = autolandEnabled();
+    }
+    if (autoMerge() !== current.auto_merge) patch.auto_merge = autoMerge();
+    const attempts = maxFixAttempts().trim();
+    const attemptsNum = Number(attempts);
+    if (attempts === '' || !Number.isInteger(attemptsNum) || attemptsNum < 0) {
+      return 'Max fix attempts must be a whole number of 0 or more.';
+    }
+    if (attemptsNum !== current.max_fix_attempts) patch.max_fix_attempts = attemptsNum;
+    if (normText(landerProvider()) !== current.lander_provider) {
+      patch.lander_provider = normText(landerProvider());
+    }
 
     return patch;
   };
@@ -757,6 +790,53 @@ function SettingsForm(props: {
             onInput={(e) => setMaxInstances(e.currentTarget.value)}
           />
         </label>
+      </section>
+
+      <section class="card">
+        <h2>Autoland</h2>
+        <label class="check">
+          <input
+            type="checkbox"
+            name="autoland_enabled"
+            checked={autolandEnabled()}
+            disabled={autolandBlocked()}
+            onChange={(e) => setAutolandEnabled(e.currentTarget.checked)}
+          />
+          <span>Autoland claim PRs (spawn a lander to validate; merge on clean PASS)</span>
+        </label>
+        <Show when={autolandBlocked()}>
+          <small class="hint hint-block">Autoland needs a forge tracker binding.</small>
+        </Show>
+        <label class="check">
+          <input
+            type="checkbox"
+            name="auto_merge"
+            checked={autoMerge()}
+            onChange={(e) => setAutoMerge(e.currentTarget.checked)}
+          />
+          <span>Merge on clean PASS (off: approve only, human merges)</span>
+        </label>
+        <label class="field">
+          <span>Max fix attempts</span>
+          <input
+            type="number"
+            name="max_fix_attempts"
+            min="0"
+            step="1"
+            autocomplete="off"
+            value={maxFixAttempts()}
+            onInput={(e) => setMaxFixAttempts(e.currentTarget.value)}
+          />
+        </label>
+        <Select
+          skin="field"
+          label="Lander agent"
+          name="lander_provider"
+          value={landerProvider()}
+          options={providerOptions()}
+          inheritLabel="Inherit repo agent"
+          onChange={setLanderProvider}
+        />
       </section>
 
       <section class="card">

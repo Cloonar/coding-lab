@@ -155,6 +155,10 @@ function baseRepo(): Repo {
     clone_error: null,
     created_at: '2026-07-01T00:00:00.000Z',
     last_opened_at: null,
+    autoland_enabled: false,
+    max_fix_attempts: 2,
+    auto_merge: true,
+    lander_provider: null,
   };
 }
 

@@ -43,11 +43,13 @@ func TestActiveAFKRuns_filtersAndOrders(t *testing.T) {
 		repo := afkFixtureRepo(t, st, "proj")
 		ctx := context.Background()
 
-		// One manual run (excluded), two AFK runs (returned sorted by session
-		// name), one reaped AFK run (excluded — terminal).
+		// One manual run (excluded), two AFK runs and a lander (returned sorted
+		// by session name — the reaper owns all three), one reaped AFK run
+		// (excluded — terminal).
 		afkFixtureRun(t, st, repo.ID, RunKindManual, "proj~20260706-1200", afkClock)
 		afkFixtureRun(t, st, repo.ID, RunKindAFKAuto, "proj~afk-auto-9", afkClock.Add(time.Minute))
 		afkFixtureRun(t, st, repo.ID, RunKindAFKManual, "proj~afk-12", afkClock.Add(2*time.Minute))
+		afkFixtureRun(t, st, repo.ID, RunKindLander, "proj~lander-7", afkClock.Add(3*time.Minute))
 		reaped := afkFixtureRun(t, st, repo.ID, RunKindAFKManual, "proj~afk-3", afkClock)
 		if err := st.EndRun(ctx, reaped.ID, RunOutcomeSuccess, afkClock.Add(time.Hour), ""); err != nil {
 			t.Fatalf("EndRun: %v", err)
@@ -57,11 +59,11 @@ func TestActiveAFKRuns_filtersAndOrders(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ActiveAFKRuns: %v", err)
 		}
-		if len(runs) != 2 {
-			t.Fatalf("ActiveAFKRuns = %d runs, want 2", len(runs))
+		if len(runs) != 3 {
+			t.Fatalf("ActiveAFKRuns = %d runs, want 3", len(runs))
 		}
-		if runs[0].SessionName != "proj~afk-12" || runs[1].SessionName != "proj~afk-auto-9" {
-			t.Errorf("order = [%s, %s], want sorted by session name", runs[0].SessionName, runs[1].SessionName)
+		if runs[0].SessionName != "proj~afk-12" || runs[1].SessionName != "proj~afk-auto-9" || runs[2].SessionName != "proj~lander-7" {
+			t.Errorf("order = [%s, %s, %s], want sorted by session name", runs[0].SessionName, runs[1].SessionName, runs[2].SessionName)
 		}
 	})
 }
@@ -124,6 +126,41 @@ func TestActiveAutoRunForRepo(t *testing.T) {
 		}
 		if _, found, _ := st.ActiveAutoRunForRepo(ctx, repo.ID); found {
 			t.Error("reaped auto run still reported in flight")
+		}
+	})
+}
+
+func TestActiveRunOnBranch(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		repo := afkFixtureRepo(t, st, "proj")
+		other := afkFixtureRepo(t, st, "other")
+		ctx := context.Background()
+
+		// Empty repo: nothing on the branch.
+		if got, err := st.ActiveRunOnBranch(ctx, repo.ID, "afk/7"); err != nil || got {
+			t.Fatalf("empty repo: got=%v err=%v, want no active run", got, err)
+		}
+
+		// ANY kind counts — a manual instance parked on the branch suppresses
+		// a lander exactly like an AFK run (afkFixtureRun pins branch afk/7).
+		run := afkFixtureRun(t, st, repo.ID, RunKindManual, "proj~20260706-1200", afkClock)
+		if got, _ := st.ActiveRunOnBranch(ctx, repo.ID, "afk/7"); !got {
+			t.Error("active manual run on the branch not reported")
+		}
+		// Scoped: another branch and another repo both read clear.
+		if got, _ := st.ActiveRunOnBranch(ctx, repo.ID, "afk/8"); got {
+			t.Error("a different branch reported the run")
+		}
+		if got, _ := st.ActiveRunOnBranch(ctx, other.ID, "afk/7"); got {
+			t.Error("another repo's run leaked into the query")
+		}
+		// A terminal run stops counting — the reaped authoring run frees the
+		// branch for its lander within one tick.
+		if err := st.EndRun(ctx, run.ID, RunOutcomeSuccess, afkClock.Add(time.Hour), ""); err != nil {
+			t.Fatalf("EndRun: %v", err)
+		}
+		if got, _ := st.ActiveRunOnBranch(ctx, repo.ID, "afk/7"); got {
+			t.Error("terminal run still reported as active on the branch")
 		}
 	})
 }

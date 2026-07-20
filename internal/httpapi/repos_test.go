@@ -200,13 +200,21 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 	if repo["incogni"] != false || repo["afk_auto_enabled"] != false {
 		t.Errorf("flags = incogni %v, afk_auto %v, want false/false", repo["incogni"], repo["afk_auto_enabled"])
 	}
+	// Autoland defaults (issue #181 / ADR-0048): off, a 2-attempt fix-run
+	// bound, auto-merge on, no lander provider override.
+	if repo["autoland_enabled"] != false || repo["max_fix_attempts"] != float64(2) ||
+		repo["auto_merge"] != true || repo["lander_provider"] != nil {
+		t.Errorf("autoland defaults = enabled=%v attempts=%v automerge=%v provider=%v, want false/2/true/null",
+			repo["autoland_enabled"], repo["max_fix_attempts"], repo["auto_merge"], repo["lander_provider"])
+	}
 	// The pinned repo JSON: every key present (nullables as null).
 	for _, k := range []string{"id", "name", "remote_url", "credential_id", "forge_credential_id",
 		"tracker_binding", "forge_kind", "default_branch", "provider", "incogni", "model_default",
 		"effort_default", "git_author_name", "git_author_email", "afk_branch_pattern",
 		"manual_branch_prefix", "afk_auto_enabled", "consecutive_failures", "budget_minutes",
 		"max_instances_override", "clone_status", "clone_error", "created_at", "last_opened_at",
-		"afk_prompt", "afk_prompt_effective", "afk_provider_default"} {
+		"afk_prompt", "afk_prompt_effective", "afk_provider_default",
+		"autoland_enabled", "max_fix_attempts", "auto_merge", "lander_provider"} {
 		if _, ok := repo[k]; !ok {
 			t.Errorf("repo JSON missing pinned key %q", k)
 		}
@@ -720,6 +728,112 @@ func TestRepoRemoteDefaults(t *testing.T) {
 	}
 	if repo = x.getRepo(t, id); repo["remote_default"] != nil || repo["afk_remote_default"] != nil {
 		t.Errorf("row changed by a rejected PATCH: %v/%v", repo["remote_default"], repo["afk_remote_default"])
+	}
+}
+
+// TestRepoAutolandSettings pins the issue-#181 / ADR-0048 repo surface: the
+// four settings default off/2/true/null, PATCH sets and clears them, an
+// unknown lander_provider or a negative max_fix_attempts is a 400, and
+// autoland_enabled can only be turned ON for a forge-bound repo — the
+// poller has no PR-comment listing to read on the builtin binding — while
+// turning it off stays legal on any binding.
+func TestRepoAutolandSettings(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+
+	resp := x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	repo := decodeBody(t, resp)
+	if repo["tracker_binding"] != "builtin" {
+		t.Fatalf("tracker_binding = %v, want builtin (test fixture assumption)", repo["tracker_binding"])
+	}
+	id := repo["id"].(string)
+
+	// autoland_enabled can never turn ON while builtin-bound.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"autoland_enabled": true}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); !strings.Contains(fmt.Sprint(got["error"]), "forge tracker binding") {
+		t.Errorf("400 body = %v, want message naming the forge tracker binding requirement", got["error"])
+	}
+	// ...but turning it off is always legal, even on builtin.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"autoland_enabled": false}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if repo = decodeBody(t, resp); repo["autoland_enabled"] != false {
+		t.Errorf("autoland_enabled = %v after PATCH false, want false", repo["autoland_enabled"])
+	}
+
+	// Set all four on a forge-bound repo.
+	resp = x.do("POST", "/api/v1/credentials", map[string]any{
+		"name": "forge-tok-autoland", "kind": "forge_token",
+		"payload": map[string]any{"host": "git.cloonar.com", "token": "t"},
+	}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	forgeCred := decodeBody(t, resp)["id"].(string)
+	resp = x.do("POST", "/api/v1/repos", map[string]any{
+		"remote_url": "forgejo@git.cloonar.com:me/autoland.git", "forge_credential_id": forgeCred,
+	}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	repo = decodeBody(t, resp)
+	if repo["tracker_binding"] != "forge" {
+		t.Fatalf("tracker_binding = %v, want forge (test fixture assumption)", repo["tracker_binding"])
+	}
+	forgeID := repo["id"].(string)
+
+	resp = x.do("PATCH", "/api/v1/repos/"+forgeID, map[string]any{
+		"autoland_enabled": true, "max_fix_attempts": 5, "auto_merge": false, "lander_provider": "fake-b",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["autoland_enabled"] != true || repo["max_fix_attempts"] != float64(5) ||
+		repo["auto_merge"] != false || repo["lander_provider"] != "fake-b" {
+		t.Errorf("patched autoland settings = %+v, want true/5/false/fake-b",
+			[]any{repo["autoland_enabled"], repo["max_fix_attempts"], repo["auto_merge"], repo["lander_provider"]})
+	}
+
+	// null clears lander_provider back to inherit (this repo's own Provider).
+	resp = x.do("PATCH", "/api/v1/repos/"+forgeID, map[string]any{"lander_provider": nil}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if repo = decodeBody(t, resp); repo["lander_provider"] != nil {
+		t.Errorf("lander_provider after PATCH null = %v, want nil", repo["lander_provider"])
+	}
+
+	// Rejections, each leaving the row untouched.
+	for name, patch := range map[string]map[string]any{
+		"negative max_fix_attempts": {"max_fix_attempts": -1},
+		"unknown lander_provider":   {"lander_provider": "ghost"},
+		"null max_fix_attempts":     {"max_fix_attempts": nil},
+		"null autoland_enabled":     {"autoland_enabled": nil},
+		"null auto_merge":           {"auto_merge": nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := x.do("PATCH", "/api/v1/repos/"+forgeID, patch, h)
+			wantStatus(t, resp, http.StatusBadRequest)
+			if got := decodeBody(t, resp); got["error"] == "" {
+				t.Fatal("400 without error message")
+			}
+		})
+	}
+	repo = x.getRepo(t, forgeID)
+	if repo["autoland_enabled"] != true || repo["max_fix_attempts"] != float64(5) ||
+		repo["auto_merge"] != false || repo["lander_provider"] != nil {
+		t.Errorf("row changed by a rejected PATCH: %+v",
+			[]any{repo["autoland_enabled"], repo["max_fix_attempts"], repo["auto_merge"], repo["lander_provider"]})
+	}
+
+	// The invariant holds from the other side too: while autoland is on, the
+	// binding cannot flip away from forge — the same PATCH must turn it off.
+	resp = x.do("PATCH", "/api/v1/repos/"+forgeID, map[string]any{"tracker_binding": "builtin"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); !strings.Contains(fmt.Sprint(got["error"]), "forge tracker binding") {
+		t.Errorf("400 body = %v, want message naming the forge tracker binding requirement", got["error"])
+	}
+	resp = x.do("PATCH", "/api/v1/repos/"+forgeID, map[string]any{
+		"tracker_binding": "builtin", "autoland_enabled": false,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if repo = decodeBody(t, resp); repo["tracker_binding"] != "builtin" || repo["autoland_enabled"] != false {
+		t.Errorf("combined flip = %v/%v, want builtin/false", repo["tracker_binding"], repo["autoland_enabled"])
 	}
 }
 

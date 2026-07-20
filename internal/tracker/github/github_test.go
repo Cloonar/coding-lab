@@ -1025,6 +1025,76 @@ func TestCommentPull(t *testing.T) {
 	}
 }
 
+// --- PullComments ------------------------------------------------------------
+
+// TestPullComments_mapsSharedIssueCommentEndpoint pins that a PR's discussion
+// comments are read/mapped exactly like Issue's comment thread — the shared
+// issue-comment number space.
+func TestPullComments_mapsSharedIssueCommentEndpoint(t *testing.T) {
+	var gotMethod, gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_, _ = io.WriteString(w, `[
+		  {"body":"first comment","user":{"login":"alice"},"created_at":"2026-03-01T12:00:00Z"},
+		  {"body":"second comment","user":{"login":"bob"},"created_at":"2026-03-01T13:00:00Z"}
+		]`)
+	})
+
+	comments, err := c.PullComments(context.Background(), 62)
+	if err != nil {
+		t.Fatalf("PullComments: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != apiPrefix+"/issues/62/comments" {
+		t.Errorf("request = %s %s; want GET %s/issues/62/comments", gotMethod, gotPath, apiPrefix)
+	}
+	if len(comments) != 2 || comments[0].Author != "alice" || comments[1].Author != "bob" {
+		t.Errorf("comments = %+v", comments)
+	}
+	if comments[0].Body != "first comment" ||
+		!comments[0].CreatedAt.Equal(mustTime(t, "2026-03-01T12:00:00Z")) {
+		t.Errorf("comment[0] mismatch: %+v", comments[0])
+	}
+}
+
+// TestPullComments_paginate: unlike Forgejo, GitHub's per-issue comments
+// endpoint paginates with Link, so PullComments must follow it exactly like
+// Issue does (a >100-comment thread would otherwise be truncated).
+func TestPullComments_paginate(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			setNextLink(w, r)
+			_, _ = io.WriteString(w, genCommentsJSON(1, pageLimit))
+		case "2":
+			_, _ = io.WriteString(w, genCommentsJSON(pageLimit+1, 5))
+		default:
+			t.Errorf("unexpected comments page %q", r.URL.Query().Get("page"))
+			_, _ = io.WriteString(w, `[]`)
+		}
+	})
+
+	comments, err := c.PullComments(context.Background(), 62)
+	if err != nil {
+		t.Fatalf("PullComments: %v", err)
+	}
+	if len(comments) != pageLimit+5 {
+		t.Fatalf("got %d comments; want %d (both pages)", len(comments), pageLimit+5)
+	}
+	if comments[0].Body != "c1" || comments[pageLimit+4].Body != fmt.Sprintf("c%d", pageLimit+5) {
+		t.Errorf("comment order lost across pages")
+	}
+}
+
+func TestPullComments_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+	})
+	if _, err := c.PullComments(context.Background(), 999); !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 // --- CloseIssue ------------------------------------------------------------
 
 func TestCloseIssue(t *testing.T) {

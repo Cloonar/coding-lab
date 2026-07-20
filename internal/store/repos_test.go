@@ -26,6 +26,12 @@ func testRepo(name string, createdAt time.Time) Repo {
 		ManualBranchPrefix: "lab/",
 		CloneStatus:        CloneStatusCloning,
 		CreatedAt:          createdAt,
+		// Autoland (issue #181): AutolandEnabled false and LanderProvider nil are
+		// Go zero values already; MaxFixAttempts/AutoMerge are the reposvc.Add
+		// defaults (2/true), mirrored here the same way AFKBranchPattern and
+		// ManualBranchPrefix above already are.
+		MaxFixAttempts: 2,
+		AutoMerge:      true,
 	}
 }
 
@@ -86,6 +92,13 @@ func TestCreateRepoRoundTrip(t *testing.T) {
 		if gotMin.CloneStatus != CloneStatusCloning || gotMin.ConsecutiveFailures != 0 ||
 			gotMin.NextIssueNumber != 0 || gotMin.NextCRNumber != 0 {
 			t.Errorf("minimal repo defaults wrong: %+v", gotMin)
+		}
+		// Autoland (issue #181): default OFF, a 2-attempt fix-run bound,
+		// auto-merge on, no lander provider override.
+		if gotMin.AutolandEnabled || gotMin.MaxFixAttempts != 2 || !gotMin.AutoMerge ||
+			gotMin.LanderProvider != nil {
+			t.Errorf("minimal repo autoland defaults = enabled=%v attempts=%v automerge=%v provider=%v, want false/2/true/nil",
+				gotMin.AutolandEnabled, gotMin.MaxFixAttempts, gotMin.AutoMerge, gotMin.LanderProvider)
 		}
 
 		// Repos() lists both, ordered by name.
@@ -546,6 +559,80 @@ func TestRepoRemoteColumnsRoundTrip(t *testing.T) {
 		if untouched.AFKRemoteDefault == nil || *untouched.AFKRemoteDefault {
 			t.Errorf("AFKRemoteDefault after unrelated patch = %v, want the stored false",
 				untouched.AFKRemoteDefault)
+		}
+	})
+}
+
+// The four Autoland settings (issue #181 / ADR-0048): AutolandEnabled,
+// MaxFixAttempts, AutoMerge round-trip as plain columns; LanderProvider is
+// the nullable one — NULL means inherit this repo's own Provider chain.
+func TestRepoAutolandColumnsRoundTrip(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+
+		// Create with every knob set away from its default.
+		full := testRepo("autolandfull", now)
+		full.AutolandEnabled = true
+		full.MaxFixAttempts = 5
+		full.AutoMerge = false
+		full.LanderProvider = strPtr("fake-b")
+		created, err := s.CreateRepo(ctx, full)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		got, err := s.RepoByID(ctx, full.ID)
+		if err != nil {
+			t.Fatalf("by id: %v", err)
+		}
+		if !reflect.DeepEqual(got, created) {
+			t.Errorf("autoland columns round trip mismatch:\n got %+v\nwant %+v", got, created)
+		}
+
+		// A minimal repo carries the caller-applied defaults: off, 2 attempts,
+		// auto-merge on, no lander provider override.
+		min := testRepo("autolandmin", now)
+		if _, err := s.CreateRepo(ctx, min); err != nil {
+			t.Fatalf("create minimal: %v", err)
+		}
+		gotMin, err := s.RepoByID(ctx, min.ID)
+		if err != nil {
+			t.Fatalf("by id minimal: %v", err)
+		}
+		if gotMin.AutolandEnabled || gotMin.MaxFixAttempts != 2 || !gotMin.AutoMerge ||
+			gotMin.LanderProvider != nil {
+			t.Errorf("minimal repo autoland columns = enabled=%v attempts=%v automerge=%v provider=%v, want false/2/true/nil",
+				gotMin.AutolandEnabled, gotMin.MaxFixAttempts, gotMin.AutoMerge, gotMin.LanderProvider)
+		}
+
+		// Patch: set all four.
+		updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			AutolandEnabled: Set(true),
+			MaxFixAttempts:  Set(4),
+			AutoMerge:       Set(false),
+			LanderProvider:  Set(strPtr("claude-code")),
+		})
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if !updated.AutolandEnabled || updated.MaxFixAttempts != 4 || updated.AutoMerge ||
+			updated.LanderProvider == nil || *updated.LanderProvider != "claude-code" {
+			t.Errorf("patched autoland columns = %+v, want true/4/false/claude-code", updated)
+		}
+
+		// Patch: clear lander_provider back to NULL (inherit); the other three
+		// are untouched by an Opt zero value.
+		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			LanderProvider: Set[*string](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear lander_provider: %v", err)
+		}
+		if updated.LanderProvider != nil {
+			t.Errorf("cleared lander_provider = %v, want nil", updated.LanderProvider)
+		}
+		if !updated.AutolandEnabled || updated.MaxFixAttempts != 4 || updated.AutoMerge {
+			t.Errorf("unrelated autoland columns changed by lander_provider-only patch: %+v", updated)
 		}
 	})
 }

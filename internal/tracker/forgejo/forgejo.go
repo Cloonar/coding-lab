@@ -465,6 +465,28 @@ func (c *Client) CommentPull(ctx context.Context, number int, body string) error
 	return c.do(ctx, http.MethodPost, c.issuePath(number)+"/comments", nil, req, nil)
 }
 
+// PullComments lists pull `number`'s discussion comments, oldest first — the
+// READ counterpart of CommentPull, the autoland poller's route onto verdict
+// markers (ADR-0048). A PR shares the issue-comment number space on Forgejo,
+// so this reads and maps the SAME endpoint Issue's comment thread does. It
+// cannot go through fetchPages for the same reason Issue doesn't: Forgejo's
+// GET /issues/{index}/comments accepts only since/before and ignores
+// page/limit, always returning the full list — a pagination loop over it
+// never terminates once a pull has >= pageLimit comments. An unknown number
+// is Forgejo's 404, which statusError unwraps to tracker.ErrNotFound like
+// every single-subject read.
+func (c *Client) PullComments(ctx context.Context, number int) ([]tracker.Comment, error) {
+	var fcs []fjComment
+	if err := c.do(ctx, http.MethodGet, c.issuePath(number)+"/comments", nil, nil, &fcs); err != nil {
+		return nil, err
+	}
+	comments := make([]tracker.Comment, 0, len(fcs))
+	for _, fc := range fcs {
+		comments = append(comments, toComment(fc))
+	}
+	return comments, nil
+}
+
 // CloseIssue closes an issue via PATCH state=closed.
 func (c *Client) CloseIssue(ctx context.Context, number int) error {
 	req := struct {

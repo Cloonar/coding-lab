@@ -29,6 +29,10 @@ func (s *Service) ReaperLoop(ctx context.Context) {
 		}
 		now := s.now()
 		s.ReapOnce(ctx, now)
+		// The autoland poller rides the same tick, AFTER the reap — ordering is
+		// load-bearing: the reap frees the authoring AFK run's row first, so a
+		// fresh PR gets its lander within one tick (issue #181 AC #2).
+		s.AutolandOnce(ctx)
 		if s.sweep == nil {
 			continue
 		}
@@ -95,13 +99,26 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			continue
 		}
 		for _, run := range byRepo[repoID] {
-			// The done-signal: an open or merged PR/CR whose head is the
+			// The done-signal, derived per kind and fed into the ONE Classify
+			// table. AFK kinds: an open or merged PR/CR whose head is the
 			// run's branch (closed-unmerged deliberately does NOT count —
-			// tracker.DonePull). Matched client-side against the one pull
-			// listing; donePull is the winning pull, meaningful only when the
-			// outcome is success (it feeds the done-signal notification).
+			// tracker.DonePull). Lander: its PR pre-exists the run, so
+			// presence alone would success-reap it on its first tick — its
+			// done-signal is the state the run PRODUCED (merged, or a
+			// pass/reject verdict marker; landerDoneSignal). Matched
+			// client-side against the one pull listing; donePull is the
+			// winning pull, meaningful only when the outcome is success (it
+			// feeds the done-signal notification).
 			donePull, prPresent := tracker.DonePull(pulls, run.Branch)
-			outcome, alive, claimed := s.classifyAndClaim(ctx, run, prPresent, now)
+			done := prPresent
+			if run.Kind == store.RunKindLander {
+				var readable bool
+				done, readable = s.landerDoneSignal(ctx, trk, repo, run, donePull, prPresent)
+				if !readable {
+					continue // comments unreadable this tick — NEVER classify on missing data
+				}
+			}
+			outcome, alive, claimed := s.classifyAndClaim(ctx, run, done, now)
 			if claimed {
 				s.reapRun(ctx, trk, repo, run, outcome, alive, donePull, now)
 			}
@@ -175,6 +192,28 @@ func (s *Service) drainZombies(ctx context.Context) {
 	}
 }
 
+// landerDoneSignal derives a lander run's done-signal (issue #181 /
+// ADR-0048) — the pure LanderDone reading over polled state: the PR merged,
+// or a pass/reject verdict-marker comment on it (the spawn rule only launches
+// onto a virgin PR, so any such marker is this run's; fix-done is a fix run's
+// signal and never a lander's). PullComments is ONE bounded call per active
+// lander per tick, made only when the PR exists and is not merged; a read
+// failure returns readable=false — the run is skipped and re-derived next
+// tick, never classified on missing data (the same stance as a failed pull
+// listing).
+func (s *Service) landerDoneSignal(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, pull tracker.PullRef, prPresent bool) (done, readable bool) {
+	if !prPresent || pull.State == tracker.PullMerged {
+		return LanderDone(pull.State, prPresent, nil), true
+	}
+	comments, err := trk.PullComments(ctx, pull.Number)
+	if err != nil {
+		s.log.Warn("afk watcher: lander pull comments", "component", "afk",
+			"repo", repo.Name, "session", run.SessionName, "pull", pull.Number, "err", err)
+		return false, false
+	}
+	return LanderDone(pull.State, prPresent, VerdictWords(comments)), true
+}
+
 // classifyAndClaim makes the reap decision for one run atomically against a
 // concurrent neutral Stop (v0's atomicity core, §4c). Under runsMu — the
 // same lock StopAFK holds to write outcome 'stopped' and kill the session —
@@ -190,7 +229,9 @@ func (s *Service) drainZombies(ctx context.Context) {
 // Stop: it sees active-and-alive (a genuine fresh decision) or
 // stopped-and-gone (claimed=false, neutral). A genuine crash leaves the row
 // active, so an active run that is not alive is a real death.
-func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, prPresent bool, now time.Time) (outcome Outcome, alive, claimed bool) {
+// done is the run's kind-derived done-signal (AFK: PR presence; lander:
+// landerDoneSignal) — the classification table itself is kind-blind.
+func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done bool, now time.Time) (outcome Outcome, alive, claimed bool) {
 	s.runsMu.Lock()
 	defer s.runsMu.Unlock()
 
@@ -223,7 +264,7 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, prPresent
 	if fresh.BudgetDeadline != nil {
 		deadline = *fresh.BudgetDeadline
 	}
-	outcome = Classify(prPresent, alive, now, deadline)
+	outcome = Classify(done, alive, now, deadline)
 	if outcome == OutcomeRunning {
 		return outcome, alive, false
 	}
@@ -262,9 +303,14 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 	// this reports exactly once per terminal reap.
 	s.metrics.AFKRunEnded(run.Kind, outcome.RunOutcome(), now.Sub(run.StartedAt))
 
-	// The done-signal push (issue #100): only a success reap notifies, riding
-	// this once-per-run chokepoint so the injected sender fires exactly once.
-	if outcome == OutcomeSuccess && s.notify != nil {
+	// The done-signal push (issue #100): only a success reap of the two AFK
+	// kinds notifies, riding this once-per-run chokepoint so the injected
+	// sender fires exactly once. A lander is excluded by constraint: the copy
+	// is "<run> opened PR #n" and a lander opened nothing — its forge-
+	// observable outcome (the merge or verdict comment) IS its notification
+	// surface for now.
+	if outcome == OutcomeSuccess && s.notify != nil &&
+		(run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto) {
 		s.notify(s.doneNotification(ctx, trk, repo, run, donePull))
 	}
 

@@ -94,6 +94,123 @@ func TestShouldLaunchAuto(t *testing.T) {
 	}
 }
 
+// TestLanderDone pins the lander's done-signal derivation (issue #181 /
+// ADR-0048): merged ends the run with no comment read; on an open PR only a
+// pass or reject verdict ends it — fix-done is a FIX run's signal, unknown
+// words (escalate, a bare marker) end nothing; and no PR (vanished or
+// closed-unmerged, DonePull's floor) is never done.
+func TestLanderDone(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     string
+		prPresent bool
+		verdicts  []string
+		want      bool
+	}{
+		{"merged is done", tracker.PullMerged, true, nil, true},
+		{"open with pass verdict is done", tracker.PullOpen, true, []string{"pass"}, true},
+		{"open with reject verdict is done", tracker.PullOpen, true, []string{"reject"}, true},
+		{"open with fix-done only is NOT done", tracker.PullOpen, true, []string{"fix-done"}, false},
+		{"open with no comments is not done", tracker.PullOpen, true, nil, false},
+		{"open with unknown words is not done", tracker.PullOpen, true, []string{"escalate", ""}, false},
+		{"pass after fix-done is done", tracker.PullOpen, true, []string{"fix-done", "pass"}, true},
+		{"no PR is not done", "", false, []string{"pass"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LanderDone(tt.state, tt.prPresent, tt.verdicts); got != tt.want {
+				t.Errorf("LanderDone(%q, %v, %v) = %v, want %v", tt.state, tt.prPresent, tt.verdicts, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestVerdictWords pins the comment→words extraction: first-line exact-prefix
+// markers register (their word may be empty or unknown — grammar only), while
+// mid-line quotes, second-line markers, and indented markers stay inert
+// (ADR-0048's parse rule, via tracker.ParseVerdict).
+func TestVerdictWords(t *testing.T) {
+	comments := []tracker.Comment{
+		{Body: tracker.VerdictPass + "\n\nCONCERNS: none"},
+		{Body: "prose quoting [autoland] verdict: reject mid-line"},
+		{Body: "prose first\n" + tracker.VerdictReject},
+		{Body: tracker.VerdictFixDone},
+		{Body: tracker.VerdictMarkerPrefix},
+		{Body: " " + tracker.VerdictPass},
+	}
+	got := VerdictWords(comments)
+	want := []string{"pass", "fix-done", ""}
+	if len(got) != len(want) {
+		t.Fatalf("VerdictWords = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("VerdictWords[%d] = %q, want %q (comment order preserved)", i, got[i], want[i])
+		}
+	}
+	if words := VerdictWords(nil); words != nil {
+		t.Errorf("VerdictWords(nil) = %v, want nil", words)
+	}
+}
+
+// TestLiveReview pins the conservative "no review" gate: any non-dismissed
+// review suppresses, a dismissed one is a superseded verdict and does not.
+func TestLiveReview(t *testing.T) {
+	if LiveReview(nil) {
+		t.Error("LiveReview(nil) = true, want false")
+	}
+	if LiveReview([]tracker.Review{{Reviewer: "h", State: tracker.ReviewApproved, Dismissed: true}}) {
+		t.Error("a dismissed review reported live")
+	}
+	if !LiveReview([]tracker.Review{{Reviewer: "h", State: tracker.ReviewCommented}}) {
+		t.Error("a non-dismissed review (any state) not reported live")
+	}
+	if !LiveReview([]tracker.Review{
+		{Reviewer: "a", State: tracker.ReviewApproved, Dismissed: true},
+		{Reviewer: "b", State: tracker.ReviewChangesRequested},
+	}) {
+		t.Error("a live review hidden behind a dismissed one")
+	}
+}
+
+// TestShouldSpawnLander mirrors TestShouldLaunchAuto: base is all-go;
+// flipping exactly one term blocks the spawn — every suppression the issue
+// pins (disabled, non-forge, not-ready, paused, over cap, closed PR,
+// non-matching head, review present, marker present, live run on branch) is
+// one row.
+func TestShouldSpawnLander(t *testing.T) {
+	base := LanderSpawnDecision{
+		AutolandEnabled: true, ForgeBound: true, RepoReady: true, Paused: false, UnderCap: true,
+		PullOpen: true, ClaimBranch: true, ReviewPresent: false, VerdictPresent: false, RunOnBranch: false,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*LanderSpawnDecision)
+		want   bool
+	}{
+		{"all conditions go", func(*LanderSpawnDecision) {}, true},
+		{"autoland disabled vetoes", func(d *LanderSpawnDecision) { d.AutolandEnabled = false }, false},
+		{"non-forge binding vetoes", func(d *LanderSpawnDecision) { d.ForgeBound = false }, false},
+		{"repo not ready vetoes", func(d *LanderSpawnDecision) { d.RepoReady = false }, false},
+		{"three-strikes pause vetoes", func(d *LanderSpawnDecision) { d.Paused = true }, false},
+		{"at cap vetoes", func(d *LanderSpawnDecision) { d.UnderCap = false }, false},
+		{"closed/merged pull vetoes", func(d *LanderSpawnDecision) { d.PullOpen = false }, false},
+		{"non-matching head vetoes", func(d *LanderSpawnDecision) { d.ClaimBranch = false }, false},
+		{"live review vetoes", func(d *LanderSpawnDecision) { d.ReviewPresent = true }, false},
+		{"verdict marker vetoes", func(d *LanderSpawnDecision) { d.VerdictPresent = true }, false},
+		{"live run on branch vetoes", func(d *LanderSpawnDecision) { d.RunOnBranch = true }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := base
+			tt.mutate(&d)
+			if got := ShouldSpawnLander(d); got != tt.want {
+				t.Errorf("ShouldSpawnLander(%+v) = %v, want %v", d, got, tt.want)
+			}
+		})
+	}
+}
+
 func issues(ns ...int) []tracker.Issue {
 	out := make([]tracker.Issue, 0, len(ns))
 	for _, n := range ns {
@@ -216,7 +333,7 @@ func TestLabelRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	rejects := []string{"afk-x", "afk-feature", "afk-0", "afk--1", "afk-1x", "afk-auto-", "afk-auto-0", "afk-auto-x", "", "20260706-1200", "lab-login", "auto-7"}
+	rejects := []string{"afk-x", "afk-feature", "afk-0", "afk--1", "afk-1x", "afk-auto-", "afk-auto-0", "afk-auto-x", "", "20260706-1200", "lab-login", "auto-7", "lander-7"}
 	for _, label := range rejects {
 		if _, _, ok := ParseLabel(label); ok {
 			t.Errorf("ParseLabel(%q) accepted, want reject", label)

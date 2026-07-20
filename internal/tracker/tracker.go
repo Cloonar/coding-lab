@@ -339,6 +339,14 @@ type Tracker interface {
 	// wraps ErrUnsupported.
 	CommentPull(ctx context.Context, number int, body string) error
 
+	// PullComments lists pull number's discussion comments, oldest first — the
+	// READ counterpart of CommentPull. The autoland poller (#181) reads verdict
+	// markers (ADR-0048) through it: a PR shares the issue-comment number
+	// space, so this is the same thread Issue's Comments populates. An unknown
+	// number wraps ErrNotFound; the built-in binding wraps ErrUnsupported (no
+	// PR comment thread to list yet, ADR-0048).
+	PullComments(ctx context.Context, number int) ([]Comment, error)
+
 	// CloseIssue transitions an issue to closed.
 	CloseIssue(ctx context.Context, number int) error
 

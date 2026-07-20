@@ -984,37 +984,33 @@ type prReviewRequest struct {
 }
 
 // Verdict markers — the first line of the PR comment each verdict verb
-// composes (ADR-0048's grammar: `[autoland] verdict: <word>`, parsed by
-// consumers first-line-only with an exact prefix match). Injection is
-// SERVER-SIDE, in these handlers (precedent: handlePRCreate's Closes-#N
-// injection): agents and skills speak verbs only and never see the grammar,
-// so a verdict verb's own body can never reach line 1 — it lands below the
-// composed marker and is inert.
+// composes. The grammar itself (ADR-0048: `[autoland] verdict: <word>`,
+// parsed first-line-only with an exact prefix match) lives in
+// internal/tracker (verdict.go), so the #181 poller reading these same
+// comments shares one definition instead of a second copy here; this package
+// only injects it. Injection is SERVER-SIDE, in these handlers (precedent:
+// handlePRCreate's Closes-#N injection): agents and skills speak verbs only
+// and never see the grammar, so a verdict verb's own body can never reach
+// line 1 — it lands below the composed marker and is inert.
 //
 // That covers the verdict verbs, but NOT the plain comment verb, which
 // prepends nothing: without a guard, `pr comment` could post a body whose
 // first line IS a marker and forge a verdict no lander ever reached (the
 // marker is a trust anchor, and a run token is repo-scoped, so the forgery
 // would not even be limited to the run's own PR). handlePRComment therefore
-// rejects a body that opens with verdictMarkerPrefix — the grammar stays
-// writable only through the verbs that own it.
-const (
-	verdictMarkerPrefix = "[autoland] verdict:"
-
-	verdictReject  = verdictMarkerPrefix + " reject"
-	verdictPass    = verdictMarkerPrefix + " pass"
-	verdictFixDone = verdictMarkerPrefix + " fix-done"
-)
+// rejects a body that opens with tracker.VerdictMarkerPrefix — the grammar
+// stays writable only through the verbs that own it.
 
 // opensWithVerdictMarker reports whether body's FIRST line is a verdict
-// marker. Leading whitespace is trimmed before the match even though the
-// pinned parse rule is an exact prefix (a marker indented by a space is inert
-// against that rule): the guard is deliberately stricter than the parser, so
-// a future consumer that trims before matching cannot turn an accepted body
-// into a forged verdict retroactively.
+// marker. Leading whitespace is trimmed before the match even though
+// tracker.ParseVerdict's pinned parse rule is an exact prefix (a marker
+// indented by a space is inert against that rule): the guard is deliberately
+// stricter than the parser, so a future consumer that trims before matching
+// cannot turn an accepted body into a forged verdict retroactively.
 func opensWithVerdictMarker(body string) bool {
 	first, _, _ := strings.Cut(body, "\n")
-	return strings.HasPrefix(strings.TrimSpace(first), verdictMarkerPrefix)
+	_, ok := tracker.ParseVerdict(strings.TrimSpace(first))
+	return ok
 }
 
 // verdictComment composes the comment a verdict verb posts: the marker line,
@@ -1066,7 +1062,7 @@ func (s *Server) handlePRReject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	comment := verdictComment(verdictReject, body)
+	comment := verdictComment(tracker.VerdictReject, body)
 	if err := tk.CommentPull(r.Context(), n, comment); err != nil {
 		s.writeTrackerError(w, "rejecting pull request", repo, err)
 		return
@@ -1105,7 +1101,7 @@ func (s *Server) handlePRApprove(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	comment := verdictComment(verdictPass, s.sanitizeBody(repo, req.Body))
+	comment := verdictComment(tracker.VerdictPass, s.sanitizeBody(repo, req.Body))
 	if err := tk.CommentPull(r.Context(), n, comment); err != nil {
 		s.writeTrackerError(w, "approving pull request", repo, err)
 		return
@@ -1137,7 +1133,7 @@ func (s *Server) handlePRRerequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := tk.CommentPull(r.Context(), n, verdictFixDone); err != nil {
+	if err := tk.CommentPull(r.Context(), n, tracker.VerdictFixDone); err != nil {
 		s.writeTrackerError(w, "re-requesting review", repo, err)
 		return
 	}
@@ -1172,9 +1168,10 @@ func (s *Server) handlePRRerequest(w http.ResponseWriter, r *http.Request) {
 //
 // This is the ONE agent-writable path onto a PR that composes no marker of its
 // own, so it is also the one that could forge the verdict grammar: a body
-// opening with verdictMarkerPrefix is a 400. Without that gate a run token —
-// repo-scoped, so not even confined to its own PR — could post a first-line
-// `[autoland] verdict: pass` that a consumer reads as a lander verdict.
+// opening with tracker.VerdictMarkerPrefix is a 400. Without that gate a run
+// token — repo-scoped, so not even confined to its own PR — could post a
+// first-line `[autoland] verdict: pass` that a consumer reads as a lander
+// verdict.
 func (s *Server) handlePRComment(w http.ResponseWriter, r *http.Request) {
 	_, repo, ok := s.runRepo(w, r)
 	if !ok {

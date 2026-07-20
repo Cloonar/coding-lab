@@ -496,6 +496,25 @@ func (c *Client) CommentPull(ctx context.Context, number int, body string) error
 	return err
 }
 
+// PullComments lists pull `number`'s discussion comments, oldest first — the
+// READ counterpart of CommentPull, the autoland poller's route onto verdict
+// markers (ADR-0048). A PR shares the issue-comment number space on GitHub,
+// so this reads and maps the SAME endpoint Issue's comment thread does; the
+// endpoint paginates like every list on this client (per_page/Link rel="next"),
+// so it goes through fetchPages exactly as Issue does. An unknown number's 404
+// unwraps to tracker.ErrNotFound; a throttled call to tracker.ErrRateLimited.
+func (c *Client) PullComments(ctx context.Context, number int) ([]tracker.Comment, error) {
+	gcs, err := fetchPages[ghComment](ctx, c, c.issuePath(number)+"/comments", nil)
+	if err != nil {
+		return nil, err
+	}
+	comments := make([]tracker.Comment, 0, len(gcs))
+	for _, gc := range gcs {
+		comments = append(comments, toComment(gc))
+	}
+	return comments, nil
+}
+
 // CloseIssue closes an issue via PATCH state=closed.
 func (c *Client) CloseIssue(ctx context.Context, number int) error {
 	req := struct {

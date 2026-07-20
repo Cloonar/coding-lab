@@ -28,6 +28,7 @@ const (
 	OpReviews           = "reviews"
 	OpRerequestReview   = "rerequest_review"
 	OpCommentPull       = "comment_pull"
+	OpPullComments      = "pull_comments"
 	OpCloseIssue        = "close"
 	OpCreateIssue       = "create_issue"
 	OpEditIssue         = "edit_issue"
@@ -151,6 +152,12 @@ func (o *observed) CommentPull(ctx context.Context, number int, body string) err
 	err := o.t.CommentPull(ctx, number, body)
 	o.report(OpCommentPull, err)
 	return err
+}
+
+func (o *observed) PullComments(ctx context.Context, number int) ([]Comment, error) {
+	comments, err := o.t.PullComments(ctx, number)
+	o.report(OpPullComments, err)
+	return comments, err
 }
 
 func (o *observed) CloseIssue(ctx context.Context, number int) error {

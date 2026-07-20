@@ -32,19 +32,20 @@ func TestLiveCounts_reflectsActiveRunsAndTmuxLiveness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	// One live AFK run of each kind, plus an active row whose session died
-	// (not yet reaped) — that one must NOT count: liveness comes from tmux,
-	// never the DB.
+	// One live unattended run of each kind, plus an active row whose session
+	// died (not yet reaped) — that one must NOT count: liveness comes from
+	// tmux, never the DB.
 	f.addActiveRun(store.RunKindAFKManual, "proj~afk-7", true)
 	f.addActiveRun(store.RunKindAFKAuto, "proj~afk-auto-9", true)
+	f.addActiveRun(store.RunKindLander, "proj~lander-7", true)
 	f.addActiveRun(store.RunKindAFKAuto, "proj~afk-auto-11", false)
 
 	counts, err := f.svc.LiveCounts(t.Context())
 	if err != nil {
 		t.Fatalf("LiveCounts: %v", err)
 	}
-	if counts.Manual != 1 || counts.AFKManual != 1 || counts.AFKAuto != 1 {
-		t.Fatalf("LiveCounts = %+v, want {Manual:1 AFKManual:1 AFKAuto:1} (dead session must not count)", counts)
+	if counts.Manual != 1 || counts.AFKManual != 1 || counts.AFKAuto != 1 || counts.Lander != 1 {
+		t.Fatalf("LiveCounts = %+v, want {Manual:1 AFKManual:1 AFKAuto:1 Lander:1} (dead session must not count)", counts)
 	}
 
 	// A session killed out from under lab drops out on the next read — the
@@ -54,7 +55,7 @@ func TestLiveCounts_reflectsActiveRunsAndTmuxLiveness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LiveCounts after kill: %v", err)
 	}
-	if counts.Manual != 0 || counts.AFKManual != 1 || counts.AFKAuto != 1 {
-		t.Fatalf("LiveCounts after kill = %+v, want {Manual:0 AFKManual:1 AFKAuto:1}", counts)
+	if counts.Manual != 0 || counts.AFKManual != 1 || counts.AFKAuto != 1 || counts.Lander != 1 {
+		t.Fatalf("LiveCounts after kill = %+v, want {Manual:0 AFKManual:1 AFKAuto:1 Lander:1}", counts)
 	}
 }

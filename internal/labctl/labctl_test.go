@@ -243,6 +243,9 @@ func (f *fakeForge) CommentPull(_ context.Context, number int, body string) erro
 	f.commentedN, f.commentedBody = number, body
 	return f.commentErr
 }
+func (f *fakeForge) PullComments(context.Context, int) ([]tracker.Comment, error) {
+	return nil, nil
+}
 func (f *fakeForge) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeForge) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
 	return tracker.Issue{}, nil

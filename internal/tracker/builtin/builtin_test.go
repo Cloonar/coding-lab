@@ -919,3 +919,16 @@ func TestBuiltin_ReviewWrites_unsupported(t *testing.T) {
 		t.Errorf("CommentPull err = %v, want ErrUnsupported", err)
 	}
 }
+
+// TestBuiltin_PullComments_unsupported: CommentPull's read counterpart wraps
+// the same tracker.ErrUnsupported (no PR comment thread to list yet).
+func TestBuiltin_PullComments_unsupported(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	if _, err := tr.PullComments(ctx, 1); !errors.Is(err, tracker.ErrUnsupported) {
+		t.Errorf("PullComments err = %v, want ErrUnsupported", err)
+	}
+}

@@ -19,6 +19,7 @@ const KIND_LABELS: Record<RunKind, string> = {
   manual: 'manual',
   afk_manual: 'AFK',
   afk_auto: 'AFK auto',
+  lander: 'Lander',
 };
 
 const OUTCOMES: RunOutcome[] = ['active', 'success', 'death', 'timeout', 'stopped'];

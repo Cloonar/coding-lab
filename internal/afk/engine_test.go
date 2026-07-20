@@ -40,19 +40,25 @@ var clockTime = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
 // fakeTracker is a scriptable tracker.Tracker: the ready queue and the pull
 // listing the engine reads, plus injectable errors and a Pulls call counter.
+// Reviews/PullComments (the autoland reads, #181) are scriptable per pull
+// number and default to empty success.
 type fakeTracker struct {
-	mu          sync.Mutex
-	ready       []tracker.Issue
-	open        []tracker.Issue // the StateOpen set the blocked-by gate weighs (#136)
-	pulls       []tracker.PullRef
-	readyErr    error
-	issuesErr   error // failIssues: Issues() error injection (open-set fetch)
-	pullsErr    error
-	issuesCalls int
-	pullsCalls  int
-	pullTitles  map[int]string // Pull(n) detail title (done-signal notification body)
-	detailErr   error          // failPullDetail: Pull() error injection
-	detailCalls int
+	mu            sync.Mutex
+	ready         []tracker.Issue
+	open          []tracker.Issue // the StateOpen set the blocked-by gate weighs (#136)
+	pulls         []tracker.PullRef
+	readyErr      error
+	issuesErr     error // failIssues: Issues() error injection (open-set fetch)
+	pullsErr      error
+	issuesCalls   int
+	pullsCalls    int
+	pullTitles    map[int]string // Pull(n) detail title (done-signal notification body)
+	detailErr     error          // failPullDetail: Pull() error injection
+	detailCalls   int
+	reviews       map[int][]tracker.Review  // Reviews(n) — the poller's native-review read
+	pullComments  map[int][]tracker.Comment // PullComments(n) — verdict markers (#181)
+	commentsErr   error                     // failPullComments: PullComments() error injection
+	commentsCalls int
 }
 
 func (f *fakeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -106,12 +112,25 @@ func (f *fakeTracker) CreatePull(context.Context, string, string, string, string
 func (f *fakeTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 	return tracker.PullRef{}, errors.New("not implemented")
 }
-func (f *fakeTracker) Reviews(context.Context, int) ([]tracker.Review, error) { return nil, nil }
+func (f *fakeTracker) Reviews(_ context.Context, n int) ([]tracker.Review, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]tracker.Review(nil), f.reviews[n]...), nil
+}
 func (f *fakeTracker) RerequestReview(context.Context, int) error {
 	return errors.New("not implemented")
 }
 func (f *fakeTracker) CommentPull(context.Context, int, string) error {
 	return errors.New("not implemented")
+}
+func (f *fakeTracker) PullComments(_ context.Context, n int) ([]tracker.Comment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commentsCalls++
+	if f.commentsErr != nil {
+		return nil, f.commentsErr
+	}
+	return append([]tracker.Comment(nil), f.pullComments[n]...), nil
 }
 func (f *fakeTracker) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
@@ -184,6 +203,36 @@ func (f *fakeTracker) pullsCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.pullsCalls
+}
+
+func (f *fakeTracker) addReview(n int, state string, dismissed bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reviews == nil {
+		f.reviews = map[int][]tracker.Review{}
+	}
+	f.reviews[n] = append(f.reviews[n], tracker.Review{Reviewer: "human", State: state, Dismissed: dismissed})
+}
+
+func (f *fakeTracker) addPullComment(n int, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pullComments == nil {
+		f.pullComments = map[int][]tracker.Comment{}
+	}
+	f.pullComments[n] = append(f.pullComments[n], tracker.Comment{Author: "lander", Body: body, CreatedAt: clockTime})
+}
+
+func (f *fakeTracker) failPullComments(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commentsErr = err
+}
+
+func (f *fakeTracker) pullCommentsCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commentsCalls
 }
 
 func (f *fakeTracker) setPullTitle(n int, title string) {

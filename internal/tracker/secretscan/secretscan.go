@@ -283,6 +283,12 @@ func (s *scanner) RerequestReview(ctx context.Context, number int) error {
 	return s.inner.RerequestReview(ctx, number)
 }
 
+// PullComments is a read, so it delegates untouched like Reviews — there is
+// nothing agent-authored here to scan.
+func (s *scanner) PullComments(ctx context.Context, number int) ([]tracker.Comment, error) {
+	return s.inner.PullComments(ctx, number)
+}
+
 func (s *scanner) CloseIssue(ctx context.Context, number int) error {
 	return s.inner.CloseIssue(ctx, number)
 }
