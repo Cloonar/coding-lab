@@ -943,6 +943,64 @@ func TestPRRejectUsage(t *testing.T) {
 	}
 }
 
+// TestPREscalateOutput: `labctl pr escalate <n> <body>` records the
+// escalate-mode lander's terminal marker through the real agentapi — end to
+// end, the tracker sees ONE PR comment whose first line is the escalate
+// marker with the digest below (composed server-side) — and prints
+// #<n>\tescalated. Unlike rerequest, there is no native ping to observe.
+func TestPREscalateOutput(t *testing.T) {
+	fk := &fakeForge{}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "escalate", "12", "round 1: missing tests; round 2: still flaky"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "#12\tescalated\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "#12\tescalated\n")
+	}
+	wantComment := "[autoland] verdict: escalate\n\nround 1: missing tests; round 2: still flaky"
+	if fk.commentedN != 12 || fk.commentedBody != wantComment {
+		t.Errorf("CommentPull args = (%d, %q), want (12, %q)", fk.commentedN, fk.commentedBody, wantComment)
+	}
+}
+
+// TestPREscalateErrorExit1: a tracker failure on the verdict comment surfaces
+// on stderr and exits 1 — the verdict-verb twin of TestPRRejectErrorExit1.
+func TestPREscalateErrorExit1(t *testing.T) {
+	fk := &fakeForge{commentErr: fmt.Errorf("forge comments unreachable")}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "escalate", "12", "digest"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "forge comments unreachable") {
+		t.Errorf("stderr = %q, want the backend's own words", stderr)
+	}
+}
+
+// TestPREscalateUsage mirrors TestPRRejectUsage: a missing/non-integer PR
+// number or an empty positional body is a usage error (exit 2) — the CLI
+// never round-trips a blank digest to the server's 400.
+func TestPREscalateUsage(t *testing.T) {
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return &fakeForge{}, nil }))
+	for _, args := range [][]string{
+		{"pr", "escalate"},
+		{"pr", "escalate", "12"},
+		{"pr", "escalate", "abc", "digest"},
+		{"pr", "escalate", "12", ""},
+		{"pr", "escalate", "12", "digest", "extra"},
+	} {
+		if code, _, _ := run(t, args, f.env()); code != 2 {
+			t.Errorf("run %v: exit = %d, want 2", args, code)
+		}
+	}
+}
+
 // TestPRApproveOutput: `labctl pr approve <n> [body]` records the pass verdict
 // through the real agentapi — end to end, the tracker sees ONE PR comment
 // whose first line is the pass marker (bare when no body was given, CONCERNS

@@ -30,12 +30,13 @@ const (
 )
 
 // spawnCandidate is one launchable unit of work a producer gathered. Stage is
-// the ONLY priority — data, not control flow (issue #185) — so a new producer
-// (#182's fix runs) joins the order by emitting its rank, never by editing
-// the pass. The repo row snapshot serves the pass's cheap cap veto and its
-// logging; the launch closure owns the actual spawn through the engine's
-// locked paths (launch / LaunchLander), whose authoritative per-launch cap
-// guards on fresh liveness remain the backstop on this same path.
+// the ONLY priority — data, not control flow (issue #185) — so a producer
+// joins the order by emitting its rank, never by editing the pass (exactly
+// how #182's fix/escalate candidates arrived). The repo row snapshot serves
+// the pass's cheap cap veto and its logging; the launch closure owns the
+// actual spawn through the engine's locked paths (launch / LaunchLander /
+// LaunchFix / LaunchEscalate), whose authoritative per-launch cap guards on
+// fresh liveness remain the backstop on this same path.
 type spawnCandidate struct {
 	stage  SpawnStage
 	repo   store.Repo
@@ -78,12 +79,13 @@ func (s *Service) SpawnOnce(ctx context.Context) {
 	// own kind-specific provider resolution.
 	loggedIn := map[string]bool{}
 
-	candidates := s.landerCandidates(ctx, repos, liveCount, loggedIn)
-	// StageFix (issue #182) plugs in HERE: the fix-forward producer appends
-	// its candidates alongside the two gathers. Its rank is already reserved
-	// (StageFix, between lander and new work) and the sort below owns the
-	// order, so the insertion point is cosmetic — the producer is the whole
-	// addition.
+	// The autoland producer (issue #182 generalized #181's lander gather)
+	// emits BOTH pipeline-draining stages: StageLander for validation rounds
+	// and StageFix for fix runs plus the escalate runs that conclude the fix
+	// pipeline. Its ranks ride the candidates as data and the sort below owns
+	// the order — the producer was the whole #182 addition; the pass itself
+	// is unchanged.
+	candidates := s.autolandCandidates(ctx, repos, liveCount, loggedIn)
 	candidates = append(candidates, s.newWorkCandidates(ctx, repos, liveCount, loggedIn)...)
 
 	s.spawnPass(ctx, liveCount, candidates)

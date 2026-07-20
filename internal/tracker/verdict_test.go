@@ -16,6 +16,7 @@ func TestParseVerdict(t *testing.T) {
 		{"reject", "[autoland] verdict: reject", "reject", true},
 		{"pass", "[autoland] verdict: pass", "pass", true},
 		{"fix-done", "[autoland] verdict: fix-done", "fix-done", true},
+		{"escalate", "[autoland] verdict: escalate", "escalate", true},
 		{"unknown word", "[autoland] verdict: anything-at-all", "anything-at-all", true},
 		{"prefix only", "[autoland] verdict:", "", true},
 		{"mid-body quote", "the lander posted: [autoland] verdict: reject", "", false},

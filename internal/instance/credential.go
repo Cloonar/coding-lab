@@ -81,10 +81,14 @@ func (s *Service) cleanupCredential(repo store.Repo, runID string) {
 }
 
 // isAFKKind reports whether a run kind resolves through the AFK-override layer
-// (issue #19): both AFK kinds share the same override-then-base resolution;
-// manual does not.
+// (issue #19): the two AFK kinds share the override-then-base resolution, and
+// so does a fix run (issue #182) — unattended AFK-class work continuing an AFK
+// claim, so the AFK resolver layers (the options bag, the remote default, the
+// model/effort fallbacks when the authoring run's values fail) apply to it.
+// Manual stays base-chain; lander AND escalate stay non-AFK — validation-class
+// runs resolved on the lander chain.
 func isAFKKind(kind string) bool {
-	return kind == store.RunKindAFKManual || kind == store.RunKindAFKAuto
+	return kind == store.RunKindAFKManual || kind == store.RunKindAFKAuto || kind == store.RunKindFix
 }
 
 // ResolveProvider resolves the EFFECTIVE agent provider for a spawn of the

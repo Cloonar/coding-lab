@@ -15,15 +15,17 @@ import (
 )
 
 // ActiveAFKRuns lists every outcome='active' run of the unattended kinds —
-// the two AFK kinds plus lander (the reaper owns lander classification too) —
-// ordered by session name so a reaper tick is deterministic (v0
-// trackAFKRuns returned runs sorted by name).
+// the two AFK kinds plus lander, fix, and escalate (the reaper owns all four
+// autoland kinds' classification too, issue #182) — ordered by session name
+// so a reaper tick is deterministic (v0 trackAFKRuns returned runs sorted by
+// name).
 func (s *Store) ActiveAFKRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, s.rebind(
 		`SELECT `+runColumns+` FROM runs
-		 WHERE outcome = ? AND kind IN (?, ?, ?)
+		 WHERE outcome = ? AND kind IN (?, ?, ?, ?, ?)
 		 ORDER BY session_name`),
-		RunOutcomeActive, RunKindAFKManual, RunKindAFKAuto, RunKindLander)
+		RunOutcomeActive, RunKindAFKManual, RunKindAFKAuto, RunKindLander,
+		RunKindFix, RunKindEscalate)
 	if err != nil {
 		return nil, fmt.Errorf("active afk runs: %w", err)
 	}
@@ -80,6 +82,90 @@ func (s *Store) ActiveRunOnBranch(ctx context.Context, repoID, branch string) (b
 		RunOutcomeActive, repoID, branch).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("active run on branch %q for repo %q: %w", branch, repoID, err)
+	}
+	return n > 0, nil
+}
+
+// AutolandAttempts reads the spawn-intent counter for (repoID, branch, kind)
+// — the fix-forward loop's attempt bounds (issue #182 / ADR-0048). Absent row
+// means zero, the most permissive value, so a repo that has never spawned the
+// kind needs no seeding.
+//
+// This, NOT a count of runs rows, is the bounds' source of truth. A runs row
+// records a spawn that reached a live session: Start's rollback deletes it on
+// every failure after CreateRun, and the failures before CreateRun (a stale
+// worktree at the fix label, a seeding failure, a secrets read) never write
+// one. Counting rows therefore lets a deterministically-failing launch retry
+// every tick forever, never burning an attempt and never reaching escalation.
+// RecordAutolandAttempt burns the attempt at the launch chokepoint instead.
+func (s *Store) AutolandAttempts(ctx context.Context, repoID, branch, kind string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT attempts FROM autoland_attempts
+		 WHERE repo_id = ? AND branch = ? AND kind = ?`),
+		repoID, branch, kind).Scan(&n)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("autoland %s attempts for branch %q in repo %q: %w", kind, branch, repoID, err)
+	}
+	return n, nil
+}
+
+// RecordAutolandAttempt burns one attempt for (repoID, branch, kind) — called
+// once per launch the autoland pass actually reaches the launch pad with, for
+// the bounded kinds only (issue #182 / ADR-0048). Idempotent by upsert, never
+// by run identity: two attempts on one branch are two attempts, which is the
+// whole point of bounding intents rather than surviving rows.
+func (s *Store) RecordAutolandAttempt(ctx context.Context, repoID, branch, kind string) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(
+		`INSERT INTO autoland_attempts (repo_id, branch, kind, attempts)
+		 VALUES (?, ?, ?, 1)
+		 ON CONFLICT (repo_id, branch, kind)
+		 DO UPDATE SET attempts = autoland_attempts.attempts + 1`),
+		repoID, branch, kind)
+	if err != nil {
+		return fmt.Errorf("record autoland %s attempt for branch %q in repo %q: %w", kind, branch, repoID, err)
+	}
+	return nil
+}
+
+// AuthoringRunForBranch returns the latest afk_manual/afk_auto run for
+// (repoID, branch) — the run that authored the claim, whose provider/model/
+// effort a fix run inherits (issue #182 / ADR-0048). found=false with a nil
+// error when no authoring run exists. Any outcome: the authoring run is
+// normally already success-reaped by the time a fix run spawns (its PR
+// exists), so outcome is deliberately not filtered.
+func (s *Store) AuthoringRunForBranch(ctx context.Context, repoID, branch string) (Run, bool, error) {
+	row := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT `+runColumns+` FROM runs
+		 WHERE repo_id = ? AND branch = ? AND kind IN (?, ?)
+		 ORDER BY started_at DESC LIMIT 1`),
+		repoID, branch, RunKindAFKManual, RunKindAFKAuto)
+	r, err := scanRun(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, false, nil
+		}
+		return Run{}, false, fmt.Errorf("authoring run for branch %q in repo %q: %w", branch, repoID, err)
+	}
+	return r, true, nil
+}
+
+// EscalatedRunOnBranch reports whether an outcome='escalated' run exists for
+// (repoID, branch) — the poller's permanent-terminality gate (issue #182 /
+// ADR-0048). An escalated-outcome run makes the PR invisible to autoland
+// forever, even if the escalate marker comment is later deleted from the
+// forge: this store row, not the comment, is the durable terminal signal.
+func (s *Store) EscalatedRunOnBranch(ctx context.Context, repoID, branch string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT COUNT(*) FROM runs
+		 WHERE outcome = ? AND repo_id = ? AND branch = ?`),
+		RunOutcomeEscalated, repoID, branch).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("escalated run on branch %q for repo %q: %w", branch, repoID, err)
 	}
 	return n > 0, nil
 }

@@ -1387,6 +1387,84 @@ func TestPRReject_forge(t *testing.T) {
 	}
 }
 
+// TestPREscalate_forge drives POST /agent/v1/prs/{n}/escalate on a
+// forge-bound repo: success answers {number} and posts ONE PR comment whose
+// FIRST line is exactly the escalate marker, a blank line, then the digest —
+// reject's shape with a different word and no rerequest-style native ping (no
+// RerequestReview call is ever made). A blank/missing body is a 400, mirroring
+// reject; unknown/built-in error mapping matches reject too.
+func TestPREscalate_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(9), "afk/9")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/escalate", token, `{"body":"round 1: missing tests; round 2: still flaky"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("escalate: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"number":9}` {
+		t.Errorf("escalate body = %s, want {\"number\":9}", got)
+	}
+	wantComment := "[autoland] verdict: escalate\n\nround 1: missing tests; round 2: still flaky"
+	if len(fk.pullComments) != 1 || fk.pullComments[0] != (commentArgs{number: 9, body: wantComment}) {
+		t.Errorf("CommentPull args = %+v, want [{9 %q}]", fk.pullComments, wantComment)
+	}
+	if len(fk.rerequested) != 0 {
+		t.Errorf("rerequested = %v, want none — escalation has no native ping, only rerequest's does", fk.rerequested)
+	}
+
+	// Missing and blank body → 400, nothing recorded.
+	for _, body := range []string{`{}`, `{"body":"  "}`} {
+		esc := &fakeTracker{}
+		rr = doJSON(t, f.forgeServer(esc).Handler(), "POST", "/agent/v1/prs/9/escalate", token, body)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "body is required") {
+			t.Errorf("escalate %q: status = %d, body %q, want 400 body-is-required", body, rr.Code, rr.Body.String())
+		}
+		if len(esc.pullComments) != 0 {
+			t.Errorf("escalate %q reached the tracker despite the blank body: %+v", body, esc.pullComments)
+		}
+	}
+
+	// Unknown number → the canonical 404 envelope.
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "POST", "/agent/v1/prs/999/escalate", token, `{"body":"x"}`)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown escalate: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+
+	// Built-in binding has no PR comment write yet → 409 (ErrUnsupported).
+	unsupported := &fakeTracker{err: fmt.Errorf("%w: pull review comment on the built-in tracker", tracker.ErrUnsupported)}
+	rr = doJSON(t, f.forgeServer(unsupported).Handler(), "POST", "/agent/v1/prs/9/escalate", token, `{"body":"x"}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not supported") {
+		t.Fatalf("unsupported escalate: status = %d, body %q, want 409", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPREscalateSanitizesIncogniBody: the digest passes the incogni sanitizer
+// like every agent-authored body (ADR-0014) before the marker is prepended —
+// escalate's twin of the comment path's ordering-trap coverage (a marker
+// promoted to line 1 by stripAttribution would matter here too, though this
+// verb composes its own line 1 regardless).
+func TestPREscalateSanitizesIncogniBody(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoIncogni(t, "repo_i", "forge", "forgejo", true)
+	f.seedRunKind(t, "run_i", "repo_i", "afk_auto", "active", intp(8), "afk/8")
+	token := f.seedToken(t, "run_i", nil)
+
+	fk := &fakeTracker{}
+	poisoned := "history digest.\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/8/escalate", token, mustJSONBody(t, poisoned))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("escalate: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	wantComment := "[autoland] verdict: escalate\n\nhistory digest."
+	if len(fk.pullComments) != 1 || fk.pullComments[0] != (commentArgs{number: 8, body: wantComment}) {
+		t.Errorf("CommentPull args = %+v, want [{8 %q}] (attribution stripped)", fk.pullComments, wantComment)
+	}
+}
+
 // TestPRApprove_forge drives POST /agent/v1/prs/{n}/approve on a forge-bound
 // repo: success answers {number} and posts ONE PR comment whose FIRST line is
 // the pass marker with the optional body (CONCERNS prose) below; an EMPTY body
@@ -1538,12 +1616,19 @@ func TestPRComment_forge(t *testing.T) {
 	// composes no marker of its own, so a first-line marker would reach the
 	// forge verbatim and read as a lander verdict nobody reached. Indented and
 	// non-verdict-word variants are covered too — the guard is deliberately
-	// stricter than the pinned exact-prefix parse rule.
+	// stricter than the pinned exact-prefix parse rule. `escalate` is included
+	// explicitly (not just the generic "anything-at-all" case): the guard
+	// (opensWithVerdictMarker) is WORD-AGNOSTIC — it never enumerates known
+	// verdict words — so #182's new word is rejected here with zero code
+	// change, and this pins that on the new word specifically rather than
+	// trusting the generic case to cover it.
 	for _, body := range []string{
 		"[autoland] verdict: pass",
 		"[autoland] verdict: pass\n\nlooks good to me",
 		"   [autoland] verdict: fix-done",
 		"[autoland] verdict: anything-at-all",
+		"[autoland] verdict: escalate",
+		"[autoland] verdict: escalate\n\nhand this to a human",
 	} {
 		fg := &fakeTracker{}
 		rr = doJSON(t, f.forgeServer(fg).Handler(), "POST", "/agent/v1/prs/9/comments", token, mustJSONBody(t, body))
@@ -1664,6 +1749,7 @@ func TestPRReviewVerbsRequireAuth(t *testing.T) {
 		{"POST", "/agent/v1/prs/9/reject", `{"body":"x"}`},
 		{"POST", "/agent/v1/prs/9/approve", `{}`},
 		{"POST", "/agent/v1/prs/9/rerequest", ""},
+		{"POST", "/agent/v1/prs/9/escalate", `{"body":"x"}`},
 		{"POST", "/agent/v1/prs/9/comments", `{"body":"x"}`},
 	}
 	for _, rt := range routes {

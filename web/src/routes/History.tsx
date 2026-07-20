@@ -1,7 +1,7 @@
 // Run history (/history, per-repo filter via ?repo=, outcome filter via
 // ?outcome=): phone-first cards with kind, label/branch, model/effort,
 // started time, duration and the outcome badge (active/success/death/
-// timeout/stopped) plus failure_reason. AFK kinds title as 'AFK #N' from the
+// timeout/stopped/escalated) plus failure_reason. AFK kinds title as 'AFK #N' from the
 // run's issue number. Newest first, straight from GET /runs; the outcome
 // filter narrows client-side; run.changed refetches. (Formerly /runs; /runs
 // now redirects here, and /runs/:id stays the chat.)
@@ -20,9 +20,11 @@ const KIND_LABELS: Record<RunKind, string> = {
   afk_manual: 'AFK',
   afk_auto: 'AFK auto',
   lander: 'Lander',
+  fix: 'Fix',
+  escalate: 'Escalate',
 };
 
-const OUTCOMES: RunOutcome[] = ['active', 'success', 'death', 'timeout', 'stopped'];
+const OUTCOMES: RunOutcome[] = ['active', 'success', 'death', 'timeout', 'stopped', 'escalated'];
 
 export default function History() {
   return (

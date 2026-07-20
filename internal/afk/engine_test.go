@@ -206,12 +206,19 @@ func (f *fakeTracker) pullsCallCount() int {
 }
 
 func (f *fakeTracker) addReview(n int, state string, dismissed bool) {
+	f.addReviewFrom(n, "human", state, dismissed, "")
+}
+
+// addReviewFrom is addReview with the reviewer and body scriptable — the #182
+// rejected-state fold is per reviewer and RejectionContext quotes bodies, so
+// the fix-forward tests need both.
+func (f *fakeTracker) addReviewFrom(n int, reviewer, state string, dismissed bool, body string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.reviews == nil {
 		f.reviews = map[int][]tracker.Review{}
 	}
-	f.reviews[n] = append(f.reviews[n], tracker.Review{Reviewer: "human", State: state, Dismissed: dismissed})
+	f.reviews[n] = append(f.reviews[n], tracker.Review{Reviewer: reviewer, State: state, Dismissed: dismissed, Body: body})
 }
 
 func (f *fakeTracker) addPullComment(n int, body string) {

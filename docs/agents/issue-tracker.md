@@ -13,7 +13,7 @@ Issues and PRDs for this repo live as Forgejo issues on https://git.cloonar.com/
 - **Labels must exist before you apply them.** Forgejo rejects an unknown label. Create it first — `labctl label create --name "..." [--color "#..." --description "..."]` is idempotent (create-if-missing, safe to run unconditionally). `labctl label list` shows the repo's labels.
 - **Close**: `labctl issue close <n>`. There is no closing-comment flag, so post the explanation first with `labctl issue comment <n> "..."`, then close.
 - **Reopen**: not on the agent surface — `labctl` has no reopen verb. If an issue needs reopening, ask the operator to do it from the forge.
-- **Pull requests**: managed with `labctl pr ...` (`create`, `view`, `list`, `checks`, `merge`, plus the verdict verbs `reject` / `approve` / `rerequest` and `comment`). The `land-pr` skill drives the Forgejo PR flow.
+- **Pull requests**: managed with `labctl pr ...` (`create`, `view`, `list`, `checks`, `merge`, plus the verdict verbs `reject` / `approve` / `rerequest` / `escalate` and `comment`). The `land-pr` skill drives the Forgejo PR flow.
 
 ## When a skill says "publish to the issue tracker"
 

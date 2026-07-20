@@ -1451,6 +1451,14 @@ details.parked summary {
   color: var(--idle-text);
 }
 
+/* escalated: handed to a human, not a failure — the amber "notice" family
+   (banner-bg/banner-text), distinct from both success (run) and death/timeout
+   (err). */
+.chip.outcome-escalated {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+
 /* Issues ------------------------------------------------------------------------ */
 
 .head-actions {

@@ -470,8 +470,8 @@ export function providerLogout(id: string): Promise<ProviderAuthStatus> {
 
 // --- M3: instances & runs ---
 
-export type RunKind = 'manual' | 'afk_manual' | 'afk_auto' | 'lander';
-export type RunOutcome = 'active' | 'success' | 'death' | 'timeout' | 'stopped';
+export type RunKind = 'manual' | 'afk_manual' | 'afk_auto' | 'lander' | 'fix' | 'escalate';
+export type RunOutcome = 'active' | 'success' | 'death' | 'timeout' | 'stopped' | 'escalated';
 
 /** One row of the runs table, as the API serializes it. */
 export interface Run {
