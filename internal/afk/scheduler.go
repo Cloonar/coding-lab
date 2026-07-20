@@ -4,17 +4,20 @@ import (
 	"context"
 	"time"
 
-	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
 // SchedulerLoop is the engine's second long-lived goroutine (v0
 // runAFKScheduler): every afk_schedule_seconds (re-read per tick — D12c) it
-// runs one ScheduleOnce sweep. Deliberately a separate cadence from the
-// reaper (v0 parity: 45s vs 30s). Blocks until ctx is cancelled. Toggle-on
-// and reset kicks may additionally invoke ScheduleOnce directly — every
-// claim is single-flighted under the engine lock, so kicks are race-safe
-// against the ticker.
+// runs one SpawnOnce pass. Since issue #185 the loop makes no launch decision
+// of its own — the ONE priority-ordered spawn pass owns every spawn — so this
+// cadence is an additional fill heartbeat: new work gets considered at least
+// this often even when the reaper tick is quiet. Deliberately a separate
+// cadence from the reaper (v0 parity: 45s vs 30s). Blocks until ctx is
+// cancelled. Toggle-on and reset kicks may additionally invoke SpawnOnce
+// directly — the pass is serialized under its own lock and every claim is
+// single-flighted under the engine lock, so kicks are race-safe against both
+// tickers.
 func (s *Service) SchedulerLoop(ctx context.Context) {
 	for {
 		tick := s.settingSeconds(ctx, store.SettingAFKScheduleSeconds, defaultScheduleSeconds)
@@ -23,63 +26,57 @@ func (s *Service) SchedulerLoop(ctx context.Context) {
 			return
 		case <-time.After(tick):
 		}
-		s.ScheduleOnce(ctx)
+		s.SpawnOnce(ctx)
 	}
 }
 
-// ScheduleOnce is one scheduler sweep (v0 scheduleAFKRuns): for every
-// auto-enabled ready repo with a claimable issue, no auto run in flight,
-// headroom under the cap, and a live provider login, launch the next run
-// through the shared claim path. Serial per repo (launch re-checks
-// one-auto-per-repo under the lock), it drains the queue one issue per
-// launch, idles when nothing is claimable, and launches nothing — without
-// erroring — at the cap. A per-repo tracker error skips just that repo
-// (retried next tick), never the whole sweep.
-func (s *Service) ScheduleOnce(ctx context.Context) {
-	repos, err := s.store.Repos(ctx)
-	if err != nil {
-		s.log.Warn("afk scheduler: list repos", "component", "afk", "err", err)
-		return
-	}
+// newWorkCandidates is the new-work producer (issue #185: the old scheduler
+// sweep, v0 scheduleAFKRuns, now gathering only — it never launches and never
+// decides the cap): for every auto-enabled ready repo with a claimable issue,
+// no auto run in flight, and a live provider login, emit one StageNewWork
+// candidate whose closure drives the shared claim path. Serial per repo
+// (launch re-checks one-auto-per-repo under the lock), the loop drains the
+// queue one issue per pass and idles when nothing is claimable. A per-repo
+// tracker error skips just that repo (retried next pass), never the whole
+// gather. repos, liveCount, and loggedIn are the pass's shared listing,
+// liveness snapshot, and forced-auth memo.
+func (s *Service) newWorkCandidates(ctx context.Context, repos []store.Repo, liveCount int, loggedIn map[string]bool) []spawnCandidate {
 	// Cheap pre-filter: only auto-on repos with a usable clone can launch,
-	// so an all-manual fleet costs one repo listing per tick and nothing
-	// else.
-	var candidates []store.Repo
+	// so an all-manual fleet costs nothing beyond the pass's one repo
+	// listing.
+	var enabled []store.Repo
 	for _, r := range repos {
 		if r.AFKAutoEnabled && r.CloneStatus == store.CloneStatusReady {
-			candidates = append(candidates, r)
+			enabled = append(enabled, r)
 		}
 	}
-	if len(candidates) == 0 {
-		return
+	if len(enabled) == 0 {
+		return nil
 	}
 
-	// Auth is gated per tick with a FORCED refresh, once per distinct
-	// provider (v0 gated the whole tick): a logged-out auto-launch would
-	// claim an issue into a session that dies at the login wall — reaped as
-	// a death, parking the issue for nothing.
-	loggedIn := map[string]bool{}
-
-	live, err := s.runner.List(ctx)
-	if err != nil {
-		s.log.Warn("afk scheduler: list sessions", "component", "afk", "err", err)
-		return
-	}
-	liveCount := instance.LiveInstanceCount(live)
-
-	for _, candidate := range candidates {
+	var out []spawnCandidate
+	for _, candidate := range enabled {
 		// Re-read rather than trust the pre-filter snapshot: honours a
-		// toggle-off (or settings change) landing mid-tick.
+		// toggle-off (or settings change) landing mid-pass.
 		repo, err := s.store.RepoByID(ctx, candidate.ID)
 		if err != nil {
-			s.log.Warn("afk scheduler: repo", "component", "afk", "repo", candidate.Name, "err", err)
+			s.log.Warn("spawn: repo", "component", "afk", "repo", candidate.Name, "err", err)
+			continue
+		}
+		// At-cap production veto against the pass snapshot, BEFORE the
+		// tracker reads — a load-shedding hint, never enforcement (the pass
+		// owns the cap, #185): an at-cap repo costs zero forge reads.
+		// Strictly better than the pre-#185 scheduler, which spent
+		// ReadyIssues + FilterClaimable on a repo its own predicate was about
+		// to veto on the cap term.
+		if liveCount >= s.instances.EffectiveCap(ctx, repo) {
 			continue
 		}
 		// The AFK-effective provider (issue #66) gates the auth pre-check; the
 		// locked claim path re-resolves it authoritatively at launch.
 		prov, err := s.instances.ResolveProvider(ctx, repo, store.RunKindAFKAuto, "")
 		if err != nil {
-			s.log.Warn("afk scheduler: resolving provider", "component", "afk", "repo", repo.Name, "err", err)
+			s.log.Warn("spawn: resolving provider", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
 		if _, checked := loggedIn[prov.ID()]; !checked {
@@ -94,34 +91,33 @@ func (s *Service) ScheduleOnce(ctx context.Context) {
 		// generalisation of v0's "not a git.cloonar.com repo" gate.
 		trk, err := s.trackers.TrackerFor(ctx, repo)
 		if err != nil {
-			s.log.Warn("afk scheduler: tracker", "component", "afk", "repo", repo.Name, "err", err)
+			s.log.Warn("spawn: tracker", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
 		issues, err := trk.ReadyIssues(ctx)
 		if err != nil {
-			s.log.Warn("afk scheduler: ready issues", "component", "afk", "repo", repo.Name, "err", err)
+			s.log.Warn("spawn: ready issues", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
 		// The CLAIMABLE queue — ready issues minus existing claim branches
 		// minus issues held back by an open `## Blocked by` ref (ADR-0042) —
 		// not the raw ready count, so parked/in-flight/blocked issues read as
 		// zero and can never loop. A per-repo open-set fetch failure skips only
-		// THIS repo's tick (retried next tick), the same stance as every other
-		// per-repo error in the sweep.
+		// THIS repo's pass (retried next pass), the same stance as every other
+		// per-repo error in the gather.
 		claimable, err := s.FilterClaimable(ctx, repo, trk, issues)
 		if err != nil {
-			s.log.Warn("afk scheduler: filter claimable", "component", "afk", "repo", repo.Name, "err", err)
+			s.log.Warn("spawn: filter claimable", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
 
 		_, autoInFlight, err := s.store.ActiveAutoRunForRepo(ctx, repo.ID)
 		if err != nil {
-			s.log.Warn("afk scheduler: auto in flight", "component", "afk", "repo", repo.Name, "err", err)
+			s.log.Warn("spawn: auto in flight", "component", "afk", "repo", repo.Name, "err", err)
 			continue
 		}
 		d := AutoDecision{
 			AutoEnabled:  repo.AFKAutoEnabled,
-			UnderCap:     liveCount < s.instances.EffectiveCap(ctx, repo),
 			AutoInFlight: autoInFlight,
 			ReadyExists:  len(claimable) > 0,
 			Paused:       repo.ConsecutiveFailures >= PauseThreshold,
@@ -129,29 +125,29 @@ func (s *Service) ScheduleOnce(ctx context.Context) {
 		if !ShouldLaunchAuto(d) {
 			continue
 		}
-		_, outcome, err := s.launch(ctx, repo.ID, true)
-		if err != nil {
-			s.log.Warn("afk scheduler: launch", "component", "afk", "repo", repo.Name, "err", err)
-			continue
-		}
-		switch outcome {
-		case launchSpawned:
-			liveCount++ // this run consumed a slot; the next candidate sees it
-		case launchAtCap:
-			// launch() proved the fresh GLOBAL live count reached THIS repo's
-			// effective cap. Under per-repo cap overrides (D12c) that no longer
-			// implies every repo is at cap, so skip only this repo — a later
-			// candidate whose cap still has headroom must still launch. Raise
-			// the stale snapshot to this repo's cap first: a sound lower bound
-			// (launch proved the fresh count is at least that) that lets later
-			// pre-checks veto without another launch() call, and reproduces v0's
-			// whole-tick stop whenever every repo shares the one global cap.
-			if repoCap := s.instances.EffectiveCap(ctx, repo); repoCap > liveCount {
-				liveCount = repoCap
-			}
-			continue
-		}
-		// launchNoReady / launchAutoInFlight: a manual start or another
-		// sweep raced us between the predicate and the locked claim; move on.
+		out = append(out, spawnCandidate{
+			stage: StageNewWork,
+			repo:  repo,
+			label: "afk-auto " + repo.Name,
+			launch: func(ctx context.Context) spawnOutcome {
+				_, outcome, err := s.launch(ctx, repo.ID, true)
+				if err != nil {
+					s.log.Warn("spawn: launch", "component", "afk", "repo", repo.Name, "err", err)
+					return spawnSkipped
+				}
+				switch outcome {
+				case launchSpawned:
+					return spawnSpawned
+				case launchAtCap:
+					return spawnAtCap
+				default:
+					// launchNoReady / launchAutoInFlight: a manual start or
+					// another launch raced us between gather and spend; the
+					// locked claim path is authoritative, so just move on.
+					return spawnSkipped
+				}
+			},
+		})
 	}
+	return out
 }

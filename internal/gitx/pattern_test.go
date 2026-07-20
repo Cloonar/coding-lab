@@ -196,6 +196,46 @@ func TestParseBranch(t *testing.T) {
 	}
 }
 
+// TestMatchBranch pins the Autoland-facing reverse of RenderBranch (issue
+// #181): a PR head branch matches iff it is an exact rendering of the claim
+// pattern — the same strict-inverse contract as ParseBranch, so the two
+// oracles can never disagree on what is a claim.
+func TestMatchBranch(t *testing.T) {
+	tests := []struct {
+		pattern string
+		branch  string
+		wantN   int
+		wantOK  bool
+	}{
+		// Match rows.
+		{"afk/<N>", "afk/7", 7, true},
+		{"afk/<N>", "afk/181", 181, true}, // multi-digit
+		{"issue-<N>", "issue-42", 42, true},
+
+		// No-match rows.
+		{"afk/<N>", "lab/7", 0, false},
+		{"afk/<N>", "afk/7x", 0, false},
+		{"afk/<N>", "afk/007", 0, false}, // leading zeros are not a rendering
+		{"afk/<N>", "afk/0", 0, false},   // n starts at 1
+		{"afk/<N>", "main", 0, false},
+
+		// Prefix-only pattern.
+		{"afk/<N>", "afk/", 0, false},
+
+		// Suffix patterns: strict on both sides of <N>.
+		{"v<N>-wip", "v3-wip", 3, true},
+		{"v<N>-wip", "v3", 0, false},
+		{"v<N>-wip", "v3-wipx", 0, false},
+	}
+	for _, tt := range tests {
+		n, ok := MatchBranch(tt.pattern, tt.branch)
+		if n != tt.wantN || ok != tt.wantOK {
+			t.Errorf("MatchBranch(%q, %q) = (%d, %v), want (%d, %v)",
+				tt.pattern, tt.branch, n, ok, tt.wantN, tt.wantOK)
+		}
+	}
+}
+
 func TestParseBranchRoundTrip(t *testing.T) {
 	for _, pattern := range []string{"afk/<N>", "issue-<N>", "v<N>-wip", "<N>"} {
 		for _, n := range []int{1, 2, 7, 62, 1000} {

@@ -23,8 +23,16 @@ type LaunchSpec struct {
 	Repo     store.Repo
 	Provider provider.AgentProvider
 
-	Kind        string // store.RunKindManual | RunKindAFKManual | RunKindAFKAuto
-	IssueNumber *int   // AFK runs: the claimed issue; manual: nil
+	Kind        string // store.RunKindManual | RunKindAFKManual | RunKindAFKAuto | RunKindLander
+	IssueNumber *int   // AFK/lander runs: the claimed issue; manual: nil
+
+	// AdoptBranch checks out the EXISTING Branch DETACHED, at its origin tip
+	// (gitx.AddWorktreeExisting), instead of forking a fresh one — the lander
+	// run's mode (issue #181): the PR head branch pre-exists the run, so it IS
+	// someone's claim. A rollback must remove the worktree but never delete
+	// the branch; because the adopt is detached it creates no local branch
+	// either, so there is nothing of its own for the rollback to undo.
+	AdoptBranch bool
 
 	SessionName  string
 	Branch       string
@@ -101,8 +109,16 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 
 	// AddWorktree: fail-loud fetch → fork from origin/<default>, NO fallback
 	// base. A failure here created nothing — roll back only the credential
-	// files (the run row/token do not exist yet).
-	if err := s.git.AddWorktree(ctx, bareDir, wtPath, branch, repo.DefaultBranch, gitEnv); err != nil {
+	// files (the run row/token do not exist yet). An adopt-branch spec (the
+	// lander) checks out the EXISTING branch instead, aligned to what the
+	// forge sees.
+	addWorktree := func() error {
+		if spec.AdoptBranch {
+			return s.git.AddWorktreeExisting(ctx, bareDir, wtPath, branch, gitEnv)
+		}
+		return s.git.AddWorktree(ctx, bareDir, wtPath, branch, repo.DefaultBranch, gitEnv)
+	}
+	if err := addWorktree(); err != nil {
 		credCleanup()
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -131,8 +147,15 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		if err := s.git.RemoveWorktree(rctx, bareDir, wtPath, gitEnv); err != nil {
 			s.log.Warn("start rollback: remove worktree", "component", "instance", "session", name, "worktree", wtPath, "err", err)
 		}
-		if err := s.git.DeleteBranch(rctx, bareDir, branch, gitEnv); err != nil {
-			s.log.Warn("start rollback: delete branch", "component", "instance", "session", name, "branch", branch, "err", err)
+		// An adopted branch pre-exists the run (it IS the claim, issue #181):
+		// deleting it here would destroy the claim. An adopt is also detached,
+		// so it never created a local branch in the first place — there is
+		// nothing for this rollback to undo, and skipping is both safe and
+		// complete.
+		if !spec.AdoptBranch {
+			if err := s.git.DeleteBranch(rctx, bareDir, branch, gitEnv); err != nil {
+				s.log.Warn("start rollback: delete branch", "component", "instance", "session", name, "branch", branch, "err", err)
+			}
 		}
 		if rowCreated {
 			if err := s.store.DeleteRun(rctx, runID); err != nil {

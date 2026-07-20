@@ -124,10 +124,11 @@ type pullCall struct{ head, base, title, body string }
 // recTracker records write args and returns canned values. It does NOT
 // implement RunScoper.
 type recTracker struct {
-	comments []commentCall
-	issues   []issueCall
-	edits    []editCall
-	pulls    []pullCall
+	comments     []commentCall
+	issues       []issueCall
+	edits        []editCall
+	pulls        []pullCall
+	pullComments []commentCall // CommentPull(number, body)
 
 	issueRet tracker.Issue
 	pullRet  tracker.PullRef
@@ -157,6 +158,15 @@ func (r *recTracker) CreatePull(_ context.Context, head, base, title, body strin
 }
 func (r *recTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 	return tracker.PullRef{}, nil
+}
+func (r *recTracker) Reviews(context.Context, int) ([]tracker.Review, error) { return nil, nil }
+func (r *recTracker) RerequestReview(context.Context, int) error             { return nil }
+func (r *recTracker) CommentPull(_ context.Context, number int, body string) error {
+	r.pullComments = append(r.pullComments, commentCall{number, body})
+	return nil
+}
+func (r *recTracker) PullComments(context.Context, int) ([]tracker.Comment, error) {
+	return nil, nil
 }
 func (r *recTracker) CloseIssue(context.Context, int) error { return nil }
 func (r *recTracker) CreateIssue(_ context.Context, title, body string, labels []string) (tracker.Issue, error) {
@@ -331,6 +341,40 @@ func TestCommentExactBlocks(t *testing.T) {
 	}
 	if len(rec.comments) != 0 {
 		t.Errorf("inner CreateComment was called: %+v", rec.comments)
+	}
+}
+
+// 3b. PR comment bodies (CommentPull — the seam the verdict verbs compose
+// over, ADR-0048) are content-bearing writes: a clean body delegates
+// byte-identical; a body carrying the secret blocks and never reaches the
+// inner tracker. RerequestReview (no body) delegates untouched.
+func TestReviewWritesScanBody(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepo(t, "repo_a")
+	f.seedSecret(t, "repo_a", "DEPLOY_KEY", "s3cr3t-deploy-value")
+	rec := &recTracker{}
+	trk := f.trackerFor(t, fakeInner{trk: rec}, "repo_a")
+	ctx := context.Background()
+
+	// A clean PR comment delegates byte-identical.
+	if err := trk.CommentPull(ctx, 4, "a discussion note"); err != nil {
+		t.Fatalf("clean pull comment: %v", err)
+	}
+	if err := trk.RerequestReview(ctx, 4); err != nil {
+		t.Fatalf("rerequest: %v", err)
+	}
+	if len(rec.pullComments) != 1 || rec.pullComments[0] != (commentCall{4, "a discussion note"}) {
+		t.Errorf("pull comment args = %+v", rec.pullComments)
+	}
+
+	// A secret in the comment body blocks; inner never called for it.
+	err := trk.CommentPull(ctx, 4, "fyi s3cr3t-deploy-value")
+	be := blockedErr(t, err)
+	if len(be.Matches) != 1 || be.Matches[0].Field != "body" || be.Matches[0].Secret != "DEPLOY_KEY" {
+		t.Errorf("pull comment matches = %+v", be.Matches)
+	}
+	if len(rec.pullComments) != 1 {
+		t.Errorf("a blocked pull comment reached the inner tracker: %+v", rec.pullComments)
 	}
 }
 

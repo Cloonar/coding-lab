@@ -75,6 +75,20 @@ type repoResponse struct {
 	CloneError           *string `json:"clone_error"`
 	CreatedAt            string  `json:"created_at"`
 	LastOpenedAt         *string `json:"last_opened_at"`
+	// Autoland (issue #181 / ADR-0048), per-repo and default OFF: AutolandEnabled
+	// opts the repo in, MaxFixAttempts bounds fix-run spawns, AutoMerge gates a
+	// clean PASS (off: approve only, a human merges). LanderProvider is nullable —
+	// null means the lander run inherits this repo's own provider chain.
+	AutolandEnabled bool    `json:"autoland_enabled"`
+	MaxFixAttempts  int     `json:"max_fix_attempts"`
+	AutoMerge       bool    `json:"auto_merge"`
+	LanderProvider  *string `json:"lander_provider"`
+	// LanderModel and LanderEffort are the lander run's model/effort overrides
+	// (issue #189). Nullable — null means inherit: the lander resolves model and
+	// effort from its effective provider chain at launch (there is no write-time
+	// catalog to materialize here).
+	LanderModel  *string `json:"lander_model"`
+	LanderEffort *string `json:"lander_effort"`
 }
 
 // repoJSON renders a repo row as its pinned JSON shape. It is a pure function
@@ -115,6 +129,12 @@ func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
 		CloneStatus:          r.CloneStatus,
 		CloneError:           r.CloneError,
 		CreatedAt:            store.FormatTime(r.CreatedAt),
+		AutolandEnabled:      r.AutolandEnabled,
+		MaxFixAttempts:       r.MaxFixAttempts,
+		AutoMerge:            r.AutoMerge,
+		LanderProvider:       r.LanderProvider,
+		LanderModel:          r.LanderModel,
+		LanderEffort:         r.LanderEffort,
 	}
 	if r.LastOpenedAt != nil {
 		t := store.FormatTime(*r.LastOpenedAt)
@@ -330,6 +350,29 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			u.BudgetMinutes, err = patchNullableInt(raw, key)
 		case "max_instances_override":
 			u.MaxInstancesOverride, err = patchNullableInt(raw, key)
+		case "autoland_enabled":
+			u.AutolandEnabled, err = patchBool(raw, key)
+		case "max_fix_attempts":
+			u.MaxFixAttempts, err = patchInt(raw, key)
+		case "auto_merge":
+			u.AutoMerge, err = patchBool(raw, key)
+		case "lander_provider":
+			// null/"" clears to NULL (inherit this repo's own provider chain); a
+			// non-empty id is validated against the registry in
+			// reposvc.UpdateSettings (unknown → 400), mirroring provider/
+			// afk_provider_default above.
+			u.LanderProvider, err = patchNullableString(raw, key)
+		case "lander_model":
+			// No write-time catalog validation (issue #189): unlike a provider
+			// (a static registry), model/effort catalogs are per-provider and
+			// dynamic (#156/#157), and the lander's effective provider isn't
+			// knowable here. Accept any non-empty string (null/""/whitespace
+			// clears to NULL = inherit); an unknown value fails loudly at lander
+			// launch, where the effective provider IS known — not here.
+			u.LanderModel, err = patchNullableString(raw, key)
+		case "lander_effort":
+			// No write-time catalog validation (issue #189): see lander_model.
+			u.LanderEffort, err = patchNullableString(raw, key)
 		default:
 			err = fmt.Errorf("unknown field %q", key)
 		}
@@ -399,6 +442,15 @@ func patchBool(raw json.RawMessage, field string) (store.Opt[bool], error) {
 	var v *bool
 	if err := json.Unmarshal(raw, &v); err != nil || v == nil {
 		return store.Opt[bool]{}, fmt.Errorf("field %s must be a boolean", field)
+	}
+	return store.Set(*v), nil
+}
+
+// patchInt reads a required-integer PATCH field (null rejected).
+func patchInt(raw json.RawMessage, field string) (store.Opt[int], error) {
+	var v *int
+	if err := json.Unmarshal(raw, &v); err != nil || v == nil {
+		return store.Opt[int]{}, fmt.Errorf("field %s must be an integer", field)
 	}
 	return store.Set(*v), nil
 }

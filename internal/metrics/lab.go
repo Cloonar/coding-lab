@@ -32,7 +32,7 @@ var afkDurationBuckets = []float64{60, 300, 600, 1200, 1800, 3600, 7200, 10800, 
 func (m *Metrics) registerLab() {
 	m.afkRuns = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "lab_afk_runs_total",
-		Help: "Terminal AFK run outcomes, by outcome (success|death|timeout|stopped) and run kind (afk_manual|afk_auto).",
+		Help: "Terminal AFK run outcomes, by outcome (success|death|timeout|stopped|escalated) and run kind (afk_manual|afk_auto|lander|fix|escalate).",
 	}, []string{"outcome", "kind"})
 	m.afkRunDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "lab_afk_run_duration_seconds",
@@ -56,8 +56,9 @@ func (m *Metrics) registerLab() {
 
 // AFKRunEnded records one terminal AFK run outcome at the reaper/stop
 // chokepoint: the outcome counter and the started_at→ended_at duration
-// histogram move together. kind is the run's kind (afk_manual|afk_auto),
-// outcome the runs.outcome vocabulary (success|death|timeout|stopped).
+// histogram move together. kind is the run's kind (afk_manual|afk_auto|
+// lander — every reaper-owned kind), outcome the runs.outcome vocabulary
+// (success|death|timeout|stopped).
 func (m *Metrics) AFKRunEnded(kind, outcome string, duration time.Duration) {
 	if m == nil {
 		return
@@ -115,6 +116,9 @@ type InstanceCounts struct {
 	Manual    int
 	AFKManual int
 	AFKAuto   int
+	Lander    int
+	Fix       int
+	Escalate  int
 }
 
 // instancesScrapeTimeout bounds the snapshot query a scrape triggers — a
@@ -131,7 +135,7 @@ func (m *Metrics) RegisterInstances(snapshot func(ctx context.Context) (Instance
 	m.reg.MustRegister(&instancesCollector{
 		desc: prometheus.NewDesc(
 			"lab_instances_active",
-			"Active runs whose tmux session is live, by kind (manual|afk_manual|afk_auto). Read at scrape time.",
+			"Active runs whose tmux session is live, by kind (manual|afk_manual|afk_auto|lander|fix|escalate). Read at scrape time.",
 			[]string{"kind"}, nil,
 		),
 		snapshot: snapshot,
@@ -156,4 +160,7 @@ func (c *instancesCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(counts.Manual), "manual")
 	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(counts.AFKManual), "afk_manual")
 	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(counts.AFKAuto), "afk_auto")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(counts.Lander), "lander")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(counts.Fix), "fix")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(counts.Escalate), "escalate")
 }

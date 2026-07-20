@@ -29,6 +29,12 @@ func (s *Service) ReaperLoop(ctx context.Context) {
 		}
 		now := s.now()
 		s.ReapOnce(ctx, now)
+		// The spawn pass rides the same tick, AFTER the reap — ordering is
+		// load-bearing, and since issue #185 drain-then-fill is literal: the
+		// reap frees run rows and cap slots first, then the ONE pass spends
+		// them highest-stage-first, so a fresh PR gets its lander within one
+		// tick (issue #181 AC #2) and never loses the slot to new work.
+		s.SpawnOnce(ctx)
 		if s.sweep == nil {
 			continue
 		}
@@ -52,7 +58,8 @@ func (s *Service) ReapOnce(ctx context.Context, now time.Time) {
 
 // reapActiveRuns classifies the persisted active AFK runs (D12a/b: the runs
 // table IS the budget clock — no in-memory stamps, so a restart never resets
-// a budget). Each run's done-signal is one bounded PullsForHead read,
+// a budget). Each run's done-signal is one bounded PullsForHead read (the
+// verdict kinds add one bounded PullComments read — verdictDoneSignal),
 // UNLOCKED (the slow part) — O(active runs) tracker requests per tick,
 // independent of repo history (issue #176: the old once-per-repo Pulls call
 // walked the ENTIRE PR history, growing a page per 50 merged PRs); the
@@ -94,13 +101,23 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			continue
 		}
 		for _, run := range byRepo[repoID] {
-			// The done-signal: an open or merged PR/CR whose head is the
+			// The done-signal, derived per kind and fed into the ONE Classify
+			// table. AFK kinds: an open or merged PR/CR whose head is the
 			// run's branch (closed-unmerged deliberately does NOT count —
-			// tracker.DonePull). Read as one bounded per-branch lookup, never
-			// a history walk (issue #176). Base is repo.DefaultBranch because
-			// that is the base the agent API pins for EVERY lab-created PR
-			// (agentapi handlePRCreate: head is always the run's branch, base
-			// the repo's default branch — the caller names neither).
+			// tracker.DonePull) — plain presence, never a comment read. The
+			// verdict kinds (lander/fix/escalate, issue #182): their PR
+			// pre-exists the run, so presence alone would success-reap on the
+			// first tick — the done-signal is the marker state the run
+			// PRODUCED (verdictDoneSignal, one reading per kind). Candidates
+			// come from one bounded per-branch lookup, never a history walk
+			// (issue #176) — sound for the verdict kinds too: their
+			// pre-existing PR was created by the same agentapi handlePRCreate
+			// (head = the run's branch, base = the repo default branch), and
+			// its head branch outlives the run (MergePull never deletes the
+			// head branch, and reap-time teardown runs only after this read),
+			// so PullsForHead's LIVE-branch contract holds for every kind.
+			// Base is repo.DefaultBranch because that is the base the agent
+			// API pins for EVERY lab-created PR (the caller names neither).
 			pulls, err := trk.PullsForHead(ctx, run.Branch, repo.DefaultBranch)
 			if err != nil {
 				// Per-run isolation (tighter than the old per-repo skip): a
@@ -111,10 +128,20 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 				s.log.Warn("afk watcher: pulls for head", "component", "afk", "repo", repo.Name, "session", run.SessionName, "err", err)
 				continue
 			}
-			// donePull is the winning pull, meaningful only when the outcome
-			// is success (it feeds the done-signal notification).
+			// donePull is the winning pull, meaningful only at a success/
+			// escalated outcome (it feeds the done-signal and escalation
+			// notifications).
 			donePull, prPresent := tracker.DonePull(pulls, run.Branch)
-			outcome, alive, claimed := s.classifyAndClaim(ctx, run, prPresent, now)
+			done, escalated := prPresent, false
+			switch run.Kind {
+			case store.RunKindLander, store.RunKindFix, store.RunKindEscalate:
+				var readable bool
+				done, escalated, readable = s.verdictDoneSignal(ctx, trk, repo, run, donePull, prPresent)
+				if !readable {
+					continue // comments unreadable this tick — NEVER classify on missing data
+				}
+			}
+			outcome, alive, claimed := s.classifyAndClaim(ctx, run, done, escalated, now)
 			if claimed {
 				s.reapRun(ctx, trk, repo, run, outcome, alive, donePull, now)
 			}
@@ -188,6 +215,43 @@ func (s *Service) drainZombies(ctx context.Context) {
 	}
 }
 
+// verdictDoneSignal derives a verdict-kind run's done-signal (issues #181/
+// #182 / ADR-0048) — the per-kind pure reading over polled state, needed
+// because these runs' PRs pre-exist them: presence alone would success-reap
+// each on its first tick. Lander: the PR merged, or the LAST verdict word
+// pass/reject (LanderDone). Fix: merged — a human merged mid-run, the repair
+// is moot and moot is done — or the last word fix-done, its `labctl pr
+// rerequest` landed (FixDone). Escalate: merged is plain done; the escalate
+// marker as the last word is done-VIA-MARKER (EscalateDelivered), which
+// classifyAndClaim promotes to outcome 'escalated'. Every last-word reading
+// is safe because the active-run gate (DecideAutoland case 2) admits one
+// marker writer per branch at a time. PullComments is ONE bounded call per
+// active run per tick, made only when the PR exists and is not merged; a
+// read failure returns readable=false — the run is skipped and re-derived
+// next tick, never classified on missing data (the same stance as a failed
+// PullsForHead read).
+func (s *Service) verdictDoneSignal(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, pull tracker.PullRef, prPresent bool) (done, escalated, readable bool) {
+	var verdicts []string
+	if prPresent && pull.State != tracker.PullMerged {
+		comments, err := trk.PullComments(ctx, pull.Number)
+		if err != nil {
+			s.log.Warn("afk watcher: pull comments", "component", "afk",
+				"repo", repo.Name, "session", run.SessionName, "pull", pull.Number, "err", err)
+			return false, false, false
+		}
+		verdicts = VerdictWords(comments)
+	}
+	switch run.Kind {
+	case store.RunKindFix:
+		return FixDone(pull.State, prPresent, verdicts), false, true
+	case store.RunKindEscalate:
+		done, viaMarker := EscalateDelivered(pull.State, prPresent, verdicts)
+		return done, viaMarker, true
+	default: // lander
+		return LanderDone(pull.State, prPresent, verdicts), false, true
+	}
+}
+
 // classifyAndClaim makes the reap decision for one run atomically against a
 // concurrent neutral Stop (v0's atomicity core, §4c). Under runsMu — the
 // same lock StopAFK holds to write outcome 'stopped' and kill the session —
@@ -203,7 +267,15 @@ func (s *Service) drainZombies(ctx context.Context) {
 // Stop: it sees active-and-alive (a genuine fresh decision) or
 // stopped-and-gone (claimed=false, neutral). A genuine crash leaves the row
 // active, so an active run that is not alive is a real death.
-func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, prPresent bool, now time.Time) (outcome Outcome, alive, claimed bool) {
+//
+// done is the run's kind-derived done-signal (AFK: PR presence; the verdict
+// kinds: verdictDoneSignal) — the classification table itself is kind-blind.
+// escalated is EscalateDelivered's viaMarker (only an escalate run's
+// done-signal ever sets it): a success whose signal was the escalate marker
+// is promoted to OutcomeEscalated here, still under runsMu and with the same
+// claim semantics, so the terminal row IS the poller's permanent-terminality
+// gate (issue #182). A merge-first escalate success stays plain success.
+func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done, escalated bool, now time.Time) (outcome Outcome, alive, claimed bool) {
 	s.runsMu.Lock()
 	defer s.runsMu.Unlock()
 
@@ -236,7 +308,13 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, prPresent
 	if fresh.BudgetDeadline != nil {
 		deadline = *fresh.BudgetDeadline
 	}
-	outcome = Classify(prPresent, alive, now, deadline)
+	outcome = Classify(done, alive, now, deadline)
+	// The escalated promotion (issue #182): Classify stays kind-blind and
+	// never returns OutcomeEscalated; a marker-delivered escalate success is
+	// promoted before the claim so the row written below is 'escalated'.
+	if outcome == OutcomeSuccess && escalated {
+		outcome = OutcomeEscalated
+	}
 	if outcome == OutcomeRunning {
 		return outcome, alive, false
 	}
@@ -256,18 +334,34 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, prPresent
 // issue stays parked), delete the run's tokens and credential files, update
 // the repo's consecutive-failure counter, and publish the events.
 //
-// This is the ONLY place the run lifecycle writes the failure counter: a
-// success reap resets it (re-arming a three-strikes pause), a death or
-// timeout increments it; at PauseThreshold the auto scheduler stops
-// launching and manual starts 409 until reset. The counter is kind-agnostic
-// — manual and auto AFK runs both feed it. A neutral Stop never reaches
-// here (classifyAndClaim refuses a stopped run under runsMu). now is the
-// tick time the claim stamped as ended_at, so the metrics duration below is
-// exactly started_at→ended_at.
+// This is the ONLY place the run lifecycle writes the failure counter, and
+// only the UNATTENDED-WORK kinds feed it — the two AFK kinds (manual, auto;
+// #185) plus fix (#182): a success reap resets it (re-arming a three-strikes
+// pause), a death or timeout increments it; at PauseThreshold the auto
+// scheduler stops launching and manual starts 409 until reset. A fix run
+// counts because it IS unattended AFK-class work continuing an AFK claim
+// (the issue pins "three-strikes accounting apply"): its death is the same
+// evidence of broken unattended runs an AFK death is, and its success — the
+// repair pushed and re-requested — is the same evidence of health. The two
+// VALIDATION-class kinds, lander and escalate, move the counter in NEITHER
+// direction — the switch below used to be kind-agnostic and it ran backwards
+// both ways. A flaky lander's death/timeout would increment the counter and
+// pause the repo's UNRELATED AFK loop (and 409 its manual starts); and a
+// lander correctly posting `reject` reaps as OutcomeSuccess, which would
+// RESET the counter — clearing the strikes broken AFK runs earned and
+// re-arming the very brake that evidence should trip (a reject is evidence
+// FOR the pause, not against it). The same both-ways argument covers the
+// escalate run: its 'escalated' outcome is it DOING ITS JOB, never health
+// evidence either way. The counter is unattended-run health alone; only the
+// failure counter separates — the budget clock stays deliberately shared. A
+// neutral Stop never reaches here (classifyAndClaim refuses a stopped run
+// under runsMu). now is the tick time the claim stamped as ended_at, so the
+// metrics duration below is exactly started_at→ended_at.
 //
-// This chokepoint is also where the done-signal push fires — beside the
-// metrics report, once per success reap. trk and donePull are meaningful only
-// when outcome is success (donePull is the winning pull the notification names);
+// This chokepoint is also where the pushes fire — beside the metrics report,
+// once per claim: the done-signal push on an AFK success, the escalation push
+// on an escalated outcome (#182). trk and donePull are meaningful only at
+// those outcomes (donePull is the winning pull the notification names);
 // death, timeout, and the three-strikes pause never send.
 func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, outcome Outcome, alive bool, donePull tracker.PullRef, now time.Time) {
 	// The reaper half of the M8 terminal-outcome metrics (the neutral Stop
@@ -275,10 +369,27 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 	// this reports exactly once per terminal reap.
 	s.metrics.AFKRunEnded(run.Kind, outcome.RunOutcome(), now.Sub(run.StartedAt))
 
-	// The done-signal push (issue #100): only a success reap notifies, riding
-	// this once-per-run chokepoint so the injected sender fires exactly once.
-	if outcome == OutcomeSuccess && s.notify != nil {
+	// The done-signal push (issue #100): only a success reap of the two AFK
+	// kinds notifies, riding this once-per-run chokepoint so the injected
+	// sender fires exactly once. The verdict kinds are excluded by
+	// constraint: the copy is "<run> opened PR #n" and a lander opened
+	// nothing — its forge-observable outcome (the merge or verdict comment)
+	// IS its notification surface for now — and a fix run's success surface
+	// is its fix-done marker plus the native reviewer ping `labctl pr
+	// rerequest` already sent (#182): no push.
+	if outcome == OutcomeSuccess && s.notify != nil &&
+		(run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto) {
 		s.notify(s.doneNotification(ctx, trk, repo, run, donePull))
+	}
+
+	// The escalation push (issue #182): fired once per escalated reap off the
+	// same idempotent claim — the operator's signal that the fix-forward loop
+	// handed the PR to a human (the agent-side ready-for-human flip already
+	// executed by the time its terminal marker landed). donePull is the open
+	// PR the marker landed on: EscalateDelivered promotes only via marker,
+	// which requires an open, present PR.
+	if outcome == OutcomeEscalated && s.notify != nil {
+		s.notify(s.escalationNotification(ctx, trk, repo, run, donePull))
 	}
 
 	if alive {
@@ -295,24 +406,32 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 	}
 	s.cleanupCredential(repo, run.ID)
 
-	switch outcome {
-	case OutcomeSuccess:
-		changed, err := s.store.ResetRepoFailures(ctx, repo.ID)
-		if err != nil {
-			s.log.Warn("afk reap: reset failures", "component", "afk", "repo", repo.Name, "err", err)
-		} else if changed {
-			s.publish(EventRepoChanged, repo.ID)
-		}
-	case OutcomeDeath, OutcomeTimeout:
-		n, err := s.store.IncrementRepoFailures(ctx, repo.ID)
-		if err != nil {
-			s.log.Warn("afk reap: increment failures", "component", "afk", "repo", repo.Name, "err", err)
-		} else {
-			if n >= PauseThreshold {
-				s.log.Warn("afk auto loop paused after consecutive failures — reset from the UI to re-arm",
-					"component", "afk", "repo", repo.Name, "failures", n)
+	// Only the unattended-work kinds move the shared failure counter — the
+	// two AFK kinds (#185) and fix (#182); lander and escalate feed it in
+	// NEITHER direction. See the doc comment for why both directions are
+	// wrong for the validation-class kinds. An escalated outcome never
+	// reaches an arm below even for its own kind — it is neither success nor
+	// death/timeout — so the switch stays three-armed.
+	if run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto || run.Kind == store.RunKindFix {
+		switch outcome {
+		case OutcomeSuccess:
+			changed, err := s.store.ResetRepoFailures(ctx, repo.ID)
+			if err != nil {
+				s.log.Warn("afk reap: reset failures", "component", "afk", "repo", repo.Name, "err", err)
+			} else if changed {
+				s.publish(EventRepoChanged, repo.ID)
 			}
-			s.publish(EventRepoChanged, repo.ID)
+		case OutcomeDeath, OutcomeTimeout:
+			n, err := s.store.IncrementRepoFailures(ctx, repo.ID)
+			if err != nil {
+				s.log.Warn("afk reap: increment failures", "component", "afk", "repo", repo.Name, "err", err)
+			} else {
+				if n >= PauseThreshold {
+					s.log.Warn("afk auto loop paused after consecutive failures — reset from the UI to re-arm",
+						"component", "afk", "repo", repo.Name, "failures", n)
+				}
+				s.publish(EventRepoChanged, repo.ID)
+			}
 		}
 	}
 

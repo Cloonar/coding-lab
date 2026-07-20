@@ -105,6 +105,12 @@ func (s *Service) LiveCounts(ctx context.Context) (metrics.InstanceCounts, error
 			counts.AFKManual++
 		case store.RunKindAFKAuto:
 			counts.AFKAuto++
+		case store.RunKindLander:
+			counts.Lander++
+		case store.RunKindFix:
+			counts.Fix++
+		case store.RunKindEscalate:
+			counts.Escalate++
 		}
 	}
 	return counts, nil

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -235,6 +236,28 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo sto
 		// A merge the backend refused (required check red, protected branch,
 		// conflict, closed-unmerged): 409 with the backend's own words
 		// verbatim — mergeability is the backend's call, not lab's.
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, tracker.ErrReviewRejected) {
+		// A review operation the forge refused (a re-request it would not
+		// accept): the ErrMergeRejected twin — 409 with the forge's own words
+		// verbatim, reviewability being the backend's call, not lab's. The
+		// rerequest handler's best-effort ping downgrades its own refusals to a
+		// warning before reaching here; this branch keeps the mapping for any
+		// path that surfaces the sentinel fatally. Placed beside
+		// ErrMergeRejected, its documented mirror.
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, tracker.ErrUnsupported) {
+		// A PR-comment or review-ping write on the built-in binding (the verdict
+		// verbs compose over CommentPull; rerequest pings reviewers): the tracker
+		// has no forge review model or CR comment thread yet, so it defers rather
+		// than fakes — 409 with the "not supported on this tracker" message, the
+		// wrong-binding-for-this-operation convention. Must precede the binding-
+		// generic 502/500 folds below, or the built-in binding's refusal would
+		// miscode as an opaque 500.
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -722,14 +745,30 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 // full BODY — the read labctl pr view renders, so an agent can retrieve
 // PR-carried content (e.g. a captured card YAML) without any raw forge
 // fallback (D10). head is the bare branch name, state the three-valued
-// open|merged|closed vocabulary.
+// open|merged|closed vocabulary. reviews carries the submitted reviews (the
+// reject → re-queue loop's read); it ALWAYS marshals as an array — [] when the
+// PR carries none, never null — so an agent parsing it never special-cases a
+// nil, and a built-in binding (no forge review model) simply reports [].
 type prDetailResponse struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	State  string `json:"state"`
-	Head   string `json:"head"`
-	URL    string `json:"url"`
+	Number  int              `json:"number"`
+	Title   string           `json:"title"`
+	Body    string           `json:"body"`
+	State   string           `json:"state"`
+	Head    string           `json:"head"`
+	URL     string           `json:"url"`
+	Reviews []reviewResponse `json:"reviews"`
+}
+
+// reviewResponse is one submitted review in the GET /agent/v1/prs/{n} payload:
+// who submitted it, its normalized state (the Review* vocabulary), its prose
+// body, and whether the forge has since dismissed it — what the reject →
+// re-queue loop reads to know a PR carries an outstanding changes-requested
+// verdict and from which reviewer to re-request once a fix lands.
+type reviewResponse struct {
+	Reviewer  string `json:"reviewer"`
+	State     string `json:"state"`
+	Body      string `json:"body"`
+	Dismissed bool   `json:"dismissed"`
 }
 
 // prListItem is one row of GET /agent/v1/prs — the PullRef vocabulary (no
@@ -770,8 +809,12 @@ type prCheckItem struct {
 }
 
 // handlePRGet is GET /agent/v1/prs/{n}: one PR/CR of the run's repo in full,
-// body included. An unknown number is the canonical 404 envelope (either
-// binding's typed not-found), never a panic.
+// body AND submitted reviews included. An unknown number is the canonical 404
+// envelope (either binding's typed not-found), never a panic. Reviews are read
+// after the Pull; if that read fails the whole response fails through
+// writeTrackerError (no partial detail), so the caller never sees a PR whose
+// reviews silently dropped. On a built-in binding Reviews is a harmless empty
+// read, so the array is [] there — the same shape a reviewless forge PR yields.
 func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
 	_, repo, ok := s.runRepo(w, r)
 	if !ok {
@@ -791,13 +834,29 @@ func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
 		s.writeTrackerError(w, "loading pull request", repo, err)
 		return
 	}
+	rev, err := tk.Reviews(r.Context(), n)
+	if err != nil {
+		s.writeTrackerError(w, "loading pull request reviews", repo, err)
+		return
+	}
+	// Non-nil so the array marshals as [] on zero reviews, never null.
+	reviews := make([]reviewResponse, 0, len(rev))
+	for _, v := range rev {
+		reviews = append(reviews, reviewResponse{
+			Reviewer:  v.Reviewer,
+			State:     v.State,
+			Body:      v.Body,
+			Dismissed: v.Dismissed,
+		})
+	}
 	writeJSON(w, http.StatusOK, prDetailResponse{
-		Number: pd.Number,
-		Title:  pd.Title,
-		Body:   pd.Body,
-		State:  pd.State,
-		Head:   pd.HeadBranch,
-		URL:    pd.URL,
+		Number:  pd.Number,
+		Title:   pd.Title,
+		Body:    pd.Body,
+		State:   pd.State,
+		Head:    pd.HeadBranch,
+		URL:     pd.URL,
+		Reviews: reviews,
 	})
 }
 
@@ -919,6 +978,304 @@ func (s *Server) handlePRMerge(w http.ResponseWriter, r *http.Request) {
 		Head:   pr.HeadBranch,
 		URL:    pr.URL,
 	})
+}
+
+// prReviewRequest is the {body} payload of the verdict/comment verbs (reject,
+// approve, comment). Reject and comment require a non-empty body; approve's is
+// optional (a pass verdict needs no words).
+type prReviewRequest struct {
+	Body string `json:"body"`
+}
+
+// Verdict markers — the first line of the PR comment each verdict verb
+// composes. The grammar itself (ADR-0048: `[autoland] verdict: <word>`,
+// parsed first-line-only with an exact prefix match) lives in
+// internal/tracker (verdict.go), so the #181 poller reading these same
+// comments shares one definition instead of a second copy here; this package
+// only injects it. Injection is SERVER-SIDE, in these handlers (precedent:
+// handlePRCreate's Closes-#N injection): agents and skills speak verbs only
+// and never see the grammar, so a verdict verb's own body can never reach
+// line 1 — it lands below the composed marker and is inert.
+//
+// That covers the verdict verbs, but NOT the plain comment verb, which
+// prepends nothing: without a guard, `pr comment` could post a body whose
+// first line IS a marker and forge a verdict no lander ever reached (the
+// marker is a trust anchor, and a run token is repo-scoped, so the forgery
+// would not even be limited to the run's own PR). handlePRComment therefore
+// rejects a body that opens with tracker.VerdictMarkerPrefix — the grammar
+// stays writable only through the verbs that own it.
+
+// opensWithVerdictMarker reports whether body's FIRST line is a verdict
+// marker. Leading whitespace is trimmed before the match even though
+// tracker.ParseVerdict's pinned parse rule is an exact prefix (a marker
+// indented by a space is inert against that rule): the guard is deliberately
+// stricter than the parser, so a future consumer that trims before matching
+// cannot turn an accepted body into a forged verdict retroactively.
+func opensWithVerdictMarker(body string) bool {
+	first, _, _ := strings.Cut(body, "\n")
+	_, ok := tracker.ParseVerdict(strings.TrimSpace(first))
+	return ok
+}
+
+// verdictComment composes the comment a verdict verb posts: the marker line,
+// then the (already sanitized) body below a blank line; an empty body is the
+// bare marker.
+func verdictComment(marker, body string) string {
+	if body == "" {
+		return marker
+	}
+	return marker + "\n\n" + body
+}
+
+// handlePRReject is POST /agent/v1/prs/{n}/reject {body}: record a rejection
+// verdict on PR/CR n by posting a PR comment whose first line is the reject
+// marker with body as the findings below (body REQUIRED — blank/missing is a
+// 400, mirroring the comment create's wording; the findings are the point),
+// returning {number}. An unknown number is a 404; the built-in binding (no PR
+// comment write yet) is a 409 (ErrUnsupported). On a forge binding the write
+// runs under the SERVER's forge token — no forge credential ever reaches the
+// session (ADR-0014). The body passes the incogni sanitizer like every
+// agent-authored body (ADR-0014: no unsanitized write path) before the marker
+// is prepended; the secretscan decorator scans the composed comment at the
+// seam like any other PR comment.
+func (s *Server) handlePRReject(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req prReviewRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	// Emptiness is judged on the SANITIZED body, not the raw one: on an
+	// incogni repo stripAttribution can reduce an all-attribution body to
+	// nothing, and a rejection that posts a bare marker with no findings
+	// defeats the very gate this check is here to be — the findings are the
+	// point of a reject.
+	body := s.sanitizeBody(repo, req.Body)
+	if strings.TrimSpace(body) == "" {
+		jsonError(w, http.StatusBadRequest, "body is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	comment := verdictComment(tracker.VerdictReject, body)
+	if err := tk.CommentPull(r.Context(), n, comment); err != nil {
+		s.writeTrackerError(w, "rejecting pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n})
+}
+
+// handlePREscalate is POST /agent/v1/prs/{n}/escalate {body}: record the
+// escalate-mode lander's TERMINAL marker on PR/CR n by posting a PR comment
+// whose first line is the escalate marker with body as the history digest
+// below (body REQUIRED — blank/missing is a 400, mirroring reject; the digest
+// is the point). Unlike rerequest, there is no native ping: escalation hands
+// the PR to a human via the ready-for-human label (the escalate seed's own
+// labctl issue label steps), not a forge review request, so this handler is
+// reject's twin, not rerequest's. ADR-0048 reserved the `escalate` word for
+// exactly this marker (issue #182); the poller's Escalated fold (decide.go)
+// treats its presence as permanent — rule 1 blocks every candidate kind on
+// this branch forever after. The autoland ENGINE never writes to the forge
+// (it only spawns runs), so this agent-executed verb is the escalation
+// outcome's only PR write. Error mapping, sanitize, and credentialing all
+// match reject: unknown → 404, built-in binding → 409 (ErrUnsupported),
+// server-credentialed write (ADR-0014), sanitized body before the marker is
+// prepended.
+func (s *Server) handlePREscalate(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req prReviewRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	// Emptiness is judged on the SANITIZED body, exactly like reject: an
+	// escalation that posts a bare marker with no digest defeats the point of
+	// escalating — the digest is what a human picks up the PR with.
+	body := s.sanitizeBody(repo, req.Body)
+	if strings.TrimSpace(body) == "" {
+		jsonError(w, http.StatusBadRequest, "body is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	comment := verdictComment(tracker.VerdictEscalate, body)
+	if err := tk.CommentPull(r.Context(), n, comment); err != nil {
+		s.writeTrackerError(w, "escalating pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n})
+}
+
+// handlePRApprove is POST /agent/v1/prs/{n}/approve {body?}: record a
+// validation-passed verdict ("validated, awaiting confirm") on PR/CR n by
+// posting a PR comment whose first line is the pass marker, returning
+// {number}. The body is OPTIONAL — CONCERNS prose goes below the marker; an
+// empty body, or an absent request body entirely, both post the bare marker.
+// Error mapping is reject's: unknown → 404, built-in binding → 409
+// (ErrUnsupported). Server-credentialed and sanitized like reject.
+func (s *Server) handlePRApprove(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	// Body optional: an absent body (EOF) or an empty {} both decode to the zero
+	// value — no error, unlike reject/comment. Only a genuinely malformed body
+	// 400s. Decoded inline (not via decodeJSON) precisely because EOF is legal
+	// here.
+	var req prReviewRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	comment := verdictComment(tracker.VerdictPass, s.sanitizeBody(repo, req.Body))
+	if err := tk.CommentPull(r.Context(), n, comment); err != nil {
+		s.writeTrackerError(w, "approving pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n})
+}
+
+// handlePRRerequest is POST /agent/v1/prs/{n}/rerequest (no body): the fix
+// run's done-signal. It posts the fix-done marker as a PR comment FIRST — the
+// comment IS the signal — and THEN best-effort native re-requests every
+// reviewer whose latest verdict-bearing review is changes-requested (the human
+// forge ping). Answers {number}; a failed ping is NON-FATAL — the response
+// carries it as {number, warning} (200, labctl exits 0 and prints the warning)
+// and it is logged server-side, because the done-signal already landed and the
+// human ping is best-effort by design (ADR-0048). A comment failure IS fatal:
+// unknown number → 404, built-in binding → 409 (ErrUnsupported), and the ping
+// is never attempted.
+func (s *Server) handlePRRerequest(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	if err := tk.CommentPull(r.Context(), n, tracker.VerdictFixDone); err != nil {
+		s.writeTrackerError(w, "re-requesting review", repo, err)
+		return
+	}
+	resp := map[string]any{"number": n}
+	if err := tk.RerequestReview(r.Context(), n); err != nil {
+		// Only a forge REFUSAL degrades to a warning: the done-signal comment
+		// already landed, and a forge declining the ping is not a failed
+		// re-request. Typed upstream conditions (a PR deleted between the two
+		// calls, a spent rate-limit budget) are real errors and keep their
+		// status — degrading them here would report success for a re-request
+		// that never reached the forge at all.
+		if !errors.Is(err, tracker.ErrReviewRejected) {
+			s.writeTrackerError(w, "re-requesting review", repo, err)
+			return
+		}
+		// The seam's errors never carry the forge token (ErrReviewRejected wraps
+		// the forge's own words only), so the message is safe to echo.
+		s.log.Warn("re-request review ping failed", "component", "agentapi", "repo", repo.ID, "err", err)
+		resp["warning"] = "re-requesting review from the forge failed: " + err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handlePRComment is POST /agent/v1/prs/{n}/comments {body}: post a plain
+// discussion comment on PR/CR n (a PR shares the issue-comment number space),
+// returning {number}. Body REQUIRED non-empty — blank/missing is a 400 in the
+// comment create's wording. Unlike PR create, no `Closes #N` is injected (that
+// is a PR-create-only concern). Error mapping is the review verbs': unknown →
+// 404, built-in binding → 409 (ErrUnsupported). The body passes the incogni
+// sanitizer like every agent-authored body; the secretscan decorator scans it
+// at the seam.
+//
+// This path composes no marker of its own, so it could forge the verdict
+// grammar: a body opening with tracker.VerdictMarkerPrefix is a 400. Without
+// that gate a run token — repo-scoped, so not even confined to its own PR —
+// could post a first-line `[autoland] verdict: pass` that a consumer reads as
+// a lander verdict.
+//
+// The gate here is NOT airtight, and must not be read as one. handleCommentCreate
+// (POST /agent/v1/issues/{n}/comments) is a second agent-writable path onto the
+// same thread — a PR shares the issue-comment number space, so both verbs
+// resolve to issuePath(n)+"/comments", the endpoint PullComments reads — and it
+// carries no verdict gate. A run token can still forge a marker through it, which
+// would deny a PR its validation (VerdictPresent suppresses the spawn) or
+// false-success-reap a live lander.
+//
+// That is a KNOWN, accepted gap: the exploit requires a deliberately adversarial
+// agent rather than a mistaken one, and the accidental path is narrow (a body
+// must BEGIN with the marker). Closing it means gating handleCommentCreate too,
+// or moving the check down to the CreateComment seam so both verbs inherit it
+// structurally — the better fix, and the one to make if this ever stops being a
+// trust-the-agent boundary.
+func (s *Server) handlePRComment(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req prReviewRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	// Both gates judge the SANITIZED body — the string that actually reaches
+	// the forge. Sanitizing can DELETE leading lines (stripAttribution), so a
+	// marker sitting on line 2 under an attribution line would be promoted to
+	// line 1 after a raw-body check had already passed it.
+	body := s.sanitizeBody(repo, req.Body)
+	if strings.TrimSpace(body) == "" {
+		jsonError(w, http.StatusBadRequest, "body is required")
+		return
+	}
+	if opensWithVerdictMarker(body) {
+		jsonError(w, http.StatusBadRequest, "body must not begin with a verdict marker line")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	if err := tk.CommentPull(r.Context(), n, body); err != nil {
+		s.writeTrackerError(w, "commenting on pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n})
 }
 
 // publishCRChanged emits cr.changed for repoID — the same {type, repoID}

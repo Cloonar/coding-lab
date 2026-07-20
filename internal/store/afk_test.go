@@ -27,9 +27,17 @@ func afkFixtureRepo(t *testing.T, st *Store, name string) Repo {
 
 func afkFixtureRun(t *testing.T, st *Store, repoID, kind, session string, startedAt time.Time) Run {
 	t.Helper()
+	return afkFixtureRunOn(t, st, repoID, kind, "afk/7", session, startedAt)
+}
+
+// afkFixtureRunOn is afkFixtureRun with an explicit branch — the fix and
+// escalate tests below need per-row branch control that afkFixtureRun's fixed
+// "afk/7" doesn't give.
+func afkFixtureRunOn(t *testing.T, st *Store, repoID, kind, branch, session string, startedAt time.Time) Run {
+	t.Helper()
 	run, err := st.CreateRun(context.Background(), Run{
 		ID: ids.NewID("run"), RepoID: repoID, Kind: kind, Provider: "claude-code",
-		Branch: "afk/7", WorktreePath: "/wt/x", SessionName: session,
+		Branch: branch, WorktreePath: "/wt/x", SessionName: session,
 		Model: "opus[1m]", Effort: "max", StartedAt: startedAt, Outcome: RunOutcomeActive,
 	})
 	if err != nil {
@@ -43,11 +51,16 @@ func TestActiveAFKRuns_filtersAndOrders(t *testing.T) {
 		repo := afkFixtureRepo(t, st, "proj")
 		ctx := context.Background()
 
-		// One manual run (excluded), two AFK runs (returned sorted by session
-		// name), one reaped AFK run (excluded — terminal).
+		// One manual run (excluded), five unattended-kind runs — two AFK, a
+		// lander, a fix, and an escalate (returned sorted by session name —
+		// the reaper owns the classification of all five, issue #182), one
+		// reaped AFK run (excluded — terminal).
 		afkFixtureRun(t, st, repo.ID, RunKindManual, "proj~20260706-1200", afkClock)
 		afkFixtureRun(t, st, repo.ID, RunKindAFKAuto, "proj~afk-auto-9", afkClock.Add(time.Minute))
 		afkFixtureRun(t, st, repo.ID, RunKindAFKManual, "proj~afk-12", afkClock.Add(2*time.Minute))
+		afkFixtureRun(t, st, repo.ID, RunKindLander, "proj~lander-7", afkClock.Add(3*time.Minute))
+		afkFixtureRun(t, st, repo.ID, RunKindFix, "proj~fix-5", afkClock.Add(4*time.Minute))
+		afkFixtureRun(t, st, repo.ID, RunKindEscalate, "proj~escalate-4", afkClock.Add(5*time.Minute))
 		reaped := afkFixtureRun(t, st, repo.ID, RunKindAFKManual, "proj~afk-3", afkClock)
 		if err := st.EndRun(ctx, reaped.ID, RunOutcomeSuccess, afkClock.Add(time.Hour), ""); err != nil {
 			t.Fatalf("EndRun: %v", err)
@@ -57,11 +70,14 @@ func TestActiveAFKRuns_filtersAndOrders(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ActiveAFKRuns: %v", err)
 		}
-		if len(runs) != 2 {
-			t.Fatalf("ActiveAFKRuns = %d runs, want 2", len(runs))
+		if len(runs) != 5 {
+			t.Fatalf("ActiveAFKRuns = %d runs, want 5", len(runs))
 		}
-		if runs[0].SessionName != "proj~afk-12" || runs[1].SessionName != "proj~afk-auto-9" {
-			t.Errorf("order = [%s, %s], want sorted by session name", runs[0].SessionName, runs[1].SessionName)
+		wantOrder := []string{"proj~afk-12", "proj~afk-auto-9", "proj~escalate-4", "proj~fix-5", "proj~lander-7"}
+		for i, want := range wantOrder {
+			if runs[i].SessionName != want {
+				t.Errorf("order[%d] = %s, want %s (sorted by session name)", i, runs[i].SessionName, want)
+			}
 		}
 	})
 }
@@ -124,6 +140,152 @@ func TestActiveAutoRunForRepo(t *testing.T) {
 		}
 		if _, found, _ := st.ActiveAutoRunForRepo(ctx, repo.ID); found {
 			t.Error("reaped auto run still reported in flight")
+		}
+	})
+}
+
+func TestActiveRunOnBranch(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		repo := afkFixtureRepo(t, st, "proj")
+		other := afkFixtureRepo(t, st, "other")
+		ctx := context.Background()
+
+		// Empty repo: nothing on the branch.
+		if got, err := st.ActiveRunOnBranch(ctx, repo.ID, "afk/7"); err != nil || got {
+			t.Fatalf("empty repo: got=%v err=%v, want no active run", got, err)
+		}
+
+		// ANY kind counts — a manual instance parked on the branch suppresses
+		// a lander exactly like an AFK run (afkFixtureRun pins branch afk/7).
+		run := afkFixtureRun(t, st, repo.ID, RunKindManual, "proj~20260706-1200", afkClock)
+		if got, _ := st.ActiveRunOnBranch(ctx, repo.ID, "afk/7"); !got {
+			t.Error("active manual run on the branch not reported")
+		}
+		// Scoped: another branch and another repo both read clear.
+		if got, _ := st.ActiveRunOnBranch(ctx, repo.ID, "afk/8"); got {
+			t.Error("a different branch reported the run")
+		}
+		if got, _ := st.ActiveRunOnBranch(ctx, other.ID, "afk/7"); got {
+			t.Error("another repo's run leaked into the query")
+		}
+		// A terminal run stops counting — the reaped authoring run frees the
+		// branch for its lander within one tick.
+		if err := st.EndRun(ctx, run.ID, RunOutcomeSuccess, afkClock.Add(time.Hour), ""); err != nil {
+			t.Fatalf("EndRun: %v", err)
+		}
+		if got, _ := st.ActiveRunOnBranch(ctx, repo.ID, "afk/7"); got {
+			t.Error("terminal run still reported as active on the branch")
+		}
+	})
+}
+
+// TestFixRunCountForBranch pins the fix-forward attempt bound's source of
+// truth (issue #182 / ADR-0048): every kind='fix' row on the branch counts,
+// regardless of outcome — a fix run that dies on the launch pad still burns
+// an attempt — and no other kind or branch/repo leaks in.
+func TestAutolandAttempts(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		repo := afkFixtureRepo(t, st, "proj")
+		other := afkFixtureRepo(t, st, "other")
+		ctx := context.Background()
+
+		// Absent row reads zero — the most permissive value, so a branch that
+		// has never been attempted needs no seeding.
+		if n, err := st.AutolandAttempts(ctx, repo.ID, "afk/7", RunKindFix); err != nil || n != 0 {
+			t.Fatalf("virgin branch: n=%d err=%v, want 0", n, err)
+		}
+
+		for range 2 {
+			if err := st.RecordAutolandAttempt(ctx, repo.ID, "afk/7", RunKindFix); err != nil {
+				t.Fatalf("RecordAutolandAttempt: %v", err)
+			}
+		}
+		if n, err := st.AutolandAttempts(ctx, repo.ID, "afk/7", RunKindFix); err != nil || n != 2 {
+			t.Errorf("after two attempts: n=%d err=%v, want 2", n, err)
+		}
+
+		// The counter is keyed on all three of (repo, branch, kind): the other
+		// kind on the same branch, the same kind on another branch, and the
+		// same pair in another repo are each their own budget.
+		if err := st.RecordAutolandAttempt(ctx, repo.ID, "afk/7", RunKindEscalate); err != nil {
+			t.Fatalf("RecordAutolandAttempt escalate: %v", err)
+		}
+		for _, tc := range []struct {
+			name           string
+			repoID, branch string
+			kind           string
+			want           int
+		}{
+			{"fix on the branch", repo.ID, "afk/7", RunKindFix, 2},
+			{"escalate on the branch", repo.ID, "afk/7", RunKindEscalate, 1},
+			{"fix on another branch", repo.ID, "afk/8", RunKindFix, 0},
+			{"fix in another repo", other.ID, "afk/7", RunKindFix, 0},
+		} {
+			n, err := st.AutolandAttempts(ctx, tc.repoID, tc.branch, tc.kind)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if n != tc.want {
+				t.Errorf("%s: n=%d, want %d", tc.name, n, tc.want)
+			}
+		}
+
+		// The counter is spawn-INTENT, decoupled from runs rows entirely: a
+		// branch carrying no fix run at all still reports its burned attempts
+		// (the launch-pad-failure case that a row count cannot see).
+		if runs, err := st.RunsByRepo(ctx, repo.ID, 0); err != nil {
+			t.Fatalf("RunsByRepo: %v", err)
+		} else if len(runs) != 0 {
+			t.Fatalf("runs = %d, want 0 — attempts must not depend on run rows", len(runs))
+		}
+	})
+}
+
+// TestEscalatedRunOnBranch pins the poller's permanent-terminality gate
+// (issue #182 / ADR-0048): true only once an outcome='escalated' row exists
+// for the branch, never on an active or otherwise-terminal escalate run.
+// Round-trips both new CHECK values (kind='escalate', outcome='escalated')
+// through the normal store API, proving the widened migration constraints.
+func TestEscalatedRunOnBranch(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		repo := afkFixtureRepo(t, st, "proj")
+		other := afkFixtureRepo(t, st, "other")
+		ctx := context.Background()
+
+		if got, err := st.EscalatedRunOnBranch(ctx, repo.ID, "afk/5"); err != nil || got {
+			t.Fatalf("empty branch: got=%v err=%v, want false", got, err)
+		}
+
+		// An active escalate run is not yet the terminal signal.
+		active := afkFixtureRunOn(t, st, repo.ID, RunKindEscalate, "afk/5", "proj~escalate-1", afkClock)
+		if got, _ := st.EscalatedRunOnBranch(ctx, repo.ID, "afk/5"); got {
+			t.Error("active escalate run reported terminal")
+		}
+		// A merged escalate run (Classify's merged-first rule) ends success,
+		// not escalated — also not the terminal signal.
+		if err := st.EndRun(ctx, active.ID, RunOutcomeSuccess, afkClock.Add(time.Hour), ""); err != nil {
+			t.Fatalf("EndRun: %v", err)
+		}
+		if got, _ := st.EscalatedRunOnBranch(ctx, repo.ID, "afk/5"); got {
+			t.Error("success-outcome escalate run reported terminal")
+		}
+
+		// Only outcome='escalated' flips the gate.
+		esc := afkFixtureRunOn(t, st, repo.ID, RunKindEscalate, "afk/5", "proj~escalate-2", afkClock.Add(time.Minute))
+		if err := st.EndRun(ctx, esc.ID, RunOutcomeEscalated, afkClock.Add(time.Hour), ""); err != nil {
+			t.Fatalf("EndRun: %v", err)
+		}
+		got, err := st.EscalatedRunOnBranch(ctx, repo.ID, "afk/5")
+		if err != nil || !got {
+			t.Fatalf("EscalatedRunOnBranch: got=%v err=%v, want true", got, err)
+		}
+		// Scoped: a different branch and a different repo both read clear —
+		// escalation is per-branch, never a repo-wide lock.
+		if got, _ := st.EscalatedRunOnBranch(ctx, repo.ID, "afk/6"); got {
+			t.Error("a different branch reported escalated")
+		}
+		if got, _ := st.EscalatedRunOnBranch(ctx, other.ID, "afk/5"); got {
+			t.Error("another repo's escalated run leaked into the query")
 		}
 	})
 }

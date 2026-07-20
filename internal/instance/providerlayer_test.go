@@ -109,6 +109,26 @@ func TestResolveProvider_chains(t *testing.T) {
 			name: "afk with nothing set inherits the global default", kind: store.RunKindAFKManual,
 			want: "claude-code",
 		},
+		{
+			// A fix run is AFK-class (issue #182): unattended work continuing
+			// an AFK claim, so the AFK-override layer applies to its fallback
+			// resolution exactly as it does to the two AFK kinds.
+			name: "fix consults the AFK overrides", kind: store.RunKindFix,
+			repo: store.Repo{Provider: strptr("claude-code"), AFKProviderDefault: strptr("fake-b")},
+			want: "fake-b",
+		},
+		{
+			// Lander and escalate are validation-class (issues #181/#182):
+			// never AFK, so the AFK overrides are invisible to them.
+			name: "lander ignores the AFK overrides", kind: store.RunKindLander,
+			repo: store.Repo{AFKProviderDefault: strptr("fake-b")}, globalAFK: "fake-b",
+			want: "claude-code",
+		},
+		{
+			name: "escalate ignores the AFK overrides", kind: store.RunKindEscalate,
+			repo: store.Repo{AFKProviderDefault: strptr("fake-b")}, globalAFK: "fake-b",
+			want: "claude-code",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

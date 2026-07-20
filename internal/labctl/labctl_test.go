@@ -172,6 +172,14 @@ type fakeForge struct {
 	checks       []tracker.Check     // returned by Checks (single-shot tests)
 	checksSeq    [][]tracker.Check   // consecutive Checks() results (--wait); overrides checks when set
 	checksCall   int                 // index into checksSeq
+
+	reviews []tracker.Review // returned by Reviews
+
+	rerequestErr  error  // returned by RerequestReview when set
+	rerequestedN  int    // records the last RerequestReview argument
+	commentErr    error  // returned by CommentPull when set
+	commentedN    int    // records the last CommentPull number argument
+	commentedBody string // records the last CommentPull body argument
 }
 
 func (f *fakeForge) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -232,6 +240,23 @@ func (f *fakeForge) MergePull(_ context.Context, number int) (tracker.PullRef, e
 		return tracker.PullRef{}, f.mergeErr
 	}
 	return f.mergeRef, nil
+}
+func (f *fakeForge) Reviews(context.Context, int) ([]tracker.Review, error) {
+	if f.reviews == nil {
+		return []tracker.Review{}, nil
+	}
+	return f.reviews, nil
+}
+func (f *fakeForge) RerequestReview(_ context.Context, number int) error {
+	f.rerequestedN = number
+	return f.rerequestErr
+}
+func (f *fakeForge) CommentPull(_ context.Context, number int, body string) error {
+	f.commentedN, f.commentedBody = number, body
+	return f.commentErr
+}
+func (f *fakeForge) PullComments(context.Context, int) ([]tracker.Comment, error) {
+	return nil, nil
 }
 func (f *fakeForge) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeForge) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
@@ -816,6 +841,8 @@ func TestPRViewOutput(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr %q", code, stderr)
 	}
+	// No reviews on this fixture: output stays exactly what it was before
+	// reviews existed.
 	want := "#12 feat: capture card\n" +
 		"state: open\n" +
 		"head: afk/7\n" +
@@ -831,6 +858,307 @@ func TestPRViewOutput(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "not found") {
 		t.Errorf("stderr = %q, want the 404 message", stderr)
+	}
+}
+
+// TestPRViewWithReviews extends TestPRViewOutput (issue #180): two submitted
+// reviews (one dismissed) each render under a "--- review by <reviewer>
+// (<state>)" separator following the body, dismissed adding ", dismissed" to
+// the parenthetical.
+func TestPRViewWithReviews(t *testing.T) {
+	fk := &fakeForge{
+		pullDetail: &tracker.PullDetail{
+			Number: 12, Title: "feat: capture card", Body: "card: |\n  kind: capture",
+			State: tracker.PullOpen, HeadBranch: "afk/7", URL: "https://forge.example/pr/12",
+		},
+		reviews: []tracker.Review{
+			{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "fix the tests", Dismissed: false},
+			{Reviewer: "bob", State: tracker.ReviewApproved, Body: "lgtm", Dismissed: true},
+		},
+	}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "view", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	want := "#12 feat: capture card\n" +
+		"state: open\n" +
+		"head: afk/7\n" +
+		"url: https://forge.example/pr/12\n" +
+		"\ncard: |\n  kind: capture\n" +
+		"\n--- review by alice (changes_requested)\nfix the tests\n" +
+		"\n--- review by bob (approved, dismissed)\nlgtm\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// --- pr review verbs (issue #180) -------------------------------------------
+
+// TestPRRejectOutput: `labctl pr reject <n> <body>` records the rejection
+// verdict through the real agentapi — end to end, the tracker sees ONE PR
+// comment whose first line is the reject marker with the findings below
+// (composed server-side; the CLI speaks verbs only) — and prints
+// #<n>\trejected.
+func TestPRRejectOutput(t *testing.T) {
+	fk := &fakeForge{}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "reject", "12", "fix the tests"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "#12\trejected\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "#12\trejected\n")
+	}
+	wantComment := "[autoland] verdict: reject\n\nfix the tests"
+	if fk.commentedN != 12 || fk.commentedBody != wantComment {
+		t.Errorf("CommentPull args = (%d, %q), want (12, %q)", fk.commentedN, fk.commentedBody, wantComment)
+	}
+}
+
+// TestPRRejectErrorExit1: a tracker failure on the verdict comment surfaces
+// on stderr and exits 1 — the verdict-verb twin of TestPRMergeRejectedExit1.
+func TestPRRejectErrorExit1(t *testing.T) {
+	fk := &fakeForge{commentErr: fmt.Errorf("forge comments unreachable")}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "reject", "12", "fix it"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "forge comments unreachable") {
+		t.Errorf("stderr = %q, want the backend's own words", stderr)
+	}
+}
+
+// TestPRRejectUsage: a missing/non-integer PR number or an empty positional
+// body is a usage error (exit 2) — the CLI never round-trips a blank body to
+// the server's 400.
+func TestPRRejectUsage(t *testing.T) {
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return &fakeForge{}, nil }))
+	for _, args := range [][]string{
+		{"pr", "reject"},
+		{"pr", "reject", "12"},
+		{"pr", "reject", "abc", "issues found"},
+		{"pr", "reject", "12", ""},
+		{"pr", "reject", "12", "issues found", "extra"},
+	} {
+		if code, _, _ := run(t, args, f.env()); code != 2 {
+			t.Errorf("run %v: exit = %d, want 2", args, code)
+		}
+	}
+}
+
+// TestPREscalateOutput: `labctl pr escalate <n> <body>` records the
+// escalate-mode lander's terminal marker through the real agentapi — end to
+// end, the tracker sees ONE PR comment whose first line is the escalate
+// marker with the digest below (composed server-side) — and prints
+// #<n>\tescalated. Unlike rerequest, there is no native ping to observe.
+func TestPREscalateOutput(t *testing.T) {
+	fk := &fakeForge{}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "escalate", "12", "round 1: missing tests; round 2: still flaky"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "#12\tescalated\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "#12\tescalated\n")
+	}
+	wantComment := "[autoland] verdict: escalate\n\nround 1: missing tests; round 2: still flaky"
+	if fk.commentedN != 12 || fk.commentedBody != wantComment {
+		t.Errorf("CommentPull args = (%d, %q), want (12, %q)", fk.commentedN, fk.commentedBody, wantComment)
+	}
+}
+
+// TestPREscalateErrorExit1: a tracker failure on the verdict comment surfaces
+// on stderr and exits 1 — the verdict-verb twin of TestPRRejectErrorExit1.
+func TestPREscalateErrorExit1(t *testing.T) {
+	fk := &fakeForge{commentErr: fmt.Errorf("forge comments unreachable")}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "escalate", "12", "digest"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "forge comments unreachable") {
+		t.Errorf("stderr = %q, want the backend's own words", stderr)
+	}
+}
+
+// TestPREscalateUsage mirrors TestPRRejectUsage: a missing/non-integer PR
+// number or an empty positional body is a usage error (exit 2) — the CLI
+// never round-trips a blank digest to the server's 400.
+func TestPREscalateUsage(t *testing.T) {
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return &fakeForge{}, nil }))
+	for _, args := range [][]string{
+		{"pr", "escalate"},
+		{"pr", "escalate", "12"},
+		{"pr", "escalate", "abc", "digest"},
+		{"pr", "escalate", "12", ""},
+		{"pr", "escalate", "12", "digest", "extra"},
+	} {
+		if code, _, _ := run(t, args, f.env()); code != 2 {
+			t.Errorf("run %v: exit = %d, want 2", args, code)
+		}
+	}
+}
+
+// TestPRApproveOutput: `labctl pr approve <n> [body]` records the pass verdict
+// through the real agentapi — end to end, the tracker sees ONE PR comment
+// whose first line is the pass marker (bare when no body was given, CONCERNS
+// prose below it otherwise) — and prints #<n>\tapproved.
+func TestPRApproveOutput(t *testing.T) {
+	fk := &fakeForge{}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "approve", "12", "looks good"}, f.env())
+	if code != 0 {
+		t.Fatalf("with body: exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "#12\tapproved\n" {
+		t.Errorf("with body: stdout = %q, want %q", stdout, "#12\tapproved\n")
+	}
+	wantComment := "[autoland] verdict: pass\n\nlooks good"
+	if fk.commentedN != 12 || fk.commentedBody != wantComment {
+		t.Errorf("CommentPull args = (%d, %q), want (12, %q)", fk.commentedN, fk.commentedBody, wantComment)
+	}
+
+	code, stdout, stderr = run(t, []string{"pr", "approve", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("without body: exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "#12\tapproved\n" {
+		t.Errorf("without body: stdout = %q, want %q", stdout, "#12\tapproved\n")
+	}
+	if fk.commentedBody != "[autoland] verdict: pass" {
+		t.Errorf("without body: CommentPull body = %q, want the bare pass marker", fk.commentedBody)
+	}
+}
+
+// TestPRApproveUsage mirrors TestPRRejectUsage: a missing/non-integer number
+// or trailing junk is a usage error (exit 2); the body stays optional.
+func TestPRApproveUsage(t *testing.T) {
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return &fakeForge{}, nil }))
+	for _, args := range [][]string{
+		{"pr", "approve"},
+		{"pr", "approve", "abc"},
+		{"pr", "approve", "12", "body", "extra"},
+	} {
+		if code, _, _ := run(t, args, f.env()); code != 2 {
+			t.Errorf("run %v: exit = %d, want 2", args, code)
+		}
+	}
+}
+
+// TestPRRerequestOutput: `labctl pr rerequest <n>` signals fix-done — end to
+// end, the tracker sees the bare fix-done marker as a PR comment AND the native
+// reviewer re-request — and prints #<n>\trerequested.
+func TestPRRerequestOutput(t *testing.T) {
+	fk := &fakeForge{}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "rerequest", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "#12\trerequested\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "#12\trerequested\n")
+	}
+	if fk.commentedN != 12 || fk.commentedBody != "[autoland] verdict: fix-done" {
+		t.Errorf("CommentPull args = (%d, %q), want the bare fix-done marker on 12", fk.commentedN, fk.commentedBody)
+	}
+	if fk.rerequestedN != 12 {
+		t.Errorf("RerequestReview arg = %d, want 12", fk.rerequestedN)
+	}
+}
+
+// TestPRRerequestPingFailureWarnsExit0: a refused native reviewer ping is
+// NON-FATAL — the fix-done comment already landed (it is the done-signal), so
+// labctl prints the warning on stderr, keeps the success line, and exits 0.
+func TestPRRerequestPingFailureWarnsExit0(t *testing.T) {
+	fk := &fakeForge{rerequestErr: fmt.Errorf("%w: the forge declined the re-request", tracker.ErrReviewRejected)}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "rerequest", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+	}
+	if stdout != "#12\trerequested\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "#12\trerequested\n")
+	}
+	if !strings.Contains(stderr, "warning") || !strings.Contains(stderr, "declined the re-request") {
+		t.Errorf("stderr = %q, want a warning carrying the forge's own words", stderr)
+	}
+	if fk.commentedN != 12 || fk.commentedBody != "[autoland] verdict: fix-done" {
+		t.Errorf("CommentPull args = (%d, %q), want the fix-done marker despite the failed ping", fk.commentedN, fk.commentedBody)
+	}
+}
+
+// TestPRRerequestUsage: a missing/non-integer/extra number is a usage error
+// (exit 2) — `pr rerequest` takes exactly one argument.
+func TestPRRerequestUsage(t *testing.T) {
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return &fakeForge{}, nil }))
+	for _, args := range [][]string{
+		{"pr", "rerequest"},
+		{"pr", "rerequest", "abc"},
+		{"pr", "rerequest", "12", "extra"},
+	} {
+		if code, _, _ := run(t, args, f.env()); code != 2 {
+			t.Errorf("run %v: exit = %d, want 2", args, code)
+		}
+	}
+}
+
+// TestPRCommentOutput: `labctl pr comment <n> <body>` posts a plain
+// discussion comment and prints nothing on success — mirroring `labctl issue
+// comment`'s parseable-silence confirmation shape exactly.
+func TestPRCommentOutput(t *testing.T) {
+	fk := &fakeForge{}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "comment", "12", "tests are green"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty (parseable silence on success)", stdout)
+	}
+	if fk.commentedN != 12 || fk.commentedBody != "tests are green" {
+		t.Errorf("CommentPull args = (%d, %q), want (12, %q)", fk.commentedN, fk.commentedBody, "tests are green")
+	}
+}
+
+// TestPRCommentUsage mirrors TestPRRejectUsage: `pr comment` requires exactly
+// <n> <body>, and an empty positional body is a usage error too.
+func TestPRCommentUsage(t *testing.T) {
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return &fakeForge{}, nil }))
+	for _, args := range [][]string{
+		{"pr", "comment"},
+		{"pr", "comment", "12"},
+		{"pr", "comment", "abc", "hi"},
+		{"pr", "comment", "12", ""},
+		{"pr", "comment", "12", "hi", "extra"},
+	} {
+		if code, _, _ := run(t, args, f.env()); code != 2 {
+			t.Errorf("run %v: exit = %d, want 2", args, code)
+		}
 	}
 }
 

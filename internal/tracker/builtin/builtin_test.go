@@ -1032,3 +1032,53 @@ func TestBuiltin_MergePull_noServiceWiredFailsLoud(t *testing.T) {
 		t.Fatalf("err = %v, want a plain wiring error (not a merge rejection)", err)
 	}
 }
+
+// --- Reviews (deferred on the built-in binding) ----------------------------
+
+// TestBuiltin_Reviews_empty: the built-in tracker has no forge review model, so
+// Reviews is a harmless empty read for any number, never an error.
+func TestBuiltin_Reviews_empty(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	reviews, err := tr.Reviews(ctx, 1)
+	if err != nil {
+		t.Fatalf("Reviews: %v", err)
+	}
+	if len(reviews) != 0 {
+		t.Errorf("Reviews = %#v, want empty", reviews)
+	}
+}
+
+// TestBuiltin_ReviewWrites_unsupported: each review-adjacent WRITE verb wraps
+// tracker.ErrUnsupported (reviews are forge-observable state a lab-internal CR
+// has no model for, and CRs have no comment thread yet), and names the verb
+// rather than faking a result.
+func TestBuiltin_ReviewWrites_unsupported(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	if err := tr.RerequestReview(ctx, 1); !errors.Is(err, tracker.ErrUnsupported) {
+		t.Errorf("RerequestReview err = %v, want ErrUnsupported", err)
+	}
+	if err := tr.CommentPull(ctx, 1, "body"); !errors.Is(err, tracker.ErrUnsupported) {
+		t.Errorf("CommentPull err = %v, want ErrUnsupported", err)
+	}
+}
+
+// TestBuiltin_PullComments_unsupported: CommentPull's read counterpart wraps
+// the same tracker.ErrUnsupported (no PR comment thread to list yet).
+func TestBuiltin_PullComments_unsupported(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	if _, err := tr.PullComments(ctx, 1); !errors.Is(err, tracker.ErrUnsupported) {
+		t.Errorf("PullComments err = %v, want ErrUnsupported", err)
+	}
+}

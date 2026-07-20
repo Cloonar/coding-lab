@@ -69,10 +69,10 @@ type afkAutoRequest struct {
 }
 
 // handleAFKAuto is PUT /api/v1/repos/{id}/afk/auto {enabled}: 200 with the
-// updated repo. Enabling kicks one scheduler sweep immediately (v0 parity —
-// the toggle should act now, not up to afk_schedule_seconds later); every
-// claim is single-flighted under the engine lock, so the kick is race-safe
-// against the ticker.
+// updated repo. Enabling kicks one spawn pass immediately (v0 parity — the
+// toggle should act now, not up to afk_schedule_seconds later); the pass is
+// serialized under its own lock and every claim is single-flighted under
+// the engine lock, so the kick is race-safe against the tickers.
 func (s *Server) handleAFKAuto(w http.ResponseWriter, r *http.Request) {
 	var req afkAutoRequest
 	if decodeJSON(w, r, &req) != nil {
@@ -107,9 +107,9 @@ func (s *Server) handleAFKAuto(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishRepoChanged(repo.ID)
 	if *req.Enabled {
-		// Server-scoped context, not the request's: the sweep outlives this
-		// handler and stops with the server.
-		go s.afk.ScheduleOnce(s.shutdownCtx)
+		// Server-scoped context, not the request's: the spawn pass outlives
+		// this handler and stops with the server.
+		go s.afk.SpawnOnce(s.shutdownCtx)
 	}
 	eff, err := s.afkPromptEffective(r.Context(), repo)
 	if err != nil {
@@ -122,7 +122,7 @@ func (s *Server) handleAFKAuto(w http.ResponseWriter, r *http.Request) {
 // handleAFKReset is POST /api/v1/repos/{id}/afk/reset: zero the consecutive-
 // failure counter (the ONLY un-pause besides a success reap — ADR-0007, never
 // automatic) and answer 200 with the repo. repo.changed is published only on
-// a real transition; a re-armed auto loop gets one immediate scheduler kick.
+// a real transition; a re-armed repo gets one immediate spawn-pass kick.
 func (s *Server) handleAFKReset(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -136,7 +136,7 @@ func (s *Server) handleAFKReset(w http.ResponseWriter, r *http.Request) {
 	repo.ConsecutiveFailures = 0
 	if changed {
 		s.publishRepoChanged(repo.ID)
-		go s.afk.ScheduleOnce(s.shutdownCtx)
+		go s.afk.SpawnOnce(s.shutdownCtx)
 	}
 	eff, err := s.afkPromptEffective(r.Context(), repo)
 	if err != nil {

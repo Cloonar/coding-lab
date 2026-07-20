@@ -16,8 +16,11 @@ import (
 // M5 engine's; M3 needs only the inverse parse for ownership.
 
 const (
-	afkLabelPrefix = "afk-"
-	afkAutoMarker  = "auto-"
+	afkLabelPrefix      = "afk-"
+	afkAutoMarker       = "auto-"
+	landerLabelPrefix   = "lander-"
+	fixLabelPrefix      = "fix-"
+	escalateLabelPrefix = "escalate-"
 )
 
 // parseAFKLabel is the strict inverse of the fixed AFK label format: cut the
@@ -41,13 +44,45 @@ func parseAFKLabel(label string) (n int, auto, ok bool) {
 	return n, auto, true
 }
 
+// adoptLabelPrefixes are the claim-adopting run kinds' label namespaces —
+// lander-<N> (issue #181) plus fix-<N> and escalate-<N> (issue #182). All
+// three adopt issue N's EXISTING claim branch detached, so their live
+// sessions must map to that branch across a restart: reconcile must re-adopt,
+// never park (and never tear down), a live fix run's worktree.
+var adoptLabelPrefixes = []string{landerLabelPrefix, fixLabelPrefix, escalateLabelPrefix}
+
+// parseAdoptLabel is the strict inverse of the adopt-label formats
+// (lander-<N> / fix-<N> / escalate-<N>): cut the matching prefix, require a
+// positive integer — the same reject rules as parseAFKLabel, so lander-x,
+// fix-0, or escalate--1 never registers (the prefixes are mutually exclusive,
+// so a failed integer parse after a prefix match is a definitive reject).
+func parseAdoptLabel(label string) (n int, ok bool) {
+	for _, prefix := range adoptLabelPrefixes {
+		rest, found := strings.CutPrefix(label, prefix)
+		if !found {
+			continue
+		}
+		n, err := strconv.Atoi(rest)
+		if err != nil || n < 1 {
+			return 0, false
+		}
+		return n, true
+	}
+	return 0, false
+}
+
 // instanceBranch is the branch an instance labelled label of a repo occupies:
-// an AFK label (afk-<N> / afk-auto-<N>) → the repo's afk_branch_pattern rendered
-// with N (the claim branch — auto and manual AFK share it); any other label →
-// the repo's manual_branch_prefix + label. This is identical to Start's branch
-// derivation, so the owned set can never drift from what Start created.
+// an AFK label (afk-<N> / afk-auto-<N>) or an adopt label (lander-<N> /
+// fix-<N> / escalate-<N> — those runs adopt issue N's claim branch) → the
+// repo's afk_branch_pattern rendered with N (the claim branch — every one of
+// them shares it); any other label → the repo's manual_branch_prefix + label.
+// This is identical to Start's branch derivation, so the owned set can never
+// drift from what Start created.
 func instanceBranch(afkPattern, manualPrefix, label string) string {
 	if n, _, ok := parseAFKLabel(label); ok {
+		return gitx.RenderBranch(afkPattern, n)
+	}
+	if n, ok := parseAdoptLabel(label); ok {
 		return gitx.RenderBranch(afkPattern, n)
 	}
 	return manualPrefix + label

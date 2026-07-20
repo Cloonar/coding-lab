@@ -43,6 +43,13 @@ const (
 	incogniManualPrefix = "wip/"
 )
 
+// Autoland defaults (issue #181 / ADR-0048): default OFF, a 2-attempt
+// fix-run bound, and auto-merge on for when a repo does opt in.
+const (
+	defaultMaxFixAttempts = 2
+	defaultAutoMerge      = true
+)
+
 // Event types this service publishes (brief §8.1). Payloads are the small
 // envelopes the SSE contract pins; clients refetch on event.
 const (
@@ -342,6 +349,8 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		ManualBranchPrefix: manualPrefix,
 		CloneStatus:        store.CloneStatusCloning,
 		CreatedAt:          s.now(),
+		MaxFixAttempts:     defaultMaxFixAttempts,
+		AutoMerge:          defaultAutoMerge,
 	}
 	created, err := s.store.CreateRepo(ctx, repo)
 	if err != nil {
@@ -382,6 +391,13 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 			return store.Repo{}, err
 		}
 		u.AFKProviderDefault.Value = v
+	}
+	if u.LanderProvider.Set {
+		v, err := s.validateProvider("lander_provider", u.LanderProvider.Value)
+		if err != nil {
+			return store.Repo{}, err
+		}
+		u.LanderProvider.Value = v
 	}
 	if u.CredentialID.Set && u.CredentialID.Value != nil {
 		if err := s.checkCredentialKind(ctx, "credential_id", *u.CredentialID.Value, vault.IsGitKind, "ssh_key or https_token"); err != nil {
@@ -453,6 +469,28 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 	}
 	if u.MaxInstancesOverride.Set && u.MaxInstancesOverride.Value != nil && *u.MaxInstancesOverride.Value < 1 {
 		return store.Repo{}, badRequestf("max_instances_override: must be at least 1 (null clears the override)")
+	}
+	if u.MaxFixAttempts.Set && u.MaxFixAttempts.Value < 0 {
+		return store.Repo{}, badRequestf("max_fix_attempts: must be at least 0")
+	}
+	// Autoland (issue #181 / ADR-0048) is forge-only: the engine polls PR
+	// comments for lander verdicts, and the builtin tracker binding has no
+	// comment listing to poll. Validate the (tracker_binding, autoland_enabled)
+	// pair that would result, the same way the forge-credential invariant above
+	// does, so neither turning autoland on under a builtin binding nor flipping
+	// an autoland-enabled repo to builtin can persist. Turning autoland OFF is
+	// always allowed, on any binding.
+	if u.AutolandEnabled.Set || u.TrackerBinding.Set {
+		binding, enabled := current.TrackerBinding, current.AutolandEnabled
+		if u.TrackerBinding.Set {
+			binding = u.TrackerBinding.Value
+		}
+		if u.AutolandEnabled.Set {
+			enabled = u.AutolandEnabled.Value
+		}
+		if enabled && binding != store.TrackerBindingForge {
+			return store.Repo{}, badRequestf("autoland_enabled: requires a forge tracker binding")
+		}
 	}
 
 	// Incogni toggle-on (D15 §9 measure 7): re-render the guard WITH the

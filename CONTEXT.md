@@ -78,17 +78,33 @@ _Avoid_: backlog, todo list, queue table
 The ready queue minus already-branched issues and minus issues whose `## Blocked by` body section references a still-open issue (ADR-0042); the auto-loop's `(N ready)` hint and its launch predicate both count the *claimable* set, so a repo whose only ready issues are all parked or all blocked reads zero and does not loop (reference ADR-0013).
 _Avoid_: available, unassigned, free
 
+**Spawn pass**:
+The fleet's one serialized launch decision (`SpawnOnce`, ADR-0049) and the sole consumer of a repo's live-instance cap: producers *gather* launch candidates and never launch themselves — a **lander run** per open **claim** PR awaiting validation, a **fix run** per rejected claim PR under its attempt bound (#182, sharing its middle **stage rank** with the escalate run that concludes the loop), a new **AFK run** per **claimable** issue — then the pass stable-sorts by stage rank and launches down the list while the repo is under cap. The ordering rule is **drain before fill**: work already in flight outranks starting new work (`lander > fix > new AFK work`), so a repo at cap validates and lands its queued PRs before opening more. Replaces the two independent loops (the scheduler tick and the reaper's autoland sweep) that each read the cap against their own snapshot and raced for it; the pass now runs on the reaper tick (after the reap), the scheduler tick, and the toggle-on/reset kicks, with the per-launch cap guards under the engine lock as the backstop.
+_Avoid_: spawn loop, scheduler loop, spawn queue, spawn worker
+
 **Budget clock**:
 An AFK run's wall-clock budget — `afk_budget_minutes` (default 120, per-repo override), persisted as `budget_deadline` on the run row at launch (D12b) so a restart re-adopts the run with its deadline intact. Expiry without a done-signal classifies the run as timeout.
 _Avoid_: idle timeout, deadline extension, reset-on-restart
 
 **Three-strikes pause**:
-Three consecutive AFK failures (death or timeout) pause a repo's auto runs until an explicit human Reset from the UI.
+Three consecutive AFK failures (death or timeout) pause a repo's auto runs until an explicit human Reset from the UI. Only AFK-run outcomes feed the counter: a **lander run**'s outcome never moves it in either direction — a lander death or timeout must not pause unrelated AFK work, and a lander's reject-success must not clear the strikes the rejected work earned (ADR-0049). The **budget clock** stays shared across all run kinds.
 _Avoid_: auto-retry, backoff, cooldown
 
 **Neutral Stop**:
 A user-initiated Stop that never counts as a failure or death, keeps the worktree and unmerged branch (the claim/park survives), and leaves the failure counter untouched.
 _Avoid_: cancel, abort, kill (the tmux kill is a mechanism, not the outcome)
+
+**Autoland**:
+The per-repo, default-off pipeline that closes ADR-0024's deferred reject-loop: a state-derived poller reads the PR's verdict state (lander verdicts plus human native reviews, ADR-0048) and the runs store, and gathers **lander run** candidates (validate a **claim**'s PR against the validation core, then merge / approve / reject) and **fix run** candidates for the fleet **spawn pass** (ADR-0049) — nothing is dispatched by message, and the engine never writes to a forge. Forge-only for now; the builtin binding joins once it grows PR-comment writes.
+_Avoid_: merge bot, merge queue, auto-merge pipeline, webhook
+
+**Fix-forward**:
+Bounded re-engagement of a rejected PR — a **fix run** spawned onto the existing **claim** branch carrying the rejection's findings as new information, its **done-signal** an explicit `labctl pr rerequest` (never a fresh PR, since the claim's PR already exists), bounded by fix-launch ATTEMPTS per branch (`max_fix_attempts`, counted in `autoland_attempts` — intents ever, never rejection verdicts and never surviving runs rows, so a fix run that dies on the launch pad still burns an attempt; a runs-row count could not, because Start's rollback deletes the row and the pre-CreateRun failures never write one). A human's native changes-requested review feeds the same loop as a lander rejection, but is cleared only by that human's newer review — the loop never merges over one. Explicitly not auto-requeue: blind retry that carries no new information stays forbidden.
+_Avoid_: auto-requeue, auto-retry, re-queue, respin
+
+**Escalation**:
+The fix-forward loop's terminal hand-off (#182): at the attempt bound with the PR still rejected, the poller spawns an **escalate run** — a lander-class run that writes the round-history digest to the linked issue, flips its label `ready-for-agent` → `ready-for-human`, and posts the terminal `labctl pr escalate` marker, all agent-executed on the run-token boundary (the engine never writes to a forge; the engine's part is the push notification off the run's `escalated` outcome). An escalated-outcome run makes its PR permanently invisible to **Autoland**; re-entry is exactly one path — a human running the interactive land-pr skill. The hand-off is itself bounded (`MaxEscalateAttempts`, 3): terminality is written only when the marker lands, so an escalate run that dies first leaves the PR rejected-at-bound and would otherwise be re-escalated every tick, forever, ahead of new work and un-braked by three-strikes. Past that bound autoland goes quiet on the PR and says so at error level.
+_Avoid_: give up, abandon, dead-letter, auto-close
 
 ### Trackers
 
@@ -159,6 +175,7 @@ _Avoid_: forge link-out, completion email, per-outcome alerts
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
 - An **AFK run**'s **claim** is its branch and nothing else; selection skips issues whose branch exists and never consults the PR list — the reaper's **done-signal** is a bounded per-branch pull lookup (open or merged, head = the run's branch), never a listing.
 - The scheduler counts the **claimable** set (**ready queue** minus existing claims, minus issues whose `## Blocked by` section references a still-open issue); an AFK run that outlives its **budget clock** without a done-signal is a timeout, and timeouts (like deaths) feed the **three-strikes pause**.
+- **Autoland** (per-repo, default-off, forge-only) reads the PR's verdict state — lander verdicts plus human native reviews — to feed the fleet **spawn pass** a **lander run** candidate that validates a **claim**'s PR and a **fix run** candidate that re-engages a rejected one on the existing claim branch; the fix run's **done-signal** is an explicit `labctl pr rerequest`, not a fresh PR, because the claim's PR already exists.
 - A manual **instance**'s **deep link** is the operator's handle to it; the deep link is captured best-effort (only for a provider with the `DeepLinker` capability) and survives restarts on the run row — a link-less provider's rows offer a copyable `tmux attach` instead.
 - The **chat** reads an instance's **transcript** through the provider seam and lets the operator reply/answer/interrupt; it complements the deep link and applies to every instance. Replying to or interrupting an **AFK run** is a **neutral** intervention — it never touches the **budget clock**, **claim**, or **three-strikes pause**. The tailer's **conversational state** feeds the instance list's live badges.
 - **Guarded teardown** runs at all four teardown sites (manual Stop, AFK reaper, startup reconciliation, merged-sweep) and produces **parked work**; the **unguarded Discard** is the only way to destroy it and the only requeue.

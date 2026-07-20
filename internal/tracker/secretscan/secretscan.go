@@ -215,6 +215,17 @@ func (s *scanner) CreatePull(ctx context.Context, head, base, title, body string
 	return s.inner.CreatePull(ctx, head, base, title, body)
 }
 
+func (s *scanner) CommentPull(ctx context.Context, number int, body string) error {
+	// A PR comment body is agent-authored text posted under the run's identity
+	// — a content-bearing write, scanned like an issue comment. The verdict
+	// verbs (reject/approve/rerequest) are handler-level compositions over this
+	// method (ADR-0048), so their bodies are scanned here too.
+	if err := s.scan(ctx, field{fieldBody, body}); err != nil {
+		return err
+	}
+	return s.inner.CommentPull(ctx, number, body)
+}
+
 func (s *scanner) EditIssue(ctx context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
 	// An edit is a content-bearing write through a run token, so its set fields
 	// are scanned before delegating — but only the fields the patch actually
@@ -266,6 +277,22 @@ func (s *scanner) Checks(ctx context.Context, number int) ([]tracker.Check, erro
 
 func (s *scanner) MergePull(ctx context.Context, number int) (tracker.PullRef, error) {
 	return s.inner.MergePull(ctx, number)
+}
+
+// Reviews is a read and RerequestReview carries no agent-authored content (it
+// re-requests existing reviewers by login), so both delegate untouched.
+func (s *scanner) Reviews(ctx context.Context, number int) ([]tracker.Review, error) {
+	return s.inner.Reviews(ctx, number)
+}
+
+func (s *scanner) RerequestReview(ctx context.Context, number int) error {
+	return s.inner.RerequestReview(ctx, number)
+}
+
+// PullComments is a read, so it delegates untouched like Reviews — there is
+// nothing agent-authored here to scan.
+func (s *scanner) PullComments(ctx context.Context, number int) ([]tracker.Comment, error) {
+	return s.inner.PullComments(ctx, number)
 }
 
 func (s *scanner) CloseIssue(ctx context.Context, number int) error {

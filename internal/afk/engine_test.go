@@ -41,6 +41,8 @@ var clockTime = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 // fakeTracker is a scriptable tracker.Tracker: the ready queue and the pull
 // rows the engine reads — the reaper through bounded PullsForHead lookups
 // (#176), never a Pulls listing — plus injectable errors and call counters.
+// Reviews/PullComments (the autoland reads, #181) are scriptable per pull
+// number and default to empty success.
 type fakeTracker struct {
 	mu                sync.Mutex
 	ready             []tracker.Issue
@@ -49,13 +51,17 @@ type fakeTracker struct {
 	readyErr          error
 	issuesErr         error // failIssues: Issues() error injection (open-set fetch)
 	issuesCalls       int
-	pullsCalls        int            // pullsCallCount: must stay ZERO across reaper ticks (#176)
+	pullsCalls        int            // pullsCallCount: reaper ticks must add ZERO (#176); the autoland poller reads it
 	pullsForHeadErr   error          // failPullsForHead: PullsForHead() error injection
 	pullsForHeadCalls int            // pullsForHeadCallCount: the bounded-read counter (#176)
 	pullsForHeadArgs  [][2]string    // recorded (head, base) per PullsForHead call
 	pullTitles        map[int]string // Pull(n) detail title (done-signal notification body)
 	detailErr         error          // failPullDetail: Pull() error injection
 	detailCalls       int
+	reviews           map[int][]tracker.Review  // Reviews(n) — the poller's native-review read
+	pullComments      map[int][]tracker.Comment // PullComments(n) — verdict markers (#181)
+	commentsErr       error                     // failPullComments: PullComments() error injection
+	commentsCalls     int
 }
 
 func (f *fakeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -127,6 +133,26 @@ func (f *fakeTracker) CreatePull(context.Context, string, string, string, string
 }
 func (f *fakeTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
 	return tracker.PullRef{}, errors.New("not implemented")
+}
+func (f *fakeTracker) Reviews(_ context.Context, n int) ([]tracker.Review, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]tracker.Review(nil), f.reviews[n]...), nil
+}
+func (f *fakeTracker) RerequestReview(context.Context, int) error {
+	return errors.New("not implemented")
+}
+func (f *fakeTracker) CommentPull(context.Context, int, string) error {
+	return errors.New("not implemented")
+}
+func (f *fakeTracker) PullComments(_ context.Context, n int) ([]tracker.Comment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commentsCalls++
+	if f.commentsErr != nil {
+		return nil, f.commentsErr
+	}
+	return append([]tracker.Comment(nil), f.pullComments[n]...), nil
 }
 func (f *fakeTracker) CloseIssue(context.Context, int) error { return nil }
 func (f *fakeTracker) CreateIssue(context.Context, string, string, []string) (tracker.Issue, error) {
@@ -212,6 +238,43 @@ func (f *fakeTracker) pullsForHeadCallArgs() [][2]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([][2]string(nil), f.pullsForHeadArgs...)
+}
+
+func (f *fakeTracker) addReview(n int, state string, dismissed bool) {
+	f.addReviewFrom(n, "human", state, dismissed, "")
+}
+
+// addReviewFrom is addReview with the reviewer and body scriptable — the #182
+// rejected-state fold is per reviewer and RejectionContext quotes bodies, so
+// the fix-forward tests need both.
+func (f *fakeTracker) addReviewFrom(n int, reviewer, state string, dismissed bool, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reviews == nil {
+		f.reviews = map[int][]tracker.Review{}
+	}
+	f.reviews[n] = append(f.reviews[n], tracker.Review{Reviewer: reviewer, State: state, Dismissed: dismissed, Body: body})
+}
+
+func (f *fakeTracker) addPullComment(n int, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pullComments == nil {
+		f.pullComments = map[int][]tracker.Comment{}
+	}
+	f.pullComments[n] = append(f.pullComments[n], tracker.Comment{Author: "lander", Body: body, CreatedAt: clockTime})
+}
+
+func (f *fakeTracker) failPullComments(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commentsErr = err
+}
+
+func (f *fakeTracker) pullCommentsCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commentsCalls
 }
 
 func (f *fakeTracker) setPullTitle(n int, title string) {
@@ -1117,7 +1180,7 @@ func TestReap_autoRunReapedLikeManual(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ := f.st.ActiveRuns(t.Context())
 	if len(active) != 1 || active[0].Kind != store.RunKindAFKAuto {
 		t.Fatalf("scheduler launch = %+v, want one afk_auto run", active)
@@ -1387,7 +1450,7 @@ func TestThreeStrikes_pauseSchedulerAndManualUntilReset(t *testing.T) {
 	f.setFailures(f.repo, 2) // two strikes down — the boundary is >= 3
 
 	// Below the threshold the scheduler still launches (boundary check).
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ := f.st.ActiveRuns(t.Context())
 	if len(active) != 1 {
 		t.Fatalf("below-threshold scheduler launched %d runs, want 1", len(active))
@@ -1402,7 +1465,7 @@ func TestThreeStrikes_pauseSchedulerAndManualUntilReset(t *testing.T) {
 	}
 
 	// Paused: the scheduler skips the repo; a manual start 409s.
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 		t.Errorf("paused repo still scheduled %d runs", len(active))
 	}
@@ -1414,7 +1477,7 @@ func TestThreeStrikes_pauseSchedulerAndManualUntilReset(t *testing.T) {
 	if _, err := f.st.ResetRepoFailures(t.Context(), f.repo.ID); err != nil {
 		t.Fatal(err)
 	}
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ = f.st.ActiveRuns(t.Context())
 	if len(active) != 1 {
 		t.Errorf("reset repo scheduled %d runs, want 1 (re-armed)", len(active))
@@ -1437,7 +1500,7 @@ func TestSchedule_launchesLowestAsAuto(t *testing.T) {
 	f.trk.setReady(12, 7)
 	autoOn(f, f.repo)
 
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ := f.st.ActiveRuns(t.Context())
 	if len(active) != 1 {
 		t.Fatalf("scheduled %d runs, want 1", len(active))
@@ -1460,7 +1523,7 @@ func TestSchedule_serialPerRepoButManualAdditive(t *testing.T) {
 	if _, err := f.svc.StartManualAFK(t.Context(), f.repo.ID); err != nil {
 		t.Fatal(err)
 	}
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ := f.st.ActiveRuns(t.Context())
 	if len(active) != 2 {
 		t.Fatalf("active = %d, want 2 (manual + auto)", len(active))
@@ -1478,7 +1541,7 @@ func TestSchedule_serialPerRepoButManualAdditive(t *testing.T) {
 	// …but a live AUTO run keeps the loop serial: nothing new even with a
 	// fresh ready issue.
 	f.trk.setReady(7, 8, 9)
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 2 {
 		t.Errorf("second sweep launched a second auto run (%d active)", len(active))
 	}
@@ -1488,7 +1551,7 @@ func TestSchedule_gates(t *testing.T) {
 	t.Run("auto off does nothing", func(t *testing.T) {
 		f := newFixture(t)
 		f.trk.setReady(7)
-		f.svc.ScheduleOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 			t.Error("auto-off repo launched")
 		}
@@ -1496,7 +1559,7 @@ func TestSchedule_gates(t *testing.T) {
 	t.Run("no ready idles", func(t *testing.T) {
 		f := newFixture(t)
 		autoOn(f, f.repo)
-		f.svc.ScheduleOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 			t.Error("empty queue launched")
 		}
@@ -1506,7 +1569,7 @@ func TestSchedule_gates(t *testing.T) {
 		f.trk.setReady(7)
 		f.createClaimBranch(f.repo, "afk/7")
 		autoOn(f, f.repo)
-		f.svc.ScheduleOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 			t.Error("parked issue re-claimed by the scheduler")
 		}
@@ -1519,7 +1582,7 @@ func TestSchedule_gates(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.runner.AddLive("other~unrelated")
-		f.svc.ScheduleOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 			t.Error("at-cap sweep claimed/launched")
 		}
@@ -1532,7 +1595,7 @@ func TestSchedule_gates(t *testing.T) {
 		f.trk.setReady(7)
 		autoOn(f, f.repo)
 		f.prov.SetLoggedIn(false)
-		f.svc.ScheduleOnce(t.Context())
+		f.svc.SpawnOnce(t.Context())
 		if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 			t.Error("logged-out sweep launched")
 		}
@@ -1552,7 +1615,7 @@ func TestSchedule_pauseIsPerRepo(t *testing.T) {
 	healthyTrk.setReady(7)
 	autoOn(f, healthy)
 
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ := f.st.ActiveRuns(t.Context())
 	if len(active) != 1 {
 		t.Fatalf("active = %d, want 1 (only the healthy repo)", len(active))
@@ -1572,7 +1635,7 @@ func TestSchedule_concurrentSweepsStaySerial(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			f.svc.ScheduleOnce(context.Background())
+			f.svc.SpawnOnce(context.Background())
 		}()
 	}
 	wg.Wait()
@@ -1587,7 +1650,7 @@ func TestSchedule_concurrentSweepsStaySerial(t *testing.T) {
 }
 
 // listHookRunner interposes a callback before every SessionRunner.List, so a
-// test can make a session appear mid-tick — between the scheduler's initial
+// test can make a session appear mid-pass — between the spawn pass's initial
 // live-count snapshot and launch()'s fresh locked cap re-check, the window that
 // turns a per-repo cap hit into launchAtCap.
 type listHookRunner struct {
@@ -1606,14 +1669,15 @@ func (r *listHookRunner) List(ctx context.Context) ([]string, error) {
 	return r.Fake.List(ctx)
 }
 
-// Regression (D12c): launchAtCap must skip only the capped repo, not abort the
-// whole scheduler tick. Under per-repo cap overrides one repo hitting its cap
-// no longer implies every repo is at cap, so a later candidate with headroom
-// must still launch. The capped repo ("proj") is processed first (Repos()
-// orders by name) and a session lands mid-tick, so its launch returns
-// launchAtCap; the healthy repo ("zzz", default cap) must still get its run.
-// Before the fix the launchAtCap `return` aborted the whole tick and the
-// healthy repo idled until the next one.
+// Regression (D12c): an at-cap launch must skip only the capped repo, not
+// abort the whole spawn pass. Under per-repo cap overrides one repo hitting
+// its cap no longer implies every repo is at cap, so a later candidate with
+// headroom must still launch. The capped repo ("proj") is processed first
+// (Repos() orders by name) and a session lands mid-pass, so its launch
+// returns atCap; the healthy repo ("zzz", default cap) must still get its
+// run. Before the fix the at-cap `return` aborted the whole tick and the
+// healthy repo idled until the next one; the spawn pass keeps the per-repo
+// floor-raise semantics (#185).
 func TestSchedule_perRepoCapDoesNotAbortTick(t *testing.T) {
 	var hooked *listHookRunner
 	f := newFixtureWrapped(t, "afk/<N>", func(fake *tmuxx.Fake) tmuxx.SessionRunner {
@@ -1649,7 +1713,7 @@ func TestSchedule_perRepoCapDoesNotAbortTick(t *testing.T) {
 		}
 	}
 
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 
 	active, _ := f.st.ActiveRuns(t.Context())
 	if len(active) != 1 {
@@ -1700,7 +1764,7 @@ func TestSchedule_blockedIssueSkippedThenClaimedAfterBlockerCloses(t *testing.T)
 	autoOn(f, f.repo)
 
 	// #87 is the LOWER number but its blocker #74 is open, so #90 is claimed.
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ := f.st.ActiveRuns(t.Context())
 	if len(active) != 1 {
 		t.Fatalf("scheduled %d runs, want 1 (#87 held back by open #74)", len(active))
@@ -1728,7 +1792,7 @@ func TestSchedule_blockedIssueSkippedThenClaimedAfterBlockerCloses(t *testing.T)
 	f.trk.setReady() // clear the queue…
 	f.trk.setReadyIssue(87, "## Blocked by\n\n- #74\n")
 	f.trk.setOpen(87) // …#74 no longer open
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	active, _ = f.st.ActiveRuns(t.Context())
 	if len(active) != 1 {
 		t.Fatalf("second sweep active = %d, want 1 (#87 unblocked once #74 closed)", len(active))
@@ -1748,7 +1812,7 @@ func TestSchedule_allBlockedIsEmptyQueue(t *testing.T) {
 
 	// (a) auto sweep: nothing launches AND the counter is untouched.
 	autoOn(f, f.repo)
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 		t.Fatalf("all-blocked sweep launched %d runs, want 0", len(active))
 	}
@@ -1769,7 +1833,7 @@ func TestFilterClaimable_noOpenFetchWithoutRefs(t *testing.T) {
 	f.trk.setReady(7, 8) // setReady writes no Body → no `## Blocked by` refs
 	autoOn(f, f.repo)
 
-	f.svc.ScheduleOnce(t.Context()) // auto path filters (claims #7)
+	f.svc.SpawnOnce(t.Context()) // auto path filters (claims #7)
 	if _, err := f.svc.StartManualAFK(t.Context(), f.repo.ID); err != nil {
 		t.Fatalf("StartManualAFK: %v", err) // manual path filters too (claims #8)
 	}
@@ -1788,7 +1852,7 @@ func TestFilterClaimable_openFetchFailureFailsClosed(t *testing.T) {
 	// (a) auto sweep: skip the repo — no run, no panic, no failure strike (a
 	// fetch error is infrastructure, not a run outcome).
 	autoOn(f, f.repo)
-	f.svc.ScheduleOnce(t.Context())
+	f.svc.SpawnOnce(t.Context())
 	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 		t.Fatalf("fetch-failed sweep launched %d runs, want 0 (fail closed)", len(active))
 	}

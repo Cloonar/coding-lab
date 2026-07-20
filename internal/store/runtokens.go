@@ -53,7 +53,7 @@ type RunTokenInfo struct {
 	RunID       string
 	RepoID      string
 	IssueNumber *int
-	Kind        string // manual|afk_manual|afk_auto
+	Kind        string // manual|afk_manual|afk_auto|lander
 	Branch      string
 	Outcome     string
 	ExpiresAt   *time.Time

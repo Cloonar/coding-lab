@@ -137,6 +137,133 @@ func TestAddWorktree_failsLoudWithoutUsableOrigin(t *testing.T) {
 	}
 }
 
+// AddWorktreeExisting is the lander's adopt-branch checkout (issue #181):
+// the matrix covers the fresh-local-branch fork from origin/<branch>, the
+// existing-local-branch checkout, the checked-out-elsewhere refusal, the
+// missing-remote-branch refusal, and the hard alignment of a diverged local
+// branch back to origin/<branch>.
+func TestAddWorktreeExisting_realGitMatrix(t *testing.T) {
+	const branch = "afk/7"
+
+	// pushBranch publishes branch on the fixture origin with one commit past
+	// main and returns its tip SHA — the PR-head shape a lander adopts.
+	pushBranch := func(t *testing.T, f *wtFixture) string {
+		t.Helper()
+		gitCmd(t, f.home, f.origin, "branch", branch, "main")
+		gitCmd(t, f.home, f.origin, "checkout", "-q", branch)
+		gitCmd(t, f.home, f.origin, "commit", "-q", "--allow-empty", "-m", "claim work")
+		sha := gitCmd(t, f.home, f.origin, "rev-parse", branch)
+		gitCmd(t, f.home, f.origin, "checkout", "-q", "main")
+		return sha
+	}
+
+	// The adopt is DETACHED at origin/<branch>: it never holds the branch ref,
+	// which is what keeps a parked claim worktree from blocking it and what
+	// keeps unpushed commits on the claim branch alive (see the two cases
+	// below). "Aligned to what the forge sees" is unchanged — that is exactly
+	// what checking out the remote tip means.
+	t.Run("no local branch checks out detached at the origin tip", func(t *testing.T) {
+		f := newWtFixture(t)
+		want := pushBranch(t, f) // pushed AFTER the clone — the fetch must see it
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		if err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env); err != nil {
+			t.Fatalf("AddWorktreeExisting: %v", err)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s; want the freshly-fetched origin/%s tip %s", got, branch, want)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+			t.Errorf("worktree on %q; want a DETACHED HEAD", got)
+		}
+		if f.branchExists(branch) {
+			t.Errorf("local branch %s created; the adopt must never hold the ref", branch)
+		}
+	})
+
+	t.Run("existing local branch is left untouched", func(t *testing.T) {
+		f := newWtFixture(t)
+		want := pushBranch(t, f)
+		gitCmd(t, f.home, f.bare, "fetch", "-q", "origin")
+		gitCmd(t, f.home, f.bare, "branch", branch, "origin/"+branch)
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		if err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env); err != nil {
+			t.Fatalf("AddWorktreeExisting: %v", err)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s; want origin/%s tip %s", got, branch, want)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+			t.Errorf("worktree on %q; want a DETACHED HEAD", got)
+		}
+	})
+
+	// The regression this whole change exists for: a parked claim worktree
+	// (an AFK run whose dirty teardown kept it, or an operator Stop) holds
+	// afk/<N>. Claiming the ref here failed, and the poller respawned every
+	// tick forever. Detached, the parked worktree is simply irrelevant.
+	t.Run("a parked worktree holding the branch does not block the adopt", func(t *testing.T) {
+		f := newWtFixture(t)
+		want := pushBranch(t, f)
+		gitCmd(t, f.home, f.bare, "fetch", "-q", "origin")
+		parked := filepath.Join(f.wtRoot, "repo-7")
+		gitCmd(t, f.home, f.bare, "worktree", "add", "-q", "--track", "-b", branch, parked, "origin/"+branch)
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		if err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env); err != nil {
+			t.Fatalf("AddWorktreeExisting blocked by a parked worktree: %v", err)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s; want origin/%s tip %s", got, branch, want)
+		}
+		// The parked worktree keeps the branch it was holding, untouched.
+		if got := gitCmd(t, f.home, parked, "rev-parse", "--abbrev-ref", "HEAD"); got != branch {
+			t.Errorf("parked worktree HEAD = %q; want it still on %s", got, branch)
+		}
+	})
+
+	t.Run("missing remote branch is a clear error", func(t *testing.T) {
+		f := newWtFixture(t)
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env)
+		if err == nil {
+			t.Fatal("AddWorktreeExisting succeeded without origin/" + branch)
+		}
+		if !strings.Contains(err.Error(), "origin/"+branch+" does not exist after fetch") {
+			t.Errorf("error = %v; want the missing origin/%s named", err, branch)
+		}
+		if dirExists(wt) || f.branchExists(branch) {
+			t.Error("failed adopt left a worktree or branch behind")
+		}
+	})
+
+	// A local branch ahead of origin is a success-path reap that parked
+	// committed-but-unpushed work (RemoveWorktree's own comment names this
+	// case). The lander must still validate what the FORGE sees, so its
+	// worktree sits at the origin tip — but the drifted branch ref survives,
+	// because a detached checkout cannot move it. Checking the branch out and
+	// hard-resetting it, as this did before, destroyed those commits silently.
+	t.Run("local branch ahead of origin is preserved, worktree at the origin tip", func(t *testing.T) {
+		f := newWtFixture(t)
+		want := pushBranch(t, f)
+		gitCmd(t, f.home, f.bare, "fetch", "-q", "origin")
+		drift := filepath.Join(f.wtRoot, "repo-drift")
+		gitCmd(t, f.home, f.bare, "worktree", "add", "-q", "--track", "-b", branch, drift, "origin/"+branch)
+		gitCmd(t, f.home, drift, "commit", "-q", "--allow-empty", "-m", "local drift")
+		drifted := gitCmd(t, f.home, drift, "rev-parse", "HEAD")
+		gitCmd(t, f.home, f.bare, "worktree", "remove", "--force", drift)
+
+		wt := filepath.Join(f.wtRoot, "repo-lander-7")
+		if err := f.eng.AddWorktreeExisting(t.Context(), f.bare, wt, branch, f.env); err != nil {
+			t.Fatalf("AddWorktreeExisting: %v", err)
+		}
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s; want origin/%s tip %s (the lander validates what the forge sees)", got, branch, want)
+		}
+		if got := gitCmd(t, f.home, f.bare, "rev-parse", "refs/heads/"+branch); got != drifted {
+			t.Errorf("local branch %s = %s; want the unpushed commit %s preserved", branch, got, drifted)
+		}
+	})
+}
+
 // BranchMerged's exit-code trichotomy: exit 0 → (true,nil); exit 1 →
 // (false,nil), a definite "keep", not an error; any other failure (here an
 // unresolvable ref, exit 128) → (false, err) the caller treats

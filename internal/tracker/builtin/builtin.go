@@ -302,6 +302,41 @@ func (t *Tracker) MergePull(ctx context.Context, number int) (tracker.PullRef, e
 	return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: %w", number, err)
 }
 
+// Reviews lists the submitted reviews on change request `number` — always an
+// empty result. Reviews are forge-observable state; a lab-internal change
+// request has no review model, so the built-in binding defers them (a harmless
+// empty read, like Checks). It does NOT look the CR up: an empty review list is
+// the honest answer for any number, and the autoland loop's human-review read
+// is a forge-binding concern (ADR-0048).
+func (t *Tracker) Reviews(ctx context.Context, number int) ([]tracker.Review, error) {
+	return nil, nil
+}
+
+// RerequestReview and CommentPull are the review-adjacent WRITE verbs the
+// built-in binding deliberately does not implement yet: a lab-internal change
+// request has no forge review model to ping and no PR comment thread to write
+// to, so rather than fake a result each wraps tracker.ErrUnsupported with a
+// short message naming the verb (the API layer answers "not supported on this
+// tracker" — distinct from a forge failure). CommentPull is the gate on
+// builtin autoland: once the built-in tracker grows CR comments, the verdict
+// verbs composed over it work here with zero further changes (ADR-0048).
+func (t *Tracker) RerequestReview(ctx context.Context, number int) error {
+	return fmt.Errorf("%w: re-request review on the built-in tracker", tracker.ErrUnsupported)
+}
+
+func (t *Tracker) CommentPull(ctx context.Context, number int, body string) error {
+	return fmt.Errorf("%w: pull review comment on the built-in tracker", tracker.ErrUnsupported)
+}
+
+// PullComments is CommentPull's read counterpart, deferred for the same
+// reason: a lab-internal change request has no PR comment thread yet, so
+// there is nothing for the autoland poller (ADR-0048) to list. Once the
+// built-in tracker grows CR comments, this and CommentPull work here with
+// zero further changes (ADR-0048).
+func (t *Tracker) PullComments(ctx context.Context, number int) ([]tracker.Comment, error) {
+	return nil, fmt.Errorf("%w: pull comment listing on the built-in tracker", tracker.ErrUnsupported)
+}
+
 // CloseIssue transitions an issue to closed (stamping closed_at).
 func (t *Tracker) CloseIssue(ctx context.Context, number int) error {
 	if _, err := t.store.UpdateIssue(ctx, t.repoID, number,

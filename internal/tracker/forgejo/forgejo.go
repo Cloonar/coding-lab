@@ -118,6 +118,17 @@ type fjComment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// fjReview is one row of the pull-reviews list (swagger PullReview): the
+// reviewer under `user`, the review-event word under `state` (ReviewStateType:
+// APPROVED, REQUEST_CHANGES, COMMENT, REQUEST_REVIEW, PENDING, or the empty
+// UNKNOWN), the review body, and the forge's `dismissed` flag.
+type fjReview struct {
+	User      fjUser `json:"user"`
+	State     string `json:"state"`
+	Body      string `json:"body"`
+	Dismissed bool   `json:"dismissed"`
+}
+
 type fjPullHead struct {
 	Ref string `json:"ref"`
 	Sha string `json:"sha"`
@@ -499,6 +510,96 @@ func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, er
 	}, nil
 }
 
+// Reviews lists the submitted reviews on pull `number`, oldest first — the read
+// behind the human half of the autoland loop's hybrid rejected-state
+// (ADR-0048). Forgejo returns them submission-ordered;
+// each review's user login is the Reviewer, its state normalized onto lab's
+// Review* vocabulary (an unrecognized state passes through lowercased), and its
+// `dismissed` flag carried through. The endpoint paginates like every list
+// (page/limit, swagger-declared), so it walks through fetchPages — a single GET
+// would silently truncate a pull with many reviews. An unknown number is
+// Forgejo's 404, which statusError unwraps to tracker.ErrNotFound like every
+// single-subject read.
+func (c *Client) Reviews(ctx context.Context, number int) ([]tracker.Review, error) {
+	fjs, err := fetchPages[fjReview](ctx, c, c.pullPath(number)+"/reviews", nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tracker.Review, 0, len(fjs))
+	for _, fj := range fjs {
+		out = append(out, toReview(fj))
+	}
+	return out, nil
+}
+
+// RerequestReview re-requests review from every reviewer whose LATEST
+// verdict-bearing, non-dismissed review requests changes. It GETs the reviews,
+// reduces them to the latest verdict per reviewer (submission order, last
+// verdict wins; only APPROVED/REQUEST_CHANGES rows carry a verdict — dismissed
+// reviews and non-verdict rows like COMMENT, REQUEST_REVIEW, or PENDING are
+// skipped), and if any reviewer's latest verdict is changes-requested POSTs
+// their logins to /requested_reviewers. No such reviewer is a convergent no-op
+// success — nothing to re-request — mirroring MergePull's already-merged
+// no-op. Accepted consequence: a successful re-request does not change the
+// reviewer's latest verdict (they ARE still changes-requested until they
+// re-review), so a repeated call re-POSTs the same reviewers instead of
+// no-opping — faithful, and the forge handles a duplicate request
+// idempotently. A forge refusal wraps tracker.ErrReviewRejected with its own
+// words; an unknown number stays tracker.ErrNotFound.
+func (c *Client) RerequestReview(ctx context.Context, number int) error {
+	reviews, err := c.Reviews(ctx, number)
+	if err != nil {
+		return err
+	}
+	reviewers := changesRequestedReviewers(reviews)
+	if len(reviewers) == 0 {
+		return nil // convergent no-op: nobody is currently requesting changes
+	}
+	req := struct {
+		Reviewers []string `json:"reviewers"`
+	}{Reviewers: reviewers}
+	if err := c.do(ctx, http.MethodPost, c.pullPath(number)+"/requested_reviewers", nil, req, nil); err != nil {
+		if errors.Is(err, tracker.ErrNotFound) {
+			return err
+		}
+		return fmt.Errorf("%w: %s", tracker.ErrReviewRejected, err.Error())
+	}
+	return nil
+}
+
+// CommentPull posts a plain discussion comment on pull `number`. A PR shares
+// the issue-comment number space on Forgejo, so this posts to the same
+// issue-comment endpoint CreateComment uses. An unknown number stays
+// tracker.ErrNotFound.
+func (c *Client) CommentPull(ctx context.Context, number int, body string) error {
+	req := struct {
+		Body string `json:"body"`
+	}{Body: body}
+	return c.do(ctx, http.MethodPost, c.issuePath(number)+"/comments", nil, req, nil)
+}
+
+// PullComments lists pull `number`'s discussion comments, oldest first — the
+// READ counterpart of CommentPull, the autoland poller's route onto verdict
+// markers (ADR-0048). A PR shares the issue-comment number space on Forgejo,
+// so this reads and maps the SAME endpoint Issue's comment thread does. It
+// cannot go through fetchPages for the same reason Issue doesn't: Forgejo's
+// GET /issues/{index}/comments accepts only since/before and ignores
+// page/limit, always returning the full list — a pagination loop over it
+// never terminates once a pull has >= pageLimit comments. An unknown number
+// is Forgejo's 404, which statusError unwraps to tracker.ErrNotFound like
+// every single-subject read.
+func (c *Client) PullComments(ctx context.Context, number int) ([]tracker.Comment, error) {
+	var fcs []fjComment
+	if err := c.do(ctx, http.MethodGet, c.issuePath(number)+"/comments", nil, nil, &fcs); err != nil {
+		return nil, err
+	}
+	comments := make([]tracker.Comment, 0, len(fcs))
+	for _, fc := range fcs {
+		comments = append(comments, toComment(fc))
+	}
+	return comments, nil
+}
+
 // CloseIssue closes an issue via PATCH state=closed.
 func (c *Client) CloseIssue(ctx context.Context, number int) error {
 	req := struct {
@@ -777,15 +878,89 @@ func toLabel(fj fjLabel) tracker.Label {
 }
 
 func toComment(fc fjComment) tracker.Comment {
-	author := fc.User.Login
-	if author == "" {
-		author = fc.User.Username
-	}
 	return tracker.Comment{
-		Author:    author,
+		Author:    fjLogin(fc.User),
 		Body:      fc.Body,
 		CreatedAt: fc.CreatedAt,
 	}
+}
+
+// fjLogin resolves a Forgejo user's display login, falling back to username
+// when login is empty (some payloads populate only one of the two).
+func fjLogin(u fjUser) string {
+	if u.Login != "" {
+		return u.Login
+	}
+	return u.Username
+}
+
+// toReview maps one Forgejo review row onto lab's Review vocabulary: the
+// reviewer login, the state normalized onto the Review* vocabulary, the body,
+// and the forge's dismissed flag.
+func toReview(fj fjReview) tracker.Review {
+	return tracker.Review{
+		Reviewer:  fjLogin(fj.User),
+		State:     mapReviewState(fj.State),
+		Body:      fj.Body,
+		Dismissed: fj.Dismissed,
+	}
+}
+
+// mapReviewState normalizes a Forgejo review-event word onto lab's Review*
+// vocabulary. Forgejo's ReviewStateType values are APPROVED, REQUEST_CHANGES,
+// COMMENT, and REQUEST_REVIEW, plus PENDING and the empty UNKNOWN. The four lab
+// recognizes map onto the constants; anything else (PENDING, "", or a word this
+// package does not know) passes through lowercased, so the agent still sees
+// exactly what the forge said (the "backend's own words" pattern, ADR-0024).
+func mapReviewState(state string) string {
+	switch state {
+	case "APPROVED":
+		return tracker.ReviewApproved
+	case "REQUEST_CHANGES":
+		return tracker.ReviewChangesRequested
+	case "COMMENT":
+		return tracker.ReviewCommented
+	case "REQUEST_REVIEW":
+		return tracker.ReviewRequested
+	default:
+		return strings.ToLower(state)
+	}
+}
+
+// changesRequestedReviewers returns the reviewer logins whose LATEST
+// verdict-bearing, non-dismissed review requests changes, in first-seen order.
+// Reviews arrive oldest-first, so the last VERDICT seen per reviewer is their
+// latest verdict: only approved/changes-requested rows carry one — the forge's
+// own rule (Forgejo's preparePullReviewType recognizes only
+// APPROVED/REQUEST_CHANGES as verdict events), so a later comment or
+// re-request-review row neither sets nor clears a reviewer's verdict (a
+// reviewer who requested changes and then replied in the thread is STILL
+// requesting changes). A dismissed review does not count (the forge cleared
+// it); a reviewer whose latest verdict is an approval drops out of the set.
+// Operates on the already-normalized tracker.Review vocabulary (Reviews()
+// maps it).
+func changesRequestedReviewers(reviews []tracker.Review) []string {
+	latest := make(map[string]string, len(reviews))
+	order := make([]string, 0, len(reviews))
+	for _, r := range reviews {
+		if r.Reviewer == "" || r.Dismissed {
+			continue
+		}
+		if r.State != tracker.ReviewApproved && r.State != tracker.ReviewChangesRequested {
+			continue // non-verdict row: commented/review_requested/pending/unknown
+		}
+		if _, seen := latest[r.Reviewer]; !seen {
+			order = append(order, r.Reviewer)
+		}
+		latest[r.Reviewer] = r.State
+	}
+	out := make([]string, 0, len(order))
+	for _, name := range order {
+		if latest[name] == tracker.ReviewChangesRequested {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func toPullRef(fj fjPull) tracker.PullRef {

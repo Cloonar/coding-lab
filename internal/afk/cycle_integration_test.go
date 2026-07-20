@@ -28,9 +28,9 @@ package afk_test
 //     keeps the unmerged branch, failures reset to 0, run tokens 401.
 //  2. three strikes: a doomed run (fake claude sleeps; 1-minute repo budget
 //     override + clock advance to the inclusive boundary) times out three
-//     times → repo paused: the scheduler skips it and a manual start is
+//     times → repo paused: the spawn pass skips it and a manual start is
 //     refused (ErrRepoPaused — the operator API's 409); reset re-arms and
-//     the next ScheduleOnce launches an auto run.
+//     the next SpawnOnce launches an auto run.
 //  3. neutral Stop mid-run through the instance.Stop delegation seam:
 //     outcome stopped, counter untouched, worktree + branch survive and the
 //     parked listing (reconcile.Parked) shows the branch; an over-budget
@@ -149,10 +149,34 @@ type cycleForgePull struct {
 	Merged bool
 }
 
+// cycleForgeReview is one canned row of GET /pulls/{n}/reviews, in the fields
+// the real forgejo client decodes (fjReview: user/state/dismissed).
+type cycleForgeReview struct {
+	User      string
+	State     string
+	Dismissed bool
+}
+
+// cycleForgeLabel is one row of the repo label set, in the fields the real
+// forgejo client decodes (fjLabel: id/name/color/description). The IDs matter:
+// the client resolves label NAMES into forge ids client-side (the
+// labels-are-IDs quirk stays behind its seam), so the escalate seed's label
+// verbs round-trip through them. The fake hands ids out 1-based in creation
+// order.
+type cycleForgeLabel struct {
+	ID          int64
+	Name        string
+	Color       string
+	Description string
+}
+
 type cycleForgeRepo struct {
 	issues     []cycleForgeIssue
 	pulls      []cycleForgePull
-	pullsLists int // GET /pulls page-1 requests — one per Tracker.Pulls()
+	labels     []cycleForgeLabel          // the repo label SET (issue rows attach by name)
+	comments   map[int][]string           // issue/PR comment bodies — the SHARED number space (verdict markers land here)
+	reviews    map[int][]cycleForgeReview // canned native reviews per pull
+	pullsLists int                        // GET /pulls page-1 requests — one per Tracker.Pulls()
 }
 
 // cycleForge is a minimal stateful Forgejo: exactly the endpoints the real
@@ -172,7 +196,105 @@ func newCycleForge(t *testing.T, token string) *cycleForge {
 func (f *cycleForge) addRepo(owner, name string, issues ...cycleForgeIssue) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.repos[owner+"/"+name] = &cycleForgeRepo{issues: issues}
+	f.repos[owner+"/"+name] = &cycleForgeRepo{
+		issues:   issues,
+		comments: map[int][]string{},
+		reviews:  map[int][]cycleForgeReview{},
+	}
+}
+
+// addPull seeds a pull directly — the autoland scenarios start from a PR that
+// pre-exists any run, exactly what the poller sweeps.
+func (f *cycleForge) addPull(owner, name string, p cycleForgePull) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.repos[owner+"/"+name]
+	st.pulls = append(st.pulls, p)
+}
+
+// addComment seeds a PR/issue comment (the pre-existing verdict marker of the
+// suppression sweep).
+func (f *cycleForge) addComment(owner, name string, n int, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.repos[owner+"/"+name]
+	st.comments[n] = append(st.comments[n], body)
+}
+
+// addReview seeds a canned native review on pull n.
+func (f *cycleForge) addReview(owner, name string, n int, r cycleForgeReview) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.repos[owner+"/"+name]
+	st.reviews[n] = append(st.reviews[n], r)
+}
+
+// addLabel seeds a repo-set label — the escalate seed's label verbs resolve
+// names against this set, and an unseeded name is tracker.ErrUnknownLabel
+// (the forgejo client's strict resolution), so the flip's source label must
+// pre-exist like a real triaged repo's would.
+func (f *cycleForge) addLabel(owner, name, label string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.repos[owner+"/"+name]
+	st.labels = append(st.labels, cycleForgeLabel{ID: int64(len(st.labels) + 1), Name: label})
+}
+
+// repoLabelNames returns the repo label set's names (a copy).
+func (f *cycleForge) repoLabelNames(owner, name string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, l := range f.repos[owner+"/"+name].labels {
+		out = append(out, l.Name)
+	}
+	return out
+}
+
+// issueLabelNames returns issue n's attached label names (a copy).
+func (f *cycleForge) issueLabelNames(owner, name string, n int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, is := range f.repos[owner+"/"+name].issues {
+		if is.Number == n {
+			return append([]string(nil), is.Labels...)
+		}
+	}
+	f.t.Errorf("fake forge: issueLabelNames(%d): no such issue", n)
+	return nil
+}
+
+// dropLastComment deletes thread n's newest comment — the harness's stand-in
+// for a human deleting a marker comment from the forge UI (the #182
+// terminality proof re-sweeps after exactly this mutation).
+func (f *cycleForge) dropLastComment(owner, name string, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.repos[owner+"/"+name]
+	if len(st.comments[n]) == 0 {
+		f.t.Errorf("fake forge: dropLastComment(%d): thread is empty", n)
+		return
+	}
+	st.comments[n] = st.comments[n][:len(st.comments[n])-1]
+}
+
+// commentsOf returns pull/issue n's comment bodies (a copy).
+func (f *cycleForge) commentsOf(owner, name string, n int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.repos[owner+"/"+name].comments[n]...)
+}
+
+// pullByNumber returns the pull with Number n, ok=false when absent.
+func (f *cycleForge) pullByNumber(owner, name string, n int) (cycleForgePull, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.repos[owner+"/"+name].pulls {
+		if p.Number == n {
+			return p, true
+		}
+	}
+	return cycleForgePull{}, false
 }
 
 func (f *cycleForge) pull(owner, name string, i int) (cycleForgePull, int) {
@@ -203,9 +325,13 @@ func (f *cycleForge) issueJSON(is cycleForgeIssue) map[string]any {
 	}
 }
 
+func (f *cycleForge) labelJSON(l cycleForgeLabel) map[string]any {
+	return map[string]any{"id": l.ID, "name": l.Name, "color": l.Color, "description": l.Description}
+}
+
 func (f *cycleForge) pullJSON(owner, name string, p cycleForgePull) map[string]any {
 	return map[string]any{
-		"number": p.Number, "state": p.State, "merged": p.Merged,
+		"number": p.Number, "state": p.State, "merged": p.Merged, "title": p.Title,
 		"head":     map[string]any{"ref": p.Head},
 		"html_url": "https://forge.test/" + owner + "/" + name + "/pulls/" + strconv.Itoa(p.Number),
 	}
@@ -276,10 +402,203 @@ func (f *cycleForge) handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/issues/{n}/comments", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if state(w, r) == nil {
+		st := state(w, r)
+		if st == nil {
 			return
 		}
-		writeJSON(w, http.StatusOK, []map[string]any{})
+		// The SHARED issue/PR comment thread (Forgejo's number space): both
+		// Issue(n)'s thread read and PullComments(n) decode these rows
+		// (fjComment: body/user/created_at). Un-paginated, like the real
+		// endpoint — the client never pages it.
+		n, _ := strconv.Atoi(r.PathValue("n"))
+		out := []map[string]any{}
+		for _, body := range st.comments[n] {
+			out = append(out, map[string]any{
+				"body": body, "user": map[string]any{"login": "lab"},
+				"created_at": "2026-07-06T12:00:00Z",
+			})
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/issues/{n}/comments", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		var req struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		n, _ := strconv.Atoi(r.PathValue("n"))
+		st.comments[n] = append(st.comments[n], req.Body)
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"body": req.Body, "user": map[string]any{"login": "lab"},
+			"created_at": "2026-07-06T12:00:00Z",
+		})
+	})
+	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{n}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		n, _ := strconv.Atoi(r.PathValue("n"))
+		for _, p := range st.pulls {
+			if p.Number == n {
+				writeJSON(w, http.StatusOK, f.pullJSON(r.PathValue("owner"), r.PathValue("repo"), p))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{n}/merge", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		n, _ := strconv.Atoi(r.PathValue("n"))
+		for i := range st.pulls {
+			if st.pulls[i].Number == n {
+				// Forgejo's merged shape: state "closed" + merged true — the
+				// client's derivePullState collapses that to "merged".
+				st.pulls[i].State = "closed"
+				st.pulls[i].Merged = true
+				writeJSON(w, http.StatusOK, map[string]any{})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{n}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		// Paginated like the real endpoint (the client walks fetchPages):
+		// rows on page 1, the empty page ends the walk.
+		out := []map[string]any{}
+		if r.URL.Query().Get("page") == "1" {
+			n, _ := strconv.Atoi(r.PathValue("n"))
+			for _, rev := range st.reviews[n] {
+				out = append(out, map[string]any{
+					"user": map[string]any{"login": rev.User}, "state": rev.State,
+					"body": "", "dismissed": rev.Dismissed,
+				})
+			}
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	// The label surface the #182 escalate seed drives through the real labctl
+	// verbs: `labctl label create` is the client's list-first EnsureLabel
+	// (GET + POST /labels), and the issue label add/remove pair resolves
+	// names to ids over the same GET before POSTing/DELETEing per issue.
+	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/labels", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		// Paginated like the real endpoint (the client's repoLabels walks
+		// fetchPages): rows on page 1, the empty page ends the walk.
+		out := []map[string]any{}
+		if r.URL.Query().Get("page") == "1" {
+			for _, l := range st.labels {
+				out = append(out, f.labelJSON(l))
+			}
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/labels", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		var req struct {
+			Name        string `json:"name"`
+			Color       string `json:"color"`
+			Description string `json:"description"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		l := cycleForgeLabel{ID: int64(len(st.labels) + 1), Name: req.Name, Color: req.Color, Description: req.Description}
+		st.labels = append(st.labels, l)
+		writeJSON(w, http.StatusCreated, f.labelJSON(l))
+	})
+	mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/issues/{n}/labels", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		var req struct {
+			Labels []int64 `json:"labels"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		n, _ := strconv.Atoi(r.PathValue("n"))
+		for i := range st.issues {
+			if st.issues[i].Number != n {
+				continue
+			}
+			for _, id := range req.Labels {
+				for _, l := range st.labels {
+					if l.ID == id && !cycleHasLabel(st.issues[i], l.Name) {
+						st.issues[i].Labels = append(st.issues[i].Labels, l.Name)
+					}
+				}
+			}
+			writeJSON(w, http.StatusOK, []map[string]any{})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/issues/{n}/labels/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st := state(w, r)
+		if st == nil {
+			return
+		}
+		n, _ := strconv.Atoi(r.PathValue("n"))
+		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		for i := range st.issues {
+			if st.issues[i].Number != n {
+				continue
+			}
+			for _, l := range st.labels {
+				if l.ID != id {
+					continue
+				}
+				kept := st.issues[i].Labels[:0]
+				for _, name := range st.issues[i].Labels {
+					if name != l.Name {
+						kept = append(kept, name)
+					}
+				}
+				st.issues[i].Labels = kept
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
 	})
 	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -453,6 +772,31 @@ func cycleBranchExists(env []string, bareDir, branch string) bool {
 
 // --- the world -----------------------------------------------------------------
 
+// cycleNotes records every done-signal push the reaper fires through the
+// injected Notify seam — the harness's push observer.
+type cycleNotes struct {
+	mu  sync.Mutex
+	got []afk.Notification
+}
+
+func (r *cycleNotes) record(n afk.Notification) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, n)
+}
+
+func (r *cycleNotes) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.got)
+}
+
+func (r *cycleNotes) all() []afk.Notification {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]afk.Notification(nil), r.got...)
+}
+
 type cycleWorld struct {
 	t     *testing.T
 	ctx   context.Context
@@ -466,6 +810,7 @@ type cycleWorld struct {
 	clock *testutil.FakeClock
 	agent *httptest.Server
 	bus   *events.Bus
+	notes *cycleNotes
 
 	home         string
 	env          []string
@@ -557,10 +902,12 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	if err != nil {
 		t.Fatalf("instance.New: %v", err)
 	}
+	notes := &cycleNotes{}
 	svc, err := afk.New(afk.Options{
 		Store: st, Git: git, Runner: runner, Trackers: trackers,
 		Instances: inst, Materializer: mat, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
+		Notify: notes.record,
 	})
 	if err != nil {
 		t.Fatalf("afk.New: %v", err)
@@ -577,7 +924,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 
 	return &cycleWorld{
 		t: t, ctx: ctx, svc: svc, inst: inst, recon: recon, st: st, tmux: runner,
-		forge: forge, prov: prov, clock: clock, agent: agent, bus: bus,
+		forge: forge, prov: prov, clock: clock, agent: agent, bus: bus, notes: notes,
 		home: home, env: env, reposDir: reposDir, labctlDir: filepath.Dir(labctlBin),
 		forgeOwner: "it", forgeToken: forgeToken, forgeCredID: credID,
 		worktreeRoot: worktreeRoot,
@@ -882,7 +1229,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 		}
 
 		// Paused: the scheduler skips the repo entirely...
-		w.svc.ScheduleOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		if w.alive("doom~afk-auto-1") {
 			t.Fatal("scheduler launched on a paused repo")
 		}
@@ -896,7 +1243,7 @@ func TestAFKCycleIntegration(t *testing.T) {
 		if changed, err := w.st.ResetRepoFailures(w.ctx, doom.ID); err != nil || !changed {
 			t.Fatalf("ResetRepoFailures: changed=%v err=%v", changed, err)
 		}
-		w.svc.ScheduleOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
 		run, err := w.st.RunBySession(w.ctx, "doom~afk-auto-1")
 		if err != nil {
 			t.Fatalf("no auto run after reset: %v", err)
@@ -1623,6 +1970,778 @@ func TestAFKCycleIncogniBuiltinIntegration(t *testing.T) {
 		}
 		if !cycleBranchExists(w.env, w.bare(repo), "issue-2") {
 			t.Error("unmerged claim branch issue-2 was deleted by the timeout teardown")
+		}
+	})
+}
+
+// --- the #181 autoland variant ---------------------------------------------------
+
+// landerScript is the fake claude of a lander run: it drives the REAL labctl
+// verdict verbs (via PATH, LAB_TOKEN from the session env) against the real
+// agent API, records the exit status, then idles like a real agent CLI — the
+// reaper's forge-observable classification, never the exit, ends the run.
+func landerScript(out, bin string, cmds ...string) string {
+	return `#!/bin/sh
+OUT=` + shq(out) + `
+BIN=` + shq(bin) + `
+PATH="$BIN:$PATH"; export PATH
+(
+  set -ex
+  ` + strings.Join(cmds, "\n  ") + `
+) >> "$OUT/log.txt" 2>&1
+printf '%s\n' "$?" > "$OUT/status"
+exec sleep 600
+`
+}
+
+// fixCycleScript is the fake claude of a fix run (issue #182): capture the
+// FULL seed prompt (the rejection work order rides in it), make a real repair
+// commit on the DETACHED worktree, push the explicit refspec the seed
+// contract pins (a bare `git push` has no upstream on a detached worktree),
+// then post the done-signal through the real `labctl pr rerequest` — and
+// NEVER `labctl pr create`: the PR exists, and the no-new-PR assertion reads
+// the fake forge's pull count. The pushed HEAD sha is recorded so the merge
+// scenario can prove the fix commit is what merged.
+func fixCycleScript(out, bin, branch string, pr int) string {
+	return `#!/bin/sh
+OUT=` + shq(out) + `
+BIN=` + shq(bin) + `
+for seed in "$@"; do :; done  # the seed prompt is the trailing positional (after any --settings flag)
+printf '%s' "$seed" > "$OUT/seed.txt"
+PATH="$BIN:$PATH"; export PATH
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+(
+  set -ex
+  printf 'repaired\n' > fix.txt
+  git add fix.txt
+  git commit -q -m 'fix: address the rejection findings'
+  git rev-parse HEAD > "$OUT/head.txt"
+  git push -q origin HEAD:refs/heads/` + branch + `
+  labctl pr rerequest ` + strconv.Itoa(pr) + `
+) >> "$OUT/log.txt" 2>&1
+printf '%s\n' "$?" > "$OUT/status"
+exec sleep 600
+`
+}
+
+// seedClaimBranch pushes a claim branch with one commit of its own onto the
+// repo's origin — the shape of an AFK run's opened PR head, adoptable by the
+// lander (AddWorktreeExisting fetches origin/<branch>).
+func seedClaimBranch(t *testing.T, w *cycleWorld, origin, branch, workFile string) {
+	t.Helper()
+	gitCmd(t, w.home, origin, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(origin, workFile), []byte("done\n"), 0o644); err != nil {
+		t.Fatalf("write work file: %v", err)
+	}
+	gitCmd(t, w.home, origin, "add", workFile)
+	gitCmd(t, w.home, origin, "commit", "-q", "-m", "feat: claim work")
+	gitCmd(t, w.home, origin, "checkout", "-q", "main")
+}
+
+// waitCycleStatus waits for the fake claude's exit-status file and fails on a
+// non-zero script.
+func waitCycleStatus(t *testing.T, out string) {
+	t.Helper()
+	status := waitForCycleFile(t, filepath.Join(out, "status"), filepath.Join(out, "log.txt"), 90*time.Second)
+	if strings.TrimSpace(status) != "0" {
+		log, _ := os.ReadFile(filepath.Join(out, "log.txt"))
+		t.Fatalf("fake claude exited %s; log:\n%s", strings.TrimSpace(status), log)
+	}
+}
+
+// TestAutolandCycleIntegration is the issue #181 acceptance, local form: the
+// state-derived autoland poller and the lander run over the same real seams
+// as the AFK cycle — real engine, real store, real git, real tmux, the real
+// forgejo REST client against the stateful fake forge, the real agent API,
+// and the real labctl verdict verbs driven by fake claude scripts. Each
+// scenario gets its own forge-bound repo with autoland enabled (the settings
+// live on the repos row); the lander gather is driven by explicit SpawnOnce
+// passes and the reaper by explicit ReapOnce ticks, exactly what ReaperLoop
+// runs per tick (#185). The suppression sweep runs LAST: its seeded active-run row
+// has no live session and must never be exposed to a ReapOnce.
+func TestAutolandCycleIntegration(t *testing.T) {
+	w := newCycleWorld(t)
+
+	// --- scenario a: clean PASS, auto_merge on -------------------------------
+	outA := t.TempDir()
+	scriptA := writeCycleScript(t, "claude-lander-pass.sh",
+		landerScript(outA, w.labctlDir, "labctl pr approve 1", "labctl pr merge 1"))
+	landa, originA := w.addRepo("landa", scriptA, func(r *store.Repo) {
+		r.AutolandEnabled = true
+		r.AutoMerge = true
+	})
+	seedClaimBranch(t, w, originA, "afk/1", "work.txt")
+	w.forge.addPull(w.forgeOwner, "landa", cycleForgePull{
+		Number: 1, Head: "afk/1", Base: "main", Title: "resolve the flux issue", State: "open",
+	})
+
+	ok := t.Run("clean PASS with auto_merge merges", func(t *testing.T) {
+		w.svc.SpawnOnce(w.ctx)
+		run, err := w.st.RunBySession(w.ctx, "landa~lander-1")
+		if err != nil {
+			t.Fatalf("no lander run after the sweep: %v", err)
+		}
+		if run.Kind != store.RunKindLander || run.Branch != "afk/1" ||
+			run.IssueNumber == nil || *run.IssueNumber != 1 {
+			t.Fatalf("run = kind %s branch %s issue %v, want lander afk/1 issue 1", run.Kind, run.Branch, run.IssueNumber)
+		}
+		// The AFK budget rule applies verbatim: the row carries the clock.
+		if run.BudgetDeadline == nil {
+			t.Fatal("lander run has no persisted budget_deadline")
+		}
+		if !w.alive("landa~lander-1") {
+			t.Fatal("lander session not live")
+		}
+		// A second sweep while the lander lives is idempotent by state.
+		w.svc.SpawnOnce(w.ctx)
+		if runs, err := w.st.ActiveRunsByRepo(w.ctx, landa.ID); err != nil || len(runs) != 1 {
+			t.Fatalf("active runs after the second sweep = %d (err %v), want still 1", len(runs), err)
+		}
+
+		// The script approves then merges through the real labctl verbs.
+		waitCycleStatus(t, outA)
+
+		// Reap: the merged PR is the lander's done-signal.
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		got := w.run(landa, run.ID)
+		if got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("outcome = %s, want success off the merged PR", got.Outcome)
+		}
+		if w.alive("landa~lander-1") {
+			t.Error("lander session still live after the success reap")
+		}
+		pull, found := w.forge.pullByNumber(w.forgeOwner, "landa", 1)
+		if !found || !pull.Merged {
+			t.Errorf("forge pull = %+v, want merged", pull)
+		}
+		comments := w.forge.commentsOf(w.forgeOwner, "landa", 1)
+		if len(comments) != 1 || comments[0] != tracker.VerdictPass {
+			t.Errorf("PR comments = %q, want exactly the bare pass marker", comments)
+		}
+		if f := w.failures(landa); f != 0 {
+			t.Errorf("consecutive_failures = %d, want 0 (a lander success never strikes)", f)
+		}
+		// No done-signal push for a lander: the copy is "opened PR #n" and it
+		// opened nothing (the Notify seam is the harness's push observer).
+		if n := w.notes.count(); n != 0 {
+			t.Errorf("lander success reap sent %d pushes, want 0", n)
+		}
+	})
+	if !ok {
+		t.Fatal("clean-PASS scenario failed; skipping the dependent scenarios")
+	}
+
+	// --- scenario b: auto_merge off stops at the approve ----------------------
+	outB := t.TempDir()
+	scriptB := writeCycleScript(t, "claude-lander-approve.sh",
+		landerScript(outB, w.labctlDir, "labctl pr approve 1"))
+	landb, originB := w.addRepo("landb", scriptB, func(r *store.Repo) {
+		r.AutolandEnabled = true
+		r.AutoMerge = false
+	})
+	seedClaimBranch(t, w, originB, "afk/1", "work.txt")
+	w.forge.addPull(w.forgeOwner, "landb", cycleForgePull{
+		Number: 1, Head: "afk/1", Base: "main", Title: "resolve", State: "open",
+	})
+
+	t.Run("auto_merge off ends approved and unmerged", func(t *testing.T) {
+		w.svc.SpawnOnce(w.ctx)
+		run, err := w.st.RunBySession(w.ctx, "landb~lander-1")
+		if err != nil {
+			t.Fatalf("no lander run after the sweep: %v", err)
+		}
+		waitCycleStatus(t, outB)
+
+		// Reap: the pass marker on the still-open PR is the done-signal.
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		got := w.run(landb, run.ID)
+		if got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("outcome = %s, want success off the pass verdict", got.Outcome)
+		}
+		pull, found := w.forge.pullByNumber(w.forgeOwner, "landb", 1)
+		if !found || pull.Merged || pull.State != "open" {
+			t.Errorf("forge pull = %+v, want open and unmerged (a human merges)", pull)
+		}
+		comments := w.forge.commentsOf(w.forgeOwner, "landb", 1)
+		if len(comments) != 1 || comments[0] != tracker.VerdictPass {
+			t.Errorf("PR comments = %q, want exactly the bare pass marker", comments)
+		}
+	})
+
+	// --- scenario c: FAIL rejects with the findings ---------------------------
+	outC := t.TempDir()
+	scriptC := writeCycleScript(t, "claude-lander-reject.sh",
+		landerScript(outC, w.labctlDir, `labctl pr reject 1 'findings: broken tests'`))
+	landc, originC := w.addRepo("landc", scriptC, func(r *store.Repo) {
+		r.AutolandEnabled = true
+		r.AutoMerge = true
+	})
+	seedClaimBranch(t, w, originC, "afk/1", "work.txt")
+	w.forge.addPull(w.forgeOwner, "landc", cycleForgePull{
+		Number: 1, Head: "afk/1", Base: "main", Title: "resolve", State: "open",
+	})
+
+	t.Run("FAIL ends rejected with the findings", func(t *testing.T) {
+		w.svc.SpawnOnce(w.ctx)
+		run, err := w.st.RunBySession(w.ctx, "landc~lander-1")
+		if err != nil {
+			t.Fatalf("no lander run after the sweep: %v", err)
+		}
+		waitCycleStatus(t, outC)
+
+		// A reject IS a completed lander: reaped success, no strike.
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		got := w.run(landc, run.ID)
+		if got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("outcome = %s, want success (a reject verdict completes the run)", got.Outcome)
+		}
+		pull, found := w.forge.pullByNumber(w.forgeOwner, "landc", 1)
+		if !found || pull.Merged || pull.State != "open" {
+			t.Errorf("forge pull = %+v, want open and unmerged", pull)
+		}
+		comments := w.forge.commentsOf(w.forgeOwner, "landc", 1)
+		want := tracker.VerdictReject + "\n\nfindings: broken tests"
+		if len(comments) != 1 || comments[0] != want {
+			t.Errorf("PR comments = %q, want %q", comments, want)
+		}
+		if f := w.failures(landc); f != 0 {
+			t.Errorf("consecutive_failures = %d, want 0", f)
+		}
+	})
+
+	// --- scenario e: a lander death does NOT strike; a paused repo still stops
+	// spawning landers (issue #185) --------------------------------------------
+	// The script idles long enough to pass the post-spawn liveness check, then
+	// dies without any forge-observable action — a real lander crash. Its death
+	// is a terminal FAILURE outcome, but it must NOT move the AFK counter:
+	// lander flakiness may never pause a repo's unrelated AFK work. The pause
+	// itself is still real — a repo paused by genuine AFK strikes stops spawning
+	// landers too — so this half is seeded directly through IncrementRepoFailures,
+	// the AFK-run path the counter actually belongs to, NOT through the death.
+	scriptE := writeCycleScript(t, "claude-lander-death.sh", "#!/bin/sh\nsleep 3\nexit 0\n")
+	lande, originE := w.addRepo("lande", scriptE, func(r *store.Repo) {
+		r.AutolandEnabled = true
+		r.AutoMerge = true
+	})
+	seedClaimBranch(t, w, originE, "afk/1", "work.txt")
+	w.forge.addPull(w.forgeOwner, "lande", cycleForgePull{
+		Number: 1, Head: "afk/1", Base: "main", Title: "resolve", State: "open",
+	})
+
+	t.Run("lander death does not strike and a paused repo stops spawning", func(t *testing.T) {
+		w.svc.SpawnOnce(w.ctx)
+		run, err := w.st.RunBySession(w.ctx, "lande~lander-1")
+		if err != nil {
+			t.Fatalf("no lander run after the sweep: %v", err)
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		for w.alive("lande~lander-1") && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if w.alive("lande~lander-1") {
+			t.Fatal("lander session never died")
+		}
+
+		// Dead without a done-signal (PR open, no verdict): a real death — but a
+		// lander death leaves the AFK counter untouched (issue #185).
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		got := w.run(lande, run.ID)
+		if got.Outcome != store.RunOutcomeDeath {
+			t.Fatalf("outcome = %s, want death", got.Outcome)
+		}
+		if f := w.failures(lande); f != 0 {
+			t.Fatalf("consecutive_failures = %d, want 0 (a lander death never strikes, #185)", f)
+		}
+
+		// Seed a genuine AFK-run pause directly, then confirm the poller stops
+		// spawning: the same open, verdict-less, run-less PR is left alone until
+		// a human resets. (The death above contributed nothing, so the whole
+		// threshold is seeded here.)
+		for i := 0; i < afk.PauseThreshold; i++ {
+			if _, err := w.st.IncrementRepoFailures(w.ctx, lande.ID); err != nil {
+				t.Fatalf("IncrementRepoFailures: %v", err)
+			}
+		}
+		w.svc.SpawnOnce(w.ctx)
+		if runs, err := w.st.ActiveRunsByRepo(w.ctx, lande.ID); err != nil || len(runs) != 0 {
+			t.Errorf("paused repo spawned %d runs (err %v), want 0", len(runs), err)
+		}
+	})
+
+	// --- scenario d: the suppression sweep (last — its seeded run row has no
+	// session and must never meet a ReapOnce) ---------------------------------
+	sleepScript := writeCycleScript(t, "claude-lander-idle.sh", "#!/bin/sh\nexec sleep 600\n")
+	landoff, _ := w.addRepo("landoff", sleepScript, nil) // autoland stays default OFF
+	w.forge.addPull(w.forgeOwner, "landoff", cycleForgePull{
+		Number: 1, Head: "afk/1", Base: "main", Title: "virgin", State: "open",
+	})
+	landd, _ := w.addRepo("landd", sleepScript, func(r *store.Repo) {
+		r.AutolandEnabled = true
+	})
+	w.forge.addPull(w.forgeOwner, "landd", cycleForgePull{
+		Number: 1, Head: "fix/typo", Base: "main", Title: "human branch", State: "open",
+	})
+	w.forge.addPull(w.forgeOwner, "landd", cycleForgePull{
+		Number: 2, Head: "afk/2", Base: "main", Title: "reviewed", State: "open",
+	})
+	w.forge.addReview(w.forgeOwner, "landd", 2, cycleForgeReview{User: "human", State: "APPROVED"})
+	w.forge.addPull(w.forgeOwner, "landd", cycleForgePull{
+		Number: 3, Head: "afk/3", Base: "main", Title: "verdict exists", State: "open",
+	})
+	w.forge.addComment(w.forgeOwner, "landd", 3, tracker.VerdictFixDone)
+	w.forge.addPull(w.forgeOwner, "landd", cycleForgePull{
+		Number: 4, Head: "afk/4", Base: "main", Title: "being worked", State: "open",
+	})
+	if _, err := w.st.CreateRun(w.ctx, store.Run{
+		ID: ids.NewID("run"), RepoID: landd.ID, Kind: store.RunKindAFKManual,
+		Provider: "claude-code", Branch: "afk/4", WorktreePath: "/wt/landd-4",
+		SessionName: "landd~afk-4", Model: "m", Effort: "e",
+		StartedAt: w.clock.Now(), Outcome: store.RunOutcomeActive,
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	t.Run("suppression sweep spawns nothing", func(t *testing.T) {
+		w.svc.SpawnOnce(w.ctx)
+		for _, repo := range []store.Repo{landoff, landd} {
+			runs, err := w.st.RunsByRepo(w.ctx, repo.ID, 0)
+			if err != nil {
+				t.Fatalf("RunsByRepo(%s): %v", repo.Name, err)
+			}
+			for _, r := range runs {
+				if r.Kind == store.RunKindLander {
+					t.Errorf("repo %s grew a lander run %s (branch %s) — suppression failed", repo.Name, r.SessionName, r.Branch)
+				}
+			}
+		}
+	})
+}
+
+// --- the #182 fix-forward variant ----------------------------------------------
+
+// seedAuthoringRun persists a TERMINAL afk_manual run row on the branch — the
+// authoring history a fix run once inherited (issue #182 / ADR-0048). Issue
+// #189 REVERSED that: a fix run now resolves provider/model/effort through the
+// normal AFK chain, so this row proves the OPPOSITE. Its haiku/low sit
+// deliberately OFF the seeded spawn defaults (opus[1m]/max) the AFK chain
+// resolves to, so the fix run's own row carrying opus[1m]/max — never this
+// row's haiku/low — is the observable proof the authoring row has no say.
+// Terminal on purpose: an active row would be DecideAutoland's case-2 gate and
+// suppress the whole loop.
+func (w *cycleWorld) seedAuthoringRun(repo store.Repo, issueN int, branch string) {
+	w.t.Helper()
+	ended := w.clock.Now()
+	if _, err := w.st.CreateRun(w.ctx, store.Run{
+		ID: ids.NewID("run"), RepoID: repo.ID, Kind: store.RunKindAFKManual,
+		Provider: "claude-code", IssueNumber: &issueN, Branch: branch,
+		WorktreePath: "/wt/" + repo.Name + "-" + strconv.Itoa(issueN),
+		SessionName:  repo.Name + "~afk-" + strconv.Itoa(issueN),
+		Model:        "haiku", Effort: "low",
+		StartedAt: w.clock.Now(), EndedAt: &ended, Outcome: store.RunOutcomeSuccess,
+	}); err != nil {
+		w.t.Fatalf("CreateRun (authoring row): %v", err)
+	}
+}
+
+// seedLocalClaimRef plants the claim branch in the repo's bare reference
+// clone — the LOCAL half of a real claim's shape (ADR-0013: the branch IS the
+// claim, and an authoring AFK run forks it in the bare clone at launch; the
+// synthetic authoring row above skips that launch). The multi-round loop
+// needs it because the guarded teardown's merged check resolves the local
+// branch: without it every lander/fix teardown fails the check and keeps its
+// clean worktree, and the next round's launch would collide on the same path
+// — a state no real repo reaches.
+func seedLocalClaimRef(t *testing.T, w *cycleWorld, repo store.Repo, branch string) {
+	t.Helper()
+	gitCmd(t, w.home, w.bare(repo), "fetch", "-q", "origin", "+refs/heads/"+branch+":refs/heads/"+branch)
+}
+
+// runCount is the repo's total runs-row count — the terminality probe: a
+// spawn pass that launched anything grows it.
+func (w *cycleWorld) runCount(repo store.Repo) int {
+	w.t.Helper()
+	runs, err := w.st.RunsByRepo(w.ctx, repo.ID, 0)
+	if err != nil {
+		w.t.Fatalf("RunsByRepo: %v", err)
+	}
+	return len(runs)
+}
+
+func cycleContains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// The prose the fix-forward scripts post — package consts so the assertions
+// compare the forge state and the seeded prompts against the SAME literals
+// the scripts shipped (no apostrophes: the bodies ride single-quoted in sh).
+const (
+	fixLoopFindings = "the tests are red: TestFlux fails on the nil branch"
+	fixBoundRound1  = "round 1: the polish flakes under load"
+	fixBoundRound2  = "round 2: still flaking under load"
+	fixBoundDigest  = "Digest: rejected twice for flaking; the single fix attempt pushed a repair that did not converge. Handing to a human."
+)
+
+// TestAutolandCycleFixForwardIntegration is the issue #182 acceptance, local
+// form: the WHOLE fix-forward loop over the same real seams as the #181 suite
+// above — real engine, real store, real git, real tmux, the real forgejo REST
+// client against the stateful fake forge, the real agent API, and the real
+// labctl verbs (reject/rerequest/approve/merge/escalate plus the escalate
+// seed's issue-comment and label verbs) driven by fake claude scripts. Both
+// scenarios seed the PR as #2 with head afk/1 ON PURPOSE: Forgejo's number
+// space is shared (issue #1 exists, so a real forge would number the PR 2),
+// which keeps the <N>/<PR> interpolations and the issue-vs-PR comment threads
+// distinguishable in every assertion. Each verdict round swaps the repo's
+// fake claude (setScript) before the SpawnOnce that launches it — the ticks
+// are explicit, so the swap is race-free.
+//
+//  1. the loop converges: round-1 lander REJECTS → a fix run spawns (kind
+//     fix, session <repo>~fix-<N>, provider/model/effort resolved through the
+//     normal AFK chain — issue #189, NOT the seeded authoring row), repairs on
+//     the detached worktree, pushes the explicit refspec, posts fix-done via
+//     `labctl pr rerequest` (never a new PR) → the re-validation lander
+//     approves and merges → the PR is merged at the fix commit and the poller
+//     goes quiet.
+//  2. the loop bounds: max_fix_attempts=1 and the rejection persists → the
+//     escalate run executes the full hand-off contract against the real
+//     agentapi (issue digest, ready-for-human label flip, terminal escalate
+//     marker LAST) → outcome 'escalated', exactly one push, and the PR is
+//     invisible to every further pass — even after a human deletes the marker
+//     comment, because the escalated run row is the durable gate.
+func TestAutolandCycleFixForwardIntegration(t *testing.T) {
+	w := newCycleWorld(t)
+
+	// --- scenario 1: reject → fix → re-validate → merge ----------------------
+	outReject := t.TempDir()
+	scriptReject := writeCycleScript(t, "claude-lander-reject-r1.sh",
+		landerScript(outReject, w.labctlDir, `labctl pr reject 2 '`+fixLoopFindings+`'`))
+	outFix := t.TempDir()
+	scriptFix := writeCycleScript(t, "claude-fix.sh", fixCycleScript(outFix, w.labctlDir, "afk/1", 2))
+	outPass := t.TempDir()
+	scriptPass := writeCycleScript(t, "claude-lander-pass-r2.sh",
+		landerScript(outPass, w.labctlDir, "labctl pr approve 2", "labctl pr merge 2"))
+
+	fixa, originFixa := w.addRepo("fixa", scriptReject, func(r *store.Repo) {
+		r.AutolandEnabled = true
+		r.AutoMerge = true
+		r.MaxFixAttempts = 2 // the bound stays unspent — this scenario proves convergence
+	},
+		cycleForgeIssue{Number: 1, Title: "Wire the flux capacitor", Body: "make it hum", State: "open", Labels: []string{tracker.ReadyLabel}},
+	)
+	seedClaimBranch(t, w, originFixa, "afk/1", "work.txt")
+	seedLocalClaimRef(t, w, fixa, "afk/1")
+	w.forge.addPull(w.forgeOwner, "fixa", cycleForgePull{
+		Number: 2, Head: "afk/1", Base: "main", Title: "resolve the flux issue", State: "open",
+	})
+	w.seedAuthoringRun(fixa, 1, "afk/1")
+
+	ok := t.Run("reject then fix then re-validate then merge", func(t *testing.T) {
+		// Round 1: the virgin PR gets its lander, which REJECTS with findings
+		// (#181 scenario c pins the reject mechanics — here it is the loop's
+		// entry state).
+		w.svc.SpawnOnce(w.ctx)
+		lander1, err := w.st.RunBySession(w.ctx, "fixa~lander-1")
+		if err != nil {
+			t.Fatalf("no round-1 lander after the sweep: %v", err)
+		}
+		waitCycleStatus(t, outReject)
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		if got := w.run(fixa, lander1.ID); got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("round-1 lander outcome = %s, want success (a reject completes the run)", got.Outcome)
+		}
+
+		// The rejected PR yields a FIX run on the next pass: kind fix, its own
+		// session/worktree namespace, the AFK budget rule, and the identity
+		// resolved through the normal AFK chain (issue #189) — opus[1m]/max,
+		// the seeded base defaults the landers also resolve to, NOT the
+		// authoring row's haiku/low.
+		w.prov.setScript("fixa", scriptFix)
+		w.svc.SpawnOnce(w.ctx)
+		fixRun, err := w.st.RunBySession(w.ctx, "fixa~fix-1")
+		if err != nil {
+			t.Fatalf("no fix run after the sweep: %v", err)
+		}
+		if fixRun.Kind != store.RunKindFix || fixRun.Branch != "afk/1" ||
+			fixRun.IssueNumber == nil || *fixRun.IssueNumber != 1 {
+			t.Fatalf("fix run = kind %s branch %s issue %v, want fix afk/1 issue 1", fixRun.Kind, fixRun.Branch, fixRun.IssueNumber)
+		}
+		if fixRun.BudgetDeadline == nil || !fixRun.BudgetDeadline.Equal(w.clock.Now().Add(120*time.Minute)) {
+			t.Fatalf("fix budget_deadline = %v, want clock+120m persisted", fixRun.BudgetDeadline)
+		}
+		if fixRun.Provider != "claude-code" || fixRun.Model != "opus[1m]" || fixRun.Effort != "max" {
+			t.Fatalf("fix run identity = %s/%s/%s, want the AFK-chain claude-code/opus[1m]/max (NOT the authoring row's haiku/low)", fixRun.Provider, fixRun.Model, fixRun.Effort)
+		}
+		if !w.alive("fixa~fix-1") {
+			t.Fatal("fix session not live")
+		}
+
+		// The script repairs, pushes the refspec, rerequests through the real
+		// labctl. Its seed prompt is the EXACT #182 rendering: the pinned fix
+		// template with the round-1 rejection findings verbatim below the
+		// separator — the work order that licenses the re-engagement.
+		waitCycleStatus(t, outFix)
+		seed, _ := os.ReadFile(filepath.Join(outFix, "seed.txt"))
+		if got, want := string(seed), afk.FixSeedPrompt(1, 2, "afk/1", false, "Lander rejection:\n"+fixLoopFindings); got != want {
+			t.Errorf("fix seed prompt = %q, want %q", got, want)
+		}
+
+		// Reap: the fix-done marker (its `labctl pr rerequest` landed) is the
+		// fix run's done-signal → success. The PR thread carries the marker
+		// sequence — the reject, then the BARE fix-done — and the forge still
+		// holds exactly the one pre-existing PR: `labctl pr create` is not the
+		// fix run's to run, and it didn't.
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		if got := w.run(fixa, fixRun.ID); got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("fix outcome = %s, want success off the fix-done marker", got.Outcome)
+		}
+		if w.alive("fixa~fix-1") {
+			t.Error("fix session still live after the success reap")
+		}
+		comments := w.forge.commentsOf(w.forgeOwner, "fixa", 2)
+		if len(comments) != 2 || comments[0] != tracker.VerdictReject+"\n\n"+fixLoopFindings ||
+			comments[1] != tracker.VerdictFixDone {
+			t.Fatalf("PR comments = %q, want the reject then the bare fix-done marker", comments)
+		}
+		if _, n := w.forge.pull(w.forgeOwner, "fixa", 0); n != 1 {
+			t.Fatalf("forge holds %d pulls, want the 1 pre-existing PR (a fix run never opens one)", n)
+		}
+
+		// Re-validation round: fix-done as the last word yields a fresh LANDER
+		// (DecideAutoland case 4), which approves and merges.
+		w.prov.setScript("fixa", scriptPass)
+		w.svc.SpawnOnce(w.ctx)
+		lander2, err := w.st.RunBySession(w.ctx, "fixa~lander-1")
+		if err != nil {
+			t.Fatalf("no re-validation lander after the sweep: %v", err)
+		}
+		if lander2.ID == lander1.ID {
+			t.Fatal("re-validation lander is the round-1 run row — nothing respawned")
+		}
+		waitCycleStatus(t, outPass)
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		if got := w.run(fixa, lander2.ID); got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("re-validation outcome = %s, want success off the merged PR", got.Outcome)
+		}
+		pull, found := w.forge.pullByNumber(w.forgeOwner, "fixa", 2)
+		if !found || !pull.Merged {
+			t.Fatalf("forge pull = %+v, want merged", pull)
+		}
+		// The commit that merged IS the fix run's: origin's claim branch
+		// advanced to the pushed repair before the merge verdict consumed it.
+		headSHA, _ := os.ReadFile(filepath.Join(outFix, "head.txt"))
+		if got, want := gitCmd(t, w.home, originFixa, "rev-parse", "refs/heads/afk/1"), strings.TrimSpace(string(headSHA)); want == "" || got != want {
+			t.Errorf("origin afk/1 = %s, want the fix commit %q", got, want)
+		}
+
+		// Quiet: a merged PR yields nothing, forever — and the whole loop
+		// earned no strikes and sent no pushes (landers never touch the
+		// counter, the fix success reset an untouched 0, and neither kind
+		// notifies on success).
+		count := w.runCount(fixa)
+		w.svc.SpawnOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
+		if after := w.runCount(fixa); after != count {
+			t.Errorf("post-merge sweeps grew the runs table (%d → %d)", count, after)
+		}
+		if f := w.failures(fixa); f != 0 {
+			t.Errorf("consecutive_failures = %d, want 0", f)
+		}
+		if n := w.notes.count(); n != 0 {
+			t.Errorf("the converging loop sent %d pushes, want 0", n)
+		}
+	})
+	if !ok {
+		t.Fatal("fix-forward loop scenario failed; skipping the escalation scenario")
+	}
+
+	// --- scenario 2: the bound — persistent rejection escalates, terminally --
+	outBoundR1 := t.TempDir()
+	scriptBoundR1 := writeCycleScript(t, "claude-lander-bound-r1.sh",
+		landerScript(outBoundR1, w.labctlDir, `labctl pr reject 2 '`+fixBoundRound1+`'`))
+	outBoundFix := t.TempDir()
+	scriptBoundFix := writeCycleScript(t, "claude-fix-bound.sh", fixCycleScript(outBoundFix, w.labctlDir, "afk/1", 2))
+	outBoundR2 := t.TempDir()
+	scriptBoundR2 := writeCycleScript(t, "claude-lander-bound-r2.sh",
+		landerScript(outBoundR2, w.labctlDir, `labctl pr reject 2 '`+fixBoundRound2+`'`))
+	// The escalate script is the FULL #182 hand-off contract, in seed order:
+	// digest on the ISSUE, the idempotent label create, the ready-for-agent →
+	// ready-for-human flip, and the terminal PR marker LAST — every verb the
+	// real labctl against the real agentapi against the fake forge.
+	outEsc := t.TempDir()
+	scriptEsc := writeCycleScript(t, "claude-escalate.sh",
+		landerScript(outEsc, w.labctlDir,
+			`labctl issue comment 1 '`+fixBoundDigest+`'`,
+			`labctl label create --name ready-for-human`,
+			`labctl issue label remove 1 ready-for-agent`,
+			`labctl issue label add 1 ready-for-human`,
+			`labctl pr escalate 2 '`+fixBoundDigest+`'`))
+
+	fixb, originFixb := w.addRepo("fixb", scriptBoundR1, func(r *store.Repo) {
+		r.AutolandEnabled = true
+		r.AutoMerge = true
+		r.MaxFixAttempts = 1 // one fix attempt, then escalation
+	},
+		cycleForgeIssue{Number: 1, Title: "Polish the flux capacitor", Body: "never converges", State: "open", Labels: []string{tracker.ReadyLabel}},
+	)
+	w.forge.addLabel(w.forgeOwner, "fixb", tracker.ReadyLabel) // the flip's source label — strict name resolution needs it in the repo SET
+	seedClaimBranch(t, w, originFixb, "afk/1", "work.txt")
+	seedLocalClaimRef(t, w, fixb, "afk/1")
+	w.forge.addPull(w.forgeOwner, "fixb", cycleForgePull{
+		Number: 2, Head: "afk/1", Base: "main", Title: "polish", State: "open",
+	})
+	w.seedAuthoringRun(fixb, 1, "afk/1")
+
+	t.Run("persistent rejection escalates terminally", func(t *testing.T) {
+		// A pre-existing strike, seeded through the AFK path the counter
+		// belongs to: the rounds below then prove the #182/#185 accounting —
+		// the lander's success reap must NOT reset it, the fix run's must.
+		if _, err := w.st.IncrementRepoFailures(w.ctx, fixb.ID); err != nil {
+			t.Fatalf("IncrementRepoFailures: %v", err)
+		}
+
+		// Round 1: the lander rejects.
+		w.svc.SpawnOnce(w.ctx)
+		lander1, err := w.st.RunBySession(w.ctx, "fixb~lander-1")
+		if err != nil {
+			t.Fatalf("no round-1 lander after the sweep: %v", err)
+		}
+		waitCycleStatus(t, outBoundR1)
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		if got := w.run(fixb, lander1.ID); got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("round-1 lander outcome = %s, want success", got.Outcome)
+		}
+		if f := w.failures(fixb); f != 1 {
+			t.Fatalf("consecutive_failures = %d after the lander reap, want the seeded 1 (a lander success never resets)", f)
+		}
+
+		// The ONE fix attempt: a trivial repair pushed and rerequested. Its
+		// success is unattended-work health and RESETS the strike (#182:
+		// three-strikes accounting applies to fix runs).
+		w.prov.setScript("fixb", scriptBoundFix)
+		w.svc.SpawnOnce(w.ctx)
+		fixRun, err := w.st.RunBySession(w.ctx, "fixb~fix-1")
+		if err != nil {
+			t.Fatalf("no fix run after the sweep: %v", err)
+		}
+		waitCycleStatus(t, outBoundFix)
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		if got := w.run(fixb, fixRun.ID); got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("fix outcome = %s, want success off the fix-done marker", got.Outcome)
+		}
+		if f := w.failures(fixb); f != 0 {
+			t.Fatalf("consecutive_failures = %d after the fix success, want 0 (reset)", f)
+		}
+
+		// Round 2: the re-validation lander rejects AGAIN — the marker state
+		// returns to rejected with the attempt bound now spent.
+		w.prov.setScript("fixb", scriptBoundR2)
+		w.svc.SpawnOnce(w.ctx)
+		lander2, err := w.st.RunBySession(w.ctx, "fixb~lander-1")
+		if err != nil {
+			t.Fatalf("no re-validation lander after the sweep: %v", err)
+		}
+		waitCycleStatus(t, outBoundR2)
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		if got := w.run(fixb, lander2.ID); got.Outcome != store.RunOutcomeSuccess {
+			t.Fatalf("round-2 lander outcome = %s, want success", got.Outcome)
+		}
+
+		// The bound is spent (1 fix spawn >= max_fix_attempts 1): the next
+		// pass spawns the ESCALATE run — kind escalate, its own namespace, and
+		// the LANDER-CHAIN identity (base defaults — a validation-class run
+		// resolved on the lander chain, not the AFK chain the fix run used).
+		w.prov.setScript("fixb", scriptEsc)
+		w.svc.SpawnOnce(w.ctx)
+		esc, err := w.st.RunBySession(w.ctx, "fixb~escalate-1")
+		if err != nil {
+			t.Fatalf("no escalate run after the sweep: %v", err)
+		}
+		if esc.Kind != store.RunKindEscalate || esc.Branch != "afk/1" ||
+			esc.IssueNumber == nil || *esc.IssueNumber != 1 {
+			t.Fatalf("escalate run = kind %s branch %s issue %v, want escalate afk/1 issue 1", esc.Kind, esc.Branch, esc.IssueNumber)
+		}
+		if esc.Provider != "claude-code" || esc.Model != "opus[1m]" || esc.Effort != "max" {
+			t.Fatalf("escalate run identity = %s/%s/%s, want the lander chain's claude-code/opus[1m]/max", esc.Provider, esc.Model, esc.Effort)
+		}
+		waitCycleStatus(t, outEsc)
+
+		// Reap: the terminal marker as the last word is done-VIA-MARKER, which
+		// the reaper promotes to outcome 'escalated' — never plain success.
+		w.svc.ReapOnce(w.ctx, w.clock.Now())
+		if got := w.run(fixb, esc.ID); got.Outcome != store.RunOutcomeEscalated {
+			t.Fatalf("escalate outcome = %s, want escalated", got.Outcome)
+		}
+		if w.alive("fixb~escalate-1") {
+			t.Error("escalate session still live after the reap")
+		}
+
+		// The hand-off landed, piece by piece, on the fake forge. The digest
+		// is on the ISSUE thread (#1 — distinct from the PR's #2 thread) ...
+		if issueComments := w.forge.commentsOf(w.forgeOwner, "fixb", 1); len(issueComments) != 1 || issueComments[0] != fixBoundDigest {
+			t.Errorf("issue #1 comments = %q, want exactly the digest", issueComments)
+		}
+		// ... the terminal marker comment is LAST on the PR thread, its first
+		// line EXACTLY the escalate marker with the digest below ...
+		prComments := w.forge.commentsOf(w.forgeOwner, "fixb", 2)
+		if len(prComments) == 0 {
+			t.Fatal("PR thread is empty")
+		}
+		last := prComments[len(prComments)-1]
+		if first := strings.SplitN(last, "\n", 2)[0]; first != tracker.VerdictEscalate {
+			t.Errorf("last PR comment first line = %q, want the escalate marker %q", first, tracker.VerdictEscalate)
+		}
+		if want := tracker.VerdictEscalate + "\n\n" + fixBoundDigest; last != want {
+			t.Errorf("last PR comment = %q, want %q", last, want)
+		}
+		// ... the label flip re-routed the issue: ready-for-human exists on
+		// the repo (created by the run) and replaced ready-for-agent ...
+		if labels := w.forge.repoLabelNames(w.forgeOwner, "fixb"); !cycleContains(labels, "ready-for-human") {
+			t.Errorf("repo labels = %q, want ready-for-human created", labels)
+		}
+		issueLabels := w.forge.issueLabelNames(w.forgeOwner, "fixb", 1)
+		if !cycleContains(issueLabels, "ready-for-human") || cycleContains(issueLabels, tracker.ReadyLabel) {
+			t.Errorf("issue #1 labels = %q, want ready-for-human without %s", issueLabels, tracker.ReadyLabel)
+		}
+		// ... and EXACTLY ONE push fired across the whole two-scenario world:
+		// the escalation notification (the fix-forward loop's only push).
+		notes := w.notes.all()
+		if len(notes) != 1 {
+			t.Fatalf("pushes = %d (%+v), want exactly the escalation one", len(notes), notes)
+		}
+		if !strings.Contains(notes[0].Title, "escalated") {
+			t.Errorf("push title = %q, want it to name the escalation", notes[0].Title)
+		}
+
+		// Terminal, forever: further passes spawn nothing for the PR ...
+		count := w.runCount(fixb)
+		w.svc.SpawnOnce(w.ctx)
+		w.svc.SpawnOnce(w.ctx)
+		if after := w.runCount(fixb); after != count {
+			t.Fatalf("post-escalation sweeps grew the runs table (%d → %d)", count, after)
+		}
+		// ... even after a human deletes the marker comment: the escalated
+		// run row alone keeps the PR invisible (the durable half of rule 1).
+		// Without the row, reject-as-last-word at a spent bound would spawn a
+		// SECOND escalate run right here.
+		w.forge.dropLastComment(w.forgeOwner, "fixb", 2)
+		w.svc.SpawnOnce(w.ctx)
+		if after := w.runCount(fixb); after != count {
+			t.Fatalf("marker-less sweep grew the runs table (%d → %d) — the escalated row did not gate", count, after)
+		}
+		if runs, err := w.st.ActiveRunsByRepo(w.ctx, fixb.ID); err != nil || len(runs) != 0 {
+			t.Errorf("active runs after terminality = %d (err %v), want 0", len(runs), err)
+		}
+
+		// The three-strikes ledger the loop earned: 0. The fix success reset
+		// the seeded strike; the two landers and the escalate run touched the
+		// counter in NEITHER direction (validation-class kinds, #185), and an
+		// escalated outcome reaches no counter arm at all.
+		if f := w.failures(fixb); f != 0 {
+			t.Errorf("consecutive_failures = %d, want 0", f)
 		}
 	})
 }

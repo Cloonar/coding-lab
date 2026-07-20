@@ -182,10 +182,11 @@ func (s *Service) killSessionOnBranch(ctx context.Context, repo store.Repo, bran
 		now := s.now()
 		if err := s.store.EndRun(ctx, run.ID, store.RunOutcomeStopped, now, "discarded"); err != nil {
 			s.log.Warn("discard: end run", "component", "reconcile", "run", run.ID, "err", err)
-		} else if s.afkRunEnded != nil && (run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto) {
+		} else if s.afkRunEnded != nil && run.Kind != store.RunKindManual {
 			// This kill is a terminal-outcome writer like the reaper/Stop
-			// chokepoints, so it reports to lab_afk_runs_total the same way.
-			// Manual-kind runs stay outside the metric's label vocabulary.
+			// chokepoints, so it reports to lab_afk_runs_total the same way for
+			// every reaper-owned kind (afk_manual, afk_auto, lander). Manual-kind
+			// runs stay outside the metric's label vocabulary.
 			s.afkRunEnded(run.Kind, store.RunOutcomeStopped, now.Sub(run.StartedAt))
 		}
 		if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
