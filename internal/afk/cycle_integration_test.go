@@ -2298,12 +2298,14 @@ func TestAutolandCycleIntegration(t *testing.T) {
 // --- the #182 fix-forward variant ----------------------------------------------
 
 // seedAuthoringRun persists a TERMINAL afk_manual run row on the branch — the
-// authoring history the fix-run inheritance reads (store.AuthoringRunForBranch;
-// issue #182: a fix run's provider/model/effort come from the PERSISTED
-// authoring row, never the repo chain). Model/effort sit deliberately OFF the
-// seeded spawn defaults (opus[1m]/max) so inheritance is observable on the fix
-// run's own row. Terminal on purpose: an active row would be DecideAutoland's
-// case-2 gate and suppress the whole loop.
+// authoring history a fix run once inherited (issue #182 / ADR-0048). Issue
+// #189 REVERSED that: a fix run now resolves provider/model/effort through the
+// normal AFK chain, so this row proves the OPPOSITE. Its haiku/low sit
+// deliberately OFF the seeded spawn defaults (opus[1m]/max) the AFK chain
+// resolves to, so the fix run's own row carrying opus[1m]/max — never this
+// row's haiku/low — is the observable proof the authoring row has no say.
+// Terminal on purpose: an active row would be DecideAutoland's case-2 gate and
+// suppress the whole loop.
 func (w *cycleWorld) seedAuthoringRun(repo store.Repo, issueN int, branch string) {
 	w.t.Helper()
 	ended := w.clock.Now()
@@ -2376,11 +2378,12 @@ const (
 // are explicit, so the swap is race-free.
 //
 //  1. the loop converges: round-1 lander REJECTS → a fix run spawns (kind
-//     fix, session <repo>~fix-<N>, provider/model/effort inherited from the
-//     persisted authoring row), repairs on the detached worktree, pushes the
-//     explicit refspec, posts fix-done via `labctl pr rerequest` (never a new
-//     PR) → the re-validation lander approves and merges → the PR is merged
-//     at the fix commit and the poller goes quiet.
+//     fix, session <repo>~fix-<N>, provider/model/effort resolved through the
+//     normal AFK chain — issue #189, NOT the seeded authoring row), repairs on
+//     the detached worktree, pushes the explicit refspec, posts fix-done via
+//     `labctl pr rerequest` (never a new PR) → the re-validation lander
+//     approves and merges → the PR is merged at the fix commit and the poller
+//     goes quiet.
 //  2. the loop bounds: max_fix_attempts=1 and the rejection persists → the
 //     escalate run executes the full hand-off contract against the real
 //     agentapi (issue digest, ready-for-human label flip, terminal escalate
@@ -2431,8 +2434,9 @@ func TestAutolandCycleFixForwardIntegration(t *testing.T) {
 
 		// The rejected PR yields a FIX run on the next pass: kind fix, its own
 		// session/worktree namespace, the AFK budget rule, and the identity
-		// inherited from the persisted authoring row — haiku/low, NOT the
-		// seeded opus[1m]/max defaults the landers resolve to.
+		// resolved through the normal AFK chain (issue #189) — opus[1m]/max,
+		// the seeded base defaults the landers also resolve to, NOT the
+		// authoring row's haiku/low.
 		w.prov.setScript("fixa", scriptFix)
 		w.svc.SpawnOnce(w.ctx)
 		fixRun, err := w.st.RunBySession(w.ctx, "fixa~fix-1")
@@ -2446,8 +2450,8 @@ func TestAutolandCycleFixForwardIntegration(t *testing.T) {
 		if fixRun.BudgetDeadline == nil || !fixRun.BudgetDeadline.Equal(w.clock.Now().Add(120*time.Minute)) {
 			t.Fatalf("fix budget_deadline = %v, want clock+120m persisted", fixRun.BudgetDeadline)
 		}
-		if fixRun.Provider != "claude-code" || fixRun.Model != "haiku" || fixRun.Effort != "low" {
-			t.Fatalf("fix run identity = %s/%s/%s, want the authoring row's claude-code/haiku/low", fixRun.Provider, fixRun.Model, fixRun.Effort)
+		if fixRun.Provider != "claude-code" || fixRun.Model != "opus[1m]" || fixRun.Effort != "max" {
+			t.Fatalf("fix run identity = %s/%s/%s, want the AFK-chain claude-code/opus[1m]/max (NOT the authoring row's haiku/low)", fixRun.Provider, fixRun.Model, fixRun.Effort)
 		}
 		if !w.alive("fixa~fix-1") {
 			t.Fatal("fix session not live")
@@ -2626,8 +2630,8 @@ func TestAutolandCycleFixForwardIntegration(t *testing.T) {
 
 		// The bound is spent (1 fix spawn >= max_fix_attempts 1): the next
 		// pass spawns the ESCALATE run — kind escalate, its own namespace, and
-		// the LANDER-CHAIN identity (base defaults, never the authoring row's:
-		// a validation-class run).
+		// the LANDER-CHAIN identity (base defaults — a validation-class run
+		// resolved on the lander chain, not the AFK chain the fix run used).
 		w.prov.setScript("fixb", scriptEsc)
 		w.svc.SpawnOnce(w.ctx)
 		esc, err := w.st.RunBySession(w.ctx, "fixb~escalate-1")

@@ -119,6 +119,8 @@ function baseRepo(): Repo {
     max_fix_attempts: 2,
     auto_merge: true,
     lander_provider: null,
+    lander_model: null,
+    lander_effort: null,
   };
 }
 
@@ -732,6 +734,9 @@ describe('RepoSettings Autoland', () => {
     expect(input('auto_merge').checked).toBe(true);
     expect(input('max_fix_attempts').value).toBe('2');
     expect(selectedLabel('lander_provider')).toBe('Inherit repo agent');
+    // Lander model/effort (issue #189) default to the inherit row too.
+    expect(selectedLabel('lander_model')).toBe('Inherit repo default');
+    expect(selectedLabel('lander_effort')).toBe('Inherit repo default');
   });
 
   it('disables autoland_enabled with a hint on a non-forge (builtin) binding', async () => {
@@ -785,6 +790,42 @@ describe('RepoSettings Autoland', () => {
     await settle();
 
     expect(patchBodies).toEqual([{ lander_provider: null }]);
+  });
+
+  it('picking a lander model and effort PATCHes lander_model / lander_effort', async () => {
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('button[name="lander_model"]'),
+      'lander model select',
+    );
+    // The catalog resolves against the lander's effective provider — here the
+    // repo's chain falls back to provider_default (claude-code).
+    expect(selectedLabel('lander_model')).toBe('Inherit repo default');
+
+    await chooseFromSelect('lander_model', 'Sonnet');
+    await chooseFromSelect('lander_effort', 'high');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ lander_model: 'sonnet', lander_effort: 'high' }]);
+    expect(repoOnServer.lander_model).toBe('sonnet');
+    expect(repoOnServer.lander_effort).toBe('high');
+  });
+
+  it('clearing a stored lander model back to inherit PATCHes null', async () => {
+    repoOnServer = { ...baseRepo(), lander_model: 'sonnet' };
+    await mountSettings();
+    await waitFor(
+      () => container.querySelector('button[name="lander_model"]'),
+      'lander model select',
+    );
+    expect(selectedLabel('lander_model')).toBe('Sonnet');
+
+    await chooseFromSelect('lander_model', 'Inherit repo default');
+    submitForm();
+    await settle();
+
+    expect(patchBodies).toEqual([{ lander_model: null }]);
   });
 
   it('rejects a blank max_fix_attempts client-side without PATCHing', async () => {

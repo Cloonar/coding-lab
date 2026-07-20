@@ -30,9 +30,9 @@ func afkFixtureRun(t *testing.T, st *Store, repoID, kind, session string, starte
 	return afkFixtureRunOn(t, st, repoID, kind, "afk/7", session, startedAt)
 }
 
-// afkFixtureRunOn is afkFixtureRun with an explicit branch — the fix,
-// escalate, and authoring-run tests below need per-row branch control that
-// afkFixtureRun's fixed "afk/7" doesn't give.
+// afkFixtureRunOn is afkFixtureRun with an explicit branch — the fix and
+// escalate tests below need per-row branch control that afkFixtureRun's fixed
+// "afk/7" doesn't give.
 func afkFixtureRunOn(t *testing.T, st *Store, repoID, kind, branch, session string, startedAt time.Time) Run {
 	t.Helper()
 	run, err := st.CreateRun(context.Background(), Run{
@@ -237,43 +237,6 @@ func TestAutolandAttempts(t *testing.T) {
 			t.Fatalf("RunsByRepo: %v", err)
 		} else if len(runs) != 0 {
 			t.Fatalf("runs = %d, want 0 — attempts must not depend on run rows", len(runs))
-		}
-	})
-}
-
-// TestAuthoringRunForBranch pins the provider/model/effort inheritance
-// source for a fix run (issue #182 / ADR-0048): the LATEST afk_manual/
-// afk_auto row on the branch, ignoring manual/lander/fix rows entirely, even
-// ones that started later.
-func TestAuthoringRunForBranch(t *testing.T) {
-	forEachBackend(t, func(t *testing.T, st *Store) {
-		repo := afkFixtureRepo(t, st, "proj")
-		ctx := context.Background()
-
-		if _, found, err := st.AuthoringRunForBranch(ctx, repo.ID, "afk/9"); err != nil || found {
-			t.Fatalf("empty branch: found=%v err=%v, want none", found, err)
-		}
-
-		afkFixtureRunOn(t, st, repo.ID, RunKindManual, "afk/9", "proj~manual", afkClock)
-		afkFixtureRunOn(t, st, repo.ID, RunKindAFKAuto, "afk/9", "proj~afk-auto", afkClock.Add(time.Minute))
-		newer := afkFixtureRunOn(t, st, repo.ID, RunKindAFKManual, "afk/9", "proj~afk-manual", afkClock.Add(2*time.Minute))
-		// The authoring run is normally already success-reaped by the time a
-		// fix run spawns (its PR already exists) — outcome is deliberately
-		// not filtered, so a terminal authoring run must still be found.
-		if err := st.EndRun(ctx, newer.ID, RunOutcomeSuccess, afkClock.Add(time.Hour), ""); err != nil {
-			t.Fatalf("EndRun: %v", err)
-		}
-		// Later lander and fix rows on the same branch are not afk kinds and
-		// must be ignored even though they started after the authoring run.
-		afkFixtureRunOn(t, st, repo.ID, RunKindLander, "afk/9", "proj~lander", afkClock.Add(3*time.Minute))
-		afkFixtureRunOn(t, st, repo.ID, RunKindFix, "afk/9", "proj~fix-1", afkClock.Add(4*time.Minute))
-
-		got, found, err := st.AuthoringRunForBranch(ctx, repo.ID, "afk/9")
-		if err != nil || !found {
-			t.Fatalf("AuthoringRunForBranch: found=%v err=%v", found, err)
-		}
-		if got.ID != newer.ID {
-			t.Errorf("authoring run = %q, want the latest afk-kind row %q", got.ID, newer.ID)
 		}
 	})
 }

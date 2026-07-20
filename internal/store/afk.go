@@ -131,28 +131,6 @@ func (s *Store) RecordAutolandAttempt(ctx context.Context, repoID, branch, kind 
 	return nil
 }
 
-// AuthoringRunForBranch returns the latest afk_manual/afk_auto run for
-// (repoID, branch) — the run that authored the claim, whose provider/model/
-// effort a fix run inherits (issue #182 / ADR-0048). found=false with a nil
-// error when no authoring run exists. Any outcome: the authoring run is
-// normally already success-reaped by the time a fix run spawns (its PR
-// exists), so outcome is deliberately not filtered.
-func (s *Store) AuthoringRunForBranch(ctx context.Context, repoID, branch string) (Run, bool, error) {
-	row := s.db.QueryRowContext(ctx, s.rebind(
-		`SELECT `+runColumns+` FROM runs
-		 WHERE repo_id = ? AND branch = ? AND kind IN (?, ?)
-		 ORDER BY started_at DESC LIMIT 1`),
-		repoID, branch, RunKindAFKManual, RunKindAFKAuto)
-	r, err := scanRun(row.Scan)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Run{}, false, nil
-		}
-		return Run{}, false, fmt.Errorf("authoring run for branch %q in repo %q: %w", branch, repoID, err)
-	}
-	return r, true, nil
-}
-
 // EscalatedRunOnBranch reports whether an outcome='escalated' run exists for
 // (repoID, branch) — the poller's permanent-terminality gate (issue #182 /
 // ADR-0048). An escalated-outcome run makes the PR invisible to autoland

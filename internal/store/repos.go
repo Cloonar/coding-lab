@@ -103,6 +103,13 @@ type Repo struct {
 	MaxFixAttempts  int
 	AutoMerge       bool
 	LanderProvider  *string
+	// LanderModel and LanderEffort are the lander run's model/effort overrides
+	// (issue #189). NULL = inherit the lander's normal model/effort resolution
+	// (repo base → global base → provider default); non-NULL is a strict
+	// per-spawn request that fails the launch if the model/effort is unknown,
+	// rather than silently falling back.
+	LanderModel  *string
+	LanderEffort *string
 }
 
 // repoColumns is the one column list every repo SELECT/INSERT uses, in the
@@ -116,7 +123,8 @@ const repoColumns = `id, name, remote_url, credential_id, forge_credential_id,
 	created_at, last_opened_at,
 	afk_model_default, afk_effort_default, afk_options, afk_prompt,
 	afk_provider_default, remote_default, afk_remote_default,
-	autoland_enabled, max_fix_attempts, auto_merge, lander_provider`
+	autoland_enabled, max_fix_attempts, auto_merge, lander_provider,
+	lander_model, lander_effort`
 
 // triageLabels are the five canonical triage labels seeded per repo at
 // creation (design §3a colors; docs/agents/triage-labels.md meanings).
@@ -152,7 +160,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 	}
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO repos (`+repoColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.Name, r.RemoteURL, r.CredentialID, r.ForgeCredentialID,
 		r.TrackerBinding, r.ForgeKind, r.DefaultBranch, r.Provider, r.ModelDefault,
 		r.EffortDefault, r.Incogni, r.GitAuthorName, r.GitAuthorEmail,
@@ -162,7 +170,8 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 		fmtTime(r.CreatedAt), fmtNullTime(r.LastOpenedAt),
 		r.AFKModelDefault, r.AFKEffortDefault, afkOptions, r.AFKPrompt,
 		r.AFKProviderDefault, r.RemoteDefault, r.AFKRemoteDefault,
-		r.AutolandEnabled, r.MaxFixAttempts, r.AutoMerge, r.LanderProvider)
+		r.AutolandEnabled, r.MaxFixAttempts, r.AutoMerge, r.LanderProvider,
+		r.LanderModel, r.LanderEffort)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Repo{}, fmt.Errorf("create repo %q: %w", r.Name, ErrNameTaken)
@@ -285,6 +294,8 @@ type RepoSettingsUpdate struct {
 	MaxFixAttempts       Opt[int]
 	AutoMerge            Opt[bool]
 	LanderProvider       Opt[*string] // lander run's provider override (issue #181); nil clears (NULL = inherit repo's Provider)
+	LanderModel          Opt[*string] // lander run's model override; issue #189; nil clears (NULL = inherit)
+	LanderEffort         Opt[*string] // lander run's effort override; issue #189; nil clears (NULL = inherit)
 }
 
 // UpdateRepoSettings applies the set fields of u to one repo and returns the
@@ -383,6 +394,12 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 	}
 	if u.LanderProvider.Set {
 		add("lander_provider", u.LanderProvider.Value)
+	}
+	if u.LanderModel.Set {
+		add("lander_model", u.LanderModel.Value)
+	}
+	if u.LanderEffort.Set {
+		add("lander_effort", u.LanderEffort.Value)
 	}
 	if len(sets) == 0 {
 		return s.RepoByID(ctx, id)
@@ -529,6 +546,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		afkProviderDef                    sql.NullString
 		remoteDef, afkRemoteDef           sql.NullBool
 		landerProvider                    sql.NullString
+		landerModel, landerEffort         sql.NullString
 	)
 	if err := scan(&r.ID, &r.Name, &r.RemoteURL, &credID, &forgeCredID,
 		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &providerCol, &modelDef,
@@ -539,7 +557,8 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		&created, &lastOpened,
 		&afkModelDef, &afkEffortDef, &afkOptions, &afkPrompt,
 		&afkProviderDef, &remoteDef, &afkRemoteDef,
-		&r.AutolandEnabled, &r.MaxFixAttempts, &r.AutoMerge, &landerProvider); err != nil {
+		&r.AutolandEnabled, &r.MaxFixAttempts, &r.AutoMerge, &landerProvider,
+		&landerModel, &landerEffort); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
@@ -559,6 +578,8 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.RemoteDefault = nullBool(remoteDef)
 	r.AFKRemoteDefault = nullBool(afkRemoteDef)
 	r.LanderProvider = nullStr(landerProvider)
+	r.LanderModel = nullStr(landerModel)
+	r.LanderEffort = nullStr(landerEffort)
 
 	var err error
 	if r.AFKOptions, err = unmarshalOptions(afkOptions); err != nil {

@@ -537,14 +537,17 @@ func TestReap_landerSuccessDoesNotNotify(t *testing.T) {
 // --- the fix-forward producer (issue #182) ---------------------------------------
 
 // The headline: a reject marker on a lander-engaged PR (no live run) yields a
-// fix run within one spawn pass — carrying the rejection as its work order
-// and inheriting provider/model/effort from the PERSISTED authoring run row,
-// not from a fresh resolution.
-func TestSpawnOnce_rejectSpawnsFixRunInheritingAuthoringRow(t *testing.T) {
+// fix run within one spawn pass — carrying the rejection as its work order and
+// resolving provider/model/effort through the NORMAL AFK chain (issue #189
+// reversed the ADR-0048 authoring-row inheritance). The authoring run row is
+// present recording a DISTINCT value, and the repo's AFK overrides point
+// somewhere else again: the fix run carries the AFK-chain values, proving the
+// persisted authoring row has zero influence.
+func TestSpawnOnce_rejectSpawnsFixRunOnAFKChain(t *testing.T) {
 	f := newFixture(t)
 	autolandOn(f, f.repo)
-	// Distinct AFK defaults so the authoring run ROW records values the base
-	// chain would not re-derive.
+	// The authoring run records sonnet/high (the AFK defaults at ITS launch) —
+	// a distinctive value neither the base heads nor the later override match.
 	sonnet, high := "sonnet", "high"
 	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
 		AFKModelDefault: store.Set(&sonnet), AFKEffortDefault: store.Set(&high),
@@ -557,7 +560,7 @@ func TestSpawnOnce_rejectSpawnsFixRunInheritingAuthoringRow(t *testing.T) {
 		t.Fatalf("StartManualAFK: %v", err)
 	}
 	if authoring.Model != "sonnet" || authoring.Effort != "high" {
-		t.Fatalf("authoring run model/effort = %s/%s, want sonnet/high (the AFK defaults)", authoring.Model, authoring.Effort)
+		t.Fatalf("authoring run model/effort = %s/%s, want sonnet/high (the AFK defaults at its launch)", authoring.Model, authoring.Effort)
 	}
 	f.commitInWorktree(authoring.WorktreePath)
 	f.trk.addPull("afk/7", tracker.PullOpen) // pull #1 — the authoring run's done-signal
@@ -565,10 +568,13 @@ func TestSpawnOnce_rejectSpawnsFixRunInheritingAuthoringRow(t *testing.T) {
 	if got := f.runRow(authoring.ID); got.Outcome != store.RunOutcomeSuccess {
 		t.Fatalf("authoring outcome = %q, want success before the fix round", got.Outcome)
 	}
-	// Clear the AFK defaults: a fresh empty-request resolution would now pick
-	// the catalog heads, so matching values below prove ROW inheritance.
+	// Repoint the AFK overrides to fable/xhigh — DIFFERENT from both the
+	// authoring row (sonnet/high) AND the base heads (opus[1m]/max). This is
+	// the AFK-chain value the fix run must resolve to; the authoring row's
+	// recorded sonnet/high must NOT leak in.
+	fable, xhigh := "fable", "xhigh"
 	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
-		AFKModelDefault: store.Set[*string](nil), AFKEffortDefault: store.Set[*string](nil),
+		AFKModelDefault: store.Set(&fable), AFKEffortDefault: store.Set(&xhigh),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -593,11 +599,13 @@ func TestSpawnOnce_rejectSpawnsFixRunInheritingAuthoringRow(t *testing.T) {
 	if run.BudgetDeadline == nil {
 		t.Error("fix run has no persisted budget deadline")
 	}
-	// The #182 inheritance pin: provider/model/effort equal the authoring
-	// row's, surviving the cleared defaults.
-	if run.Provider != authoring.Provider || run.Model != "sonnet" || run.Effort != "high" {
-		t.Errorf("fix run provider/model/effort = %s/%s/%s, want the authoring row's %s/sonnet/high",
-			run.Provider, run.Model, run.Effort, authoring.Provider)
+	// The #189 pin: model/effort are the AFK-chain override (fable/xhigh), NOT
+	// the authoring row's sonnet/high — the persisted authoring row has zero
+	// influence. Provider stays claude-code: the fixture registers no second
+	// provider, so the AFK chain and the authoring row happen to agree there.
+	if run.Provider != "claude-code" || run.Model != "fable" || run.Effort != "xhigh" {
+		t.Errorf("fix run provider/model/effort = %s/%s/%s, want the AFK-chain claude-code/fable/xhigh (authoring row recorded sonnet/high)",
+			run.Provider, run.Model, run.Effort)
 	}
 	// The seed carries the rejection work order below the separator — exactly
 	// FixSeedPrompt over RejectionContext's rendering.
@@ -619,9 +627,10 @@ func TestSpawnOnce_rejectSpawnsFixRunInheritingAuthoringRow(t *testing.T) {
 
 // The hybrid trigger (ADR-0048): a live human changes-requested native
 // review, with NO markers at all, is rejected-state — a fix run spawns, its
-// work order quoting the review. No authoring run row exists here, so the
-// provider falls back through the repo chain (warned, never fatal — the loop
-// stays alive).
+// work order quoting the review. Its provider resolves through the normal AFK
+// chain (issue #189) — the base default claude-code here — exactly as every
+// fix run now resolves, authoring row or not: there is no longer a "missing
+// row" branch, only the one chain.
 func TestSpawnOnce_humanRejectionAloneSpawnsFixRun(t *testing.T) {
 	f := newFixture(t)
 	autolandOn(f, f.repo)
@@ -636,7 +645,7 @@ func TestSpawnOnce_humanRejectionAloneSpawnsFixRun(t *testing.T) {
 		t.Fatalf("fix runs = %d, want exactly 1 (a native changes-requested is rejected-state)", len(fixes))
 	}
 	if fixes[0].Provider != "claude-code" {
-		t.Errorf("provider = %q, want the repo-chain fallback claude-code (no authoring row exists)", fixes[0].Provider)
+		t.Errorf("provider = %q, want the AFK-chain base default claude-code", fixes[0].Provider)
 	}
 	sess, live := f.runner.Session(fixes[0].SessionName)
 	if !live {

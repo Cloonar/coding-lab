@@ -201,11 +201,14 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		t.Errorf("flags = incogni %v, afk_auto %v, want false/false", repo["incogni"], repo["afk_auto_enabled"])
 	}
 	// Autoland defaults (issue #181 / ADR-0048): off, a 2-attempt fix-run
-	// bound, auto-merge on, no lander provider override.
+	// bound, auto-merge on, and no lander provider/model/effort override
+	// (issue #189: model/effort join provider as nullable = inherit).
 	if repo["autoland_enabled"] != false || repo["max_fix_attempts"] != float64(2) ||
-		repo["auto_merge"] != true || repo["lander_provider"] != nil {
-		t.Errorf("autoland defaults = enabled=%v attempts=%v automerge=%v provider=%v, want false/2/true/null",
-			repo["autoland_enabled"], repo["max_fix_attempts"], repo["auto_merge"], repo["lander_provider"])
+		repo["auto_merge"] != true || repo["lander_provider"] != nil ||
+		repo["lander_model"] != nil || repo["lander_effort"] != nil {
+		t.Errorf("autoland defaults = enabled=%v attempts=%v automerge=%v provider=%v model=%v effort=%v, want false/2/true/null/null/null",
+			repo["autoland_enabled"], repo["max_fix_attempts"], repo["auto_merge"],
+			repo["lander_provider"], repo["lander_model"], repo["lander_effort"])
 	}
 	// The pinned repo JSON: every key present (nullables as null).
 	for _, k := range []string{"id", "name", "remote_url", "credential_id", "forge_credential_id",
@@ -214,7 +217,8 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		"manual_branch_prefix", "afk_auto_enabled", "consecutive_failures", "budget_minutes",
 		"max_instances_override", "clone_status", "clone_error", "created_at", "last_opened_at",
 		"afk_prompt", "afk_prompt_effective", "afk_provider_default",
-		"autoland_enabled", "max_fix_attempts", "auto_merge", "lander_provider"} {
+		"autoland_enabled", "max_fix_attempts", "auto_merge", "lander_provider",
+		"lander_model", "lander_effort"} {
 		if _, ok := repo[k]; !ok {
 			t.Errorf("repo JSON missing pinned key %q", k)
 		}
@@ -796,6 +800,45 @@ func TestRepoAutolandSettings(t *testing.T) {
 	wantStatus(t, resp, http.StatusOK)
 	if repo = decodeBody(t, resp); repo["lander_provider"] != nil {
 		t.Errorf("lander_provider after PATCH null = %v, want nil", repo["lander_provider"])
+	}
+
+	// lander_model / lander_effort (issue #189) round-trip as plain nullable
+	// strings — real-looking ids set and echo back.
+	resp = x.do("PATCH", "/api/v1/repos/"+forgeID, map[string]any{
+		"lander_model": "sonnet", "lander_effort": "high",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["lander_model"] != "sonnet" || repo["lander_effort"] != "high" {
+		t.Errorf("patched lander model/effort = %v/%v, want sonnet/high", repo["lander_model"], repo["lander_effort"])
+	}
+
+	// DELIBERATE (issue #189): an arbitrary unknown model/effort string is
+	// ACCEPTED at write time — there is NO catalog to validate against here
+	// (per-provider, dynamic #156/#157; the lander's effective provider isn't
+	// knowable at PATCH). Strictness lives at lander launch, which fails loudly
+	// on an unknown value. So "ghost-model" round-trips, unlike an unknown
+	// lander_provider (registry-checked, 400 below).
+	resp = x.do("PATCH", "/api/v1/repos/"+forgeID, map[string]any{
+		"lander_model": "ghost-model", "lander_effort": "ghost-effort",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["lander_model"] != "ghost-model" || repo["lander_effort"] != "ghost-effort" {
+		t.Errorf("unknown lander model/effort = %v/%v, want them accepted as-is (validation is at launch, not write)",
+			repo["lander_model"], repo["lander_effort"])
+	}
+
+	// null clears one, "" clears the other — pinning patchNullableString's
+	// null-or-empty → NULL (inherit) behavior for these two fields too.
+	resp = x.do("PATCH", "/api/v1/repos/"+forgeID, map[string]any{
+		"lander_model": nil, "lander_effort": "",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	repo = decodeBody(t, resp)
+	if repo["lander_model"] != nil || repo["lander_effort"] != nil {
+		t.Errorf("cleared lander model/effort = %v/%v, want nulls (null and \"\" both clear)",
+			repo["lander_model"], repo["lander_effort"])
 	}
 
 	// Rejections, each leaving the row untouched.

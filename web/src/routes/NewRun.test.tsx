@@ -65,6 +65,8 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
     max_fix_attempts: 2,
     auto_merge: true,
     lander_provider: null,
+    lander_model: null,
+    lander_effort: null,
     ...overrides,
   };
 }

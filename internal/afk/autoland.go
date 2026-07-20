@@ -183,7 +183,7 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 			// (memoized per provider per pass): a logged-out launch strands a
 			// session that dies at the login wall and reaps as a death. The
 			// locked launch path re-makes the same resolution authoritatively.
-			prov, err := s.autolandProvider(ctx, repo, pull.HeadBranch, action)
+			prov, err := s.autolandProvider(ctx, repo, action)
 			if err != nil {
 				s.log.Warn("spawn: resolving autoland provider", "component", "afk", "repo", repo.Name, "pull", pull.Number, "err", err)
 				continue
@@ -238,15 +238,15 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 
 // autolandProvider resolves the provider gating an autoland action's
 // candidate: lander and escalate runs on the lander chain (lander_provider
-// else base — validation-class, non-AFK), fix runs on the authoring chain
-// (the persisted authoring run's provider, else the repo chain — fixProvider).
-// Each arm is the SAME resolution its launch path re-makes under the engine
-// lock, so the gate and the launch can never disagree on which login matters.
-func (s *Service) autolandProvider(ctx context.Context, repo store.Repo, branch string, action AutolandAction) (provider.AgentProvider, error) {
+// else base — validation-class, non-AFK), fix runs on the normal AFK chain
+// (repo AFK override → global AFK override → base — RunKindFix is an AFK kind;
+// issue #189 reversed the ADR-0048 authoring-provider inheritance). Each arm
+// is the SAME resolution its launch path re-makes under the engine lock, so
+// the gate and the launch can never disagree on which login matters.
+func (s *Service) autolandProvider(ctx context.Context, repo store.Repo, action AutolandAction) (provider.AgentProvider, error) {
 	switch action {
 	case ActionFix:
-		prov, _, _, err := s.fixProvider(ctx, repo, branch)
-		return prov, err
+		return s.instances.ResolveProvider(ctx, repo, store.RunKindFix, "")
 	case ActionEscalate:
 		return s.landerChainProvider(ctx, repo, store.RunKindEscalate)
 	default: // ActionLander
