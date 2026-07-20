@@ -183,34 +183,60 @@ func TestActiveRunOnBranch(t *testing.T) {
 // truth (issue #182 / ADR-0048): every kind='fix' row on the branch counts,
 // regardless of outcome — a fix run that dies on the launch pad still burns
 // an attempt — and no other kind or branch/repo leaks in.
-func TestFixRunCountForBranch(t *testing.T) {
+func TestAutolandAttempts(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, st *Store) {
 		repo := afkFixtureRepo(t, st, "proj")
 		other := afkFixtureRepo(t, st, "other")
 		ctx := context.Background()
 
-		if n, err := st.FixRunCountForBranch(ctx, repo.ID, "afk/7"); err != nil || n != 0 {
-			t.Fatalf("empty branch: n=%d err=%v, want 0", n, err)
+		// Absent row reads zero — the most permissive value, so a branch that
+		// has never been attempted needs no seeding.
+		if n, err := st.AutolandAttempts(ctx, repo.ID, "afk/7", RunKindFix); err != nil || n != 0 {
+			t.Fatalf("virgin branch: n=%d err=%v, want 0", n, err)
 		}
 
-		// One active fix run and one dead fix run — both count.
-		afkFixtureRunOn(t, st, repo.ID, RunKindFix, "afk/7", "proj~fix-1", afkClock)
-		dead := afkFixtureRunOn(t, st, repo.ID, RunKindFix, "afk/7", "proj~fix-2", afkClock.Add(time.Minute))
-		if err := st.EndRun(ctx, dead.ID, RunOutcomeDeath, afkClock.Add(time.Hour), "x"); err != nil {
-			t.Fatalf("EndRun: %v", err)
+		for range 2 {
+			if err := st.RecordAutolandAttempt(ctx, repo.ID, "afk/7", RunKindFix); err != nil {
+				t.Fatalf("RecordAutolandAttempt: %v", err)
+			}
 		}
-		// A non-fix kind on the same branch, a fix run on a different branch,
-		// and a fix run in a different repo must never count.
-		afkFixtureRunOn(t, st, repo.ID, RunKindAFKAuto, "afk/7", "proj~afk-9", afkClock)
-		afkFixtureRunOn(t, st, repo.ID, RunKindFix, "afk/8", "proj~fix-other-branch", afkClock)
-		afkFixtureRunOn(t, st, other.ID, RunKindFix, "afk/7", "other~fix-1", afkClock)
+		if n, err := st.AutolandAttempts(ctx, repo.ID, "afk/7", RunKindFix); err != nil || n != 2 {
+			t.Errorf("after two attempts: n=%d err=%v, want 2", n, err)
+		}
 
-		n, err := st.FixRunCountForBranch(ctx, repo.ID, "afk/7")
-		if err != nil {
-			t.Fatalf("FixRunCountForBranch: %v", err)
+		// The counter is keyed on all three of (repo, branch, kind): the other
+		// kind on the same branch, the same kind on another branch, and the
+		// same pair in another repo are each their own budget.
+		if err := st.RecordAutolandAttempt(ctx, repo.ID, "afk/7", RunKindEscalate); err != nil {
+			t.Fatalf("RecordAutolandAttempt escalate: %v", err)
 		}
-		if n != 2 {
-			t.Errorf("count = %d, want 2 (active and death both count as spawns)", n)
+		for _, tc := range []struct {
+			name           string
+			repoID, branch string
+			kind           string
+			want           int
+		}{
+			{"fix on the branch", repo.ID, "afk/7", RunKindFix, 2},
+			{"escalate on the branch", repo.ID, "afk/7", RunKindEscalate, 1},
+			{"fix on another branch", repo.ID, "afk/8", RunKindFix, 0},
+			{"fix in another repo", other.ID, "afk/7", RunKindFix, 0},
+		} {
+			n, err := st.AutolandAttempts(ctx, tc.repoID, tc.branch, tc.kind)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if n != tc.want {
+				t.Errorf("%s: n=%d, want %d", tc.name, n, tc.want)
+			}
+		}
+
+		// The counter is spawn-INTENT, decoupled from runs rows entirely: a
+		// branch carrying no fix run at all still reports its burned attempts
+		// (the launch-pad-failure case that a row count cannot see).
+		if runs, err := st.RunsByRepo(ctx, repo.ID, 0); err != nil {
+			t.Fatalf("RunsByRepo: %v", err)
+		} else if len(runs) != 0 {
+			t.Fatalf("runs = %d, want 0 — attempts must not depend on run rows", len(runs))
 		}
 	})
 }

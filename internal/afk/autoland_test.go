@@ -94,6 +94,12 @@ func seedTerminalFixRun(f *fixture, repo store.Repo, branch, session, outcome st
 	if err := f.st.EndRun(f.t.Context(), id, outcome, clockTime, ""); err != nil {
 		f.t.Fatalf("EndRun: %v", err)
 	}
+	// The row is the run's history; the ATTEMPT is what the bound counts (a
+	// row can be rolled back out of existence, an attempt cannot). A seeded
+	// past fix run therefore has to burn its attempt too.
+	if err := f.st.RecordAutolandAttempt(f.t.Context(), repo.ID, branch, store.RunKindFix); err != nil {
+		f.t.Fatalf("RecordAutolandAttempt: %v", err)
+	}
 }
 
 // --- the lander gather through the spawn pass ------------------------------------
@@ -311,6 +317,12 @@ func launchFixFixture(f *fixture, rejection string) store.Run {
 	if err := f.svc.LaunchFix(f.t.Context(), f.repo.ID, 1, "afk/7", 7, rejection); err != nil {
 		f.t.Fatalf("LaunchFix: %v", err)
 	}
+	// Production burns the attempt in autolandLaunch, the pass's chokepoint —
+	// not inside LaunchFix — so a direct-entry fixture must burn it too, or the
+	// bound reads one attempt short of what the poller would see.
+	if err := f.st.RecordAutolandAttempt(f.t.Context(), f.repo.ID, "afk/7", store.RunKindFix); err != nil {
+		f.t.Fatalf("RecordAutolandAttempt: %v", err)
+	}
 	run, err := f.st.RunBySession(f.t.Context(), "proj~fix-7")
 	if err != nil {
 		f.t.Fatalf("RunBySession: %v", err)
@@ -325,6 +337,9 @@ func launchEscalateFixture(f *fixture, history string) store.Run {
 	originClaimBranch(f, f.repo, "afk/7")
 	if err := f.svc.LaunchEscalate(f.t.Context(), f.repo.ID, 1, "afk/7", 7, history); err != nil {
 		f.t.Fatalf("LaunchEscalate: %v", err)
+	}
+	if err := f.st.RecordAutolandAttempt(f.t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate); err != nil {
+		f.t.Fatalf("RecordAutolandAttempt: %v", err)
 	}
 	run, err := f.st.RunBySession(f.t.Context(), "proj~escalate-7")
 	if err != nil {
@@ -695,6 +710,106 @@ func TestSpawnOnce_atFixBoundSpawnsEscalate(t *testing.T) {
 // Escalated terminality: after escalation the PR is invisible to autoland
 // FOREVER — by the durable run row even if the marker comment was deleted,
 // and by the marker at ANY comment position even without a row.
+// An escalate run that dies BEFORE posting its marker writes no 'escalated'
+// row, so the poller re-derives the identical rejected-at-bound state and
+// escalates again. Nothing else brakes that: escalate is excluded from the
+// three-strikes counter, and the candidate outranks new work at StageFix. The
+// escalate arm is therefore bounded in its own right — MaxEscalateAttempts
+// spawns, then autoland goes quiet on the PR instead of spinning forever.
+func TestSpawnOnce_escalateArmIsBounded(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		MaxFixAttempts: store.Set(0), // straight to the escalate arm
+	}); err != nil {
+		t.Fatal(err)
+	}
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
+
+	// Each round the escalate run fails to deliver — killed before it can post
+	// its marker, or unable to launch at all once round 1's worktree survives
+	// the un-merged teardown. Either way no 'escalated' row is ever written, so
+	// the PR keeps re-deriving rejected-at-bound. The attempt counter is what
+	// the bound reads, so it is what this asserts on: a surviving runs row is
+	// exactly the thing that cannot be relied upon here.
+	for round := 1; round <= MaxEscalateAttempts; round++ {
+		f.svc.SpawnOnce(t.Context())
+		n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate)
+		if err != nil {
+			t.Fatalf("round %d: AutolandAttempts: %v", round, err)
+		}
+		if n != round {
+			t.Fatalf("round %d: escalate attempts = %d, want %d", round, n, round)
+		}
+		for _, run := range activeRuns(f) {
+			f.runner.Kill(run.SessionName)
+		}
+		f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Duration(round)*time.Minute))
+	}
+	if esc, err := f.st.EscalatedRunOnBranch(t.Context(), f.repo.ID, "afk/7"); err != nil || esc {
+		t.Fatalf("EscalatedRunOnBranch = %v (err %v), want false — no marker ever landed", esc, err)
+	}
+
+	// The bound is spent: the PR still reads rejected-at-bound, but the poller
+	// must go quiet rather than spawn escalate attempt MaxEscalateAttempts+1.
+	f.svc.SpawnOnce(t.Context())
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate); err != nil || n != MaxEscalateAttempts {
+		t.Errorf("escalate attempts = %d (err %v), want %d — the arm must not respawn past its bound", n, err, MaxEscalateAttempts)
+	}
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Errorf("active runs = %d, want 0 — autoland is silent on the PR past the bound", len(active))
+	}
+}
+
+// activeRuns is the fixture's live-run snapshot for the repo under test.
+func activeRuns(f *fixture) []store.Run {
+	f.t.Helper()
+	runs, err := f.st.ActiveRunsByRepo(f.t.Context(), f.repo.ID)
+	if err != nil {
+		f.t.Fatalf("ActiveRunsByRepo: %v", err)
+	}
+	return runs
+}
+
+// A fix launch that fails on the launch pad — before any runs row survives —
+// must still burn an attempt. Start's rollback deletes the row on every
+// post-CreateRun failure and the pre-CreateRun failures never write one, so a
+// bound counting runs rows would let the same failing launch retry every tick
+// forever. Here the claim branch is missing from origin, so LaunchFix fails
+// with no row left behind.
+func TestSpawnOnce_failedFixLaunchBurnsAttempt(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		MaxFixAttempts: store.Set(1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately NO originClaimBranch: the launch cannot make a worktree.
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
+
+	f.svc.SpawnOnce(t.Context())
+	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 0 {
+		t.Fatalf("fix run rows = %d, want 0 — the launch failed, so no row survives", n)
+	}
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindFix); err != nil || n != 1 {
+		t.Fatalf("AutolandAttempts(fix) = %d (err %v), want 1 — the ATTEMPT burns it, not the surviving row", n, err)
+	}
+
+	// The bound is 1 and it is spent: the next pass must escalate, never retry
+	// the same failing fix launch.
+	f.svc.SpawnOnce(t.Context())
+	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 0 {
+		t.Errorf("fix run rows = %d, want still 0 — the bound is spent, no respawn", n)
+	}
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate); err != nil || n != 1 {
+		t.Errorf("AutolandAttempts(escalate) = %d (err %v), want 1 — the loop moved on to the hand-off", n, err)
+	}
+}
+
 func TestSpawnOnce_escalatedIsTerminal(t *testing.T) {
 	t.Run("escalated-outcome run row blocks forever", func(t *testing.T) {
 		f := newFixture(t)
@@ -854,8 +969,8 @@ func TestReap_fixDeathBurnsAttemptStrikesAndEscalatesNext(t *testing.T) {
 	if n := f.failures(f.repo); n != 1 {
 		t.Errorf("failures = %d, want 1 (a fix death strikes — three-strikes accounting applies, #182)", n)
 	}
-	if n, err := f.st.FixRunCountForBranch(t.Context(), f.repo.ID, "afk/7"); err != nil || n != 1 {
-		t.Errorf("FixRunCountForBranch = %d (err %v), want 1 — the dead spawn burned the attempt", n, err)
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindFix); err != nil || n != 1 {
+		t.Errorf("AutolandAttempts(fix) = %d (err %v), want 1 — the dead spawn burned the attempt", n, err)
 	}
 
 	// The next pass: still rejected, FixSpawns 1 >= bound 1 → escalate, never

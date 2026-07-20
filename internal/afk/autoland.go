@@ -147,13 +147,34 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 			// spent exactly when the zero-count decision says fix, never on
 			// the pass's virgin/validated/escalated majority.
 			if action == ActionFix {
-				n, err := s.store.FixRunCountForBranch(ctx, repo.ID, pull.HeadBranch)
+				n, err := s.store.AutolandAttempts(ctx, repo.ID, pull.HeadBranch, store.RunKindFix)
 				if err != nil {
-					s.log.Warn("spawn: fix run count", "component", "afk", "repo", repo.Name, "branch", pull.HeadBranch, "err", err)
+					s.log.Warn("spawn: fix attempt count", "component", "afk", "repo", repo.Name, "branch", pull.HeadBranch, "err", err)
 					continue
 				}
 				st.FixSpawns = n
 				action, approveOnly = DecideAutoland(st)
+			}
+			// The escalate count is fetched on the same lazy terms and for the
+			// same reason: zero is its most permissive value, and the only
+			// action a real count can change is ActionEscalate (to silence at
+			// the bound). Both entry paths land here — the fix bound spent
+			// above, or MaxFixAttempts=0 escalating on the first decision.
+			if action == ActionEscalate {
+				n, err := s.store.AutolandAttempts(ctx, repo.ID, pull.HeadBranch, store.RunKindEscalate)
+				if err != nil {
+					s.log.Warn("spawn: escalate attempt count", "component", "afk", "repo", repo.Name, "branch", pull.HeadBranch, "err", err)
+					continue
+				}
+				st.EscalateSpawns = n
+				if action, approveOnly = DecideAutoland(st); action == ActionNone {
+					// Terminal-but-unmarked: the hand-off itself failed
+					// MaxEscalateAttempts times. Loud, because nothing
+					// downstream will say it — the PR simply goes quiet.
+					s.log.Error("spawn: escalation exhausted, autoland silent on pull",
+						"component", "afk", "repo", repo.Name, "pull", pull.Number,
+						"branch", pull.HeadBranch, "attempts", n)
+				}
 			}
 			if action == ActionNone {
 				continue
@@ -180,7 +201,7 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 					stage: StageLander,
 					repo:  repo,
 					label: fmt.Sprintf("lander %s#%d", repo.Name, pull.Number),
-					launch: s.autolandLaunch(repo, pull.Number, "lander", func(ctx context.Context) error {
+					launch: s.autolandLaunch(repo, pull.Number, pull.HeadBranch, store.RunKindLander, func(ctx context.Context) error {
 						return s.LaunchLander(ctx, repo.ID, pull.Number, pull.HeadBranch, issueN, approveOnly)
 					}),
 				})
@@ -193,7 +214,7 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 					stage: StageFix,
 					repo:  repo,
 					label: fmt.Sprintf("fix %s#%d", repo.Name, pull.Number),
-					launch: s.autolandLaunch(repo, pull.Number, "fix", func(ctx context.Context) error {
+					launch: s.autolandLaunch(repo, pull.Number, pull.HeadBranch, store.RunKindFix, func(ctx context.Context) error {
 						return s.LaunchFix(ctx, repo.ID, pull.Number, pull.HeadBranch, issueN, rejection)
 					}),
 				})
@@ -205,7 +226,7 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 					stage: StageFix,
 					repo:  repo,
 					label: fmt.Sprintf("escalate %s#%d", repo.Name, pull.Number),
-					launch: s.autolandLaunch(repo, pull.Number, "escalate", func(ctx context.Context) error {
+					launch: s.autolandLaunch(repo, pull.Number, pull.HeadBranch, store.RunKindEscalate, func(ctx context.Context) error {
 						return s.LaunchEscalate(ctx, repo.ID, pull.Number, pull.HeadBranch, issueN, history)
 					}),
 				})
@@ -238,17 +259,31 @@ func (s *Service) autolandProvider(ctx context.Context, repo store.Repo, branch 
 // claims anything, so the pass turns it into its per-repo floor-raise
 // (spawnPass owns that reasoning). Any other error is logged here and the
 // candidate skipped — no slot spent.
-func (s *Service) autolandLaunch(repo store.Repo, pullNumber int, verb string, launch func(context.Context) error) func(context.Context) spawnOutcome {
+func (s *Service) autolandLaunch(repo store.Repo, pullNumber int, branch, verb string, launch func(context.Context) error) func(context.Context) spawnOutcome {
 	return func(ctx context.Context) spawnOutcome {
 		err := launch(ctx)
-		switch {
-		case err == nil:
-			return spawnSpawned
-		case errors.Is(err, instance.ErrOverCap):
+		// ErrOverCap first, and before the attempt burns: the pass never
+		// reached the launch pad, so nothing was attempted. Every OTHER
+		// outcome burns one attempt for the bounded kinds — success and
+		// launch-pad failure alike. This is the whole fix for the runs-row
+		// count's blind spot: Start's rollback deletes the row (and the
+		// pre-CreateRun failures never write one), so a launch that fails
+		// the same way every tick would otherwise respawn forever.
+		if errors.Is(err, instance.ErrOverCap) {
 			return spawnAtCap
-		default:
-			s.log.Warn("spawn: launch "+verb, "component", "afk", "repo", repo.Name, "pull", pullNumber, "err", err)
-			return spawnSkipped
 		}
+		if verb == store.RunKindFix || verb == store.RunKindEscalate {
+			if rerr := s.store.RecordAutolandAttempt(ctx, repo.ID, branch, verb); rerr != nil {
+				// Log only: a counter write that fails must not also lose the
+				// launch. The next pass re-reads the counter, so a dropped
+				// increment costs one extra attempt, never correctness.
+				s.log.Warn("spawn: record "+verb+" attempt", "component", "afk", "repo", repo.Name, "branch", branch, "err", rerr)
+			}
+		}
+		if err == nil {
+			return spawnSpawned
+		}
+		s.log.Warn("spawn: launch "+verb, "component", "afk", "repo", repo.Name, "pull", pullNumber, "err", err)
+		return spawnSkipped
 	}
 }

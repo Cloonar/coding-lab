@@ -86,22 +86,49 @@ func (s *Store) ActiveRunOnBranch(ctx context.Context, repoID, branch string) (b
 	return n > 0, nil
 }
 
-// FixRunCountForBranch counts kind='fix' runs for (repoID, branch), any
-// outcome — the fix-forward loop's attempt bound (issue #182 / ADR-0048).
-// This is the attempt bound's source of truth: spawns ever, never rejection
-// verdicts, so a fix run that dies on the launch pad still burns an attempt
-// (a dead run posts no verdict comment, so bounding on rejections would let
-// it respawn without end).
-func (s *Store) FixRunCountForBranch(ctx context.Context, repoID, branch string) (int, error) {
+// AutolandAttempts reads the spawn-intent counter for (repoID, branch, kind)
+// — the fix-forward loop's attempt bounds (issue #182 / ADR-0048). Absent row
+// means zero, the most permissive value, so a repo that has never spawned the
+// kind needs no seeding.
+//
+// This, NOT a count of runs rows, is the bounds' source of truth. A runs row
+// records a spawn that reached a live session: Start's rollback deletes it on
+// every failure after CreateRun, and the failures before CreateRun (a stale
+// worktree at the fix label, a seeding failure, a secrets read) never write
+// one. Counting rows therefore lets a deterministically-failing launch retry
+// every tick forever, never burning an attempt and never reaching escalation.
+// RecordAutolandAttempt burns the attempt at the launch chokepoint instead.
+func (s *Store) AutolandAttempts(ctx context.Context, repoID, branch, kind string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, s.rebind(
-		`SELECT COUNT(*) FROM runs
-		 WHERE kind = ? AND repo_id = ? AND branch = ?`),
-		RunKindFix, repoID, branch).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("fix run count for branch %q in repo %q: %w", branch, repoID, err)
+		`SELECT attempts FROM autoland_attempts
+		 WHERE repo_id = ? AND branch = ? AND kind = ?`),
+		repoID, branch, kind).Scan(&n)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("autoland %s attempts for branch %q in repo %q: %w", kind, branch, repoID, err)
 	}
 	return n, nil
+}
+
+// RecordAutolandAttempt burns one attempt for (repoID, branch, kind) — called
+// once per launch the autoland pass actually reaches the launch pad with, for
+// the bounded kinds only (issue #182 / ADR-0048). Idempotent by upsert, never
+// by run identity: two attempts on one branch are two attempts, which is the
+// whole point of bounding intents rather than surviving rows.
+func (s *Store) RecordAutolandAttempt(ctx context.Context, repoID, branch, kind string) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(
+		`INSERT INTO autoland_attempts (repo_id, branch, kind, attempts)
+		 VALUES (?, ?, ?, 1)
+		 ON CONFLICT (repo_id, branch, kind)
+		 DO UPDATE SET attempts = autoland_attempts.attempts + 1`),
+		repoID, branch, kind)
+	if err != nil {
+		return fmt.Errorf("record autoland %s attempt for branch %q in repo %q: %w", kind, branch, repoID, err)
+	}
+	return nil
 }
 
 // AuthoringRunForBranch returns the latest afk_manual/afk_auto run for

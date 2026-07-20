@@ -320,9 +320,29 @@ type PullVerdictState struct {
 	HumanRejected  bool     // some reviewer's latest live verdict requests changes (HumanRejected)
 	Escalated      bool     // escalate word present (ANY position) OR an escalated-outcome run exists — the caller ORs both sources, because a human can delete the marker comment but never the run row
 	RunOnBranch    bool     // an active run of ANY kind works the branch
-	FixSpawns      int      // fix runs EVER spawned for this branch, any outcome — spawns, never rejection verdicts: a fix run that dies on the launch pad still burns an attempt (ADR-0048)
+	FixSpawns      int      // fix launches EVER attempted for this branch (autoland_attempts) — intents, never rejection verdicts and never surviving runs rows: a fix run that dies on the launch pad still burns an attempt (ADR-0048)
 	MaxFixAttempts int      // the repo's per-branch fix-attempt bound (repos.max_fix_attempts)
+	EscalateSpawns int      // escalate launches EVER attempted for this branch (autoland_attempts), bounded by MaxEscalateAttempts
 }
+
+// MaxEscalateAttempts bounds escalate launches per branch (issue #182).
+//
+// The escalate arm needs a bound of its own, and it is not optional. Its
+// terminality is written by the reaper only once the escalate run POSTS its
+// marker; an escalate run that dies or times out first leaves no 'escalated'
+// row, so the next pass re-derives the identical rejected-at-bound state and
+// escalates again. Nothing else brakes that loop: reapRun excludes escalate
+// from the consecutive-failure counter in both directions, and the candidate
+// sorts at StageFix — AHEAD of new AFK work under drain-before-fill — so a
+// single wedged branch would starve its repo's new-work pipeline indefinitely.
+//
+// Three, because escalation is one comment, one label flip and one marker: if
+// three separate runs cannot land that, the failure is systemic and retrying
+// is not what fixes it. Past the bound the poller goes quiet on the PR (and
+// says so at error level) rather than spinning — the PR keeps its rejected
+// state and its issue keeps ready-for-agent, so a human running the land-pr
+// skill still has every path in.
+const MaxEscalateAttempts = 3
 
 // AutolandAction is what the per-PR decision yields: nothing, or exactly one
 // spawn candidate. The action names the KIND; its pipeline rank in the spawn
@@ -387,7 +407,12 @@ func DecideAutoland(st PullVerdictState) (action AutolandAction, approveOnly boo
 		if st.FixSpawns < st.MaxFixAttempts {
 			return ActionFix, false
 		}
-		return ActionEscalate, false
+		// At the fix bound: hand off — but the hand-off is itself bounded,
+		// because a dead escalate run writes no terminality (MaxEscalateAttempts).
+		if st.EscalateSpawns < MaxEscalateAttempts {
+			return ActionEscalate, false
+		}
+		return ActionNone, false
 	}
 	return ActionNone, false
 }
