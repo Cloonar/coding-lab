@@ -26,10 +26,12 @@ type LaunchSpec struct {
 	Kind        string // store.RunKindManual | RunKindAFKManual | RunKindAFKAuto | RunKindLander
 	IssueNumber *int   // AFK/lander runs: the claimed issue; manual: nil
 
-	// AdoptBranch checks out the EXISTING Branch (gitx.AddWorktreeExisting)
-	// instead of forking a fresh one — the lander run's mode (issue #181):
-	// the PR head branch pre-exists the run, so it IS someone's claim, and a
-	// rollback must remove the worktree but never force-delete the branch.
+	// AdoptBranch checks out the EXISTING Branch DETACHED, at its origin tip
+	// (gitx.AddWorktreeExisting), instead of forking a fresh one — the lander
+	// run's mode (issue #181): the PR head branch pre-exists the run, so it IS
+	// someone's claim. A rollback must remove the worktree but never delete
+	// the branch; because the adopt is detached it creates no local branch
+	// either, so there is nothing of its own for the rollback to undo.
 	AdoptBranch bool
 
 	SessionName  string
@@ -146,8 +148,10 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 			s.log.Warn("start rollback: remove worktree", "component", "instance", "session", name, "worktree", wtPath, "err", err)
 		}
 		// An adopted branch pre-exists the run (it IS the claim, issue #181):
-		// force-deleting it here would destroy the claim, so only a branch this
-		// launch created is rolled back.
+		// deleting it here would destroy the claim. An adopt is also detached,
+		// so it never created a local branch in the first place — there is
+		// nothing for this rollback to undo, and skipping is both safe and
+		// complete.
 		if !spec.AdoptBranch {
 			if err := s.git.DeleteBranch(rctx, bareDir, branch, gitEnv); err != nil {
 				s.log.Warn("start rollback: delete branch", "component", "instance", "session", name, "branch", branch, "err", err)

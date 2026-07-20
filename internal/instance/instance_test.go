@@ -628,8 +628,14 @@ func TestLaunch_adoptBranchChecksOutExistingAndRollbackKeepsBranch(t *testing.T)
 		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
 			t.Errorf("worktree HEAD = %s, want the origin/afk/7 tip %s (adopted, never a fresh fork)", got, want)
 		}
-		if got := gitCmd(t, f.home, wt, "symbolic-ref", "HEAD"); got != "refs/heads/afk/7" {
-			t.Errorf("worktree on %q, want refs/heads/afk/7", got)
+		// Detached: the adopt never takes the branch ref, so the pre-existing
+		// local afk/7 (the parked-claim shape seedClaimBranch builds) is still
+		// free and still where it was.
+		if got := gitCmd(t, f.home, wt, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+			t.Errorf("worktree on %q, want a DETACHED HEAD", got)
+		}
+		if got := gitCmd(t, f.home, f.bare(), "rev-parse", "refs/heads/afk/7"); got != want {
+			t.Errorf("local claim branch = %s, want it untouched at %s", got, want)
 		}
 		if _, live := f.runner.Session("proj~lander-7"); !live {
 			t.Error("session not live after adopt-launch")

@@ -67,8 +67,11 @@ func (s *Store) ActiveAutoRunForRepo(ctx context.Context, repoID string) (Run, b
 // ActiveRunOnBranch reports whether any outcome='active' run — ANY kind —
 // works branch in the repo: the autoland poller's runs-store gate (issue
 // #181). The authoring AFK run still idling on its claim and a lander already
-// validating it both suppress a lander spawn; the store answers with one
-// count query (idx_runs_outcome narrows it), never a client-side scan.
+// validating it both suppress a lander spawn; the store answers with one count
+// query, never a client-side scan. No index covers this predicate —
+// idx_runs_outcome is on outcome alone and 'active' is its hot value, so it
+// narrows almost nothing; the working set of active runs is small enough that
+// the scan is cheap. Revisit if that stops being true.
 func (s *Store) ActiveRunOnBranch(ctx context.Context, repoID, branch string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, s.rebind(

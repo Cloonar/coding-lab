@@ -60,7 +60,9 @@ var validationCore = func() string {
 // appends the same attribution sentence the AFK template appends to its
 // commit step (the inline-fix step is the lander's only committing step).
 func LanderSeedPromptTemplate(autoMerge, incogni bool) string {
-	fix := "3. Fix trivial findings only — formatting, lint, merge conflicts — inline: commit to `" + BranchToken + "`, push." +
+	fix := "3. Fix trivial findings only — formatting, lint, merge conflicts — inline: commit, then" +
+		" `git push origin HEAD:refs/heads/" + BranchToken + "` (your worktree is DETACHED at the PR head, so" +
+		" push the refspec explicitly — a bare `git push` has no upstream to resolve)." +
 		" Substantive problems are never yours to fix — they belong to the verdict."
 	if incogni {
 		fix += " No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links."
@@ -100,9 +102,12 @@ func LanderSeedPrompt(pr int, branch string, autoMerge, incogni bool) string {
 }
 
 // landerWorktreePath is the on-disk worktree of a lander run for issue n:
-// <worktrees>/<repoName>-lander-<N> — the label keeps it disjoint from the
-// AFK run's <repoName>-<N> for the same issue, so a lander can validate a
-// claim whose (parked) AFK worktree still exists.
+// <worktrees>/<repoName>-lander-<N> — the label keeps its PATH disjoint from
+// the AFK run's <repoName>-<N> for the same issue. Disjoint paths are only
+// half of what lets a lander validate a claim whose (parked) AFK worktree
+// still exists: both worktrees would want the same afk/<N> ref, and git lets
+// only one hold it. The adopt is DETACHED (gitx.AddWorktreeExisting) so the
+// lander never asks for the ref at all.
 func (s *Service) landerWorktreePath(repoName string, n int) string {
 	return filepath.Join(s.worktreeRoot, gitx.WorktreeDir(repoName, LanderLabel(n)))
 }

@@ -50,7 +50,7 @@ func TestLanderSeedPrompt(t *testing.T) {
 		"You are an autonomous lander run. Validate pull request #9 (head branch `afk/7`)",
 		"1. Run `labctl pr view 9` and `labctl pr checks 9 --wait`.",
 		"2. Validate the pull request against the validation core below.",
-		"3. Fix trivial findings only — formatting, lint, merge conflicts — inline: commit to `afk/7`, push. Substantive problems are never yours to fix — they belong to the verdict.",
+		"3. Fix trivial findings only — formatting, lint, merge conflicts — inline: commit, then `git push origin HEAD:refs/heads/afk/7` (your worktree is DETACHED at the PR head, so push the refspec explicitly — a bare `git push` has no upstream to resolve). Substantive problems are never yours to fix — they belong to the verdict.",
 		"clean PASS → `labctl pr approve 9`, then `labctl pr merge 9`.",
 		"PASS with CONCERNS → `labctl pr approve 9 <concerns>`, then stop — never merge.",
 		"FAIL or blocking CONCERNS → `labctl pr reject 9 <findings>`.",
@@ -93,7 +93,7 @@ func TestLanderSeedPrompt(t *testing.T) {
 	// incogni appends the attribution sentence to the committing step only.
 	inc := LanderSeedPrompt(9, "afk/7", true, true)
 	const sentence = "No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links."
-	if !strings.Contains(inc, "push. Substantive problems are never yours to fix — they belong to the verdict. "+sentence) {
+	if !strings.Contains(inc, "Substantive problems are never yours to fix — they belong to the verdict. "+sentence) {
 		t.Errorf("incogni sentence not appended to the inline-fix step:\n%s", inc)
 	}
 	if strings.Contains(p, sentence) {
@@ -181,7 +181,12 @@ func TestLaunchLander(t *testing.T) {
 
 // A lander run's Stop is the neutral Stop (§4c), delegated through the
 // instance service exactly like the AFK kinds: outcome 'stopped', session
-// killed, and the adopted branch KEPT — a Stop must never destroy the claim.
+// killed, and the adopted claim KEPT — a Stop must never destroy it.
+//
+// The claim is the branch ON THE FORGE (it is the PR's head); the adopt is
+// detached and never creates a local ref, so origin's branch is what this
+// asserts. A local refs/heads/afk/7 used to exist here only as a by-product
+// of the old on-branch adopt, and checking it tested the by-product.
 func TestLaunchLander_neutralStopParks(t *testing.T) {
 	f := newFixture(t)
 	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
@@ -201,8 +206,8 @@ func TestLaunchLander_neutralStopParks(t *testing.T) {
 	if len(active) != 0 {
 		t.Errorf("lander still active after Stop: %v", active)
 	}
-	if !f.branchExists(f.repo, "afk/7") {
-		t.Error("neutral Stop deleted the adopted claim branch")
+	if got := gitCmd(t, f.home, origin, "rev-parse", "--verify", "refs/heads/afk/7"); got == "" {
+		t.Error("neutral Stop destroyed the claim branch on the forge")
 	}
 	if n := f.failures(f.repo); n != 0 {
 		t.Errorf("failures = %d, want 0 (a neutral Stop never counts)", n)

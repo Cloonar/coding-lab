@@ -52,16 +52,28 @@ func (e *Engine) AddWorktree(ctx context.Context, bareDir, path, branch, base st
 	return err
 }
 
-// AddWorktreeExisting creates a worktree at path on the EXISTING branch —
-// the lander run's adopt-branch checkout (issue #181 / ADR-0048), the one
+// AddWorktreeExisting creates a DETACHED worktree at path on origin/<branch>
+// — the lander run's adopt checkout (issue #181 / ADR-0048), the one
 // deliberate counterpart to AddWorktree's fresh fork. Same fail-loud fetch,
 // then: origin/<branch> must exist (a vanished PR head is a clear error, not
-// a fallback); an existing local branch is checked out where it stands,
-// UNLESS another worktree already has it (a parked claim worktree) — that is
-// an error the caller logs and retries next tick, never a steal; with no
-// local branch, `worktree add --track -b` forks it from origin/<branch>.
-// Finally the worktree is hard-reset to origin/<branch> so the lander
-// validates exactly what the forge sees, never a stale or diverged local ref.
+// a fallback), and the worktree is checked out DETACHED at that remote tip.
+//
+// Detached is load-bearing, not incidental. The lander only needs the local
+// branch REF for its one committing step, and it pushes that explicitly
+// (HEAD:refs/heads/<branch>), so never holding the ref buys two properties:
+//
+//   - A parked claim worktree — an AFK run whose dirty teardown kept its
+//     worktree, or an operator Stop — no longer blocks the adopt. Both want
+//     the same afk/<N>; only one may hold it, and git refuses the second.
+//     Claiming it here wedged the poller into a hot un-backed-off retry
+//     (spawn → adopt fails → log → respawn next tick, forever).
+//   - Committed-but-unpushed work on the claim branch survives. Checking the
+//     branch out and hard-resetting it to origin/<branch> moved the REF, so a
+//     success-path reap that parked unpushed commits (see RemoveWorktree)
+//     lost them silently. A detached checkout cannot move a branch.
+//
+// The lander still validates exactly what the forge sees — that was the point
+// of the reset, and origin/<branch> is what it now checks out directly.
 func (e *Engine) AddWorktreeExisting(ctx context.Context, bareDir, path, branch string, extraEnv []string) error {
 	if err := e.Fetch(ctx, bareDir, extraEnv); err != nil {
 		return err
@@ -73,23 +85,7 @@ func (e *Engine) AddWorktreeExisting(ctx context.Context, bareDir, path, branch 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir worktrees root: %w", err)
 	}
-	if e.refExists(ctx, bareDir, "refs/heads/"+branch, extraEnv) {
-		wts, err := e.Worktrees(ctx, bareDir, extraEnv)
-		if err != nil {
-			return err
-		}
-		for _, wt := range wts {
-			if wt.Branch == branch {
-				return fmt.Errorf("adopt branch %q: already checked out at %s", branch, wt.Path)
-			}
-		}
-		if _, err := e.run(ctx, bareDir, extraEnv, "worktree", "add", path, branch); err != nil {
-			return err
-		}
-	} else if _, err := e.run(ctx, bareDir, extraEnv, "worktree", "add", "--track", "-b", branch, path, remote); err != nil {
-		return err
-	}
-	if _, err := e.run(ctx, path, extraEnv, "reset", "--hard", remote); err != nil {
+	if _, err := e.run(ctx, bareDir, extraEnv, "worktree", "add", "--detach", path, remote); err != nil {
 		return err
 	}
 	return nil

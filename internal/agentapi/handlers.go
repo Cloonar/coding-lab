@@ -1166,12 +1166,26 @@ func (s *Server) handlePRRerequest(w http.ResponseWriter, r *http.Request) {
 // sanitizer like every agent-authored body; the secretscan decorator scans it
 // at the seam.
 //
-// This is the ONE agent-writable path onto a PR that composes no marker of its
-// own, so it is also the one that could forge the verdict grammar: a body
-// opening with tracker.VerdictMarkerPrefix is a 400. Without that gate a run
-// token — repo-scoped, so not even confined to its own PR — could post a
-// first-line `[autoland] verdict: pass` that a consumer reads as a lander
-// verdict.
+// This path composes no marker of its own, so it could forge the verdict
+// grammar: a body opening with tracker.VerdictMarkerPrefix is a 400. Without
+// that gate a run token — repo-scoped, so not even confined to its own PR —
+// could post a first-line `[autoland] verdict: pass` that a consumer reads as
+// a lander verdict.
+//
+// The gate here is NOT airtight, and must not be read as one. handleCommentCreate
+// (POST /agent/v1/issues/{n}/comments) is a second agent-writable path onto the
+// same thread — a PR shares the issue-comment number space, so both verbs
+// resolve to issuePath(n)+"/comments", the endpoint PullComments reads — and it
+// carries no verdict gate. A run token can still forge a marker through it, which
+// would deny a PR its validation (VerdictPresent suppresses the spawn) or
+// false-success-reap a live lander.
+//
+// That is a KNOWN, accepted gap: the exploit requires a deliberately adversarial
+// agent rather than a mistaken one, and the accidental path is narrow (a body
+// must BEGIN with the marker). Closing it means gating handleCommentCreate too,
+// or moving the check down to the CreateComment seam so both verbs inherit it
+// structurally — the better fix, and the one to make if this ever stops being a
+// trust-the-agent boundary.
 func (s *Server) handlePRComment(w http.ResponseWriter, r *http.Request) {
 	_, repo, ok := s.runRepo(w, r)
 	if !ok {
