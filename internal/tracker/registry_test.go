@@ -33,7 +33,10 @@ func (stubTracker) MergePull(context.Context, int) (PullRef, error) { return Pul
 func (stubTracker) Reviews(context.Context, int) ([]Review, error)  { return nil, nil }
 func (stubTracker) RerequestReview(context.Context, int) error      { return nil }
 func (stubTracker) CommentPull(context.Context, int, string) error  { return nil }
-func (stubTracker) CloseIssue(context.Context, int) error           { return nil }
+func (stubTracker) PullComments(context.Context, int) ([]Comment, error) {
+	return nil, nil
+}
+func (stubTracker) CloseIssue(context.Context, int) error { return nil }
 func (stubTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
 	return Issue{}, nil
 }

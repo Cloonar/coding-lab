@@ -52,6 +52,45 @@ func (e *Engine) AddWorktree(ctx context.Context, bareDir, path, branch, base st
 	return err
 }
 
+// AddWorktreeExisting creates a DETACHED worktree at path on origin/<branch>
+// — the lander run's adopt checkout (issue #181 / ADR-0048), the one
+// deliberate counterpart to AddWorktree's fresh fork. Same fail-loud fetch,
+// then: origin/<branch> must exist (a vanished PR head is a clear error, not
+// a fallback), and the worktree is checked out DETACHED at that remote tip.
+//
+// Detached is load-bearing, not incidental. The lander only needs the local
+// branch REF for its one committing step, and it pushes that explicitly
+// (HEAD:refs/heads/<branch>), so never holding the ref buys two properties:
+//
+//   - A parked claim worktree — an AFK run whose dirty teardown kept its
+//     worktree, or an operator Stop — no longer blocks the adopt. Both want
+//     the same afk/<N>; only one may hold it, and git refuses the second.
+//     Claiming it here wedged the poller into a hot un-backed-off retry
+//     (spawn → adopt fails → log → respawn next tick, forever).
+//   - Committed-but-unpushed work on the claim branch survives. Checking the
+//     branch out and hard-resetting it to origin/<branch> moved the REF, so a
+//     success-path reap that parked unpushed commits (see RemoveWorktree)
+//     lost them silently. A detached checkout cannot move a branch.
+//
+// The lander still validates exactly what the forge sees — that was the point
+// of the reset, and origin/<branch> is what it now checks out directly.
+func (e *Engine) AddWorktreeExisting(ctx context.Context, bareDir, path, branch string, extraEnv []string) error {
+	if err := e.Fetch(ctx, bareDir, extraEnv); err != nil {
+		return err
+	}
+	remote := "origin/" + branch
+	if !e.refExists(ctx, bareDir, "refs/remotes/"+remote, extraEnv) {
+		return fmt.Errorf("adopt branch %q: %s does not exist after fetch", branch, remote)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir worktrees root: %w", err)
+	}
+	if _, err := e.run(ctx, bareDir, extraEnv, "worktree", "add", "--detach", path, remote); err != nil {
+		return err
+	}
+	return nil
+}
+
 // RemoveWorktree removes the worktree at path (`git worktree remove
 // --force`). --force handles a tree that still has changes git considers
 // worth guarding: the guarded teardown only reaches it clean, but a

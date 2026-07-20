@@ -576,6 +576,93 @@ func TestLaunch_seedPromptIsTrailingSpawnPositional(t *testing.T) {
 	}
 }
 
+// Adopt-branch launch (issue #181): a lander LaunchSpec checks out the
+// EXISTING PR head branch (gitx.AddWorktreeExisting — never a fresh fork),
+// and a forced rollback removes the worktree but LEAVES the branch — an
+// adopted branch pre-exists the run and IS the claim, so force-deleting it
+// would destroy the claim.
+func TestLaunch_adoptBranchChecksOutExistingAndRollbackKeepsBranch(t *testing.T) {
+	// seedClaimBranch publishes afk/7 on the fixture origin one commit past
+	// main (the PR-head shape) and pre-creates the local claim branch in the
+	// bare clone (the parked-claim shape a lander typically meets).
+	seedClaimBranch := func(t *testing.T, f *fixture) string {
+		t.Helper()
+		origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+		gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+		gitCmd(t, f.home, origin, "checkout", "-q", "afk/7")
+		gitCmd(t, f.home, origin, "commit", "-q", "--allow-empty", "-m", "claim work")
+		sha := gitCmd(t, f.home, origin, "rev-parse", "afk/7")
+		gitCmd(t, f.home, origin, "checkout", "-q", "main")
+		gitCmd(t, f.home, f.bare(), "fetch", "-q", "origin")
+		gitCmd(t, f.home, f.bare(), "branch", "afk/7", "origin/afk/7")
+		return sha
+	}
+	n := 7
+	spec := func(f *fixture) LaunchSpec {
+		return LaunchSpec{
+			Repo:         f.repo,
+			Provider:     f.prov,
+			Kind:         store.RunKindLander,
+			AdoptBranch:  true,
+			IssueNumber:  &n,
+			SessionName:  "proj~lander-7",
+			Branch:       "afk/7",
+			WorktreePath: filepath.Join(f.worktreeRoot, "proj-lander-7"),
+			Model:        "opus[1m]",
+			Effort:       "max",
+			SeedPrompt:   "validate PR #9",
+		}
+	}
+
+	t.Run("adopts the existing branch", func(t *testing.T) {
+		f := newFixture(t)
+		want := seedClaimBranch(t, f)
+		run, err := f.svc.Launch(t.Context(), spec(f))
+		if err != nil {
+			t.Fatalf("Launch: %v", err)
+		}
+		if run.Kind != store.RunKindLander || run.Branch != "afk/7" {
+			t.Fatalf("run = %+v, want a lander on afk/7", run)
+		}
+		wt := filepath.Join(f.worktreeRoot, "proj-lander-7")
+		if got := gitCmd(t, f.home, wt, "rev-parse", "HEAD"); got != want {
+			t.Errorf("worktree HEAD = %s, want the origin/afk/7 tip %s (adopted, never a fresh fork)", got, want)
+		}
+		// Detached: the adopt never takes the branch ref, so the pre-existing
+		// local afk/7 (the parked-claim shape seedClaimBranch builds) is still
+		// free and still where it was.
+		if got := gitCmd(t, f.home, wt, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+			t.Errorf("worktree on %q, want a DETACHED HEAD", got)
+		}
+		if got := gitCmd(t, f.home, f.bare(), "rev-parse", "refs/heads/afk/7"); got != want {
+			t.Errorf("local claim branch = %s, want it untouched at %s", got, want)
+		}
+		if _, live := f.runner.Session("proj~lander-7"); !live {
+			t.Error("session not live after adopt-launch")
+		}
+	})
+
+	t.Run("forced rollback removes the worktree but keeps the branch", func(t *testing.T) {
+		f := newFixture(t)
+		seedClaimBranch(t, f)
+		f.runner.FailStart("proj~lander-7", errors.New("boom"))
+		_, err := f.svc.Launch(t.Context(), spec(f))
+		var startFailed *StartFailedError
+		if !errors.As(err, &startFailed) {
+			t.Fatalf("Launch err = %v, want StartFailedError", err)
+		}
+		if dirExists(filepath.Join(f.worktreeRoot, "proj-lander-7")) {
+			t.Error("worktree survived the adopt-launch rollback")
+		}
+		if !f.branchExists("afk/7") {
+			t.Error("adopt-launch rollback force-deleted the pre-existing branch — the claim is destroyed")
+		}
+		if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+			t.Errorf("run row survived rollback: %d active", len(active))
+		}
+	})
+}
+
 // The per-run dialog-capture settings file (ADR-0020) is written under runtime/
 // before the spawn and survives a successful Start; a spawn-failure rollback
 // unlinks it (no orphan in the runtime dir).

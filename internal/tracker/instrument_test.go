@@ -31,7 +31,10 @@ func (f failingTracker) MergePull(context.Context, int) (PullRef, error) { retur
 func (f failingTracker) Reviews(context.Context, int) ([]Review, error)  { return nil, f.err }
 func (f failingTracker) RerequestReview(context.Context, int) error      { return f.err }
 func (f failingTracker) CommentPull(context.Context, int, string) error  { return f.err }
-func (f failingTracker) CloseIssue(context.Context, int) error           { return f.err }
+func (f failingTracker) PullComments(context.Context, int) ([]Comment, error) {
+	return nil, f.err
+}
+func (f failingTracker) CloseIssue(context.Context, int) error { return f.err }
 func (f failingTracker) CreateIssue(context.Context, string, string, []string) (Issue, error) {
 	return Issue{}, f.err
 }
@@ -93,6 +96,7 @@ func driveAll(t *testing.T, trk Tracker) {
 	_, _ = trk.Reviews(ctx, 1)
 	_ = trk.RerequestReview(ctx, 1)
 	_ = trk.CommentPull(ctx, 1, "body")
+	_, _ = trk.PullComments(ctx, 1)
 	_ = trk.CloseIssue(ctx, 1)
 	_, _ = trk.CreateIssue(ctx, "t", "b", []string{"bug"})
 	_, _ = trk.EditIssue(ctx, 1, IssueEdit{})
@@ -104,7 +108,7 @@ func driveAll(t *testing.T, trk Tracker) {
 
 // opOrder mirrors driveAll.
 var opOrder = []string{OpReadyIssues, OpIssues, OpIssue, OpCreateComment, OpPulls, OpPull, OpChecks, OpCreatePull,
-	OpMergePull, OpReviews, OpRerequestReview, OpCommentPull,
+	OpMergePull, OpReviews, OpRerequestReview, OpCommentPull, OpPullComments,
 	OpCloseIssue, OpCreateIssue, OpEditIssue, OpAddIssueLabels, OpRemoveIssueLabels, OpLabels, OpEnsureLabel}
 
 func TestObserverReportsEveryOp(t *testing.T) {

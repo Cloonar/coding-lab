@@ -1024,6 +1024,79 @@ func TestCommentPull(t *testing.T) {
 	}
 }
 
+// --- PullComments ------------------------------------------------------------
+
+// TestPullComments_mapsSharedIssueCommentEndpoint pins that a PR's discussion
+// comments are read/mapped exactly like Issue's comment thread — the shared
+// issue-comment number space — including the login/username fallback.
+func TestPullComments_mapsSharedIssueCommentEndpoint(t *testing.T) {
+	var gotMethod, gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_, _ = io.WriteString(w, `[
+		  {"body":"first comment","user":{"login":"alice","username":"alice"},"created_at":"2026-03-01T12:00:00Z"},
+		  {"body":"second comment","user":{"login":"","username":"bob"},"created_at":"2026-03-01T13:00:00Z"}
+		]`)
+	})
+
+	comments, err := c.PullComments(context.Background(), 62)
+	if err != nil {
+		t.Fatalf("PullComments: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != apiPrefix+"/issues/62/comments" {
+		t.Errorf("request = %s %s; want GET %s/issues/62/comments", gotMethod, gotPath, apiPrefix)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("got %d comments; want 2", len(comments))
+	}
+	if comments[0].Author != "alice" || comments[0].Body != "first comment" ||
+		!comments[0].CreatedAt.Equal(mustTime(t, "2026-03-01T12:00:00Z")) {
+		t.Errorf("comment[0] mismatch: %+v", comments[0])
+	}
+	if comments[1].Author != "bob" { // login empty → fall back to username
+		t.Errorf("comment[1].Author = %q; want bob (username fallback)", comments[1].Author)
+	}
+}
+
+// TestPullComments_manyCommentsFetchedInOneUnpaginatedGET is PullComments'
+// half of the Issue comments-endpoint regression: the SAME endpoint ignores
+// page/limit and always returns the full list, so a pagination loop would
+// spin forever once a pull has >= pageLimit comments.
+func TestPullComments_manyCommentsFetchedInOneUnpaginatedGET(t *testing.T) {
+	const n = pageLimit + 9
+	var commentReqs int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		commentReqs++
+		if commentReqs > 3 {
+			t.Errorf("comments endpoint requested %d times; want exactly 1", commentReqs)
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		_, _ = io.WriteString(w, genCommentsJSON(n))
+	})
+
+	comments, err := c.PullComments(context.Background(), 62)
+	if err != nil {
+		t.Fatalf("PullComments: %v", err)
+	}
+	if commentReqs != 1 {
+		t.Errorf("comments endpoint requested %d times; want exactly 1 (un-paginated GET)", commentReqs)
+	}
+	if len(comments) != n {
+		t.Fatalf("got %d comments; want all %d", len(comments), n)
+	}
+}
+
+func TestPullComments_notFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"pull request does not exist"}`)
+	})
+	if _, err := c.PullComments(context.Background(), 999); !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 // --- CloseIssue ------------------------------------------------------------
 
 func TestCloseIssue(t *testing.T) {

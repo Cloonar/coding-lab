@@ -126,6 +126,16 @@ func RenderBranch(pattern string, n int) string {
 	return strings.Replace(pattern, NToken, strconv.Itoa(n), 1)
 }
 
+// MatchBranch is the reverse of RenderBranch: pattern split on NToken, branch
+// must equal prefix + digits + suffix with the digits parsing to n ≥ 1. It is
+// ParseBranch's strict-inverse contract under the Autoland-facing name (issue
+// #181: the poller matches PR head branches against the repo's claim
+// pattern), delegated so the two oracles can never disagree — a branch that
+// is not a claim (leading zeros included) matches neither.
+func MatchBranch(pattern, branch string) (n int, ok bool) {
+	return ParseBranch(pattern, branch)
+}
+
 // ParseBranch is the strict inverse of RenderBranch: it extracts the issue
 // number from ref and accepts only when re-rendering the pattern with that
 // number reproduces ref exactly. Issue numbers start at 1 (v0

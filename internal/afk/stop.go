@@ -27,7 +27,10 @@ func (s *Service) StopAFK(ctx context.Context, session string) error {
 	if err != nil {
 		return err // ErrNotFound → already terminal
 	}
-	if run.Kind != store.RunKindAFKManual && run.Kind != store.RunKindAFKAuto {
+	// Every unattended, reaper-owned kind stops here — the two AFK kinds and
+	// lander (issue #181): the same park-the-claim semantics apply, since an
+	// adopted PR head branch must survive a Stop exactly like a claim branch.
+	if run.Kind == store.RunKindManual {
 		return fmt.Errorf("session %q is not an AFK run", session)
 	}
 

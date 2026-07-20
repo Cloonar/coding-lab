@@ -132,10 +132,10 @@ func TestCloneMetrics(t *testing.T) {
 
 func TestInstancesCollectorReadsSnapshotAtScrape(t *testing.T) {
 	m := New()
-	counts := InstanceCounts{Manual: 2, AFKManual: 1, AFKAuto: 3}
+	counts := InstanceCounts{Manual: 2, AFKManual: 1, AFKAuto: 3, Lander: 4}
 	m.RegisterInstances(func(context.Context) (InstanceCounts, error) { return counts, nil })
 
-	for kind, want := range map[string]float64{"manual": 2, "afk_manual": 1, "afk_auto": 3} {
+	for kind, want := range map[string]float64{"manual": 2, "afk_manual": 1, "afk_auto": 3, "lander": 4} {
 		if got, ok := gaugeValue(t, m, "lab_instances_active", map[string]string{"kind": kind}); !ok || got != want {
 			t.Errorf("lab_instances_active{%s} = %v (found %v), want %v", kind, got, ok, want)
 		}

@@ -102,6 +102,78 @@ func Classify(prPresent, sessionAlive bool, now, budgetDeadline time.Time) Outco
 	}
 }
 
+// landerDoneWords are the verdict words that END a lander run — pass and
+// reject — derived from the canonical markers (tracker/verdict.go) through
+// the parser itself so the grammar and this reading can never drift. fix-done
+// is a FIX run's done-signal (#182) and never ends a lander; `escalate` and
+// any future word are likewise not a lander's to finish on.
+var landerDoneWords = func() map[string]bool {
+	words := map[string]bool{}
+	for _, marker := range []string{tracker.VerdictPass, tracker.VerdictReject} {
+		w, ok := tracker.ParseVerdict(marker)
+		if !ok {
+			panic("afk: verdict marker constant does not parse under its own grammar")
+		}
+		words[w] = true
+	}
+	return words
+}()
+
+// LanderDone derives a lander run's done-signal from polled forge state
+// (issue #181 / ADR-0048) — the counterpart of the AFK kinds' PR-presence
+// reading, needed because a lander's PR pre-exists the run: presence alone
+// would success-reap it on its first tick. Done is the forge-observable state
+// the run PRODUCED: the PR merged, or any pass/reject verdict marker on it
+// (the spawn rule only launches onto a virgin PR, so such a marker is this
+// run's). prPresent/pullState carry tracker.DonePull's reading for the run's
+// head branch; verdicts are the marker words VerdictWords extracted from the
+// PR's comments. No PR — vanished, or closed-unmerged — is never done: the
+// run ends in death/timeout like an AFK run whose PR never lands.
+func LanderDone(pullState string, prPresent bool, verdicts []string) bool {
+	if !prPresent {
+		return false
+	}
+	if pullState == tracker.PullMerged {
+		return true
+	}
+	for _, w := range verdicts {
+		if landerDoneWords[w] {
+			return true
+		}
+	}
+	return false
+}
+
+// VerdictWords extracts the verdict-marker words from a PR's comment thread,
+// in comment order: every body whose FIRST line parses under the marker
+// grammar (tracker.ParseVerdict — exact prefix, first line only) contributes
+// its word, which may be empty or unknown (the parser judges the grammar, not
+// the vocabulary). LanderDone reads the words for the done-signal; the
+// autoland poller treats ANY entry as existing verdict state (a non-virgin
+// PR, #181's poller never spawns on one).
+func VerdictWords(comments []tracker.Comment) []string {
+	var words []string
+	for _, c := range comments {
+		if w, ok := tracker.ParseVerdict(c.Body); ok {
+			words = append(words, w)
+		}
+	}
+	return words
+}
+
+// LiveReview reports whether any non-dismissed review exists — the poller's
+// conservative "no review" gate (issue #181: ANY live review suppresses a
+// lander spawn; the ADR-0048 hybrid rejected-state fold is #182's). A
+// dismissed review is a superseded verdict, not a live one.
+func LiveReview(reviews []tracker.Review) bool {
+	for _, r := range reviews {
+		if !r.Dismissed {
+			return true
+		}
+	}
+	return false
+}
+
 // AutoDecision holds the facts the auto-launch predicate weighs for one repo
 // on one scheduler tick (v0 afkAutoDecision, verbatim).
 type AutoDecision struct {
@@ -118,6 +190,35 @@ type AutoDecision struct {
 // Every term is load-bearing — flipping exactly one blocks the launch.
 func ShouldLaunchAuto(d AutoDecision) bool {
 	return d.AutoEnabled && d.UnderCap && !d.AutoInFlight && d.ReadyExists && !d.Paused
+}
+
+// LanderSpawnDecision holds the facts the lander-spawn predicate weighs for
+// one pull on one autoland tick (issue #181 / ADR-0048) — AutoDecision's
+// sibling: AutolandOnce gathers the facts, this decides. The repo half
+// (enabled/binding/ready/paused/cap) and the pull half (open/claim-branch/
+// review/verdict/run) live in one struct so the whole spawn rule is one
+// table-tested predicate.
+type LanderSpawnDecision struct {
+	AutolandEnabled bool // the per-repo opt-in is on (default off — never by upgrade)
+	ForgeBound      bool // tracker_binding is forge — builtin has no PR comments to poll (ADR-0048)
+	RepoReady       bool // clone_status is ready
+	Paused          bool // consecutive_failures >= PauseThreshold (three-strikes pauses lander spawns too)
+	UnderCap        bool // lab is below the repo's effective live-instance cap
+	PullOpen        bool // the pull is state open (a merged or closed PR needs no validation)
+	ClaimBranch     bool // head matches the repo's claim-branch pattern — human-branch PRs are never touched
+	ReviewPresent   bool // any non-dismissed native review exists (conservative "no review"; the hybrid fold is #182's)
+	VerdictPresent  bool // any verdict-marker comment exists, ANY word — verdict state means the PR is not virgin
+	RunOnBranch     bool // an active run of ANY kind works the branch (the authoring AFK run idling, or a lander already on it)
+}
+
+// ShouldSpawnLander decides whether the autoland poller spawns a lander run
+// for a pull this tick: opted in, forge-bound, ready, not paused, under the
+// cap, and the pull is an open, review-less, verdict-less claim PR nobody is
+// working. Every term is load-bearing — flipping exactly one blocks the
+// spawn.
+func ShouldSpawnLander(d LanderSpawnDecision) bool {
+	return d.AutolandEnabled && d.ForgeBound && d.RepoReady && !d.Paused && d.UnderCap &&
+		d.PullOpen && d.ClaimBranch && !d.ReviewPresent && !d.VerdictPresent && !d.RunOnBranch
 }
 
 // PickLowestIssue returns the issue with the minimum Number from the list;

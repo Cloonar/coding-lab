@@ -241,6 +241,14 @@ export interface Repo {
   clone_error: string | null;
   created_at: string;
   last_opened_at: string | null;
+  /** Autoland (issue #181 / ADR-0048), per-repo and default off. */
+  autoland_enabled: boolean;
+  /** Fix-run spawn bound; default 2. */
+  max_fix_attempts: number;
+  /** On clean PASS: merge directly. Off: approve only, a human merges. Default true. */
+  auto_merge: boolean;
+  /** Lander run's provider override; null = inherit this repo's own provider. */
+  lander_provider: string | null;
 }
 
 export interface CreateRepoRequest {
@@ -288,6 +296,11 @@ export interface RepoPatch {
   afk_auto_enabled?: boolean;
   budget_minutes?: number | null;
   max_instances_override?: number | null;
+  autoland_enabled?: boolean;
+  max_fix_attempts?: number;
+  auto_merge?: boolean;
+  /** null clears back to inherit this repo's own provider. */
+  lander_provider?: string | null;
 }
 
 /** 201 with clone_status "cloning" — the bare clone runs async, watch SSE. */
@@ -457,7 +470,7 @@ export function providerLogout(id: string): Promise<ProviderAuthStatus> {
 
 // --- M3: instances & runs ---
 
-export type RunKind = 'manual' | 'afk_manual' | 'afk_auto';
+export type RunKind = 'manual' | 'afk_manual' | 'afk_auto' | 'lander';
 export type RunOutcome = 'active' | 'success' | 'death' | 'timeout' | 'stopped';
 
 /** One row of the runs table, as the API serializes it. */
