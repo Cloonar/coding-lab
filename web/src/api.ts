@@ -249,6 +249,10 @@ export interface Repo {
   auto_merge: boolean;
   /** Lander run's provider override; null = inherit this repo's own provider. */
   lander_provider: string | null;
+  /** Lander run's model override; null = inherit (resolved at lander launch). */
+  lander_model: string | null;
+  /** Lander run's effort override; null = inherit (resolved at lander launch). */
+  lander_effort: string | null;
 }
 
 export interface CreateRepoRequest {
@@ -301,6 +305,12 @@ export interface RepoPatch {
   auto_merge?: boolean;
   /** null clears back to inherit this repo's own provider. */
   lander_provider?: string | null;
+  /** null/"" clears back to inherit; any non-empty string is accepted (no
+   *  write-time catalog check — strictness is at lander launch, issue #189). */
+  lander_model?: string | null;
+  /** null/"" clears back to inherit; any non-empty string is accepted (no
+   *  write-time catalog check — strictness is at lander launch, issue #189). */
+  lander_effort?: string | null;
 }
 
 /** 201 with clone_status "cloning" — the bare clone runs async, watch SSE. */

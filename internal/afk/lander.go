@@ -186,13 +186,44 @@ func (s *Service) landerChainProvider(ctx context.Context, repo store.Repo, kind
 	return s.instances.ResolveProvider(ctx, repo, kind, req)
 }
 
+// landerRequestModelEffort extracts the lander-chain's per-spawn model/effort
+// REQUEST from the repo row (issue #189) — the model/effort sibling of
+// landerChainProvider's nil→"" extraction, and shared by both launch paths for
+// the same reason: lander and escalate are one validation class, and a
+// separate escalate knob is explicitly out of scope. NULL (nil) stays "" —
+// ResolveModelEffort's ordinary layered resolution (repo base → global base →
+// provider default), i.e. today's behavior, unchanged. Non-NULL is a STRICT
+// per-spawn request: ResolveModelEffort fails the launch loudly on an unknown
+// value (*instance.BadRequestError) — including the issue-#156 per-model rule,
+// where an effort outside the RESOLVED model's own list 400s even if the
+// provider's union carries it. Same strict mechanism as lander_provider
+// (#181), and deliberately UNLIKE the repo model/effort DEFAULT columns,
+// whose skip-layer semantics let a stale value silently fall through to the
+// next layer: the operator asked for this exact value by name, so any miss is
+// fatal to the launch, same as an unknown reqModel/reqEffort on any manual
+// spawn.
+func landerRequestModelEffort(repo store.Repo) (model, effort string) {
+	if repo.LanderModel != nil {
+		model = *repo.LanderModel
+	}
+	if repo.LanderEffort != nil {
+		effort = *repo.LanderEffort
+	}
+	return model, effort
+}
+
 // LaunchLander claims nothing and selects nothing: it spawns the lander run
 // for an ALREADY-DECIDED (PR, head branch, issue) triple — the poller owns
 // the decision. Single-flighted under the engine lock like every launch, with
 // the repo re-read and the cap re-checked against fresh liveness there. The
 // provider resolves through the lander chain (landerChainProvider);
 // model/effort/options/remote resolve with the lander kind, which is NOT an
-// AFK kind (isAFKKind), so the AFK override layers never apply. approveOnly
+// AFK kind (isAFKKind), so the AFK override layers never apply. Model/effort
+// additionally take the lander_model/lander_effort row as a STRICT per-spawn
+// request when set (landerRequestModelEffort, issue #189): NULL inherits the
+// lander's normal layered resolution exactly as before; non-NULL fails the
+// launch loudly on an unknown value, the same fatal-to-the-launch contract
+// the #181 provider precedent established. approveOnly
 // forces the approve-and-stop seed variant regardless of repo.AutoMerge — the
 // producer sets it for a re-validation round under an outstanding human
 // changes-requested (never merge over a live human rejection; ADR-0048's
@@ -228,7 +259,8 @@ func (s *Service) LaunchLander(ctx context.Context, repoID string, prNumber int,
 		return instance.ErrOverCap
 	}
 
-	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindLander, "", "")
+	reqModel, reqEffort := landerRequestModelEffort(repo)
+	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindLander, reqModel, reqEffort)
 	if err != nil {
 		return err
 	}
@@ -278,7 +310,11 @@ func (s *Service) escalateWorktreePath(repoName string, n int) string {
 // identity: kind RunKindEscalate — deliberately NON-AFK, a validation-class
 // run on the lander chain (landerChainProvider; isAFKKind excludes it, so the
 // AFK override layers never apply) — label escalate-<N>, detached adopt of
-// the existing PR head, and the AFK budget/token rule. Its own `labctl pr
+// the existing PR head, and the AFK budget/token rule. Model/effort resolve
+// through the SAME lander_model/lander_effort row as LaunchLander
+// (landerRequestModelEffort, issue #189) — lander and escalate are one
+// validation class and deliberately share the knobs; there is no separate
+// escalate override. Its own `labctl pr
 // escalate` marker is its done-signal (EscalateDelivered), which the reaper
 // maps to outcome 'escalated' — the poller's permanent-terminality gate.
 func (s *Service) LaunchEscalate(ctx context.Context, repoID string, prNumber int, headBranch string, issueN int, history string) error {
@@ -309,7 +345,8 @@ func (s *Service) LaunchEscalate(ctx context.Context, repoID string, prNumber in
 		return instance.ErrOverCap
 	}
 
-	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindEscalate, "", "")
+	reqModel, reqEffort := landerRequestModelEffort(repo)
+	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindEscalate, reqModel, reqEffort)
 	if err != nil {
 		return err
 	}

@@ -20,7 +20,6 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
-	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -97,55 +96,27 @@ func (s *Service) fixWorktreePath(repoName string, n int) string {
 	return filepath.Join(s.worktreeRoot, gitx.WorktreeDir(repoName, FixLabel(n)))
 }
 
-// fixProvider resolves a fix run's effective provider (issue #182 / ADR-0048:
-// a fix run inherits its AUTHORING run's provider): the latest afk_manual/
-// afk_auto run row for the branch (store.AuthoringRunForBranch) supplies its
-// recorded provider as a per-spawn request through the normal resolver, so
-// validation applies. When no authoring row exists, or the recorded provider
-// no longer resolves (unregistered since the claim was authored), it warns
-// and falls back to an empty-request resolution through the repo chain — the
-// loop must stay alive; a vanished provider never strands a rejected PR.
-// Shared by the producer's auth gate and LaunchFix so the two resolutions can
-// never disagree. The authoring row rides back for the model/effort
-// inheritance (found=false when none exists); a store read failure is
-// returned raw — infrastructure, not a resolution miss.
-func (s *Service) fixProvider(ctx context.Context, repo store.Repo, branch string) (provider.AgentProvider, store.Run, bool, error) {
-	authoring, found, err := s.store.AuthoringRunForBranch(ctx, repo.ID, branch)
-	if err != nil {
-		return nil, store.Run{}, false, err
-	}
-	if found {
-		prov, err := s.instances.ResolveProvider(ctx, repo, store.RunKindFix, authoring.Provider)
-		if err == nil {
-			return prov, authoring, true, nil
-		}
-		s.log.Warn("fix launch: authoring provider does not resolve — falling back to the repo chain",
-			"component", "afk", "repo", repo.Name, "branch", branch, "provider", authoring.Provider, "err", err)
-	} else {
-		s.log.Warn("fix launch: no authoring run for the branch — falling back to the repo chain",
-			"component", "afk", "repo", repo.Name, "branch", branch)
-	}
-	prov, err := s.instances.ResolveProvider(ctx, repo, store.RunKindFix, "")
-	return prov, authoring, found, err
-}
-
 // LaunchFix claims nothing and selects nothing: it spawns the fix run for an
 // ALREADY-DECIDED (PR, head branch, issue) triple plus the rejection work
 // order the producer captured at gather time — the poller owns the decision.
 // Single-flighted under the engine lock like every launch, with the repo
 // re-read and the cap re-checked against fresh liveness there. Provider,
-// model, and effort inherit from the PERSISTED authoring run row
-// (fixProvider; runs.provider/model/effort as per-spawn requests through the
-// normal resolvers so validation applies) — a missing row or a value that no
-// longer resolves warns and falls back through the repo chain, NEVER failing
-// the launch: the loop must stay alive. RunKindFix IS an AFK kind
-// (instance-side isAFKKind — unattended AFK-class work continuing an AFK
-// claim), so the AFK override layers govern the fallbacks, the options bag,
-// and the remote knob. The adopt is DETACHED (AdoptBranch: the PR head branch
-// pre-exists the run and IS the claim; the rollback never deletes it). Budget
-// clock and token expiry follow the AFK rule exactly (effectiveBudget; token
-// dies runTokenSlack past the deadline) — the reaper owns fix classification
-// on the same contract, with FixDone as the done-signal.
+// model, and effort resolve through the NORMAL AFK chain (repo AFK override →
+// global AFK override → base) like any AFK-kind run — issue #189 reverses the
+// ADR-0048 inheritance rule (issue #182) that read them from the persisted
+// authoring run row. Nothing provider-specific carries over from the run that
+// authored the claim: the adopt is DETACHED (AdoptBranch: the PR head branch
+// pre-exists the run and IS the claim; the rollback never deletes it), so a
+// fix may legitimately run under a different provider than the authoring run —
+// the operator wants one AFK settings surface, not a second one shadowing it.
+// RunKindFix IS an AFK kind (instance-side isAFKKind — unattended AFK-class
+// work continuing an AFK claim), so the empty-request resolutions here pick up
+// the AFK override layers automatically, and the same layers govern the
+// options bag and the remote knob. A resolution miss is fatal, no fallback
+// ladder: with no per-spawn request there is nothing to fall back FROM.
+// Budget clock and token expiry follow the AFK rule exactly (effectiveBudget;
+// token dies runTokenSlack past the deadline) — the reaper owns fix
+// classification on the same contract, with FixDone as the done-signal.
 func (s *Service) LaunchFix(ctx context.Context, repoID string, prNumber int, headBranch string, issueN int, rejection string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -159,7 +130,10 @@ func (s *Service) LaunchFix(ctx context.Context, repoID string, prNumber int, he
 	if repo.CloneStatus != store.CloneStatusReady {
 		return instance.ErrRepoNotReady
 	}
-	prov, authoring, found, err := s.fixProvider(ctx, repo, headBranch)
+	// Provider resolves through the normal AFK chain (RunKindFix is an AFK
+	// kind): empty request → repo AFK override → global AFK override → base.
+	// The authoring run's persisted provider has no say (issue #189).
+	prov, err := s.instances.ResolveProvider(ctx, repo, store.RunKindFix, "")
 	if err != nil {
 		return err
 	}
@@ -174,21 +148,10 @@ func (s *Service) LaunchFix(ctx context.Context, repoID string, prNumber int, he
 		return instance.ErrOverCap
 	}
 
-	// Model/effort inherit from the authoring row as per-spawn requests. A
-	// request the resolved provider's catalog refuses — the provider fell
-	// back above, or the model vanished from the catalog — warns and drops
-	// BOTH requests for an empty-request resolution through the repo chain:
-	// the same stay-alive stance as the provider.
-	reqModel, reqEffort := "", ""
-	if found {
-		reqModel, reqEffort = authoring.Model, authoring.Effort
-	}
-	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindFix, reqModel, reqEffort)
-	if err != nil && (reqModel != "" || reqEffort != "") {
-		s.log.Warn("fix launch: authoring model/effort do not resolve — falling back to the repo chain",
-			"component", "afk", "repo", repo.Name, "model", reqModel, "effort", reqEffort, "err", err)
-		model, effort, err = s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindFix, "", "")
-	}
+	// Model/effort resolve through the same AFK chain — one empty-request
+	// call, error fatal (issue #189: no authoring row to inherit from, so no
+	// fallback ladder). The AFK override layers already govern the result.
+	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindFix, "", "")
 	if err != nil {
 		return err
 	}

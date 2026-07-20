@@ -10,6 +10,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -437,5 +438,185 @@ func TestLaunchLander_unknownLanderProviderFails(t *testing.T) {
 	}
 	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
 		t.Errorf("failed lander launch left %d active runs", len(active))
+	}
+}
+
+// The lander also resolves its model through lander_model as a STRICT
+// per-spawn request (issue #189) — the model/effort sibling of
+// lander_provider above: an unknown id fails the launch loudly, never a
+// silent fallback to the repo/global base chain.
+func TestLaunchLander_unknownLanderModelFails(t *testing.T) {
+	f := newFixture(t)
+	bogus := "no-such-model"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderModel: store.Set(&bogus),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false)
+	if err == nil || !strings.Contains(err.Error(), "unknown model") {
+		t.Fatalf("err = %v, want the strict unknown-model refusal", err)
+	}
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Errorf("failed lander launch left %d active runs", len(active))
+	}
+}
+
+// The escalate-mode lander shares the EXACT SAME lander_model/lander_effort
+// knobs as the lander (issue #189 — a separate escalate override is
+// explicitly out of scope), so an unknown lander_model fails an escalate
+// launch identically to TestLaunchLander_unknownLanderModelFails above.
+func TestLaunchEscalate_unknownLanderModelFails(t *testing.T) {
+	f := newFixture(t)
+	bogus := "no-such-model"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderModel: store.Set(&bogus),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := f.svc.LaunchEscalate(t.Context(), f.repo.ID, 9, "afk/7", 7, "history")
+	if err == nil || !strings.Contains(err.Error(), "unknown model") {
+		t.Fatalf("err = %v, want the strict unknown-model refusal", err)
+	}
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Errorf("failed escalate launch left %d active runs", len(active))
+	}
+}
+
+// An unknown lander_effort fails the lander launch identically to an unknown
+// lander_model. One kind is enough: LaunchLander and LaunchEscalate both feed
+// ResolveModelEffort through the shared landerRequestModelEffort helper, and
+// the model case above (mirrored for both kinds) already proves the two call
+// sites reach the same resolution path — this pins the effort knob is wired
+// through that same helper, not dropped.
+func TestLaunchLander_unknownLanderEffortFails(t *testing.T) {
+	f := newFixture(t)
+	bogus := "no-such-effort"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderEffort: store.Set(&bogus),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false)
+	if err == nil || !strings.Contains(err.Error(), "unknown effort") {
+		t.Fatalf("err = %v, want the strict unknown-effort refusal", err)
+	}
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Errorf("failed lander launch left %d active runs", len(active))
+	}
+}
+
+// A non-NULL lander_model/lander_effort is a STRICT per-spawn REQUEST (issue
+// #189): the launched run row records EXACTLY those values, deliberately
+// chosen to differ from both the repo base (unset here) and the seeded
+// global base defaults (opus[1m]/max — SeedDefaultSettings) they could
+// otherwise be confused with.
+func TestLaunchLander_recordsLanderModelEffort(t *testing.T) {
+	f := newFixture(t)
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+	model, effort := "sonnet", "low"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderModel:  store.Set(&model),
+		LanderEffort: store.Set(&effort),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false); err != nil {
+		t.Fatalf("LaunchLander: %v", err)
+	}
+	active, err := f.st.ActiveRuns(t.Context())
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active runs = %v (err %v), want exactly one", active, err)
+	}
+	if active[0].Model != model || active[0].Effort != effort {
+		t.Errorf("run model/effort = %q/%q, want the requested %q/%q", active[0].Model, active[0].Effort, model, effort)
+	}
+}
+
+// Same recording, for the escalate-mode lander: lander and escalate share the
+// exact same knobs (issue #189), never a separate escalate override.
+func TestLaunchEscalate_recordsLanderModelEffort(t *testing.T) {
+	f := newFixture(t)
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+	model, effort := "sonnet", "low"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderModel:  store.Set(&model),
+		LanderEffort: store.Set(&effort),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.svc.LaunchEscalate(t.Context(), f.repo.ID, 9, "afk/7", 7, "history"); err != nil {
+		t.Fatalf("LaunchEscalate: %v", err)
+	}
+	active, err := f.st.ActiveRuns(t.Context())
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active runs = %v (err %v), want exactly one", active, err)
+	}
+	if active[0].Model != model || active[0].Effort != effort {
+		t.Errorf("run model/effort = %q/%q, want the requested %q/%q", active[0].Model, active[0].Effort, model, effort)
+	}
+}
+
+// The issue-#156 per-model effort rule reaches the lander chain too: an
+// effort present in the provider's UNION but NOT in the RESOLVED lander
+// model's own list is the unsupported-combo 400 — even though a plain
+// union-only check would have accepted it — exactly like any other spawn
+// kind's explicit request (TestResolveModelEffort_perModelEfforts in
+// internal/instance pins the underlying rule; this pins the lander chain
+// actually reaches it).
+func TestLaunchLander_unsupportedEffortForResolvedModelFails(t *testing.T) {
+	f := newFixture(t)
+	// Restrict the fake's model catalog to one model ("sonnet") whose OWN
+	// effort list is just "low" (SetModels). The union efforts catalog is
+	// left alone (SetCatalogs untouched), so it still carries "high" — the
+	// request below is a per-model rejection, not a plain unknown-effort miss.
+	f.prov.SetModels([]provider.ModelOption{
+		{Option: provider.Option{Value: "sonnet", Label: "Sonnet"}, Efforts: []provider.Option{{Value: "low", Label: "low"}}},
+	})
+	model, effort := "sonnet", "high"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderModel:  store.Set(&model),
+		LanderEffort: store.Set(&effort),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false)
+	if err == nil || !strings.Contains(err.Error(), "unknown effort") {
+		t.Fatalf("err = %v, want the per-model unsupported-combo refusal", err)
+	}
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Errorf("failed lander launch left %d active runs", len(active))
+	}
+}
+
+// NULL lander_model/lander_effort (the zero value — never set on this repo)
+// inherits the lander's ordinary layered resolution exactly as it did before
+// issue #189 added the knobs: the seeded global base defaults (opus[1m]/max —
+// SeedDefaultSettings), since neither the repo base nor any AFK layer (lander
+// and escalate are not AFK kinds) is set either. Escalate shares the identical
+// landerRequestModelEffort call, already exercised by the recording tests
+// above, so a second full launch here would just repeat the same assertion.
+func TestLaunchLander_nullLanderModelEffortInheritsBaseResolution(t *testing.T) {
+	f := newFixture(t)
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+
+	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false); err != nil {
+		t.Fatalf("LaunchLander: %v", err)
+	}
+	active, err := f.st.ActiveRuns(t.Context())
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active runs = %v (err %v), want exactly one", active, err)
+	}
+	if active[0].Model != "opus[1m]" || active[0].Effort != "max" {
+		t.Errorf("run model/effort = %q/%q, want the inherited base defaults opus[1m]/max", active[0].Model, active[0].Effort)
 	}
 }

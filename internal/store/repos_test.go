@@ -29,7 +29,9 @@ func testRepo(name string, createdAt time.Time) Repo {
 		// Autoland (issue #181): AutolandEnabled false and LanderProvider nil are
 		// Go zero values already; MaxFixAttempts/AutoMerge are the reposvc.Add
 		// defaults (2/true), mirrored here the same way AFKBranchPattern and
-		// ManualBranchPrefix above already are.
+		// ManualBranchPrefix above already are. LanderModel/LanderEffort (issue
+		// #189) are nullable with no default, so nil is already the Go zero
+		// value — nothing to set here.
 		MaxFixAttempts: 2,
 		AutoMerge:      true,
 	}
@@ -94,11 +96,11 @@ func TestCreateRepoRoundTrip(t *testing.T) {
 			t.Errorf("minimal repo defaults wrong: %+v", gotMin)
 		}
 		// Autoland (issue #181): default OFF, a 2-attempt fix-run bound,
-		// auto-merge on, no lander provider override.
+		// auto-merge on, no lander provider/model/effort override (issue #189).
 		if gotMin.AutolandEnabled || gotMin.MaxFixAttempts != 2 || !gotMin.AutoMerge ||
-			gotMin.LanderProvider != nil {
-			t.Errorf("minimal repo autoland defaults = enabled=%v attempts=%v automerge=%v provider=%v, want false/2/true/nil",
-				gotMin.AutolandEnabled, gotMin.MaxFixAttempts, gotMin.AutoMerge, gotMin.LanderProvider)
+			gotMin.LanderProvider != nil || gotMin.LanderModel != nil || gotMin.LanderEffort != nil {
+			t.Errorf("minimal repo autoland defaults = enabled=%v attempts=%v automerge=%v provider=%v model=%v effort=%v, want false/2/true/nil/nil/nil",
+				gotMin.AutolandEnabled, gotMin.MaxFixAttempts, gotMin.AutoMerge, gotMin.LanderProvider, gotMin.LanderModel, gotMin.LanderEffort)
 		}
 
 		// Repos() lists both, ordered by name.
@@ -564,8 +566,9 @@ func TestRepoRemoteColumnsRoundTrip(t *testing.T) {
 }
 
 // The four Autoland settings (issue #181 / ADR-0048): AutolandEnabled,
-// MaxFixAttempts, AutoMerge round-trip as plain columns; LanderProvider is
-// the nullable one — NULL means inherit this repo's own Provider chain.
+// MaxFixAttempts, AutoMerge round-trip as plain columns; LanderProvider,
+// LanderModel, LanderEffort (issue #189) are the nullable ones — NULL means
+// inherit this repo's own Provider chain / normal model-effort resolution.
 func TestRepoAutolandColumnsRoundTrip(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
@@ -577,6 +580,8 @@ func TestRepoAutolandColumnsRoundTrip(t *testing.T) {
 		full.MaxFixAttempts = 5
 		full.AutoMerge = false
 		full.LanderProvider = strPtr("fake-b")
+		full.LanderModel = strPtr("opus[1m]")
+		full.LanderEffort = strPtr("max")
 		created, err := s.CreateRepo(ctx, full)
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -590,7 +595,7 @@ func TestRepoAutolandColumnsRoundTrip(t *testing.T) {
 		}
 
 		// A minimal repo carries the caller-applied defaults: off, 2 attempts,
-		// auto-merge on, no lander provider override.
+		// auto-merge on, no lander provider/model/effort override.
 		min := testRepo("autolandmin", now)
 		if _, err := s.CreateRepo(ctx, min); err != nil {
 			t.Fatalf("create minimal: %v", err)
@@ -600,39 +605,46 @@ func TestRepoAutolandColumnsRoundTrip(t *testing.T) {
 			t.Fatalf("by id minimal: %v", err)
 		}
 		if gotMin.AutolandEnabled || gotMin.MaxFixAttempts != 2 || !gotMin.AutoMerge ||
-			gotMin.LanderProvider != nil {
-			t.Errorf("minimal repo autoland columns = enabled=%v attempts=%v automerge=%v provider=%v, want false/2/true/nil",
-				gotMin.AutolandEnabled, gotMin.MaxFixAttempts, gotMin.AutoMerge, gotMin.LanderProvider)
+			gotMin.LanderProvider != nil || gotMin.LanderModel != nil || gotMin.LanderEffort != nil {
+			t.Errorf("minimal repo autoland columns = enabled=%v attempts=%v automerge=%v provider=%v model=%v effort=%v, want false/2/true/nil/nil/nil",
+				gotMin.AutolandEnabled, gotMin.MaxFixAttempts, gotMin.AutoMerge, gotMin.LanderProvider, gotMin.LanderModel, gotMin.LanderEffort)
 		}
 
-		// Patch: set all four.
+		// Patch: set all six.
 		updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
 			AutolandEnabled: Set(true),
 			MaxFixAttempts:  Set(4),
 			AutoMerge:       Set(false),
 			LanderProvider:  Set(strPtr("claude-code")),
+			LanderModel:     Set(strPtr("sonnet")),
+			LanderEffort:    Set(strPtr("high")),
 		})
 		if err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		if !updated.AutolandEnabled || updated.MaxFixAttempts != 4 || updated.AutoMerge ||
-			updated.LanderProvider == nil || *updated.LanderProvider != "claude-code" {
-			t.Errorf("patched autoland columns = %+v, want true/4/false/claude-code", updated)
+			updated.LanderProvider == nil || *updated.LanderProvider != "claude-code" ||
+			updated.LanderModel == nil || *updated.LanderModel != "sonnet" ||
+			updated.LanderEffort == nil || *updated.LanderEffort != "high" {
+			t.Errorf("patched autoland columns = %+v, want true/4/false/claude-code/sonnet/high", updated)
 		}
 
-		// Patch: clear lander_provider back to NULL (inherit); the other three
-		// are untouched by an Opt zero value.
+		// Patch: clear lander_provider/model/effort back to NULL (inherit); the
+		// other three are untouched by an Opt zero value.
 		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
 			LanderProvider: Set[*string](nil),
+			LanderModel:    Set[*string](nil),
+			LanderEffort:   Set[*string](nil),
 		})
 		if err != nil {
-			t.Fatalf("clear lander_provider: %v", err)
+			t.Fatalf("clear lander_provider/model/effort: %v", err)
 		}
-		if updated.LanderProvider != nil {
-			t.Errorf("cleared lander_provider = %v, want nil", updated.LanderProvider)
+		if updated.LanderProvider != nil || updated.LanderModel != nil || updated.LanderEffort != nil {
+			t.Errorf("cleared lander provider/model/effort = %v/%v/%v, want nil/nil/nil",
+				updated.LanderProvider, updated.LanderModel, updated.LanderEffort)
 		}
 		if !updated.AutolandEnabled || updated.MaxFixAttempts != 4 || updated.AutoMerge {
-			t.Errorf("unrelated autoland columns changed by lander_provider-only patch: %+v", updated)
+			t.Errorf("unrelated autoland columns changed by lander clear patch: %+v", updated)
 		}
 	})
 }
