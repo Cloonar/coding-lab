@@ -11,16 +11,17 @@ package tracker
 import "strings"
 
 // VerdictMarkerPrefix opens every verdict-marker comment. VerdictReject,
-// VerdictPass, and VerdictFixDone are the full first-line markers the verdict
-// verbs compose (handlePRReject/Approve/Rerequest, ADR-0048). `escalate` is
-// reserved for #182's escalation digest — same grammar, same prefix,
-// implemented there, so it is deliberately not one of these constants yet.
+// VerdictPass, VerdictFixDone, and VerdictEscalate are the full first-line
+// markers the verdict verbs compose (handlePRReject/Approve/Rerequest/
+// Escalate, ADR-0048). VerdictEscalate is the escalate-mode lander's terminal
+// marker (issue #182): ADR-0048 reserved the word, #182 ships it.
 const (
 	VerdictMarkerPrefix = "[autoland] verdict:"
 
-	VerdictReject  = VerdictMarkerPrefix + " reject"
-	VerdictPass    = VerdictMarkerPrefix + " pass"
-	VerdictFixDone = VerdictMarkerPrefix + " fix-done"
+	VerdictReject   = VerdictMarkerPrefix + " reject"
+	VerdictPass     = VerdictMarkerPrefix + " pass"
+	VerdictFixDone  = VerdictMarkerPrefix + " fix-done"
+	VerdictEscalate = VerdictMarkerPrefix + " escalate"
 )
 
 // ParseVerdict parses body's verdict marker, if it has one. The FIRST line
@@ -32,8 +33,9 @@ const (
 // prefix, trimmed, and ok=true; word may be empty (a bare prefix with
 // nothing following) or a word this package does not recognize — ParseVerdict
 // parses the GRAMMAR only, it does not validate against the known verdict
-// words, so a future word (`escalate`) parses under the same rule with zero
-// change here. Anywhere else word is "" and ok is false.
+// words, so a future word parses under the same rule with zero change here
+// (this is how `escalate`, #182, arrived needing no change to this func).
+// Anywhere else word is "" and ok is false.
 func ParseVerdict(body string) (word string, ok bool) {
 	first, _, _ := strings.Cut(body, "\n")
 	if !strings.HasPrefix(first, VerdictMarkerPrefix) {

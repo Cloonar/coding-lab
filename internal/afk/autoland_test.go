@@ -1,11 +1,13 @@
 package afk
 
-// Autoland gather + lander-reaping engine tests (issue #181; the gather now
-// feeds the spawn pass, #185): the same fixture as engine_test.go — fakes for
-// tmux/tracker/provider, a REAL store, REAL git fixtures. The store does not
-// police the (binding, autoland) pair — that is reposvc's API guard — so the
-// fixture's fake-tracker repo can be re-bound "forge" to satisfy the
-// gather's forge-only gate.
+// Autoland gather + verdict-kind reaping engine tests (issues #181/#182; the
+// gather feeds the spawn pass, #185): the same fixture as engine_test.go —
+// fakes for tmux/tracker/provider, a REAL store, REAL git fixtures. The store
+// does not police the (binding, autoland) pair — that is reposvc's API guard
+// — so the fixture's fake-tracker repo can be re-bound "forge" to satisfy the
+// gather's forge-only gate. The pure decision rows live in TestDecideAutoland
+// (decide_test.go); the tests here prove the producer assembles the right
+// facts and the launch/reap paths honour them.
 
 import (
 	"context"
@@ -14,16 +16,21 @@ import (
 	"testing"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
 
-// autolandOn flips repo to a forge binding with autoland enabled.
+// autolandOn flips repo to a forge binding with autoland enabled, at the
+// production attempt bound (max_fix_attempts 2, the migration default — the
+// fixture's CreateRepo writes the zero value, which would escalate on the
+// first rejection and mask the fix stage entirely).
 func autolandOn(f *fixture, repo store.Repo) {
 	f.t.Helper()
 	if _, err := f.st.UpdateRepoSettings(f.t.Context(), repo.ID, store.RepoSettingsUpdate{
 		TrackerBinding:  store.Set(store.TrackerBindingForge),
 		AutolandEnabled: store.Set(true),
+		MaxFixAttempts:  store.Set(2),
 	}); err != nil {
 		f.t.Fatal(err)
 	}
@@ -51,6 +58,42 @@ func landerRuns(f *fixture, repo store.Repo) []store.Run {
 		}
 	}
 	return out
+}
+
+// runsOfKind lists repo's runs of one kind, ANY outcome — the fix-forward
+// tests read terminal rows too (a burned fix attempt is a terminal row that
+// still counts against the bound).
+func runsOfKind(f *fixture, repo store.Repo, kind string) []store.Run {
+	f.t.Helper()
+	runs, err := f.st.RunsByRepo(f.t.Context(), repo.ID, 0)
+	if err != nil {
+		f.t.Fatalf("RunsByRepo: %v", err)
+	}
+	var out []store.Run
+	for _, r := range runs {
+		if r.Kind == kind {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// seedTerminalFixRun writes one already-ended fix run row for (repo, branch)
+// — a burned attempt: FixRunCountForBranch counts SPAWNS with any outcome,
+// so tests seed the bound without driving whole fix rounds.
+func seedTerminalFixRun(f *fixture, repo store.Repo, branch, session, outcome string) {
+	f.t.Helper()
+	id := ids.NewID("run")
+	if _, err := f.st.CreateRun(f.t.Context(), store.Run{
+		ID: id, RepoID: repo.ID, Kind: store.RunKindFix, Provider: "claude-code",
+		Branch: branch, WorktreePath: "/wt/" + session, SessionName: session,
+		Model: "m", Effort: "e", StartedAt: clockTime, Outcome: store.RunOutcomeActive,
+	}); err != nil {
+		f.t.Fatalf("CreateRun: %v", err)
+	}
+	if err := f.st.EndRun(f.t.Context(), id, outcome, clockTime, ""); err != nil {
+		f.t.Fatalf("EndRun: %v", err)
+	}
 }
 
 // --- the lander gather through the spawn pass ------------------------------------
@@ -88,10 +131,10 @@ func TestSpawnOnce_spawnsLanderOnVirginClaimPR(t *testing.T) {
 	}
 }
 
-// The lander suppressions at the wiring level (the predicate rows live in
-// TestShouldSpawnLander; these prove the gather assembles the right facts —
-// and, for the at-cap row, that the pass enforces what the predicate no
-// longer weighs, #185).
+// The lander suppressions at the wiring level (the decision rows live in
+// TestDecideAutoland; these prove the gather assembles the right facts — and,
+// for the at-cap row, that the pass enforces what the decision never weighs,
+// #185).
 func TestSpawnOnce_landerSuppressions(t *testing.T) {
 	t.Run("autoland disabled never reads the tracker", func(t *testing.T) {
 		f := newFixture(t)
@@ -163,14 +206,29 @@ func TestSpawnOnce_landerSuppressions(t *testing.T) {
 			t.Error("dismissed-only review still suppressed the spawn")
 		}
 	})
-	t.Run("any verdict marker suppresses, fix-done included", func(t *testing.T) {
+	t.Run("pass verdict with no live rejection spawns nothing", func(t *testing.T) {
+		// #181 read ANY marker as "not mine"; #182's decision table refines
+		// that: a validated PR (last word pass, no outstanding rejection) is
+		// DecideAutoland's nothing — for every kind, not just the lander.
 		f := newFixture(t)
 		autolandOn(f, f.repo)
 		f.trk.addPull("afk/7", tracker.PullOpen)
-		f.trk.addPullComment(1, tracker.VerdictFixDone)
+		f.trk.addPullComment(1, tracker.VerdictPass)
 		f.svc.SpawnOnce(t.Context())
-		if len(landerRuns(f, f.repo)) != 0 {
-			t.Error("PR with verdict state spawned a #181 lander (that PR is the fix-forward loop's, #182)")
+		if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+			t.Errorf("validated PR spawned %d runs, want 0", len(active))
+		}
+	})
+	t.Run("merged pull is never a candidate", func(t *testing.T) {
+		f := newFixture(t)
+		autolandOn(f, f.repo)
+		f.trk.addPull("afk/7", tracker.PullMerged)
+		f.svc.SpawnOnce(t.Context())
+		if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+			t.Errorf("merged PR spawned %d runs, want 0", len(active))
+		}
+		if calls := f.trk.pullCommentsCallCount(); calls != 0 {
+			t.Errorf("merged PR's comments were read %d times, want 0 (the open gate precedes the per-pull reads)", calls)
 		}
 	})
 	t.Run("live run on the branch suppresses", func(t *testing.T) {
@@ -235,10 +293,40 @@ func TestSpawnOnce_landerSuppressions(t *testing.T) {
 func launchLanderFixture(f *fixture) store.Run {
 	f.t.Helper()
 	originClaimBranch(f, f.repo, "afk/7")
-	if err := f.svc.LaunchLander(f.t.Context(), f.repo.ID, 1, "afk/7", 7); err != nil {
+	if err := f.svc.LaunchLander(f.t.Context(), f.repo.ID, 1, "afk/7", 7, false); err != nil {
 		f.t.Fatalf("LaunchLander: %v", err)
 	}
 	run, err := f.st.RunBySession(f.t.Context(), "proj~lander-7")
+	if err != nil {
+		f.t.Fatalf("RunBySession: %v", err)
+	}
+	return run
+}
+
+// launchFixFixture spawns a fix run for pull #1 on afk/7 through the real
+// engine entry point, carrying rejection as the seed's work order.
+func launchFixFixture(f *fixture, rejection string) store.Run {
+	f.t.Helper()
+	originClaimBranch(f, f.repo, "afk/7")
+	if err := f.svc.LaunchFix(f.t.Context(), f.repo.ID, 1, "afk/7", 7, rejection); err != nil {
+		f.t.Fatalf("LaunchFix: %v", err)
+	}
+	run, err := f.st.RunBySession(f.t.Context(), "proj~fix-7")
+	if err != nil {
+		f.t.Fatalf("RunBySession: %v", err)
+	}
+	return run
+}
+
+// launchEscalateFixture spawns an escalate run for pull #1 on afk/7 through
+// the real engine entry point, carrying history below its seed's separator.
+func launchEscalateFixture(f *fixture, history string) store.Run {
+	f.t.Helper()
+	originClaimBranch(f, f.repo, "afk/7")
+	if err := f.svc.LaunchEscalate(f.t.Context(), f.repo.ID, 1, "afk/7", 7, history); err != nil {
+		f.t.Fatalf("LaunchEscalate: %v", err)
+	}
+	run, err := f.st.RunBySession(f.t.Context(), "proj~escalate-7")
 	if err != nil {
 		f.t.Fatalf("RunBySession: %v", err)
 	}
@@ -428,6 +516,460 @@ func TestReap_landerSuccessDoesNotNotify(t *testing.T) {
 	}
 	if cap.count() != 0 {
 		t.Errorf("lander success reap sent %d pushes, want 0", cap.count())
+	}
+}
+
+// --- the fix-forward producer (issue #182) ---------------------------------------
+
+// The headline: a reject marker on a lander-engaged PR (no live run) yields a
+// fix run within one spawn pass — carrying the rejection as its work order
+// and inheriting provider/model/effort from the PERSISTED authoring run row,
+// not from a fresh resolution.
+func TestSpawnOnce_rejectSpawnsFixRunInheritingAuthoringRow(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	// Distinct AFK defaults so the authoring run ROW records values the base
+	// chain would not re-derive.
+	sonnet, high := "sonnet", "high"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		AFKModelDefault: store.Set(&sonnet), AFKEffortDefault: store.Set(&high),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.trk.setReady(7)
+	authoring, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK: %v", err)
+	}
+	if authoring.Model != "sonnet" || authoring.Effort != "high" {
+		t.Fatalf("authoring run model/effort = %s/%s, want sonnet/high (the AFK defaults)", authoring.Model, authoring.Effort)
+	}
+	f.commitInWorktree(authoring.WorktreePath)
+	f.trk.addPull("afk/7", tracker.PullOpen) // pull #1 — the authoring run's done-signal
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(authoring.ID); got.Outcome != store.RunOutcomeSuccess {
+		t.Fatalf("authoring outcome = %q, want success before the fix round", got.Outcome)
+	}
+	// Clear the AFK defaults: a fresh empty-request resolution would now pick
+	// the catalog heads, so matching values below prove ROW inheritance.
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		AFKModelDefault: store.Set[*string](nil), AFKEffortDefault: store.Set[*string](nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The lander round rejected; the PR head exists at origin (the detached
+	// adopt fetches it — the shape a pushed claim has).
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings: broken tests")
+
+	f.svc.SpawnOnce(t.Context())
+
+	fixes := runsOfKind(f, f.repo, store.RunKindFix)
+	if len(fixes) != 1 {
+		t.Fatalf("fix runs = %d, want exactly 1 within one pass", len(fixes))
+	}
+	run := fixes[0]
+	if run.Branch != "afk/7" || run.SessionName != "proj~fix-7" {
+		t.Errorf("run identity = %s/%s, want afk/7 / proj~fix-7", run.Branch, run.SessionName)
+	}
+	if run.IssueNumber == nil || *run.IssueNumber != 7 {
+		t.Errorf("issue = %v, want 7", run.IssueNumber)
+	}
+	if run.BudgetDeadline == nil {
+		t.Error("fix run has no persisted budget deadline")
+	}
+	// The #182 inheritance pin: provider/model/effort equal the authoring
+	// row's, surviving the cleared defaults.
+	if run.Provider != authoring.Provider || run.Model != "sonnet" || run.Effort != "high" {
+		t.Errorf("fix run provider/model/effort = %s/%s/%s, want the authoring row's %s/sonnet/high",
+			run.Provider, run.Model, run.Effort, authoring.Provider)
+	}
+	// The seed carries the rejection work order below the separator — exactly
+	// FixSeedPrompt over RejectionContext's rendering.
+	sess, live := f.runner.Session(run.SessionName)
+	if !live {
+		t.Fatal("fix session not live")
+	}
+	want := FixSeedPrompt(7, 1, "afk/7", false, "Lander rejection:\nfindings: broken tests")
+	if last := sess.Argv[len(sess.Argv)-1]; last != want {
+		t.Errorf("seed argv = %q, want the exact FixSeedPrompt with the rejection work order", last)
+	}
+
+	// Idempotent by state: the live fix run occupies the branch.
+	f.svc.SpawnOnce(t.Context())
+	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 1 {
+		t.Errorf("second pass grew the fix count to %d, want still 1", n)
+	}
+}
+
+// The hybrid trigger (ADR-0048): a live human changes-requested native
+// review, with NO markers at all, is rejected-state — a fix run spawns, its
+// work order quoting the review. No authoring run row exists here, so the
+// provider falls back through the repo chain (warned, never fatal — the loop
+// stays alive).
+func TestSpawnOnce_humanRejectionAloneSpawnsFixRun(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addReviewFrom(1, "human", tracker.ReviewChangesRequested, false, "please split the migration")
+
+	f.svc.SpawnOnce(t.Context())
+
+	fixes := runsOfKind(f, f.repo, store.RunKindFix)
+	if len(fixes) != 1 {
+		t.Fatalf("fix runs = %d, want exactly 1 (a native changes-requested is rejected-state)", len(fixes))
+	}
+	if fixes[0].Provider != "claude-code" {
+		t.Errorf("provider = %q, want the repo-chain fallback claude-code (no authoring row exists)", fixes[0].Provider)
+	}
+	sess, live := f.runner.Session(fixes[0].SessionName)
+	if !live {
+		t.Fatal("fix session not live")
+	}
+	want := FixSeedPrompt(7, 1, "afk/7", false, "Review by human (changes requested):\nplease split the migration")
+	if last := sess.Argv[len(sess.Argv)-1]; last != want {
+		t.Errorf("seed argv = %q, want the human rejection as the work order", last)
+	}
+}
+
+// At the attempt bound (FixSpawns >= MaxFixAttempts) rejected-state spawns
+// the terminal escalate run instead of a third fix run — gated on the LANDER
+// provider chain, strict on a named lander_provider.
+func TestSpawnOnce_atFixBoundSpawnsEscalate(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo) // max_fix_attempts 2
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 1: broken")
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 2: still broken")
+	// Two attempts already burned — SPAWNS with any outcome count, so a dead
+	// fix run burns one exactly like a rejected one.
+	seedTerminalFixRun(f, f.repo, "afk/7", "proj~fix-7-r1", store.RunOutcomeDeath)
+	seedTerminalFixRun(f, f.repo, "afk/7", "proj~fix-7-r2", store.RunOutcomeSuccess)
+
+	// A bogus lander_provider vetoes the escalate candidate: the gate is the
+	// lander chain, strict on the operator-named id.
+	bogus := "no-such-provider"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderProvider: store.Set(&bogus),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SpawnOnce(t.Context())
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Fatalf("bogus lander provider still spawned %d runs", len(active))
+	}
+
+	// Cleared, the escalate run spawns — with the full round history below
+	// its seed's separator.
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderProvider: store.Set[*string](nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SpawnOnce(t.Context())
+	escs := runsOfKind(f, f.repo, store.RunKindEscalate)
+	if len(escs) != 1 {
+		t.Fatalf("escalate runs = %d, want exactly 1 at the bound", len(escs))
+	}
+	run := escs[0]
+	if run.Branch != "afk/7" || run.SessionName != "proj~escalate-7" {
+		t.Errorf("run identity = %s/%s, want afk/7 / proj~escalate-7", run.Branch, run.SessionName)
+	}
+	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 2 {
+		t.Errorf("fix runs = %d, want the 2 burned attempts only — never a third at the bound", n)
+	}
+	sess, live := f.runner.Session(run.SessionName)
+	if !live {
+		t.Fatal("escalate session not live")
+	}
+	history := "Verdict comments (oldest first):\n\n" +
+		tracker.VerdictReject + "\n\nround 1: broken" + "\n\n" +
+		tracker.VerdictReject + "\n\nround 2: still broken"
+	if last := sess.Argv[len(sess.Argv)-1]; last != EscalateSeedPrompt(7, 1, "afk/7", history) {
+		t.Errorf("seed argv = %q, want the exact EscalateSeedPrompt with the round history", last)
+	}
+}
+
+// Escalated terminality: after escalation the PR is invisible to autoland
+// FOREVER — by the durable run row even if the marker comment was deleted,
+// and by the marker at ANY comment position even without a row.
+func TestSpawnOnce_escalatedIsTerminal(t *testing.T) {
+	t.Run("escalated-outcome run row blocks forever", func(t *testing.T) {
+		f := newFixture(t)
+		autolandOn(f, f.repo)
+		originClaimBranch(f, f.repo, "afk/7")
+		f.trk.addPull("afk/7", tracker.PullOpen)
+		// Rejected-state on the thread (the marker itself deleted by a
+		// human): without the row this would spawn a fix run.
+		f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
+		id := ids.NewID("run")
+		if _, err := f.st.CreateRun(t.Context(), store.Run{
+			ID: id, RepoID: f.repo.ID, Kind: store.RunKindEscalate, Provider: "claude-code",
+			Branch: "afk/7", WorktreePath: "/wt/proj-escalate-7", SessionName: "proj~escalate-7-old",
+			Model: "m", Effort: "e", StartedAt: clockTime, Outcome: store.RunOutcomeActive,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.st.EndRun(t.Context(), id, store.RunOutcomeEscalated, clockTime, ""); err != nil {
+			t.Fatal(err)
+		}
+
+		f.svc.SpawnOnce(t.Context())
+		if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+			t.Errorf("escalated PR spawned %d runs, want 0 forever (the row is the durable gate)", len(active))
+		}
+	})
+	t.Run("escalate marker blocks at any position", func(t *testing.T) {
+		f := newFixture(t)
+		autolandOn(f, f.repo)
+		originClaimBranch(f, f.repo, "afk/7")
+		f.trk.addPull("afk/7", tracker.PullOpen)
+		f.trk.addPullComment(1, tracker.VerdictEscalate+"\n\ndigest")
+		// A later rejection does not resurrect the loop: escalate wins from
+		// ANY position, not only as the last word.
+		f.trk.addPullComment(1, tracker.VerdictReject+"\n\na human re-rejected")
+
+		f.svc.SpawnOnce(t.Context())
+		if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+			t.Errorf("escalate-marked PR spawned %d runs, want 0 (marker alone is terminal)", len(active))
+		}
+	})
+}
+
+// fix-done as the last word spawns the re-validation lander (DecideAutoland
+// case 4) — with the repo's own AutoMerge honoured when no human rejection is
+// outstanding, and the approve-only seed forced when one is (never merge over
+// a live human changes-requested; the round still runs to move the marker
+// state, and a fix run here would instant-reap on its own done-signal).
+func TestSpawnOnce_fixDoneSpawnsRevalidationLander(t *testing.T) {
+	t.Run("plain re-validation honours AutoMerge", func(t *testing.T) {
+		f := newFixture(t)
+		autolandOn(f, f.repo)
+		if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+			AutoMerge: store.Set(true),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		originClaimBranch(f, f.repo, "afk/7")
+		f.trk.addPull("afk/7", tracker.PullOpen)
+		f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 1")
+		f.trk.addPullComment(1, tracker.VerdictFixDone)
+
+		f.svc.SpawnOnce(t.Context())
+		landers := landerRuns(f, f.repo)
+		if len(landers) != 1 {
+			t.Fatalf("lander runs = %d, want exactly 1 (fix-done is the re-validation trigger)", len(landers))
+		}
+		sess, _ := f.runner.Session("proj~lander-7")
+		if last := sess.Argv[len(sess.Argv)-1]; last != LanderSeedPrompt(1, "afk/7", true, false) {
+			t.Errorf("seed argv = %q, want the AutoMerge variant (no human rejection outstanding)", last)
+		}
+	})
+	t.Run("outstanding human rejection forces the approve-only seed", func(t *testing.T) {
+		f := newFixture(t)
+		autolandOn(f, f.repo)
+		if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+			AutoMerge: store.Set(true),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		originClaimBranch(f, f.repo, "afk/7")
+		f.trk.addPull("afk/7", tracker.PullOpen)
+		f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 1")
+		f.trk.addPullComment(1, tracker.VerdictFixDone)
+		f.trk.addReviewFrom(1, "human", tracker.ReviewChangesRequested, false, "still wrong")
+
+		f.svc.SpawnOnce(t.Context())
+		landers := landerRuns(f, f.repo)
+		if len(landers) != 1 {
+			t.Fatalf("lander runs = %d, want exactly 1 (the round must run — never a fix run at fix-done)", len(landers))
+		}
+		if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 0 {
+			t.Fatalf("fix runs = %d, want 0 (the instant-reap trap: fix-done is already a fix done-signal)", n)
+		}
+		sess, _ := f.runner.Session("proj~lander-7")
+		if last := sess.Argv[len(sess.Argv)-1]; last != LanderSeedPrompt(1, "afk/7", false, false) {
+			t.Errorf("seed argv = %q, want the approve-only variant despite AutoMerge=true", last)
+		}
+	})
+}
+
+// --- the reaper on fix and escalate runs -----------------------------------------
+
+// A fix run ends on its fix-done marker as the LAST word — the stale reject
+// it spawned from does not end it — and its success RESETS the failure
+// counter (fix is AFK-class unattended work, #182) without sending any push
+// (the marker plus the native reviewer ping is its surface).
+func TestReap_fixRunEndsOnFixDoneAndResetsCounter(t *testing.T) {
+	f := newFixture(t)
+	notes := &captureNotifier{}
+	f.svc.notify = notes.notify
+	f.setFailures(f.repo, 2)
+	run := launchFixFixture(f, "findings: broken tests")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings: broken tests")
+
+	// Last word reject: the run's own signal has not landed — still active.
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeActive {
+		t.Fatalf("outcome = %q on the stale reject, want still active", got.Outcome)
+	}
+
+	// `labctl pr rerequest` landed: fix-done becomes the last word.
+	f.trk.addPullComment(1, tracker.VerdictFixDone)
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(2*time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeSuccess {
+		t.Fatalf("outcome = %q, want success off the fix-done marker", got.Outcome)
+	}
+	if n := f.failures(f.repo); n != 0 {
+		t.Errorf("failures = %d, want 0 (a fix success resets the counter, #182)", n)
+	}
+	if notes.count() != 0 {
+		t.Errorf("fix success sent %d pushes, want 0 (its marker + native ping is the surface)", notes.count())
+	}
+}
+
+// A dead fix session with no marker is a death: the attempt is burned (the
+// spawn already counted — FixRunCountForBranch), the failure counter strikes,
+// and the NEXT pass at the bound escalates instead of respawning.
+func TestReap_fixDeathBurnsAttemptStrikesAndEscalatesNext(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		MaxFixAttempts: store.Set(1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := launchFixFixture(f, "findings")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 1")
+	f.runner.Kill(run.SessionName)
+
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeDeath {
+		t.Fatalf("outcome = %q, want death (session gone, no fix-done, PR not merged)", got.Outcome)
+	}
+	if n := f.failures(f.repo); n != 1 {
+		t.Errorf("failures = %d, want 1 (a fix death strikes — three-strikes accounting applies, #182)", n)
+	}
+	if n, err := f.st.FixRunCountForBranch(t.Context(), f.repo.ID, "afk/7"); err != nil || n != 1 {
+		t.Errorf("FixRunCountForBranch = %d (err %v), want 1 — the dead spawn burned the attempt", n, err)
+	}
+
+	// The next pass: still rejected, FixSpawns 1 >= bound 1 → escalate, never
+	// a second fix run.
+	f.svc.SpawnOnce(t.Context())
+	if n := len(runsOfKind(f, f.repo, store.RunKindEscalate)); n != 1 {
+		t.Fatalf("escalate runs after the burned attempt = %d, want 1", n)
+	}
+	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 1 {
+		t.Errorf("fix runs = %d, want still 1 (the bound is spent — no respawn)", n)
+	}
+}
+
+// An escalate run whose marker lands ends outcome 'escalated' — not success —
+// fires the escalation push exactly once off the idempotent claim, tears down
+// like any reap, leaves the failure counter alone in BOTH directions, and its
+// terminal row then blocks the poller forever.
+func TestReap_escalateMarkerEndsEscalatedAndNotifiesOnce(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo) // forge binding: the push noun is "PR"
+	notes := &captureNotifier{}
+	f.svc.notify = notes.notify
+	f.setFailures(f.repo, 2)
+	// The parked-claim shape: the origin branch one commit past main AND its
+	// local claim ref in the bare, so the guarded teardown's merged check has
+	// a branch to judge (clean worktree removed, unmerged branch kept).
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+	gitCmd(t, f.home, origin, "checkout", "-q", "afk/7")
+	gitCmd(t, f.home, origin, "commit", "-q", "--allow-empty", "-m", "claim work")
+	gitCmd(t, f.home, origin, "checkout", "-q", "main")
+	gitCmd(t, f.home, f.bare(f.repo), "fetch", "-q", "origin")
+	gitCmd(t, f.home, f.bare(f.repo), "branch", "afk/7", "origin/afk/7")
+	if err := f.svc.LaunchEscalate(t.Context(), f.repo.ID, 1, "afk/7", 7, "history"); err != nil {
+		t.Fatalf("LaunchEscalate: %v", err)
+	}
+	run, err := f.st.RunBySession(t.Context(), "proj~escalate-7")
+	if err != nil {
+		t.Fatalf("RunBySession: %v", err)
+	}
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.setPullTitle(1, "Resolve issue 7")
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 1")
+
+	// Last word reject: the hand-off has not landed — still active, no push.
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeActive {
+		t.Fatalf("outcome = %q before the marker, want still active", got.Outcome)
+	}
+	if notes.count() != 0 {
+		t.Fatalf("push fired before the escalate marker landed")
+	}
+
+	// `labctl pr escalate` landed LAST: the terminal marker.
+	f.trk.addPullComment(1, tracker.VerdictEscalate+"\n\ndigest")
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(2*time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeEscalated {
+		t.Fatalf("outcome = %q, want escalated (the marker, not success)", got.Outcome)
+	}
+	if _, live := f.runner.Session(run.SessionName); live {
+		t.Error("escalate session still live after the reap")
+	}
+	if dirExists(run.WorktreePath) {
+		t.Error("clean escalate worktree not removed (the guarded teardown applies as usual)")
+	}
+	if !f.branchExists(f.repo, "afk/7") {
+		t.Error("unmerged claim branch deleted on the escalated reap (the guarded teardown keeps it)")
+	}
+	if n := f.failures(f.repo); n != 2 {
+		t.Errorf("failures = %d, want 2 unchanged (an escalate outcome moves the counter in neither direction)", n)
+	}
+	if notes.count() != 1 {
+		t.Fatalf("escalation pushes = %d, want exactly 1", notes.count())
+	}
+	want := Notification{
+		Title: "proj~escalate-7 escalated PR #1",
+		Body:  "Resolve issue 7",
+		Tag:   run.ID,
+		Route: "/runs/" + run.ID,
+	}
+	if got := notes.last(); got != want {
+		t.Errorf("notification = %+v; want %+v", got, want)
+	}
+
+	// Idempotent: a second sweep neither reclassifies nor re-sends.
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(3*time.Minute))
+	if notes.count() != 1 {
+		t.Errorf("second sweep re-sent the escalation push: count = %d, want 1", notes.count())
+	}
+	// And the escalated row is the poller's permanent gate.
+	f.svc.SpawnOnce(t.Context())
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Errorf("escalated PR spawned %d runs after the terminal reap, want 0", len(active))
+	}
+}
+
+// A PR merged mid-escalate is moot: plain success (merged-first mirrors
+// LanderDone), no escalation push, and no comment read spent on a merged PR.
+func TestReap_escalateMergedMidRunIsPlainSuccess(t *testing.T) {
+	f := newFixture(t)
+	notes := &captureNotifier{}
+	f.svc.notify = notes.notify
+	run := launchEscalateFixture(f, "history")
+	f.trk.addPull("afk/7", tracker.PullMerged)
+
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeSuccess {
+		t.Fatalf("outcome = %q, want plain success off the merged PR", got.Outcome)
+	}
+	if notes.count() != 0 {
+		t.Errorf("merged-mid-escalate sent %d pushes, want 0", notes.count())
+	}
+	if calls := f.trk.pullCommentsCallCount(); calls != 0 {
+		t.Errorf("PullComments called %d times for a merged PR, want 0 (bounded read)", calls)
 	}
 }
 

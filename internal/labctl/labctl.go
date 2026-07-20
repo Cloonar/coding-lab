@@ -53,6 +53,8 @@ Usage:
   labctl pr approve <n> [body]          record a validation-passed verdict on PR n (body optional)
   labctl pr rerequest <n>               signal fix-done on PR n and re-request review from reviewers
                                         whose latest verdict requested changes
+  labctl pr escalate <n> <body>         record the escalate-mode lander's terminal marker on PR n with
+                                        body as the round-history digest
   labctl pr comment <n> <body>          post a plain discussion comment on PR n (no Closes # injection)
   labctl secret list                    list the repo's secrets (name, description; never values)
   labctl secret exec <NAME...> -- <cmd> [args...]
@@ -507,6 +509,33 @@ func runPR(args []string, env Env) int {
 				_, _ = fmt.Fprintf(env.Stderr, "labctl pr rerequest: warning: %s\n", pr.Warning)
 			}
 			_, _ = fmt.Fprintf(env.Stdout, "#%d\trerequested\n", pr.Number)
+			return nil
+		})
+	case "escalate":
+		// Exactly <n> <body>, mirroring reject: the digest is the point, so a
+		// blank body is a usage error (exit 2) here rather than a round trip
+		// to the server's 400. Unlike rerequest there is no native ping to
+		// warn about — escalation's forge-facing surface is this ONE comment.
+		if len(args) != 3 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr escalate: want <n> <body>")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr escalate: PR number %q is not an integer\n", args[1])
+			return 2
+		}
+		body := args[2]
+		if body == "" {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr escalate: body must not be empty")
+			return 2
+		}
+		return withClient(env, "pr escalate", func(c *Client) error {
+			pr, err := c.PREscalate(n, body)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(env.Stdout, "#%d\tescalated\n", pr.Number)
 			return nil
 		})
 	case "comment":

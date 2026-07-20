@@ -56,6 +56,7 @@ func TestOutcomeStrings(t *testing.T) {
 		{OutcomeSuccess, "success", "success"},
 		{OutcomeDeath, "failure (death)", "death"},
 		{OutcomeTimeout, "failure (timeout)", "timeout"},
+		{OutcomeEscalated, "escalated", "escalated"},
 	}
 	for _, tt := range tests {
 		if got := tt.o.String(); got != tt.str {
@@ -117,10 +118,12 @@ func TestShouldLaunchAuto(t *testing.T) {
 }
 
 // TestLanderDone pins the lander's done-signal derivation (issue #181 /
-// ADR-0048): merged ends the run with no comment read; on an open PR only a
-// pass or reject verdict ends it — fix-done is a FIX run's signal, unknown
-// words (escalate, a bare marker) end nothing; and no PR (vanished or
-// closed-unmerged, DonePull's floor) is never done.
+// ADR-0048, last-word rework #182): merged ends the run with no comment
+// read; on an open PR only the LAST verdict word being pass or reject ends
+// it — fix-done is a FIX run's signal, escalate an ESCALATE run's, a bare
+// marker or unknown word ends nothing — so a round-2 lander spawned at
+// fix-done is NOT instant-reaped by round 1's stale reject; and no PR
+// (vanished or closed-unmerged, DonePull's floor) is never done.
 func TestLanderDone(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -134,14 +137,106 @@ func TestLanderDone(t *testing.T) {
 		{"open with reject verdict is done", tracker.PullOpen, true, []string{"reject"}, true},
 		{"open with fix-done only is NOT done", tracker.PullOpen, true, []string{"fix-done"}, false},
 		{"open with no comments is not done", tracker.PullOpen, true, nil, false},
-		{"open with unknown words is not done", tracker.PullOpen, true, []string{"escalate", ""}, false},
+		{"open with escalate/bare words is not done", tracker.PullOpen, true, []string{"escalate", ""}, false},
 		{"pass after fix-done is done", tracker.PullOpen, true, []string{"fix-done", "pass"}, true},
+		{"round-2 spawn state is NOT done (stale reject never instant-reaps)", tracker.PullOpen, true, []string{"reject", "fix-done"}, false},
+		{"round-2 verdict after stale round 1 is done", tracker.PullOpen, true, []string{"reject", "fix-done", "pass"}, true},
+		{"trailing unknown word does not mask the last verdict", tracker.PullOpen, true, []string{"pass", "bogus"}, true},
 		{"no PR is not done", "", false, []string{"pass"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := LanderDone(tt.state, tt.prPresent, tt.verdicts); got != tt.want {
 				t.Errorf("LanderDone(%q, %v, %v) = %v, want %v", tt.state, tt.prPresent, tt.verdicts, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLastVerdictWord pins the marker-state fold (issue #182): the fold
+// walks backward to the newest KNOWN word — unknown and empty words are
+// skipped (their markers still make a PR non-virgin, but that reading is
+// VerdictWords' length, never the fold's) — and "" means no known word.
+func TestLastVerdictWord(t *testing.T) {
+	tests := []struct {
+		name  string
+		words []string
+		want  string
+	}{
+		{"nil folds to empty", nil, ""},
+		{"unknown words only fold to empty", []string{"", "bogus"}, ""},
+		{"single known word", []string{"pass"}, "pass"},
+		{"last known word wins", []string{"reject", "fix-done"}, "fix-done"},
+		{"trailing unknown words are skipped", []string{"reject", "bogus", ""}, "reject"},
+		{"escalate is a known word", []string{"reject", "escalate"}, "escalate"},
+		{"full round narrative folds to the newest", []string{"reject", "fix-done", "pass"}, "pass"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LastVerdictWord(tt.words); got != tt.want {
+				t.Errorf("LastVerdictWord(%v) = %q, want %q", tt.words, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFixDone pins the fix run's done-signal (issue #182): merged is moot
+// and moot is done; else only fix-done as the LAST word — the state a fix
+// run actually spawns from (an earlier fix-done superseded by a reject) is
+// never done at spawn, which is what makes the signal sound; and no PR is
+// never done.
+func TestFixDone(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     string
+		prPresent bool
+		verdicts  []string
+		want      bool
+	}{
+		{"merged is done", tracker.PullMerged, true, nil, true},
+		{"rerequest landed is done", tracker.PullOpen, true, []string{"reject", "fix-done"}, true},
+		{"spawn state (last word reject) is not done", tracker.PullOpen, true, []string{"fix-done", "reject"}, false},
+		{"virgin thread is not done", tracker.PullOpen, true, nil, false},
+		{"trailing unknown word does not mask fix-done", tracker.PullOpen, true, []string{"reject", "fix-done", "bogus"}, true},
+		{"pass as the last word is not a fix run's done", tracker.PullOpen, true, []string{"pass"}, false},
+		{"no PR is never done", "", false, []string{"fix-done"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FixDone(tt.state, tt.prPresent, tt.verdicts); got != tt.want {
+				t.Errorf("FixDone(%q, %v, %v) = %v, want %v", tt.state, tt.prPresent, tt.verdicts, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEscalateDelivered pins the escalate run's done-signal (issue #182):
+// merged first — a human merged mid-hand-off, an ordinary success, even with
+// the marker already posted — else the escalate marker as the LAST word means
+// delivered viaMarker (the reaper's outcome 'escalated'); anything else is
+// still running.
+func TestEscalateDelivered(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     string
+		prPresent bool
+		verdicts  []string
+		wantDone  bool
+		wantVia   bool
+	}{
+		{"merged is success", tracker.PullMerged, true, nil, true, false},
+		{"merged beats the marker", tracker.PullMerged, true, []string{"reject", "escalate"}, true, false},
+		{"escalate marker delivered", tracker.PullOpen, true, []string{"reject", "escalate"}, true, true},
+		{"spawn state (last word reject) is not delivered", tracker.PullOpen, true, []string{"reject"}, false, false},
+		{"trailing unknown word does not mask escalate", tracker.PullOpen, true, []string{"escalate", "bogus"}, true, true},
+		{"no PR is never delivered", "", false, []string{"escalate"}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			done, via := EscalateDelivered(tt.state, tt.prPresent, tt.verdicts)
+			if done != tt.wantDone || via != tt.wantVia {
+				t.Errorf("EscalateDelivered(%q, %v, %v) = (%v, %v), want (%v, %v)",
+					tt.state, tt.prPresent, tt.verdicts, done, via, tt.wantDone, tt.wantVia)
 			}
 		})
 	}
@@ -195,41 +290,220 @@ func TestLiveReview(t *testing.T) {
 	}
 }
 
-// TestShouldSpawnLander mirrors TestShouldLaunchAuto: base is all-go;
-// flipping exactly one term blocks the spawn — every suppression the issue
-// pins (disabled, non-forge, not-ready, paused, closed PR, non-matching
-// head, review present, marker present, live run on branch) is one row. The
-// old at-cap row is gone with the term: cap enforcement moved to the single
-// spawn pass (#185).
-func TestShouldSpawnLander(t *testing.T) {
-	base := LanderSpawnDecision{
-		AutolandEnabled: true, ForgeBound: true, RepoReady: true, Paused: false,
-		PullOpen: true, ClaimBranch: true, ReviewPresent: false, VerdictPresent: false, RunOnBranch: false,
+// TestHumanRejected pins the human half of ADR-0048's hybrid rejected-state
+// (issue #182): per-reviewer fold, positional recency (Reviews() is
+// oldest-first, no timestamps), only approved/changes-requested rows carry a
+// verdict, dismissed rows are cleared verdicts, and one outstanding rejection
+// among any number of approvers is enough.
+func TestHumanRejected(t *testing.T) {
+	rev := func(who, state string, dismissed bool) tracker.Review {
+		return tracker.Review{Reviewer: who, State: state, Dismissed: dismissed}
 	}
 	tests := []struct {
-		name   string
-		mutate func(*LanderSpawnDecision)
-		want   bool
+		name    string
+		reviews []tracker.Review
+		want    bool
 	}{
-		{"all conditions go", func(*LanderSpawnDecision) {}, true},
-		{"autoland disabled vetoes", func(d *LanderSpawnDecision) { d.AutolandEnabled = false }, false},
-		{"non-forge binding vetoes", func(d *LanderSpawnDecision) { d.ForgeBound = false }, false},
-		{"repo not ready vetoes", func(d *LanderSpawnDecision) { d.RepoReady = false }, false},
-		{"three-strikes pause vetoes", func(d *LanderSpawnDecision) { d.Paused = true }, false},
-		{"closed/merged pull vetoes", func(d *LanderSpawnDecision) { d.PullOpen = false }, false},
-		{"non-matching head vetoes", func(d *LanderSpawnDecision) { d.ClaimBranch = false }, false},
-		{"live review vetoes", func(d *LanderSpawnDecision) { d.ReviewPresent = true }, false},
-		{"verdict marker vetoes", func(d *LanderSpawnDecision) { d.VerdictPresent = true }, false},
-		{"live run on branch vetoes", func(d *LanderSpawnDecision) { d.RunOnBranch = true }, false},
+		{"no reviews", nil, false},
+		{"changes requested binds", []tracker.Review{rev("alice", tracker.ReviewChangesRequested, false)}, true},
+		{"approval alone does not", []tracker.Review{rev("alice", tracker.ReviewApproved, false)}, false},
+		{"newer approval clears the same reviewer's rejection",
+			[]tracker.Review{rev("alice", tracker.ReviewChangesRequested, false), rev("alice", tracker.ReviewApproved, false)}, false},
+		{"newer rejection overrides the same reviewer's approval",
+			[]tracker.Review{rev("alice", tracker.ReviewApproved, false), rev("alice", tracker.ReviewChangesRequested, false)}, true},
+		{"a comment neither sets nor clears a standing rejection",
+			[]tracker.Review{rev("alice", tracker.ReviewChangesRequested, false), rev("alice", tracker.ReviewCommented, false)}, true},
+		{"a re-request row neither sets nor clears",
+			[]tracker.Review{rev("alice", tracker.ReviewChangesRequested, false), rev("alice", tracker.ReviewRequested, false)}, true},
+		{"a dismissed rejection does not bind", []tracker.Review{rev("alice", tracker.ReviewChangesRequested, true)}, false},
+		{"one rejecting reviewer among approvers",
+			[]tracker.Review{rev("alice", tracker.ReviewApproved, false), rev("bob", tracker.ReviewChangesRequested, false)}, true},
+		{"a non-verdict-only thread does not bind", []tracker.Review{rev("alice", tracker.ReviewCommented, false)}, false},
+		{"anonymous rows are skipped", []tracker.Review{rev("", tracker.ReviewChangesRequested, false)}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := base
-			tt.mutate(&d)
-			if got := ShouldSpawnLander(d); got != tt.want {
-				t.Errorf("ShouldSpawnLander(%+v) = %v, want %v", d, got, tt.want)
+			if got := HumanRejected(tt.reviews); got != tt.want {
+				t.Errorf("HumanRejected(%v) = %v, want %v", tt.reviews, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDecideAutoland transcribes the #182 decision table — priority order
+// exactly as pinned: escalated beats everything, an active run beats
+// spawning, the virgin lander keeps #181's conservative any-review gate, the
+// fix-done re-validation lander outranks rejected-state (the instant-reap
+// trap: a fix run spawned at fix-done would be born done), rejected-state
+// spawns a fix run under the bound and escalates at it, and everything else
+// is nothing.
+func TestDecideAutoland(t *testing.T) {
+	tests := []struct {
+		name        string
+		st          PullVerdictState
+		wantAction  AutolandAction
+		wantApprove bool
+	}{
+		{"virgin PR spawns a lander",
+			PullVerdictState{MaxFixAttempts: 2}, ActionLander, false},
+		{"escalated beats everything",
+			PullVerdictState{Words: []string{"reject"}, LiveReview: true, HumanRejected: true, Escalated: true, MaxFixAttempts: 2}, ActionNone, false},
+		{"escalated blocks even a virgin lander (marker deleted, run row remains)",
+			PullVerdictState{Escalated: true, MaxFixAttempts: 2}, ActionNone, false},
+		{"active run on the branch beats spawning",
+			PullVerdictState{RunOnBranch: true, MaxFixAttempts: 2}, ActionNone, false},
+		{"active run blocks a fix spawn too",
+			PullVerdictState{Words: []string{"reject"}, RunOnBranch: true, MaxFixAttempts: 2}, ActionNone, false},
+		{"live review on a virgin PR suppresses the lander",
+			PullVerdictState{LiveReview: true, MaxFixAttempts: 2}, ActionNone, false},
+		{"human rejection on a virgin PR spawns a fix run",
+			PullVerdictState{LiveReview: true, HumanRejected: true, MaxFixAttempts: 2}, ActionFix, false},
+		{"fix-done spawns the re-validation lander",
+			PullVerdictState{Words: []string{"reject", "fix-done"}, MaxFixAttempts: 2}, ActionLander, false},
+		{"fix-done under a human rejection is an approve-only lander, never a fix run (the instant-reap trap)",
+			PullVerdictState{Words: []string{"reject", "fix-done"}, LiveReview: true, HumanRejected: true, MaxFixAttempts: 2}, ActionLander, true},
+		{"reject under the bound spawns a fix run",
+			PullVerdictState{Words: []string{"reject"}, FixSpawns: 1, MaxFixAttempts: 2}, ActionFix, false},
+		{"reject at the bound escalates",
+			PullVerdictState{Words: []string{"reject"}, FixSpawns: 2, MaxFixAttempts: 2}, ActionEscalate, false},
+		{"human rejection at the bound escalates",
+			PullVerdictState{Words: []string{"pass"}, LiveReview: true, HumanRejected: true, FixSpawns: 2, MaxFixAttempts: 2}, ActionEscalate, false},
+		{"human rejection after a pass spawns a fix run",
+			PullVerdictState{Words: []string{"pass"}, LiveReview: true, HumanRejected: true, MaxFixAttempts: 2}, ActionFix, false},
+		{"pass with no rejection is nothing",
+			PullVerdictState{Words: []string{"pass"}, MaxFixAttempts: 2}, ActionNone, false},
+		{"unknown words only is nothing (non-virgin, no known state)",
+			PullVerdictState{Words: []string{"bogus", ""}, MaxFixAttempts: 2}, ActionNone, false},
+		{"trailing unknown word does not mask fix-done",
+			PullVerdictState{Words: []string{"reject", "fix-done", "bogus"}, MaxFixAttempts: 2}, ActionLander, false},
+		{"a zero-attempt bound escalates on the first rejection",
+			PullVerdictState{Words: []string{"reject"}, MaxFixAttempts: 0}, ActionEscalate, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action, approve := DecideAutoland(tt.st)
+			if action != tt.wantAction || approve != tt.wantApprove {
+				t.Errorf("DecideAutoland(%+v) = (%v, %v), want (%v, %v)",
+					tt.st, action, approve, tt.wantAction, tt.wantApprove)
+			}
+		})
+	}
+}
+
+// TestRejectionContext pins the fix run's work order rendering: the LATEST
+// reject comment's prose with the marker line stripped, then each reviewer
+// whose latest live verdict is changes-requested with that review's body —
+// superseded, dismissed, and approving rows excluded, empty sections skipped
+// cleanly, "" when nothing renders.
+func TestRejectionContext(t *testing.T) {
+	comments := []tracker.Comment{
+		{Body: "ordinary thread prose"},
+		{Body: tracker.VerdictReject + "\n\nround-1 findings"},
+		{Body: tracker.VerdictFixDone},
+		{Body: tracker.VerdictReject + "\n\nround-2 findings:\n- test X fails"},
+	}
+	reviews := []tracker.Review{
+		{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "please split this function"},
+		{Reviewer: "bob", State: tracker.ReviewApproved, Body: "lgtm"},
+	}
+	got := RejectionContext(comments, reviews)
+	want := "Lander rejection:\nround-2 findings:\n- test X fails\n\n" +
+		"Review by alice (changes requested):\nplease split this function"
+	if got != want {
+		t.Errorf("RejectionContext =\n%q\nwant\n%q", got, want)
+	}
+
+	// Per-reviewer recency: a newer approval clears that reviewer's section;
+	// a newer rejection's body supersedes the older one's.
+	if got := RejectionContext(nil, []tracker.Review{
+		{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "old findings"},
+		{Reviewer: "alice", State: tracker.ReviewApproved},
+	}); got != "" {
+		t.Errorf("cleared rejection still rendered: %q", got)
+	}
+	if got := RejectionContext(nil, []tracker.Review{
+		{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "first-pass findings"},
+		{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "second-pass findings"},
+	}); got != "Review by alice (changes requested):\nsecond-pass findings" {
+		t.Errorf("latest rejection body not used: %q", got)
+	}
+
+	// Dismissed rows and empty bodies render no section; a bare reject marker
+	// (no prose below the marker line) renders none either.
+	if got := RejectionContext(
+		[]tracker.Comment{{Body: tracker.VerdictReject}},
+		[]tracker.Review{
+			{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "stale", Dismissed: true},
+			{Reviewer: "bob", State: tracker.ReviewChangesRequested, Body: "   "},
+		},
+	); got != "" {
+		t.Errorf("empty sections not skipped: %q", got)
+	}
+	if got := RejectionContext(nil, nil); got != "" {
+		t.Errorf("RejectionContext(nil, nil) = %q, want empty", got)
+	}
+
+	// A bare LATEST reject supersedes an earlier round's findings — they are
+	// already worked, never re-served as a stale work order.
+	if got := RejectionContext([]tracker.Comment{
+		{Body: tracker.VerdictReject + "\n\nround-1 findings"},
+		{Body: tracker.VerdictReject},
+	}, nil); got != "" {
+		t.Errorf("stale round-1 findings re-served: %q", got)
+	}
+
+	// A rejection cleared by a later fix-done/pass renders NO lander section
+	// even though its comment survives in the thread: a fix run spawned off a
+	// HUMAN rejection after the lander round passed must get only the live
+	// human findings, never the already-worked lander round's.
+	if got := RejectionContext([]tracker.Comment{
+		{Body: tracker.VerdictReject + "\n\nround-1 findings"},
+		{Body: tracker.VerdictFixDone},
+		{Body: tracker.VerdictPass},
+	}, []tracker.Review{
+		{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "ship without the debug flag"},
+	}); got != "Review by alice (changes requested):\nship without the debug flag" {
+		t.Errorf("cleared lander rejection re-served beside the live human findings: %q", got)
+	}
+}
+
+// TestEscalationHistory pins the round narrative rendering: every
+// verdict-marker comment in order with its FULL body (marker line included —
+// which round said what is the point), every review with reviewer, state,
+// and dismissal flag (dismissed rows are history too), non-marker thread
+// prose excluded, and "" on empty inputs.
+func TestEscalationHistory(t *testing.T) {
+	comments := []tracker.Comment{
+		{Body: "plain thread prose"},
+		{Body: tracker.VerdictReject + "\n\nround-1 findings"},
+		{Body: tracker.VerdictFixDone},
+		{Body: tracker.VerdictReject + "\n\nround-2 findings"},
+	}
+	reviews := []tracker.Review{
+		{Reviewer: "alice", State: tracker.ReviewChangesRequested, Body: "split this"},
+		{Reviewer: "alice", State: tracker.ReviewApproved, Dismissed: true},
+	}
+	got := EscalationHistory(comments, reviews)
+	want := "Verdict comments (oldest first):\n\n" +
+		tracker.VerdictReject + "\n\nround-1 findings\n\n" +
+		tracker.VerdictFixDone + "\n\n" +
+		tracker.VerdictReject + "\n\nround-2 findings\n\n" +
+		"Reviews (oldest first):\n\n" +
+		"Review by alice (changes_requested):\nsplit this\n\n" +
+		"Review by alice (approved, dismissed):"
+	if got != want {
+		t.Errorf("EscalationHistory =\n%q\nwant\n%q", got, want)
+	}
+
+	// One-sided inputs render their one section, with no dangling separator.
+	if got := EscalationHistory(comments[:2], nil); got != "Verdict comments (oldest first):\n\n"+tracker.VerdictReject+"\n\nround-1 findings" {
+		t.Errorf("comments-only history = %q", got)
+	}
+	if got := EscalationHistory(nil, reviews[:1]); got != "Reviews (oldest first):\n\nReview by alice (changes_requested):\nsplit this" {
+		t.Errorf("reviews-only history = %q", got)
+	}
+	if got := EscalationHistory(nil, nil); got != "" {
+		t.Errorf("EscalationHistory(nil, nil) = %q, want empty", got)
 	}
 }
 

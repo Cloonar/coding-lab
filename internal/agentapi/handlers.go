@@ -1070,6 +1070,56 @@ func (s *Server) handlePRReject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"number": n})
 }
 
+// handlePREscalate is POST /agent/v1/prs/{n}/escalate {body}: record the
+// escalate-mode lander's TERMINAL marker on PR/CR n by posting a PR comment
+// whose first line is the escalate marker with body as the history digest
+// below (body REQUIRED — blank/missing is a 400, mirroring reject; the digest
+// is the point). Unlike rerequest, there is no native ping: escalation hands
+// the PR to a human via the ready-for-human label (the escalate seed's own
+// labctl issue label steps), not a forge review request, so this handler is
+// reject's twin, not rerequest's. ADR-0048 reserved the `escalate` word for
+// exactly this marker (issue #182); the poller's Escalated fold (decide.go)
+// treats its presence as permanent — rule 1 blocks every candidate kind on
+// this branch forever after. The autoland ENGINE never writes to the forge
+// (it only spawns runs), so this agent-executed verb is the escalation
+// outcome's only PR write. Error mapping, sanitize, and credentialing all
+// match reject: unknown → 404, built-in binding → 409 (ErrUnsupported),
+// server-credentialed write (ADR-0014), sanitized body before the marker is
+// prepended.
+func (s *Server) handlePREscalate(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req prReviewRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	// Emptiness is judged on the SANITIZED body, exactly like reject: an
+	// escalation that posts a bare marker with no digest defeats the point of
+	// escalating — the digest is what a human picks up the PR with.
+	body := s.sanitizeBody(repo, req.Body)
+	if strings.TrimSpace(body) == "" {
+		jsonError(w, http.StatusBadRequest, "body is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	comment := verdictComment(tracker.VerdictEscalate, body)
+	if err := tk.CommentPull(r.Context(), n, comment); err != nil {
+		s.writeTrackerError(w, "escalating pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n})
+}
+
 // handlePRApprove is POST /agent/v1/prs/{n}/approve {body?}: record a
 // validation-passed verdict ("validated, awaiting confirm") on PR/CR n by
 // posting a PR comment whose first line is the pass marker, returning

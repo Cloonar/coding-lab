@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/assets"
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -26,6 +27,99 @@ func TestLanderLabel(t *testing.T) {
 		if _, _, ok := ParseLabel(LanderLabel(n)); ok {
 			t.Errorf("ParseLabel(%q) accepted a lander label as an AFK run", LanderLabel(n))
 		}
+	}
+}
+
+// TestEscalateLabel pins the escalate label grammar (issue #182):
+// escalate-<N>, [a-z0-9-] only — and that ParseLabel never misparses one as
+// an AFK run.
+func TestEscalateLabel(t *testing.T) {
+	if got := EscalateLabel(7); got != "escalate-7" {
+		t.Errorf("EscalateLabel(7) = %q, want escalate-7", got)
+	}
+	if got := EscalateLabel(182); got != "escalate-182" {
+		t.Errorf("EscalateLabel(182) = %q, want escalate-182", got)
+	}
+	for _, n := range []int{1, 7, 182} {
+		if _, _, ok := ParseLabel(EscalateLabel(n)); ok {
+			t.Errorf("ParseLabel(%q) accepted an escalate label as an AFK run", EscalateLabel(n))
+		}
+	}
+}
+
+// TestEscalateSeedPrompt pins the escalate seed prompt (issue #182 /
+// ADR-0048): tokens interpolated at every occurrence, the hand-off contract
+// verbatim (digest to the issue, idempotent label create before the flip,
+// tolerated remove error, `labctl pr escalate` posted LAST as the terminal
+// marker, stop), the round history appended verbatim below the separator
+// AFTER interpolation, no separator when empty — and no incogni variant, so
+// never an attribution sentence (there is no commit step to hang one on).
+func TestEscalateSeedPrompt(t *testing.T) {
+	const history = "Verdict comments (oldest first):\n\nround history here"
+	p := EscalateSeedPrompt(7, 9, "afk/7", history)
+	for _, banned := range []string{gitx.NToken, PRToken, BranchToken} {
+		if strings.Contains(p, banned) {
+			t.Errorf("prompt carries an un-interpolated %s:\n%s", banned, p)
+		}
+	}
+	for _, want := range []string{
+		"You are an autonomous escalation run. Pull request #9 (head branch `afk/7`, issue #7) has exhausted its fix budget and is still rejected; hand it to a human and stop.",
+		"1. `labctl issue view 7` and `labctl pr view 9` — read fully; the round history is below. Inspect the branch (git log/diff) as needed.",
+		"2. Write a history digest: what was rejected each round, what each fix attempt changed, why it still fails.",
+		"3. `labctl issue comment 7 <digest>`.",
+		"4. `labctl label create --name ready-for-human` (idempotent, safe if it exists), then `labctl issue label remove 7 ready-for-agent` and `labctl issue label add 7 ready-for-human`. Tolerate a remove error if the label is already gone.",
+		"5. `labctl pr escalate 9 <digest>` — the terminal marker; post it LAST.",
+		"6. Then stop working. Do not start unrelated work.",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q:\n%s", want, p)
+		}
+	}
+	// The escalate marker step comes after the digest comment and the label
+	// flip — LAST is load-bearing (posting it first could reap the run
+	// mid-hand-off).
+	if strings.Index(p, "labctl pr escalate") < strings.Index(p, "labctl issue label add") {
+		t.Errorf("pr escalate not the last labctl step:\n%s", p)
+	}
+	// The history rides verbatim below the separator; `<digest>` is an
+	// unknown token and passes through literally.
+	if !strings.HasSuffix(p, "\n\n---\n\n"+history) {
+		t.Errorf("history not appended below the separator:\n%s", p)
+	}
+
+	// No history → no separator, the prompt ends at the stop line.
+	bare := EscalateSeedPrompt(7, 9, "afk/7", "")
+	if strings.Contains(bare, "---") {
+		t.Errorf("empty history still appended a separator:\n%s", bare)
+	}
+	if !strings.HasSuffix(bare, "6. Then stop working. Do not start unrelated work.") {
+		t.Errorf("bare prompt does not end at the stop line:\n%s", bare)
+	}
+	if strings.Contains(p, "No AI attribution") {
+		t.Error("escalate prompt carries an attribution sentence (it has no commit step)")
+	}
+
+	// History is appended AFTER interpolation: quoted forge prose is never
+	// token-substituted.
+	quoted := EscalateSeedPrompt(7, 9, "afk/7", "a review quoting "+gitx.NToken+" literally")
+	if !strings.HasSuffix(quoted, "a review quoting "+gitx.NToken+" literally") {
+		t.Errorf("history content was token-substituted:\n%s", quoted)
+	}
+}
+
+// TestEscalateSeedPromptTemplate pins that the escalate template carries the
+// LITERAL tokens — including the issue number in three distinct steps (view,
+// comment, label flip), which is exactly why token interpolation replaces
+// EVERY occurrence.
+func TestEscalateSeedPromptTemplate(t *testing.T) {
+	tmpl := EscalateSeedPromptTemplate()
+	for _, token := range []string{gitx.NToken, PRToken, BranchToken} {
+		if !strings.Contains(tmpl, token) {
+			t.Errorf("template missing literal %s:\n%s", token, tmpl)
+		}
+	}
+	if strings.Count(tmpl, gitx.NToken) < 3 {
+		t.Errorf("template names the issue fewer than 3 times (view, comment, label flip):\n%s", tmpl)
 	}
 }
 
@@ -120,7 +214,7 @@ func TestLaunchLander(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7); err != nil {
+	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false); err != nil {
 		t.Fatalf("LaunchLander: %v", err)
 	}
 
@@ -179,6 +273,99 @@ func TestLaunchLander(t *testing.T) {
 	}
 }
 
+// approveOnly forces the approve-and-stop seed variant regardless of the
+// repo's AutoMerge (issue #182): a re-validation lander spawned under an
+// outstanding human changes-requested must never merge — only that human's
+// newer review clears the rejection (ADR-0048's ownership rule; the producer
+// decides the flag, DecideAutoland case 4).
+func TestLaunchLander_approveOnlyOverridesAutoMerge(t *testing.T) {
+	f := newFixture(t)
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		AutoMerge: store.Set(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, true); err != nil {
+		t.Fatalf("LaunchLander: %v", err)
+	}
+	sess, live := f.runner.Session("proj~lander-7")
+	if !live {
+		t.Fatal("lander session not live")
+	}
+	if last := sess.Argv[len(sess.Argv)-1]; last != LanderSeedPrompt(9, "afk/7", false, false) {
+		t.Errorf("seed = %q, want the approve-only (autoMerge=false) variant despite repo.AutoMerge=true", last)
+	}
+}
+
+// TestLaunchEscalate drives the engine-level escalate launch end to end
+// (issue #182): kind escalate, the escalate identity (label/session/worktree),
+// the lander provider chain, the AFK budget/token rule, and the escalate seed
+// — history below the separator — as the trailing spawn positional.
+func TestLaunchEscalate(t *testing.T) {
+	f := newFixture(t)
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+
+	if err := f.svc.LaunchEscalate(t.Context(), f.repo.ID, 9, "afk/7", 7, "round history"); err != nil {
+		t.Fatalf("LaunchEscalate: %v", err)
+	}
+
+	active, err := f.st.ActiveRuns(t.Context())
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active runs = %v (err %v), want exactly one", active, err)
+	}
+	run := active[0]
+	if run.Kind != store.RunKindEscalate || run.Branch != "afk/7" || run.SessionName != "proj~escalate-7" {
+		t.Fatalf("run = kind %s branch %s session %s, want an escalate run on afk/7 as proj~escalate-7",
+			run.Kind, run.Branch, run.SessionName)
+	}
+	if run.IssueNumber == nil || *run.IssueNumber != 7 {
+		t.Errorf("issue = %v, want 7", run.IssueNumber)
+	}
+	if want := f.svc.escalateWorktreePath("proj", 7); run.WorktreePath != want || !strings.HasSuffix(want, "proj-escalate-7") {
+		t.Errorf("worktree = %q, want %q (<repo>-escalate-<N>)", run.WorktreePath, want)
+	}
+	if run.BudgetDeadline == nil || !run.BudgetDeadline.Equal(clockTime.Add(120*time.Minute)) {
+		t.Errorf("budget deadline = %v, want the AFK rule's default 120m", run.BudgetDeadline)
+	}
+	sess, live := f.runner.Session(run.SessionName)
+	if !live || sess.Dir != run.WorktreePath {
+		t.Fatalf("session live=%v dir=%q, want live in %q", live, sess.Dir, run.WorktreePath)
+	}
+	if last := sess.Argv[len(sess.Argv)-1]; last != EscalateSeedPrompt(7, 9, "afk/7", "round history") {
+		t.Errorf("last spawn argv = %q, want the exact EscalateSeedPrompt as one trailing positional", last)
+	}
+	// The reaper owns the escalate run: it must be in the active set the
+	// reaper enumerates.
+	reapable, err := f.st.ActiveAFKRuns(t.Context())
+	if err != nil || len(reapable) != 1 || reapable[0].ID != run.ID {
+		t.Errorf("ActiveAFKRuns = %v (err %v), want the escalate run", reapable, err)
+	}
+}
+
+// The escalate launch resolves through the LANDER chain (lander_provider as
+// the strict request when set) — never the authoring or AFK chains.
+func TestLaunchEscalate_unknownLanderProviderFails(t *testing.T) {
+	f := newFixture(t)
+	bogus := "no-such-provider"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderProvider: store.Set(&bogus),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := f.svc.LaunchEscalate(t.Context(), f.repo.ID, 9, "afk/7", 7, "history")
+	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
+		t.Fatalf("err = %v, want the strict unknown-provider refusal", err)
+	}
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Errorf("failed escalate launch left %d active runs", len(active))
+	}
+}
+
 // A lander run's Stop is the neutral Stop (§4c), delegated through the
 // instance service exactly like the AFK kinds: outcome 'stopped', session
 // killed, and the adopted claim KEPT — a Stop must never destroy it.
@@ -191,7 +378,7 @@ func TestLaunchLander_neutralStopParks(t *testing.T) {
 	f := newFixture(t)
 	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
 	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
-	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7); err != nil {
+	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false); err != nil {
 		t.Fatalf("LaunchLander: %v", err)
 	}
 
@@ -223,7 +410,7 @@ func TestLaunchLander_overCap(t *testing.T) {
 	}
 	f.runner.AddLive("other~existing")
 
-	err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7)
+	err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false)
 	if !errors.Is(err, instance.ErrOverCap) {
 		t.Fatalf("err = %v, want ErrOverCap", err)
 	}
@@ -244,7 +431,7 @@ func TestLaunchLander_unknownLanderProviderFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7)
+	err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false)
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("err = %v, want the strict unknown-provider refusal", err)
 	}

@@ -22,28 +22,41 @@ import (
 // AFK-seam can classify any row. 'lander' is the Autoland validation run
 // (issue #181 / ADR-0048) — unattended and reaper-owned like the AFK kinds,
 // but adopting an EXISTING PR head branch instead of forking a fresh claim.
+// 'fix' and 'escalate' are the fix-forward loop's two kinds (issue #182 /
+// ADR-0048): a fix run re-engages a rejected claim's PR on the existing head
+// branch, carrying the rejection findings forward; an escalate run is the
+// terminal hand-off once the fix-attempt bound is spent. 'escalate' is a
+// kind of its own rather than a lander mode flag because the reaper's
+// done-signal rule is per-kind and the run's mode must survive a restart.
 const (
 	RunKindManual    = "manual"
 	RunKindAFKManual = "afk_manual"
 	RunKindAFKAuto   = "afk_auto"
 	RunKindLander    = "lander"
+	RunKindFix       = "fix"
+	RunKindEscalate  = "escalate"
 )
 
 // Run outcomes (design §3a). 'active' is the only non-terminal value; the
 // terminal outcomes are set once, at the Stop/reap/reconcile chokepoint.
+// 'escalated' (issue #182 / ADR-0048) is written only for a RunKindEscalate
+// run whose escalate marker landed — the poller's permanent-terminality
+// gate, distinct from 'success' so EscalatedRunOnBranch can find it without
+// also matching every ordinary successful run on the branch.
 const (
-	RunOutcomeActive  = "active"
-	RunOutcomeSuccess = "success"
-	RunOutcomeDeath   = "death"
-	RunOutcomeTimeout = "timeout"
-	RunOutcomeStopped = "stopped"
+	RunOutcomeActive    = "active"
+	RunOutcomeSuccess   = "success"
+	RunOutcomeDeath     = "death"
+	RunOutcomeTimeout   = "timeout"
+	RunOutcomeStopped   = "stopped"
+	RunOutcomeEscalated = "escalated"
 )
 
 // Run is one row of runs — every §3a column. Nil pointers are NULL.
 type Run struct {
 	ID           string
 	RepoID       string
-	Kind         string // manual|afk_manual|afk_auto|lander
+	Kind         string // manual|afk_manual|afk_auto|lander|fix|escalate
 	Provider     string
 	IssueNumber  *int
 	Branch       string

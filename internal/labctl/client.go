@@ -197,6 +197,18 @@ func (c *Client) PRReject(n int, body string) (PRVerdict, error) {
 	return pr, err
 }
 
+// PREscalate records the escalate-mode lander's terminal marker on PR/CR n
+// with body as the round-history digest (required non-empty; the server
+// 400s a blank body, mirroring PRReject). Unlike PRRerequest there is no
+// native reviewer ping — escalation hands the PR to a human through the
+// ready-for-human label, a step the escalate seed runs itself.
+func (c *Client) PREscalate(n int, body string) (PRVerdict, error) {
+	var pr PRVerdict
+	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/escalate",
+		map[string]string{"body": body}, &pr)
+	return pr, err
+}
+
 // PRApprove records a validation-passed verdict on PR/CR n; body may be empty.
 // Always sends a JSON body — a pass with no words is still a real request, not
 // an absent one.

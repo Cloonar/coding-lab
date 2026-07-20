@@ -48,13 +48,20 @@ func TestInstanceBranch(t *testing.T) {
 		{"afk/<N>", "lab/", "afk-7", "afk/7"},
 		{"afk/<N>", "lab/", "afk-auto-7", "afk/7"}, // auto marker never reaches the branch
 		{"afk/<N>", "lab/", "lander-7", "afk/7"},   // the lander adopts issue 7's claim branch (issue #181)
+		{"afk/<N>", "lab/", "fix-5", "afk/5"},      // a fix run adopts issue 5's claim branch (issue #182)
+		{"afk/<N>", "lab/", "escalate-5", "afk/5"}, // so does the escalate-mode lander
 		{"afk/<N>", "lab/", "20260608-1530", "lab/20260608-1530"},
 		{"afk/<N>", "lab/", "debug-20260608-1530", "lab/debug-20260608-1530"},
 		{"afk/<N>", "lab/", "lander-x", "lab/lander-x"}, // strict inverse: not a lander label
 		{"afk/<N>", "lab/", "lander-0", "lab/lander-0"},
+		{"afk/<N>", "lab/", "fix-x", "lab/fix-x"}, // strict inverse holds for the #182 prefixes too
+		{"afk/<N>", "lab/", "fix-0", "lab/fix-0"},
+		{"afk/<N>", "lab/", "escalate--1", "lab/escalate--1"},
 		// Per-repo patterns (incogni): nothing assumes the literal afk//lab/.
 		{"issue-<N>", "wip/", "afk-9", "issue-9"},
 		{"issue-<N>", "wip/", "lander-9", "issue-9"},
+		{"issue-<N>", "wip/", "fix-9", "issue-9"},
+		{"issue-<N>", "wip/", "escalate-9", "issue-9"},
 		{"issue-<N>", "wip/", "feature", "wip/feature"},
 	}
 	for _, tt := range tests {
@@ -69,13 +76,14 @@ func TestOwnedBranches(t *testing.T) {
 	// of them own a branch (issue #77).
 	sessions := []string{
 		"proj~afk-7", "proj~afk-auto-8", "proj~feature-20260608-1530", "proj~20260608-1600",
-		"proj~lander-4", // a live lander owns the claim branch it adopted (issue #181)
+		"proj~lander-4",                 // a live lander owns the claim branch it adopted (issue #181)
+		"proj~fix-5", "proj~escalate-6", // so do live fix/escalate runs (issue #182) — a restart must re-adopt, never park them
 		"projfoo~afk-9", "other~afk-3", tmuxx.LoginSessionName("claude-code"),
 		tmuxx.LoginSessionName("codex"), "lab-login",
 	}
 	got := ownedBranches("afk/<N>", "lab/", sessions, "proj")
 	want := map[string]bool{
-		"afk/7": true, "afk/8": true, "afk/4": true,
+		"afk/7": true, "afk/8": true, "afk/4": true, "afk/5": true, "afk/6": true,
 		"lab/feature-20260608-1530": true, "lab/20260608-1600": true,
 	}
 	if !reflect.DeepEqual(got, want) {

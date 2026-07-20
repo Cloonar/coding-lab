@@ -104,23 +104,25 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			// The done-signal, derived per kind and fed into the ONE Classify
 			// table. AFK kinds: an open or merged PR/CR whose head is the
 			// run's branch (closed-unmerged deliberately does NOT count —
-			// tracker.DonePull). Lander: its PR pre-exists the run, so
-			// presence alone would success-reap it on its first tick — its
-			// done-signal is the state the run PRODUCED (merged, or a
-			// pass/reject verdict marker; landerDoneSignal). Matched
+			// tracker.DonePull) — plain presence, never a comment read. The
+			// verdict kinds (lander/fix/escalate, issue #182): their PR
+			// pre-exists the run, so presence alone would success-reap on the
+			// first tick — the done-signal is the marker state the run
+			// PRODUCED (verdictDoneSignal, one reading per kind). Matched
 			// client-side against the one pull listing; donePull is the
-			// winning pull, meaningful only when the outcome is success (it
-			// feeds the done-signal notification).
+			// winning pull, meaningful only at a success/escalated outcome
+			// (it feeds the done-signal and escalation notifications).
 			donePull, prPresent := tracker.DonePull(pulls, run.Branch)
-			done := prPresent
-			if run.Kind == store.RunKindLander {
+			done, escalated := prPresent, false
+			switch run.Kind {
+			case store.RunKindLander, store.RunKindFix, store.RunKindEscalate:
 				var readable bool
-				done, readable = s.landerDoneSignal(ctx, trk, repo, run, donePull, prPresent)
+				done, escalated, readable = s.verdictDoneSignal(ctx, trk, repo, run, donePull, prPresent)
 				if !readable {
 					continue // comments unreadable this tick — NEVER classify on missing data
 				}
 			}
-			outcome, alive, claimed := s.classifyAndClaim(ctx, run, done, now)
+			outcome, alive, claimed := s.classifyAndClaim(ctx, run, done, escalated, now)
 			if claimed {
 				s.reapRun(ctx, trk, repo, run, outcome, alive, donePull, now)
 			}
@@ -194,26 +196,41 @@ func (s *Service) drainZombies(ctx context.Context) {
 	}
 }
 
-// landerDoneSignal derives a lander run's done-signal (issue #181 /
-// ADR-0048) — the pure LanderDone reading over polled state: the PR merged,
-// or a pass/reject verdict-marker comment on it (the spawn rule only launches
-// onto a virgin PR, so any such marker is this run's; fix-done is a fix run's
-// signal and never a lander's). PullComments is ONE bounded call per active
-// lander per tick, made only when the PR exists and is not merged; a read
-// failure returns readable=false — the run is skipped and re-derived next
-// tick, never classified on missing data (the same stance as a failed pull
-// listing).
-func (s *Service) landerDoneSignal(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, pull tracker.PullRef, prPresent bool) (done, readable bool) {
-	if !prPresent || pull.State == tracker.PullMerged {
-		return LanderDone(pull.State, prPresent, nil), true
+// verdictDoneSignal derives a verdict-kind run's done-signal (issues #181/
+// #182 / ADR-0048) — the per-kind pure reading over polled state, needed
+// because these runs' PRs pre-exist them: presence alone would success-reap
+// each on its first tick. Lander: the PR merged, or the LAST verdict word
+// pass/reject (LanderDone). Fix: merged — a human merged mid-run, the repair
+// is moot and moot is done — or the last word fix-done, its `labctl pr
+// rerequest` landed (FixDone). Escalate: merged is plain done; the escalate
+// marker as the last word is done-VIA-MARKER (EscalateDelivered), which
+// classifyAndClaim promotes to outcome 'escalated'. Every last-word reading
+// is safe because the active-run gate (DecideAutoland case 2) admits one
+// marker writer per branch at a time. PullComments is ONE bounded call per
+// active run per tick, made only when the PR exists and is not merged; a
+// read failure returns readable=false — the run is skipped and re-derived
+// next tick, never classified on missing data (the same stance as a failed
+// pull listing).
+func (s *Service) verdictDoneSignal(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, pull tracker.PullRef, prPresent bool) (done, escalated, readable bool) {
+	var verdicts []string
+	if prPresent && pull.State != tracker.PullMerged {
+		comments, err := trk.PullComments(ctx, pull.Number)
+		if err != nil {
+			s.log.Warn("afk watcher: pull comments", "component", "afk",
+				"repo", repo.Name, "session", run.SessionName, "pull", pull.Number, "err", err)
+			return false, false, false
+		}
+		verdicts = VerdictWords(comments)
 	}
-	comments, err := trk.PullComments(ctx, pull.Number)
-	if err != nil {
-		s.log.Warn("afk watcher: lander pull comments", "component", "afk",
-			"repo", repo.Name, "session", run.SessionName, "pull", pull.Number, "err", err)
-		return false, false
+	switch run.Kind {
+	case store.RunKindFix:
+		return FixDone(pull.State, prPresent, verdicts), false, true
+	case store.RunKindEscalate:
+		done, viaMarker := EscalateDelivered(pull.State, prPresent, verdicts)
+		return done, viaMarker, true
+	default: // lander
+		return LanderDone(pull.State, prPresent, verdicts), false, true
 	}
-	return LanderDone(pull.State, prPresent, VerdictWords(comments)), true
 }
 
 // classifyAndClaim makes the reap decision for one run atomically against a
@@ -231,9 +248,15 @@ func (s *Service) landerDoneSignal(ctx context.Context, trk tracker.Tracker, rep
 // Stop: it sees active-and-alive (a genuine fresh decision) or
 // stopped-and-gone (claimed=false, neutral). A genuine crash leaves the row
 // active, so an active run that is not alive is a real death.
-// done is the run's kind-derived done-signal (AFK: PR presence; lander:
-// landerDoneSignal) — the classification table itself is kind-blind.
-func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done bool, now time.Time) (outcome Outcome, alive, claimed bool) {
+//
+// done is the run's kind-derived done-signal (AFK: PR presence; the verdict
+// kinds: verdictDoneSignal) — the classification table itself is kind-blind.
+// escalated is EscalateDelivered's viaMarker (only an escalate run's
+// done-signal ever sets it): a success whose signal was the escalate marker
+// is promoted to OutcomeEscalated here, still under runsMu and with the same
+// claim semantics, so the terminal row IS the poller's permanent-terminality
+// gate (issue #182). A merge-first escalate success stays plain success.
+func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done, escalated bool, now time.Time) (outcome Outcome, alive, claimed bool) {
 	s.runsMu.Lock()
 	defer s.runsMu.Unlock()
 
@@ -267,6 +290,12 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done bool
 		deadline = *fresh.BudgetDeadline
 	}
 	outcome = Classify(done, alive, now, deadline)
+	// The escalated promotion (issue #182): Classify stays kind-blind and
+	// never returns OutcomeEscalated; a marker-delivered escalate success is
+	// promoted before the claim so the row written below is 'escalated'.
+	if outcome == OutcomeSuccess && escalated {
+		outcome = OutcomeEscalated
+	}
 	if outcome == OutcomeRunning {
 		return outcome, alive, false
 	}
@@ -287,26 +316,33 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done bool
 // the repo's consecutive-failure counter, and publish the events.
 //
 // This is the ONLY place the run lifecycle writes the failure counter, and
-// since issue #185 ONLY the two AFK kinds (manual, auto) feed it: a success
-// reap resets it (re-arming a three-strikes pause), a death or timeout
-// increments it; at PauseThreshold the auto scheduler stops launching and
-// manual starts 409 until reset. A lander outcome moves the counter in
-// NEITHER direction — the switch below used to be kind-agnostic and it ran
-// backwards both ways. A flaky lander's death/timeout would increment the
-// counter and pause the repo's UNRELATED AFK loop (and 409 its manual
-// starts); and a lander correctly posting `reject` reaps as OutcomeSuccess,
-// which would RESET the counter — clearing the strikes broken AFK runs earned
-// and re-arming the very brake that evidence should trip (a reject is evidence
-// FOR the pause, not against it). The counter is AFK-run health alone, so a
-// lander gets no counter at all (decided in #185); only the failure counter
-// separates — the budget clock stays deliberately shared. A neutral Stop never
-// reaches here (classifyAndClaim refuses a stopped run under runsMu). now is
-// the tick time the claim stamped as ended_at, so the metrics duration below
-// is exactly started_at→ended_at.
+// only the UNATTENDED-WORK kinds feed it — the two AFK kinds (manual, auto;
+// #185) plus fix (#182): a success reap resets it (re-arming a three-strikes
+// pause), a death or timeout increments it; at PauseThreshold the auto
+// scheduler stops launching and manual starts 409 until reset. A fix run
+// counts because it IS unattended AFK-class work continuing an AFK claim
+// (the issue pins "three-strikes accounting apply"): its death is the same
+// evidence of broken unattended runs an AFK death is, and its success — the
+// repair pushed and re-requested — is the same evidence of health. The two
+// VALIDATION-class kinds, lander and escalate, move the counter in NEITHER
+// direction — the switch below used to be kind-agnostic and it ran backwards
+// both ways. A flaky lander's death/timeout would increment the counter and
+// pause the repo's UNRELATED AFK loop (and 409 its manual starts); and a
+// lander correctly posting `reject` reaps as OutcomeSuccess, which would
+// RESET the counter — clearing the strikes broken AFK runs earned and
+// re-arming the very brake that evidence should trip (a reject is evidence
+// FOR the pause, not against it). The same both-ways argument covers the
+// escalate run: its 'escalated' outcome is it DOING ITS JOB, never health
+// evidence either way. The counter is unattended-run health alone; only the
+// failure counter separates — the budget clock stays deliberately shared. A
+// neutral Stop never reaches here (classifyAndClaim refuses a stopped run
+// under runsMu). now is the tick time the claim stamped as ended_at, so the
+// metrics duration below is exactly started_at→ended_at.
 //
-// This chokepoint is also where the done-signal push fires — beside the
-// metrics report, once per success reap. trk and donePull are meaningful only
-// when outcome is success (donePull is the winning pull the notification names);
+// This chokepoint is also where the pushes fire — beside the metrics report,
+// once per claim: the done-signal push on an AFK success, the escalation push
+// on an escalated outcome (#182). trk and donePull are meaningful only at
+// those outcomes (donePull is the winning pull the notification names);
 // death, timeout, and the three-strikes pause never send.
 func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, outcome Outcome, alive bool, donePull tracker.PullRef, now time.Time) {
 	// The reaper half of the M8 terminal-outcome metrics (the neutral Stop
@@ -316,13 +352,25 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 
 	// The done-signal push (issue #100): only a success reap of the two AFK
 	// kinds notifies, riding this once-per-run chokepoint so the injected
-	// sender fires exactly once. A lander is excluded by constraint: the copy
-	// is "<run> opened PR #n" and a lander opened nothing — its forge-
-	// observable outcome (the merge or verdict comment) IS its notification
-	// surface for now.
+	// sender fires exactly once. The verdict kinds are excluded by
+	// constraint: the copy is "<run> opened PR #n" and a lander opened
+	// nothing — its forge-observable outcome (the merge or verdict comment)
+	// IS its notification surface for now — and a fix run's success surface
+	// is its fix-done marker plus the native reviewer ping `labctl pr
+	// rerequest` already sent (#182): no push.
 	if outcome == OutcomeSuccess && s.notify != nil &&
 		(run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto) {
 		s.notify(s.doneNotification(ctx, trk, repo, run, donePull))
+	}
+
+	// The escalation push (issue #182): fired once per escalated reap off the
+	// same idempotent claim — the operator's signal that the fix-forward loop
+	// handed the PR to a human (the agent-side ready-for-human flip already
+	// executed by the time its terminal marker landed). donePull is the open
+	// PR the marker landed on: EscalateDelivered promotes only via marker,
+	// which requires an open, present PR.
+	if outcome == OutcomeEscalated && s.notify != nil {
+		s.notify(s.escalationNotification(ctx, trk, repo, run, donePull))
 	}
 
 	if alive {
@@ -339,10 +387,13 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 	}
 	s.cleanupCredential(repo, run.ID)
 
-	// Issue #185: only the two AFK kinds move the shared failure counter — a
-	// lander outcome feeds it in NEITHER direction (mirrors the done-signal
-	// push guard above). See the doc comment for why both directions are wrong.
-	if run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto {
+	// Only the unattended-work kinds move the shared failure counter — the
+	// two AFK kinds (#185) and fix (#182); lander and escalate feed it in
+	// NEITHER direction. See the doc comment for why both directions are
+	// wrong for the validation-class kinds. An escalated outcome never
+	// reaches an arm below even for its own kind — it is neither success nor
+	// death/timeout — so the switch stays three-armed.
+	if run.Kind == store.RunKindAFKManual || run.Kind == store.RunKindAFKAuto || run.Kind == store.RunKindFix {
 		switch outcome {
 		case OutcomeSuccess:
 			changed, err := s.store.ResetRepoFailures(ctx, repo.ID)

@@ -92,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /agent/v1/prs/{n}/reject", s.handlePRReject)
 	mux.HandleFunc("POST /agent/v1/prs/{n}/approve", s.handlePRApprove)
 	mux.HandleFunc("POST /agent/v1/prs/{n}/rerequest", s.handlePRRerequest)
+	mux.HandleFunc("POST /agent/v1/prs/{n}/escalate", s.handlePREscalate)
 	mux.HandleFunc("POST /agent/v1/prs/{n}/comments", s.handlePRComment)
 	mux.HandleFunc("GET /agent/v1/secrets", s.handleSecretList)
 	mux.HandleFunc("POST /agent/v1/secrets/values", s.handleSecretValues)
