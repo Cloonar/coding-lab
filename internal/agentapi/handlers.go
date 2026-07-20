@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -235,6 +236,24 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo sto
 		// A merge the backend refused (required check red, protected branch,
 		// conflict, closed-unmerged): 409 with the backend's own words
 		// verbatim — mergeability is the backend's call, not lab's.
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, tracker.ErrReviewRejected) {
+		// A review write the forge refused (approving one's own pull, a
+		// re-request it would not accept): the ErrMergeRejected twin — 409 with
+		// the forge's own words verbatim, reviewability being the backend's call,
+		// not lab's. Placed beside ErrMergeRejected, its documented mirror.
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, tracker.ErrUnsupported) {
+		// A review WRITE verb on the built-in binding (reject/approve/rerequest/
+		// comment): the tracker has no forge review model, so it defers rather
+		// than fakes — 409 with the "not supported on this tracker" message, the
+		// wrong-binding-for-this-operation convention. Must precede the binding-
+		// generic 502/500 folds below, or the built-in binding's refusal would
+		// miscode as an opaque 500.
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -722,14 +741,30 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 // full BODY — the read labctl pr view renders, so an agent can retrieve
 // PR-carried content (e.g. a captured card YAML) without any raw forge
 // fallback (D10). head is the bare branch name, state the three-valued
-// open|merged|closed vocabulary.
+// open|merged|closed vocabulary. reviews carries the submitted reviews (the
+// reject → re-queue loop's read); it ALWAYS marshals as an array — [] when the
+// PR carries none, never null — so an agent parsing it never special-cases a
+// nil, and a built-in binding (no forge review model) simply reports [].
 type prDetailResponse struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	State  string `json:"state"`
-	Head   string `json:"head"`
-	URL    string `json:"url"`
+	Number  int              `json:"number"`
+	Title   string           `json:"title"`
+	Body    string           `json:"body"`
+	State   string           `json:"state"`
+	Head    string           `json:"head"`
+	URL     string           `json:"url"`
+	Reviews []reviewResponse `json:"reviews"`
+}
+
+// reviewResponse is one submitted review in the GET /agent/v1/prs/{n} payload:
+// who submitted it, its normalized state (the Review* vocabulary), its prose
+// body, and whether the forge has since dismissed it — what the reject →
+// re-queue loop reads to know a PR carries an outstanding changes-requested
+// verdict and from which reviewer to re-request once a fix lands.
+type reviewResponse struct {
+	Reviewer  string `json:"reviewer"`
+	State     string `json:"state"`
+	Body      string `json:"body"`
+	Dismissed bool   `json:"dismissed"`
 }
 
 // prListItem is one row of GET /agent/v1/prs — the PullRef vocabulary (no
@@ -770,8 +805,12 @@ type prCheckItem struct {
 }
 
 // handlePRGet is GET /agent/v1/prs/{n}: one PR/CR of the run's repo in full,
-// body included. An unknown number is the canonical 404 envelope (either
-// binding's typed not-found), never a panic.
+// body AND submitted reviews included. An unknown number is the canonical 404
+// envelope (either binding's typed not-found), never a panic. Reviews are read
+// after the Pull; if that read fails the whole response fails through
+// writeTrackerError (no partial detail), so the caller never sees a PR whose
+// reviews silently dropped. On a built-in binding Reviews is a harmless empty
+// read, so the array is [] there — the same shape a reviewless forge PR yields.
 func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
 	_, repo, ok := s.runRepo(w, r)
 	if !ok {
@@ -791,13 +830,29 @@ func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
 		s.writeTrackerError(w, "loading pull request", repo, err)
 		return
 	}
+	rev, err := tk.Reviews(r.Context(), n)
+	if err != nil {
+		s.writeTrackerError(w, "loading pull request reviews", repo, err)
+		return
+	}
+	// Non-nil so the array marshals as [] on zero reviews, never null.
+	reviews := make([]reviewResponse, 0, len(rev))
+	for _, v := range rev {
+		reviews = append(reviews, reviewResponse{
+			Reviewer:  v.Reviewer,
+			State:     v.State,
+			Body:      v.Body,
+			Dismissed: v.Dismissed,
+		})
+	}
 	writeJSON(w, http.StatusOK, prDetailResponse{
-		Number: pd.Number,
-		Title:  pd.Title,
-		Body:   pd.Body,
-		State:  pd.State,
-		Head:   pd.HeadBranch,
-		URL:    pd.URL,
+		Number:  pd.Number,
+		Title:   pd.Title,
+		Body:    pd.Body,
+		State:   pd.State,
+		Head:    pd.HeadBranch,
+		URL:     pd.URL,
+		Reviews: reviews,
 	})
 }
 
@@ -915,6 +970,153 @@ func (s *Server) handlePRMerge(w http.ResponseWriter, r *http.Request) {
 		Head:   pr.HeadBranch,
 		URL:    pr.URL,
 	})
+}
+
+// prReviewRequest is the {body} payload of the review WRITE verbs (reject,
+// approve, comment). Reject and comment require a non-empty body; approve's is
+// optional (an approval needs no words).
+type prReviewRequest struct {
+	Body string `json:"body"`
+}
+
+// handlePRReject is POST /agent/v1/prs/{n}/reject {body}: post a
+// changes-requested review on PR/CR n with body as the findings (REQUIRED —
+// blank/missing is a 400, mirroring the comment create's wording), returning
+// {number, state}. Reviewability is the backend's call: a forge refusal
+// surfaces verbatim as a 409 (ErrReviewRejected), an unknown number is a 404,
+// and the built-in binding (no forge review model) is a 409 (ErrUnsupported).
+// On a forge binding the write runs under the SERVER's forge token — no forge
+// credential ever reaches the session (ADR-0014). The body passes the incogni
+// sanitizer like every agent-authored body (ADR-0014: no unsanitized write
+// path); the secretscan decorator scans it at the seam.
+func (s *Server) handlePRReject(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req prReviewRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		jsonError(w, http.StatusBadRequest, "body is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	review, err := tk.RejectPull(r.Context(), n, s.sanitizeBody(repo, req.Body))
+	if err != nil {
+		s.writeTrackerError(w, "rejecting pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n, "state": review.State})
+}
+
+// handlePRApprove is POST /agent/v1/prs/{n}/approve {body?}: post an approving
+// review on PR/CR n, returning {number, state}. The body is OPTIONAL — an empty
+// body, or an absent request body entirely, both approve wordlessly. Error
+// mapping is RejectPull's: forge refusal → 409 verbatim, unknown → 404, built-in
+// binding → 409 (ErrUnsupported). Server-credentialed and sanitized like reject.
+func (s *Server) handlePRApprove(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	// Body optional: an absent body (EOF) or an empty {} both decode to the zero
+	// value — no error, unlike reject/comment. Only a genuinely malformed body
+	// 400s. Decoded inline (not via decodeJSON) precisely because EOF is legal
+	// here.
+	var req prReviewRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	review, err := tk.ApprovePull(r.Context(), n, s.sanitizeBody(repo, req.Body))
+	if err != nil {
+		s.writeTrackerError(w, "approving pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n, "state": review.State})
+}
+
+// handlePRRerequest is POST /agent/v1/prs/{n}/rerequest (no body): re-request
+// review from every reviewer whose latest non-dismissed review requests
+// changes, returning {number}. No such reviewer is a convergent no-op success
+// (the seam's contract). Error mapping is the review verbs': forge refusal →
+// 409 verbatim, unknown → 404, built-in binding → 409 (ErrUnsupported).
+func (s *Server) handlePRRerequest(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	if err := tk.RerequestReview(r.Context(), n); err != nil {
+		s.writeTrackerError(w, "re-requesting review", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n})
+}
+
+// handlePRComment is POST /agent/v1/prs/{n}/comments {body}: post a plain
+// discussion comment on PR/CR n (a PR shares the issue-comment number space),
+// returning {number}. Body REQUIRED non-empty — blank/missing is a 400 in the
+// comment create's wording. Unlike PR create, no `Closes #N` is injected (that
+// is a PR-create-only concern). Error mapping is the review verbs': unknown →
+// 404, built-in binding → 409 (ErrUnsupported). The body passes the incogni
+// sanitizer like every agent-authored body; the secretscan decorator scans it
+// at the seam.
+func (s *Server) handlePRComment(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req prReviewRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		jsonError(w, http.StatusBadRequest, "body is required")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	if err := tk.CommentPull(r.Context(), n, s.sanitizeBody(repo, req.Body)); err != nil {
+		s.writeTrackerError(w, "commenting on pull request", repo, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"number": n})
 }
 
 // publishCRChanged emits cr.changed for repoID — the same {type, repoID}

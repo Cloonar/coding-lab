@@ -57,6 +57,27 @@ var ErrUnknownLabel = errors.New("tracker: unknown label")
 // agent surface). The agent API answers 409 with the message.
 var ErrMergeRejected = errors.New("tracker: merge rejected")
 
+// ErrReviewRejected marks a review write the forge refused: an ApprovePull or
+// RejectPull the forge declined (e.g. "you cannot approve your own pull
+// request"), or a RerequestReview it would not accept. It mirrors
+// ErrMergeRejected exactly — reviewability is the backend's call, never
+// reasoned about agent-side: lab attempts the write and, if the forge refuses,
+// wraps this sentinel around the refusal's OWN words verbatim (the forge's
+// error body), because that text is what the agent needs to read to know why
+// the write did not take (ADR-0024's verbatim-refusal pattern). The forge
+// token never appears in the wrapped message. The agent API answers 409 with
+// it.
+var ErrReviewRejected = errors.New("tracker: review rejected")
+
+// ErrUnsupported marks an operation a tracker backend does not implement — the
+// built-in binding's review WRITE verbs (RejectPull, ApprovePull,
+// RerequestReview, CommentPull). Reviews are forge-observable state a
+// lab-internal change request has no model for, so the built-in tracker defers
+// the writes rather than faking a result; the wrapping error names the verb.
+// Callers errors.Is-detect it to answer "not supported on this tracker"
+// distinctly from a forge failure.
+var ErrUnsupported = errors.New("tracker: operation not supported by this tracker backend")
+
 // ErrRateLimited marks a forge call throttled by the upstream rate limiter
 // (GitHub answers 403/429 with X-RateLimit-Remaining: 0 or a Retry-After
 // header when the token's hourly budget is spent). The GitHub client wraps it
@@ -79,6 +100,22 @@ const (
 	PullOpen   = "open"
 	PullMerged = "merged"
 	PullClosed = "closed"
+)
+
+// Review-state vocabulary a submitted Review's State is normalized into. The
+// backends map their own forge's review-event words onto these four
+// (Forgejo's APPROVED/REQUEST_CHANGES/COMMENT/REQUEST_REVIEW, GitHub's
+// APPROVED/CHANGES_REQUESTED/COMMENTED); a state a backend does not recognize
+// passes through lowercased, so an agent reading a review still sees exactly
+// what the forge said (the RawState-style "backend's own words" pattern,
+// ADR-0024). ReviewRequested is a pending request for review, distinct from a
+// submitted verdict; the reject → re-queue loop reads ReviewChangesRequested
+// to know a PR carries outstanding findings.
+const (
+	ReviewApproved         = "approved"
+	ReviewChangesRequested = "changes_requested"
+	ReviewCommented        = "commented"
+	ReviewRequested        = "review_requested"
 )
 
 // Issue-state vocabulary and the Issues() state filter. StateOpen/StateClosed
@@ -160,6 +197,21 @@ type PullDetail struct {
 	State      string
 	HeadBranch string
 	URL        string
+}
+
+// Review is one submitted review on a pull/change request in lab's vocabulary:
+// who submitted it (Reviewer), its normalized State (the Review* vocabulary; an
+// unrecognized forge state passes through lowercased), its body prose, and
+// whether the forge has since dismissed it. The reject → re-queue loop reads
+// these to know whether a PR carries an outstanding changes-requested review
+// and from which reviewer to re-request once a fix lands. Dismissed carries the
+// forge's own dismissal signal (Forgejo's `dismissed` flag; GitHub's DISMISSED
+// review state) so a superseded verdict is not mistaken for a live one.
+type Review struct {
+	Reviewer  string
+	State     string
+	Body      string
+	Dismissed bool
 }
 
 // Check-state vocabulary a Checks() row's State is normalized into. The
@@ -263,6 +315,43 @@ type Tracker interface {
 	// ErrNotFound. On a forge binding the merge is a server-credentialed
 	// call — no forge token ever reaches the agent session (ADR-0014).
 	MergePull(ctx context.Context, number int) (PullRef, error)
+
+	// Reviews lists the submitted reviews on pull number, oldest first — the
+	// read behind the reject → re-queue loop. An unknown number wraps
+	// ErrNotFound. The built-in binding has no forge reviews to report and
+	// answers an empty list (reviews are forge-observable state a lab-internal
+	// change request has no model for), never an error.
+	Reviews(ctx context.Context, number int) ([]Review, error)
+
+	// RejectPull posts a changes-requested review on pull number with body as
+	// the findings, returning the submitted Review. Reviewability is the
+	// backend's call, never reasoned about agent-side: a forge that refuses the
+	// write (e.g. reviewing one's own pull) wraps ErrReviewRejected around the
+	// refusal's own words verbatim; an unknown number wraps ErrNotFound. On a
+	// forge binding the write is a server-credentialed call — no forge token
+	// reaches the agent session (ADR-0014). Body validation (non-empty) is the
+	// API layer's job, not the seam's. The built-in binding wraps ErrUnsupported.
+	RejectPull(ctx context.Context, number int, body string) (Review, error)
+
+	// ApprovePull posts an approving review on pull number; body may be empty.
+	// It returns the submitted Review. A refusal wraps ErrReviewRejected with
+	// the forge's own words; an unknown number wraps ErrNotFound; the built-in
+	// binding wraps ErrUnsupported. Server-credentialed on a forge binding, like
+	// RejectPull.
+	ApprovePull(ctx context.Context, number int, body string) (Review, error)
+
+	// RerequestReview re-requests review from every reviewer whose latest
+	// non-dismissed review requests changes; no such reviewer is a convergent
+	// no-op success (nothing to re-request), mirroring MergePull's already-merged
+	// no-op. A forge refusal wraps ErrReviewRejected with its own words; an
+	// unknown number wraps ErrNotFound; the built-in binding wraps ErrUnsupported.
+	RerequestReview(ctx context.Context, number int) error
+
+	// CommentPull posts a plain discussion comment on pull number (a PR shares
+	// the issue-comment number space). Body validation (non-empty) is the API
+	// layer's job. An unknown number wraps ErrNotFound; the built-in binding
+	// wraps ErrUnsupported.
+	CommentPull(ctx context.Context, number int, body string) error
 
 	// CloseIssue transitions an issue to closed.
 	CloseIssue(ctx context.Context, number int) error

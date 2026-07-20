@@ -135,6 +135,16 @@ type ghComment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// ghReview is one row of the pull-reviews list: the reviewer under `user` and
+// the review state (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, or
+// PENDING). GitHub has no `dismissed` boolean — a dismissed review is reported
+// with state DISMISSED, which toReview maps to Dismissed=true.
+type ghReview struct {
+	User  ghUser `json:"user"`
+	State string `json:"state"`
+	Body  string `json:"body"`
+}
+
 type ghPullHead struct {
 	Ref string `json:"ref"`
 	Sha string `json:"sha"`
@@ -420,6 +430,105 @@ func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, er
 	}, nil
 }
 
+// Reviews lists the submitted reviews on pull `number`, oldest first — the read
+// behind the reject → re-queue loop. Each review's user login is the Reviewer,
+// its state normalized onto lab's Review* vocabulary (a DISMISSED review sets
+// Dismissed=true; an unrecognized state passes through lowercased). The endpoint
+// paginates like every list (per_page/Link rel="next"). An unknown number's 404
+// unwraps to tracker.ErrNotFound; a throttled call to tracker.ErrRateLimited.
+func (c *Client) Reviews(ctx context.Context, number int) ([]tracker.Review, error) {
+	ghs, err := fetchPages[ghReview](ctx, c, c.pullPath(number)+"/reviews", nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tracker.Review, 0, len(ghs))
+	for _, gh := range ghs {
+		out = append(out, toReview(gh))
+	}
+	return out, nil
+}
+
+// RejectPull posts a changes-requested review on pull `number` with body as the
+// findings, returning the submitted review. GitHub — not lab — judges whether
+// the write is allowed: a refusal (e.g. 422 reviewing one's own pull) becomes
+// tracker.ErrReviewRejected carrying GitHub's own words verbatim; an unknown
+// number stays tracker.ErrNotFound and a throttle tracker.ErrRateLimited (both
+// typed upstream conditions, not refusals). The write is authorized by this
+// client's server-side forge token, so no credential reaches the agent session
+// (ADR-0014).
+func (c *Client) RejectPull(ctx context.Context, number int, body string) (tracker.Review, error) {
+	return c.submitReview(ctx, number, "REQUEST_CHANGES", body)
+}
+
+// ApprovePull posts an approving review on pull `number` (body may be empty),
+// returning the submitted review — same refusal/not-found/throttle handling as
+// RejectPull. The event word is GitHub's APPROVE (not Forgejo's APPROVED).
+func (c *Client) ApprovePull(ctx context.Context, number int, body string) (tracker.Review, error) {
+	return c.submitReview(ctx, number, "APPROVE", body)
+}
+
+// submitReview POSTs a review event to pull `number`'s /reviews and maps the
+// created review. Shared by RejectPull (REQUEST_CHANGES) and ApprovePull
+// (APPROVE), which differ only in the event word. A 404 stays
+// tracker.ErrNotFound and a throttle tracker.ErrRateLimited; any other non-2xx
+// is GitHub's refusal, wrapped in tracker.ErrReviewRejected with its body
+// verbatim (the MergePull pattern — GitHub's words, never the token).
+func (c *Client) submitReview(ctx context.Context, number int, event, body string) (tracker.Review, error) {
+	req := struct {
+		Event string `json:"event"`
+		Body  string `json:"body"`
+	}{Event: event, Body: body}
+	var gh ghReview
+	if _, err := c.do(ctx, http.MethodPost, c.pullPath(number)+"/reviews", nil, req, &gh); err != nil {
+		if errors.Is(err, tracker.ErrNotFound) || errors.Is(err, tracker.ErrRateLimited) {
+			return tracker.Review{}, err
+		}
+		return tracker.Review{}, fmt.Errorf("%w: %s", tracker.ErrReviewRejected, err.Error())
+	}
+	return toReview(gh), nil
+}
+
+// RerequestReview re-requests review from every reviewer whose LATEST
+// non-dismissed review requests changes. It GETs the reviews, reduces them to
+// the latest state per reviewer (submission order, last wins; PENDING and
+// dismissed reviews skipped), and if any reviewer's latest is changes-requested
+// POSTs their logins to /requested_reviewers. No such reviewer is a convergent
+// no-op success, mirroring MergePull's already-merged no-op. A GitHub refusal
+// wraps tracker.ErrReviewRejected with its own words; an unknown number stays
+// tracker.ErrNotFound and a throttle tracker.ErrRateLimited.
+func (c *Client) RerequestReview(ctx context.Context, number int) error {
+	reviews, err := c.Reviews(ctx, number)
+	if err != nil {
+		return err
+	}
+	reviewers := changesRequestedReviewers(reviews)
+	if len(reviewers) == 0 {
+		return nil // convergent no-op: nobody is currently requesting changes
+	}
+	req := struct {
+		Reviewers []string `json:"reviewers"`
+	}{Reviewers: reviewers}
+	if _, err := c.do(ctx, http.MethodPost, c.pullPath(number)+"/requested_reviewers", nil, req, nil); err != nil {
+		if errors.Is(err, tracker.ErrNotFound) || errors.Is(err, tracker.ErrRateLimited) {
+			return err
+		}
+		return fmt.Errorf("%w: %s", tracker.ErrReviewRejected, err.Error())
+	}
+	return nil
+}
+
+// CommentPull posts a plain discussion comment on pull `number`. A PR shares the
+// issue-comment number space on GitHub, so this posts to the same issue-comment
+// endpoint CreateComment uses. An unknown number stays tracker.ErrNotFound; a
+// throttle tracker.ErrRateLimited.
+func (c *Client) CommentPull(ctx context.Context, number int, body string) error {
+	req := struct {
+		Body string `json:"body"`
+	}{Body: body}
+	_, err := c.do(ctx, http.MethodPost, c.issuePath(number)+"/comments", nil, req, nil)
+	return err
+}
+
 // CloseIssue closes an issue via PATCH state=closed.
 func (c *Client) CloseIssue(ctx context.Context, number int) error {
 	req := struct {
@@ -694,6 +803,74 @@ func toComment(gc ghComment) tracker.Comment {
 		Body:      gc.Body,
 		CreatedAt: gc.CreatedAt,
 	}
+}
+
+// toReview maps one GitHub review row onto lab's Review vocabulary: the reviewer
+// login, the state normalized onto the Review* vocabulary, the body, and the
+// dismissed flag derived from GitHub's DISMISSED state.
+func toReview(gh ghReview) tracker.Review {
+	state, dismissed := mapReviewState(gh.State)
+	return tracker.Review{
+		Reviewer:  gh.User.Login,
+		State:     state,
+		Body:      gh.Body,
+		Dismissed: dismissed,
+	}
+}
+
+// mapReviewState normalizes a GitHub review state onto lab's Review* vocabulary
+// and reports whether the review is dismissed. GitHub's states are APPROVED,
+// CHANGES_REQUESTED, COMMENTED, DISMISSED, and PENDING. A DISMISSED review is
+// reported with Dismissed=true and its state passed through lowercased
+// ("dismissed") — GitHub collapses the original verdict into the DISMISSED
+// state, so there is no pre-dismissal word to recover — while every other state
+// maps onto the constants or passes through lowercased (PENDING → "pending", or
+// any word this package does not know). GitHub has no REQUEST_REVIEW review
+// state (a requested reviewer is not a submitted review), so lab's
+// ReviewRequested never originates here.
+func mapReviewState(state string) (string, bool) {
+	switch state {
+	case "APPROVED":
+		return tracker.ReviewApproved, false
+	case "CHANGES_REQUESTED":
+		return tracker.ReviewChangesRequested, false
+	case "COMMENTED":
+		return tracker.ReviewCommented, false
+	case "DISMISSED":
+		return strings.ToLower(state), true
+	default:
+		return strings.ToLower(state), false
+	}
+}
+
+// changesRequestedReviewers returns the reviewer logins whose LATEST
+// non-dismissed, non-pending review requests changes, in first-seen order.
+// Reviews arrive oldest-first, so the last state seen per reviewer is their
+// latest verdict; a dismissed review does not count (GitHub cleared it) and a
+// still-pending review is not a submitted verdict. A reviewer who later approves
+// therefore drops out of the set. Operates on the already-normalized
+// tracker.Review vocabulary (Reviews() maps it): "pending" is the lowercased
+// PENDING state, dismissed is the DISMISSED-derived flag, and changes-requested
+// is tracker.ReviewChangesRequested.
+func changesRequestedReviewers(reviews []tracker.Review) []string {
+	latest := make(map[string]string, len(reviews))
+	order := make([]string, 0, len(reviews))
+	for _, r := range reviews {
+		if r.Reviewer == "" || r.Dismissed || r.State == "pending" {
+			continue
+		}
+		if _, seen := latest[r.Reviewer]; !seen {
+			order = append(order, r.Reviewer)
+		}
+		latest[r.Reviewer] = r.State
+	}
+	out := make([]string, 0, len(order))
+	for _, name := range order {
+		if latest[name] == tracker.ReviewChangesRequested {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func toPullRef(gh ghPull) tracker.PullRef {

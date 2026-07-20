@@ -49,6 +49,10 @@ Usage:
   labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
   labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
                                         pending (exit 0 green/none · 2 red · 3 still pending)
+  labctl pr reject <n> <body>           post a changes-requested review on PR n with body as the findings
+  labctl pr approve <n> [body]          post an approving review on PR n (body optional)
+  labctl pr rerequest <n>               re-request review from reviewers whose latest verdict requested changes
+  labctl pr comment <n> <body>          post a plain discussion comment on PR n (no Closes # injection)
   labctl secret list                    list the repo's secrets (name, description; never values)
   labctl secret exec <NAME...> -- <cmd> [args...]
                                         run cmd with each named secret injected as $NAME in its
@@ -431,6 +435,94 @@ func runPR(args []string, env Env) int {
 		// Hand-rolled env/client setup (NOT withClient) — this verb's exit
 		// contract folds env/usage errors into 1, never withClient's 2.
 		return runPRChecks(args[1:], env)
+	case "reject":
+		// Exactly <n> <body>: unlike `issue comment`, the body is ONE
+		// positional argument (quote a multi-word body) — the findings are
+		// required non-empty, checked here so a blank body is a usage error
+		// (exit 2), not a round trip to the server's 400.
+		if len(args) != 3 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr reject: want <n> <body>")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr reject: PR number %q is not an integer\n", args[1])
+			return 2
+		}
+		body := args[2]
+		if body == "" {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr reject: body must not be empty")
+			return 2
+		}
+		return withClient(env, "pr reject", func(c *Client) error {
+			pr, err := c.PRReject(n, body)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\n", pr.Number, pr.State)
+			return nil
+		})
+	case "approve":
+		// <n> [body]: the body is optional — an approval needs no words.
+		if len(args) != 2 && len(args) != 3 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr approve: want <n> [body]")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr approve: PR number %q is not an integer\n", args[1])
+			return 2
+		}
+		var body string
+		if len(args) == 3 {
+			body = args[2]
+		}
+		return withClient(env, "pr approve", func(c *Client) error {
+			pr, err := c.PRApprove(n, body)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\n", pr.Number, pr.State)
+			return nil
+		})
+	case "rerequest":
+		if len(args) != 2 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr rerequest: want <n>")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr rerequest: PR number %q is not an integer\n", args[1])
+			return 2
+		}
+		return withClient(env, "pr rerequest", func(c *Client) error {
+			pr, err := c.PRRerequest(n)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(env.Stdout, "#%d\trerequested\n", pr.Number)
+			return nil
+		})
+	case "comment":
+		// Exactly <n> <body>, mirroring reject — a plain discussion comment,
+		// required non-empty, no `Closes #N` injection.
+		if len(args) != 3 {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr comment: want <n> <body>")
+			return 2
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr comment: PR number %q is not an integer\n", args[1])
+			return 2
+		}
+		body := args[2]
+		if body == "" {
+			_, _ = fmt.Fprintln(env.Stderr, "labctl pr comment: body must not be empty")
+			return 2
+		}
+		// Silent on success, mirroring `labctl issue comment`'s confirmation
+		// shape exactly: parseable silence, nothing to disambiguate.
+		return withClient(env, "pr comment", func(c *Client) error { return c.PRComment(n, body) })
 	case "create":
 		// handled below
 	default:
@@ -480,13 +572,24 @@ func printIssue(w io.Writer, is Issue) {
 }
 
 // printPR renders the plain-text PR view, mirroring printIssue: number,
-// title, then one metadata line each for state, head, and url, then the body.
+// title, then one metadata line each for state, head, and url, then the
+// body, then each submitted review under a "--- review by <reviewer>
+// (<state>)" separator (dismissed reviews add ", dismissed" to the
+// parenthetical) — the reject → re-queue loop's read. No reviews leaves the
+// output exactly as it was before reviews existed.
 func printPR(w io.Writer, pd PRDetail) {
 	_, _ = fmt.Fprintf(w, "#%d %s\n", pd.Number, pd.Title)
 	_, _ = fmt.Fprintf(w, "state: %s\n", pd.State)
 	_, _ = fmt.Fprintf(w, "head: %s\n", pd.Head)
 	_, _ = fmt.Fprintf(w, "url: %s\n", pd.URL)
 	_, _ = fmt.Fprintf(w, "\n%s\n", pd.Body)
+	for _, rv := range pd.Reviews {
+		state := rv.State
+		if rv.Dismissed {
+			state += ", dismissed"
+		}
+		_, _ = fmt.Fprintf(w, "\n--- review by %s (%s)\n%s\n", rv.Reviewer, state, rv.Body)
+	}
 }
 
 // checksPollInterval and checksWaitCap govern `labctl pr checks --wait`. It

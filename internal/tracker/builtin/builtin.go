@@ -245,6 +245,38 @@ func (t *Tracker) MergePull(ctx context.Context, number int) (tracker.PullRef, e
 	return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: %w", number, err)
 }
 
+// Reviews lists the submitted reviews on change request `number` — always an
+// empty result. Reviews are forge-observable state; a lab-internal change
+// request has no review model, so the built-in binding defers them (a harmless
+// empty read, like Checks). It does NOT look the CR up: an empty review list is
+// the honest answer for any number, and the reject → re-queue loop that reads
+// reviews is a forge-binding concern.
+func (t *Tracker) Reviews(ctx context.Context, number int) ([]tracker.Review, error) {
+	return nil, nil
+}
+
+// RejectPull, ApprovePull, RerequestReview, and CommentPull are the review
+// WRITE verbs the built-in binding deliberately does not implement: a
+// lab-internal change request has no forge review model to write to, so rather
+// than fake a result each wraps tracker.ErrUnsupported with a short message
+// naming the verb (the API layer answers "not supported on this tracker" —
+// distinct from a forge failure). Reviews defer to the forge binding.
+func (t *Tracker) RejectPull(ctx context.Context, number int, body string) (tracker.Review, error) {
+	return tracker.Review{}, fmt.Errorf("%w: reject pull review on the built-in tracker", tracker.ErrUnsupported)
+}
+
+func (t *Tracker) ApprovePull(ctx context.Context, number int, body string) (tracker.Review, error) {
+	return tracker.Review{}, fmt.Errorf("%w: approve pull review on the built-in tracker", tracker.ErrUnsupported)
+}
+
+func (t *Tracker) RerequestReview(ctx context.Context, number int) error {
+	return fmt.Errorf("%w: re-request review on the built-in tracker", tracker.ErrUnsupported)
+}
+
+func (t *Tracker) CommentPull(ctx context.Context, number int, body string) error {
+	return fmt.Errorf("%w: pull review comment on the built-in tracker", tracker.ErrUnsupported)
+}
+
 // CloseIssue transitions an issue to closed (stamping closed_at).
 func (t *Tracker) CloseIssue(ctx context.Context, number int) error {
 	if _, err := t.store.UpdateIssue(ctx, t.repoID, number,

@@ -25,6 +25,11 @@ const (
 	OpChecks            = "checks"
 	OpCreatePull        = "create_pull"
 	OpMergePull         = "merge_pull"
+	OpReviews           = "reviews"
+	OpRejectPull        = "reject_pull"
+	OpApprovePull       = "approve_pull"
+	OpRerequestReview   = "rerequest_review"
+	OpCommentPull       = "comment_pull"
 	OpCloseIssue        = "close"
 	OpCreateIssue       = "create_issue"
 	OpEditIssue         = "edit_issue"
@@ -130,6 +135,36 @@ func (o *observed) MergePull(ctx context.Context, number int) (PullRef, error) {
 	pull, err := o.t.MergePull(ctx, number)
 	o.report(OpMergePull, err)
 	return pull, err
+}
+
+func (o *observed) Reviews(ctx context.Context, number int) ([]Review, error) {
+	reviews, err := o.t.Reviews(ctx, number)
+	o.report(OpReviews, err)
+	return reviews, err
+}
+
+func (o *observed) RejectPull(ctx context.Context, number int, body string) (Review, error) {
+	review, err := o.t.RejectPull(ctx, number, body)
+	o.report(OpRejectPull, err)
+	return review, err
+}
+
+func (o *observed) ApprovePull(ctx context.Context, number int, body string) (Review, error) {
+	review, err := o.t.ApprovePull(ctx, number, body)
+	o.report(OpApprovePull, err)
+	return review, err
+}
+
+func (o *observed) RerequestReview(ctx context.Context, number int) error {
+	err := o.t.RerequestReview(ctx, number)
+	o.report(OpRerequestReview, err)
+	return err
+}
+
+func (o *observed) CommentPull(ctx context.Context, number int, body string) error {
+	err := o.t.CommentPull(ctx, number, body)
+	o.report(OpCommentPull, err)
+	return err
 }
 
 func (o *observed) CloseIssue(ctx context.Context, number int) error {

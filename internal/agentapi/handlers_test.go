@@ -29,8 +29,15 @@ type fakeTracker struct {
 
 	createdPull  *pullArgs
 	pullRef      tracker.PullRef
-	mergeRef     tracker.PullRef // returned by MergePull on success
-	merged       []int           // records MergePull arguments
+	mergeRef     tracker.PullRef  // returned by MergePull on success
+	merged       []int            // records MergePull arguments
+	reviews      []tracker.Review // returned by Reviews
+	reviewsErr   error            // Reviews-only error (Pull can still succeed) — the pr-view partial-failure path
+	reviewRef    tracker.Review   // returned by RejectPull/ApprovePull on success
+	rejected     []commentArgs    // records RejectPull arguments
+	approved     []commentArgs    // records ApprovePull arguments
+	pullComments []commentArgs    // records CommentPull arguments
+	rerequested  []int            // records RerequestReview arguments
 	pulls        []tracker.PullRef
 	pullDetails  []tracker.PullDetail
 	checks       []tracker.Check // returned by Checks (with f.err)
@@ -121,6 +128,40 @@ func (f *fakeTracker) MergePull(_ context.Context, number int) (tracker.PullRef,
 	}
 	f.merged = append(f.merged, number)
 	return f.mergeRef, nil
+}
+func (f *fakeTracker) Reviews(context.Context, int) ([]tracker.Review, error) {
+	if f.reviewsErr != nil {
+		return nil, f.reviewsErr
+	}
+	return f.reviews, f.err
+}
+func (f *fakeTracker) RejectPull(_ context.Context, number int, body string) (tracker.Review, error) {
+	if f.err != nil {
+		return tracker.Review{}, f.err
+	}
+	f.rejected = append(f.rejected, commentArgs{number: number, body: body})
+	return f.reviewRef, nil
+}
+func (f *fakeTracker) ApprovePull(_ context.Context, number int, body string) (tracker.Review, error) {
+	if f.err != nil {
+		return tracker.Review{}, f.err
+	}
+	f.approved = append(f.approved, commentArgs{number: number, body: body})
+	return f.reviewRef, nil
+}
+func (f *fakeTracker) RerequestReview(_ context.Context, number int) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.rerequested = append(f.rerequested, number)
+	return nil
+}
+func (f *fakeTracker) CommentPull(_ context.Context, number int, body string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.pullComments = append(f.pullComments, commentArgs{number: number, body: body})
+	return nil
 }
 func (f *fakeTracker) CloseIssue(_ context.Context, number int) error {
 	if f.err != nil {
@@ -1051,12 +1092,13 @@ func TestPRViewAndList_forge(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := prDetailResponse{
-		Number: 12, Title: "feat: capture card", Body: "card: |\n  kind: capture",
-		State: "open", Head: "afk/7", URL: "https://git.example.com/o/r/pulls/12",
+	if got.Number != 12 || got.Title != "feat: capture card" || got.Body != "card: |\n  kind: capture" ||
+		got.State != "open" || got.Head != "afk/7" || got.URL != "https://git.example.com/o/r/pulls/12" {
+		t.Errorf("PR detail = %+v", got)
 	}
-	if got != want {
-		t.Errorf("PR detail = %+v, want %+v", got, want)
+	// This fixture carries no reviews: the array is present and empty, never null.
+	if got.Reviews == nil || len(got.Reviews) != 0 {
+		t.Errorf("PR reviews = %+v, want an empty non-nil array", got.Reviews)
 	}
 
 	rr = doJSON(t, handler, "GET", "/agent/v1/prs", token, "")
@@ -1124,6 +1166,10 @@ func TestPRViewAndList_builtin(t *testing.T) {
 	}
 	if !strings.Contains(got.Body, "card: |\n  kind: capture") || !strings.Contains(got.Body, "Closes #7") {
 		t.Errorf("CR body = %q, want the card YAML and the injected Closes #7", got.Body)
+	}
+	// The built-in binding has no forge review model: reviews is [], never null.
+	if got.Reviews == nil || len(got.Reviews) != 0 {
+		t.Errorf("CR reviews = %+v, want an empty non-nil array on the built-in binding", got.Reviews)
 	}
 
 	rr = doJSON(t, handler, "GET", "/agent/v1/prs", token, "")
@@ -1270,6 +1316,282 @@ func TestEnsureCloses(t *testing.T) {
 	for _, tt := range tests {
 		if got := ensureCloses(tt.body, tt.n); got != tt.want {
 			t.Errorf("ensureCloses(%q, %d) = %q, want %q", tt.body, tt.n, got, tt.want)
+		}
+	}
+}
+
+// TestPRReject_forge drives POST /agent/v1/prs/{n}/reject on a forge-bound
+// repo: success reports the returned review's state and passes the number and
+// findings body through to RejectPull; a missing or blank body is a 400 (the
+// findings are required); a forge refusal surfaces verbatim as a 409; an
+// unknown number is the canonical 404; the built-in binding's ErrUnsupported is
+// a 409.
+func TestPRReject_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(9), "afk/9")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{reviewRef: tracker.Review{State: tracker.ReviewChangesRequested}}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/reject", token, `{"body":"needs tests before this lands"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reject: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"number":9,"state":"changes_requested"}` {
+		t.Errorf("reject body = %s, want {\"number\":9,\"state\":\"changes_requested\"}", got)
+	}
+	if len(fk.rejected) != 1 || fk.rejected[0] != (commentArgs{number: 9, body: "needs tests before this lands"}) {
+		t.Errorf("RejectPull args = %+v, want [{9 needs tests before this lands}]", fk.rejected)
+	}
+
+	// Missing and blank body → 400, nothing recorded.
+	for _, body := range []string{`{}`, `{"body":"  "}`} {
+		rej := &fakeTracker{}
+		rr = doJSON(t, f.forgeServer(rej).Handler(), "POST", "/agent/v1/prs/9/reject", token, body)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "body is required") {
+			t.Errorf("reject %q: status = %d, body %q, want 400 body-is-required", body, rr.Code, rr.Body.String())
+		}
+		if len(rej.rejected) != 0 {
+			t.Errorf("reject %q reached the tracker despite the blank body: %+v", body, rej.rejected)
+		}
+	}
+
+	// Forge refusal → 409 with the backend's own words verbatim.
+	refuse := &fakeTracker{err: fmt.Errorf("%w: you cannot request changes on your own pull request", tracker.ErrReviewRejected)}
+	rr = doJSON(t, f.forgeServer(refuse).Handler(), "POST", "/agent/v1/prs/9/reject", token, `{"body":"nope"}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "your own pull request") {
+		t.Fatalf("refused reject: status = %d, body %q, want 409 verbatim", rr.Code, rr.Body.String())
+	}
+
+	// Unknown number → the canonical 404 envelope.
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "POST", "/agent/v1/prs/999/reject", token, `{"body":"x"}`)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown reject: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+
+	// Built-in binding refuses the write verb → 409 (ErrUnsupported).
+	unsupported := &fakeTracker{err: fmt.Errorf("%w: reject pull review on the built-in tracker", tracker.ErrUnsupported)}
+	rr = doJSON(t, f.forgeServer(unsupported).Handler(), "POST", "/agent/v1/prs/9/reject", token, `{"body":"x"}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not supported") {
+		t.Fatalf("unsupported reject: status = %d, body %q, want 409", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPRApprove_forge drives POST /agent/v1/prs/{n}/approve on a forge-bound
+// repo: success with a body reports the returned review's state and passes the
+// body through; an EMPTY body and an ABSENT request body both approve
+// wordlessly (200, empty body forwarded); the forge-refusal/unknown/built-in
+// error mapping matches reject.
+func TestPRApprove_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(9), "afk/9")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{reviewRef: tracker.Review{State: tracker.ReviewApproved}}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/approve", token, `{"body":"looks good, shipping"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("approve: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"number":9,"state":"approved"}` {
+		t.Errorf("approve body = %s, want {\"number\":9,\"state\":\"approved\"}", got)
+	}
+	if len(fk.approved) != 1 || fk.approved[0] != (commentArgs{number: 9, body: "looks good, shipping"}) {
+		t.Errorf("ApprovePull args = %+v, want [{9 looks good, shipping}]", fk.approved)
+	}
+
+	// Empty body (`{"body":""}`) and absent body (``) both approve with "".
+	for _, body := range []string{`{"body":""}`, ``} {
+		ap := &fakeTracker{reviewRef: tracker.Review{State: tracker.ReviewApproved}}
+		rr = doJSON(t, f.forgeServer(ap).Handler(), "POST", "/agent/v1/prs/9/approve", token, body)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("approve empty body %q: status = %d, body %s", body, rr.Code, rr.Body.String())
+		}
+		if len(ap.approved) != 1 || ap.approved[0] != (commentArgs{number: 9, body: ""}) {
+			t.Errorf("approve empty body %q: ApprovePull args = %+v, want [{9 }]", body, ap.approved)
+		}
+	}
+
+	refuse := &fakeTracker{err: fmt.Errorf("%w: you cannot approve your own pull request", tracker.ErrReviewRejected)}
+	rr = doJSON(t, f.forgeServer(refuse).Handler(), "POST", "/agent/v1/prs/9/approve", token, `{}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "approve your own pull request") {
+		t.Fatalf("refused approve: status = %d, body %q, want 409 verbatim", rr.Code, rr.Body.String())
+	}
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "POST", "/agent/v1/prs/999/approve", token, `{}`)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown approve: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+	unsupported := &fakeTracker{err: fmt.Errorf("%w: approve pull review on the built-in tracker", tracker.ErrUnsupported)}
+	rr = doJSON(t, f.forgeServer(unsupported).Handler(), "POST", "/agent/v1/prs/9/approve", token, `{}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not supported") {
+		t.Fatalf("unsupported approve: status = %d, body %q, want 409", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPRRerequest_forge drives POST /agent/v1/prs/{n}/rerequest on a
+// forge-bound repo: success takes no body, answers {number}, and passes the
+// number through to RerequestReview; the forge-refusal/unknown/built-in error
+// mapping matches the other review verbs.
+func TestPRRerequest_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(9), "afk/9")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/rerequest", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("rerequest: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"number":9}` {
+		t.Errorf("rerequest body = %s, want {\"number\":9}", got)
+	}
+	if len(fk.rerequested) != 1 || fk.rerequested[0] != 9 {
+		t.Errorf("RerequestReview args = %v, want [9]", fk.rerequested)
+	}
+
+	refuse := &fakeTracker{err: fmt.Errorf("%w: the forge declined the re-request", tracker.ErrReviewRejected)}
+	rr = doJSON(t, f.forgeServer(refuse).Handler(), "POST", "/agent/v1/prs/9/rerequest", token, "")
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "declined the re-request") {
+		t.Fatalf("refused rerequest: status = %d, body %q, want 409 verbatim", rr.Code, rr.Body.String())
+	}
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "POST", "/agent/v1/prs/999/rerequest", token, "")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown rerequest: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+	unsupported := &fakeTracker{err: fmt.Errorf("%w: re-request review on the built-in tracker", tracker.ErrUnsupported)}
+	rr = doJSON(t, f.forgeServer(unsupported).Handler(), "POST", "/agent/v1/prs/9/rerequest", token, "")
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not supported") {
+		t.Fatalf("unsupported rerequest: status = %d, body %q, want 409", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPRComment_forge drives POST /agent/v1/prs/{n}/comments on a forge-bound
+// repo: success answers {number} and passes the number and body through to
+// CommentPull; a missing or blank body is a 400 (mirroring the issue comment);
+// an unknown number is a 404; the built-in binding's ErrUnsupported is a 409.
+func TestPRComment_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(9), "afk/9")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/comments", token, `{"body":"rebased onto main"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("pr comment: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"number":9}` {
+		t.Errorf("pr comment body = %s, want {\"number\":9}", got)
+	}
+	if len(fk.pullComments) != 1 || fk.pullComments[0] != (commentArgs{number: 9, body: "rebased onto main"}) {
+		t.Errorf("CommentPull args = %+v, want [{9 rebased onto main}]", fk.pullComments)
+	}
+
+	// Missing and blank body → 400, nothing recorded (mirrors the issue comment).
+	for _, body := range []string{`{}`, `{"body":"   "}`} {
+		cm := &fakeTracker{}
+		rr = doJSON(t, f.forgeServer(cm).Handler(), "POST", "/agent/v1/prs/9/comments", token, body)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "body is required") {
+			t.Errorf("pr comment %q: status = %d, body %q, want 400 body-is-required", body, rr.Code, rr.Body.String())
+		}
+		if len(cm.pullComments) != 0 {
+			t.Errorf("pr comment %q reached the tracker despite the blank body: %+v", body, cm.pullComments)
+		}
+	}
+
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "POST", "/agent/v1/prs/999/comments", token, `{"body":"x"}`)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown pr comment: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+	unsupported := &fakeTracker{err: fmt.Errorf("%w: pull review comment on the built-in tracker", tracker.ErrUnsupported)}
+	rr = doJSON(t, f.forgeServer(unsupported).Handler(), "POST", "/agent/v1/prs/9/comments", token, `{"body":"x"}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not supported") {
+		t.Fatalf("unsupported pr comment: status = %d, body %q, want 409", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPRReviewsInView pins the reviews field on GET /agent/v1/prs/{n}: a
+// multi-review PR (including an approved-but-dismissed verdict) comes back with
+// every review in order, normalized states and the dismissed flag intact; and a
+// Reviews read that fails after a successful Pull fails the whole response (no
+// partial detail), propagated through writeTrackerError.
+func TestPRReviewsInView(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{
+		pullDetails: []tracker.PullDetail{{
+			Number: 12, Title: "feat: thing", Body: "body", State: tracker.PullOpen,
+			HeadBranch: "afk/7", URL: "https://git.example.com/o/r/pulls/12",
+		}},
+		reviews: []tracker.Review{
+			{Reviewer: "reviewer-a", State: tracker.ReviewChangesRequested, Body: "needs tests", Dismissed: false},
+			{Reviewer: "reviewer-b", State: tracker.ReviewApproved, Body: "", Dismissed: true},
+			{Reviewer: "reviewer-c", State: tracker.ReviewCommented, Body: "one nit", Dismissed: false},
+		},
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /prs/12: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got prDetailResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []reviewResponse{
+		{Reviewer: "reviewer-a", State: "changes_requested", Body: "needs tests", Dismissed: false},
+		{Reviewer: "reviewer-b", State: "approved", Body: "", Dismissed: true},
+		{Reviewer: "reviewer-c", State: "commented", Body: "one nit", Dismissed: false},
+	}
+	if len(got.Reviews) != len(want) {
+		t.Fatalf("reviews = %+v, want %+v", got.Reviews, want)
+	}
+	for i := range want {
+		if got.Reviews[i] != want[i] {
+			t.Errorf("review[%d] = %+v, want %+v", i, got.Reviews[i], want[i])
+		}
+	}
+
+	// Pull succeeds but Reviews fails: the whole response fails (no partial
+	// detail). A plain forge error folds to 502 with the diagnostic.
+	revErr := &fakeTracker{
+		pullDetails: []tracker.PullDetail{{Number: 12, State: tracker.PullOpen, HeadBranch: "afk/7"}},
+		reviewsErr:  errors.New("forge reviews unreachable"),
+	}
+	rr = doJSON(t, f.forgeServer(revErr).Handler(), "GET", "/agent/v1/prs/12", token, "")
+	if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "forge reviews unreachable") {
+		t.Fatalf("reviews error: status = %d, body %q, want 502 propagated", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPRReviewVerbsRequireAuth confirms the four new review-write routes sit
+// behind AuthMiddleware like the rest: a request without a run token is the same
+// opaque 401, never the handler.
+func TestPRReviewVerbsRequireAuth(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(9), "afk/9")
+
+	handler := f.forgeServer(&fakeTracker{}).Handler()
+	routes := []struct{ method, path, body string }{
+		{"POST", "/agent/v1/prs/9/reject", `{"body":"x"}`},
+		{"POST", "/agent/v1/prs/9/approve", `{}`},
+		{"POST", "/agent/v1/prs/9/rerequest", ""},
+		{"POST", "/agent/v1/prs/9/comments", `{"body":"x"}`},
+	}
+	for _, rt := range routes {
+		req := httptest.NewRequest(rt.method, rt.path, strings.NewReader(rt.body))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without token: status = %d, want 401 (body %s)", rt.method, rt.path, rr.Code, rr.Body.String())
 		}
 	}
 }

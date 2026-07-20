@@ -54,14 +54,38 @@ type PR struct {
 	URL    string `json:"url"`
 }
 
-// PRDetail is the agent API's GET /prs/{n} shape: metadata plus the full body.
+// PRDetail is the agent API's GET /prs/{n} shape: metadata plus the full body
+// and the submitted reviews (always present, [] when none).
 type PRDetail struct {
+	Number  int        `json:"number"`
+	Title   string     `json:"title"`
+	Body    string     `json:"body"`
+	State   string     `json:"state"`
+	Head    string     `json:"head"`
+	URL     string     `json:"url"`
+	Reviews []PRReview `json:"reviews"`
+}
+
+// PRReview is one submitted review in PRDetail.Reviews: who submitted it, its
+// normalized state (approved|changes_requested|commented|review_requested),
+// its prose body, and whether the forge has since dismissed it.
+type PRReview struct {
+	Reviewer  string `json:"reviewer"`
+	State     string `json:"state"`
+	Body      string `json:"body"`
+	Dismissed bool   `json:"dismissed"`
+}
+
+// PRReviewed is the agent API's POST /prs/{n}/reject and /approve answer: the
+// PR's number and the submitted review's state.
+type PRReviewed struct {
 	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
 	State  string `json:"state"`
-	Head   string `json:"head"`
-	URL    string `json:"url"`
+}
+
+// PRRerequested is the agent API's POST /prs/{n}/rerequest answer.
+type PRRerequested struct {
+	Number int `json:"number"`
 }
 
 // PRRef is one row of the agent API's GET /prs list (no title/body).
@@ -158,6 +182,42 @@ func (c *Client) PRMerge(n int) (PRMerged, error) {
 	var pm PRMerged
 	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/merge", nil, &pm)
 	return pm, err
+}
+
+// PRReject posts a changes-requested review on PR/CR n with body as the
+// findings (required non-empty; the server 400s a blank body) and returns the
+// submitted review's state.
+func (c *Client) PRReject(n int, body string) (PRReviewed, error) {
+	var pr PRReviewed
+	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/reject",
+		map[string]string{"body": body}, &pr)
+	return pr, err
+}
+
+// PRApprove posts an approving review on PR/CR n; body may be empty. Always
+// sends a JSON body — an approval with no words is still a real request, not
+// an absent one.
+func (c *Client) PRApprove(n int, body string) (PRReviewed, error) {
+	var pr PRReviewed
+	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/approve",
+		map[string]string{"body": body}, &pr)
+	return pr, err
+}
+
+// PRRerequest re-requests review from every reviewer whose latest verdict
+// requested changes on PR/CR n; no such reviewer is a convergent no-op
+// success.
+func (c *Client) PRRerequest(n int) (PRRerequested, error) {
+	var pr PRRerequested
+	err := c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/rerequest", nil, &pr)
+	return pr, err
+}
+
+// PRComment posts a plain discussion comment on PR/CR n (no `Closes #N`
+// injection — that is `pr create`'s concern only).
+func (c *Client) PRComment(n int, body string) error {
+	return c.do(http.MethodPost, "/agent/v1/prs/"+strconv.Itoa(n)+"/comments",
+		map[string]string{"body": body}, nil)
 }
 
 // PRChecks fetches the CI status report for PR/CR n — the rows plus the

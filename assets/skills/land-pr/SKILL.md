@@ -7,7 +7,9 @@ description: Validate a Forgejo pull request — checks, conventions, conflicts 
 
 Take a pull request on the current repo's Forgejo tracker from "open" to "merged": **validate** it, **resolve** any merge conflict (grilling the human only when the resolution is a real judgement call), and **merge** it — but only on explicit free-text confirmation.
 
-This skill is global: it operates on whatever repo it is invoked in, the same way `triage` does. It learns each repo's conventions at runtime rather than hard-coding them — see [Learn the repo's rules](#learn-the-repos-rules).
+This skill is global: it operates on whatever repo it is invoked in, the same way `triage` does. It learns each repo's conventions at runtime rather than hard-coding them — see [Learn the repo's rules](#learn-the-repos-rules). The definition of **landable** it validates against lives in `validation-core.md` in this skill's directory — read it; it is the single source both this skill and the autoland lander apply.
+
+The whole tracker surface is `labctl`: `LAB_URL` and `LAB_TOKEN` are already in the session environment, it targets the run's repo from the run token, and it needs no login or `--login`/`--repo` flags.
 
 Every comment or review this skill posts to the tracker **must** start with this disclaimer:
 
@@ -17,15 +19,19 @@ Every comment or review this skill posts to the tracker **must** start with this
 
 ## Non-negotiable rules
 
-- **Merging needs explicit free-text approval, per PR.** A merge is a write to the default branch. Do **not** use `AskUserQuestion` for it — the auto-mode classifier does not treat its answers as authorisation. And `tea pr merge` is an API call, not `git push`, so the classifier will not prompt for it on its own: *this skill is the gate*. Validate, present the verdict, ask the human in plain text, and run `tea pr merge` **only** on an explicit free-text go-ahead for **that one PR**. Never offer a "merge everything green" batch.
-- **Never force-push, never push to `main`.** Conflict resolution pushes go to the PR's **head branch** only, with an ordinary push. If the head branch is one the human does not own (a fork / external contributor), do **not** push — stop and hand back. (In practice every PR here is authored as `dominik`, AFK or manual.)
-- **Require a clean working tree before checking out a PR.** `tea pr checkout` switches the working tree. If `git status` is not clean, stop — never risk clobbering uncommitted work. Restore the prior branch when done.
-- **`tea` calls are flags-first and TTY-guarded.** Every invocation needs `--login git.cloonar.com --repo <owner>/<repo>` placed **before** any positional argument, and `</dev/null` (plus a `timeout`) so it can't hang waiting on a missing TTY. Derive `<owner>/<repo>` from the `origin` remote.
-- **Prefer a signal that already vouches over re-running anything.** Re-running an expensive gate the repo already enforced is waste. Only run the project's own checks yourself when nothing already vouches for the PR (see step 2).
+- **Merging needs explicit free-text approval, per PR.** A merge is a write to the default branch. Do **not** use `AskUserQuestion` for it — the auto-mode classifier does not treat its answers as authorisation. And `labctl pr merge` is an API call, not a `git push`, so the classifier will not prompt for it on its own: *this skill is the gate*. Validate, approve, present the verdict, ask the human in plain text, and run `labctl pr merge` **only** on an explicit free-text go-ahead for **that one PR**. An `approve` is **not** a merge — it records that validation passed; only free text merges. Never offer a "merge everything green" batch.
+- **Never force-push, never push to the base branch.** Conflict-resolution pushes go to the PR's **head branch** only, with an ordinary push. If the head branch is one the human does not own (a fork / external contributor), do **not** push and do **not** delete it — stop and hand back. (In practice every PR here is authored as `dominik`, AFK or manual.)
+- **Require a clean working tree before checking out a PR.** Checking out the head switches the working tree. If `git status` is not clean, stop — never risk clobbering uncommitted work. Restore the prior branch when done.
+- **Prefer a signal that already vouches over re-running anything.** Re-running an expensive gate the repo already enforced is waste. Only run the project's own checks yourself when nothing already vouches (see [Learn the repo's rules](#learn-the-repos-rules)).
 
 ## Preconditions
 
-The active repo's `origin` must be a Forgejo repo on `git.cloonar.com` — the same gate the lab uses for AFK runs. Detect it from `git remote get-url origin` (both `forgejo@git.cloonar.com:owner/repo.git` and `https://git.cloonar.com/owner/repo` shapes). If `origin` is not on `git.cloonar.com`, stop and say so — `tea` has nothing to target and the conventions below don't apply.
+`labctl` reaches the tracker over the lab API — no forge login, no `--login`/`--repo` flags, and it works from anywhere in the worktree. Two things must hold:
+
+- **`LAB_URL` and `LAB_TOKEN` are present** — without them `labctl` can't reach the tracker. (Every lab session has them.)
+- **A git worktree with an `origin` remote** — conflict resolution fetches, checks out, and pushes the PR head over `origin`.
+
+If either is missing, stop and say so.
 
 ## Invocation
 
@@ -40,16 +46,16 @@ The human invokes `/land-pr` and may name a PR or describe intent in natural lan
 Ride Forgejo's native PR review lifecycle; do **not** invent labels.
 
 ```
-open ──validate──► [blockers?] ──yes──► request-changes (tea pr reject + findings)
-                       │                        ▲
-                       │ no                      └── author pushes a fix ──┐
-                       ▼                                                    │
-                    PASS ──(free-text go-ahead)──► merge ──► closed   (re-invoke) ─┘
+open ──validate──► [blockers?] ──yes──► request-changes (labctl pr reject + findings)
+                       │                          ▲
+                       │ no                        └── author pushes a fix, rerequest ──┐
+                       ▼                                                                 │
+              PASS ──approve──► (free-text go-ahead) ──► merge ──► closed   (re-invoke) ─┘
 ```
 
-- **Blockers** → `tea pr reject` with the findings as the review body. The PR stays open in *changes-requested* for the author (or an AFK re-run) to fix; re-invoke later.
-- **Clean** → report PASS. Do **not** post a formal `tea pr approve`: these PRs are authored as `dominik` and merged as `dominik`, so a self-LGTM is meaningless ceremony. "Approved" is the human's free-text merge go-ahead.
-- **Always** post a one-comment audit summary of what was checked and the verdict (with the disclaimer above).
+- **Blockers** (`FAIL` or blocking `CONCERNS`) → `labctl pr reject <N> "<findings>"` posts a Forgejo-native *changes-requested* review with the findings as the body. The PR stays open in changes-requested for the author (or an AFK re-run) to fix; re-invoke later. Once the author has pushed a fix, `labctl pr rerequest <N>` re-requests review from every reviewer whose latest review requests changes, clearing the changes-requested state (a no-op if nothing is outstanding).
+- **Clean** (`PASS`) → post `labctl pr approve <N>` with a short summary body. The approving review is the forge-observable "validated, awaiting confirm" state — but it is **not** a merge: the merge still waits on the human's free-text go-ahead.
+- **The verdict review is the audit record** — the approve body on a `PASS`, the reject body on a blocker, each stating what was checked and the verdict (disclaimer line first). Extra progress notes (e.g. a conflict you resolved) go as `labctl pr comment <N> "<body>"`. `labctl pr view <N>` prints submitted reviews after the body, so the changes-requested / approved state is visible there.
 
 ## Learn the repo's rules
 
@@ -61,49 +67,55 @@ Discover how to verify and merge *this* repo, first hit wins:
 
 ## Validate a PR
 
-1. **Fetch & gate.** `tea pulls <N> --fields state,mergeable,head,base,title,body,labels,author`. Confirm it's open and not a draft. Skip drafts with a note.
-2. **Verification signal.** Run `labctl pr checks --wait <N>` and decide from its result, per [Learn the repo's rules](#learn-the-repos-rules):
-   - **Exit `0`, `state: success`** — a signal vouches. **Do not re-run it** — say so in the verdict, so the human knows what's being relied on.
-   - **Exit `0`, `state: none`** — nothing vouches (no CI configured on this repo, or a commit-time gate the checks call can't see). Run the project's own checks now.
-   - **Exit `2`** (aggregate `failure`) — a blocker: report the failing check rows in the verdict and stop for the human. The fix belongs to the PR author, not the lander.
-   - **Exit `3`** (still pending at the ~5 min cap) — say so, and either re-run the wait or stop for the human. Never merge on a pending signal.
+Read `validation-core.md` in this skill's directory — it is the single definition of **landable** (the checks aggregate, the conventions, the conflict policy, the `PASS`/`CONCERNS`/`FAIL` rubric). This section drives that definition; it does not restate it.
 
-   *(Know the reach of the signal you rely on: if the PR's CI is split so that some gates run only conditionally — e.g. an expensive nix/build gate gated behind dependency-file changes — a green light may not have exercised the path this diff touches. Call that out when it matters.)*
-3. **Convention lint.** Title is Conventional Commits (`feat:`, `fix(scope):`, …). Apply any extra rules the repo's `CLAUDE.md` states.
-4. **AFK contract (every repo).** If the head branch is `afk/<N>` (an AFK run), confirm the body carries a working **`Closes #<issue>`**. A missing/malformed link is a **blocker**: without it the merge won't auto-close the issue, which then stays open while its `afk/<N>` branch lingers as the run's claim — parked out of the `ready-for-agent` queue until the branch is deleted.
-5. **Review the diff.** Read the full diff and reason about correctness against the PR's stated intent and its linked issue. For a deeper pass, you may run `/code-review`. Flag anything that diverges from the issue's intent — if it's ambiguous whether a divergence is intentional, **grill** (see below).
-6. **Verdict.** Emit `PASS` / `CONCERNS` / `FAIL` with concrete, file-and-line findings, and state which verification signal was relied on. `FAIL`/blocking `CONCERNS` → `tea pr reject` with the findings. `PASS` → proceed toward the merge gate.
+1. **Fetch & gate.** `labctl pr view <N>` — read state, head, base, title, body, and any submitted reviews (printed after the body). Confirm it's open and not a draft. Skip drafts with a note.
+2. **Checks.** Run `labctl pr checks --wait <N>` and read the aggregate per `validation-core.md`:
+   - **Exit `0`, `state: success`** — a signal vouches. **Do not re-run it** — say so in the verdict.
+   - **Exit `0`, `state: none`** — nothing vouches (no CI configured, or a commit-time gate the checks call can't see). Run the project's own checks now.
+   - **Exit `2`** (aggregate `failure`) — a blocker: report the failing check rows and stop for the human. The fix belongs to the PR author, not the lander.
+   - **Exit `3`** (still pending at the cap) — say so, and either re-run the wait or stop. Never merge on a pending signal.
+3. **Conventions.** Title is Conventional Commits (`feat:`, `fix(scope):`, …). The body carries a working `Closes #<issue>` — a **blocker** if missing (the AFK contract in `validation-core.md` says why). Apply any extra rules the repo's `CLAUDE.md` states.
+4. **Review the diff.** Read the full diff and reason about correctness against the PR's stated intent and its linked issue. For a deeper pass, run `/code-review`. Flag anything that diverges from the issue's intent; if a divergence is ambiguous, **grill** (see below).
+5. **Verdict.** Emit `PASS` / `CONCERNS` / `FAIL` per the rubric in `validation-core.md`, with concrete file-and-line findings, naming the signal you relied on. Then route:
+   - **`PASS`** → `labctl pr approve <N>` with a short summary body (disclaimer line first), then proceed toward the merge gate.
+   - **`FAIL` / blocking `CONCERNS`** → `labctl pr reject <N> "<findings>"`, the disclaimer line first and the findings as the body:
+
+     ```
+     labctl pr reject <N> "> *This was generated by AI while landing a PR.*
+
+     <findings, file-and-line>"
+     ```
 
 ## Resolve a merge conflict
 
-When `mergeable` is false because the PR conflicts with its base:
+When merging the PR would conflict with its base. You don't pre-reason the forge's mergeability (branch protection, required checks — that's the backend's call, surfaced verbatim when you attempt the merge); a *textual* conflict you resolve on the head yourself, and you'll see it the moment you merge the base into the head locally. Resolve it before the merge gate so the human's single go-ahead covers the resolved tree:
 
-1. **Checkout** (working tree must be clean): `tea pr checkout <N>`.
-2. **Bring the base in** with a merge, never a rebase: `git merge origin/<base>`. (Rebase needs a force-push that rewrites the branch and can disrupt the open PR.)
-3. **Resolve:**
-   - **Auto-resolve silently** only when the resolution is *deterministic and behaviour-preserving*: disjoint additions both sides made (two new imports, two new list entries, two new functions → union), regenerated lock/generated files, pure formatting/whitespace.
-   - **Grill the human** (inline and targeted — *not* a full `/grill-me` interview) the moment it's a *semantic choice*: both sides changed the same statement/value/logic differently, or one side deleted what the other edited. Show both sides and ask the single question you need — *"PR sets the timeout to 30s, `main` changed it to 60s — which wins, or is there a combined intent?"* — then apply the answer. For a genuinely tangled, multi-point resolution, offer to escalate to a `/grill-me` session.
-4. **Commit** the merge and **push** to the head branch (ordinary push).
-5. **Re-verify — mandatory.** The resolution commit is one *no gate has seen*, so the "a signal already vouches" shortcut no longer applies: run the project's own checks on the resolved tree now (this is the justified case for running them).
-6. **Show the resolution diff** to the human before the merge gate.
+1. **Working tree must be clean** (else stop — see the non-negotiable rules). Head branch comes from `labctl pr view <N>`.
+2. **Fetch & check out the head:** `git fetch origin <head>` then `git checkout <head>`.
+3. **Bring the base in** with a merge, never a rebase: `git merge origin/<base>`. (A rebase needs a force-push that rewrites the branch and disrupts the open PR.)
+4. **Resolve** per the conflict policy in `validation-core.md`: auto-resolve silently only when the resolution is deterministic and behaviour-preserving; the moment it's a *semantic choice*, **grill** the human — inline and targeted, not a full interview — showing both sides and asking the single question you need (*"PR sets the timeout to 30s, `main` changed it to 60s — which wins, or is there a combined intent?"*), then apply the answer. For a genuinely tangled, multi-point resolution, offer to escalate to a `/grill-me` session.
+5. **Commit** the merge and **push** to the head branch (ordinary push, never force, never to base).
+6. **Re-verify — mandatory.** The resolution commit is one *no gate has seen*, so the "a signal already vouches" shortcut no longer applies: run the project's own checks on the resolved tree now.
+7. **Show the resolution diff** to the human before the merge gate; optionally record it as `labctl pr comment <N> "<summary>"` (disclaimer line first) for the audit trail.
 
 The same principle generalises: act autonomously while the call is safe; **grill the moment a judgement is needed** — a semantic conflict or a validation ambiguity — and only then.
 
 ## Merge
 
-Only after a clean verdict (and, if there was a conflict, a re-verified resolution the human has seen):
+Only after a clean verdict (`PASS`, approved) and, if there was a conflict, a re-verified resolution the human has seen:
 
-1. **Free-text gate.** Tell the human the PR is clean and ask them to confirm the merge in plain text. Proceed only on an explicit go-ahead for this PR. (No `AskUserQuestion`.)
-2. **Merge.** `tea pr merge --style merge <N>` — a merge commit, matching this repo's `"Merge pull request '…' (#NN)"` history and safe after a conflict-merge. If branch protection rejects it (the repo mandates squash/rebase), retry with the style it allows.
-3. **Close the loop.** Confirm the linked issue auto-closed via its `Closes #<issue>` link; if it didn't, `tea issues close` it. There is no claim label to clear — an AFK run claims via its `afk/<N>` branch, not a label, and the merge closing the issue is what releases the claim.
-4. **Clean up.** `tea pr clean <N>` (deletes the remote + local head branch); if that fails against the remote, fall back to `git push origin --delete <head>` plus a local branch delete. Then restore the working tree to the base branch.
+1. **Free-text gate.** Tell the human the PR is validated and approved, and ask them to confirm the merge in plain text. Proceed only on an explicit go-ahead for this PR. (No `AskUserQuestion`.)
+2. **Merge.** `labctl pr merge <N>`. The merge method is the **server's** choice — there is no `--style`/`--method` flag. Mergeability is the backend's call: attempt it and read the result — if the forge refuses (required check red, protected base, or a conflict), it surfaces the refusal's *own words* verbatim and exits non-zero. Don't pre-reason it. A refusal for a **conflict** routes to [Resolve a merge conflict](#resolve-a-merge-conflict), then re-present and re-attempt. Re-merging an already-merged PR is a no-op **success**.
+3. **Close the loop.** The merge normally auto-closes the linked issue via its `Closes #<issue>` link. Confirm it closed; if it didn't, comment the reason then `labctl issue close <n>`. There is no claim label to clear — an AFK run claims via its `afk/<N>` branch, not a label, and the merge closing the issue is what releases the claim.
+4. **Clean up.** Lab never auto-deletes a head branch on merge — branch lifecycle is guarded teardown's job, not the merge's. Once the PR is merged, delete the head branch yourself: `git push origin --delete <head>` (head from `labctl pr view`), then delete any local copy and restore the working tree to the base branch. Do **not** delete a branch the human doesn't own — leave a fork / external contributor's head alone.
 5. **Report, don't babysit.** If the merge triggers the repo's CD, say so and stop — do not block-watch the deploy. The skill's job ends at a clean merge.
 
 ## No argument: list, pick, loop
 
 `/land-pr` with no argument — and plural-intent phrasings like "land the afk PRs" — is a **lazy, list-first picker**, not a batch validator. It lists cheaply and defers *all* validation until a PR is picked. There is no batch runner: plural intent is served by the loop below, and every merge keeps its own free-text gate.
 
-1. **List cheaply.** `tea pulls list --state open`, plus at most **one** cheap body fetch per PR for a one-line gloss. Each row shows: PR number, title, a one-line plain-language gloss of what the PR is about, author / head branch, and a status tag only where relevant (`draft`, `changes-requested`). **Read no diff, run no checks, probe no conflicts, and show no PASS/FAIL or mergeable status** — computing those *is* the deferred validation this path exists to avoid.
+1. **List cheaply.** `labctl pr list` (it lists PRs across all states — filter to the open, non-draft ones yourself), plus at most **one** cheap `labctl pr view <N>` per PR for a one-line gloss. Each row shows: PR number, title, a one-line plain-language gloss of what the PR is about, author / head branch, and a status tag only where relevant (`draft`, `changes-requested`). **Read no diff, run no checks, probe no conflicts, and show no PASS/FAIL or mergeable status** — computing those *is* the deferred validation this path exists to avoid.
 2. **Route on the count of open, non-draft PRs:**
    - **Exactly one** → skip the picker and run the full flow on it directly: [Validate a PR](#validate-a-pr) → (resolve any conflict) → [Merge](#merge). The merge still needs explicit free-text approval.
    - **Only draft(s)** → list them tagged `draft`, note none are landable, and stop.
