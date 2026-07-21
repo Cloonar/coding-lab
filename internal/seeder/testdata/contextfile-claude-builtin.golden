@@ -29,6 +29,7 @@ no login.
     labctl label list                     list the repo's labels (name, color, description)
     labctl label create --name N [--color C --description D]
                                           create the label if missing (idempotent)
+    labctl pr view <n>                    show PR n (state, head, url, body, reviews, comments)
     labctl pr create --title T --body B   open a PR/CR for the current branch
 
 A PR/CR body must reference the issue it resolves with `Closes #<n>`.

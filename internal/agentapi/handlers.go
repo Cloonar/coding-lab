@@ -749,14 +749,25 @@ func (s *Server) handlePRCreate(w http.ResponseWriter, r *http.Request) {
 // reject → re-queue loop's read); it ALWAYS marshals as an array — [] when the
 // PR carries none, never null — so an agent parsing it never special-cases a
 // nil, and a built-in binding (no forge review model) simply reports [].
+// comments carries the PR's discussion thread — whatever tracker.PullComments
+// returns, oldest first (discussion comments only; inline review comments are
+// out of scope) — so `labctl pr view` can render the conversation and a fix
+// agent or lander catching up on a PR reads it in one call instead of raw
+// forge fallback (issue #191). Content is verbatim and unfiltered, including
+// autoland verdict-marker comments (ADR-0048): a reject's body IS the
+// findings a fix agent needs, so nothing here is stripped or annotated. Same
+// always-[]-never-null contract as reviews, for the same reason (see
+// handlePRGet: the built-in binding has no CR comment thread yet and reports
+// [] there too).
 type prDetailResponse struct {
-	Number  int              `json:"number"`
-	Title   string           `json:"title"`
-	Body    string           `json:"body"`
-	State   string           `json:"state"`
-	Head    string           `json:"head"`
-	URL     string           `json:"url"`
-	Reviews []reviewResponse `json:"reviews"`
+	Number   int               `json:"number"`
+	Title    string            `json:"title"`
+	Body     string            `json:"body"`
+	State    string            `json:"state"`
+	Head     string            `json:"head"`
+	URL      string            `json:"url"`
+	Reviews  []reviewResponse  `json:"reviews"`
+	Comments []commentResponse `json:"comments"`
 }
 
 // reviewResponse is one submitted review in the GET /agent/v1/prs/{n} payload:
@@ -809,12 +820,18 @@ type prCheckItem struct {
 }
 
 // handlePRGet is GET /agent/v1/prs/{n}: one PR/CR of the run's repo in full,
-// body AND submitted reviews included. An unknown number is the canonical 404
-// envelope (either binding's typed not-found), never a panic. Reviews are read
-// after the Pull; if that read fails the whole response fails through
-// writeTrackerError (no partial detail), so the caller never sees a PR whose
-// reviews silently dropped. On a built-in binding Reviews is a harmless empty
-// read, so the array is [] there — the same shape a reviewless forge PR yields.
+// body, submitted reviews, AND its discussion comment thread included. An
+// unknown number is the canonical 404 envelope (either binding's typed
+// not-found), never a panic. Reviews are read after the Pull, then comments
+// are read after Reviews; if either read fails the whole response fails
+// through writeTrackerError (no partial detail), so the caller never sees a
+// PR whose reviews or thread silently dropped — EXCEPT PullComments wrapping
+// ErrUnsupported, which is not a failure: it is the built-in binding's "no CR
+// comment thread yet" (ADR-0048, builtin.go), and renders as the same []
+// empty array a commentless forge PR yields rather than 409ing every builtin
+// `pr view`. On a built-in binding Reviews is likewise a harmless empty read,
+// so that array is [] there too — the same shape a reviewless forge PR
+// yields.
 func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
 	_, repo, ok := s.runRepo(w, r)
 	if !ok {
@@ -849,14 +866,31 @@ func (s *Server) handlePRGet(w http.ResponseWriter, r *http.Request) {
 			Dismissed: v.Dismissed,
 		})
 	}
+	cs, err := tk.PullComments(r.Context(), n)
+	if err != nil && !errors.Is(err, tracker.ErrUnsupported) {
+		s.writeTrackerError(w, "loading pull request comments", repo, err)
+		return
+	}
+	// Non-nil so the array marshals as [] on zero comments, never null — same
+	// contract as reviews, and how ErrUnsupported (the built-in binding's "no
+	// CR comment thread yet") lands here too.
+	comments := make([]commentResponse, 0, len(cs))
+	for _, c := range cs {
+		comments = append(comments, commentResponse{
+			Author:    c.Author,
+			Body:      c.Body,
+			CreatedAt: store.FormatTime(c.CreatedAt),
+		})
+	}
 	writeJSON(w, http.StatusOK, prDetailResponse{
-		Number:  pd.Number,
-		Title:   pd.Title,
-		Body:    pd.Body,
-		State:   pd.State,
-		Head:    pd.HeadBranch,
-		URL:     pd.URL,
-		Reviews: reviews,
+		Number:   pd.Number,
+		Title:    pd.Title,
+		Body:     pd.Body,
+		State:    pd.State,
+		Head:     pd.HeadBranch,
+		URL:      pd.URL,
+		Reviews:  reviews,
+		Comments: comments,
 	})
 }
 

@@ -27,25 +27,27 @@ type fakeTracker struct {
 	labels []tracker.Label
 	err    error // returned by every read/write when set
 
-	createdPull  *pullArgs
-	pullRef      tracker.PullRef
-	mergeRef     tracker.PullRef  // returned by MergePull on success
-	merged       []int            // records MergePull arguments
-	reviews      []tracker.Review // returned by Reviews
-	reviewsErr   error            // Reviews-only error (Pull can still succeed) — the pr-view partial-failure path
-	pullComments []commentArgs    // records CommentPull arguments
-	rerequested  []int            // records RerequestReview arguments
-	rerequestErr error            // RerequestReview-only error (CommentPull can still succeed) — the best-effort ping path
-	pulls        []tracker.PullRef
-	pullDetails  []tracker.PullDetail
-	checks       []tracker.Check // returned by Checks (with f.err)
-	comments     []commentArgs
-	createdIssue *issueArgs
-	editedIssues []editArgs
-	labelAdds    []labelsArgs
-	labelRemoves []labelsArgs
-	ensured      []tracker.Label
-	closed       []int
+	createdPull   *pullArgs
+	pullRef       tracker.PullRef
+	mergeRef      tracker.PullRef   // returned by MergePull on success
+	merged        []int             // records MergePull arguments
+	reviews       []tracker.Review  // returned by Reviews
+	reviewsErr    error             // Reviews-only error (Pull can still succeed) — the pr-view partial-failure path
+	pullComments  []commentArgs     // records CommentPull arguments
+	rerequested   []int             // records RerequestReview arguments
+	rerequestErr  error             // RerequestReview-only error (CommentPull can still succeed) — the best-effort ping path
+	prComments    []tracker.Comment // returned by PullComments
+	prCommentsErr error             // PullComments-only error (Pull/Reviews can still succeed) — the pr-view partial-failure path
+	pulls         []tracker.PullRef
+	pullDetails   []tracker.PullDetail
+	checks        []tracker.Check // returned by Checks (with f.err)
+	comments      []commentArgs
+	createdIssue  *issueArgs
+	editedIssues  []editArgs
+	labelAdds     []labelsArgs
+	labelRemoves  []labelsArgs
+	ensured       []tracker.Label
+	closed        []int
 }
 
 type pullArgs struct{ head, base, title, body string }
@@ -164,7 +166,10 @@ func (f *fakeTracker) CommentPull(_ context.Context, number int, body string) er
 	return nil
 }
 func (f *fakeTracker) PullComments(context.Context, int) ([]tracker.Comment, error) {
-	return nil, f.err
+	if f.prCommentsErr != nil {
+		return nil, f.prCommentsErr
+	}
+	return f.prComments, f.err
 }
 func (f *fakeTracker) CloseIssue(_ context.Context, number int) error {
 	if f.err != nil {
@@ -1115,6 +1120,10 @@ func TestPRViewAndList_forge(t *testing.T) {
 	if got.Reviews == nil || len(got.Reviews) != 0 {
 		t.Errorf("PR reviews = %+v, want an empty non-nil array", got.Reviews)
 	}
+	// Likewise no comments: the array is present and empty, never null.
+	if got.Comments == nil || len(got.Comments) != 0 {
+		t.Errorf("PR comments = %+v, want an empty non-nil array", got.Comments)
+	}
 
 	rr = doJSON(t, handler, "GET", "/agent/v1/prs", token, "")
 	if rr.Code != http.StatusOK {
@@ -1146,6 +1155,68 @@ func TestPRViewAndList_forge(t *testing.T) {
 		if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), `"error"`) {
 			t.Errorf("GET %s: status = %d, body %q, want 404 envelope", path, rr.Code, rr.Body.String())
 		}
+	}
+}
+
+// TestPRViewComments_forge pins the discussion-thread read GET /agent/v1/prs/{n}
+// gained in issue #191: two comments come through in order with fields mapped
+// verbatim (author, body, created_at via store.FormatTime), a comment opening
+// with an autoland verdict marker (ADR-0048) passes through unfiltered — the
+// reject body IS the findings a fix agent needs — and a PullComments failure
+// fails the whole response through writeTrackerError (no partial detail),
+// exactly like the Reviews-only failure path.
+func TestPRViewComments_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	t1 := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 7, 20, 11, 30, 0, 0, time.UTC)
+	fk := &fakeTracker{
+		pullDetails: []tracker.PullDetail{{
+			Number: 12, Title: "feat: thing", Body: "body", State: tracker.PullOpen,
+			HeadBranch: "afk/7", URL: "https://git.example.com/o/r/pulls/12",
+		}},
+		prComments: []tracker.Comment{
+			{Author: "alice", Body: "looks good so far", CreatedAt: t1},
+			{Author: "autoland", Body: tracker.VerdictReject + "\nfindings: tests fail on the fix branch", CreatedAt: t2},
+		},
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /prs/12: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got prDetailResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []commentResponse{
+		{Author: "alice", Body: "looks good so far", CreatedAt: store.FormatTime(t1)},
+		{Author: "autoland", Body: tracker.VerdictReject + "\nfindings: tests fail on the fix branch", CreatedAt: store.FormatTime(t2)},
+	}
+	if len(got.Comments) != len(want) {
+		t.Fatalf("comments = %+v, want %+v", got.Comments, want)
+	}
+	for i := range want {
+		if got.Comments[i] != want[i] {
+			t.Errorf("comment[%d] = %+v, want %+v", i, got.Comments[i], want[i])
+		}
+	}
+	if !strings.HasPrefix(got.Comments[1].Body, tracker.VerdictMarkerPrefix) {
+		t.Errorf("comment[1] body = %q, want the verdict marker passed through verbatim", got.Comments[1].Body)
+	}
+
+	// Pull succeeds but PullComments fails: the whole response fails (no
+	// partial detail). A plain forge error folds to 502 with the backend's
+	// own words propagated — the reviews-failure convention.
+	commentsErr := &fakeTracker{
+		pullDetails:   []tracker.PullDetail{{Number: 12, State: tracker.PullOpen, HeadBranch: "afk/7"}},
+		prCommentsErr: errors.New("forge comments unreachable"),
+	}
+	rr = doJSON(t, f.forgeServer(commentsErr).Handler(), "GET", "/agent/v1/prs/12", token, "")
+	if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "forge comments unreachable") {
+		t.Fatalf("comments error: status = %d, body %q, want 502 propagated", rr.Code, rr.Body.String())
 	}
 }
 
@@ -1185,6 +1256,14 @@ func TestPRViewAndList_builtin(t *testing.T) {
 	// The built-in binding has no forge review model: reviews is [], never null.
 	if got.Reviews == nil || len(got.Reviews) != 0 {
 		t.Errorf("CR reviews = %+v, want an empty non-nil array on the built-in binding", got.Reviews)
+	}
+	// The built-in binding has no CR comment thread yet (ADR-0048):
+	// PullComments wraps ErrUnsupported, which handlePRGet treats as an empty
+	// thread rather than a failure — comments is [], never null, and the
+	// response still 200s. This is the regression test for that carve-out:
+	// without it, builtin `pr view` would 409 on every PR.
+	if got.Comments == nil || len(got.Comments) != 0 {
+		t.Errorf("CR comments = %+v, want an empty non-nil array on the built-in binding", got.Comments)
 	}
 
 	rr = doJSON(t, handler, "GET", "/agent/v1/prs", token, "")

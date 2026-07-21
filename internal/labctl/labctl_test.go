@@ -895,6 +895,50 @@ func TestPRViewWithReviews(t *testing.T) {
 	}
 }
 
+// TestPRViewWithComments extends TestPRViewWithReviews (issue #191): PR
+// comments render AFTER the reviews block, each under printIssue's own
+// "--- comment by <author> (<time>)" separator, oldest first (slice order,
+// no sorting). The server-side wiring of GET /agent/v1/prs/{n}'s comments
+// array is issue #191's other half (internal/agentapi, done in parallel), so
+// this drives the Client straight against a raw JSON httptest server — like
+// TestPRChecksUnknownAggregateExitsOne below — rather than through
+// newAgentFixture's fakeForge, exercising labctl's decode-and-render path on
+// its own.
+func TestPRViewWithComments(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = io.WriteString(w, `{
+			"number": 12, "title": "feat: capture card", "body": "card: |\n  kind: capture",
+			"state": "open", "head": "afk/7", "url": "https://forge.example/pr/12",
+			"reviews": [
+				{"reviewer": "alice", "state": "changes_requested", "body": "fix the tests", "dismissed": false}
+			],
+			"comments": [
+				{"author": "alice", "body": "pushed a fix for the tests", "created_at": "2026-07-06T12:00:00Z"},
+				{"author": "bob", "body": "looks good now", "created_at": "2026-07-06T13:00:00Z"}
+			]
+		}`)
+	}))
+	defer ts.Close()
+
+	env := map[string]string{"LAB_URL": ts.URL, "LAB_TOKEN": "lab_run_x"}
+	code, stdout, stderr := run(t, []string{"pr", "view", "12"}, env)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	want := "#12 feat: capture card\n" +
+		"state: open\n" +
+		"head: afk/7\n" +
+		"url: https://forge.example/pr/12\n" +
+		"\ncard: |\n  kind: capture\n" +
+		"\n--- review by alice (changes_requested)\nfix the tests\n" +
+		"\n--- comment by alice (2026-07-06T12:00:00Z)\npushed a fix for the tests\n" +
+		"\n--- comment by bob (2026-07-06T13:00:00Z)\nlooks good now\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
 // --- pr review verbs (issue #180) -------------------------------------------
 
 // TestPRRejectOutput: `labctl pr reject <n> <body>` records the rejection
