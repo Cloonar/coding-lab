@@ -8,12 +8,18 @@
 import { describe, expect, it } from 'vitest';
 
 // Every .ts/.tsx under src/ as raw text, excluding tests (whose fixtures may
-// legitimately name concrete providers) — and thereby this file itself.
-const sources = import.meta.glob<string>(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts*'], {
-  eager: true,
-  query: '?raw',
-  import: 'default',
-});
+// legitimately name concrete providers) — and thereby this file itself. Also
+// excludes shared test harnesses (issue #194): *.test.ts* files import fixture
+// helpers from a sibling harness.tsx that carries the same provider fixtures
+// (e.g. RunChat's runchat/harness.tsx) but isn't itself suffixed `.test.ts*`.
+const sources = import.meta.glob<string>(
+  ['./**/*.ts', './**/*.tsx', '!./**/*.test.ts*', '!./**/harness.tsx'],
+  {
+    eager: true,
+    query: '?raw',
+    import: 'default',
+  },
+);
 
 describe('provider-neutral sources', () => {
   it('scans the real source tree (sanity: the guard must never go blind)', () => {
