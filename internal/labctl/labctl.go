@@ -44,7 +44,7 @@ Usage:
   labctl label create --name N [--color C --description D]
                                         create the label if missing (idempotent)
   labctl pr create --title T --body B   open a PR/CR for the current branch
-  labctl pr view <n>                    show PR n (number, title, state, head, url, body)
+  labctl pr view <n>                    show PR n (number, title, state, head, url, body, reviews, comments)
   labctl pr list                        list open PRs plus the ~50 most recently closed (number, state, head, url)
   labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
   labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
@@ -610,8 +610,14 @@ func printIssue(w io.Writer, is Issue) {
 // title, then one metadata line each for state, head, and url, then the
 // body, then each submitted review under a "--- review by <reviewer>
 // (<state>)" separator (dismissed reviews add ", dismissed" to the
-// parenthetical) — the reject → re-queue loop's read. No reviews leaves the
-// output exactly as it was before reviews existed.
+// parenthetical) — the reject → re-queue loop's read — and finally each
+// discussion comment, AFTER the reviews block, under printIssue's own
+// "--- comment by <author> (<time>)" separator, oldest first (slice order,
+// no sorting — the server already returns them that way). Comment bodies
+// render verbatim, verdict-marker comments included: a reject's marker line
+// plus the findings below it IS the input a fix agent reads next, so nothing
+// here may summarize or strip it. No reviews and no comments leaves the
+// output exactly as it was before either existed.
 func printPR(w io.Writer, pd PRDetail) {
 	_, _ = fmt.Fprintf(w, "#%d %s\n", pd.Number, pd.Title)
 	_, _ = fmt.Fprintf(w, "state: %s\n", pd.State)
@@ -624,6 +630,9 @@ func printPR(w io.Writer, pd PRDetail) {
 			state += ", dismissed"
 		}
 		_, _ = fmt.Fprintf(w, "\n--- review by %s (%s)\n%s\n", rv.Reviewer, state, rv.Body)
+	}
+	for _, c := range pd.Comments {
+		_, _ = fmt.Fprintf(w, "\n--- comment by %s (%s)\n%s\n", c.Author, c.CreatedAt, c.Body)
 	}
 }
 

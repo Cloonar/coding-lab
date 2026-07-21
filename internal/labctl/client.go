@@ -54,16 +54,18 @@ type PR struct {
 	URL    string `json:"url"`
 }
 
-// PRDetail is the agent API's GET /prs/{n} shape: metadata plus the full body
-// and the submitted reviews (always present, [] when none).
+// PRDetail is the agent API's GET /prs/{n} shape: metadata plus the full body,
+// the submitted reviews, and the discussion comments — reviews and comments
+// are each always present, [] when none.
 type PRDetail struct {
-	Number  int        `json:"number"`
-	Title   string     `json:"title"`
-	Body    string     `json:"body"`
-	State   string     `json:"state"`
-	Head    string     `json:"head"`
-	URL     string     `json:"url"`
-	Reviews []PRReview `json:"reviews"`
+	Number   int        `json:"number"`
+	Title    string     `json:"title"`
+	Body     string     `json:"body"`
+	State    string     `json:"state"`
+	Head     string     `json:"head"`
+	URL      string     `json:"url"`
+	Reviews  []PRReview `json:"reviews"`
+	Comments []Comment  `json:"comments"`
 }
 
 // PRReview is one submitted review in PRDetail.Reviews: who submitted it, its
