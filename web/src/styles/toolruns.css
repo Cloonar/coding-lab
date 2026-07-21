@@ -1,0 +1,47 @@
+/* --- Coalesced tool-call runs (issue #13) ------------------------------- */
+
+/* The "N tool calls" summary line for a run of chips — the same quiet
+   transparent-outline treatment as a lone chip (Phase 3). A single <button>
+   since issue #145 (frame + summary classes on one element), opening the
+   detail panel at the group's list page. */
+.chat-tool-group {
+  align-self: flex-start;
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+}
+.tool-group-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  min-height: 44px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+.tool-group-summary.has-error {
+  color: var(--err-text);
+}
+.tool-group-failed {
+  color: var(--err-text);
+  font-weight: 600;
+}
+.tool-group-running {
+  color: var(--muted);
+  font-weight: 500;
+}
+/* The expanded run: the individual chips (and any interleaved thinking) stack
+   vertically, indented slightly from the group frame. Desktop only (issue
+   #154); the mobile group tap opens the detail sheet instead. */
+.tool-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0 0.5rem 0.5rem;
+}

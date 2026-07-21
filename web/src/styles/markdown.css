@@ -1,0 +1,194 @@
+/* --- Markdown rendering in chat messages (issue #13) --------------------- */
+
+/* The rendered markdown body: block flow with comfortable spacing. Wide
+   elements (tables, code fences) get their OWN horizontal scroll so the
+   message column never forces the page to scroll sideways. */
+.md {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md-p {
+  margin: 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+/* Chat markdown headings ride the serif too — they live in assistant prose. */
+.md-h {
+  margin: 0.2rem 0;
+  line-height: 1.3;
+  font-family: var(--font-serif);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+h1.md-h {
+  font-size: 1.35rem;
+}
+h2.md-h {
+  font-size: 1.2rem;
+}
+h3.md-h {
+  font-size: 1.08rem;
+}
+h4.md-h,
+h5.md-h,
+h6.md-h {
+  font-size: 1rem;
+}
+.md-list {
+  margin: 0;
+  padding-left: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.md-list li {
+  overflow-wrap: anywhere;
+}
+/* Nested lists tuck in without the doubled top gap. */
+.md-list .md-list {
+  margin-top: 0.25rem;
+}
+.md-quote {
+  margin: 0;
+  padding: 0.1rem 0 0.1rem 0.75rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+.md-hr {
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.25rem 0;
+}
+.md-link {
+  color: var(--link);
+  overflow-wrap: anywhere;
+}
+.role-user .md-link {
+  color: inherit;
+  text-decoration: underline;
+}
+/* Inline code — distinct from a fenced block; wraps rather than overflows. */
+.md-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  padding: 0.05rem 0.3rem;
+  border-radius: 5px;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  overflow-wrap: anywhere;
+}
+/* The user bubble now shares the chip tint, so inline code falls back to the
+   page bg there to stay legible against it (dark: recessed; light: lighter). */
+.role-user .md-code {
+  background: var(--bg);
+}
+
+/* Fenced code block: header bar (language + copy) over a horizontally
+   scrollable <pre>. No syntax highlighting (decision 4) — plain monospace. */
+/* Code surfaces set their OWN neutral colors and mono family, so a block reads
+   the same inside the user bubble or the bubble-less assistant prose. */
+.md-codeblock {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--card);
+  color: var(--text);
+}
+.md-codeblock-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.2rem 0.35rem 0.2rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--chip-bg);
+}
+.md-codeblock-lang {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.md-pre {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  overflow-x: auto;
+  white-space: pre;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+/* Table: own overflow-x scroll container — faithful grid, swipe sideways. */
+.md-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.md-table {
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border);
+  padding: 0.3rem 0.55rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.md-table th {
+  background: var(--chip-bg);
+  font-weight: 650;
+}
+.md-align-center {
+  text-align: center !important;
+}
+.md-align-right {
+  text-align: right !important;
+}
+
+/* Whole-message copy action row, under an assistant message (decision 14). */
+.chat-msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.1rem;
+}
+
+/* Copy button — always visible (mobile has no hover), icon→check feedback. */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 30px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.copy-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.copy-btn.copied {
+  color: var(--ok);
+}
+.md-codeblock-bar .copy-btn {
+  min-height: 28px;
+}
+.copy-icon {
+  display: block;
+  flex: none;
+}
+.copy-label {
+  line-height: 1;
+}

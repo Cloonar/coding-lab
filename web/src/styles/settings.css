@@ -1,0 +1,19 @@
+/* Settings ------------------------------------------------------------------------ */
+
+.field .field-error {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 400;
+  color: var(--danger);
+  margin-top: 0.3rem;
+}
+
+/* API tokens ---------------------------------------------------------------------- */
+
+.token-reveal .banner {
+  margin-bottom: 0.8rem;
+}
+
+.token-reveal input[readonly] {
+  background: var(--hover);
+}

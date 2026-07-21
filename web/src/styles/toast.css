@@ -1,0 +1,32 @@
+/* Toast -------------------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  z-index: 20;
+  background: var(--text);
+  color: var(--bg);
+  padding: 0.55rem 1rem;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow);
+  font-weight: 600;
+  max-width: min(90vw, 480px);
+  overflow-wrap: anywhere;
+}
+
+/* Diff render cap: large files collapse behind an explicit expand tap so a
+   ~1MiB diff never materializes tens of thousands of rows on a phone. */
+.diff-expand {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.6rem;
+  min-height: 44px;
+  font-size: 0.85rem;
+  color: var(--link);
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}

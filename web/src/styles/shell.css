@@ -1,0 +1,416 @@
+/* App shell / side rail --------------------------------------------------- */
+/* Phase 1 structural shell (issue #41): a persistent 260px side rail beside the
+   routed content at >=1024px; the SAME SideNav as a left overlay drawer below
+   that (hamburger or a follow-finger rightward drag from anywhere to open;
+   scrim/Escape/route-change/leftward drag to close — issue #140). Everything is
+   expressed in existing tokens (--card, --border, --hover, --accent, --space-*)
+   so Phase 2a can swap token VALUES with no edits here — no hardcoded colors.
+   Class map for later phases: .shell (root, carries .drawer-open / .rail-
+   collapsed / .drawer-dragging), .shell-topstrip / .strip-hamburger / .attn-
+   badge (mobile), .shell-scrim, .shell-rail (drawer/persistent wrapper),
+   .shell-content, .rail-reopen (collapsed chevron), and .rail-* inside SideNav. */
+
+.shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Mobile top strip (<1024px; the component also hides it on /runs/:id). */
+.shell-topstrip {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.5rem var(--space-3);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.strip-hamburger {
+  position: relative;
+  color: var(--text);
+}
+
+/* Attention badge on the hamburger: any live run is needs_input/question. */
+.attn-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  border: 2px solid var(--bg);
+}
+
+/* Scrim behind the drawer (mobile). */
+.shell-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* The rail wrapper. Mobile: an off-canvas drawer sliding in from the left. */
+.shell-rail {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 30;
+  width: 260px;
+  max-width: 85vw;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  transform: translateX(-100%);
+  /* A closed drawer leaves the a11y tree and the tab order, not just the
+     viewport — otherwise every page starts with ~10 invisible off-screen tab
+     stops (the old TopBar menu unmounted entirely; this is its equivalent).
+     visibility flips AFTER the slide-out so closing still animates; the open
+     rule below restores it immediately so opening never slides in invisible. */
+  visibility: hidden;
+  transition:
+    transform 0.24s ease,
+    visibility 0s linear 0.24s;
+}
+
+.shell.drawer-open .shell-rail {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.24s ease;
+}
+
+/* Mid-drag (issue #140): AppShell pins the rail to the finger with an inline
+   transform and drives the scrim opacity from drag progress. Transitions are
+   off so the rail tracks 1:1, and visibility is forced on while a still-
+   "closed" drawer is dragged out. On release AppShell clears the inline
+   styles and flips .drawer-open in the same tick, so the transitions above
+   animate the settle from wherever the finger left off. */
+.shell.drawer-dragging .shell-rail {
+  visibility: visible;
+  transition: none;
+}
+
+/* Collapsed re-open chevron — desktop-only (see the >=1024 block). */
+.rail-reopen {
+  display: none;
+}
+
+/* SideNav inner content. */
+.rail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  min-height: 100%;
+}
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Collapse chevron is desktop-only (collapse applies only >=1024px). */
+.rail-collapse {
+  display: none;
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.rail-newrun {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.rail-newrun:hover {
+  text-decoration: none;
+  filter: brightness(0.96);
+}
+
+.rail-section-label {
+  margin: var(--space-2) 0 0;
+  padding: 0 0.2rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.rail-active {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail-empty {
+  margin: 0;
+  padding: 0.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.rail-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.rail-row:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+
+/* Current run highlighted via the router's aria-current="page". */
+.rail-row[aria-current='page'] {
+  background: var(--hover);
+  font-weight: 600;
+}
+
+.rail-row-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+}
+
+/* Attention = accent (matches the hamburger badge); working = the convo amber. */
+.rail-row-dot.needs-input,
+.rail-row-dot.question {
+  background: var(--accent);
+}
+
+.rail-row-dot.working {
+  background: var(--banner-text);
+}
+
+.rail-row-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+/* Title plus the optional "N behind" chip (issue #149) on one line. */
+.rail-row-top {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.rail-row-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Small and muted — metadata, not a call to action (issue #149). */
+.rail-behind-chip {
+  flex: none;
+  font-size: 0.68rem;
+  padding: 0.05rem 0.4rem;
+  color: var(--muted);
+}
+
+.rail-row-repo {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* AFK budget countdown on the secondary line (re-homed from InstanceList). */
+.rail-row-budget.over {
+  color: var(--danger);
+}
+
+/* Pushes the footer nav + signed-in row to the bottom of the rail. */
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.rail-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 44px;
+  padding: 0.4rem 0.5rem;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 550;
+  border-radius: var(--radius-control);
+}
+
+.rail-nav-link:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+
+.rail-nav-link.active {
+  color: var(--link);
+  font-weight: 650;
+}
+
+.rail-nav-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.rail-nav-link.active .rail-nav-icon {
+  color: var(--link);
+}
+
+.rail-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: var(--space-2);
+  margin-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.rail-user {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rail-logout {
+  flex: none;
+  min-height: 44px;
+  padding: 0.35rem 0.6rem;
+}
+
+/* Desktop >=1024px: persistent rail beside the content; no drawer chrome. */
+@media (min-width: 1024px) {
+  .shell {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .shell-topstrip,
+  .shell-scrim {
+    display: none;
+  }
+
+  .shell-rail {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    height: 100dvh;
+    flex: none;
+    max-width: none;
+    transform: none;
+    transition: none;
+    visibility: visible; /* the base rule hides the closed DRAWER — not the rail */
+  }
+
+  .shell-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .rail-collapse {
+    display: inline-flex;
+  }
+
+  /* Collapsed: hide the rail, surface a fixed re-open chevron top-left. */
+  .shell.rail-collapsed .shell-rail {
+    display: none;
+  }
+
+  .shell.rail-collapsed .rail-reopen {
+    display: inline-flex;
+    position: fixed;
+    top: var(--space-3);
+    left: var(--space-3);
+    z-index: 30;
+    background: var(--card);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+}
+
+/* prefers-reduced-motion: the drawer snaps rather than slides. The drag
+   itself still tracks the finger 1:1 (user-driven motion, not an animation),
+   but the release settle — which is this transition — snaps instead of
+   sliding since it's set to none below. The .drawer-open selector is needed
+   too: that rule carries its own transition at higher specificity than bare
+   .shell-rail, so without it a settle INTO the open state would still slide. */
+@media (prefers-reduced-motion: reduce) {
+  .shell-rail,
+  .shell.drawer-open .shell-rail {
+    transition: none;
+  }
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: var(--space-3);
+}
+
+.section-head h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.center-note {
+  color: var(--muted);
+  text-align: center;
+  padding: 3rem 1rem;
+}
+
+/* Live-connection dot ------------------------------------------------------ */
+
+.live-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+  transition: background 0.2s ease;
+}
+
+.live-dot.on {
+  background: var(--ok);
+}

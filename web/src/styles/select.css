@@ -1,0 +1,173 @@
+/* Unified select (issue #66) ------------------------------------------------ */
+
+/* Relative wrapper around the trigger + panel (the .composer-pop pattern);
+   the field skin stretches it to the form-control width. */
+.select-pop {
+  position: relative;
+  display: inline-flex;
+}
+.select-pop-field {
+  display: block;
+  width: 100%;
+}
+.select-pop-field .select-panel {
+  width: 100%;
+  max-width: none;
+}
+/* The panel itself never scrolls — the listbox does, so the filter input
+   stays pinned at the top. */
+.select-panel {
+  overflow: hidden;
+}
+.select-listbox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-height: 0;
+  overflow-y: auto;
+}
+.select-listbox:focus-visible {
+  outline: none; /* aria-activedescendant carries focus; rows show .active */
+}
+/* Panel filter input: the .field input look. */
+.select-panel .select-search {
+  flex: none;
+  width: 100%;
+  font-size: 16px;
+  min-height: 44px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+}
+
+/* Field-skin trigger: the .field select metrics on a button, plus the muted
+   caret. Inner spans carry explicit resets — `.field span` styles every span
+   in a field block (the label look) and must not leak into the control. */
+.select-field-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  font-size: 16px;
+  text-align: left;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.select-field-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.select-field-trigger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.select-field-trigger .select-field-label {
+  display: block;
+  flex: 1;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-field-trigger .select-field-caret {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Option rows (formerly .repo-row): enabled rows selectable; disabled rows
+   stay visible with muted status text (e.g. clone progress). */
+.select-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  font-weight: 550;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.select-option:hover:not(:disabled),
+.select-option.active:not(:disabled) {
+  background: var(--hover);
+}
+.select-option:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.select-option.selected {
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+.select-option .select-option-label {
+  display: block;
+  flex: 1;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.select-option .select-option-status {
+  display: block;
+  flex: none;
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* AFK strip under the composer. */
+.afk-strip {
+  margin-top: var(--space-3);
+}
+.afk-strip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.afk-strip-start,
+.afk-strip-auto {
+  min-height: 44px;
+  font-size: 0.9rem;
+  font-weight: 550;
+}
+/* Greyed hint at a known-0 claimable count — visual only; the button stays a
+   real, enabled control (the server re-checks and 409s a stale click). */
+.afk-strip-start.greyed {
+  opacity: 0.55;
+}
+.afk-strip-paused {
+  margin-bottom: var(--space-2);
+  align-items: center;
+}
+.afk-strip-reset {
+  min-height: 44px;
+  padding: 0 0.7rem;
+}
+
+/* <640px: the composer fills the width and the chip row wraps naturally. */
+@media (max-width: 639.98px) {
+  .composer {
+    margin-top: var(--space-4);
+  }
+  .composer-chip-label {
+    max-width: 7rem;
+  }
+}

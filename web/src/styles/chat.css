@@ -1,0 +1,584 @@
+/* --- Embedded chat (issue #7): phone-first conversation view ------------- */
+
+/* Conversational-state badges on instance rows and the chat header. */
+.chip.convo.working {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+.chip.convo.needs-input,
+.chip.convo.question {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+/* The chat page is a BOUNDED flex row (height, not min-height): the document
+   never scrolls, .chat-stream is the scroll container, and the composer stays
+   pinned at the bottom of .chat-column — the column wrapper that carries the
+   old page-as-column layout now that the tool panel sidebar (issue #145) can
+   sit beside it. Inside the app shell (issue #41) the rail sits BESIDE the
+   chat (a width, never a height), and the mobile top strip is hidden on
+   /runs/:id, so this 100dvh fill still equals the viewport at every
+   breakpoint — a flex/height chain, no magic offset for chrome above. */
+.chat-page {
+  display: flex;
+  flex-direction: row;
+  height: 100vh;
+  height: 100dvh;
+  padding-bottom: 0;
+}
+
+/* The header/stream positioning context (issue #35 §2): on mobile the header
+   overlays the stream and slides via translateY, so it lives in a relative body
+   wrapper separate from the sticky composer. */
+.chat-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: nowrap; /* <640px: a single non-wrapping row (§1) */
+  padding: 0.5rem 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.chat-back {
+  /* sizing/centering come from .icon-btn; only neutralise .crumb's margin. */
+  margin: 0;
+}
+/* The title area (issue #132): the title button/form plus the project name and
+   forge icon as siblings — a link inside a button is invalid nested-interactive
+   HTML. This wrapper is the header's flex item (mobile grower / desktop cap the
+   button used to carry); inside it the title shrinks last and the project first
+   (below). Baseline-aligned like the old in-button row. */
+.chat-titlebar {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1; /* <640px: grow + let children truncate so the row never wraps (§1) */
+}
+.chat-title {
+  font-weight: 600;
+  flex: 0 1 auto; /* within .chat-titlebar: shrink, never grow past the project */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Inline rename (issue #111): the title is a click-to-edit <button> in view
+   mode and a compact <form> in edit mode — both wear .chat-title so the
+   header's flex sizing (mobile grower / desktop 40% cap) applies unchanged. */
+button.chat-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.chat-title:hover {
+  background: none;
+}
+/* Flex children ellipsize themselves (the container's clip can't reach them);
+   the title's flex-shrink stays default (1) while the project span's is huge
+   (100000, below) so the project hits zero width before the title loses a
+   pixel. */
+.chat-title-text,
+.chat-title-project {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+}
+/* The project name beside the display title (titled or not, issue #120) —
+   muted, secondary, shrinks-to-zero-first per the rule above. */
+.chat-title-project {
+  flex: 0 100000 auto;
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+/* As a link to the repo's issues page (issue #132) it keeps the muted look, with
+   a hover cue; the legacy no-`~` case still renders nothing at all. */
+a.chat-title-project {
+  text-decoration: none;
+}
+a.chat-title-project:hover,
+a.chat-title-project:focus-visible {
+  color: var(--text);
+  text-decoration: underline;
+}
+/* The forge git-icon link (issue #132) — a compact inline affordance beside the
+   project name, NOT a 44px .icon-btn: it rides the title row, so it centers
+   against the baseline-aligned text and only tints on hover. Hidden entirely
+   (never greyed) when there's no forge URL. */
+.chat-title-forge {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem;
+  color: var(--muted);
+  border-radius: var(--radius-control);
+  line-height: 0;
+}
+.chat-title-forge:hover,
+.chat-title-forge:focus-visible {
+  color: var(--text);
+}
+/* The pencil fades in on hover/focus as the edit affordance; the whole title
+   is the button, so touch (no hover) loses nothing. */
+.chat-title-pencil {
+  flex: none;
+  align-self: center;
+  color: var(--muted);
+  opacity: 0;
+}
+button.chat-title:hover .chat-title-pencil,
+button.chat-title:focus-visible .chat-title-pencil {
+  opacity: 1;
+}
+/* Edit mode: input + save/cancel in the title's slot. 36px controls — the
+   header's 44px back button still sets the row height, so both modes measure
+   the same. */
+.chat-title-form {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1; /* fill .chat-titlebar in edit mode (the project/icon are hidden) */
+  overflow: visible; /* don't clip the input's focus outline */
+}
+.chat-title-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 16px; /* no iOS zoom */
+  min-height: 36px;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+}
+.chat-title-form .icon-btn {
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0.35rem;
+}
+/* OpenAffordance is icon-only inside the chat header (both breakpoints). */
+.chat-header .action-label {
+  display: none;
+}
+@media (min-width: 640px) {
+  .chat-header .action-icon {
+    display: inline-flex;
+  }
+}
+/* <640px the title is the sole grower (fills the row, dot + ••• hug the right);
+   the spacer only grows at >=640px, where the title stops growing (§1). */
+.chat-header .spacer {
+  flex: none;
+}
+
+.chat-stream {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: var(--space-3) 0;
+}
+
+/* Messages (issue #41 Phase 3): assistant text is bubble-less serif prose on
+   the page; only the user reply keeps a bubble — a soft warm neutral, never
+   accent (accent is reserved for actions/attention). Order matters: .thinking
+   follows .role-* so it wins the equal-specificity override. */
+.chat-msg {
+  max-width: 100%;
+  min-width: 0;
+}
+/* Assistant / default role: full-column serif prose, no card. The serif family
+   is scoped to the prose blocks (below) so code blocks, copy buttons and lang
+   labels keep the system sans/mono stacks — UI chrome never turns serif. */
+.chat-msg.role-assistant {
+  font-size: 16.5px;
+  color: var(--text);
+}
+.chat-msg.role-assistant .md-p,
+.chat-msg.role-assistant .md-list,
+.chat-msg.role-assistant .md-quote,
+.chat-msg.role-assistant .md-table {
+  font-family: var(--font-serif);
+}
+.chat-msg.role-assistant .md-p,
+.chat-msg.role-assistant .md-list li {
+  line-height: 1.65;
+}
+/* User reply: soft warm-neutral bubble, right-aligned, system sans. Light uses
+   the slightly deeper --idle-bg (reads as a bubble on bone: 13.5:1 text on the
+   fill, 1.17:1 fill vs --bg); dark uses the pinned --chip-bg tone (9.8:1). */
+.chat-msg.role-user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 0.5rem 0.8rem;
+  border-radius: 16px;
+  background: var(--idle-bg);
+  color: var(--text);
+}
+@media (prefers-color-scheme: dark) {
+  .chat-msg.role-user {
+    background: var(--chip-bg);
+  }
+}
+/* Thinking: a quiet serif-italic aside, no bubble, a notch smaller than prose.
+   No copy button and (almost) never code here, so the whole block — tag
+   included — can carry the italic. */
+.chat-msg.thinking {
+  align-self: stretch;
+  max-width: 100%;
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 14.5px;
+  color: var(--muted);
+}
+.chat-msg-tag {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  margin-bottom: 0.2rem;
+}
+.chat-msg-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Tool activity (issue #41 Phase 3): a quiet bordered mono row. No accent;
+   only an error tints the text red. Since issue #145 the chip is a <button>
+   wearing BOTH classes (frame + row) that opens the detail panel — the
+   button-element resets live in the panel section at the end. */
+.chat-tool {
+  align-self: flex-start;
+  max-width: 100%;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+}
+.tool-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.tool-summary .tool-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-summary.tool-error {
+  color: var(--err-text);
+}
+.tool-status {
+  font-weight: 600;
+}
+/* Tool I/O: a subtly recessed mono pane. Rendered inside the detail panel
+   (issue #145) and, on desktop, inline under an expanded chip (issue #154); the
+   40vh cap is lifted in both, which supply their own single scroll container. */
+.tool-body {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--border);
+  background: var(--hover);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  max-height: 40vh;
+}
+.tool-output {
+  color: var(--muted);
+}
+/* The lone chip's desktop inline expansion (issue #154): ONE scroll container
+   for the whole rich body, so the per-<pre> 40vh cap is lifted inside (mirrors
+   how .tool-panel .tool-body lifts it in the sheet/sidebar). */
+.tool-inline-body {
+  max-height: 45vh;
+  overflow-y: auto;
+}
+.tool-inline-body .tool-body {
+  max-height: none;
+}
+
+.chat-lifecycle {
+  align-self: center;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.chat-lifecycle.error {
+  color: var(--err-text);
+}
+
+.chat-dialog-inline {
+  align-self: flex-start;
+  max-width: 100%;
+}
+.chat-dialog-prompt {
+  margin: 0 0 0.4rem;
+  font-weight: 600;
+}
+
+/* Answered Q→A summaries (issue #56 decision 3): a resolved dialog stays in
+   history as a compact, inert summary — a muted rail instead of card chrome,
+   visibly quieter than the interactive .chat-dialog-card. Each pair is the
+   question (muted, small) above the recorded answer; dismissals and plan
+   resolutions get one muted marker line. No buttons, no unchosen options. */
+.chat-dialog-answered {
+  align-self: flex-start;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.15rem 0 0.15rem 0.75rem;
+  border-left: 2px solid var(--border);
+}
+.dialog-qa {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.dialog-qa-question {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.dialog-qa-answer {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.35rem;
+}
+/* The operator's typed words — distinct from a listed option label. */
+.dialog-qa-other {
+  font-style: italic;
+}
+.dialog-qa-none,
+.chat-dialog-outcome {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* Fixed bottom composer; state follows the run. */
+.chat-composer {
+  position: sticky;
+  bottom: 0;
+  padding: 0.5rem 0 0.75rem;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+.chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4rem;
+}
+.chat-input {
+  flex: 1;
+  font-size: 16px;
+  min-height: 44px;
+  /* Auto-grows one row → content height, capped here with internal scroll
+     (ADR-0022 decision 9b). JS sets the exact height inline; max-height clamps
+     it and overflow takes over. resize:none — the drag handle is gone. */
+  max-height: 9.5rem;
+  overflow-y: auto;
+  line-height: 1.4;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+  resize: none;
+}
+.chat-send {
+  min-height: 44px;
+  padding: 0 1rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: var(--radius-control);
+}
+/* Composer Send + the locked-state Interrupt escape hatch: icon-only accent
+   squares sharing one slot style (ADR-0029). .chat-send is the always-present
+   composer Send; .chat-interrupt now serves only the degraded question-state
+   locked branch (issue #165 item 3 dropped it from the dialog-pending branch —
+   an accent square in Send's slot next to a live interactive card drew
+   miss-taps; the header/ChatMenu Interrupt covers that state instead). The
+   extra .icon-btn is ONLY on these composer buttons, never on the dialog
+   Submit/Send buttons. */
+.chat-send.icon-btn,
+.chat-interrupt.icon-btn {
+  min-width: 44px;
+  padding: 0;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+}
+.chat-send.icon-btn.busy,
+.chat-interrupt.icon-btn.busy,
+.chat-turn-interrupt.icon-btn.busy {
+  opacity: 0.6;
+}
+.chat-interrupt-busy {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.chat-composer-note {
+  margin: 0;
+  padding: 0.5rem;
+  text-align: center;
+  color: var(--muted);
+}
+
+/* Dialog panel: native tappable option buttons from the structured input. */
+.chat-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.dialog-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+/* House-style option cards (issue #56 decision 7): every dialog option — the
+   single-select rows, the flat multi-select toggles (formerly bare checkbox
+   rows that dropped descriptions), and the multi-question form's buttons —
+   is a full-width rectangular card on the control radius, never the seg
+   pill: left-aligned, bold label with the muted description always visible
+   beneath, and a check indicator riding the trailing edge when toggled on. */
+.dialog-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+}
+.dialog-option-body {
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+.dialog-other {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* Option faces (issue #51): bold label over a secondary description, shared by
+   single-question options, plan approve/reject rows and the question form. */
+.dialog-option-label {
+  display: block;
+  font-weight: 600;
+}
+.dialog-option-desc {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+/* A picked (not yet submitted) toggle: accent border + subtle tint + the
+   check indicator (issue #56 decision 7); aria-pressed carries the state. */
+.dialog-option.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+.dialog-option-check {
+  display: inline-flex;
+  flex: none;
+  color: var(--accent);
+}
+
+/* Plan review (issue #51): the prompt IS the plan body — markdown at natural
+   height (issue #56: the chat pane is the only scrollbar, no inner scrollbox),
+   so the approve/reject rows sit after the fully-rendered plan. */
+.chat-dialog-plan {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+}
+
+/* Multi-question form (issue #51): stacked questions, each a small header chip
+   + the question text + its option buttons; ONE submit for all answers. Natural
+   height — the chat pane is the only scrollbar (issue #56). */
+.dialog-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.dialog-question {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.dialog-question-header {
+  align-self: flex-start;
+}
+.dialog-other-input {
+  width: 100%;
+  margin-top: 0.3rem;
+}
+
+/* Inline dialog cards (issue #56) ------------------------------------------ */
+
+/* The pending dialog as a stream card (decision 1): a full-width house card
+   inside .chat-stream, scrolling with the conversation. scroll-margin keeps
+   the card's question text clear of the chat header when the arrival scroll
+   brings the card's top into view (decision 5). */
+.chat-dialog-card {
+  padding: var(--space-4);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  scroll-margin-top: var(--space-3);
+}
+/* <640px the header overlays the stream's top band (§2), so the margin must
+   also clear its measured height — same offset the stream's padding reserves. */
+@media (max-width: 639.98px) {
+  .chat-dialog-card {
+    scroll-margin-top: calc(var(--chat-header-h, 48px) + var(--space-3));
+  }
+}
+
+.chat-earlier {
+  align-self: center;
+}

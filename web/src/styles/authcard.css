@@ -1,0 +1,22 @@
+/* Auth card (issue #41 phase 2a) -------------------------------------------- */
+
+/* Login/Setup render <main class="page"><div class="card auth-card">…</div>
+   </main> (see routes/Login.tsx, routes/Setup.tsx) — :has() scopes the
+   centered treatment to those two routes without a new class hook on <main>,
+   so every other .page consumer (still top-anchored) is untouched. Falls
+   back to the plain top-anchored .card look in browsers without :has()
+   support — .auth-card's own max-width/margin below still centers it
+   horizontally either way. */
+main.page:has(> .auth-card) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  margin: 0 auto;
+}

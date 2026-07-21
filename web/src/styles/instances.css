@@ -1,0 +1,206 @@
+/* Instances ------------------------------------------------------------------ */
+
+.instance-list {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* Mobile-first (<640px): the row stacks into two lines — info then actions. */
+.instance-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Line 1: title + branch (+ budget) with the state chips, full width. */
+.instance-info {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.instance-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.instance-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Long mono branch names wrap (anywhere) so a 360px page never scrolls sideways. */
+.instance-branch {
+  font-size: 0.8rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Line 2: the Chat / Open / Stop controls, icon-only 44px targets on phones. */
+.instance-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.instance-actions .card-link {
+  min-width: 44px;
+  justify-content: center;
+}
+
+.instance-actions .instance-stop {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Desktop (>=640px): single-line row with text actions — unchanged from before. */
+@media (min-width: 640px) {
+  .instance-row {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .instance-info {
+    flex: 1 1 auto;
+  }
+
+  .instance-actions {
+    gap: 0.5rem;
+  }
+
+  .instance-actions .card-link {
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .instance-actions .instance-stop {
+    min-width: auto;
+    min-height: 36px;
+    padding: 0 0.75rem;
+  }
+}
+
+.chip.connecting {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+
+.chip.idle {
+  background: var(--idle-bg);
+  color: var(--idle-text);
+}
+
+.pulse {
+  animation: pulse-fade 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse-fade {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+}
+
+button.stop-all {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+/* Start-instance form / collapsibles ------------------------------------------ */
+
+details.start-instance,
+details.parked {
+  margin-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.35rem;
+}
+
+details.start-instance summary,
+details.parked summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  font-weight: 550;
+  color: var(--link);
+  list-style: none;
+}
+
+details.start-instance summary::before,
+details.parked summary::before {
+  content: '▸';
+  margin-right: 0.4rem;
+  transition: transform 0.15s ease;
+}
+
+details.start-instance[open] summary::before,
+details.parked[open] summary::before {
+  transform: rotate(90deg);
+}
+
+details.start-instance form {
+  padding: 0.35rem 0 0.2rem;
+}
+
+.field-row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.field-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Claude auth card ------------------------------------------------------------- */
+
+.auth-status-card .card-head button {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+.login-flow {
+  margin-top: 0.5rem;
+}
+
+.oauth-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The device-code one-time code: big and selectable — the operator reads it
+   off (or single-click selects it) to enter on the verification page. */
+.device-user-code {
+  display: inline-block;
+  margin-top: 0.25rem;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  user-select: all;
+}

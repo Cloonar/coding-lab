@@ -1,0 +1,132 @@
+/* Cards -------------------------------------------------------------------- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  padding: var(--space-4);
+}
+
+.auth-card {
+  max-width: 420px;
+  margin: 2.5rem auto 0;
+}
+
+.auth-card p {
+  margin-top: 0;
+}
+
+.form-card {
+  margin-bottom: var(--space-4);
+}
+
+.form-card > p {
+  margin-top: 0;
+}
+
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.card-title {
+  font-weight: 650;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.card-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+}
+
+.card-link {
+  color: var(--link);
+  text-decoration: none;
+  font-weight: 550;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.card-link:hover {
+  text-decoration: underline;
+}
+
+/* A <button> that reads as a card-link (the copyable tmux-attach affordance). */
+button.attach-copy {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.add-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  margin-top: var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-card);
+  color: var(--link);
+  text-decoration: none;
+  font-weight: 550;
+}
+
+.add-row:hover {
+  background: var(--hover);
+}
+
+/* Roomier vertical rhythm on desktop (one rung up from phone). */
+@media (min-width: 640px) {
+  .card {
+    padding: var(--space-5); /* 16 → 24 */
+  }
+  .card-list,
+  .stack {
+    gap: var(--space-4); /* 12 → 16 */
+  }
+  .topbar {
+    margin-bottom: var(--space-5); /* 16 → 24 */
+  }
+  .stack,
+  .form-card {
+    margin-bottom: var(--space-5); /* 16 → 24 */
+  }
+  .section-head {
+    margin-bottom: var(--space-4); /* 12 → 16 */
+  }
+  .instance-list {
+    margin-top: var(--space-4); /* 12 → 16 */
+  }
+  .page {
+    padding: var(--space-4) var(--space-4) var(--space-6); /* 12/12/32 → 16/16/32 */
+  }
+}
