@@ -35,6 +35,15 @@ esac
 
 image_ref="localhost/agent-tools:${provider}-${version}"
 
+# SMOKE_EXTRA_RUN_ARGS: optional extra `podman run` arguments, split on
+# whitespace (so no arg may contain spaces). CI sets it to accommodate its
+# nested job container (see .forgejo/workflows/agent-tools.yml); leave it
+# empty on any real host.
+extra_run_args=()
+if [ -n "${SMOKE_EXTRA_RUN_ARGS:-}" ]; then
+  read -r -a extra_run_args <<<"${SMOKE_EXTRA_RUN_ARGS}"
+fi
+
 if ! "${PODMAN}" image exists "${image_ref}"; then
   echo "error: image ${image_ref} not found locally — run build.sh first:" >&2
   echo "         containers/agent-tools/build.sh ${provider}" >&2
@@ -57,6 +66,7 @@ for base in ${bases}; do
   # cgroup tree there) — with no change to what the test proves.
   "${PODMAN}" run --rm \
     --network=host --cgroups=disabled \
+    "${extra_run_args[@]}" \
     --mount "type=image,source=${image_ref},destination=/opt/lab" \
     "${base}" \
     sh -c "export PATH=/opt/lab/bin:\$PATH; ${cli} --version && labctl --help >/dev/null && echo \"OK (${cli} + labctl on \$(uname -m))\""

@@ -81,6 +81,12 @@ jobs:
       # 238). Layer caching buys nothing here anyway — every CI run starts
       # from an empty store.
       BUILDAH_LAYERS: "false"
+      # The job container cannot mount a fresh procfs: its /proc carries
+      # locked masked-path overmounts, so the kernel's fully-visible rule
+      # denies the mount ("crun: mount `proc` to `proc`: Operation not
+      # permitted", run 244). Share the job's PID namespace and rbind its
+      # /proc into the smoke containers instead. A real host needs neither.
+      SMOKE_EXTRA_RUN_ARGS: "--pid=host --mount type=bind,source=/proc,destination=/proc"
     steps:
       - uses: actions/checkout@v4
 
@@ -144,6 +150,7 @@ jobs:
       # Same nested-runner necessity as the smoke job's env above.
       BUILDAH_ISOLATION: chroot
       BUILDAH_LAYERS: "false"
+      SMOKE_EXTRA_RUN_ARGS: "--pid=host --mount type=bind,source=/proc,destination=/proc"
     steps:
       # Gate on the registry token BEFORE checkout — fail loud and early with
       # provisioning instructions rather than deep inside a push. No `set -x`
