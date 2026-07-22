@@ -89,11 +89,12 @@ jobs:
       # cgroup-less containers to own a private PID namespace (run 250);
       # the rbound /proc then shows the job's pidns view, which the
       # version/help probes never consult. A real host needs none of this.
-      # --uts=private: podman couples the UTS namespace to --network=host,
-      # and with a host UTS namespace crun's hostname setup dies with
-      # "sethostname: Operation not permitted" (run 252); a private UTS
-      # namespace makes it legal again.
-      SMOKE_EXTRA_RUN_ARGS: "--uts=private --mount type=bind,source=/proc,destination=/proc"
+      # --uts=host: the runner's Docker seccomp profile denies sethostname
+      # outright — runs 252 (default UTS) and 254 (explicit --uts=private,
+      # where the kernel would allow it) both died with "crun: sethostname:
+      # Operation not permitted". With a host UTS namespace podman omits the
+      # hostname from the OCI spec entirely, so crun never makes the call.
+      SMOKE_EXTRA_RUN_ARGS: "--uts=host --mount type=bind,source=/proc,destination=/proc"
     steps:
       - uses: actions/checkout@v4
 
@@ -188,11 +189,12 @@ jobs:
       # Same nested-runner necessity as the smoke job's env above.
       BUILDAH_ISOLATION: chroot
       BUILDAH_LAYERS: "false"
-      # --uts=private: podman couples the UTS namespace to --network=host,
-      # and with a host UTS namespace crun's hostname setup dies with
-      # "sethostname: Operation not permitted" (run 252); a private UTS
-      # namespace makes it legal again.
-      SMOKE_EXTRA_RUN_ARGS: "--uts=private --mount type=bind,source=/proc,destination=/proc"
+      # --uts=host: the runner's Docker seccomp profile denies sethostname
+      # outright — runs 252 (default UTS) and 254 (explicit --uts=private,
+      # where the kernel would allow it) both died with "crun: sethostname:
+      # Operation not permitted". With a host UTS namespace podman omits the
+      # hostname from the OCI spec entirely, so crun never makes the call.
+      SMOKE_EXTRA_RUN_ARGS: "--uts=host --mount type=bind,source=/proc,destination=/proc"
     steps:
       # Gate on the registry token BEFORE checkout — fail loud and early with
       # provisioning instructions rather than deep inside a push. No `set -x`
