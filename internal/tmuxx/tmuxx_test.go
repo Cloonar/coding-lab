@@ -2,6 +2,7 @@ package tmuxx
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -89,4 +90,107 @@ func TestCmd_privateSocketFlag(t *testing.T) {
 	if !slices.Equal(cmd.Args, want) {
 		t.Errorf("cmd args without socket = %q; want %q", cmd.Args, want)
 	}
+}
+
+// isBaselineVar is the pass-through allow-list: the fixed names plus any
+// LC_* locale category, and nothing else (secrets like LAB_DB, tmux's own
+// TMUX, git's GIT_* all fall through).
+func TestIsBaselineVar(t *testing.T) {
+	for _, name := range []string{
+		"PATH", "HOME", "TERM", "TERMINFO_DIRS",
+		"LANG", "LANGUAGE", "LOCALE_ARCHIVE",
+		"LC_ALL", "LC_CTYPE", "LC_TIME",
+	} {
+		if !isBaselineVar(name) {
+			t.Errorf("isBaselineVar(%q) = false; want true", name)
+		}
+	}
+	for _, name := range []string{
+		"LAB_DB", "LAB_URL", "LAB_TOKEN", "TMUX", "SSH_AUTH_SOCK",
+		"GIT_AUTHOR_NAME", "PATHOLOGICAL", "LC", "XLC_ALL", "",
+	} {
+		if isBaselineVar(name) {
+			t.Errorf("isBaselineVar(%q) = true; want false", name)
+		}
+	}
+}
+
+// baselineEnv forwards ONLY the present baseline vars from the lab process
+// env: a planted secret is dropped, the locale set survives, and a baseline
+// var that isn't actually set is not fabricated.
+func TestBaselineEnv_filtersProcessEnv(t *testing.T) {
+	t.Setenv("LAB_DB", "postgres://user:secret@db/lab")
+	t.Setenv("LC_ALL", "C.UTF-8")
+	t.Setenv("LANG", "en_US.UTF-8")
+	t.Setenv("TERMINFO_DIRS", "/nix/store/xxx-terminfo/share/terminfo")
+	t.Setenv("PATH", "/nix/store/bin:/bin")
+	t.Setenv("HOME", "/home/lab")
+	// LANGUAGE is deliberately left unset to prove absent vars aren't invented.
+
+	got := envNames(baselineEnv())
+	for _, name := range []string{"PATH", "HOME", "LANG", "LC_ALL", "TERMINFO_DIRS"} {
+		if !got[name] {
+			t.Errorf("baselineEnv() missing baseline var %q; got %v", name, got)
+		}
+	}
+	if got["LAB_DB"] {
+		t.Errorf("baselineEnv() leaked secret LAB_DB; got %v", got)
+	}
+	if got["LANGUAGE"] {
+		t.Errorf("baselineEnv() fabricated unset LANGUAGE; got %v", got)
+	}
+}
+
+// cmd pins Env to the baseline: a secret in the lab process env never reaches
+// the tmux client (and so never seeds the server's global env / any pane),
+// while the baseline survives. A non-nil Env is the whole point — a nil
+// cmd.Env means "inherit os.Environ() wholesale", which was the #204 leak.
+func TestCmd_scrubsEnvToBaseline(t *testing.T) {
+	t.Setenv("LAB_DB", "postgres://user:secret@db/lab")
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+	t.Setenv("LC_ALL", "C.UTF-8")
+	t.Setenv("PATH", "/nix/store/bin:/bin")
+	t.Setenv("HOME", "/home/lab")
+
+	cmd := New("tmux").cmd(t.Context(), "has-session", "-t", "=x")
+	if cmd.Env == nil {
+		t.Fatal("cmd.Env is nil — the pane would inherit the whole lab process env (#204)")
+	}
+	got := envNames(cmd.Env)
+	for _, name := range []string{"PATH", "HOME", "LC_ALL"} {
+		if !got[name] {
+			t.Errorf("cmd.Env missing baseline var %q; got %v", name, got)
+		}
+	}
+	for _, name := range []string{"LAB_DB", "TMUX"} {
+		if got[name] {
+			t.Errorf("cmd.Env leaked non-baseline var %q; got %v", name, got)
+		}
+	}
+}
+
+// isEnvName screens continuation lines of a multi-line show-environment value
+// (which can't be real variable names) out of the legacy global-env scrub.
+func TestIsEnvName(t *testing.T) {
+	for _, s := range []string{"PATH", "LAB_DB", "_hidden", "A1_B2", "X"} {
+		if !isEnvName(s) {
+			t.Errorf("isEnvName(%q) = false; want true", s)
+		}
+	}
+	for _, s := range []string{"", "1PATH", "bad.name", "has space", "a=b", "-flag", "a-b"} {
+		if isEnvName(s) {
+			t.Errorf("isEnvName(%q) = true; want false", s)
+		}
+	}
+}
+
+// envNames indexes a KEY=VALUE slice by name for presence assertions.
+func envNames(env []string) map[string]bool {
+	m := make(map[string]bool, len(env))
+	for _, kv := range env {
+		if name, _, ok := strings.Cut(kv, "="); ok {
+			m[name] = true
+		}
+	}
+	return m
 }
