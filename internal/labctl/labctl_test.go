@@ -152,6 +152,9 @@ type agentFixture struct {
 	url   string
 	token string
 	runID string
+	// handler is the agentapi handler behind url, kept so the UDS tests can
+	// serve the SAME real API over a unix domain socket (uds_test.go).
+	handler http.Handler
 }
 
 type resolverFunc func(ctx context.Context, repo store.Repo) (tracker.Tracker, error)
@@ -351,7 +354,7 @@ func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerReso
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
-	return &agentFixture{st: st, vlt: vlt, repo: repo.ID, url: ts.URL, token: token, runID: runID}
+	return &agentFixture{st: st, vlt: vlt, repo: repo.ID, url: ts.URL, token: token, runID: runID, handler: handler}
 }
 
 // newTestVault seals a Vault under a random 32-byte key — the same key the

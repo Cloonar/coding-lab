@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -82,8 +81,9 @@ Flags (env overrides in parentheses; flag > env > default):
   -proxy-auth-header string  header carrying the proxy-authenticated username (default "Remote-User")
   -trusted-proxies string  comma-separated CIDRs of trusted reverse proxies
   -base-url string         external base URL, e.g. https://lab.example.com (LAB_BASE_URL)
-  -agent-url string        session-facing base URL handed to labctl as LAB_URL;
-                           defaults to --base-url, else http://127.0.0.1:<port> (LAB_AGENT_URL)
+  -agent-url string        session-facing base URL handed to labctl as LAB_URL,
+                           http(s) or unix:///abs/path; defaults to
+                           unix://<state-dir>/agent.sock (LAB_AGENT_URL)
 `
 
 func main() {
@@ -560,15 +560,33 @@ func run() int {
 	// server-scoped context those streams select on, so they drain first.
 	srv.RegisterOnShutdown(api.CloseStreams)
 
+	// The agent unix socket (issue #201): the SAME run-token-authenticated
+	// handler the TCP listener mounts under /agent/v1, served on a second
+	// listener at <state-dir>/agent.sock. It is the default LAB_URL transport
+	// (see labURL), so session traffic never hairpins through whatever proxy
+	// fronts the TCP address. No CloseStreams hook: the agent API has no SSE.
+	sock := agentapi.SocketPath(cfg.StateDir)
+	agentLn, err := agentapi.ListenSocket(sock)
+	if err != nil {
+		logger.Error("listening on agent socket", "component", "main", "path", sock, "err", err)
+		return 1
+	}
+	agentSrv := &http.Server{
+		Handler:           agent.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
 	logger.Info("lab starting",
 		"component", "main",
 		"version", version,
 		"addr", cfg.Addr,
+		"agent_sock", sock,
 		"db", dbBackend(cfg.DB),
 		"state_dir", cfg.StateDir)
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() { errCh <- srv.ListenAndServe() }()
+	go func() { errCh <- agentSrv.Serve(agentLn) }()
 
 	select {
 	case err := <-errCh:
@@ -578,12 +596,22 @@ func run() int {
 		logger.Info("shutting down", "component", "main")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		failed := false
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error("graceful shutdown failed", "component", "main", "err", err)
-			return 1
+			failed = true
+		}
+		// Shutdown closes the unix listener, which unlinks the socket file
+		// (ListenSocket handles the crash case where it never got to).
+		if err := agentSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("agent socket shutdown failed", "component", "main", "err", err)
+			failed = true
 		}
 		// Cancel running clone jobs; interrupted repos heal on next start.
 		repoSvc.Close()
+		if failed {
+			return 1
+		}
 		return 0
 	}
 }
@@ -619,23 +647,17 @@ func loadOrGenerateVAPIDKey(path string, logger *slog.Logger) (push.Key, error) 
 	return push.LoadKey(path)
 }
 
-// labURL is the LAB_URL handed to spawned sessions. Precedence: the dedicated
-// agent URL when set, else the external base URL, else http://127.0.0.1:<port>
-// (labctl runs on the same host). The agent URL wins over the base URL so a
-// deployment behind an SSO/auth proxy can keep machine traffic on loopback
-// while the base URL still names the external origin (issue #30).
+// labURL is the LAB_URL handed to spawned sessions. An explicit --agent-url
+// wins verbatim; otherwise the agent unix socket, which always exists (run
+// listens on it before serving) and keeps machine traffic off the TCP
+// address entirely. BaseURL deliberately plays no part: routing agent
+// traffic through the external origin was exactly the SSO-proxy failure
+// mode of issue #30.
 func labURL(cfg config.Config) string {
 	if cfg.AgentURL != "" {
 		return cfg.AgentURL
 	}
-	if cfg.BaseURL != "" {
-		return cfg.BaseURL
-	}
-	_, port, err := net.SplitHostPort(cfg.Addr)
-	if err != nil || port == "" {
-		port = "8080"
-	}
-	return "http://127.0.0.1:" + port
+	return "unix://" + agentapi.SocketPath(cfg.StateDir)
 }
 
 // dbBackend names the backend for the startup line without ever echoing the
