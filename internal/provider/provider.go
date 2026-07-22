@@ -153,13 +153,24 @@ type AuthChangedPayload struct {
 	Provider string `json:"provider"`
 }
 
-// SeedOpts parametrizes SeedWorkspace. The trust + MCP grants and the
-// .git/info/exclude entries are unconditional; Incogni (the repo's flag,
-// D15 §9 measure 1) additionally makes the provider disable its own
-// attribution output in the worktree's local settings, so commits and PRs
+// SeedOpts parametrizes SeedWorkspace. The MCP grant and the
+// .git/info/exclude entries are worktree-local and unconditional; Incogni (the
+// repo's flag, D15 §9 measure 1) additionally makes the provider disable its
+// own attribution output in the worktree's local settings, so commits and PRs
 // from the session carry no AI markers at the source.
 type SeedOpts struct {
 	Incogni bool
+	// Home is the run's private instance HOME root (issue #202). The
+	// HOME-global grants — claude's ~/.claude.json folder-trust + onboarding,
+	// codex's config.toml directory-trust + the global AGENTS.md bridge —
+	// write ONLY under Home, so a run's trust state never touches the machine's
+	// master store. An empty Home skips those global grants entirely (the
+	// worktree-local grants — MCP approval, attribution-off, and the
+	// .git/info/exclude entries — still apply): a run with no per-run home gets
+	// no global-config write and NEVER falls back to the master store or the
+	// process HOME, isolation by construction (and graceful degradation for
+	// runs spawned before this feature).
+	Home string
 }
 
 // SeedMeta is the provider-declared workspace-seeding metadata (issue #51
@@ -580,26 +591,60 @@ type AgentProvider interface {
 	// lab seeds on the provider's behalf.
 	SeedMeta() SeedMeta
 
+	// InjectCredentials installs working model credentials for one run
+	// (issue #202): given the run's private instance HOME, it copies whatever
+	// the machine's MASTER credential store holds into the layout the agent CLI
+	// reads under that HOME, and returns any env entries the spawn must carry so
+	// the CLI resolves its state under the instance HOME. Both adapters must
+	// defend the tmux-inheritance vector: the spawn inherits the lab server's
+	// environment, and each CLI honors a master-store override variable that
+	// outranks HOME. codex REQUIRES CODEX_HOME=<home>/.codex (lab supports
+	// $CODEX_HOME for the master store — internal/provider/codex codexHomeDir);
+	// claude REQUIRES CLAUDE_CONFIG_DIR= pinned EMPTY (the CLI resolves
+	// CLAUDE_CONFIG_DIR over HOME and treats empty as unset — compat §3a — so
+	// the empty pin keeps resolution on the instance HOME without relocating
+	// the .claude.json layout the adapter seeds).
+	//
+	// Exactly ONE call site exists (the launch path), so a server-side
+	// credential proxy can later replace the copy wholesale — the env would
+	// point the CLI at the proxy instead of at copied files, and no caller
+	// changes. A MISSING master credential (the operator never logged in) is NOT
+	// an error: the injector logs it loudly and returns nil so the spawn
+	// proceeds — the CLI shows its own login prompt in the pane, exactly today's
+	// behavior on an unauthenticated host. An empty home is a programmer error
+	// and returns an error. The injector NEVER deletes anything; wipe-on-stop of
+	// the instance HOME is what shreds the copy.
+	InjectCredentials(instanceHome string) (env []string, err error)
+
 	// --- Chat surface (issue #7 / ADR-0016, generalized in issue #51) -------
 	// Every method below owns a fragile agent-CLI coupling pinned in
 	// internal/compat (per adapter): the transcript location + schema, the
 	// send-keys reply/dialog/interrupt recipes, and the command catalog.
 
 	// Commands is the provider's slash-command catalog for a session running
-	// in worktree (issue #51 decision 5) — the composer's autocomplete
-	// source. Worktree-dependent by design: project- and user-level commands
-	// are discovered relative to the worktree (builtins are not), which is
-	// why the API serves it per run. The adapter CURATES the list: a command
-	// that would strand the TUI in an interactive picker lab cannot see
-	// ships ChatSafe=false and is filtered from the chat surface. Role tags
-	// entry semantics — CommandRoleClear marks the provider's native
-	// clear-context command; execution of any chosen command rides the
-	// normal Reply path as pasted text, never a dedicated seam method.
-	Commands(ctx context.Context, worktree string) ([]CommandSpec, error)
+	// in worktree under the instance HOME home (issue #51 decision 5, home
+	// added in issue #202) — the composer's autocomplete source.
+	// Worktree-dependent by design: project-level commands are discovered
+	// relative to the worktree, and USER-level commands under the run's private
+	// home (empty home ⇒ no user-level commands — never the master store or the
+	// process HOME); builtins are neither. That is why the API serves it per
+	// run. The adapter CURATES the list: a command that would strand the TUI in
+	// an interactive picker lab cannot see ships ChatSafe=false and is filtered
+	// from the chat surface. Role tags entry semantics — CommandRoleClear marks
+	// the provider's native clear-context command; execution of any chosen
+	// command rides the normal Reply path as pasted text, never a dedicated
+	// seam method.
+	Commands(ctx context.Context, worktree, home string) ([]CommandSpec, error)
 	// LocateTranscript finds the provider-native transcript file for the
-	// session running in worktree, keyed by cwd-match analogous to
-	// CaptureDeepLink. Returns "" (no error) when no transcript is found yet.
-	// The path is persisted on the run row so ended runs stay readable.
+	// session running in worktree UNDER the instance HOME home (issue #202),
+	// keyed by cwd-match analogous to CaptureDeepLink. Resolution is strictly
+	// under home — the run's private per-run store, NEVER the machine's master
+	// store or the process HOME: an empty home is a miss ("", nil), the case for
+	// a run with no per-run home (or one spawned before this feature), where the
+	// caller keeps the run's already-stored transcript path (see
+	// internal/chat/chat.go locateActive: a locate miss keeps known). Returns ""
+	// (no error) when no transcript is found yet. The path is persisted on the
+	// run row so ended runs stay readable.
 	//
 	// Clear/epoch obligation (issue #51 decision 2): an adapter MUST surface
 	// a NEW conversation identity here whenever its provider clears context —
@@ -608,7 +653,7 @@ type AgentProvider interface {
 	// fresh transcript file on /clear (compat §5), satisfying this for free;
 	// an adapter whose CLI clears IN PLACE must synthesize a new epoch (e.g.
 	// an epoch-qualified path) so the identity still rotates.
-	LocateTranscript(ctx context.Context, sessionName, worktree string) (string, error)
+	LocateTranscript(ctx context.Context, sessionName, worktree, home string) (string, error)
 	// ReadChat reads the run's conversation and composes its conversational
 	// state — the adapter owns "what state is my agent in", composed from
 	// whatever its agent's best signals are (issue #92): the transcript at
@@ -789,10 +834,14 @@ type SetupOpts struct {
 // link for them.
 type DeepLinker interface {
 	// CaptureDeepLink polls for the session's deep link, keyed by its
-	// worktree (the one cwd unique to the session). On a miss it returns an
-	// empty string — a generic fallback is NEVER returned through capture, so
-	// the caller's write-only-on-hit rule needs no provider-specific constant.
-	CaptureDeepLink(ctx context.Context, sessionName, worktree string) (string, error)
+	// worktree (the one cwd unique to the session) UNDER the instance HOME home
+	// the session runs with (issue #202) — the session registry it reads lives
+	// under home. On a miss it returns an empty string — a generic fallback is
+	// NEVER returned through capture, so the caller's write-only-on-hit rule
+	// needs no provider-specific constant. An empty home is a miss too (no
+	// per-run home ⇒ no registry to read), never a fall back to the master
+	// store.
+	CaptureDeepLink(ctx context.Context, sessionName, worktree, home string) (string, error)
 	// FallbackOpen is the provider's generic web open affordance, rendered
 	// when no exact link was captured (URL + explanatory tooltip). Owned by
 	// the provider so no core code or SPA hardcodes a provider URL.

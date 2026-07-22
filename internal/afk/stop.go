@@ -66,6 +66,13 @@ func (s *Service) StopAFK(ctx context.Context, session string) error {
 	} else {
 		s.log.Warn("afk stop: repo for credential cleanup", "component", "afk", "run", run.ID, "err", err)
 	}
+	// Wipe the run's private instance HOME (issue #202) — its credential copy,
+	// config, and transcripts. The park (worktree + claim branch) is untouched;
+	// only the instance HOME goes. A failure logs and continues (the boot/runtime
+	// sweep is the backstop).
+	if err := s.homes.Wipe(run.ID); err != nil {
+		s.log.Warn("afk stop: wipe instance home", "component", "afk", "run", run.ID, "err", err)
+	}
 
 	s.publishRun(EventRunChanged, run.RepoID, run.ID)
 	s.publish(EventParkedChanged, run.RepoID)

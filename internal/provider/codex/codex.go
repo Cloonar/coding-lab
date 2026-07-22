@@ -103,21 +103,18 @@ type Options struct {
 	// CodexBin is the codex binary (path or PATH-resolved name). Empty
 	// defaults to the adapter-owned "codex" (PATH lookup).
 	CodexBin string
-	// ConfigPath is codex's global config file (<codexHome>/config.toml),
-	// the directory-trust seeding target. Empty defaults from codexHome.
+	// ConfigPath is codex's MASTER global config file
+	// (<codexHome>/config.toml). Master-store only: the per-run directory-trust
+	// seed writes to <SeedOpts.Home>/.codex/config.toml instead (issue #202).
+	// Empty defaults from codexHome.
 	ConfigPath string
-	// SessionsDir is codex's rollout-transcript tree
-	// (<codexHome>/sessions/YYYY/MM/DD/rollout-*.jsonl), the chat surface's
-	// read root. Empty defaults from codexHome.
-	SessionsDir string
-	// AgentsFile is codex's GLOBAL AGENTS.md (<codexHome>/AGENTS.md) — the
-	// one instructions file codex always concatenates, where SeedWorkspace
-	// maintains the marker-guarded AGENTS.local.md bridge. Empty defaults
-	// from codexHome.
-	AgentsFile string
 	// LoginDir is the working directory of the login session ($HOME —
 	// login is global, one machine-level credential). Also the base of the
-	// default codex home (<LoginDir>/.codex) when $CODEX_HOME is unset.
+	// default codex home (<LoginDir>/.codex) when $CODEX_HOME is unset — the
+	// MASTER store, used for logout and as the InjectCredentials source. All
+	// INSTANCE-facing state (rollout tree, trust config, AGENTS.md bridge)
+	// derives per-call from the run's private instance HOME on the seam instead
+	// (issue #202 / ADR-0038).
 	LoginDir string
 	// Runner drives tmux for the login session and the reply/interrupt
 	// recipes.
@@ -133,15 +130,13 @@ type Options struct {
 
 // Provider is the codex AgentProvider. Construct with New.
 type Provider struct {
-	codexBin    string
-	configPath  string
-	sessionsDir string
-	agentsFile  string
-	loginDir    string
-	runner      tmuxx.SessionRunner
-	bus         *events.Bus
-	log         *slog.Logger
-	now         func() time.Time
+	codexBin   string
+	configPath string // MASTER <codexHome>/config.toml — master-store reference only
+	loginDir   string
+	runner     tmuxx.SessionRunner
+	bus        *events.Bus
+	log        *slog.Logger
+	now        func() time.Time
 
 	captureTimeout time.Duration
 	authTTL        time.Duration
@@ -181,12 +176,11 @@ var _ provider.AgentProvider = (*Provider)(nil)
 var _ provider.LoginCodeReporter = (*Provider)(nil)
 
 // New validates o and returns a Provider with the pinned production
-// timeouts. The path fields (CodexBin, ConfigPath, SessionsDir, AgentsFile)
-// are optional: an explicit value always wins, an empty one falls back to
-// the adapter-owned default under codex's own home resolution ($CODEX_HOME,
-// else <LoginDir>/.codex). The environment is consulted ONLY when a default
-// is actually needed — hermetic tests and the conformance suite pass every
-// path explicitly and never touch env or the real HOME.
+// timeouts. The MASTER path fields (CodexBin, ConfigPath) are optional: an
+// explicit value always wins, an empty one falls back to the adapter-owned
+// default under codex's own home resolution ($CODEX_HOME, else
+// <LoginDir>/.codex). Instance-facing paths are NOT construction-time inputs —
+// they derive per-call from the run's private instance HOME (issue #202).
 func New(o Options) (*Provider, error) {
 	switch {
 	case o.LoginDir == "":
@@ -212,19 +206,9 @@ func New(o Options) (*Provider, error) {
 	if configPath == "" {
 		configPath = filepath.Join(codexHomeDir(o.LoginDir), "config.toml")
 	}
-	sessionsDir := o.SessionsDir
-	if sessionsDir == "" {
-		sessionsDir = filepath.Join(codexHomeDir(o.LoginDir), "sessions")
-	}
-	agentsFile := o.AgentsFile
-	if agentsFile == "" {
-		agentsFile = filepath.Join(codexHomeDir(o.LoginDir), "AGENTS.md")
-	}
 	p := &Provider{
 		codexBin:       codexBin,
 		configPath:     configPath,
-		sessionsDir:    sessionsDir,
-		agentsFile:     agentsFile,
 		loginDir:       o.LoginDir,
 		runner:         o.Runner,
 		bus:            o.Bus,
@@ -255,6 +239,15 @@ func codexHomeDir(loginDir string) string {
 	}
 	return filepath.Join(loginDir, ".codex")
 }
+
+// instanceCodexHome is the codex state home under a run's private instance HOME
+// (issue #202 / ADR-0038): <home>/.codex, mirroring codex's own HOME-relative
+// default (the $CODEX_HOME default is ~/.codex). Every INSTANCE-facing codex
+// path hangs off it — the rollout tree, the trust config.toml, the global
+// AGENTS.md bridge — and it is also the CODEX_HOME env pin InjectCredentials
+// returns so a session inheriting a stale $CODEX_HOME cannot reach the master
+// store.
+func instanceCodexHome(home string) string { return filepath.Join(home, ".codex") }
 
 // ID implements provider.AgentProvider.
 func (p *Provider) ID() string { return ID }

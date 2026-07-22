@@ -105,12 +105,12 @@ func attachNotifyLine(payload string) string {
 	return `{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"` + payload + `","timestamp":"2026-07-12T02:59:20.258Z"}}`
 }
 
-func chatProvider(t *testing.T, registryDir, projectsDir string) *Provider {
+func chatProvider(t *testing.T) *Provider {
 	t.Helper()
 	p, err := New(Options{
 		ClaudeBin: "claude", ConfigPath: filepath.Join(t.TempDir(), ".claude.json"),
-		RegistryDir: registryDir, ProjectsDir: projectsDir, LoginDir: t.TempDir(),
-		Runner: tmuxx.NewFake(), Bus: events.NewBus(),
+		LoginDir: t.TempDir(),
+		Runner:   tmuxx.NewFake(), Bus: events.NewBus(),
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
@@ -119,9 +119,14 @@ func chatProvider(t *testing.T, registryDir, projectsDir string) *Provider {
 	return p
 }
 
+// The instance registry + transcript tree live under the run's private HOME
+// (issue #202): <home>/.claude/sessions and <home>/.claude/projects.
 func TestLocateTranscript_registryMatch(t *testing.T) {
-	registryDir := t.TempDir()
-	projectsDir := t.TempDir()
+	home := t.TempDir()
+	registryDir := registryDirUnder(home)
+	if err := os.MkdirAll(registryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	worktree := "/home/op/state/worktrees/proj-manual-1"
 	sessionID := "abcd-1234"
 
@@ -130,8 +135,8 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 		"pid": os.Getpid(), "cwd": worktree, "startedAt": 1, "sessionId": sessionID,
 		"bridgeSessionId": "session_x",
 	})
-	// The transcript file at the slug path.
-	dir := filepath.Join(projectsDir, SlugForDir(worktree))
+	// The transcript file at the slug path under the instance projects tree.
+	dir := filepath.Join(projectsDirUnder(home), SlugForDir(worktree))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +145,8 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := chatProvider(t, registryDir, projectsDir)
-	got, err := p.LocateTranscript(context.Background(), "proj~manual-1", worktree)
+	p := chatProvider(t)
+	got, err := p.LocateTranscript(context.Background(), "proj~manual-1", worktree, home)
 	if err != nil {
 		t.Fatalf("LocateTranscript: %v", err)
 	}
@@ -150,9 +155,15 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 	}
 
 	// A worktree with no registry entry misses cleanly (no error).
-	got, err = p.LocateTranscript(context.Background(), "proj~other", "/no/such/worktree")
+	got, err = p.LocateTranscript(context.Background(), "proj~other", "/no/such/worktree", home)
 	if err != nil || got != "" {
 		t.Errorf("miss = (%q, %v); want (\"\", nil)", got, err)
+	}
+
+	// An empty home is a miss too — no per-run home ⇒ no instance registry to
+	// read, and never a fall back to the master store (issue #202).
+	if got, err := p.LocateTranscript(context.Background(), "proj~manual-1", worktree, ""); err != nil || got != "" {
+		t.Errorf("homeless locate = (%q, %v); want (\"\", nil)", got, err)
 	}
 }
 
@@ -161,7 +172,7 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 // the overlay, exactly as core returned the read error before applying
 // signals, so a gone transcript never resurrects as a dialog-only chat.
 func TestReadChat_goneFile(t *testing.T) {
-	p := chatProvider(t, t.TempDir(), t.TempDir())
+	p := chatProvider(t)
 	if _, err := p.ReadChat("", "", filepath.Join(t.TempDir(), "absent.jsonl")); err != provider.ErrTranscriptGone {
 		t.Errorf("ReadChat(absent) err = %v; want ErrTranscriptGone", err)
 	}

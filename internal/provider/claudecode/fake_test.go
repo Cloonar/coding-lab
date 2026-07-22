@@ -75,13 +75,12 @@ func testProvider(t *testing.T, run tmuxx.SessionRunner) (*Provider, *events.Bus
 	t.Helper()
 	bus := events.NewBus()
 	p, err := New(Options{
-		ClaudeBin:   "claude-not-invoked", // tests that exec set a real script
-		ConfigPath:  filepath.Join(t.TempDir(), ".claude.json"),
-		RegistryDir: filepath.Join(t.TempDir(), "sessions"),
-		LoginDir:    t.TempDir(),
-		Runner:      run,
-		Bus:         bus,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		ClaudeBin:  "claude-not-invoked", // tests that exec set a real script
+		ConfigPath: filepath.Join(t.TempDir(), ".claude.json"),
+		LoginDir:   t.TempDir(),
+		Runner:     run,
+		Bus:        bus,
+		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

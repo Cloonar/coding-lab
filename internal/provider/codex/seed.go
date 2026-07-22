@@ -13,35 +13,42 @@ import (
 
 // SeedWorkspace implements provider.AgentProvider: pre-approve the worktree
 // so codex launches unattended. It writes NOTHING inside the worktree — both
-// grants are guarded appends to codex's GLOBAL state (atomic tmp+rename):
+// grants are guarded appends to codex's HOME-GLOBAL state under the run's
+// private instance HOME opts.Home (atomic tmp+rename), never the machine's
+// master store (issue #202):
 //
-//  1. Directory trust in config.toml (SeedTrust). The argv route
-//     (`-c projects...trust_level`) is DEAD on 0.133 — live-verified: the
+//  1. Directory trust in <opts.Home>/.codex/config.toml (SeedTrust). The argv
+//     route (`-c projects...trust_level`) is DEAD on 0.133 — live-verified: the
 //     first-run trust prompt still appears — so the working mechanism is a
 //     config append. Live-validated 2026-07-10: an appended
 //     [projects."<dir>"] table suppressed the trust prompt on a real spawn.
-//  2. The AGENTS.local.md bridge in the global AGENTS.md (SeedAgentsBridge).
-//     codex's project_doc_fallback_filenames override is fallback-only per
-//     directory level: a repo-committed AGENTS.md silently skips it
-//     (live-verified), but the global $CODEX_HOME/AGENTS.md is ALWAYS
+//  2. The AGENTS.local.md bridge in the global <opts.Home>/.codex/AGENTS.md
+//     (SeedAgentsBridge). codex's project_doc_fallback_filenames override is
+//     fallback-only per directory level: a repo-committed AGENTS.md silently
+//     skips it (live-verified), but the global $CODEX_HOME/AGENTS.md is ALWAYS
 //     concatenated — so lab maintains a marker-guarded block there pointing
 //     the agent at the workspace-root AGENTS.local.md.
 //
-// opts.Incogni is a no-op: codex 0.133 writes no commit/PR attribution at
-// the source (the codex_git_commit feature is off; `commit_attribution` is
+// Both grants are HOME-global, so an empty opts.Home skips them entirely (a run
+// with no per-run home gets no global write, never a fallback to the master
+// store). opts.Incogni is a no-op: codex 0.133 writes no commit/PR attribution
+// at the source (the codex_git_commit feature is off; `commit_attribution` is
 // an unknown config key), so there is nothing to disable — the declared
 // ScrubPatterns stay as the defensive backstop (ADR-0033).
 //
 // The lab-side seeder covers the worktree files (context file, skills,
 // .git/info/exclude) from SeedMeta; nothing here touches git state.
 func (p *Provider) SeedWorkspace(worktree string, opts provider.SeedOpts) error {
-	if err := SeedTrust(p.configPath, worktree); err != nil {
+	if opts.Home == "" {
+		return nil // no per-run home ⇒ no HOME-global grants (never the master store)
+	}
+	codexHome := instanceCodexHome(opts.Home)
+	if err := SeedTrust(filepath.Join(codexHome, "config.toml"), worktree); err != nil {
 		return err
 	}
-	if err := SeedAgentsBridge(p.agentsFile); err != nil {
+	if err := SeedAgentsBridge(filepath.Join(codexHome, "AGENTS.md")); err != nil {
 		return err
 	}
-	_ = opts // Incogni: no-op by decision (see above)
 	return nil
 }
 

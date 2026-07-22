@@ -27,6 +27,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
@@ -79,6 +80,13 @@ type Options struct {
 	Bus          *events.Bus
 	Logger       *slog.Logger
 
+	// Homes owns <state>/instances — the per-run private HOME lifecycle (issue
+	// #202): Launch materializes a run's home, Stop/rollback wipes it, and the
+	// boot/runtime sweeps GC orphans. Required — the launch path always
+	// materializes a home so the spawned CLI's HOME is the run's private store,
+	// never the machine's master ~/.claude*/~/.codex.
+	Homes *instancehome.Manager
+
 	// ReposDir is <state>/repos — the parent of every bare reference clone
 	// (design §7: repos/<repoID>.git). WorktreeRoot is <state>/worktrees, the
 	// parent of every instance worktree.
@@ -116,6 +124,7 @@ type Service struct {
 	providers *provider.Registry
 	vault     *vault.Vault
 	mat       *vault.Materializer
+	homes     *instancehome.Manager
 	guard     *startguard.Guard
 	bus       *events.Bus
 	seeder    WorkspaceSeeder
@@ -164,6 +173,8 @@ func New(o Options) (*Service, error) {
 		return nil, fmt.Errorf("instance: Options.Vault is required")
 	case o.Materializer == nil:
 		return nil, fmt.Errorf("instance: Options.Materializer is required")
+	case o.Homes == nil:
+		return nil, fmt.Errorf("instance: Options.Homes is required")
 	case o.Guard == nil:
 		return nil, fmt.Errorf("instance: Options.Guard is required")
 	case o.Bus == nil:
@@ -196,6 +207,7 @@ func New(o Options) (*Service, error) {
 		providers:    o.Providers,
 		vault:        o.Vault,
 		mat:          o.Materializer,
+		homes:        o.Homes,
 		guard:        o.Guard,
 		bus:          o.Bus,
 		seeder:       seed,
@@ -284,7 +296,13 @@ func (s *Service) deepLinker(providerID string) (provider.DeepLinker, bool) {
 // provider; the in-flight set drives the "connecting…" render state
 // (Connecting).
 func (s *Service) runCapture(run store.Run, dl provider.DeepLinker) {
-	url, err := dl.CaptureDeepLink(s.captureCtx, run.SessionName, run.WorktreePath)
+	// The run's private instance HOME (issue #202): the deep-link registry the
+	// provider reads lives under it. HomePath is a PURE derivation, so a
+	// pre-upgrade run adopted after a restart yields a nonexistent dir → the
+	// provider finds no registry → a capture miss → the loud ADR-0017 miss log
+	// plus the fallback link, which is the designed degradation for a run that
+	// never had a per-run home.
+	url, err := dl.CaptureDeepLink(s.captureCtx, run.SessionName, run.WorktreePath, s.homes.HomePath(run.ID))
 	if err != nil || url == "" {
 		return // miss (or an in-flight duplicate call) → nothing to persist
 	}

@@ -64,6 +64,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
@@ -893,10 +894,11 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	git := gitx.New("git")
 	runner := cycleTmux(t)
 	guard := startguard.New()
+	homes := instancehome.New(filepath.Join(stateDir, "instances"))
 
 	inst, err := instance.New(instance.Options{
 		Store: st, Git: git, Runner: runner, Providers: reg, Vault: vlt, Materializer: mat,
-		Guard: guard, Bus: bus, ReposDir: reposDir, WorktreeRoot: worktreeRoot,
+		Homes: homes, Guard: guard, Bus: bus, ReposDir: reposDir, WorktreeRoot: worktreeRoot,
 		LabURL: agent.URL, GitEnv: env, CaptureCtx: context.Background(), Now: clock.Now,
 	})
 	if err != nil {
@@ -905,7 +907,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	notes := &cycleNotes{}
 	svc, err := afk.New(afk.Options{
 		Store: st, Git: git, Runner: runner, Trackers: trackers,
-		Instances: inst, Materializer: mat, Bus: bus, Guard: guard,
+		Instances: inst, Materializer: mat, Homes: homes, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
 		Notify: notes.record,
 	})
@@ -915,7 +917,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	inst.SetAFKStopper(svc)
 
 	recon, err := reconcile.New(reconcile.Options{
-		Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Bus: bus,
+		Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Homes: homes, Bus: bus,
 		ReposDir: reposDir, GitEnv: env, Now: clock.Now,
 	})
 	if err != nil {

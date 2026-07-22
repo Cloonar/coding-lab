@@ -2,6 +2,7 @@ package providertest
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -73,8 +74,9 @@ func (f *NoLinkFake) SeedMeta() provider.SeedMeta {
 }
 
 // Commands declares no slash commands — a stand-in for a provider whose
-// catalog scan hasn't been built (issue #51 decision 5).
-func (f *NoLinkFake) Commands(context.Context, string) ([]provider.CommandSpec, error) {
+// catalog scan hasn't been built (issue #51 decision 5). worktree and home
+// (issue #202) are unused.
+func (f *NoLinkFake) Commands(context.Context, string, string) ([]provider.CommandSpec, error) {
 	return nil, nil
 }
 
@@ -118,9 +120,19 @@ func (f *NoLinkFake) SeedWorkspace(worktree string, _ provider.SeedOpts) error {
 	return nil
 }
 
+// InjectCredentials implements provider.AgentProvider (issue #202): this
+// link-less fake carries no master store to copy from, so it returns no env and
+// no error for any non-empty home; an empty home is a programmer error.
+func (f *NoLinkFake) InjectCredentials(instanceHome string) ([]string, error) {
+	if instanceHome == "" {
+		return nil, errors.New("providertest: InjectCredentials requires a non-empty instance HOME")
+	}
+	return nil, nil
+}
+
 // --- chat surface (mandatory on the seam; trivial for a link-less fake) ----
 
-func (f *NoLinkFake) LocateTranscript(context.Context, string, string) (string, error) {
+func (f *NoLinkFake) LocateTranscript(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
 

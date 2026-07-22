@@ -50,18 +50,26 @@ func SlugForDir(dir string) string {
 }
 
 // LocateTranscript implements provider.AgentProvider: find the transcript
-// file for the session running in worktree. It reuses the deep-link registry
-// (~/.claude/sessions/<pid>.json) — the newest live claude whose cwd matches
-// worktree — to read its sessionId, then builds
-// <projects>/<slug(worktree)>/<sessionId>.jsonl and returns it if the file
-// exists. A miss (no matching live process, or the file not yet written)
-// returns "" with no error, exactly like CaptureDeepLink; the caller retries.
-func (p *Provider) LocateTranscript(_ context.Context, _ /*sessionName*/, worktree string) (string, error) {
-	sessionID := sessionIDForDir(p.registryDir, worktree)
+// file for the session running in worktree UNDER the instance HOME home
+// (issue #202). It reuses the deep-link registry (<home>/.claude/sessions/
+// <pid>.json) — the newest live claude whose cwd matches worktree — to read
+// its sessionId, then builds
+// <home>/.claude/projects/<slug(worktree)>/<sessionId>.jsonl and returns it if
+// the file exists. A miss (no matching live process, or the file not yet
+// written) returns "" with no error, exactly like CaptureDeepLink; the caller
+// retries. An empty home is a miss too — a run with no per-run home has no
+// instance registry to read, and lab never falls back to the master store
+// (isolation by construction; a locate miss keeps the run's stored path, see
+// internal/chat/chat.go locateActive).
+func (p *Provider) LocateTranscript(_ context.Context, _ /*sessionName*/, worktree, home string) (string, error) {
+	if home == "" {
+		return "", nil
+	}
+	sessionID := sessionIDForDir(registryDirUnder(home), worktree)
 	if sessionID == "" {
 		return "", nil
 	}
-	path := filepath.Join(p.projectsDir, SlugForDir(worktree), sessionID+".jsonl")
+	path := filepath.Join(projectsDirUnder(home), SlugForDir(worktree), sessionID+".jsonl")
 	if _, err := os.Stat(path); err != nil {
 		return "", nil
 	}

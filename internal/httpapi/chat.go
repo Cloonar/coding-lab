@@ -263,7 +263,10 @@ func (s *Server) chatSafeCommands(ctx context.Context, run store.Run) ([]provide
 	if !ok {
 		return nil, fmt.Errorf("run %s: unknown provider %q", run.ID, run.Provider)
 	}
-	all, err := prov.Commands(ctx, run.WorktreePath)
+	// User-level commands resolve strictly under the run's private instance HOME
+	// (issue #202); an empty home (no manager wired, or a pre-upgrade run) yields
+	// no user-level commands, never the master store or the process HOME.
+	all, err := prov.Commands(ctx, run.WorktreePath, s.homeFor(run.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +280,16 @@ func (s *Server) chatSafeCommands(ctx context.Context, run store.Run) ([]provide
 	}
 	s.storeCommands(run.ID, cmds)
 	return cmds, nil
+}
+
+// homeFor resolves a run's private instance HOME (issue #202) through the
+// injected manager, degrading to "" — a no-user-commands miss by the seam
+// contract — when none was wired (a build without the instance stack).
+func (s *Server) homeFor(runID string) string {
+	if s.homes == nil {
+		return ""
+	}
+	return s.homes.HomePath(runID)
 }
 
 // cachedCommands returns a run's memoized chat-safe command catalog when the

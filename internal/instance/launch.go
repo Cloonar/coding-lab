@@ -167,7 +167,26 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 				s.log.Warn("start rollback: remove dialog settings", "component", "instance", "run", runID, "err", err)
 			}
 		}
+		// Wipe the run's private instance HOME (issue #202): the credential copy
+		// and config the injector/seeder wrote go with the rolled-back run. Wipe
+		// is idempotent, so it is harmless on the paths where Materialize never
+		// ran (a failure before it) and removes the tree on the paths where it
+		// did — logged like every other rollback step so one failure never skips
+		// the rest (the boot/runtime sweep is the backstop).
+		if err := s.homes.Wipe(runID); err != nil {
+			s.log.Warn("start rollback: wipe instance home", "component", "instance", "run", runID, "err", err)
+		}
 		credCleanup()
+	}
+
+	// The run's private instance HOME (issue #202): materialized right after the
+	// worktree add so a failure here still rolls back the worktree, and BEFORE
+	// seeding/injection so the provider's HOME-global grants and its credential
+	// copy land under it. A materialize failure is a real I/O problem — abort.
+	home, err := s.homes.Materialize(runID)
+	if err != nil {
+		rollback(false)
+		return store.Run{}, &StartFailedError{cause: err}
 	}
 
 	// Seed the worktree: the provider's grants first (trust/MCP,
@@ -175,7 +194,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// embedded skills bundle into .claude/skills/, the generated
 	// CLAUDE.local.md, and their exclude entries). Either failure aborts the
 	// launch — nothing stranded.
-	if err := spec.Provider.SeedWorkspace(wtPath, seedOpts(repo)); err != nil {
+	if err := spec.Provider.SeedWorkspace(wtPath, seedOpts(repo, home)); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -196,6 +215,24 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// the repo's secret inventory (issue #104) for the generated Secrets
 	// section.
 	if err := s.seeder.SeedWorkspace(wtPath, repo, spec.Provider.SeedMeta(), seeder.Opts{Secrets: secrets}); err != nil {
+		rollback(false)
+		return store.Run{}, &StartFailedError{cause: err}
+	}
+
+	// Install the run's model credentials into its private HOME (issue #202):
+	// the provider copies the machine's MASTER credential store into the layout
+	// its CLI reads under home, and returns the env the spawn must carry for the
+	// CLI to resolve its state there — each adapter pins its CLI's master-store
+	// override variable against tmux inheritance (claude: CLAUDE_CONFIG_DIR=
+	// empty, which the CLI treats as unset; codex: CODEX_HOME=<home>/.codex).
+	// This is the seam's ONLY call
+	// site, so a future server-side credential proxy can replace the copy
+	// wholesale behind it. A MISSING master credential is NOT an error — the
+	// injector logs it and returns nil, and the CLI shows its own login prompt
+	// in the pane (today's unauthenticated-host behavior); an error here is a
+	// real I/O problem, so it rolls the launch back like the seed steps.
+	injEnv, err := spec.Provider.InjectCredentials(home)
+	if err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -230,7 +267,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, err
 	}
 
-	extraEnv, err := s.spawnEnv(ctx, repo, credEnv, token)
+	extraEnv, err := s.spawnEnv(ctx, repo, credEnv, token, home, injEnv)
 	if err != nil {
 		rollback(true)
 		return store.Run{}, err

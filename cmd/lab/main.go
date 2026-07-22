@@ -28,6 +28,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
@@ -165,6 +166,14 @@ func run() int {
 		logger.Error("preparing runtime dir", "component", "main", "err", err)
 		return 1
 	}
+	// Per-run private HOME lifecycle (issue #202): <state>/instances holds one
+	// private HOME per run — the isolation seam a run's provider credential copy,
+	// config, and transcripts live under. New does no I/O (the dirs are created
+	// lazily at launch), so it is wired unconditionally beside the vault
+	// materializer and shared by the instance/afk/reconcile services (Materialize
+	// at launch, Wipe at stop/rollback, SweepAll at boot/runtime) and the
+	// chat/httpapi read paths (the pure HomePath).
+	homes := instancehome.New(filepath.Join(cfg.StateDir, "instances"))
 
 	// Web push (issue #98): load-or-generate the VAPID keypair with the same
 	// first-start bootstrap and key-file contract as the master key, then wire
@@ -261,14 +270,12 @@ func run() int {
 	} else {
 		runner := tmuxx.New(cfg.TmuxBin, tmuxx.WithNofileCap(cfg.PrlimitBin, cfg.SessionNofile))
 		claudeProvider, perr := claudecode.New(claudecode.Options{
-			ClaudeBin:   cfg.ProviderBin[claudecode.ID],
-			ConfigPath:  cfg.ProviderConfig[claudecode.ID],
-			RegistryDir: filepath.Join(home, ".claude", "sessions"),
-			ProjectsDir: filepath.Join(home, ".claude", "projects"),
-			LoginDir:    home,
-			Runner:      runner,
-			Bus:         bus,
-			Logger:      logger,
+			ClaudeBin:  cfg.ProviderBin[claudecode.ID],
+			ConfigPath: cfg.ProviderConfig[claudecode.ID],
+			LoginDir:   home,
+			Runner:     runner,
+			Bus:        bus,
+			Logger:     logger,
 		})
 		if perr != nil {
 			logger.Error("building claude provider", "component", "main", "err", perr)
@@ -303,6 +310,7 @@ func run() int {
 			Providers:    providerReg,
 			Vault:        vlt,
 			Materializer: mat,
+			Homes:        homes,
 			Guard:        guard,
 			Bus:          bus,
 			Logger:       logger,
@@ -321,6 +329,7 @@ func run() int {
 			Runner:       runner,
 			Guard:        guard,
 			Materializer: mat,
+			Homes:        homes,
 			Bus:          bus,
 			Logger:       logger,
 			ReposDir:     reposDir,
@@ -342,6 +351,7 @@ func run() int {
 			Trackers:     trackerReg,
 			Instances:    instanceSvc,
 			Materializer: mat,
+			Homes:        homes,
 			Bus:          bus,
 			Guard:        guard,
 			Logger:       logger,
@@ -386,6 +396,10 @@ func run() int {
 			// so the seam is wired unconditionally; a repo with no secrets
 			// still short-circuits inside the Source (nil redactor).
 			Secrets: (&secrets.Source{Values: st.AllRepoSecretValues, Decrypt: vlt.Decrypt}).Redactor,
+			// A run's transcript/user-commands resolve strictly under its private
+			// instance HOME (issue #202): HomePath is pure, so it is handed straight
+			// in as the closure the chat seams thread through LocateTranscript.
+			HomeFor: homes.HomePath,
 		})
 		if err != nil {
 			logger.Error("building chat service", "component", "main", "err", err)
@@ -493,6 +507,7 @@ func run() int {
 		Reconcile:       reconcileSvc,
 		Chat:            chatSvc,
 		Providers:       providerReg,
+		Homes:           homes,
 		Tracker:         trackerReg,
 		AFK:             afkSvc,
 		Push:            pushSender,

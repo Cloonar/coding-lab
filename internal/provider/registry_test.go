@@ -28,15 +28,16 @@ func (s stubProvider) AuthStatus(context.Context, bool) (AuthStatus, error) {
 func (s stubProvider) LoginStart(context.Context) (string, error)    { return "", nil }
 func (s stubProvider) LoginSubmitCode(context.Context, string) error { return nil }
 func (s stubProvider) Logout(context.Context) error                  { return nil }
-func (s stubProvider) CaptureDeepLink(context.Context, string, string) (string, error) {
+func (s stubProvider) CaptureDeepLink(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
-func (s stubProvider) SeedWorkspace(string, SeedOpts) error { return nil }
-func (s stubProvider) SeedMeta() SeedMeta                   { return s.seedMeta }
-func (s stubProvider) Commands(context.Context, string) ([]CommandSpec, error) {
+func (s stubProvider) SeedWorkspace(string, SeedOpts) error       { return nil }
+func (s stubProvider) SeedMeta() SeedMeta                         { return s.seedMeta }
+func (s stubProvider) InjectCredentials(string) ([]string, error) { return nil, nil }
+func (s stubProvider) Commands(context.Context, string, string) ([]CommandSpec, error) {
 	return nil, nil
 }
-func (s stubProvider) LocateTranscript(context.Context, string, string) (string, error) {
+func (s stubProvider) LocateTranscript(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
 func (s stubProvider) ReadChat(string, string, string) (Chat, error) { return Chat{}, nil }

@@ -36,6 +36,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -84,8 +85,13 @@ type Options struct {
 	Runner       tmuxx.SessionRunner
 	Guard        *startguard.Guard
 	Materializer *vault.Materializer
-	Bus          *events.Bus
-	Logger       *slog.Logger
+	// Homes is the per-run private HOME lifecycle (issue #202) — the SAME
+	// *instancehome.Manager instance/ and afk/ are built with. The startup and
+	// throttled sweeps GC orphaned instance homes through it against the same
+	// live-run keep-set the credential sweep uses.
+	Homes  *instancehome.Manager
+	Bus    *events.Bus
+	Logger *slog.Logger
 
 	// ReposDir is <state>/repos — the parent of every bare reference clone.
 	ReposDir string
@@ -121,6 +127,7 @@ type Service struct {
 	runner tmuxx.SessionRunner
 	guard  *startguard.Guard
 	mat    *vault.Materializer
+	homes  *instancehome.Manager
 	bus    *events.Bus
 	log    *slog.Logger
 
@@ -144,6 +151,8 @@ func New(o Options) (*Service, error) {
 		return nil, fmt.Errorf("reconcile: Options.Guard is required")
 	case o.Materializer == nil:
 		return nil, fmt.Errorf("reconcile: Options.Materializer is required")
+	case o.Homes == nil:
+		return nil, fmt.Errorf("reconcile: Options.Homes is required")
 	case o.Bus == nil:
 		return nil, fmt.Errorf("reconcile: Options.Bus is required")
 	case o.ReposDir == "":
@@ -163,6 +172,7 @@ func New(o Options) (*Service, error) {
 		runner:      o.Runner,
 		guard:       o.Guard,
 		mat:         o.Materializer,
+		homes:       o.Homes,
 		bus:         o.Bus,
 		log:         logger,
 		reposDir:    o.ReposDir,
