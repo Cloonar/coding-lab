@@ -27,31 +27,27 @@ RUN go mod download
 COPY . ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/labctl ./cmd/labctl
 
-# ---- Stage: claude — fetch, verify, sanity-run, then PT_INTERP-patch ---------
+# ---- Stage: claude — verify, sanity-run, then PT_INTERP-patch ----------------
 FROM docker.io/library/alpine:3.22 AS claude
-RUN apk add --no-cache curl patchelf
+RUN apk add --no-cache patchelf
 
 # No defaults: build.sh always passes both from versions.env. A missing arg must
-# fail the build (empty URL / empty checksum), never silently fetch something else.
+# fail the build (empty context path / empty checksum), never silently accept
+# something else.
 ARG CLAUDE_CODE_VERSION
 ARG CLAUDE_CODE_SHA256_X64_MUSL
 
-# Download the pinned linux-x64-musl binary and verify its sha256 before use.
-# --create-dirs makes /out on this fresh stage (nothing else creates it).
-# Stall protection (CI runs 242/246 hung >15min): the CDN path is bimodal —
-# multi-MB/s or a crawl — so abort any transfer under 250KB/s for 30s and
-# retry; --retry-all-errors is safe because the sha256 check follows.
-RUN curl -fsSL --create-dirs \
-      --connect-timeout 15 --speed-limit 256000 --speed-time 30 \
-      --retry 6 --retry-delay 2 --retry-all-errors \
-      -o /out/claude \
-      "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/linux-x64-musl/claude" \
-    && echo "${CLAUDE_CODE_SHA256_X64_MUSL}  /out/claude" | sha256sum -c - \
+# The pinned linux-x64-musl binary is fetched, sha256-verified, and cached by
+# build.sh into the build context (see its fetch_artifact rationale). COPY it
+# and RE-verify the sha256 in-stage so the image build stays self-verifying
+# against versions.env no matter how the context file got there.
+COPY containers/agent-tools/artifacts/claude-${CLAUDE_CODE_VERSION}-linux-x64-musl /out/claude
+RUN echo "${CLAUDE_CODE_SHA256_X64_MUSL}  /out/claude" | sha256sum -c - \
     && chmod 755 /out/claude
 
 # Build-time sanity run BEFORE patching. The unpatched binary's PT_INTERP is
 # /lib/ld-musl-x86_64.so.1, which exists on this alpine stage (alpine's loader
-# IS musl libc), so this proves the download is a working executable.
+# IS musl libc), so this proves the artifact is a working executable.
 RUN /out/claude --version
 
 # Rewrite PT_INTERP to the absolute /opt/lab path baked into the shipped image,

@@ -24,6 +24,32 @@ cd "${REPO_ROOT}"
 
 PODMAN="${PODMAN:-podman}"
 
+ARTIFACTS_DIR="containers/agent-tools/artifacts"
+
+# fetch_artifact <dest> <url> <sha256> — reuse dest when it already matches the
+# pinned sha256, else (re)download and verify. The fetch lives HERE, not in a
+# Containerfile RUN step: a context file can be cached across CI runs
+# (actions/cache keyed on versions.env) and reused by local rebuilds, where an
+# in-build fetch re-downloads on every build — repeated pulls of the claude
+# binary tripped per-IP throttling on downloads.claude.ai (CI runs 242–248).
+# The Containerfiles re-verify the sha256 in-stage, so artifact provenance
+# stays pinned to versions.env either way. Slow-transfer aborts + retries
+# because a degraded CDN path otherwise rides a crawling connection forever.
+fetch_artifact() {
+  dest="$1"; url="$2"; sha="$3"
+  if [ -f "${dest}" ] && echo "${sha}  ${dest}" | sha256sum -c - >/dev/null 2>&1; then
+    echo "artifact cached: ${dest}"
+    return 0
+  fi
+  echo "fetching: ${url}"
+  curl -fsSL --create-dirs \
+    --connect-timeout 15 --speed-limit 65536 --speed-time 60 \
+    --retry 6 --retry-delay 2 --retry-all-errors \
+    -o "${dest}.tmp" "${url}"
+  echo "${sha}  ${dest}.tmp" | sha256sum -c -
+  mv "${dest}.tmp" "${dest}"
+}
+
 provider="${1:-}"
 case "${provider}" in
   claude)
@@ -32,6 +58,10 @@ case "${provider}" in
       --build-arg "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}"
       --build-arg "CLAUDE_CODE_SHA256_X64_MUSL=${CLAUDE_CODE_SHA256_X64_MUSL}"
     )
+    fetch_artifact \
+      "${ARTIFACTS_DIR}/claude-${CLAUDE_CODE_VERSION}-linux-x64-musl" \
+      "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/linux-x64-musl/claude" \
+      "${CLAUDE_CODE_SHA256_X64_MUSL}"
     ;;
   codex)
     version="${CODEX_VERSION}"
@@ -39,6 +69,10 @@ case "${provider}" in
       --build-arg "CODEX_VERSION=${CODEX_VERSION}"
       --build-arg "CODEX_SHA256_X64_MUSL_TGZ=${CODEX_SHA256_X64_MUSL_TGZ}"
     )
+    fetch_artifact \
+      "${ARTIFACTS_DIR}/codex-${CODEX_VERSION}-x86_64-linux-musl.tar.gz" \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
+      "${CODEX_SHA256_X64_MUSL_TGZ}"
     ;;
   *)
     echo "usage: $0 <claude|codex>" >&2

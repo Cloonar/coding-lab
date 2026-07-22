@@ -90,6 +90,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # build.sh fetches the pinned CLI artifacts into
+      # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
+      # a cache hit skips the CDNs entirely. Keyed on versions.env: a version
+      # bump misses and refetches; restore-keys still restores the previous
+      # dir so only the bumped artifact is re-downloaded (wrong-sha files are
+      # ignored and refetched). Repeated pulls of the claude binary tripped
+      # per-IP throttling on downloads.claude.ai (runs 242–248) — this keeps
+      # CI to one pull per version.
+      - name: Cache pinned CLI artifacts
+        uses: actions/cache@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}
+          restore-keys: |
+            agent-tools-artifacts-
+
       - name: Ensure podman
         run: |
           # First workflow to need podman on these runners; it ships on some
@@ -181,6 +197,22 @@ jobs:
           echo "FORGE_REGISTRY_TOKEN is present — proceeding to build, smoke test, and publish."
 
       - uses: actions/checkout@v4
+
+      # build.sh fetches the pinned CLI artifacts into
+      # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
+      # a cache hit skips the CDNs entirely. Keyed on versions.env: a version
+      # bump misses and refetches; restore-keys still restores the previous
+      # dir so only the bumped artifact is re-downloaded (wrong-sha files are
+      # ignored and refetched). Repeated pulls of the claude binary tripped
+      # per-IP throttling on downloads.claude.ai (runs 242–248) — this keeps
+      # CI to one pull per version.
+      - name: Cache pinned CLI artifacts
+        uses: actions/cache@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}
+          restore-keys: |
+            agent-tools-artifacts-
 
       - name: Ensure podman
         run: |
