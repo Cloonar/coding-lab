@@ -84,26 +84,32 @@ jobs:
       # The job container cannot mount a fresh procfs: its /proc carries
       # locked masked-path overmounts, so the kernel's fully-visible rule
       # denies the mount ("crun: mount `proc` to `proc`: Operation not
-      # permitted", run 244). Share the job's PID namespace and rbind its
-      # /proc into the smoke containers instead. A real host needs neither.
-      SMOKE_EXTRA_RUN_ARGS: "--pid=host --mount type=bind,source=/proc,destination=/proc"
+      # permitted", run 244). rbind the job's own /proc into the smoke
+      # containers instead. Deliberately NOT --pid=host: crun requires
+      # cgroup-less containers to own a private PID namespace (run 250);
+      # the rbound /proc then shows the job's pidns view, which the
+      # version/help probes never consult. A real host needs none of this.
+      SMOKE_EXTRA_RUN_ARGS: "--mount type=bind,source=/proc,destination=/proc"
     steps:
       - uses: actions/checkout@v4
 
       # build.sh fetches the pinned CLI artifacts into
       # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
-      # a cache hit skips the CDNs entirely. Keyed on versions.env: a version
-      # bump misses and refetches; restore-keys still restores the previous
-      # dir so only the bumped artifact is re-downloaded (wrong-sha files are
-      # ignored and refetched). Repeated pulls of the claude binary tripped
-      # per-IP throttling on downloads.claude.ai (runs 242–248) — this keeps
-      # CI to one pull per version.
-      - name: Cache pinned CLI artifacts
-        uses: actions/cache@v4
+      # a restored cache skips the CDNs entirely — repeated pulls of the claude
+      # binary tripped per-IP throttling on downloads.claude.ai (runs 242–248);
+      # this keeps CI to one pull per version. Split restore/save (not
+      # actions/cache) because the paired action only saves on job SUCCESS,
+      # which would discard a good fetch whenever a later step fails — exactly
+      # the runs that most need the artifact banked. Wrong/partial files are
+      # never a risk: build.sh ignores and refetches anything failing its
+      # sha256 pin.
+      - name: Restore pinned CLI artifacts cache
+        uses: actions/cache/restore@v4
         with:
           path: containers/agent-tools/artifacts
-          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
           restore-keys: |
+            agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-
             agent-tools-artifacts-
 
       - name: Ensure podman
@@ -158,6 +164,18 @@ jobs:
           podman image prune -f
           df -h /var/lib
 
+      # Bank whatever build.sh fetched even when an earlier step failed (the
+      # run-id key suffix keeps keys unique — cache entries are immutable).
+      # continue-on-error: a cold, fully-failed run fetched nothing, and the
+      # then-missing path must not repaint the job.
+      - name: Save pinned CLI artifacts cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
+
   # Release leg — build, re-smoke, then push digest-pinned tags to the registry.
   publish:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -166,7 +184,7 @@ jobs:
       # Same nested-runner necessity as the smoke job's env above.
       BUILDAH_ISOLATION: chroot
       BUILDAH_LAYERS: "false"
-      SMOKE_EXTRA_RUN_ARGS: "--pid=host --mount type=bind,source=/proc,destination=/proc"
+      SMOKE_EXTRA_RUN_ARGS: "--mount type=bind,source=/proc,destination=/proc"
     steps:
       # Gate on the registry token BEFORE checkout — fail loud and early with
       # provisioning instructions rather than deep inside a push. No `set -x`
@@ -200,18 +218,21 @@ jobs:
 
       # build.sh fetches the pinned CLI artifacts into
       # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
-      # a cache hit skips the CDNs entirely. Keyed on versions.env: a version
-      # bump misses and refetches; restore-keys still restores the previous
-      # dir so only the bumped artifact is re-downloaded (wrong-sha files are
-      # ignored and refetched). Repeated pulls of the claude binary tripped
-      # per-IP throttling on downloads.claude.ai (runs 242–248) — this keeps
-      # CI to one pull per version.
-      - name: Cache pinned CLI artifacts
-        uses: actions/cache@v4
+      # a restored cache skips the CDNs entirely — repeated pulls of the claude
+      # binary tripped per-IP throttling on downloads.claude.ai (runs 242–248);
+      # this keeps CI to one pull per version. Split restore/save (not
+      # actions/cache) because the paired action only saves on job SUCCESS,
+      # which would discard a good fetch whenever a later step fails — exactly
+      # the runs that most need the artifact banked. Wrong/partial files are
+      # never a risk: build.sh ignores and refetches anything failing its
+      # sha256 pin.
+      - name: Restore pinned CLI artifacts cache
+        uses: actions/cache/restore@v4
         with:
           path: containers/agent-tools/artifacts
-          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
           restore-keys: |
+            agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-
             agent-tools-artifacts-
 
       - name: Ensure podman
@@ -299,3 +320,12 @@ jobs:
             echo "published ${p}: ${pinned}  (tag ${p}-${ver})"
             echo "- \`${p}\` \`${ver}\` → \`${pinned}\`" >> "$GITHUB_STEP_SUMMARY"
           done
+
+      # Same fetch-banking as the smoke job's save step.
+      - name: Save pinned CLI artifacts cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
