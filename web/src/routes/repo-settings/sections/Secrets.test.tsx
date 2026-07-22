@@ -41,7 +41,10 @@ describe('RepoSettings secrets section', () => {
       },
     ];
     await mountSecrets();
-    await waitFor(() => container.querySelector('section h2') && secretsSection(), 'secrets section');
+    await waitFor(
+      () => container.querySelector('section h2') && secretsSection(),
+      'secrets section',
+    );
 
     const section = secretsSection();
     expect(section.textContent).toContain('API_KEY');

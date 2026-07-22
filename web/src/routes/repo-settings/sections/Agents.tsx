@@ -5,13 +5,7 @@
 
 import { For, Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
-import {
-  updateRepo,
-  type Provider,
-  type Repo,
-  type RepoPatch,
-  type Settings,
-} from '../../../api';
+import { updateRepo, type Provider, type Repo, type RepoPatch, type Settings } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
 import Select, { type SelectOption } from '../../../components/Select';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';

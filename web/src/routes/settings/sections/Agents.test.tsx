@@ -148,7 +148,9 @@ describe('Settings remote control', () => {
     await settle();
 
     // Both go as JSON bools — `false` is a value here, never an omission.
-    expect(h.patchBodies).toEqual([{ spawn_remote_default: true, spawn_remote_default_afk: false }]);
+    expect(h.patchBodies).toEqual([
+      { spawn_remote_default: true, spawn_remote_default_afk: false },
+    ]);
   });
 
   it('clears an AFK override back to inherit as null, and never sends an untouched field', async () => {

@@ -41,9 +41,7 @@ describe('repo-settings deep links', () => {
   };
 
   it('probes cover exactly the declared categories', () => {
-    expect(Object.keys(probes).sort()).toEqual(
-      REPO_SETTINGS_CATEGORIES.map((c) => c.slug).sort(),
-    );
+    expect(Object.keys(probes).sort()).toEqual(REPO_SETTINGS_CATEGORIES.map((c) => c.slug).sort());
   });
 
   for (const category of REPO_SETTINGS_CATEGORIES) {
