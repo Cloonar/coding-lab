@@ -16,7 +16,11 @@
 #     ever touching the registry credential, so an untrusted PR can never
 #     publish or read the token. This is also the first workflow to need podman
 #     on these runners; its `podman version` / `podman info` diagnostics are the
-#     evidence if a runner cannot run podman at all.
+#     evidence if a runner cannot run podman at all. The job itself executes
+#     inside the runner's Docker container (no /dev/fuse, overlayfs root, no
+#     systemd), so both jobs configure podman for nested operation before first
+#     use: vfs storage, cgroupfs/file backends, chroot build isolation — see
+#     the "Ensure podman" steps and docs/ops.md § "CI runner prerequisites".
 #
 #   * Release leg (job `publish`, `push` to main + `workflow_dispatch`): builds,
 #     re-runs the smoke test (cheap insurance that exactly what we push passes
@@ -66,6 +70,12 @@ jobs:
   smoke:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      # RUN steps execute via chroot instead of an OCI runtime: inside the
+      # runner's Docker job container the runtime cannot create its
+      # namespaces/cgroups. chroot isolation also keeps RUN in the job's own
+      # network namespace, so apk/curl/go egress needs no netavark setup.
+      BUILDAH_ISOLATION: chroot
     steps:
       - uses: actions/checkout@v4
 
@@ -77,6 +87,19 @@ jobs:
           # this step's output is the evidence.
           set -eux
           command -v podman || (sudo apt-get update && sudo apt-get install -y podman)
+          # The job executes inside the runner's Docker container: podman's
+          # default overlay storage cannot mount there — not natively
+          # (overlay-upon-overlay is rejected by the kernel) and not via the
+          # fuse-overlayfs fallback (no /dev/fuse in the job container; run 234
+          # failed exactly there). vfs needs no mounts at all — slower, but
+          # this job is path-gated and correctness beats speed here. cgroupfs +
+          # file backends because the job container has no systemd/journald.
+          sudo mkdir -p /etc/containers
+          printf '[storage]\ndriver = "vfs"\n' | sudo tee /etc/containers/storage.conf
+          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' | sudo tee /etc/containers/containers.conf
+          # Drop any store a pre-provisioned runner image may have initialized
+          # under the default driver — a driver flip over existing storage errors.
+          sudo rm -rf /var/lib/containers/storage
           podman version
           podman info
 
@@ -96,6 +119,9 @@ jobs:
   publish:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    env:
+      # Same nested-runner necessity as the smoke job's env above.
+      BUILDAH_ISOLATION: chroot
     steps:
       # Gate on the registry token BEFORE checkout — fail loud and early with
       # provisioning instructions rather than deep inside a push. No `set -x`
@@ -129,9 +155,14 @@ jobs:
 
       - name: Ensure podman
         run: |
-          # Same install-if-missing + diagnostics as the PR leg's smoke job.
+          # Same install-if-missing + nested-runner podman config + diagnostics
+          # as the PR leg's smoke job — see that step for the rationale.
           set -eux
           command -v podman || (sudo apt-get update && sudo apt-get install -y podman)
+          sudo mkdir -p /etc/containers
+          printf '[storage]\ndriver = "vfs"\n' | sudo tee /etc/containers/storage.conf
+          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' | sudo tee /etc/containers/containers.conf
+          sudo rm -rf /var/lib/containers/storage
           podman version
           podman info
 

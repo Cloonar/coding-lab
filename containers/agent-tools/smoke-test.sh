@@ -50,7 +50,13 @@ for base in ${bases}; do
   # container must never mutate). The inner script runs in the BASE image's
   # shell: $PATH and $(uname -m) are intentionally left unexpanded here so they
   # evaluate inside the container.
+  #
+  # --network=host + --cgroups=disabled: the probe needs neither a network
+  # namespace nor resource limits, and skipping both is what lets it run
+  # inside CI's nested job container (no netavark privileges, no writable
+  # cgroup tree there) — with no change to what the test proves.
   "${PODMAN}" run --rm \
+    --network=host --cgroups=disabled \
     --mount "type=image,source=${image_ref},destination=/opt/lab" \
     "${base}" \
     sh -c "export PATH=/opt/lab/bin:\$PATH; ${cli} --version && labctl --help >/dev/null && echo \"OK (${cli} + labctl on \$(uname -m))\""
