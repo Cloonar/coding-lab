@@ -95,7 +95,10 @@ jobs:
           # this job is path-gated and correctness beats speed here. cgroupfs +
           # file backends because the job container has no systemd/journald.
           sudo mkdir -p /etc/containers
-          printf '[storage]\ndriver = "vfs"\n' | sudo tee /etc/containers/storage.conf
+          # A hand-written storage.conf replaces ALL built-in storage defaults,
+          # so runroot/graphroot must be spelled out too (their stock paths) —
+          # storage errors with "runroot must be set" otherwise.
+          printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
           printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' | sudo tee /etc/containers/containers.conf
           # Drop any store a pre-provisioned runner image may have initialized
           # under the default driver — a driver flip over existing storage errors.
@@ -160,7 +163,10 @@ jobs:
           set -eux
           command -v podman || (sudo apt-get update && sudo apt-get install -y podman)
           sudo mkdir -p /etc/containers
-          printf '[storage]\ndriver = "vfs"\n' | sudo tee /etc/containers/storage.conf
+          # A hand-written storage.conf replaces ALL built-in storage defaults,
+          # so runroot/graphroot must be spelled out too (their stock paths) —
+          # storage errors with "runroot must be set" otherwise.
+          printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
           printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' | sudo tee /etc/containers/containers.conf
           sudo rm -rf /var/lib/containers/storage
           podman version
