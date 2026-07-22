@@ -14,9 +14,9 @@ import RepoCRs from './routes/RepoCRs';
 import RepoIssues from './routes/RepoIssues';
 import RepoLabels from './routes/RepoLabels';
 import Repos from './routes/Repos';
-import RepoSettings from './routes/RepoSettings';
+import RepoSettings from './routes/repo-settings';
 import RunChat from './routes/RunChat';
-import Settings from './routes/Settings';
+import Settings from './routes/settings';
 import Setup from './routes/Setup';
 import Tokens from './routes/Tokens';
 import { registerServiceWorker } from './pwa';
@@ -39,10 +39,12 @@ render(
       {/* Static /runs redirect must precede the /runs/:id chat route. */}
       <Route path="/runs" component={() => <Navigate href="/history" />} />
       <Route path="/runs/:id" component={RunChat} />
-      <Route path="/settings" component={Settings} />
+      {/* Optional :section (issue #198): the bare path renders the category
+          index on mobile and redirects to the first category on desktop. */}
+      <Route path="/settings/:section?" component={Settings} />
       <Route path="/tokens" component={Tokens} />
       <Route path="/repos/new" component={AddRepo} />
-      <Route path="/repos/:id/settings" component={RepoSettings} />
+      <Route path="/repos/:id/settings/:section?" component={RepoSettings} />
       <Route path="/repos/:id/issues" component={RepoIssues} />
       <Route path="/repos/:id/issues/new" component={NewIssue} />
       <Route path="/repos/:id/issues/:number" component={IssueDetail} />

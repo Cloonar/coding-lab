@@ -1,33 +1,27 @@
-// Global settings (/settings): spawn defaults (model/effort from the
-// provider catalog), the global instance cap, AFK budget minutes, reaper and
-// scheduler ticks, sweep interval and git author identity. Saved as a
-// dirty-fields-only PATCH; int fields validate per field client-side and the
-// server's 400 {"error"} lands in the banner. Runtime loops re-read settings
-// each tick, so saves apply without a restart.
+// Global settings › Agents (issue #198): spawn defaults (model/effort from the
+// provider catalog), the AFK defaults override, the AFK seed prompt, and the
+// global capacity/AFK loop tuning. Saved as a dirty-fields-only PATCH; int
+// fields validate per field client-side and the server's 400 {"error"} lands
+// in the banner. Runtime loops re-read settings each tick, so saves apply
+// without a restart. Ported verbatim from the old Settings monolith's
+// SettingsForm minus the git author card (now the General section), onto the
+// shared useSettingsForm primitive — where the monolith's buildPatch returned
+// null on a field error, this returns the 'Fix the highlighted fields first.'
+// string useSettingsForm surfaces as the error banner (same save() behavior).
 
-import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
+import { For, Show, createSignal } from 'solid-js';
 import {
-  createPushDevice,
-  deletePushDevice,
-  errorMessage,
-  getSettings,
-  listProviders,
-  listPushDevices,
-  pushKey,
-  testPushDevice,
   updateSettings,
   type BoolSettingKey,
   type IntSettingKey,
   type Provider,
-  type PushDevice,
-  type Settings as SettingsPayload,
+  type Settings,
   type TextSettingKey,
-} from '../api';
-import Select, { type SelectOption } from '../components/Select';
-import ErrorBanner from '../components/ErrorBanner';
-import RequireAuth from '../components/RequireAuth';
-import { install } from '../lib/install';
-import { providerFor } from '../lib/spawn';
+} from '../../../api';
+import Select, { type SelectOption } from '../../../components/Select';
+import ErrorBanner from '../../../components/ErrorBanner';
+import { useSettingsForm } from '../../../components/settings/useSettingsForm';
+import { providerFor } from '../../../lib/spawn';
 
 /** The AFK remote override's explicit picks; the inherit row is Select's own. */
 const REMOTE_OPTIONS: SelectOption[] = [
@@ -100,80 +94,21 @@ const INT_FIELDS: IntField[] = [
 const SPAWN_INT_FIELDS = INT_FIELDS.filter((f) => f.card === 'spawn');
 const CAPACITY_INT_FIELDS = INT_FIELDS.filter((f) => f.card === 'capacity');
 
-export default function Settings() {
-  return (
-    <RequireAuth>
-      <SettingsView />
-    </RequireAuth>
-  );
-}
-
-function SettingsView() {
-  const [settings, { refetch }] = createResource(() => getSettings());
-  const [providers] = createResource(() => listProviders());
-
-  return (
-    <main class="page">
-      <div class="section-head">
-        <h2>Settings</h2>
-      </div>
-      <Switch>
-        <Match when={settings.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(settings.error)}</span>
-          </div>
-        </Match>
-        <Match when={settings()}>
-          {(current) => (
-            <SettingsForm
-              initial={current()}
-              // Global spawn defaults have no repo context; the catalogs
-              // resolve against the DRAFTED provider_default / AFK provider
-              // (skip-layer over this list), never a hardcoded provider id
-              // (issue #51).
-              providers={providers() ?? []}
-              onSaved={() => void refetch()}
-            />
-          )}
-        </Match>
-      </Switch>
-      {/* PWA install re-entry (issue #142) — device-local like notifications,
-          so it lives outside the settings PATCH. The sole way back after a
-          permanent "Not now": reopens the sheet AppShell mounts and clears the
-          dismissed flag. Hidden when running standalone; on iOS always shown
-          otherwise; on Android only while a captured beforeinstallprompt event
-          is in hand. Placed above Notifications because on iOS installing is
-          the prerequisite for enabling push at all. */}
-      <Show when={install.settingsRowVisible()}>
-        <section class="card">
-          <h2>Install app</h2>
-          <small class="hint hint-block">Add lab to your Home Screen for a full-screen app.</small>
-          <button type="button" class="primary" onClick={() => install.openFromSettings()}>
-            Install app
-          </button>
-        </section>
-      </Show>
-      {/* Device-local, not part of the saved settings PATCH — its own card. */}
-      <NotificationsSection />
-    </main>
-  );
-}
-
 /**
  * String draft of one settings value ('' for an absent key). Bool keys (issue
  * #163) draft as 'true'/'false', and null — the AFK override's inherit state —
  * drafts as '' exactly like an absent key: both mean "no explicit pick here".
  */
 function seedDraft(
-  initial: SettingsPayload,
+  initial: Settings,
   key: IntSettingKey | TextSettingKey | BoolSettingKey,
 ): string {
   const value = initial[key];
   return value === undefined || value === null ? '' : String(value);
 }
 
-function SettingsForm(props: {
-  initial: SettingsPayload;
+export default function Agents(props: {
+  initial: Settings;
   providers: Provider[];
   onSaved: () => void;
 }) {
@@ -190,8 +125,6 @@ function SettingsForm(props: {
     spawn_model_default_afk: seedDraft(initial, 'spawn_model_default_afk'),
     spawn_effort_default_afk: seedDraft(initial, 'spawn_effort_default_afk'),
     spawn_remote_default_afk: seedDraft(initial, 'spawn_remote_default_afk'),
-    git_author_name: seedDraft(initial, 'git_author_name'),
-    git_author_email: seedDraft(initial, 'git_author_email'),
     afk_prompt: seedDraft(initial, 'afk_prompt'),
     ...Object.fromEntries(INT_FIELDS.map((f) => [f.key, seedDraft(initial, f.key)])),
   });
@@ -225,10 +158,6 @@ function SettingsForm(props: {
   const remoteBlocker = (provider: Provider | null): string | null =>
     provider !== null && !provider.supports_remote ? provider.display_name : null;
 
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-  const [note, setNote] = createSignal<string | null>(null);
-
   const intDirty = (key: IntSettingKey) => draft(key).trim() !== seedDraft(initial, key);
 
   /** Per-field validation: only dirty int fields can be in error. Each
@@ -250,8 +179,8 @@ function SettingsForm(props: {
   const boolValue = (key: BoolSettingKey): boolean | null =>
     draft(key) === '' ? null : draft(key) === 'true';
 
-  const buildPatch = (): SettingsPayload | null => {
-    const patch: SettingsPayload = {};
+  const buildPatch = (): Settings | string => {
+    const patch: Settings = {};
     for (const key of [
       'provider_default',
       'spawn_model_default',
@@ -259,8 +188,6 @@ function SettingsForm(props: {
       'spawn_provider_default_afk',
       'spawn_model_default_afk',
       'spawn_effort_default_afk',
-      'git_author_name',
-      'git_author_email',
       'afk_prompt',
     ] as TextSettingKey[]) {
       // afk_prompt_default is deliberately absent from this list: it is a
@@ -274,7 +201,9 @@ function SettingsForm(props: {
     }
     for (const field of INT_FIELDS) {
       if (!intDirty(field.key)) continue;
-      if (intError(field.key) !== null) return null; // blocked by a field error
+      // Where the monolith returned null (blocked), we hand useSettingsForm the
+      // banner string it surfaces as the error — same behavior save() produced.
+      if (intError(field.key) !== null) return 'Fix the highlighted fields first.';
       patch[field.key] = Number(draft(field.key).trim());
     }
     // Send the full declared bag ("true"/"false" per key) once any option
@@ -287,30 +216,20 @@ function SettingsForm(props: {
     return patch;
   };
 
-  const save = async (event: SubmitEvent) => {
-    event.preventDefault();
-    setError(null);
-    setNote(null);
+  // One source of truth for the leave guard: dirty is derived straight from
+  // buildPatch (a string result means "dirty but blocked by a field error"),
+  // never a parallel bookkeeping signal.
+  const dirty = () => {
     const patch = buildPatch();
-    if (patch === null) {
-      setError('Fix the highlighted fields first.');
-      return;
-    }
-    if (Object.keys(patch).length === 0) {
-      setNote('Nothing to save.');
-      return;
-    }
-    setBusy(true);
-    try {
-      await updateSettings(patch);
-      setNote('Saved.');
-      props.onSaved();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+    return typeof patch === 'string' || Object.keys(patch).length > 0;
   };
+
+  const form = useSettingsForm<Settings>({
+    dirty,
+    buildPatch,
+    submit: (patch) => updateSettings(patch),
+    onSaved: () => props.onSaved(),
+  });
 
   // Shared row markup for every int field, regardless of which card it
   // renders in (issue #124 needs one field split out of Capacity & AFK into
@@ -336,11 +255,11 @@ function SettingsForm(props: {
   );
 
   return (
-    <form onSubmit={(e) => void save(e)} class="stack">
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <Show when={note()}>
+    <form onSubmit={(e) => void form.save(e)} class="stack">
+      <ErrorBanner message={form.error()} onDismiss={() => form.setError(null)} />
+      <Show when={form.note()}>
         <div class="banner success" role="status">
-          <span class="banner-text">{note()}</span>
+          <span class="banner-text">{form.note()}</span>
         </div>
       </Show>
 
@@ -505,255 +424,9 @@ function SettingsForm(props: {
         <For each={CAPACITY_INT_FIELDS}>{intFieldRow}</For>
       </section>
 
-      <section class="card">
-        <h2>Git author</h2>
-        <label class="field">
-          <span>Author name</span>
-          <input
-            type="text"
-            name="git_author_name"
-            autocomplete="off"
-            value={draft('git_author_name')}
-            onInput={(e) => setDraft('git_author_name', e.currentTarget.value)}
-          />
-          <small class="hint">Used for commits unless a repo overrides it.</small>
-        </label>
-        <label class="field">
-          <span>Author email</span>
-          <input
-            type="text"
-            name="git_author_email"
-            autocomplete="off"
-            spellcheck={false}
-            value={draft('git_author_email')}
-            onInput={(e) => setDraft('git_author_email', e.currentTarget.value)}
-          />
-        </label>
-      </section>
-
-      <button type="submit" class="primary wide" disabled={busy()}>
-        {busy() ? 'Saving…' : 'Save settings'}
+      <button type="submit" class="primary wide" disabled={form.busy()}>
+        {form.busy() ? 'Saving…' : 'Save settings'}
       </button>
     </form>
-  );
-}
-
-// --- Notifications (Web Push, issue #98) ---
-//
-// Device-local, so it lives outside the settings PATCH: enabling registers
-// THIS browser's push subscription with the server and lists every device the
-// account has enabled. Support is gated hard — Web Push needs a secure context
-// and an installed service worker, neither of which the dev server provides.
-
-type PushEnv =
-  | { kind: 'unsupported' }
-  | { kind: 'no-sw' }
-  | { kind: 'ready'; registration: ServiceWorkerRegistration };
-
-/** What this browser can do with Web Push, resolved once on mount. */
-async function detectPushEnv(): Promise<PushEnv> {
-  // Synchronous feature checks first: a non-secure context or a browser without
-  // the push/notification APIs can never subscribe. (On iOS the whole surface
-  // only exists once the PWA is installed to the Home Screen.)
-  if (
-    !window.isSecureContext ||
-    !('serviceWorker' in navigator) ||
-    !('PushManager' in window) ||
-    !('Notification' in window)
-  ) {
-    return { kind: 'unsupported' };
-  }
-  // NEVER await navigator.serviceWorker.ready — it hangs forever when no worker
-  // ever registers (the dev server serves no /sw.js). getRegistration() instead
-  // resolves to undefined, which is exactly the "not the installed app" signal.
-  const registration = await navigator.serviceWorker.getRegistration();
-  if (!registration) return { kind: 'no-sw' };
-  return { kind: 'ready', registration };
-}
-
-/** base64url (the VAPID key form) → the Uint8Array applicationServerKey wants.
- *  Backed by a concrete ArrayBuffer so it satisfies BufferSource. */
-function urlBase64ToUint8Array(base64url: string): Uint8Array<ArrayBuffer> {
-  const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
-  const base64 = (base64url + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(base64);
-  const bytes = new Uint8Array(new ArrayBuffer(raw.length));
-  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
-  return bytes;
-}
-
-/** Locale date, tolerant of an unparseable timestamp (mirrors Tokens). */
-function onDate(timestamp: string): string {
-  const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleDateString();
-}
-
-function NotificationsSection() {
-  const [env] = createResource(detectPushEnv);
-  return (
-    <section class="card">
-      <h2>Notifications</h2>
-      <Switch fallback={<small class="hint hint-block">Checking push support…</small>}>
-        <Match when={env()?.kind === 'unsupported'}>
-          <small class="hint hint-block">
-            Push notifications need HTTPS. On iOS 16.4+ you must add lab to the Home Screen and open
-            it from there before notifications can be enabled.
-          </small>
-        </Match>
-        <Match when={env()?.kind === 'no-sw'}>
-          <small class="hint hint-block">
-            Notifications need the installed (production) app — the dev server registers no service
-            worker, so there is nothing to subscribe.
-          </small>
-        </Match>
-        <Match when={env()?.kind === 'ready'}>
-          <NotificationsReady
-            registration={(env() as Extract<PushEnv, { kind: 'ready' }>).registration}
-          />
-        </Match>
-      </Switch>
-    </section>
-  );
-}
-
-function NotificationsReady(props: { registration: ServiceWorkerRegistration }) {
-  const [devices, { refetch }] = createResource(() => listPushDevices());
-  // The browser's current local subscription — its endpoint is what marks a
-  // listed device as "this device" and what Remove unsubscribes.
-  const [localSub, { refetch: refetchLocal }] = createResource(() =>
-    props.registration.pushManager.getSubscription(),
-  );
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-  const [note, setNote] = createSignal<string | null>(null);
-
-  const localEndpoint = () => localSub()?.endpoint ?? null;
-
-  const enable = async () => {
-    setError(null);
-    setNote(null);
-    // The click is the user gesture: request permission FIRST, before any
-    // network await — iOS only shows the prompt when requestPermission() rides
-    // the gesture, and any prior await forfeits it.
-    let permission: NotificationPermission;
-    try {
-      permission = await Notification.requestPermission();
-    } catch (err) {
-      setError(errorMessage(err));
-      return;
-    }
-    if (permission !== 'granted') {
-      setError(
-        'Notification permission was denied — allow notifications in your browser settings, then try again.',
-      );
-      return;
-    }
-    setBusy(true);
-    try {
-      const sub = await props.registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(await pushKey()),
-      });
-      const json = sub.toJSON() as {
-        endpoint?: string;
-        keys?: { p256dh?: string; auth?: string };
-      };
-      await createPushDevice({
-        endpoint: json.endpoint ?? sub.endpoint,
-        keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
-      });
-      setNote('Notifications enabled on this device.');
-      void refetchLocal();
-      void refetch();
-    } catch (err) {
-      // Surfaced verbatim, never swallowed: a failed subscribe (bad VAPID key,
-      // blocked push service, HTTPS misconfig) is the self-hoster's only clue.
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async (device: PushDevice) => {
-    setError(null);
-    setNote(null);
-    try {
-      await deletePushDevice(device.id);
-      // When it is THIS browser, drop the local subscription too so the browser
-      // side matches the server — a stale local sub keeps receiving pushes.
-      if (device.endpoint === localEndpoint()) {
-        const sub = await props.registration.pushManager.getSubscription();
-        await sub?.unsubscribe();
-        void refetchLocal();
-      }
-      void refetch();
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  };
-
-  const sendTest = async (device: PushDevice) => {
-    setError(null);
-    setNote(null);
-    try {
-      await testPushDevice(device.id);
-      setNote(`Test notification sent to ${device.label}.`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  };
-
-  return (
-    <>
-      <small class="hint hint-block">
-        Get a push when an AFK run needs you or finishes. Enable it once per browser — every device
-        you enable is listed below.
-      </small>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <Show when={note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{note()}</span>
-        </div>
-      </Show>
-      {/* Always offered — even when already granted it re-syncs this browser's
-          subscription (the server upsert is idempotent). */}
-      <button type="button" class="primary" disabled={busy()} onClick={() => void enable()}>
-        {busy() ? 'Enabling…' : 'Enable notifications on this device'}
-      </button>
-      <Switch>
-        <Match when={devices.error !== undefined}>
-          <small class="hint hint-block">{errorMessage(devices.error)}</small>
-        </Match>
-        <Match when={devices()?.length === 0}>
-          <p class="empty">No devices yet — enable notifications above.</p>
-        </Match>
-        <Match when={devices()}>
-          <div class="card-list">
-            <For each={devices()}>
-              {(device) => (
-                <article class="card">
-                  <div class="card-head">
-                    <span class="card-title">
-                      {device.label}
-                      <Show when={device.endpoint === localEndpoint()}>
-                        <span class="muted"> · this device</span>
-                      </Show>
-                    </span>
-                    <span class="spacer" />
-                    <button type="button" class="small" onClick={() => void sendTest(device)}>
-                      Send test
-                    </button>
-                    <button type="button" class="danger small" onClick={() => void remove(device)}>
-                      Remove
-                    </button>
-                  </div>
-                  <p class="muted card-sub">Added {onDate(device.created_at)}</p>
-                </article>
-              )}
-            </For>
-          </div>
-        </Match>
-      </Switch>
-    </>
   );
 }

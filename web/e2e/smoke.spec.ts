@@ -122,8 +122,10 @@ test('settings notifications card reaches the ready state', async ({ page }) => 
   await login(page);
   await swReady(page);
 
-  await page.goto('/settings');
-  // The "ready" env in Settings.tsx's detectPushEnv() only resolves once
+  // Deep link to the Notifications category (issue #198): the bare /settings
+  // path redirects to the General section on a desktop-sized viewport.
+  await page.goto('/settings/notifications');
+  // The "ready" env in the Notifications section's detectPushEnv() only resolves once
   // navigator.serviceWorker.getRegistration() finds a registration — so this
   // heading/button pair is also a UI-level assertion that the SW is
   // registered, not just that the card rendered.
