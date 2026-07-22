@@ -66,10 +66,13 @@ type Config struct {
 	BaseURL string // external base URL; "" when unset
 
 	// AgentURL is the session-facing base URL handed to labctl as LAB_URL,
-	// independent of BaseURL. "" when unset; the session-URL helper then falls
-	// back to BaseURL, else loopback. It exists so machine traffic can stay on
-	// loopback while BaseURL points at an external (possibly SSO-fronted)
-	// origin (issue #30).
+	// independent of BaseURL. "" when unset; the session-URL helper then
+	// defaults to the agent unix socket (unix://<state-dir>/agent.sock,
+	// issue #201). It exists as the explicit override for deployments where
+	// the default socket won't do — an http(s) URL for off-host sessions, or
+	// a unix:///abs/path naming a different socket. Machine traffic never
+	// routes through BaseURL: an external (possibly SSO-fronted) origin is
+	// exactly the issue #30 failure mode.
 	AgentURL string
 
 	// SeedUser is the username of the initial operator user to seed at
@@ -148,7 +151,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		trustedProxies  = fs.String("trusted-proxies", "", "comma-separated CIDRs of trusted reverse proxies")
 
 		baseURL  = fs.String("base-url", "", "external base URL, e.g. https://lab.example.com (env LAB_BASE_URL)")
-		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL; defaults to --base-url, else http://127.0.0.1:<port> (env LAB_AGENT_URL)")
+		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL, http(s) or unix:///abs/path; defaults to unix://<state-dir>/agent.sock (env LAB_AGENT_URL)")
 
 		seedUser             = fs.String("seed-user", "", "username of the initial operator user to seed at startup (env LAB_SEED_USER)")
 		seedPasswordHash     = fs.String("seed-password-hash", "", "PHC-encoded argon2id hash of the initial operator password, given inline (env LAB_SEED_PASSWORD_HASH)")
@@ -252,7 +255,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 
 	cfg.AgentURL = pick("agent-url", *agentURL, "LAB_AGENT_URL", "")
 	if cfg.AgentURL != "" {
-		if err := validateHTTPURL("--agent-url", cfg.AgentURL); err != nil {
+		if err := validateAgentURL("--agent-url", cfg.AgentURL); err != nil {
 			return Config{}, err
 		}
 	}
@@ -324,10 +327,24 @@ func resolveProviderMap(providerIDs []string, getenv func(string) string, envPre
 	return out
 }
 
+// validateAgentURL admits everything validateHTTPURL does plus the agent
+// socket scheme labctl understands (issue #201): unix:// followed by an
+// absolute socket path. Only --agent-url gets this — --base-url names an
+// origin browsers must reach, and a socket is not one.
+func validateAgentURL(flag, value string) error {
+	if sock, ok := strings.CutPrefix(value, "unix://"); ok {
+		if !strings.HasPrefix(sock, "/") {
+			return fmt.Errorf("%s %q: unix:// socket path must be absolute (unix:///abs/path)", flag, value)
+		}
+		return nil
+	}
+	return validateHTTPURL(flag, value)
+}
+
 // validateHTTPURL rejects a value that is not an absolute http(s) URL. Used
-// for --base-url and --agent-url alike: both name origins that must carry a
-// scheme and host (relative or other-scheme values are a misconfiguration
-// caught at startup, not silently accepted).
+// for --base-url and (via validateAgentURL) --agent-url: both name origins
+// that must carry a scheme and host (relative or other-scheme values are a
+// misconfiguration caught at startup, not silently accepted).
 func validateHTTPURL(flag, value string) error {
 	// A bare host:port (scheme omitted) trips url.Parse's "first path segment
 	// cannot contain colon"; fold that into the same actionable message rather

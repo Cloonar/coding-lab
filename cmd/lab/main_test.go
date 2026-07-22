@@ -70,50 +70,40 @@ func TestUsageDocumentsSeedFlags(t *testing.T) {
 	}
 }
 
-// TestLabURL pins the session-facing LAB_URL precedence: the dedicated agent
-// URL wins over the external base URL, which wins over the loopback fallback
-// derived from --addr (issue #30).
+// TestLabURL pins the session-facing LAB_URL precedence (issue #201): an
+// explicit agent URL wins verbatim; otherwise the agent unix socket under the
+// state dir. BaseURL and the pre-#201 loopback fallback play no part —
+// routing agent traffic through the external origin was the issue #30
+// failure mode.
 func TestLabURL(t *testing.T) {
 	tests := []struct {
 		name     string
 		agentURL string
 		baseURL  string
 		addr     string
+		stateDir string
 		want     string
 	}{
 		{
-			name: "loopback fallback from addr port",
-			addr: ":8080",
-			want: "http://127.0.0.1:8080",
+			name:     "socket default from state dir",
+			stateDir: "/var/lib/lab",
+			addr:     ":8080",
+			want:     "unix:///var/lib/lab/agent.sock",
 		},
 		{
-			name: "loopback fallback with host in addr",
-			addr: "0.0.0.0:9090",
-			want: "http://127.0.0.1:9090",
+			name:     "socket default ignores base url and addr",
+			stateDir: "/srv/lab",
+			baseURL:  "https://lab.example.com",
+			addr:     "0.0.0.0:9090",
+			want:     "unix:///srv/lab/agent.sock",
 		},
 		{
-			name: "loopback fallback defaults port when addr has none",
-			addr: "unparseable",
-			want: "http://127.0.0.1:8080",
-		},
-		{
-			name:    "base url beats loopback",
-			baseURL: "https://lab.example.com",
-			addr:    ":8080",
-			want:    "https://lab.example.com",
-		},
-		{
-			name:     "agent url beats base url",
+			name:     "agent url wins verbatim",
 			agentURL: "http://127.0.0.1:8080",
 			baseURL:  "https://lab.example.com",
+			stateDir: "/srv/lab",
 			addr:     ":8080",
 			want:     "http://127.0.0.1:8080",
-		},
-		{
-			name:     "agent url beats loopback with no base url",
-			agentURL: "http://lab-host.internal:8080",
-			addr:     ":8080",
-			want:     "http://lab-host.internal:8080",
 		},
 	}
 	for _, tt := range tests {
@@ -122,6 +112,7 @@ func TestLabURL(t *testing.T) {
 				AgentURL: tt.agentURL,
 				BaseURL:  tt.baseURL,
 				Addr:     tt.addr,
+				StateDir: tt.stateDir,
 			})
 			if got != tt.want {
 				t.Errorf("labURL() = %q, want %q", got, tt.want)

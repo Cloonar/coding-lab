@@ -253,17 +253,20 @@ in
 
     agentUrl = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = "http://127.0.0.1:${toString listenPort}";
-      defaultText = lib.literalExpression ''"http://127.0.0.1:<port from listenAddr>"'';
+      default = null;
+      defaultText = lib.literalExpression ''null (lab's own default: unix://''${config.services.lab.stateDir}/agent.sock)'';
       example = "http://lab-host.internal:8080";
       description = ''
         Session-facing base URL (--agent-url) handed to labctl as `LAB_URL`.
-        Defaults to a loopback URL derived from {option}`listenAddr`, so that
-        agent/machine traffic reaches lab directly and never hairpins out
-        through {option}`baseUrl`'s external origin and any SSO/auth proxy in
-        front of it. Override it only when sessions run off-host and must reach
-        lab over the network; set it to `null` to fall back to lab's own
-        precedence (baseUrl, else loopback).
+        Leave at `null` (the default) and lab hands every spawned session
+        `unix://<state-dir>/agent.sock` — the agent API's own unix socket
+        under {option}`stateDir`, mode 0700, always present, never touching
+        the network or any proxy in front of {option}`baseUrl`. Set this
+        option only when sessions run off-host and must reach lab over TCP
+        (a `unix:///abs/path` value naming a different socket is also
+        accepted); never point it at the external/SSO-fronted origin — that
+        was issue #30's failure mode (agent traffic hairpinning through the
+        auth proxy).
       '';
     };
 
