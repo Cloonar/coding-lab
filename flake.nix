@@ -132,6 +132,18 @@
                 };
               };
 
+              # Second text-level dummy (its unit text is also realized by the
+              # runCommand, so the same no-real-agent-CLIs rule applies): pins
+              # that an explicitly-set agentUrl still serializes as --agent-url
+              # now that the module default is null / no flag (#201).
+              agentUrlDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  agentUrl = "unix:///run/lab/agent.sock";
+                };
+              };
+
               # Eval-only dummies: the asserts below read package *names* off
               # config.systemd.services.lab.path. lib.getName / pname access
               # does not force outPaths, so the unfree claude-code default
@@ -184,7 +196,11 @@
             pkgs.runCommand "lab-nixos-module-eval"
               {
                 unit = dummy.config.systemd.units."lab.service".text;
-                passAsFile = [ "unit" ];
+                agentUrlUnit = agentUrlDummy.config.systemd.units."lab.service".text;
+                passAsFile = [
+                  "unit"
+                  "agentUrlUnit"
+                ];
                 # PATH-serialization greps below match against these store paths:
                 # the alias (hello), a baseline tool, ripgrep, and nix.
                 hello = pkgs.hello;
@@ -224,12 +240,19 @@
                   exit 1
                 fi
 
-                # Regression (issue #30): machine traffic must default to
-                # loopback. Even with the external https baseUrl set above, the
-                # module defaults agentUrl to a loopback URL derived from
-                # listenAddr and passes it as --agent-url, so labctl's LAB_URL
-                # never hairpins out through the SSO/auth proxy.
-                grep '^ExecStart=' "$unitPath" | grep -qF -- '"--agent-url" "http://127.0.0.1:8080"'
+                # Regression (issues #30, #201): machine traffic must default
+                # to lab's own agent socket, never the network. agentUrl
+                # defaults to null and the module emits no --agent-url flag, so
+                # lab falls back internally to unix://<state-dir>/agent.sock —
+                # even with the external https baseUrl set above, labctl's
+                # LAB_URL cannot hairpin out through the SSO/auth proxy (#30's
+                # failure mode).
+                if grep '^ExecStart=' "$unitPath" | grep -qF -- '--agent-url'; then
+                  echo "default unit must not pass --agent-url (socket default, issue #201)" >&2
+                  exit 1
+                fi
+                # ...while an explicitly-set agentUrl must still serialize.
+                grep '^ExecStart=' "$agentUrlUnitPath" | grep -qF -- '"--agent-url" "unix:///run/lab/agent.sock"'
 
                 # Text-level PATH serialization (issue #74): prove the path list
                 # actually lands on the unit's Environment=PATH line — the
