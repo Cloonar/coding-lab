@@ -357,6 +357,29 @@ func TestParse(t *testing.T) {
 			wantErr: "http(s)",
 		},
 		{
+			// The default LAB_URL is itself a unix:// URL (issue #201), so the
+			// explicit override must be able to name a socket too — a custom
+			// path, or the container-side mount point of #205.
+			name: "agent url accepts unix socket",
+			args: []string{"--agent-url", "unix:///run/lab/agent.sock"},
+			want: with(func(c *Config) { c.AgentURL = "unix:///run/lab/agent.sock" }),
+		},
+		{
+			// unix:// is followed directly by the path, so unix://agent.sock
+			// names the relative "agent.sock" — a misconfiguration caught at
+			// startup, mirroring labctl's own validation.
+			name:    "agent url unix path must be absolute",
+			args:    []string{"--agent-url", "unix://agent.sock"},
+			wantErr: "unix:// socket path must be absolute",
+		},
+		{
+			// Only --agent-url learns the socket scheme; --base-url names an
+			// origin browsers must reach.
+			name:    "base url rejects unix scheme",
+			args:    []string{"--base-url", "unix:///run/lab/agent.sock"},
+			wantErr: "http(s)",
+		},
+		{
 			name:    "agent url must be absolute",
 			args:    []string{"--agent-url", "lab-host.internal"},
 			wantErr: "http(s)",

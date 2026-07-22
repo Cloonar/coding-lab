@@ -19,7 +19,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `stateDir` | `/var/lib/lab` | State root (layout below). Managed via systemd `StateDirectory` when left at the default; otherwise the operator provides the directory (lab creates missing children itself, 0700). |
 | `listenAddr` | `":8080"` | Passed as `--addr`. |
 | `baseUrl` | `null` | Passed as `--base-url`. Drives Secure-cookie detection and the CSRF Origin check — set it whenever lab sits behind TLS. |
-| `agentUrl` | `"http://127.0.0.1:<port>"` | Passed as `--agent-url`. Session-facing base URL handed to `labctl` as `LAB_URL`. Defaults to a loopback URL derived from `listenAddr` so agent traffic reaches lab directly and never hairpins out through `baseUrl` and any SSO/auth proxy in front of it. Override only when sessions run off-host; set to `null` to fall back to lab's own precedence (baseUrl, else loopback). |
+| `agentUrl` | `null` | Passed as `--agent-url`. Session-facing base URL handed to `labctl` as `LAB_URL`. `null` (the default) leaves it unset, and lab hands every spawned session `unix://<state-dir>/agent.sock` — the agent API's own unix socket (see [Agent socket](#agent-socket)), which never touches the network or any SSO/auth proxy in front of `baseUrl`. Set it only when sessions run off-host and must reach lab over TCP; never point it at the external/SSO-fronted origin (issue #30's failure mode). |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps lab's derived sqlite default **and** lets a `LAB_DB` entry in `environmentFile` take effect (precedence is flag > env > default — a `--db` flag would shadow `LAB_DB`). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
@@ -82,6 +82,14 @@ Full example — sops-provided master key, Postgres DSN via `environmentFile`:
 
 **Debugging sessions**: the module installs tmux system-wide; attach to a live agent session with `sudo -u lab tmux attach -t '<repo>~<label>'` (detach with `C-b d` — never kill the pane; Stop from the UI so the guarded teardown runs).
 
+### Agent socket
+
+Alongside its TCP listener (`--addr`, web UI / human auth only), lab always serves the agent API (`/agent/v1`, run-token auth) on a unix domain socket at `<state-dir>/agent.sock` — mode 0700, owned by the service user. A stale socket file from an unclean shutdown is removed and recreated on every boot; the state dir itself is already 0700, so the socket needs no separate ACL.
+
+This is what `LAB_URL` resolves to for every spawned session by default (`--agent-url` unset, the `null` default of `services.lab.agentUrl` — see the option table above): `unix://<state-dir>/agent.sock`. `labctl` accepts `LAB_URL=unix:///abs/path` in every subcommand — including `secret exec`, `secret scan`, and therefore the pre-push guard hook — with http(s) `LAB_URL` values behaving exactly as before.
+
+The same socket is what the future container runner (issue #205) will bind-mount into each instance's container, so containerized sessions reach the agent API without any host-network exposure.
+
 ### Reverse proxy / Authelia
 
 lab works bare (its own login) or behind a forward-auth proxy. Behind nginx + Authelia:
@@ -105,7 +113,7 @@ Sharp edges (all enforced server-side):
 
 - The proxy header is trusted **only** when the TCP peer (never X-Forwarded-For) is inside `--trusted-proxies` **and** the header value exactly equals the admin username; on mismatch lab falls through to its own auth and logs once per distinct value.
 - Set `--base-url` (`services.lab.baseUrl`) to the public https URL. It drives the CSRF Origin check and Secure cookies. Cookies are Secure when the request came over TLS, or `--base-url` is https, or `X-Forwarded-Proto: https` arrives from a trusted proxy — if none of these can ever hold, lab logs a prominent warning at startup.
-- **Do not route agent traffic through the proxy.** `labctl` inside a session authenticates to `/agent/v1` with a run token only — no SSO session, no cookies. If its `LAB_URL` pointed at the external origin, every call would hairpin out to the proxy, get 302'd to the login portal, and fail. The NixOS module defaults `services.lab.agentUrl` (`--agent-url`) to `http://127.0.0.1:<port>`, so `LAB_URL` stays on loopback and bypasses the proxy entirely — no operator action needed. Only override it when sessions run off-host (then expose `/agent/v1` to those hosts by network reach, not by widening the public vhost). If you ever see `labctl` fail with an HTML/redirect error, `LAB_URL` is aimed at the proxy — check `agentUrl`.
+- **Do not route agent traffic through the proxy.** `labctl` inside a session authenticates to `/agent/v1` with a run token only — no SSO session, no cookies. If its `LAB_URL` pointed at the external origin, every call would hairpin out to the proxy, get 302'd to the login portal, and fail. Out of the box this can't happen: lab serves `/agent/v1` on a unix socket (`<state-dir>/agent.sock`, see [Agent socket](#agent-socket)) and hands sessions `LAB_URL=unix://<state-dir>/agent.sock` by default — nothing hairpins through the proxy because agent traffic never touches TCP at all. The warning still applies if an operator sets `services.lab.agentUrl` (`--agent-url`) to reach lab over TCP (off-host sessions): point it at a host lab is reachable on directly, never at `baseUrl`'s public origin. If you ever see `labctl` fail with an HTML/redirect error after setting `agentUrl`, `LAB_URL` is aimed at the proxy — check the value.
 - Keep `proxy_buffering off` for `/api/v1/events` or the SSE stream stalls.
 
 ### Bare metal
@@ -166,8 +174,8 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--proxy-auth` | — | off | Accept the proxy auth header from trusted proxies. |
 | `--proxy-auth-header` | — | `Remote-User` | Header carrying the proxy-authenticated username. |
 | `--trusted-proxies` | — | (empty) | Comma-separated CIDRs of trusted reverse proxies (also gates `X-Forwarded-Proto` / `X-Forwarded-For` trust). |
-| `--base-url` | `LAB_BASE_URL` | (empty) | Absolute http(s) external URL. Drives Secure cookies and the CSRF Origin check. Also seeds the `LAB_URL` handed to sessions **unless** `--agent-url` is set. |
-| `--agent-url` | `LAB_AGENT_URL` | (empty) | Absolute http(s) session-facing URL handed to `labctl` as `LAB_URL`. Precedence: `--agent-url` → `--base-url` → `http://127.0.0.1:<port>`. Set it (or the NixOS `agentUrl` default) to a loopback URL so agent traffic bypasses any front proxy. |
+| `--base-url` | `LAB_BASE_URL` | (empty) | Absolute http(s) external URL. Drives Secure cookies and the CSRF Origin check. Does **not** feed `LAB_URL` — agent traffic never derives from it (see `--agent-url`). |
+| `--agent-url` | `LAB_AGENT_URL` | (empty) | Session-facing URL handed to `labctl` as `LAB_URL` — absolute http(s), or `unix:///abs/path` for a custom socket. Precedence: `--agent-url` when set, else `unix://<state-dir>/agent.sock` (see [Agent socket](#agent-socket)) — the old `--base-url` / loopback-TCP fallbacks are gone (they were issue #30's SSO-proxy hairpin failure mode; the socket always exists, so there's nothing left to fall back through). `labctl` accepts `LAB_URL=unix:///abs/path` in every subcommand alongside http(s); set `--agent-url` only for off-host sessions that must reach lab over TCP, or to point runs at a different socket path. |
 
 The per-provider host settings (`--provider-bin` / `--provider-config` and their `--claude` / `--claude-config` aliases) resolve **per provider entry**, highest wins: **generic flag > generic env > alias flag > alias env** — the generic form always beats the claude-named alias for the same setting, and within each pair a flag beats its env. The registered provider IDs come from `cmd/lab`, so a new provider's binary and config path are two entries under its ID with no config change (ADR-0034).
 
@@ -225,6 +233,7 @@ The flavor is the routing authority: an unrecognized host (a second Forgejo inst
   lab.db                     sqlite database (WAL mode; absent on postgres)
   master.key                 vault master key (64 hex chars, 0600)
   vapid.key                  Web Push VAPID key (64 hex chars, 0600)
+  agent.sock                 agent API unix socket, 0700, recreated on boot
   repos/<repoID>.git/        bare reference clones (worktree parents)
   worktrees/<repo>-<label>/  instance worktrees (manual: -<label>, AFK: -<N>)
   runtime/                   0700 — materialized credential files, per-op
@@ -245,6 +254,7 @@ Explicitly **excluded** (reconstructible or ephemeral):
 
 - `<state>/runtime/` — materialized key files, known_hosts; 0700, regenerated per operation, swept at startup.
 - `<state>/worktrees/` — recreated from branches; dirty worktrees are parked work the operator resolves *before* decommissioning a host (a backup cannot carry uncommitted changes safely).
+- `<state>/agent.sock` — the agent API unix socket (see [Agent socket](#agent-socket)); a stale socket file is removed and recreated on every boot, so it carries no state to preserve.
 
 Mechanics:
 

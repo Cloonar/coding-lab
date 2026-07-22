@@ -86,8 +86,9 @@ type Options struct {
 	WorktreeRoot string
 
 	// LabURL is the value handed to spawned sessions as LAB_URL so labctl can
-	// reach the agent API. It comes from labURL()'s precedence: the dedicated
-	// agent URL if set, else the external base URL, else http://127.0.0.1:<port>.
+	// reach the agent API. It comes from labURL()'s precedence (issue #201):
+	// the dedicated agent URL if set, else the agent unix socket
+	// unix://<state-dir>/agent.sock.
 	LabURL string
 
 	// GitEnv is prepended to every git subprocess (before the per-credential
