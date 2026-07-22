@@ -91,7 +91,7 @@ jobs:
           # version/info as diagnostics — if the runner cannot run podman,
           # this step's output is the evidence.
           set -eux
-          command -v podman || (sudo apt-get update && sudo apt-get install -y podman)
+          { command -v podman && command -v crun; } || (sudo apt-get update && sudo apt-get install -y podman crun)
           # The job executes inside the runner's Docker container: podman's
           # default overlay storage cannot mount there — not natively
           # (overlay-upon-overlay is rejected by the kernel) and not via the
@@ -104,7 +104,10 @@ jobs:
           # so runroot/graphroot must be spelled out too (their stock paths) —
           # storage errors with "runroot must be set" otherwise.
           printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
-          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' | sudo tee /etc/containers/containers.conf
+          # runtime = crun: Ubuntu's podman defaults to runc, which refuses
+          # the smoke test's --cgroups=disabled ("not compatible with
+          # NoCgroups", run 240); crun supports it.
+          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\nruntime = "crun"\n' | sudo tee /etc/containers/containers.conf
           # Drop any store a pre-provisioned runner image may have initialized
           # under the default driver — a driver flip over existing storage errors.
           sudo rm -rf /var/lib/containers/storage
@@ -177,13 +180,16 @@ jobs:
           # Same install-if-missing + nested-runner podman config + diagnostics
           # as the PR leg's smoke job — see that step for the rationale.
           set -eux
-          command -v podman || (sudo apt-get update && sudo apt-get install -y podman)
+          { command -v podman && command -v crun; } || (sudo apt-get update && sudo apt-get install -y podman crun)
           sudo mkdir -p /etc/containers
           # A hand-written storage.conf replaces ALL built-in storage defaults,
           # so runroot/graphroot must be spelled out too (their stock paths) —
           # storage errors with "runroot must be set" otherwise.
           printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
-          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' | sudo tee /etc/containers/containers.conf
+          # runtime = crun: Ubuntu's podman defaults to runc, which refuses
+          # the smoke test's --cgroups=disabled ("not compatible with
+          # NoCgroups", run 240); crun supports it.
+          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\nruntime = "crun"\n' | sudo tee /etc/containers/containers.conf
           sudo rm -rf /var/lib/containers/storage
           podman version
           podman info
