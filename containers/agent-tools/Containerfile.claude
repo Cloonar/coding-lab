@@ -38,10 +38,12 @@ ARG CLAUDE_CODE_SHA256_X64_MUSL
 
 # Download the pinned linux-x64-musl binary and verify its sha256 before use.
 # --create-dirs makes /out on this fresh stage (nothing else creates it).
-# Stall protection (CI run 242 hung >15min on a dead connection): abort when
-# the transfer drops under 10KB/s for 30s, cap connect at 15s, retry 3×.
+# Stall protection (CI runs 242/246 hung >15min): the CDN path is bimodal —
+# multi-MB/s or a crawl — so abort any transfer under 250KB/s for 30s and
+# retry; --retry-all-errors is safe because the sha256 check follows.
 RUN curl -fsSL --create-dirs \
-      --connect-timeout 15 --speed-limit 10240 --speed-time 30 --retry 3 \
+      --connect-timeout 15 --speed-limit 256000 --speed-time 30 \
+      --retry 6 --retry-delay 2 --retry-all-errors \
       -o /out/claude \
       "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/linux-x64-musl/claude" \
     && echo "${CLAUDE_CODE_SHA256_X64_MUSL}  /out/claude" | sha256sum -c - \

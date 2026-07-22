@@ -35,10 +35,11 @@ ARG CODEX_SHA256_X64_MUSL_TGZ
 # Download the pinned release tarball, verify its sha256, then extract. The tar
 # member is named codex-x86_64-unknown-linux-musl; rename it to /out/codex.
 # mkdir -p /out makes the output dir on this fresh stage.
-# Same curl stall protection as Containerfile.claude's download (CI run 242).
+# Same curl stall protection as Containerfile.claude's download (runs 242/246).
 RUN mkdir -p /out \
     && curl -fsSL \
-      --connect-timeout 15 --speed-limit 10240 --speed-time 30 --retry 3 \
+      --connect-timeout 15 --speed-limit 256000 --speed-time 30 \
+      --retry 6 --retry-delay 2 --retry-all-errors \
       -o /tmp/codex.tar.gz \
       "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
     && echo "${CODEX_SHA256_X64_MUSL_TGZ}  /tmp/codex.tar.gz" | sha256sum -c - \
