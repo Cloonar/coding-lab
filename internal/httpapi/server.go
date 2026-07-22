@@ -22,6 +22,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -69,6 +70,12 @@ type Options struct {
 	// Providers is the agent-provider registry (M3): the providers catalog and
 	// the claude auth/login endpoints. Nil leaves those routes unmounted.
 	Providers *provider.Registry
+
+	// Homes maps a run to its private instance HOME (issue #202): the commands
+	// endpoint resolves a run's user-level slash commands strictly under it. Nil
+	// (a build without the instance stack, where the commands route is unmounted
+	// anyway) resolves to "" — a no-user-commands miss by the seam contract.
+	Homes *instancehome.Manager
 
 	// Tracker resolves a per-repo issue/PR Tracker for the operator issue and
 	// label surface (M4): the built-in store-backed tracker for builtin repos,
@@ -147,6 +154,7 @@ type Server struct {
 	reconcile *reconcile.Service
 	chat      *chat.Service
 	providers *provider.Registry
+	homes     *instancehome.Manager
 	tracker   *tracker.Registry
 	afk       *afk.Service
 	push      *push.Sender
@@ -237,6 +245,7 @@ func New(o Options) (*Server, error) {
 		reconcile:     o.Reconcile,
 		chat:          o.Chat,
 		providers:     o.Providers,
+		homes:         o.Homes,
 		tracker:       o.Tracker,
 		afk:           o.AFK,
 		push:          o.Push,

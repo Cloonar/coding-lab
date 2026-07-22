@@ -146,18 +146,39 @@ func TestCaptureBridgeURL_timesOut(t *testing.T) {
 
 func TestCaptureDeepLink_hit(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
-	if err := os.MkdirAll(p.registryDir, 0o755); err != nil {
+	// The session registry lives under the run's private HOME (issue #202).
+	home := t.TempDir()
+	registryDir := registryDirUnder(home)
+	if err := os.MkdirAll(registryDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeRegistryEntry(t, p.registryDir, "1.json", RegistryEntry{
+	writeRegistryEntry(t, registryDir, "1.json", RegistryEntry{
 		PID: os.Getpid(), Cwd: "/work/a", StartedAt: 1, BridgeSessionID: "cse_abc",
 	})
-	got, err := p.CaptureDeepLink(context.Background(), "repo~x-1", "/work/a")
+	got, err := p.CaptureDeepLink(context.Background(), "repo~x-1", "/work/a", home)
 	if err != nil {
 		t.Fatalf("CaptureDeepLink: %v", err)
 	}
 	if want := "https://claude.ai/code/session_abc"; got != want {
 		t.Errorf("CaptureDeepLink = %q; want %q", got, want)
+	}
+}
+
+// An empty home is a QUIET miss — a run with no per-run home has no instance
+// registry, and lab never falls back to the master store (issue #202). No loud
+// capture-miss warning fires (that is reserved for a real registry poll that
+// timed out).
+func TestCaptureDeepLink_emptyHomeQuietMiss(t *testing.T) {
+	var logBuf bytes.Buffer
+	p, _ := testProvider(t, newFakeRunner())
+	p.log = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	got, err := p.CaptureDeepLink(context.Background(), "repo~x-1", "/work/a", "")
+	if err != nil || got != "" {
+		t.Errorf("homeless capture = (%q, %v); want (\"\", nil)", got, err)
+	}
+	if strings.Contains(logBuf.String(), "deep-link capture missed") {
+		t.Errorf("empty-home capture logged a capture-miss warning; want a quiet miss. log = %q", logBuf.String())
 	}
 }
 
@@ -170,7 +191,7 @@ func TestCaptureDeepLink_missReturnsEmptyAndWarnsLoudly(t *testing.T) {
 	p.log = slog.New(slog.NewTextHandler(&logBuf, nil))
 	p.bridgeTimeout = 100 * time.Millisecond
 
-	got, err := p.CaptureDeepLink(context.Background(), "repo~x-1", "/work/nowhere")
+	got, err := p.CaptureDeepLink(context.Background(), "repo~x-1", "/work/nowhere", t.TempDir())
 	if err != nil {
 		t.Fatalf("CaptureDeepLink: %v", err)
 	}
@@ -202,10 +223,11 @@ func TestCaptureDeepLink_idempotentPerSessionAndConnecting(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 	p.bridgeTimeout = 600 * time.Millisecond
 	const name = "repo~x-1"
+	home := t.TempDir()
 
 	done := make(chan string, 1)
 	go func() {
-		url, _ := p.CaptureDeepLink(context.Background(), name, "/work/a")
+		url, _ := p.CaptureDeepLink(context.Background(), name, "/work/a", home)
 		done <- url
 	}()
 
@@ -219,7 +241,7 @@ func TestCaptureDeepLink_idempotentPerSessionAndConnecting(t *testing.T) {
 	}
 
 	start := time.Now()
-	got, err := p.CaptureDeepLink(context.Background(), name, "/work/a")
+	got, err := p.CaptureDeepLink(context.Background(), name, "/work/a", home)
 	if err != nil {
 		t.Fatalf("second CaptureDeepLink: %v", err)
 	}

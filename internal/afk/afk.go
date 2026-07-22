@@ -42,6 +42,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -91,8 +92,13 @@ type Options struct {
 	Trackers     TrackerResolver
 	Instances    *instance.Service
 	Materializer *vault.Materializer
-	Bus          *events.Bus
-	Logger       *slog.Logger
+	// Homes is the per-run private HOME lifecycle (issue #202) — the SAME
+	// *instancehome.Manager instance/ and reconcile/ are built with. The reaper
+	// and the neutral Stop wipe a reaped/stopped run's home through it, mirroring
+	// the credential cleanup they already do.
+	Homes  *instancehome.Manager
+	Bus    *events.Bus
+	Logger *slog.Logger
 
 	// Guard is the shared starting-set race guard (design §4b) — the SAME
 	// *startguard.Guard instance/ and reconcile/ are built with. The reaper
@@ -140,6 +146,7 @@ type Service struct {
 	trackers  TrackerResolver
 	instances *instance.Service
 	mat       *vault.Materializer
+	homes     *instancehome.Manager
 	bus       *events.Bus
 	guard     *startguard.Guard
 	log       *slog.Logger
@@ -188,6 +195,8 @@ func New(o Options) (*Service, error) {
 		return nil, fmt.Errorf("afk: Options.Instances is required")
 	case o.Materializer == nil:
 		return nil, fmt.Errorf("afk: Options.Materializer is required")
+	case o.Homes == nil:
+		return nil, fmt.Errorf("afk: Options.Homes is required")
 	case o.Bus == nil:
 		return nil, fmt.Errorf("afk: Options.Bus is required")
 	case o.Guard == nil:
@@ -212,6 +221,7 @@ func New(o Options) (*Service, error) {
 		trackers:     o.Trackers,
 		instances:    o.Instances,
 		mat:          o.Materializer,
+		homes:        o.Homes,
 		bus:          o.Bus,
 		guard:        o.Guard,
 		log:          logger,

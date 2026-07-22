@@ -203,25 +203,24 @@ func TestProviderID(t *testing.T) {
 func TestNew_requiredOptions(t *testing.T) {
 	base := func() Options {
 		return Options{
-			ClaudeBin:   "claude",
-			ConfigPath:  "/tmp/x/.claude.json",
-			RegistryDir: "/tmp/x/sessions",
-			LoginDir:    "/tmp/x",
-			Runner:      newFakeRunner(),
-			Bus:         events.NewBus(),
+			ClaudeBin:  "claude",
+			ConfigPath: "/tmp/x/.claude.json",
+			LoginDir:   "/tmp/x",
+			Runner:     newFakeRunner(),
+			Bus:        events.NewBus(),
 		}
 	}
 	if _, err := New(base()); err != nil {
 		t.Fatalf("New with all options: %v", err)
 	}
 	// ClaudeBin/ConfigPath are no longer required (issue #78: adapters keep
-	// their own defaults when no config entry exists) — only the fields
-	// below still fail construction when empty/nil.
+	// their own defaults when no config entry exists); RegistryDir/ProjectsDir
+	// are gone (issue #202: instance state derives from the per-run home) —
+	// only the fields below still fail construction when empty/nil.
 	for name, mut := range map[string]func(*Options){
-		"RegistryDir": func(o *Options) { o.RegistryDir = "" },
-		"LoginDir":    func(o *Options) { o.LoginDir = "" },
-		"Runner":      func(o *Options) { o.Runner = nil },
-		"Bus":         func(o *Options) { o.Bus = nil },
+		"LoginDir": func(o *Options) { o.LoginDir = "" },
+		"Runner":   func(o *Options) { o.Runner = nil },
+		"Bus":      func(o *Options) { o.Bus = nil },
 	} {
 		o := base()
 		mut(&o)
@@ -287,12 +286,11 @@ func TestNew_claudeBinConfigPathDefaults(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := New(Options{
-				ClaudeBin:   tc.claudeBin,
-				ConfigPath:  tc.configPath,
-				RegistryDir: "/tmp/x/sessions",
-				LoginDir:    tc.loginDir,
-				Runner:      newFakeRunner(),
-				Bus:         events.NewBus(),
+				ClaudeBin:  tc.claudeBin,
+				ConfigPath: tc.configPath,
+				LoginDir:   tc.loginDir,
+				Runner:     newFakeRunner(),
+				Bus:        events.NewBus(),
 			})
 			if err != nil {
 				t.Fatalf("New: %v", err)

@@ -981,3 +981,53 @@ func TestCompat_Live_authLogout(t *testing.T) {
 		t.Errorf("credentials file still present after `claude auth logout`: stat err = %v", err)
 	}
 }
+
+// Config-dir resolution pin (compat.md §3a, issue #202): CLAUDE_CONFIG_DIR
+// outranks HOME for ALL claude state, and an EMPTY value behaves as unset.
+// Both facts are load-bearing for per-run isolation: the instance spawn
+// inherits the lab server's environment through tmux, so the claude injector
+// pins CLAUDE_CONFIG_DIR= (empty) to keep the CLI's resolution on the
+// private instance HOME (claudecode/inject.go). Opt-in via LAB_COMPAT_LIVE=1
+// so CI stays hermetic.
+//
+// The probe is `claude config set theme dark` — a config write whose landing
+// spot (.claude.json) reveals which directory the CLI resolved, with no
+// login, TTY, or network needed. Observable state, not exit code or output.
+func TestCompat_Live_configDirResolution(t *testing.T) {
+	if os.Getenv("LAB_COMPAT_LIVE") != "1" {
+		t.Skip("set LAB_COMPAT_LIVE=1 to probe the installed claude binary")
+	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		t.Skipf("claude not on PATH: %v", err)
+	}
+
+	probe := func(t *testing.T, home, configDir string) {
+		t.Helper()
+		t.Setenv("HOME", home)
+		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+		cmd := exec.Command(bin, "config", "set", "theme", "dark")
+		cmd.Dir = t.TempDir()
+		out, runErr := cmd.CombinedOutput()
+		t.Logf("live `claude config set theme dark` exit=%v output=%q", runErr, strings.TrimSpace(string(out)))
+	}
+
+	t.Run("set: CLAUDE_CONFIG_DIR outranks HOME", func(t *testing.T) {
+		home, cfg := t.TempDir(), t.TempDir()
+		probe(t, home, cfg)
+		if _, err := os.Stat(filepath.Join(cfg, ".claude.json")); err != nil {
+			t.Errorf(".claude.json missing under CLAUDE_CONFIG_DIR (%v) — the CLI no longer resolves the variable over HOME; re-verify the injector's empty pin is still needed", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
+			t.Errorf(".claude.json present under HOME (stat err = %v) despite CLAUDE_CONFIG_DIR being set", err)
+		}
+	})
+
+	t.Run("empty: behaves as unset, HOME resolution", func(t *testing.T) {
+		home := t.TempDir()
+		probe(t, home, "")
+		if _, err := os.Stat(filepath.Join(home, ".claude.json")); err != nil {
+			t.Errorf(".claude.json missing under HOME (%v) — an empty CLAUDE_CONFIG_DIR no longer behaves as unset; the injector's empty pin (claudecode/inject.go) is broken", err)
+		}
+	})
+}

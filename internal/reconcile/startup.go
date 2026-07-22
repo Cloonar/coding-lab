@@ -39,6 +39,14 @@ func (s *Service) StartupReconcile(ctx context.Context) error {
 	if err := s.mat.CleanupAll(credentialKeep(liveRunIDs)); err != nil {
 		s.log.Warn("sweeping runtime credential dir", "component", "reconcile", "err", err)
 	}
+	// Instance-home keep-set cleanup (issue #202): mirrors the credential sweep
+	// above — keep exactly the private homes of re-adopted LIVE runs, reap the
+	// rest (an orphan a crashed/rolled-back launch left behind, once it ages out
+	// past homeDirMinAge). The keep predicate is the run id directly (homes are
+	// keyed by run id, unlike the credID.opID credential filenames).
+	if err := s.homes.SweepAll(func(runID string) bool { return liveRunIDs[runID] }); err != nil {
+		s.log.Warn("sweeping instance homes dir", "component", "reconcile", "err", err)
+	}
 	return nil
 }
 

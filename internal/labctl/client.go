@@ -7,9 +7,11 @@ package labctl
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -132,6 +134,8 @@ type PRCheck struct {
 }
 
 // Client is the transport to /agent/v1, built from LAB_URL/LAB_TOKEN.
+// BaseURL is http(s)://… or unix:///abs/path/agent.sock — the unix scheme
+// sends the same HTTP requests over a unix domain socket (see requestBase).
 type Client struct {
 	BaseURL string
 	Token   string
@@ -369,8 +373,11 @@ type ScanFinding struct {
 // is built by hand — do() is JSON-only — but the Bearer auth and the response
 // handling (envelope, bounds, proxy detection) match do() exactly.
 func (c *Client) SecretScan(diff io.Reader) ([]ScanFinding, error) {
-	req, err := http.NewRequest(http.MethodPost,
-		strings.TrimRight(c.BaseURL, "/")+"/agent/v1/secrets/scan", diff)
+	base, err := c.requestBase()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/agent/v1/secrets/scan", diff)
 	if err != nil {
 		return nil, err
 	}
@@ -396,6 +403,10 @@ func (c *Client) SecretScan(diff io.Reader) ([]ScanFinding, error) {
 // server's {"error"} message (or "HTTP <status>" when the body is not the
 // envelope); out, when non-nil, receives the decoded 2xx body.
 func (c *Client) do(method, path string, reqBody, out any) error {
+	base, err := c.requestBase()
+	if err != nil {
+		return err
+	}
 	var body io.Reader
 	if reqBody != nil {
 		data, err := json.Marshal(reqBody)
@@ -404,7 +415,7 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 		}
 		body = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(method, strings.TrimRight(c.BaseURL, "/")+path, body)
+	req, err := http.NewRequest(method, base+path, body)
 	if err != nil {
 		return err
 	}
@@ -421,13 +432,53 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 	return c.decodeResponse(resp, out)
 }
 
+// unixSocketPath returns the socket path when BaseURL carries the unix://
+// scheme (LAB_URL=unix:///abs/path/agent.sock), false for http(s). The scheme
+// changes ONLY how connections are dialed — the requests stay plain HTTP —
+// and it lives on Client so every subcommand inherits it, including `secret
+// exec` and `secret scan`, which build their Client by hand (issue #201).
+func (c *Client) unixSocketPath() (string, bool) {
+	if !strings.HasPrefix(c.BaseURL, "unix://") {
+		return "", false
+	}
+	return strings.TrimPrefix(c.BaseURL, "unix://"), true
+}
+
+// requestBase returns the prefix request URLs are built on: for http(s), the
+// trailing-slash-trimmed LAB_URL exactly as before. For unix:// the URL's
+// host is never resolved — the transport dials the socket — so a fixed dummy
+// origin keeps http.Request well-formed; a relative socket path (unix:// is
+// followed directly by the path, so unix://foo.sock names "foo.sock") is
+// rejected here, before any dial can produce a confusing ENOENT.
+func (c *Client) requestBase() (string, error) {
+	sock, ok := c.unixSocketPath()
+	if !ok {
+		return strings.TrimRight(c.BaseURL, "/"), nil
+	}
+	if !strings.HasPrefix(sock, "/") {
+		return "", fmt.Errorf("LAB_URL unix:// socket path must be absolute (unix:///abs/path)")
+	}
+	return "http://lab", nil
+}
+
 // httpClient returns the injected client (tests) or the default: a 60s
-// timeout and no redirect-following (see noRedirect).
+// timeout and no redirect-following (see noRedirect). A unix:// BaseURL adds
+// a transport that dials the socket instead of TCP; whatever host the request
+// URL names is ignored.
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: httpTimeout, CheckRedirect: noRedirect}
+	client := &http.Client{Timeout: httpTimeout, CheckRedirect: noRedirect}
+	if sock, ok := c.unixSocketPath(); ok {
+		client.Transport = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		}
+	}
+	return client
 }
 
 // decodeResponse turns one agent-API response into out or an error, shared by

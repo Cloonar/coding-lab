@@ -94,17 +94,20 @@ func BuiltinCommands() []provider.CommandSpec {
 // pinned builtin table, then the worktree's project-level commands
 // (<worktree>/.claude/commands/*.md) merged with its seeded user-invocable
 // skills (<worktree>/.claude/skills/*/SKILL.md — the lab-seeded bundle plus
-// anything repo-committed), then the user-level commands (~/.claude/commands,
-// injectable via Options.UserCommandsDir). Builtins keep the pinned order;
-// the project and user groups sort alphabetically. Scanned commands are
-// ChatSafe by construction: a custom command/skill is a prompt template —
-// claude runs it as a normal turn, there is no UI to strand.
+// anything repo-committed), then the USER-level commands discovered under the
+// instance HOME home (<home>/.claude/commands, issue #202). Builtins keep the
+// pinned order; the project and user groups sort alphabetically. Scanned
+// commands are ChatSafe by construction: a custom command/skill is a prompt
+// template — claude runs it as a normal turn, there is no UI to strand.
 //
-// Missing directories are silently empty (a fresh worktree has no commands
-// yet; most machines have no ~/.claude/commands); only a real I/O failure
-// surfaces as an error. Unparseable frontmatter degrades to an empty
-// description, never an error — the name alone is still a servable command.
-func (p *Provider) Commands(_ context.Context, worktree string) ([]provider.CommandSpec, error) {
+// An empty home contributes NO user-level commands — a run with no per-run
+// home never reads the master store's ~/.claude/commands (isolation by
+// construction). Missing directories are silently empty (a fresh worktree has
+// no commands yet; most instance homes have no .claude/commands); only a real
+// I/O failure surfaces as an error. Unparseable frontmatter degrades to an
+// empty description, never an error — the name alone is still a servable
+// command.
+func (p *Provider) Commands(_ context.Context, worktree, home string) ([]provider.CommandSpec, error) {
 	out := BuiltinCommands()
 
 	project, err := scanCommandsDir(filepath.Join(worktree, ".claude", "commands"), commandSourceProject)
@@ -119,7 +122,10 @@ func (p *Provider) Commands(_ context.Context, worktree string) ([]provider.Comm
 	sortCommands(project)
 	out = append(out, project...)
 
-	user, err := scanCommandsDir(p.userCommandsDir, commandSourceUser)
+	if home == "" {
+		return out, nil // no per-run home ⇒ no user-level command discovery
+	}
+	user, err := scanCommandsDir(userCommandsDirUnder(home), commandSourceUser)
 	if err != nil {
 		return nil, err
 	}

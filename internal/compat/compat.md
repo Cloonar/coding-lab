@@ -130,6 +130,25 @@ Provenance legend:
   20s, loginPoll 1s, authTTL 30s, bridgeTimeout 30s, poll cadence 200ms,
   login code cap 4096.
 
+## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214, 2026-07-22)
+
+- `CLAUDE_CONFIG_DIR` outranks HOME for **all** claude state: with it set,
+  `.claude.json`, `projects/` (transcripts), `backups/`, and the
+  credentials file all land under `$CLAUDE_CONFIG_DIR`; HOME receives only
+  `.cache`. Probed live with `claude config set theme dark` against fresh
+  temp dirs.
+- An **empty** value behaves as **unset**: resolution falls back to
+  `$HOME/.claude.json` / `$HOME/.claude/`. Probed live the same way.
+- Both facts are load-bearing for per-run isolation (issue #202): the
+  instance spawn inherits the lab server's environment through tmux, so a
+  service-wide `CLAUDE_CONFIG_DIR` (which lab honors for the MASTER store —
+  `claudecode.credentialsPath`) would silently point every instance's
+  claude back at the master store. The injector therefore always pins
+  `CLAUDE_CONFIG_DIR=` (empty) in the spawn env
+  (`claudecode/inject.go`) — empty-as-unset keeps resolution on the
+  private instance HOME without relocating the seeded `.claude.json`
+  layout. Live re-verification: `TestCompat_Live_configDirResolution`.
+
 ## 4. Trust / attribution keys — folder trust live (2.1.198), MCP fixture (v0), attribution schema-extracted (2.1.198)
 
 - Folder trust: `~/.claude.json` → `projects.<absolute worktree dir>.

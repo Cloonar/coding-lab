@@ -359,6 +359,27 @@ func TestAPI_RunCommands(t *testing.T) {
 	}
 }
 
+// Issue #202: the commands endpoint resolves a run's user-level slash commands
+// strictly under its private instance HOME — the threaded home reaching the
+// provider's Commands is the run's HomePath, never "".
+func TestAPI_RunCommands_threadsInstanceHome(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetCommands([]provider.CommandSpec{{Name: "compact", Source: "builtin", ChatSafe: true}}, nil)
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/commands", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+
+	want := x.srv.homes.HomePath(runID)
+	if want == "" {
+		t.Fatal("HomePath returned empty for a real run")
+	}
+	homes := x.prov.CommandsHomes()
+	if len(homes) != 1 || homes[0] != want {
+		t.Errorf("Commands homes = %v, want exactly [%q] (the run's private instance HOME)", homes, want)
+	}
+}
+
 // No chat-safe commands still serves a non-null empty array (the SPA renders
 // "no commands", never crashes on null). Pinned on a server without a pull
 // service — with one wired the lab-owned pull-base entry always shows.

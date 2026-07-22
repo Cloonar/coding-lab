@@ -31,14 +31,12 @@ func fixturePath(t *testing.T) string {
 func newWithBin(t *testing.T, bin string) *Provider {
 	t.Helper()
 	p, err := New(Options{
-		CodexBin:    bin,
-		ConfigPath:  filepath.Join(t.TempDir(), "config.toml"),
-		SessionsDir: filepath.Join(t.TempDir(), "sessions"),
-		AgentsFile:  filepath.Join(t.TempDir(), "AGENTS.md"),
-		LoginDir:    t.TempDir(),
-		Runner:      newFakeRunner(),
-		Bus:         events.NewBus(),
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CodexBin:   bin,
+		ConfigPath: filepath.Join(t.TempDir(), "config.toml"),
+		LoginDir:   t.TempDir(),
+		Runner:     newFakeRunner(),
+		Bus:        events.NewBus(),
+		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

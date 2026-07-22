@@ -48,6 +48,12 @@ type mockProvider struct {
 	// readChat overrides the default conforming ReadChat — the read-chat
 	// breakage hook (issue #92).
 	readChat func(transcriptPath string) (provider.Chat, error)
+	// inject overrides the default conforming InjectCredentials — the
+	// inject-credentials breakage hook (issue #202).
+	inject func(instanceHome string) ([]string, error)
+	// locate overrides the default conforming LocateTranscript — the
+	// locate-homeless breakage hook (issue #202).
+	locate func(home string) (string, error)
 }
 
 var _ provider.AgentProvider = (*mockProvider)(nil)
@@ -217,11 +223,31 @@ func (m *mockProvider) AuthStatus(context.Context, bool) (provider.AuthStatus, e
 func (m *mockProvider) LoginStart(context.Context) (string, error)    { return "", nil }
 func (m *mockProvider) LoginSubmitCode(context.Context, string) error { return nil }
 func (m *mockProvider) Logout(context.Context) error                  { return nil }
-func (m *mockProvider) Commands(context.Context, string) ([]provider.CommandSpec, error) {
+func (m *mockProvider) Commands(context.Context, string, string) ([]provider.CommandSpec, error) {
 	return nil, nil
 }
-func (m *mockProvider) LocateTranscript(context.Context, string, string) (string, error) {
+
+// LocateTranscript's default is conforming per the locate-homeless obligation
+// (issue #202): an empty instance home is a miss ("", nil), never an error and
+// never a fall back to a master store the mock does not have.
+func (m *mockProvider) LocateTranscript(_ context.Context, _, _, home string) (string, error) {
+	if m.locate != nil {
+		return m.locate(home)
+	}
 	return "", nil
+}
+
+// InjectCredentials's default is conforming per the inject-credentials
+// obligation (issue #202): an empty home is a programmer error; a non-empty
+// home writes nothing (the mock has no master store) and returns no env.
+func (m *mockProvider) InjectCredentials(instanceHome string) ([]string, error) {
+	if m.inject != nil {
+		return m.inject(instanceHome)
+	}
+	if instanceHome == "" {
+		return nil, errors.New("mockagent: InjectCredentials requires a non-empty instance HOME")
+	}
+	return nil, nil
 }
 
 // ReadChat's default is conforming per the read-chat obligation (issue #92):
@@ -294,8 +320,11 @@ func TestCheckFunctions_wellFormedProviderPasses(t *testing.T) {
 		{"auth-flow", func(t *testing.T) []error { return checkAuthFlow(p) }},
 		{"login-session", func(t *testing.T) []error { return checkLoginSession(p) }},
 		{"read-chat", func(t *testing.T) []error { return checkReadChat(t, p) }},
+		{"locate-homeless", func(t *testing.T) []error { return checkLocateHomeless(p) }},
+		{"inject-credentials", func(t *testing.T) []error { return checkInjectCredentials(t, p) }},
 		{"seeding-exclude-coverage", func(t *testing.T) []error { return checkSeedingExcludeCoverage(t, p) }},
 		{"seeding-incogni", func(t *testing.T) []error { return checkSeedingIncogni(t, p) }},
+		{"seed-home-containment", func(t *testing.T) []error { return checkSeedHomeContainment(t, p) }},
 		{"scrub-markers", func(t *testing.T) []error { return checkScrubMarkers(t, p, mockFixture()) }},
 	}
 	for _, c := range checks {
@@ -507,4 +536,56 @@ func TestCheckReadChat_nilErrorForVanishedPathFails(t *testing.T) {
 		return provider.Chat{State: provider.StateIdle}, nil
 	}
 	wantError(t, checkReadChat(t, p), "read-chat", "ErrTranscriptGone")
+}
+
+// The locate-homeless breakage (issue #202): an adapter that resolves a
+// transcript for an empty instance HOME has fallen back to a master store
+// instead of treating "no per-run home" as a miss.
+func TestCheckLocateHomeless_nonEmptyForHomelessFails(t *testing.T) {
+	p := newMockProvider()
+	p.locate = func(home string) (string, error) {
+		if home == "" {
+			return "/master/store/transcript.jsonl", nil // the fallback that must not happen
+		}
+		return "", nil
+	}
+	wantError(t, checkLocateHomeless(p), "locate-homeless", "master store")
+}
+
+// The inject-credentials empty-HOME breakage (issue #202): treating "" as valid
+// instead of a programmer error.
+func TestCheckInjectCredentials_emptyHomeNotErroringFails(t *testing.T) {
+	p := newMockProvider()
+	p.inject = func(string) ([]string, error) { return nil, nil }
+	wantError(t, checkInjectCredentials(t, p), "inject-credentials", "empty instance HOME", "programmer error")
+}
+
+// The inject-credentials missing-master breakage (issue #202): failing when the
+// master credential is absent, instead of proceeding so the CLI shows its own
+// login prompt.
+func TestCheckInjectCredentials_missingMasterErroringFails(t *testing.T) {
+	p := newMockProvider()
+	p.inject = func(home string) ([]string, error) {
+		if home == "" {
+			return nil, errors.New("empty instance HOME")
+		}
+		return nil, errors.New("no master credential present")
+	}
+	wantError(t, checkInjectCredentials(t, p), "inject-credentials", "missing master credential is NOT an error")
+}
+
+// The seed-home-containment breakage (issue #202): a HOME-global grant that
+// writes to the ENV-derived master store instead of under the run's Home.
+func TestCheckSeedHomeContainment_masterStoreWriteFails(t *testing.T) {
+	p := newMockProvider()
+	p.seed = func(worktree string, opts provider.SeedOpts) error {
+		// The breakage: seed trust into the master store (CLAUDE_CONFIG_DIR),
+		// which the check has pointed at a fresh empty temp dir.
+		dir := os.Getenv("CLAUDE_CONFIG_DIR")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, ".claude.json"), []byte("{}\n"), 0o600)
+	}
+	wantError(t, checkSeedHomeContainment(t, p), "seed-home-containment", "master store")
 }
