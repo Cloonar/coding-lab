@@ -23,16 +23,29 @@ var gitExcludeEntries = []string{".claude/"}
 
 // SeedWorkspace implements provider.AgentProvider: pre-approve the
 // worktree so neither claude's first-run onboarding, the workspace-trust
-// dialog, nor the project MCP-server prompt blocks an unattended run
-// (SeedTrust), for incogni
-// repos additionally disable claude's own attribution output (D15 §9
+// dialog, nor the project MCP-server prompt blocks an unattended run, for
+// incogni repos additionally disable claude's own attribution output (D15 §9
 // measure 1 — merged into the same settings.local.json through the same
 // preserve-unknown-keys atomic writer), then keep the seeded files out of
 // git status via .git/info/exclude. Called after the worktree exists and
 // before claude spawns; any failure aborts the Start (caller rolls back
 // the worktree + branch).
+//
+// The two HOME-GLOBAL grants (onboarding + folder trust in ~/.claude.json)
+// write ONLY under the run's private instance HOME opts.Home
+// (<opts.Home>/.claude.json, issue #202) — never the machine's master
+// ~/.claude.json — so a run's trust state stays inside its own home. An empty
+// opts.Home skips those two grants entirely (a run with no per-run home gets no
+// global-config write, never a fallback to the master store); the worktree-
+// local grants — MCP approval, attribution-off, and the excludes — apply
+// either way.
 func (p *Provider) SeedWorkspace(worktree string, opts provider.SeedOpts) error {
-	if err := SeedTrust(p.configPath, worktree); err != nil {
+	if opts.Home != "" {
+		if err := seedGlobalConfig(globalConfigUnder(opts.Home), worktree); err != nil {
+			return err
+		}
+	}
+	if err := seedProjectMcpApproval(worktree); err != nil {
 		return err
 	}
 	if opts.Incogni {

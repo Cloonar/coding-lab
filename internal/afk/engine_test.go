@@ -24,6 +24,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
@@ -337,6 +338,7 @@ type fixture struct {
 	trackers *fakeResolver
 	git      *gitx.Engine
 	guard    *startguard.Guard
+	homes    *instancehome.Manager
 
 	home         string
 	env          []string
@@ -422,9 +424,10 @@ func newFixtureWrapped(t *testing.T, pattern string, wrap func(*tmuxx.Fake) tmux
 	clock := testutil.NewFakeClock(clockTime)
 
 	guard := startguard.New()
+	homes := instancehome.New(filepath.Join(stateDir, "instances"))
 	inst, err := instance.New(instance.Options{
 		Store: st, Git: git, Runner: svcRunner, Providers: reg, Vault: vlt, Materializer: mat,
-		Guard: guard, Bus: bus, ReposDir: reposDir, WorktreeRoot: worktreeRoot,
+		Homes: homes, Guard: guard, Bus: bus, ReposDir: reposDir, WorktreeRoot: worktreeRoot,
 		LabURL: "http://127.0.0.1:8080", GitEnv: env, CaptureCtx: context.Background(),
 		Now: clock.Now,
 	})
@@ -435,7 +438,7 @@ func newFixtureWrapped(t *testing.T, pattern string, wrap func(*tmuxx.Fake) tmux
 	trackers := newFakeResolver()
 	svc, err := New(Options{
 		Store: st, Git: git, Runner: svcRunner, Trackers: trackers,
-		Instances: inst, Materializer: mat, Bus: bus, Guard: guard,
+		Instances: inst, Materializer: mat, Homes: homes, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
 	})
 	if err != nil {
@@ -445,7 +448,7 @@ func newFixtureWrapped(t *testing.T, pattern string, wrap func(*tmuxx.Fake) tmux
 
 	f := &fixture{
 		t: t, svc: svc, inst: inst, st: st, runner: runner, prov: prov, bus: bus,
-		clock: clock, trackers: trackers, git: git, guard: guard,
+		clock: clock, trackers: trackers, git: git, guard: guard, homes: homes,
 		home: home, env: env, reposDir: reposDir, worktreeRoot: worktreeRoot,
 	}
 	f.repo, f.trk = f.addRepo("proj", pattern)
@@ -1865,5 +1868,57 @@ func TestFilterClaimable_openFetchFailureFailsClosed(t *testing.T) {
 	var te *TrackerError
 	if !errors.As(err, &te) {
 		t.Fatalf("manual start err = %v, want *TrackerError (fail closed on infra)", err)
+	}
+}
+
+// --- instance HOME wipe (issue #202) ------------------------------------------
+
+// A neutral Stop of an AFK run wipes its private instance HOME (the credential
+// copy) while the park — worktree + claim branch — survives untouched.
+func TestStopAFK_wipesInstanceHome(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReady(7)
+	run, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK: %v", err)
+	}
+	home := f.homes.HomePath(run.ID)
+	if !dirExists(home) {
+		t.Fatalf("instance home %s not materialized by launch", home)
+	}
+
+	if err := f.svc.StopAFK(t.Context(), run.SessionName); err != nil {
+		t.Fatalf("StopAFK: %v", err)
+	}
+	if dirExists(home) {
+		t.Error("instance home survived StopAFK (the credential copy must go)")
+	}
+	// The park is untouched: the claim branch still exists.
+	if !f.branchExists(f.repo, "afk/7") {
+		t.Error("StopAFK deleted the claim branch — the park must survive")
+	}
+}
+
+// A reaper terminal outcome (here a death) wipes the run's private instance
+// HOME beside the credential cleanup it already does.
+func TestReap_wipesInstanceHome(t *testing.T) {
+	f := newFixture(t)
+	f.trk.setReady(7)
+	run, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK: %v", err)
+	}
+	home := f.homes.HomePath(run.ID)
+	if !dirExists(home) {
+		t.Fatalf("instance home %s not materialized by launch", home)
+	}
+
+	f.runner.Kill(run.SessionName) // crashed → reaps as death
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Minute))
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeDeath {
+		t.Fatalf("outcome = %q, want death (so reapRun ran)", got.Outcome)
+	}
+	if dirExists(home) {
+		t.Error("instance home survived the reap (the credential copy must go)")
 	}
 }

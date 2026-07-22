@@ -34,6 +34,13 @@ func (s *Service) RuntimeSweep(ctx context.Context) {
 	if err := s.mat.CleanupAll(credentialKeep(keep)); err != nil {
 		s.log.Warn("sweep: runtime credential dir", "component", "reconcile", "err", err)
 	}
+	// Instance-home keep-set cleanup (issue #202): the throttled repeat of the
+	// startup rule, beside the credential sweep — keep the live runs' homes,
+	// reap aged-out orphans. Homes are keyed by run id, so the keep predicate is
+	// the run id directly.
+	if err := s.homes.SweepAll(func(runID string) bool { return keep[runID] }); err != nil {
+		s.log.Warn("sweep: instance homes dir", "component", "reconcile", "err", err)
+	}
 }
 
 // SweepLoop drives RuntimeSweep on a sweepTick ticker throttled to sweepThrottle

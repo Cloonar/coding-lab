@@ -30,10 +30,12 @@ type Fake struct {
 
 	// Slash-command catalog (issue #51 decision 5). commands/commandsErr
 	// script Commands; commandsCalls records the worktrees it was asked
-	// about, in order.
+	// about, in order; commandsHomes records the instance HOME of each call
+	// (issue #202 threading assertion), positionally paired with commandsCalls.
 	commands      []provider.CommandSpec
 	commandsErr   error
 	commandsCalls []string
+	commandsHomes []string
 
 	spawnSpecs []provider.SpawnSpec // every SpawnArgv spec, in order (threading assertions)
 
@@ -47,7 +49,9 @@ type Fake struct {
 	fallbackOpen provider.OpenAffordance // returned by FallbackOpen (the generic web link + title)
 	seedErr      error
 	seeded       []string            // worktrees passed to SeedWorkspace, in order
-	seedOpts     []provider.SeedOpts // the SeedOpts of each SeedWorkspace call, in order
+	seedOpts     []provider.SeedOpts // the SeedOpts (incl. Home) of each SeedWorkspace call, in order
+	injectEnv    []string            // env InjectCredentials returns (issue #202)
+	injectHomes  []string            // instance homes InjectCredentials was called with, in order
 	connect      map[string]bool
 	oauthURL     string
 	loginErr     error
@@ -68,6 +72,7 @@ type Fake struct {
 	readErr        error
 	readCalls      []ReadCall
 	locateCt       int
+	locateHomes    []string // instance HOMEs LocateTranscript was called with, in order (issue #202)
 	replies        []string
 	answers        []provider.DialogAnswer
 	interrupts     int
@@ -194,11 +199,13 @@ func (f *Fake) SeedMeta() provider.SeedMeta {
 }
 
 // Commands returns the scripted slash-command catalog (or error), recording
-// the worktree it was asked about (issue #51 decision 5).
-func (f *Fake) Commands(_ context.Context, worktree string) ([]provider.CommandSpec, error) {
+// the worktree AND the instance HOME (issue #202) it was asked about (issue #51
+// decision 5).
+func (f *Fake) Commands(_ context.Context, worktree, home string) ([]provider.CommandSpec, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.commandsCalls = append(f.commandsCalls, worktree)
+	f.commandsHomes = append(f.commandsHomes, home)
 	if f.commandsErr != nil {
 		return nil, f.commandsErr
 	}
@@ -347,8 +354,9 @@ func (f *Fake) Logout(context.Context) error {
 
 // CaptureDeepLink implements provider.DeepLinker: it returns the scripted real
 // link, or "" when the deep link was cleared (a miss — ADR-0017: the generic
-// fallback is FallbackOpen's job, never returned through capture).
-func (f *Fake) CaptureDeepLink(_ context.Context, session, _ string) (string, error) {
+// fallback is FallbackOpen's job, never returned through capture). home (issue
+// #202) is accepted for the seam and unused.
+func (f *Fake) CaptureDeepLink(_ context.Context, session, _, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.captureCt++
@@ -374,6 +382,22 @@ func (f *Fake) SeedWorkspace(worktree string, opts provider.SeedOpts) error {
 	return nil
 }
 
+// InjectCredentials implements provider.AgentProvider (issue #202): it records
+// the run's instance home and returns the scripted env with a nil error — a
+// missing master credential is not the fake's concern. An empty home is a
+// programmer error and returns an error, matching the seam contract, so a
+// core integration test can assert the injector's exactly-one call site never
+// hands it "".
+func (f *Fake) InjectCredentials(instanceHome string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if instanceHome == "" {
+		return nil, errors.New("providertest: InjectCredentials requires a non-empty instance HOME")
+	}
+	f.injectHomes = append(f.injectHomes, instanceHome)
+	return append([]string(nil), f.injectEnv...), nil
+}
+
 func (f *Fake) Connecting(session string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -382,12 +406,14 @@ func (f *Fake) Connecting(session string) bool {
 
 // --- chat surface ---------------------------------------------------------
 
-// LocateTranscript returns the scripted path ("" → not found yet) and counts
-// the call, mirroring CaptureDeepLink's miss-is-not-an-error contract.
-func (f *Fake) LocateTranscript(_ context.Context, _, _ string) (string, error) {
+// LocateTranscript returns the scripted path ("" → not found yet), counts the
+// call, and records the instance HOME it was resolved under (issue #202),
+// mirroring CaptureDeepLink's miss-is-not-an-error contract.
+func (f *Fake) LocateTranscript(_ context.Context, _, _, home string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.locateCt++
+	f.locateHomes = append(f.locateHomes, home)
 	return f.transcriptPath, nil
 }
 
@@ -604,6 +630,14 @@ func (f *Fake) CommandsCalls() []string {
 	return append([]string(nil), f.commandsCalls...)
 }
 
+// CommandsHomes returns the instance HOMEs Commands was called with, in order
+// (issue #202 threading assertion), positionally paired with CommandsCalls.
+func (f *Fake) CommandsHomes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.commandsHomes...)
+}
+
 // SetDeepLink scripts CaptureDeepLink's real hit ("" → a miss).
 func (f *Fake) SetDeepLink(url string) {
 	f.mu.Lock()
@@ -686,6 +720,14 @@ func (f *Fake) LocateCount() int {
 	return f.locateCt
 }
 
+// LocateHomes returns the instance HOMEs LocateTranscript was called with, in
+// order (issue #202 threading assertion).
+func (f *Fake) LocateHomes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.locateHomes...)
+}
+
 // SetLoginError / SetCodeError script the login flow.
 func (f *Fake) SetLoginError(err error) { f.mu.Lock(); f.loginErr = err; f.mu.Unlock() }
 func (f *Fake) SetCodeError(err error)  { f.mu.Lock(); f.codeErr = err; f.mu.Unlock() }
@@ -708,11 +750,26 @@ func (f *Fake) Seeded() []string {
 }
 
 // SeededOpts returns the SeedOpts of each SeedWorkspace call, in order
-// (the incogni-flag wiring assertion, D15 §9 measure 1).
+// (the incogni-flag and, since issue #202, the per-run Home wiring assertion).
 func (f *Fake) SeededOpts() []provider.SeedOpts {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]provider.SeedOpts(nil), f.seedOpts...)
+}
+
+// SetInjectEnv scripts the env InjectCredentials returns (issue #202).
+func (f *Fake) SetInjectEnv(env []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.injectEnv = env
+}
+
+// InjectHomes returns the instance homes InjectCredentials was called with,
+// in order (the credential-injection wiring assertion, issue #202).
+func (f *Fake) InjectHomes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.injectHomes...)
 }
 
 // CaptureCount reports how many times CaptureDeepLink ran.

@@ -229,6 +229,9 @@ The flavor is the routing authority: an unrecognized host (a second Forgejo inst
   worktrees/<repo>-<label>/  instance worktrees (manual: -<label>, AFK: -<N>)
   runtime/                   0700 — materialized credential files, per-op
                              (<credID>.<opID>.key/.askpass/.sshpass), known_hosts
+  instances/<runID>/home/    0700 — per-run private HOME (issue #202): the
+                             provider credential copy, config, and transcripts;
+                             created at launch, wiped at stop/rollback, swept at boot
 ```
 
 Sessions are named `<repo>~<label>`; `~` never appears in paths (the Windows-8.3 lookalike pattern stalls Claude).
@@ -244,6 +247,7 @@ Back up, **consistently together** (one snapshot set):
 Explicitly **excluded** (reconstructible or ephemeral):
 
 - `<state>/runtime/` — materialized key files, known_hosts; 0700, regenerated per operation, swept at startup.
+- `<state>/instances/` — per-run private HOMEs (issue #202) holding the provider credential copy, config, and transcripts; 0700, created at launch, wiped at stop/rollback, swept at boot — ephemeral, never restored.
 - `<state>/worktrees/` — recreated from branches; dirty worktrees are parked work the operator resolves *before* decommissioning a host (a backup cannot carry uncommitted changes safely).
 
 Mechanics:

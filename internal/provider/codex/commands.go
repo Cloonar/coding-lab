@@ -88,10 +88,12 @@ func BuiltinCommands() []provider.CommandSpec {
 }
 
 // Commands implements provider.AgentProvider (issue #51 decision 5): the
-// pinned builtin table, worktree-independent — codex 0.133 has no project-
-// or user-level command discovery (skills load only from the global
-// $CODEX_HOME/skills, and a repo's .codex dir is not a command source), so
-// the catalog is the same for every session.
-func (p *Provider) Commands(_ context.Context, _ string) ([]provider.CommandSpec, error) {
+// pinned builtin table, worktree- AND home-independent — codex 0.133 has no
+// project- or user-level command discovery (skills load only from the global
+// codex home's skills dir, and a repo's .codex dir is not a command source), so
+// there is nothing under the instance HOME to scan and the catalog is the same
+// for every session. worktree and home (issue #202) are accepted for the seam
+// and unused.
+func (p *Provider) Commands(_ context.Context, _, _ string) ([]provider.CommandSpec, error) {
 	return BuiltinCommands(), nil
 }

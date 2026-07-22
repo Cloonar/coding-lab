@@ -177,13 +177,11 @@ func TestProviderIdentity(t *testing.T) {
 func TestNew_requiredOptions(t *testing.T) {
 	base := func() Options {
 		return Options{
-			CodexBin:    "codex",
-			ConfigPath:  "/tmp/x/config.toml",
-			SessionsDir: "/tmp/x/sessions",
-			AgentsFile:  "/tmp/x/AGENTS.md",
-			LoginDir:    "/tmp/x",
-			Runner:      newFakeRunner(),
-			Bus:         events.NewBus(),
+			CodexBin:   "codex",
+			ConfigPath: "/tmp/x/config.toml",
+			LoginDir:   "/tmp/x",
+			Runner:     newFakeRunner(),
+			Bus:        events.NewBus(),
 		}
 	}
 	if _, err := New(base()); err != nil {
@@ -202,9 +200,10 @@ func TestNew_requiredOptions(t *testing.T) {
 	}
 }
 
-// The path defaults resolve under codex's own home ($CODEX_HOME when set,
-// else LoginDir/.codex); explicit values always win (issue #78:
-// adapter-owned defaults).
+// The MASTER path defaults resolve under codex's own home ($CODEX_HOME when
+// set, else LoginDir/.codex); explicit values always win (issue #78:
+// adapter-owned defaults). Instance-facing paths derive from the per-run home
+// on the seam and are no longer construction-time fields (issue #202).
 func TestNew_pathDefaults(t *testing.T) {
 	t.Run("defaults under LoginDir/.codex", func(t *testing.T) {
 		t.Setenv("CODEX_HOME", "")
@@ -219,12 +218,6 @@ func TestNew_pathDefaults(t *testing.T) {
 		if p.configPath != filepath.Join(home, "config.toml") {
 			t.Errorf("configPath = %q; want %q", p.configPath, filepath.Join(home, "config.toml"))
 		}
-		if p.sessionsDir != filepath.Join(home, "sessions") {
-			t.Errorf("sessionsDir = %q; want %q", p.sessionsDir, filepath.Join(home, "sessions"))
-		}
-		if p.agentsFile != filepath.Join(home, "AGENTS.md") {
-			t.Errorf("agentsFile = %q; want %q", p.agentsFile, filepath.Join(home, "AGENTS.md"))
-		}
 	})
 	t.Run("CODEX_HOME wins over LoginDir/.codex", func(t *testing.T) {
 		t.Setenv("CODEX_HOME", "/srv/codex-home")
@@ -236,23 +229,20 @@ func TestNew_pathDefaults(t *testing.T) {
 			t.Errorf("configPath = %q; want under $CODEX_HOME", p.configPath)
 		}
 	})
-	t.Run("explicit paths win over every default", func(t *testing.T) {
+	t.Run("explicit master paths win over every default", func(t *testing.T) {
 		t.Setenv("CODEX_HOME", "/srv/codex-home")
 		p, err := New(Options{
-			CodexBin:    "/opt/custom/codex",
-			ConfigPath:  "/etc/codex/custom.toml",
-			SessionsDir: "/var/rollouts",
-			AgentsFile:  "/etc/codex/AGENTS.md",
-			LoginDir:    "/home/x",
-			Runner:      newFakeRunner(),
-			Bus:         events.NewBus(),
+			CodexBin:   "/opt/custom/codex",
+			ConfigPath: "/etc/codex/custom.toml",
+			LoginDir:   "/home/x",
+			Runner:     newFakeRunner(),
+			Bus:        events.NewBus(),
 		})
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		if p.codexBin != "/opt/custom/codex" || p.configPath != "/etc/codex/custom.toml" ||
-			p.sessionsDir != "/var/rollouts" || p.agentsFile != "/etc/codex/AGENTS.md" {
-			t.Errorf("explicit paths lost to defaults: %+v", p)
+		if p.codexBin != "/opt/custom/codex" || p.configPath != "/etc/codex/custom.toml" {
+			t.Errorf("explicit master paths lost to defaults: %+v", p)
 		}
 	})
 }

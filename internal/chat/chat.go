@@ -124,6 +124,15 @@ type Options struct {
 	// encrypted blob (issue #108). Nil → transcript scanning/masking is off
 	// (the feature is absent, like a nil Notify).
 	Secrets func(ctx context.Context, repoID string) (*secrets.Redactor, error)
+
+	// HomeFor maps a run id to its private instance HOME (issue #202) — the
+	// pure instancehome.Manager.HomePath, injected as a closure so chat need not
+	// import the manager (its idiom for cross-package seams, like Notify and
+	// Secrets). LocateTranscript resolves the transcript strictly under this
+	// home. Nil → "" for every run, which is a locate MISS by the seam contract
+	// (the pre-upgrade / no-home degradation, keeping the run's already-stored
+	// path) — the same effect HomePath gives for a run whose home never existed.
+	HomeFor func(runID string) string
 }
 
 // defaultPoll is the tailer's file-change poll cadence. It doubles as the
@@ -150,6 +159,11 @@ type Service struct {
 	// secrets is the injected per-repo redactor seam (issue #108), nil when
 	// cmd/lab wired none — see Options.Secrets and redact.go.
 	secrets func(ctx context.Context, repoID string) (*secrets.Redactor, error)
+
+	// homeFor maps a run id to its private instance HOME (issue #202), nil when
+	// cmd/lab wired none — see Options.HomeFor. Read through home() so a nil
+	// closure degrades to "" (a locate miss).
+	homeFor func(runID string) string
 
 	tailers *tailerSet
 
@@ -228,8 +242,19 @@ func New(o Options) (*Service, error) {
 		notify:         o.Notify,
 		notifyDebounce: notifyDebounce,
 		secrets:        o.Secrets,
+		homeFor:        o.HomeFor,
 		tailers:        newTailerSet(),
 	}, nil
+}
+
+// home resolves a run's private instance HOME (issue #202) through the injected
+// homeFor closure, degrading to "" — a locate MISS by the seam contract — when
+// none was wired (a test service, or a build without the instance stack).
+func (s *Service) home(runID string) string {
+	if s.homeFor == nil {
+		return ""
+	}
+	return s.homeFor(runID)
 }
 
 // View is the chat service's read of one run: the adapter-composed
@@ -343,7 +368,12 @@ func (s *Service) resolvePath(ctx context.Context, prov provider.AgentProvider, 
 //   - a different, non-empty path is a rotation (a /clear or /rewind rotated the
 //     sessionId → a fresh transcript file, compat §5): adopt and persist it.
 func (s *Service) locateActive(ctx context.Context, prov provider.AgentProvider, run store.Run, known string) string {
-	path, err := prov.LocateTranscript(ctx, run.SessionName, run.WorktreePath)
+	// The transcript is resolved strictly under the run's private instance HOME
+	// (issue #202) — the LocateTranscript contract. Only active runs reach here,
+	// and a pre-upgrade run's nonexistent home yields a locate miss ("", nil),
+	// which the miss branch below turns into "keep known" (the doc comment's
+	// promise) — never a fall back to the master store.
+	path, err := prov.LocateTranscript(ctx, run.SessionName, run.WorktreePath, s.home(run.ID))
 	if err != nil || path == "" {
 		return known
 	}

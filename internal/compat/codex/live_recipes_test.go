@@ -185,7 +185,9 @@ func TestCompat_Live_locateTranscript(t *testing.T) {
 		t.Fatalf("codex.New: %v", err)
 	}
 
-	located, err := prov.LocateTranscript(context.Background(), "unused-session-name", cwd)
+	// The instance HOME whose <home>/.codex/sessions tree holds the rollout
+	// (issue #202): the real user home in the default no-$CODEX_HOME case.
+	located, err := prov.LocateTranscript(context.Background(), "unused-session-name", cwd, home)
 	if err != nil {
 		t.Fatalf("LocateTranscript(%q): %v", cwd, err)
 	}

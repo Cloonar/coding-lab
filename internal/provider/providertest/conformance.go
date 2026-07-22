@@ -10,6 +10,7 @@ package providertest
 // through the check functions and assert the failure messages directly.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -46,19 +47,22 @@ type Fixture struct {
 // only its BRE sub-check when grep is absent; everything else always runs.
 //
 // The live-process seam methods — AuthStatus, LoginStart/LoginSubmitCode,
-// Logout, Commands, Reply, AnswerDialog, Interrupt, LocateTranscript, and
-// ReadChat's transcript GRAMMAR — are deliberately NOT exercised: each is an
+// Logout, Commands, Reply, AnswerDialog, Interrupt, and the transcript GRAMMAR
+// of LocateTranscript/ReadChat — are deliberately NOT exercised: each is an
 // adapter-owned fragile CLI coupling that must be live-verified per adapter
-// (the ADR-0008 bar, Tier-2), never hermetically. ReadChat's ARGUMENT
-// contract is the exception (issue #92): how an adapter treats an empty
-// transcriptPath and a vanished one is seam law core relies on blind, needs
-// no CLI, and is pinned here by read-chat. Tier-1 otherwise covers exactly
-// the declarations lab's core consumes blind: pattern dialect (issue #75 /
-// ADR-0033), the lab-owned context file (issue #79 / ADR-0035), defensive
-// catalog/meta clones, spawn argv shape (issue #19 / ADR-0021), the
-// auth-flow vocabulary and login-session naming (issue #77 / ADR-0034), the
-// remote-control knob's advertise-or-ignore contract (issue #163), and
-// executable exclude/scrub coverage.
+// (the ADR-0008 bar, Tier-2), never hermetically. The ARGUMENT contracts core
+// relies on blind ARE pinned here, needing no CLI: ReadChat's empty/vanished
+// transcriptPath (issue #92, read-chat), LocateTranscript's empty-HOME miss
+// (issue #202, locate-homeless), InjectCredentials' empty-HOME error and
+// missing-master tolerance (issue #202, inject-credentials), and that
+// SeedWorkspace's per-run Home grants never touch the master store (issue #202,
+// seed-home-containment). Tier-1 otherwise covers exactly the declarations
+// lab's core consumes blind: pattern dialect (issue #75 / ADR-0033), the
+// lab-owned context file (issue #79 / ADR-0035), defensive catalog/meta clones,
+// spawn argv shape (issue #19 / ADR-0021), the auth-flow vocabulary and
+// login-session naming (issue #77 / ADR-0034), the remote-control knob's
+// advertise-or-ignore contract (issue #163), and executable exclude/scrub
+// coverage.
 func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Helper()
 	report := func(t *testing.T, errs []error) {
@@ -76,8 +80,11 @@ func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Run("auth-flow", func(t *testing.T) { report(t, checkAuthFlow(p)) })
 	t.Run("login-session", func(t *testing.T) { report(t, checkLoginSession(p)) })
 	t.Run("read-chat", func(t *testing.T) { report(t, checkReadChat(t, p)) })
+	t.Run("locate-homeless", func(t *testing.T) { report(t, checkLocateHomeless(p)) })
+	t.Run("inject-credentials", func(t *testing.T) { report(t, checkInjectCredentials(t, p)) })
 	t.Run("seeding-exclude-coverage", func(t *testing.T) { report(t, checkSeedingExcludeCoverage(t, p)) })
 	t.Run("seeding-incogni", func(t *testing.T) { report(t, checkSeedingIncogni(t, p)) })
+	t.Run("seed-home-containment", func(t *testing.T) { report(t, checkSeedHomeContainment(t, p)) })
 	t.Run("scrub-markers", func(t *testing.T) { report(t, checkScrubMarkers(t, p, fx)) })
 }
 
@@ -493,6 +500,52 @@ func checkReadChat(tb testing.TB, p provider.AgentProvider) []error {
 	return errs
 }
 
+// checkLocateHomeless pins LocateTranscript's empty-HOME contract hermetically
+// (issue #202): a run with no per-run instance HOME has no instance transcript
+// store to resolve under, so the locate is a miss ("", nil) — NEVER an error,
+// and NEVER a fall back to the machine's master store (isolation by
+// construction; a locate miss keeps the run's already-stored path, see
+// internal/chat/chat.go locateActive).
+func checkLocateHomeless(p provider.AgentProvider) []error {
+	path, err := p.LocateTranscript(context.Background(), "conformance-session-1", "/conformance/no-such-worktree", "")
+	if err != nil {
+		return []error{fmt.Errorf("locate-homeless: LocateTranscript with home=\"\" returned error %v — an empty instance HOME is a miss (\"\", nil), never an error; a run with no per-run home never falls back to the master store (provider.AgentProvider.LocateTranscript contract; issue #202)", err)}
+	}
+	if path != "" {
+		return []error{fmt.Errorf("locate-homeless: LocateTranscript with home=\"\" returned %q; want \"\" — with no per-run home there is no instance transcript store to resolve under, and resolving one means falling back to the master store, which isolation by construction forbids (issue #202)", path)}
+	}
+	return nil
+}
+
+// checkInjectCredentials pins InjectCredentials' argument contract hermetically
+// (issue #202): (b) an empty instance HOME is a programmer error; (c) with no
+// master credential present the injector returns nil error and writes nothing
+// to the master store — a missing master credential is NOT an error (the CLI
+// shows its own login prompt in the pane), and the injector only ever copies
+// FROM the master store, never into it. Every adapter's ENV-derived master
+// resolution is pointed at fresh empty temp dirs (CLAUDE_CONFIG_DIR /
+// CODEX_HOME / HOME — the adapters' own isolation seam), so the copy source is
+// genuinely absent; the construction-time master paths the registration table
+// set already live in t.TempDir()s.
+func checkInjectCredentials(t *testing.T, p provider.AgentProvider) []error {
+	var errs []error
+	if _, err := p.InjectCredentials(""); err == nil {
+		errs = append(errs, fmt.Errorf("inject-credentials: InjectCredentials(\"\") returned nil error — an empty instance HOME is a programmer error and must fail (provider.AgentProvider.InjectCredentials contract; issue #202)"))
+	}
+	master := t.TempDir()
+	t.Setenv("HOME", filepath.Join(master, "home"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(master, "claude-config"))
+	t.Setenv("CODEX_HOME", filepath.Join(master, "codex-home"))
+	home := t.TempDir()
+	if _, err := p.InjectCredentials(home); err != nil {
+		errs = append(errs, fmt.Errorf("inject-credentials: InjectCredentials(tempHome) with no master credential present returned %v — a missing master credential is NOT an error; the injector logs it and the spawn proceeds, exactly today's behavior on an unauthenticated host (issue #202)", err))
+	}
+	if n := countFiles(master); n != 0 {
+		errs = append(errs, fmt.Errorf("inject-credentials: InjectCredentials wrote %d file(s) into the master store tree %q — the injector copies FROM the master store, never into it (issue #202)", n, master))
+	}
+	return errs
+}
+
 // conformanceRepo is the minimal repo row the lab seeder renders the context
 // file from (mirrors internal/seeder's builtin-binding fixture).
 var conformanceRepo = store.Repo{Name: "proj", TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none"}
@@ -583,6 +636,50 @@ func checkSeedingIncogni(tb testing.TB, p provider.AgentProvider) []error {
 		return []error{fmt.Errorf("seeding-incogni: lab seeder over this provider's SeedMeta: %v (issue #51 decision 8; issue #80)", err)}
 	}
 	return checkStatusClean("seeding-incogni", tb, wt, env, meta)
+}
+
+// checkSeedHomeContainment pins that SeedWorkspace's per-run Home grants stay
+// out of the master store (issue #202): seeding a fresh linked worktree with a
+// temp instance Home must leave the machine's master store untouched — the
+// HOME-global trust grants (claude's ~/.claude.json, codex's config.toml +
+// AGENTS.md) belong under the run's private Home — and, as the other seeding
+// checks require, must not dirty any tracked worktree file. The git common-dir
+// exclude write is expected and is covered by git status, not a containment
+// violation. Every adapter's ENV-derived master resolution is pinned to fresh
+// empty temp dirs so a grant that wrongly targeted the master (instead of Home)
+// is caught as a stray write there.
+func checkSeedHomeContainment(t *testing.T, p provider.AgentProvider) []error {
+	wt, env := newConformanceWorktree(t)
+	master := t.TempDir()
+	t.Setenv("HOME", filepath.Join(master, "home"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(master, "claude-config"))
+	t.Setenv("CODEX_HOME", filepath.Join(master, "codex-home"))
+	home := t.TempDir()
+	if err := p.SeedWorkspace(wt, provider.SeedOpts{Home: home}); err != nil {
+		return []error{fmt.Errorf("seed-home-containment: SeedWorkspace with a per-run Home on a fresh linked worktree: %v — seeding must succeed unattended before the session spawns (issue #202)", err)}
+	}
+	var errs []error
+	if n := countFiles(master); n != 0 {
+		errs = append(errs, fmt.Errorf("seed-home-containment: SeedWorkspace(Home) wrote %d file(s) into the master store tree %q — the HOME-global trust grants must land under the run's private Home, never the master store (provider.SeedOpts.Home contract; issue #202)", n, master))
+	}
+	errs = append(errs, checkStatusClean("seed-home-containment", t, wt, env, p.SeedMeta())...)
+	return errs
+}
+
+// countFiles walks dir and returns the number of regular files under it (0 when
+// dir does not exist) — the "no stray writes landed here" probe.
+func countFiles(dir string) int {
+	n := 0
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable / missing → count nothing
+		}
+		if !d.IsDir() {
+			n++
+		}
+		return nil
+	})
+	return n
 }
 
 // checkScrubMarkers proves the fixture's ground-truth marker lines are caught
