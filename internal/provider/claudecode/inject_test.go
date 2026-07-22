@@ -24,7 +24,9 @@ func masterCreds(t *testing.T) []byte {
 // (a) Happy path: the master credentials are copied into
 // <home>/.claude/.credentials.json (0600), the master ~/.claude.json's
 // oauthAccount is mirrored into <home>/.claude.json (and only that key), and
-// claude needs no env pin.
+// the env pins CLAUDE_CONFIG_DIR to EMPTY — the CLI resolves that variable
+// over HOME (compat §3a), so a tmux-inherited value would point the instance
+// back at the master store; empty = unset keeps resolution on HOME alone.
 func TestInjectCredentials_happyPath(t *testing.T) {
 	creds := masterCreds(t)
 	p, _ := testProvider(t, newFakeRunner())
@@ -40,8 +42,8 @@ func TestInjectCredentials_happyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InjectCredentials: %v", err)
 	}
-	if env != nil {
-		t.Errorf("env = %v; want nil (claude resolves its state from HOME alone)", env)
+	if len(env) != 1 || env[0] != "CLAUDE_CONFIG_DIR=" {
+		t.Errorf("env = %v; want [CLAUDE_CONFIG_DIR=] (empty pin neutralizing an inherited master pointer)", env)
 	}
 
 	dst := instanceCredsUnder(home)
@@ -69,7 +71,8 @@ func TestInjectCredentials_happyPath(t *testing.T) {
 
 // (b) Missing-master tolerance: no master creds and no master config ⇒ no
 // error, and nothing is written into the instance home (the CLI shows its own
-// login prompt in the pane).
+// login prompt in the pane). The CLAUDE_CONFIG_DIR= pin still fires — it
+// governs PATH RESOLUTION, not authentication.
 func TestInjectCredentials_missingMasterTolerated(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // empty ⇒ no master creds
 	p, _ := testProvider(t, newFakeRunner())   // p.configPath (master ~/.claude.json) does not exist
@@ -79,8 +82,8 @@ func TestInjectCredentials_missingMasterTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InjectCredentials with no master: %v", err)
 	}
-	if env != nil {
-		t.Errorf("env = %v; want nil", env)
+	if len(env) != 1 || env[0] != "CLAUDE_CONFIG_DIR=" {
+		t.Errorf("env = %v; want [CLAUDE_CONFIG_DIR=] (the pin fires even with no master credential)", env)
 	}
 	if _, err := os.Stat(instanceCredsUnder(home)); !os.IsNotExist(err) {
 		t.Errorf("instance creds written despite a missing master (%v)", err)

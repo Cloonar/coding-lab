@@ -222,8 +222,10 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// Install the run's model credentials into its private HOME (issue #202):
 	// the provider copies the machine's MASTER credential store into the layout
 	// its CLI reads under home, and returns the env the spawn must carry for the
-	// CLI to resolve its state there (claude needs none — HOME alone points it;
-	// codex REQUIRES CODEX_HOME=<home>/.codex). This is the seam's ONLY call
+	// CLI to resolve its state there — each adapter pins its CLI's master-store
+	// override variable against tmux inheritance (claude: CLAUDE_CONFIG_DIR=
+	// empty, which the CLI treats as unset; codex: CODEX_HOME=<home>/.codex).
+	// This is the seam's ONLY call
 	// site, so a future server-side credential proxy can replace the copy
 	// wholesale behind it. A MISSING master credential is NOT an error — the
 	// injector logs it and returns nil, and the CLI shows its own login prompt

@@ -595,11 +595,15 @@ type AgentProvider interface {
 	// (issue #202): given the run's private instance HOME, it copies whatever
 	// the machine's MASTER credential store holds into the layout the agent CLI
 	// reads under that HOME, and returns any env entries the spawn must carry so
-	// the CLI resolves its state under the instance HOME. claude needs none —
-	// HOME alone points its readers at the copy; codex REQUIRES
-	// CODEX_HOME=<home>/.codex, because lab supports $CODEX_HOME for the master
-	// store (internal/provider/codex codexHomeDir) and without the pin a value
-	// inherited through tmux would point the instance back at that master store.
+	// the CLI resolves its state under the instance HOME. Both adapters must
+	// defend the tmux-inheritance vector: the spawn inherits the lab server's
+	// environment, and each CLI honors a master-store override variable that
+	// outranks HOME. codex REQUIRES CODEX_HOME=<home>/.codex (lab supports
+	// $CODEX_HOME for the master store — internal/provider/codex codexHomeDir);
+	// claude REQUIRES CLAUDE_CONFIG_DIR= pinned EMPTY (the CLI resolves
+	// CLAUDE_CONFIG_DIR over HOME and treats empty as unset — compat §3a — so
+	// the empty pin keeps resolution on the instance HOME without relocating
+	// the .claude.json layout the adapter seeds).
 	//
 	// Exactly ONE call site exists (the launch path), so a server-side
 	// credential proxy can later replace the copy wholesale — the env would

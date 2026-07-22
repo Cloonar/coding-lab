@@ -26,9 +26,19 @@ import (
 //     writer and SeedWorkspace's trust seed both preserve each other's keys via
 //     the generic map round-trip, so injector/seed order does not matter.
 //
-// claude needs NO env pins beyond HOME — lab's readers never supported a
-// service-wide CLAUDE_CONFIG_DIR, so none is introduced per run — hence a nil
-// env return. A MISSING master file (the operator never logged in) is NOT an
+// It ALWAYS returns CLAUDE_CONFIG_DIR= (explicitly EMPTY) — the claude CLI
+// resolves CLAUDE_CONFIG_DIR *over* HOME for ALL of its state (credentials,
+// .claude.json, projects/ — compat §3a), and lab itself honors a service-wide
+// value for the master store (credentialsPath, shared with logout.go), so a
+// value inherited through tmux would point the instance's claude straight back
+// at that master store. The CLI treats an empty value as unset (compat §3a),
+// so the empty pin neutralizes the inherited value while keeping the exact
+// HOME-only layout this package seeds and reads — the same defense codex
+// mounts with its unconditional CODEX_HOME pin, minus the relocation (pinning
+// a non-empty dir would move .claude.json under it, away from the
+// <home>/.claude.json this package writes).
+//
+// A MISSING master file (the operator never logged in) is NOT an
 // error: it is logged loudly and simply not written, so the spawn proceeds and
 // the CLI shows its own login prompt in the pane, exactly today's behavior on
 // an unauthenticated host. An empty home is a programmer error. The injector
@@ -43,7 +53,10 @@ func (p *Provider) InjectCredentials(instanceHome string) ([]string, error) {
 	if err := p.mirrorOAuthAccount(instanceHome); err != nil {
 		return nil, err
 	}
-	return nil, nil // claude resolves its state from HOME alone — no env pin
+	// Unconditional, and deliberately EMPTY: an inherited CLAUDE_CONFIG_DIR
+	// outranks HOME in the CLI's resolution, so it must be cleared for the
+	// instance; empty = unset (compat §3a) keeps resolution on HOME alone.
+	return []string{"CLAUDE_CONFIG_DIR="}, nil
 }
 
 // copyMasterCredentials copies the master .credentials.json (credentialsPath,

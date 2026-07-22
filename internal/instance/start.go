@@ -142,10 +142,11 @@ func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 // HOME is the issue #202 isolation seam: it is the run's private per-run home,
 // so the spawned CLI reads/writes ONLY under it — the machine's master
 // ~/.claude*/~/.codex are never touched by an instance process. injEnv is the
-// provider's own credential-resolution env for that home (empty for claude,
-// which needs only HOME; CODEX_HOME=<home>/.codex for codex, which must pin the
-// store so a value inherited through tmux can't point it back at the master
-// store). Appended AFTER HOME so a provider entry always wins over it.
+// provider's own credential-resolution env for that home, pinning the CLI's
+// master-store override variable so a value inherited through tmux can't point
+// the instance back at the master store (CLAUDE_CONFIG_DIR= — empty behaves as
+// unset — for claude; CODEX_HOME=<home>/.codex for codex). Appended AFTER HOME
+// so a provider entry always wins over it.
 func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken, home string, injEnv []string) ([]string, error) {
 	env := append([]string{}, credEnv...)
 	env = append(env, "LAB_URL="+s.labURL, "LAB_TOKEN="+runToken, "HOME="+home)
