@@ -283,6 +283,54 @@ Two Forgejo Actions gates run on pull requests (ADR-0023):
 
 The store suite additionally runs against a real Postgres wherever `LAB_TEST_POSTGRES_DSN` is set; `ci.yml` carries a ready-made `store-postgres` job as a commented template (service container + DSN export, plus the same in-job nix install) — uncomment it once your runners support service containers.
 
+**Agent-tools gate** ([`.forgejo/workflows/agent-tools.yml`](../.forgejo/workflows/agent-tools.yml), see [Agent-tools images](#agent-tools-images)) — path-gated to `containers/**` and the workflow itself, so it does not run on common-path PRs. Where it does run it needs, beyond the native gate's toolchain:
+
+- **`podman`** on the runner. This is the first gate to need it; it ships on some stock images and not others, so both jobs install-if-missing (`command -v podman || apt-get install -y podman`) then dump `podman version` / `podman info` as the diagnostic if a runner cannot run podman at all — the same apt-reachable-and-root-or-sudo requirement the native gate's `tmux` install carries.
+- Outbound egress for `downloads.claude.ai` (the Claude Code `linux-x64-musl` binary + its `manifest.json`), `github.com` (the codex release asset), and `docker.io` (the `debian:stable-slim` and `alpine` base images the injection smoke test mounts into). The release leg additionally reaches the Forgejo package registry at `git.cloonar.com` to push.
+
+## Agent-tools images
+
+Per-provider **agent-tools** OCI images carry an agent CLI and a static `labctl` INTO an operator-chosen dev container, so the agent surface travels with lab instead of being baked into the base image. Built and published by [`.forgejo/workflows/agent-tools.yml`](../.forgejo/workflows/agent-tools.yml) from `containers/agent-tools/`; the design rationale (libc mechanism, alternatives) is [ADR-0051](adr/0051-agent-tools-oci-images.md), and the consumer is the container runner (issue #205). This complements the ADR-0033 tools baseline (which puts CLIs on the lab *unit* PATH) rather than replacing it: the baseline serves host-PATH sessions, these images serve sessions running inside an arbitrary container.
+
+**What the images are.** One image per provider, `FROM scratch` (pure payload, never run as a container), tagged `git.cloonar.com/cloonar/agent-tools:<provider>-<cli-version>`. claude and codex ship today; gemini is deferred until the gemini adapter (#126) lands. Exact contents:
+
+| Image | Root filesystem |
+|---|---|
+| `agent-tools:claude-<ver>` | `/bin/claude` (Claude Code `linux-x64-musl` native build), `/bin/labctl` (static, built from this repo), `/lib/ld-musl-x86_64.so.1` (the musl loader, from Alpine) |
+| `agent-tools:codex-<ver>` | `/bin/codex` (upstream static-pie musl binary), `/bin/labctl` |
+
+Nothing else — no shell, no userland. The image ships ONLY lab-owned binaries; the userland a session assumes (`tar`, `curl`, `jq`, `rg`, …) is the dev image's own business, deliberately NOT imposed by this mount (ADR-0033's baseline is for host-PATH sessions, not this seam).
+
+**The injection contract.** The container runner mounts the image read-only into the operator's chosen dev container and prepends `/opt/lab/bin` to PATH:
+
+```
+podman run --mount type=image,src=git.cloonar.com/cloonar/agent-tools@sha256:…,dst=/opt/lab …
+# binaries then resolve at /opt/lab/bin/claude, /opt/lab/bin/codex, /opt/lab/bin/labctl
+```
+
+`/opt/lab` is a **HARD contract**, not a convention: the claude binary's ELF interpreter (`PT_INTERP`) is rewritten at image-build time to the absolute path `/opt/lab/lib/ld-musl-x86_64.so.1`. Mount the image anywhere else and claude will not start. This is what lets claude run on both a glibc base (debian) and a musl base (alpine) without using the base image's libc — the one bundled musl loader IS the only libc claude consults. codex is static-pie with no interpreter and runs as-is; `labctl` is pure-Go `CGO_ENABLED=0` and needs no loader.
+
+**Tagging + digest pinning.** The `<provider>-<cli-version>` tag is human-facing. The **digest** is the pinning contract: a same-tag re-push (e.g. a `labctl` refresh at an unchanged CLI version) produces a NEW digest under the SAME tag, so the tag is a moving reference and consumers pin `agent-tools@sha256:…`. The release job emits the digest-pinned reference to its job summary.
+
+**The version catalog.** `containers/agent-tools/versions.env` is the single source of truth for provider CLI versions and artifact checksums, sourced by both the build scripts and the publish job:
+
+- `CLAUDE_CODE_VERSION` + the sha256 of the `linux-x64-musl` binary (from Anthropic's per-version manifest at `downloads.claude.ai/claude-code-releases/<ver>/manifest.json`).
+- `CODEX_VERSION` + the sha256 of `codex-x86_64-unknown-linux-musl.tar.gz` (from the GitHub release's per-asset digest).
+
+These versions ARE the repo's compat-record pins (`internal/compat/compat.md` pins Claude Code, `internal/compat/codex/compat.md` pins codex-cli) — versions.env is what makes those prose pins actual build inputs. **Bump procedure**: re-verify the compat record against the new CLI version FIRST (the compat doc is the checklist), THEN bump the version + sha in versions.env. The PR runs the injection smoke test; the merge to main publishes. A version bump that skips the compat re-verification is the failure mode to guard against — it ships an unverified CLI under a pin that claims verification.
+
+**CI legs** (deliberately asymmetric on secrets):
+
+- **PR leg** (job `smoke`, on `pull_request`): builds both images locally and runs the injection smoke test — mount each into stock `debian:stable-slim` and `alpine` and run `claude --version` / `codex --version` / `labctl --help`. It references NO secret and NEVER pushes, so a PR from any branch (forks included) exercises the full build+inject path without ever touching the registry credential.
+- **Release leg** (job `publish`, on `push` to `main` + `workflow_dispatch`): re-runs the smoke test (cheap insurance that exactly what is pushed passes injection), then pushes the digest-pinned tags to the registry. Both legs are path-gated to `containers/**` and the workflow file so unrelated merges don't re-release. `workflow_dispatch` is the manual re-release knob: `labctl` is built from the repo INSIDE the image build, so a labctl change that should be baked into fresh images is shipped by dispatching this workflow even with no `containers/**` diff.
+
+**Operator provisioning.** The release leg needs one repository CI secret, gated before checkout so a missing token fails loud and early with these instructions rather than deep inside a push:
+
+- **`FORGE_REGISTRY_TOKEN`** (required) — a Forgejo access token with package write (`write:package`) scope on `git.cloonar.com`. PRs never see it.
+- **`FORGE_REGISTRY_USER`** (optional) — the token owner's username, used as the `podman login` user. Defaults to the repository owner; set it only when the token does not belong to that account.
+
+**x86_64-only today.** Both upstreams publish arm64(-musl) artifacts, so an arm64 variant is a mechanical follow-up (a second set of tags off the same versions.env and Containerfiles) once an arm64 runner/host exists.
+
 ## Observability
 
 - `GET /healthz` — liveness; 200 `ok` always (no dependencies).

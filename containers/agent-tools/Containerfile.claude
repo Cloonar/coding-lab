@@ -1,0 +1,80 @@
+# agent-tools: claude — a FROM-scratch OCI image whose whole root filesystem is
+# /bin/claude (Claude Code's linux-x64-musl native build), /bin/labctl (built
+# static from this repo), and /lib/ld-musl-x86_64.so.1 (the musl loader, taken
+# from Alpine). It is pure payload: no shell, no userland, no base. It is NEVER
+# run as a container — the container runner (#205) mounts it read-only into an
+# operator-chosen dev container via `podman run --mount type=image,...,dst=/opt/lab`
+# and prepends /opt/lab/bin to PATH.
+#
+# The image contract (ADR-0051, docs/ops.md § "Agent-tools images"):
+#   * /opt/lab is a HARD mount destination, not a convention. The claude
+#     binary's ELF interpreter (PT_INTERP) is rewritten below to the absolute
+#     path /opt/lab/lib/ld-musl-x86_64.so.1. Mount the image anywhere else and
+#     claude will not start. This is what lets claude run on both a glibc base
+#     (debian) and a musl base (alpine) without either's libc — the one bundled
+#     musl loader IS the only libc claude consults.
+#   * The version tag is human-facing; consumers pin the immutable @sha256:
+#     digest the publish job emits.
+
+# ---- Stage: labctl — static pure-Go binary built from the working tree -------
+# Matches the Makefile's CGO_ENABLED=0 convention; -trimpath -ldflags='-s -w'
+# make it reproducible and small. Untagged build (no `-tags ui`) uses the
+# webui placeholder variant, so no embedded SPA dist is required.
+FROM docker.io/library/golang:1.26-alpine AS labctl
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/labctl ./cmd/labctl
+
+# ---- Stage: claude — fetch, verify, sanity-run, then PT_INTERP-patch ---------
+FROM docker.io/library/alpine:3.22 AS claude
+RUN apk add --no-cache curl patchelf
+
+# No defaults: build.sh always passes both from versions.env. A missing arg must
+# fail the build (empty URL / empty checksum), never silently fetch something else.
+ARG CLAUDE_CODE_VERSION
+ARG CLAUDE_CODE_SHA256_X64_MUSL
+
+# Download the pinned linux-x64-musl binary and verify its sha256 before use.
+# --create-dirs makes /out on this fresh stage (nothing else creates it).
+RUN curl -fsSL --create-dirs -o /out/claude \
+      "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/linux-x64-musl/claude" \
+    && echo "${CLAUDE_CODE_SHA256_X64_MUSL}  /out/claude" | sha256sum -c - \
+    && chmod 755 /out/claude
+
+# Build-time sanity run BEFORE patching. The unpatched binary's PT_INTERP is
+# /lib/ld-musl-x86_64.so.1, which exists on this alpine stage (alpine's loader
+# IS musl libc), so this proves the download is a working executable.
+RUN /out/claude --version
+
+# Rewrite PT_INTERP to the absolute /opt/lab path baked into the shipped image,
+# then bundle alpine's own musl loader (the one file the binary needs at
+# runtime) alongside it.
+#
+# Why PT_INTERP patching and NOT a loader wrapper (ADR-0051): claude re-execs
+# process.execPath under argv0=rg to serve its EMBEDDED ripgrep. A wrapper that
+# exec'd an explicit loader would make process.execPath the loader, not claude,
+# so the self-exec loses ripgrep. Patching PT_INTERP leaves the binary
+# self-identifying, so the ripgrep self-exec stays intact.
+#
+# Why the patched binary is NOT run again in this stage: PT_INTERP now points at
+# /opt/lab/lib/ld-musl-x86_64.so.1, a path that only exists once the image is
+# mounted at /opt/lab by the runner — it is absent here, so `claude --version`
+# on the patched binary would fail to start. The pre-patch sanity run above is
+# the in-build proof; injection is proven by smoke-test.sh / the CI smoke job.
+RUN patchelf --set-interpreter /opt/lab/lib/ld-musl-x86_64.so.1 /out/claude \
+    && cp /lib/ld-musl-x86_64.so.1 /out/ld-musl-x86_64.so.1
+
+# ---- Final: pure payload -----------------------------------------------------
+FROM scratch
+# ARG must be redeclared in this stage to reach the version label below.
+ARG CLAUDE_CODE_VERSION
+COPY --from=claude /out/claude /bin/claude
+COPY --from=labctl /out/labctl /bin/labctl
+COPY --from=claude /out/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+LABEL org.opencontainers.image.title="agent-tools: claude" \
+      org.opencontainers.image.description="Self-contained Claude Code (linux-x64-musl) plus static labctl, mounted read-only at /opt/lab for injection into an operator-chosen dev container." \
+      org.opencontainers.image.source="https://git.cloonar.com/Cloonar/coding-lab" \
+      org.opencontainers.image.version="${CLAUDE_CODE_VERSION}" \
+      com.cloonar.lab.provider="claude-code"

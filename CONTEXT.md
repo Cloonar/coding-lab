@@ -146,6 +146,10 @@ _Avoid_: plugins, user-level skills
 A per-repo flag applying seven leak-prevention measures so a run's output carries no AI attribution — neutral branch patterns, sanitized bodies, real git identity, pre-push guard. Sanitized bodies and the pre-push guard both screen against the union of every registered provider's declared markers, not just the repo's own provider (ADR-0033), so a per-session provider override (ADR-0030) is never screened by the wrong provider's patterns. It cannot hide the forge account of the token used, nor style/timing signals.
 _Avoid_: stealth mode, anonymous mode
 
+**Agent-tools image**:
+The per-provider OCI image (`agent-tools:<provider>-<cli-version>` on the forge package registry) carrying exactly one provider's self-contained CLI (claude-code's native musl `claude`, codex's static `codex`) plus a static `labctl`, and nothing else — `FROM scratch`, never run as a container. The container runner mounts it read-only at `/opt/lab` into any operator-chosen dev container and prepends `/opt/lab/bin` to PATH, so the agent surface (provider CLI + `labctl`) travels with lab instead of being baked into the dev image. The `/opt/lab` destination is a hard contract: the claude binary's ELF interpreter is rewritten to `/opt/lab/lib/ld-musl-x86_64.so.1` at build time, so it runs on a glibc or musl base without either's libc. Consumers pin the immutable `@sha256:` digest, never the moving version tag (ADR-0051).
+_Avoid_: tools container, sidecar image, base image
+
 ### Security
 
 **Master key**:
