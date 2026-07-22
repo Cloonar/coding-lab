@@ -76,6 +76,11 @@ jobs:
       # namespaces/cgroups. chroot isolation also keeps RUN in the job's own
       # network namespace, so apk/curl/go egress needs no netavark setup.
       BUILDAH_ISOLATION: chroot
+      # No per-step layer commits: under vfs every committed layer is a FULL
+      # copy of the stage filesystem, which ran the runner out of disk (run
+      # 238). Layer caching buys nothing here anyway — every CI run starts
+      # from an empty store.
+      BUILDAH_LAYERS: "false"
     steps:
       - uses: actions/checkout@v4
 
@@ -105,18 +110,28 @@ jobs:
           sudo rm -rf /var/lib/containers/storage
           podman version
           podman info
+          # Disk headroom diagnostic: vfs stores every layer as a full copy,
+          # so free space here is what bounds the builds.
+          df -h /var/lib
 
       - name: "claude: build + injection smoke test"
         run: |
           set -euo pipefail
           containers/agent-tools/build.sh claude
           containers/agent-tools/smoke-test.sh claude
+          # vfs disk hygiene: drop dangling intermediates (stage leftovers)
+          # before the next provider's build; tagged images are untouched.
+          podman image prune -f
+          df -h /var/lib
 
       - name: "codex: build + injection smoke test"
         run: |
           set -euo pipefail
           containers/agent-tools/build.sh codex
           containers/agent-tools/smoke-test.sh codex
+          # Same vfs disk hygiene as the claude step above.
+          podman image prune -f
+          df -h /var/lib
 
   # Release leg — build, re-smoke, then push digest-pinned tags to the registry.
   publish:
@@ -125,6 +140,7 @@ jobs:
     env:
       # Same nested-runner necessity as the smoke job's env above.
       BUILDAH_ISOLATION: chroot
+      BUILDAH_LAYERS: "false"
     steps:
       # Gate on the registry token BEFORE checkout — fail loud and early with
       # provisioning instructions rather than deep inside a push. No `set -x`
@@ -171,18 +187,28 @@ jobs:
           sudo rm -rf /var/lib/containers/storage
           podman version
           podman info
+          # Disk headroom diagnostic: vfs stores every layer as a full copy,
+          # so free space here is what bounds the builds.
+          df -h /var/lib
 
       - name: "claude: build + injection smoke test"
         run: |
           set -euo pipefail
           containers/agent-tools/build.sh claude
           containers/agent-tools/smoke-test.sh claude
+          # vfs disk hygiene: drop dangling intermediates (stage leftovers)
+          # before the next provider's build; tagged images are untouched.
+          podman image prune -f
+          df -h /var/lib
 
       - name: "codex: build + injection smoke test"
         run: |
           set -euo pipefail
           containers/agent-tools/build.sh codex
           containers/agent-tools/smoke-test.sh codex
+          # Same vfs disk hygiene as the claude step above.
+          podman image prune -f
+          df -h /var/lib
 
       - name: Publish digest-pinned images to the Forgejo registry
         env:
