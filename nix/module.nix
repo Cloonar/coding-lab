@@ -12,6 +12,11 @@
 #     "cannot run ssh: No such file or directory".
 #   - util-linux provides prlimit, the per-session RLIMIT_NOFILE wrapper; it
 #     runs as the inner tmux pane command and resolves against this PATH.
+#   - bashInteractive is load-bearing for the agent harness: Claude Code's
+#     Bash tool shells out through bash and NixOS has no /bin/bash. Since
+#     per-run instance HOMEs (issue #202) the unit PATH is a session's ONLY
+#     tool source — no user dotfiles or settings env.PATH apply — so every
+#     tool an agent needs must be here (or in extraPackages).
 #
 # Secret provisioning (design §9, D9):
 #
@@ -193,6 +198,12 @@ in
         Extra packages appended to the unit PATH, and thus to the PATH of every
         spawned session. Purely additive — never affects
         {option}`agentPackages` or the fixed tools baseline.
+
+        Since per-run instance HOMEs (issue #202) the unit PATH is a session's
+        only tool source — user dotfiles and `~/.claude/settings.json`
+        `env.PATH` no longer apply — so host-specific tools agents rely on
+        (e.g. `ddev`, `docker`) must be listed here; `environment.systemPackages`
+        does not reach sessions.
       '';
     };
 
@@ -469,19 +480,41 @@ in
 
       # Everything a run needs, resolved from the unit PATH: git (+ssh),
       # tmux, prlimit — and labctl for agent sessions (cfg.package ships it).
+      # Since per-run instance HOMEs (issue #202), this PATH is the ONLY tool
+      # source a session has: the agent's HOME is a fresh private dir, so no
+      # user dotfile, home-manager session-var, or ~/.claude/settings.json
+      # env.PATH can smuggle tools in anymore. What is not on the unit PATH
+      # does not exist for the agent.
       path = [
         cfg.package
         pkgs.git
         pkgs.tmux
         pkgs.openssh
         pkgs.util-linux
+        # bash is load-bearing for the agent harness itself: Claude Code's
+        # Bash tool executes through bash, and NixOS ships no /bin/bash — an
+        # agent on a unit PATH without it has no working shell tool at all
+        # ("no bash access", diagnosed live 2026-07-23 on the #202 rollout).
+        pkgs.bashInteractive
       ]
       # Fixed baseline of tools every session can assume — deliberately not an
       # option, deliberately no language toolchains (those come from each
       # project's flake via nix). config.nix.package puts `nix` on PATH so
       # sessions can `nix develop`/`nix shell` for per-project toolchains.
       # (issue #74 / ADR-0033)
+      #
+      # coreutils/findutils/grep/sed are listed explicitly even though NixOS
+      # appends them to every unit PATH: the baseline documents the full
+      # session contract in one place rather than leaning on a NixOS default
+      # the reader has to know about. diffutils and which round out what
+      # agent shell work assumes everywhere (`diff`, `which go`).
       ++ [
+        pkgs.coreutils
+        pkgs.findutils
+        pkgs.gnugrep
+        pkgs.gnused
+        pkgs.diffutils
+        pkgs.which
         pkgs.gawk
         pkgs.gnutar
         pkgs.gzip

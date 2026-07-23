@@ -160,6 +160,17 @@
 
               unitPathNames = d: map lib.getName d.config.systemd.services.lab.path;
               baselineNames = [
+                # bash is load-bearing for Claude Code's Bash tool (no /bin/bash
+                # on NixOS); since per-run HOMEs (#202) the unit PATH is a
+                # session's only tool source, so the shell-work basics are
+                # pinned here too (module.nix documents each).
+                "bash-interactive"
+                "coreutils"
+                "findutils"
+                "gnugrep"
+                "gnused"
+                "diffutils"
+                "which"
                 "gawk"
                 "gnutar"
                 "gzip"
