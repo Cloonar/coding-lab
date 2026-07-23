@@ -49,6 +49,7 @@ func TestRunArgvGolden(t *testing.T) {
 		"--name", "labrun-myrepo.afk-205-7876ed",
 		"--userns=keep-id",
 		"--network=pasta",
+		"--cgroups=split",
 		"--memory", "8g",
 		"--pids-limit", "4096",
 		"--ulimit", "nofile=16384:16384",

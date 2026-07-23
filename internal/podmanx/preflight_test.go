@@ -14,10 +14,11 @@ import (
 // scripted runner. greenFixture returns a host where every check passes;
 // each table case mutates exactly the piece it breaks.
 type pfFixture struct {
-	cfg    PreflightConfig
-	paths  map[string]string
-	files  map[string]string
-	runner *recordingRunner
+	cfg      PreflightConfig
+	paths    map[string]string
+	files    map[string]string
+	writable map[string]bool // paths the service user can write (cgroup delegation)
+	runner   *recordingRunner
 }
 
 func greenFixture() *pfFixture {
@@ -40,6 +41,11 @@ func greenFixture() *pfFixture {
 			"/proc/self/cgroup":                 "0::/system.slice/lab.service\n",
 			"/sys/fs/cgroup/system.slice/lab.service/cgroup.controllers": "memory pids\n",
 		},
+		// Delegate=yes chowns lab's cgroup dir to the service user; a
+		// non-delegated host leaves it root-owned (unwritable).
+		writable: map[string]bool{
+			"/sys/fs/cgroup/system.slice/lab.service": true,
+		},
 		runner: &recordingRunner{script: map[string]cmdResult{
 			"podman version --format {{.Client.Version}}":   {out: "5.2.3\n"},
 			"podman image exists reg/agent-tools@sha256:aa": {},
@@ -61,6 +67,7 @@ func (f *pfFixture) deps() Deps {
 			}
 			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 		},
+		Writable: func(path string) bool { return f.writable[path] },
 		Run:      f.runner.run,
 		Username: "lab",
 		UID:      990,
@@ -174,6 +181,27 @@ func TestPreflight(t *testing.T) {
 			wantChecks:  []string{CheckDelegation},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
+				if !strings.Contains(r.Failures[0].Hint, "Delegate=yes") {
+					t.Errorf("hint %q does not name the systemd fix", r.Failures[0].Hint)
+				}
+			},
+		},
+		{
+			// The false-green this fix closes: memory+pids ARE available in
+			// lab's cgroup.controllers (parent delegated them inward), but the
+			// cgroup is not delegated to the lab user (Delegate=no leaves it
+			// root-owned), so lab cannot create the limited child cgroup
+			// --cgroups=split needs — the caps would be silently absent.
+			name: "controllers present but cgroup not delegated (not writable)",
+			mutate: func(f *pfFixture) {
+				delete(f.writable, "/sys/fs/cgroup/system.slice/lab.service")
+			},
+			wantChecks:  []string{CheckDelegation},
+			wantVersion: "5.2.3",
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				if !strings.Contains(r.Failures[0].Detail, "not writable") {
+					t.Errorf("detail %q does not explain the delegation failure", r.Failures[0].Detail)
+				}
 				if !strings.Contains(r.Failures[0].Hint, "Delegate=yes") {
 					t.Errorf("hint %q does not name the systemd fix", r.Failures[0].Hint)
 				}

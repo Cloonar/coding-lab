@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // Check identifiers, one per way Preflight can fail. Stable strings, not an
@@ -44,6 +46,14 @@ type Deps struct {
 	LookPath func(string) (string, error)
 	ReadFile func(string) ([]byte, error)
 	Run      CmdRunner
+	// Writable reports whether the service user can write path — the probe
+	// behind the cgroup-delegation check. systemd's Delegate=yes chowns the
+	// delegated cgroup directory to the unit's user so it can create the
+	// child cgroups a container needs; a non-delegated cgroup stays
+	// root-owned. Read access (ReadFile of cgroup.controllers) cannot tell
+	// the two apart — both are world-readable — so delegation is detected by
+	// write access to the cgroup directory itself.
+	Writable func(string) bool
 	// Username and UID identify the service user for subuid/subgid
 	// matching: shadow(5) keys ranges by either the login name or the
 	// numeric uid, so both are accepted.
@@ -62,6 +72,7 @@ func RealDeps() Deps {
 		LookPath: exec.LookPath,
 		ReadFile: os.ReadFile,
 		Run:      ExecRunner(),
+		Writable: func(path string) bool { return unix.Access(path, unix.W_OK) == nil },
 		UID:      os.Getuid(),
 	}
 	if u, err := user.Current(); err == nil {
@@ -170,10 +181,28 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 		}
 	}
 
-	// 4. cgroup v2 with memory+pids delegated. Rootless podman applies
-	// --memory/--pids-limit through cgroup v2 delegation; on a v1 host or
-	// an undelegated cgroup the caps would be silently absent — worse than
-	// failing, since #205's whole point is a bounded blast radius.
+	// 4. cgroup v2 with memory+pids delegated TO lab's own cgroup. The pane
+	// argv pins --cgroups=split, so the container's payload cgroup is a child
+	// of lab's own cgroup (<lab's cgroup>/libpod-payload-<id>), not podman's
+	// rootless default of user.slice — which means THIS cgroup, the one
+	// /proc/self/cgroup names, is exactly where --memory/--pids-limit take
+	// effect. Two conditions must both hold or the caps are silently absent
+	// (worse than failing, since #205's whole point is a bounded blast
+	// radius):
+	//
+	//   (a) memory and pids are available in this cgroup — i.e. the parent
+	//       delegated them inward (cgroup.controllers lists them); and
+	//   (b) this cgroup is actually delegated to the lab user, so lab can
+	//       create the child cgroups --cgroups=split needs and enable the
+	//       controllers on them.
+	//
+	// (a) alone is a false green: cgroup.controllers reflects what the PARENT
+	// enabled in its subtree_control, so a non-delegated lab.service still
+	// shows "memory pids" there while lab cannot create a single limited
+	// child (Delegate=no leaves the cgroup dir root-owned). And subtree_control
+	// is not a substitute — a correctly delegated but idle cgroup has it empty
+	// until the first child is created. So (b) is checked by write access to
+	// the cgroup directory, the durable signal systemd's Delegate=yes leaves.
 	const cgroupRoot = "/sys/fs/cgroup"
 	delegHint := "the lab service's cgroup lacks memory/pids delegation — set Delegate=yes on the systemd unit"
 	if _, err := d.ReadFile(cgroupRoot + "/cgroup.controllers"); err != nil {
@@ -183,11 +212,14 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 	} else if path, ok := unifiedCgroupPath(self); !ok {
 		fail(CheckCgroup2, "no unified (0::) entry in /proc/self/cgroup", "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
 	} else {
-		ctrlFile := cgroupRoot + strings.TrimSuffix(path, "/") + "/cgroup.controllers"
+		cgroupDir := cgroupRoot + strings.TrimSuffix(path, "/")
+		ctrlFile := cgroupDir + "/cgroup.controllers"
 		if ctrl, err := d.ReadFile(ctrlFile); err != nil {
 			fail(CheckDelegation, fmt.Sprintf("cannot read %s: %v", ctrlFile, err), delegHint)
 		} else if have := strings.Fields(string(ctrl)); !slices.Contains(have, "memory") || !slices.Contains(have, "pids") {
 			fail(CheckDelegation, fmt.Sprintf("cgroup %s delegates only %q — memory and pids are required", path, strings.TrimSpace(string(ctrl))), delegHint)
+		} else if d.Writable != nil && !d.Writable(cgroupDir) {
+			fail(CheckDelegation, fmt.Sprintf("cgroup %s is not delegated to the lab user (not writable) — its --memory/--pids-limit caps would be silently absent", path), delegHint)
 		}
 	}
 

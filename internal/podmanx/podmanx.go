@@ -123,11 +123,25 @@ type RunSpec struct {
 //     any chown dance.
 //   - --network=pasta: full egress with no route back to the host's
 //     loopback services — the agent talks to lab only through the mounted
-//     unix socket, never a host port.
+//     unix socket, never a host port. (Caveat: pasta still maps
+//     host.containers.internal to the host's global address, so a host
+//     service bound to a wildcard/LAN address stays reachable — only
+//     loopback-bound services are unreachable.)
+//   - --cgroups=split: place the container in lab's OWN delegated cgroup
+//     (<lab's cgroup>/libpod-payload-<id>) instead of podman's rootless
+//     default of user.slice. Without this the container lands in a subtree
+//     the startup preflight never checks, so its --memory/--pids-limit caps
+//     could be silently absent on a green preflight (the delegation check in
+//     preflight.go reads lab's own cgroup — split makes that the SAME
+//     subtree the container uses). Split reuses the current cgroup for both
+//     conmon and payload; it requires cgroup-v2 with memory+pids delegated
+//     to the lab unit (systemd Delegate=yes), which the preflight enforces.
 //   - --memory/--pids-limit/--ulimit nofile: per-run blast-radius caps; the
 //     ulimit replaces the host-side prlimit wrapper, which is retired for
 //     container runs (the pane command is now the podman client, and
-//     capping THAT process would be aiming at the wrong target).
+//     capping THAT process would be aiming at the wrong target). These caps
+//     only bind because --cgroups=split lands the payload in lab's delegated
+//     cgroup subtree.
 //   - --mount type=image: the read-only agent-tools injection at ToolsDst
 //     (ADR-0051 — the destination is a hard contract, see ToolsDst).
 //   - the -v binds and -w: the mount inventory documented on RunSpec.
@@ -141,6 +155,7 @@ func RunArgv(s RunSpec) []string {
 		"--name", s.Name,
 		"--userns=keep-id",
 		"--network=pasta",
+		"--cgroups=split",
 		"--memory", s.Memory,
 		"--pids-limit", strconv.Itoa(s.Pids),
 		"--ulimit", fmt.Sprintf("nofile=%d:%d", s.Nofile, s.Nofile),
