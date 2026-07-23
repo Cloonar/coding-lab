@@ -42,6 +42,17 @@
 #   Postgres DSN with a password: put LAB_DB=postgres://… into
 #   `environmentFile` and leave `db` at null — lab's precedence is
 #   flag > env > default, so a --db flag would shadow LAB_DB.
+#
+# Container runner (ADR-0052/ADR-0053; docs/ops.md "Container runner"):
+#
+#   services.lab.container.enable provisions everything the startup
+#   preflight verifies for `repos.runner = container`: rootless podman +
+#   passt on the unit PATH, cgroup delegation (Delegate=yes), a preserved
+#   /run/lab runtime dir, subuid/subgid ranges for the service user, and
+#   the --container-image / --container-tools-image flags. Every host
+#   mutation gates on that explicit enable switch — never on option
+#   non-emptiness — so a half-filled container block changes nothing on a
+#   host that has not opted in.
 self:
 {
   config,
@@ -109,6 +120,21 @@ let
     "--trusted-proxies"
     (lib.concatStringsSep "," cfg.proxyAuth.trustedProxies)
   ]
+  # Container flags gate on container.enable, never on option non-emptiness:
+  # with enable = false they never render regardless of the option values.
+  # Attrset iteration is name-sorted, so the provider=ref string is
+  # deterministic across evals.
+  ++ lib.optionals (cfg.container.enable && cfg.container.toolsImages != { }) [
+    "--container-tools-image"
+    (lib.concatStringsSep "," (lib.mapAttrsToList (id: ref: "${id}=${ref}") cfg.container.toolsImages))
+  ]
+  ++ lib.optionals (cfg.container.enable && cfg.container.defaultImage != null) [
+    "--container-image"
+    cfg.container.defaultImage
+  ]
+  # extraFlags stays LAST: an operator's hand-rolled container flags (today's
+  # pre-module workaround) must still win during migration — the Go flag
+  # parser takes the last occurrence of a flag.
   ++ cfg.extraFlags;
 
   # HOME for the unit (and thus every spawned session): the agent CLIs and git
@@ -419,6 +445,82 @@ in
       };
     };
 
+    # Container runner (ADR-0052/ADR-0053): host provisioning + image flags
+    # for rootless-podman container panes. Everything below only takes effect
+    # under container.enable — see the header comment.
+    container = {
+      enable = lib.mkEnableOption "container-runner host provisioning: rootless podman + passt on the unit PATH, cgroup delegation, a preserved /run/lab runtime dir, subuid/subgid ranges, and the container image flags";
+
+      toolsImages = lib.mkOption {
+        type = lib.types.attrsOf lib.types.nonEmptyStr;
+        default = { };
+        example = lib.literalExpression ''{ "claude-code" = "git.cloonar.com/cloonar/agent-tools:claude-code@sha256:…"; }'';
+        description = ''
+          Agent-tools OCI image refs (--container-tools-image), keyed by lab
+          provider ID — the same strings the provider registry, the DB
+          `provider` column, and the API use. Each value names the read-only
+          agent-tools image (provider CLI + labctl) mounted at `/opt/lab` in
+          that provider's container panes (ADR-0051). `@sha256`-pinned refs —
+          what the release job publishes — are recommended but deliberately
+          not enforced: a local tag is fine during bring-up.
+
+          Keys are deliberately NOT validated against provider IDs at eval
+          time: the server's boot error names the registered IDs, and a
+          nix-side list would drift as providers land (e.g. #126). Preflight
+          remains the runtime authority on host readiness — it resolves every
+          configured ref at startup and refuses container spawns until all of
+          them do.
+        '';
+      };
+
+      defaultImage = lib.mkOption {
+        type = lib.types.nullOr lib.types.nonEmptyStr;
+        default = null;
+        example = "docker.io/library/debian:stable-slim";
+        description = ''
+          Global default dev image (--container-image) container sessions run
+          in when their repo's own **Dev image** field is blank. `null` is a
+          valid deployment: each repo can carry its own ref
+          (`repos.image_ref`, ADR-0053), and a spawn with no effective image —
+          repo field blank AND this unset — is refused at spawn, naming both
+          knobs.
+        '';
+      };
+
+      subIdRange = lib.mkOption {
+        type = lib.types.nullOr (
+          lib.types.submodule {
+            options = {
+              start = lib.mkOption {
+                type = lib.types.ints.unsigned;
+                default = 100000;
+                description = "First subordinate UID/GID of the range.";
+              };
+              count = lib.mkOption {
+                type = lib.types.ints.positive;
+                default = 65536;
+                description = "Number of subordinate IDs in the range.";
+              };
+            };
+          }
+        );
+        default = {
+          start = 100000;
+          count = 65536;
+        };
+        description = ''
+          subuid/subgid range provisioned for {option}`user` — rootless
+          podman cannot build the user namespace `--userns=keep-id` needs
+          without one. NixOS merges user attrs, so the range lands on
+          whatever {option}`user` names — operator-brought users included,
+          not just the module-created `lab` default. Override
+          `start`/`count` when the default collides with ranges already
+          allocated on the host; set the whole option to `null` to opt out
+          entirely and manage `/etc/subuid` / `/etc/subgid` yourself.
+        '';
+      };
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -454,19 +556,56 @@ in
         assertion = (cfg.seedUser != null) == (seedHashSourceCount == 1);
         message = "services.lab.seedUser must be set together with exactly one of services.lab.seedPasswordHash or services.lab.seedPasswordHashFile — not both, not neither. lab itself refuses to start on this mismatch; this assertion catches a typo'd deploy at `nixos-rebuild` eval instead of after the service has already restarted.";
       }
+      # Deliberately no assertion on container.defaultImage (null + per-repo
+      # image refs is a valid deployment, ADR-0053), no key validation, no
+      # digest-pin enforcement — see the toolsImages description.
+      {
+        assertion = cfg.container.enable -> cfg.container.toolsImages != { };
+        message = "services.lab.container.enable is set but services.lab.container.toolsImages is empty — without agent-tools refs, preflight would refuse every container spawn anyway. This assertion catches the typo'd deploy at `nixos-rebuild` eval instead of after the service has already restarted.";
+      }
     ];
 
     warnings = lib.optional (cfg.claudePackage != null) "services.lab.claudePackage is deprecated and will be removed; set services.lab.agentPackages.\"claude-code\" instead (it now lands on the unit PATH as agentPackages.\"claude-code\").";
 
-    users.users = lib.mkIf (cfg.user == "lab") {
-      lab = {
-        isSystemUser = true;
-        group = cfg.group;
-        home = cfg.stateDir;
-        description = "lab service user";
-      };
-    };
+    users.users = lib.mkMerge [
+      (lib.mkIf (cfg.user == "lab") {
+        lab = {
+          isSystemUser = true;
+          group = cfg.group;
+          home = cfg.stateDir;
+          description = "lab service user";
+        };
+      })
+      # subuid/subgid ranges for rootless podman's user namespace. Deliberately
+      # a separate mkMerge piece keyed on ${cfg.user}, NOT folded into the
+      # `lab` default above: NixOS merges user attrs, so the ranges land on
+      # operator-brought users too. subIdRange = null opts out (the operator
+      # manages /etc/subuid+/etc/subgid); custom start/count overrides a
+      # collision with ranges already allocated on the host.
+      (lib.mkIf (cfg.container.enable && cfg.container.subIdRange != null) {
+        ${cfg.user} = {
+          subUidRanges = [
+            {
+              startUid = cfg.container.subIdRange.start;
+              count = cfg.container.subIdRange.count;
+            }
+          ];
+          subGidRanges = [
+            {
+              startGid = cfg.container.subIdRange.start;
+              count = cfg.container.subIdRange.count;
+            }
+          ];
+        };
+      })
+    ];
     users.groups = lib.mkIf (cfg.group == "lab") { lab = { }; };
+
+    # Pulls in the container-host baseline (policy.json, registries.conf, crun
+    # via virtualisation.containers). A plain `true`, not mkDefault: an
+    # operator force-disabling podman while container mode is on should
+    # surface as an option conflict at eval, not silently break preflight.
+    virtualisation.podman.enable = lib.mkIf cfg.container.enable true;
 
     # Operators debug sessions with `tmux attach` (v0 parity).
     environment.systemPackages = [ pkgs.tmux ];
@@ -529,6 +668,14 @@ in
         pkgs.ripgrep
         config.nix.package
       ]
+      # Container runner (enable-gated): preflight's PATH lookup probes
+      # `podman` and `pasta` (shipped by the passt package), and the container
+      # pane argv resolves against this PATH. crun is podman's default OCI
+      # runtime and comes in via virtualisation.podman below.
+      ++ lib.optionals cfg.container.enable [
+        pkgs.podman
+        pkgs.passt
+      ]
       # Agent CLIs (non-null agentPackages values, claudePackage alias folded
       # in) then the additive extraPackages.
       ++ lib.filter (p: p != null) (lib.attrValues effectiveAgentPackages)
@@ -545,6 +692,11 @@ in
       # (isSystemUser). A tmux server that survives an upgrade keeps its old
       # env, so a running deploy picks this up only after that server restarts.
       environment.SHELL = "${pkgs.bashInteractive}/bin/bash";
+
+      # Rootless podman's runtime root — matches RuntimeDirectory=lab below
+      # (see the RuntimeDirectoryPreserve comment there for why the dir must
+      # survive a service stop).
+      environment.XDG_RUNTIME_DIR = lib.mkIf cfg.container.enable "/run/lab";
 
       serviceConfig = {
         Type = "simple";
@@ -571,6 +723,27 @@ in
       // lib.optionalAttrs (cfg.stateDir == "/var/lib/lab") {
         StateDirectory = "lab";
         StateDirectoryMode = "0700";
+      }
+      // lib.optionalAttrs cfg.container.enable {
+        # Delegate ALL controllers: container panes run `podman run …
+        # --cgroups=split`, which places the container's cgroup inside lab's
+        # own so the --memory/--pids-limit caps land in the exact subtree
+        # preflight checks — that only works with lab's cgroup delegated.
+        # This is what docs/ops.md's "Container runner" guidance was validated
+        # against; preflight verifies delegation by write access to lab's
+        # cgroup dir, not by controller presence.
+        Delegate = true;
+
+        # Rootless podman needs XDG_RUNTIME_DIR and a system service gets
+        # none. RuntimeDirectoryPreserve is LOAD-BEARING next to
+        # KillMode=process: podman-attached containers stay alive across a
+        # lab restart/deploy, and a plain RuntimeDirectory would be wiped
+        # underneath them on service stop, destroying rootless podman's
+        # runtime state (pause-process refs, netns bookkeeping) — Preserve is
+        # what makes restart-survival work.
+        RuntimeDirectory = "lab";
+        RuntimeDirectoryPreserve = "yes";
+        RuntimeDirectoryMode = "0700";
       };
     };
   };
