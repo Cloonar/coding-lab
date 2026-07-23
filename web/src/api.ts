@@ -192,6 +192,8 @@ export function deleteCredential(id: string): Promise<void> {
 export type TrackerBinding = 'forge' | 'builtin';
 export type ForgeKind = 'forgejo' | 'github' | 'none';
 export type CloneStatus = 'cloning' | 'ready' | 'error';
+/** The repo's host/container pane pick (issue #205). NOT NULL — no inherit state. */
+export type Runner = 'container' | 'host';
 
 export interface Repo {
   id: string;
@@ -253,6 +255,16 @@ export interface Repo {
   lander_model: string | null;
   /** Lander run's effort override; null = inherit (resolved at lander launch). */
   lander_effort: string | null;
+  /** Host (unsandboxed — full host access, break-glass) or container (rootless
+   *  podman). NOT NULL; default host until the container preflight is proven
+   *  (issue #205). */
+  runner: Runner;
+  /** Container-mode resource-limit overrides (issue #205); null = inherit the
+   *  matching global container_memory/container_pids/container_nofile setting.
+   *  Meaningless while runner is "host". */
+  container_memory: string | null;
+  container_pids: number | null;
+  container_nofile: number | null;
 }
 
 export interface CreateRepoRequest {
@@ -311,6 +323,13 @@ export interface RepoPatch {
   /** null/"" clears back to inherit; any non-empty string is accepted (no
    *  write-time catalog check — strictness is at lander launch, issue #189). */
   lander_effort?: string | null;
+  /** NOT NULL (issue #205) — a PATCH must send a concrete value, never null. */
+  runner?: Runner;
+  /** Container-mode limit overrides (issue #205); null clears back to inherit
+   *  the global default. */
+  container_memory?: string | null;
+  container_pids?: number | null;
+  container_nofile?: number | null;
 }
 
 /** 201 with clone_status "cloning" — the bare clone runs async, watch SSE. */
@@ -1341,6 +1360,13 @@ export const INT_SETTING_KEYS = [
    * valid, meaningful value ("never time out"), not a sentinel for unset.
    */
   'dialog_timeout_minutes',
+  /**
+   * The global container resource-limit defaults (issue #205), seeded
+   * 4096/16384 — the floor under a repo's container_pids/container_nofile
+   * override (the repo-settings Runner section's inherit hint reads these).
+   */
+  'container_pids',
+  'container_nofile',
 ] as const;
 
 export const TEXT_SETTING_KEYS = [
@@ -1355,6 +1381,11 @@ export const TEXT_SETTING_KEYS = [
   'git_author_name',
   'git_author_email',
   'afk_prompt',
+  /**
+   * The global container --memory default (issue #205), seeded "8g" — the
+   * floor under a repo's container_memory override.
+   */
+  'container_memory',
   /**
    * Read-only, server-injected (issue #52): the built-in seed-prompt template
    * with literal <N>/<BRANCH> tokens un-interpolated. Listed here only so

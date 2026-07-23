@@ -41,6 +41,8 @@ const afkPromptDefaultKey = "afk_prompt_default"
 // would hammer tmux and the tracker (pinned: budget > 0, ticks >= 5s).
 // dialog_timeout_minutes (issue #124) is the one key with floor 0: 0/absent
 // means "never auto-dismiss", not a deadlock.
+// container_pids/container_nofile (issue #205) floor at 1: podman's
+// --pids-limit and --ulimit nofile both need at least one to run anything.
 var settingsIntMin = map[string]int{
 	store.SettingMaxInstances:         1,
 	store.SettingAFKBudgetMinutes:     1,
@@ -48,6 +50,8 @@ var settingsIntMin = map[string]int{
 	store.SettingAFKScheduleSeconds:   5,
 	store.SettingSweepIntervalMinutes: 1,
 	store.SettingDialogTimeoutMinutes: 0,
+	store.SettingContainerPids:        1,
+	store.SettingContainerNofile:      1,
 }
 
 // settingsBoolNullable is the closed set of BOOLEAN settings keys (issue #163 —
@@ -257,6 +261,20 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			v, err := parseSettingString(raw)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			updates[key] = v
+		case store.SettingContainerMemory:
+			// The global floor under repos.container_memory (issue #205): must
+			// match podman's --memory grammar (store.ValidContainerMemory, shared
+			// with the repo-level override's own validation in reposvc).
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			if !store.ValidContainerMemory(v) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must look like a podman --memory value, e.g. %q", key, "8g"))
 				return
 			}
 			updates[key] = v

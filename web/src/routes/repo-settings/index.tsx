@@ -23,6 +23,7 @@ import DangerZone from './sections/Danger';
 import GeneralSection from './sections/General';
 import IntegrationsSection from './sections/Integrations';
 import RepoSecretsSection from './sections/Secrets';
+import RunnerSection from './sections/Runner';
 
 export default function RepoSettings() {
   return (
@@ -126,6 +127,9 @@ function RepoSettingsView() {
                       settings={settings() ?? {}}
                       onSaved={refetch}
                     />
+                  </Match>
+                  <Match when={params.section === 'runner'}>
+                    <RunnerSection repo={r} settings={settings() ?? {}} onSaved={refetch} />
                   </Match>
                   <Match when={params.section === 'autoland'}>
                     <AutolandSection

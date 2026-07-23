@@ -88,14 +88,15 @@ func TestLabURL(t *testing.T) {
 			name:     "socket default from state dir",
 			stateDir: "/var/lib/lab",
 			addr:     ":8080",
-			want:     "unix:///var/lib/lab/agent.sock",
+			// The socket's own dir since issue #205 (agentapi.SocketDir).
+			want: "unix:///var/lib/lab/agent/agent.sock",
 		},
 		{
 			name:     "socket default ignores base url and addr",
 			stateDir: "/srv/lab",
 			baseURL:  "https://lab.example.com",
 			addr:     "0.0.0.0:9090",
-			want:     "unix:///srv/lab/agent.sock",
+			want:     "unix:///srv/lab/agent/agent.sock",
 		},
 		{
 			name:     "agent url wins verbatim",

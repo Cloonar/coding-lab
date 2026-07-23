@@ -34,6 +34,11 @@ func testRepo(name string, createdAt time.Time) Repo {
 		// value — nothing to set here.
 		MaxFixAttempts: 2,
 		AutoMerge:      true,
+		// Runner (issue #205) is NOT NULL; the caller (reposvc.Add) always
+		// stamps the host default, mirrored here. ContainerMemory/
+		// ContainerPids/ContainerNofile are nullable with no default, so nil
+		// is already the Go zero value.
+		Runner: RunnerHost,
 	}
 }
 
@@ -645,6 +650,87 @@ func TestRepoAutolandColumnsRoundTrip(t *testing.T) {
 		}
 		if !updated.AutolandEnabled || updated.MaxFixAttempts != 4 || updated.AutoMerge {
 			t.Errorf("unrelated autoland columns changed by lander clear patch: %+v", updated)
+		}
+	})
+}
+
+// TestRepoContainerRunnerColumnsRoundTrip pins the repos.runner tracer-bullet
+// slice (issue #205): a full container-mode repo with all three limit
+// overrides set round-trips; a minimal repo defaults to runner="host" with
+// every override nil; and UpdateRepoSettings both sets and clears the
+// overrides back to nil (inherit the global settings).
+func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
+
+		// Create with every knob set away from its default.
+		full := testRepo("runnerfull", now)
+		full.Runner = RunnerContainer
+		full.ContainerMemory = strPtr("4g")
+		full.ContainerPids = intPtr(2048)
+		full.ContainerNofile = intPtr(8192)
+		created, err := s.CreateRepo(ctx, full)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		got, err := s.RepoByID(ctx, full.ID)
+		if err != nil {
+			t.Fatalf("by id: %v", err)
+		}
+		if !reflect.DeepEqual(got, created) {
+			t.Errorf("container runner columns round trip mismatch:\n got %+v\nwant %+v", got, created)
+		}
+
+		// A minimal repo carries the caller-applied default: host, every
+		// override nil (inherit the global settings).
+		min := testRepo("runnermin", now)
+		if _, err := s.CreateRepo(ctx, min); err != nil {
+			t.Fatalf("create minimal: %v", err)
+		}
+		gotMin, err := s.RepoByID(ctx, min.ID)
+		if err != nil {
+			t.Fatalf("by id minimal: %v", err)
+		}
+		if gotMin.Runner != RunnerHost || gotMin.ContainerMemory != nil ||
+			gotMin.ContainerPids != nil || gotMin.ContainerNofile != nil {
+			t.Errorf("minimal repo runner columns = runner=%v memory=%v pids=%v nofile=%v, want host/nil/nil/nil",
+				gotMin.Runner, gotMin.ContainerMemory, gotMin.ContainerPids, gotMin.ContainerNofile)
+		}
+
+		// Patch: flip to container and set all three overrides.
+		updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			Runner:          Set(RunnerContainer),
+			ContainerMemory: Set(strPtr("8g")),
+			ContainerPids:   Set(intPtr(4096)),
+			ContainerNofile: Set(intPtr(16384)),
+		})
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if updated.Runner != RunnerContainer ||
+			updated.ContainerMemory == nil || *updated.ContainerMemory != "8g" ||
+			updated.ContainerPids == nil || *updated.ContainerPids != 4096 ||
+			updated.ContainerNofile == nil || *updated.ContainerNofile != 16384 {
+			t.Errorf("patched runner columns = %+v, want container/8g/4096/16384", updated)
+		}
+
+		// Patch: clear the three overrides back to NULL (inherit); runner
+		// (NOT NULL, untouched by this patch) stays container.
+		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			ContainerMemory: Set[*string](nil),
+			ContainerPids:   Set[*int](nil),
+			ContainerNofile: Set[*int](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear container overrides: %v", err)
+		}
+		if updated.ContainerMemory != nil || updated.ContainerPids != nil || updated.ContainerNofile != nil {
+			t.Errorf("cleared container overrides = %v/%v/%v, want nil/nil/nil",
+				updated.ContainerMemory, updated.ContainerPids, updated.ContainerNofile)
+		}
+		if updated.Runner != RunnerContainer {
+			t.Errorf("unrelated runner column changed by clear patch: %v", updated.Runner)
 		}
 	})
 }

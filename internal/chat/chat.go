@@ -89,14 +89,19 @@ type Options struct {
 	Bus       *events.Bus
 	Logger    *slog.Logger
 
-	// RuntimeDir is lab's runtime dir (<state>/runtime — the materializer dir),
-	// where a LiveSignals provider spools its live signals (ADR-0020). Core
-	// never reads the spool itself (issue #92): it passes this dir through
-	// ReadChat for ACTIVE runs — the adapter composes its own signals there —
-	// and GCs ended runs' spools (SweepSpools). Empty disables both (every
-	// read degrades to transcript-only); cmd/lab passes the materializer's
-	// Dir().
-	RuntimeDir string
+	// RuntimeDirFor maps a run id to its PRIVATE runtime dir
+	// (<state>/instances/<runID>/runtime, issue #205) — where a LiveSignals
+	// provider spools that run's live signals (ADR-0020). Injected as a
+	// closure over the pure instancehome.Manager.RuntimePath, exactly like
+	// HomeFor, so chat never imports the manager. Core never reads the spool
+	// itself (issue #92): it passes the resolved dir through ReadChat for
+	// ACTIVE runs — the adapter composes its own signals there. Ended runs
+	// always read transcript-only ("" down the seam), and spool GC is no
+	// longer chat's job: the per-run dir dies with the run's tree
+	// (instancehome.Wipe/SweepAll). Nil disables live signals entirely —
+	// every read degrades to transcript-only; cmd/lab passes
+	// homes.RuntimePath.
+	RuntimeDirFor func(runID string) string
 
 	// Poll is the transcript poll/debounce cadence; nil → defaultPoll.
 	Poll time.Duration
@@ -142,14 +147,18 @@ const defaultPoll = 1 * time.Second
 
 // Service is the chat brain. Construct with New; start the tailer with Run.
 type Service struct {
-	store      *store.Store
-	providers  *provider.Registry
-	bus        *events.Bus
-	log        *slog.Logger
-	poll       time.Duration
-	ctx        context.Context
-	now        func() time.Time
-	runtimeDir string
+	store     *store.Store
+	providers *provider.Registry
+	bus       *events.Bus
+	log       *slog.Logger
+	poll      time.Duration
+	ctx       context.Context
+	now       func() time.Time
+
+	// runtimeDirFor maps a run id to its private runtime dir (issue #205),
+	// nil when cmd/lab wired none — see Options.RuntimeDirFor. Read through
+	// runtimeDir() so a nil closure degrades to "" (live signals off).
+	runtimeDirFor func(runID string) string
 
 	// notify is the injected push seam (issue #99), nil when cmd/lab wired none;
 	// notifyDebounce is the gate's flap-debounce window.
@@ -228,14 +237,14 @@ func New(o Options) (*Service, error) {
 		notifyDebounce = defaultNotifyDebounce
 	}
 	return &Service{
-		store:      o.Store,
-		providers:  o.Providers,
-		bus:        o.Bus,
-		log:        log,
-		poll:       poll,
-		ctx:        ctx,
-		now:        now,
-		runtimeDir: o.RuntimeDir,
+		store:         o.Store,
+		providers:     o.Providers,
+		bus:           o.Bus,
+		log:           log,
+		poll:          poll,
+		ctx:           ctx,
+		now:           now,
+		runtimeDirFor: o.RuntimeDirFor,
 		// Store Notify verbatim (no nil-default, like reconcile's afkRunEnded): a
 		// nil closure stays nil and the tailer allocates no gate. Same for
 		// Secrets: nil stays nil and scanAndRedact returns before touching a run.
@@ -255,6 +264,17 @@ func (s *Service) home(runID string) string {
 		return ""
 	}
 	return s.homeFor(runID)
+}
+
+// runtimeDir resolves a run's private runtime dir (issue #205) through the
+// injected runtimeDirFor closure, degrading to "" — live signals off, the
+// transcript-only read — when none was wired (a test service, or a build
+// without the instance stack). home's exact sibling.
+func (s *Service) runtimeDir(runID string) string {
+	if s.runtimeDirFor == nil {
+		return ""
+	}
+	return s.runtimeDirFor(runID)
 }
 
 // View is the chat service's read of one run: the adapter-composed
@@ -284,10 +304,11 @@ type View struct {
 // own live signals (issue #92 — composition is adapter-owned; core never
 // interprets a spool). Core contributes only run lifecycle:
 //
-//   - an ACTIVE run reads with the runtime dir, so the adapter's live signals
-//     apply — including the no-transcript-yet case (path ""), where the
-//     adapter must still consult them (a pending dialog can exist before
-//     LocateTranscript first hits) and otherwise yields an idle empty chat;
+//   - an ACTIVE run reads with its per-run runtime dir (issue #205), so the
+//     adapter's live signals apply — including the no-transcript-yet case
+//     (path ""), where the adapter must still consult them (a pending dialog
+//     can exist before LocateTranscript first hits) and otherwise yields an
+//     idle empty chat;
 //   - an ENDED run reads transcript-only (runtimeDir "") BY CONSTRUCTION, so
 //     no spool residue can leak into a terminal view, and is then forced to
 //     StateEnded with no pending dialog — terminal state is core-owned,
@@ -307,7 +328,7 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	}
 	dir := ""
 	if active {
-		dir = s.runtimeDir
+		dir = s.runtimeDir(run.ID)
 	}
 	chat, err := prov.ReadChat(run.ID, dir, path)
 	if err != nil {

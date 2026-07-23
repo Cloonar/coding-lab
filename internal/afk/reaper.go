@@ -211,6 +211,9 @@ func (s *Service) drainZombies(ctx context.Context) {
 			s.log.Warn("afk watcher: drain zombie session", "component", "afk", "session", name, "err", err)
 			continue
 		}
+		// Container backstop (issue #205): a drained zombie may be a container
+		// pane whose podman client also ignored the earlier kill.
+		s.removeRunContainer(ctx, name)
 		s.log.Info("afk watcher: drained zombie session", "component", "afk", "session", name)
 	}
 }
@@ -397,18 +400,23 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 			s.log.Warn("afk reap: stop session", "component", "afk", "session", run.SessionName, "err", err)
 		}
 	}
+	// Container backstop (issue #205), run even for a dead session: a
+	// container pane's CLI can exit while the podman client (or the container
+	// under a SIGHUP-deaf CLI) lingers holding the deterministic name.
+	// --ignore keeps the common nothing-there case a no-op.
+	s.removeRunContainer(ctx, run.SessionName)
 	s.git.TeardownGuarded(ctx, s.log, s.bareDir(repo.ID), run.WorktreePath, run.Branch, repo.DefaultBranch, s.gitEnv)
 
-	// Terminal-outcome cleanup (§3a): the run's tokens must 401 immediately,
-	// and its materialized credential files go with it.
+	// Terminal-outcome cleanup (§3a): the run's tokens must 401 immediately.
 	if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 		s.log.Warn("afk reap: delete run tokens", "component", "afk", "run", run.ID, "err", err)
 	}
-	s.cleanupCredential(repo, run.ID)
-	// Wipe the run's private instance HOME (issue #202): the credential copy and
-	// config go with the reaped run. The guarded teardown above owns the
-	// worktree/branch; this removes only the instance HOME. A failure logs and
-	// continues (the boot/runtime sweep is the backstop).
+	// Wipe the run's private per-run tree (issues #202/#205): the credential
+	// copy, config, AND the runtime dir's materialized git credential files go
+	// with the reaped run (the wipe subsumes the old per-file credential
+	// cleanup). The guarded teardown above owns the worktree/branch; this
+	// removes only the per-run tree. A failure logs and continues (the
+	// boot/runtime sweep is the backstop).
 	if err := s.homes.Wipe(run.ID); err != nil {
 		s.log.Warn("afk reap: wipe instance home", "component", "afk", "run", run.ID, "err", err)
 	}

@@ -152,16 +152,23 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 
 // wantSpawnArgv is the exact argv the fake runner should record for a run: the
 // provider's flags (built with an empty prompt), then the injected per-run
-// dialog-capture --settings flag (ADR-0020), then the seed prompt as the
-// trailing positional when non-empty. Flags precede the positional so the
-// parser never swallows --settings as prompt text.
+// dialog-capture --settings flag (ADR-0020) pointing into the run's PRIVATE
+// runtime dir (issue #205), then the seed prompt as the trailing positional
+// when non-empty. Flags precede the positional so the parser never swallows
+// --settings as prompt text.
 func (f *fixture) wantSpawnArgv(name, model, effort, seed, runID string) []string {
 	argv := f.prov.SpawnArgv(provider.SpawnSpec{SessionName: name, Model: model, Effort: effort})
-	argv = append(argv, "--settings", filepath.Join(f.runtime, "settings."+runID+".json"))
+	argv = append(argv, "--settings", f.settingsPath(runID))
 	if seed != "" {
 		argv = append(argv, seed)
 	}
 	return argv
+}
+
+// settingsPath is the per-run dialog-capture settings file inside the run's
+// private runtime dir (<instances>/<runID>/runtime, issue #205).
+func (f *fixture) settingsPath(runID string) string {
+	return filepath.Join(f.homes.RuntimePath(runID), "settings."+runID+".json")
 }
 
 func gitCmd(t *testing.T, home, dir string, args ...string) string {
@@ -296,7 +303,7 @@ func TestStart_happyPath(t *testing.T) {
 	// Regression (finding: seed-via-argv): the last argv element is the injected
 	// settings path, not a stray/empty trailing prompt — a manual spawn never
 	// appends one.
-	if last := sess.Argv[len(sess.Argv)-1]; last != filepath.Join(f.runtime, "settings."+run.ID+".json") {
+	if last := sess.Argv[len(sess.Argv)-1]; last != f.settingsPath(run.ID) {
 		t.Errorf("manual spawn last argv = %q, want the settings path (no trailing seed prompt)", last)
 	}
 	// And no seed was injected post-spawn via keystrokes (the mechanism moved
@@ -586,6 +593,86 @@ func TestStart_materializesAndThreadsInstanceHome(t *testing.T) {
 	}
 }
 
+// Issue #205: the launch materializes the repo's git credential into the run's
+// PRIVATE runtime dir — key and known_hosts paths in the session's git env all
+// point under <state>/instances/<runID>/runtime, never the global runtime dir
+// (the future container runner bind-mounts exactly one run's credential
+// surface) — and seeds the per-run known_hosts from the global one so
+// previously pinned host keys survive the per-run reset. Stop's per-run tree
+// wipe then removes every credential file with no per-file cleanup.
+func TestLaunch_materializesCredentialIntoPerRunRuntime(t *testing.T) {
+	f := newFixture(t)
+	// The GLOBAL known_hosts carries a pinned host key (clone/fetch ops
+	// accumulate these in production).
+	const pin = "git.example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPinnedKey\n"
+	if err := os.WriteFile(filepath.Join(f.runtime, "known_hosts"), []byte(pin), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A repo with an SSH credential. The fixture origin is file://, so ssh
+	// never actually runs — the env wiring is what's under test.
+	sealed, err := f.svc.vault.EncryptPayload(vault.SSHKeyPayload{PrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n"})
+	if err != nil {
+		t.Fatalf("EncryptPayload: %v", err)
+	}
+	cred, err := f.st.CreateCredential(t.Context(), ids.NewID("cred"), "deploy-key",
+		store.CredentialKindSSHKey, sealed, f.clock.Now())
+	if err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	repo := f.repo
+	repo.CredentialID = &cred.ID
+
+	run, err := f.svc.Launch(t.Context(), LaunchSpec{
+		Repo: repo, Provider: f.prov, Kind: store.RunKindManual,
+		SessionName: "proj~cred", Branch: "lab/cred",
+		WorktreePath: filepath.Join(f.worktreeRoot, "proj-cred"),
+		Model:        "opus[1m]", Effort: "max",
+	})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	rt := f.homes.RuntimePath(run.ID)
+	keyPath := filepath.Join(rt, cred.ID+"."+run.ID+".key")
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Errorf("materialized key not in the per-run runtime dir: %v", err)
+	}
+	// The spawned session's git env references ONLY per-run paths.
+	sess, live := f.runner.Session("proj~cred")
+	if !live {
+		t.Fatal("session not live after Launch")
+	}
+	sshCmd := envValue(sess.ExtraEnv, "GIT_SSH_COMMAND")
+	if !strings.Contains(sshCmd, "-i "+keyPath) {
+		t.Errorf("GIT_SSH_COMMAND = %q, want the per-run key path %q", sshCmd, keyPath)
+	}
+	if want := "UserKnownHostsFile=" + filepath.Join(rt, "known_hosts"); !strings.Contains(sshCmd, want) {
+		t.Errorf("GIT_SSH_COMMAND = %q, want %q", sshCmd, want)
+	}
+	if strings.Contains(sshCmd, f.runtime) {
+		t.Errorf("GIT_SSH_COMMAND = %q references the GLOBAL runtime dir %q", sshCmd, f.runtime)
+	}
+	// known_hosts seeding copied the global file's pins into the per-run one.
+	if b, err := os.ReadFile(filepath.Join(rt, "known_hosts")); err != nil || string(b) != pin {
+		t.Errorf("per-run known_hosts = %q, %v; want the seeded global pin %q", b, err, pin)
+	}
+	// Nothing run-scoped was materialized into the GLOBAL runtime dir.
+	entries, _ := os.ReadDir(f.runtime)
+	for _, e := range entries {
+		if e.Name() != "known_hosts" {
+			t.Errorf("global runtime dir gained %q; run credentials must be per-run only", e.Name())
+		}
+	}
+
+	// Stop wipes the whole per-run tree — the credential files go with it.
+	if _, err := f.svc.Stop(t.Context(), run.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if dirExists(filepath.Join(f.instancesDir, run.ID)) {
+		t.Error("per-run tree survived Stop — credential files leaked")
+	}
+}
+
 // Issue #202: a spawn failure rolls the launch back including the instance HOME
 // wipe — no <instances>/<runID> tree is left behind (the boot/runtime sweep is
 // only a backstop; the synchronous rollback owns the immediate cleanup).
@@ -599,8 +686,8 @@ func TestStart_spawnFailureWipesInstanceHome(t *testing.T) {
 	if !errors.As(err, &startFailed) {
 		t.Fatalf("Start err = %v, want StartFailedError", err)
 	}
-	// Materialize ran (after the worktree add) and rollback wiped it: the
-	// instances root is left with no per-run subtree.
+	// Materialize ran (first thing in Launch, issue #205) and rollback wiped
+	// it: the instances root is left with no per-run subtree.
 	entries, rerr := os.ReadDir(f.instancesDir)
 	if rerr != nil && !os.IsNotExist(rerr) {
 		t.Fatalf("ReadDir(instances): %v", rerr)
@@ -764,32 +851,38 @@ func TestLaunch_adoptBranchChecksOutExistingAndRollbackKeepsBranch(t *testing.T)
 	})
 }
 
-// The per-run dialog-capture settings file (ADR-0020) is written under runtime/
-// before the spawn and survives a successful Start; a spawn-failure rollback
-// unlinks it (no orphan in the runtime dir).
+// The per-run dialog-capture settings file (ADR-0020) is written into the
+// run's PRIVATE runtime dir (<instances>/<runID>/runtime, issue #205) before
+// the spawn and survives a successful Start; a spawn-failure rollback wipes
+// the whole per-run tree, taking the settings file with it — no per-file
+// unlink, no orphan anywhere.
 func TestStart_dialogSettingsFileLifecycle(t *testing.T) {
 	f := newFixture(t)
 	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	settings := filepath.Join(f.runtime, "settings."+run.ID+".json")
-	if _, err := os.Stat(settings); err != nil {
+	if _, err := os.Stat(f.settingsPath(run.ID)); err != nil {
 		t.Fatalf("settings file missing after Start: %v", err)
 	}
+	// Nothing run-scoped leaked into the GLOBAL runtime dir (issue #205).
+	entries, _ := os.ReadDir(f.runtime)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "settings.") {
+			t.Errorf("settings file %q leaked into the global runtime dir", e.Name())
+		}
+	}
 
-	// A second Start whose spawn fails must roll back its own settings file.
+	// A second Start whose spawn fails must roll back its settings file with
+	// the per-run tree wipe.
 	f2 := newFixture(t)
 	name := "proj~20260608-1530"
 	f2.runner.FailStart(name, errors.New("boom"))
 	if _, err := f2.svc.Start(t.Context(), StartParams{RepoID: f2.repo.ID}); err == nil {
 		t.Fatal("Start: want spawn failure")
 	}
-	entries, _ := os.ReadDir(f2.runtime)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "settings.") {
-			t.Errorf("settings file %q survived spawn-failure rollback", e.Name())
-		}
+	if trees, _ := os.ReadDir(f2.instancesDir); len(trees) != 0 {
+		t.Errorf("per-run trees survived spawn-failure rollback: %v", trees)
 	}
 }
 

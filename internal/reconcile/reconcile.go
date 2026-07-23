@@ -37,6 +37,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
+	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -116,6 +117,16 @@ type Options struct {
 	// under-counts 'stopped' without it. Nil → no report (degraded wiring).
 	AFKRunEnded func(kind, outcome string, duration time.Duration)
 
+	// Container-runner backstop wiring (issue #205), mirroring
+	// instance.Options: PodmanBin + PodmanRun (nil → podmanx.ExecRunner) run
+	// the `podman rm` behind the Discard kill and the startup orphan sweep;
+	// ContainerPreflight non-nil is the "container mode is wired on this
+	// server" gate for both. Reconcile never spawns containers — it only
+	// reaps what a session kill or a server-host crash left behind.
+	PodmanBin          string
+	PodmanRun          podmanx.CmdRunner
+	ContainerPreflight func() (podmanx.Result, bool)
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -136,6 +147,13 @@ type Service struct {
 	armCapture  func(store.Run)
 	afkRunEnded func(kind, outcome string, duration time.Duration)
 	now         func() time.Time
+
+	// Container backstop wiring (issue #205; see the Options fields).
+	// podmanRun is always non-nil (New defaults it); containerPreflight nil =
+	// container mode not wired, backstop and orphan sweep no-op.
+	podmanBin          string
+	podmanRun          podmanx.CmdRunner
+	containerPreflight func() (podmanx.Result, bool)
 }
 
 // New validates o and returns a Service.
@@ -166,6 +184,10 @@ func New(o Options) (*Service, error) {
 	if now == nil {
 		now = time.Now
 	}
+	podmanRun := o.PodmanRun
+	if podmanRun == nil {
+		podmanRun = podmanx.ExecRunner()
+	}
 	return &Service{
 		store:       o.Store,
 		git:         o.Git,
@@ -180,6 +202,10 @@ func New(o Options) (*Service, error) {
 		armCapture:  o.ArmCapture,
 		afkRunEnded: o.AFKRunEnded,
 		now:         now,
+
+		podmanBin:          o.PodmanBin,
+		podmanRun:          podmanRun,
+		containerPreflight: o.ContainerPreflight,
 	}, nil
 }
 

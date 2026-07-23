@@ -63,10 +63,12 @@ func (s *Service) Run(ctx context.Context) {
 const resyncFactor = 30
 
 // sync arms a tailer for every active run not yet tailed and disarms tailers
-// whose run is no longer active, then GCs the dialog spools of runs that are no
-// longer active. Only ever called from Run's select — never on shutdown — so a
-// clean shutdown leaves an active run's spool intact for restart survival
-// (ADR-0020 decision 2).
+// whose run is no longer active. Only ever called from Run's select — never
+// on shutdown — so a clean shutdown leaves an active run's spool intact for
+// restart survival (ADR-0020 decision 2). Spool GC is no longer chat's job
+// (issue #205): a run's spools live in its private runtime dir, which dies
+// with the run's tree (instancehome.Wipe at stop/rollback,
+// instancehome.SweepAll for crash orphans).
 func (s *Service) sync(ctx context.Context) {
 	runs, err := s.store.ActiveRuns(ctx)
 	if err != nil {
@@ -74,34 +76,10 @@ func (s *Service) sync(ctx context.Context) {
 		return
 	}
 	active := make(map[string]store.Run, len(runs))
-	activeIDs := make(map[string]bool, len(runs))
 	for _, r := range runs {
 		active[r.SessionName] = r
-		activeIDs[r.ID] = true
 	}
 	s.tailers.retain(active, func(run store.Run) { s.arm(run) })
-	s.sweepSpools(activeIDs)
-}
-
-// sweepSpools removes the dialog spool, blocked marker, and per-run settings
-// file of every run no longer active (ADR-0020: a spool for an ended run is
-// garbage; one for an active run survives a lab restart, so the active set is
-// the keep-set — the same principle as the credential runtime GC). Runs against
-// every provider advertising the LiveSignals capability.
-func (s *Service) sweepSpools(activeIDs map[string]bool) {
-	if s.runtimeDir == "" {
-		return
-	}
-	keep := func(runID string) bool { return activeIDs[runID] }
-	for _, prov := range s.providers.List() {
-		h, ok := prov.(provider.LiveSignals)
-		if !ok {
-			continue
-		}
-		if err := h.SweepSpools(s.runtimeDir, keep); err != nil {
-			s.log.Warn("chat tailer sync: sweeping dialog spools", "component", "chat", "provider", prov.ID(), "err", err)
-		}
-	}
 }
 
 // arm starts a tailer goroutine for run under a child of the service ctx.
@@ -133,6 +111,10 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		return
 	}
 	signals, _ := prov.(provider.LiveSignals) // nil for a transcript-only provider
+	// The run's private runtime dir (issue #205) is fixed for the tailer's
+	// whole life — the tailer is per-run, so it resolves once. "" (no closure
+	// wired) turns live signals off and every read transcript-only.
+	runtimeDir := s.runtimeDir(run.ID)
 	// The notify gate exists only when cmd/lab injected the push seam (issue
 	// #99). It is owned by this one goroutine (not concurrency-safe by design)
 	// and dies with it: a run ending or the dead-session sweep cancels ctx, so an
@@ -196,13 +178,13 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			}
 		}
 		var sig string
-		if signals != nil && s.runtimeDir != "" {
-			sig = signals.SpoolSig(run.ID, s.runtimeDir)
+		if signals != nil && runtimeDir != "" {
+			sig = signals.SpoolSig(run.ID, runtimeDir)
 		}
 		if first || transcriptChanged || sig != lastSig {
 			// The tailer only ever tails ACTIVE runs, so it always passes the
-			// runtime dir — composition (spool dialog / blocked-state precedence)
-			// lives inside the adapter since issue #92. That move retired the
+			// run's runtime dir — composition (spool dialog / blocked-state
+			// precedence) lives inside the adapter since issue #92. That move retired the
 			// core-side parse cache, so a spool-only flip re-reads the transcript
 			// too — a deliberate trade: spool flips are rare (a dialog opening or
 			// resolving), and the common no-change tick still costs only stats.
@@ -210,7 +192,7 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			// the staged stat all stand), so the next tick re-detects the same
 			// change and retries the read instead of freezing on a half-observed
 			// change (e.g. the file vanishing mid-rotation).
-			chat, err := prov.ReadChat(run.ID, s.runtimeDir, path)
+			chat, err := prov.ReadChat(run.ID, runtimeDir, path)
 			if err == nil {
 				// Scan + mask FIRST — before setState and, critically, before
 				// gate.observe below: the needs-input push body is built from the

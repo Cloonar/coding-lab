@@ -147,7 +147,7 @@ func newInstanceServerMod(t *testing.T, mod func(*Options), extraProvs ...provid
 		}
 		cs, err := chat.New(chat.Options{
 			Store: st, Providers: reg, Bus: o.Bus, Logger: logx.New(io.Discard),
-			RuntimeDir: mat.Dir(), HomeFor: homes.HomePath, Now: func() time.Time { return instClock },
+			RuntimeDirFor: homes.RuntimePath, HomeFor: homes.HomePath, Now: func() time.Time { return instClock },
 		})
 		if err != nil {
 			t.Fatal(err)

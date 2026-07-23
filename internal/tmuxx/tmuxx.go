@@ -92,14 +92,38 @@ func targetErr(op string, err error, out []byte) error {
 // on the spawn path.
 const startRecheckDelay = 500 * time.Millisecond
 
+// StartOpt adjusts one Start call — the per-start sibling of the
+// construction-time Option, introduced for the container runner (issue
+// #205): host and container panes share one Tmux instance, so a switch that
+// only some spawns need must ride the call, not the constructor.
+type StartOpt func(*startConfig)
+
+// startConfig is the switch set StartOpts accumulate into. Zero value =
+// today's host-pane behavior, so every pre-#205 Start call is unchanged.
+type startConfig struct {
+	withoutNofileCap bool
+}
+
+// WithoutNofileCap skips the prlimit RLIMIT_NOFILE wrapper for this one
+// Start. For a container pane the inner command is the podman CLIENT, not
+// the agent: the agent's descriptor bound is the container's own `--ulimit
+// nofile` (podmanx.RunSpec.Nofile, issue #205), and prlimit-capping the
+// client would aim the cap at the wrong process — bounding podman's own
+// descriptors while the agent inside stays governed solely by the
+// container limit anyway.
+func WithoutNofileCap() StartOpt {
+	return func(c *startConfig) { c.withoutNofileCap = true }
+}
+
 // SessionRunner is the seam over tmux (design §4d). The real
 // implementation is Tmux; Fake is the behavioral test double.
 type SessionRunner interface {
 	// Start launches argv detached in dir under the session name, with
 	// extraEnv ("KEY=VALUE" entries) added to the pane's environment and
-	// the configured prlimit nofile cap wrapping the inner command.
+	// the configured prlimit nofile cap wrapping the inner command
+	// (unless a StartOpt retires it for this call).
 	// Idempotent: an already-live name returns nil.
-	Start(ctx context.Context, name, dir string, argv []string, extraEnv []string) error
+	Start(ctx context.Context, name, dir string, argv []string, extraEnv []string, opts ...StartOpt) error
 	// Stop kills the session if it exists. Idempotent.
 	Stop(ctx context.Context, name string) error
 	// IsRunning reports whether the exact session name is live.
@@ -177,16 +201,22 @@ func New(bin string, opts ...Option) *Tmux {
 // NixOS mechanisms that make TERM and the locale actually *resolve* (the
 // terminfo database and glibc's locale archive live in the store, not under
 // /usr/share), so they are part of the baseline's meaning, not extras.
+// XDG_RUNTIME_DIR joined the baseline for the container runner (issue #205):
+// the rootless podman client a container pane runs needs it to find its
+// runtime root (pause process, netns state); the service unit sets it exactly
+// where rootless podman is intended to work, and its value names a path,
+// never a secret — passing it through leaks nothing.
 // Everything else in the lab process env — notably EnvironmentFile secrets
 // like a LAB_DB DSN — is deliberately absent (issue #204).
 var baselineVars = map[string]bool{
-	"PATH":           true,
-	"HOME":           true,
-	"TERM":           true,
-	"TERMINFO_DIRS":  true,
-	"LANG":           true,
-	"LANGUAGE":       true,
-	"LOCALE_ARCHIVE": true,
+	"PATH":            true,
+	"HOME":            true,
+	"TERM":            true,
+	"TERMINFO_DIRS":   true,
+	"LANG":            true,
+	"LANGUAGE":        true,
+	"LOCALE_ARCHIVE":  true,
+	"XDG_RUNTIME_DIR": true,
 }
 
 // isBaselineVar reports whether name is a baseline pass-through variable: one
@@ -234,7 +264,11 @@ func (t *Tmux) cmd(ctx context.Context, args ...string) *exec.Cmd {
 // session by that name already exists, returns nil. After spawn, waits
 // ~500 ms and re-checks — if the session vanished the inner command
 // exited immediately, which is surfaced as an error (v0 quick-fail).
-func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extraEnv []string) error {
+func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extraEnv []string, opts ...StartOpt) error {
+	var cfg startConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	ok, err := t.IsRunning(ctx, name)
 	if err != nil {
 		return err
@@ -247,7 +281,7 @@ func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extra
 		return err
 	}
 
-	args := t.newSessionArgs(name, dir, argv, extraEnv)
+	args := t.newSessionArgs(name, dir, argv, extraEnv, cfg)
 	if out, err := t.cmd(ctx, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -358,13 +392,17 @@ func isEnvName(s string) bool {
 // to the inner command tmux runs inside the pane, not to the tmux call
 // itself — so the RLIMIT_NOFILE bound reaches the agent's whole process
 // tree and survives `new-session -d` daemonizing the pane under the
-// long-lived shared server (v0-pinned).
-func (t *Tmux) newSessionArgs(name, dir string, argv, extraEnv []string) []string {
+// long-lived shared server (v0-pinned). A container pane retires the
+// wrapper per call (WithoutNofileCap): its inner command is the podman
+// client, and the agent's nofile bound is the container's own --ulimit.
+func (t *Tmux) newSessionArgs(name, dir string, argv, extraEnv []string, cfg startConfig) []string {
 	args := []string{"new-session", "-d", "-s", name, "-c", dir}
 	for _, kv := range extraEnv {
 		args = append(args, "-e", kv)
 	}
-	args = append(args, t.nofileCapArgv()...)
+	if !cfg.withoutNofileCap {
+		args = append(args, t.nofileCapArgv()...)
+	}
 	return append(args, argv...)
 }
 

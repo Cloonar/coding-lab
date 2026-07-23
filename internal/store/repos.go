@@ -31,6 +31,18 @@ const (
 	CloneStatusError   = "error"
 )
 
+// Runner values (issue #205 / the 2026-07-22 container-isolation design): the
+// repo-level pick between today's host pane (prlimit-wrapped, unsandboxed —
+// full host access) and a rootless-podman container pane. Host is the
+// zero-friction default (repos.runner is NOT NULL DEFAULT 'host' — migration
+// 0017) until the container preflight is proven; there is no DB CHECK on the
+// value, matching TrackerBinding's precedent — reposvc.UpdateSettings enforces
+// the two-value enum app-side.
+const (
+	RunnerHost      = "host"
+	RunnerContainer = "container"
+)
+
 // CloneErrorInterrupted is the clone_error written by HealInterruptedClones
 // for repos found mid-clone at startup; the operator retries from the UI.
 const CloneErrorInterrupted = "interrupted by restart"
@@ -110,6 +122,16 @@ type Repo struct {
 	// rather than silently falling back.
 	LanderModel  *string
 	LanderEffort *string
+	// Runner is the repo's host/container pick (issue #205), NOT NULL: "host"
+	// (today's prlimit-wrapped pane, unsandboxed — full host access) or
+	// "container" (rootless podman). ContainerMemory/ContainerPids/
+	// ContainerNofile are that mode's per-repo resource-limit overrides — nil
+	// means inherit the matching global settings.SettingContainerMemory &c.
+	// default; all three are meaningless while Runner is "host".
+	Runner          string
+	ContainerMemory *string
+	ContainerPids   *int
+	ContainerNofile *int
 }
 
 // repoColumns is the one column list every repo SELECT/INSERT uses, in the
@@ -124,7 +146,8 @@ const repoColumns = `id, name, remote_url, credential_id, forge_credential_id,
 	afk_model_default, afk_effort_default, afk_options, afk_prompt,
 	afk_provider_default, remote_default, afk_remote_default,
 	autoland_enabled, max_fix_attempts, auto_merge, lander_provider,
-	lander_model, lander_effort`
+	lander_model, lander_effort,
+	runner, container_memory, container_pids, container_nofile`
 
 // triageLabels are the five canonical triage labels seeded per repo at
 // creation (design §3a colors; docs/agents/triage-labels.md meanings).
@@ -160,7 +183,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 	}
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO repos (`+repoColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.Name, r.RemoteURL, r.CredentialID, r.ForgeCredentialID,
 		r.TrackerBinding, r.ForgeKind, r.DefaultBranch, r.Provider, r.ModelDefault,
 		r.EffortDefault, r.Incogni, r.GitAuthorName, r.GitAuthorEmail,
@@ -171,7 +194,8 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 		r.AFKModelDefault, r.AFKEffortDefault, afkOptions, r.AFKPrompt,
 		r.AFKProviderDefault, r.RemoteDefault, r.AFKRemoteDefault,
 		r.AutolandEnabled, r.MaxFixAttempts, r.AutoMerge, r.LanderProvider,
-		r.LanderModel, r.LanderEffort)
+		r.LanderModel, r.LanderEffort,
+		r.Runner, r.ContainerMemory, r.ContainerPids, r.ContainerNofile)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Repo{}, fmt.Errorf("create repo %q: %w", r.Name, ErrNameTaken)
@@ -296,6 +320,10 @@ type RepoSettingsUpdate struct {
 	LanderProvider       Opt[*string] // lander run's provider override (issue #181); nil clears (NULL = inherit repo's Provider)
 	LanderModel          Opt[*string] // lander run's model override; issue #189; nil clears (NULL = inherit)
 	LanderEffort         Opt[*string] // lander run's effort override; issue #189; nil clears (NULL = inherit)
+	Runner               Opt[string]  // host|container (issue #205); NOT NULL, no inherit state
+	ContainerMemory      Opt[*string] // podman --memory override; nil clears (NULL = inherit the global default)
+	ContainerPids        Opt[*int]    // podman --pids-limit override; nil clears (NULL = inherit)
+	ContainerNofile      Opt[*int]    // podman --ulimit nofile override; nil clears (NULL = inherit)
 }
 
 // UpdateRepoSettings applies the set fields of u to one repo and returns the
@@ -400,6 +428,18 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 	}
 	if u.LanderEffort.Set {
 		add("lander_effort", u.LanderEffort.Value)
+	}
+	if u.Runner.Set {
+		add("runner", u.Runner.Value)
+	}
+	if u.ContainerMemory.Set {
+		add("container_memory", u.ContainerMemory.Value)
+	}
+	if u.ContainerPids.Set {
+		add("container_pids", u.ContainerPids.Value)
+	}
+	if u.ContainerNofile.Set {
+		add("container_nofile", u.ContainerNofile.Value)
 	}
 	if len(sets) == 0 {
 		return s.RepoByID(ctx, id)
@@ -547,6 +587,8 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		remoteDef, afkRemoteDef           sql.NullBool
 		landerProvider                    sql.NullString
 		landerModel, landerEffort         sql.NullString
+		containerMemory                   sql.NullString
+		containerPids, containerNofile    sql.NullInt64
 	)
 	if err := scan(&r.ID, &r.Name, &r.RemoteURL, &credID, &forgeCredID,
 		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &providerCol, &modelDef,
@@ -558,7 +600,8 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		&afkModelDef, &afkEffortDef, &afkOptions, &afkPrompt,
 		&afkProviderDef, &remoteDef, &afkRemoteDef,
 		&r.AutolandEnabled, &r.MaxFixAttempts, &r.AutoMerge, &landerProvider,
-		&landerModel, &landerEffort); err != nil {
+		&landerModel, &landerEffort,
+		&r.Runner, &containerMemory, &containerPids, &containerNofile); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
@@ -580,6 +623,9 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.LanderProvider = nullStr(landerProvider)
 	r.LanderModel = nullStr(landerModel)
 	r.LanderEffort = nullStr(landerEffort)
+	r.ContainerMemory = nullStr(containerMemory)
+	r.ContainerPids = nullInt(containerPids)
+	r.ContainerNofile = nullInt(containerNofile)
 
 	var err error
 	if r.AFKOptions, err = unmarshalOptions(afkOptions); err != nil {

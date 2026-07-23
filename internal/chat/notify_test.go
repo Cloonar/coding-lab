@@ -294,8 +294,10 @@ func newNotifyService(t *testing.T, notify func(Notification), debounce time.Dur
 		t.Fatal(err)
 	}
 	bus := events.NewBus()
+	rtDir := t.TempDir()
 	svc, err := New(Options{Store: st, Providers: reg, Bus: bus, Logger: logx.New(io.Discard),
-		Poll: 5 * time.Millisecond, RuntimeDir: t.TempDir(), Notify: notify, NotifyDebounce: debounce})
+		Poll: 5 * time.Millisecond, RuntimeDirFor: func(string) string { return rtDir },
+		Notify: notify, NotifyDebounce: debounce})
 	if err != nil {
 		t.Fatal(err)
 	}

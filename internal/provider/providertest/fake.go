@@ -80,11 +80,12 @@ type Fake struct {
 	interruptErr   error
 
 	// LiveSignals lifecycle capability (issue #17 / ADR-0020, narrowed in
-	// issue #92). hookArgs/hookSettings script Setup; spoolSig scripts the
-	// change digest; pendingDialog/blocked script the live signals ReadChat
-	// composes (the fake's adapter-private state, like claudecode's spool);
-	// hookCalls records Setup runIDs, setupOpts its received opts (issue
-	// #124), and sweeps counts SweepSpools.
+	// issue #92 and again in #205 — no GC method; the per-run runtime dir is
+	// wiped with the run). hookArgs/hookSettings script Setup; spoolSig
+	// scripts the change digest; pendingDialog/blocked script the live
+	// signals ReadChat composes (the fake's adapter-private state, like
+	// claudecode's spool); hookCalls records Setup runIDs, setupOpts its
+	// received opts (issue #124).
 	hookSettings  []byte
 	hookArgs      []string
 	pendingDialog *provider.Dialog
@@ -93,8 +94,6 @@ type Fake struct {
 	spoolSig      string
 	hookCalls     []string
 	setupOpts     []provider.SetupOpts
-	sweeps        int
-	sweepErr      error
 }
 
 // ReadCall is one recorded ReadChat invocation — the assertion surface for
@@ -522,14 +521,6 @@ func (f *Fake) SpoolSig(_, _ string) string {
 	return f.spoolSig
 }
 
-// SweepSpools counts the call (and returns the scripted error).
-func (f *Fake) SweepSpools(_ string, _ func(runID string) bool) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.sweeps++
-	return f.sweepErr
-}
-
 // SetPendingDialog scripts the live pending dialog ReadChat composes when a
 // runtime dir is passed (nil → none) — the fake's stand-in for claudecode's
 // PreToolUse spool.
@@ -577,13 +568,6 @@ func (f *Fake) SetupOpts() []provider.SetupOpts {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]provider.SetupOpts(nil), f.setupOpts...)
-}
-
-// Sweeps reports how many times SweepSpools ran.
-func (f *Fake) Sweeps() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.sweeps
 }
 
 // --- test controls -------------------------------------------------------

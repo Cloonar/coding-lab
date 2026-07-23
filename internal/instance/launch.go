@@ -8,9 +8,12 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
 // LaunchSpec is the fully-derived identity of one session launch — the shared
@@ -72,18 +75,20 @@ type LaunchSpec struct {
 }
 
 // Launch runs the v0-pinned spawn sequence for a fully-derived spec:
-// startguard.Mark → credential materialization → gitx.AddWorktree (fail-loud
-// fetch, no fallback base) → workspace seeding (provider trust/MCP, then
-// lab's skills bundle + CLAUDE.local.md) → runs row + run token → tmux
-// spawn (SeedPrompt, when set, carried as the spawn argv's trailing
-// positional — the AFK seed prompt or a manual run's first chat message,
-// issue #96) → StampOpened → async deep-link capture → run.changed.
-// Any failure after worktree creation rolls back to the exact pre-launch
-// state (session kill, RemoveWorktree, force DeleteBranch, run row/token
-// delete, credential cleanup); a failure before worktree creation rolls back
-// nothing but the credential files. For an AFK spec the worktree/branch
-// creation IS the claim, so the rollback is what releases a claimed issue
-// back into the selectable queue.
+// startguard.Mark → per-run tree materialization (home + runtime, issues
+// #202/#205) → credential materialization into the per-run runtime dir →
+// gitx.AddWorktree (fail-loud fetch, no fallback base) → workspace seeding
+// (provider trust/MCP, then lab's skills bundle + CLAUDE.local.md) → runs
+// row + run token → tmux spawn (SeedPrompt, when set, carried as the spawn
+// argv's trailing positional — the AFK seed prompt or a manual run's first
+// chat message, issue #96) → StampOpened → async deep-link capture →
+// run.changed. Any failure after worktree creation rolls back to the exact
+// pre-launch state (session kill, RemoveWorktree, force DeleteBranch, run
+// row/token delete, per-run tree wipe — the wipe subsumes the old per-file
+// credential/settings cleanup, issue #205); a failure before worktree
+// creation rolls back nothing but the per-run tree. For an AFK spec the
+// worktree/branch creation IS the claim, so the rollback is what releases a
+// claimed issue back into the selectable queue.
 func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error) {
 	repo := spec.Repo
 	name := spec.SessionName
@@ -92,26 +97,84 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	bareDir := s.bareDir(repo.ID)
 	runID := ids.NewID("run")
 
+	// Container-mode gate + limit resolution (issue #205), FIRST — before the
+	// guard, the per-run tree, and above all before AddWorktree: for an AFK
+	// spec the worktree IS the claim, so a container refusal (host not ready,
+	// missing tools image) landing any later would park the issue behind a
+	// host problem. Both checks are pure reads; a refusal here rolls back
+	// nothing because nothing exists yet. The resolved limits carry to the
+	// spawn branch below.
+	container := repo.Runner == store.RunnerContainer
+	var ctrMemory string
+	var ctrPids, ctrNofile int
+	if container {
+		if err := s.refuseContainerSpawn(spec.Provider.ID()); err != nil {
+			return store.Run{}, err
+		}
+		var err error
+		if ctrMemory, ctrPids, ctrNofile, err = s.effectiveContainerLimits(ctx, repo); err != nil {
+			return store.Run{}, &StartFailedError{cause: err}
+		}
+	}
+
 	// Sweep guard spans worktree-creation → session-live (§4b). Cleared on
 	// every return via defer (success or rollback), matching v0's
 	// markStarting/defer clearStarting.
 	s.guard.Mark(name)
 	defer s.guard.Clear(name)
 
-	// Materialize the repo's GIT credential (opID = run id) for the worktree
-	// fetch AND the spawned session's git env. Kept alive for the session on
-	// success; cleaned only on rollback here / at Stop or reap.
-	credEnv, credCleanup, err := s.credentialEnv(ctx, repo, runID)
+	// The run's private per-run tree (issues #202/#205), materialized FIRST:
+	// the runtime subdir must exist before the credential materializer writes
+	// into it, and the credential env must exist before the worktree fetch
+	// authenticates with it. The homeDirMinAge sweep guard covers the whole
+	// launch window, so materializing this early is safe. wipeHome is the
+	// pre-worktree failure cleanup (nothing else exists yet); the full
+	// rollback below reuses the same wipe as its last step. A materialize
+	// failure is a real I/O problem — abort.
+	home, err := s.homes.Materialize(runID)
 	if err != nil {
+		return store.Run{}, &StartFailedError{cause: err}
+	}
+	wipeHome := func() {
+		if err := s.homes.Wipe(runID); err != nil {
+			s.log.Warn("start rollback: wipe instance home", "component", "instance", "run", runID, "err", err)
+		}
+	}
+
+	// The run's private runtime materializer (issue #205): credential files,
+	// known_hosts, the dialog settings file, and the hook spools all live
+	// under <state>/instances/<runID>/runtime — one run's surface, wiped with
+	// the run, bind-mountable into a future container without exposing any
+	// other run's secrets.
+	runMat, err := vault.NewMaterializer(s.homes.RuntimePath(runID))
+	if err != nil {
+		wipeHome()
+		return store.Run{}, &StartFailedError{cause: err}
+	}
+	// Seed ssh's TOFU state from the global runtime dir's known_hosts so a
+	// fresh per-run dir does not reset previously pinned host keys (issue
+	// #205). Best-effort: a failed seed only degrades to accept-new
+	// re-pinning for this run — never a reason to block a launch.
+	if err := runMat.SeedKnownHosts(s.mat.KnownHostsPath()); err != nil {
+		s.log.Warn("seeding per-run known_hosts", "component", "instance", "run", runID, "err", err)
+	}
+
+	// Materialize the repo's GIT credential (opID = run id) into the per-run
+	// runtime dir, for the worktree fetch AND the spawned session's git env.
+	// The files live for the whole session; the per-run tree wipe (rollback
+	// here, Stop/reap later) removes them — no per-file cleanup.
+	credEnv, err := s.credentialEnv(ctx, repo, runID, runMat)
+	if err != nil {
+		wipeHome()
 		return store.Run{}, &StartFailedError{cause: err}
 	}
 	gitEnv := append(append([]string{}, s.gitEnv...), credEnv...)
 
 	// AddWorktree: fail-loud fetch → fork from origin/<default>, NO fallback
-	// base. A failure here created nothing — roll back only the credential
-	// files (the run row/token do not exist yet). An adopt-branch spec (the
-	// lander) checks out the EXISTING branch instead, aligned to what the
-	// forge sees.
+	// base. A failure here created nothing beyond the per-run tree (the run
+	// row/token do not exist yet) — wipe it and stop. An adopt-branch spec
+	// (the lander) checks out the EXISTING branch instead, aligned to what
+	// the forge sees.
 	addWorktree := func() error {
 		if spec.AdoptBranch {
 			return s.git.AddWorktreeExisting(ctx, bareDir, wtPath, branch, gitEnv)
@@ -119,20 +182,18 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return s.git.AddWorktree(ctx, bareDir, wtPath, branch, repo.DefaultBranch, gitEnv)
 	}
 	if err := addWorktree(); err != nil {
-		credCleanup()
+		wipeHome()
 		return store.Run{}, &StartFailedError{cause: err}
 	}
 
-	// dialogSettingsPath is the per-run dialog-capture settings file (ADR-0020),
-	// written just before the spawn; rollback unlinks it. "" until armed (or
-	// for a provider without the LiveSignals capability).
-	var dialogSettingsPath string
-
 	// rollback restores the exact pre-launch state after the worktree exists:
 	// RemoveWorktree + force DeleteBranch (both attempted, each logged) + the
-	// run row/token (when created) + the credential files + the dialog
-	// settings file. Runs on a detached context so a client disconnect can't
-	// strand a half-built instance.
+	// run row/token (when created) + the whole per-run tree — home AND
+	// runtime, so the credential files and the dialog settings file go with
+	// it (issue #205; no per-file removal). The wipe comes LAST, after the
+	// session kill, so no live process is stranded mid-teardown with its
+	// credential surface already gone. Runs on a detached context so a client
+	// disconnect can't strand a half-built instance.
 	rollback := func(rowCreated bool) {
 		rctx := context.WithoutCancel(ctx)
 		// Kill the session first. runner.Start can return an error while the
@@ -144,6 +205,11 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		if err := s.runner.Stop(rctx, name); err != nil {
 			s.log.Warn("start rollback: stop session", "component", "instance", "session", name, "err", err)
 		}
+		// Container backstop (issue #205): the kill above SIGHUPs a container
+		// pane's podman client and --rm reaps, but a CLI ignoring SIGHUP would
+		// leave the container (and its claimed name) behind a rolled-back
+		// launch. Deterministic name, --ignore no-op for host panes.
+		s.removeRunContainer(rctx, name)
 		if err := s.git.RemoveWorktree(rctx, bareDir, wtPath, gitEnv); err != nil {
 			s.log.Warn("start rollback: remove worktree", "component", "instance", "session", name, "worktree", wtPath, "err", err)
 		}
@@ -162,31 +228,12 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 				s.log.Warn("start rollback: delete run row", "component", "instance", "run", runID, "err", err)
 			}
 		}
-		if dialogSettingsPath != "" {
-			if err := os.Remove(dialogSettingsPath); err != nil && !os.IsNotExist(err) {
-				s.log.Warn("start rollback: remove dialog settings", "component", "instance", "run", runID, "err", err)
-			}
-		}
-		// Wipe the run's private instance HOME (issue #202): the credential copy
-		// and config the injector/seeder wrote go with the rolled-back run. Wipe
-		// is idempotent, so it is harmless on the paths where Materialize never
-		// ran (a failure before it) and removes the tree on the paths where it
-		// did — logged like every other rollback step so one failure never skips
+		// Wipe the run's private per-run tree LAST (issues #202/#205): the
+		// credential files, dialog settings, provider credential copy, and
+		// config all go with the rolled-back run. Wipe is idempotent and
+		// logged like every other rollback step so one failure never skips
 		// the rest (the boot/runtime sweep is the backstop).
-		if err := s.homes.Wipe(runID); err != nil {
-			s.log.Warn("start rollback: wipe instance home", "component", "instance", "run", runID, "err", err)
-		}
-		credCleanup()
-	}
-
-	// The run's private instance HOME (issue #202): materialized right after the
-	// worktree add so a failure here still rolls back the worktree, and BEFORE
-	// seeding/injection so the provider's HOME-global grants and its credential
-	// copy land under it. A materialize failure is a real I/O problem — abort.
-	home, err := s.homes.Materialize(runID)
-	if err != nil {
-		rollback(false)
-		return store.Run{}, &StartFailedError{cause: err}
+		wipeHome()
 	}
 
 	// Seed the worktree: the provider's grants first (trust/MCP,
@@ -274,12 +321,13 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	}
 
 	// Arm live dialog capture (ADR-0020): write the per-run hook settings file
-	// under runtime/ and inject --settings into the spawn argv, so a pending
-	// AskUserQuestion/ExitPlanMode spools where the chat can read it (Claude
-	// Code never flushes a pending tool_use to the transcript live). Best-
-	// effort — a write failure logs and spawns without capture (the chat keeps
-	// transcript-only behavior); dialog capture must never block a launch. A
-	// provider without the LiveSignals capability contributes nothing.
+	// under the run's private runtime dir (issue #205) and inject --settings
+	// into the spawn argv, so a pending AskUserQuestion/ExitPlanMode spools
+	// where the chat can read it (Claude Code never flushes a pending
+	// tool_use to the transcript live). Best-effort — a write failure logs
+	// and spawns without capture (the chat keeps transcript-only behavior);
+	// dialog capture must never block a launch. A provider without the
+	// LiveSignals capability contributes nothing.
 	//
 	// Build the spawn argv from the provider (issue #19 SpawnSpec seam): the
 	// seed prompt rides as the trailing positional and the provider applies any
@@ -297,20 +345,53 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		Options:       spec.Options,
 		InitialPrompt: spec.SeedPrompt,
 	})
-	if extra, path := s.armDialogHooks(ctx, spec.Provider, runID, spec.Kind); path != "" {
-		dialogSettingsPath = path
+	if extra, path := s.armDialogHooks(ctx, spec.Provider, runID, spec.Kind, runMat.Dir()); path != "" {
 		spawnArgv = injectBeforePrompt(spawnArgv, extra, spec.SeedPrompt != "")
 	}
 
-	// Spawn in the worktree (never the reference repo), prlimit-wrapped by the
-	// runner. SeedPrompt (the AFK seed prompt, or a manual run's first chat
-	// message per issue #96) rides the spawn argv as claude's trailing
-	// positional (v0-pinned) — no post-spawn keystroke, so there is no
-	// cold-start TUI race to leave a run unseeded. A spawn failure
-	// rolls the whole launch back, releasing an AFK claim.
-	if err := s.runner.Start(ctx, name, wtPath, spawnArgv, extraEnv); err != nil {
+	// Spawn in the worktree (never the reference repo). SeedPrompt (the AFK
+	// seed prompt, or a manual run's first chat message per issue #96) rides
+	// the spawn argv as claude's trailing positional (v0-pinned) — no
+	// post-spawn keystroke, so there is no cold-start TUI race to leave a run
+	// unseeded. A spawn failure rolls the whole launch back, releasing an AFK
+	// claim.
+	//
+	// The dual-runner seam (issue #205): host mode is EXACTLY the pre-#205
+	// spawn — provider argv, prlimit-wrapped, full spawn env via tmux -e.
+	// Container mode wraps the SAME provider argv in `podman run` (the pane
+	// command becomes the podman client; tmux stays untouched otherwise):
+	// non-secret env rides the podman argv, the secret forwards (LAB_TOKEN)
+	// ride tmux -e + name-only --env so no argv ever carries them, and the
+	// host prlimit cap is retired in favor of the container's own --ulimit
+	// (WithoutNofileCap — capping the podman client would aim at the wrong
+	// process).
+	var spawnErr error
+	if container {
+		env, forward := containerEnv(extraEnv, home, s.containerSockURL())
+		paneArgv := podmanx.RunArgv(podmanx.RunSpec{
+			Bin:         s.podmanBin,
+			Name:        podmanx.ContainerName(name),
+			Image:       s.containerImage,
+			ToolsImage:  s.containerToolsImages[spec.Provider.ID()],
+			WorktreeDir: wtPath,
+			BareDir:     bareDir,
+			AgentDir:    s.agentSockDir,
+			HomeDir:     home,
+			RuntimeDir:  s.homes.RuntimePath(runID),
+			Memory:      ctrMemory,
+			Pids:        ctrPids,
+			Nofile:      ctrNofile,
+			Env:         env,
+			ForwardEnv:  forward,
+			Argv:        spawnArgv,
+		})
+		spawnErr = s.runner.Start(ctx, name, wtPath, paneArgv, secretForwardEnv(extraEnv, forward), tmuxx.WithoutNofileCap())
+	} else {
+		spawnErr = s.runner.Start(ctx, name, wtPath, spawnArgv, extraEnv)
+	}
+	if spawnErr != nil {
 		rollback(true)
-		return store.Run{}, &StartFailedError{cause: err}
+		return store.Run{}, &StartFailedError{cause: spawnErr}
 	}
 
 	// Recency is keyed by repo and stamped BEFORE the capture so the sort is
@@ -343,20 +424,23 @@ func injectBeforePrompt(argv, extra []string, hasPrompt bool) []string {
 	return append(out, argv[n])
 }
 
-// armDialogHooks writes the per-run dialog-capture settings file (ADR-0020) into
-// the runtime dir and returns the spawn args to append (--settings <path>) plus
-// the settings path (for rollback). The run kind resolves the dialog
-// auto-dismiss window folded into the settings payload (issue #124, via
-// dialogTimeout). A provider without the LiveSignals capability contributes
-// nothing. Best-effort: a write failure logs and returns no args — the run
-// still spawns, its chat just keeps transcript-only behavior.
-func (s *Service) armDialogHooks(ctx context.Context, prov provider.AgentProvider, runID, kind string) (args []string, settingsPath string) {
+// armDialogHooks writes the per-run dialog-capture settings file (ADR-0020)
+// into runtimeDir — the run's PRIVATE runtime dir (issue #205), never the
+// global one — and returns the spawn args to append (--settings <path>) plus
+// the settings path (the caller's armed/not-armed signal; the file itself
+// needs no rollback bookkeeping — it dies with the per-run tree). The run
+// kind resolves the dialog auto-dismiss window folded into the settings
+// payload (issue #124, via dialogTimeout). A provider without the
+// LiveSignals capability contributes nothing. Best-effort: a write failure
+// logs and returns no args — the run still spawns, its chat just keeps
+// transcript-only behavior.
+func (s *Service) armDialogHooks(ctx context.Context, prov provider.AgentProvider, runID, kind, runtimeDir string) (args []string, settingsPath string) {
 	signals, ok := prov.(provider.LiveSignals)
 	if !ok {
 		return nil, ""
 	}
 	opts := provider.SetupOpts{DialogTimeout: s.dialogTimeout(ctx, kind)}
-	settings, path, extra := signals.Setup(runID, s.mat.Dir(), opts)
+	settings, path, extra := signals.Setup(runID, runtimeDir, opts)
 	if err := writeFileAtomic0600(path, settings); err != nil {
 		s.log.Warn("arming dialog hooks", "component", "instance", "run", runID, "err", err)
 		return nil, ""
@@ -393,13 +477,14 @@ func (s *Service) dialogTimeout(ctx context.Context, kind string) time.Duration 
 }
 
 // writeFileAtomic0600 writes data to path via a temp sibling + rename (0600), so
-// a reader never sees a half-written file. The runtime dir already exists (the
-// materializer created it 0700).
+// a reader never sees a half-written file. The per-run runtime dir already
+// exists (Launch materialized it 0700).
 func writeFileAtomic0600(path string, data []byte) error {
-	// The ".settings.tmp-" prefix must match claudecode.settingsTempPrefix so a
-	// crash-orphaned temp is reaped by the provider's SweepSpools GC (the two
-	// live in different packages — instance must not import a concrete provider,
-	// ADR-0017 — so the prefix is a documented coupling, not a shared constant).
+	// A temp sibling orphaned by a crash between CreateTemp and rename needs
+	// no dedicated GC (the pre-#205 SweepSpools coupling): it lives inside
+	// the run's per-run runtime dir, so it is wiped with the run's tree at
+	// stop/rollback, or reaped by instancehome.SweepAll once the tree
+	// orphans.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".settings.tmp-*")
 	if err != nil {
 		return fmt.Errorf("tmpfile: %w", err)

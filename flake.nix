@@ -254,10 +254,10 @@
                 # Regression (issues #30, #201): machine traffic must default
                 # to lab's own agent socket, never the network. agentUrl
                 # defaults to null and the module emits no --agent-url flag, so
-                # lab falls back internally to unix://<state-dir>/agent.sock —
-                # even with the external https baseUrl set above, labctl's
-                # LAB_URL cannot hairpin out through the SSO/auth proxy (#30's
-                # failure mode).
+                # lab falls back internally to unix://<state-dir>/agent/agent.sock
+                # (relocated into its own dir by issue #205) — even with the
+                # external https baseUrl set above, labctl's LAB_URL cannot
+                # hairpin out through the SSO/auth proxy (#30's failure mode).
                 if grep '^ExecStart=' "$unitPath" | grep -qF -- '--agent-url'; then
                   echo "default unit must not pass --agent-url (socket default, issue #201)" >&2
                   exit 1

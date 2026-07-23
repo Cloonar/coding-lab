@@ -46,6 +46,28 @@ func TestFake_startRecordsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// The fake records the WithoutNofileCap StartOpt (issue #205) so launch
+// tests can assert a container pane retired the prlimit wrapper while a
+// host pane kept it.
+func TestFake_startRecordsWithoutNofileCap(t *testing.T) {
+	ctx := t.Context()
+	f := NewFake()
+
+	if err := f.Start(ctx, "host", "/wt", []string{"claude"}, nil); err != nil {
+		t.Fatalf("Start (host): %v", err)
+	}
+	if err := f.Start(ctx, "container", "/wt", []string{"podman"}, nil, WithoutNofileCap()); err != nil {
+		t.Fatalf("Start (container): %v", err)
+	}
+
+	if s, _ := f.Session("host"); s.NoNofileCap {
+		t.Error("host Start recorded NoNofileCap=true; want false")
+	}
+	if s, _ := f.Session("container"); !s.NoNofileCap {
+		t.Error("container Start recorded NoNofileCap=false; want true")
+	}
+}
+
 func TestFake_lifecycleAndList(t *testing.T) {
 	ctx := t.Context()
 	f := NewFake()

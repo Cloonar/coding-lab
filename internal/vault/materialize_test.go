@@ -41,6 +41,55 @@ func TestNewMaterializerCreatesDir0700(t *testing.T) {
 	}
 }
 
+// SeedKnownHosts (issue #205): a per-run materializer copies the global
+// known_hosts so accept-new TOFU pins survive the fresh per-run dir; a
+// missing source is a clean no-op (a fresh install has nothing to seed).
+func TestSeedKnownHosts(t *testing.T) {
+	global := newTestMaterializer(t)
+	perRun := newTestMaterializer(t)
+
+	t.Run("missing source is a no-op", func(t *testing.T) {
+		if err := perRun.SeedKnownHosts(global.KnownHostsPath()); err != nil {
+			t.Fatalf("SeedKnownHosts with no source file: %v", err)
+		}
+		if _, err := os.Stat(perRun.KnownHostsPath()); !os.IsNotExist(err) {
+			t.Errorf("no-op seed created %s", perRun.KnownHostsPath())
+		}
+	})
+
+	t.Run("copies pins 0600", func(t *testing.T) {
+		const pins = "git.example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPinnedKey\n"
+		if err := os.WriteFile(global.KnownHostsPath(), []byte(pins), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := perRun.SeedKnownHosts(global.KnownHostsPath()); err != nil {
+			t.Fatalf("SeedKnownHosts: %v", err)
+		}
+		b, err := os.ReadFile(perRun.KnownHostsPath())
+		if err != nil {
+			t.Fatalf("seeded known_hosts unreadable: %v", err)
+		}
+		if string(b) != pins {
+			t.Errorf("seeded known_hosts = %q, want %q", b, pins)
+		}
+		fi, err := os.Stat(perRun.KnownHostsPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Errorf("seeded known_hosts mode %04o, want 0600", fi.Mode().Perm())
+		}
+		// Pins accepted DURING a run stay per-run: appending to the per-run
+		// file never touches the source.
+		if err := os.WriteFile(perRun.KnownHostsPath(), []byte(pins+"other.invalid ssh-rsa BBBB\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(global.KnownHostsPath()); string(b) != pins {
+			t.Errorf("global known_hosts changed to %q; per-run pins must stay per-run", b)
+		}
+	})
+}
+
 func TestNewMaterializerTightensExistingDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "runtime")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -210,6 +210,14 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 			repo["autoland_enabled"], repo["max_fix_attempts"], repo["auto_merge"],
 			repo["lander_provider"], repo["lander_model"], repo["lander_effort"])
 	}
+	// Runner (issue #205) defaults to host with every limit override nil.
+	if repo["runner"] != "host" {
+		t.Errorf("runner = %v, want host", repo["runner"])
+	}
+	if repo["container_memory"] != nil || repo["container_pids"] != nil || repo["container_nofile"] != nil {
+		t.Errorf("container overrides = %v/%v/%v, want null/null/null at create",
+			repo["container_memory"], repo["container_pids"], repo["container_nofile"])
+	}
 	// The pinned repo JSON: every key present (nullables as null).
 	for _, k := range []string{"id", "name", "remote_url", "credential_id", "forge_credential_id",
 		"tracker_binding", "forge_kind", "default_branch", "provider", "incogni", "model_default",
@@ -218,7 +226,8 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		"max_instances_override", "clone_status", "clone_error", "created_at", "last_opened_at",
 		"afk_prompt", "afk_prompt_effective", "afk_provider_default",
 		"autoland_enabled", "max_fix_attempts", "auto_merge", "lander_provider",
-		"lander_model", "lander_effort"} {
+		"lander_model", "lander_effort",
+		"runner", "container_memory", "container_pids", "container_nofile"} {
 		if _, ok := repo[k]; !ok {
 			t.Errorf("repo JSON missing pinned key %q", k)
 		}
@@ -427,6 +436,10 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 		"empty default branch":  {"default_branch": ""},
 		"unknown field":         {"nonsense": 1},
 		"wrong type":            {"incogni": "yes"},
+		// Runner + container limits (issue #205).
+		"unknown runner":       {"runner": "bogus"},
+		"bad container memory": {"container_memory": "9x"},
+		"container pids zero":  {"container_pids": 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resp := x.do("PATCH", "/api/v1/repos/"+id, patch, h)
@@ -446,6 +459,10 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 		"git_author_name":      "Lab Bot",
 		"afk_auto_enabled":     true,
 		"default_branch":       "main",
+		"runner":               "container",
+		"container_memory":     "512m",
+		"container_pids":       2048,
+		"container_nofile":     8192,
 	}, h)
 	wantStatus(t, resp, http.StatusOK)
 	repo := decodeBody(t, resp)
@@ -457,6 +474,12 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 	}
 	if repo["afk_auto_enabled"] != true || repo["git_author_name"] != "Lab Bot" {
 		t.Errorf("afk_auto/author = %v/%v", repo["afk_auto_enabled"], repo["git_author_name"])
+	}
+	// Runner + container limits (issue #205): echoed back verbatim.
+	if repo["runner"] != "container" || repo["container_memory"] != "512m" ||
+		repo["container_pids"] != float64(2048) || repo["container_nofile"] != float64(8192) {
+		t.Errorf("runner/limits = %v/%v/%v/%v, want container/512m/2048/8192",
+			repo["runner"], repo["container_memory"], repo["container_pids"], repo["container_nofile"])
 	}
 
 	// Incogni flip does NOT rewrite patterns (pinned contract).
@@ -470,11 +493,20 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 	// null clears nullable overrides.
 	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
 		"budget_minutes": nil, "model_default": nil, "git_author_name": nil,
+		"container_nofile": nil,
 	}, h)
 	wantStatus(t, resp, http.StatusOK)
 	repo = decodeBody(t, resp)
 	if repo["budget_minutes"] != nil || repo["model_default"] != nil || repo["git_author_name"] != nil {
 		t.Errorf("cleared fields = %v/%v/%v, want nulls", repo["budget_minutes"], repo["model_default"], repo["git_author_name"])
+	}
+	// container_nofile:null clears the override back to inherit (issue #205);
+	// the other two limits set above are untouched.
+	if repo["container_nofile"] != nil {
+		t.Errorf("container_nofile = %v, want null", repo["container_nofile"])
+	}
+	if repo["container_memory"] != "512m" || repo["container_pids"] != float64(2048) {
+		t.Errorf("unrelated limits changed by container_nofile clear: memory=%v pids=%v", repo["container_memory"], repo["container_pids"])
 	}
 
 	// Unknown repo → 404.

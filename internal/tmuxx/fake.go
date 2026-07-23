@@ -13,6 +13,10 @@ type FakeSession struct {
 	Dir      string
 	Argv     []string
 	ExtraEnv []string
+	// NoNofileCap records whether the Start carried WithoutNofileCap — the
+	// container pane's per-call retirement of the prlimit wrapper (issue
+	// #205); tests assert a container spawn sets it and a host spawn does not.
+	NoNofileCap bool
 }
 
 // SentKey is one recorded SendKeys call.
@@ -73,9 +77,14 @@ func NewFake() *Fake {
 
 // Start records the session as live with copies of argv and extraEnv
 // (fresh-slice discipline: a caller's later append must not alias into
-// the fake). Idempotent like the real one: an already-live name returns
-// nil and keeps the original record.
-func (f *Fake) Start(_ context.Context, name, dir string, argv []string, extraEnv []string) error {
+// the fake) plus the resolved StartOpts (NoNofileCap — issue #205).
+// Idempotent like the real one: an already-live name returns nil and
+// keeps the original record.
+func (f *Fake) Start(_ context.Context, name, dir string, argv []string, extraEnv []string, opts ...StartOpt) error {
+	var cfg startConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.startErr[name]; err != nil {
@@ -85,9 +94,10 @@ func (f *Fake) Start(_ context.Context, name, dir string, argv []string, extraEn
 		return nil
 	}
 	f.sessions[name] = FakeSession{
-		Dir:      dir,
-		Argv:     append([]string(nil), argv...),
-		ExtraEnv: append([]string(nil), extraEnv...),
+		Dir:         dir,
+		Argv:        append([]string(nil), argv...),
+		ExtraEnv:    append([]string(nil), extraEnv...),
+		NoNofileCap: cfg.withoutNofileCap,
 	}
 	if err := f.startErrLive[name]; err != nil {
 		// Session recorded live, but Start reports failure — models tmux's

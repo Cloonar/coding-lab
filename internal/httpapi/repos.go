@@ -89,6 +89,17 @@ type repoResponse struct {
 	// catalog to materialize here).
 	LanderModel  *string `json:"lander_model"`
 	LanderEffort *string `json:"lander_effort"`
+	// Runner (issue #205): host (today's prlimit-wrapped pane, unsandboxed —
+	// full host access) or container (rootless podman). NOT NULL — no inherit
+	// state, unlike the nullable overrides below.
+	Runner string `json:"runner"`
+	// ContainerMemory/ContainerPids/ContainerNofile are the container-mode
+	// resource-limit overrides (issue #205): null means inherit the matching
+	// global container_memory/container_pids/container_nofile setting. All
+	// three stay meaningless while Runner is "host".
+	ContainerMemory *string `json:"container_memory"`
+	ContainerPids   *int    `json:"container_pids"`
+	ContainerNofile *int    `json:"container_nofile"`
 }
 
 // repoJSON renders a repo row as its pinned JSON shape. It is a pure function
@@ -135,6 +146,10 @@ func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
 		LanderProvider:       r.LanderProvider,
 		LanderModel:          r.LanderModel,
 		LanderEffort:         r.LanderEffort,
+		Runner:               r.Runner,
+		ContainerMemory:      r.ContainerMemory,
+		ContainerPids:        r.ContainerPids,
+		ContainerNofile:      r.ContainerNofile,
 	}
 	if r.LastOpenedAt != nil {
 		t := store.FormatTime(*r.LastOpenedAt)
@@ -373,6 +388,19 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		case "lander_effort":
 			// No write-time catalog validation (issue #189): see lander_model.
 			u.LanderEffort, err = patchNullableString(raw, key)
+		case "runner":
+			// NOT NULL (issue #205): null rejected, same as tracker_binding; the
+			// host|container enum itself is checked in reposvc.UpdateSettings.
+			u.Runner, err = patchString(raw, key)
+		case "container_memory":
+			// Nullable (issue #205): null clears back to the global default; a
+			// non-null value's podman --memory grammar is checked in
+			// reposvc.UpdateSettings.
+			u.ContainerMemory, err = patchNullableString(raw, key)
+		case "container_pids":
+			u.ContainerPids, err = patchNullableInt(raw, key)
+		case "container_nofile":
+			u.ContainerNofile, err = patchNullableInt(raw, key)
 		default:
 			err = fmt.Errorf("unknown field %q", key)
 		}
