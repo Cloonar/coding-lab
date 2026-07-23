@@ -113,6 +113,13 @@ func (p *Provider) mirrorOAuthAccount(instanceHome string) error {
 		return nil // no account metadata to mirror (logged out, or a lean config)
 	}
 	dst := globalConfigUnder(instanceHome)
+	// Create the parent like copyMasterCredentials does rather than relying on
+	// the launch order (SeedWorkspace's seedGlobalConfig usually made it): with
+	// master credentials absent but an oauthAccount present, this is otherwise
+	// the first write under <home>/.claude and CreateTemp would ENOENT.
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+	}
 	cfg, err := readJSONObject(dst)
 	if err != nil {
 		return err
