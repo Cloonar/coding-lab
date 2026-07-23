@@ -769,19 +769,22 @@ type OpenAffordance struct {
 }
 
 // LiveSignals is the optional live-signal LIFECYCLE capability (ADR-0020;
-// renamed from DialogHooker in issue #51 decision 6; narrowed in issue #92):
-// the plumbing lab genuinely owns for an adapter whose agent spools live
-// signals under lab's runtime dir — arming the channel at spawn (Setup),
-// cheap change detection for the tailer (SpoolSig), and runtime-dir GC
-// (SweepSpools). What the signals MEAN is not a seam concept: the adapter
-// interprets its own spool inside ReadChat (issue #92 — state composition is
-// adapter-owned), so core never reads a dialog or blocked state from here.
-// lab owns the runtime spool directory and its lifecycle (it creates the
-// dir, writes the per-run settings file, and GCs spools for ended runs); the
-// provider owns the settings shape and the spool file protocol — for
-// claude-code a fragile coupling pinned in compat §9. Advertised
-// structurally (a type assertion at the call site, exactly like
-// ConnectingReporter and DeepLinker).
+// renamed from DialogHooker in issue #51 decision 6; narrowed in issue #92,
+// then again in issue #205): the plumbing lab genuinely owns for an adapter
+// whose agent spools live signals under a run's PRIVATE runtime dir
+// (<state>/instances/<runID>/runtime — the dir argument both methods take) —
+// arming the channel at spawn (Setup) and cheap change detection for the
+// tailer (SpoolSig). What the signals MEAN is not a seam concept: the
+// adapter interprets its own spool inside ReadChat (issue #92 — state
+// composition is adapter-owned), so core never reads a dialog or blocked
+// state from here. lab owns the runtime spool directory and its lifecycle
+// (it creates the dir at launch and wipes the whole per-run tree at
+// stop/rollback — instancehome.Wipe/SweepAll — which is why the seam carries
+// no GC method since issue #205: spools, marker, settings file, and crash
+// orphans all die with the run's tree); the provider owns the settings shape
+// and the spool file protocol — for claude-code a fragile coupling pinned in
+// compat §9. Advertised structurally (a type assertion at the call site,
+// exactly like ConnectingReporter and DeepLinker).
 //
 // Honest degradation (issue #51 decision 6): a provider WITHOUT a verified
 // structured signal channel simply omits the capability — the never-scrape
@@ -792,15 +795,15 @@ type OpenAffordance struct {
 type LiveSignals interface {
 	// Setup builds the per-run settings/config payload that arms the agent's
 	// live signal channel (claude: the PreToolUse/PostToolUse/Notification
-	// dialog-capture hooks) to spool into the runtime dir keyed by runID. It
-	// returns the file bytes, the path lab must write them to (the provider
-	// owns the runtime layout under dir), and the spawn args to append (e.g.
-	// ["--settings", settingsPath]). lab writes the bytes at settingsPath and
-	// appends the args to the spawn argv. The spooling commands self-create
-	// their subdirs, so a run whose dialog opens after a lab restart still
-	// spools with no re-arming. opts carries the per-run knobs Setup folds
-	// into the same payload (issue #124); the zero value yields the baseline
-	// payload.
+	// dialog-capture hooks) to spool into the run's runtime dir keyed by
+	// runID. It returns the file bytes, the path lab must write them to (the
+	// provider owns the runtime layout under dir), and the spawn args to
+	// append (e.g. ["--settings", settingsPath]). lab writes the bytes at
+	// settingsPath and appends the args to the spawn argv. The spooling
+	// commands self-create their subdirs, so a run whose dialog opens after
+	// a lab restart still spools with no re-arming. opts carries the per-run
+	// knobs Setup folds into the same payload (issue #124); the zero value
+	// yields the baseline payload.
 	Setup(runID, dir string, opts SetupOpts) (settings []byte, settingsPath string, args []string)
 
 	// SpoolSig is a cheap change-detector over the run's spool + marker files
@@ -808,12 +811,6 @@ type LiveSignals interface {
 	// the transcript is byte-frozen and republishes state. "" when neither
 	// file exists.
 	SpoolSig(runID, dir string) string
-
-	// SweepSpools removes the spool, marker, and per-run settings file under
-	// dir for every run whose keep(runID) is false — the run-ended GC (a spool
-	// for a non-active run is garbage; one for an active run survives a lab
-	// restart, so keep the active set). A nil keep removes all.
-	SweepSpools(dir string, keep func(runID string) bool) error
 }
 
 // SetupOpts carries the per-run knobs LiveSignals.Setup folds into the

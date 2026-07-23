@@ -254,12 +254,12 @@ in
     agentUrl = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      defaultText = lib.literalExpression ''null (lab's own default: unix://''${config.services.lab.stateDir}/agent.sock)'';
+      defaultText = lib.literalExpression ''null (lab's own default: unix://''${config.services.lab.stateDir}/agent/agent.sock)'';
       example = "http://lab-host.internal:8080";
       description = ''
         Session-facing base URL (--agent-url) handed to labctl as `LAB_URL`.
         Leave at `null` (the default) and lab hands every spawned session
-        `unix://<state-dir>/agent.sock` — the agent API's own unix socket
+        `unix://<state-dir>/agent/agent.sock` — the agent API's own unix socket
         under {option}`stateDir`, mode 0700, always present, never touching
         the network or any proxy in front of {option}`baseUrl`. Set this
         option only when sessions run off-host and must reach lab over TCP

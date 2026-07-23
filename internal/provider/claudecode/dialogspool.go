@@ -12,10 +12,15 @@ package claudecode
 //
 // Seam split (issue #92): the provider.LiveSignals capability carries only the
 // spool LIFECYCLE plumbing lab genuinely owns — Setup (arming the hooks at
-// spawn), SpoolSig (the tailer's change detector), SweepSpools (runtime-dir
-// GC). What the spooled signals MEAN — the pending dialog, the blocked marker
-// — is adapter-private: pendingDialog and blockedState below are the
-// composition inputs ReadChat consults, never read across the seam.
+// spawn) and SpoolSig (the tailer's change detector). What the spooled
+// signals MEAN — the pending dialog, the blocked marker — is adapter-private:
+// pendingDialog and blockedState below are the composition inputs ReadChat
+// consults, never read across the seam. There is no GC method (issue #205):
+// every file this adapter spools lives in the run's PRIVATE runtime dir
+// (<state>/instances/<runID>/runtime), so spools, marker, settings file, and
+// any crash-orphaned atomic-write temp sibling are all wiped with the run's
+// tree at stop/rollback (instancehome.Wipe) or reaped by the orphan sweep
+// (instancehome.SweepAll).
 //
 // Every exact string here is a fragile Claude Code coupling pinned in
 // internal/compat §9 (the hook payload shapes + the spool protocol), live-
@@ -36,21 +41,13 @@ import (
 
 var _ provider.LiveSignals = (*Provider)(nil)
 
-// spoolTempMaxAge is how old an atomic-write temp sibling (`<runID>.json.tmp`
-// from a hook, or `.settings.tmp-*` from lab's own write) must be before
-// SweepSpools reaps it as a crash orphan — a hook (external sh) or lab killed
-// between the temp write and the rename leaves one behind. The age guard keeps
-// the sweep from racing an in-flight write (mirrors vault.staleTempMaxAge).
-const spoolTempMaxAge = 2 * time.Minute
-
-// settingsTempPrefix is the prefix of lab's per-run settings atomic-write temp
-// (instance.writeFileAtomic0600 uses os.CreateTemp(dir, settingsTempPrefix+"*")).
-// Kept here so SweepSpools recognises the orphan; the two must stay in sync.
-const settingsTempPrefix = ".settings.tmp-"
-
-// Runtime spool layout under lab's runtime dir (lab-owned; the provider owns
-// the per-run names). One dialog spool and one marker per run — only one dialog
-// can be pending per session, so a single overwritten file per run suffices.
+// Runtime spool layout under the run's private runtime dir (lab-owned; the
+// provider owns the per-run names). One dialog spool and one marker per run —
+// only one dialog can be pending per session, so a single overwritten file
+// per run suffices. Atomic-write temp siblings a crash orphans here
+// (`<runID>.json.tmp` from a hook, `.settings.tmp-*` from lab's settings
+// write) need no adapter-side GC: since issue #205 the whole dir is wiped
+// with the run's tree.
 const (
 	dialogsSubdir  = "dialogs" // <dir>/dialogs/<runID>.json  — the PreToolUse dialog spool
 	stateSubdir    = "state"   // <dir>/state/<runID>.json    — the Notification blocked marker
@@ -335,82 +332,6 @@ func (p *Provider) SpoolSig(runID, dir string) string {
 	return b.String()
 }
 
-// SweepSpools implements provider.LiveSignals: remove the dialog spool, the
-// marker, and the per-run settings file for every run whose keep(runID) is
-// false, plus any stale atomic-write temp orphan. Enumerates by directory so an
-// orphan from a crashed run (whose row is gone) is still reaped. Missing files
-// are not an error.
-func (p *Provider) SweepSpools(dir string, keep func(runID string) bool) error {
-	var errs []error
-	remove := func(path string) {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, err)
-		}
-	}
-	// reapTemp removes an atomic-write temp sibling once it has aged past
-	// spoolTempMaxAge (a hook or lab killed between the temp write and the
-	// rename); the age guard never races an in-flight write.
-	reapTemp := func(path string, e os.DirEntry) {
-		info, err := e.Info()
-		if err != nil || time.Since(info.ModTime()) < spoolTempMaxAge {
-			return
-		}
-		remove(path)
-	}
-
-	// dialogs/ and state/ spools: <runID>.json, plus <runID>.json.tmp orphans.
-	for _, sub := range []string{dialogsSubdir, stateSubdir} {
-		subdir := filepath.Join(dir, sub)
-		entries, err := os.ReadDir(subdir)
-		if err != nil {
-			continue // subdir not created yet — nothing to sweep
-		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() {
-				continue
-			}
-			if strings.HasSuffix(name, ".tmp") {
-				reapTemp(filepath.Join(subdir, name), e)
-				continue
-			}
-			if !strings.HasSuffix(name, spoolExt) {
-				continue
-			}
-			runID := strings.TrimSuffix(name, spoolExt)
-			if keep != nil && keep(runID) {
-				continue
-			}
-			remove(filepath.Join(subdir, name))
-		}
-	}
-
-	// settings.<runID>.json directly under dir, plus .settings.tmp-* orphans.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return joinErrs(errs)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() {
-			continue
-		}
-		if strings.HasPrefix(name, settingsTempPrefix) {
-			reapTemp(filepath.Join(dir, name), e)
-			continue
-		}
-		if !strings.HasPrefix(name, settingsPrefix) || !strings.HasSuffix(name, spoolExt) {
-			continue
-		}
-		runID := strings.TrimSuffix(strings.TrimPrefix(name, settingsPrefix), spoolExt)
-		if keep != nil && keep(runID) {
-			continue
-		}
-		remove(filepath.Join(dir, name))
-	}
-	return joinErrs(errs)
-}
-
 // toolIDInTranscript reports whether a tool_use or tool_result block carrying
 // id appears anywhere in the transcript at path. The tool_use of a pending
 // dialog is flushed only on resolution (compat §5), so a hit means the dialog
@@ -442,15 +363,4 @@ func toolIDInTranscript(path, id string) bool {
 		}
 	}
 	return false
-}
-
-func joinErrs(errs []error) error {
-	switch len(errs) {
-	case 0:
-		return nil
-	case 1:
-		return errs[0]
-	default:
-		return fmt.Errorf("sweep spools: %d errors: %v", len(errs), errs)
-	}
 }

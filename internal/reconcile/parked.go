@@ -175,6 +175,11 @@ func (s *Service) killSessionOnBranch(ctx context.Context, repo store.Repo, bran
 		if err := s.runner.Stop(ctx, name); err != nil {
 			s.log.Warn("discard: stop session", "component", "reconcile", "session", name, "err", err)
 		}
+		// Container backstop (issue #205): the discard kill is a session kill
+		// like Stop's, so it gets the same forced rm behind it — a container
+		// pane's CLI ignoring SIGHUP must not leave the container running
+		// against a force-deleted worktree.
+		s.removeRunContainer(ctx, name)
 		run, err := s.store.RunBySession(ctx, name)
 		if err != nil {
 			continue // no active run for this session (already reaped)
@@ -196,6 +201,13 @@ func (s *Service) killSessionOnBranch(ctx context.Context, repo store.Repo, bran
 			if err := s.mat.Cleanup(*repo.CredentialID, run.ID); err != nil {
 				s.log.Warn("discard: cleanup credential", "component", "reconcile", "run", run.ID, "err", err)
 			}
+		}
+		// Wipe the discarded run's private per-run tree NOW (issues #202/#205):
+		// its credential files and provider state must not wait out the
+		// age-based sweep a prior refactor left them to — a discard is a
+		// terminal outcome like Stop/reap, and those wipe immediately.
+		if err := s.homes.Wipe(run.ID); err != nil {
+			s.log.Warn("discard: wipe instance home", "component", "reconcile", "run", run.ID, "err", err)
 		}
 	}
 }

@@ -5,6 +5,7 @@
 // per-icon deep imports — the app icon system.
 
 import Bot from 'lucide-solid/icons/bot';
+import ContainerIcon from 'lucide-solid/icons/container';
 import GitBranch from 'lucide-solid/icons/git-branch';
 import LockKeyhole from 'lucide-solid/icons/lock-keyhole';
 import PlaneLanding from 'lucide-solid/icons/plane-landing';
@@ -37,6 +38,12 @@ export const REPO_SETTINGS_CATEGORIES: SettingsCategory[] = [
     title: 'Agents',
     description: 'Spawn and AFK defaults, auto-spawn, budget.',
     icon: Bot,
+  },
+  {
+    slug: 'runner',
+    title: 'Runner',
+    description: 'Container or host execution, resource limits.',
+    icon: ContainerIcon,
   },
   {
     slug: 'autoland',

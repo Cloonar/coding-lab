@@ -38,12 +38,12 @@ type loginRunner struct {
 
 func newLoginRunner() *loginRunner { return &loginRunner{Fake: tmuxx.NewFake()} }
 
-func (r *loginRunner) Start(ctx context.Context, name, dir string, argv []string, extraEnv []string) error {
+func (r *loginRunner) Start(ctx context.Context, name, dir string, argv []string, extraEnv []string, opts ...tmuxx.StartOpt) error {
 	live, err := r.IsRunning(ctx, name)
 	if err != nil {
 		return err
 	}
-	if err := r.Fake.Start(ctx, name, dir, argv, extraEnv); err != nil {
+	if err := r.Fake.Start(ctx, name, dir, argv, extraEnv, opts...); err != nil {
 		return err
 	}
 	if !live {

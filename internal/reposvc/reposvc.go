@@ -351,6 +351,9 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		CreatedAt:          s.now(),
 		MaxFixAttempts:     defaultMaxFixAttempts,
 		AutoMerge:          defaultAutoMerge,
+		// Runner (issue #205) is NOT NULL: stamp the host default explicitly
+		// so CreateRepo never inserts the Go zero string "" into it.
+		Runner: store.RunnerHost,
 	}
 	created, err := s.store.CreateRepo(ctx, repo)
 	if err != nil {
@@ -449,6 +452,25 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		u.DefaultBranch.Value = branch
 	}
 
+	// Runner (issue #205): a plain two-value enum, exactly like tracker_binding
+	// above — no inherit state, since repos.runner is NOT NULL. An empty string
+	// is not valid either: a PATCH must send a concrete "host" or "container".
+	if u.Runner.Set {
+		switch u.Runner.Value {
+		case store.RunnerHost, store.RunnerContainer:
+		default:
+			return store.Repo{}, badRequestf("runner: must be %q or %q", store.RunnerHost, store.RunnerContainer)
+		}
+	}
+	// container_memory (issue #205): nullable — null clears the per-repo
+	// override back to inherit the global container_memory setting — but a
+	// non-null value must match podman's --memory grammar (store.ValidContainerMemory,
+	// shared with the global setting's own validation in httpapi/settings.go),
+	// e.g. "8g".
+	if u.ContainerMemory.Set && u.ContainerMemory.Value != nil && !store.ValidContainerMemory(*u.ContainerMemory.Value) {
+		return store.Repo{}, badRequestf("container_memory: must look like a podman --memory value, e.g. %q", "8g")
+	}
+
 	// Pattern grammar (design §4a): validate the pair that would result,
 	// so changing one side cannot silently create an overlap with the other.
 	if u.AFKBranchPattern.Set || u.ManualBranchPrefix.Set {
@@ -469,6 +491,16 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 	}
 	if u.MaxInstancesOverride.Set && u.MaxInstancesOverride.Value != nil && *u.MaxInstancesOverride.Value < 1 {
 		return store.Repo{}, badRequestf("max_instances_override: must be at least 1 (null clears the override)")
+	}
+	// container_pids/container_nofile (issue #205): nullable per-repo overrides
+	// of the podman --pids-limit / --ulimit nofile floors; null clears back to
+	// the global default, same "null clears the override" wording as the pair
+	// above.
+	if u.ContainerPids.Set && u.ContainerPids.Value != nil && *u.ContainerPids.Value < 1 {
+		return store.Repo{}, badRequestf("container_pids: must be at least 1 (null clears the override)")
+	}
+	if u.ContainerNofile.Set && u.ContainerNofile.Value != nil && *u.ContainerNofile.Value < 1 {
+		return store.Repo{}, badRequestf("container_nofile: must be at least 1 (null clears the override)")
 	}
 	if u.MaxFixAttempts.Set && u.MaxFixAttempts.Value < 0 {
 		return store.Repo{}, badRequestf("max_fix_attempts: must be at least 0")

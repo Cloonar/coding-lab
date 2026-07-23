@@ -14,7 +14,7 @@ func TestNewSessionArgs_nofileCap(t *testing.T) {
 	argv := []string{"claude", "--remote-control", "proj-x", "--effort", "max", "--model", "opus[1m]"}
 
 	capped := New("tmux", WithNofileCap("prlimit", 4096))
-	got := capped.newSessionArgs("proj-x", "/work/x", argv, nil)
+	got := capped.newSessionArgs("proj-x", "/work/x", argv, nil, startConfig{})
 	want := []string{
 		"new-session", "-d", "-s", "proj-x", "-c", "/work/x",
 		"prlimit", "--nofile=4096:4096", "--",
@@ -27,7 +27,7 @@ func TestNewSessionArgs_nofileCap(t *testing.T) {
 
 	// Zero cap (the default) spawns bare — no wrapper, just the argv.
 	bare := New("tmux")
-	got = bare.newSessionArgs("proj-x", "/work/x", argv, nil)
+	got = bare.newSessionArgs("proj-x", "/work/x", argv, nil, startConfig{})
 	want = []string{
 		"new-session", "-d", "-s", "proj-x", "-c", "/work/x",
 		"claude", "--remote-control", "proj-x",
@@ -35,6 +35,26 @@ func TestNewSessionArgs_nofileCap(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("bare newSessionArgs =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// WithoutNofileCap retires the prlimit wrapper for one Start even on a
+// capped runner (issue #205): a container pane's inner command is the podman
+// client, whose agent is bounded by the container's own --ulimit nofile —
+// the host-side wrapper would cap the wrong process.
+func TestNewSessionArgs_withoutNofileCap(t *testing.T) {
+	argv := []string{"podman", "run", "--rm", "-it", "img", "claude"}
+	capped := New("tmux", WithNofileCap("prlimit", 4096))
+
+	var cfg startConfig
+	WithoutNofileCap()(&cfg)
+	got := capped.newSessionArgs("proj-x", "/work/x", argv, nil, cfg)
+	want := []string{
+		"new-session", "-d", "-s", "proj-x", "-c", "/work/x",
+		"podman", "run", "--rm", "-it", "img", "claude",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("uncapped newSessionArgs =\n  %q\nwant\n  %q", got, want)
 	}
 }
 
@@ -47,7 +67,7 @@ func TestNewSessionArgs_extraEnvFlags(t *testing.T) {
 	env := []string{"LAB_URL=http://127.0.0.1:8080", "LAB_TOKEN=lab_run_secret"}
 
 	tm := New("tmux", WithNofileCap("prlimit", 1024))
-	got := tm.newSessionArgs("repo~20260608-1530", "/work/wt", argv, env)
+	got := tm.newSessionArgs("repo~20260608-1530", "/work/wt", argv, env, startConfig{})
 	want := []string{
 		"new-session", "-d", "-s", "repo~20260608-1530", "-c", "/work/wt",
 		"-e", "LAB_URL=http://127.0.0.1:8080",
@@ -100,6 +120,8 @@ func TestIsBaselineVar(t *testing.T) {
 		"PATH", "HOME", "TERM", "TERMINFO_DIRS",
 		"LANG", "LANGUAGE", "LOCALE_ARCHIVE",
 		"LC_ALL", "LC_CTYPE", "LC_TIME",
+		// The rootless podman client's runtime-root anchor (issue #205).
+		"XDG_RUNTIME_DIR",
 	} {
 		if !isBaselineVar(name) {
 			t.Errorf("isBaselineVar(%q) = false; want true", name)

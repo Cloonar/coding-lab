@@ -61,8 +61,9 @@ func newSecretService(t *testing.T, notify func(Notification), debounce time.Dur
 		Values:  st.AllRepoSecretValues,
 		Decrypt: func(blob []byte) ([]byte, error) { return blob, nil },
 	}
+	rtDir := t.TempDir()
 	svc, err := New(Options{Store: st, Providers: reg, Bus: bus, Logger: logx.New(io.Discard),
-		Poll: 5 * time.Millisecond, RuntimeDir: t.TempDir(),
+		Poll: 5 * time.Millisecond, RuntimeDirFor: func(string) string { return rtDir },
 		Notify: notify, NotifyDebounce: debounce, Secrets: src.Redactor})
 	if err != nil {
 		t.Fatal(err)

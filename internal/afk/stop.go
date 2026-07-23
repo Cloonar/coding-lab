@@ -58,17 +58,15 @@ func (s *Service) StopAFK(ctx context.Context, session string) error {
 	if err := s.runner.Stop(ctx, session); err != nil {
 		s.log.Warn("afk stop: stop session", "component", "afk", "session", session, "err", err)
 	}
-	// The run is over; its materialized credential files go with it. The
-	// parked worktree needs no live key file — a later manual instance
-	// materializes its own.
-	if repo, err := s.store.RepoByID(ctx, run.RepoID); err == nil {
-		s.cleanupCredential(repo, run.ID)
-	} else {
-		s.log.Warn("afk stop: repo for credential cleanup", "component", "afk", "run", run.ID, "err", err)
-	}
-	// Wipe the run's private instance HOME (issue #202) — its credential copy,
-	// config, and transcripts. The park (worktree + claim branch) is untouched;
-	// only the instance HOME goes. A failure logs and continues (the boot/runtime
+	// Container backstop (issue #205): forced rm behind the tmux kill, for a
+	// provider CLI that ignored the SIGHUP --rm relies on. No-op for host
+	// sessions and when container wiring is absent.
+	s.removeRunContainer(ctx, session)
+	// Wipe the run's private per-run tree (issues #202/#205) — its credential
+	// copy, config, transcripts, AND the runtime dir holding the materialized
+	// git credential files (the wipe subsumes the old per-file credential
+	// cleanup). The park (worktree + claim branch) is untouched; only the
+	// per-run tree goes. A failure logs and continues (the boot/runtime
 	// sweep is the backstop).
 	if err := s.homes.Wipe(run.ID); err != nil {
 		s.log.Warn("afk stop: wipe instance home", "component", "afk", "run", run.ID, "err", err)

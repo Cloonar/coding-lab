@@ -277,8 +277,7 @@ func TestLaunch_threadsOptionsAndKeepsSettingsBeforePrompt(t *testing.T) {
 		t.Errorf("last argv = %q, want the seed prompt %q as the trailing positional", last, seed)
 	}
 	joined := strings.Join(argv, " ")
-	settingsPath := filepath.Join(f.runtime, "settings."+run.ID+".json")
-	if !strings.Contains(joined, "--settings "+settingsPath+" "+seed) {
+	if !strings.Contains(joined, "--settings "+f.settingsPath(run.ID)+" "+seed) {
 		t.Errorf("argv = %q, want --settings before the trailing prompt", joined)
 	}
 }

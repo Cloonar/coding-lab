@@ -12,6 +12,10 @@ Self-hosted orchestrator for remote coding agents: the operator adds git reposit
 A running agent session in its own worktree on its own branch, forked from freshly-fetched `origin/<default>`, identified by the tmux session name `<repo>~<label>`.
 _Avoid_: job, task, workspace, slot
 
+**Runner**:
+The per-repo pick of where an instance's pane command executes (`repos.runner`, NOT NULL, default `host`). `host` runs the provider CLI directly on the host under the prlimit nofile cap — the unsandboxed break-glass, labeled "unsandboxed — full host access" in the UI. `container` makes the pane command a rootless podman + crun `podman run -it --rm` carrying ADR-0052's mount inventory (worktree and bare rw at host-identical paths, the agent socket directory, the instance HOME at `/home/agent`, the per-run runtime dir, the **agent-tools image** read-only at `/opt/lab`), while tmux stays host-side and keeps owning liveness, attach, send-keys, and capture. A container spawn on a host that fails the startup preflight is refused with the collected actionable failures.
+_Avoid_: sandbox mode, executor, isolation level, backend
+
 **Title**:
 A user-set display name on an instance, stored as nullable `runs.title`; it overrides the label-derived title everywhere the UI names the instance — chat header, runs rail, History — but never becomes identity, since branch, worktree, and tmux session name all stay keyed off the label regardless (ADR-0040).
 _Avoid_: nickname, alias, custom label, session name
@@ -177,6 +181,7 @@ _Avoid_: forge link-out, completion email, per-outcome alerts
 ## Relationships
 
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
+- A repo's **Runner** decides where each of its **instances** executes: `container` turns the pane command into rootless `podman run`, mounting the worktree, the **reference repo**, the agent socket directory, the per-run HOME/runtime tree, and the **agent-tools image** at `/opt/lab` — and is refused at spawn while the startup preflight finds the host unready (for AFK work the refusal lands before the **claim**, so no issue is parked); `host` is the prlimit-capped break-glass.
 - An **AFK run**'s **claim** is its branch and nothing else; selection skips issues whose branch exists and never consults the PR list — the reaper's **done-signal** is a bounded per-branch pull lookup (open or merged, head = the run's branch), never a listing.
 - The scheduler counts the **claimable** set (**ready queue** minus existing claims, minus issues whose `## Blocked by` section references a still-open issue); an AFK run that outlives its **budget clock** without a done-signal is a timeout, and timeouts (like deaths) feed the **three-strikes pause**.
 - **Autoland** (per-repo, default-off, forge-only) reads the PR's verdict state — lander verdicts plus human native reviews — to feed the fleet **spawn pass** a **lander run** candidate that validates a **claim**'s PR and a **fix run** candidate that re-engages a rejected one on the existing claim branch; the fix run's **done-signal** is an explicit `labctl pr rerequest`, not a fresh PR, because the claim's PR already exists.

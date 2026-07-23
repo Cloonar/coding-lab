@@ -57,8 +57,108 @@ func mustListen(t *testing.T, path string) net.Listener {
 }
 
 func TestSocketPath(t *testing.T) {
-	if got, want := SocketPath("/var/lib/lab"), filepath.Join("/var/lib/lab", "agent.sock"); got != want {
+	// The socket lives inside its own mountable directory (issue #205): the
+	// container runner binds <state>/agent, and the server re-creates the
+	// socket inside it across restarts.
+	if got, want := SocketPath("/var/lib/lab"), filepath.Join("/var/lib/lab", "agent", "agent.sock"); got != want {
 		t.Errorf("SocketPath = %q, want %q", got, want)
+	}
+	if got, want := SocketDir("/var/lib/lab"), filepath.Join("/var/lib/lab", "agent"); got != want {
+		t.Errorf("SocketDir = %q, want %q", got, want)
+	}
+	if got, want := SocketPath("/var/lib/lab"), filepath.Join(SocketDir("/var/lib/lab"), "agent.sock"); got != want {
+		t.Errorf("SocketPath = %q, want it inside SocketDir (%q)", got, want)
+	}
+}
+
+// ListenSocket creates the socket's parent directory itself, 0700 — callers
+// (and a container about to mount it) never need a separate mkdir.
+func TestListenSocketCreatesSocketDir(t *testing.T) {
+	state := socketDir(t)
+	path := SocketPath(state)
+	mustListen(t, path)
+
+	fi, err := os.Stat(SocketDir(state))
+	if err != nil {
+		t.Fatalf("stat socket dir: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("socket dir is not a directory: %v", fi.Mode())
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("socket dir perm = %o, want 0700", perm)
+	}
+}
+
+// LegacySocketSymlink pins the pre-#205 path: <state>/agent.sock must resolve
+// to the relocated socket so sessions spawned by an older server (whose
+// LAB_URL still names the old path) keep reaching the API after the upgrade.
+func TestLegacySocketSymlink(t *testing.T) {
+	t.Run("fresh state dir", func(t *testing.T) {
+		state := socketDir(t)
+		mustListen(t, SocketPath(state))
+		if err := LegacySocketSymlink(state); err != nil {
+			t.Fatalf("LegacySocketSymlink: %v", err)
+		}
+		assertLegacyLink(t, state)
+	})
+
+	t.Run("replaces the pre-upgrade socket file", func(t *testing.T) {
+		state := socketDir(t)
+		// A pre-#205 server's socket (or its crash leftover) sits at the old
+		// path; the symlink must replace it, not fail on it.
+		old, err := net.Listen("unix", filepath.Join(state, "agent.sock"))
+		if err != nil {
+			t.Fatalf("old-path listen: %v", err)
+		}
+		old.(*net.UnixListener).SetUnlinkOnClose(false)
+		if err := old.Close(); err != nil {
+			t.Fatalf("old-path close: %v", err)
+		}
+		mustListen(t, SocketPath(state))
+		if err := LegacySocketSymlink(state); err != nil {
+			t.Fatalf("LegacySocketSymlink: %v", err)
+		}
+		assertLegacyLink(t, state)
+	})
+
+	t.Run("idempotent across restarts", func(t *testing.T) {
+		state := socketDir(t)
+		mustListen(t, SocketPath(state))
+		for i := 0; i < 2; i++ {
+			if err := LegacySocketSymlink(state); err != nil {
+				t.Fatalf("LegacySocketSymlink (call %d): %v", i+1, err)
+			}
+		}
+		assertLegacyLink(t, state)
+	})
+}
+
+// assertLegacyLink asserts <state>/agent.sock is a symlink whose relative
+// target names the relocated socket and whose resolution reaches it.
+func assertLegacyLink(t *testing.T, state string) {
+	t.Helper()
+	link := filepath.Join(state, "agent.sock")
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat legacy link: %v", err)
+	}
+	if fi.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("legacy path mode = %v, want a symlink", fi.Mode())
+	}
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if want := filepath.Join("agent", "agent.sock"); target != want {
+		t.Errorf("legacy link target = %q, want %q (relative)", target, want)
+	}
+	resolved, err := os.Stat(link)
+	if err != nil {
+		t.Fatalf("stat through legacy link: %v", err)
+	}
+	if resolved.Mode()&fs.ModeSocket == 0 {
+		t.Errorf("legacy link resolves to mode %v, want the socket", resolved.Mode())
 	}
 }
 
@@ -68,6 +168,11 @@ func TestSocketPath(t *testing.T) {
 func TestListenSocketReplacesStaleFile(t *testing.T) {
 	t.Run("regular file", func(t *testing.T) {
 		path := SocketPath(socketDir(t))
+		// Pre-create the socket dir: the stale artifact predates this call to
+		// ListenSocket, which is what normally creates the dir.
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir socket dir: %v", err)
+		}
 		if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
 			t.Fatalf("write stale file: %v", err)
 		}
@@ -76,6 +181,9 @@ func TestListenSocketReplacesStaleFile(t *testing.T) {
 
 	t.Run("orphaned socket", func(t *testing.T) {
 		path := SocketPath(socketDir(t))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir socket dir: %v", err)
+		}
 		// Simulate a crash: leave the socket file behind by disabling the
 		// unlink-on-close a clean shutdown relies on.
 		orphan, err := net.Listen("unix", path)

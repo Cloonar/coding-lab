@@ -18,28 +18,32 @@ func baseEnv() map[string]string {
 
 func TestParse(t *testing.T) {
 	defaults := Config{
-		Addr:            ":8080",
-		StateDir:        "/home/u/.local/state/lab",
-		DB:              "sqlite:/home/u/.local/state/lab/lab.db",
-		MasterKeyFile:   "/home/u/.local/state/lab/master.key",
-		VAPIDKeyFile:    "/home/u/.local/state/lab/vapid.key",
-		ProviderBin:     map[string]string{},
-		ProviderConfig:  map[string]string{},
-		TmuxBin:         "tmux",
-		GitBin:          "git",
-		PrlimitBin:      "prlimit",
-		MaxInstances:    6,
-		SessionNofile:   16384,
-		ProxyAuth:       false,
-		ProxyAuthHeader: "Remote-User",
-		BaseURL:         "",
-		AgentURL:        "",
+		Addr:                 ":8080",
+		StateDir:             "/home/u/.local/state/lab",
+		DB:                   "sqlite:/home/u/.local/state/lab/lab.db",
+		MasterKeyFile:        "/home/u/.local/state/lab/master.key",
+		VAPIDKeyFile:         "/home/u/.local/state/lab/vapid.key",
+		ProviderBin:          map[string]string{},
+		ProviderConfig:       map[string]string{},
+		TmuxBin:              "tmux",
+		GitBin:               "git",
+		PrlimitBin:           "prlimit",
+		PodmanBin:            "podman",
+		ContainerImage:       "",
+		ContainerToolsImages: map[string]string{},
+		MaxInstances:         6,
+		SessionNofile:        16384,
+		ProxyAuth:            false,
+		ProxyAuthHeader:      "Remote-User",
+		BaseURL:              "",
+		AgentURL:             "",
 	}
 
-	// with copies defaults and applies mut. NOTE: ProviderBin/ProviderConfig
-	// are shared map references with defaults, so a mutation must ASSIGN a
-	// fresh map (c.ProviderBin = map[...]{...}), never index into the shared
-	// one, or it would corrupt defaults for every later test.
+	// with copies defaults and applies mut. NOTE: ProviderBin/ProviderConfig/
+	// ContainerToolsImages are shared map references with defaults, so a
+	// mutation must ASSIGN a fresh map (c.ProviderBin = map[...]{...}), never
+	// index into the shared one, or it would corrupt defaults for every later
+	// test.
 	with := func(mut func(*Config)) Config {
 		c := defaults
 		mut(&c)
@@ -135,12 +139,91 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "binary path overrides",
-			args: []string{"--tmux", "/usr/bin/tmux", "--git", "/usr/bin/git", "--prlimit", "/usr/bin/prlimit"},
+			args: []string{"--tmux", "/usr/bin/tmux", "--git", "/usr/bin/git", "--prlimit", "/usr/bin/prlimit", "--podman", "/usr/bin/podman"},
 			want: with(func(c *Config) {
 				c.TmuxBin = "/usr/bin/tmux"
 				c.GitBin = "/usr/bin/git"
 				c.PrlimitBin = "/usr/bin/prlimit"
+				c.PodmanBin = "/usr/bin/podman"
 			}),
+		},
+
+		// --- containerized runner knobs (issue #205, refs per ADR-0051) ---
+		{
+			name: "container-image flag lands in Config",
+			args: []string{"--container-image", "docker.io/library/debian:stable-slim"},
+			want: with(func(c *Config) { c.ContainerImage = "docker.io/library/debian:stable-slim" }),
+		},
+		{
+			name: "container-image env lands in Config",
+			env:  map[string]string{"LAB_CONTAINER_IMAGE": "docker.io/library/alpine:3"},
+			want: with(func(c *Config) { c.ContainerImage = "docker.io/library/alpine:3" }),
+		},
+		{
+			name: "container-image flag beats env",
+			args: []string{"--container-image", "docker.io/library/debian:stable-slim"},
+			env:  map[string]string{"LAB_CONTAINER_IMAGE": "docker.io/library/alpine:3"},
+			want: with(func(c *Config) { c.ContainerImage = "docker.io/library/debian:stable-slim" }),
+		},
+		{
+			name: "container-tools-image flag parses one pair",
+			args: []string{"--container-tools-image", "claude-code=git.cloonar.com/cloonar/agent-tools@sha256:aa"},
+			want: with(func(c *Config) {
+				c.ContainerToolsImages = map[string]string{"claude-code": "git.cloonar.com/cloonar/agent-tools@sha256:aa"}
+			}),
+		},
+		{
+			name:        "container-tools-image flag parses comma-separated pairs",
+			args:        []string{"--container-tools-image", "claude-code=reg/agent-tools@sha256:aa, codex=reg/agent-tools@sha256:bb"},
+			providerIDs: []string{"claude-code", "codex"},
+			want: with(func(c *Config) {
+				c.ContainerToolsImages = map[string]string{
+					"claude-code": "reg/agent-tools@sha256:aa",
+					"codex":       "reg/agent-tools@sha256:bb",
+				}
+			}),
+		},
+		{
+			name: "container-tools-image env lands in Config",
+			env:  map[string]string{"LAB_CONTAINER_TOOLS_IMAGE": "claude-code=reg/agent-tools@sha256:ee"},
+			want: with(func(c *Config) {
+				c.ContainerToolsImages = map[string]string{"claude-code": "reg/agent-tools@sha256:ee"}
+			}),
+		},
+		{
+			// The flag value replaces the env value wholesale (single-value
+			// pick precedence) — no per-entry merge like the -provider-* maps.
+			name: "container-tools-image flag beats env",
+			args: []string{"--container-tools-image", "claude-code=reg/agent-tools@sha256:aa"},
+			env:  map[string]string{"LAB_CONTAINER_TOOLS_IMAGE": "claude-code=reg/agent-tools@sha256:ee"},
+			want: with(func(c *Config) {
+				c.ContainerToolsImages = map[string]string{"claude-code": "reg/agent-tools@sha256:aa"}
+			}),
+		},
+		{
+			name:    "container-tools-image pair without = is malformed",
+			args:    []string{"--container-tools-image", "claude-code"},
+			wantErr: "want provider=ref",
+		},
+		{
+			name:    "container-tools-image empty ref is malformed",
+			args:    []string{"--container-tools-image", "claude-code="},
+			wantErr: "want provider=ref",
+		},
+		{
+			name:    "container-tools-image unknown provider errors and names the id",
+			args:    []string{"--container-tools-image", "bogus=reg/agent-tools@sha256:aa"},
+			wantErr: "bogus",
+		},
+		{
+			name:    "container-tools-image duplicate provider errors",
+			args:    []string{"--container-tools-image", "claude-code=reg/a@sha256:aa,claude-code=reg/b@sha256:bb"},
+			wantErr: "set more than once",
+		},
+		{
+			name:    "container-tools-image env is validated like the flag",
+			env:     map[string]string{"LAB_CONTAINER_TOOLS_IMAGE": "bogus=reg/agent-tools@sha256:aa"},
+			wantErr: "bogus",
 		},
 
 		// --- generic per-provider host overrides (issue #78) ---

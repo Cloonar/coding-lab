@@ -248,6 +248,12 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		{"unknown provider", map[string]any{"provider_default": "ghost"}},
 		{"blank provider", map[string]any{"provider_default": ""}},
 		{"afk unknown provider", map[string]any{"spawn_provider_default_afk": "ghost"}},
+		// The container resource-limit defaults (issue #205): the two integer
+		// keys floor at 1, and container_memory must match podman's --memory
+		// value grammar.
+		{"container pids zero", map[string]any{"container_pids": 0}},
+		{"container nofile zero", map[string]any{"container_nofile": 0}},
+		{"bad container memory", map[string]any{"container_memory": "bogus"}},
 		{"unknown spawn option key", map[string]any{"spawn_options_afk": map[string]any{"warp_drive": "true"}}},
 		{"bad spawn option value", map[string]any{"spawn_options_afk": map[string]any{"ultracode": "maybe"}}},
 		{"spawn options not an object", map[string]any{"spawn_options_afk": "nope"}},
@@ -455,5 +461,46 @@ func TestAPI_SettingsProviderDefaultsRoundtrip(t *testing.T) {
 	wantStatus(t, resp, http.StatusOK)
 	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingSpawnProviderDefaultAFK] != "" {
 		t.Errorf("cleared spawn_provider_default_afk = %v, want empty (inherit)", got[store.SettingSpawnProviderDefaultAFK])
+	}
+}
+
+// The container resource-limit defaults (issue #205): seeded 8g/4096/16384,
+// typed as JSON numbers for the two integer keys, and all three round-trip
+// through a PATCH. Floor/grammar violations are covered by
+// TestAPI_SettingsPatchValidation.
+func TestAPI_SettingsContainerLimitsRoundtrip(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingContainerMemory] != "8g" {
+		t.Errorf("container_memory = %v, want seeded 8g", got[store.SettingContainerMemory])
+	}
+	if got[store.SettingContainerPids] != float64(4096) {
+		t.Errorf("container_pids = %v, want seeded 4096", got[store.SettingContainerPids])
+	}
+	if got[store.SettingContainerNofile] != float64(16384) {
+		t.Errorf("container_nofile = %v, want seeded 16384", got[store.SettingContainerNofile])
+	}
+
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingContainerMemory: "16g",
+		store.SettingContainerPids:   2048,
+		store.SettingContainerNofile: 8192,
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got = settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingContainerMemory] != "16g" {
+		t.Errorf("container_memory = %v, want 16g", got[store.SettingContainerMemory])
+	}
+	if got[store.SettingContainerPids] != float64(2048) || got[store.SettingContainerNofile] != float64(8192) {
+		t.Errorf("container_pids/nofile = %v/%v, want 2048/8192", got[store.SettingContainerPids], got[store.SettingContainerNofile])
+	}
+
+	// Persisted where the container-runner config would read them.
+	if v, err := x.st.GetString(context.Background(), store.SettingContainerMemory, ""); err != nil || v != "16g" {
+		t.Errorf("stored container_memory = %q (%v), want 16g", v, err)
 	}
 }

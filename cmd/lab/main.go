@@ -31,6 +31,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
@@ -83,7 +84,7 @@ Flags (env overrides in parentheses; flag > env > default):
   -base-url string         external base URL, e.g. https://lab.example.com (LAB_BASE_URL)
   -agent-url string        session-facing base URL handed to labctl as LAB_URL,
                            http(s) or unix:///abs/path; defaults to
-                           unix://<state-dir>/agent.sock (LAB_AGENT_URL)
+                           unix://<state-dir>/agent/agent.sock (LAB_AGENT_URL)
 `
 
 func main() {
@@ -251,6 +252,41 @@ func run() int {
 		Logger:       logger,
 	})
 
+	// Container runner preflight (issue #205): with any container config
+	// present, verify the host in a startup GOROUTINE — an unresolved tools
+	// ref means an image pull, possibly minutes, and boot must not block on
+	// it — and publish the verdict through an atomic gate. Container spawns
+	// consult the gate per launch: refused with "retry in a moment" until the
+	// verdict lands, with the full failure list if the host cannot serve, and
+	// allowed once OK — no restart needed for the unblock. containerPreflight
+	// stays nil when no container config exists: that nil IS the "container
+	// mode structurally unavailable" signal for instance/afk/reconcile, and
+	// it also disables their podman-rm backstops on host-only deployments.
+	var containerPreflight func() (podmanx.Result, bool)
+	if cfg.ContainerImage != "" || len(cfg.ContainerToolsImages) > 0 {
+		gate := &podmanx.Gate{}
+		containerPreflight = gate.Result
+		go func() {
+			res := podmanx.Preflight(ctx, podmanx.PreflightConfig{
+				PodmanBin:   cfg.PodmanBin,
+				Image:       cfg.ContainerImage,
+				ToolsImages: cfg.ContainerToolsImages,
+			}, podmanx.RealDeps())
+			gate.Set(res)
+			if res.OK() {
+				logger.Info("container preflight passed", "component", "main", "podman_version", res.Version)
+				return
+			}
+			// Every failure logged individually — the operator fixes the host
+			// once, not one restart per failure (podmanx.Preflight collects
+			// them all for the same reason).
+			for _, f := range res.Failures {
+				logger.Warn("container preflight failed", "component", "main",
+					"check", f.Check, "detail", f.Detail, "hint", f.Hint)
+			}
+		}()
+	}
+
 	// M3 instance/AFK stack. The claude-code adapter derives its default global
 	// config path from HOME (issue #78 / ADR-0034), so with HOME unset AND no
 	// explicit -provider-config claude-code=… entry there is nothing to hand it:
@@ -318,6 +354,14 @@ func run() int {
 			WorktreeRoot: worktreeRoot,
 			LabURL:       labURL(cfg),
 			CaptureCtx:   ctx,
+			// Container runner wiring (issue #205): the spawn seam that turns a
+			// Runner=container repo's pane command into `podman run`, gated on
+			// the preflight verdict above (nil = structurally unavailable).
+			PodmanBin:            cfg.PodmanBin,
+			ContainerImage:       cfg.ContainerImage,
+			ContainerToolsImages: cfg.ContainerToolsImages,
+			ContainerPreflight:   containerPreflight,
+			AgentSockDir:         agentapi.SocketDir(cfg.StateDir),
 		})
 		if err != nil {
 			logger.Error("building instance service", "component", "main", "err", err)
@@ -335,6 +379,10 @@ func run() int {
 			ReposDir:     reposDir,
 			ArmCapture:   instanceSvc.ArmCapture,
 			AFKRunEnded:  m.AFKRunEnded,
+			// Container backstops (issue #205): the Discard kill's podman rm
+			// and the startup orphaned-container sweep.
+			PodmanBin:          cfg.PodmanBin,
+			ContainerPreflight: containerPreflight,
 		})
 		if err != nil {
 			logger.Error("building reconcile service", "component", "main", "err", err)
@@ -350,7 +398,6 @@ func run() int {
 			Runner:       runner,
 			Trackers:     trackerReg,
 			Instances:    instanceSvc,
-			Materializer: mat,
 			Homes:        homes,
 			Bus:          bus,
 			Guard:        guard,
@@ -359,6 +406,10 @@ func run() int {
 			WorktreeRoot: worktreeRoot,
 			Sweep:        reconcileSvc.RuntimeSweep,
 			Metrics:      m,
+			// Container backstops (issue #205): podman rm behind the engine's
+			// session kills (neutral Stop, reap, zombie drain).
+			PodmanBin:          cfg.PodmanBin,
+			ContainerPreflight: containerPreflight,
 			// Web push on the reaper's done-signal (issue #100): a closure over
 			// the push sender so afk never imports push. Broadcast is
 			// async/fire-and-forget, so the reaper never blocks on gateway I/O.
@@ -376,12 +427,17 @@ func run() int {
 		// It self-syncs its tailer set to the active runs off the event bus,
 		// and feeds the instance list its conversational-state field.
 		chatSvc, err = chat.New(chat.Options{
-			Store:      st,
-			Providers:  providerReg,
-			Bus:        bus,
-			Logger:     logger,
-			Ctx:        ctx,
-			RuntimeDir: mat.Dir(),
+			Store:     st,
+			Providers: providerReg,
+			Bus:       bus,
+			Logger:    logger,
+			Ctx:       ctx,
+			// A run's live-signal spools live in its PRIVATE runtime dir
+			// (issue #205): RuntimePath is pure, so it is handed straight in
+			// as the closure the tailer/read paths resolve per run — the
+			// same idiom as HomeFor below. The global runtime dir no longer
+			// carries any run-scoped file.
+			RuntimeDirFor: homes.RuntimePath,
 			// Web push on the needs-input/question edge (issue #99): a closure
 			// over the push sender so chat never imports push. Broadcast is
 			// async/fire-and-forget, so the tailer's tick loop never blocks on
@@ -562,14 +618,23 @@ func run() int {
 
 	// The agent unix socket (issue #201): the SAME run-token-authenticated
 	// handler the TCP listener mounts under /agent/v1, served on a second
-	// listener at <state-dir>/agent.sock. It is the default LAB_URL transport
-	// (see labURL), so session traffic never hairpins through whatever proxy
-	// fronts the TCP address. No CloseStreams hook: the agent API has no SSE.
+	// listener at <state-dir>/agent/agent.sock (its own mountable dir since
+	// issue #205 — see agentapi.SocketDir). It is the default LAB_URL
+	// transport (see labURL), so session traffic never hairpins through
+	// whatever proxy fronts the TCP address. No CloseStreams hook: the agent
+	// API has no SSE.
 	sock := agentapi.SocketPath(cfg.StateDir)
 	agentLn, err := agentapi.ListenSocket(sock)
 	if err != nil {
 		logger.Error("listening on agent socket", "component", "main", "path", sock, "err", err)
 		return 1
+	}
+	// Back-compat symlink at the pre-#205 path <state>/agent.sock: sessions
+	// spawned by an older server carry that path in LAB_URL and outlive the
+	// upgrade (tmux survives restarts). A warn, never fatal — only those
+	// pre-upgrade sessions depend on it.
+	if err := agentapi.LegacySocketSymlink(cfg.StateDir); err != nil {
+		logger.Warn("installing legacy agent.sock symlink", "component", "main", "err", err)
 	}
 	agentSrv := &http.Server{
 		Handler:           agent.Handler(),

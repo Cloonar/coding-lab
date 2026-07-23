@@ -438,7 +438,7 @@ func newFixtureWrapped(t *testing.T, pattern string, wrap func(*tmuxx.Fake) tmux
 	trackers := newFakeResolver()
 	svc, err := New(Options{
 		Store: st, Git: git, Runner: svcRunner, Trackers: trackers,
-		Instances: inst, Materializer: mat, Homes: homes, Bus: bus, Guard: guard,
+		Instances: inst, Homes: homes, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
 	})
 	if err != nil {

@@ -907,7 +907,7 @@ func newCycleWorld(t *testing.T) *cycleWorld {
 	notes := &cycleNotes{}
 	svc, err := afk.New(afk.Options{
 		Store: st, Git: git, Runner: runner, Trackers: trackers,
-		Instances: inst, Materializer: mat, Homes: homes, Bus: bus, Guard: guard,
+		Instances: inst, Homes: homes, Bus: bus, Guard: guard,
 		ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env, Now: clock.Now,
 		Notify: notes.record,
 	})

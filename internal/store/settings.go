@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -75,7 +76,33 @@ const (
 	// (spawn_model_default → spawn_model_default_afk), and there is no base
 	// prompt to override — so this matches the suffix-less afk_budget_minutes.
 	SettingAFKPrompt = "afk_prompt"
+
+	// Container resource-limit defaults (issue #205 / the 2026-07-22
+	// container-isolation design): the global floor under repos.container_memory
+	// /container_pids/container_nofile, applied to every container-mode run that
+	// doesn't set its own per-repo override. The seeded values
+	// (--memory=8g --pids-limit=4096 --ulimit nofile=16384:16384) are the ones
+	// the design grilled and pinned; unlike the AFK-override keys above these ARE
+	// seeded — a container run always needs a concrete limit, there is no lower
+	// layer to inherit from.
+	SettingContainerMemory = "container_memory"
+	SettingContainerPids   = "container_pids"
+	SettingContainerNofile = "container_nofile"
 )
+
+// containerMemoryRe is podman's --memory value grammar (issue #205): a
+// positive integer, optionally suffixed with one b/k/m/g unit letter
+// (case-insensitive) — e.g. "8g", "512m", "1073741824". Shared by the
+// repo-level container_memory PATCH (reposvc.UpdateSettings) and the global
+// container_memory setting PATCH (httpapi settings), so the per-repo override
+// and the global default can never validate against two different grammars.
+var containerMemoryRe = regexp.MustCompile(`^[1-9][0-9]*[bkmgBKMG]?$`)
+
+// ValidContainerMemory reports whether s matches podman's --memory value
+// grammar (see containerMemoryRe).
+func ValidContainerMemory(s string) bool {
+	return containerMemoryRe.MatchString(s)
+}
 
 // GetSetting returns the raw value for key, or ErrNotFound.
 func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
@@ -188,7 +215,10 @@ func (s *Store) GetBool(ctx context.Context, key string, def bool) (bool, error)
 // empty-means-inherit row (the degraded no-provider boot). spawn_remote_default
 // seeds "false" (issue #163): a boolean knob has no blank-means-unset spelling,
 // so the base layer must state the default out loud — its AFK override stays
-// unseeded, like the other _afk keys.
+// unseeded, like the other _afk keys. The container limit trio (issue #205)
+// is seeded the same way and for the same reason: a container-mode spawn
+// always needs a concrete --memory/--pids-limit/--ulimit nofile, so there is
+// no lower layer for "absent" to fall back to.
 func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defaultProvider string) error {
 	defaults := map[string]string{
 		SettingSpawnModelDefault:    "opus[1m]",
@@ -202,6 +232,9 @@ func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defau
 		SettingSweepIntervalMinutes: "10",
 		SettingGitAuthorName:        "",
 		SettingGitAuthorEmail:       "",
+		SettingContainerMemory:      "8g",
+		SettingContainerPids:        "4096",
+		SettingContainerNofile:      "16384",
 	}
 	for key, value := range defaults {
 		_, err := s.db.ExecContext(ctx, s.rebind(

@@ -134,7 +134,7 @@ func newAFKServer(t *testing.T, mods ...func(*afkConfig)) *afkTestServer {
 			})
 		afkSvc, err := afk.New(afk.Options{
 			Store: st, Git: git, Runner: runner, Trackers: trackerReg,
-			Instances: inst, Materializer: mat, Homes: homes, Bus: o.Bus, Logger: logx.New(io.Discard),
+			Instances: inst, Homes: homes, Bus: o.Bus, Logger: logx.New(io.Discard),
 			Guard: guard, ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env,
 			Now: func() time.Time { return afkClock },
 		})

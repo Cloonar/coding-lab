@@ -1,21 +1,23 @@
 // Package instance owns the manual instance lifecycle (design §1; brief M3):
 // Start (the synchronous fail-loud spawn sequence with full rollback and the
 // starting-set race guard), Stop (guarded teardown + terminal outcome + token
-// and credential cleanup), and StopAll. It codes against the real core seams —
-// gitx worktrees, the tmuxx SessionRunner, the provider registry, the vault
-// materializer, and startguard — and is the single owner of runs-row creation
-// and the run.changed SSE event on the manual path. AFK-labeled sessions are a
-// seam delegated to the M5 AFK engine (Stop refuses them with a 501-mapped
-// error in M3).
+// deletion + per-run tree wipe), and StopAll. It codes against the real core
+// seams — gitx worktrees, the tmuxx SessionRunner, the provider registry, the
+// vault materializer, and startguard — and is the single owner of runs-row
+// creation and the run.changed SSE event on the manual path. AFK-labeled
+// sessions are a seam delegated to the M5 AFK engine (Stop refuses them with
+// a 501-mapped error in M3).
 //
 // The Start sequence is v0-pinned (sessions-spawn + git-worktrees port specs):
 // cap check → FORCE auth refresh (never trust the 30s cache before a spawn) →
-// label/branch/worktree derivation → startguard.Mark → gitx.AddWorktree
-// (fail-loud fetch, no fallback base) → seed workspace → create runs row + mint
-// run token → tmux Start → StampOpened → async deep-link capture → run.changed.
+// label/branch/worktree derivation → startguard.Mark → per-run tree + per-run
+// credential materialization (issues #202/#205) → gitx.AddWorktree (fail-loud
+// fetch, no fallback base) → seed workspace → create runs row + mint run
+// token → tmux Start → StampOpened → async deep-link capture → run.changed.
 // Any failure after worktree creation rolls back to the exact pre-Start state
-// (RemoveWorktree + force DeleteBranch + delete row/token + credential cleanup);
-// a failure before worktree creation rolls back nothing.
+// (RemoveWorktree + force DeleteBranch + delete row/token + per-run tree
+// wipe, which removes the run's credential files and dialog settings); a
+// failure before worktree creation rolls back nothing but the per-run tree.
 package instance
 
 import (
@@ -28,6 +30,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
+	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
@@ -70,21 +73,29 @@ type WorkspaceSeeder interface {
 // Options configures a Service. Everything except Logger, GitEnv, CaptureCtx,
 // Seeder, and Now is required.
 type Options struct {
-	Store        *store.Store
-	Git          *gitx.Engine
-	Runner       tmuxx.SessionRunner
-	Providers    *provider.Registry
-	Vault        *vault.Vault
+	Store     *store.Store
+	Git       *gitx.Engine
+	Runner    tmuxx.SessionRunner
+	Providers *provider.Registry
+	Vault     *vault.Vault
+
+	// Materializer is the GLOBAL runtime materializer (<state>/runtime).
+	// Since issue #205 the launch path materializes run credentials into a
+	// PER-RUN materializer over Homes.RuntimePath(runID) instead; the global
+	// one remains only as the seed source for each run's known_hosts
+	// (SeedKnownHosts — clone/fetch ops keep accumulating TOFU pins there).
 	Materializer *vault.Materializer
 	Guard        *startguard.Guard
 	Bus          *events.Bus
 	Logger       *slog.Logger
 
-	// Homes owns <state>/instances — the per-run private HOME lifecycle (issue
-	// #202): Launch materializes a run's home, Stop/rollback wipes it, and the
-	// boot/runtime sweeps GC orphans. Required — the launch path always
-	// materializes a home so the spawned CLI's HOME is the run's private store,
-	// never the machine's master ~/.claude*/~/.codex.
+	// Homes owns <state>/instances — the per-run tree lifecycle (issues
+	// #202/#205): Launch materializes a run's home + runtime dirs,
+	// Stop/rollback wipes the tree, and the boot/runtime sweeps GC orphans.
+	// Required — the launch path always materializes the tree so the spawned
+	// CLI's HOME is the run's private store (never the machine's master
+	// ~/.claude*/~/.codex) and its git credential files live in the run's
+	// private runtime dir (never the global one).
 	Homes *instancehome.Manager
 
 	// ReposDir is <state>/repos — the parent of every bare reference clone
@@ -96,8 +107,44 @@ type Options struct {
 	// LabURL is the value handed to spawned sessions as LAB_URL so labctl can
 	// reach the agent API. It comes from labURL()'s precedence (issue #201):
 	// the dedicated agent URL if set, else the agent unix socket
-	// unix://<state-dir>/agent.sock.
+	// unix://<state-dir>/agent/agent.sock.
 	LabURL string
+
+	// --- Container runner wiring (issue #205). All optional: with
+	// ContainerPreflight nil, container mode is structurally unavailable —
+	// a Runner=container repo's spawn is refused and the podman rm backstops
+	// are no-ops — and every host-mode path is byte-identical to before.
+
+	// PodmanBin is the podman binary (--podman) the container pane argv and
+	// the rm backstop shell out to.
+	PodmanBin string
+	// ContainerImage is the operator's dev image (--container-image) every
+	// containerized session runs in. Deliberately no default: ADR-0051 makes
+	// the container userland the operator's, so absence means "refuse", not
+	// "pick one" (the preflight owns that refusal).
+	ContainerImage string
+	// ContainerToolsImages maps provider id → agent-tools image ref
+	// (--container-tools-image, digest-pinned per ADR-0051), the read-only
+	// /opt/lab injection. A provider without an entry cannot spawn in
+	// container mode — its CLI would not exist inside the container.
+	ContainerToolsImages map[string]string
+	// PodmanRun is the exec seam the rm backstop runs podman through; nil →
+	// podmanx.ExecRunner(). Injectable so container Stop/rollback tests
+	// record argv instead of spawning podman.
+	PodmanRun podmanx.CmdRunner
+	// ContainerPreflight reads the startup preflight verdict (podmanx.Gate's
+	// Result method): (r, true) once the boot preflight finished, (_, false)
+	// while it is still running. nil — the cmd/lab wiring when no container
+	// config is present — means container mode is structurally unavailable on
+	// this server. Consulted per spawn, so a preflight finishing after boot
+	// unblocks container spawns without a restart.
+	ContainerPreflight func() (podmanx.Result, bool)
+	// AgentSockDir is <state>/agent (agentapi.SocketDir) — the directory
+	// holding agent.sock, bind-mounted whole into every container so the
+	// socket survives a server restart (a bind of the FILE would pin the dead
+	// inode; see agentapi.SocketDir). Also the anchor of the container-side
+	// LAB_URL rewrite: a container always talks over this mounted socket.
+	AgentSockDir string
 
 	// GitEnv is prepended to every git subprocess (before the per-credential
 	// env). Production leaves it nil; tests pass testutil.HermeticGitEnv so
@@ -136,6 +183,16 @@ type Service struct {
 	gitEnv       []string
 	captureCtx   context.Context
 	now          func() time.Time
+
+	// Container runner wiring (issue #205; see the Options fields). podmanRun
+	// is always non-nil (New defaults it); containerPreflight nil = container
+	// mode structurally unavailable.
+	podmanBin            string
+	containerImage       string
+	containerToolsImages map[string]string
+	podmanRun            podmanx.CmdRunner
+	containerPreflight   func() (podmanx.Result, bool)
+	agentSockDir         string
 
 	// afkStop is the M5 AFK engine's neutral-Stop delegation (design §4c),
 	// wired once at startup via SetAFKStopper; nil refuses AFK stops.
@@ -200,6 +257,10 @@ func New(o Options) (*Service, error) {
 	if seed == nil {
 		seed = seeder.New()
 	}
+	podmanRun := o.PodmanRun
+	if podmanRun == nil {
+		podmanRun = podmanx.ExecRunner()
+	}
 	return &Service{
 		store:        o.Store,
 		git:          o.Git,
@@ -218,6 +279,13 @@ func New(o Options) (*Service, error) {
 		gitEnv:       o.GitEnv,
 		captureCtx:   captureCtx,
 		now:          now,
+
+		podmanBin:            o.PodmanBin,
+		containerImage:       o.ContainerImage,
+		containerToolsImages: o.ContainerToolsImages,
+		podmanRun:            podmanRun,
+		containerPreflight:   o.ContainerPreflight,
+		agentSockDir:         o.AgentSockDir,
 	}, nil
 }
 

@@ -94,6 +94,10 @@ export function baseRepo(): Repo {
     lander_provider: null,
     lander_model: null,
     lander_effort: null,
+    runner: 'host',
+    container_memory: null,
+    container_pids: null,
+    container_nofile: null,
   };
 }
 

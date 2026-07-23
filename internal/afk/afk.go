@@ -44,11 +44,11 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
-	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
 
 // SSE event types this engine publishes (brief §8.1). Each service owns its
@@ -89,16 +89,28 @@ type Options struct {
 	// an option any more (issue #66): the engine resolves each launch's
 	// effective provider through Instances.ResolveProvider — one skip-layer
 	// resolution rule, owned by the instance service.
-	Trackers     TrackerResolver
-	Instances    *instance.Service
-	Materializer *vault.Materializer
+	Trackers  TrackerResolver
+	Instances *instance.Service
 	// Homes is the per-run private HOME lifecycle (issue #202) — the SAME
 	// *instancehome.Manager instance/ and reconcile/ are built with. The reaper
-	// and the neutral Stop wipe a reaped/stopped run's home through it, mirroring
-	// the credential cleanup they already do.
+	// and the neutral Stop wipe a reaped/stopped run's tree through it; since
+	// issue #205 that wipe also subsumes the credential cleanup (the run's
+	// materialized credential files live inside the per-run tree, so afk no
+	// longer carries a vault.Materializer at all).
 	Homes  *instancehome.Manager
 	Bus    *events.Bus
 	Logger *slog.Logger
+
+	// Container-runner backstop wiring (issue #205), mirroring
+	// instance.Options: PodmanBin + PodmanRun (nil → podmanx.ExecRunner) run
+	// the `podman rm` that backs every session kill this engine performs
+	// (neutral Stop, reap, zombie drain), and ContainerPreflight non-nil is
+	// the "container mode is wired on this server" signal gating those
+	// backstops. The engine never spawns containers itself — that is
+	// instance.Launch's seam — it only reaps them.
+	PodmanBin          string
+	PodmanRun          podmanx.CmdRunner
+	ContainerPreflight func() (podmanx.Result, bool)
 
 	// Guard is the shared starting-set race guard (design §4b) — the SAME
 	// *startguard.Guard instance/ and reconcile/ are built with. The reaper
@@ -145,11 +157,17 @@ type Service struct {
 	runner    tmuxx.SessionRunner
 	trackers  TrackerResolver
 	instances *instance.Service
-	mat       *vault.Materializer
 	homes     *instancehome.Manager
 	bus       *events.Bus
 	guard     *startguard.Guard
 	log       *slog.Logger
+
+	// Container backstop wiring (issue #205; see the Options fields).
+	// podmanRun is always non-nil (New defaults it); containerPreflight nil =
+	// container mode not wired, backstops no-op.
+	podmanBin          string
+	podmanRun          podmanx.CmdRunner
+	containerPreflight func() (podmanx.Result, bool)
 
 	reposDir     string
 	worktreeRoot string
@@ -193,8 +211,6 @@ func New(o Options) (*Service, error) {
 		return nil, fmt.Errorf("afk: Options.Trackers is required")
 	case o.Instances == nil:
 		return nil, fmt.Errorf("afk: Options.Instances is required")
-	case o.Materializer == nil:
-		return nil, fmt.Errorf("afk: Options.Materializer is required")
 	case o.Homes == nil:
 		return nil, fmt.Errorf("afk: Options.Homes is required")
 	case o.Bus == nil:
@@ -214,24 +230,30 @@ func New(o Options) (*Service, error) {
 	if now == nil {
 		now = time.Now
 	}
+	podmanRun := o.PodmanRun
+	if podmanRun == nil {
+		podmanRun = podmanx.ExecRunner()
+	}
 	return &Service{
-		store:        o.Store,
-		git:          o.Git,
-		runner:       o.Runner,
-		trackers:     o.Trackers,
-		instances:    o.Instances,
-		mat:          o.Materializer,
-		homes:        o.Homes,
-		bus:          o.Bus,
-		guard:        o.Guard,
-		log:          logger,
-		reposDir:     o.ReposDir,
-		worktreeRoot: o.WorktreeRoot,
-		gitEnv:       o.GitEnv,
-		sweep:        o.Sweep,
-		metrics:      o.Metrics,
-		notify:       o.Notify,
-		now:          now,
+		store:              o.Store,
+		git:                o.Git,
+		runner:             o.Runner,
+		trackers:           o.Trackers,
+		instances:          o.Instances,
+		homes:              o.Homes,
+		bus:                o.Bus,
+		guard:              o.Guard,
+		log:                logger,
+		podmanBin:          o.PodmanBin,
+		podmanRun:          podmanRun,
+		containerPreflight: o.ContainerPreflight,
+		reposDir:           o.ReposDir,
+		worktreeRoot:       o.WorktreeRoot,
+		gitEnv:             o.GitEnv,
+		sweep:              o.Sweep,
+		metrics:            o.Metrics,
+		notify:             o.Notify,
+		now:                now,
 	}, nil
 }
 
@@ -302,14 +324,20 @@ func (s *Service) effectiveBudget(ctx context.Context, repo store.Repo) time.Dur
 	return s.settingMinutes(ctx, store.SettingAFKBudgetMinutes, defaultBudgetMinutes)
 }
 
-// cleanupCredential removes a run's materialized credential files at a
-// terminal outcome (opID = run id). A repo without a git credential is a
-// no-op.
-func (s *Service) cleanupCredential(repo store.Repo, runID string) {
-	if repo.CredentialID == nil {
+// removeRunContainer is the `podman rm` backstop behind this engine's
+// session kills (issue #205), mirroring instance.Service.removeRunContainer:
+// tmux kill-session SIGHUPs a container pane's attached podman client, which
+// sig-proxies in and --rm reaps — the forced rm covers a provider CLI that
+// ignores SIGHUP. Names are deterministic (podmanx.ContainerName over the
+// session), so no stored state; for a host-mode session the container never
+// existed and --ignore makes it a no-op. Skipped entirely when container
+// wiring is absent; failures log-warn — a stop must not fail on its backstop
+// (the startup orphan sweep is the backstop's backstop).
+func (s *Service) removeRunContainer(ctx context.Context, session string) {
+	if s.podmanBin == "" || s.containerPreflight == nil {
 		return
 	}
-	if err := s.mat.Cleanup(*repo.CredentialID, runID); err != nil {
-		s.log.Warn("cleaning materialized credential at reap", "component", "afk", "run", runID, "err", err)
+	if err := podmanx.RemoveContainer(ctx, s.podmanRun, s.podmanBin, podmanx.ContainerName(session)); err != nil {
+		s.log.Warn("removing run container", "component", "afk", "session", session, "err", err)
 	}
 }

@@ -166,6 +166,9 @@ func TestSeedDefaultSettings(t *testing.T) {
 			SettingSweepIntervalMinutes: "10",
 			SettingGitAuthorName:        "",
 			SettingGitAuthorEmail:       "",
+			SettingContainerMemory:      "8g",
+			SettingContainerPids:        "4096",
+			SettingContainerNofile:      "16384",
 		}
 		if len(all) != len(want) {
 			t.Errorf("seeded %d keys, want %d: %v", len(all), len(want), all)

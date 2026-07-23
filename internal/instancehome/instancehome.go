@@ -1,7 +1,13 @@
-// Package instancehome owns <state>/instances — one private HOME directory
-// per run (issue #202): the isolation seam the container runner will later
-// bind-mount into a run's container, so an agent process sees a HOME scoped
-// to that run alone and never the host's or another run's.
+// Package instancehome owns <state>/instances — one private per-run tree per
+// run: <root>/<runID>/home, the run's private HOME (issue #202), and
+// <root>/<runID>/runtime, the run's private runtime dir (issue #205) holding
+// its materialized git credential files, known_hosts, dialog-hook settings
+// file, and dialog spools. Both are the isolation seam the container runner
+// will later bind-mount into a run's container at host-identical paths: an
+// agent process sees a HOME and a credential/spool surface scoped to that run
+// alone — never the host's, and never another run's (a shared runtime dir
+// would expose other runs' materialized git credentials inside the
+// container).
 //
 // Its lifecycle deliberately mirrors internal/vault's credential
 // Materializer: Materialize writes the tree at launch, Wipe removes it
@@ -43,9 +49,9 @@ const homeDirMinAge = 5 * time.Minute
 // otherwise look orphaned.
 var runIDPattern = regexp.MustCompile(`^run_[0-9a-f]{32}$`)
 
-// Manager owns <state>/instances — one private HOME per run (issue #202):
-// the isolation seam the container runner will later mount. See the package
-// doc comment for the full lifecycle.
+// Manager owns <state>/instances — one private per-run tree (home + runtime)
+// per run (issues #202/#205): the isolation seam the container runner will
+// later mount. See the package doc comment for the full lifecycle.
 type Manager struct {
 	root string
 }
@@ -69,6 +75,17 @@ func (m *Manager) HomePath(runID string) string {
 	return filepath.Join(m.root, runID, "home")
 }
 
+// RuntimePath returns <root>/<runID>/runtime — the run's private runtime dir
+// (issue #205), where the launch materializes the run's git credential files
+// and known_hosts and writes its dialog-hook settings file, and where the
+// provider's hooks spool live signals. Pure path derivation like HomePath;
+// the directory need not exist yet. Living inside the per-run tree means
+// Wipe/SweepAll cover it for free, and the container runner can bind-mount
+// exactly one run's credential/spool surface.
+func (m *Manager) RuntimePath(runID string) string {
+	return filepath.Join(m.root, runID, "runtime")
+}
+
 // checkRunID validates runID with the same defensiveness vault's
 // checkNameParts applies to credential/op ids: non-empty and free of the
 // path separators, NUL, and dot that could let a hand-fed value escape
@@ -85,12 +102,14 @@ func checkRunID(runID string) error {
 	return nil
 }
 
-// Materialize creates <root>, <root>/<runID>, and <root>/<runID>/home — all
-// mode 0700 (owner-only: HOME may end up holding provider credentials or
-// config the agent process itself writes) — tightening the mode on any of
-// the three that already existed looser, exactly as vault.NewMaterializer
-// tightens its runtime dir. It returns HomePath(runID). Calling it again
-// for the same runID is a no-op beyond re-tightening perms.
+// Materialize creates <root>, <root>/<runID>, <root>/<runID>/home, and
+// <root>/<runID>/runtime — all mode 0700 (owner-only: HOME may end up
+// holding provider credentials or config the agent process itself writes,
+// and runtime holds materialized git credential files, issue #205) —
+// tightening the mode on any that already existed looser, exactly as
+// vault.NewMaterializer tightens its runtime dir. It returns
+// HomePath(runID). Calling it again for the same runID is a no-op beyond
+// re-tightening perms.
 func (m *Manager) Materialize(runID string) (string, error) {
 	if err := checkRunID(runID); err != nil {
 		return "", err
@@ -105,6 +124,9 @@ func (m *Manager) Materialize(runID string) (string, error) {
 	home := filepath.Join(runDir, "home")
 	if err := mkdirTight(home); err != nil {
 		return "", fmt.Errorf("home dir for run %s: %w", runID, err)
+	}
+	if err := mkdirTight(filepath.Join(runDir, "runtime")); err != nil {
+		return "", fmt.Errorf("runtime dir for run %s: %w", runID, err)
 	}
 	return home, nil
 }

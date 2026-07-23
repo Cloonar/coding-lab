@@ -19,7 +19,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `stateDir` | `/var/lib/lab` | State root (layout below). Managed via systemd `StateDirectory` when left at the default; otherwise the operator provides the directory (lab creates missing children itself, 0700). |
 | `listenAddr` | `":8080"` | Passed as `--addr`. |
 | `baseUrl` | `null` | Passed as `--base-url`. Drives Secure-cookie detection and the CSRF Origin check — set it whenever lab sits behind TLS. |
-| `agentUrl` | `null` | Passed as `--agent-url`. Session-facing base URL handed to `labctl` as `LAB_URL`. `null` (the default) leaves it unset, and lab hands every spawned session `unix://<state-dir>/agent.sock` — the agent API's own unix socket (see [Agent socket](#agent-socket)), which never touches the network or any SSO/auth proxy in front of `baseUrl`. Set it only when sessions run off-host and must reach lab over TCP; never point it at the external/SSO-fronted origin (issue #30's failure mode). |
+| `agentUrl` | `null` | Passed as `--agent-url`. Session-facing base URL handed to `labctl` as `LAB_URL`. `null` (the default) leaves it unset, and lab hands every spawned session `unix://<state-dir>/agent/agent.sock` — the agent API's own unix socket (see [Agent socket](#agent-socket)), which never touches the network or any SSO/auth proxy in front of `baseUrl`. Set it only when sessions run off-host and must reach lab over TCP; never point it at the external/SSO-fronted origin (issue #30's failure mode). Container-runner sessions ignore a TCP value and always get the unix socket. |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps lab's derived sqlite default **and** lets a `LAB_DB` entry in `environmentFile` take effect (precedence is flag > env > default — a `--db` flag would shadow `LAB_DB`). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
@@ -84,11 +84,13 @@ Full example — sops-provided master key, Postgres DSN via `environmentFile`:
 
 ### Agent socket
 
-Alongside its TCP listener (`--addr`, web UI / human auth only), lab always serves the agent API (`/agent/v1`, run-token auth) on a unix domain socket at `<state-dir>/agent.sock` — mode 0700, owned by the service user. A stale socket file from an unclean shutdown is removed and recreated on every boot; the state dir itself is already 0700, so the socket needs no separate ACL.
+Alongside its TCP listener (`--addr`, web UI / human auth only), lab always serves the agent API (`/agent/v1`, run-token auth) on a unix domain socket at `<state-dir>/agent/agent.sock` — mode 0700, owned by the service user. A stale socket file from an unclean shutdown is removed and recreated on every boot; the state dir itself is already 0700, so the socket needs no separate ACL.
 
-This is what `LAB_URL` resolves to for every spawned session by default (`--agent-url` unset, the `null` default of `services.lab.agentUrl` — see the option table above): `unix://<state-dir>/agent.sock`. `labctl` accepts `LAB_URL=unix:///abs/path` in every subcommand — including `secret exec`, `secret scan`, and therefore the pre-push guard hook — with http(s) `LAB_URL` values behaving exactly as before.
+**Path move (issue #205 / ADR-0052)**: the socket used to live at `<state-dir>/agent.sock`. It moved into its own directory so the [container runner](#container-runner) can bind-mount the socket's *directory* rather than the socket file — a socket-file bind would pin a dead inode across a server restart, while the directory mount makes the recreated socket visible to containers that outlive the restart. A back-compat symlink is kept at the old `<state-dir>/agent.sock`, so an operator-set `LAB_URL=unix://…/agent.sock` (or any tooling pointing at the old path) keeps working; no action is needed on upgrade.
 
-The same socket is what the future container runner (issue #205) will bind-mount into each instance's container, so containerized sessions reach the agent API without any host-network exposure.
+This is what `LAB_URL` resolves to for every spawned session by default (`--agent-url` unset, the `null` default of `services.lab.agentUrl` — see the option table above): `unix://<state-dir>/agent/agent.sock`. `labctl` accepts `LAB_URL=unix:///abs/path` in every subcommand — including `secret exec`, `secret scan`, and therefore the pre-push guard hook — with http(s) `LAB_URL` values behaving exactly as before.
+
+The socket directory is what the container runner bind-mounts into each instance's container, so containerized sessions reach the agent API without any host-network exposure — a container run always gets the unix `LAB_URL` (a TCP `--agent-url` is deliberately unreachable from inside, see [Container runner](#container-runner)).
 
 ### Reverse proxy / Authelia
 
@@ -113,7 +115,7 @@ Sharp edges (all enforced server-side):
 
 - The proxy header is trusted **only** when the TCP peer (never X-Forwarded-For) is inside `--trusted-proxies` **and** the header value exactly equals the admin username; on mismatch lab falls through to its own auth and logs once per distinct value.
 - Set `--base-url` (`services.lab.baseUrl`) to the public https URL. It drives the CSRF Origin check and Secure cookies. Cookies are Secure when the request came over TLS, or `--base-url` is https, or `X-Forwarded-Proto: https` arrives from a trusted proxy — if none of these can ever hold, lab logs a prominent warning at startup.
-- **Do not route agent traffic through the proxy.** `labctl` inside a session authenticates to `/agent/v1` with a run token only — no SSO session, no cookies. If its `LAB_URL` pointed at the external origin, every call would hairpin out to the proxy, get 302'd to the login portal, and fail. Out of the box this can't happen: lab serves `/agent/v1` on a unix socket (`<state-dir>/agent.sock`, see [Agent socket](#agent-socket)) and hands sessions `LAB_URL=unix://<state-dir>/agent.sock` by default — nothing hairpins through the proxy because agent traffic never touches TCP at all. The warning still applies if an operator sets `services.lab.agentUrl` (`--agent-url`) to reach lab over TCP (off-host sessions): point it at a host lab is reachable on directly, never at `baseUrl`'s public origin. If you ever see `labctl` fail with an HTML/redirect error after setting `agentUrl`, `LAB_URL` is aimed at the proxy — check the value.
+- **Do not route agent traffic through the proxy.** `labctl` inside a session authenticates to `/agent/v1` with a run token only — no SSO session, no cookies. If its `LAB_URL` pointed at the external origin, every call would hairpin out to the proxy, get 302'd to the login portal, and fail. Out of the box this can't happen: lab serves `/agent/v1` on a unix socket (`<state-dir>/agent/agent.sock`, see [Agent socket](#agent-socket)) and hands sessions `LAB_URL=unix://<state-dir>/agent/agent.sock` by default — nothing hairpins through the proxy because agent traffic never touches TCP at all. The warning still applies if an operator sets `services.lab.agentUrl` (`--agent-url`) to reach lab over TCP (off-host sessions): point it at a host lab is reachable on directly, never at `baseUrl`'s public origin. If you ever see `labctl` fail with an HTML/redirect error after setting `agentUrl`, `LAB_URL` is aimed at the proxy — check the value.
 - Keep `proxy_buffering off` for `/api/v1/events` or the SSE stream stalls.
 
 ### Bare metal
@@ -168,14 +170,17 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--claude-config` | `LAB_CLAUDE_CONFIG` | (see `--provider-config`) | **Deprecated alias** for `--provider-config claude-code=<path>` (env alias for `LAB_PROVIDER_CONFIG_CLAUDE_CODE`). Prefer the generic flag. |
 | `--tmux` | — | `tmux` (PATH lookup) | tmux binary. |
 | `--git` | — | `git` (PATH lookup) | git binary. |
-| `--prlimit` | — | `prlimit` (PATH lookup) | prlimit binary (session NOFILE cap). |
+| `--prlimit` | — | `prlimit` (PATH lookup) | prlimit binary (session NOFILE cap, host-runner panes only). |
+| `--podman` | — | `podman` (PATH lookup) | podman binary for container-runner panes (see [Container runner](#container-runner)). |
+| `--container-image` | `LAB_CONTAINER_IMAGE` | (empty) | Dev image containerized sessions run in. Empty = unconfigured: container spawns are refused by preflight — lab deliberately ships no image of its own (the operator owns the container userland, ADR-0051). |
+| `--container-tools-image` | `LAB_CONTAINER_TOOLS_IMAGE` | (empty) | Agent-tools image refs as `provider=ref[,provider=ref…]`, keyed by provider ID (unknown IDs and duplicate keys are boot errors). Refs should be `@sha256`-pinned per ADR-0051 (documented, not enforced — a local tag is fine during bring-up). The flag value replaces the env value wholesale. Empty = unconfigured: container spawns are refused by preflight. |
 | `--max-instances` | — | `6` | Global live-instance cap. Seeds the `max_instances` settings row on **first start only**; thereafter the runtime setting wins. Must be ≥ 1. |
 | `--session-nofile` | — | `16384` | RLIMIT_NOFILE (soft+hard) for spawned sessions via prlimit; `0` disables the cap. |
 | `--proxy-auth` | — | off | Accept the proxy auth header from trusted proxies. |
 | `--proxy-auth-header` | — | `Remote-User` | Header carrying the proxy-authenticated username. |
 | `--trusted-proxies` | — | (empty) | Comma-separated CIDRs of trusted reverse proxies (also gates `X-Forwarded-Proto` / `X-Forwarded-For` trust). |
 | `--base-url` | `LAB_BASE_URL` | (empty) | Absolute http(s) external URL. Drives Secure cookies and the CSRF Origin check. Does **not** feed `LAB_URL` — agent traffic never derives from it (see `--agent-url`). |
-| `--agent-url` | `LAB_AGENT_URL` | (empty) | Session-facing URL handed to `labctl` as `LAB_URL` — absolute http(s), or `unix:///abs/path` for a custom socket. Precedence: `--agent-url` when set, else `unix://<state-dir>/agent.sock` (see [Agent socket](#agent-socket)) — the old `--base-url` / loopback-TCP fallbacks are gone (they were issue #30's SSO-proxy hairpin failure mode; the socket always exists, so there's nothing left to fall back through). `labctl` accepts `LAB_URL=unix:///abs/path` in every subcommand alongside http(s); set `--agent-url` only for off-host sessions that must reach lab over TCP, or to point runs at a different socket path. |
+| `--agent-url` | `LAB_AGENT_URL` | (empty) | Session-facing URL handed to `labctl` as `LAB_URL` — absolute http(s), or `unix:///abs/path` for a custom socket. Precedence: `--agent-url` when set, else `unix://<state-dir>/agent/agent.sock` (see [Agent socket](#agent-socket)) — the old `--base-url` / loopback-TCP fallbacks are gone (they were issue #30's SSO-proxy hairpin failure mode; the socket always exists, so there's nothing left to fall back through). `labctl` accepts `LAB_URL=unix:///abs/path` in every subcommand alongside http(s); set `--agent-url` only for off-host sessions that must reach lab over TCP, or to point runs at a different socket path. |
 
 The per-provider host settings (`--provider-bin` / `--provider-config` and their `--claude` / `--claude-config` aliases) resolve **per provider entry**, highest wins: **generic flag > generic env > alias flag > alias env** — the generic form always beats the claude-named alias for the same setting, and within each pair a flag beats its env. The registered provider IDs come from `cmd/lab`, so a new provider's binary and config path are two entries under its ID with no config change (ADR-0034).
 
@@ -191,6 +196,9 @@ Runtime-mutable knobs live in the `settings` table (Settings UI / `PATCH /api/v1
 | `afk_schedule_seconds` | `45` | Scheduler loop interval (separate goroutine, v0 parity). |
 | `sweep_interval_minutes` | `10` | Throttled merged-sweep + runtime-credential sweep cadence. |
 | `git_author_name` / `git_author_email` | (blank) | Global git identity fallback for sessions and CR merges; per-repo overrides on the repo row. |
+| `container_memory` | `8g` | `--memory` for container-runner panes (podman's grammar: integer + optional b/k/m/g); per-repo override on the repo row. Ignored by host-runner repos. |
+| `container_pids` | `4096` | `--pids-limit` for container-runner panes; per-repo override on the repo row. |
+| `container_nofile` | `16384` | `--ulimit nofile` (soft+hard) inside the container — replaces the host prlimit cap for container-runner panes; per-repo override on the repo row. |
 
 ## Seeding the initial operator user
 
@@ -233,14 +241,22 @@ The flavor is the routing authority: an unrecognized host (a second Forgejo inst
   lab.db                     sqlite database (WAL mode; absent on postgres)
   master.key                 vault master key (64 hex chars, 0600)
   vapid.key                  Web Push VAPID key (64 hex chars, 0600)
-  agent.sock                 agent API unix socket, 0700, recreated on boot
+  agent/agent.sock           agent API unix socket, 0700, recreated on boot;
+                             the directory is what the container runner mounts
+  agent.sock                 back-compat symlink to agent/agent.sock (the
+                             pre-#205 socket path)
   repos/<repoID>.git/        bare reference clones (worktree parents)
   worktrees/<repo>-<label>/  instance worktrees (manual: -<label>, AFK: -<N>)
-  runtime/                   0700 — materialized credential files, per-op
-                             (<credID>.<opID>.key/.askpass/.sshpass), known_hosts
+  runtime/                   0700 — materialized credential files for repo-level
+                             ops (clone/fetch: <credID>.<opID>.key/.askpass/
+                             .sshpass), known_hosts
   instances/<runID>/home/    0700 — per-run private HOME (issue #202): the
                              provider credential copy, config, and transcripts;
                              created at launch, wiped at stop/rollback, swept at boot
+  instances/<runID>/runtime/ 0700 — per-run runtime dir (issue #205): the run's
+                             materialized git credential files, known_hosts,
+                             dialog spool, and --settings file; same lifecycle
+                             as home/, bind-mounted into the run's container
 ```
 
 Sessions are named `<repo>~<label>`; `~` never appears in paths (the Windows-8.3 lookalike pattern stalls Claude).
@@ -256,9 +272,9 @@ Back up, **consistently together** (one snapshot set):
 Explicitly **excluded** (reconstructible or ephemeral):
 
 - `<state>/runtime/` — materialized key files, known_hosts; 0700, regenerated per operation, swept at startup.
-- `<state>/instances/` — per-run private HOMEs (issue #202) holding the provider credential copy, config, and transcripts; 0700, created at launch, wiped at stop/rollback, swept at boot — ephemeral, never restored.
+- `<state>/instances/` — per-run private HOME + runtime trees (issues #202/#205) holding the provider credential copy, config, transcripts, and the run's materialized git credentials and spool; 0700, created at launch, wiped at stop/rollback, swept at boot — ephemeral, never restored.
 - `<state>/worktrees/` — recreated from branches; dirty worktrees are parked work the operator resolves *before* decommissioning a host (a backup cannot carry uncommitted changes safely).
-- `<state>/agent.sock` — the agent API unix socket (see [Agent socket](#agent-socket)); a stale socket file is removed and recreated on every boot, so it carries no state to preserve.
+- `<state>/agent/` (and the `<state>/agent.sock` compat symlink) — the agent API unix socket (see [Agent socket](#agent-socket)); a stale socket file is removed and recreated on every boot, so it carries no state to preserve.
 
 Mechanics:
 
@@ -344,6 +360,26 @@ These versions ARE the repo's compat-record pins (`internal/compat/compat.md` pi
 - **`FORGE_REGISTRY_USER`** (optional) — the token owner's username, used as the `podman login` user. Defaults to the repository owner; set it only when the token does not belong to that account.
 
 **x86_64-only today.** Both upstreams publish arm64(-musl) artifacts, so an arm64 variant is a mechanical follow-up (a second set of tags off the same versions.env and Containerfiles) once an arm64 runner/host exists.
+
+## Container runner
+
+A repo whose **runner** is `container` (repo settings → Runner) runs each session's pane command as `podman run -it --rm …` — rootless podman + crun, tmux still host-side owning liveness/attach/capture — per [ADR-0052](adr/0052-container-runner.md). `host` (the default) keeps today's pane — the provider CLI directly on the host under the prlimit nofile cap — as break-glass, labeled "unsandboxed — full host access" in the UI. Flipping a repo to `container` requires host provisioning; the startup **preflight** verifies all of it and refuses container spawns with actionable errors until the host passes.
+
+**What the host must provide** for `repos.runner = container`:
+
+- **podman >= 4, crun, and passt** on the service PATH. Preflight probes `podman` (the `--podman` flag names the binary) and `pasta` (the network backend `--network=pasta` pins — shipped by the `passt` package); crun is podman's default OCI runtime on current distros and is not probed separately.
+- **subuid/subgid ranges for the service user** — rootless podman cannot build the user namespace `--userns=keep-id` needs without them: `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 lab` (or the equivalent `lab:100000:65536` lines in `/etc/subuid` and `/etc/subgid`).
+- **cgroup v2 with memory+pids delegated to the lab unit.** The `--memory`/`--pids-limit` caps apply through cgroup-v2 delegation; without it they would be *silently absent*, so preflight fails instead. Boot on the unified hierarchy and set `Delegate=yes` on the lab systemd unit (NixOS: `systemd.services.lab.serviceConfig.Delegate = true;`).
+- **A runtime dir for rootless podman** (`XDG_RUNTIME_DIR`). A system service gets none by default: either enable lingering for the service user (`loginctl enable-linger lab`, giving `/run/user/<uid>`) or set `RuntimeDirectory=lab` plus `Environment=XDG_RUNTIME_DIR=/run/lab` on the unit.
+- **The two image knobs** (flags table above): `--container-image` — the dev image sessions run in; lab ships none and refuses container spawns while it is unset — and `--container-tools-image provider=ref[,provider=ref…]` with `@sha256`-pinned refs from the agent-tools release job ([Agent-tools images](#agent-tools-images), ADR-0051). The registry must be reachable from the host: preflight resolves every configured tools ref (`podman image exists`, else one pull).
+
+**Resource limits.** Global settings rows `container_memory` / `container_pids` / `container_nofile` (seeded `8g` / `4096` / `16384`; Settings UI or `PATCH /api/v1/settings`) feed `--memory`, `--pids-limit`, and `--ulimit nofile` on every container pane; each repo can override any of the three on its Runner settings card (blank = inherit the global). The host prlimit wrapper applies to host-runner panes only — for container panes the nofile cap moves inside the container.
+
+**Preflight and refusals.** Preflight runs at server startup and collects *every* failure — podman missing/too old, pasta missing, missing subuid/subgid entry, cgroup v1 or missing delegation, unset image knobs, unresolvable tools refs — into one message, each item paired with the command or config that fixes it. While any check fails, container spawns are refused with that message (host-runner repos are unaffected); an AFK spawn is refused *before* the issue is claimed, so an unready host never parks an issue. Fix the host, restart lab, and the refusal clears.
+
+**Socket path on upgrades.** The agent socket moved to `<state>/agent/agent.sock` with this feature (the container runner mounts the socket's *directory*; a socket-file bind would go stale across a lab restart). A back-compat symlink is kept at the old `<state>/agent.sock` — existing `LAB_URL` values and tooling keep working with no operator action (see [Agent socket](#agent-socket)).
+
+**Dev image expectations.** The image is the operator's choice and needs **no lab-specific contents** — the agent layer (provider CLI + `labctl`) is always injected via the read-only agent-tools mount at `/opt/lab`, and the container PATH puts `/opt/lab/bin` first. What the image must bring is the session's userland: a shell and coreutils, `git` (the agent commits and pushes from inside), and an ssh client for repos with ssh remotes. Any stock distro image (`debian:stable-slim`, `alpine` + the needed packages) qualifies. The tracer uses one global `--container-image` for all container repos; per-repo image selection (`repos.image_ref`) lands with issue #207, and containerized provider login is issue #206.
 
 ## Observability
 

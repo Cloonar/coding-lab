@@ -20,8 +20,14 @@ const deathReasonAtStartup = "session gone at startup"
 //     survivors (re-arm deep-link capture if the link is still NULL), mark the
 //     rest dead. Finishing before the schedulers means no Start can race it.
 //  2. Pass A/B per ready repo (guarded orphan teardown + bare-merged GC).
-//  3. runtime/ credential keep-set cleanup: keep exactly the files of re-adopted
-//     LIVE runs, unlink the rest (design §6 restart rule).
+//  3. runtime/ credential keep-set cleanup (design §6 restart rule). Since
+//     issue #205 run credentials materialize into per-run dirs, so the GLOBAL
+//     runtime dir normally holds only clone-op files (opID = repo id, cleaned
+//     synchronously by reposvc) — but a PRE-UPGRADE lab left run-keyed cred
+//     files here, and this sweep is exactly what reaps them, so it stays: keep
+//     the files of re-adopted LIVE runs (a pre-upgrade run re-adopted across
+//     the upgrade still authenticates through its global-dir files), unlink
+//     the rest.
 func (s *Service) StartupReconcile(ctx context.Context) error {
 	liveRunIDs, err := s.readopt(ctx)
 	if err != nil {
@@ -47,6 +53,12 @@ func (s *Service) StartupReconcile(ctx context.Context) error {
 	if err := s.homes.SweepAll(func(runID string) bool { return liveRunIDs[runID] }); err != nil {
 		s.log.Warn("sweeping instance homes dir", "component", "reconcile", "err", err)
 	}
+
+	// Orphaned-container sweep (issue #205): remove every labrun- container no
+	// live session accounts for — the keep-set idiom of the two sweeps above
+	// applied to podman's world. Runs after re-adoption so "live" is the
+	// post-readopt truth; a no-op unless container wiring is configured.
+	s.sweepOrphanContainers(ctx)
 	return nil
 }
 
@@ -112,7 +124,11 @@ func (s *Service) keptRunIDs(ctx context.Context) (map[string]bool, error) {
 // credentialKeep builds the CleanupAll keep predicate from a set of run ids: a
 // materialized file is kept iff its opID (the run id, per the credID.opID
 // filename grammar) belongs to a live run. Everything else — orphaned by a
-// finished/dead run — is unlinked.
+// finished/dead run — is unlinked. Since issue #205 launches materialize run
+// credentials into per-run dirs, so in the GLOBAL dir this predicate only
+// ever matches files a PRE-UPGRADE launch left behind — load-bearing for a
+// pre-upgrade run re-adopted across the upgrade, whose live session still
+// authenticates through those global-dir paths.
 func credentialKeep(liveRunIDs map[string]bool) func(filename string) bool {
 	return func(filename string) bool {
 		opID, ok := vault.OpIDFromFile(filename)

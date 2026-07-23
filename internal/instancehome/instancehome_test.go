@@ -32,6 +32,19 @@ func TestHomePathShape(t *testing.T) {
 	}
 }
 
+func TestRuntimePathShape(t *testing.T) {
+	m := newTestManager(t)
+	const runID = "run_deadbeefdeadbeefdeadbeefdeadbeef"
+	want := filepath.Join(m.Root(), runID, "runtime")
+	if got := m.RuntimePath(runID); got != want {
+		t.Errorf("RuntimePath(%q) = %q, want %q", runID, got, want)
+	}
+	// Pure derivation, no I/O — like HomePath.
+	if _, err := os.Stat(m.Root()); !os.IsNotExist(err) {
+		t.Errorf("RuntimePath created %q; want no I/O until Materialize", m.Root())
+	}
+}
+
 func TestMaterializeCreatesTree0700(t *testing.T) {
 	m := newTestManager(t)
 	const runID = "run_aaaa"
@@ -44,7 +57,9 @@ func TestMaterializeCreatesTree0700(t *testing.T) {
 		t.Errorf("Materialize returned %q, want %q", home, want)
 	}
 
-	for _, dir := range []string{m.Root(), filepath.Join(m.Root(), runID), home} {
+	// The whole per-run tree: root, run dir, home, and the per-run runtime
+	// dir (issue #205) — all 0700.
+	for _, dir := range []string{m.Root(), filepath.Join(m.Root(), runID), home, m.RuntimePath(runID)} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("stat %s: %v", dir, err)
@@ -63,12 +78,15 @@ func TestMaterializeTightensExistingLooseDirs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, runID, "home"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, runID, "runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	m := New(root)
 	home, err := m.Materialize(runID)
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	for _, dir := range []string{root, filepath.Join(root, runID), home} {
+	for _, dir := range []string{root, filepath.Join(root, runID), home, m.RuntimePath(runID)} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -127,6 +145,11 @@ func TestWipeRemovesWholeTreeIncludingNestedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(nested, "file.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A materialized credential file in the per-run runtime dir (issue #205):
+	// Wipe is what removes a run's credential surface at stop.
+	if err := os.WriteFile(filepath.Join(m.RuntimePath(runID), "cred_x.run_y.key"), []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runDir := filepath.Join(m.Root(), runID)

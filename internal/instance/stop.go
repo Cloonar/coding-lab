@@ -32,7 +32,8 @@ func (s *Service) SetAFKStopper(stopper AFKStopper) { s.afkStop = stopper }
 
 // Stop tears down a manual instance: kill the session, apply the guarded
 // teardown rule to its worktree+branch, move the run to outcome 'stopped',
-// delete its run tokens, and remove its materialized credential files. It
+// delete its run tokens, and wipe its private per-run tree (which holds the
+// materialized credential files and dialog spools, issues #202/#205). It
 // returns OutcomeRemoved when the worktree went away, OutcomeParked when a
 // dirty tree was kept. store.ErrNotFound → 404. A run of an AFK kind is
 // delegated to the AFK engine's neutral Stop (§4c) and always reports
@@ -122,7 +123,7 @@ func (s *Service) StopAll(ctx context.Context, repoID string) (int, error) {
 
 // teardownManualRun is the shared Stop body for a known manual run: kill the
 // session (best-effort), run the guarded teardown, write the terminal outcome,
-// delete the run's tokens, and clean its credential files. It reports whether
+// delete the run's tokens, and wipe the per-run tree. It reports whether
 // the worktree was actually removed (drives removed-vs-parked). Never returns
 // an error — a Stop must not fail on a teardown hiccup (the session is already
 // gone; a leftover worktree is reclaimable by the sweeps).
@@ -130,6 +131,11 @@ func (s *Service) teardownManualRun(ctx context.Context, run store.Run, repo sto
 	if err := s.runner.Stop(ctx, run.SessionName); err != nil {
 		s.log.Warn("stopping session", "component", "instance", "session", run.SessionName, "err", err)
 	}
+	// Container backstop (issue #205): the tmux kill SIGHUPs a container
+	// pane's attached podman client, which sig-proxies into the container and
+	// --rm reaps it; the forced rm covers a provider CLI that ignores SIGHUP.
+	// Deterministic name, --ignore no-op for host-mode sessions.
+	s.removeRunContainer(ctx, run.SessionName)
 	action := s.git.TeardownGuarded(ctx, s.log, s.bareDir(repo.ID), run.WorktreePath, run.Branch, repo.DefaultBranch, s.gitEnv)
 
 	if err := s.store.EndRun(ctx, run.ID, store.RunOutcomeStopped, s.now(), ""); err != nil {
@@ -138,12 +144,14 @@ func (s *Service) teardownManualRun(ctx context.Context, run store.Run, repo sto
 	if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 		s.log.Warn("deleting run tokens", "component", "instance", "run", run.ID, "err", err)
 	}
-	s.cleanupCredential(repo, run.ID)
-	// Wipe the run's private instance HOME (issue #202): the credential copy,
-	// config, and transcripts go with the stopped run. Neutral Stop semantics
-	// are unchanged — the wipe removes the instance HOME only, NEVER the
-	// worktree/branch (the park). A failure logs and continues; the boot/runtime
-	// sweep is the backstop.
+	// Wipe the run's private per-run tree (issues #202/#205): the provider
+	// credential copy, config, transcripts, AND the runtime dir — the run's
+	// materialized git credential files, known_hosts, settings file, and
+	// dialog spools — all go with the stopped run in this one call (the
+	// pre-#205 per-file credential cleanup is subsumed). Neutral Stop
+	// semantics are unchanged — the wipe removes the per-run tree only,
+	// NEVER the worktree/branch (the park). A failure logs and continues;
+	// the boot/runtime sweep is the backstop.
 	if err := s.homes.Wipe(run.ID); err != nil {
 		s.log.Warn("stop: wipe instance home", "component", "instance", "run", run.ID, "err", err)
 	}

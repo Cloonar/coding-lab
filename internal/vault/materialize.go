@@ -77,6 +77,31 @@ func (m *Materializer) Dir() string { return m.dir }
 // never touches it.
 func (m *Materializer) KnownHostsPath() string { return filepath.Join(m.dir, "known_hosts") }
 
+// SeedKnownHosts copies the known_hosts file at src into this Materializer's
+// dir (mode 0600). It exists for PER-RUN runtime dirs (issue #205): each run
+// gets a fresh runtime dir, which would otherwise reset ssh's accept-new
+// TOFU state on every launch — every run would silently re-accept every host
+// key from scratch. Seeding from the global runtime dir's known_hosts (which
+// clone/fetch ops keep accumulating) preserves previously pinned host keys,
+// while pins accepted DURING a run stay confined to that run's file and die
+// with its tree — deliberately, so one run's accepted key never widens
+// another's trust. A missing src is a no-op (nil): a fresh install has
+// nothing to seed. A plain (non-atomic) write suffices — the file is written
+// once at launch, before any ssh of this run could read it.
+func (m *Materializer) SeedKnownHosts(src string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("seed known_hosts: %w", err)
+	}
+	if err := os.WriteFile(m.KnownHostsPath(), b, 0o600); err != nil {
+		return fmt.Errorf("seed known_hosts: %w", err)
+	}
+	return nil
+}
+
 func (m *Materializer) sshKeyPath(credID, opID string) string {
 	return filepath.Join(m.dir, credID+"."+opID+sshKeySuffix)
 }

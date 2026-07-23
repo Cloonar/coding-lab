@@ -119,6 +119,10 @@ export function baseRepo(): Repo {
     lander_provider: null,
     lander_model: null,
     lander_effort: null,
+    runner: 'host',
+    container_memory: null,
+    container_pids: null,
+    container_nofile: null,
   };
 }
 
@@ -464,7 +468,14 @@ export function installRepoSettingsHooks(): void {
   beforeEach(() => {
     h.repoOnServer = baseRepo();
     h.providersOnServer = baseProviders();
-    h.settingsOnServer = { provider_default: 'claude-code' };
+    h.settingsOnServer = {
+      provider_default: 'claude-code',
+      // The container resource-limit defaults (issue #205), seeded server-side —
+      // the Runner section's inherit hints read these.
+      container_memory: '8g',
+      container_pids: 4096,
+      container_nofile: 16384,
+    };
     h.credentialsOnServer = [];
     h.patchBodies = [];
     h.secretsOnServer = [];

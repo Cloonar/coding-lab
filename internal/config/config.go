@@ -55,6 +55,27 @@ type Config struct {
 	TmuxBin    string
 	GitBin     string
 	PrlimitBin string
+	PodmanBin  string
+
+	// ContainerImage is the dev image containerized sessions run in
+	// (issue #205). "" means unconfigured — container mode then refuses to
+	// spawn (the podmanx preflight owns that refusal, not Parse), because
+	// lab deliberately ships no dev image of its own: the operator owns the
+	// container userland, lab injects only the agent tools (ADR-0051).
+	ContainerImage string
+
+	// ContainerToolsImages maps a provider id to its agent-tools OCI image
+	// ref, the read-only /opt/lab injection of ADR-0051. Refs should be
+	// @sha256-pinned — the digest, not the tag, is the consumer contract (a
+	// same-tag re-push silently moves the tag) — but pinning is documented,
+	// not enforced, so an operator can point at a local tag during
+	// bring-up. Always non-nil after Parse; empty means unconfigured
+	// (container mode refuses to spawn, again via preflight). Set via
+	// --container-tools-image or LAB_CONTAINER_TOOLS_IMAGE, value
+	// provider=ref[,provider=ref…]; the flag value replaces the env value
+	// wholesale (single-value pick precedence, unlike the per-entry
+	// -provider-* merge).
+	ContainerToolsImages map[string]string
 
 	MaxInstances  int // seeds the max_instances settings row on first start
 	SessionNofile int // RLIMIT_NOFILE for spawned sessions; 0 disables
@@ -67,8 +88,8 @@ type Config struct {
 
 	// AgentURL is the session-facing base URL handed to labctl as LAB_URL,
 	// independent of BaseURL. "" when unset; the session-URL helper then
-	// defaults to the agent unix socket (unix://<state-dir>/agent.sock,
-	// issue #201). It exists as the explicit override for deployments where
+	// defaults to the agent unix socket (unix://<state-dir>/agent/agent.sock,
+	// issue #201; relocated into its own dir by #205). It exists as the explicit override for deployments where
 	// the default socket won't do — an http(s) URL for off-host sessions, or
 	// a unix:///abs/path naming a different socket. Machine traffic never
 	// routes through BaseURL: an external (possibly SSO-fronted) origin is
@@ -123,7 +144,8 @@ func (p *providerMapFlag) Set(value string) error {
 // a Config. Env overrides defaults, flags override env. Recognized env vars:
 // LAB_ADDR, LAB_DB, LAB_STATE_DIR, LAB_MASTER_KEY_FILE, LAB_VAPID_KEY_FILE,
 // LAB_PROVIDER_BIN_<ID>, LAB_PROVIDER_CONFIG_<ID>, LAB_CLAUDE_CONFIG (a deprecated alias for
-// LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_BASE_URL, LAB_AGENT_URL, LAB_SEED_USER,
+// LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_CONTAINER_IMAGE, LAB_CONTAINER_TOOLS_IMAGE,
+// LAB_BASE_URL, LAB_AGENT_URL, LAB_SEED_USER,
 // LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE. providerIDs
 // is the caller's list of registered provider ids: the generic per-provider
 // flags are validated against it (an unknown id is a parse error), and the
@@ -142,6 +164,10 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
 		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
 		prlimitBin = fs.String("prlimit", "prlimit", "prlimit binary (PATH lookup by default)")
+		podmanBin  = fs.String("podman", "podman", "podman binary (PATH lookup by default)")
+
+		containerImage      = fs.String("container-image", "", "dev image containerized sessions run in; empty refuses container spawns (env LAB_CONTAINER_IMAGE)")
+		containerToolsImage = fs.String("container-tools-image", "", "agent-tools image refs, provider=ref[,provider=ref…], @sha256-pinned per ADR-0051 (env LAB_CONTAINER_TOOLS_IMAGE)")
 
 		maxInstances  = fs.Int("max-instances", DefaultMaxInstances, "global live-instance cap; seeds the settings row on first start")
 		sessionNofile = fs.Int("session-nofile", DefaultSessionNofile, "RLIMIT_NOFILE (soft+hard) for spawned sessions; 0 disables")
@@ -151,7 +177,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		trustedProxies  = fs.String("trusted-proxies", "", "comma-separated CIDRs of trusted reverse proxies")
 
 		baseURL  = fs.String("base-url", "", "external base URL, e.g. https://lab.example.com (env LAB_BASE_URL)")
-		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL, http(s) or unix:///abs/path; defaults to unix://<state-dir>/agent.sock (env LAB_AGENT_URL)")
+		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL, http(s) or unix:///abs/path; defaults to unix://<state-dir>/agent/agent.sock (env LAB_AGENT_URL)")
 
 		seedUser             = fs.String("seed-user", "", "username of the initial operator user to seed at startup (env LAB_SEED_USER)")
 		seedPasswordHash     = fs.String("seed-password-hash", "", "PHC-encoded argon2id hash of the initial operator password, given inline (env LAB_SEED_PASSWORD_HASH)")
@@ -263,6 +289,14 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 	cfg.TmuxBin = *tmuxBin
 	cfg.GitBin = *gitBin
 	cfg.PrlimitBin = *prlimitBin
+	cfg.PodmanBin = *podmanBin
+
+	cfg.ContainerImage = pick("container-image", *containerImage, "LAB_CONTAINER_IMAGE", "")
+	toolsImages, err := parseToolsImages(pick("container-tools-image", *containerToolsImage, "LAB_CONTAINER_TOOLS_IMAGE", ""), providerIDs)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ContainerToolsImages = toolsImages
 
 	cfg.MaxInstances = *maxInstances
 	if cfg.MaxInstances < 1 {
@@ -325,6 +359,38 @@ func resolveProviderMap(providerIDs []string, getenv func(string) string, envPre
 		out[id] = path // generic flag beats generic env
 	}
 	return out
+}
+
+// parseToolsImages parses a --container-tools-image value —
+// provider=ref pairs, comma-separated — into a map, validating each
+// provider id against the registered providerIDs exactly as
+// providerMapFlag does for the -provider-* flags: a boot-time typo dies at
+// Parse, not as a mysteriously image-less provider at first container
+// spawn. Refs should be @sha256-pinned (ADR-0051: the digest, not the tag,
+// is the consumer contract) but pinning is documented, not enforced. The
+// result is always non-nil; an empty value yields an empty map — the
+// podmanx preflight, not Parse, owns the "container mode unconfigured"
+// refusal.
+func parseToolsImages(value string, providerIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	for part := range strings.SplitSeq(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, ref, ok := strings.Cut(part, "=")
+		if !ok || id == "" || ref == "" {
+			return nil, fmt.Errorf("--container-tools-image %q: want provider=ref[,provider=ref…]", part)
+		}
+		if !slices.Contains(providerIDs, id) {
+			return nil, fmt.Errorf("--container-tools-image: unknown provider id %q; registered ids: %s", id, strings.Join(providerIDs, ", "))
+		}
+		if _, dup := out[id]; dup {
+			return nil, fmt.Errorf("--container-tools-image: provider id %q set more than once", id)
+		}
+		out[id] = ref
+	}
+	return out, nil
 }
 
 // validateAgentURL admits everything validateHTTPURL does plus the agent

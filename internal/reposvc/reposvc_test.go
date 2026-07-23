@@ -220,6 +220,14 @@ func TestAddCloneLifecycle(t *testing.T) {
 	if repo.AFKBranchPattern != "afk/<N>" || repo.ManualBranchPrefix != "lab/" {
 		t.Errorf("patterns = %q/%q, want afk/<N> and lab/", repo.AFKBranchPattern, repo.ManualBranchPrefix)
 	}
+	// Runner (issue #205) is NOT NULL: Add must stamp the host default itself
+	// rather than let CreateRepo insert the Go zero string.
+	if repo.Runner != store.RunnerHost {
+		t.Errorf("runner = %q, want %q", repo.Runner, store.RunnerHost)
+	}
+	if repo.ContainerMemory != nil || repo.ContainerPids != nil || repo.ContainerNofile != nil {
+		t.Errorf("container overrides = %v/%v/%v, want nil/nil/nil at create", repo.ContainerMemory, repo.ContainerPids, repo.ContainerNofile)
+	}
 
 	final := e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
 	if final.DefaultBranch != "trunk" {
@@ -892,6 +900,13 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 		{TrackerBinding: store.Set("auto")},  // not a stored binding value
 		{DefaultBranch: store.Set("  ")},
 		{Name: store.Set("   ")}, // whitespace-only sanitizes to ""
+		// Runner/container overrides (issue #205): the enum and the
+		// podman-flavored grammars all reject bad input as a BadRequestError.
+		{Runner: store.Set("bogus")},
+		{Runner: store.Set("")}, // NOT NULL: a PATCH must send a concrete value
+		{ContainerMemory: store.Set(ptr("9x"))},
+		{ContainerPids: store.Set(ptr(0))},
+		{ContainerNofile: store.Set(ptr(0))},
 	} {
 		_, err := e.svc.UpdateSettings(t.Context(), repo.ID, u)
 		var bad *BadRequestError
@@ -936,6 +951,39 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 	}
 	if updated.BudgetMinutes != nil {
 		t.Errorf("budget_minutes = %v, want nil", updated.BudgetMinutes)
+	}
+
+	// Runner (issue #205): flip to container and set all three limit
+	// overrides, then clear them back to nil (inherit) without touching
+	// runner.
+	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		Runner:          store.Set(store.RunnerContainer),
+		ContainerMemory: store.Set(ptr("512m")),
+		ContainerPids:   store.Set(ptr(2048)),
+		ContainerNofile: store.Set(ptr(8192)),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings runner+limits: %v", err)
+	}
+	if updated.Runner != store.RunnerContainer ||
+		updated.ContainerMemory == nil || *updated.ContainerMemory != "512m" ||
+		updated.ContainerPids == nil || *updated.ContainerPids != 2048 ||
+		updated.ContainerNofile == nil || *updated.ContainerNofile != 8192 {
+		t.Errorf("runner+limits = %+v, want container/512m/2048/8192", updated)
+	}
+	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ContainerMemory: store.Set[*string](nil),
+		ContainerPids:   store.Set[*int](nil),
+		ContainerNofile: store.Set[*int](nil),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings clear limits: %v", err)
+	}
+	if updated.ContainerMemory != nil || updated.ContainerPids != nil || updated.ContainerNofile != nil {
+		t.Errorf("cleared limits = %v/%v/%v, want nil/nil/nil", updated.ContainerMemory, updated.ContainerPids, updated.ContainerNofile)
+	}
+	if updated.Runner != store.RunnerContainer {
+		t.Error("clearing limit overrides silently reset runner")
 	}
 
 	waitFor(t, "repo.changed after PATCH", func() bool {

@@ -12,71 +12,55 @@ import (
 )
 
 // credentialEnv materializes the repo's GIT credential (design §6) keyed by
-// opID (the run id) and returns the exact git env entries plus a cleanup that
-// removes exactly this op's files. Unlike the clone path, the materialized
-// files must survive for the whole session (the spawned agent's git ops use
-// the same GIT_SSH_COMMAND/GIT_ASKPASS), so the caller does NOT run cleanup on
-// the success path — it runs it only on Start rollback, and Stop removes the
-// files explicitly at session end (mat.Cleanup(credID, runID)).
+// opID (the run id) into runMat — the run's PRIVATE per-run runtime
+// materializer (<state>/instances/<runID>/runtime, issue #205) — and returns
+// the exact git env entries. Key, askpass helper, and known_hosts all
+// reference per-run paths, so the container runner can bind-mount exactly
+// this run's credential surface and no other's. Unlike the clone path, the
+// materialized files must survive for the whole session (the spawned agent's
+// git ops use the same GIT_SSH_COMMAND/GIT_ASKPASS); there is no per-file
+// cleanup anymore — the files live inside the per-run tree, which
+// instancehome.Wipe removes wholesale at Stop and on Start rollback.
 //
-// A nil credential yields no env and a no-op cleanup. Error strings never carry
-// payload bytes (the vault sanitizes decrypt errors). Mirrors
-// reposvc.credentialEnv — the same design §6 wiring, kept per-service to avoid
-// coupling the two lifecycles.
-func (s *Service) credentialEnv(ctx context.Context, repo store.Repo, opID string) (env []string, cleanup func(), err error) {
-	noop := func() {}
+// A nil credential yields no env. Error strings never carry payload bytes
+// (the vault sanitizes decrypt errors). Mirrors reposvc.credentialEnv — the
+// same design §6 wiring, kept per-service to avoid coupling the two
+// lifecycles (the clone path stays on the GLOBAL runtime materializer).
+func (s *Service) credentialEnv(ctx context.Context, repo store.Repo, opID string, runMat *vault.Materializer) ([]string, error) {
 	if repo.CredentialID == nil {
-		return nil, noop, nil
+		return nil, nil
 	}
 	cred, err := s.store.CredentialByID(ctx, *repo.CredentialID)
 	if err != nil {
-		return nil, noop, err
-	}
-	remove := func() {
-		if err := s.mat.Cleanup(cred.ID, opID); err != nil {
-			s.log.Warn("cleaning materialized credential", "component", "instance", "err", err)
-		}
+		return nil, err
 	}
 	switch cred.Kind {
 	case store.CredentialKindSSHKey:
 		var p vault.SSHKeyPayload
 		if err := s.vault.DecryptPayload(cred.EncryptedPayload, &p); err != nil {
-			return nil, noop, err
+			return nil, err
 		}
-		keyPath, sshAskpass, err := s.mat.MaterializeSSHKey(cred.ID, opID, p)
+		keyPath, sshAskpass, err := runMat.MaterializeSSHKey(cred.ID, opID, p)
 		if err != nil {
-			remove()
-			return nil, noop, err
+			return nil, err
 		}
 		if sshAskpass != "" {
-			return vault.SSHEnvWithPassphrase(keyPath, s.mat.KnownHostsPath(), sshAskpass), remove, nil
+			return vault.SSHEnvWithPassphrase(keyPath, runMat.KnownHostsPath(), sshAskpass), nil
 		}
-		return vault.SSHEnv(keyPath, s.mat.KnownHostsPath()), remove, nil
+		return vault.SSHEnv(keyPath, runMat.KnownHostsPath()), nil
 	case store.CredentialKindHTTPSToken:
 		var p vault.HTTPSTokenPayload
 		if err := s.vault.DecryptPayload(cred.EncryptedPayload, &p); err != nil {
-			return nil, noop, err
+			return nil, err
 		}
-		askpass, err := s.mat.MaterializeAskpass(cred.ID, opID, p)
+		askpass, err := runMat.MaterializeAskpass(cred.ID, opID, p)
 		if err != nil {
-			remove()
-			return nil, noop, err
+			return nil, err
 		}
-		return vault.HTTPSEnv(askpass), remove, nil
+		return vault.HTTPSEnv(askpass), nil
 	default:
 		// forge_token never authenticates git (design §3a).
-		return nil, noop, fmt.Errorf("credential kind %s cannot authenticate git", cred.Kind)
-	}
-}
-
-// cleanupCredential removes a run's materialized credential files at session
-// end (opID = run id). A nil credential or a missing file is not an error.
-func (s *Service) cleanupCredential(repo store.Repo, runID string) {
-	if repo.CredentialID == nil {
-		return
-	}
-	if err := s.mat.Cleanup(*repo.CredentialID, runID); err != nil {
-		s.log.Warn("cleaning materialized credential at stop", "component", "instance", "run", runID, "err", err)
+		return nil, fmt.Errorf("credential kind %s cannot authenticate git", cred.Kind)
 	}
 }
 

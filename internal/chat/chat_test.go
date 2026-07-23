@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,8 +27,13 @@ func newService(t *testing.T) (*Service, *store.Store, *providertest.Fake, *even
 		t.Fatal(err)
 	}
 	bus := events.NewBus()
+	// Per-run runtime dirs (issue #205), shaped like production's
+	// instancehome.RuntimePath — the seam-args tests re-derive the same path
+	// through svc.runtimeDir(runID).
+	base := t.TempDir()
 	svc, err := New(Options{Store: st, Providers: reg, Bus: bus, Logger: logx.New(io.Discard),
-		Poll: 5 * time.Millisecond, RuntimeDir: t.TempDir()})
+		Poll:          5 * time.Millisecond,
+		RuntimeDirFor: func(runID string) string { return filepath.Join(base, runID, "runtime") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,9 +226,11 @@ func TestLocateActive_passesRunHomeToProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	homeFor := func(runID string) string { return "/state/instances/" + runID + "/home" }
+	rtDir := t.TempDir()
 	svc, err := New(Options{Store: st, Providers: reg, Bus: events.NewBus(),
-		Logger: logx.New(io.Discard), Poll: 5 * time.Millisecond, RuntimeDir: t.TempDir(),
-		HomeFor: homeFor})
+		Logger: logx.New(io.Discard), Poll: 5 * time.Millisecond,
+		RuntimeDirFor: func(string) string { return rtDir },
+		HomeFor:       homeFor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,8 +508,9 @@ func TestRead_endedRunIgnoresSpool(t *testing.T) {
 }
 
 // Core's side of the #92 seam contract for an ACTIVE run: ReadChat gets the
-// run id (keys the adapter's spool), the service's runtime dir (live signals
-// on), and the resolved transcript path.
+// run id (keys the adapter's spool), the run's PRIVATE runtime dir (issue
+// #205 — live signals on, resolved through RuntimeDirFor), and the resolved
+// transcript path.
 func TestRead_activeRunPassesSeamArgs(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
@@ -515,7 +524,10 @@ func TestRead_activeRunPassesSeamArgs(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("ReadChat calls = %d; want 1", len(calls))
 	}
-	want := providertest.ReadCall{RunID: run.ID, RuntimeDir: svc.runtimeDir, TranscriptPath: "/transcript.jsonl"}
+	want := providertest.ReadCall{RunID: run.ID, RuntimeDir: svc.runtimeDir(run.ID), TranscriptPath: "/transcript.jsonl"}
+	if want.RuntimeDir == "" {
+		t.Fatal("fixture wired no RuntimeDirFor — the per-run dir assertion would be vacuous")
+	}
 	if calls[0] != want {
 		t.Errorf("ReadChat call = %+v; want %+v", calls[0], want)
 	}
@@ -549,10 +561,10 @@ func TestRead_preTranscriptConsultsLiveSignals(t *testing.T) {
 	if v.State != provider.StateQuestion || v.PendingDialog == nil || v.PendingDialog.ToolID != "t_early" {
 		t.Errorf("view = {state:%q dialog:%+v}; want question with the early dialog t_early", v.State, v.PendingDialog)
 	}
-	// Both reads went down the seam with the runtime dir and an empty path.
+	// Both reads went down the seam with the run's runtime dir and an empty path.
 	for i, c := range fake.ReadCalls() {
-		if c.RunID != run.ID || c.RuntimeDir != svc.runtimeDir || c.TranscriptPath != "" {
-			t.Errorf("ReadChat call %d = %+v; want {RunID:%s RuntimeDir:%s TranscriptPath:\"\"}", i, c, run.ID, svc.runtimeDir)
+		if c.RunID != run.ID || c.RuntimeDir != svc.runtimeDir(run.ID) || c.TranscriptPath != "" {
+			t.Errorf("ReadChat call %d = %+v; want {RunID:%s RuntimeDir:%s TranscriptPath:\"\"}", i, c, run.ID, svc.runtimeDir(run.ID))
 		}
 	}
 }
@@ -604,14 +616,6 @@ func TestReply_lockedBySpoolDialog(t *testing.T) {
 
 	if err := svc.Reply(context.Background(), run, "hi"); err != ErrDialogPending {
 		t.Errorf("reply while a spool dialog is pending = %v; want ErrDialogPending", err)
-	}
-}
-
-func TestSweepSpools_runsPerProvider(t *testing.T) {
-	svc, _, fake, _ := newService(t)
-	svc.sweepSpools(map[string]bool{"run_active": true})
-	if got := fake.Sweeps(); got != 1 {
-		t.Errorf("SweepSpools calls = %d; want 1 (once per LiveSignals provider)", got)
 	}
 }
 
