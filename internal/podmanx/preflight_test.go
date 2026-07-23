@@ -303,6 +303,11 @@ func TestPreflight(t *testing.T) {
 			if r.OK() != (len(tt.wantChecks) == 0) {
 				t.Errorf("OK() = %v with failures %+v", r.OK(), r.Failures)
 			}
+			// HasPullFailure keys cmd/lab's retry loop (issue #220): true
+			// exactly when a tools-image pull failure is among the failures.
+			if got, want := r.HasPullFailure(), slices.Contains(gotChecks, CheckToolsPull); got != want {
+				t.Errorf("HasPullFailure() = %v, want %v (failures: %+v)", got, want, r.Failures)
+			}
 			if r.Version != tt.wantVersion {
 				t.Errorf("Version = %q, want %q", r.Version, tt.wantVersion)
 			}

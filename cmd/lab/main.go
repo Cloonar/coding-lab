@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -86,6 +87,12 @@ Flags (env overrides in parentheses; flag > env > default):
   -agent-url string        session-facing base URL handed to labctl as LAB_URL,
                            http(s) or unix:///abs/path; defaults to
                            unix://<state-dir>/agent/agent.sock (LAB_AGENT_URL)
+  -container-image string  global default dev image for containerized sessions;
+                           per-repo Dev image overrides it, neither set refuses
+                           the spawn (LAB_CONTAINER_IMAGE)
+  -container-tools-image provider=ref[,provider=ref…]
+                           agent-tools injection image per provider id,
+                           @sha256-pinned per ADR-0051 (LAB_CONTAINER_TOOLS_IMAGE)
 `
 
 func main() {
@@ -263,26 +270,52 @@ func run() int {
 	// stays nil when no container config exists: that nil IS the "container
 	// mode structurally unavailable" signal for instance/afk/reconcile, and
 	// it also disables their podman-rm backstops on host-only deployments.
+	//
+	// Pull failures are RETRIED (issue #220): the deploy pipeline restarts
+	// lab concurrently with the agent-tools publish job for the same commit,
+	// so the startup pull of a rev-pinned tools tag can race the push and
+	// lose. That is the one preflight failure time heals — every other check
+	// reports host state only a redeploy (and thus a fresh boot) changes —
+	// so the loop re-runs preflight while a pull failure is present and
+	// republishes through the gate: container spawns unblock the moment the
+	// registry serves the ref, no restart needed. Repeat verdicts log only
+	// when the failure set changes; a steady-state outage stays one warning,
+	// not one per minute.
 	var containerPreflight func() (podmanx.Result, bool)
 	if cfg.ContainerImage != "" || len(cfg.ContainerToolsImages) > 0 {
 		gate := &podmanx.Gate{}
 		containerPreflight = gate.Result
 		go func() {
-			res := podmanx.Preflight(ctx, podmanx.PreflightConfig{
-				PodmanBin:   cfg.PodmanBin,
-				ToolsImages: cfg.ContainerToolsImages,
-			}, podmanx.RealDeps())
-			gate.Set(res)
-			if res.OK() {
-				logger.Info("container preflight passed", "component", "main", "podman_version", res.Version)
-				return
-			}
-			// Every failure logged individually — the operator fixes the host
-			// once, not one restart per failure (podmanx.Preflight collects
-			// them all for the same reason).
-			for _, f := range res.Failures {
-				logger.Warn("container preflight failed", "component", "main",
-					"check", f.Check, "detail", f.Detail, "hint", f.Hint)
+			const pullRetryEvery = time.Minute
+			var prev []podmanx.Failure
+			for {
+				res := podmanx.Preflight(ctx, podmanx.PreflightConfig{
+					PodmanBin:   cfg.PodmanBin,
+					ToolsImages: cfg.ContainerToolsImages,
+				}, podmanx.RealDeps())
+				gate.Set(res)
+				if res.OK() {
+					logger.Info("container preflight passed", "component", "main", "podman_version", res.Version)
+					return
+				}
+				// Every failure logged individually — the operator fixes the
+				// host once, not one restart per failure (podmanx.Preflight
+				// collects them all for the same reason).
+				if !slices.Equal(res.Failures, prev) {
+					for _, f := range res.Failures {
+						logger.Warn("container preflight failed", "component", "main",
+							"check", f.Check, "detail", f.Detail, "hint", f.Hint)
+					}
+					prev = res.Failures
+				}
+				if !res.HasPullFailure() {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(pullRetryEvery):
+				}
 			}
 		}()
 	}

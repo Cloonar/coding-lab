@@ -100,6 +100,21 @@ type Result struct {
 // OK reports whether every check passed.
 func (r Result) OK() bool { return len(r.Failures) == 0 }
 
+// HasPullFailure reports whether any failure is a tools-image pull failure
+// (CheckToolsPull) — the one check whose verdict can change with no host
+// change at all: the agent-tools publish job may still be pushing the
+// rev-pinned tag this boot's pull raced (issue #220), or the registry may be
+// briefly down. cmd/lab keys its retry loop on this — every other check
+// reports host state that only a redeploy (and thus a fresh boot) changes.
+func (r Result) HasPullFailure() bool {
+	for _, f := range r.Failures {
+		if f.Check == CheckToolsPull {
+			return true
+		}
+	}
+	return false
+}
+
 // Error renders every failure into one actionable message for the spawn
 // refusal, "" when OK. All failures in one string, deliberately: surfacing
 // only the first would make the operator fix the host one restart at a
@@ -240,7 +255,10 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 	// so a bad digest surfaces here and not as a failed spawn hours later.
 	// `image exists` is the cheap local probe; a miss attempts one pull
 	// (the ref is digest-pinned, so a successful pull is the permanent
-	// fix). Skipped entirely when podman itself failed check 1: every probe
+	// fix). A pull failure is also the one failure cmd/lab RETRIES (see
+	// HasPullFailure): a rev-pinned tag may simply not be published yet
+	// when a deploy races the agent-tools publish job (issue #220).
+	// Skipped entirely when podman itself failed check 1: every probe
 	// would just re-report the same root cause. Providers iterate in sorted
 	// order so failure order — and the tests — are deterministic.
 	if podmanOK {
