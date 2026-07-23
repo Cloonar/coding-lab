@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,25 @@ type repoTestServer struct {
 	reposDir string
 	runtime  string
 	home     string
+	pin      *fakePinner // the injected image-ref pinner (issue #207)
+}
+
+// fakePinner is a test double for reposvc.Options.PinImageRef: it returns a
+// canned pinned string (or a canned error), so the pin-on-save contract
+// (ADR-0053) is exercised over HTTP without a live registry.
+type fakePinner struct {
+	mu     sync.Mutex
+	pinned string // returned on success — the canonical digest-pinned form
+	err    error  // when non-nil, returned verbatim (imageref errors are user-facing)
+}
+
+func (p *fakePinner) Pin(_ context.Context, _ string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return "", p.err
+	}
+	return p.pinned, nil
 }
 
 // newRepoTestServer builds a logged-in test server with the full M2 stack:
@@ -63,6 +83,7 @@ func newRepoTestServer(t *testing.T) *repoTestServer {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 
+	pin := &fakePinner{}
 	var svc *reposvc.Service
 	x := newTestServer(t, func(o *Options) {
 		svc, err = reposvc.New(reposvc.Options{
@@ -75,6 +96,7 @@ func newRepoTestServer(t *testing.T) *repoTestServer {
 			ReposDir:     reposDir,
 			GitEnv:       testutil.HermeticGitEnv(home),
 			Providers:    reg,
+			PinImageRef:  pin.Pin,
 		})
 		if err != nil {
 			t.Fatalf("reposvc.New: %v", err)
@@ -85,7 +107,7 @@ func newRepoTestServer(t *testing.T) *repoTestServer {
 	})
 	t.Cleanup(svc.Close)
 	x.setup("op", "password123")
-	return &repoTestServer{testServer: x, svc: svc, reposDir: reposDir, runtime: runtime, home: home}
+	return &repoTestServer{testServer: x, svc: svc, reposDir: reposDir, runtime: runtime, home: home, pin: pin}
 }
 
 // repoGitCmd runs one git command with the hermetic env.
@@ -227,7 +249,7 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		"afk_prompt", "afk_prompt_effective", "afk_provider_default",
 		"autoland_enabled", "max_fix_attempts", "auto_merge", "lander_provider",
 		"lander_model", "lander_effort",
-		"runner", "container_memory", "container_pids", "container_nofile"} {
+		"runner", "container_memory", "container_pids", "container_nofile", "image_ref"} {
 		if _, ok := repo[k]; !ok {
 			t.Errorf("repo JSON missing pinned key %q", k)
 		}
@@ -909,6 +931,63 @@ func TestRepoAutolandSettings(t *testing.T) {
 	wantStatus(t, resp, http.StatusOK)
 	if repo = decodeBody(t, resp); repo["tracker_binding"] != "builtin" || repo["autoland_enabled"] != false {
 		t.Errorf("combined flip = %v/%v, want builtin/false", repo["tracker_binding"], repo["autoland_enabled"])
+	}
+}
+
+// TestRepoImageRef pins the issue-#207 repo surface: image_ref is a nullable
+// key always present in the response; a PATCH with a ref echoes back the
+// PINNER'S digest-pinned output (pin-on-save, ADR-0053); null clears it back to
+// inherit; and a pinner rejection is a 400 with the pinner's message in the
+// error envelope.
+func TestRepoImageRef(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+
+	resp := x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	repo := decodeBody(t, resp)
+	// The nullable key is always present, and null on a fresh repo (inherit).
+	if v, ok := repo["image_ref"]; !ok {
+		t.Fatal("repo JSON missing image_ref key")
+	} else if v != nil {
+		t.Errorf("image_ref = %v on a fresh repo, want null (inherit)", v)
+	}
+	id := repo["id"].(string)
+	x.waitCloneStatus(t, id, "ready")
+
+	// A tag ref is digest-pinned on save: the response echoes the PINNER'S
+	// output, never the operator's moving tag.
+	pinned := "docker.io/library/debian:bookworm@sha256:" + strings.Repeat("a", 64)
+	x.pin.pinned = pinned
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
+		"image_ref": "docker.io/library/debian:bookworm",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if repo = decodeBody(t, resp); repo["image_ref"] != pinned {
+		t.Errorf("image_ref = %v after PATCH, want the pinned %q", repo["image_ref"], pinned)
+	}
+
+	// null clears it back to inherit (a NULL column).
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"image_ref": nil}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if repo = decodeBody(t, resp); repo["image_ref"] != nil {
+		t.Errorf("image_ref = %v after PATCH null, want null", repo["image_ref"])
+	}
+
+	// A pinner rejection surfaces as a 400 with the pinner's message verbatim.
+	x.pin.pinned = ""
+	x.pin.err = errors.New(`invalid tag "BOOK MARK": up to 128 letters, digits, underscores, dots and dashes`)
+	resp = x.do("PATCH", "/api/v1/repos/"+id, map[string]any{
+		"image_ref": "docker.io/library/debian:BOOK MARK",
+	}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); !strings.Contains(fmt.Sprint(got["error"]), "invalid tag") {
+		t.Errorf("400 body = %v, want the pinner's message", got["error"])
+	}
+	// The rejected ref never landed on the row.
+	if repo = x.getRepo(t, id); repo["image_ref"] != nil {
+		t.Errorf("image_ref = %v after a rejected pin, want null", repo["image_ref"])
 	}
 }
 

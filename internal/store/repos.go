@@ -132,6 +132,12 @@ type Repo struct {
 	ContainerMemory *string
 	ContainerPids   *int
 	ContainerNofile *int
+	// ImageRef is the repo's dev container image reference (issue #207). Nil /
+	// NULL means inherit the globally configured default dev image
+	// (--container-image); a non-NULL value is always digest-pinned, pinned by
+	// reposvc on save — the store persists whatever it is given, unchanged. It
+	// only matters while Runner is "container".
+	ImageRef *string
 }
 
 // repoColumns is the one column list every repo SELECT/INSERT uses, in the
@@ -147,7 +153,7 @@ const repoColumns = `id, name, remote_url, credential_id, forge_credential_id,
 	afk_provider_default, remote_default, afk_remote_default,
 	autoland_enabled, max_fix_attempts, auto_merge, lander_provider,
 	lander_model, lander_effort,
-	runner, container_memory, container_pids, container_nofile`
+	runner, container_memory, container_pids, container_nofile, image_ref`
 
 // triageLabels are the five canonical triage labels seeded per repo at
 // creation (design §3a colors; docs/agents/triage-labels.md meanings).
@@ -183,7 +189,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 	}
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO repos (`+repoColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.Name, r.RemoteURL, r.CredentialID, r.ForgeCredentialID,
 		r.TrackerBinding, r.ForgeKind, r.DefaultBranch, r.Provider, r.ModelDefault,
 		r.EffortDefault, r.Incogni, r.GitAuthorName, r.GitAuthorEmail,
@@ -195,7 +201,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 		r.AFKProviderDefault, r.RemoteDefault, r.AFKRemoteDefault,
 		r.AutolandEnabled, r.MaxFixAttempts, r.AutoMerge, r.LanderProvider,
 		r.LanderModel, r.LanderEffort,
-		r.Runner, r.ContainerMemory, r.ContainerPids, r.ContainerNofile)
+		r.Runner, r.ContainerMemory, r.ContainerPids, r.ContainerNofile, r.ImageRef)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Repo{}, fmt.Errorf("create repo %q: %w", r.Name, ErrNameTaken)
@@ -324,6 +330,7 @@ type RepoSettingsUpdate struct {
 	ContainerMemory      Opt[*string] // podman --memory override; nil clears (NULL = inherit the global default)
 	ContainerPids        Opt[*int]    // podman --pids-limit override; nil clears (NULL = inherit)
 	ContainerNofile      Opt[*int]    // podman --ulimit nofile override; nil clears (NULL = inherit)
+	ImageRef             Opt[*string] // dev container image ref override (issue #207); nil clears (NULL = inherit the global default dev image)
 }
 
 // UpdateRepoSettings applies the set fields of u to one repo and returns the
@@ -440,6 +447,9 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 	}
 	if u.ContainerNofile.Set {
 		add("container_nofile", u.ContainerNofile.Value)
+	}
+	if u.ImageRef.Set {
+		add("image_ref", u.ImageRef.Value)
 	}
 	if len(sets) == 0 {
 		return s.RepoByID(ctx, id)
@@ -589,6 +599,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		landerModel, landerEffort         sql.NullString
 		containerMemory                   sql.NullString
 		containerPids, containerNofile    sql.NullInt64
+		imageRef                          sql.NullString
 	)
 	if err := scan(&r.ID, &r.Name, &r.RemoteURL, &credID, &forgeCredID,
 		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &providerCol, &modelDef,
@@ -601,7 +612,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		&afkProviderDef, &remoteDef, &afkRemoteDef,
 		&r.AutolandEnabled, &r.MaxFixAttempts, &r.AutoMerge, &landerProvider,
 		&landerModel, &landerEffort,
-		&r.Runner, &containerMemory, &containerPids, &containerNofile); err != nil {
+		&r.Runner, &containerMemory, &containerPids, &containerNofile, &imageRef); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
@@ -626,6 +637,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.ContainerMemory = nullStr(containerMemory)
 	r.ContainerPids = nullInt(containerPids)
 	r.ContainerNofile = nullInt(containerNofile)
+	r.ImageRef = nullStr(imageRef)
 
 	var err error
 	if r.AFKOptions, err = unmarshalOptions(afkOptions); err != nil {

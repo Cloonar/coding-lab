@@ -140,6 +140,15 @@ type Options struct {
 	// incogni hook then guards nothing on content, which is inert because no
 	// agent runs in that mode.
 	Providers *provider.Registry
+	// PinImageRef resolves and digest-pins a dev image ref on save (issue #207;
+	// ADR-0053 — pin-on-save is the contract: a tag is a moving reference, so the
+	// digest recorded on save is exactly what the spawn-time pull runs, and a
+	// same-tag re-push between save and spawn changes nothing; the store persists
+	// this returned pinned string verbatim). Production injects imageref's
+	// Resolver.Pin. Nil is the no-pinner degraded state — an image_ref update then
+	// FAILS rather than persisting an unpinned ref: storing what spawn cannot
+	// trust is never the safe fallback.
+	PinImageRef func(ctx context.Context, ref string) (string, error)
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -159,8 +168,9 @@ type Service struct {
 	credentialKeep func(filename string) bool
 	liveInstances  func(ctx context.Context, repoID string) (int, error)
 	stopInstances  func(ctx context.Context, repoID string) (int, error)
-	metrics        *metrics.Metrics   // nil-safe report methods
-	providers      *provider.Registry // nil in the no-provider degraded boot
+	pinImageRef    func(ctx context.Context, ref string) (string, error) // nil = no-pinner degraded state (image_ref updates fail)
+	metrics        *metrics.Metrics                                      // nil-safe report methods
+	providers      *provider.Registry                                    // nil in the no-provider degraded boot
 
 	// mu guards jobs: the single-flight registry of running clone jobs,
 	// keyed by repo id.
@@ -208,6 +218,7 @@ func New(o Options) (*Service, error) {
 		credentialKeep: o.CredentialKeep,
 		liveInstances:  o.LiveInstances,
 		stopInstances:  o.StopInstances,
+		pinImageRef:    o.PinImageRef,
 		metrics:        o.Metrics,
 		providers:      o.Providers,
 		jobs:           make(map[string]*cloneJob),
@@ -522,6 +533,36 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		}
 		if enabled && binding != store.TrackerBindingForge {
 			return store.Repo{}, badRequestf("autoland_enabled: requires a forge tracker binding")
+		}
+	}
+
+	// image_ref (issue #207) is validated LAST because it is the only field that
+	// touches the network: every cheap enum/grammar check above gates the
+	// registry round-trip, so a request invalid for another reason never pays for
+	// a pin. Set-to-nil clears the per-repo override back to inherit the global
+	// default dev image, with no pinner call. A non-nil value is TrimSpace'd, and
+	// blank-after-trim is treated as a clear too (defensive — httpapi's
+	// patchNullableString already folds blank → nil). Otherwise the ref is pinned
+	// on save (ADR-0053 — a tag moves, the digest does not), so the column only
+	// ever holds a canonical host/path:tag@sha256:… form: a nil pinner is the
+	// degraded no-pinner boot and fails plainly (a config gap — 500-family, not
+	// the operator's fault, and never a silently-stored unpinned ref); a pinner
+	// error IS the operator's, and imageref's messages already name the ref and
+	// the offending part, so it surfaces verbatim as a 400 with no double-wrap. On
+	// success the RETURNED pinned string is stored, never the input tag.
+	if u.ImageRef.Set && u.ImageRef.Value != nil {
+		trimmed := strings.TrimSpace(*u.ImageRef.Value)
+		switch {
+		case trimmed == "":
+			u.ImageRef.Value = nil
+		case s.pinImageRef == nil:
+			return store.Repo{}, errors.New("image ref pinning unavailable")
+		default:
+			pinned, err := s.pinImageRef(ctx, trimmed)
+			if err != nil {
+				return store.Repo{}, badRequestf("%s", err)
+			}
+			u.ImageRef.Value = &pinned
 		}
 	}
 

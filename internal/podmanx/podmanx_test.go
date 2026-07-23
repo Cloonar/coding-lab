@@ -220,6 +220,62 @@ func TestRemoveContainerError(t *testing.T) {
 	}
 }
 
+func TestEnsureImage(t *testing.T) {
+	const ref = "registry.example.com/dev@sha256:cafe"
+
+	t.Run("local hit does not pull", func(t *testing.T) {
+		r := &recordingRunner{script: map[string]cmdResult{
+			"podman image exists " + ref: {},
+		}}
+		if err := EnsureImage(context.Background(), r.run, "podman", ref); err != nil {
+			t.Fatalf("EnsureImage: %v", err)
+		}
+		if len(r.calls) != 1 {
+			t.Fatalf("calls = %q, want only the exists probe (no pull on a hit)", r.calls)
+		}
+		assertArgv(t, r.calls[0], []string{"podman", "image", "exists", ref})
+	})
+
+	t.Run("miss pulls, success", func(t *testing.T) {
+		r := &recordingRunner{script: map[string]cmdResult{
+			"podman image exists " + ref: {err: errors.New("exit status 1")},
+			"podman pull " + ref:         {},
+		}}
+		if err := EnsureImage(context.Background(), r.run, "podman", ref); err != nil {
+			t.Fatalf("EnsureImage: %v", err)
+		}
+		want := [][]string{
+			{"podman", "image", "exists", ref},
+			{"podman", "pull", ref},
+		}
+		if len(r.calls) != len(want) {
+			t.Fatalf("calls = %q, want %q", r.calls, want)
+		}
+		for i := range want {
+			assertArgv(t, r.calls[i], want[i])
+		}
+	})
+
+	t.Run("miss then pull fails: error names the ref and quotes podman", func(t *testing.T) {
+		podErr := errors.New("manifest unknown")
+		r := &recordingRunner{script: map[string]cmdResult{
+			"podman image exists " + ref: {err: errors.New("exit status 1")},
+			"podman pull " + ref:         {err: podErr},
+		}}
+		err := EnsureImage(context.Background(), r.run, "podman", ref)
+		if !errors.Is(err, podErr) {
+			t.Fatalf("EnsureImage error = %v, want wrapped %v", err, podErr)
+		}
+		// Surfaces verbatim in the spawn refusal, so it must be actionable:
+		// the ref, podman's own words, and where to look.
+		for _, sub := range []string{ref, "manifest unknown", "registry access"} {
+			if !strings.Contains(err.Error(), sub) {
+				t.Errorf("error %q does not carry %q", err, sub)
+			}
+		}
+	})
+}
+
 func TestListRunContainers(t *testing.T) {
 	const psCmd = "podman ps --all --filter name=labrun- --format {{.Names}}"
 

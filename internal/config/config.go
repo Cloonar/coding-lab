@@ -57,11 +57,16 @@ type Config struct {
 	PrlimitBin string
 	PodmanBin  string
 
-	// ContainerImage is the dev image containerized sessions run in
-	// (issue #205). "" means unconfigured — container mode then refuses to
-	// spawn (the podmanx preflight owns that refusal, not Parse), because
-	// lab deliberately ships no dev image of its own: the operator owns the
-	// container userland, lab injects only the agent tools (ADR-0051).
+	// ContainerImage is the global DEFAULT dev image containerized sessions
+	// run in (issue #205), overridable per repo via repos.image_ref (issue
+	// #207): a repo with its own image_ref ignores this, one without inherits
+	// it. lab deliberately ships no dev image of its own — the operator owns
+	// the container userland, lab injects only the agent tools (ADR-0051). ""
+	// means no global default, which is NO LONGER a preflight failure (#207):
+	// a deployment where every container repo pins its own image_ref is valid.
+	// The refusal moved to the spawn instead — a container launch whose repo
+	// has neither an image_ref override nor this global default is refused
+	// there (only the spawn knows the repo), never at startup.
 	ContainerImage string
 
 	// ContainerToolsImages maps a provider id to its agent-tools OCI image

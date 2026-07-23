@@ -265,6 +265,11 @@ export interface Repo {
   container_memory: string | null;
   container_pids: number | null;
   container_nofile: number | null;
+  /** OCI image ref this repo's container sessions run in (issue #207); null =
+   *  inherit the server's globally configured default dev image
+   *  (--container-image). The server resolves and digest-pins the ref
+   *  (https registries only) on save. */
+  image_ref: string | null;
 }
 
 export interface CreateRepoRequest {
@@ -330,6 +335,10 @@ export interface RepoPatch {
   container_memory?: string | null;
   container_pids?: number | null;
   container_nofile?: number | null;
+  /** null clears back to inherit the server's global default dev image
+   *  (issue #207). A non-null value is resolved and digest-pinned server-side
+   *  on save — that can 400 with a resolution error. */
+  image_ref?: string | null;
 }
 
 /** 201 with clone_status "cloning" — the bare clone runs async, watch SSE. */

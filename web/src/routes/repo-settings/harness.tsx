@@ -123,6 +123,7 @@ export function baseRepo(): Repo {
     container_memory: null,
     container_pids: null,
     container_nofile: null,
+    image_ref: null,
   };
 }
 

@@ -14,17 +14,20 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
-// recordingCmdRunner is the podmanx.CmdRunner fake for the backstop tests:
-// records every invocation, answers scripted output keyed by the space-joined
-// command line ("" default), never spawns podman.
+// recordingCmdRunner is the podmanx.CmdRunner fake for the backstop and
+// EnsureImage tests: records every invocation, answers scripted output keyed
+// by the space-joined command line ("" default), and — for the EnsureImage
+// pull paths (issue #207) — an optional scripted error under the same key
+// (nil default, so a bare script entry still succeeds). Never spawns podman.
 type recordingCmdRunner struct {
 	mu     sync.Mutex
 	calls  [][]string
 	script map[string]string
+	errs   map[string]error
 }
 
 func newRecordingCmdRunner() *recordingCmdRunner {
-	return &recordingCmdRunner{script: map[string]string{}}
+	return &recordingCmdRunner{script: map[string]string{}, errs: map[string]error{}}
 }
 
 func (r *recordingCmdRunner) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -32,7 +35,17 @@ func (r *recordingCmdRunner) run(_ context.Context, name string, args ...string)
 	defer r.mu.Unlock()
 	argv := append([]string{name}, args...)
 	r.calls = append(r.calls, argv)
-	return []byte(r.script[strings.Join(argv, " ")]), nil
+	key := strings.Join(argv, " ")
+	return []byte(r.script[key]), r.errs[key] // nil map read is nil — no error by default
+}
+
+// reset drops the recorded calls, letting a test isolate a later phase's
+// podman calls (e.g. Stop's rm) from an earlier one's (Start's EnsureImage
+// probe, #207).
+func (r *recordingCmdRunner) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = nil
 }
 
 func (r *recordingCmdRunner) recorded() [][]string {
@@ -282,6 +295,154 @@ func TestStart_containerRefusals(t *testing.T) {
 	}
 }
 
+// hasCall reports whether calls contains the exact argv want — used to assert
+// EnsureImage's probe fired against a specific image among a launch's calls.
+func hasCall(calls [][]string, want []string) bool {
+	for _, c := range calls {
+		if slices.Equal(c, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseContainerSpawn doubles as the effective dev-image resolver (issue
+// #207): the repo's image_ref override wins when set and non-empty, else the
+// server's global default; neither set is a *BadRequestError naming BOTH knobs
+// (either one fixes it). Driven directly on the helper — the pure selection
+// needs no launch machinery — with the gate otherwise green (preflight OK,
+// tools image present) so only the image branch decides.
+func TestRefuseContainerSpawn_effectiveImage(t *testing.T) {
+	override := "registry.example.com/dev@sha256:override"
+	empty := ""
+	cases := []struct {
+		name      string
+		global    string
+		imageRef  *string
+		wantImage string
+		wantErr   []string // substrings the refusal must carry; nil = success
+	}{
+		{name: "repo override wins", global: testDevImage, imageRef: &override, wantImage: override},
+		{name: "nil override falls back to global", global: testDevImage, imageRef: nil, wantImage: testDevImage},
+		{name: "empty override falls back to global", global: testDevImage, imageRef: &empty, wantImage: testDevImage},
+		{name: "neither set refuses naming both knobs", global: "", imageRef: nil,
+			wantErr: []string{"no dev image for this repo", "Runner settings", "--container-image"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.enableContainer(t)
+			f.svc.containerImage = tc.global
+			image, err := f.svc.refuseContainerSpawn("claude-code", store.Repo{ImageRef: tc.imageRef})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("refuseContainerSpawn: %v", err)
+				}
+				if image != tc.wantImage {
+					t.Errorf("effective image = %q, want %q", image, tc.wantImage)
+				}
+				return
+			}
+			var bad *BadRequestError
+			if !errors.As(err, &bad) {
+				t.Fatalf("error type = %T (%v), want *BadRequestError (the 400 mapping)", err, err)
+			}
+			for _, sub := range tc.wantErr {
+				if !strings.Contains(err.Error(), sub) {
+					t.Errorf("refusal %q does not name %q", err, sub)
+				}
+			}
+		})
+	}
+}
+
+// The launch.go seam carries the effective dev image (issue #207) into BOTH
+// the podman pane's image and EnsureImage's pull-if-missing probe, and a pull
+// failure refuses as a *BadRequestError BEFORE the claim. Driven through Start
+// (RepoByID reflects the persisted image_ref).
+func TestStart_containerImageResolution(t *testing.T) {
+	const override = "registry.example.com/dev@sha256:feed"
+	setOverride := func(t *testing.T, f *fixture) {
+		ref := override
+		if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+			ImageRef: store.Set(&ref),
+		}); err != nil {
+			t.Fatalf("UpdateRepoSettings(image_ref): %v", err)
+		}
+	}
+
+	t.Run("override drives the pane image and the EnsureImage probe", func(t *testing.T) {
+		f := newFixture(t)
+		rec := f.enableContainer(t)
+		setOverride(t, f)
+
+		if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		sess, live := f.runner.Session("proj~20260608-1530")
+		if !live {
+			t.Fatal("session not live")
+		}
+		if !slices.Contains(sess.Argv, override) {
+			t.Errorf("pane argv does not carry the override image %q:\n  %q", override, sess.Argv)
+		}
+		if slices.Contains(sess.Argv, testDevImage) {
+			t.Errorf("pane argv still carries the global default %q despite the repo override", testDevImage)
+		}
+		if !hasCall(rec.recorded(), []string{testPodmanBin, "image", "exists", override}) {
+			t.Errorf("EnsureImage did not probe the override image; calls = %q", rec.recorded())
+		}
+	})
+
+	t.Run("pull failure refuses as BadRequest before the claim", func(t *testing.T) {
+		f := newFixture(t)
+		rec := f.enableContainer(t)
+		setOverride(t, f)
+		// Image absent locally, pull fails: podman's own explanation and the
+		// actionable hint must both surface verbatim.
+		rec.errs[testPodmanBin+" image exists "+override] = errors.New("exit status 1")
+		rec.errs[testPodmanBin+" pull "+override] = errors.New("manifest unknown")
+
+		_, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+		if err == nil {
+			t.Fatal("Start succeeded, want a pull refusal")
+		}
+		var bad *BadRequestError
+		if !errors.As(err, &bad) {
+			t.Errorf("error type = %T (%v), want *BadRequestError (config-fixable → 400)", err, err)
+		}
+		for _, sub := range []string{override, "manifest unknown", "registry access"} {
+			if !strings.Contains(err.Error(), sub) {
+				t.Errorf("refusal %q does not carry %q", err, sub)
+			}
+		}
+		// EnsureImage runs before the claim: the failed pull parked nothing.
+		if dirExists(filepath.Join(f.worktreeRoot, "proj-20260608-1530")) {
+			t.Error("failed pull created a worktree")
+		}
+		if _, err := f.st.RunBySession(t.Context(), "proj~20260608-1530"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("RunBySession after pull failure: %v, want ErrNotFound (no run row)", err)
+		}
+	})
+}
+
+// A host-runner repo never resolves an image and never calls EnsureImage: the
+// whole container gate is skipped. The podman seam is wired but the repo stays
+// on the default host runner, so Start must issue no podman at all.
+func TestStart_hostRunner_noEnsureImage(t *testing.T) {
+	f := newFixture(t)
+	rec := newRecordingCmdRunner()
+	f.svc.podmanBin = testPodmanBin
+	f.svc.podmanRun = rec.run
+
+	if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if calls := rec.recorded(); len(calls) != 0 {
+		t.Errorf("host-runner Start issued podman calls = %q, want none (no EnsureImage)", calls)
+	}
+}
+
 // Stop of a container-mode run follows the tmux kill with the `podman rm`
 // backstop, addressed by the deterministic container name; a host-mode stop
 // on an unwired server runs no podman at all (the existing Stop tests cover
@@ -295,6 +456,9 @@ func TestStop_containerBackstop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
+		// Start already recorded EnsureImage's `image exists` probe (#207);
+		// drop it so this assertion isolates exactly what Stop issues.
+		rec.reset()
 		if _, err := f.svc.Stop(t.Context(), run.SessionName); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
@@ -329,10 +493,14 @@ func TestLaunch_containerRollbackRemovesContainer(t *testing.T) {
 	if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err == nil {
 		t.Fatal("Start succeeded despite injected spawn failure")
 	}
-	want := []string{testPodmanBin, "rm", "--force", "--ignore", "--time", "5", podmanx.ContainerName(name)}
+	// One failing Launch records two podman calls in order: EnsureImage's
+	// pre-claim `image exists` probe (#207, the effective image is the global
+	// default here — no repo override), then the rollback's rm backstop.
+	wantExists := []string{testPodmanBin, "image", "exists", testDevImage}
+	wantRm := []string{testPodmanBin, "rm", "--force", "--ignore", "--time", "5", podmanx.ContainerName(name)}
 	calls := rec.recorded()
-	if len(calls) != 1 || !slices.Equal(calls[0], want) {
-		t.Errorf("rollback podman calls = %q, want exactly [%q]", calls, want)
+	if len(calls) != 2 || !slices.Equal(calls[0], wantExists) || !slices.Equal(calls[1], wantRm) {
+		t.Errorf("rollback podman calls = %q, want [%q, %q]", calls, wantExists, wantRm)
 	}
 	if _, live := f.runner.Session(name); live {
 		t.Error("rollback left the session live")

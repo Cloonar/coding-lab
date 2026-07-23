@@ -27,6 +27,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/httpapi"
+	"git.cloonar.com/Cloonar/coding-lab/internal/imageref"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
@@ -269,7 +270,6 @@ func run() int {
 		go func() {
 			res := podmanx.Preflight(ctx, podmanx.PreflightConfig{
 				PodmanBin:   cfg.PodmanBin,
-				Image:       cfg.ContainerImage,
 				ToolsImages: cfg.ContainerToolsImages,
 			}, podmanx.RealDeps())
 			gate.Set(res)
@@ -523,6 +523,11 @@ func run() int {
 		// provider config entry resolved above), which renders a content-inert
 		// guard.
 		Providers: providerReg,
+		// PinImageRef digest-pins a repo's dev image ref on save (issue #207 /
+		// ADR-0053). The zero-value Resolver's nil Client means the package's
+		// https-only default client — that exact construction is the production
+		// wiring the imageref package documents.
+		PinImageRef: (&imageref.Resolver{}).Pin,
 	}
 	if instanceSvc != nil {
 		// Preserve live-session credential files across the restart heal — the

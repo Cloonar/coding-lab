@@ -35,6 +35,42 @@ type testEnv struct {
 	reposDir string
 	runtime  string
 	home     string
+	pin      *fakePinner // the injected image-ref pinner (issue #207)
+}
+
+// fakePinner is a test double for reposvc.Options.PinImageRef: it records every
+// ref handed to it and returns a canned pinned string (or a canned error), so
+// the pin-on-save contract (ADR-0053) is exercised without a live registry.
+type fakePinner struct {
+	mu     sync.Mutex
+	calls  []string
+	pinned string // returned on success — the canonical digest-pinned form
+	err    error  // when non-nil, returned verbatim (imageref errors are user-facing)
+}
+
+func (p *fakePinner) Pin(_ context.Context, ref string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, ref)
+	if p.err != nil {
+		return "", p.err
+	}
+	return p.pinned, nil
+}
+
+func (p *fakePinner) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.calls)
+}
+
+func (p *fakePinner) lastCall() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.calls) == 0 {
+		return ""
+	}
+	return p.calls[len(p.calls)-1]
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -73,6 +109,7 @@ func newTestEnvProviders(t *testing.T, providers ...provider.AgentProvider) *tes
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
+	pin := &fakePinner{}
 	svc, err := New(Options{
 		Store:        st,
 		Vault:        v,
@@ -83,6 +120,7 @@ func newTestEnvProviders(t *testing.T, providers ...provider.AgentProvider) *tes
 		ReposDir:     reposDir,
 		GitEnv:       testutil.HermeticGitEnv(home),
 		Providers:    providerReg,
+		PinImageRef:  pin.Pin,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -90,7 +128,7 @@ func newTestEnvProviders(t *testing.T, providers ...provider.AgentProvider) *tes
 	// LIFO cleanup: cancel and drain clone jobs BEFORE the temp dirs and
 	// the store go away under them.
 	t.Cleanup(svc.Close)
-	return &testEnv{svc: svc, st: st, bus: bus, reposDir: reposDir, runtime: runtime, home: home}
+	return &testEnv{svc: svc, st: st, bus: bus, reposDir: reposDir, runtime: runtime, home: home, pin: pin}
 }
 
 // gitCmd runs one git command with the hermetic env, failing t on error.
@@ -994,6 +1032,160 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// TestUpdateSettingsImageRefPinsOnSave pins the issue-#207 / ADR-0053 save
+// contract: a tag ref is digest-pinned before it is stored, so the column holds
+// the PINNER'S canonical output — never the operator's moving tag — and the
+// pinner is handed the TRIMMED operator input.
+func TestUpdateSettingsImageRefPinsOnSave(t *testing.T) {
+	e := newTestEnv(t)
+	origin := makeOrigin(t, e.home, "main", 1)
+	repo, err := e.svc.Add(t.Context(), AddParams{RemoteURL: origin})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
+
+	pinned := "docker.io/library/debian:bookworm@sha256:" + strings.Repeat("a", 64)
+	e.pin.pinned = pinned
+
+	updated, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set(ptr("  docker.io/library/debian:bookworm  ")),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings image_ref: %v", err)
+	}
+	if updated.ImageRef == nil || *updated.ImageRef != pinned {
+		t.Errorf("stored image_ref = %v, want the pinner's output %q", updated.ImageRef, pinned)
+	}
+	// The pinner saw the trimmed operator input, not the raw padded string.
+	if got := e.pin.lastCall(); got != "docker.io/library/debian:bookworm" {
+		t.Errorf("pinner called with %q, want the trimmed operator ref", got)
+	}
+}
+
+// TestUpdateSettingsImageRefPinnerError: a pinner rejection (bad ref,
+// unreachable registry) becomes a BadRequestError carrying the pinner's message
+// VERBATIM — imageref errors already name the ref, so reposvc must not
+// double-wrap them — and stores nothing.
+func TestUpdateSettingsImageRefPinnerError(t *testing.T) {
+	e := newTestEnv(t)
+	origin := makeOrigin(t, e.home, "main", 1)
+	repo, err := e.svc.Add(t.Context(), AddParams{RemoteURL: origin})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
+
+	e.pin.err = errors.New(`invalid tag "BOOK MARK": up to 128 letters, digits, underscores, dots and dashes`)
+	_, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set(ptr("docker.io/library/debian:BOOK MARK")),
+	})
+	var bad *BadRequestError
+	if err == nil || !asBadRequest(err, &bad) {
+		t.Fatalf("UpdateSettings error = %v, want BadRequestError", err)
+	}
+	if bad.Error() != e.pin.err.Error() {
+		t.Errorf("BadRequestError message = %q, want the pinner's verbatim %q", bad.Error(), e.pin.err.Error())
+	}
+	row, err := e.st.RepoByID(t.Context(), repo.ID)
+	if err != nil {
+		t.Fatalf("RepoByID: %v", err)
+	}
+	if row.ImageRef != nil {
+		t.Errorf("image_ref = %v after a rejected pin, want nil", row.ImageRef)
+	}
+}
+
+// TestUpdateSettingsImageRefClearNeverPins: clearing the override — an explicit
+// nil OR a blank string (defensive) — NULLs the column and never calls the
+// pinner.
+func TestUpdateSettingsImageRefClearNeverPins(t *testing.T) {
+	e := newTestEnv(t)
+	origin := makeOrigin(t, e.home, "main", 1)
+	repo, err := e.svc.Add(t.Context(), AddParams{RemoteURL: origin})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
+
+	e.pin.pinned = "docker.io/library/debian:bookworm@sha256:" + strings.Repeat("b", 64)
+
+	// Seed a pinned value (one pin call), then clear it with an explicit nil.
+	if _, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set(ptr("docker.io/library/debian:bookworm")),
+	}); err != nil {
+		t.Fatalf("seed image_ref: %v", err)
+	}
+	calls := e.pin.callCount()
+	updated, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set[*string](nil),
+	})
+	if err != nil {
+		t.Fatalf("clear image_ref: %v", err)
+	}
+	if updated.ImageRef != nil {
+		t.Errorf("image_ref = %v after clear, want nil", updated.ImageRef)
+	}
+	if e.pin.callCount() != calls {
+		t.Errorf("clearing image_ref called the pinner (%d → %d)", calls, e.pin.callCount())
+	}
+
+	// Re-seed, then a blank string clears too (defensive) — still no pin call.
+	if _, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set(ptr("docker.io/library/debian:bookworm")),
+	}); err != nil {
+		t.Fatalf("re-seed image_ref: %v", err)
+	}
+	calls = e.pin.callCount()
+	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set(ptr("   ")),
+	})
+	if err != nil {
+		t.Fatalf("blank image_ref: %v", err)
+	}
+	if updated.ImageRef != nil {
+		t.Errorf("image_ref = %v after a blank PATCH, want nil (blank clears)", updated.ImageRef)
+	}
+	if e.pin.callCount() != calls {
+		t.Errorf("blank image_ref called the pinner (%d → %d)", calls, e.pin.callCount())
+	}
+}
+
+// TestUpdateSettingsImageRefPinnerUnavailable: with no pinner injected (the
+// degraded no-pinner boot) a set image_ref fails with a PLAIN error — a config
+// gap is 500-family, not a client BadRequestError — and stores nothing.
+func TestUpdateSettingsImageRefPinnerUnavailable(t *testing.T) {
+	e := newTestEnv(t)
+	e.svc.pinImageRef = nil // simulate the no-pinner boot (in-package access)
+	origin := makeOrigin(t, e.home, "main", 1)
+	repo, err := e.svc.Add(t.Context(), AddParams{RemoteURL: origin})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
+
+	_, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set(ptr("docker.io/library/debian:bookworm")),
+	})
+	if err == nil {
+		t.Fatal("UpdateSettings with no pinner succeeded, want an error")
+	}
+	var bad *BadRequestError
+	if asBadRequest(err, &bad) {
+		t.Errorf("no-pinner error = %v, want a plain (non-BadRequest) error — a config gap is not the client's fault", err)
+	}
+	if !strings.Contains(err.Error(), "image ref pinning unavailable") {
+		t.Errorf("no-pinner error = %q, want it to name pinning as unavailable", err)
+	}
+	row, err := e.st.RepoByID(t.Context(), repo.ID)
+	if err != nil {
+		t.Fatalf("RepoByID: %v", err)
+	}
+	if row.ImageRef != nil {
+		t.Errorf("image_ref = %v after a no-pinner failure, want nil", row.ImageRef)
+	}
 }
 
 func ptr[T any](v T) *T { return &v }

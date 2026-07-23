@@ -116,4 +116,52 @@ describe('RepoSettings Runner', () => {
 
     expect(h.patchBodies).toEqual([{ container_pids: null, container_nofile: null }]);
   });
+
+  it('typing a dev image ref and saving PATCHes it alone', async () => {
+    await mountRunner();
+    await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
+
+    typeInto(input('image_ref'), 'docker.io/library/debian:bookworm');
+    submitForm();
+    await settle();
+
+    expect(h.patchBodies).toEqual([{ image_ref: 'docker.io/library/debian:bookworm' }]);
+    expect(h.repoOnServer.image_ref).toBe('docker.io/library/debian:bookworm');
+  });
+
+  it('clearing a seeded dev image ref PATCHes null', async () => {
+    h.repoOnServer = {
+      ...baseRepo(),
+      runner: 'container',
+      image_ref: 'docker.io/library/debian:bookworm@sha256:abc123',
+    };
+    await mountRunner();
+    await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
+
+    expect(input('image_ref').value).toBe('docker.io/library/debian:bookworm@sha256:abc123');
+
+    typeInto(input('image_ref'), '');
+    submitForm();
+    await settle();
+
+    expect(h.patchBodies).toEqual([{ image_ref: null }]);
+    expect(h.repoOnServer.image_ref).toBeNull();
+  });
+
+  it('an untouched dev image ref is not re-sent when saving a different field', async () => {
+    h.repoOnServer = {
+      ...baseRepo(),
+      runner: 'container',
+      image_ref: 'docker.io/library/debian:bookworm',
+    };
+    await mountRunner();
+    await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
+
+    typeInto(input('container_memory'), '512m');
+    submitForm();
+    await settle();
+
+    expect(h.patchBodies).toEqual([{ container_memory: '512m' }]);
+    expect(h.repoOnServer.image_ref).toBe('docker.io/library/debian:bookworm');
+  });
 });
