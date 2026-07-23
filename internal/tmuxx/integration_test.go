@@ -319,6 +319,98 @@ func TestTmux_extraEnvReachesPane(t *testing.T) {
 	}
 }
 
+// The #204 regression: a secret in the lab process env (LAB_TEST_SCRUB_CANARY
+// standing in for a LAB_DB DSN) must NOT reach a spawned pane, while the
+// explicit extraEnv entry and the PATH/HOME/TERM baseline still do. The
+// canary is planted with t.Setenv so it is genuinely in the environment the
+// (fresh) tmux server is born from.
+func TestTmux_startScrubsProcessEnvFromPane(t *testing.T) {
+	t.Setenv("LAB_TEST_SCRUB_CANARY", "super-secret")
+	ctx := t.Context()
+	tm := testTmux(t)
+	const name = "lab-test-scrub"
+	dir := t.TempDir()
+	out := filepath.Join(dir, "env.txt")
+
+	argv := []string{"sh", "-c", "env > '" + out + "'; sleep 600"}
+	if err := tm.Start(ctx, name, dir, argv, []string{"LAB_TEST_OK=present"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	env := waitForFile(t, out)
+	if strings.Contains(env, "LAB_TEST_SCRUB_CANARY") {
+		t.Errorf("process-env secret leaked into pane env:\n%s", env)
+	}
+	if !strings.Contains(env, "LAB_TEST_OK=present") {
+		t.Errorf("extraEnv entry missing from pane env:\n%s", env)
+	}
+	for _, name := range []string{"PATH=", "HOME=", "TERM="} {
+		if !strings.Contains(env, name) {
+			t.Errorf("baseline var %s missing from pane env:\n%s", name, env)
+		}
+	}
+}
+
+// Legacy dirty server: a tmux server started by a pre-#204 lab holds the
+// dirty env in its GLOBAL environment, which new panes inherit even with a
+// scrubbed client. Seed such a server by bypassing the wrapper — a raw tmux
+// client whose Env carries the canary — then drive the wrapper's Start on the
+// SAME socket and assert the canary is scrubbed from the second session's
+// pane.
+func TestTmux_startScrubsLegacyServerGlobalEnv(t *testing.T) {
+	testutil.RequireTool(t, "tmux")
+	ctx := t.Context()
+	socket := fmt.Sprintf("lab-test-%d-%d", os.Getpid(), socketSeq.Add(1))
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+	dir := t.TempDir()
+
+	// Pre-fix spawn: the tmux client inherits os.Environ() plus the canary, so
+	// the implicitly-started server's global env carries the leak.
+	seed := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "lab-test-legacy-first", "sleep", "600")
+	seed.Env = append(os.Environ(), "LAB_TEST_LEGACY_CANARY=leaked")
+	if out, err := seed.CombinedOutput(); err != nil {
+		t.Fatalf("seed legacy server: %v: %s", err, out)
+	}
+
+	// Same socket as the dirty server (testTmux would allocate its own), with
+	// the same kill-server cleanup already registered above.
+	tm := New("tmux", WithSocket(socket))
+	out := filepath.Join(dir, "env.txt")
+	argv := []string{"sh", "-c", "env > '" + out + "'; sleep 600"}
+	if err := tm.Start(ctx, "lab-test-legacy-second", dir, argv, []string{"LAB_TEST_OK=present"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	env := waitForFile(t, out)
+	if strings.Contains(env, "LAB_TEST_LEGACY_CANARY") {
+		t.Errorf("legacy server's global-env secret leaked into new pane:\n%s", env)
+	}
+	if !strings.Contains(env, "LAB_TEST_OK=present") {
+		t.Errorf("extraEnv entry missing from pane env:\n%s", env)
+	}
+}
+
+// Login shape: providers call Start with extraEnv == nil and run in $HOME.
+// After the #204 scrub the pane gets baseline-only env, so HOME and PATH —
+// which the login shell and its tools need — must still be present.
+func TestTmux_startLoginShapeKeepsBaseline(t *testing.T) {
+	ctx := t.Context()
+	tm := testTmux(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "env.txt")
+
+	argv := []string{"sh", "-c", "env > '" + out + "'; sleep 600"}
+	if err := tm.Start(ctx, LoginSessionName("claude-code"), dir, argv, nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	env := waitForFile(t, out)
+	for _, name := range []string{"HOME=", "PATH="} {
+		if !strings.Contains(env, name) {
+			t.Errorf("login pane missing baseline var %s:\n%s", name, env)
+		}
+	}
+}
+
 // A private socket whose server was never started: List means "no
 // sessions", IsRunning means "absent" — neither is an error.
 func TestTmux_serverAbsentMeansEmpty(t *testing.T) {

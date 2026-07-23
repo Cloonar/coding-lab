@@ -12,9 +12,14 @@
 // receives per-session environment entries (LAB_URL/LAB_TOKEN, the repo
 // credential's git env) via `new-session -e KEY=VALUE` flags (tmux ≥ 3.2;
 // the value never appears in the pane command's argv, so it stays out of
-// `ps` output); SendKeys takes an explicit enter flag; pane capture is a
-// single-shot CapturePane — the poll loops (captureTimeout etc.) live in
-// the provider.
+// `ps` output), and a session's environment is exactly those entries plus a
+// fixed PATH/HOME/TERM/locale baseline forwarded from the lab process — the
+// service environment (EnvironmentFile secrets such as a LAB_DB DSN) is
+// scrubbed from every pane, since the tmux server the first wrapper call
+// starts implicitly would otherwise seed its global environment from
+// os.Environ() and hand it to every pane (issue #204); SendKeys takes an
+// explicit enter flag; pane capture is a single-shot CapturePane — the poll
+// loops (captureTimeout etc.) live in the provider.
 //
 // MUST-NOT-CHANGE v0 behaviours kept verbatim: prlimit wraps the INNER
 // pane command with soft=hard and a "--" terminator; "=" exact-match
@@ -31,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -164,13 +170,64 @@ func New(bin string, opts ...Option) *Tmux {
 	return t
 }
 
+// baselineVars is the fixed allow-list of process-environment variable names
+// a spawned session may inherit from the lab process. PATH/HOME/TERM plus the
+// locale (LANG/LANGUAGE/LC_*) are the grilled-spec baseline every pane needs
+// to run a shell and render text; TERMINFO_DIRS and LOCALE_ARCHIVE are the
+// NixOS mechanisms that make TERM and the locale actually *resolve* (the
+// terminfo database and glibc's locale archive live in the store, not under
+// /usr/share), so they are part of the baseline's meaning, not extras.
+// Everything else in the lab process env — notably EnvironmentFile secrets
+// like a LAB_DB DSN — is deliberately absent (issue #204).
+var baselineVars = map[string]bool{
+	"PATH":           true,
+	"HOME":           true,
+	"TERM":           true,
+	"TERMINFO_DIRS":  true,
+	"LANG":           true,
+	"LANGUAGE":       true,
+	"LOCALE_ARCHIVE": true,
+}
+
+// isBaselineVar reports whether name is a baseline pass-through variable: one
+// of the fixed allow-list above, or any LC_* locale category (LC_ALL,
+// LC_CTYPE, LC_TIME, …).
+func isBaselineVar(name string) bool {
+	return baselineVars[name] || strings.HasPrefix(name, "LC_")
+}
+
+// baselineEnv filters the lab process environment down to the baseline
+// allow-list (isBaselineVar), passing through only variables that are
+// actually present. It is the environment every tmux client invocation runs
+// with — and, because the tmux server started implicitly by the first such
+// call seeds its global environment from that client, the environment every
+// pane is born into. Computed per call: cheap (a scan of os.Environ), and it
+// picks up t.Setenv in tests.
+func baselineEnv() []string {
+	all := os.Environ()
+	env := make([]string, 0, len(baselineVars))
+	for _, kv := range all {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && isBaselineVar(name) {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
 // cmd builds a tmux invocation, prefixing the private-socket flag when
-// configured.
+// configured. Env is pinned to baselineEnv() — not left nil (which would
+// inherit os.Environ() wholesale) — so no client call can leak a service
+// secret into the tmux server's global environment, and thus into panes.
+// gitx sets cmd.Env on its git subprocesses for the same reason; tmuxx
+// historically did not, which was the #204 leak.
 func (t *Tmux) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	if t.socket != "" {
 		args = append([]string{"-L", t.socket}, args...)
 	}
-	return exec.CommandContext(ctx, t.bin, args...)
+	c := exec.CommandContext(ctx, t.bin, args...)
+	c.Env = baselineEnv()
+	return c
 }
 
 // Start launches argv detached in dir under name. Idempotent: if a
@@ -184,6 +241,10 @@ func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extra
 	}
 	if ok {
 		return nil
+	}
+
+	if err := t.scrubGlobalEnv(ctx); err != nil {
+		return err
 	}
 
 	args := t.newSessionArgs(name, dir, argv, extraEnv)
@@ -204,6 +265,91 @@ func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extra
 		return fmt.Errorf("session %q exited immediately (check `tmux capture-pane -pt %s`)", name, name)
 	}
 	return nil
+}
+
+// scrubGlobalEnv sweeps a non-baseline variable out of an already-running
+// tmux server's GLOBAL environment before Start spawns into it. A server born
+// under a pre-#204 lab inherited os.Environ() wholesale as its global env, and
+// — because that server outlives service restarts (parked sessions keep it
+// alive) — a scrubbed client alone cannot fix it: new-session copies the
+// server's global env into each pane. So we drop every non-baseline global
+// var here. On a post-fix server the global env is already baseline-only, so
+// this is one show-environment call that unsets nothing — the cheap happy
+// path.
+func (t *Tmux) scrubGlobalEnv(ctx context.Context) error {
+	out, err := t.cmd(ctx, "show-environment", "-g").Output()
+	if err != nil {
+		// Same classification List uses for list-sessions: an ExitError means
+		// no server is running, so there is no global env to scrub. Anything
+		// else (couldn't exec tmux, etc.) is a real failure.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return nil
+		}
+		return fmt.Errorf("tmux show-environment: %v", err)
+	}
+
+	var unset []string
+	for line := range strings.Lines(string(out)) {
+		line = strings.TrimSuffix(line, "\n")
+		if strings.HasPrefix(line, "-") {
+			continue // tmux marks a variable staged for removal "-NAME"
+		}
+		name, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue // not a NAME=... entry
+		}
+		// isEnvName screens out continuation lines of a multi-line value, which
+		// show-environment prints unindented and so cannot be told apart from a
+		// real entry except by shape.
+		if !isEnvName(name) || isBaselineVar(name) {
+			continue
+		}
+		unset = append(unset, name)
+	}
+	if len(unset) == 0 {
+		return nil
+	}
+
+	// Chain the unsets into one client call: `set-environment -g -u NAME
+	// [; set-environment -g -u NAME]...`, ";" a separate argv element.
+	var args []string
+	for _, name := range unset {
+		if len(args) > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "set-environment", "-g", "-u", name)
+	}
+	if out, err := t.cmd(ctx, args...).CombinedOutput(); err != nil {
+		// An "unknown variable" is a harmless no-op — it can only come from a
+		// multi-line value's continuation line that happened to look like an
+		// entry above — and is ignored. Any OTHER failure would be a silently
+		// unscrubbed secret if swallowed, so it fails Start loudly.
+		if msg := strings.TrimSpace(string(out)); !strings.Contains(msg, "unknown variable") {
+			return fmt.Errorf("tmux set-environment -g -u: %v: %s", err, msg)
+		}
+	}
+	return nil
+}
+
+// isEnvName reports whether s is a syntactically valid POSIX environment
+// variable name ([A-Za-z_][A-Za-z0-9_]*). scrubGlobalEnv uses it to reject
+// the continuation lines of a multi-line global value, which cannot be real
+// variable names, before treating a show-environment line as an entry.
+func isEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_':
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // newSessionArgs builds the tmux `new-session` argv that launches argv in
