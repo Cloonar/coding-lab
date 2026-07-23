@@ -208,6 +208,43 @@ func TestLocateActive_skipsPersistForEndedRun(t *testing.T) {
 	}
 }
 
+// Issue #202: locateActive resolves the transcript strictly under the run's
+// private instance HOME — the injected HomeFor closure's value for the run id
+// reaches the provider's LocateTranscript, so a real per-run home is never
+// bypassed for the master store.
+func TestLocateActive_passesRunHomeToProvider(t *testing.T) {
+	st := testutil.TempStore(t)
+	fake := providertest.New()
+	reg, err := provider.NewRegistry(fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeFor := func(runID string) string { return "/state/instances/" + runID + "/home" }
+	svc, err := New(Options{Store: st, Providers: reg, Bus: events.NewBus(),
+		Logger: logx.New(io.Discard), Poll: 5 * time.Millisecond, RuntimeDir: t.TempDir(),
+		HomeFor: homeFor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+
+	if _, err := svc.Read(context.Background(), run); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	homes := fake.LocateHomes()
+	if len(homes) == 0 {
+		t.Fatal("LocateTranscript never ran")
+	}
+	want := homeFor(run.ID)
+	for i, got := range homes {
+		if got != want {
+			t.Errorf("LocateTranscript call %d home = %q, want the run's instance home %q", i, got, want)
+		}
+	}
+}
+
 func TestRead_endedRunOverridesState(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeStopped)

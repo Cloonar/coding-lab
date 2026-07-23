@@ -981,3 +981,69 @@ func TestCompat_Live_authLogout(t *testing.T) {
 		t.Errorf("credentials file still present after `claude auth logout`: stat err = %v", err)
 	}
 }
+
+// Config-dir resolution pin (compat.md §3a, issue #202): CLAUDE_CONFIG_DIR
+// outranks HOME for ALL claude state. This fact is load-bearing for per-run
+// isolation: the instance spawn inherits the lab server's environment through
+// tmux, so the claude injector pins CLAUDE_CONFIG_DIR=<home>/.claude to keep
+// the CLI's resolution on the private instance HOME (claudecode/inject.go).
+// Opt-in via LAB_COMPAT_LIVE=1 so CI stays hermetic.
+//
+// The pin must NEVER be empty. "Empty behaves as unset" was live-probed on
+// 2.1.214 and is FALSE on 2.1.198 for credential resolution: the CLI joins
+// the empty dir into a RELATIVE ./.credentials.json (straced 2026-07-23),
+// while .claude.json still falls back to HOME — so a config-write probe
+// passes yet the instance spawns unauthenticated and every chat reply dies
+// at "Not logged in". No cross-version assertion exists for the empty form,
+// which is exactly why the injector stopped using it; this probe pins only
+// the set form both versions agree on.
+//
+// The probe is `claude config set theme dark` — a config write whose landing
+// spot (.claude.json) reveals which directory the CLI resolved, with no
+// login, TTY, or network needed. Observable state, not exit code or output.
+func TestCompat_Live_configDirResolution(t *testing.T) {
+	if os.Getenv("LAB_COMPAT_LIVE") != "1" {
+		t.Skip("set LAB_COMPAT_LIVE=1 to probe the installed claude binary")
+	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		t.Skipf("claude not on PATH: %v", err)
+	}
+
+	probe := func(t *testing.T, home, configDir string) {
+		t.Helper()
+		t.Setenv("HOME", home)
+		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+		cmd := exec.Command(bin, "config", "set", "theme", "dark")
+		cmd.Dir = t.TempDir()
+		out, runErr := cmd.CombinedOutput()
+		t.Logf("live `claude config set theme dark` exit=%v output=%q", runErr, strings.TrimSpace(string(out)))
+	}
+
+	t.Run("set: CLAUDE_CONFIG_DIR outranks HOME", func(t *testing.T) {
+		home, cfg := t.TempDir(), t.TempDir()
+		probe(t, home, cfg)
+		if _, err := os.Stat(filepath.Join(cfg, ".claude.json")); err != nil {
+			t.Errorf(".claude.json missing under CLAUDE_CONFIG_DIR (%v) — the CLI no longer resolves the variable over HOME; re-verify the injector's empty pin is still needed", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
+			t.Errorf(".claude.json present under HOME (stat err = %v) despite CLAUDE_CONFIG_DIR being set", err)
+		}
+	})
+
+	t.Run("set: nested instance layout resolves .claude.json inside it", func(t *testing.T) {
+		// The injector's actual pin shape: config dir = <home>/.claude. The CLI
+		// must land .claude.json INSIDE it (<home>/.claude/.claude.json — where
+		// claudecode.globalConfigUnder writes the trust seed + oauthAccount
+		// mirror), never at the HOME-convention <home>/.claude.json.
+		home := t.TempDir()
+		cfg := filepath.Join(home, ".claude")
+		probe(t, home, cfg)
+		if _, err := os.Stat(filepath.Join(cfg, ".claude.json")); err != nil {
+			t.Errorf(".claude.json missing under the pinned <home>/.claude (%v) — the CLI no longer resolves the injector's pin; instances would miss their trust/onboarding/oauthAccount seed", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
+			t.Errorf(".claude.json present at HOME-convention <home>/.claude.json (stat err = %v) despite the config-dir pin", err)
+		}
+	})
+}

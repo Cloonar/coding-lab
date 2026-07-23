@@ -235,12 +235,20 @@ func TestSeedWorkspace_seedsTrustAndExclude(t *testing.T) {
 	run := newFakeRunner()
 	p, _ := testProvider(t, run)
 	wt := newFakeWorktree(t)
+	home := t.TempDir()
 
-	if err := p.SeedWorkspace(wt, provider.SeedOpts{}); err != nil {
+	if err := p.SeedWorkspace(wt, provider.SeedOpts{Home: home}); err != nil {
 		t.Fatalf("SeedWorkspace: %v", err)
 	}
-	if !trustOf(readCfg(t, p.configPath), wt) {
-		t.Errorf("worktree not folder-trusted in %s", p.configPath)
+	// Folder trust + onboarding are HOME-global: they land under the run's
+	// private HOME — inside its pinned config dir (<home>/.claude/.claude.json,
+	// globalConfigUnder), NEVER the master p.configPath (issue #202).
+	homeCfg := globalConfigUnder(home)
+	if !trustOf(readCfg(t, homeCfg), wt) {
+		t.Errorf("worktree not folder-trusted in %s", homeCfg)
+	}
+	if _, err := os.Stat(p.configPath); !os.IsNotExist(err) {
+		t.Errorf("master config %s was written; the global grant must stay under the instance HOME", p.configPath)
 	}
 	if !mcpApprovedIn(t, wt) {
 		t.Errorf("MCP approval missing in worktree settings")
@@ -248,6 +256,27 @@ func TestSeedWorkspace_seedsTrustAndExclude(t *testing.T) {
 	got := readExclude(t, wt)
 	if !strings.Contains(got, ".claude/\n") {
 		t.Errorf("exclude = %q; want a .claude/ line", got)
+	}
+}
+
+// An empty Home skips ONLY the global-config write — the worktree-local grants
+// (MCP approval, excludes) still apply, and nothing is written to the master
+// store (issue #202).
+func TestSeedWorkspace_emptyHomeSkipsGlobalConfigOnly(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	wt := newFakeWorktree(t)
+
+	if err := p.SeedWorkspace(wt, provider.SeedOpts{}); err != nil {
+		t.Fatalf("SeedWorkspace: %v", err)
+	}
+	if _, err := os.Stat(p.configPath); !os.IsNotExist(err) {
+		t.Errorf("master config %s written on an empty-Home seed; the global grant must be skipped", p.configPath)
+	}
+	if !mcpApprovedIn(t, wt) {
+		t.Errorf("MCP approval missing after empty-Home seed — worktree-local grants must still apply")
+	}
+	if got := readExclude(t, wt); !strings.Contains(got, ".claude/\n") {
+		t.Errorf("exclude = %q; want a .claude/ line even on an empty-Home seed", got)
 	}
 }
 

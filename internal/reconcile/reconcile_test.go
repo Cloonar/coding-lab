@@ -14,6 +14,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
@@ -30,9 +31,11 @@ type recFixture struct {
 	runner                                *tmuxx.Fake
 	guard                                 *startguard.Guard
 	mat                                   *vault.Materializer
+	homes                                 *instancehome.Manager
 	git                                   *gitx.Engine
 	bus                                   *events.Bus
 	home, reposDir, worktreeRoot, runtime string
+	instancesDir                          string
 	env                                   []string
 	repo                                  store.Repo
 	armed                                 *[]store.Run
@@ -81,13 +84,15 @@ func newRecFixture(t *testing.T) *recFixture {
 	if err != nil {
 		t.Fatalf("NewMaterializer: %v", err)
 	}
+	instancesDir := filepath.Join(stateDir, "instances")
+	homes := instancehome.New(instancesDir)
 	runner := tmuxx.NewFake()
 	guard := startguard.New()
 	bus := events.NewBus()
 	var armed []store.Run
 	var afkEnded []afkEndedCall
 	svc, err := New(Options{
-		Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Bus: bus,
+		Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Homes: homes, Bus: bus,
 		ReposDir: reposDir, GitEnv: env, Now: func() time.Time { return recClock },
 		ArmCapture: func(r store.Run) { armed = append(armed, r) },
 		AFKRunEnded: func(kind, outcome string, d time.Duration) {
@@ -98,9 +103,9 @@ func newRecFixture(t *testing.T) *recFixture {
 		t.Fatalf("reconcile.New: %v", err)
 	}
 	return &recFixture{
-		t: t, svc: svc, st: st, runner: runner, guard: guard, mat: mat, git: git, bus: bus,
+		t: t, svc: svc, st: st, runner: runner, guard: guard, mat: mat, homes: homes, git: git, bus: bus,
 		home: home, reposDir: reposDir, worktreeRoot: worktreeRoot, runtime: runtime,
-		env: env, repo: repo, armed: &armed, afkEnded: &afkEnded,
+		instancesDir: instancesDir, env: env, repo: repo, armed: &armed, afkEnded: &afkEnded,
 	}
 }
 
@@ -555,6 +560,44 @@ func TestStartupReconcile_credentialKeepSet(t *testing.T) {
 	}
 	if _, err := os.Stat(knownHosts); err != nil {
 		t.Errorf("known_hosts was removed: %v", err)
+	}
+}
+
+// StartupReconcile also sweeps the instance-home keep-set (issue #202), mirroring
+// the credential sweep: a live re-adopted run's private home survives, while an
+// aged-out orphan (a crashed/rolled-back launch's leftover) is reaped.
+func TestStartupReconcile_instanceHomeKeepSet(t *testing.T) {
+	f := newRecFixture(t)
+	liveRun := f.activeRun("proj~live-20260608-1530", "lab/live-20260608-1530", nil)
+	f.runner.AddLive("proj~live-20260608-1530")
+
+	// The live run's home (kept) and an orphan run-id home with no store row
+	// (reaped once aged). Both materialized through the real manager.
+	liveHome, err := f.homes.Materialize(liveRun.ID)
+	if err != nil {
+		t.Fatalf("Materialize live home: %v", err)
+	}
+	orphanID := ids.NewID("run")
+	if _, err := f.homes.Materialize(orphanID); err != nil {
+		t.Fatalf("Materialize orphan home: %v", err)
+	}
+	orphanDir := filepath.Join(f.instancesDir, orphanID)
+	// Backdate the orphan past the 5-min in-flight guard so the keep-set reaps
+	// it (a fresh orphan is spared as a possible mid-launch home).
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(orphanDir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.svc.StartupReconcile(t.Context()); err != nil {
+		t.Fatalf("StartupReconcile: %v", err)
+	}
+
+	if _, err := os.Stat(liveHome); err != nil {
+		t.Errorf("live run's instance home was removed: %v", err)
+	}
+	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
+		t.Errorf("orphan instance home survived: %s (err %v)", orphanDir, err)
 	}
 }
 

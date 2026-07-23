@@ -21,6 +21,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
@@ -126,9 +127,10 @@ func newInstanceServerMod(t *testing.T, mod func(*Options), extraProvs ...provid
 			t.Fatal(err)
 		}
 		guard := startguard.New()
+		homes := instancehome.New(filepath.Join(stateDir, "instances"))
 		svc, err := instance.New(instance.Options{
 			Store: st, Git: git, Runner: runner, Providers: reg, Vault: vlt, Materializer: mat,
-			Guard: guard, Bus: o.Bus, Logger: logx.New(io.Discard), ReposDir: reposDir,
+			Homes: homes, Guard: guard, Bus: o.Bus, Logger: logx.New(io.Discard), ReposDir: reposDir,
 			WorktreeRoot: worktreeRoot, LabURL: "http://127.0.0.1:8080", GitEnv: env,
 			CaptureCtx: context.Background(), Now: func() time.Time { return instClock },
 		})
@@ -136,7 +138,7 @@ func newInstanceServerMod(t *testing.T, mod func(*Options), extraProvs ...provid
 			t.Fatal(err)
 		}
 		rec, err := reconcile.New(reconcile.Options{
-			Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Bus: o.Bus,
+			Store: st, Git: git, Runner: runner, Guard: guard, Materializer: mat, Homes: homes, Bus: o.Bus,
 			Logger: logx.New(io.Discard), ReposDir: reposDir, GitEnv: env,
 			ArmCapture: svc.ArmCapture, Now: func() time.Time { return instClock },
 		})
@@ -145,7 +147,7 @@ func newInstanceServerMod(t *testing.T, mod func(*Options), extraProvs ...provid
 		}
 		cs, err := chat.New(chat.Options{
 			Store: st, Providers: reg, Bus: o.Bus, Logger: logx.New(io.Discard),
-			RuntimeDir: mat.Dir(), Now: func() time.Time { return instClock },
+			RuntimeDir: mat.Dir(), HomeFor: homes.HomePath, Now: func() time.Time { return instClock },
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -155,6 +157,7 @@ func newInstanceServerMod(t *testing.T, mod func(*Options), extraProvs ...provid
 		o.Instances = svc
 		o.Reconcile = rec
 		o.Providers = reg
+		o.Homes = homes
 		o.Chat = cs
 		// Wires commits_behind's git dependency (issue #149): the real engine
 		// + this fixture's reposDir/env, same as instance's own Start/List.

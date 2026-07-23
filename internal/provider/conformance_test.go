@@ -28,12 +28,11 @@ var conformanceProviders = []struct {
 		name: "claude-code",
 		make: func(t *testing.T) (provider.AgentProvider, providertest.Fixture) {
 			p, err := claudecode.New(claudecode.Options{
-				ClaudeBin:   "claude-not-invoked", // the suite never spawns the CLI
-				ConfigPath:  filepath.Join(t.TempDir(), ".claude.json"),
-				RegistryDir: filepath.Join(t.TempDir(), "sessions"),
-				LoginDir:    t.TempDir(),
-				Runner:      tmuxx.NewFake(),
-				Bus:         events.NewBus(),
+				ClaudeBin:  "claude-not-invoked", // the suite never spawns the CLI
+				ConfigPath: filepath.Join(t.TempDir(), ".claude.json"),
+				LoginDir:   t.TempDir(),
+				Runner:     tmuxx.NewFake(),
+				Bus:        events.NewBus(),
 			})
 			if err != nil {
 				t.Fatalf("claudecode.New: %v", err)
@@ -58,13 +57,11 @@ var conformanceProviders = []struct {
 		name: "codex",
 		make: func(t *testing.T) (provider.AgentProvider, providertest.Fixture) {
 			p, err := codex.New(codex.Options{
-				CodexBin:    "codex-not-invoked", // the suite never spawns the CLI
-				ConfigPath:  filepath.Join(t.TempDir(), "config.toml"),
-				SessionsDir: filepath.Join(t.TempDir(), "sessions"),
-				AgentsFile:  filepath.Join(t.TempDir(), "AGENTS.md"),
-				LoginDir:    t.TempDir(),
-				Runner:      tmuxx.NewFake(),
-				Bus:         events.NewBus(),
+				CodexBin:   "codex-not-invoked", // the suite never spawns the CLI
+				ConfigPath: filepath.Join(t.TempDir(), "config.toml"),
+				LoginDir:   t.TempDir(),
+				Runner:     tmuxx.NewFake(),
+				Bus:        events.NewBus(),
 			})
 			if err != nil {
 				t.Fatalf("codex.New: %v", err)

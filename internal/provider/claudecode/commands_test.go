@@ -14,13 +14,12 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 )
 
-func commandsProvider(t *testing.T, userCommandsDir string) *Provider {
+func commandsProvider(t *testing.T) *Provider {
 	t.Helper()
 	p, err := New(Options{
 		ClaudeBin: "claude", ConfigPath: filepath.Join(t.TempDir(), ".claude.json"),
-		RegistryDir: t.TempDir(), LoginDir: t.TempDir(),
-		UserCommandsDir: userCommandsDir,
-		Runner:          newFakeRunner(), Bus: events.NewBus(),
+		LoginDir: t.TempDir(),
+		Runner:   newFakeRunner(), Bus: events.NewBus(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -40,7 +39,7 @@ func writeFile(t *testing.T, path, content string) {
 
 func TestCommands_mergesBuiltinsProjectSkillsUser(t *testing.T) {
 	worktree := t.TempDir()
-	userDir := t.TempDir()
+	home := t.TempDir()
 
 	// Project commands: frontmatter-described, bare, and one with args.
 	writeFile(t, filepath.Join(worktree, ".claude", "commands", "deploy.md"),
@@ -55,11 +54,11 @@ func TestCommands_mergesBuiltinsProjectSkillsUser(t *testing.T) {
 	writeFile(t, filepath.Join(worktree, ".claude", "skills", "internal-helper", "SKILL.md"),
 		"---\nname: internal-helper\ndescription: model-only\nuser-invocable: false\n---\nbody\n")
 	writeFile(t, filepath.Join(worktree, ".claude", "skills", "not-a-skill", "README.md"), "not a skill\n")
-	// User-level command.
-	writeFile(t, filepath.Join(userDir, "zz-mine.md"), "---\ndescription: My user command\n---\nbody\n")
+	// User-level command, under the instance HOME (issue #202).
+	writeFile(t, filepath.Join(userCommandsDirUnder(home), "zz-mine.md"), "---\ndescription: My user command\n---\nbody\n")
 
-	p := commandsProvider(t, userDir)
-	cmds, err := p.Commands(context.Background(), worktree)
+	p := commandsProvider(t)
+	cmds, err := p.Commands(context.Background(), worktree, home)
 	if err != nil {
 		t.Fatalf("Commands: %v", err)
 	}
@@ -108,11 +107,11 @@ func TestCommands_mergesBuiltinsProjectSkillsUser(t *testing.T) {
 	}
 }
 
-// Missing dirs are silently empty: a fresh worktree (no .claude at all) and a
-// machine without ~/.claude/commands still get the builtin table.
+// Missing dirs are silently empty: a fresh worktree (no .claude at all) and an
+// instance HOME without .claude/commands still get the builtin table.
 func TestCommands_missingDirsAreEmpty(t *testing.T) {
-	p := commandsProvider(t, filepath.Join(t.TempDir(), "does-not-exist"))
-	cmds, err := p.Commands(context.Background(), filepath.Join(t.TempDir(), "fresh"))
+	p := commandsProvider(t)
+	cmds, err := p.Commands(context.Background(), filepath.Join(t.TempDir(), "fresh"), filepath.Join(t.TempDir(), "no-home"))
 	if err != nil {
 		t.Fatalf("Commands: %v", err)
 	}
@@ -121,11 +120,37 @@ func TestCommands_missingDirsAreEmpty(t *testing.T) {
 	}
 }
 
+// An empty home contributes NO user-level commands — a run with no per-run home
+// never reads the master store's ~/.claude/commands (issue #202).
+func TestCommands_emptyHomeSkipsUserCommands(t *testing.T) {
+	worktree := t.TempDir()
+	home := t.TempDir()
+	writeFile(t, filepath.Join(userCommandsDirUnder(home), "mine.md"), "---\ndescription: user\n---\nbody\n")
+	p := commandsProvider(t)
+
+	withHome, err := p.Commands(context.Background(), worktree, home)
+	if err != nil {
+		t.Fatalf("Commands(home): %v", err)
+	}
+	homeless, err := p.Commands(context.Background(), worktree, "")
+	if err != nil {
+		t.Fatalf("Commands(\"\"): %v", err)
+	}
+	if len(withHome) != len(homeless)+1 {
+		t.Errorf("home vs homeless counts = %d vs %d; want exactly one user command dropped when home is empty", len(withHome), len(homeless))
+	}
+	for _, c := range homeless {
+		if c.Source == commandSourceUser {
+			t.Errorf("homeless catalog carried a user command %+v; want none", c)
+		}
+	}
+}
+
 // The catalog is complete-and-honest: unsafe builtins ARE returned (the API
 // layer filters on ChatSafe) and every scanned entry is ChatSafe.
 func TestCommands_chatSafeIsTheCurationSignal(t *testing.T) {
-	p := commandsProvider(t, t.TempDir())
-	cmds, err := p.Commands(context.Background(), t.TempDir())
+	p := commandsProvider(t)
+	cmds, err := p.Commands(context.Background(), t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatalf("Commands: %v", err)
 	}

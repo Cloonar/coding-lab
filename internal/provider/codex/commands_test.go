@@ -6,6 +6,7 @@ package codex
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -80,24 +81,49 @@ func TestCommands_staticAndCopied(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 	ctx := context.Background()
 
-	a, err := p.Commands(ctx, "/anywhere")
+	a, err := p.Commands(ctx, "/anywhere", "")
 	if err != nil {
 		t.Fatalf("Commands: %v", err)
 	}
-	b, err := p.Commands(ctx, t.TempDir())
+	b, err := p.Commands(ctx, t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatalf("Commands: %v", err)
 	}
 	if len(a) != len(b) || len(a) != len(BuiltinCommands()) {
-		t.Fatalf("catalog varies by worktree: %d vs %d entries", len(a), len(b))
+		t.Fatalf("catalog varies by worktree/home: %d vs %d entries", len(a), len(b))
 	}
 
 	a[0].Name = "mutated"
 	if BuiltinCommands()[0].Name != "new" {
 		t.Error("Commands exposed internal catalog storage")
 	}
-	if fresh, _ := p.Commands(ctx, "/anywhere"); fresh[0].Name != "new" {
+	if fresh, _ := p.Commands(ctx, "/anywhere", ""); fresh[0].Name != "new" {
 		t.Error("a caller's mutation poisoned the next Commands call")
+	}
+}
+
+// TestCommands_homeIndependence pins the doc comment's home-independence claim
+// (issue #202) with DEEP equality, not just a count: codex 0.133 has no
+// project- or user-level command discovery, so the served catalog must be
+// byte-for-byte identical for every worktree/home combination, including the
+// empty-string edges that mean "no worktree yet" / "no per-run home".
+func TestCommands_homeIndependence(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	ctx := context.Background()
+	want := BuiltinCommands()
+
+	worktrees := []string{"", "/work/a", t.TempDir()}
+	homes := []string{"", "/nonexistent/home", t.TempDir()}
+	for _, wt := range worktrees {
+		for _, home := range homes {
+			got, err := p.Commands(ctx, wt, home)
+			if err != nil {
+				t.Fatalf("Commands(worktree=%q, home=%q): %v", wt, home, err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Commands(worktree=%q, home=%q) = %+v; want the identical builtin table %+v", wt, home, got, want)
+			}
+		}
 	}
 }
 
@@ -105,7 +131,7 @@ func TestCommands_staticAndCopied(t *testing.T) {
 // layer filters on ChatSafe), with both verdicts present.
 func TestCommands_chatSafeIsTheCurationSignal(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
-	cmds, err := p.Commands(context.Background(), t.TempDir())
+	cmds, err := p.Commands(context.Background(), t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatalf("Commands: %v", err)
 	}

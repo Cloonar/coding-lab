@@ -22,6 +22,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
@@ -114,9 +115,10 @@ func newAFKServer(t *testing.T, mods ...func(*afkConfig)) *afkTestServer {
 		// with), so the reaper skips a mid-Launch run whose session is not yet
 		// live.
 		guard := startguard.New()
+		homes := instancehome.New(filepath.Join(stateDir, "instances"))
 		inst, err := instance.New(instance.Options{
 			Store: st, Git: git, Runner: runner, Providers: reg, Vault: vlt, Materializer: mat,
-			Guard: guard, Bus: o.Bus, Logger: logx.New(io.Discard), ReposDir: reposDir,
+			Homes: homes, Guard: guard, Bus: o.Bus, Logger: logx.New(io.Discard), ReposDir: reposDir,
 			WorktreeRoot: worktreeRoot, LabURL: "http://127.0.0.1:8080", GitEnv: env,
 			CaptureCtx: context.Background(), Now: func() time.Time { return afkClock },
 		})
@@ -132,7 +134,7 @@ func newAFKServer(t *testing.T, mods ...func(*afkConfig)) *afkTestServer {
 			})
 		afkSvc, err := afk.New(afk.Options{
 			Store: st, Git: git, Runner: runner, Trackers: trackerReg,
-			Instances: inst, Materializer: mat, Bus: o.Bus, Logger: logx.New(io.Discard),
+			Instances: inst, Materializer: mat, Homes: homes, Bus: o.Bus, Logger: logx.New(io.Discard),
 			Guard: guard, ReposDir: reposDir, WorktreeRoot: worktreeRoot, GitEnv: env,
 			Now: func() time.Time { return afkClock },
 		})
@@ -142,6 +144,7 @@ func newAFKServer(t *testing.T, mods ...func(*afkConfig)) *afkTestServer {
 		inst.SetAFKStopper(afkSvc)
 		o.Instances = inst
 		o.Providers = reg
+		o.Homes = homes
 		o.Tracker = trackerReg
 		o.AFK = afkSvc
 	})

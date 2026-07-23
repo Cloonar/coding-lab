@@ -167,15 +167,20 @@ func TestSeedAgentsBridge_createAppendSkip(t *testing.T) {
 	})
 }
 
-// SeedWorkspace writes NOTHING inside the worktree (both grants are global),
-// is idempotent (a second run changes no bytes), and Incogni is a no-op —
-// codex 0.133 writes no attribution at the source, so there is nothing to
-// disable.
+// SeedWorkspace writes NOTHING inside the worktree (both grants are HOME-global,
+// landing under the run's private HOME per issue #202), leaves the master store
+// untouched, is idempotent (a second run changes no bytes), and Incogni is a
+// no-op — codex 0.133 writes no attribution at the source, so there is nothing
+// to disable.
 func TestSeedWorkspace_globalOnlyIdempotentIncogniNoop(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 	worktree := t.TempDir()
+	home := t.TempDir()
+	codexHome := instanceCodexHome(home)
+	cfgPath := filepath.Join(codexHome, "config.toml")
+	agentsPath := filepath.Join(codexHome, "AGENTS.md")
 
-	if err := p.SeedWorkspace(worktree, provider.SeedOpts{}); err != nil {
+	if err := p.SeedWorkspace(worktree, provider.SeedOpts{Home: home}); err != nil {
 		t.Fatalf("SeedWorkspace: %v", err)
 	}
 	entries, err := os.ReadDir(worktree)
@@ -186,23 +191,27 @@ func TestSeedWorkspace_globalOnlyIdempotentIncogniNoop(t *testing.T) {
 		t.Errorf("SeedWorkspace wrote into the worktree: %v", entries)
 	}
 
-	cfg := readFile(t, p.configPath)
-	agents := readFile(t, p.agentsFile)
+	cfg := readFile(t, cfgPath)
+	agents := readFile(t, agentsPath)
 	if !strings.Contains(cfg, projectsHeader(worktree)) {
-		t.Errorf("config.toml missing the worktree trust table:\n%q", cfg)
+		t.Errorf("instance config.toml missing the worktree trust table:\n%q", cfg)
 	}
 	if !strings.Contains(agents, agentsBridgeMarker) {
-		t.Errorf("global AGENTS.md missing the bridge marker:\n%q", agents)
+		t.Errorf("instance AGENTS.md missing the bridge marker:\n%q", agents)
+	}
+	// The MASTER config.toml is never touched — the grant stays under the HOME.
+	if _, err := os.Stat(p.configPath); !os.IsNotExist(err) {
+		t.Errorf("master config.toml written; the trust grant must stay under the instance HOME")
 	}
 
 	// Second run — Incogni on — must change nothing anywhere.
-	if err := p.SeedWorkspace(worktree, provider.SeedOpts{Incogni: true}); err != nil {
+	if err := p.SeedWorkspace(worktree, provider.SeedOpts{Home: home, Incogni: true}); err != nil {
 		t.Fatalf("SeedWorkspace (incogni re-run): %v", err)
 	}
-	if got := readFile(t, p.configPath); got != cfg {
+	if got := readFile(t, cfgPath); got != cfg {
 		t.Error("second SeedWorkspace mutated config.toml")
 	}
-	if got := readFile(t, p.agentsFile); got != agents {
+	if got := readFile(t, agentsPath); got != agents {
 		t.Error("second SeedWorkspace mutated the global AGENTS.md")
 	}
 	entries, err = os.ReadDir(worktree)
@@ -212,4 +221,81 @@ func TestSeedWorkspace_globalOnlyIdempotentIncogniNoop(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("incogni SeedWorkspace wrote into the worktree: %v", entries)
 	}
+}
+
+// An empty Home skips both HOME-global grants — a run with no per-run home gets
+// no global write and never touches the master store (issue #202).
+func TestSeedWorkspace_emptyHomeSkipsGlobalGrants(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	worktree := t.TempDir()
+
+	if err := p.SeedWorkspace(worktree, provider.SeedOpts{}); err != nil {
+		t.Fatalf("SeedWorkspace: %v", err)
+	}
+	if entries, _ := os.ReadDir(worktree); len(entries) != 0 {
+		t.Errorf("empty-Home SeedWorkspace wrote into the worktree: %v", entries)
+	}
+	if _, err := os.Stat(p.configPath); !os.IsNotExist(err) {
+		t.Errorf("empty-Home SeedWorkspace wrote the master config.toml")
+	}
+}
+
+// TestSeedWorkspace_masterStoreDecoyUntouched proves the isolation claim with
+// teeth against codex's OWN master-store resolution: $CODEX_HOME is pointed at
+// a decoy dir already carrying an operator's own config.toml/AGENTS.md (so a
+// wrongly-targeted write would corrupt real content, not just create a file).
+// SeedWorkspace(Home=home) must land both grants under <home>/.codex and leave
+// the decoy files byte-for-byte untouched — whether Home is set or empty.
+func TestSeedWorkspace_masterStoreDecoyUntouched(t *testing.T) {
+	master := t.TempDir()
+	t.Setenv("CODEX_HOME", master)
+	decoyCfg := filepath.Join(master, "config.toml")
+	decoyAgents := filepath.Join(master, "AGENTS.md")
+	const decoyCfgContent = "model = \"gpt-5.5\"\n"
+	const decoyAgentsContent = "# operator's own global codex instructions\n"
+	if err := os.WriteFile(decoyCfg, []byte(decoyCfgContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(decoyAgents, []byte(decoyAgentsContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Home set", func(t *testing.T) {
+		p, _ := testProvider(t, newFakeRunner())
+		worktree := t.TempDir()
+		home := t.TempDir()
+
+		if err := p.SeedWorkspace(worktree, provider.SeedOpts{Home: home}); err != nil {
+			t.Fatalf("SeedWorkspace: %v", err)
+		}
+		if got := readFile(t, decoyCfg); got != decoyCfgContent {
+			t.Errorf("decoy master config.toml mutated:\n got %q\nwant %q", got, decoyCfgContent)
+		}
+		if got := readFile(t, decoyAgents); got != decoyAgentsContent {
+			t.Errorf("decoy master AGENTS.md mutated:\n got %q\nwant %q", got, decoyAgentsContent)
+		}
+		// The grants DID land, just under the instance home, not the decoy.
+		codexHome := instanceCodexHome(home)
+		if got := readFile(t, filepath.Join(codexHome, "config.toml")); !strings.Contains(got, projectsHeader(worktree)) {
+			t.Errorf("instance config.toml missing the trust table:\n%q", got)
+		}
+		if got := readFile(t, filepath.Join(codexHome, "AGENTS.md")); !strings.Contains(got, agentsBridgeMarker) {
+			t.Errorf("instance AGENTS.md missing the bridge marker:\n%q", got)
+		}
+	})
+
+	t.Run("Home empty", func(t *testing.T) {
+		p, _ := testProvider(t, newFakeRunner())
+		worktree := t.TempDir()
+
+		if err := p.SeedWorkspace(worktree, provider.SeedOpts{}); err != nil {
+			t.Fatalf("SeedWorkspace: %v", err)
+		}
+		if got := readFile(t, decoyCfg); got != decoyCfgContent {
+			t.Errorf("decoy master config.toml mutated despite empty Home:\n got %q\nwant %q", got, decoyCfgContent)
+		}
+		if got := readFile(t, decoyAgents); got != decoyAgentsContent {
+			t.Errorf("decoy master AGENTS.md mutated despite empty Home:\n got %q\nwant %q", got, decoyAgentsContent)
+		}
+	})
 }

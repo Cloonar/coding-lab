@@ -1,0 +1,14 @@
+# Build-context trim for the agent-tools images (containers/agent-tools/,
+# issue #203). The build context is the repo root because the images' labctl
+# stage compiles labctl from the Go working tree — it needs go.mod/go.sum and
+# the cmd/ + internal/ tree (with its embedded assets), but NOT .git, the
+# compiled binaries, or the web SPA's node_modules/dist. labctl builds untagged
+# (no `-tags ui`), so it uses internal/webui's placeholder variant and never
+# reaches internal/webui/dist — safe to drop. Keeping the context lean speeds
+# the COPY and avoids shipping build outputs into the image build.
+.git
+bin
+web/node_modules
+web/dist
+internal/webui/dist
+.claude

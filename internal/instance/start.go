@@ -134,11 +134,23 @@ func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 }
 
 // spawnEnv assembles a session's extra environment (design §3a/§6/M3 contract):
-// the repo credential's git env + LAB_URL + LAB_TOKEN + the git author/committer
-// identity when configured. The forge token is never included (§3a).
-func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken string) ([]string, error) {
+// the repo credential's git env + LAB_URL + LAB_TOKEN + HOME (the run's private
+// instance home) + the provider credential-injection env + the git
+// author/committer identity when configured. The forge token is never included
+// (§3a).
+//
+// HOME is the issue #202 isolation seam: it is the run's private per-run home,
+// so the spawned CLI reads/writes ONLY under it — the machine's master
+// ~/.claude*/~/.codex are never touched by an instance process. injEnv is the
+// provider's own credential-resolution env for that home, pinning the CLI's
+// master-store override variable so a value inherited through tmux can't point
+// the instance back at the master store (CLAUDE_CONFIG_DIR=<home>/.claude for
+// claude; CODEX_HOME=<home>/.codex for codex). Appended AFTER HOME
+// so a provider entry always wins over it.
+func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken, home string, injEnv []string) ([]string, error) {
 	env := append([]string{}, credEnv...)
-	env = append(env, "LAB_URL="+s.labURL, "LAB_TOKEN="+runToken)
+	env = append(env, "LAB_URL="+s.labURL, "LAB_TOKEN="+runToken, "HOME="+home)
+	env = append(env, injEnv...)
 	author, err := s.authorEnv(ctx, repo)
 	if err != nil {
 		return nil, err
@@ -154,7 +166,10 @@ const defaultMaxInstances = 6
 
 // seedOpts derives the provider's SeedOpts for a launch on repo: the incogni
 // flag flows through so the provider seeds attribution-off settings into the
-// worktree (D15 §9 measure 1).
-func seedOpts(repo store.Repo) provider.SeedOpts {
-	return provider.SeedOpts{Incogni: repo.Incogni}
+// worktree (D15 §9 measure 1), and home is the run's private instance HOME
+// (issue #202) so the provider writes its HOME-global grants (claude's folder
+// trust + onboarding, codex's directory trust + AGENTS.md bridge) ONLY under
+// that home — never the machine's master store or the process HOME.
+func seedOpts(repo store.Repo, home string) provider.SeedOpts {
+	return provider.SeedOpts{Incogni: repo.Incogni, Home: home}
 }

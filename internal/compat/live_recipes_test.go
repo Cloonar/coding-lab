@@ -76,12 +76,11 @@ func newLiveRecipeRig(t *testing.T, name string, extraArgs ...string) *liveRecip
 	tm := tmuxx.New("tmux", tmuxx.WithSocket(socket))
 
 	prov, err := claudecode.New(claudecode.Options{
-		ClaudeBin:   claudeBin,
-		ConfigPath:  filepath.Join(home, ".claude.json"),
-		RegistryDir: filepath.Join(home, ".claude", "sessions"),
-		LoginDir:    home,
-		Runner:      tm,
-		Bus:         events.NewBus(),
+		ClaudeBin:  claudeBin,
+		ConfigPath: filepath.Join(home, ".claude.json"),
+		LoginDir:   home,
+		Runner:     tm,
+		Bus:        events.NewBus(),
 	})
 	if err != nil {
 		t.Fatalf("claudecode.New: %v", err)

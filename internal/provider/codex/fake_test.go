@@ -16,21 +16,20 @@ import (
 // next to the interface).
 func newFakeRunner() *tmuxx.Fake { return tmuxx.NewFake() }
 
-// testProvider builds a Provider with every path pointed into t.TempDir()
-// (hermetic: no env, no real HOME) and tiny poll timeouts. Callers
+// testProvider builds a Provider with the MASTER path pointed into t.TempDir()
+// (hermetic: no env, no real HOME) and tiny poll timeouts. Instance-facing
+// paths derive from the per-run home passed on the seam (issue #202). Callers
 // shrink/override further where the timing is the contract.
 func testProvider(t *testing.T, run tmuxx.SessionRunner) (*Provider, *events.Bus) {
 	t.Helper()
 	bus := events.NewBus()
 	p, err := New(Options{
-		CodexBin:    "codex-not-invoked", // tests that exec set a real script
-		ConfigPath:  filepath.Join(t.TempDir(), "config.toml"),
-		SessionsDir: filepath.Join(t.TempDir(), "sessions"),
-		AgentsFile:  filepath.Join(t.TempDir(), "AGENTS.md"),
-		LoginDir:    t.TempDir(),
-		Runner:      run,
-		Bus:         bus,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CodexBin:   "codex-not-invoked", // tests that exec set a real script
+		ConfigPath: filepath.Join(t.TempDir(), "config.toml"),
+		LoginDir:   t.TempDir(),
+		Runner:     run,
+		Bus:        bus,
+		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -16,6 +16,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
@@ -39,10 +40,12 @@ type fixture struct {
 	guard                  *startguard.Guard
 	bus                    *events.Bus
 	clock                  *testutil.FakeClock
+	homes                  *instancehome.Manager
 	home                   string
 	env                    []string
 	reposDir, worktreeRoot string
 	runtime                string
+	instancesDir           string
 	repo                   store.Repo
 }
 
@@ -129,9 +132,11 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	bus := events.NewBus()
 	clock := testutil.NewFakeClock(clockTime)
 
+	instancesDir := filepath.Join(stateDir, "instances")
+	homes := instancehome.New(instancesDir)
 	svc, err := New(Options{
 		Store: st, Git: git, Runner: runner, Providers: reg, Vault: vlt, Materializer: mat,
-		Guard: guard, Bus: bus, ReposDir: reposDir, WorktreeRoot: worktreeRoot,
+		Homes: homes, Guard: guard, Bus: bus, ReposDir: reposDir, WorktreeRoot: worktreeRoot,
 		LabURL: "http://127.0.0.1:8080", GitEnv: env, CaptureCtx: context.Background(),
 		Now: clock.Now,
 	})
@@ -140,7 +145,8 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	}
 	return &fixture{
 		t: t, svc: svc, st: st, runner: runner, prov: prov, guard: guard, bus: bus, clock: clock,
-		home: home, env: env, reposDir: reposDir, worktreeRoot: worktreeRoot, runtime: runtime, repo: repo,
+		homes: homes, home: home, env: env, reposDir: reposDir, worktreeRoot: worktreeRoot,
+		runtime: runtime, instancesDir: instancesDir, repo: repo,
 	}
 }
 
@@ -528,6 +534,101 @@ func TestStart_rollbackOnLabSeedFailure(t *testing.T) {
 	}
 	if snap := f.guard.Snapshot(); len(snap) != 0 {
 		t.Errorf("startguard not cleared after rollback: %v", snap)
+	}
+}
+
+// Issue #202: a Launch materializes the run's private instance HOME and threads
+// it through the whole spawn — the provider's SeedOpts.Home (its HOME-global
+// grants), a single InjectCredentials call, and the session env's HOME plus the
+// injector's returned env. HOME is the isolation seam: the spawned CLI reads and
+// writes ONLY under the per-run home.
+func TestStart_materializesAndThreadsInstanceHome(t *testing.T) {
+	f := newFixture(t)
+	f.prov.SetInjectEnv([]string{"CODEX_HOME=/injected/marker", "PROVIDER_INJECTED=yes"})
+
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	home := f.homes.HomePath(run.ID)
+
+	// The private HOME tree exists on disk (0700, created by Materialize).
+	if !dirExists(home) {
+		t.Errorf("instance home %s not materialized", home)
+	}
+
+	// The provider's SeedOpts carried the run's home (its HOME-global grants
+	// land under it, never the master store).
+	opts := f.prov.SeededOpts()
+	if len(opts) != 1 || opts[0].Home != home {
+		t.Errorf("SeedOpts.Home = %+v, want a single call with Home=%q", opts, home)
+	}
+
+	// InjectCredentials ran exactly once, with the run's home — the seam's ONLY
+	// call site.
+	if homes := f.prov.InjectHomes(); len(homes) != 1 || homes[0] != home {
+		t.Errorf("InjectHomes = %v, want exactly [%q]", homes, home)
+	}
+
+	// The session env carries HOME=<home> and the injector's returned env.
+	sess, live := f.runner.Session(run.SessionName)
+	if !live {
+		t.Fatal("session not live after Start")
+	}
+	if got := envValue(sess.ExtraEnv, "HOME"); got != home {
+		t.Errorf("session HOME = %q, want the instance home %q", got, home)
+	}
+	if got := envValue(sess.ExtraEnv, "PROVIDER_INJECTED"); got != "yes" {
+		t.Errorf("session env missing the injector's PROVIDER_INJECTED=yes (got %q)", got)
+	}
+	if got := envValue(sess.ExtraEnv, "CODEX_HOME"); got != "/injected/marker" {
+		t.Errorf("session env missing the injector's CODEX_HOME (got %q)", got)
+	}
+}
+
+// Issue #202: a spawn failure rolls the launch back including the instance HOME
+// wipe — no <instances>/<runID> tree is left behind (the boot/runtime sweep is
+// only a backstop; the synchronous rollback owns the immediate cleanup).
+func TestStart_spawnFailureWipesInstanceHome(t *testing.T) {
+	f := newFixture(t)
+	name := "proj~20260608-1530"
+	f.runner.FailStart(name, errors.New("tmux new-session failed"))
+
+	_, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	var startFailed *StartFailedError
+	if !errors.As(err, &startFailed) {
+		t.Fatalf("Start err = %v, want StartFailedError", err)
+	}
+	// Materialize ran (after the worktree add) and rollback wiped it: the
+	// instances root is left with no per-run subtree.
+	entries, rerr := os.ReadDir(f.instancesDir)
+	if rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatalf("ReadDir(instances): %v", rerr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("instances dir has %d leftover entries after rollback, want 0: %v", len(entries), entries)
+	}
+}
+
+// Issue #202: a manual Stop wipes the run's private instance HOME (the
+// credential copy), while the worktree/branch disposal stays the guarded
+// teardown's job.
+func TestStop_wipesInstanceHome(t *testing.T) {
+	f := newFixture(t)
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	home := f.homes.HomePath(run.ID)
+	if !dirExists(home) {
+		t.Fatalf("instance home %s not materialized by Start", home)
+	}
+
+	if _, err := f.svc.Stop(t.Context(), run.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if dirExists(filepath.Join(f.instancesDir, run.ID)) {
+		t.Errorf("instance home tree %s survived Stop", filepath.Join(f.instancesDir, run.ID))
 	}
 }
 

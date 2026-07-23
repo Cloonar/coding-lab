@@ -26,23 +26,30 @@ import (
 const truncateLimit = 2000
 
 // LocateTranscript implements provider.AgentProvider: find the rollout file
-// for the session running in worktree. Rollouts live at
-// <SessionsDir>/YYYY/MM/DD/rollout-<local-ts>-<uuid>.jsonl and the first
-// line is a session_meta record whose payload.cwd is the session's working
-// directory. Date directories are scanned newest-first (years desc, months
-// desc, days desc; the components are zero-padded, so a string sort is a
+// for the session running in worktree UNDER the instance HOME home (issue
+// #202). Rollouts live at
+// <home>/.codex/sessions/YYYY/MM/DD/rollout-<local-ts>-<uuid>.jsonl and the
+// first line is a session_meta record whose payload.cwd is the session's
+// working directory. Date directories are scanned newest-first (years desc,
+// months desc, days desc; the components are zero-padded, so a string sort is a
 // date sort) and files within a day sorted by filename desc — NOTE the
 // filename timestamp is LOCAL time while the payload timestamps are UTC, so
 // only the filename order is used for recency, never compared against
 // payload times. Only the first line of each candidate is read. Returns ""
-// (no error) when no rollout matches.
+// (no error) when no rollout matches. An empty home is a miss — a run with no
+// per-run home has no instance rollout tree, and lab never falls back to the
+// master store (isolation by construction).
 //
 // Clear/epoch obligation (issue #51 decision 2): /new in the codex TUI
 // natively rotates to a fresh rollout file with a new session id, so the
 // newest-first cwd match surfaces the post-clear identity for free — no
 // epoch synthesis needed.
-func (p *Provider) LocateTranscript(_ context.Context, _ /*sessionName*/, worktree string) (string, error) {
-	for _, day := range dateDirsNewestFirst(p.sessionsDir) {
+func (p *Provider) LocateTranscript(_ context.Context, _ /*sessionName*/, worktree, home string) (string, error) {
+	if home == "" {
+		return "", nil
+	}
+	sessionsDir := filepath.Join(instanceCodexHome(home), "sessions")
+	for _, day := range dateDirsNewestFirst(sessionsDir) {
 		entries, err := os.ReadDir(day)
 		if err != nil {
 			continue

@@ -131,17 +131,23 @@ func captureBridgeURL(ctx context.Context, registryDir, dir string, timeout time
 	}
 }
 
-// CaptureDeepLink implements provider.DeepLinker: poll the registry up to
-// bridgeTimeout for the deep link of the session running in worktree. On a
-// miss it logs LOUDLY (brief §11.2 — v0 was silent) and returns "" — the
-// generic fallback is surfaced through FallbackOpen, not capture, so the
-// caller's write-only-on-hit rule needs no cross-package constant.
+// CaptureDeepLink implements provider.DeepLinker: poll the registry under the
+// instance HOME home (issue #202) up to bridgeTimeout for the deep link of the
+// session running in worktree. On a miss it logs LOUDLY (brief §11.2 — v0 was
+// silent) and returns "" — the generic fallback is surfaced through
+// FallbackOpen, not capture, so the caller's write-only-on-hit rule needs no
+// cross-package constant. An empty home is a quiet miss: a run with no per-run
+// home has no instance registry to read, and lab never falls back to the master
+// store (isolation by construction).
 //
 // Idempotent per session: while a capture is in flight, a second call is a
 // no-op returning ("", nil), so callers can't stack polls on one session.
 // The in-flight set doubles as the "connecting…" render state, exposed via
 // Connecting.
-func (p *Provider) CaptureDeepLink(ctx context.Context, sessionName, worktree string) (string, error) {
+func (p *Provider) CaptureDeepLink(ctx context.Context, sessionName, worktree, home string) (string, error) {
+	if home == "" {
+		return "", nil
+	}
 	p.captureMu.Lock()
 	if p.capturing[sessionName] {
 		p.captureMu.Unlock()
@@ -155,12 +161,13 @@ func (p *Provider) CaptureDeepLink(ctx context.Context, sessionName, worktree st
 		p.captureMu.Unlock()
 	}()
 
-	if url := captureBridgeURL(ctx, p.registryDir, worktree, p.bridgeTimeout); url != "" {
+	registryDir := registryDirUnder(home)
+	if url := captureBridgeURL(ctx, registryDir, worktree, p.bridgeTimeout); url != "" {
 		return url, nil
 	}
 	p.log.Warn("deep-link capture missed — the row will show the generic claude.ai fallback link",
 		"component", "provider.claudecode", "session", sessionName,
-		"worktree", worktree, "registry_dir", p.registryDir, "timeout", p.bridgeTimeout)
+		"worktree", worktree, "registry_dir", registryDir, "timeout", p.bridgeTimeout)
 	return "", nil
 }
 

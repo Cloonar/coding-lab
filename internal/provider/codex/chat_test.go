@@ -42,23 +42,27 @@ func writeRollout(t *testing.T, sessionsDir, yyyy, mm, dd, name, cwd string) str
 func TestLocateTranscript_newestFirstCwdMatch(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 	ctx := context.Background()
+	// The rollout tree lives under the run's private HOME (issue #202):
+	// <home>/.codex/sessions.
+	home := t.TempDir()
+	sessions := filepath.Join(instanceCodexHome(home), "sessions")
 	const wtA, wtB = "/work/a", "/work/b"
 
-	writeRollout(t, p.sessionsDir, "2026", "07", "09", "rollout-2026-07-09T23-59-59-aaa.jsonl", wtA)
-	wantB := writeRollout(t, p.sessionsDir, "2026", "07", "10", "rollout-2026-07-10T01-00-00-bbb.jsonl", wtB)
-	wantA := writeRollout(t, p.sessionsDir, "2026", "07", "10", "rollout-2026-07-10T02-00-00-ccc.jsonl", wtA)
+	writeRollout(t, sessions, "2026", "07", "09", "rollout-2026-07-09T23-59-59-aaa.jsonl", wtA)
+	wantB := writeRollout(t, sessions, "2026", "07", "10", "rollout-2026-07-10T01-00-00-bbb.jsonl", wtB)
+	wantA := writeRollout(t, sessions, "2026", "07", "10", "rollout-2026-07-10T02-00-00-ccc.jsonl", wtA)
 
-	if got, err := p.LocateTranscript(ctx, "sess", wtA); err != nil || got != wantA {
+	if got, err := p.LocateTranscript(ctx, "sess", wtA, home); err != nil || got != wantA {
 		t.Errorf("LocateTranscript(A) = %q, %v; want the newest A rollout %q", got, err, wantA)
 	}
-	if got, err := p.LocateTranscript(ctx, "sess", wtB); err != nil || got != wantB {
+	if got, err := p.LocateTranscript(ctx, "sess", wtB, home); err != nil || got != wantB {
 		t.Errorf("LocateTranscript(B) = %q, %v; want %q", got, err, wantB)
 	}
 
 	// A fresh rollout in the same day with a later local timestamp — the
 	// /new rotation — immediately becomes A's identity.
-	rotated := writeRollout(t, p.sessionsDir, "2026", "07", "10", "rollout-2026-07-10T03-00-00-ddd.jsonl", wtA)
-	if got, _ := p.LocateTranscript(ctx, "sess", wtA); got != rotated {
+	rotated := writeRollout(t, sessions, "2026", "07", "10", "rollout-2026-07-10T03-00-00-ddd.jsonl", wtA)
+	if got, _ := p.LocateTranscript(ctx, "sess", wtA, home); got != rotated {
 		t.Errorf("LocateTranscript(A) after rotation = %q; want %q", got, rotated)
 	}
 }
@@ -66,14 +70,16 @@ func TestLocateTranscript_newestFirstCwdMatch(t *testing.T) {
 func TestLocateTranscript_misses(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 	ctx := context.Background()
+	home := t.TempDir()
+	sessions := filepath.Join(instanceCodexHome(home), "sessions")
 
 	// Missing sessions tree: "" with no error (nothing rolled out yet).
-	if got, err := p.LocateTranscript(ctx, "sess", "/work/a"); err != nil || got != "" {
+	if got, err := p.LocateTranscript(ctx, "sess", "/work/a", home); err != nil || got != "" {
 		t.Errorf("LocateTranscript on missing tree = %q, %v; want \"\", nil", got, err)
 	}
 
 	// A malformed first line and a non-rollout file are skipped quietly.
-	dir := filepath.Join(p.sessionsDir, "2026", "07", "10")
+	dir := filepath.Join(sessions, "2026", "07", "10")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +89,35 @@ func TestLocateTranscript_misses(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("irrelevant"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := p.LocateTranscript(ctx, "sess", "/work/a"); err != nil || got != "" {
+	if got, err := p.LocateTranscript(ctx, "sess", "/work/a", home); err != nil || got != "" {
 		t.Errorf("LocateTranscript over junk = %q, %v; want \"\", nil", got, err)
+	}
+
+	// An empty home is a miss too — no per-run home ⇒ no instance rollout tree,
+	// never a fall back to the master store (issue #202).
+	if got, err := p.LocateTranscript(ctx, "sess", "/work/a", ""); err != nil || got != "" {
+		t.Errorf("homeless locate = %q, %v; want \"\", nil", got, err)
+	}
+}
+
+// TestLocateTranscript_emptyHomeIgnoresMasterStoreMatch proves the no-fallback
+// rule (issue #202) with teeth: a $CODEX_HOME master-store tree carrying a
+// rollout that WOULD match the worktree exists, yet LocateTranscript with
+// home="" still misses cleanly — it never consults $CODEX_HOME or any other
+// master-store location, only the home argument threaded on the seam.
+func TestLocateTranscript_emptyHomeIgnoresMasterStoreMatch(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	ctx := context.Background()
+	const worktree = "/work/a"
+
+	// A master store (CODEX_HOME, un-nested — codex's own convention) holding
+	// a rollout whose session_meta.cwd matches worktree exactly.
+	master := t.TempDir()
+	t.Setenv("CODEX_HOME", master)
+	writeRollout(t, filepath.Join(master, "sessions"), "2026", "07", "10", "rollout-2026-07-10T01-00-00-fff.jsonl", worktree)
+
+	if got, err := p.LocateTranscript(ctx, "sess", worktree, ""); err != nil || got != "" {
+		t.Errorf("LocateTranscript(home=\"\") = %q, %v; want \"\", nil even though the master store %q holds a matching rollout", got, err, master)
 	}
 }
 

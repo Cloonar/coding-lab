@@ -130,6 +130,38 @@ Provenance legend:
   20s, loginPoll 1s, authTTL 30s, bridgeTimeout 30s, poll cadence 200ms,
   login code cap 4096.
 
+## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214 2026-07-22; 2.1.198 re-probed 2026-07-23)
+
+- `CLAUDE_CONFIG_DIR` outranks HOME for **all** claude state: with it set,
+  `.claude.json`, `projects/` (transcripts), `backups/`, and the
+  credentials file all land under `$CLAUDE_CONFIG_DIR`; HOME receives only
+  `.cache`. Probed live with `claude config set theme dark` against fresh
+  temp dirs (2.1.214 and 2.1.198 agree).
+- An **empty** value is **VERSION-DEPENDENT — never rely on it** (the
+  regression behind the 2026-07-23 "chat never reaches the instance"
+  outage). On 2.1.214 empty behaves as unset (full HOME fallback). On
+  2.1.198 the resolution SPLITS: `.claude.json` falls back to HOME, but
+  the **credentials** path joins the empty dir into a **relative**
+  `./.credentials.json` (straced live: `openat(AT_FDCWD,
+  ".credentials.json") = ENOENT`) — so a config-write probe looks fine
+  while the CLI runs unauthenticated and answers every turn with "Not
+  logged in".
+- The set-form fact is load-bearing for per-run isolation (issue #202): the
+  instance spawn inherits the lab server's environment through tmux, so a
+  service-wide `CLAUDE_CONFIG_DIR` (which lab honors for the MASTER store —
+  `claudecode.credentialsPath`) would silently point every instance's
+  claude back at the master store. The injector therefore always pins
+  `CLAUDE_CONFIG_DIR=<home>/.claude` in the spawn env
+  (`claudecode/inject.go`) — an explicit per-run config dir with identical
+  resolution on every probed version, and the same directory every adapter
+  reader/writer (`globalConfigUnder`, `projectsDirUnder`,
+  `registryDirUnder`, `instanceCredsUnder`) already resolves under. The
+  seeded global config consequently lives at `<home>/.claude/.claude.json`,
+  not the HOME-convention `<home>/.claude.json`. End-to-end verified
+  2026-07-23 on 2.1.198: spawn → authenticated turn → transcript under
+  `<home>/.claude/projects/`. Live re-verification:
+  `TestCompat_Live_configDirResolution`.
+
 ## 4. Trust / attribution keys — folder trust live (2.1.198), MCP fixture (v0), attribution schema-extracted (2.1.198)
 
 - Folder trust: `~/.claude.json` → `projects.<absolute worktree dir>.

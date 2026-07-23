@@ -1,0 +1,341 @@
+# agent-tools = build, injection-smoke-test, and (on release) publish the
+# per-provider "agent-tools" OCI images (issue #203). Each image is a
+# self-contained bundle of one agent CLI plus a static `labctl`, meant to be
+# injected read-only into an arbitrary dev container at run time via
+# `podman run --mount type=image,...` (the container runner, issue #205, is the
+# consumer). It carries the ADR-0033 tools-baseline idea across the
+# container-isolation boundary: instead of putting the agent CLI on a session's
+# host PATH, the CLI travels *inside* a mountable image so any base image gets
+# it without being rebuilt.
+#
+# Two legs, on disjoint events, deliberately asymmetric on secrets:
+#
+#   * PR leg (job `smoke`, `pull_request`): builds both images locally and runs
+#     the injection smoke test — NO push, and it references NO secret. A PR from
+#     any branch (including forks) exercises the full build+inject path without
+#     ever touching the registry credential, so an untrusted PR can never
+#     publish or read the token. This is also the first workflow to need podman
+#     on these runners; its `podman version` / `podman info` diagnostics are the
+#     evidence if a runner cannot run podman at all. The job itself executes
+#     inside the runner's Docker container (no /dev/fuse, overlayfs root, no
+#     systemd), so both jobs configure podman for nested operation before first
+#     use: vfs storage, cgroupfs/file backends, chroot build isolation — see
+#     the "Ensure podman" steps and docs/ops.md § "CI runner prerequisites".
+#
+#   * Release leg (job `publish`, `push` to main + `workflow_dispatch`): builds,
+#     re-runs the smoke test (cheap insurance that exactly what we push passes
+#     injection), then pushes digest-pinned tags to the Forgejo package registry.
+#     Both legs are path-gated (containers/** or this file) so unrelated merges
+#     to main don't re-release. `workflow_dispatch` is the manual re-release
+#     knob: `labctl` is built from the repo *inside* the image build, so a
+#     labctl change that should be baked into fresh images is shipped by
+#     dispatching this workflow — even with no containers/** diff.
+#
+# Tags and the pinning contract. Tags are `<provider>-<cli-version>`
+# (`claude-<CLAUDE_CODE_VERSION>`, `codex-<CODEX_VERSION>`), the versions read
+# from containers/agent-tools/versions.env — the single source of truth the
+# build scripts also source. The version tag is human-facing; consumers pin the
+# **digest** this job emits, not the tag. A same-tag re-push (e.g. a labctl
+# refresh via dispatch, same CLI version) produces a NEW digest under the SAME
+# tag, so the tag is a moving reference and only the digest is immutable — which
+# is why the digest, not the tag, is the pinning contract (issue #205 pins by
+# `@sha256:...`).
+#
+# Registry/owner are derived at run time from the Actions context, not
+# hardcoded: REGISTRY from `github.server_url` (scheme stripped), OWNER from
+# `github.repository_owner` lowercased for OCI ref rules. For this repo today
+# that resolves to git.cloonar.com / cloonar (image
+# `git.cloonar.com/cloonar/agent-tools`).
+#
+# See issue #203, ADR-0033 (agent packages + tools baseline), and docs/ops.md
+# § "Agent-tools images" for the registry-token provisioning and consumer
+# contract. Runner prerequisites mirror the other gates (see docs/ops.md
+# § "CI runner prerequisites") plus podman + apt reachable.
+name: agent-tools
+
+on:
+  pull_request:
+    paths:
+      - "containers/**"
+      - ".forgejo/workflows/agent-tools.yml"
+  push:
+    branches: [main]
+    paths:
+      - "containers/**"
+      - ".forgejo/workflows/agent-tools.yml"
+  workflow_dispatch:
+
+jobs:
+  # PR leg — local build + injection smoke test only. No push, no secrets.
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      # RUN steps execute via chroot instead of an OCI runtime: inside the
+      # runner's Docker job container the runtime cannot create its
+      # namespaces/cgroups. chroot isolation also keeps RUN in the job's own
+      # network namespace, so apk/curl/go egress needs no netavark setup.
+      BUILDAH_ISOLATION: chroot
+      # No per-step layer commits: under vfs every committed layer is a FULL
+      # copy of the stage filesystem, which ran the runner out of disk (run
+      # 238). Layer caching buys nothing here anyway — every CI run starts
+      # from an empty store.
+      BUILDAH_LAYERS: "false"
+      # The job container cannot mount a fresh procfs: its /proc carries
+      # locked masked-path overmounts, so the kernel's fully-visible rule
+      # denies the mount ("crun: mount `proc` to `proc`: Operation not
+      # permitted", run 244). rbind the job's own /proc into the smoke
+      # containers instead. Deliberately NOT --pid=host: crun requires
+      # cgroup-less containers to own a private PID namespace (run 250);
+      # the rbound /proc then shows the job's pidns view, which the
+      # version/help probes never consult. A real host needs none of this.
+      # --uts=host: the runner's Docker seccomp profile denies sethostname
+      # outright — runs 252 (default UTS) and 254 (explicit --uts=private,
+      # where the kernel would allow it) both died with "crun: sethostname:
+      # Operation not permitted". With a host UTS namespace podman omits the
+      # hostname from the OCI spec entirely, so crun never makes the call.
+      SMOKE_EXTRA_RUN_ARGS: "--uts=host --mount type=bind,source=/proc,destination=/proc"
+    steps:
+      - uses: actions/checkout@v4
+
+      # build.sh fetches the pinned CLI artifacts into
+      # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
+      # a restored cache skips the CDNs entirely — repeated pulls of the claude
+      # binary tripped per-IP throttling on downloads.claude.ai (runs 242–248);
+      # this keeps CI to one pull per version. Split restore/save (not
+      # actions/cache) because the paired action only saves on job SUCCESS,
+      # which would discard a good fetch whenever a later step fails — exactly
+      # the runs that most need the artifact banked. Wrong/partial files are
+      # never a risk: build.sh ignores and refetches anything failing its
+      # sha256 pin.
+      - name: Restore pinned CLI artifacts cache
+        uses: actions/cache/restore@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
+          restore-keys: |
+            agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-
+            agent-tools-artifacts-
+
+      - name: Ensure podman
+        run: |
+          # First workflow to need podman on these runners; it ships on some
+          # stock images and not others, so install-if-missing then dump
+          # version/info as diagnostics — if the runner cannot run podman,
+          # this step's output is the evidence.
+          set -eux
+          { command -v podman && command -v crun; } || (sudo apt-get update && sudo apt-get install -y podman crun)
+          # The job executes inside the runner's Docker container: podman's
+          # default overlay storage cannot mount there — not natively
+          # (overlay-upon-overlay is rejected by the kernel) and not via the
+          # fuse-overlayfs fallback (no /dev/fuse in the job container; run 234
+          # failed exactly there). vfs needs no mounts at all — slower, but
+          # this job is path-gated and correctness beats speed here. cgroupfs +
+          # file backends because the job container has no systemd/journald.
+          sudo mkdir -p /etc/containers
+          # A hand-written storage.conf replaces ALL built-in storage defaults,
+          # so runroot/graphroot must be spelled out too (their stock paths) —
+          # storage errors with "runroot must be set" otherwise.
+          printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
+          # runtime = crun: Ubuntu's podman defaults to runc, which refuses
+          # the smoke test's --cgroups=disabled ("not compatible with
+          # NoCgroups", run 240); crun supports it.
+          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\nruntime = "crun"\n' | sudo tee /etc/containers/containers.conf
+          # Drop any store a pre-provisioned runner image may have initialized
+          # under the default driver — a driver flip over existing storage errors.
+          sudo rm -rf /var/lib/containers/storage
+          podman version
+          podman info
+          # Disk headroom diagnostic: vfs stores every layer as a full copy,
+          # so free space here is what bounds the builds.
+          df -h /var/lib
+
+      - name: "claude: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh claude
+          containers/agent-tools/smoke-test.sh claude
+          # vfs disk hygiene: drop dangling intermediates (stage leftovers)
+          # before the next provider's build; tagged images are untouched.
+          podman image prune -f
+          df -h /var/lib
+
+      - name: "codex: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh codex
+          containers/agent-tools/smoke-test.sh codex
+          # Same vfs disk hygiene as the claude step above.
+          podman image prune -f
+          df -h /var/lib
+
+      # Bank whatever build.sh fetched even when an earlier step failed (the
+      # run-id key suffix keeps keys unique — cache entries are immutable).
+      # continue-on-error: a cold, fully-failed run fetched nothing, and the
+      # then-missing path must not repaint the job.
+      - name: Save pinned CLI artifacts cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
+
+  # Release leg — build, re-smoke, then push digest-pinned tags to the registry.
+  publish:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      # Same nested-runner necessity as the smoke job's env above.
+      BUILDAH_ISOLATION: chroot
+      BUILDAH_LAYERS: "false"
+      # --uts=host: the runner's Docker seccomp profile denies sethostname
+      # outright — runs 252 (default UTS) and 254 (explicit --uts=private,
+      # where the kernel would allow it) both died with "crun: sethostname:
+      # Operation not permitted". With a host UTS namespace podman omits the
+      # hostname from the OCI spec entirely, so crun never makes the call.
+      SMOKE_EXTRA_RUN_ARGS: "--uts=host --mount type=bind,source=/proc,destination=/proc"
+    steps:
+      # Gate on the registry token BEFORE checkout — fail loud and early with
+      # provisioning instructions rather than deep inside a push. No `set -x`
+      # here: this step reads the token env (it only ever tests emptiness, never
+      # prints the value).
+      - name: Require registry token
+        env:
+          FORGE_REGISTRY_TOKEN: ${{ secrets.FORGE_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${FORGE_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::FORGE_REGISTRY_TOKEN is not set — cannot publish agent-tools images."
+            echo ""
+            echo "This job pushes the agent-tools images to the Forgejo package registry at"
+            echo "git.cloonar.com. That requires the repository secret FORGE_REGISTRY_TOKEN."
+            echo ""
+            echo "Provision FORGE_REGISTRY_TOKEN as an operator-provisioned Forgejo access"
+            echo "token with package write scope (write:package) for the registry at"
+            echo "git.cloonar.com."
+            echo ""
+            echo "If that token does NOT belong to the Cloonar org-owner default, also set the"
+            echo "optional secret FORGE_REGISTRY_USER to the token owner's username (it is used"
+            echo "as the podman login user; otherwise the repository owner is used)."
+            echo ""
+            echo "See docs/ops.md § \"Agent-tools images\" for the full provisioning steps."
+            exit 1
+          fi
+          echo "FORGE_REGISTRY_TOKEN is present — proceeding to build, smoke test, and publish."
+
+      - uses: actions/checkout@v4
+
+      # build.sh fetches the pinned CLI artifacts into
+      # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
+      # a restored cache skips the CDNs entirely — repeated pulls of the claude
+      # binary tripped per-IP throttling on downloads.claude.ai (runs 242–248);
+      # this keeps CI to one pull per version. Split restore/save (not
+      # actions/cache) because the paired action only saves on job SUCCESS,
+      # which would discard a good fetch whenever a later step fails — exactly
+      # the runs that most need the artifact banked. Wrong/partial files are
+      # never a risk: build.sh ignores and refetches anything failing its
+      # sha256 pin.
+      - name: Restore pinned CLI artifacts cache
+        uses: actions/cache/restore@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
+          restore-keys: |
+            agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-
+            agent-tools-artifacts-
+
+      - name: Ensure podman
+        run: |
+          # Same install-if-missing + nested-runner podman config + diagnostics
+          # as the PR leg's smoke job — see that step for the rationale.
+          set -eux
+          { command -v podman && command -v crun; } || (sudo apt-get update && sudo apt-get install -y podman crun)
+          sudo mkdir -p /etc/containers
+          # A hand-written storage.conf replaces ALL built-in storage defaults,
+          # so runroot/graphroot must be spelled out too (their stock paths) —
+          # storage errors with "runroot must be set" otherwise.
+          printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
+          # runtime = crun: Ubuntu's podman defaults to runc, which refuses
+          # the smoke test's --cgroups=disabled ("not compatible with
+          # NoCgroups", run 240); crun supports it.
+          printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\nruntime = "crun"\n' | sudo tee /etc/containers/containers.conf
+          sudo rm -rf /var/lib/containers/storage
+          podman version
+          podman info
+          # Disk headroom diagnostic: vfs stores every layer as a full copy,
+          # so free space here is what bounds the builds.
+          df -h /var/lib
+
+      - name: "claude: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh claude
+          containers/agent-tools/smoke-test.sh claude
+          # vfs disk hygiene: drop dangling intermediates (stage leftovers)
+          # before the next provider's build; tagged images are untouched.
+          podman image prune -f
+          df -h /var/lib
+
+      - name: "codex: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh codex
+          containers/agent-tools/smoke-test.sh codex
+          # Same vfs disk hygiene as the claude step above.
+          podman image prune -f
+          df -h /var/lib
+
+      - name: Publish digest-pinned images to the Forgejo registry
+        env:
+          FORGE_REGISTRY_TOKEN: ${{ secrets.FORGE_REGISTRY_TOKEN }}
+          FORGE_REGISTRY_USER: ${{ secrets.FORGE_REGISTRY_USER }}
+        run: |
+          # No `set -x` in this step — it handles the registry token. Login is
+          # --password-stdin; the token value is never echoed or put on argv.
+          set -euo pipefail
+
+          # REGISTRY = server host without scheme; OWNER = repo owner lowercased
+          # (OCI refs must be lowercase). Derived from the Actions context, not
+          # hardcoded — resolves to git.cloonar.com / cloonar for this repo today.
+          REGISTRY="$(printf '%s' '${{ github.server_url }}' | sed -E 's#^https?://##')"
+          OWNER_AS_GIVEN='${{ github.repository_owner }}'
+          OWNER="$(printf '%s' "$OWNER_AS_GIVEN" | tr '[:upper:]' '[:lower:]')"
+
+          # Login user: FORGE_REGISTRY_USER when set, else the repository owner
+          # as given. Token piped on stdin, never as an argument.
+          podman login "$REGISTRY" \
+            -u "${FORGE_REGISTRY_USER:-$OWNER_AS_GIVEN}" \
+            --password-stdin <<<"$FORGE_REGISTRY_TOKEN"
+
+          # versions.env is the single source of truth for the CLI versions the
+          # build scripts pinned; the tags must match what was built.
+          . containers/agent-tools/versions.env
+
+          for entry in "claude:${CLAUDE_CODE_VERSION}" "codex:${CODEX_VERSION}"; do
+            p="${entry%%:*}"
+            ver="${entry#*:}"
+            local_ref="localhost/agent-tools:${p}-${ver}"
+            remote_ref="${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
+
+            podman tag "$local_ref" "$remote_ref"
+            podman push --digestfile "/tmp/digest.${p}" "$remote_ref"
+
+            digest="$(cat "/tmp/digest.${p}")"
+            pinned="${REGISTRY}/${OWNER}/agent-tools@${digest}"
+
+            # The digest-pinned reference is the pinning contract (issue #205):
+            # emit it to the log and to the job summary. The version tag is only
+            # human-facing.
+            echo "published ${p}: ${pinned}  (tag ${p}-${ver})"
+            echo "- \`${p}\` \`${ver}\` → \`${pinned}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      # Same fetch-banking as the smoke job's save step.
+      - name: Save pinned CLI artifacts cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}

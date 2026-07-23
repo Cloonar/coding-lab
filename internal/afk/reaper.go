@@ -405,6 +405,13 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 		s.log.Warn("afk reap: delete run tokens", "component", "afk", "run", run.ID, "err", err)
 	}
 	s.cleanupCredential(repo, run.ID)
+	// Wipe the run's private instance HOME (issue #202): the credential copy and
+	// config go with the reaped run. The guarded teardown above owns the
+	// worktree/branch; this removes only the instance HOME. A failure logs and
+	// continues (the boot/runtime sweep is the backstop).
+	if err := s.homes.Wipe(run.ID); err != nil {
+		s.log.Warn("afk reap: wipe instance home", "component", "afk", "run", run.ID, "err", err)
+	}
 
 	// Only the unattended-work kinds move the shared failure counter — the
 	// two AFK kinds (#185) and fix (#182); lander and escalate feed it in

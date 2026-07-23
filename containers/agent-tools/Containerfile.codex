@@ -1,0 +1,59 @@
+# agent-tools: codex — a FROM-scratch OCI image whose whole root filesystem is
+# /bin/codex (codex's upstream static-pie musl binary) and /bin/labctl (built
+# static from this repo). Pure payload: no shell, no userland, no base, and
+# NEVER run as a container. The container runner (#205) mounts it read-only into
+# an operator-chosen dev container via `podman run --mount type=image,...,dst=/opt/lab`
+# and prepends /opt/lab/bin to PATH.
+#
+# Unlike claude, codex's linux musl build is static-pie with no PT_INTERP and no
+# DT_NEEDED — it runs on any base as-is, so nothing is patched and no loader is
+# bundled. The /opt/lab mount is still the runner's contract for PATH resolution
+# (ADR-0051, docs/ops.md § "Agent-tools images"), but for codex it carries no
+# baked-in path dependency. Consumers pin the immutable @sha256: digest, not the
+# human-facing version tag.
+
+# ---- Stage: labctl — static pure-Go binary built from the working tree -------
+# Identical to Containerfile.claude's labctl stage (see that file for rationale):
+# CGO_ENABLED=0 matches the Makefile; untagged build uses the webui placeholder,
+# so no embedded SPA dist is needed.
+FROM docker.io/library/golang:1.26-alpine AS labctl
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/labctl ./cmd/labctl
+
+# ---- Stage: codex — verify, extract, sanity-run ------------------------------
+FROM docker.io/library/alpine:3.22 AS codex
+
+# No defaults: build.sh always passes both from versions.env. A missing arg must
+# fail the build, never silently accept something else.
+ARG CODEX_VERSION
+ARG CODEX_SHA256_X64_MUSL_TGZ
+
+# The pinned release tarball is fetched, sha256-verified, and cached by
+# build.sh into the build context (see its fetch_artifact rationale). COPY it,
+# RE-verify the sha256 in-stage, then extract: the tar member is named
+# codex-x86_64-unknown-linux-musl; rename it to /out/codex.
+COPY containers/agent-tools/artifacts/codex-${CODEX_VERSION}-x86_64-linux-musl.tar.gz /tmp/codex.tar.gz
+RUN mkdir -p /out \
+    && echo "${CODEX_SHA256_X64_MUSL_TGZ}  /tmp/codex.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/codex.tar.gz -C /tmp \
+    && mv /tmp/codex-x86_64-unknown-linux-musl /out/codex \
+    && chmod 755 /out/codex
+
+# Build-time sanity run. codex is static-pie with no interpreter, so it runs
+# here as-is (and identically once injected) — no patching needed.
+RUN /out/codex --version
+
+# ---- Final: pure payload -----------------------------------------------------
+FROM scratch
+# ARG must be redeclared in this stage to reach the version label below.
+ARG CODEX_VERSION
+COPY --from=codex /out/codex /bin/codex
+COPY --from=labctl /out/labctl /bin/labctl
+LABEL org.opencontainers.image.title="agent-tools: codex" \
+      org.opencontainers.image.description="Self-contained codex (static-pie linux musl) plus static labctl, mounted read-only at /opt/lab for injection into an operator-chosen dev container." \
+      org.opencontainers.image.source="https://git.cloonar.com/Cloonar/coding-lab" \
+      org.opencontainers.image.version="${CODEX_VERSION}" \
+      com.cloonar.lab.provider="codex"

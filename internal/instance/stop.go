@@ -139,6 +139,14 @@ func (s *Service) teardownManualRun(ctx context.Context, run store.Run, repo sto
 		s.log.Warn("deleting run tokens", "component", "instance", "run", run.ID, "err", err)
 	}
 	s.cleanupCredential(repo, run.ID)
+	// Wipe the run's private instance HOME (issue #202): the credential copy,
+	// config, and transcripts go with the stopped run. Neutral Stop semantics
+	// are unchanged — the wipe removes the instance HOME only, NEVER the
+	// worktree/branch (the park). A failure logs and continues; the boot/runtime
+	// sweep is the backstop.
+	if err := s.homes.Wipe(run.ID); err != nil {
+		s.log.Warn("stop: wipe instance home", "component", "instance", "run", run.ID, "err", err)
+	}
 	// v0's ForgetURL (drop the deep link when the worktree is gone) is subsumed
 	// by the active-runs filter: a stopped run is terminal, so GET /instances
 	// never surfaces its stale deep link.

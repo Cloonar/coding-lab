@@ -2,6 +2,7 @@
 /bin/
 /lab
 /labctl
+containers/agent-tools/artifacts/
 web/dist/
 internal/webui/dist/
 web/node_modules/

@@ -129,27 +129,21 @@ type Options struct {
 	// the owning adapter, so a caller with no configured entry for this
 	// provider still gets a working Provider.
 	ClaudeBin string
-	// ConfigPath is claude's global config file (~/.claude.json), the
-	// folder-trust seeding target. Empty defaults to LoginDir/.claude.json
-	// (LoginDir is the service user's HOME) — the same adapter-owned-default
-	// decision as ClaudeBin (issue #78). The old `-claude-config` flag /
-	// LAB_CLAUDE_CONFIG env is becoming a deprecated alias for the generic
-	// `-provider-config claude-code=path`; either way the resolved value
-	// lands here unchanged.
+	// ConfigPath is claude's MASTER global config file (~/.claude.json). It is
+	// the folder-trust reference only for master-store ops — the
+	// InjectCredentials source for the oauthAccount metadata (issue #202); the
+	// per-run trust seed writes to <SeedOpts.Home>/.claude.json instead. Empty
+	// defaults to LoginDir/.claude.json (LoginDir is the service user's HOME) —
+	// the same adapter-owned-default decision as ClaudeBin (issue #78). The old
+	// `-claude-config` flag / LAB_CLAUDE_CONFIG env is becoming a deprecated
+	// alias for the generic `-provider-config claude-code=path`; either way the
+	// resolved value lands here unchanged.
 	ConfigPath string
-	// RegistryDir is claude's per-process session registry
-	// ($HOME/.claude/sessions); injectable for tests.
-	RegistryDir string
-	// ProjectsDir is claude's transcript tree ($HOME/.claude/projects); the
-	// chat surface reads <ProjectsDir>/<cwd-slug>/<sessionId>.jsonl.
-	// Injectable for tests.
-	ProjectsDir string
-	// UserCommandsDir is claude's user-level custom slash-command directory
-	// ($HOME/.claude/commands), scanned by Commands (issue #51 decision 5).
-	// Defaults to the "commands" sibling of RegistryDir; injectable for tests.
-	UserCommandsDir string
 	// LoginDir is the working directory of the login session ($HOME —
-	// login is global, one machine-level credential).
+	// login is global, one machine-level credential). All INSTANCE-facing
+	// state (session registry, transcript tree, user commands) is NOT resolved
+	// from here: it derives per-call from the run's private instance HOME on the
+	// seam (issue #202 / ADR-0038), never from a construction-time master path.
 	LoginDir string
 	// Runner drives tmux for the login session.
 	Runner tmuxx.SessionRunner
@@ -164,16 +158,13 @@ type Options struct {
 
 // Provider is the claude-code AgentProvider. Construct with New.
 type Provider struct {
-	claudeBin       string
-	configPath      string
-	registryDir     string
-	projectsDir     string
-	userCommandsDir string
-	loginDir        string
-	runner          tmuxx.SessionRunner
-	bus             *events.Bus
-	log             *slog.Logger
-	now             func() time.Time
+	claudeBin  string
+	configPath string // MASTER ~/.claude.json — master-store ops only (login flow, InjectCredentials source)
+	loginDir   string
+	runner     tmuxx.SessionRunner
+	bus        *events.Bus
+	log        *slog.Logger
+	now        func() time.Time
 
 	captureTimeout time.Duration
 	bridgeTimeout  time.Duration
@@ -221,8 +212,6 @@ var _ provider.RemoteCapable = (*Provider)(nil)
 // fills the adapter-owned default when the entry is absent.
 func New(o Options) (*Provider, error) {
 	switch {
-	case o.RegistryDir == "":
-		return nil, errors.New("claudecode: Options.RegistryDir is required")
 	case o.LoginDir == "":
 		return nil, errors.New("claudecode: Options.LoginDir is required")
 	case o.Runner == nil:
@@ -251,36 +240,22 @@ func New(o Options) (*Provider, error) {
 	if configPath == "" {
 		configPath = filepath.Join(o.LoginDir, ".claude.json")
 	}
-	// ProjectsDir/UserCommandsDir default to siblings of RegistryDir
-	// (~/.claude/sessions → ~/.claude/projects, ~/.claude/commands) so
-	// existing callers keep working; main.go sets ProjectsDir explicitly.
-	projectsDir := o.ProjectsDir
-	if projectsDir == "" {
-		projectsDir = filepath.Join(filepath.Dir(o.RegistryDir), "projects")
-	}
-	userCommandsDir := o.UserCommandsDir
-	if userCommandsDir == "" {
-		userCommandsDir = filepath.Join(filepath.Dir(o.RegistryDir), "commands")
-	}
 	p := &Provider{
-		claudeBin:       claudeBin,
-		configPath:      configPath,
-		registryDir:     o.RegistryDir,
-		projectsDir:     projectsDir,
-		userCommandsDir: userCommandsDir,
-		loginDir:        o.LoginDir,
-		runner:          o.Runner,
-		bus:             o.Bus,
-		log:             logger,
-		now:             now,
-		captureTimeout:  defaultCaptureTimeout,
-		bridgeTimeout:   defaultBridgeTimeout,
-		loginTimeout:    defaultLoginTimeout,
-		loginPoll:       defaultLoginPoll,
-		authTTL:         defaultAuthTTL,
-		logoutTimeout:   defaultLogoutTimeout,
-		keyDelay:        defaultDialogKeyDelay,
-		capturing:       map[string]bool{},
+		claudeBin:      claudeBin,
+		configPath:     configPath,
+		loginDir:       o.LoginDir,
+		runner:         o.Runner,
+		bus:            o.Bus,
+		log:            logger,
+		now:            now,
+		captureTimeout: defaultCaptureTimeout,
+		bridgeTimeout:  defaultBridgeTimeout,
+		loginTimeout:   defaultLoginTimeout,
+		loginPoll:      defaultLoginPoll,
+		authTTL:        defaultAuthTTL,
+		logoutTimeout:  defaultLogoutTimeout,
+		keyDelay:       defaultDialogKeyDelay,
+		capturing:      map[string]bool{},
 	}
 	// Wire the mismatch backstop's forensic instrumentation (issue #165 item
 	// 1) onto the intent registry: p.intents is a plain zero-value struct
@@ -426,6 +401,36 @@ func applySpawnOptions(prompt string, options map[string]string) string {
 		return ultracodeDirective + "\n\n" + prompt
 	}
 	return prompt
+}
+
+// Per-run instance-HOME path derivation (issue #202 / ADR-0038). Every
+// INSTANCE-facing claude path lives under the run's private HOME, derived per
+// call from the home argument threaded on the seam — never from a
+// construction-time master path. An empty home means "no per-run home": the
+// caller treats it as a miss / no-op and NEVER falls back to the master store
+// or the process HOME (isolation by construction).
+//
+// The layout is <home>/.claude as an EXPLICIT config dir: the spawn env pins
+// CLAUDE_CONFIG_DIR=<home>/.claude (instanceConfigDirUnder — see
+// InjectCredentials), so the session registry, the transcript tree, the
+// user-command dir, the global config, and the credentials file all sit where
+// the CLI's config-dir resolution puts them (compat §3a). This is deliberately
+// version-proof: config-dir-set resolution is identical on every probed CLI,
+// while the previous empty-pin's "empty behaves as unset" only holds from
+// ~2.1.214 — on 2.1.198 an empty value is joined as a real (relative) config
+// dir for the CREDENTIALS path, so the instance spawned unauthenticated and
+// every chat reply died at "Not logged in" (live-straced 2026-07-23). The only
+// path this moved is the global config: .claude.json now lives INSIDE
+// <home>/.claude rather than at <home>/.claude.json (HOME-convention).
+func instanceConfigDirUnder(home string) string { return filepath.Join(home, ".claude") }
+func registryDirUnder(home string) string       { return filepath.Join(home, ".claude", "sessions") }
+func projectsDirUnder(home string) string       { return filepath.Join(home, ".claude", "projects") }
+func userCommandsDirUnder(home string) string   { return filepath.Join(home, ".claude", "commands") }
+func globalConfigUnder(home string) string {
+	return filepath.Join(home, ".claude", ".claude.json")
+}
+func instanceCredsUnder(home string) string {
+	return filepath.Join(home, ".claude", ".credentials.json")
 }
 
 func (p *Provider) publishAuthChanged() {
