@@ -983,12 +983,20 @@ func TestCompat_Live_authLogout(t *testing.T) {
 }
 
 // Config-dir resolution pin (compat.md §3a, issue #202): CLAUDE_CONFIG_DIR
-// outranks HOME for ALL claude state, and an EMPTY value behaves as unset.
-// Both facts are load-bearing for per-run isolation: the instance spawn
-// inherits the lab server's environment through tmux, so the claude injector
-// pins CLAUDE_CONFIG_DIR= (empty) to keep the CLI's resolution on the
-// private instance HOME (claudecode/inject.go). Opt-in via LAB_COMPAT_LIVE=1
-// so CI stays hermetic.
+// outranks HOME for ALL claude state. This fact is load-bearing for per-run
+// isolation: the instance spawn inherits the lab server's environment through
+// tmux, so the claude injector pins CLAUDE_CONFIG_DIR=<home>/.claude to keep
+// the CLI's resolution on the private instance HOME (claudecode/inject.go).
+// Opt-in via LAB_COMPAT_LIVE=1 so CI stays hermetic.
+//
+// The pin must NEVER be empty. "Empty behaves as unset" was live-probed on
+// 2.1.214 and is FALSE on 2.1.198 for credential resolution: the CLI joins
+// the empty dir into a RELATIVE ./.credentials.json (straced 2026-07-23),
+// while .claude.json still falls back to HOME — so a config-write probe
+// passes yet the instance spawns unauthenticated and every chat reply dies
+// at "Not logged in". No cross-version assertion exists for the empty form,
+// which is exactly why the injector stopped using it; this probe pins only
+// the set form both versions agree on.
 //
 // The probe is `claude config set theme dark` — a config write whose landing
 // spot (.claude.json) reveals which directory the CLI resolved, with no
@@ -1023,11 +1031,19 @@ func TestCompat_Live_configDirResolution(t *testing.T) {
 		}
 	})
 
-	t.Run("empty: behaves as unset, HOME resolution", func(t *testing.T) {
+	t.Run("set: nested instance layout resolves .claude.json inside it", func(t *testing.T) {
+		// The injector's actual pin shape: config dir = <home>/.claude. The CLI
+		// must land .claude.json INSIDE it (<home>/.claude/.claude.json — where
+		// claudecode.globalConfigUnder writes the trust seed + oauthAccount
+		// mirror), never at the HOME-convention <home>/.claude.json.
 		home := t.TempDir()
-		probe(t, home, "")
-		if _, err := os.Stat(filepath.Join(home, ".claude.json")); err != nil {
-			t.Errorf(".claude.json missing under HOME (%v) — an empty CLAUDE_CONFIG_DIR no longer behaves as unset; the injector's empty pin (claudecode/inject.go) is broken", err)
+		cfg := filepath.Join(home, ".claude")
+		probe(t, home, cfg)
+		if _, err := os.Stat(filepath.Join(cfg, ".claude.json")); err != nil {
+			t.Errorf(".claude.json missing under the pinned <home>/.claude (%v) — the CLI no longer resolves the injector's pin; instances would miss their trust/onboarding/oauthAccount seed", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
+			t.Errorf(".claude.json present at HOME-convention <home>/.claude.json (stat err = %v) despite the config-dir pin", err)
 		}
 	})
 }

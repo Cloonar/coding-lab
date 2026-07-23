@@ -33,7 +33,8 @@ var gitExcludeEntries = []string{".claude/"}
 //
 // The two HOME-GLOBAL grants (onboarding + folder trust in ~/.claude.json)
 // write ONLY under the run's private instance HOME opts.Home
-// (<opts.Home>/.claude.json, issue #202) — never the machine's master
+// (<opts.Home>/.claude/.claude.json — inside the pinned per-run
+// CLAUDE_CONFIG_DIR, issue #202) — never the machine's master
 // ~/.claude.json — so a run's trust state stays inside its own home. An empty
 // opts.Home skips those two grants entirely (a run with no per-run home gets no
 // global-config write, never a fallback to the master store); the worktree-
@@ -113,6 +114,14 @@ func SeedTrust(configPath, dir string) error {
 // clobber a concurrent claude writer. Folding onboarding into the trust pass
 // keeps this to the one read+write the trust seed already performed each spawn.
 func seedGlobalConfig(configPath, dir string) error {
+	// The instance global config lives INSIDE the pinned per-run config dir
+	// (<home>/.claude/.claude.json — globalConfigUnder), and SeedWorkspace runs
+	// before InjectCredentials in the launch order, so the parent may not exist
+	// yet: create it with the same owner-only mode the injector's credential
+	// copy uses (a no-op for an existing dir).
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(configPath), err)
+	}
 	cfg, err := readJSONObject(configPath)
 	if err != nil {
 		return err

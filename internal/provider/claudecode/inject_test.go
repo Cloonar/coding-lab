@@ -23,10 +23,15 @@ func masterCreds(t *testing.T) []byte {
 
 // (a) Happy path: the master credentials are copied into
 // <home>/.claude/.credentials.json (0600), the master ~/.claude.json's
-// oauthAccount is mirrored into <home>/.claude.json (and only that key), and
-// the env pins CLAUDE_CONFIG_DIR to EMPTY — the CLI resolves that variable
-// over HOME (compat §3a), so a tmux-inherited value would point the instance
-// back at the master store; empty = unset keeps resolution on HOME alone.
+// oauthAccount is mirrored into <home>/.claude/.claude.json (and only that
+// key), and the env pins CLAUDE_CONFIG_DIR to <home>/.claude — the CLI
+// resolves that variable over HOME (compat §3a), so a tmux-inherited value
+// would point the instance back at the master store. The pin must be a
+// NON-EMPTY explicit dir: the old CLAUDE_CONFIG_DIR= (empty) pin relied on
+// empty-behaves-as-unset, which pre-2.1.214 CLIs do not implement for
+// credential resolution — they join the empty dir into a relative
+// ./.credentials.json, the instance spawns unauthenticated, and every chat
+// reply dies at "Not logged in" (live-diagnosed 2026-07-23 on 2.1.198).
 func TestInjectCredentials_happyPath(t *testing.T) {
 	creds := masterCreds(t)
 	p, _ := testProvider(t, newFakeRunner())
@@ -42,8 +47,29 @@ func TestInjectCredentials_happyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InjectCredentials: %v", err)
 	}
-	if len(env) != 1 || env[0] != "CLAUDE_CONFIG_DIR=" {
-		t.Errorf("env = %v; want [CLAUDE_CONFIG_DIR=] (empty pin neutralizing an inherited master pointer)", env)
+	wantPin := "CLAUDE_CONFIG_DIR=" + instanceConfigDirUnder(home)
+	if len(env) != 1 || env[0] != wantPin {
+		t.Errorf("env = %v; want [%s] (explicit per-run config dir overriding an inherited master pointer)", env, wantPin)
+	}
+	// Layout-consistency regression guard: the pinned config dir must be the
+	// SAME directory the credential copy and every adapter reader resolve
+	// under — a pin pointing anywhere else re-creates the unauthenticated
+	// spawn this test's doc comment describes.
+	pinned := env[0][len("CLAUDE_CONFIG_DIR="):]
+	if pinned == "" {
+		t.Fatalf("pinned CLAUDE_CONFIG_DIR is empty — pre-2.1.214 CLIs treat empty as a real config dir and spawn unauthenticated")
+	}
+	if got := filepath.Dir(instanceCredsUnder(home)); got != pinned {
+		t.Errorf("credential copy dir %q != pinned config dir %q", got, pinned)
+	}
+	if got := filepath.Dir(globalConfigUnder(home)); got != pinned {
+		t.Errorf("global config dir %q != pinned config dir %q", got, pinned)
+	}
+	if got := filepath.Dir(projectsDirUnder(home)); got != pinned {
+		t.Errorf("projects parent dir %q != pinned config dir %q", got, pinned)
+	}
+	if got := filepath.Dir(registryDirUnder(home)); got != pinned {
+		t.Errorf("session-registry parent dir %q != pinned config dir %q", got, pinned)
 	}
 
 	dst := instanceCredsUnder(home)
@@ -71,7 +97,7 @@ func TestInjectCredentials_happyPath(t *testing.T) {
 
 // (b) Missing-master tolerance: no master creds and no master config ⇒ no
 // error, and nothing is written into the instance home (the CLI shows its own
-// login prompt in the pane). The CLAUDE_CONFIG_DIR= pin still fires — it
+// login prompt in the pane). The CLAUDE_CONFIG_DIR pin still fires — it
 // governs PATH RESOLUTION, not authentication.
 func TestInjectCredentials_missingMasterTolerated(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // empty ⇒ no master creds
@@ -82,8 +108,9 @@ func TestInjectCredentials_missingMasterTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InjectCredentials with no master: %v", err)
 	}
-	if len(env) != 1 || env[0] != "CLAUDE_CONFIG_DIR=" {
-		t.Errorf("env = %v; want [CLAUDE_CONFIG_DIR=] (the pin fires even with no master credential)", env)
+	wantPin := "CLAUDE_CONFIG_DIR=" + instanceConfigDirUnder(home)
+	if len(env) != 1 || env[0] != wantPin {
+		t.Errorf("env = %v; want [%s] (the pin fires even with no master credential)", env, wantPin)
 	}
 	if _, err := os.Stat(instanceCredsUnder(home)); !os.IsNotExist(err) {
 		t.Errorf("instance creds written despite a missing master (%v)", err)

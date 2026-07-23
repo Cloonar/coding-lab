@@ -144,8 +144,8 @@ func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 // ~/.claude*/~/.codex are never touched by an instance process. injEnv is the
 // provider's own credential-resolution env for that home, pinning the CLI's
 // master-store override variable so a value inherited through tmux can't point
-// the instance back at the master store (CLAUDE_CONFIG_DIR= — empty behaves as
-// unset — for claude; CODEX_HOME=<home>/.codex for codex). Appended AFTER HOME
+// the instance back at the master store (CLAUDE_CONFIG_DIR=<home>/.claude for
+// claude; CODEX_HOME=<home>/.codex for codex). Appended AFTER HOME
 // so a provider entry always wins over it.
 func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken, home string, injEnv []string) ([]string, error) {
 	env := append([]string{}, credEnv...)
