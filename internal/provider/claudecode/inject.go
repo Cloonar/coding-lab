@@ -21,22 +21,26 @@ import (
 //     resolution logout.go shares) → <home>/.claude/.credentials.json, the file
 //     claude reads for its OAuth tokens (compat §3);
 //   - the master ~/.claude.json's oauthAccount key (account metadata) merged
-//     into <home>/.claude.json create-or-update style — the CLI treats that
-//     block as part of "logged in", so mirroring it is cheap insurance. This
+//     into <home>/.claude/.claude.json create-or-update style — the CLI treats
+//     that block as part of "logged in", so mirroring it is cheap insurance. This
 //     writer and SeedWorkspace's trust seed both preserve each other's keys via
 //     the generic map round-trip, so injector/seed order does not matter.
 //
-// It ALWAYS returns CLAUDE_CONFIG_DIR= (explicitly EMPTY) — the claude CLI
-// resolves CLAUDE_CONFIG_DIR *over* HOME for ALL of its state (credentials,
-// .claude.json, projects/ — compat §3a), and lab itself honors a service-wide
-// value for the master store (credentialsPath, shared with logout.go), so a
-// value inherited through tmux would point the instance's claude straight back
-// at that master store. The CLI treats an empty value as unset (compat §3a),
-// so the empty pin neutralizes the inherited value while keeping the exact
-// HOME-only layout this package seeds and reads — the same defense codex
-// mounts with its unconditional CODEX_HOME pin, minus the relocation (pinning
-// a non-empty dir would move .claude.json under it, away from the
-// <home>/.claude.json this package writes).
+// It ALWAYS returns CLAUDE_CONFIG_DIR=<home>/.claude (explicitly SET) — the
+// claude CLI resolves CLAUDE_CONFIG_DIR *over* HOME for ALL of its state
+// (credentials, .claude.json, projects/ — compat §3a), and lab itself honors a
+// service-wide value for the master store (credentialsPath, shared with
+// logout.go), so a value inherited through tmux would point the instance's
+// claude straight back at that master store. Pinning the instance's OWN
+// .claude dir both neutralizes the inherited value and keeps resolution
+// version-proof: the previous CLAUDE_CONFIG_DIR= (empty) pin relied on
+// empty-behaves-as-unset, which only holds from ~2.1.214 — on 2.1.198 the
+// credentials path joins the empty dir into a RELATIVE ./.credentials.json,
+// so every instance spawned unauthenticated and chat replies died at "Not
+// logged in" (live-straced 2026-07-23; compat §3a). The same defense codex
+// mounts with its unconditional CODEX_HOME pin. All adapter readers/writers
+// (globalConfigUnder, projectsDirUnder, registryDirUnder, instanceCredsUnder)
+// resolve inside the pinned dir, so the CLI and lab agree on one layout.
 //
 // A MISSING master file (the operator never logged in) is NOT an
 // error: it is logged loudly and simply not written, so the spawn proceeds and
@@ -53,10 +57,11 @@ func (p *Provider) InjectCredentials(instanceHome string) ([]string, error) {
 	if err := p.mirrorOAuthAccount(instanceHome); err != nil {
 		return nil, err
 	}
-	// Unconditional, and deliberately EMPTY: an inherited CLAUDE_CONFIG_DIR
-	// outranks HOME in the CLI's resolution, so it must be cleared for the
-	// instance; empty = unset (compat §3a) keeps resolution on HOME alone.
-	return []string{"CLAUDE_CONFIG_DIR="}, nil
+	// Unconditional, and deliberately the instance's own .claude dir: an
+	// inherited CLAUDE_CONFIG_DIR outranks HOME in the CLI's resolution, so it
+	// must be overridden for the instance — with an explicit dir, never empty
+	// (empty is treated as a REAL config dir by pre-2.1.214 CLIs; compat §3a).
+	return []string{"CLAUDE_CONFIG_DIR=" + instanceConfigDirUnder(instanceHome)}, nil
 }
 
 // copyMasterCredentials copies the master .credentials.json (credentialsPath,
@@ -84,7 +89,7 @@ func (p *Provider) copyMasterCredentials(instanceHome string) error {
 }
 
 // mirrorOAuthAccount merges the master ~/.claude.json's oauthAccount key into
-// the instance <home>/.claude.json, preserving every other key on both sides
+// the instance <home>/.claude/.claude.json, preserving every other key on both sides
 // (the same read-modify-write seedGlobalConfig performs). A missing master
 // config, or one carrying no oauthAccount, writes nothing — not an error.
 func (p *Provider) mirrorOAuthAccount(instanceHome string) error {

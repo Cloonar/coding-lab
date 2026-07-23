@@ -408,15 +408,27 @@ func applySpawnOptions(prompt string, options map[string]string) string {
 // call from the home argument threaded on the seam — never from a
 // construction-time master path. An empty home means "no per-run home": the
 // caller treats it as a miss / no-op and NEVER falls back to the master store
-// or the process HOME (isolation by construction). The layout mirrors claude's
-// own $HOME-relative convention (compat §2/§4a/§5/§10): the session registry,
-// the transcript tree, the user-command dir, the global config, and the
-// credentials file all sit exactly where claude's own readers look when HOME is
-// the instance home.
-func registryDirUnder(home string) string     { return filepath.Join(home, ".claude", "sessions") }
-func projectsDirUnder(home string) string     { return filepath.Join(home, ".claude", "projects") }
-func userCommandsDirUnder(home string) string { return filepath.Join(home, ".claude", "commands") }
-func globalConfigUnder(home string) string    { return filepath.Join(home, ".claude.json") }
+// or the process HOME (isolation by construction).
+//
+// The layout is <home>/.claude as an EXPLICIT config dir: the spawn env pins
+// CLAUDE_CONFIG_DIR=<home>/.claude (instanceConfigDirUnder — see
+// InjectCredentials), so the session registry, the transcript tree, the
+// user-command dir, the global config, and the credentials file all sit where
+// the CLI's config-dir resolution puts them (compat §3a). This is deliberately
+// version-proof: config-dir-set resolution is identical on every probed CLI,
+// while the previous empty-pin's "empty behaves as unset" only holds from
+// ~2.1.214 — on 2.1.198 an empty value is joined as a real (relative) config
+// dir for the CREDENTIALS path, so the instance spawned unauthenticated and
+// every chat reply died at "Not logged in" (live-straced 2026-07-23). The only
+// path this moved is the global config: .claude.json now lives INSIDE
+// <home>/.claude rather than at <home>/.claude.json (HOME-convention).
+func instanceConfigDirUnder(home string) string { return filepath.Join(home, ".claude") }
+func registryDirUnder(home string) string       { return filepath.Join(home, ".claude", "sessions") }
+func projectsDirUnder(home string) string       { return filepath.Join(home, ".claude", "projects") }
+func userCommandsDirUnder(home string) string   { return filepath.Join(home, ".claude", "commands") }
+func globalConfigUnder(home string) string {
+	return filepath.Join(home, ".claude", ".claude.json")
+}
 func instanceCredsUnder(home string) string {
 	return filepath.Join(home, ".claude", ".credentials.json")
 }

@@ -600,10 +600,10 @@ type AgentProvider interface {
 	// environment, and each CLI honors a master-store override variable that
 	// outranks HOME. codex REQUIRES CODEX_HOME=<home>/.codex (lab supports
 	// $CODEX_HOME for the master store — internal/provider/codex codexHomeDir);
-	// claude REQUIRES CLAUDE_CONFIG_DIR= pinned EMPTY (the CLI resolves
-	// CLAUDE_CONFIG_DIR over HOME and treats empty as unset — compat §3a — so
-	// the empty pin keeps resolution on the instance HOME without relocating
-	// the .claude.json layout the adapter seeds).
+	// claude REQUIRES CLAUDE_CONFIG_DIR=<home>/.claude pinned EXPLICITLY (the
+	// CLI resolves CLAUDE_CONFIG_DIR over HOME — compat §3a; the pin must
+	// never be empty, because pre-2.1.214 CLIs treat an empty value as a real
+	// config dir for credential resolution and spawn unauthenticated).
 	//
 	// Exactly ONE call site exists (the launch path), so a server-side
 	// credential proxy can later replace the copy wholesale — the env would

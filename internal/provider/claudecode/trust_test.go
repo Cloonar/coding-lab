@@ -241,9 +241,9 @@ func TestSeedWorkspace_seedsTrustAndExclude(t *testing.T) {
 		t.Fatalf("SeedWorkspace: %v", err)
 	}
 	// Folder trust + onboarding are HOME-global: they land under the run's
-	// private HOME (<home>/.claude.json), NEVER the master p.configPath
-	// (issue #202).
-	homeCfg := filepath.Join(home, ".claude.json")
+	// private HOME — inside its pinned config dir (<home>/.claude/.claude.json,
+	// globalConfigUnder), NEVER the master p.configPath (issue #202).
+	homeCfg := globalConfigUnder(home)
 	if !trustOf(readCfg(t, homeCfg), wt) {
 		t.Errorf("worktree not folder-trusted in %s", homeCfg)
 	}
