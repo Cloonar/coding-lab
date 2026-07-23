@@ -24,7 +24,6 @@ const (
 	CheckSubgid     = "subgid"            // no usable /etc/subgid entry for the service user
 	CheckCgroup2    = "cgroup2"           // unified hierarchy not mounted / not in use
 	CheckDelegation = "cgroup-delegation" // memory/pids not delegated to our cgroup
-	CheckImage      = "image"             // no dev image configured
 	CheckToolsImage = "tools-image"       // no agent-tools images configured
 	CheckToolsPull  = "tools-image-pull"  // a configured agent-tools ref does not resolve
 )
@@ -34,7 +33,6 @@ const (
 // package needs no config import and tests build it literally.
 type PreflightConfig struct {
 	PodmanBin   string
-	Image       string            // configured dev image; "" = unconfigured
 	ToolsImages map[string]string // provider id -> agent-tools ref, digest-pinned (ADR-0051)
 }
 
@@ -120,12 +118,16 @@ func (r Result) Error() string {
 // Preflight verifies the host can actually run containerized sessions
 // (#205): podman >= 4 present, pasta present, subuid/subgid ranges for the
 // service user, cgroup v2 with memory+pids delegated (the --memory and
-// --pids-limit caps silently do nothing without it), the dev image
-// configured, and every agent-tools ref resolvable. It NEVER aborts early —
-// all failures are collected so one refusal names everything wrong at once
-// — and it is safe on a host with no podman at all: that is just Failures,
-// never a panic. A later task calls this at server startup and gates
-// container spawns on Result.OK.
+// --pids-limit caps silently do nothing without it), at least one agent-tools
+// image configured, and every configured agent-tools ref resolvable. The dev
+// image is deliberately NOT checked here (issue #207): it is per-repo-or-
+// global and only the spawn knows the repo, so its presence is ensured at
+// spawn (EnsureImage) — a host with no global default is a valid deployment
+// where every repo pins its own image. Preflight NEVER aborts early — all
+// failures are collected so one refusal names everything wrong at once — and
+// it is safe on a host with no podman at all: that is just Failures, never a
+// panic. A later task calls this at server startup and gates container spawns
+// on Result.OK.
 func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 	var r Result
 	fail := func(check, detail, hint string) {
@@ -223,12 +225,13 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 		}
 	}
 
-	// 5. Images configured. Container mode has no default image on purpose:
-	// the operator owns the dev userland (ADR-0051), so an unconfigured
-	// image is "refuse to spawn", not "pick one for them".
-	if cfg.Image == "" {
-		fail(CheckImage, "no dev container image configured", "set --container-image")
-	}
+	// 5. Agent-tools images configured. Container mode has no default tools
+	// image on purpose: the tools injection is lab's own (ADR-0051), but the
+	// operator must still point at the built refs, so none configured is
+	// "refuse to spawn", not "pick one for them". The DEV image used to be
+	// checked here too; issue #207 moved it to the spawn (EnsureImage), where
+	// the repo's own image_ref override is known — an unset global default is
+	// no longer a preflight failure.
 	if len(cfg.ToolsImages) == 0 {
 		fail(CheckToolsImage, "no agent-tools images configured", "set --container-tools-image provider=ref")
 	}

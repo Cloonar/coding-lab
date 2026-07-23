@@ -25,7 +25,6 @@ func greenFixture() *pfFixture {
 	return &pfFixture{
 		cfg: PreflightConfig{
 			PodmanBin: "podman",
-			Image:     "docker.io/library/debian:stable-slim",
 			ToolsImages: map[string]string{
 				"claude-code": "reg/agent-tools@sha256:aa",
 			},
@@ -208,19 +207,25 @@ func TestPreflight(t *testing.T) {
 			},
 		},
 		{
-			name: "unconfigured images",
+			// issue #207: the dev image is no longer a preflight concern (it is
+			// per-repo-or-global, ensured at spawn), so ONLY a missing tools
+			// image fails here — an unset global dev image is fine, proven both
+			// by the green fixture carrying no dev image and by this check
+			// producing exactly one failure, the tools one.
+			name: "unconfigured tools image (unset dev image is not a failure)",
 			mutate: func(f *pfFixture) {
-				f.cfg.Image = ""
 				f.cfg.ToolsImages = nil
 			},
-			wantChecks:  []string{CheckImage, CheckToolsImage},
+			wantChecks:  []string{CheckToolsImage},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Hint, "--container-image") {
-					t.Errorf("image hint %q does not name the flag", r.Failures[0].Hint)
+				if !strings.Contains(r.Failures[0].Hint, "--container-tools-image") {
+					t.Errorf("tools hint %q does not name the flag", r.Failures[0].Hint)
 				}
-				if !strings.Contains(r.Failures[1].Hint, "--container-tools-image") {
-					t.Errorf("tools hint %q does not name the flag", r.Failures[1].Hint)
+				for _, fa := range r.Failures {
+					if fa.Check == "image" {
+						t.Errorf("unset dev image produced a preflight failure %+v — #207 moved that check to the spawn", fa)
+					}
 				}
 			},
 		},
@@ -273,12 +278,11 @@ func TestPreflight(t *testing.T) {
 			mutate: func(f *pfFixture) {
 				f.paths = map[string]string{}
 				f.files = map[string]string{}
-				f.cfg.Image = ""
 				f.cfg.ToolsImages = nil
 			},
 			wantChecks: []string{
 				CheckPodman, CheckPasta, CheckSubuid, CheckSubgid,
-				CheckCgroup2, CheckImage, CheckToolsImage,
+				CheckCgroup2, CheckToolsImage,
 			},
 		},
 	}

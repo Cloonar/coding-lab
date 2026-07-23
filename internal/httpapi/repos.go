@@ -100,6 +100,11 @@ type repoResponse struct {
 	ContainerMemory *string `json:"container_memory"`
 	ContainerPids   *int    `json:"container_pids"`
 	ContainerNofile *int    `json:"container_nofile"`
+	// ImageRef is the repo's dev container image override (issue #207): null
+	// means inherit the globally configured default dev image. A non-null value
+	// is always digest-pinned (reposvc pins it on save). Meaningless while Runner
+	// is "host", same as the container limits above.
+	ImageRef *string `json:"image_ref"`
 }
 
 // repoJSON renders a repo row as its pinned JSON shape. It is a pure function
@@ -150,6 +155,7 @@ func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
 		ContainerMemory:      r.ContainerMemory,
 		ContainerPids:        r.ContainerPids,
 		ContainerNofile:      r.ContainerNofile,
+		ImageRef:             r.ImageRef,
 	}
 	if r.LastOpenedAt != nil {
 		t := store.FormatTime(*r.LastOpenedAt)
@@ -401,6 +407,12 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			u.ContainerPids, err = patchNullableInt(raw, key)
 		case "container_nofile":
 			u.ContainerNofile, err = patchNullableInt(raw, key)
+		case "image_ref":
+			// Nullable (issue #207): null/"" clears back to inherit the global
+			// default dev image; a non-empty ref is digest-pinned on save in
+			// reposvc.UpdateSettings (a parse/resolve failure → 400, its message
+			// naming the ref).
+			u.ImageRef, err = patchNullableString(raw, key)
 		default:
 			err = fmt.Errorf("unknown field %q", key)
 		}

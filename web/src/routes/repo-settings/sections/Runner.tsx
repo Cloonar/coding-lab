@@ -42,6 +42,11 @@ export default function RunnerSection(props: {
   const [containerNofile, setContainerNofile] = drafts.field((r) =>
     r.container_nofile === null ? '' : String(r.container_nofile),
   );
+  // The per-repo dev image override (issue #207): nullable, same '' ↔ null
+  // shape as the limits above. The server resolves and digest-pins the ref on
+  // save (https registries only) — a bad ref surfaces as a 400 in the
+  // section's ErrorBanner via useSettingsForm, not a client-side check here.
+  const [imageRef, setImageRef] = drafts.field((r) => r.image_ref ?? '');
 
   // The inherited global defaults (issue #205), read from GET /settings —
   // SeedDefaultSettings always seeds these three, so the fallback literals
@@ -69,6 +74,9 @@ export default function RunnerSection(props: {
     const nofile = normInt(containerNofile());
     if (nofile === undefined) return 'Container open-files limit must be a whole number.';
     if (nofile !== current.container_nofile) patch.container_nofile = nofile;
+
+    const image = normText(imageRef());
+    if (image !== current.image_ref) patch.image_ref = image;
 
     return patch;
   };
@@ -110,6 +118,25 @@ export default function RunnerSection(props: {
             only; use the container runner once available.
           </small>
         </Show>
+      </section>
+
+      <section class="card">
+        <h2>Dev image</h2>
+        <small class="hint hint-block">Applies to container runs only.</small>
+        <label class="field">
+          <span>Image reference</span>
+          <input
+            type="text"
+            name="image_ref"
+            autocomplete="off"
+            placeholder="docker.io/library/debian:bookworm"
+            value={imageRef()}
+            onInput={(e) => setImageRef(e.currentTarget.value)}
+          />
+          <small class="hint">
+            Resolved and pinned to a digest on save. Blank inherits the server's default image.
+          </small>
+        </label>
       </section>
 
       <section class="card">

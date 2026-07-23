@@ -28,12 +28,20 @@ const (
 // refuseContainerSpawn is the container-mode spawn gate (issue #205), run
 // BEFORE anything is created — a refused spawn must never park a claim (the
 // AFK worktree IS the claim, so ordering this after AddWorktree would strand
-// the issue behind a host misconfiguration). Refusals, most-structural
-// first: no wiring at all → the server was started without container config;
-// preflight unfinished → the boot goroutine (image pulls can take minutes)
-// has not published a verdict, retry; preflight failed → the full
-// multi-failure message, so ONE refusal names everything the operator must
-// fix; no tools image for THIS provider → the actionable per-provider flag.
+// the issue behind a host misconfiguration). It doubles as the effective dev
+// image resolver (issue #207) and returns that image on success: the two
+// concerns share this pre-claim spot because the dev-image refusal, unlike
+// every host/tools check the startup preflight owns, is PER-REPO — only the
+// spawn knows the repo, so a "no image for this repo" verdict cannot be
+// reached at boot the way the others are. Refusals, most-structural first: no
+// wiring at all → the server was started without container config; preflight
+// unfinished → the boot goroutine (image pulls can take minutes) has not
+// published a verdict, retry; preflight failed → the full multi-failure
+// message, so ONE refusal names everything the operator must fix; no tools
+// image for THIS provider → the actionable per-provider flag; finally the
+// effective dev image — the repo's image_ref override when set, else the
+// global default — refused naming BOTH knobs when neither is set, since
+// either one fixes it.
 //
 // Error mapping — the documented choice (issue #205): every refusal is a
 // *BadRequestError → 400 via httpapi's writeInstanceError. Of the two
@@ -45,21 +53,33 @@ const (
 // 409 case would mean extending httpapi, which this wiring task's scope
 // pins closed. Precedent: the unknown-model/provider 400s, equally "what
 // you asked for, this deployment cannot spawn".
-func (s *Service) refuseContainerSpawn(providerID string) error {
+func (s *Service) refuseContainerSpawn(providerID string, repo store.Repo) (image string, err error) {
 	if s.containerPreflight == nil {
-		return badRequestf("container runner not configured on this server — set --container-image and --container-tools-image")
+		return "", badRequestf("container runner not configured on this server — set --container-tools-image (and a dev image via the repo's Runner settings or --container-image)")
 	}
 	r, done := s.containerPreflight()
 	if !done {
-		return badRequestf("container preflight has not finished — retry in a moment")
+		return "", badRequestf("container preflight has not finished — retry in a moment")
 	}
 	if !r.OK() {
-		return badRequestf("%s", r.Error())
+		return "", badRequestf("%s", r.Error())
 	}
 	if s.containerToolsImages[providerID] == "" {
-		return badRequestf("no agent-tools image configured for provider %s — set --container-tools-image %s=<ref>", providerID, providerID)
+		return "", badRequestf("no agent-tools image configured for provider %s — set --container-tools-image %s=<ref>", providerID, providerID)
 	}
-	return nil
+	// Effective dev image (issue #207): the repo's own image_ref override
+	// (digest-pinned by reposvc on save) wins, else the server's global
+	// default. Neither set is the refusal preflight no longer owns — name both
+	// knobs, since setting either one clears it.
+	if repo.ImageRef != nil && *repo.ImageRef != "" {
+		image = *repo.ImageRef
+	} else {
+		image = s.containerImage
+	}
+	if image == "" {
+		return "", badRequestf("no dev image for this repo — set a dev image in the repo's Runner settings or configure a server default with --container-image")
+	}
+	return image, nil
 }
 
 // effectiveContainerLimits resolves a container run's resource caps: the

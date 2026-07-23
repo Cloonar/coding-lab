@@ -97,23 +97,37 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	bareDir := s.bareDir(repo.ID)
 	runID := ids.NewID("run")
 
-	// Container-mode gate + limit resolution (issue #205), FIRST — before the
-	// guard, the per-run tree, and above all before AddWorktree: for an AFK
-	// spec the worktree IS the claim, so a container refusal (host not ready,
-	// missing tools image) landing any later would park the issue behind a
-	// host problem. Both checks are pure reads; a refusal here rolls back
-	// nothing because nothing exists yet. The resolved limits carry to the
-	// spawn branch below.
+	// Container-mode gate + image/limit resolution (issues #205, #207), FIRST
+	// — before the guard, the per-run tree, and above all before AddWorktree:
+	// for an AFK spec the worktree IS the claim, so a container refusal (host
+	// not ready, missing tools image, no dev image for the repo, an
+	// unresolvable dev-image ref) landing any later would park the issue behind
+	// a host/config problem. The gate and limit reads are pure; the one side
+	// effect is EnsureImage's pull-if-missing (#207), placed here on purpose so
+	// a failed pull refuses PRE-claim rather than stranding one. A refusal here
+	// rolls back nothing because nothing exists yet. The resolved image and
+	// limits carry to the spawn branch below.
 	container := repo.Runner == store.RunnerContainer
-	var ctrMemory string
+	var ctrImage, ctrMemory string
 	var ctrPids, ctrNofile int
 	if container {
-		if err := s.refuseContainerSpawn(spec.Provider.ID()); err != nil {
+		var err error
+		if ctrImage, err = s.refuseContainerSpawn(spec.Provider.ID(), repo); err != nil {
 			return store.Run{}, err
 		}
-		var err error
 		if ctrMemory, ctrPids, ctrNofile, err = s.effectiveContainerLimits(ctx, repo); err != nil {
 			return store.Run{}, &StartFailedError{cause: err}
+		}
+		// Pull-if-missing the effective dev image before the claim (issue #207):
+		// EnsureImage probes `image exists` and pulls once on a miss, so a bad
+		// ref or an unreachable registry is refused HERE — never after
+		// AddWorktree, where a failed pull would park the AFK claim. The failure
+		// is a *BadRequestError (the #205 posture: operator/config-fixable
+		// refusals are 400s carrying the actionable text verbatim, never 500s).
+		// A cold pull can block the request for the length of the download — the
+		// documented trade of pinning the pull to spawn time (ADR-0053).
+		if err = podmanx.EnsureImage(ctx, s.podmanRun, s.podmanBin, ctrImage); err != nil {
+			return store.Run{}, badRequestf("%s", err)
 		}
 	}
 
@@ -371,7 +385,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		paneArgv := podmanx.RunArgv(podmanx.RunSpec{
 			Bin:         s.podmanBin,
 			Name:        podmanx.ContainerName(name),
-			Image:       s.containerImage,
+			Image:       ctrImage,
 			ToolsImage:  s.containerToolsImages[spec.Provider.ID()],
 			WorktreeDir: wtPath,
 			BareDir:     bareDir,

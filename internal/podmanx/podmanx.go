@@ -274,6 +274,28 @@ func RemoveContainer(ctx context.Context, run CmdRunner, bin, name string) error
 	return nil
 }
 
+// EnsureImage guarantees the dev image is present locally before a container
+// spawn commits to it: `podman image exists <ref>` is the cheap local probe,
+// and a miss triggers exactly one `podman pull <ref>` — the same
+// exists-then-pull shape as preflight's tools-image check, but run per-spawn
+// because the effective dev image is per-repo (issue #207) and only the spawn
+// knows which repo, so it cannot be a startup-once check like the tools refs.
+// A local hit returns nil with no pull; a successful pull returns nil. A
+// failed pull returns an error naming BOTH the ref and podman's own
+// explanation, plus the operator action — the wiring layer surfaces this text
+// verbatim in the spawn refusal, so it must say what to fix (the ref, or this
+// host's access to its registry), never a bare "pull failed". Called before
+// the claim so a cold pull that fails parks no issue behind it.
+func EnsureImage(ctx context.Context, run CmdRunner, bin, ref string) error {
+	if _, err := run(ctx, bin, "image", "exists", ref); err == nil {
+		return nil
+	}
+	if _, err := run(ctx, bin, "pull", ref); err != nil {
+		return fmt.Errorf("pulling dev image %s: %w (check the ref and registry access from this host)", ref, err)
+	}
+	return nil
+}
+
 // ListRunContainers returns the names of every lab run container podman
 // knows: `podman ps --all --filter name=labrun- --format {{.Names}}`. It
 // feeds the startup orphan sweep (issue #205) — a hard server-host crash, or

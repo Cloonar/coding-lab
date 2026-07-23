@@ -735,6 +735,76 @@ func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
 	})
 }
 
+// TestRepoImageRefColumnRoundTrip pins the repos.image_ref per-repo dev-image
+// slice (issue #207): a repo created with ImageRef set round-trips it; a
+// minimal repo defaults to nil (inherit the global default dev image);
+// UpdateRepoSettings sets it; and a later UpdateRepoSettings clears it back
+// to NULL while an unrelated field (Runner) survives untouched.
+func TestRepoImageRefColumnRoundTrip(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
+
+		// Create with ImageRef set round-trips.
+		full := testRepo("imagereffull", now)
+		full.ImageRef = strPtr("registry.example.com/dev@sha256:aaaa")
+		created, err := s.CreateRepo(ctx, full)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		got, err := s.RepoByID(ctx, full.ID)
+		if err != nil {
+			t.Fatalf("by id: %v", err)
+		}
+		if !reflect.DeepEqual(got, created) {
+			t.Errorf("image_ref column round trip mismatch:\n got %+v\nwant %+v", got, created)
+		}
+
+		// A minimal repo carries the caller-applied default: nil (inherit the
+		// global default dev image).
+		min := testRepo("imagerefmin", now)
+		if _, err := s.CreateRepo(ctx, min); err != nil {
+			t.Fatalf("create minimal: %v", err)
+		}
+		gotMin, err := s.RepoByID(ctx, min.ID)
+		if err != nil {
+			t.Fatalf("by id minimal: %v", err)
+		}
+		if gotMin.ImageRef != nil {
+			t.Errorf("minimal repo image_ref = %v, want nil", gotMin.ImageRef)
+		}
+
+		// Patch: set image_ref; Runner (untouched by this patch) stays as
+		// created.
+		updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			ImageRef: Set(strPtr("registry.example.com/dev@sha256:bbbb")),
+		})
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if updated.ImageRef == nil || *updated.ImageRef != "registry.example.com/dev@sha256:bbbb" {
+			t.Errorf("patched image_ref = %v, want set", updated.ImageRef)
+		}
+		if updated.Runner != gotMin.Runner {
+			t.Errorf("unrelated runner column changed by set patch: %v", updated.Runner)
+		}
+
+		// Patch: clear image_ref back to NULL (inherit); other fields survive.
+		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			ImageRef: Set[*string](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear image_ref: %v", err)
+		}
+		if updated.ImageRef != nil {
+			t.Errorf("cleared image_ref = %v, want nil", updated.ImageRef)
+		}
+		if updated.Runner != gotMin.Runner {
+			t.Errorf("unrelated runner column changed by clear patch: %v", updated.Runner)
+		}
+	})
+}
+
 func TestUpdateRepoCloneStatusAndTouch(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
