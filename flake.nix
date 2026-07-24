@@ -175,6 +175,19 @@
                 };
               };
 
+              # Third text-level dummy (realized): container mode explicitly
+              # OFF. Since #220 flipped container.enable's default to true,
+              # the opt-OUT is the non-default path — this dummy's unit text
+              # carries the zero-diff guard below (a host-only deployment
+              # must get the byte-identical pre-container unit).
+              containerOffDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  container.enable = false;
+                };
+              };
+
               # Eval-only dummies: the asserts below read package *names* off
               # config.systemd.services.lab.path. lib.getName / pname access
               # does not force outPaths, so the unfree claude-code default
@@ -193,7 +206,9 @@
               # never built, so like the other eval-only dummies they skip the
               # fileSystems/bootloader extras and the asserts below filter the
               # resulting unrelated assertion noise.
-              containerEmptyDummy = mkDummy { services.lab.container.enable = true; }; # must fail the toolsImages assertion
+              # enable is NOT set here (#220): with the default now true, an
+              # explicitly-emptied toolsImages alone must trip the assertion.
+              containerEmptyDummy = mkDummy { services.lab.container.toolsImages = { }; };
               containerSubIdDummy = mkDummy {
                 services.lab.container = {
                   enable = true;
@@ -289,8 +304,27 @@
               "nixos-module check: a custom container.subIdRange must land verbatim on the service user";
             assert lib.assertMsg (subUids containerNoSubIdDummy == [ ] && subGids containerNoSubIdDummy == [ ])
               "nixos-module check: container.subIdRange = null must provision no subuid/subgid ranges (operator-managed /etc/subuid+/etc/subgid)";
-            assert lib.assertMsg (subUids defaultsDummy == [ ] && subGids defaultsDummy == [ ])
-              "nixos-module check: with container mode off no subuid/subgid ranges may be provisioned";
+            # Default-on semantics (#220): a config that never mentions
+            # container.* provisions the default range; the explicit opt-out
+            # provisions nothing.
+            assert lib.assertMsg
+              (subUids defaultsDummy == [ { startUid = 100000; count = 65536; } ] && subGids defaultsDummy == [ { startGid = 100000; count = 65536; } ])
+              "nixos-module check: container mode is on by default (#220), so a config with no container.* settings must still provision the default subuid/subgid range";
+            assert lib.assertMsg (subUids containerOffDummy == [ ] && subGids containerOffDummy == [ ])
+              "nixos-module check: with container.enable = false no subuid/subgid ranges may be provisioned";
+            # Default toolsImages (#220): the CLI-version tags from
+            # versions.env for both shipped providers (prefix-grepped so a
+            # version bump never touches this check).
+            assert lib.assertMsg
+              (
+                lib.attrNames defaultsDummy.config.services.lab.container.toolsImages == [
+                  "claude-code"
+                  "codex"
+                ]
+                && lib.hasPrefix "git.cloonar.com/cloonar/agent-tools:claude-" defaultsDummy.config.services.lab.container.toolsImages."claude-code"
+                && lib.hasPrefix "git.cloonar.com/cloonar/agent-tools:codex-" defaultsDummy.config.services.lab.container.toolsImages.codex
+              )
+              "nixos-module check: the default toolsImages must carry claude-code + codex refs into git.cloonar.com/cloonar/agent-tools with claude-/codex- tag prefixes (#220)";
             # defaultImage = null is a valid deployment (per-repo image refs,
             # ADR-0053): the tools flag renders, the image flag does not.
             # Reads only the ExecStart string — never forces the dummy's
@@ -301,17 +335,19 @@
                 && !lib.hasInfix "--container-image" containerNoDefaultImageDummy.config.systemd.services.lab.serviceConfig.ExecStart
               )
               "nixos-module check: with defaultImage = null the unit must pass --container-tools-image but no --container-image";
-            assert lib.assertMsg (containerDummy.config.virtualisation.podman.enable && !defaultsDummy.config.virtualisation.podman.enable)
-              "nixos-module check: container.enable must switch virtualisation.podman on, and container-off must leave it off";
+            assert lib.assertMsg (defaultsDummy.config.virtualisation.podman.enable && !containerOffDummy.config.virtualisation.podman.enable)
+              "nixos-module check: virtualisation.podman must be on by default (#220) and off under container.enable = false";
             pkgs.runCommand "lab-nixos-module-eval"
               {
                 unit = dummy.config.systemd.units."lab.service".text;
                 agentUrlUnit = agentUrlDummy.config.systemd.units."lab.service".text;
                 containerUnit = containerDummy.config.systemd.units."lab.service".text;
+                containerOffUnit = containerOffDummy.config.systemd.units."lab.service".text;
                 passAsFile = [
                   "unit"
                   "agentUrlUnit"
                   "containerUnit"
+                  "containerOffUnit"
                 ];
                 # PATH-serialization greps below match against these store paths:
                 # the alias (hello), a baseline tool, ripgrep, and nix — plus
@@ -379,26 +415,49 @@
                 grep -q "$ripgrep/bin" "$unitPath"
                 grep -q "$nixPkg/bin" "$unitPath"
 
-                # Zero-diff guard (issue #218): with container.enable = false
-                # (the default, as in this dummy) NOTHING container-shaped may
-                # reach the unit — no flags, no cgroup delegation, no runtime
-                # dir (the bare ^RuntimeDirectory also catches Preserve/Mode),
-                # no podman env. Container config leaking into a disabled unit
-                # fails here forever after.
-                if grep '^ExecStart=' "$unitPath" | grep -qF -- '--container'; then
+                # Default-on container provisioning (#220): a unit with NO
+                # container.* settings must come up container-ready — the
+                # versions.env-pinned default tools refs (prefix-grepped so
+                # a version bump never touches this check), no
+                # --container-image (defaultImage stays null), cgroup
+                # delegation, the preserved runtime dir, and podman + passt
+                # on the unit PATH.
+                grep '^ExecStart=' "$unitPath" | grep -qF -- '--container-tools-image'
+                grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:claude-'
+                grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:codex-'
+                if grep '^ExecStart=' "$unitPath" | grep -qF -- '--container-image'; then
+                  echo "default unit must not pass --container-image (defaultImage defaults to null)" >&2
+                  exit 1
+                fi
+                grep -q '^Delegate=true$' "$unitPath"
+                grep -q '^RuntimeDirectory=lab$' "$unitPath"
+                grep -q "$podman/bin" "$unitPath"
+                grep -q "$passt/bin" "$unitPath"
+
+                # Zero-diff guard (issue #218; opt-OUT since #220 flipped the
+                # default): with container.enable = false NOTHING
+                # container-shaped may reach the unit — no flags, no cgroup
+                # delegation, no runtime dir (the bare ^RuntimeDirectory also
+                # catches Preserve/Mode), no podman env. Container config
+                # leaking into a disabled unit fails here forever after.
+                if grep '^ExecStart=' "$containerOffUnitPath" | grep -qF -- '--container'; then
                   echo "container flags leaked into a container-disabled unit" >&2
                   exit 1
                 fi
-                if grep -q '^Delegate=' "$unitPath"; then
+                if grep -q '^Delegate=' "$containerOffUnitPath"; then
                   echo "Delegate= leaked into a container-disabled unit" >&2
                   exit 1
                 fi
-                if grep -q '^RuntimeDirectory' "$unitPath"; then
+                if grep -q '^RuntimeDirectory' "$containerOffUnitPath"; then
                   echo "RuntimeDirectory* leaked into a container-disabled unit" >&2
                   exit 1
                 fi
-                if grep -qF 'XDG_RUNTIME_DIR' "$unitPath"; then
+                if grep -qF 'XDG_RUNTIME_DIR' "$containerOffUnitPath"; then
                   echo "XDG_RUNTIME_DIR leaked into a container-disabled unit" >&2
+                  exit 1
+                fi
+                if grep -q "$podman/bin" "$containerOffUnitPath"; then
+                  echo "podman leaked onto a container-disabled unit PATH" >&2
                   exit 1
                 fi
 

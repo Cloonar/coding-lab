@@ -8,11 +8,22 @@
 # below rebuilds the full NixOS config with the new pin and fails the deploy
 # if it breaks, before anything is pushed.
 #
+# Ordering with agent-tools (issue #220 / ADR-0054): the NixOS module's
+# toolsImages default names the CLI-version tags this commit's versions.env
+# pins, and a merge that changes the agent-tools inputs triggers their
+# publish job on the SAME push this deploy runs on. The "Wait for the
+# agent-tools refs" step below refuses to bump the pin until every default
+# ref resolves in the registry — anonymously, which is also the deployment
+# contract (hosts pull without credentials) — so the pin only ever advances
+# to a rev whose images are already published and pullable. For merges that
+# don't touch agent-tools the tags long exist and the step passes instantly.
+#
 # Like ci.yml, this runs on the stock `ubuntu-latest` runner and installs nix
 # in-job (Determinate installer, daemonless `--init none`), because
-# test-configuration needs nix. Whatever that script needs beyond nix (e.g.
-# KVM for VM tests) must be available on the runner. Same egress
-# prerequisites as ci.yml — see docs/ops.md.
+# test-configuration needs nix (and the wait step runs skopeo out of nixpkgs).
+# Whatever that script needs beyond nix (e.g. KVM for VM tests) must be
+# available on the runner. Same egress prerequisites as ci.yml — see
+# docs/ops.md.
 name: deploy
 
 on:
@@ -23,14 +34,57 @@ jobs:
   bump-nixos-pin:
     runs-on: ubuntu-latest
     steps:
+      # Checked out for containers/agent-tools/versions.env — the committed
+      # pin the wait step derives the expected registry tags from.
+      - uses: actions/checkout@v4
+
+      - name: Install nix
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+            | sh -s -- install linux --no-confirm --init none
+
+      - name: Wait for the agent-tools refs this rev pins
+        run: |
+          # Refuse to advance the host pin until the default toolsImages refs
+          # resolve — see the header comment. skopeo inspect runs with no
+          # credentials on purpose: it proves the exact anonymous pull every
+          # host's preflight performs. The deadline covers a same-push image
+          # build (~15 min); on timeout the deploy fails and the pin stays,
+          # which is the honest outcome — a bumped pin would ship a server
+          # whose default refs don't resolve.
+          set -euo pipefail
+          set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
+
+          . containers/agent-tools/versions.env
+
+          REGISTRY="$(printf '%s' '${{ github.server_url }}' | sed -E 's#^https?://##')"
+          OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+
+          skopeo="$(nix build --no-link --print-out-paths nixpkgs#skopeo)/bin/skopeo"
+          deadline=$(( $(date +%s) + 1800 ))
+
+          for entry in "claude:${CLAUDE_CODE_VERSION}" "codex:${CODEX_VERSION}"; do
+            p="${entry%%:*}"
+            ver="${entry#*:}"
+            ref="docker://${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
+            until "$skopeo" inspect --no-tags "$ref" >/dev/null 2>&1; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::${ref} still does not resolve — the agent-tools publish for this versions.env has not landed (or the package is not publicly readable). Not bumping the pin."
+                exit 1
+              fi
+              echo "waiting for ${ref} …"
+              sleep 30
+            done
+            echo "resolved ${ref}"
+          done
+
       - name: Bump the pin in Cloonar/nixos
         env:
           NIXOS_TOKEN: ${{ secrets.NIXOS_PIN_TOKEN }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
-            | sh -s -- install linux --no-confirm --init none
           set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
           git clone "https://oauth2:${NIXOS_TOKEN}@git.cloonar.com/Cloonar/nixos.git" nixos
           cd nixos

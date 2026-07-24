@@ -14,9 +14,9 @@ type Gate struct {
 	v atomic.Pointer[Result]
 }
 
-// Set publishes a finished preflight result. Last write wins — today there
-// is exactly one Set per boot; a future re-preflight would simply Set again
-// and spawns atomically see the newer verdict.
+// Set publishes a finished preflight result. Last write wins — cmd/lab's
+// retry loop (issue #220) Sets once per preflight round while a tools-image
+// pull failure persists, and spawns atomically see the newer verdict.
 func (g *Gate) Set(r Result) { g.v.Store(&r) }
 
 // Result returns the published result and whether one has been published

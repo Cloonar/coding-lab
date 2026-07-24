@@ -46,8 +46,10 @@ func greenFixture() *pfFixture {
 			"/sys/fs/cgroup/system.slice/lab.service": true,
 		},
 		runner: &recordingRunner{script: map[string]cmdResult{
-			"podman version --format {{.Client.Version}}":   {out: "5.2.3\n"},
-			"podman image exists reg/agent-tools@sha256:aa": {},
+			"podman version --format {{.Client.Version}}": {out: "5.2.3\n"},
+			// Pull-first (ADR-0054): even a locally-present tools image is
+			// re-pulled so a moved tag reaches the host.
+			"podman pull reg/agent-tools@sha256:aa": {},
 		}},
 	}
 }
@@ -75,11 +77,12 @@ func (f *pfFixture) deps() Deps {
 
 func TestPreflight(t *testing.T) {
 	tests := []struct {
-		name        string
-		mutate      func(*pfFixture)
-		wantChecks  []string // Failure.Check values in order; nil means OK
-		wantVersion string
-		after       func(*testing.T, *pfFixture, Result)
+		name         string
+		mutate       func(*pfFixture)
+		wantChecks   []string // Failure.Check values in order; nil means OK
+		wantVersion  string
+		wantWarnings int
+		after        func(*testing.T, *pfFixture, Result)
 	}{
 		{
 			name:        "all green",
@@ -230,16 +233,17 @@ func TestPreflight(t *testing.T) {
 			},
 		},
 		{
-			name: "tools image absent locally, pull succeeds",
+			// Pull-first (ADR-0054): the pull happens unconditionally — no
+			// `image exists` short-circuit that would pin the host to the
+			// first digest a moving tag ever resolved to.
+			name: "tools image pull runs even with no local probe first",
 			mutate: func(f *pfFixture) {
-				f.runner.script["podman image exists reg/agent-tools@sha256:aa"] = cmdResult{err: errors.New("exit status 1")}
 				f.runner.script["podman pull reg/agent-tools@sha256:aa"] = cmdResult{}
 			},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
 				want := [][]string{
 					{"podman", "version", "--format", "{{.Client.Version}}"},
-					{"podman", "image", "exists", "reg/agent-tools@sha256:aa"},
 					{"podman", "pull", "reg/agent-tools@sha256:aa"},
 				}
 				if len(f.runner.calls) != len(want) {
@@ -247,6 +251,23 @@ func TestPreflight(t *testing.T) {
 				}
 				for i := range want {
 					assertArgv(t, f.runner.calls[i], want[i])
+				}
+			},
+		},
+		{
+			// Registry down but the image is cached: degrade to the cache
+			// with a warning instead of refusing spawns — stale tools beat
+			// none.
+			name: "tools pull fails with cached image: OK plus warning",
+			mutate: func(f *pfFixture) {
+				f.runner.script["podman pull reg/agent-tools@sha256:aa"] = cmdResult{err: errors.New("connection refused")}
+				f.runner.script["podman image exists reg/agent-tools@sha256:aa"] = cmdResult{}
+			},
+			wantVersion:  "5.2.3",
+			wantWarnings: 1,
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				if w := r.Warnings[0]; !strings.Contains(w, "reg/agent-tools@sha256:aa") || !strings.Contains(w, "cached") {
+					t.Errorf("warning %q does not name the ref and the cached fallback", w)
 				}
 			},
 		},
@@ -303,8 +324,16 @@ func TestPreflight(t *testing.T) {
 			if r.OK() != (len(tt.wantChecks) == 0) {
 				t.Errorf("OK() = %v with failures %+v", r.OK(), r.Failures)
 			}
+			// HasPullFailure keys cmd/lab's retry loop (issue #220): true
+			// exactly when a tools-image pull failure is among the failures.
+			if got, want := r.HasPullFailure(), slices.Contains(gotChecks, CheckToolsPull); got != want {
+				t.Errorf("HasPullFailure() = %v, want %v (failures: %+v)", got, want, r.Failures)
+			}
 			if r.Version != tt.wantVersion {
 				t.Errorf("Version = %q, want %q", r.Version, tt.wantVersion)
+			}
+			if len(r.Warnings) != tt.wantWarnings {
+				t.Errorf("Warnings = %q, want %d of them", r.Warnings, tt.wantWarnings)
 			}
 			// Error() must mention every failure — a spawn refusal that
 			// names only the first would hide the rest.

@@ -43,16 +43,26 @@
 #   `environmentFile` and leave `db` at null — lab's precedence is
 #   flag > env > default, so a --db flag would shadow LAB_DB.
 #
-# Container runner (ADR-0052/ADR-0053; docs/ops.md "Container runner"):
+# Container runner (ADR-0052/ADR-0053/ADR-0054; docs/ops.md "Container
+# runner"):
 #
 #   services.lab.container.enable provisions everything the startup
 #   preflight verifies for `repos.runner = container`: rootless podman +
 #   passt on the unit PATH, cgroup delegation (Delegate=yes), a preserved
 #   /run/lab runtime dir, subuid/subgid ranges for the service user, and
 #   the --container-image / --container-tools-image flags. Every host
-#   mutation gates on that explicit enable switch — never on option
-#   non-emptiness — so a half-filled container block changes nothing on a
-#   host that has not opted in.
+#   mutation gates on the enable switch — never on option non-emptiness —
+#   so a half-filled container block changes nothing on a host that has
+#   opted out.
+#
+#   enable defaults to TRUE (ADR-0054): enabling lab means container-ready
+#   provisioning, and toolsImages defaults to the CLI-version tags from
+#   containers/agent-tools/versions.env — the committed pin the publish
+#   job (.forgejo/workflows/agent-tools.yml, path-gated) builds from, so
+#   the default refs only move when the agent-tools inputs change and
+#   always name an already-published image. A host that must not run
+#   containers sets container.enable = false and gets the byte-identical
+#   pre-container unit (zero-diff checks pin this).
 self:
 {
   config,
@@ -180,6 +190,25 @@ let
     cfg.seedPasswordHash
     cfg.seedPasswordHashFile
   ];
+
+  # Default agent-tools refs, derived from the committed pin (ADR-0054):
+  # containers/agent-tools/versions.env is the single source of truth the
+  # build scripts and the publish job also read, and the publish leg pushes
+  # exactly these `<prefix>-<cli-version>` tags — only when the agent-tools
+  # inputs change, which is also the only time these defaults change. The
+  # deploy pipeline bumps the consuming host pin only after the refs
+  # resolve in the registry, and preflight re-pulls the tags each boot, so
+  # a same-tag re-push (a labctl refresh via workflow_dispatch) reaches
+  # hosts on their next restart.
+  agentToolsVersion =
+    key:
+    let
+      lines = lib.splitString "\n" (builtins.readFile (self + "/containers/agent-tools/versions.env"));
+    in
+    lib.removePrefix "${key}=" (lib.head (lib.filter (l: lib.hasPrefix "${key}=" l) lines));
+  agentToolsDefault =
+    tagPrefix: versionKey:
+    "${cfg.container.toolsImageRepo}:${tagPrefix}-${agentToolsVersion versionKey}";
 in
 {
   options.services.lab = {
@@ -445,31 +474,72 @@ in
       };
     };
 
-    # Container runner (ADR-0052/ADR-0053): host provisioning + image flags
-    # for rootless-podman container panes. Everything below only takes effect
-    # under container.enable — see the header comment.
+    # Container runner (ADR-0052/ADR-0053/ADR-0054): host provisioning +
+    # image flags for rootless-podman container panes. Everything below only
+    # takes effect under container.enable — see the header comment.
     container = {
-      enable = lib.mkEnableOption "container-runner host provisioning: rootless podman + passt on the unit PATH, cgroup delegation, a preserved /run/lab runtime dir, subuid/subgid ranges, and the container image flags";
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Container-runner host provisioning: rootless podman + passt on the
+          unit PATH, cgroup delegation, a preserved /run/lab runtime dir,
+          subuid/subgid ranges, and the container image flags. On by default
+          (ADR-0054): enabling lab means the host can serve
+          `repos.runner = container` out of the box, with
+          {option}`toolsImages` defaulting to the published agent-tools
+          images pinned by this source's `versions.env`. Set to `false` for
+          a host-only deployment — the unit is then byte-identical to the
+          pre-container output (no podman, no delegation, no subid ranges,
+          no flags).
+        '';
+      };
+
+      toolsImageRepo = lib.mkOption {
+        type = lib.types.nonEmptyStr;
+        default = "git.cloonar.com/cloonar/agent-tools";
+        description = ''
+          OCI repository (registry/namespace/name, no tag) the default
+          {option}`toolsImages` refs point into — where
+          `.forgejo/workflows/agent-tools.yml` publishes. The lab host pulls
+          from it anonymously (the module provisions no registry
+          credentials), which the publish job verifies after every push.
+          Only consulted by the {option}`toolsImages` default; an explicit
+          `toolsImages` ignores it.
+        '';
+      };
 
       toolsImages = lib.mkOption {
         type = lib.types.attrsOf lib.types.nonEmptyStr;
-        default = { };
+        default = {
+          "claude-code" = agentToolsDefault "claude" "CLAUDE_CODE_VERSION";
+          codex = agentToolsDefault "codex" "CODEX_VERSION";
+        };
+        defaultText = lib.literalExpression ''{ "claude-code" = "''${toolsImageRepo}:claude-''${CLAUDE_CODE_VERSION}"; codex = "''${toolsImageRepo}:codex-''${CODEX_VERSION}"; } — the CLI versions from containers/agent-tools/versions.env'';
         example = lib.literalExpression ''{ "claude-code" = "git.cloonar.com/cloonar/agent-tools:claude-code@sha256:…"; }'';
         description = ''
           Agent-tools OCI image refs (--container-tools-image), keyed by lab
           provider ID — the same strings the provider registry, the DB
           `provider` column, and the API use. Each value names the read-only
           agent-tools image (provider CLI + labctl) mounted at `/opt/lab` in
-          that provider's container panes (ADR-0051). `@sha256`-pinned refs —
-          what the release job publishes — are recommended but deliberately
-          not enforced: a local tag is fine during bring-up.
+          that provider's container panes (ADR-0051).
+
+          The default follows the committed pin (ADR-0054): the CLI-version
+          tags from `containers/agent-tools/versions.env`, which the publish
+          job builds and pushes exactly when the agent-tools inputs change —
+          so the default refs only move together with the images they name,
+          and preflight re-pulls the tags each boot so a same-tag re-push (a
+          labctl refresh) reaches hosts on their next restart. `@sha256`-
+          pinned refs are the strict contract and remain recommended for
+          hand-set values, but are deliberately not enforced: a local tag is
+          fine during bring-up.
 
           Keys are deliberately NOT validated against provider IDs at eval
           time: the server's boot error names the registered IDs, and a
           nix-side list would drift as providers land (e.g. #126). Preflight
           remains the runtime authority on host readiness — it resolves every
-          configured ref at startup and refuses container spawns until all of
-          them do.
+          configured ref at startup (retrying pulls that race the publish
+          job) and refuses container spawns until all of them do.
         '';
       };
 
@@ -515,8 +585,12 @@ in
           whatever {option}`user` names — operator-brought users included,
           not just the module-created `lab` default. Override
           `start`/`count` when the default collides with ranges already
-          allocated on the host; set the whole option to `null` to opt out
-          entirely and manage `/etc/subuid` / `/etc/subgid` yourself.
+          allocated on the host — with {option}`enable` on by default this
+          deserves a look on any host whose `/etc/subuid` already has
+          entries (100000 is also the range most tools hand the first user;
+          neither NixOS nor lab detects the overlap). Set the whole option
+          to `null` to opt out entirely and manage `/etc/subuid` /
+          `/etc/subgid` yourself.
         '';
       };
     };
@@ -561,7 +635,7 @@ in
       # digest-pin enforcement — see the toolsImages description.
       {
         assertion = cfg.container.enable -> cfg.container.toolsImages != { };
-        message = "services.lab.container.enable is set but services.lab.container.toolsImages is empty — without agent-tools refs, preflight would refuse every container spawn anyway. This assertion catches the typo'd deploy at `nixos-rebuild` eval instead of after the service has already restarted.";
+        message = "services.lab.container.enable is on (the default) but services.lab.container.toolsImages is empty — without agent-tools refs, preflight would refuse every container spawn anyway. Restore the versions.env-pinned default (or set explicit refs), or opt out of the container runner entirely with services.lab.container.enable = false.";
       }
     ];
 
