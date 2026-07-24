@@ -47,16 +47,20 @@ type Fixture struct {
 // only its BRE sub-check when grep is absent; everything else always runs.
 //
 // The live-process seam methods — AuthStatus, LoginStart/LoginSubmitCode,
-// Logout, Commands, Reply, AnswerDialog, Interrupt, and the transcript GRAMMAR
-// of LocateTranscript/ReadChat — are deliberately NOT exercised: each is an
+// Logout, Commands, Reply, AnswerDialog, Interrupt, RefreshCredentials (the
+// blind CLI poke, issue #222), and the transcript GRAMMAR of
+// LocateTranscript/ReadChat — are deliberately NOT exercised: each is an
 // adapter-owned fragile CLI coupling that must be live-verified per adapter
 // (the ADR-0008 bar, Tier-2), never hermetically. The ARGUMENT contracts core
 // relies on blind ARE pinned here, needing no CLI: ReadChat's empty/vanished
 // transcriptPath (issue #92, read-chat), LocateTranscript's empty-HOME miss
 // (issue #202, locate-homeless), InjectCredentials' empty-HOME error and
-// missing-master tolerance (issue #202, inject-credentials), and that
-// SeedWorkspace's per-run Home grants never touch the master store (issue #202,
-// seed-home-containment). Tier-1 otherwise covers exactly the declarations
+// missing-master tolerance (issue #202, inject-credentials), the
+// credential-authority seam's ""-means-master / missing-master-empty-sig
+// conventions and AdoptCredentials' error guards (issue #222,
+// credential-authority), and that SeedWorkspace's per-run Home grants never
+// touch the master store (issue #202, seed-home-containment). Tier-1 otherwise
+// covers exactly the declarations
 // lab's core consumes blind: pattern dialect (issue #75 / ADR-0033), the
 // lab-owned context file (issue #79 / ADR-0035), defensive catalog/meta clones,
 // spawn argv shape (issue #19 / ADR-0021), the auth-flow vocabulary and
@@ -82,6 +86,7 @@ func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Run("read-chat", func(t *testing.T) { report(t, checkReadChat(t, p)) })
 	t.Run("locate-homeless", func(t *testing.T) { report(t, checkLocateHomeless(p)) })
 	t.Run("inject-credentials", func(t *testing.T) { report(t, checkInjectCredentials(t, p)) })
+	t.Run("credential-authority", func(t *testing.T) { report(t, checkCredentialAuthority(t, p)) })
 	t.Run("seeding-exclude-coverage", func(t *testing.T) { report(t, checkSeedingExcludeCoverage(t, p)) })
 	t.Run("seeding-incogni", func(t *testing.T) { report(t, checkSeedingIncogni(t, p)) })
 	t.Run("seed-home-containment", func(t *testing.T) { report(t, checkSeedHomeContainment(t, p)) })
@@ -542,6 +547,60 @@ func checkInjectCredentials(t *testing.T, p provider.AgentProvider) []error {
 	}
 	if n := countFiles(master); n != 0 {
 		errs = append(errs, fmt.Errorf("inject-credentials: InjectCredentials wrote %d file(s) into the master store tree %q — the injector copies FROM the master store, never into it (issue #202)", n, master))
+	}
+	return errs
+}
+
+// checkCredentialAuthority pins the hermetic universals of the credential-
+// authority seam (issue #222) — the single-refresher design's argument
+// contracts core relies on blind: the ""-means-MASTER convention, the
+// missing-master-is-empty-sig acceptance criterion, AdoptCredentials' two error
+// guards, and the emptiness agreement between InjectCredentials and
+// CredentialsSig. Every adapter's ENV-derived master resolution is pointed at
+// fresh empty temp dirs (CLAUDE_CONFIG_DIR / CODEX_HOME / HOME), so the master
+// store is genuinely absent.
+//
+// RefreshCredentials is deliberately NOT exercised: it shells out to the live
+// provider CLI, so adapters cover it in their own unit tests with a stubbed
+// binary. Richer round-trips (a seeded master → non-empty sig → adopt an
+// instance copy back) are pinned adapter-side too — hermetic conformance cannot
+// seed an adapter-private master store.
+func checkCredentialAuthority(t *testing.T, p provider.AgentProvider) []error {
+	var errs []error
+	master := t.TempDir()
+	t.Setenv("HOME", filepath.Join(master, "home"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(master, "claude-config"))
+	t.Setenv("CODEX_HOME", filepath.Join(master, "codex-home"))
+
+	// ""-means-master AND missing-master-is-empty-sig (issue #222 acceptance):
+	// a host whose master store holds no credentials reports an empty sig and a
+	// zero mtime.
+	if sig, mtime := p.CredentialsSig(""); sig != "" || !mtime.IsZero() {
+		errs = append(errs, fmt.Errorf("credential-authority: CredentialsSig(\"\") on a host with no master credentials returned (sig %q, mtime %v); want (\"\", zero time) — \"\" means the master store, and a missing master store is the empty sig (provider.AgentProvider.CredentialsSig contract; issue #222)", sig, mtime))
+	}
+
+	// AdoptCredentials("") is a programmer error.
+	if err := p.AdoptCredentials(""); err == nil {
+		errs = append(errs, fmt.Errorf("credential-authority: AdoptCredentials(\"\") returned nil error — an empty instance HOME is a programmer error and must fail (provider.AgentProvider.AdoptCredentials contract; issue #222)"))
+	}
+
+	// AdoptCredentials on a home with no credential files is an error: adoption
+	// is only ever requested after a sig proved the files existed, so if they
+	// have vanished the caller must learn of it — there is nothing to adopt,
+	// never a silent no-op.
+	if err := p.AdoptCredentials(t.TempDir()); err == nil {
+		errs = append(errs, fmt.Errorf("credential-authority: AdoptCredentials(freshEmptyDir) returned nil error — with no instance credential files there is nothing to adopt, and the caller must learn of it rather than silently adopt nothing (provider.AgentProvider.AdoptCredentials contract; issue #222)"))
+	}
+
+	// InjectCredentials with a missing master store writes nothing (its own
+	// contract), so the injected home has no credential files and its sig must
+	// agree with CredentialsSig's emptiness convention.
+	home := t.TempDir()
+	if _, err := p.InjectCredentials(home); err != nil {
+		errs = append(errs, fmt.Errorf("credential-authority: InjectCredentials(tempHome) with no master credential present returned %v — a missing master credential is NOT an error (provider.AgentProvider.InjectCredentials contract; issue #202)", err))
+	}
+	if sig, mtime := p.CredentialsSig(home); sig != "" || !mtime.IsZero() {
+		errs = append(errs, fmt.Errorf("credential-authority: after InjectCredentials(home) with a missing master store (which writes nothing), CredentialsSig(home) returned (sig %q, mtime %v); want (\"\", zero time) — InjectCredentials and CredentialsSig must agree about emptiness (issue #222)", sig, mtime))
 	}
 	return errs
 }

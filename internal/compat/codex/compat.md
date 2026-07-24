@@ -637,6 +637,95 @@ No hermetic pin — operational notes. When this breaks: `codex doctor`
 first, then re-check TERM/OSC behavior in a scratch tmux before blaming
 the recipes.
 
+## 11. Non-interactive refresh trigger (candidate) — NOT live-verified
+
+Issue #222 (the credential-authority seam: lab core becomes the SINGLE
+refresher per provider grant, so a per-instance CLI self-refresh can never
+fork the shared OAuth token family) needs a codex analogue to claude's
+probe-confirmed `claude -p` refresh trigger — a minimal non-interactive
+invocation that makes one real API call so the CLI itself decides whether
+its token is near expiry and rotates it. `Provider.RefreshCredentials`
+(`internal/provider/codex/credauthority.go`) runs:
+
+```
+{codex} exec --sandbox read-only --skip-git-repo-check ok
+```
+
+with `CODEX_HOME` in the child's environment forced (filtered-then-
+appended, never a bare inherited/duplicated value) to the MASTER codex home
+directory — `credentialsPath()`'s own directory, the same master resolution
+Logout's rm-escalation and InjectCredentials' copy source use — and the
+working directory set to that same dir when it exists (otherwise the
+command still runs and its own failure surfaces; callers gate the call on
+`CredentialsSig("") != ""`).
+
+Flag names confirmed against the installed codex-cli **0.144.4**'s `codex
+exec --help` (one version-bump ahead of this record's 0.133.0/0.144.1
+pins): `--sandbox read-only` locks the probe so it can never write through
+an agent tool call even though the one-word prompt is not expected to
+trigger one; `--skip-git-repo-check` is required because the master codex
+home is not necessarily inside a git repository; the bare prompt `ok` rides
+as the trailing positional exactly like a real spawn's `InitialPrompt`
+(§1). No `-c` config override is used — these three purpose-built flags
+cover the whole requirement more narrowly than any `-c` combination would.
+cli extraction (`--help` text only — the recipe's actual EFFECT on a real
+grant is exactly what remains unconfirmed; see below).
+
+**This recipe is a CANDIDATE — it is NOT live-verified.** The
+implementation host has no codex login (this is a lab dev/build
+environment, not an operator's authenticated machine), and issue #222
+explicitly forbids live-probing a real grant to check it: forcing a
+near-expiry check against a genuine token risks double-spending its
+refresh token — the exact same hazard that made issue #222 drop its
+grace-window probe design ("blocking only that adapter's
+RefreshCredentials, not the core loop"). Two questions from the issue stay
+open until an operator runs the verification procedure below:
+
+1. **Does this invocation actually refresh a near-expiry token** — i.e.,
+   does `codex exec` perform the same refresh-if-near-expiry check the
+   interactive TUI performs before an ordinary turn, or could `exec` mode
+   skip it entirely?
+2. **Does codex read its auth state fresh from disk before that check**,
+   or could it cache credentials in memory in a way a short-lived,
+   separate `exec` process would never observe? A stray in-memory-only
+   cache would make this probe a structural no-op regardless of expiry.
+
+**Operator-supervised verification procedure** — run on a host that IS
+logged into codex, with NO lab instances running (anything else holding
+the master token family must be idle, so nothing spends the refresh token
+before this check does):
+
+1. Forge near-expiry in the MASTER `auth.json`'s token-expiry field under
+   the master `$CODEX_HOME` (or, if forging is impractical, simply wait
+   for the real token's natural near-expiry window).
+2. Run the recipe above with `CODEX_HOME` set to that same master
+   directory: `codex exec --sandbox read-only --skip-git-repo-check ok`.
+3. Run `codex login status` and confirm it still reports logged in (§2
+   vocabulary).
+4. Confirm the master `auth.json` was actually rewritten — compare its
+   mtime/size (or a full byte diff; lab's no-token-parsing stance means
+   this check must stay at the file level, never inspect token fields)
+   against a copy saved before step 2.
+
+A pass on both (3) and (4) around a genuinely near-expiry token answers
+question 1 affirmatively. Seeing (4) rewrite unconditionally on every
+invocation — with no expiry manipulation at all — would refute the CLI's
+own expiry gating and should be reported back against issue #222 rather
+than assumed away.
+
+Pinned by nothing yet. The codex package's `credauthority_test.go`
+(`TestRefreshCredentials_argvAndEnv`, `TestRefreshCredentials_failureSurfacesStderr`,
+`TestRefreshCredentials_rewriteChangesMasterSig`) exercise the recipe's
+argv/env-override/error-wrapping mechanics hermetically, against a STUBBED
+codex binary only — no fixture or live test in this package or
+`internal/provider/codex` exercises the REAL CLI's refresh decision. When
+this breaks, or once it is first verified: run the procedure above, flip
+this section's status from candidate to live/refuted, and add a
+`TestCompat_Live_*` bullet to "Live re-verification" below mirroring the
+other three (today it can only be added as a manual checklist row — see
+below — because no repeatable automated probe is safe against a real
+grant).
+
 ## Live re-verification
 
 Three opt-in probes run against the installed binary and the real
@@ -662,10 +751,20 @@ stays hermetic — the parent package's gating style, no build tags):
   every non-empty DefaultEffort is a member of its model's own list, and
   the union covers every per-model effort (the same invariants the
   conformance suite pins on the served catalog). Read-only.
+- **Non-interactive refresh trigger (§11, issue #222) — MANUAL, not
+  `LAB_COMPAT_LIVE`-gated.** No automated test exists here: unlike the
+  three probes above (read-only observations), this one exercises a
+  MUTATING operation on a live grant, and a repeatable automated version
+  would risk double-spending the refresh token on every CI-adjacent run.
+  Verify instead via the §11 operator-supervised procedure — on a host
+  logged into codex with no lab instances running, forge (or await)
+  near-expiry in the master `auth.json`, run the recipe, then confirm both
+  `codex login status` and the rewritten `auth.json`.
 
-Use them after a Codex upgrade before trusting any §1–§7 pin; the §6
-hazard checks and the §3/§4 seeding legs still need a by-hand scratch-TUI
-session (they mutate state and cost model calls).
+Use the three automated probes after a Codex upgrade before trusting any
+§1–§7 pin; the §6 hazard checks, the §3/§4 seeding legs, and the §11
+refresh trigger still need a by-hand scratch session (they mutate state
+and/or cost model calls).
 
 When any pin above breaks: update the codex port
 (`internal/provider/codex`), the fixture, the affected tests, and this

@@ -54,6 +54,10 @@ var runIDPattern = regexp.MustCompile(`^run_[0-9a-f]{32}$`)
 // later mount. See the package doc comment for the full lifecycle.
 type Manager struct {
 	root string
+
+	// preWipe is the issue #222 adopt-check seam, installed by SetPreWipeHook.
+	// nil (the zero value) is a no-op.
+	preWipe func(runID string)
 }
 
 // New returns a Manager rooted at root. Unlike vault.NewMaterializer, which
@@ -68,6 +72,31 @@ func New(root string) *Manager {
 
 // Root returns the instances root directory (<state>/instances).
 func (m *Manager) Root() string { return m.root }
+
+// SetPreWipeHook installs hook as the issue #222 adopt-check seam. Wipe (the
+// stop/rollback path) and SweepAll (the orphan GC) — the ONLY two places any
+// per-run home tree is ever destroyed — call it synchronously with the run's
+// id immediately BEFORE that run's tree is removed, so a wipe can never
+// destroy the only valid credential family: the hook gets one last look at
+// the live tree to adopt a self-refreshed family into the master store
+// before it is gone for good.
+//
+// Wipe fires it only when the run's directory actually exists — an
+// idempotent re-wipe of an already-gone tree must not re-fire an adopt-check.
+// SweepAll fires it only for entries that already passed the run-id-pattern,
+// keep-set, and min-age gates — a genuine reap, never a kept, too-young, or
+// non-run-shaped entry.
+//
+// Manager has no lock of its own, so — like the rest of its invariants (e.g.
+// checkRunID's assumption that every runID it sees already satisfies the
+// id-shape contract) — this one is enforced by the caller, not the type: the
+// hook must be installed once at composition time, before any run can reach
+// Wipe or SweepAll, never concurrently with wipes already in flight. A nil
+// hook (the zero value — SetPreWipeHook never called) is a no-op:
+// Wipe/SweepAll behave exactly as they did before issue #222.
+func (m *Manager) SetPreWipeHook(hook func(runID string)) {
+	m.preWipe = hook
+}
 
 // HomePath returns <root>/<runID>/home — pure path derivation, no I/O; the
 // directory need not exist yet.
@@ -146,11 +175,24 @@ func mkdirTight(dir string) error {
 // vault.Materializer.Cleanup). A missing directory is success: idempotent
 // across repeated calls, and a run whose home was never materialized (e.g.
 // a rollback before Materialize ran) wipes cleanly too.
+//
+// If a pre-wipe hook is installed (SetPreWipeHook, issue #222) and the run's
+// directory actually exists, it runs synchronously here, immediately before
+// the RemoveAll — the run's last chance to adopt a self-refreshed credential
+// family into the master store before its home is gone for good. It does
+// NOT fire for an already-missing directory: an idempotent re-wipe must not
+// re-fire the adopt-check.
 func (m *Manager) Wipe(runID string) error {
 	if err := checkRunID(runID); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(filepath.Join(m.root, runID)); err != nil {
+	runDir := filepath.Join(m.root, runID)
+	if m.preWipe != nil {
+		if _, err := os.Stat(runDir); err == nil {
+			m.preWipe(runID)
+		}
+	}
+	if err := os.RemoveAll(runDir); err != nil {
 		return fmt.Errorf("wipe instance home for run %s: %w", runID, err)
 	}
 	return nil
@@ -170,6 +212,13 @@ func (m *Manager) Wipe(runID string) error {
 // rest), are collected with errors.Join, and are returned to the caller to
 // log — the same shape reconcile's sweep/startup callers already handle for
 // CleanupAll.
+//
+// If a pre-wipe hook is installed (SetPreWipeHook, issue #222), it runs
+// synchronously right before each entry's RemoveAll — i.e. only for entries
+// that already passed the run-id-pattern, keep-set, and min-age gates, never
+// for a kept or too-young or non-run-shaped entry — so an orphan reaped here
+// (the restart-after-downtime race a startup sweep exists to close) gets the
+// same adopt-check chance as the synchronous Wipe path.
 func (m *Manager) SweepAll(keep func(runID string) bool) error {
 	entries, err := os.ReadDir(m.root)
 	if err != nil {
@@ -193,6 +242,9 @@ func (m *Manager) SweepAll(keep func(runID string) bool) error {
 		info, ierr := e.Info()
 		if ierr != nil || time.Since(info.ModTime()) < homeDirMinAge {
 			continue // in-flight launch: materialized, but its run isn't in the keep-set yet
+		}
+		if m.preWipe != nil {
+			m.preWipe(name)
 		}
 		if err := os.RemoveAll(filepath.Join(m.root, name)); err != nil {
 			errs = append(errs, err)

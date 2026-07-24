@@ -79,6 +79,12 @@ type Run struct {
 	Outcome        string
 	FailureReason  *string
 	Title          *string // user-set display overlay (issue #111); never identity
+	// CredSig is the provider credential signature lab last injected into this
+	// run's instance HOME (issue #222) — the adopt-check baseline: a live home
+	// whose current sig differs from this self-refreshed and must be adopted
+	// back into the master store before any wipe. "" = never stamped (a
+	// pre-upgrade row, or no provider credentials existed at launch).
+	CredSig string
 }
 
 // DisplayName is the run's user-facing name: the title overlay when non-blank
@@ -97,7 +103,8 @@ func (r Run) DisplayName() string {
 // scanRun reads.
 const runColumns = `id, repo_id, kind, provider, issue_number, branch,
 	worktree_path, session_name, model, effort, deep_link_url, transcript_path,
-	started_at, budget_deadline, ended_at, outcome, failure_reason, title, remote`
+	started_at, budget_deadline, ended_at, outcome, failure_reason, title, remote,
+	cred_sig`
 
 // CreateRun inserts r exactly as given (the caller has derived every field:
 // session name, branch, worktree path, resolved model/effort). Timestamps are
@@ -115,13 +122,20 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	if r.Outcome == "" {
 		r.Outcome = RunOutcomeActive
 	}
+	// cred_sig is nullable; "" (never stamped) must land as NULL, not the
+	// literal empty string, so a fresh row reads the same as a pre-0019 one.
+	var credSig any
+	if r.CredSig != "" {
+		credSig = r.CredSig
+	}
 	_, err := s.db.ExecContext(ctx, s.rebind(
 		`INSERT INTO runs (`+runColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.RepoID, r.Kind, r.Provider, r.IssueNumber, r.Branch,
 		r.WorktreePath, r.SessionName, r.Model, r.Effort, r.DeepLinkURL,
 		r.TranscriptPath, fmtTime(r.StartedAt), fmtNullTime(r.BudgetDeadline),
-		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason, r.Title, r.Remote)
+		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason, r.Title, r.Remote,
+		credSig)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return Run{}, fmt.Errorf("create run %q: %w", r.SessionName, ErrNotFound)
@@ -276,6 +290,26 @@ func (s *Store) UpdateRunTranscriptPath(ctx context.Context, id, path string) er
 	return nil
 }
 
+// UpdateRunCredSig stamps the provider credential signature lab just injected
+// into this run's instance HOME (issue #222) — the rotation loop's baseline
+// for the next adopt-check. Like the transcript path, the value is computed
+// by the caller; the store just writes what it is given.
+func (s *Store) UpdateRunCredSig(ctx context.Context, id, sig string) error {
+	res, err := s.db.ExecContext(ctx, s.rebind(
+		`UPDATE runs SET cred_sig = ? WHERE id = ?`), sig, id)
+	if err != nil {
+		return fmt.Errorf("update run %q cred sig: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update run %q cred sig: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update run %q cred sig: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // DeleteRun removes a run row (its run_tokens cascade). This is the Start
 // rollback path (§3a: a failure after worktree creation deletes the runs
 // row/token), NOT a terminal outcome — a rolled-back start leaves no history.
@@ -315,11 +349,12 @@ func scanRun(scan func(dest ...any) error) (Run, error) {
 		ended      sql.NullString
 		failure    sql.NullString
 		title      sql.NullString
+		credSig    sql.NullString
 	)
 	if err := scan(&r.ID, &r.RepoID, &r.Kind, &r.Provider, &issueN, &r.Branch,
 		&r.WorktreePath, &r.SessionName, &r.Model, &r.Effort, &deepLink,
 		&transcript, &started, &budget, &ended, &r.Outcome, &failure, &title,
-		&r.Remote); err != nil {
+		&r.Remote, &credSig); err != nil {
 		return Run{}, err
 	}
 	r.IssueNumber = nullInt(issueN)
@@ -327,6 +362,9 @@ func scanRun(scan func(dest ...any) error) (Run, error) {
 	r.TranscriptPath = nullStr(transcript)
 	r.FailureReason = nullStr(failure)
 	r.Title = nullStr(title)
+	// cred_sig is nullable; a NULL scans as the zero-value sql.NullString, so
+	// .String is "" without needing the Valid check — "" IS "never stamped".
+	r.CredSig = credSig.String
 
 	var err error
 	if r.StartedAt, err = parseTime(started); err != nil {

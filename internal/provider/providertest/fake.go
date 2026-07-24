@@ -52,6 +52,22 @@ type Fake struct {
 	seedOpts     []provider.SeedOpts // the SeedOpts (incl. Home) of each SeedWorkspace call, in order
 	injectEnv    []string            // env InjectCredentials returns (issue #202)
 	injectHomes  []string            // instance homes InjectCredentials was called with, in order
+
+	// Credential-authority seam (issue #222): the single-refresher rotation
+	// loop's fake. credSigs holds each home's scripted (sig, mtime) — the ""
+	// key is the MASTER store; InjectCredentials copies the master entry to the
+	// injected home (a copy is byte-identical), AdoptCredentials copies a home's
+	// entry back to the master. refreshCalls counts RefreshCredentials pokes;
+	// refreshHook is the optional CLI-rotation simulation (it runs WITHOUT the
+	// lock so it may call SetCredentialsSig); refreshErr scripts a poke failure;
+	// adoptedHomes records AdoptCredentials calls in order; adoptErr scripts an
+	// adopt failure.
+	credSigs     map[string]credSig
+	refreshCalls int
+	refreshHook  func()
+	refreshErr   error
+	adoptedHomes []string
+	adoptErr     error
 	connect      map[string]bool
 	oauthURL     string
 	loginErr     error
@@ -103,6 +119,15 @@ type ReadCall struct {
 	RunID          string
 	RuntimeDir     string
 	TranscriptPath string
+}
+
+// credSig is one home's scripted credential signature: the opaque sig string
+// core compares for equality and the newest credential-file mtime core uses
+// for the adopt tie-break (issue #222). The zero value is the "" sig + zero
+// mtime a home with no credential files reports.
+type credSig struct {
+	sig   string
+	mtime time.Time
 }
 
 var (
@@ -168,6 +193,7 @@ func New() *Fake {
 		fallbackOpen: provider.OpenAffordance{URL: "https://claude.ai/code", Title: "Opens the claude.ai session picker — the exact deep link wasn't captured"},
 		connect:      map[string]bool{},
 		oauthURL:     "https://claude.com/cai/oauth/authorize?code=true",
+		credSigs:     map[string]credSig{},
 	}
 }
 
@@ -386,7 +412,10 @@ func (f *Fake) SeedWorkspace(worktree string, opts provider.SeedOpts) error {
 // missing master credential is not the fake's concern. An empty home is a
 // programmer error and returns an error, matching the seam contract, so a
 // core integration test can assert the injector's exactly-one call site never
-// hands it "".
+// hands it "". It additionally copies the current MASTER sig+mtime into that
+// home's entry (issue #222): a copy is byte-identical to the master, so a
+// core-loop test that scripts a master rotation then injects reads the home's
+// sig as the master's — the seam's inject-then-consume invariant.
 func (f *Fake) InjectCredentials(instanceHome string) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -394,7 +423,64 @@ func (f *Fake) InjectCredentials(instanceHome string) ([]string, error) {
 		return nil, errors.New("providertest: InjectCredentials requires a non-empty instance HOME")
 	}
 	f.injectHomes = append(f.injectHomes, instanceHome)
+	if f.credSigs == nil {
+		f.credSigs = map[string]credSig{}
+	}
+	f.credSigs[instanceHome] = f.credSigs[""]
 	return append([]string(nil), f.injectEnv...), nil
+}
+
+// RefreshCredentials implements provider.AgentProvider (issue #222): it counts
+// the blind periodic poke (RefreshCalls), runs the optional scripted CLI-
+// rotation hook, and returns the scripted poke error. The hook runs WITHOUT the
+// lock so it may call SetCredentialsSig("") to simulate the real CLI deciding
+// the master token was near expiry and rotating it — the rotation a core-loop
+// test then detects purely via CredentialsSig("") changing, never from this
+// return.
+func (f *Fake) RefreshCredentials(context.Context) error {
+	f.mu.Lock()
+	f.refreshCalls++
+	hook, err := f.refreshHook, f.refreshErr
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return err
+}
+
+// CredentialsSig implements provider.AgentProvider (issue #222): it returns the
+// scripted (sig, mtime) for home — the "" key is the MASTER store, and an
+// unscripted home reads the zero value ("" sig, zero mtime), the "no credential
+// files" state a real adapter reports for an empty store.
+func (f *Fake) CredentialsSig(home string) (string, time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cs := f.credSigs[home]
+	return cs.sig, cs.mtime
+}
+
+// AdoptCredentials implements provider.AgentProvider (issue #222): it records
+// the home in adoptedHomes and copies that home's sig+mtime back onto the
+// MASTER entry (the master adopting the instance's self-refreshed family). An
+// empty home returns an error unconditionally, matching the contract; a scripted
+// adoptErr (SetAdoptErr) otherwise makes it fail. It does NOT model the missing-
+// files error — the hermetic conformance check owns that for real adapters;
+// here a home whose sig was never scripted simply adopts the zero value.
+func (f *Fake) AdoptCredentials(instanceHome string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if instanceHome == "" {
+		return errors.New("providertest: AdoptCredentials requires a non-empty instance HOME")
+	}
+	if f.adoptErr != nil {
+		return f.adoptErr
+	}
+	f.adoptedHomes = append(f.adoptedHomes, instanceHome)
+	if f.credSigs == nil {
+		f.credSigs = map[string]credSig{}
+	}
+	f.credSigs[""] = f.credSigs[instanceHome]
+	return nil
 }
 
 func (f *Fake) Connecting(session string) bool {
@@ -754,6 +840,48 @@ func (f *Fake) InjectHomes() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.injectHomes...)
+}
+
+// SetCredentialsSig scripts a home's opaque sig + newest-file mtime (issue
+// #222); use "" for the MASTER store. This is how a core-loop test simulates a
+// master rotation (SetCredentialsSig("", newSig, newMtime)) or an instance
+// self-refresh (SetCredentialsSig(instanceHome, newSig, newMtime)).
+func (f *Fake) SetCredentialsSig(home, sig string, mtime time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.credSigs == nil {
+		f.credSigs = map[string]credSig{}
+	}
+	f.credSigs[home] = credSig{sig: sig, mtime: mtime}
+}
+
+// SetRefreshHook scripts a hook RefreshCredentials runs (unlocked) on each
+// poke — the CLI-rotation simulation: the hook may call SetCredentialsSig("")
+// to rotate the master sig (issue #222). nil clears it.
+func (f *Fake) SetRefreshHook(hook func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshHook = hook
+}
+
+// SetRefreshErr / SetAdoptErr script the poke and adopt-back failures (issue
+// #222). AdoptCredentials still errors on an empty home regardless.
+func (f *Fake) SetRefreshErr(err error) { f.mu.Lock(); f.refreshErr = err; f.mu.Unlock() }
+func (f *Fake) SetAdoptErr(err error)   { f.mu.Lock(); f.adoptErr = err; f.mu.Unlock() }
+
+// RefreshCalls reports how many RefreshCredentials pokes happened (issue #222).
+func (f *Fake) RefreshCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refreshCalls
+}
+
+// AdoptedHomes returns the instance homes AdoptCredentials was called with, in
+// order (the adopt-back wiring assertion, issue #222).
+func (f *Fake) AdoptedHomes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.adoptedHomes...)
 }
 
 // CaptureCount reports how many times CaptureDeepLink ran.

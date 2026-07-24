@@ -79,15 +79,25 @@ func (p *Provider) runLogoutCommand(ctx context.Context) string {
 	return stderr.String()
 }
 
-// credentialsPath resolves claude's machine-level credentials file the same way
-// the claude binary does: CLAUDE_CONFIG_DIR when set (the isolation seam the
-// compat test relies on), else $HOME/.claude. The rm-escalation must target the
-// exact file `claude auth logout` would, so this mirrors claude's own
-// resolution rather than deriving from lab's injected registry/config paths.
-func credentialsPath() string {
+// masterConfigDir resolves claude's machine-level config dir the same way the
+// claude binary does: CLAUDE_CONFIG_DIR when set (the isolation seam the compat
+// test relies on — it outranks HOME for ALL claude state, compat §3a), else
+// $HOME/.claude. Master-store operations (the rm-escalation, InjectCredentials'
+// source, the credential-authority seam's master reads/writes and the refresh
+// poke's CLAUDE_CONFIG_DIR pin) all derive from this one resolver so lab and the
+// CLI agree on exactly one master layout.
+func masterConfigDir() string {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
 		dir = filepath.Join(os.Getenv("HOME"), ".claude")
 	}
-	return filepath.Join(dir, ".credentials.json")
+	return dir
+}
+
+// credentialsPath resolves claude's machine-level credentials file. The
+// rm-escalation must target the exact file `claude auth logout` would, so this
+// mirrors claude's own resolution (masterConfigDir) rather than deriving from
+// lab's injected registry/config paths.
+func credentialsPath() string {
+	return filepath.Join(masterConfigDir(), ".credentials.json")
 }

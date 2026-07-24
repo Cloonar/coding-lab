@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubProvider is the minimal AgentProvider for registry tests. seedMeta lets
@@ -34,6 +35,9 @@ func (s stubProvider) CaptureDeepLink(context.Context, string, string, string) (
 func (s stubProvider) SeedWorkspace(string, SeedOpts) error       { return nil }
 func (s stubProvider) SeedMeta() SeedMeta                         { return s.seedMeta }
 func (s stubProvider) InjectCredentials(string) ([]string, error) { return nil, nil }
+func (s stubProvider) RefreshCredentials(context.Context) error   { return nil }
+func (s stubProvider) CredentialsSig(string) (string, time.Time)  { return "", time.Time{} }
+func (s stubProvider) AdoptCredentials(string) error              { return nil }
 func (s stubProvider) Commands(context.Context, string, string) ([]CommandSpec, error) {
 	return nil, nil
 }

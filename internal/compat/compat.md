@@ -162,6 +162,90 @@ Provenance legend:
   `<home>/.claude/projects/`. Live re-verification:
   `TestCompat_Live_configDirResolution`.
 
+## 3b. Non-interactive refresh trigger (`claude -p --model haiku`) — live (2026-07-24)
+
+The credential-authority seam (issue #222) makes lab core the **single
+refresher** per Anthropic OAuth grant. Per-run credential snapshots share one
+refresh-token family, so an instance's own CLI self-refresh rotates that family
+and invalidates the token held by the master store **and every sibling
+snapshot** — logging the host out. Core therefore pokes the MASTER store on a
+schedule and every instance is a pure consumer (`InjectCredentials`, §3). The
+poke needs a way to make Claude Code refresh its own token **non-interactively**;
+this section pins the recipe and the live evidence behind it. Implementation:
+`claudecode.RefreshCredentials` (`internal/provider/claudecode/credauthority.go`),
+pinned by the `TestRefreshCredentials_*` unit tests against a stubbed binary
+(the live CLI is never run in tests).
+
+- **The recipe.** `claude -p --model haiku <prompt>` — a real API call in **print
+  mode** (`-p` = one-shot, no TTY) against the cheapest model:
+  - **argv**: `-p`, `--model`, `haiku`, and a minimal prompt (`ok`);
+  - **env**: `CLAUDE_CONFIG_DIR` **overridden** to the MASTER config dir
+    (`claudecode.masterConfigDir`, the resolver `credentialsPath` derives from).
+    The pin starts from `os.Environ()` and **filters any inherited value first** —
+    the lab server's own env may carry a stray/instance `CLAUDE_CONFIG_DIR`, which
+    outranks HOME for credential resolution (§3a), and the pin must **never be
+    empty**;
+  - **working dir**: the master config dir. The poke does **not** create it — an
+    absent dir means the host never logged in, and the CLI's own failure surfaces
+    as the returned error (callers gate the poke on `CredentialsSig("") != ""`).
+  Stdout is discarded (only the on-disk rotation matters); stderr is captured for
+  the failure message.
+
+- **Live probe (2026-07-24, this host's installed Claude Code).** The master
+  store's `expiresAt` was **forged 60 s into the past**, then
+  `claude -p --model haiku` was run under the master `CLAUDE_CONFIG_DIR`. It
+  **succeeded and rewrote the master store in place** — `.credentials.json` grew
+  **509 → 945 bytes** with a fresh, valid token family. So a print-mode API call
+  is a sufficient non-interactive refresh trigger. live.
+
+- **The CLI reads credential state FROM DISK before refreshing.** It honored the
+  **forged on-disk** `expiresAt` and refreshed even though the token was not
+  actually expired server-side — the rotation fired because the file said
+  near-expiry. This is exactly what lets lab drive the schedule by keeping the
+  master file current: the CLI re-reads it each `-p` invocation and does not
+  carry a contradicting in-memory expiry across separate processes. live.
+
+- **A valid-token poke is a no-op.** Against a genuinely-valid `expiresAt` the
+  same call is one trivial haiku round-trip and leaves the store byte-unchanged.
+  So core pokes blindly on a schedule and learns whether anything rotated PURELY
+  by comparing `CredentialsSig("")` before/after — `RefreshCredentials` never
+  reports "did I rotate" (a no-op poke and a full family rotation are
+  indistinguishable from its return; only the CLI knows expiry).
+
+- **`claude auth status` does NOT rewrite a valid store (control), and is NOT the
+  trigger.** A control `claude auth status --json` against a valid master store
+  left `.credentials.json` byte-identical — status is a safe read (it is what §3's
+  `AuthStatus` already runs). It was **not** tested against an expired store: the
+  `-p` trigger above is confirmed, so whether status would also refresh is moot
+  for this seam. fixture/control.
+
+- **Rotation invalidates the PREVIOUS family within minutes — why core fans out
+  immediately.** Once the poke rotates the master family, the old refresh token is
+  invalidated server-side shortly after, so every still-running instance holding
+  the pre-rotation snapshot is on borrowed time. Core therefore treats ANY master
+  `CredentialsSig("")` change as an immediate fan-out trigger (re-inject the fresh
+  family into live instances) rather than waiting for their next spawn.
+
+- **The sig/adopt coupling — `.credentials.json` is the whole family file lab
+  touches.** `CredentialsSig` stats (never parses) and `AdoptCredentials` copies
+  exactly `.credentials.json` — the file OAuth rotation rewrites. `~/.claude.json`'s
+  `oauthAccount` block (which `InjectCredentials` also mirrors, §3/§4) is account
+  **metadata**, not token material: any auth change that matters — a re-login or a
+  family rotation — rewrites `.credentials.json` too, so signing the family file
+  alone catches every rotation while **excluding** incidental `.claude.json` churn
+  (the folder-trust and onboarding writes of §4/§4a rewrite it on every spawn, and
+  must not flap the sig or force needless fan-out/adopt). The sig is opaque
+  (existence + mtime + size, the §9 `SpoolSig` shape); core compares it for
+  EQUALITY only and never learns the path behind it.
+
+When a Claude Code upgrade breaks this (the poke stops refreshing a near-expiry
+store, or starts rotating a valid one on every call), re-verify with the
+2026-07-24 recipe: forge the master `.credentials.json` `expiresAt` 60 s into the
+past, run `CLAUDE_CONFIG_DIR=<master> claude -p --model haiku ok`, and confirm the
+file is rewritten with a future `expiresAt`; then repeat against a valid store and
+confirm it is left byte-identical. Then update the port, the tests, and this
+section in one commit (issue #222).
+
 ## 4. Trust / attribution keys — folder trust live (2.1.198), MCP fixture (v0), attribution schema-extracted (2.1.198)
 
 - Folder trust: `~/.claude.json` → `projects.<absolute worktree dir>.
@@ -1254,6 +1338,19 @@ of a by-hand TUI session; they need tmux + a logged-in claude and take a few
 minutes. (They watch the pane via `capture-pane` to know WHEN the picker is
 up — that is the verification harness observing its own probe, not a
 production scrape; the recipes themselves stay blind.)
+
+**Credential refresh trigger re-verification (issue #222).** The non-interactive
+refresh poke (§3b) has no automated live test — it rotates the host's real OAuth
+family, which no hermetic run may do — so it is re-verified BY HAND with the §3b
+recipe after a Claude Code upgrade: forge the master `.credentials.json`
+`expiresAt` 60 s into the past, run `CLAUDE_CONFIG_DIR=<master> claude -p --model
+haiku ok`, and confirm `.credentials.json` is rewritten in place with a fresh,
+future-`expiresAt` family; then repeat against a valid store and confirm it is
+left byte-identical (no rotate-on-every-call regression). The unit tests
+(`claudecode.TestRefreshCredentials_*`) pin the argv/env/cwd of the poke and the
+`CredentialsSig`-based rotation-detection path against a stubbed binary, but the
+trigger itself is a live coupling — re-run this by hand when the poke stops
+refreshing a near-expiry store or starts churning a valid one.
 
 When any pin above breaks: update the claudecode port, the fixture, the
 affected tests, and this document in the same commit.

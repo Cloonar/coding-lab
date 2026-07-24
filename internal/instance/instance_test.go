@@ -252,6 +252,10 @@ func TestLiveInstanceCount_excludesAllLoginSessions(t *testing.T) {
 func TestStart_happyPath(t *testing.T) {
 	f := newFixture(t)
 	f.prov.SetDeepLink("https://claude.ai/code/session_real")
+	// A master credential is present (issue #222): InjectCredentials copies
+	// this sig+mtime onto the run's home, and Launch stamps the POST-inject
+	// observation as the run's CredSig baseline — asserted on the row below.
+	f.prov.SetCredentialsSig("", "master-sig-1", f.clock.Now())
 
 	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
 	if err != nil {
@@ -276,6 +280,11 @@ func TestStart_happyPath(t *testing.T) {
 	}
 	if got.Outcome != store.RunOutcomeActive {
 		t.Errorf("outcome = %q, want active", got.Outcome)
+	}
+	// The launch baseline (issue #222): CredSig round-trips the master sig
+	// InjectCredentials copied onto the run's home at launch.
+	if got.CredSig != "master-sig-1" {
+		t.Errorf("CredSig = %q, want the injected master sig %q", got.CredSig, "master-sig-1")
 	}
 	// Worktree on disk, branch created, session live.
 	wt := filepath.Join(f.worktreeRoot, "proj-20260608-1530")

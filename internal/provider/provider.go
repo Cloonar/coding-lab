@@ -616,6 +616,80 @@ type AgentProvider interface {
 	// the instance HOME is what shreds the copy.
 	InjectCredentials(instanceHome string) (env []string, err error)
 
+	// RefreshCredentials, CredentialsSig, and AdoptCredentials form the
+	// credential-authority seam with InjectCredentials above (issue #222): the
+	// single-refresher design that stops per-run OAuth snapshots from forking a
+	// provider's token family. Exactly ONE refresher runs per provider grant —
+	// lab core's rotation loop, against the machine's MASTER store — and every
+	// instance is a CONSUMER that receives the rotated family through
+	// InjectCredentials, never a refresher of its own. A per-instance refresh
+	// would rotate the shared refresh token and log every other holder — the
+	// master and all sibling snapshots — out. Core owns the schedule, the
+	// change comparison, the fan-out ordering, and the adopt tie-breaks; the
+	// adapter owns every file path and CLI recipe. Lab core NEVER parses token
+	// contents — signatures are opaque adapter-produced strings.
+
+	// RefreshCredentials is the loop's blind periodic poke (issue #222): it
+	// drives this provider's OWN CLI non-interactively on the host against the
+	// MASTER credential store, and the CLI ITSELF decides whether the token is
+	// near expiry and rotates it. Lab never parses token contents and never
+	// speaks any provider's OAuth protocol — it pokes, then observes.
+	//
+	// Callers detect a resulting rotation PURELY via CredentialsSig("")
+	// changing, NEVER from this method's return: a poke that rotated nothing and
+	// a poke that rotated the whole token family are indistinguishable here by
+	// design (only the CLI knows expiry). The error channel reports that the
+	// poke itself could not run, not that no rotation happened.
+	//
+	// Callers gate the poke on CredentialsSig("") != "" — a logged-out host has
+	// nothing to refresh, so the loop skips it; if called anyway, the CLI's
+	// failure surfaces as the returned error. Callers bound the call with a ctx
+	// timeout, since the CLI is a live subprocess.
+	RefreshCredentials(ctx context.Context) error
+
+	// CredentialsSig is a cheap, opaque change-detector over the provider's
+	// credential file(s) under a home (issue #222): core compares it for
+	// EQUALITY only and never parses it. home == "" means the machine's MASTER
+	// store; a non-empty home is that instance's private credential copy. It
+	// follows the SpoolSig precedent (existence + mtime + size digest): the sig
+	// is "" exactly when no credential files exist under home, so "" doubles as
+	// "logged out / never injected" — and CredentialsSig("") == "" on a host
+	// whose master store was never populated is a pinned acceptance criterion.
+	//
+	// The sig string is adapter-PRIVATE — core learns only whether two sigs
+	// match, never the file paths behind them. That opacity is what lets core
+	// own the whole rotation policy (schedule, change detection, fan-out
+	// ordering, adopt tie-breaks) while the adapter keeps every file path.
+	//
+	// The returned mtime is the NEWEST credential-file modification time under
+	// home (zero when none exist) — deliberately exposed as typed filesystem
+	// metadata, NOT token content, so CORE can own the settled adopt tie-break
+	// ("several instances self-refreshed in one scan → the newest
+	// credential-file mtime wins") without ever learning the adapter's file
+	// layout. It is a file stat, never a parsed token field.
+	CredentialsSig(home string) (sig string, mtime time.Time)
+
+	// AdoptCredentials is the reverse of InjectCredentials (issue #222): it
+	// copies the instance HOME's credential file(s) back into the machine's
+	// MASTER store, ATOMICALLY (a tmp file + rename WITHIN the master dir, so a
+	// live host-side CLI reading the master store never observes a torn file).
+	// It is the eager adopt-back half of the single-refresher design.
+	//
+	// Core calls it when it detects an instance SELF-refreshed — the instance's
+	// CredentialsSig diverged from the sig core last injected into it — so the
+	// master adopts that still-valid rotated token family instead of a later
+	// wipe destroying the only live copy. Core owns WHEN to adopt (the
+	// divergence detection and the newest-mtime tie-break across several
+	// self-refreshers, an adopt-check before every wipe); this method owns only
+	// the atomic copy.
+	//
+	// An empty instanceHome is a programmer error and returns an error. A
+	// MISSING instance credential file is an error too — unlike
+	// InjectCredentials' tolerant missing-master case: adoption is only ever
+	// requested after a sig proved the files existed, so if they have vanished
+	// the caller must LEARN of it rather than silently adopt nothing.
+	AdoptCredentials(instanceHome string) error
+
 	// --- Chat surface (issue #7 / ADR-0016, generalized in issue #51) -------
 	// Every method below owns a fragile agent-CLI coupling pinned in
 	// internal/compat (per adapter): the transcript location + schema, the

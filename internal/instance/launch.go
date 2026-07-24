@@ -297,6 +297,13 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
+	// The POST-inject signature is this run's persisted adopt-check baseline
+	// (issue #222): the rotation loop's adopt-scan and every pre-wipe
+	// adopt-check compare the home's FUTURE signature against this stamped
+	// value to detect a self-refresh. "" — a missing master credential at
+	// launch, the not-an-error case just above — stays "never stamped",
+	// same as a pre-upgrade row.
+	credSig, _ := spec.Provider.CredentialsSig(home)
 
 	run := store.Run{
 		ID:             runID,
@@ -313,6 +320,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		StartedAt:      s.now(),
 		BudgetDeadline: spec.BudgetDeadline,
 		Outcome:        store.RunOutcomeActive,
+		CredSig:        credSig,
 	}
 	created, err := s.store.CreateRun(ctx, run)
 	if err != nil {
