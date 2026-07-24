@@ -312,9 +312,9 @@
               "nixos-module check: container mode is on by default (#220), so a config with no container.* settings must still provision the default subuid/subgid range";
             assert lib.assertMsg (subUids containerOffDummy == [ ] && subGids containerOffDummy == [ ])
               "nixos-module check: with container.enable = false no subuid/subgid ranges may be provisioned";
-            # Default toolsImages (#220): rev-pinned agent-tools refs for both
-            # shipped providers (CLI-version tags on a revless/dirty source —
-            # the prefix grep covers both shapes).
+            # Default toolsImages (#220): the CLI-version tags from
+            # versions.env for both shipped providers (prefix-grepped so a
+            # version bump never touches this check).
             assert lib.assertMsg
               (
                 lib.attrNames defaultsDummy.config.services.lab.container.toolsImages == [
@@ -417,11 +417,11 @@
 
                 # Default-on container provisioning (#220): a unit with NO
                 # container.* settings must come up container-ready — the
-                # rev-pinned default tools refs (prefix-grepped: a clean
-                # source renders claude-<rev>, a dirty one the CLI-version
-                # fallback), no --container-image (defaultImage stays null),
-                # cgroup delegation, the preserved runtime dir, and
-                # podman + passt on the unit PATH.
+                # versions.env-pinned default tools refs (prefix-grepped so
+                # a version bump never touches this check), no
+                # --container-image (defaultImage stays null), cgroup
+                # delegation, the preserved runtime dir, and podman + passt
+                # on the unit PATH.
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '--container-tools-image'
                 grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:claude-'
                 grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:codex-'

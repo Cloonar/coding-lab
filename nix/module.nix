@@ -56,12 +56,13 @@
 #   opted out.
 #
 #   enable defaults to TRUE (ADR-0054): enabling lab means container-ready
-#   provisioning, and toolsImages defaults to the agent-tools images
-#   release-tagged with THIS flake's git rev (published per merge by
-#   .forgejo/workflows/agent-tools.yml), so the labctl baked into the
-#   injected image is exactly the one this server was built from. A host
-#   that must not run containers sets container.enable = false and gets
-#   the byte-identical pre-container unit (zero-diff checks pin this).
+#   provisioning, and toolsImages defaults to the CLI-version tags from
+#   containers/agent-tools/versions.env — the committed pin the publish
+#   job (.forgejo/workflows/agent-tools.yml, path-gated) builds from, so
+#   the default refs only move when the agent-tools inputs change and
+#   always name an already-published image. A host that must not run
+#   containers sets container.enable = false and gets the byte-identical
+#   pre-container unit (zero-diff checks pin this).
 self:
 {
   config,
@@ -190,16 +191,15 @@ let
     cfg.seedPasswordHashFile
   ];
 
-  # Default agent-tools refs, pinned to the CODE this module ships with
-  # (ADR-0054): the publish leg of .forgejo/workflows/agent-tools.yml pushes
-  # a `<prefix>-<git sha>` tag on every merge to main, so a flake pinned to
-  # rev R names the images whose baked-in labctl was built from exactly R.
-  # A revless source (dirty working tree — `nix flake check`, a local
-  # `nixos-rebuild --flake .` mid-hack) has no such tag, so it falls back to
-  # the CLI-version tags (`claude-<ver>`, published whenever containers/**
-  # changes): a slightly stale labctl beats an eval failure in the exact
-  # situation where determinism matters least. versions.env is the single
-  # source of truth the build scripts and the publish job also read.
+  # Default agent-tools refs, derived from the committed pin (ADR-0054):
+  # containers/agent-tools/versions.env is the single source of truth the
+  # build scripts and the publish job also read, and the publish leg pushes
+  # exactly these `<prefix>-<cli-version>` tags — only when the agent-tools
+  # inputs change, which is also the only time these defaults change. The
+  # deploy pipeline bumps the consuming host pin only after the refs
+  # resolve in the registry, and preflight re-pulls the tags each boot, so
+  # a same-tag re-push (a labctl refresh via workflow_dispatch) reaches
+  # hosts on their next restart.
   agentToolsVersion =
     key:
     let
@@ -208,9 +208,7 @@ let
     lib.removePrefix "${key}=" (lib.head (lib.filter (l: lib.hasPrefix "${key}=" l) lines));
   agentToolsDefault =
     tagPrefix: versionKey:
-    "${cfg.container.toolsImageRepo}:${tagPrefix}-${
-      if self ? rev then self.rev else agentToolsVersion versionKey
-    }";
+    "${cfg.container.toolsImageRepo}:${tagPrefix}-${agentToolsVersion versionKey}";
 in
 {
   options.services.lab = {
@@ -489,9 +487,9 @@ in
           subuid/subgid ranges, and the container image flags. On by default
           (ADR-0054): enabling lab means the host can serve
           `repos.runner = container` out of the box, with
-          {option}`toolsImages` defaulting to the agent-tools images
-          release-tagged with this flake's own git rev. Set to `false` for a
-          host-only deployment — the unit is then byte-identical to the
+          {option}`toolsImages` defaulting to the published agent-tools
+          images pinned by this source's `versions.env`. Set to `false` for
+          a host-only deployment — the unit is then byte-identical to the
           pre-container output (no podman, no delegation, no subid ranges,
           no flags).
         '';
@@ -517,7 +515,7 @@ in
           "claude-code" = agentToolsDefault "claude" "CLAUDE_CODE_VERSION";
           codex = agentToolsDefault "codex" "CODEX_VERSION";
         };
-        defaultText = lib.literalExpression ''{ "claude-code" = "''${toolsImageRepo}:claude-''${rev}"; codex = "''${toolsImageRepo}:codex-''${rev}"; } — the flake's own git rev; the CLI-version tags from containers/agent-tools/versions.env when the source has no rev (dirty tree)'';
+        defaultText = lib.literalExpression ''{ "claude-code" = "''${toolsImageRepo}:claude-''${CLAUDE_CODE_VERSION}"; codex = "''${toolsImageRepo}:codex-''${CODEX_VERSION}"; } — the CLI versions from containers/agent-tools/versions.env'';
         example = lib.literalExpression ''{ "claude-code" = "git.cloonar.com/cloonar/agent-tools:claude-code@sha256:…"; }'';
         description = ''
           Agent-tools OCI image refs (--container-tools-image), keyed by lab
@@ -526,10 +524,12 @@ in
           agent-tools image (provider CLI + labctl) mounted at `/opt/lab` in
           that provider's container panes (ADR-0051).
 
-          The default pins each ref to the git rev of this flake (ADR-0054):
-          the agent-tools publish job pushes `claude-<rev>` / `codex-<rev>`
-          tags on every merge to main, so a deployment pinned to rev R runs
-          the labctl built from exactly R inside its containers. `@sha256`-
+          The default follows the committed pin (ADR-0054): the CLI-version
+          tags from `containers/agent-tools/versions.env`, which the publish
+          job builds and pushes exactly when the agent-tools inputs change —
+          so the default refs only move together with the images they name,
+          and preflight re-pulls the tags each boot so a same-tag re-push (a
+          labctl refresh) reaches hosts on their next restart. `@sha256`-
           pinned refs are the strict contract and remain recommended for
           hand-set values, but are deliberately not enforced: a local tag is
           fine during bring-up.
@@ -635,7 +635,7 @@ in
       # digest-pin enforcement — see the toolsImages description.
       {
         assertion = cfg.container.enable -> cfg.container.toolsImages != { };
-        message = "services.lab.container.enable is on (the default) but services.lab.container.toolsImages is empty — without agent-tools refs, preflight would refuse every container spawn anyway. Restore the rev-pinned default (or set explicit refs), or opt out of the container runner entirely with services.lab.container.enable = false.";
+        message = "services.lab.container.enable is on (the default) but services.lab.container.toolsImages is empty — without agent-tools refs, preflight would refuse every container spawn anyway. Restore the versions.env-pinned default (or set explicit refs), or opt out of the container runner entirely with services.lab.container.enable = false.";
       }
     ];
 

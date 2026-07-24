@@ -271,16 +271,15 @@ func run() int {
 	// mode structurally unavailable" signal for instance/afk/reconcile, and
 	// it also disables their podman-rm backstops on host-only deployments.
 	//
-	// Pull failures are RETRIED (issue #220): the deploy pipeline restarts
-	// lab concurrently with the agent-tools publish job for the same commit,
-	// so the startup pull of a rev-pinned tools tag can race the push and
-	// lose. That is the one preflight failure time heals — every other check
-	// reports host state only a redeploy (and thus a fresh boot) changes —
-	// so the loop re-runs preflight while a pull failure is present and
-	// republishes through the gate: container spawns unblock the moment the
-	// registry serves the ref, no restart needed. Repeat verdicts log only
-	// when the failure set changes; a steady-state outage stays one warning,
-	// not one per minute.
+	// Pull failures are RETRIED (issue #220): deploy.yml refuses to bump the
+	// host pin until the default tools refs resolve, but a registry blip or
+	// a workflow_dispatch re-release can still leave a startup pull that
+	// only time heals — every other preflight check reports host state only
+	// a redeploy (and thus a fresh boot) changes. So the loop re-runs
+	// preflight while a pull failure is present and republishes through the
+	// gate: container spawns unblock the moment the registry serves the
+	// ref, no restart needed. Repeat verdicts log only when the failure set
+	// changes; a steady-state outage stays one warning, not one per minute.
 	var containerPreflight func() (podmanx.Result, bool)
 	if cfg.ContainerImage != "" || len(cfg.ContainerToolsImages) > 0 {
 		gate := &podmanx.Gate{}
@@ -295,6 +294,12 @@ func run() int {
 				}, podmanx.RealDeps())
 				gate.Set(res)
 				if res.OK() {
+					// Warnings ride an OK verdict (e.g. running on a cached
+					// tools image because the registry was unreachable) —
+					// spawns proceed, the operator should still know.
+					for _, w := range res.Warnings {
+						logger.Warn("container preflight warning", "component", "main", "warning", w)
+					}
 					logger.Info("container preflight passed", "component", "main", "podman_version", res.Version)
 					return
 				}
@@ -302,6 +307,9 @@ func run() int {
 				// host once, not one restart per failure (podmanx.Preflight
 				// collects them all for the same reason).
 				if !slices.Equal(res.Failures, prev) {
+					for _, w := range res.Warnings {
+						logger.Warn("container preflight warning", "component", "main", "warning", w)
+					}
 					for _, f := range res.Failures {
 						logger.Warn("container preflight failed", "component", "main",
 							"check", f.Check, "detail", f.Detail, "hint", f.Hint)

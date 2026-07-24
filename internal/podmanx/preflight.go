@@ -90,11 +90,14 @@ type Failure struct {
 }
 
 // Result is a full preflight pass: the podman client version when it could
-// be read, and every failure found. Zero failures means container spawns
-// may proceed.
+// be read, every failure found, and any non-fatal warnings (conditions the
+// operator should know about that do not block spawns — e.g. running on a
+// cached tools image because the registry was unreachable). Zero failures
+// means container spawns may proceed.
 type Result struct {
 	Version  string
 	Failures []Failure
+	Warnings []string
 }
 
 // OK reports whether every check passed.
@@ -102,10 +105,11 @@ func (r Result) OK() bool { return len(r.Failures) == 0 }
 
 // HasPullFailure reports whether any failure is a tools-image pull failure
 // (CheckToolsPull) — the one check whose verdict can change with no host
-// change at all: the agent-tools publish job may still be pushing the
-// rev-pinned tag this boot's pull raced (issue #220), or the registry may be
-// briefly down. cmd/lab keys its retry loop on this — every other check
-// reports host state that only a redeploy (and thus a fresh boot) changes.
+// change at all: the agent-tools publish job may still be pushing the tag
+// this boot's pull raced (issue #220), or the registry may be briefly down
+// with no cached image to fall back on. cmd/lab keys its retry loop on
+// this — every other check reports host state that only a redeploy (and
+// thus a fresh boot) changes.
 func (r Result) HasPullFailure() bool {
 	for _, f := range r.Failures {
 		if f.Check == CheckToolsPull {
@@ -252,25 +256,35 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 	}
 
 	// 6. Every configured agent-tools ref resolvable — checked at startup
-	// so a bad digest surfaces here and not as a failed spawn hours later.
-	// `image exists` is the cheap local probe; a miss attempts one pull
-	// (the ref is digest-pinned, so a successful pull is the permanent
-	// fix). A pull failure is also the one failure cmd/lab RETRIES (see
-	// HasPullFailure): a rev-pinned tag may simply not be published yet
-	// when a deploy races the agent-tools publish job (issue #220).
-	// Skipped entirely when podman itself failed check 1: every probe
-	// would just re-report the same root cause. Providers iterate in sorted
-	// order so failure order — and the tests — are deterministic.
+	// so a bad ref surfaces here and not as a failed spawn hours later.
+	// PULL FIRST, deliberately (ADR-0054): the default refs are moving
+	// CLI-version tags, and a same-tag re-push (a labctl refresh shipped
+	// via workflow_dispatch) must reach the host on its next boot — an
+	// exists-first probe would pin the host to whatever it pulled first,
+	// forever. An up-to-date tag makes the pull a cheap manifest check.
+	// When the pull fails but a cached image exists, the host degrades to
+	// the cache with a warning instead of refusing spawns — stale tools
+	// beat none while the registry is unreachable. A pull failure with no
+	// cache is the one failure cmd/lab RETRIES (see HasPullFailure): the
+	// tag may simply not be published yet when a deploy races the
+	// agent-tools publish job. Skipped entirely when podman itself failed
+	// check 1: every probe would just re-report the same root cause.
+	// Providers iterate in sorted order so failure order — and the tests —
+	// are deterministic.
 	if podmanOK {
 		for _, provider := range slices.Sorted(maps.Keys(cfg.ToolsImages)) {
 			ref := cfg.ToolsImages[provider]
-			if _, err := d.Run(ctx, cfg.PodmanBin, "image", "exists", ref); err == nil {
+			pullErr := func() error { _, err := d.Run(ctx, cfg.PodmanBin, "pull", ref); return err }()
+			if pullErr == nil {
 				continue
 			}
-			if _, err := d.Run(ctx, cfg.PodmanBin, "pull", ref); err != nil {
-				fail(CheckToolsPull, fmt.Sprintf("provider %s: tools image %s not resolvable: %v", provider, ref, err),
-					"check the ref (@sha256-pinned per ADR-0051) and registry access from this host")
+			if _, err := d.Run(ctx, cfg.PodmanBin, "image", "exists", ref); err == nil {
+				r.Warnings = append(r.Warnings,
+					fmt.Sprintf("provider %s: tools image %s: pull failed (%v); using the locally cached image — a moved tag will not reach this host until the registry is reachable again", provider, ref, pullErr))
+				continue
 			}
+			fail(CheckToolsPull, fmt.Sprintf("provider %s: tools image %s not resolvable: %v", provider, ref, pullErr),
+				"check the ref and registry access from this host; the default tags are published by the agent-tools workflow")
 		}
 	}
 

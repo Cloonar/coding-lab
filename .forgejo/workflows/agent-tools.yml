@@ -25,33 +25,29 @@
 #   * Release leg (job `publish`, `push` to main + `workflow_dispatch`): builds,
 #     re-runs the smoke test (cheap insurance that exactly what we push passes
 #     injection), then pushes digest-pinned tags to the Forgejo package registry
-#     and verifies they pull back anonymously. The PR leg stays path-gated
-#     (containers/** or this file); the release leg deliberately is NOT
-#     (issue #220): `labctl` is built from the repo *inside* the image build,
-#     so EVERY merge to main changes what the images should carry, and every
-#     merge must publish the `<provider>-<sha>` tags the NixOS module defaults
-#     to (see below) — a path filter here would leave those default refs
-#     dangling for any merge outside containers/**. `workflow_dispatch` stays
-#     as the manual re-release knob.
+#     and verifies they pull back anonymously. Both legs are path-gated
+#     (containers/** or this file) so unrelated merges to main don't re-release
+#     (issue #220 settled this deliberately: images rebuild only when their
+#     inputs change, and the consuming pin — versions.env, which the NixOS
+#     module's toolsImages default reads — moves only together with a build).
+#     `workflow_dispatch` is the manual re-release knob: `labctl` is built from
+#     the repo *inside* the image build, so a labctl change that should be
+#     baked into fresh images is shipped by dispatching this workflow — even
+#     with no containers/** diff; the lab server re-pulls the tags at every
+#     preflight, so the refresh reaches hosts on their next restart.
 #
-# Tags and the pinning contract. Each publish pushes two tags per provider:
-#
-#   * `<provider>-<cli-version>` (`claude-<CLAUDE_CODE_VERSION>`,
-#     `codex-<CODEX_VERSION>`), versions read from
-#     containers/agent-tools/versions.env — the single source of truth the
-#     build scripts also source. Human-facing, answers "which CLI is in here".
-#   * `<provider>-<git sha>` (issue #220) — the CODE pin: names the lab
-#     commit whose labctl is baked in. This is what
-#     `services.lab.container.toolsImages` defaults to, so a host whose flake
-#     is pinned to rev R runs the labctl built from exactly R inside its
-#     containers. The lab server retries the startup pull of these refs — a
-#     freshly-deployed host may race this job for the same sha.
-#
-# Consumers who hand-pin still pin the **digest** this job emits, not a tag. A
-# same-tag re-push (e.g. a dispatch re-release on an already-published sha)
-# produces a NEW digest under the SAME tag, so every tag is a moving reference
-# and only the digest is immutable — the digest is the strict pinning contract
-# (issue #205 pins by `@sha256:...`).
+# Tags and the pinning contract. Tags are `<provider>-<cli-version>`
+# (`claude-<CLAUDE_CODE_VERSION>`, `codex-<CODEX_VERSION>`), the versions read
+# from containers/agent-tools/versions.env — the single source of truth the
+# build scripts also source, and what the NixOS module's toolsImages default
+# derives its refs from (ADR-0054): a deployment pinned to a lab rev names
+# exactly the tags that rev's versions.env pins, and deploy.yml refuses to
+# bump the host pin until those tags resolve in the registry. Strict consumers
+# pin the **digest** this job emits, not the tag. A same-tag re-push (e.g. a
+# labctl refresh via dispatch, same CLI version) produces a NEW digest under
+# the SAME tag, so the tag is a moving reference and only the digest is
+# immutable — which is why the digest, not the tag, is the strict pinning
+# contract (issue #205 pins by `@sha256:...`).
 #
 # Registry/owner are derived at run time from the Actions context, not
 # hardcoded: REGISTRY from `github.server_url` (scheme stripped), OWNER from
@@ -70,10 +66,11 @@ on:
     paths:
       - "containers/**"
       - ".forgejo/workflows/agent-tools.yml"
-  # Deliberately un-path-gated (issue #220): every merge publishes the
-  # `<provider>-<sha>` tags the NixOS module's toolsImages default names.
   push:
     branches: [main]
+    paths:
+      - "containers/**"
+      - ".forgejo/workflows/agent-tools.yml"
   workflow_dispatch:
 
 jobs:
@@ -301,7 +298,6 @@ jobs:
         env:
           FORGE_REGISTRY_TOKEN: ${{ secrets.FORGE_REGISTRY_TOKEN }}
           FORGE_REGISTRY_USER: ${{ secrets.FORGE_REGISTRY_USER }}
-          SHA: ${{ github.sha }}
         run: |
           # No `set -x` in this step — it handles the registry token. Login is
           # --password-stdin; the token value is never echoed or put on argv.
@@ -329,38 +325,32 @@ jobs:
             ver="${entry#*:}"
             local_ref="localhost/agent-tools:${p}-${ver}"
             remote_ref="${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
-            # The code pin (issue #220): the tag the NixOS module's
-            # toolsImages default names for this commit. Same image, second
-            # tag — the layers upload once, the second push is metadata.
-            remote_sha_ref="${REGISTRY}/${OWNER}/agent-tools:${p}-${SHA}"
 
-            podman tag "$local_ref" "$remote_ref" "$remote_sha_ref"
+            podman tag "$local_ref" "$remote_ref"
             podman push --digestfile "/tmp/digest.${p}" "$remote_ref"
-            podman push "$remote_sha_ref"
 
             digest="$(cat "/tmp/digest.${p}")"
             pinned="${REGISTRY}/${OWNER}/agent-tools@${digest}"
 
             # The digest-pinned reference is the pinning contract (issue #205):
-            # emit it to the log and to the job summary. The tags are the
-            # human-facing (CLI version) and module-default (sha) references.
-            echo "published ${p}: ${pinned}  (tags ${p}-${ver}, ${p}-${SHA})"
-            echo "- \`${p}\` \`${ver}\` → \`${pinned}\` (tags \`${p}-${ver}\`, \`${p}-${SHA}\`)" >> "$GITHUB_STEP_SUMMARY"
+            # emit it to the log and to the job summary. The version tag is only
+            # human-facing.
+            echo "published ${p}: ${pinned}  (tag ${p}-${ver})"
+            echo "- \`${p}\` \`${ver}\` → \`${pinned}\`" >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - name: Verify anonymous pull of the published sha tags
-        env:
-          SHA: ${{ github.sha }}
+      - name: Verify anonymous pull of the published tags
         run: |
           # The deployment contract check (issue #220): the NixOS module
           # provisions NO registry credentials, so the lab host's preflight
           # pulls the default toolsImages refs anonymously. Forgejo package
           # visibility follows the owning repo/org settings — a private
           # package would pass the authenticated push above and then fail on
-          # every host, so prove the anonymous path here, against the sha
-          # tags the module actually defaults to. A scratch storage root
-          # (never the job's store, which already holds these images) forces
-          # a real registry round-trip; logout drops the push credential.
+          # every host, so prove the anonymous path here, against the
+          # CLI-version tags the module's default derives from versions.env.
+          # A scratch storage root (never the job's store, which already
+          # holds these images) forces a real registry round-trip; logout
+          # drops the push credential.
           set -euo pipefail
 
           REGISTRY="$(printf '%s' '${{ github.server_url }}' | sed -E 's#^https?://##')"
@@ -368,8 +358,12 @@ jobs:
 
           podman logout "$REGISTRY"
 
-          for p in claude codex; do
-            ref="${REGISTRY}/${OWNER}/agent-tools:${p}-${SHA}"
+          . containers/agent-tools/versions.env
+
+          for entry in "claude:${CLAUDE_CODE_VERSION}" "codex:${CODEX_VERSION}"; do
+            p="${entry%%:*}"
+            ver="${entry#*:}"
+            ref="${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
             scratch="$(mktemp -d)"
             if ! podman --root "${scratch}/root" --runroot "${scratch}/run" pull "$ref"; then
               echo "::error::anonymous pull of ${ref} failed — the agent-tools package is not publicly readable (or the push did not land)."
