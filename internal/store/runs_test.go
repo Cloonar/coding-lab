@@ -144,6 +144,95 @@ func TestUpdateRunTitle(t *testing.T) {
 	}
 }
 
+// TestUpdateRunCredSig pins runs.cred_sig (issue #222): a run created before
+// any stamp reads CredSig == "" (never stamped), UpdateRunCredSig persists
+// and surfaces in both the by-ID fetch and ActiveRuns, and updating a
+// nonexistent run is ErrNotFound — the same not-found semantics as the
+// existing single-column updaters (e.g. UpdateRunTranscriptPath).
+func TestUpdateRunCredSig(t *testing.T) {
+	st := openTestSQLite(t)
+	ctx := context.Background()
+	repo := seedRepoForRuns(t, st)
+	run, err := st.CreateRun(ctx, manualRun(repo.ID, "proj~credsig", "lab/credsig", time.Now()))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Never stamped: reads back "" through the by-ID fetch.
+	got, err := st.RunByID(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+	if got.CredSig != "" {
+		t.Errorf("CredSig before any stamp = %q, want \"\"", got.CredSig)
+	}
+
+	const sig = "home:/home/run_credsig|exists:1|mtime:1721 mtime:1721|size:512"
+	if err := st.UpdateRunCredSig(ctx, run.ID, sig); err != nil {
+		t.Fatalf("UpdateRunCredSig: %v", err)
+	}
+
+	got, err = st.RunByID(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("RunByID after stamp: %v", err)
+	}
+	if got.CredSig != sig {
+		t.Errorf("CredSig after stamp = %q, want %q", got.CredSig, sig)
+	}
+
+	// ActiveRuns scans the same column list — the rotation loop's own read
+	// path — so it must see the stamped signature too.
+	active, err := st.ActiveRuns(ctx)
+	if err != nil {
+		t.Fatalf("ActiveRuns: %v", err)
+	}
+	found := false
+	for _, r := range active {
+		if r.ID == run.ID {
+			found = true
+			if r.CredSig != sig {
+				t.Errorf("ActiveRuns CredSig = %q, want %q", r.CredSig, sig)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("ActiveRuns did not include run %q", run.ID)
+	}
+
+	if err := st.UpdateRunCredSig(ctx, "run_missing", sig); !errors.Is(err, ErrNotFound) {
+		t.Errorf("UpdateRunCredSig on missing run err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestCreateRunCredSig pins the CreateRun round trip: a caller that already
+// knows the injected signature at launch (credentials existed before the
+// instance HOME was ever created) can stamp it at insert time, and it reads
+// back verbatim.
+func TestCreateRunCredSig(t *testing.T) {
+	st := openTestSQLite(t)
+	ctx := context.Background()
+	repo := seedRepoForRuns(t, st)
+
+	const sig = "home:/home/run_launch|exists:1|mtime:1700|size:256"
+	r := manualRun(repo.ID, "proj~credsig-create", "lab/credsig-create", time.Now())
+	r.CredSig = sig
+	created, err := st.CreateRun(ctx, r)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if created.CredSig != sig {
+		t.Errorf("CreateRun returned CredSig = %q, want %q", created.CredSig, sig)
+	}
+
+	got, err := st.RunByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+	if got.CredSig != sig {
+		t.Errorf("RunByID CredSig = %q, want %q", got.CredSig, sig)
+	}
+}
+
 // TestRunRemoteRoundTrip pins runs.remote (issue #163): the resolved value the
 // launcher stamped, read back verbatim in both directions. It is a plain bool,
 // not a tri-state — a run row records what WAS resolved, so there is nothing to

@@ -24,6 +24,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/agentapi"
 	"git.cloonar.com/Cloonar/coding-lab/internal/chat"
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
+	"git.cloonar.com/Cloonar/coding-lab/internal/credrotate"
 	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
@@ -334,11 +335,12 @@ func run() int {
 	// the instance/parked/provider routes stay unmounted and lab still serves
 	// the M2 surface.
 	var (
-		instanceSvc  *instance.Service
-		reconcileSvc *reconcile.Service
-		providerReg  *provider.Registry
-		afkSvc       *afk.Service
-		chatSvc      *chat.Service
+		instanceSvc   *instance.Service
+		reconcileSvc  *reconcile.Service
+		providerReg   *provider.Registry
+		afkSvc        *afk.Service
+		chatSvc       *chat.Service
+		credrotateSvc *credrotate.Service
 	)
 	home := os.Getenv("HOME")
 	if home == "" && cfg.ProviderConfig[claudecode.ID] == "" {
@@ -504,6 +506,38 @@ func run() int {
 		}
 		instanceSvc.SetChatState(chatSvc)
 
+		// Credential rotation loop (issue #222): the single refresher per
+		// provider grant. It runs against each provider's MASTER store, fans
+		// rotations out to every live instance's private HOME, and adopts back
+		// any instance that self-refreshed — so a per-run OAuth snapshot can
+		// never fork the token family and log the host out. Built here beside
+		// the other per-run-home services because it needs the same providerReg
+		// and instancehome Manager; its Loop is started with the other loops
+		// below. AdoptCheck is wired into the wipe paths directly below.
+		credrotateSvc, err = credrotate.New(credrotate.Options{
+			Providers: providerReg,
+			Store:     st,
+			Homes:     homes,
+			Logger:    logger,
+		})
+		if err != nil {
+			logger.Error("building credrotate service", "component", "main", "err", err)
+			return 1
+		}
+		// Wire the pre-wipe adopt-check (issue #222 decision 4: adopt-check
+		// before every wipe) into instancehome.Manager. EVERY wipe path in the
+		// repo funnels through Manager.Wipe or Manager.SweepAll — the
+		// instancehome package doc lists the full call-site set (stop,
+		// rollback, afk stop, the reaper, the parked sweep, the startup and
+		// throttled orphan sweeps) — so this single hook makes the decision
+		// total across all of them. Installed HERE, before StartupReconcile
+		// runs below, so the startup sweep of orphan homes left behind by a
+		// lab restart is covered too — closing the restart-after-downtime race
+		// issue #222 exists to fix. ctx is the process signal context: during
+		// shutdown AdoptCheck degrades to a fast no-op (its store lookup fails
+		// and it returns immediately, best-effort by design).
+		homes.SetPreWipeHook(func(runID string) { credrotateSvc.AdoptCheck(ctx, runID) })
+
 		// lab_instances_active (M8): a scrape-time gauge over the live
 		// tmux+active-runs view — registered only with the instance stack up
 		// (without it no runner exists; the absent series says so).
@@ -650,6 +684,13 @@ func run() int {
 	// tailer set in sync with the active runs and publishes run.messages.changed.
 	if chatSvc != nil {
 		go chatSvc.Run(ctx)
+	}
+	// The credential rotation loop (issue #222): one goroutine that keeps every
+	// provider's master credential family live and fanned out across the fleet —
+	// the single refresher that stops per-run OAuth snapshots from forking and
+	// logging the host out. Its own scan cadence, stopped when ctx is cancelled.
+	if credrotateSvc != nil {
+		go credrotateSvc.Loop(ctx)
 	}
 
 	srv := &http.Server{

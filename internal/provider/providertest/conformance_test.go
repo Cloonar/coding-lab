@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
@@ -54,6 +55,11 @@ type mockProvider struct {
 	// locate overrides the default conforming LocateTranscript — the
 	// locate-homeless breakage hook (issue #202).
 	locate func(home string) (string, error)
+	// credentialsSig / adopt override the default conforming CredentialsSig
+	// and AdoptCredentials — the credential-authority breakage hooks (issue
+	// #222).
+	credentialsSig func(home string) (string, time.Time)
+	adopt          func(instanceHome string) error
 }
 
 var _ provider.AgentProvider = (*mockProvider)(nil)
@@ -250,6 +256,35 @@ func (m *mockProvider) InjectCredentials(instanceHome string) ([]string, error) 
 	return nil, nil
 }
 
+// RefreshCredentials is a trivial stub — the credential-authority obligation
+// deliberately does NOT exercise it (it shells out to a live CLI; issue #222).
+func (m *mockProvider) RefreshCredentials(context.Context) error { return nil }
+
+// CredentialsSig's default is conforming per the credential-authority
+// obligation (issue #222): the mock has no credential files under any home
+// (including the "" master store), so its sig is always "" with a zero mtime —
+// the missing-master-is-empty-sig acceptance criterion.
+func (m *mockProvider) CredentialsSig(home string) (string, time.Time) {
+	if m.credentialsSig != nil {
+		return m.credentialsSig(home)
+	}
+	return "", time.Time{}
+}
+
+// AdoptCredentials's default is conforming per the credential-authority
+// obligation (issue #222): an empty home is a programmer error, and any
+// non-empty home has no credential files to adopt (the mock never injects
+// any), which the contract makes an error too.
+func (m *mockProvider) AdoptCredentials(instanceHome string) error {
+	if m.adopt != nil {
+		return m.adopt(instanceHome)
+	}
+	if instanceHome == "" {
+		return errors.New("mockagent: AdoptCredentials requires a non-empty instance HOME")
+	}
+	return errors.New("mockagent: no credential files to adopt under " + instanceHome)
+}
+
 // ReadChat's default is conforming per the read-chat obligation (issue #92):
 // an empty transcriptPath is the idle pre-transcript read of an active run,
 // and a vanished non-empty path surfaces the ErrTranscriptGone sentinel via
@@ -322,6 +357,7 @@ func TestCheckFunctions_wellFormedProviderPasses(t *testing.T) {
 		{"read-chat", func(t *testing.T) []error { return checkReadChat(t, p) }},
 		{"locate-homeless", func(t *testing.T) []error { return checkLocateHomeless(p) }},
 		{"inject-credentials", func(t *testing.T) []error { return checkInjectCredentials(t, p) }},
+		{"credential-authority", func(t *testing.T) []error { return checkCredentialAuthority(t, p) }},
 		{"seeding-exclude-coverage", func(t *testing.T) []error { return checkSeedingExcludeCoverage(t, p) }},
 		{"seeding-incogni", func(t *testing.T) []error { return checkSeedingIncogni(t, p) }},
 		{"seed-home-containment", func(t *testing.T) []error { return checkSeedHomeContainment(t, p) }},
@@ -572,6 +608,40 @@ func TestCheckInjectCredentials_missingMasterErroringFails(t *testing.T) {
 		return nil, errors.New("no master credential present")
 	}
 	wantError(t, checkInjectCredentials(t, p), "inject-credentials", "missing master credential is NOT an error")
+}
+
+// The credential-authority missing-master breakage (issue #222): a provider
+// that reports a NON-empty sig for the "" master store on a host whose master
+// was never populated violates the ""-means-master / missing-master-empty-sig
+// convention core keys its whole change detection on.
+func TestCheckCredentialAuthority_missingMasterNonEmptySigFails(t *testing.T) {
+	p := newMockProvider()
+	p.credentialsSig = func(string) (string, time.Time) {
+		return "sig-from-nowhere", time.Unix(1, 0)
+	}
+	wantError(t, checkCredentialAuthority(t, p), "credential-authority", "master store", "issue #222")
+}
+
+// The credential-authority empty-HOME breakage (issue #222): AdoptCredentials
+// must treat "" as a programmer error, not a valid adopt target.
+func TestCheckCredentialAuthority_emptyHomeAdoptNotErroringFails(t *testing.T) {
+	p := newMockProvider()
+	p.adopt = func(string) error { return nil }
+	wantError(t, checkCredentialAuthority(t, p), "credential-authority", "empty instance HOME", "programmer error")
+}
+
+// The credential-authority missing-files breakage (issue #222): AdoptCredentials
+// on a home with no credential files must error — silently adopting nothing
+// would let a wipe destroy the only live token family unnoticed.
+func TestCheckCredentialAuthority_missingFilesAdoptNotErroringFails(t *testing.T) {
+	p := newMockProvider()
+	p.adopt = func(instanceHome string) error {
+		if instanceHome == "" {
+			return errors.New("empty instance HOME")
+		}
+		return nil // the breakage: adopting no files silently succeeds
+	}
+	wantError(t, checkCredentialAuthority(t, p), "credential-authority", "nothing to adopt")
 }
 
 // The seed-home-containment breakage (issue #202): a HOME-global grant that

@@ -130,6 +130,27 @@ func (f *NoLinkFake) InjectCredentials(instanceHome string) ([]string, error) {
 	return nil, nil
 }
 
+// RefreshCredentials implements provider.AgentProvider (issue #222): this
+// link-less fake owns no master store to poke, so the blind refresh is an inert
+// success — it never rotates a sig.
+func (f *NoLinkFake) RefreshCredentials(context.Context) error { return nil }
+
+// CredentialsSig implements provider.AgentProvider (issue #222): this fake holds
+// no credential files under any home (including the "" master store), so its sig
+// is always "" with a zero mtime — the "no credentials" state (issue #222's
+// missing-master convention).
+func (f *NoLinkFake) CredentialsSig(string) (string, time.Time) { return "", time.Time{} }
+
+// AdoptCredentials implements provider.AgentProvider (issue #222): an empty home
+// is a programmer error; any non-empty home has no credential files to adopt
+// (this fake never injects any), which the contract makes an error too.
+func (f *NoLinkFake) AdoptCredentials(instanceHome string) error {
+	if instanceHome == "" {
+		return errors.New("providertest: AdoptCredentials requires a non-empty instance HOME")
+	}
+	return errors.New("providertest: NoLinkFake has no credential files to adopt")
+}
+
 // --- chat surface (mandatory on the seam; trivial for a link-less fake) ----
 
 func (f *NoLinkFake) LocateTranscript(context.Context, string, string, string) (string, error) {
