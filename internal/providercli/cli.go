@@ -81,6 +81,12 @@ func (c *ContainerCLI) Run(ctx context.Context, inv provider.CLIInvocation) ([]b
 	if msg := c.cfg.structuralRefusal(r); msg != "" {
 		return nil, nil, errors.New(msg)
 	}
+	// Restart-safety guard (ADR-0058), re-run per invocation: a cgroup
+	// layout podman dirtied after boot would wedge the next service restart,
+	// so it hard-refuses here — a could-not-run error, never a CLI verdict.
+	if err := r.Cgroups.Verify(); err != nil {
+		return nil, nil, fmt.Errorf("container cgroup layout unsafe: %w", err)
+	}
 	if err := podmanx.EnsureImage(ctx, c.cfg.runner(), c.cfg.PodmanBin, c.cfg.Image); err != nil {
 		return nil, nil, err
 	}
@@ -104,13 +110,14 @@ func (c *ContainerCLI) Run(ctx context.Context, inv provider.CLIInvocation) ([]b
 		// HomeDir stays empty (the CLI shape): a poke's HOME is the
 		// container's own writable layer, and the store bind target alone
 		// creates the /home/agent parents (RunSpec.HomeDir's contract).
-		StoreDir: spec.HostDir,
-		StoreDst: storeDst,
-		Workdir:  c.workdir(inv.Dir, spec.HostDir, storeDst),
-		NoTTY:    true, // no pane, no pty — plain `podman run` stdin semantics
-		Memory:   memory,
-		Pids:     pids,
-		Nofile:   nofile,
+		StoreDir:     spec.HostDir,
+		StoreDst:     storeDst,
+		Workdir:      c.workdir(inv.Dir, spec.HostDir, storeDst),
+		NoTTY:        true, // no pane, no pty — plain `podman run` stdin semantics
+		CgroupParent: r.CgroupParent(),
+		Memory:       memory,
+		Pids:         pids,
+		Nofile:       nofile,
 		// Pins first, the invocation's own env after: later --env wins under
 		// podman, so an adapter's own config-dir pin — the same value once
 		// rewritten — stays authoritative over these defaults, preserving

@@ -126,6 +126,15 @@ type RunSpec struct {
 	Pids   int    // --pids-limit
 	Nofile int    // soft+hard RLIMIT_NOFILE; replaces the host prlimit wrapper
 
+	// CgroupParent is the payload cgroup every container lands under, as a
+	// cgroupfs path (Result.CgroupParent — ADR-0058). Every real spawn sets
+	// it: the preflight refuses spawns before a layout exists. Empty omits
+	// the flags (hand-built specs in tests) — podman's default parent is
+	// then unwritable for the rootless service user, so a miswired spec
+	// fails the spawn loudly instead of silently landing uncapped in some
+	// subtree the preflight never verified.
+	CgroupParent string
+
 	// Workdir is the container workdir when non-empty; empty falls back to
 	// WorktreeDir, so existing run-shape callers are untouched. The
 	// login/CLI shapes set it to Home. When both are empty, -w is omitted
@@ -173,20 +182,22 @@ type RunSpec struct {
 //     host.containers.internal to the host's global address, so a host
 //     service bound to a wildcard/LAN address stays reachable — only
 //     loopback-bound services are unreachable.)
-//   - --cgroups=split: place the container in lab's OWN delegated cgroup
-//     (<lab's cgroup>/libpod-payload-<id>) instead of podman's rootless
-//     default of user.slice. Without this the container lands in a subtree
-//     the startup preflight never checks, so its --memory/--pids-limit caps
-//     could be silently absent on a green preflight (the delegation check in
-//     preflight.go reads lab's own cgroup — split makes that the SAME
-//     subtree the container uses). Split reuses the current cgroup for both
-//     conmon and payload; it requires cgroup-v2 with memory+pids delegated
-//     to the lab unit (systemd Delegate=yes), which the preflight enforces.
+//   - --cgroup-manager=cgroupfs + --cgroup-parent (ADR-0058, replacing the
+//     retired --cgroups=split): place the container under the lab-owned
+//     payload cgroup (RunSpec.CgroupParent, established by the preflight)
+//     instead of podman's rootless default of user.slice. Split put the
+//     payload inside lab's OWN cgroup, which made podman enable controllers
+//     in the very cgroup systemd re-attaches lab into — the restart-EBUSY
+//     trap cgroup.go documents. The payload cgroup is the SAME subtree the
+//     preflight verified delegation on, so the caps below verifiably bind;
+//     the cgroupfs manager is pinned because a system service has no systemd
+//     user session for podman's default manager, and the fallback choice
+//     must not depend on podman's environment sniffing.
 //   - --memory/--pids-limit/--ulimit nofile: per-run blast-radius caps; the
 //     ulimit replaces the host-side prlimit wrapper, which is retired for
 //     container runs (the pane command is now the podman client, and
 //     capping THAT process would be aiming at the wrong target). These caps
-//     only bind because --cgroups=split lands the payload in lab's delegated
+//     only bind because --cgroup-parent lands the payload in lab's delegated
 //     cgroup subtree.
 //   - --mount type=image: the read-only agent-tools injection at ToolsDst
 //     (ADR-0051 — the destination is a hard contract, see ToolsDst).
@@ -202,7 +213,11 @@ type RunSpec struct {
 // preserved — later entries win under podman just as with exec env), the
 // image, and the provider argv verbatim.
 func RunArgv(s RunSpec) []string {
-	args := []string{s.Bin, "run", "--rm"}
+	args := []string{s.Bin}
+	if s.CgroupParent != "" {
+		args = append(args, "--cgroup-manager=cgroupfs")
+	}
+	args = append(args, "run", "--rm")
 	if !s.NoTTY {
 		args = append(args, "-it")
 	}
@@ -210,7 +225,11 @@ func RunArgv(s RunSpec) []string {
 		"--name", s.Name,
 		"--userns=keep-id",
 		"--network=pasta",
-		"--cgroups=split",
+	)
+	if s.CgroupParent != "" {
+		args = append(args, "--cgroup-parent="+s.CgroupParent)
+	}
+	args = append(args,
 		"--memory", s.Memory,
 		"--pids-limit", strconv.Itoa(s.Pids),
 		"--ulimit", fmt.Sprintf("nofile=%d:%d", s.Nofile, s.Nofile),

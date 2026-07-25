@@ -358,11 +358,18 @@
                 agentUrlUnit = agentUrlDummy.config.systemd.units."lab.service".text;
                 containerUnit = containerDummy.config.systemd.units."lab.service".text;
                 containerOffUnit = containerOffDummy.config.systemd.units."lab.service".text;
+                hygieneUnit = containerDummy.config.systemd.units."lab-cgroup-hygiene.service".text;
+                # The script body is a store file the unit's ExecStart points
+                # at — its content never appears in the unit text, so it is
+                # passed (and grepped) separately.
+                hygieneScript = containerDummy.config.systemd.services.lab-cgroup-hygiene.script;
                 passAsFile = [
                   "unit"
                   "agentUrlUnit"
                   "containerUnit"
                   "containerOffUnit"
+                  "hygieneUnit"
+                  "hygieneScript"
                 ];
                 # PATH-serialization greps below match against these store paths:
                 # the alias (hello), a baseline tool, ripgrep, and nix — plus
@@ -443,6 +450,7 @@
                 grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:codex-'
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '"--container-image" "docker.io/library/buildpack-deps:stable-scm@sha256:07554a82a7a29ce00a048e0b29d18f454b5721b41940d43ee3be1ef59d55b114"'
                 grep -q '^Delegate=true$' "$unitPath"
+                grep -q '^DelegateSubgroup=main$' "$unitPath"
                 grep -q '^RuntimeDirectory=lab$' "$unitPath"
                 grep -q "$podman/bin" "$unitPath"
                 grep -q "$passt/bin" "$unitPath"
@@ -458,8 +466,12 @@
                   echo "container flags leaked into a container-disabled unit" >&2
                   exit 1
                 fi
-                if grep -q '^Delegate=' "$containerOffUnitPath"; then
-                  echo "Delegate= leaked into a container-disabled unit" >&2
+                if grep -q '^Delegate' "$containerOffUnitPath"; then
+                  echo "Delegate=/DelegateSubgroup= leaked into a container-disabled unit" >&2
+                  exit 1
+                fi
+                if grep -qF 'lab-cgroup-hygiene' "$containerOffUnitPath"; then
+                  echo "the hygiene-unit dependency leaked into a container-disabled unit" >&2
                   exit 1
                 fi
                 if grep -q '^RuntimeDirectory' "$containerOffUnitPath"; then
@@ -500,10 +512,21 @@
                 # runtime dir, and rootless podman's XDG_RUNTIME_DIR pointing
                 # at it.
                 grep -q '^Delegate=true$' "$containerUnitPath"
+                grep -q '^DelegateSubgroup=main$' "$containerUnitPath"
                 grep -q '^RuntimeDirectory=lab$' "$containerUnitPath"
                 grep -q '^RuntimeDirectoryPreserve=yes$' "$containerUnitPath"
                 grep -q '^RuntimeDirectoryMode=0700$' "$containerUnitPath"
                 grep -q 'Environment="XDG_RUNTIME_DIR=/run/lab"' "$containerUnitPath"
+
+                # The restart-safety hygiene oneshot (ADR-0058): ordered
+                # before every lab start, clearing any controller delegation
+                # podman re-armed inside the main/ attach subgroup — the
+                # 2026-07-25 "Failed to spawn executor: EBUSY" outage class.
+                grep -q '^Wants=.*lab-cgroup-hygiene.service' "$containerUnitPath"
+                grep -q '^After=.*lab-cgroup-hygiene.service' "$containerUnitPath"
+                grep -q '^Before=.*lab.service' "$hygieneUnitPath"
+                grep -qF 'cgroup.subtree_control' "$hygieneScriptPath"
+                grep -qF '/sys/fs/cgroup/system.slice/lab.service/main' "$hygieneScriptPath"
 
                 # ...and podman + passt (pasta) on the unit PATH line, where
                 # preflight's lookup and the container pane argv resolve them —

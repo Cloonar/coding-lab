@@ -66,22 +66,37 @@ func (r *recordingCmdRunner) recorded() [][]string {
 // The canonical container config the tests wire up — the same values
 // instance/container_test.go pins for the run path.
 const (
-	testProviderID = "claude-code"
-	testPodmanBin  = "podman"
-	testDevImage   = "docker.io/library/debian:stable-slim"
-	testToolsImage = "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef"
+	testProviderID   = "claude-code"
+	testPodmanBin    = "podman"
+	testDevImage     = "docker.io/library/debian:stable-slim"
+	testToolsImage   = "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef"
+	testCgroupParent = "/system.slice/lab.service/payload"
 )
 
 // okPreflight returns a Gate-style Preflight closure with a published green
-// verdict.
+// verdict carrying the established cgroup layout (ADR-0058) — the goldens
+// pin its Parent riding into the argv's --cgroup-parent. AttachDir stays
+// empty so the restart-safety guard verifies vacuously (Cgroups doc).
 func okPreflight() func() (podmanx.Result, bool) {
 	var g podmanx.Gate
-	g.Set(podmanx.Result{Version: "5.0.0"})
+	g.Set(podmanx.Result{Version: "5.0.0", Cgroups: &podmanx.Cgroups{Parent: testCgroupParent}})
 	return g.Result
 }
 
 // fixedLimits stands in for the global container_* settings rows.
 func fixedLimits(context.Context) (string, int, int, error) { return "8g", 4096, 16384, nil }
+
+// dirtyCgroups builds a Cgroups whose AttachDir points at a real temp dir
+// with delegated controllers — the re-armed restart trap (ADR-0058) the
+// per-spawn Verify guard must hard-refuse on.
+func dirtyCgroups(t *testing.T) *podmanx.Cgroups {
+	t.Helper()
+	attach := t.TempDir()
+	if err := os.WriteFile(filepath.Join(attach, "cgroup.subtree_control"), []byte("memory pids\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return &podmanx.Cgroups{Parent: testCgroupParent, AttachDir: attach, RootDir: t.TempDir()}
+}
 
 // testConfig builds the canonical Config over t.TempDir paths: a static
 // master-store spec (claude-code's shape) and a fresh logins root.
@@ -199,11 +214,11 @@ func TestLoginRunnerStartGolden(t *testing.T) {
 	}
 
 	want := []string{
-		testPodmanBin, "run", "--rm", "-it",
+		testPodmanBin, "--cgroup-manager=cgroupfs", "run", "--rm", "-it",
 		"--name", "labrun-lab-login-claude-code-3e99da",
 		"--userns=keep-id",
 		"--network=pasta",
-		"--cgroups=split",
+		"--cgroup-parent=" + testCgroupParent,
 		"--memory", "8g",
 		"--pids-limit", "4096",
 		"--ulimit", "nofile=16384:16384",
@@ -285,6 +300,17 @@ func TestLoginRunnerStartRefusals(t *testing.T) {
 			name:     "no dev image",
 			mutate:   func(c *Config, _ *recordingCmdRunner) { c.Image = "" },
 			wantText: "no dev image configured — set --container-image",
+		},
+		{
+			// The per-spawn restart-safety guard (ADR-0058): a green verdict
+			// whose cgroup layout has since been dirtied still refuses.
+			name: "restart-safety guard: dirty cgroup layout",
+			mutate: func(c *Config, _ *recordingCmdRunner) {
+				var g podmanx.Gate
+				g.Set(podmanx.Result{Version: "5.0.0", Cgroups: dirtyCgroups(t)})
+				c.Preflight = g.Result
+			},
+			wantText: "container cgroup layout unsafe",
 		},
 		{
 			name: "dev image pull failure",

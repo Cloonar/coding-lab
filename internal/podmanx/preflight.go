@@ -18,14 +18,16 @@ import (
 // enum: they end up in the spawn-refusal message and in logs, and the tests
 // key on them.
 const (
-	CheckPodman     = "podman"            // podman missing, unrunnable, or < 4
-	CheckPasta      = "pasta"             // pasta missing (the backend --network=pasta pins)
-	CheckSubuid     = "subuid"            // no usable /etc/subuid entry for the service user
-	CheckSubgid     = "subgid"            // no usable /etc/subgid entry for the service user
-	CheckCgroup2    = "cgroup2"           // unified hierarchy not mounted / not in use
-	CheckDelegation = "cgroup-delegation" // memory/pids not delegated to our cgroup
-	CheckToolsImage = "tools-image"       // no agent-tools images configured
-	CheckToolsPull  = "tools-image-pull"  // a configured agent-tools ref does not resolve
+	CheckPodman        = "podman"                // podman missing, unrunnable, or < 4
+	CheckPasta         = "pasta"                 // pasta missing (the backend --network=pasta pins)
+	CheckSubuid        = "subuid"                // no usable /etc/subuid entry for the service user
+	CheckSubgid        = "subgid"                // no usable /etc/subgid entry for the service user
+	CheckCgroup2       = "cgroup2"               // unified hierarchy not mounted / not in use
+	CheckCgroupLayout  = "cgroup-layout"         // lab not in a delegated subgroup (ADR-0058)
+	CheckDelegation    = "cgroup-delegation"     // memory/pids not delegated into the payload cgroup
+	CheckRestartSafety = "cgroup-restart-safety" // the layout would wedge the next service restart
+	CheckToolsImage    = "tools-image"           // no agent-tools images configured
+	CheckToolsPull     = "tools-image-pull"      // a configured agent-tools ref does not resolve
 )
 
 // PreflightConfig is the container-mode configuration Preflight validates —
@@ -45,13 +47,19 @@ type Deps struct {
 	ReadFile func(string) ([]byte, error)
 	Run      CmdRunner
 	// Writable reports whether the service user can write path — the probe
-	// behind the cgroup-delegation check. systemd's Delegate=yes chowns the
+	// behind the cgroup-layout check. systemd's Delegate=yes chowns the
 	// delegated cgroup directory to the unit's user so it can create the
 	// child cgroups a container needs; a non-delegated cgroup stays
 	// root-owned. Read access (ReadFile of cgroup.controllers) cannot tell
 	// the two apart — both are world-readable — so delegation is detected by
 	// write access to the cgroup directory itself.
 	Writable func(string) bool
+	// WriteFile and Mkdir are setupCgroups' write seams (ADR-0058): adopting
+	// stray root pids, enabling the payload controllers, creating the
+	// payload cgroup. Mkdir must be MkdirAll-shaped (an existing dir is
+	// success — the payload cgroup survives restarts by design).
+	WriteFile func(name string, data []byte, perm os.FileMode) error
+	Mkdir     func(name string, perm os.FileMode) error
 	// Username and UID identify the service user for subuid/subgid
 	// matching: shadow(5) keys ranges by either the login name or the
 	// numeric uid, so both are accepted.
@@ -67,11 +75,13 @@ type Deps struct {
 // accepted match keys.
 func RealDeps() Deps {
 	d := Deps{
-		LookPath: exec.LookPath,
-		ReadFile: os.ReadFile,
-		Run:      ExecRunner(),
-		Writable: func(path string) bool { return unix.Access(path, unix.W_OK) == nil },
-		UID:      os.Getuid(),
+		LookPath:  exec.LookPath,
+		ReadFile:  os.ReadFile,
+		Run:       ExecRunner(),
+		Writable:  func(path string) bool { return unix.Access(path, unix.W_OK) == nil },
+		WriteFile: os.WriteFile,
+		Mkdir:     func(name string, perm os.FileMode) error { return os.MkdirAll(name, perm) },
+		UID:       os.Getuid(),
 	}
 	if u, err := user.Current(); err == nil {
 		d.Username = u.Username
@@ -98,10 +108,25 @@ type Result struct {
 	Version  string
 	Failures []Failure
 	Warnings []string
+	// Cgroups is the container cgroup layout the preflight established
+	// (ADR-0058) — the spawn sites read RunSpec.CgroupParent from it and run
+	// its Verify guard per spawn. Nil exactly when the cgroup checks failed
+	// (Failures then says why) or on a hand-built Result.
+	Cgroups *Cgroups
 }
 
 // OK reports whether every check passed.
 func (r Result) OK() bool { return len(r.Failures) == 0 }
+
+// CgroupParent is the --cgroup-parent value for RunSpec, "" when no layout
+// was established (only reachable alongside a failed preflight or in tests —
+// a green Preflight always carries one).
+func (r Result) CgroupParent() string {
+	if r.Cgroups == nil {
+		return ""
+	}
+	return r.Cgroups.Parent
+}
 
 // HasPullFailure reports whether any failure is a tools-image pull failure
 // (CheckToolsPull) — the one check whose verdict can change with no host
@@ -202,46 +227,27 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 		}
 	}
 
-	// 4. cgroup v2 with memory+pids delegated TO lab's own cgroup. The pane
-	// argv pins --cgroups=split, so the container's payload cgroup is a child
-	// of lab's own cgroup (<lab's cgroup>/libpod-payload-<id>), not podman's
-	// rootless default of user.slice — which means THIS cgroup, the one
-	// /proc/self/cgroup names, is exactly where --memory/--pids-limit take
-	// effect. Two conditions must both hold or the caps are silently absent
-	// (worse than failing, since #205's whole point is a bounded blast
-	// radius):
-	//
-	//   (a) memory and pids are available in this cgroup — i.e. the parent
-	//       delegated them inward (cgroup.controllers lists them); and
-	//   (b) this cgroup is actually delegated to the lab user, so lab can
-	//       create the child cgroups --cgroups=split needs and enable the
-	//       controllers on them.
-	//
-	// (a) alone is a false green: cgroup.controllers reflects what the PARENT
-	// enabled in its subtree_control, so a non-delegated lab.service still
-	// shows "memory pids" there while lab cannot create a single limited
-	// child (Delegate=no leaves the cgroup dir root-owned). And subtree_control
-	// is not a substitute — a correctly delegated but idle cgroup has it empty
-	// until the first child is created. So (b) is checked by write access to
-	// the cgroup directory, the durable signal systemd's Delegate=yes leaves.
-	const cgroupRoot = "/sys/fs/cgroup"
-	delegHint := "the lab service's cgroup lacks memory/pids delegation — set Delegate=yes on the systemd unit"
-	if _, err := d.ReadFile(cgroupRoot + "/cgroup.controllers"); err != nil {
+	// 4. cgroup v2 with the ADR-0058 layout established: lab in a delegated
+	// SUBGROUP (systemd Delegate=yes + DelegateSubgroup=main), a payload
+	// sibling cgroup created next to it with memory+pids actually delegated
+	// into it (the pane argv pins --cgroup-parent at that payload cgroup, so
+	// this is exactly where --memory/--pids-limit take effect — verifying any
+	// other subtree would be a false green, #205's original lesson), and the
+	// restart-safety guard clean. setupCgroups (cgroup.go) does the
+	// establishing and returns the first structural Failure; the guard runs
+	// again before every spawn, this pass just surfaces a dirty host at boot.
+	if _, err := d.ReadFile(cgroupFSRoot + "/cgroup.controllers"); err != nil {
 		fail(CheckCgroup2, "cgroup v2 (unified hierarchy) not mounted", "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
 	} else if self, err := d.ReadFile("/proc/self/cgroup"); err != nil {
 		fail(CheckCgroup2, fmt.Sprintf("cannot read /proc/self/cgroup: %v", err), "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
 	} else if path, ok := unifiedCgroupPath(self); !ok {
 		fail(CheckCgroup2, "no unified (0::) entry in /proc/self/cgroup", "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
+	} else if cg, failure := setupCgroups(path, d); failure != nil {
+		r.Failures = append(r.Failures, *failure)
+	} else if err := cg.Verify(); err != nil {
+		fail(CheckRestartSafety, err.Error(), "restart the lab service — the lab-cgroup-hygiene unit clears the stale layout before each start (ADR-0058)")
 	} else {
-		cgroupDir := cgroupRoot + strings.TrimSuffix(path, "/")
-		ctrlFile := cgroupDir + "/cgroup.controllers"
-		if ctrl, err := d.ReadFile(ctrlFile); err != nil {
-			fail(CheckDelegation, fmt.Sprintf("cannot read %s: %v", ctrlFile, err), delegHint)
-		} else if have := strings.Fields(string(ctrl)); !slices.Contains(have, "memory") || !slices.Contains(have, "pids") {
-			fail(CheckDelegation, fmt.Sprintf("cgroup %s delegates only %q — memory and pids are required", path, strings.TrimSpace(string(ctrl))), delegHint)
-		} else if d.Writable != nil && !d.Writable(cgroupDir) {
-			fail(CheckDelegation, fmt.Sprintf("cgroup %s is not delegated to the lab user (not writable) — its --memory/--pids-limit caps would be silently absent", path), delegHint)
-		}
+		r.Cgroups = cg
 	}
 
 	// 5. Agent-tools images configured. Container mode has no default tools

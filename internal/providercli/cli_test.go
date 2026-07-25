@@ -77,15 +77,15 @@ func TestContainerCLIGolden(t *testing.T) {
 		t.Fatalf("exec calls = %d, want 1", len(ex.calls))
 	}
 	got := ex.calls[0]
-	if len(got) < 5 || !cliNameRe.MatchString(got[4]) {
-		t.Fatalf("container name %q does not match %v (argv: %q)", got[4], cliNameRe, got)
+	if len(got) < 6 || !cliNameRe.MatchString(got[5]) {
+		t.Fatalf("container name %q does not match %v (argv: %q)", got[5], cliNameRe, got)
 	}
 	want := []string{
-		testPodmanBin, "run", "--rm",
-		"--name", got[4],
+		testPodmanBin, "--cgroup-manager=cgroupfs", "run", "--rm",
+		"--name", got[5],
 		"--userns=keep-id",
 		"--network=pasta",
-		"--cgroups=split",
+		"--cgroup-parent=" + testCgroupParent,
 		"--memory", "8g",
 		"--pids-limit", "4096",
 		"--ulimit", "nofile=16384:16384",
@@ -278,6 +278,17 @@ func TestContainerCLIStructuralErrors(t *testing.T) {
 			mutate:   func(c *ContainerCLI) { c.cfg.Image = "" },
 			wantText: "no dev image configured — set --container-image",
 		},
+		{
+			// The per-spawn restart-safety guard (ADR-0058): a green verdict
+			// whose cgroup layout has since been dirtied is could-not-run.
+			name: "restart-safety guard: dirty cgroup layout",
+			mutate: func(c *ContainerCLI) {
+				var g podmanx.Gate
+				g.Set(podmanx.Result{Version: "5.0.0", Cgroups: dirtyCgroups(t)})
+				c.cfg.Preflight = g.Result
+			},
+			wantText: "container cgroup layout unsafe",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -401,7 +412,7 @@ func TestContainerCLIUniqueNames(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 	}
-	a, b := ex.calls[0][4], ex.calls[1][4]
+	a, b := ex.calls[0][5], ex.calls[1][5]
 	if a == b {
 		t.Errorf("two invocations shared the container name %q", a)
 	}

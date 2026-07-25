@@ -24,18 +24,19 @@ func assertArgv(t *testing.T, got, want []string) {
 
 func TestRunArgvGolden(t *testing.T) {
 	s := RunSpec{
-		Bin:         "/usr/bin/podman",
-		Name:        "labrun-myrepo.afk-205-7876ed",
-		Image:       "docker.io/library/debian:stable-slim",
-		ToolsImage:  "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
-		WorktreeDir: "/var/lib/lab/worktrees/myrepo-1",
-		BareDir:     "/var/lib/lab/repos/myrepo.git",
-		AgentDir:    "/var/lib/lab/agent",
-		HomeDir:     "/var/lib/lab/instances/run_1/home",
-		RuntimeDir:  "/var/lib/lab/runtime/run_1",
-		Memory:      "8g",
-		Pids:        4096,
-		Nofile:      16384,
+		Bin:          "/usr/bin/podman",
+		Name:         "labrun-myrepo.afk-205-7876ed",
+		Image:        "docker.io/library/debian:stable-slim",
+		ToolsImage:   "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
+		WorktreeDir:  "/var/lib/lab/worktrees/myrepo-1",
+		BareDir:      "/var/lib/lab/repos/myrepo.git",
+		AgentDir:     "/var/lib/lab/agent",
+		HomeDir:      "/var/lib/lab/instances/run_1/home",
+		RuntimeDir:   "/var/lib/lab/runtime/run_1",
+		CgroupParent: "/system.slice/lab.service/payload",
+		Memory:       "8g",
+		Pids:         4096,
+		Nofile:       16384,
 		Env: []string{
 			"PATH=" + PATH,
 			"HOME=" + Home,
@@ -45,11 +46,11 @@ func TestRunArgvGolden(t *testing.T) {
 		Argv:       []string{"claude", "--model", "opus"},
 	}
 	want := []string{
-		"/usr/bin/podman", "run", "--rm", "-it",
+		"/usr/bin/podman", "--cgroup-manager=cgroupfs", "run", "--rm", "-it",
 		"--name", "labrun-myrepo.afk-205-7876ed",
 		"--userns=keep-id",
 		"--network=pasta",
-		"--cgroups=split",
+		"--cgroup-parent=/system.slice/lab.service/payload",
 		"--memory", "8g",
 		"--pids-limit", "4096",
 		"--ulimit", "nofile=16384:16384",
@@ -79,17 +80,18 @@ func TestRunArgvGolden(t *testing.T) {
 // runs on the pane's pty exactly like a run.
 func TestLoginArgvGolden(t *testing.T) {
 	s := RunSpec{
-		Bin:        "/usr/bin/podman",
-		Name:       "labrun-lab-login-claude-code-2b7e15",
-		Image:      "docker.io/library/debian:stable-slim",
-		ToolsImage: "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
-		HomeDir:    "/var/lib/lab/logins/lab-login-claude-code",
-		StoreDir:   "/var/lib/lab/.claude",
-		StoreDst:   Home + "/.claude",
-		Workdir:    Home,
-		Memory:     "8g",
-		Pids:       4096,
-		Nofile:     16384,
+		Bin:          "/usr/bin/podman",
+		Name:         "labrun-lab-login-claude-code-2b7e15",
+		Image:        "docker.io/library/debian:stable-slim",
+		ToolsImage:   "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
+		HomeDir:      "/var/lib/lab/logins/lab-login-claude-code",
+		StoreDir:     "/var/lib/lab/.claude",
+		StoreDst:     Home + "/.claude",
+		Workdir:      Home,
+		CgroupParent: "/system.slice/lab.service/payload",
+		Memory:       "8g",
+		Pids:         4096,
+		Nofile:       16384,
 		Env: []string{
 			"PATH=" + PATH,
 			"HOME=" + Home,
@@ -99,11 +101,11 @@ func TestLoginArgvGolden(t *testing.T) {
 		Argv:       []string{"claude", "auth", "login", "--claudeai"},
 	}
 	want := []string{
-		"/usr/bin/podman", "run", "--rm", "-it",
+		"/usr/bin/podman", "--cgroup-manager=cgroupfs", "run", "--rm", "-it",
 		"--name", "labrun-lab-login-claude-code-2b7e15",
 		"--userns=keep-id",
 		"--network=pasta",
-		"--cgroups=split",
+		"--cgroup-parent=/system.slice/lab.service/payload",
 		"--memory", "8g",
 		"--pids-limit", "4096",
 		"--ulimit", "nofile=16384:16384",
@@ -128,17 +130,18 @@ func TestLoginArgvGolden(t *testing.T) {
 // whose destination creates the /home/agent parents by itself.
 func TestCLIArgvGolden(t *testing.T) {
 	s := RunSpec{
-		Bin:        "/usr/bin/podman",
-		Name:       "labrun-cli-claude-code-2b7e15",
-		Image:      "docker.io/library/debian:stable-slim",
-		ToolsImage: "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
-		StoreDir:   "/var/lib/lab/credentials/claude",
-		StoreDst:   Home + "/.claude",
-		Workdir:    Home,
-		NoTTY:      true,
-		Memory:     "8g",
-		Pids:       4096,
-		Nofile:     16384,
+		Bin:          "/usr/bin/podman",
+		Name:         "labrun-cli-claude-code-2b7e15",
+		Image:        "docker.io/library/debian:stable-slim",
+		ToolsImage:   "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
+		StoreDir:     "/var/lib/lab/credentials/claude",
+		StoreDst:     Home + "/.claude",
+		Workdir:      Home,
+		NoTTY:        true,
+		CgroupParent: "/system.slice/lab.service/payload",
+		Memory:       "8g",
+		Pids:         4096,
+		Nofile:       16384,
 		Env: []string{
 			"PATH=" + PATH,
 			"HOME=" + Home,
@@ -147,11 +150,11 @@ func TestCLIArgvGolden(t *testing.T) {
 		Argv:       []string{"claude", "auth", "status"},
 	}
 	want := []string{
-		"/usr/bin/podman", "run", "--rm",
+		"/usr/bin/podman", "--cgroup-manager=cgroupfs", "run", "--rm",
 		"--name", "labrun-cli-claude-code-2b7e15",
 		"--userns=keep-id",
 		"--network=pasta",
-		"--cgroups=split",
+		"--cgroup-parent=/system.slice/lab.service/payload",
 		"--memory", "8g",
 		"--pids-limit", "4096",
 		"--ulimit", "nofile=16384:16384",
@@ -193,6 +196,20 @@ func TestRunArgvTail(t *testing.T) {
 		t.Fatalf("argv too short: %q", got)
 	}
 	assertArgv(t, got[len(got)-len(wantTail):], wantTail)
+}
+
+// TestRunArgvNoCgroupParent pins the omission contract: a spec without
+// CgroupParent (unreachable behind a green preflight) renders neither
+// --cgroup-manager nor --cgroup-parent — podman's default parent is then
+// unwritable for the rootless service user, so a miswired spawn fails loudly
+// instead of landing uncapped in an unverified subtree (RunSpec.CgroupParent).
+func TestRunArgvNoCgroupParent(t *testing.T) {
+	got := RunArgv(RunSpec{Bin: "podman", Image: "img"})
+	for _, a := range got {
+		if strings.Contains(a, "cgroup") {
+			t.Fatalf("argv %q carries %q despite empty CgroupParent", got, a)
+		}
+	}
 }
 
 // binds collects the value after every -v flag — the full bind list in

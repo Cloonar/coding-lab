@@ -333,7 +333,7 @@ func TestRefuseContainerSpawn_effectiveImage(t *testing.T) {
 			f := newFixture(t)
 			f.enableContainer(t)
 			f.svc.containerImage = tc.global
-			image, err := f.svc.refuseContainerSpawn("claude-code", store.Repo{ImageRef: tc.imageRef})
+			image, _, err := f.svc.refuseContainerSpawn("claude-code", store.Repo{ImageRef: tc.imageRef})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("refuseContainerSpawn: %v", err)
