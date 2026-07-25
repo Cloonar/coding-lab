@@ -226,12 +226,17 @@
                   subIdRange = null;
                 };
               }; # null opts out of subuid/subgid provisioning
-              containerNoDefaultImageDummy = mkDummy {
+              # Explicit opt-out (issue #230 only changed the *default*; the
+              # ADR-0053 demotion of defaultImage to optional stands, so
+              # setting it to null explicitly must still be a valid
+              # deployment — per-repo image refs cover the rest).
+              containerNullImageDummy = mkDummy {
                 services.lab.container = {
                   enable = true;
                   toolsImages.codex = "example.com/lab/agent-tools:codex";
+                  defaultImage = null;
                 };
-              }; # defaultImage = null is a valid deployment (ADR-0053)
+              };
 
               unitPathNames = d: map lib.getName d.config.systemd.services.lab.path;
               baselineNames = [
@@ -325,16 +330,26 @@
                 && lib.hasPrefix "git.cloonar.com/cloonar/agent-tools:codex-" defaultsDummy.config.services.lab.container.toolsImages.codex
               )
               "nixos-module check: the default toolsImages must carry claude-code + codex refs into git.cloonar.com/cloonar/agent-tools with claude-/codex- tag prefixes (#220)";
-            # defaultImage = null is a valid deployment (per-repo image refs,
-            # ADR-0053): the tools flag renders, the image flag does not.
-            # Reads only the ExecStart string — never forces the dummy's
-            # unfree agent package defaults.
+            # Explicit defaultImage = null (per-repo image refs, ADR-0053):
+            # the tools flag renders, the image flag does not. Reads only the
+            # ExecStart string — never forces the dummy's unfree agent
+            # package defaults.
             assert lib.assertMsg
               (
-                lib.hasInfix "--container-tools-image" containerNoDefaultImageDummy.config.systemd.services.lab.serviceConfig.ExecStart
-                && !lib.hasInfix "--container-image" containerNoDefaultImageDummy.config.systemd.services.lab.serviceConfig.ExecStart
+                lib.hasInfix "--container-tools-image" containerNullImageDummy.config.systemd.services.lab.serviceConfig.ExecStart
+                && !lib.hasInfix "--container-image" containerNullImageDummy.config.systemd.services.lab.serviceConfig.ExecStart
               )
-              "nixos-module check: with defaultImage = null the unit must pass --container-tools-image but no --container-image";
+              "nixos-module check: with explicit defaultImage = null the unit must pass --container-tools-image but no --container-image";
+            # The default (issue #230): a config that never mentions
+            # container.defaultImage now gets the pinned stock scm image
+            # rather than null — re-pin command lives beside the option in
+            # module.nix.
+            assert lib.assertMsg
+              (
+                defaultsDummy.config.services.lab.container.defaultImage
+                == "docker.io/library/buildpack-deps:stable-scm@sha256:07554a82a7a29ce00a048e0b29d18f454b5721b41940d43ee3be1ef59d55b114"
+              )
+              "nixos-module check: services.lab.container.defaultImage must default to the digest-pinned buildpack-deps:stable-scm ref (issue #230)";
             assert lib.assertMsg (defaultsDummy.config.virtualisation.podman.enable && !containerOffDummy.config.virtualisation.podman.enable)
               "nixos-module check: virtualisation.podman must be on by default (#220) and off under container.enable = false";
             pkgs.runCommand "lab-nixos-module-eval"
@@ -418,17 +433,15 @@
                 # Default-on container provisioning (#220): a unit with NO
                 # container.* settings must come up container-ready — the
                 # versions.env-pinned default tools refs (prefix-grepped so
-                # a version bump never touches this check), no
-                # --container-image (defaultImage stays null), cgroup
+                # a version bump never touches this check), the pinned stock
+                # scm --container-image default (issue #230 — no more null,
+                # so a repo-less deployment can still spawn), cgroup
                 # delegation, the preserved runtime dir, and podman + passt
                 # on the unit PATH.
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '--container-tools-image'
                 grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:claude-'
                 grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:codex-'
-                if grep '^ExecStart=' "$unitPath" | grep -qF -- '--container-image'; then
-                  echo "default unit must not pass --container-image (defaultImage defaults to null)" >&2
-                  exit 1
-                fi
+                grep '^ExecStart=' "$unitPath" | grep -qF -- '"--container-image" "docker.io/library/buildpack-deps:stable-scm@sha256:07554a82a7a29ce00a048e0b29d18f454b5721b41940d43ee3be1ef59d55b114"'
                 grep -q '^Delegate=true$' "$unitPath"
                 grep -q '^RuntimeDirectory=lab$' "$unitPath"
                 grep -q "$podman/bin" "$unitPath"
@@ -469,9 +482,17 @@
                 # Container-enabled unit (issue #218): the image flags render
                 # with systemd escaping, the tools flag comma-joined and
                 # name-sorted (claude-code before codex) — pinning the
-                # deterministic provider=ref serialization.
+                # deterministic provider=ref serialization. containerDummy's
+                # explicit defaultImage also proves a repo-level/operator
+                # override still WINS over the module's new pinned default
+                # (issue #230): the debian:stable-slim ref renders and the
+                # buildpack-deps default does not leak in alongside it.
                 grep '^ExecStart=' "$containerUnitPath" | grep -qF -- '"--container-tools-image" "claude-code=example.com/lab/agent-tools:claude,codex=example.com/lab/agent-tools:codex"'
                 grep '^ExecStart=' "$containerUnitPath" | grep -qF -- '"--container-image" "docker.io/library/debian:stable-slim"'
+                if grep '^ExecStart=' "$containerUnitPath" | grep -qF 'buildpack-deps'; then
+                  echo "explicit defaultImage override must replace the module default, not join it (issue #230)" >&2
+                  exit 1
+                fi
 
                 # Host provisioning preflight verifies (module.nix): cgroup
                 # delegation (systemd booleans serialize as `true` — the docs'
