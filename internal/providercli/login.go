@@ -65,9 +65,10 @@ func (l *LoginRunner) Start(ctx context.Context, name, dir string, argv []string
 	if msg := l.cfg.structuralRefusal(r); msg != "" {
 		return fmt.Errorf("%w: %s", provider.ErrLoginUnavailable, msg)
 	}
-	// Restart-safety guard (ADR-0058), re-run per spawn: a cgroup layout
-	// podman dirtied after boot would wedge the next service restart, so it
-	// refuses the login pane loudly instead.
+	// Restart-safety guard (ADR-0059), re-run per spawn: a cgroup layout
+	// dirtied after boot (a re-armed trap under lab.service, or the
+	// lab-payload.service holder losing its delegation) would wedge the next
+	// service restart or void the caps, so it refuses the login pane loudly.
 	if err := r.Cgroups.Verify(); err != nil {
 		return fmt.Errorf("%w: container cgroup layout unsafe: %s", provider.ErrLoginUnavailable, err)
 	}

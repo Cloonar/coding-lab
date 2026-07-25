@@ -30,7 +30,7 @@ const (
 // AFK worktree IS the claim, so ordering this after AddWorktree would strand
 // the issue behind a host misconfiguration). It doubles as the effective dev
 // image resolver (issue #207), returning that image — plus the payload
-// cgroup's --cgroup-parent value (ADR-0058) — on success: the two
+// cgroup's --cgroup-parent value (ADR-0059) — on success: the two
 // concerns share this pre-claim spot because the dev-image refusal, unlike
 // every host/tools check the startup preflight owns, is PER-REPO — only the
 // spawn knows the repo, so a "no image for this repo" verdict cannot be
@@ -65,10 +65,11 @@ func (s *Service) refuseContainerSpawn(providerID string, repo store.Repo) (imag
 	if !r.OK() {
 		return "", "", badRequestf("%s", r.Error())
 	}
-	// Restart-safety guard (ADR-0058), re-run per spawn — the boot verdict
-	// cannot cover it: podman re-arming the cgroup trap AFTER preflight (a
-	// changed heuristic, an upgrade) would otherwise stay invisible until the
-	// next deploy's restart fails. A dirty layout hard-refuses the spawn.
+	// Restart-safety guard (ADR-0059), re-run per spawn — the boot verdict
+	// cannot cover it: something re-arming the cgroup trap under lab.service
+	// AFTER preflight, or the lab-payload.service holder losing its delegation,
+	// would otherwise stay invisible until the next deploy's restart fails (or
+	// the caps silently stop binding). A dirty layout hard-refuses the spawn.
 	if gerr := r.Cgroups.Verify(); gerr != nil {
 		return "", "", badRequestf("container cgroup layout unsafe: %s", gerr)
 	}

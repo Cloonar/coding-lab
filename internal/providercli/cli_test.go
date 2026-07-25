@@ -279,7 +279,7 @@ func TestContainerCLIStructuralErrors(t *testing.T) {
 			wantText: "no dev image configured — set --container-image",
 		},
 		{
-			// The per-spawn restart-safety guard (ADR-0058): a green verdict
+			// The per-spawn restart-safety guard (ADR-0059): a green verdict
 			// whose cgroup layout has since been dirtied is could-not-run.
 			name: "restart-safety guard: dirty cgroup layout",
 			mutate: func(c *ContainerCLI) {

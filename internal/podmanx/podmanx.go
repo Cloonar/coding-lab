@@ -127,12 +127,12 @@ type RunSpec struct {
 	Nofile int    // soft+hard RLIMIT_NOFILE; replaces the host prlimit wrapper
 
 	// CgroupParent is the payload cgroup every container lands under, as a
-	// cgroupfs path (Result.CgroupParent — ADR-0058). Every real spawn sets
-	// it: the preflight refuses spawns before a layout exists. Empty omits
-	// the flags (hand-built specs in tests) — podman's default parent is
-	// then unwritable for the rootless service user, so a miswired spec
-	// fails the spawn loudly instead of silently landing uncapped in some
-	// subtree the preflight never verified.
+	// cgroupfs path (Result.CgroupParent — ADR-0059: the payload/ subtree of
+	// the lab-payload.service holder). Every real spawn sets it: the preflight
+	// refuses spawns before a layout exists. Empty omits the flags (hand-built
+	// specs in tests) — podman's default parent is then unwritable for the
+	// rootless service user, so a miswired spec fails the spawn loudly instead
+	// of silently landing uncapped in some subtree the preflight never verified.
 	CgroupParent string
 
 	// Workdir is the container workdir when non-empty; empty falls back to
@@ -182,23 +182,25 @@ type RunSpec struct {
 //     host.containers.internal to the host's global address, so a host
 //     service bound to a wildcard/LAN address stays reachable — only
 //     loopback-bound services are unreachable.)
-//   - --cgroup-manager=cgroupfs + --cgroup-parent (ADR-0058, replacing the
-//     retired --cgroups=split): place the container under the lab-owned
-//     payload cgroup (RunSpec.CgroupParent, established by the preflight)
-//     instead of podman's rootless default of user.slice. Split put the
-//     payload inside lab's OWN cgroup, which made podman enable controllers
-//     in the very cgroup systemd re-attaches lab into — the restart-EBUSY
-//     trap cgroup.go documents. The payload cgroup is the SAME subtree the
-//     preflight verified delegation on, so the caps below verifiably bind;
-//     the cgroupfs manager is pinned because a system service has no systemd
-//     user session for podman's default manager, and the fallback choice
-//     must not depend on podman's environment sniffing.
+//   - --cgroup-manager=cgroupfs + --cgroup-parent (ADR-0059, replacing the
+//     retired --cgroups=split): place the container under the payload cgroup
+//     of the lab-payload.service holder (RunSpec.CgroupParent, established by
+//     the preflight) instead of podman's rootless default of user.slice. The
+//     delegation lives in the never-restarted holder, NOT in lab's own cgroup:
+//     ADR-0058's attempt to carry it on lab.service (DelegateSubgroup=main)
+//     died because systemd spawns lab's main PID into lab.service's cgroup
+//     root regardless, EBUSYing the next restart — the trap cgroup.go
+//     documents. The payload cgroup is the SAME subtree the preflight verified
+//     delegation on, so the caps below verifiably bind; the cgroupfs manager
+//     is pinned because a system service has no systemd user session for
+//     podman's default manager, and the fallback choice must not depend on
+//     podman's environment sniffing.
 //   - --memory/--pids-limit/--ulimit nofile: per-run blast-radius caps; the
 //     ulimit replaces the host-side prlimit wrapper, which is retired for
 //     container runs (the pane command is now the podman client, and
 //     capping THAT process would be aiming at the wrong target). These caps
-//     only bind because --cgroup-parent lands the payload in lab's delegated
-//     cgroup subtree.
+//     only bind because --cgroup-parent lands the payload in the holder's
+//     delegated cgroup subtree.
 //   - --mount type=image: the read-only agent-tools injection at ToolsDst
 //     (ADR-0051 — the destination is a hard contract, see ToolsDst).
 //   - the -v binds and -w: the mount inventory documented on RunSpec.

@@ -42,23 +42,26 @@ func greenFixture() *pfFixture {
 			"podman": "/usr/bin/podman",
 			"pasta":  "/usr/bin/pasta",
 		},
-		// The ADR-0058 layout: lab attached in the main/ subgroup
-		// (DelegateSubgroup=main), the delegated root process-free, main/
-		// delegating nothing, and the payload cgroup carrying memory+pids
-		// once setupCgroups enables them on the root.
+		// The ADR-0059 layout: lab runs in a plain, UNDELEGATED lab.service
+		// cgroup (its subtree_control empty), while the lab-payload.service
+		// holder carries the delegation — proc-free at its root
+		// (DelegateSubgroup=main keeps the sleep in main/), and its payload
+		// cgroup carries memory+pids once setupCgroups enables them on the
+		// holder root.
 		files: map[string]string{
 			"/etc/subuid":                       "lab:100000:65536\n",
 			"/etc/subgid":                       "lab:100000:65536\n",
 			"/sys/fs/cgroup/cgroup.controllers": "cpuset cpu io memory hugetlb pids\n",
-			"/proc/self/cgroup":                 "0::/system.slice/lab.service/main\n",
-			"/sys/fs/cgroup/system.slice/lab.service/cgroup.procs":                "",
-			"/sys/fs/cgroup/system.slice/lab.service/main/cgroup.subtree_control": "\n",
-			"/sys/fs/cgroup/system.slice/lab.service/payload/cgroup.controllers":  "memory pids\n",
+			"/proc/self/cgroup":                 "0::/system.slice/lab.service\n",
+			"/sys/fs/cgroup/system.slice/lab.service/cgroup.subtree_control":             "\n",
+			"/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.procs":               "",
+			"/sys/fs/cgroup/system.slice/lab-payload.service/payload/cgroup.controllers": "memory pids\n",
 		},
-		// Delegate=yes chowns the delegated unit root to the service user; a
-		// non-delegated host leaves it root-owned (unwritable).
+		// Delegate=yes + User=lab chowns the holder's delegated root to the
+		// service user; a missing or non-delegated holder leaves it root-owned
+		// (unwritable).
 		writable: map[string]bool{
-			"/sys/fs/cgroup/system.slice/lab.service": true,
+			"/sys/fs/cgroup/system.slice/lab-payload.service": true,
 		},
 		runner: &recordingRunner{script: map[string]cmdResult{
 			"podman version --format {{.Client.Version}}": {out: "5.2.3\n"},
@@ -136,17 +139,17 @@ func TestPreflight(t *testing.T) {
 				if r.Error() != "" {
 					t.Errorf("Error() = %q, want empty on OK", r.Error())
 				}
-				// The established ADR-0058 layout rides the Result: the
-				// payload cgroup as --cgroup-parent, the controllers enabled
-				// on the delegated root, the payload cgroup created.
-				if got, want := r.CgroupParent(), "/system.slice/lab.service/payload"; got != want {
+				// The established ADR-0059 layout rides the Result: the payload
+				// cgroup as --cgroup-parent, the controllers enabled on the
+				// holder root, the payload cgroup created under the holder.
+				if got, want := r.CgroupParent(), "/system.slice/lab-payload.service/payload"; got != want {
 					t.Errorf("CgroupParent() = %q, want %q", got, want)
 				}
-				wantWrite := cgWrite{"/sys/fs/cgroup/system.slice/lab.service/cgroup.subtree_control", "+memory +pids"}
+				wantWrite := cgWrite{"/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.subtree_control", "+memory +pids"}
 				if !slices.Contains(f.cgWrites, wantWrite) {
 					t.Errorf("cgroup writes %+v missing the controller enable %+v", f.cgWrites, wantWrite)
 				}
-				if !slices.Contains(f.mkdirs, "/sys/fs/cgroup/system.slice/lab.service/payload") {
+				if !slices.Contains(f.mkdirs, "/sys/fs/cgroup/system.slice/lab-payload.service/payload") {
 					t.Errorf("mkdirs %q missing the payload cgroup", f.mkdirs)
 				}
 			},
@@ -235,70 +238,56 @@ func TestPreflight(t *testing.T) {
 		{
 			// The controllers never arrived in the payload cgroup — the
 			// no-false-green posture retargeted at the subtree containers
-			// actually land in (ADR-0058).
+			// actually land in (ADR-0059).
 			name: "payload cgroup missing memory",
 			mutate: func(f *pfFixture) {
-				f.files["/sys/fs/cgroup/system.slice/lab.service/payload/cgroup.controllers"] = "cpu pids\n"
+				f.files["/sys/fs/cgroup/system.slice/lab-payload.service/payload/cgroup.controllers"] = "cpu pids\n"
 			},
 			wantChecks:  []string{CheckDelegation},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Hint, "Delegate=yes") {
-					t.Errorf("hint %q does not name the systemd fix", r.Failures[0].Hint)
+				if !strings.Contains(r.Failures[0].Hint, "lab-payload.service") {
+					t.Errorf("hint %q does not name the holder unit", r.Failures[0].Hint)
 				}
 			},
 		},
 		{
-			// Delegate=no leaves the unit root root-owned: lab cannot enable
-			// the payload controllers or create the payload cgroup — the caps
-			// would be silently absent (the #205 false green).
-			name: "unit root not delegated (not writable)",
+			// The holder is missing or not delegated (Delegate=no, or
+			// lab-payload.service not running): its root stays root-owned, so
+			// lab cannot enable the payload controllers or create the payload
+			// cgroup — the caps would be silently absent (the #205 false green).
+			name: "holder not delegated (not writable)",
 			mutate: func(f *pfFixture) {
-				delete(f.writable, "/sys/fs/cgroup/system.slice/lab.service")
+				delete(f.writable, "/sys/fs/cgroup/system.slice/lab-payload.service")
 			},
-			wantChecks:  []string{CheckCgroupLayout},
+			wantChecks:  []string{CheckHolder},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Detail, "not writable") {
-					t.Errorf("detail %q does not explain the delegation failure", r.Failures[0].Detail)
+				if !strings.Contains(r.Failures[0].Detail, "lab-payload.service") {
+					t.Errorf("detail %q does not name the holder unit", r.Failures[0].Detail)
 				}
-				if !strings.Contains(r.Failures[0].Hint, "Delegate=yes") {
-					t.Errorf("hint %q does not name the systemd fix", r.Failures[0].Hint)
-				}
-			},
-		},
-		{
-			// Pre-ADR-0058 layout: lab attached at the unit cgroup root
-			// itself (no DelegateSubgroup). Refused — the root could never
-			// delegate the payload controllers without re-arming the
-			// restart-EBUSY trap.
-			name: "lab at the unit cgroup root (no DelegateSubgroup)",
-			mutate: func(f *pfFixture) {
-				f.files["/proc/self/cgroup"] = "0::/system.slice/lab.service\n"
-			},
-			wantChecks:  []string{CheckCgroupLayout},
-			wantVersion: "5.2.3",
-			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Hint, "DelegateSubgroup=main") {
-					t.Errorf("hint %q does not name DelegateSubgroup", r.Failures[0].Hint)
+				if !strings.Contains(r.Failures[0].Hint, "lab-payload.service") {
+					t.Errorf("hint %q does not name the holder unit", r.Failures[0].Hint)
 				}
 			},
 		},
 		{
-			// A tmux server surviving from a pre-ADR-0058 deploy still sits
-			// at the delegated root: setupCgroups adopts it into lab's own
-			// cgroup (the root must be process-free before controllers can be
-			// enabled on it), and the fixture's kernel-faithful pid-move
-			// leaves the root empty for the guard.
-			name: "stray root pids adopted into lab's cgroup",
+			// A process still sitting at the holder root (systemd < 254
+			// ignoring DelegateSubgroup, or a start-up race): setupCgroups
+			// adopts it into the holder's main/ subgroup so the root is
+			// proc-free before its controllers are enabled.
+			name: "stray holder-root pids adopted into main/",
 			mutate: func(f *pfFixture) {
-				f.files["/sys/fs/cgroup/system.slice/lab.service/cgroup.procs"] = "4242\n"
+				f.files["/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.procs"] = "4242\n"
 			},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				want := cgWrite{"/sys/fs/cgroup/system.slice/lab.service/main/cgroup.procs", "4242"}
+				want := cgWrite{"/sys/fs/cgroup/system.slice/lab-payload.service/main/cgroup.procs", "4242"}
 				if !slices.Contains(f.cgWrites, want) {
 					t.Errorf("cgroup writes %+v missing the stray adoption %+v", f.cgWrites, want)
+				}
+				if !slices.Contains(f.mkdirs, "/sys/fs/cgroup/system.slice/lab-payload.service/main") {
+					t.Errorf("mkdirs %q missing the holder main/ subgroup", f.mkdirs)
 				}
 			},
 		},
@@ -306,7 +295,7 @@ func TestPreflight(t *testing.T) {
 			name: "enabling the payload controllers fails",
 			mutate: func(f *pfFixture) {
 				f.writeErr = map[string]error{
-					"/sys/fs/cgroup/system.slice/lab.service/cgroup.subtree_control": errors.New("device or resource busy"),
+					"/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.subtree_control": errors.New("device or resource busy"),
 				}
 			},
 			wantChecks:  []string{CheckDelegation},
@@ -318,12 +307,13 @@ func TestPreflight(t *testing.T) {
 			},
 		},
 		{
-			// The restart-safety guard at boot: lab's own cgroup delegating
-			// controllers is exactly the state that wedged the 2026-07-25
-			// restart — refuse loudly instead of arming the trap again.
+			// The restart-safety guard at boot: lab's OWN cgroup delegating
+			// controllers is exactly the state that wedged the 2026-07-26
+			// restart — refuse loudly instead of arming the trap again. Named
+			// in issue #237's acceptance criteria.
 			name: "restart guard: lab's own cgroup delegates controllers",
 			mutate: func(f *pfFixture) {
-				f.files["/sys/fs/cgroup/system.slice/lab.service/main/cgroup.subtree_control"] = "memory pids\n"
+				f.files["/sys/fs/cgroup/system.slice/lab.service/cgroup.subtree_control"] = "memory\n"
 			},
 			wantChecks:  []string{CheckRestartSafety},
 			wantVersion: "5.2.3",
@@ -333,25 +323,6 @@ func TestPreflight(t *testing.T) {
 				}
 				if r.Cgroups != nil {
 					t.Errorf("Cgroups = %+v, want nil on a guard failure", r.Cgroups)
-				}
-			},
-		},
-		{
-			// A stray root pid whose adoption did not stick (the write
-			// failed) must fail the guard — the root holding processes is the
-			// other half of the restart trap.
-			name: "restart guard: unadoptable stray at the delegated root",
-			mutate: func(f *pfFixture) {
-				f.files["/sys/fs/cgroup/system.slice/lab.service/cgroup.procs"] = "4242\n"
-				f.writeErr = map[string]error{
-					"/sys/fs/cgroup/system.slice/lab.service/main/cgroup.procs": errors.New("permission denied"),
-				}
-			},
-			wantChecks:  []string{CheckRestartSafety},
-			wantVersion: "5.2.3",
-			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Detail, "4242") {
-					t.Errorf("detail %q does not name the stray pid", r.Failures[0].Detail)
 				}
 			},
 		},
@@ -496,4 +467,71 @@ func TestPreflight(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCgroupsVerify drives the per-spawn restart-safety guard (ADR-0059)
+// directly over an injected readFile: the two invariants it re-checks before
+// every spawn, and the vacuous forms hand-built Results rely on. The
+// re-armed-trap case is also reached through Preflight above; the
+// holder-lost-delegation case is Verify-only (setupCgroups would have failed
+// first at boot — it only appears when the holder is restarted AFTER a green
+// preflight, which is exactly what the per-spawn guard exists to catch).
+func TestCgroupsVerify(t *testing.T) {
+	const labDir = "/sys/fs/cgroup/system.slice/lab.service"
+	const payloadDir = "/sys/fs/cgroup/system.slice/lab-payload.service/payload"
+	read := func(m map[string]string) func(string) ([]byte, error) {
+		return func(p string) ([]byte, error) {
+			if s, ok := m[p]; ok {
+				return []byte(s), nil
+			}
+			return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+		}
+	}
+	cg := func(m map[string]string) *Cgroups {
+		return &Cgroups{Parent: payloadDir, LabDir: labDir, PayloadDir: payloadDir, readFile: read(m)}
+	}
+
+	t.Run("green layout verifies OK", func(t *testing.T) {
+		err := cg(map[string]string{
+			labDir + "/cgroup.subtree_control": "\n",
+			payloadDir + "/cgroup.controllers": "memory pids\n",
+		}).Verify()
+		if err != nil {
+			t.Errorf("Verify() = %v, want nil on the clean layout", err)
+		}
+	})
+
+	t.Run("re-armed trap: lab's own subtree_control non-empty", func(t *testing.T) {
+		err := cg(map[string]string{
+			labDir + "/cgroup.subtree_control": "memory pids\n",
+			payloadDir + "/cgroup.controllers": "memory pids\n",
+		}).Verify()
+		if err == nil || !strings.Contains(err.Error(), labDir) {
+			t.Errorf("Verify() = %v, want an error naming %s", err, labDir)
+		}
+	})
+
+	t.Run("holder lost delegation: payload controllers missing pids", func(t *testing.T) {
+		err := cg(map[string]string{
+			labDir + "/cgroup.subtree_control": "\n",
+			payloadDir + "/cgroup.controllers": "memory\n",
+		}).Verify()
+		if err == nil || !strings.Contains(err.Error(), "lab-payload.service") {
+			t.Errorf("Verify() = %v, want an error naming lab-payload.service", err)
+		}
+	})
+
+	// Vacuous forms: a nil receiver and an empty LabDir (hand-built Results,
+	// degenerate wiring) verify OK with no probe at all.
+	t.Run("nil receiver verifies OK", func(t *testing.T) {
+		var c *Cgroups
+		if err := c.Verify(); err != nil {
+			t.Errorf("nil Verify() = %v, want nil", err)
+		}
+	})
+	t.Run("empty LabDir verifies OK", func(t *testing.T) {
+		if err := (&Cgroups{Parent: payloadDir}).Verify(); err != nil {
+			t.Errorf("empty-LabDir Verify() = %v, want nil", err)
+		}
+	})
 }

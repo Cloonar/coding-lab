@@ -23,8 +23,8 @@ const (
 	CheckSubuid        = "subuid"                // no usable /etc/subuid entry for the service user
 	CheckSubgid        = "subgid"                // no usable /etc/subgid entry for the service user
 	CheckCgroup2       = "cgroup2"               // unified hierarchy not mounted / not in use
-	CheckCgroupLayout  = "cgroup-layout"         // lab not in a delegated subgroup (ADR-0058)
-	CheckDelegation    = "cgroup-delegation"     // memory/pids not delegated into the payload cgroup
+	CheckHolder        = "cgroup-holder"         // lab-payload.service holder cgroup missing or not delegated (ADR-0059)
+	CheckDelegation    = "cgroup-delegation"     // memory/pids not delegated into the payload cgroup (under the holder)
 	CheckRestartSafety = "cgroup-restart-safety" // the layout would wedge the next service restart
 	CheckToolsImage    = "tools-image"           // no agent-tools images configured
 	CheckToolsPull     = "tools-image-pull"      // a configured agent-tools ref does not resolve
@@ -47,17 +47,18 @@ type Deps struct {
 	ReadFile func(string) ([]byte, error)
 	Run      CmdRunner
 	// Writable reports whether the service user can write path — the probe
-	// behind the cgroup-layout check. systemd's Delegate=yes chowns the
-	// delegated cgroup directory to the unit's user so it can create the
-	// child cgroups a container needs; a non-delegated cgroup stays
-	// root-owned. Read access (ReadFile of cgroup.controllers) cannot tell
-	// the two apart — both are world-readable — so delegation is detected by
-	// write access to the cgroup directory itself.
+	// behind the cgroup-holder check. systemd's Delegate=yes + User=lab chowns
+	// the holder's delegated cgroup directory to the unit's user so it can
+	// create the child cgroups a container needs; a non-delegated (or missing)
+	// cgroup stays root-owned. Read access (ReadFile of cgroup.controllers)
+	// cannot tell the two apart — both are world-readable — so delegation is
+	// detected by write access to the cgroup directory itself.
 	Writable func(string) bool
-	// WriteFile and Mkdir are setupCgroups' write seams (ADR-0058): adopting
-	// stray root pids, enabling the payload controllers, creating the
-	// payload cgroup. Mkdir must be MkdirAll-shaped (an existing dir is
-	// success — the payload cgroup survives restarts by design).
+	// WriteFile and Mkdir are setupCgroups' write seams (ADR-0059): adopting
+	// stray holder-root pids into main/, enabling the payload controllers on
+	// the holder root, creating the payload cgroup. Mkdir must be
+	// MkdirAll-shaped (an existing dir is success — the holder's cgroups
+	// survive restarts by design).
 	WriteFile func(name string, data []byte, perm os.FileMode) error
 	Mkdir     func(name string, perm os.FileMode) error
 	// Username and UID identify the service user for subuid/subgid
@@ -109,7 +110,7 @@ type Result struct {
 	Failures []Failure
 	Warnings []string
 	// Cgroups is the container cgroup layout the preflight established
-	// (ADR-0058) — the spawn sites read RunSpec.CgroupParent from it and run
+	// (ADR-0059) — the spawn sites read RunSpec.CgroupParent from it and run
 	// its Verify guard per spawn. Nil exactly when the cgroup checks failed
 	// (Failures then says why) or on a hand-built Result.
 	Cgroups *Cgroups
@@ -227,14 +228,16 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 		}
 	}
 
-	// 4. cgroup v2 with the ADR-0058 layout established: lab in a delegated
-	// SUBGROUP (systemd Delegate=yes + DelegateSubgroup=main), a payload
-	// sibling cgroup created next to it with memory+pids actually delegated
-	// into it (the pane argv pins --cgroup-parent at that payload cgroup, so
-	// this is exactly where --memory/--pids-limit take effect — verifying any
-	// other subtree would be a false green, #205's original lesson), and the
-	// restart-safety guard clean. setupCgroups (cgroup.go) does the
-	// establishing and returns the first structural Failure; the guard runs
+	// 4. cgroup v2 with the ADR-0059 layout established: the lab-payload.service
+	// holder delegated to the lab user (Delegate=yes + User=lab), memory+pids
+	// enabled on its root, and a payload/ cgroup under it actually carrying
+	// those controllers (the pane argv pins --cgroup-parent at that payload
+	// cgroup, so this is exactly where --memory/--pids-limit take effect —
+	// verifying any other subtree would be a false green, #205's original
+	// lesson), plus the restart-safety guard clean. The /proc/self/cgroup path
+	// is still read — it feeds LabDir, the plain lab.service cgroup whose
+	// subtree_control the guard must find empty. setupCgroups (cgroup.go) does
+	// the establishing and returns the first structural Failure; the guard runs
 	// again before every spawn, this pass just surfaces a dirty host at boot.
 	if _, err := d.ReadFile(cgroupFSRoot + "/cgroup.controllers"); err != nil {
 		fail(CheckCgroup2, "cgroup v2 (unified hierarchy) not mounted", "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
@@ -245,7 +248,7 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 	} else if cg, failure := setupCgroups(path, d); failure != nil {
 		r.Failures = append(r.Failures, *failure)
 	} else if err := cg.Verify(); err != nil {
-		fail(CheckRestartSafety, err.Error(), "restart the lab service — the lab-cgroup-hygiene unit clears the stale layout before each start (ADR-0058)")
+		fail(CheckRestartSafety, err.Error(), "restart the lab service — the lab-cgroup-hygiene unit clears any stale delegation under lab.service before each start (ADR-0059)")
 	} else {
 		r.Cgroups = cg
 	}
