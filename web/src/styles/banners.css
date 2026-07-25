@@ -1,0 +1,101 @@
+/* Banners ------------------------------------------------------------------ */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-control);
+  margin-bottom: 0.9rem;
+}
+
+.banner.error {
+  background: var(--err-bg);
+  border: 1px solid var(--err-border);
+  color: var(--err-text);
+}
+
+.banner.success {
+  background: var(--run-bg);
+  border: 1px solid color-mix(in srgb, var(--run-text) 30%, var(--run-bg));
+  color: var(--run-text);
+}
+
+/* Informational, non-error banner (issue #149) — e.g. a reply's `notice`
+   body. Neutral/amber, distinct from both the error and success palettes;
+   shares the "in progress" tone already used for .chip.status-cloning. */
+.banner.notice {
+  background: var(--banner-bg);
+  border: 1px solid color-mix(in srgb, var(--banner-text) 30%, var(--banner-bg));
+  color: var(--banner-text);
+}
+
+.banner-text {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.banner-dismiss {
+  min-height: auto;
+  padding: 0 0.35rem;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 1.1rem;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+
+.banner-dismiss:hover {
+  background: none;
+  opacity: 0.7;
+}
+
+/* Danger zone ----------------------------------------------------------------- */
+
+.danger-zone {
+  border-color: var(--danger-border);
+}
+
+.danger-zone h2 {
+  color: var(--danger);
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+button.danger:hover {
+  background: var(--err-bg);
+}
+
+/* Empty state --------------------------------------------------------------- */
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 2.25rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-card);
+}
+
+/* Compact action icon/label swap (shared contract, issue #15) ---------------- */
+/* A control renders both an <Icon class="action-icon"> and a <span            */
+/* class="action-label">; base (mobile) shows the icon, >=640px shows the text. */
+/* The accessible name lives on the enclosing button/link, so it is stable      */
+/* across both. (The chat header hides .action-label to stay icon-only there.)  */
+.action-label {
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .action-icon {
+    display: none;
+  }
+
+  .action-label {
+    display: inline;
+  }
+}

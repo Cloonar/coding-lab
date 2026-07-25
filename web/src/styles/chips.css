@@ -1,0 +1,100 @@
+/* Chips ---------------------------------------------------------------------- */
+
+.chip-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.55rem;
+}
+
+.chip {
+  display: inline-block;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border-radius: var(--radius-pill);
+  padding: 0.12rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chip.incogni {
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  color: var(--link);
+}
+
+.chip.in-use {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.chip.status-cloning {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+
+.chip.status-error {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+/* Clone progress -------------------------------------------------------------- */
+
+.clone-progress {
+  margin-top: 0.7rem;
+}
+
+.progress-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.3rem;
+}
+
+.progress-track {
+  height: 6px;
+  background: var(--idle-bg);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width 0.25s ease;
+}
+
+.progress-fill.indeterminate {
+  width: 30%;
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  from {
+    margin-left: -30%;
+  }
+  to {
+    margin-left: 100%;
+  }
+}
+
+.progress-line {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.clone-error {
+  margin: 0.7rem 0 0;
+  align-items: center;
+}
+
+.clone-error button {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}

@@ -1,0 +1,79 @@
+/* Parked ----------------------------------------------------------------------- */
+
+details.parked summary {
+  color: var(--text);
+}
+
+.parked-count {
+  margin-left: 0.25rem;
+  font-weight: 650;
+}
+
+.parked-list {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+
+.parked-entry {
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.parked-entry:last-child {
+  border-bottom: none;
+}
+
+.parked-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.parked-branch {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.parked-path {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.parked-discard {
+  min-height: 36px;
+  padding: 0 0.75rem;
+}
+
+.discard-confirm {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-control);
+  background: var(--err-bg);
+}
+
+.discard-warning {
+  margin: 0 0 0.75rem;
+  color: var(--err-text);
+}
+
+/* Claude logout confirm gate (issue #46): same danger framing as discard. */
+.logout-confirm {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-control);
+  background: var(--err-bg);
+}
+
+.logout-warning {
+  margin: 0 0 0.75rem;
+  color: var(--err-text);
+}
+
+.logout-runs {
+  font-weight: 600;
+}

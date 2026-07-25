@@ -1,0 +1,116 @@
+/* lab design language — ported from v0's index.html (store-http-ui port spec).
+   Phone-first: 760px single column, 44px touch targets, 16px inputs,
+   OS-driven dark mode (no toggle, no persisted theme state). */
+
+:root {
+  color-scheme: light dark;
+
+  /* Warm reskin (issue #41 phase 2a) — bone/ivory light, terracotta accent.
+     Every var below keeps its original name; components never changed. */
+  --bg: #faf9f5;
+  --card: #ffffff;
+  --text: #1f1e1d;
+  --muted: #6b675c;
+  --border: #e8e4da;
+  --hover: #f1efe8;
+  --accent: #d97757;
+  /* Warm coffee-brown, not white: white-on-#d97757 is 3.12:1 and fails WCAG
+     AA (4.5:1) for text. This dark warm brown clears it at 5.36:1 instead. */
+  --accent-text: #2a1a12;
+  /* Terracotta as TEXT (links, active nav, tinted chips) needs a darker cut:
+     raw #d97757 on bone is only 2.96:1. Burnt terracotta clears AA at 4.83:1. */
+  --link: #b0532f;
+  --danger: #c0362c;
+  --danger-border: #e6b8b3;
+  --ok: #1a9c5b;
+  --run-bg: #e7f2e1;
+  --run-text: #1f6b3d;
+  --idle-bg: #ece7db;
+  --idle-text: #5f594c;
+  --chip-bg: #eeeae0;
+  --chip-text: #524c3f;
+  --banner-bg: #faf1d8;
+  --banner-border: #e9cd8e;
+  --banner-text: #5b4b16;
+  --err-bg: #fbeae5;
+  --err-border: #eec2b8;
+  --err-text: #9c3324;
+  --shadow: 0 1px 2px rgba(40, 32, 22, 0.06), 0 1px 3px rgba(40, 32, 22, 0.04);
+
+  --font-serif: 'Source Serif 4 Variable', Georgia, 'Times New Roman', serif;
+
+  --radius-card: 14px;
+  --radius-control: 10px;
+  --radius-pill: 999px;
+
+  /* Spacing scale — 4px base grid, theme-agnostic (never duplicated in the
+     dark block). Phone-first; the >=640px block steps semantic consumers up
+     one rung for a roomier desktop. */
+  --space-1: 0.25rem; /*  4px */
+  --space-2: 0.5rem; /*  8px */
+  --space-3: 0.75rem; /* 12px */
+  --space-4: 1rem; /* 16px */
+  --space-5: 1.5rem; /* 24px */
+  --space-6: 2rem; /* 32px */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Warm charcoal, not blue-black — accent stays the same terracotta as
+       light (accent-text is theme-agnostic too: not redeclared here). */
+    --bg: #262624;
+    --card: #30302e;
+    --text: #ecebe6;
+    --muted: #a5a196;
+    --border: #3e3c37;
+    --hover: #373631;
+    --accent: #d97757;
+    /* Lighter cut for dark: #d97757 is 4.24:1 on cards; this clears 5.3:1. */
+    --link: #e08d70;
+    --danger: #f28577;
+    --danger-border: #5c2b27;
+    --ok: #3ecf8e;
+    --run-bg: #17301d;
+    --run-text: #6cd99a;
+    --idle-bg: #35332e;
+    --idle-text: #a8a398;
+    --chip-bg: #3a3833;
+    --chip-text: #d6d2c7;
+    --banner-bg: #2e2712;
+    --banner-border: #5c4f20;
+    --banner-text: #e6d9a6;
+    --err-bg: #2e1613;
+    --err-border: #5c2b27;
+    --err-text: #f3aca2;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    15px/1.5 system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+code,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

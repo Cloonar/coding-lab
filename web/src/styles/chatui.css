@@ -1,0 +1,410 @@
+/* --- Chat UI redesign (issue #35) --------------------------------------- */
+/* Appended after the base chat block so equal-specificity overrides (e.g. the
+   in-menu OpenAffordance label) win on source order. Phone-first: the base
+   rules above are the <640px view; the min-width:640px block at the end
+   restores the desktop header verbatim. */
+
+/* §1 — the convo chip reduced to a saturated dot beside the title (<640px).
+   Reuses the convo palette tokens so light/dark track the full chip. */
+.chat-state-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.chat-state-dot.working {
+  background: var(--banner-text);
+}
+.chat-state-dot.needs-input,
+.chat-state-dot.question {
+  background: var(--run-text);
+}
+/* The secret-exposure warning dot/chip (issue #108) — not a conversational
+   state, so it skips the `.convo` namespace and uses the err palette (same
+   destructive tokens as `.chip.status-error`) rather than the convo one. */
+.chat-state-dot.exposed {
+  background: var(--err-text);
+}
+.chip.exposed {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+/* The full text chip and the inline desktop cluster are the >=640px view. */
+.chat-state-chip {
+  display: none;
+}
+.chat-desktop-actions {
+  display: none;
+}
+/* The spawn-time model chip (issue #68) — same >=640px-only display gate as
+   the state chip beside it; its string rides the ••• menu's info row on
+   mobile instead. Muted so it reads as metadata, not an interactive control. */
+.chat-model-chip {
+  display: none;
+  color: var(--muted);
+  font-weight: 500;
+}
+/* The "N behind" chip (issue #149) — unlike the model chip above, this rides
+   at ALL widths (a countless dot would be useless), so it skips the
+   >=640px-only display gate entirely; `.chip` already keeps it
+   display:inline-block. Same muted metadata look as the model chip. */
+.chat-behind-chip {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* §1 — the `•••` overflow menu: an anchored dropdown mirroring TopBar's
+   nav-menu/nav-scrim pattern (outside-tap + Escape + tap-to-close). */
+.chat-menu {
+  position: relative;
+  flex: none;
+}
+.chat-menu-toggle {
+  color: var(--text); /* size/hit-area from .icon-btn */
+}
+.chat-menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 2; /* above the scrim, within the header's stacking context */
+  min-width: 12rem;
+  max-width: min(16rem, calc(100vw - 1rem));
+  display: flex;
+  flex-direction: column;
+  padding: 0.4rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.chat-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  font-weight: 550;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.chat-menu-item:hover {
+  background: var(--hover);
+}
+.chat-menu-item.danger {
+  color: var(--danger);
+}
+.chat-menu-item.accent {
+  color: var(--accent);
+}
+.chat-menu-icon {
+  flex: none;
+  color: var(--muted);
+}
+.chat-menu-item.danger .chat-menu-icon {
+  color: var(--danger);
+}
+.chat-menu-item.accent .chat-menu-icon {
+  color: var(--accent);
+}
+/* Non-interactive model info row (issue #68), pinned above the menu items: a
+   plain div (no hover affordance — it's not clickable), muted and set off by
+   its own bottom border/margin so it reads as metadata, not an action. */
+.chat-menu-info {
+  padding: 0.4rem 0.6rem 0.55rem;
+  margin-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+/* The OpenAffordance in a menu row reveals BOTH icon and label (the header
+   context keeps it icon-only). This must appear after
+   `.chat-header .action-label { display:none }` to win the specificity tie. */
+.chat-menu-open {
+  padding: 0;
+}
+.chat-menu-open .card-link,
+.chat-menu-open .attach-copy {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.4rem 0.6rem;
+  color: var(--text);
+  border-radius: var(--radius-control);
+}
+.chat-menu-open .card-link:hover,
+.chat-menu-open .attach-copy:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+.chat-menu-open .action-icon {
+  display: inline-flex;
+  color: var(--muted);
+}
+.chat-menu-open .action-label {
+  display: inline;
+}
+/* Scrim behind the dropdown — a dedicated class (not .nav-scrim, which sits at
+   z:5 and would paint over the z:2 header and its own panel). */
+.chat-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* The error banner outranks the header so that when the mobile overlay header
+   hides (translateY(-100%)) it slides BEHIND the (opaque) banner rather than
+   parking over it — the banner is the first child of .chat-column (issue #145
+   moved the column chain there), above .chat-body. */
+.chat-column > .banner {
+  position: relative;
+  z-index: 3;
+}
+
+/* §2 — quick-return header overlay (<640px only). The header leaves the flow so
+   translateY can hide it with NO reflow; the stream reserves its band with a
+   padding-top that scrolls away, so hiding the header reclaims reading space. */
+@media (max-width: 639.98px) {
+  .chat-header {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    transition: transform 0.22s ease;
+    will-change: transform;
+  }
+  .chat-header--hidden {
+    transform: translateY(-100%);
+  }
+  .chat-stream {
+    padding-top: calc(var(--chat-header-h, 48px) + var(--space-3));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-header {
+    transition: none; /* snap, don't slide */
+  }
+}
+
+/* §3 — needs-input stream status line: inherits .chat-lifecycle (centered,
+   muted, small); a touch of separation from the last message. */
+.chat-needs-input {
+  margin-top: 0.25rem;
+}
+
+/* §4 — jump-to-latest pill. Absolute to the sticky .chat-composer so it tracks
+   the field top as it auto-grows and never overlaps the input. Fully rounded,
+   soft shadow, leading chevron + short label. */
+.chat-jump {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 12px);
+  transform: translate(-50%, 0);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 36px;
+  padding: 0 0.9rem 0 0.7rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  box-shadow:
+    0 4px 12px rgba(40, 32, 22, 0.14),
+    var(--shadow);
+  cursor: pointer;
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+.chat-jump-icon {
+  flex: none;
+}
+.chat-jump:hover {
+  background: var(--hover);
+}
+/* Hidden = faded + slid down + click-through, but kept mounted for the exit. */
+.chat-jump.hidden {
+  opacity: 0;
+  transform: translate(-50%, 8px);
+  pointer-events: none;
+}
+/* Emphasis: the content below is a needs-you signal → accent tint. */
+.chat-jump.emphasis {
+  color: var(--accent-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.chat-jump.emphasis:hover {
+  filter: brightness(1.05);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-jump {
+    transition: none;
+  }
+}
+
+/* Slash-command autocomplete (issue #51 decision 5): anchored to the sticky
+   .chat-composer like the jump pill, floating over the stream just above the
+   field. Rows: /name + arg hint (dim mono) + source badge, description below. */
+.chat-cmd-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 3;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 0.3rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.chat-cmd-row {
+  flex: none; /* a taller-than-40vh list must scroll — shrunk rows paint over each other */
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  column-gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  cursor: pointer;
+}
+.chat-cmd-row:hover,
+.chat-cmd-row.active {
+  background: var(--hover);
+}
+.chat-cmd-name {
+  font-weight: 600;
+}
+/* Hint and description clamp to one line (full text rides the row's title
+   tooltip): rows stay uniform and the popover stays scannable. min-width: 0
+   lets the grid tracks shrink below the nowrap text's min-content width. */
+.chat-cmd-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-cmd-source {
+  justify-self: end;
+  font-size: 0.7rem;
+  padding: 0.05rem 0.45rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+.chat-cmd-desc {
+  grid-column: 1 / -1;
+  font-size: 0.85rem;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* §5 — the merged composer field: one rounded-rect holding a borderless
+   textarea and the accent circular send pinned bottom-right inside it. Scoped
+   to .chat-composer-row so the DialogPanel's own free-standing .chat-input and
+   .chat-send (which live OUTSIDE this container) keep their bordered styling. */
+.chat-composer-row {
+  position: relative; /* containing block for the pinned button */
+  display: block; /* was a flex row; now the field container */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card); /* ~14px, not a full pill (grows multiline) */
+  background: var(--card);
+}
+.chat-composer-row:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.chat-composer-row .chat-input {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-card);
+  padding: 0.6rem 3rem 0.6rem 0.75rem; /* right pad (48px) clears the 36px button */
+}
+.chat-composer-row .chat-input:focus-visible {
+  outline: none; /* the focus ring lives on the container */
+}
+/* Composer Send button: a 36px accent circle pinned bottom-right, with a 44px
+   hit area via ::after. Stays pinned as the field auto-grows. The row no longer
+   hosts an interrupt (ADR-0029: Send never morphs; Interrupt lives in the
+   header). */
+.chat-composer-row .chat-send.icon-btn {
+  position: absolute;
+  right: 6px;
+  bottom: 4px;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: 50%;
+}
+.chat-composer-row .chat-send.icon-btn::after {
+  content: '';
+  position: absolute;
+  inset: -4px; /* 36 + 2*4 = 44px touch target */
+}
+
+/* >=640px: restore the original wrapped inline header; hide all mobile bits.
+   The <640px §2 overlay query is inert here, so the header stays sticky and the
+   headerVisible toggle is a harmless no-op (one JS path, CSS gates the view). */
+@media (min-width: 640px) {
+  .chat-header {
+    flex-wrap: wrap;
+  }
+  .chat-titlebar {
+    flex: 0 1 auto;
+    max-width: 40%;
+  }
+  .chat-header .spacer {
+    flex: 1; /* the sole grower again — pushes the inline controls right */
+  }
+  .chat-state-dot {
+    display: none;
+  }
+  .chat-state-chip {
+    display: inline-block;
+  }
+  /* issue #68 — flips on beside the state chip at desktop width. */
+  .chat-model-chip {
+    display: inline-block;
+  }
+  .chat-desktop-actions {
+    display: contents; /* transparent wrapper → identical flex layout to before */
+  }
+  .chat-menu,
+  .chat-menu-scrim {
+    display: none;
+  }
+}

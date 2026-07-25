@@ -1,0 +1,36 @@
+/* Type --------------------------------------------------------------------- */
+
+/* Vendored variable fonts (OFL), web/public/fonts/ — one file per style spans
+   the whole 200-900 weight axis (woff2-variations), so headings can use any
+   weight in range without shipping per-weight static cuts. */
+@font-face {
+  font-family: 'Source Serif 4 Variable';
+  src: url('/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Source Serif 4 Variable';
+  src: url('/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* Headings + the brand wordmark read in the serif (Claude-web feel). UI
+   chrome and code keep the system sans/mono stacks set above — untouched.
+   :not(.md-h) excludes chat markdown headings (issue #13): assistant/user
+   prose stays system sans here, Phase 3 owns any chat typography beyond
+   that. */
+h1:not(.md-h),
+h2:not(.md-h),
+h3:not(.md-h) {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand {
+  font-family: var(--font-serif);
+}

@@ -1,0 +1,152 @@
+/* Settings IA (issue #198) ---------------------------------------------------
+   The SettingsLayout chrome: mobile category index rows, the mobile back
+   header, and the desktop (>=1024px, the shell breakpoint) master-detail
+   split. Tokens only — dark mode follows automatically. */
+
+/* The index: one bordered card whose rows separate with hairlines (the app's
+   card vocabulary, without per-row card chrome). overflow clips row hover
+   fills to the rounded corners. */
+.settings-index {
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* Full-width tappable row: icon, title + one-line description, chevron.
+   56px min-height clears the 44px touch floor with room for two text lines. */
+.settings-index-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 56px;
+  padding: 0.6rem 0.9rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.settings-index-row + .settings-index-row {
+  border-top: 1px solid var(--border);
+}
+
+.settings-index-row:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+
+/* Icons carry no color prop — they inherit currentColor, so these rules (and
+   the danger modifier below) are the single source of icon tint. */
+.settings-index-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.settings-index-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.settings-index-title {
+  font-weight: 550;
+}
+
+.settings-index-desc {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-index-chevron {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Danger category (pinned last by convention): icon + title in danger red;
+   the description stays muted. */
+.settings-index-row.danger .settings-index-icon,
+.settings-index-row.danger .settings-index-title {
+  color: var(--danger);
+}
+
+/* Mobile back header: chevron link back to the index + the section title,
+   spaced like .section-head. */
+.settings-back-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: var(--space-3);
+}
+
+.settings-back-head h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-back-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  margin-left: -0.6rem; /* optical: the chevron aligns with the content edge */
+  color: var(--muted);
+  border-radius: var(--radius-control);
+}
+
+.settings-back-link:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+
+/* Desktop master-detail: slim inline category nav beside the section. */
+.settings-split {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+/* Deliberately lighter than the SideNav rail links: plain small text, no
+   pill/hover fills — the active entry is accent color + weight only. */
+.settings-split-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  position: sticky;
+  top: var(--space-4);
+}
+
+.settings-split-link {
+  color: var(--muted);
+  font-size: 0.9rem;
+  padding: 0.15rem 0;
+  text-decoration: none;
+}
+
+.settings-split-link:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.settings-split-link.active {
+  color: var(--link);
+  font-weight: 650;
+}
+
+/* Danger nav entry: --danger whether active or not (it follows .active in the
+   cascade, so it also wins the color there; .active still adds the weight). */
+.settings-split-link.danger {
+  color: var(--danger);
+}
+
+.settings-split-body {
+  min-width: 0;
+}

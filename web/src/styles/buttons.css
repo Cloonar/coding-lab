@@ -1,0 +1,83 @@
+/* Buttons — 44px touch targets --------------------------------------------- */
+
+button {
+  font: inherit;
+  min-height: 44px;
+  padding: 0 1rem;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--hover);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+button.primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+button.wide {
+  width: 100%;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Shared icon-only control — hamburger, back, stop, send, dismiss. Colored via
+   currentColor so callers set color (nav/topbar inherit --text; .danger flips
+   to --danger). Class beats the `button` element selector, so on a <button> it
+   overrides the card bg/border/padding. 44px touch target. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0.5rem;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.icon-btn:hover {
+  background: var(--hover);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.icon-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.icon-btn.danger {
+  color: var(--danger);
+}
+
+.icon-btn.accent {
+  color: var(--accent);
+}

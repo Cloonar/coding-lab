@@ -1,0 +1,59 @@
+/* Runs ------------------------------------------------------------------------- */
+
+.runs-filter {
+  margin-bottom: 0;
+  min-width: 180px;
+}
+
+.run-times {
+  font-size: 0.82rem;
+}
+
+.run-failure {
+  margin: 0.55rem 0 0;
+  font-size: 0.85rem;
+  color: var(--err-text);
+  overflow-wrap: anywhere;
+}
+
+/* The repo-secret exposure warning line (issue #108) — same treatment as
+   .run-failure (err-text, same margin/size) plus the "Exposed" chip and the
+   affected run's link inline. */
+.secret-exposed {
+  margin: 0.55rem 0 0;
+  font-size: 0.85rem;
+  color: var(--err-text);
+  overflow-wrap: anywhere;
+}
+.secret-exposed .chip.exposed {
+  margin-right: 0.3rem;
+}
+
+.chip.outcome-active {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.chip.outcome-success {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.chip.outcome-death,
+.chip.outcome-timeout {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+.chip.outcome-stopped {
+  background: var(--idle-bg);
+  color: var(--idle-text);
+}
+
+/* escalated: handed to a human, not a failure — the amber "notice" family
+   (banner-bg/banner-text), distinct from both success (run) and death/timeout
+   (err). */
+.chip.outcome-escalated {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}

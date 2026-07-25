@@ -1,0 +1,337 @@
+/* Tool detail panel (issue #145) -------------------------------------------- */
+/* Tool-call detail lifted out of the chat column into a dedicated surface: a
+   modal bottom sheet on phones (<1024px) and an in-flow right sidebar on
+   desktop (>=1024px). One component renders both containers; this section
+   styles them. The sheet rides the install-sheet layering ladder (issue #142)
+   — scrim z-index 40, sheet 41 — since the two never show at once. Phone-first:
+   the base rules are the sheet; .tool-panel-side is the desktop override. */
+
+.tool-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* Chrome shared by both containers. */
+.tool-panel {
+  background: var(--card);
+  color: var(--text);
+}
+
+/* Phone: a modal bottom sheet. */
+.tool-panel-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  max-height: 82dvh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  box-shadow: var(--shadow);
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: tool-panel-up 0.2s ease-out;
+  /* Drag-to-dismiss hooks (issue #140 conventions, bound in ToolPanel): the
+     settle transition eases the sheet back to rest after a released drag;
+     .tool-panel-dragging kills it so the sheet tracks the finger 1:1 mid-drag. */
+  transition: transform 0.24s ease;
+}
+.tool-panel-dragging {
+  transition: none;
+}
+
+@keyframes tool-panel-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-panel-sheet {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Desktop: an in-flow complementary sidebar, flush to the window's right edge
+   (issue #154 §3). Height comes from the parent flex row (.chat-page) stretching
+   it; width is the CSS default for a first-time user and an inline px value once
+   dragged/stored (issue #154 §4). position:relative anchors the left-edge resize
+   handle. */
+.tool-panel-side {
+  position: relative;
+  width: clamp(320px, 30vw, 480px);
+  flex: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+/* Drag-to-resize handle (issue #154 §4): a thin col-resize strip over the
+   sidebar's left border. Absolutely positioned so it never takes flow space;
+   touch-action:none so a pointer/touch drag here resizes rather than scrolling
+   the page. Desktop-only (rendered only in the .tool-panel-side variant). */
+.tool-panel-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 1;
+}
+/* While dragging: kill text selection across the panel so the edge tracks the
+   pointer 1:1 without smearing a selection. The sidebar carries no width
+   transition, so the inline width already follows the pointer frame-by-frame. */
+.tool-panel-resizing {
+  user-select: none;
+}
+
+/* The pure-CSS grab pill atop the sheet. */
+.tool-panel-grabber {
+  flex: none;
+  width: 36px;
+  height: 4px;
+  margin: var(--space-2) auto 0;
+  border-radius: var(--radius-pill);
+  background: var(--border);
+}
+
+/* Header row: the title truncates with an ellipsis; the icon buttons never
+   shrink. */
+.tool-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.tool-panel-head .tool-panel-btn {
+  flex: none;
+}
+.tool-panel-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.tool-panel-title .tool-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-panel-title .tool-status {
+  flex: none;
+}
+
+/* The scrollable body — the list of rows or the detail's I/O panes. */
+.tool-panel-content {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+/* One list row per tool call: a full-width, left-aligned mono button (like the
+   chip summary). An error tints the text red, reusing the chip vocabulary. */
+.tool-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.3rem 0.6rem;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.tool-panel-row:hover {
+  background: var(--hover);
+}
+.tool-panel-row .tool-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-panel-row.tool-error {
+  color: var(--err-text);
+}
+
+/* The panel supersedes the 40vh chip cap — I/O gets the panel's own vertical
+   scroll. No horizontal scroll anywhere (issue #154): long lines soft-wrap
+   instead (from .tool-body). */
+.tool-panel .tool-body {
+  max-height: none;
+}
+
+/* Rich detail views (issue #146, read added #154) ---------------------------- */
+/* The detail body switches on view.kind (diff / write / command / read); these
+   dress the shapes. Tints are theme-var mixes over transparent, so they sit on
+   the .tool-body surface and adapt to light/dark on their own — never hex. */
+
+/* The file-path header above a diff / write / read body: small, dim,
+   monospace, and soft-wrapped (issue #154 — no horizontal scroll anywhere). A
+   flex row so an optional trailing accessory (ToolViewBody's `pathAction`
+   slot, e.g. a future "open in sidebar" button) sits beside the path text
+   without the path losing its ability to wrap. */
+.tool-view-path {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.tool-view-path-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* One <span> per diff line inside the .tool-body <pre>. display:block gives the
+   tint the full line width; min-height keeps a blank context line occupying
+   its row. No trailing newline in the text — the block boundary is the line
+   break, so a copied selection stays a valid diff. Lines soft-wrap (issue
+   #154) rather than growing the block width, matching .tool-body. */
+.tool-diff span {
+  display: block;
+  min-height: 1.35em;
+}
+/* Added / removed get a subtle background tint (green / red); the file-and-hunk
+   header lines (+++ / --- / @@) read as dim structure, not content. */
+.tool-diff-add {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.tool-diff-del {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.tool-diff-hunk {
+  color: var(--muted);
+}
+
+/* A shell command: a dim, unselectable `$ ` prompt ahead of the command text,
+   so a copied selection grabs the command without the prompt. */
+.tool-cmd-prompt {
+  color: var(--muted);
+  user-select: none;
+}
+
+/* --- Chat-side wiring (the RunChat half of issue #145) --- */
+
+/* The column wrapper carrying the pre-panel page layout (banner + body +
+   composer) now that .chat-page is a row. flex 1 1 auto + min-width 0 is the
+   squeeze: the column yields to the fixed-width sidebar before overflowing. */
+.chat-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+/* Desktop, panel open (issue #154 §3): the sidebar sits flush against the true
+   right edge of the content area, so the whole row goes full width (dropping the
+   .page 760px cap and its right padding — no auto-margin centering the row, no
+   right gap), while the chat column stays capped at 760px and centers in the
+   space to the LEFT of the sidebar via its own auto margins. The chat column
+   keeps min-width:0 (flex, above) so it yields to the fixed-width sidebar rather
+   than forcing a horizontal scrollbar. Closed — no .panel-open — nothing here
+   applies and the layout is byte-identical to the pre-panel page. */
+@media (min-width: 1024px) {
+  .chat-page.panel-open {
+    max-width: none;
+    padding-right: 0;
+  }
+  /* flex-basis 760px is the column's TARGET width (not content-based, which the
+     chat body doesn't reliably reach); the auto margins absorb the leftover free
+     space to its left, so flex-grow is disabled and the column stays 760 and
+     centered. flex-shrink (inherited 1) + min-width:0 still let it yield to the
+     sidebar on a cramped viewport rather than overflowing the row. */
+  .chat-page.panel-open .chat-column {
+    flex-basis: 760px;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+}
+
+/* The clickable summary ROW is a <button> now, inside its .chat-tool /
+   .chat-tool-group frame div (issue #154 split the single pre-#154 button so a
+   body can hang below the row). The frame div keeps the border/radius/fill; the
+   button neutralises the global button chrome (line ~852) those classes never
+   overrode, so it sits flush and invisible inside the frame — no double border,
+   no card fill, no hover tint (the old <summary> row had none of these) — and
+   fills the frame width, left-aligned. */
+button.tool-summary,
+button.tool-group-summary {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+}
+button.tool-summary:hover,
+button.tool-group-summary:hover {
+  background: transparent;
+}
+
+/* The chip/group whose content the panel is showing — the sheet on mobile, or
+   the file sidebar on desktop when its "open in sidebar" affordance is used
+   (issue #154 §1; a desktop chip-body click still only expands inline and never
+   selects). The dialog-option selected vocabulary (accent border + subtle tint)
+   on the frame, cleared on close. The border is the frame's, so the highlight
+   rides the wrapper, not the borderless button. */
+.chat-tool.selected,
+.chat-tool-group.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+
+/* The chip's collapsed row (issue #154 §1): the summary button plus, on a
+   desktop file tool, the sidebar affordance as its sibling. The summary fills
+   the row and the affordance never shrinks — HTML-valid (no button in a button)
+   while the collapsed look is unchanged (the row was, and stays, full width). */
+.tool-summary-row {
+  display: flex;
+  align-items: center;
+}
+.tool-summary-row .tool-summary {
+  flex: 1;
+  min-width: 0;
+}
+/* A compact, quiet "open in sidebar" icon-button (fine-pointer desktop only, so
+   the 44px touch floor is relaxed). Overrides the .icon-btn min sizing — it
+   comes after .icon-btn in the cascade, so equal specificity resolves to this. */
+.tool-open-sidebar {
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+  width: 30px;
+  height: 30px;
+  margin-right: 0.2rem;
+  padding: 0.3rem;
+  color: var(--muted);
+}
+/* In the expanded body's path header the affordance rides the (baseline-aligned)
+   row — center it against the small path text. */
+.tool-view-path .tool-open-sidebar {
+  align-self: center;
+}
