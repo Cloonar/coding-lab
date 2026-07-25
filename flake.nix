@@ -433,6 +433,7 @@
                 grep -q '^RuntimeDirectory=lab$' "$unitPath"
                 grep -q "$podman/bin" "$unitPath"
                 grep -q "$passt/bin" "$unitPath"
+                grep -qF '/run/wrappers/bin' "$unitPath"
 
                 # Zero-diff guard (issue #218; opt-OUT since #220 flipped the
                 # default): with container.enable = false NOTHING
@@ -460,6 +461,10 @@
                   echo "podman leaked onto a container-disabled unit PATH" >&2
                   exit 1
                 fi
+                if grep -qF '/run/wrappers/bin' "$containerOffUnitPath"; then
+                  echo "/run/wrappers leaked onto a container-disabled unit PATH" >&2
+                  exit 1
+                fi
 
                 # Container-enabled unit (issue #218): the image flags render
                 # with systemd escaping, the tools flag comma-joined and
@@ -480,9 +485,12 @@
                 grep -q 'Environment="XDG_RUNTIME_DIR=/run/lab"' "$containerUnitPath"
 
                 # ...and podman + passt (pasta) on the unit PATH line, where
-                # preflight's lookup and the container pane argv resolve them.
+                # preflight's lookup and the container pane argv resolve them —
+                # plus /run/wrappers/bin, where rootless podman's setuid
+                # newuidmap/newgidmap live on NixOS (issue #228).
                 grep -q "$podman/bin" "$containerUnitPath"
                 grep -q "$passt/bin" "$containerUnitPath"
+                grep -qF '/run/wrappers/bin' "$containerUnitPath"
 
                 cp "$unitPath" $out
               '';
