@@ -118,10 +118,18 @@ jobs:
             exit 1
           fi
 
+          # The module pins tag-and-digest for readability (ADR-0056), and
+          # podman on the host accepts that form — but skopeo's docker://
+          # transport rejects refs carrying both ("Docker references with
+          # both a tag and digest are currently not supported", issue #232).
+          # Strip the tag for the probe: the digest alone determines what
+          # resolves, so probing name@digest proves the same pull.
+          dev_image_probe="$(printf '%s' "$dev_image" | sed -E 's/:[A-Za-z0-9._-]+@sha256:/@sha256:/')"
+
           for ref in \
             "docker://${REGISTRY}/${OWNER}/agent-tools:claude-${CLAUDE_CODE_VERSION}" \
             "docker://${REGISTRY}/${OWNER}/agent-tools:codex-${CODEX_VERSION}" \
-            "docker://${dev_image}"
+            "docker://${dev_image_probe}"
           do
             until err="$("$skopeo" inspect --no-tags "$ref" 2>&1 >/dev/null)"; do
               if [ "$(date +%s)" -ge "$deadline" ]; then
