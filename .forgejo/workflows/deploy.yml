@@ -53,6 +53,14 @@ jobs:
           # build (~15 min); on timeout the deploy fails and the pin stays,
           # which is the honest outcome — a bumped pin would ship a server
           # whose default refs don't resolve.
+          #
+          # skopeo's stderr is captured and printed on every retry and in the
+          # deadline error (issue #224): a probe can fail for reasons that have
+          # nothing to do with the tag existing — TLS trust, the job
+          # container's network path, a registry auth quirk — and discarding
+          # it leaves "still does not resolve" as the only, misleading, signal.
+          # The 2>&1 >/dev/null ordering keeps stderr and drops stdout (the
+          # inspect JSON is noise here).
           set -euo pipefail
           set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
 
@@ -62,18 +70,19 @@ jobs:
           OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
 
           skopeo="$(nix build --no-link --print-out-paths nixpkgs#skopeo)/bin/skopeo"
+          "$skopeo" --version
           deadline=$(( $(date +%s) + 1800 ))
 
           for entry in "claude:${CLAUDE_CODE_VERSION}" "codex:${CODEX_VERSION}"; do
             p="${entry%%:*}"
             ver="${entry#*:}"
             ref="docker://${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
-            until "$skopeo" inspect --no-tags "$ref" >/dev/null 2>&1; do
+            until err="$("$skopeo" inspect --no-tags "$ref" 2>&1 >/dev/null)"; do
               if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "::error::${ref} still does not resolve — the agent-tools publish for this versions.env has not landed (or the package is not publicly readable). Not bumping the pin."
+                echo "::error::${ref} still does not resolve — the agent-tools publish for this versions.env has not landed (or the package is not publicly readable). Not bumping the pin. Last skopeo error: ${err}"
                 exit 1
               fi
-              echo "waiting for ${ref} …"
+              echo "waiting for ${ref} … (skopeo: ${err})"
               sleep 30
             done
             echo "resolved ${ref}"
