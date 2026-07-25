@@ -8,6 +8,7 @@ package providertest
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -221,6 +222,21 @@ func (f *Fake) SeedMeta() provider.SeedMeta {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.seedMeta
+}
+
+// MasterStoreSpec implements provider.AgentProvider (issue #206): the fake
+// mirrors claude-code's master-store declaration, resolved freshly per call
+// like a real adapter — the declared EnvVar outranks the HOME-derived
+// default, so the conformance suite's override-follows pin (issue #211)
+// holds against this fake exactly as against a real adapter.
+func (f *Fake) MasterStoreSpec() provider.MasterStoreSpec {
+	spec := provider.MasterStoreSpec{EnvVar: "CLAUDE_CONFIG_DIR", HomeSubdir: ".claude"}
+	if dir := os.Getenv(spec.EnvVar); dir != "" {
+		spec.HostDir = dir
+	} else {
+		spec.HostDir = filepath.Join(os.Getenv("HOME"), ".claude")
+	}
+	return spec
 }
 
 // Commands returns the scripted slash-command catalog (or error), recording

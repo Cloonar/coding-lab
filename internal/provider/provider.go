@@ -235,6 +235,27 @@ type SeedMeta struct {
 	ScrubPatterns []string
 }
 
+// MasterStoreSpec is the provider-declared description of its MASTER
+// credential store (issue #206): the three facts core needs to point a
+// containerized provider-CLI run at that store without learning anything
+// about the adapter's file layout beyond the directory itself. EnvVar is the
+// config-dir override variable the provider's CLI honors over HOME; HostDir
+// is the RESOLVED host path of the master store — override-aware, meaning a
+// set EnvVar outranks the HOME-derived default exactly as the CLI's own
+// resolution does (the issue #211 acceptance criterion, pinned by the
+// conformance suite's master-store-spec obligation); HomeSubdir is the single
+// HOME-relative directory name the CLI expects when no override is set — the
+// mount target under a containerized HOME. Adapters resolve the spec FRESHLY
+// per call (their resolvers read env vars at call time), so no caller ever
+// holds a resolution the environment has since moved. Core treats HostDir as
+// an opaque directory to mount or address — never a license to read what is
+// inside (the no-token-parsing stance, ADR-0055).
+type MasterStoreSpec struct {
+	EnvVar     string // config-dir override var the CLI honors ("CLAUDE_CONFIG_DIR" / "CODEX_HOME")
+	HostDir    string // resolved host path of the master store (override-aware, absolute)
+	HomeSubdir string // HOME-relative dir the CLI expects (".claude" / ".codex")
+}
+
 // Universal chat schema (issue #7 / ADR-0016). A provider maps its native
 // transcript into these provider-neutral kinds so lab's chat view — and any
 // future provider — speaks one vocabulary. Every message the chat renders is
@@ -591,6 +612,18 @@ type AgentProvider interface {
 	// lab seeds on the provider's behalf.
 	SeedMeta() SeedMeta
 
+	// MasterStoreSpec declares this provider's MASTER credential store
+	// (issue #206): the env override variable its CLI honors over HOME, the
+	// resolved host directory, and the HOME-relative dir name the CLI
+	// expects. Resolved freshly per call, and override-AWARE — a set EnvVar
+	// moves HostDir (the issue #211 criterion) — through the SAME resolver
+	// every other master-store operation uses (claude-code's masterConfigDir,
+	// codex's codexHomeDir), so this declaration can never disagree with the
+	// logout rm-escalation, the InjectCredentials source, or the refresh
+	// poke's env pin. Core consumes it blind: HostDir is a directory to
+	// mount/point a containerized CLI at, never something to read into.
+	MasterStoreSpec() MasterStoreSpec
+
 	// InjectCredentials installs working model credentials for one run
 	// (issue #202): given the run's private instance HOME, it copies whatever
 	// the machine's MASTER credential store holds into the layout the agent CLI
@@ -809,6 +842,13 @@ var (
 	// (device-code) where the code travels operator→browser — entered at the
 	// verification URL, never pasted back into lab. Maps to 409.
 	ErrLoginCodeUnsupported = errors.New("provider: this login flow does not take a pasted code")
+	// ErrLoginUnavailable is returned — always WRAPPED with the concrete
+	// actionable cause — when a containerized provider login cannot start on
+	// this server: the container preflight is red or unfinished, or the
+	// required image knobs are missing (issue #206). Maps to 400, and httpapi
+	// puts the wrapped text in the body verbatim, so the wrap must say
+	// exactly what the operator has to fix — never the bare sentinel.
+	ErrLoginUnavailable = errors.New("login unavailable on this server")
 )
 
 // ConnectingReporter is the optional render-state extension: a provider

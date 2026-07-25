@@ -4,17 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
-// The auth check shells out to `claude auth status --json` and reads the
-// top-level fields. Peeking at ~/.claude/.credentials.json directly was
-// rejected in v0 and stays rejected: it couples lab to claude's internal
-// storage and skips the token-expiry validation the status command does for
-// us.
+// The auth check runs `claude auth status --json` (through the CLI-runner
+// seam, issue #206 — on a container-mode server that is the containerized
+// CLI) and reads the top-level fields. Peeking at ~/.claude/.credentials.json
+// directly was rejected in v0 and stays rejected: it couples lab to claude's
+// internal storage and skips the token-expiry validation the status command
+// does for us.
 
 // statusJSON is the parsed subset of `claude auth status --json` stdout.
 // Observed extras (apiProvider, orgId, orgName, subscriptionType) are
@@ -37,8 +37,9 @@ func ParseAuthStatus(data []byte) (provider.AuthStatus, error) {
 	return provider.AuthStatus{LoggedIn: s.LoggedIn, Email: s.Email, Method: s.AuthMethod}, nil
 }
 
-// runStatus executes `{claude} auth status --json` and applies the v0
-// decision order, which is load-bearing:
+// runStatus executes `{claude} auth status --json` through p.cli (issue
+// #206; inherited env, inherited cwd) and applies the v0 decision order,
+// which is load-bearing:
 //
 //  1. Parse stdout REGARDLESS of the exit code — `claude auth status` may
 //     exit non-zero when logged out while still emitting {"loggedIn":false},
@@ -46,7 +47,9 @@ func ParseAuthStatus(data []byte) (provider.AuthStatus, error) {
 //  2. Stdout unparseable AND the command failed → the run error.
 //  3. Stdout unparseable but the command succeeded → the parse error.
 func (p *Provider) runStatus(ctx context.Context) (provider.AuthStatus, error) {
-	out, runErr := exec.CommandContext(ctx, p.claudeBin, "auth", "status", "--json").Output()
+	out, _, runErr := p.cli.Run(ctx, provider.CLIInvocation{
+		Argv: []string{p.claudeBin, "auth", "status", "--json"},
+	})
 	st, parseErr := ParseAuthStatus(out)
 	if parseErr == nil {
 		return st, nil

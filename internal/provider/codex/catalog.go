@@ -1,12 +1,10 @@
 package codex
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"slices"
 	"strings"
@@ -31,12 +29,21 @@ const probeOutputCap = 8 << 20
 // It never fails construction: a probe error leaves catModels/catEfforts nil
 // (the accessors serve the fallback) and logs ONE loud Warn. Kept as a
 // method so tests can shrink p.probeTimeout / swap p.codexBin and re-run it.
+//
+// The two probes run CONCURRENTLY: they are independent, and on a
+// container-mode server each is a full container spawn (issue #206) — run
+// serially, the best-effort version capture would both double the boot cost
+// and, when the container preflight verdict is still pending, burn the whole
+// shared budget waiting before the catalog probe even starts. Concurrency
+// hands each probe the full window.
 func (p *Provider) probeCatalog() {
 	ctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout)
 	defer cancel()
 
-	version := p.probeBinaryVersion(ctx)
-	models, efforts, err := ProbeModels(ctx, p.codexBin)
+	versionCh := make(chan string, 1)
+	go func() { versionCh <- p.probeBinaryVersion(ctx) }()
+	models, efforts, err := ProbeModels(ctx, p.cli, p.codexBin)
+	version := <-versionCh
 	if err != nil {
 		p.log.Warn("codex debug models probe failed; serving the compiled-in fallback catalog",
 			"component", "provider.codex", "err", err, "binary_version", version, "source", "fallback")
@@ -48,11 +55,14 @@ func (p *Provider) probeCatalog() {
 		"component", "provider.codex", "source", "probe", "binary_version", version, "models", len(models))
 }
 
-// probeBinaryVersion captures `codex --version` for the boot log —
-// best-effort only (trimmed stdout, e.g. "codex-cli 0.144.1"); any failure
-// yields "unknown" and never affects the catalog outcome.
+// probeBinaryVersion captures `codex --version` through p.cli (issue #206)
+// for the boot log — best-effort only (trimmed stdout, e.g. "codex-cli
+// 0.144.1"); any failure yields "unknown" and never affects the catalog
+// outcome.
 func (p *Provider) probeBinaryVersion(ctx context.Context) string {
-	out, err := exec.CommandContext(ctx, p.codexBin, "--version").Output()
+	out, _, err := p.cli.Run(ctx, provider.CLIInvocation{
+		Argv: []string{p.codexBin, "--version"},
+	})
 	if err != nil {
 		return "unknown"
 	}
@@ -62,41 +72,35 @@ func (p *Provider) probeBinaryVersion(ctx context.Context) string {
 	return "unknown"
 }
 
-// ProbeModels runs `codexBin debug models` and maps its JSON catalog to the
-// provider shapes. Exported for the live compat re-verification test (like
-// SpawnArgv is for the snapshot test). Any failure — exec error, non-zero
-// exit, output over probeOutputCap, malformed catalog — is an error; the
-// construction-time caller falls back to the compiled-in catalog then.
-func ProbeModels(ctx context.Context, codexBin string) ([]provider.ModelOption, []provider.Option, error) {
-	cmd := exec.CommandContext(ctx, codexBin, "debug", "models")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	pipe, err := cmd.StdoutPipe()
+// ProbeModels runs `codexBin debug models` through cli and maps its JSON
+// catalog to the provider shapes. Exported for the live compat
+// re-verification test (like SpawnArgv is for the snapshot test), which is
+// why it takes the runner explicitly instead of a Provider (issue #206 — the
+// live test passes provider.HostCLI). Any failure — exec error, non-zero
+// exit, stdout over probeOutputCap (the CLIInvocation.MaxStdout cap: the
+// runner kills a haywire binary and errors, never truncates silently),
+// malformed catalog — is an error; the construction-time caller falls back
+// to the compiled-in catalog then.
+func ProbeModels(ctx context.Context, cli provider.CLIRunner, codexBin string) ([]provider.ModelOption, []provider.Option, error) {
+	out, stderr, err := cli.Run(ctx, provider.CLIInvocation{
+		Argv:      []string{codexBin, "debug", "models"},
+		MaxStdout: probeOutputCap,
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("codex debug models: stdout pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		// Missing binary lands here as an immediate exec lookup error — the
-		// conformance suite's "codex-not-invoked" construction must fail fast,
-		// never ride out the probe timeout.
-		return nil, nil, fmt.Errorf("codex debug models: %w", err)
-	}
-	out, readErr := io.ReadAll(io.LimitReader(pipe, probeOutputCap+1))
-	if len(out) > probeOutputCap {
-		_ = cmd.Process.Kill() // stop a haywire binary instead of draining it
-		_ = cmd.Wait()
-		return nil, nil, fmt.Errorf("codex debug models: output exceeds %d bytes", probeOutputCap)
-	}
-	if readErr != nil {
-		_ = cmd.Wait()
-		return nil, nil, fmt.Errorf("codex debug models: read stdout: %w", readErr)
-	}
-	if err := cmd.Wait(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = "no stderr captured"
+		if _, isExit := err.(*exec.ExitError); isExit {
+			// The CLI ran and exited non-zero (the direct-type contract on
+			// CLIRunner): surface its own words.
+			msg := strings.TrimSpace(string(stderr))
+			if msg == "" {
+				msg = "no stderr captured"
+			}
+			return nil, nil, fmt.Errorf("codex debug models: %w: %s", err, msg)
 		}
-		return nil, nil, fmt.Errorf("codex debug models: %w: %s", err, msg)
+		// The invocation could not run: a missing binary (the conformance
+		// suite's "codex-not-invoked" construction must fail fast on the exec
+		// lookup, never ride out the probe timeout), a cut context, or stdout
+		// over the cap — the runner's error already names the cap.
+		return nil, nil, fmt.Errorf("codex debug models: %w", err)
 	}
 	return parseDebugModels(out)
 }

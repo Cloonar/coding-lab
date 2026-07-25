@@ -98,7 +98,7 @@ func TestCompat_Live_debugModelsProbe(t *testing.T) {
 		t.Skipf("codex not on PATH: %v", err)
 	}
 
-	models, efforts, err := codex.ProbeModels(context.Background(), bin)
+	models, efforts, err := codex.ProbeModels(context.Background(), &provider.HostCLI{}, bin)
 	if err != nil {
 		t.Fatalf("ProbeModels: %v", err)
 	}

@@ -782,6 +782,21 @@ func TestAPI_ProviderAuthStatusAndLogin(t *testing.T) {
 		t.Errorf("user_code present for a provider without LoginCodeReporter: %v", got)
 	}
 
+	// A structurally unavailable login — provider.ErrLoginUnavailable, the
+	// containerized-login refusal sentinel (issue #206), always wrapped with
+	// concrete detail — → 400 carrying the wrapped actionable text verbatim
+	// (an operator-fixable gap, the spawn-refusal posture), never the opaque
+	// 500.
+	x.prov.SetLoginError(fmt.Errorf("%w: container preflight has not finished — retry in a moment", provider.ErrLoginUnavailable))
+	resp = x.do("POST", base+"/login/start", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if body := decodeBody(t, resp); !strings.Contains(fmt.Sprint(body["error"]), "container preflight") {
+		t.Errorf("400 body = %v; want the wrapped actionable refusal text", body)
+	}
+	// Clear the scripted failure — the fake holds loginErr until overwritten,
+	// and later assertions re-enter the login flow.
+	x.prov.SetLoginError(nil)
+
 	// Code submit → 202.
 	resp = x.do("POST", base+"/login/code", map[string]any{"code": "abc#state=1"}, h)
 	wantStatus(t, resp, http.StatusAccepted)

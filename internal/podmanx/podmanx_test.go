@@ -71,6 +71,102 @@ func TestRunArgvGolden(t *testing.T) {
 	assertArgv(t, RunArgv(s), want)
 }
 
+// TestLoginArgvGolden pins the login-session shape (issue #206): the same
+// renderer with the run-only dirs empty, so the worktree/bare/agent/runtime
+// binds vanish — only the tools image, the per-attempt scratch home at
+// Home, and the master credential store nested rw inside it remain. The
+// workdir is the home (there is no worktree), and -it stays: the login TUI
+// runs on the pane's pty exactly like a run.
+func TestLoginArgvGolden(t *testing.T) {
+	s := RunSpec{
+		Bin:        "/usr/bin/podman",
+		Name:       "labrun-lab-login-claude-code-2b7e15",
+		Image:      "docker.io/library/debian:stable-slim",
+		ToolsImage: "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
+		HomeDir:    "/var/lib/lab/logins/lab-login-claude-code",
+		StoreDir:   "/var/lib/lab/.claude",
+		StoreDst:   Home + "/.claude",
+		Workdir:    Home,
+		Memory:     "8g",
+		Pids:       4096,
+		Nofile:     16384,
+		Env: []string{
+			"PATH=" + PATH,
+			"HOME=" + Home,
+			"CLAUDE_CONFIG_DIR=" + Home + "/.claude",
+		},
+		ForwardEnv: []string{"TERM"},
+		Argv:       []string{"claude", "auth", "login", "--claudeai"},
+	}
+	want := []string{
+		"/usr/bin/podman", "run", "--rm", "-it",
+		"--name", "labrun-lab-login-claude-code-2b7e15",
+		"--userns=keep-id",
+		"--network=pasta",
+		"--cgroups=split",
+		"--memory", "8g",
+		"--pids-limit", "4096",
+		"--ulimit", "nofile=16384:16384",
+		"--mount", "type=image,src=git.cloonar.com/cloonar/agent-tools@sha256:deadbeef,dst=/opt/lab",
+		"-v", "/var/lib/lab/logins/lab-login-claude-code:/home/agent",
+		"-v", "/var/lib/lab/.claude:/home/agent/.claude",
+		"-w", "/home/agent",
+		"--env", "PATH=" + PATH,
+		"--env", "HOME=/home/agent",
+		"--env", "CLAUDE_CONFIG_DIR=/home/agent/.claude",
+		"--env", "TERM",
+		"docker.io/library/debian:stable-slim",
+		"claude", "auth", "login", "--claudeai",
+	}
+	assertArgv(t, RunArgv(s), want)
+}
+
+// TestCLIArgvGolden pins the non-interactive CLI shape (issue #206: auth
+// status / logout / refresh pokes): NoTTY drops -it (a poke runs under no
+// pane and must not demand a tty), and HomeDir is empty — a poke's HOME is
+// the container's own writable layer, so the ONLY -v is the store bind,
+// whose destination creates the /home/agent parents by itself.
+func TestCLIArgvGolden(t *testing.T) {
+	s := RunSpec{
+		Bin:        "/usr/bin/podman",
+		Name:       "labrun-cli-claude-code-2b7e15",
+		Image:      "docker.io/library/debian:stable-slim",
+		ToolsImage: "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
+		StoreDir:   "/var/lib/lab/credentials/claude",
+		StoreDst:   Home + "/.claude",
+		Workdir:    Home,
+		NoTTY:      true,
+		Memory:     "8g",
+		Pids:       4096,
+		Nofile:     16384,
+		Env: []string{
+			"PATH=" + PATH,
+			"HOME=" + Home,
+		},
+		ForwardEnv: []string{"LAB_TOKEN"},
+		Argv:       []string{"claude", "auth", "status"},
+	}
+	want := []string{
+		"/usr/bin/podman", "run", "--rm",
+		"--name", "labrun-cli-claude-code-2b7e15",
+		"--userns=keep-id",
+		"--network=pasta",
+		"--cgroups=split",
+		"--memory", "8g",
+		"--pids-limit", "4096",
+		"--ulimit", "nofile=16384:16384",
+		"--mount", "type=image,src=git.cloonar.com/cloonar/agent-tools@sha256:deadbeef,dst=/opt/lab",
+		"-v", "/var/lib/lab/credentials/claude:/home/agent/.claude",
+		"-w", "/home/agent",
+		"--env", "PATH=" + PATH,
+		"--env", "HOME=/home/agent",
+		"--env", "LAB_TOKEN",
+		"docker.io/library/debian:stable-slim",
+		"claude", "auth", "status",
+	}
+	assertArgv(t, RunArgv(s), want)
+}
+
 // TestRunArgvTail pins the ordering contract of the trailing section: Env
 // K=V entries in slice order, then ForwardEnv names in slice order, then
 // the image, then the provider argv verbatim — including elements that
@@ -97,6 +193,74 @@ func TestRunArgvTail(t *testing.T) {
 		t.Fatalf("argv too short: %q", got)
 	}
 	assertArgv(t, got[len(got)-len(wantTail):], wantTail)
+}
+
+// binds collects the value after every -v flag — the full bind list in
+// argv order, so omission tests can pin exactly which mounts rendered.
+func binds(argv []string) []string {
+	var out []string
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "-v" {
+			out = append(out, argv[i+1])
+		}
+	}
+	return out
+}
+
+// TestRunArgvOmitsEmptyBinds: every dir binds only when set — an empty
+// field must never render a half-formed "-v :" for podman to reject (or
+// worse, interpret). With only HomeDir set the home bind is the sole -v;
+// with nothing set (the CLI shape before its store pair) there is no -v
+// at all.
+func TestRunArgvOmitsEmptyBinds(t *testing.T) {
+	got := RunArgv(RunSpec{Bin: "podman", Image: "img", HomeDir: "/h"})
+	assertArgv(t, binds(got), []string{"/h:" + Home})
+
+	if got := binds(RunArgv(RunSpec{Bin: "podman", Image: "img"})); got != nil {
+		t.Fatalf("binds with no dirs set = %q, want none", got)
+	}
+}
+
+// TestRunArgvStoreHalfSet: a half-set store pair is a programmer error;
+// RunArgv omits the bind entirely (documented on StoreDir), so either
+// half-set spec renders byte-identically to the store-less one and the
+// mistake surfaces as a visibly missing store, never a malformed argv.
+func TestRunArgvStoreHalfSet(t *testing.T) {
+	base := RunSpec{Bin: "podman", Image: "img", HomeDir: "/h"}
+	want := RunArgv(base)
+
+	dirOnly := base
+	dirOnly.StoreDir = "/creds/claude"
+	assertArgv(t, RunArgv(dirOnly), want)
+
+	dstOnly := base
+	dstOnly.StoreDst = Home + "/.claude"
+	assertArgv(t, RunArgv(dstOnly), want)
+}
+
+// TestRunArgvWorkdir pins -w's precedence: Workdir when set (the login/CLI
+// shapes point it at Home), else WorktreeDir (the run shape's contract,
+// unchanged), and no -w at all when both are empty — the image's own
+// workdir then applies.
+func TestRunArgvWorkdir(t *testing.T) {
+	wAfter := func(argv []string) (string, bool) {
+		for i := 0; i+1 < len(argv); i++ {
+			if argv[i] == "-w" {
+				return argv[i+1], true
+			}
+		}
+		return "", false
+	}
+
+	if w, ok := wAfter(RunArgv(RunSpec{Bin: "p", Image: "i", WorktreeDir: "/wt", Workdir: Home})); !ok || w != Home {
+		t.Errorf("-w with Workdir set = %q, %v; want %q", w, ok, Home)
+	}
+	if w, ok := wAfter(RunArgv(RunSpec{Bin: "p", Image: "i", WorktreeDir: "/wt"})); !ok || w != "/wt" {
+		t.Errorf("-w with only WorktreeDir = %q, %v; want %q", w, ok, "/wt")
+	}
+	if w, ok := wAfter(RunArgv(RunSpec{Bin: "p", Image: "i"})); ok {
+		t.Errorf("-w with neither set = %q; want no -w flag", w)
+	}
 }
 
 // podmanNameRe is podman's container-name alphabet (names(7) in podman:

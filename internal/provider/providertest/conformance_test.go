@@ -60,6 +60,9 @@ type mockProvider struct {
 	// #222).
 	credentialsSig func(home string) (string, time.Time)
 	adopt          func(instanceHome string) error
+	// masterStore overrides the default conforming MasterStoreSpec — the
+	// master-store-spec breakage hook (issues #206/#211).
+	masterStore func() provider.MasterStoreSpec
 }
 
 var _ provider.AgentProvider = (*mockProvider)(nil)
@@ -260,6 +263,23 @@ func (m *mockProvider) InjectCredentials(instanceHome string) ([]string, error) 
 // deliberately does NOT exercise it (it shells out to a live CLI; issue #222).
 func (m *mockProvider) RefreshCredentials(context.Context) error { return nil }
 
+// MasterStoreSpec's default is conforming per the master-store-spec
+// obligation (issue #206): a single-element HOME subdir and an EnvVar-first
+// resolution, re-read on every call so the override-follows pin (issue #211)
+// observes a genuinely fresh resolution.
+func (m *mockProvider) MasterStoreSpec() provider.MasterStoreSpec {
+	if m.masterStore != nil {
+		return m.masterStore()
+	}
+	spec := provider.MasterStoreSpec{EnvVar: "MOCKAGENT_HOME", HomeSubdir: ".mockagent"}
+	if dir := os.Getenv(spec.EnvVar); dir != "" {
+		spec.HostDir = dir
+	} else {
+		spec.HostDir = filepath.Join(os.Getenv("HOME"), ".mockagent")
+	}
+	return spec
+}
+
 // CredentialsSig's default is conforming per the credential-authority
 // obligation (issue #222): the mock has no credential files under any home
 // (including the "" master store), so its sig is always "" with a zero mtime —
@@ -358,6 +378,7 @@ func TestCheckFunctions_wellFormedProviderPasses(t *testing.T) {
 		{"locate-homeless", func(t *testing.T) []error { return checkLocateHomeless(p) }},
 		{"inject-credentials", func(t *testing.T) []error { return checkInjectCredentials(t, p) }},
 		{"credential-authority", func(t *testing.T) []error { return checkCredentialAuthority(t, p) }},
+		{"master-store-spec", func(t *testing.T) []error { return checkMasterStoreSpec(t, p) }},
 		{"seeding-exclude-coverage", func(t *testing.T) []error { return checkSeedingExcludeCoverage(t, p) }},
 		{"seeding-incogni", func(t *testing.T) []error { return checkSeedingIncogni(t, p) }},
 		{"seed-home-containment", func(t *testing.T) []error { return checkSeedHomeContainment(t, p) }},
@@ -490,6 +511,40 @@ func TestCheckSpawnRemote_unadvertisedButArgvDiffersFails(t *testing.T) {
 	p := newMockProvider()
 	p.spawnArgv = honorRemote
 	wantError(t, checkSpawnRemote(p), "spawn-remote", "does not implement provider.RemoteCapable", "issue #163")
+}
+
+// The master-store-spec breakages (issues #206/#211): an empty EnvVar, a
+// HomeSubdir that is not a single relative path element, and a HostDir that
+// ignores the declared override each fail with the obligation named.
+
+func TestCheckMasterStoreSpec_emptyEnvVarFails(t *testing.T) {
+	p := newMockProvider()
+	p.masterStore = func() provider.MasterStoreSpec {
+		return provider.MasterStoreSpec{HostDir: "/tmp/mockagent-master", HomeSubdir: ".mockagent"}
+	}
+	wantError(t, checkMasterStoreSpec(t, p), "master-store-spec", "EnvVar is empty", "issue #206")
+}
+
+func TestCheckMasterStoreSpec_pathHomeSubdirFails(t *testing.T) {
+	p := newMockProvider()
+	p.masterStore = func() provider.MasterStoreSpec {
+		return provider.MasterStoreSpec{EnvVar: "MOCKAGENT_HOME", HostDir: os.Getenv("MOCKAGENT_HOME"), HomeSubdir: ".config/mockagent"}
+	}
+	// Keep the override half green so the subdir violation is the one named:
+	// the hook resolves HostDir from the declared EnvVar like a real adapter.
+	t.Setenv("MOCKAGENT_HOME", t.TempDir())
+	wantError(t, checkMasterStoreSpec(t, p), "master-store-spec", `".config/mockagent"`, "path separator")
+}
+
+func TestCheckMasterStoreSpec_staleOverrideResolutionFails(t *testing.T) {
+	p := newMockProvider()
+	fixed := t.TempDir() // absolute, so only the override half can fail
+	p.masterStore = func() provider.MasterStoreSpec {
+		// The breakage: a construction-time resolution that ignores the
+		// declared EnvVar — exactly what issue #211 forbids.
+		return provider.MasterStoreSpec{EnvVar: "MOCKAGENT_HOME", HostDir: fixed, HomeSubdir: ".mockagent"}
+	}
+	wantError(t, checkMasterStoreSpec(t, p), "master-store-spec", "resolved freshly per call", "issue #211")
 }
 
 func TestCheckAuthFlow_unknownKindFails(t *testing.T) {

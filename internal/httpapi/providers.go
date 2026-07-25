@@ -137,6 +137,12 @@ func (s *Server) handleProviderAuthStatus(w http.ResponseWriter, r *http.Request
 // plus user_code when the provider reports a pending device-code login
 // (provider.LoginCodeReporter — the operator enters the code browser-side at
 // the URL, it never comes back through lab), or 409 when already logged in.
+// A login the server cannot start structurally — provider.ErrLoginUnavailable,
+// the containerized-login refusal sentinel (issue #206 / ADR-0057), always
+// wrapped with concrete detail — maps to 400 carrying that wrapped actionable
+// text verbatim: an operator-fixable container-host/config gap, the same
+// client-error posture as instance spawn refusals (the BadRequestError
+// precedent), never the opaque 500.
 func (s *Server) handleProviderLoginStart(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.providerFromPath(w, r)
 	if !ok {
@@ -147,6 +153,10 @@ func (s *Server) handleProviderLoginStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 	url, err := p.LoginStart(r.Context())
+	if errors.Is(err, provider.ErrLoginUnavailable) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
 		s.internalError(w, "starting login for "+p.ID(), err)
 		return

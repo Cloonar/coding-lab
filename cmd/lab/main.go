@@ -39,6 +39,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
+	"git.cloonar.com/Cloonar/coding-lab/internal/providercli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
@@ -348,11 +349,79 @@ func run() int {
 			"component", "main")
 	} else {
 		runner := tmuxx.New(cfg.TmuxBin, tmuxx.WithNofileCap(cfg.PrlimitBin, cfg.SessionNofile))
+		// Containerized provider login + CLI surface (issue #206 / ADR-0057):
+		// with container config present, each adapter's login pane and
+		// non-interactive CLI invocations run in containers against its master
+		// store — never a host-CLI fallback. Per-provider Config: the
+		// master-store declaration is the package-level resolver (the same one
+		// the adapter's own method uses), the tools image is that provider's
+		// ref (missing → actionable refusal at use, mirroring run spawns), the
+		// dev image is the global default only (login is repo-less), and
+		// limits read the global container_* rows with the seeded fallbacks
+		// (the effectiveContainerLimits posture, minus the repo override that
+		// cannot apply). Without container config the adapters keep the raw
+		// runner and a nil CLI (→ provider.HostCLI inside New): host-mode
+		// login stays byte-for-byte unchanged. The instance/reconcile/afk
+		// services below always get the raw runner — the run-spawn seam is
+		// their own podman handling, untouched here.
+		claudeRunner := tmuxx.SessionRunner(runner)
+		codexRunner := tmuxx.SessionRunner(runner)
+		var claudeCLI, codexCLI provider.CLIRunner
+		if containerPreflight != nil {
+			loginHomes := filepath.Join(cfg.StateDir, "logins")
+			// One limits closure shared by both providers. The fallbacks are
+			// store's single-source defaults (what SeedDefaultSettings writes)
+			// — the same last-resort posture as instance's fallbacks.
+			limits := func(ctx context.Context) (string, int, int, error) {
+				memory, err := st.GetString(ctx, store.SettingContainerMemory, store.DefaultContainerMemory)
+				if err != nil {
+					return "", 0, 0, err
+				}
+				pids, err := st.GetInt(ctx, store.SettingContainerPids, store.DefaultContainerPids)
+				if err != nil {
+					return "", 0, 0, err
+				}
+				nofile, err := st.GetInt(ctx, store.SettingContainerNofile, store.DefaultContainerNofile)
+				if err != nil {
+					return "", 0, 0, err
+				}
+				return memory, pids, nofile, nil
+			}
+			claudeCfg := providercli.Config{
+				ProviderID:    claudecode.ID,
+				PodmanBin:     cfg.PodmanBin,
+				Preflight:     containerPreflight,
+				Image:         cfg.ContainerImage,
+				ToolsImage:    cfg.ContainerToolsImages[claudecode.ID],
+				Spec:          claudecode.MasterStore,
+				LoginHomeRoot: loginHomes,
+				Limits:        limits,
+				Logger:        logger,
+			}
+			claudeRunner = providercli.NewLoginRunner(runner, claudeCfg)
+			claudeCLI = providercli.NewContainerCLI(claudeCfg)
+			codexCfg := providercli.Config{
+				ProviderID: codex.ID,
+				PodmanBin:  cfg.PodmanBin,
+				Preflight:  containerPreflight,
+				Image:      cfg.ContainerImage,
+				ToolsImage: cfg.ContainerToolsImages[codex.ID],
+				// The same loginDir codex.New is handed below, so closure and
+				// adapter resolve one store.
+				Spec:          func() provider.MasterStoreSpec { return codex.MasterStore(home) },
+				LoginHomeRoot: loginHomes,
+				Limits:        limits,
+				Logger:        logger,
+			}
+			codexRunner = providercli.NewLoginRunner(runner, codexCfg)
+			codexCLI = providercli.NewContainerCLI(codexCfg)
+		}
 		claudeProvider, perr := claudecode.New(claudecode.Options{
 			ClaudeBin:  cfg.ProviderBin[claudecode.ID],
 			ConfigPath: cfg.ProviderConfig[claudecode.ID],
 			LoginDir:   home,
-			Runner:     runner,
+			Runner:     claudeRunner,
+			CLI:        claudeCLI,
 			Bus:        bus,
 			Logger:     logger,
 		})
@@ -368,7 +437,8 @@ func run() int {
 			CodexBin:   cfg.ProviderBin[codex.ID],
 			ConfigPath: cfg.ProviderConfig[codex.ID],
 			LoginDir:   home,
-			Runner:     runner,
+			Runner:     codexRunner,
+			CLI:        codexCLI,
 			Bus:        bus,
 			Logger:     logger,
 		})
