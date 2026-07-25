@@ -352,6 +352,18 @@
               "nixos-module check: services.lab.container.defaultImage must default to the digest-pinned buildpack-deps:stable-scm ref (issue #230)";
             assert lib.assertMsg (defaultsDummy.config.virtualisation.podman.enable && !containerOffDummy.config.virtualisation.podman.enable)
               "nixos-module check: virtualisation.podman must be on by default (#220) and off under container.enable = false";
+            # The cgroup holder (ADR-0059, issue #237) must NEVER be restarted:
+            # a deploy that restarted it while surviving containers keep its
+            # delegated root populated would re-arm the executor-spawn EBUSY
+            # trap the whole design exists to defuse. Asserted at eval level —
+            # the exact X-RestartIfChanged unit-text serialization is a NixOS
+            # internal; the option value is the invariant.
+            assert lib.assertMsg (containerDummy.config.systemd.services.lab-payload.restartIfChanged == false)
+              "nixos-module check: lab-payload.service must set restartIfChanged = false — a restart with surviving containers re-arms the #237 executor-spawn EBUSY trap";
+            # Zero-diff guard (issue #237): the holder is container-machinery, so
+            # with container.enable = false it must not exist at all.
+            assert lib.assertMsg (!(containerOffDummy.config.systemd.units ? "lab-payload.service"))
+              "nixos-module check: with container.enable = false the lab-payload.service holder unit must not exist";
             pkgs.runCommand "lab-nixos-module-eval"
               {
                 unit = dummy.config.systemd.units."lab.service".text;
@@ -359,6 +371,9 @@
                 containerUnit = containerDummy.config.systemd.units."lab.service".text;
                 containerOffUnit = containerOffDummy.config.systemd.units."lab.service".text;
                 hygieneUnit = containerDummy.config.systemd.units."lab-cgroup-hygiene.service".text;
+                # The never-restarted cgroup holder (ADR-0059, issue #237) —
+                # carries the delegation lab.service must never hold itself.
+                payloadUnit = containerDummy.config.systemd.units."lab-payload.service".text;
                 # The script body is a store file the unit's ExecStart points
                 # at — its content never appears in the unit text, so it is
                 # passed (and grepped) separately.
@@ -369,6 +384,7 @@
                   "containerUnit"
                   "containerOffUnit"
                   "hygieneUnit"
+                  "payloadUnit"
                   "hygieneScript"
                 ];
                 # PATH-serialization greps below match against these store paths:
@@ -442,15 +458,23 @@
                 # versions.env-pinned default tools refs (prefix-grepped so
                 # a version bump never touches this check), the pinned stock
                 # scm --container-image default (issue #230 — no more null,
-                # so a repo-less deployment can still spawn), cgroup
-                # delegation, the preserved runtime dir, and podman + passt
-                # on the unit PATH.
+                # so a repo-less deployment can still spawn), the preserved
+                # runtime dir, and podman + passt on the unit PATH. Delegation
+                # is deliberately NOT asserted here: it moved off lab.service
+                # onto the lab-payload.service holder (ADR-0059, issue #237) —
+                # the negative guard below is the invariant now.
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '--container-tools-image'
                 grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:claude-'
                 grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:codex-'
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '"--container-image" "docker.io/library/buildpack-deps:stable-scm@sha256:07554a82a7a29ce00a048e0b29d18f454b5721b41940d43ee3be1ef59d55b114"'
-                grep -q '^Delegate=true$' "$unitPath"
-                grep -q '^DelegateSubgroup=main$' "$unitPath"
+                # lab.service must NEVER delegate — systemd's DelegateSubgroup=
+                # does not apply to the main-process spawn, so any delegation on
+                # lab.service's own cgroup EBUSYs the next restart once
+                # KillMode=process survivors keep it populated (issue #237).
+                if grep -q '^Delegate' "$unitPath"; then
+                  echo "lab.service must never delegate — payload delegation belongs to lab-payload.service (issue #237)" >&2
+                  exit 1
+                fi
                 grep -q '^RuntimeDirectory=lab$' "$unitPath"
                 grep -q "$podman/bin" "$unitPath"
                 grep -q "$passt/bin" "$unitPath"
@@ -472,6 +496,10 @@
                 fi
                 if grep -qF 'lab-cgroup-hygiene' "$containerOffUnitPath"; then
                   echo "the hygiene-unit dependency leaked into a container-disabled unit" >&2
+                  exit 1
+                fi
+                if grep -qF 'lab-payload' "$containerOffUnitPath"; then
+                  echo "the payload-holder dependency leaked into a container-disabled unit" >&2
                   exit 1
                 fi
                 if grep -q '^RuntimeDirectory' "$containerOffUnitPath"; then
@@ -506,27 +534,59 @@
                   exit 1
                 fi
 
-                # Host provisioning preflight verifies (module.nix): cgroup
-                # delegation (systemd booleans serialize as `true` — the docs'
-                # Delegate=yes is the same thing), the preserved /run/lab
-                # runtime dir, and rootless podman's XDG_RUNTIME_DIR pointing
-                # at it.
-                grep -q '^Delegate=true$' "$containerUnitPath"
-                grep -q '^DelegateSubgroup=main$' "$containerUnitPath"
+                # Host provisioning preflight verifies (module.nix): the
+                # preserved /run/lab runtime dir and rootless podman's
+                # XDG_RUNTIME_DIR pointing at it. Delegation is NOT here — it
+                # lives on the holder unit (asserted below); lab.service itself
+                # must carry none (ADR-0059, issue #237).
                 grep -q '^RuntimeDirectory=lab$' "$containerUnitPath"
                 grep -q '^RuntimeDirectoryPreserve=yes$' "$containerUnitPath"
                 grep -q '^RuntimeDirectoryMode=0700$' "$containerUnitPath"
                 grep -q 'Environment="XDG_RUNTIME_DIR=/run/lab"' "$containerUnitPath"
+                if grep -q '^Delegate' "$containerUnitPath"; then
+                  echo "lab.service must never delegate — payload delegation belongs to lab-payload.service (issue #237)" >&2
+                  exit 1
+                fi
 
-                # The restart-safety hygiene oneshot (ADR-0058): ordered
-                # before every lab start, clearing any controller delegation
-                # podman re-armed inside the main/ attach subgroup — the
-                # 2026-07-25 "Failed to spawn executor: EBUSY" outage class.
+                # The cgroup holder (ADR-0059, issue #237): a never-restarted
+                # delegated root owned by the service user, whose trivial sleep
+                # main process sits in the main/ subgroup so the root may carry
+                # the containers' controllers, and KillMode=process so a holder
+                # stop never takes the containers down. restartIfChanged=false
+                # (the load-bearing "never restart this unit" bit) is asserted
+                # at eval level above — its X-RestartIfChanged unit-text
+                # serialization is a NixOS internal, the option value is the
+                # invariant.
+                grep -q '^Delegate=true$' "$payloadUnitPath"
+                grep -q '^DelegateSubgroup=main$' "$payloadUnitPath"
+                grep -q '^KillMode=process$' "$payloadUnitPath"
+                grep -q '^User=lab$' "$payloadUnitPath"
+                grep '^ExecStart=' "$payloadUnitPath" | grep -qF sleep
+                # lab.service must be ordered after the holder so preflight
+                # never establishes the payload layout before the holder's
+                # delegated root exists (Wants not Requires — same style as the
+                # hygiene wiring below).
+                grep -q '^Wants=.*lab-payload.service' "$containerUnitPath"
+                grep -q '^After=.*lab-payload.service' "$containerUnitPath"
+
+                # The restart-safety hygiene oneshot (ADR-0059): ordered before
+                # every lab start, clearing ALL controller delegation from
+                # lab.service's OWN cgroup root — the migration off the ADR-0058
+                # layout AND standing insurance against re-armed delegation.
+                # This is the 2026-07-26 "Failed to spawn executor: EBUSY"
+                # outage class (issue #237).
                 grep -q '^Wants=.*lab-cgroup-hygiene.service' "$containerUnitPath"
                 grep -q '^After=.*lab-cgroup-hygiene.service' "$containerUnitPath"
                 grep -q '^Before=.*lab.service' "$hygieneUnitPath"
                 grep -qF 'cgroup.subtree_control' "$hygieneScriptPath"
-                grep -qF '/sys/fs/cgroup/system.slice/lab.service/main' "$hygieneScriptPath"
+                # The target is now lab.service's cgroup ROOT, not the removed
+                # main/ subgroup — the old scope would miss the root's own
+                # subtree_control, the exact file that EBUSYs the next restart.
+                grep -qF '/sys/fs/cgroup/system.slice/lab.service' "$hygieneScriptPath"
+                if grep -qF '/sys/fs/cgroup/system.slice/lab.service/main' "$hygieneScriptPath"; then
+                  echo "hygiene must clear lab.service's cgroup root, not the removed main/ subgroup (ADR-0059, issue #237)" >&2
+                  exit 1
+                fi
 
                 # ...and podman + passt (pasta) on the unit PATH line, where
                 # preflight's lookup and the container pane argv resolve them —

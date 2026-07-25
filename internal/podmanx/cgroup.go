@@ -1,39 +1,69 @@
 package podmanx
 
-// The container cgroup layout (ADR-0058). Containers used to ride
-// `--cgroups=split`, which nests the payload cgroup inside lab's OWN cgroup
-// and makes podman enable memory/pids in that cgroup's subtree_control. On
-// cgroup v2 a cgroup with controllers enabled in subtree_control may not
-// hold processes directly (the "no internal processes" rule) — and systemd
-// attaches the service's new main PID DIRECTLY into that cgroup on every
-// start. With KillMode=process keeping containers alive across restarts,
-// the first restart after any container ran died with "Failed to spawn
-// executor: Device or resource busy" (the 2026-07-25 dev-new outage).
+// The container cgroup layout (ADR-0059, issue #237).
 //
-// The fix restructures the tree so the cgroup systemd attaches into never
-// delegates controllers:
+// Every container lands under a payload cgroup pinned by --cgroup-parent so
+// its --memory/--pids-limit caps bind to a subtree lab owns and preflight
+// verified (#205's no-false-green rule). The hard part is WHERE that subtree
+// lives: a cgroup that delegates controllers may hold no processes of its own
+// (cgroup v2's no-internal-process rule), yet systemd spawns a service's main
+// PID DIRECTLY into that service's own cgroup root.
 //
-//	lab.service/          delegated root (Delegate=yes) — NO processes,
-//	│                     subtree_control carries +memory +pids
-//	├── main/             lab + tmux + every host process (systemd's
-//	│                     DelegateSubgroup=main attach point) — NO
-//	│                     controllers delegated below it, ever
-//	└── payload/          every container, via --cgroup-parent — NO
-//	    └── libpod-*/     processes directly in payload/ itself
+// ADR-0058 tried to dodge that with Delegate=yes + DelegateSubgroup=main on
+// lab.service itself, expecting systemd to spawn lab into a proc-free main/
+// subgroup and leave the unit root free to carry the payload controllers. It
+// does NOT work: DelegateSubgroup= only redirects CONTROL processes, not the
+// main ExecStart spawn — src/core/execute.c exec_params_needs_control_subcgroup
+// requires EXEC_CGROUP_DELEGATE|EXEC_CONTROL_CGROUP|EXEC_IS_CONTROL all set,
+// and the main process is not a control process. systemd clone3(CLONE_INTO_
+// CGROUP)s the new main PID into the unit cgroup ROOT and sd-executor only
+// migrates itself into main/ afterwards; when the root already delegates
+// controllers the kernel refuses that spawn with EBUSY, and systemd does NOT
+// retry it (posix_spawn_wrapper retries only ENOTSUP/EPERM). With
+// KillMode=process keeping container survivors populating and re-arming the
+// root across restarts, EVERY lab.service restart after any container had run
+// died with "Failed to spawn executor: Device or resource busy" (the
+// 2026-07-26 dev-new incident, issue #237). Any design that keeps controllers
+// enabled on lab.service's OWN cgroup root across restarts is dead.
 //
-// main/ holds processes but never delegates; payload/ delegates but never
-// holds processes directly. Both sides of the internal-process rule stay
-// satisfied across any restart, and podman never needs its move-everything-
-// into-a-"runtime"-subgroup workaround (which is what armed the old trap
-// one nesting level per service generation). setupCgroups establishes the
-// layout at preflight, Verify re-checks it before every container spawn,
-// and the nix module's lab-cgroup-hygiene oneshot clears a re-armed main/
-// before each service start as the last line of defense.
+// ADR-0059 moves the delegation OUT of lab.service entirely, into a separate,
+// never-restarted "holder" unit (lab-payload.service):
+//
+//	/sys/fs/cgroup/system.slice/
+//	├── lab.service/                 plain, UNDELEGATED — lab, tmux, all host
+//	│                                processes; its subtree_control MUST stay
+//	│                                empty forever (else the next restart EBUSYs)
+//	└── lab-payload.service/         holder: delegated root (Delegate=yes,
+//	    │                            User=lab), NEVER restarted; subtree_control
+//	    │                            carries +memory +pids (lab preflight enables)
+//	    ├── main/                    holder's own sleep (DelegateSubgroup=main
+//	    │                            keeps the delegated root proc-free)
+//	    └── payload/                 every container via --cgroup-parent
+//	        └── libpod-*/            per-container leaves; the caps bind here
+//
+// lab.service never delegates, so systemd's spawn into its cgroup root is
+// always a legal spawn into a proc-only cgroup — restart-safe forever. The
+// holder owns the delegation and is never restarted (a holder restart with
+// surviving containers would hit the very same EBUSY trap the whole design
+// avoids — hence restartIfChanged=false), so its delegated root, and the
+// containers' caps under it, survive across every lab restart.
+// DelegateSubgroup=main works on the holder because the holder's sleep is
+// spawned once and never re-attached under an armed root.
+//
+// setupCgroups establishes the payload subtree inside the holder at preflight
+// (holder delegated + writable, +memory +pids enabled on its root, payload/
+// created and confirmed to carry those controllers). Verify re-checks, before
+// EVERY container spawn, the two invariants whose violation is silent and
+// catastrophic: lab.service's own subtree_control must stay empty (something
+// re-armed the trap → the next restart EBUSYs) and the payload cgroup must
+// still carry memory+pids (the holder was restarted/stopped and lost its
+// delegation → the caps would silently not bind). The nix module's
+// lab-cgroup-hygiene oneshot clears any stray delegation under lab.service
+// before each start as the last line of defense.
 
 import (
 	"fmt"
 	"os"
-	pathpkg "path"
 	"slices"
 	"strings"
 )
@@ -41,120 +71,147 @@ import (
 // cgroupFSRoot is where the unified hierarchy is mounted.
 const cgroupFSRoot = "/sys/fs/cgroup"
 
-// payloadSubgroup is the container subtree's name under the delegated unit
-// root — the counterpart of the module's DelegateSubgroup=main.
-const payloadSubgroup = "payload"
+// holderCgroup is the lab-payload.service holder unit's delegated cgroup root,
+// as a cgroupfs path (ADR-0059). Hardcoded, not derived from lab's own cgroup:
+// the delegation deliberately lives OUTSIDE lab.service so no lab restart ever
+// spawns into a delegating cgroup. The holder is pinned to system.slice by the
+// nix module and never restarted.
+const holderCgroup = "/system.slice/lab-payload.service"
 
-// Cgroups is the established container cgroup layout (ADR-0058), published
-// on the preflight Result so every spawn site reads one source: Parent
-// becomes the argv's --cgroup-parent, Verify is the pre-spawn restart-safety
-// guard. Built by setupCgroups; a hand-built value with an empty AttachDir
-// (tests, degenerate wiring) verifies vacuously — only Preflight-produced
-// Results carry the full layout.
+// payloadCgroup is the container subtree under the holder — RunSpec.CgroupParent's
+// value, the same subtree preflight verifies delegation on. Its name is the
+// counterpart of the holder's DelegateSubgroup=main.
+const payloadCgroup = holderCgroup + "/payload"
+
+// holderMainSubgroup is where stray processes found at the holder root are
+// adopted (systemd < 254 ignoring DelegateSubgroup, or a start-up race): the
+// holder root must be proc-free before its controllers can be enabled.
+const holderMainSubgroup = "main"
+
+// Cgroups is the established container cgroup layout (ADR-0059), published on
+// the preflight Result so every spawn site reads one source: Parent becomes
+// the argv's --cgroup-parent, Verify is the pre-spawn restart-safety guard.
+// Built by setupCgroups; a hand-built value with an empty LabDir (tests,
+// degenerate wiring) verifies vacuously — only Preflight-produced Results
+// carry the full layout.
 type Cgroups struct {
-	// Parent is the payload cgroup as a cgroupfs path (e.g.
-	// "/system.slice/lab.service/payload") — RunSpec.CgroupParent's value.
+	// Parent is the payload cgroup as a cgroupfs path
+	// ("/system.slice/lab-payload.service/payload") — RunSpec.CgroupParent's value.
 	Parent string
-	// AttachDir is lab's own cgroup directory under /sys/fs/cgroup — the
-	// cgroup systemd attaches the service's main PID into on every start.
-	AttachDir string
-	// RootDir is AttachDir's parent: the delegated unit root whose
-	// subtree_control carries the payload controllers and whose cgroup.procs
-	// must stay empty.
-	RootDir string
+	// LabDir is lab's OWN cgroup directory under /sys/fs/cgroup (from
+	// /proc/self/cgroup) — the plain, undelegated lab.service cgroup whose
+	// cgroup.subtree_control must stay empty forever, else the next lab
+	// restart EBUSYs.
+	LabDir string
+	// PayloadDir is the payload cgroup directory under /sys/fs/cgroup, inside
+	// the holder — the subtree the container caps bind to, which must keep
+	// carrying memory+pids across the holder's lifetime.
+	PayloadDir string
 
 	// readFile is Verify's probe, injected by setupCgroups (Deps.ReadFile);
 	// nil falls back to os.ReadFile.
 	readFile func(string) ([]byte, error)
 }
 
-// Verify is the restart-safety guard (ADR-0058), run at preflight and again
+// Verify is the restart-safety guard (ADR-0059), run at preflight and again
 // before EVERY container spawn: it re-checks the two invariants whose
-// violation would make the NEXT service restart fail with EBUSY — the attach
-// cgroup must not delegate controllers (podman's runtime-subgroup workaround
-// re-enables them if it ever fires again, e.g. after a podman upgrade), and
-// the delegated root must hold no processes directly. Detecting the re-armed
-// trap at spawn time turns "the next deploy bricks the service" into an
-// immediate, actionable refusal. Nil receiver or empty AttachDir (a layout
-// never established — hand-built Results) verifies vacuously.
+// violation is both silent and catastrophic. Detecting them at spawn time
+// turns "the next deploy bricks the service" (or "the caps silently stopped
+// binding") into an immediate, actionable refusal. Nil receiver or empty
+// LabDir (a layout never established — hand-built Results) verifies vacuously.
 func (c *Cgroups) Verify() error {
-	if c == nil || c.AttachDir == "" {
+	if c == nil || c.LabDir == "" {
 		return nil
 	}
 	readFile := c.readFile
 	if readFile == nil {
 		readFile = os.ReadFile
 	}
-	stc := c.AttachDir + "/cgroup.subtree_control"
+	// (a) lab.service's own cgroup must delegate nothing. systemd spawns
+	// lab's main PID directly here on every start; a non-empty subtree_control
+	// means something re-armed the trap (a podman heuristic, a stray delegate)
+	// and the NEXT restart would fail with EBUSY. Nothing may ever delegate
+	// under lab.service.
+	stc := c.LabDir + "/cgroup.subtree_control"
 	b, err := readFile(stc)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", stc, err)
 	}
 	if ctrl := strings.TrimSpace(string(b)); ctrl != "" {
-		return fmt.Errorf("lab's own cgroup %s delegates controllers (%q) — the next service restart would fail (cgroup v2 forbids processes in a delegating cgroup); restarting lab clears it (lab-cgroup-hygiene)", c.AttachDir, ctrl)
+		return fmt.Errorf("lab's own cgroup %s delegates controllers (%q) — the next lab restart would fail with EBUSY (systemd spawns lab's main PID directly here, and cgroup v2 forbids processes in a delegating cgroup); nothing may delegate under lab.service. Restarting lab clears it (lab-cgroup-hygiene)", c.LabDir, ctrl)
 	}
-	procs := c.RootDir + "/cgroup.procs"
-	b, err = readFile(procs)
+	// (b) the payload cgroup must still carry both caps' controllers. If the
+	// lab-payload.service holder was restarted or stopped, its fresh cgroup
+	// lost the delegation preflight established — and --memory/--pids-limit
+	// would then silently not bind (the #205 no-false-green lesson).
+	ctrlFile := c.PayloadDir + "/cgroup.controllers"
+	b, err = readFile(ctrlFile)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", procs, err)
+		return fmt.Errorf("reading %s: %w", ctrlFile, err)
 	}
-	if strays := strings.TrimSpace(string(b)); strays != "" {
-		return fmt.Errorf("the delegated cgroup root %s holds processes (pids %s) — the next service restart would fail; they must live in a subgroup", c.RootDir, strings.Join(strings.Fields(strays), ","))
+	if have := strings.Fields(string(b)); !slices.Contains(have, "memory") || !slices.Contains(have, "pids") {
+		return fmt.Errorf("the payload cgroup %s carries only %q — the lab-payload.service holder lost its memory/pids delegation (restarted or stopped), so the container caps would silently not bind; restarting the lab service re-establishes the payload delegation", c.PayloadDir, strings.TrimSpace(string(b)))
 	}
 	return nil
 }
 
-// setupCgroups establishes the ADR-0058 layout from inside lab's own cgroup
-// (ownPath, the unified-hierarchy path from /proc/self/cgroup) and returns
-// it, or the preflight Failure that explains what the host is missing:
+// setupCgroups establishes the ADR-0059 layout inside the lab-payload.service
+// holder and returns it, or the preflight Failure that explains what the host
+// is missing. ownPath (the unified-hierarchy path from /proc/self/cgroup)
+// feeds ONLY LabDir now — the payload parent is hardcoded under the holder,
+// never derived from lab's own cgroup:
 //
-//  1. Layout: lab must run in a delegated SUBGROUP — ownPath's parent is the
-//     delegated unit root, detected by write access (the same durable signal
-//     the old delegation check used). Running at the root itself (no
-//     DelegateSubgroup) is refused: the root could then never delegate the
-//     payload controllers without re-arming the restart trap.
-//  2. Adopt strays: any process still sitting at the root (a tmux server
-//     surviving from a pre-ADR-0058 deploy) is moved into lab's own cgroup —
-//     best-effort per pid (races with exits are benign; Verify re-checks the
-//     result and fails loud if adoption didn't stick).
-//  3. Enable +memory +pids on the root's subtree_control so the payload
-//     subtree can carry the --memory/--pids-limit caps.
+//  1. Holder delegated + writable: systemd's Delegate=yes + User=lab chowns
+//     the holder's cgroup dir (and its cgroup.procs/subtree_control) to the
+//     lab user, so write access IS the delegation signal — and a missing dir
+//     (holder absent or not running) fails the same probe.
+//  2. Adopt strays: any process still sitting at the holder ROOT (systemd
+//     < 254 ignoring DelegateSubgroup, or a start-up race) is moved into the
+//     holder's main/ subgroup so the root is proc-free — best-effort per pid
+//     (a race with an exit is benign; if adoption doesn't stick, step 3 fails
+//     loudly, since the kernel refuses controller delegation on a populated
+//     cgroup).
+//  3. Enable +memory +pids on the holder root's subtree_control so the
+//     payload subtree can carry the --memory/--pids-limit caps.
 //  4. Create the payload cgroup and confirm the controllers actually arrived
-//     in it — the no-false-green posture of the old check, retargeted at the
-//     subtree containers now really land in.
+//     in it — the no-false-green posture aimed at the subtree containers land in.
 func setupCgroups(ownPath string, d Deps) (*Cgroups, *Failure) {
 	ownPath = strings.TrimSuffix(ownPath, "/")
-	rootPath := pathpkg.Dir(ownPath)
+	holderDir := cgroupFSRoot + holderCgroup
+	payloadDir := cgroupFSRoot + payloadCgroup
 	c := &Cgroups{
-		Parent:    rootPath + "/" + payloadSubgroup,
-		AttachDir: cgroupFSRoot + ownPath,
-		RootDir:   cgroupFSRoot + rootPath,
-		readFile:  d.ReadFile,
-	}
-	layoutHint := "run lab with systemd Delegate=yes AND DelegateSubgroup=main — the delegated cgroup root must stay free of processes or service restarts fail (ADR-0058)"
-	if rootPath == "/" || rootPath == "." {
-		return nil, &Failure{Check: CheckCgroupLayout, Detail: fmt.Sprintf("lab runs in cgroup %s, directly under the hierarchy root", ownPath), Hint: layoutHint}
-	}
-	if d.Writable != nil && !d.Writable(c.RootDir) {
-		return nil, &Failure{Check: CheckCgroupLayout, Detail: fmt.Sprintf("cgroup %s is not delegated to the lab user (parent %s not writable)", ownPath, rootPath), Hint: layoutHint}
+		Parent:     payloadCgroup,
+		LabDir:     cgroupFSRoot + ownPath,
+		PayloadDir: payloadDir,
+		readFile:   d.ReadFile,
 	}
 
-	// Adopt strays (step 2). The root's cgroup.procs is unreadable only on
-	// layouts step 1 already refused, so a read error here just leaves
-	// adoption to Verify's loud failure.
-	if procs, err := d.ReadFile(c.RootDir + "/cgroup.procs"); err == nil {
+	// Step 1. Write access to the holder root is the delegation signal.
+	holderHint := "the lab-payload.service holder unit must be running with Delegate=yes + DelegateSubgroup=main and the lab service user (the NixOS module ships it with container.enable) — check systemctl status lab-payload.service"
+	if d.Writable != nil && !d.Writable(holderDir) {
+		return nil, &Failure{Check: CheckHolder, Detail: fmt.Sprintf("the holder cgroup %s is not delegated to the lab user (the lab-payload.service holder is missing or not running)", holderDir), Hint: holderHint}
+	}
+
+	// Step 2. Adopt strays into the holder's main/ subgroup. Only touched when
+	// the holder root actually holds processes — in the healthy case
+	// DelegateSubgroup=main already keeps the sleep in main/ and the root
+	// proc-free, so systemd owns main/ and this is a no-op.
+	if procs, err := d.ReadFile(holderDir + "/cgroup.procs"); err == nil && strings.TrimSpace(string(procs)) != "" {
+		mainDir := holderDir + "/" + holderMainSubgroup
+		_ = d.Mkdir(mainDir, 0o755) // MkdirAll-shaped; an existing dir is success
 		for line := range strings.Lines(string(procs)) {
 			if pid := strings.TrimSpace(line); pid != "" {
-				_ = d.WriteFile(c.AttachDir+"/cgroup.procs", []byte(pid), 0)
+				_ = d.WriteFile(mainDir+"/cgroup.procs", []byte(pid), 0)
 			}
 		}
 	}
 
-	delegHint := "the lab service's cgroup lacks memory/pids delegation — set Delegate=yes (and DelegateSubgroup=main) on the systemd unit"
-	if err := d.WriteFile(c.RootDir+"/cgroup.subtree_control", []byte("+memory +pids"), 0); err != nil {
-		return nil, &Failure{Check: CheckDelegation, Detail: fmt.Sprintf("cannot enable memory/pids on %s: %v", rootPath, err), Hint: delegHint}
+	// Steps 3 & 4. Delegation into the payload subtree — the false-green check
+	// retargeted at the subtree containers really land in.
+	delegHint := "the lab-payload.service holder is not delegating memory/pids into the payload cgroup — restart the lab service to re-establish it (check systemctl status lab-payload.service)"
+	if err := d.WriteFile(holderDir+"/cgroup.subtree_control", []byte("+memory +pids"), 0); err != nil {
+		return nil, &Failure{Check: CheckDelegation, Detail: fmt.Sprintf("cannot enable memory/pids on %s: %v", holderCgroup, err), Hint: delegHint}
 	}
-	payloadDir := c.RootDir + "/" + payloadSubgroup
 	if err := d.Mkdir(payloadDir, 0o755); err != nil {
 		return nil, &Failure{Check: CheckDelegation, Detail: fmt.Sprintf("cannot create payload cgroup %s: %v", payloadDir, err), Hint: delegHint}
 	}

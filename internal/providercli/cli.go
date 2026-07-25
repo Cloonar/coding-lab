@@ -81,9 +81,11 @@ func (c *ContainerCLI) Run(ctx context.Context, inv provider.CLIInvocation) ([]b
 	if msg := c.cfg.structuralRefusal(r); msg != "" {
 		return nil, nil, errors.New(msg)
 	}
-	// Restart-safety guard (ADR-0058), re-run per invocation: a cgroup
-	// layout podman dirtied after boot would wedge the next service restart,
-	// so it hard-refuses here — a could-not-run error, never a CLI verdict.
+	// Restart-safety guard (ADR-0059), re-run per invocation: a cgroup layout
+	// dirtied after boot (a re-armed trap under lab.service, or the
+	// lab-payload.service holder losing its delegation) would wedge the next
+	// service restart or void the caps, so it hard-refuses here — a
+	// could-not-run error, never a CLI verdict.
 	if err := r.Cgroups.Verify(); err != nil {
 		return nil, nil, fmt.Errorf("container cgroup layout unsafe: %w", err)
 	}
