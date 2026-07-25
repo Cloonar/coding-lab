@@ -746,9 +746,16 @@ in
       # `podman` and `pasta` (shipped by the passt package), and the container
       # pane argv resolves against this PATH. crun is podman's default OCI
       # runtime and comes in via virtualisation.podman below.
+      #
+      # /run/wrappers is load-bearing (issue #228): rootless podman execs
+      # setuid newuidmap/newgidmap to map the subordinate ID range, and on
+      # NixOS those only exist as security wrappers under /run/wrappers/bin —
+      # the nix store forbids setuid bits, so no package can provide them and
+      # the wrapper dir must be on the unit PATH (makeBinPath appends /bin).
       ++ lib.optionals cfg.container.enable [
         pkgs.podman
         pkgs.passt
+        "/run/wrappers"
       ]
       # Agent CLIs (non-null agentPackages values, claudePackage alias folded
       # in) then the additive extraPackages.
