@@ -22,7 +22,7 @@ The pins, decided:
 
 ## Status
 
-Accepted. Settled via issue #207 (2026-07-23). Builds on ADR-0052 (the container runner — this ADR replaces its single global `--container-image` with a per-repo pick and relaxes the preflight it introduced, leaving the runner, mount inventory, and refusal-before-claim behavior otherwise intact) and ADR-0051 (the agent-tools `/opt/lab` injection contract — unchanged; the read-only future-imports rule generalizes it). Does not revisit ADR-0002's nix-first packaging of lab itself: the dev image is the operator's, never one lab builds. The remaining ADR-0052 follow-up, containerized provider login (#206), is untouched.
+Accepted. Settled via issue #207 (2026-07-23). Builds on ADR-0052 (the container runner — this ADR replaces its single global `--container-image` with a per-repo pick and relaxes the preflight it introduced, leaving the runner, mount inventory, and refusal-before-claim behavior otherwise intact) and ADR-0051 (the agent-tools `/opt/lab` injection contract — unchanged; the read-only future-imports rule generalizes it). Does not revisit ADR-0002's nix-first packaging of lab itself: the dev image is the operator's, never one lab builds. The remaining ADR-0052 follow-up, containerized provider login (#206), is untouched. Superseded in part by ADR-0056 (issue #230): the NixOS module now defaults `container.defaultImage` to a digest-pinned `buildpack-deps:stable-scm` instead of null — the demotion itself (global optional, per-repo ref wins, null valid) stands.
 
 ## Considered options
 

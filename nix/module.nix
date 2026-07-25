@@ -545,15 +545,24 @@ in
 
       defaultImage = lib.mkOption {
         type = lib.types.nullOr lib.types.nonEmptyStr;
-        default = null;
-        example = "docker.io/library/debian:stable-slim";
+        # Digest-pinned stock scm image (issue #230): satisfies the dev-image
+        # contract as-is with no operator-supplied image, so a stock
+        # deployment stops refusing container spawns for repos that never
+        # set their own image_ref.
+        # Re-pin (manual PR, no automation):
+        #   skopeo inspect --format '{{.Digest}}' docker://docker.io/library/buildpack-deps:stable-scm
+        default = "docker.io/library/buildpack-deps:stable-scm@sha256:07554a82a7a29ce00a048e0b29d18f454b5721b41940d43ee3be1ef59d55b114";
         description = ''
           Global default dev image (--container-image) container sessions run
-          in when their repo's own **Dev image** field is blank. `null` is a
-          valid deployment: each repo can carry its own ref
-          (`repos.image_ref`, ADR-0053), and a spawn with no effective image —
-          repo field blank AND this unset — is refused at spawn, naming both
-          knobs.
+          in when their repo's own **Dev image** field is blank. Defaults to
+          a digest-pinned stock scm image (`buildpack-deps:stable-scm`) that
+          satisfies the dev-image contract as-is — shell, coreutils, git,
+          openssh-client, curl, ca-certificates — and pulls anonymously from
+          docker.io (issue #230). Explicit `null` remains a valid opt-out:
+          each repo can instead carry its own ref (`repos.image_ref`,
+          ADR-0053), and a spawn with no effective image — repo field blank
+          AND this null — is refused at spawn, naming both knobs. A repo's
+          own `repos.image_ref` always overrides this default when set.
         '';
       };
 

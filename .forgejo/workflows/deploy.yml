@@ -12,11 +12,22 @@
 # toolsImages default names the CLI-version tags this commit's versions.env
 # pins, and a merge that changes the agent-tools inputs triggers their
 # publish job on the SAME push this deploy runs on. The "Wait for the
-# agent-tools refs" step below refuses to bump the pin until every default
-# ref resolves in the registry — anonymously, which is also the deployment
-# contract (hosts pull without credentials) — so the pin only ever advances
-# to a rev whose images are already published and pullable. For merges that
-# don't touch agent-tools the tags long exist and the step passes instantly.
+# agent-tools and default dev-image refs" step below refuses to bump the pin
+# until every default ref resolves in the registry — anonymously, which is
+# also the deployment contract (hosts pull without credentials) — so the pin
+# only ever advances to a rev whose images are already published and
+# pullable. For merges that don't touch agent-tools the tags long exist and
+# the step passes instantly.
+#
+# That same step also probes container.defaultImage's default (issue #230):
+# the digest-pinned docker.io dev image a fresh host falls back to for any
+# repo with no image_ref of its own. A digest that's gone stale or been
+# GC'd on docker.io would otherwise surface as spawn refusals on hosts that
+# pick up the new pin — not as a failed deploy — so the wait step resolves
+# it anonymously here, same as the agent-tools refs, before the pin moves.
+# This knowingly adds docker.io to the deploy path's probe dependencies,
+# alongside this repo's own registry; accepted because the alternative is a
+# failure mode that only shows up after the pin has already shipped.
 #
 # Like ci.yml, this runs on the stock `ubuntu-latest` runner and installs nix
 # in-job (Determinate installer, daemonless `--init none`), because
@@ -34,8 +45,10 @@ jobs:
   bump-nixos-pin:
     runs-on: ubuntu-latest
     steps:
-      # Checked out for containers/agent-tools/versions.env — the committed
-      # pin the wait step derives the expected registry tags from.
+      # Checked out for containers/agent-tools/versions.env and
+      # nix/module.nix — the wait step derives the expected agent-tools
+      # registry tags from the former and the default dev-image ref (issue
+      # #230) from the latter.
       - uses: actions/checkout@v4
 
       - name: Install nix
@@ -44,15 +57,20 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
             | sh -s -- install linux --no-confirm --init none
 
-      - name: Wait for the agent-tools refs this rev pins
+      - name: Wait for the agent-tools and default dev-image refs this rev pins
         run: |
           # Refuse to advance the host pin until the default toolsImages refs
-          # resolve — see the header comment. skopeo inspect runs with no
-          # credentials on purpose: it proves the exact anonymous pull every
-          # host's preflight performs. The deadline covers a same-push image
-          # build (~15 min); on timeout the deploy fails and the pin stays,
-          # which is the honest outcome — a bumped pin would ship a server
-          # whose default refs don't resolve.
+          # AND the module's default dev-image ref (issue #230) resolve — see
+          # the header comment. skopeo inspect runs with no credentials on
+          # purpose: it proves the exact anonymous pull every host's
+          # preflight performs. The deadline is shared across every ref
+          # probed below: it covers a same-push agent-tools image build
+          # (~15 min), and for the docker.io dev-image ref a failure that
+          # takes this long means the pinned digest has gone stale/GC'd or
+          # docker.io itself is unreachable — a long-published tag doesn't
+          # need 30 minutes to show up. On timeout the deploy fails and the
+          # pin stays, which is the honest outcome — a bumped pin would ship
+          # a server whose default refs don't resolve.
           #
           # skopeo's stderr is captured and printed on every retry and in the
           # deadline error (issue #224): a probe can fail for reasons that have
@@ -60,7 +78,9 @@ jobs:
           # container's network path, a registry auth quirk — and discarding
           # it leaves "still does not resolve" as the only, misleading, signal.
           # The 2>&1 >/dev/null ordering keeps stderr and drops stdout (the
-          # inspect JSON is noise here).
+          # inspect JSON is noise here). This capture behavior is unchanged
+          # and covers every ref in the loop below, including the dev-image
+          # one added for issue #230.
           set -euo pipefail
           set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
 
@@ -78,13 +98,34 @@ jobs:
           "$skopeo" --version
           deadline=$(( $(date +%s) + 1800 ))
 
-          for entry in "claude:${CLAUDE_CODE_VERSION}" "codex:${CODEX_VERSION}"; do
-            p="${entry%%:*}"
-            ver="${entry#*:}"
-            ref="docker://${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
+          # The module's default dev image (issue #230): nix/module.nix pins
+          # exactly one docker.io digest as container.defaultImage's default.
+          # Derive it from the module instead of hardcoding a second copy
+          # here, so a re-pin PR updates this probe for free. Zero matches
+          # means the literal moved or was removed; several means the
+          # pattern is now ambiguous — either way probing would silently
+          # check nothing or the wrong ref, so fail loudly instead. Probing
+          # this ref knowingly adds docker.io to this deploy's probe
+          # dependencies — see the header comment.
+          dev_image="$(grep -oE 'docker\.io/[A-Za-z0-9/._-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' nix/module.nix | sort -u)" || true
+          if [ -z "$dev_image" ]; then
+            dev_image_count=0
+          else
+            dev_image_count="$(printf '%s\n' "$dev_image" | wc -l)"
+          fi
+          if [ "$dev_image_count" -ne 1 ]; then
+            echo "::error::expected exactly one docker.io digest-pinned ref in nix/module.nix (container.defaultImage's default), found ${dev_image_count}: $(printf '%s' "$dev_image" | tr '\n' ' ')"
+            exit 1
+          fi
+
+          for ref in \
+            "docker://${REGISTRY}/${OWNER}/agent-tools:claude-${CLAUDE_CODE_VERSION}" \
+            "docker://${REGISTRY}/${OWNER}/agent-tools:codex-${CODEX_VERSION}" \
+            "docker://${dev_image}"
+          do
             until err="$("$skopeo" inspect --no-tags "$ref" 2>&1 >/dev/null)"; do
               if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "::error::${ref} still does not resolve — the agent-tools publish for this versions.env has not landed (or the package is not publicly readable). Not bumping the pin. Last skopeo error: ${err}"
+                echo "::error::${ref} still does not resolve — the ref this rev pins has not been published yet, or has gone stale/unreachable on its registry. Not bumping the pin. Last skopeo error: ${err}"
                 exit 1
               fi
               echo "waiting for ${ref} … (skopeo: ${err})"
