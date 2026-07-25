@@ -69,7 +69,12 @@ jobs:
           REGISTRY="$(printf '%s' '${{ github.server_url }}' | sed -E 's#^https?://##')"
           OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
 
-          skopeo="$(nix build --no-link --print-out-paths nixpkgs#skopeo)/bin/skopeo"
+          # ^out matters: skopeo has multiple outputs (man + out) and
+          # --print-out-paths prints one path per line — without the selector
+          # the assignment captures BOTH lines and every exec of "$skopeo"
+          # fails with 'No such file or directory' (issue #226, the gate's
+          # original silent failure mode).
+          skopeo="$(nix build --no-link --print-out-paths 'nixpkgs#skopeo^out')/bin/skopeo"
           "$skopeo" --version
           deadline=$(( $(date +%s) + 1800 ))
 
