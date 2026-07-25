@@ -90,6 +90,18 @@ const (
 	SettingContainerNofile = "container_nofile"
 )
 
+// Container resource-limit defaults — the ONE source of the grilled #205
+// values. SeedDefaultSettings writes them, and every read-side fallback (the
+// instance layer's effectiveContainerLimits, the provider login/CLI limits
+// closure in cmd/lab) references these same consts, so the last-resort value
+// a missing or garbled row falls back to can never drift from what the seed
+// writes.
+const (
+	DefaultContainerMemory = "8g"
+	DefaultContainerPids   = 4096
+	DefaultContainerNofile = 16384
+)
+
 // containerMemoryRe is podman's --memory value grammar (issue #205): a
 // positive integer, optionally suffixed with one b/k/m/g unit letter
 // (case-insensitive) — e.g. "8g", "512m", "1073741824". Shared by the
@@ -232,9 +244,9 @@ func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defau
 		SettingSweepIntervalMinutes: "10",
 		SettingGitAuthorName:        "",
 		SettingGitAuthorEmail:       "",
-		SettingContainerMemory:      "8g",
-		SettingContainerPids:        "4096",
-		SettingContainerNofile:      "16384",
+		SettingContainerMemory:      DefaultContainerMemory,
+		SettingContainerPids:        strconv.Itoa(DefaultContainerPids),
+		SettingContainerNofile:      strconv.Itoa(DefaultContainerNofile),
 	}
 	for key, value := range defaults {
 		_, err := s.db.ExecContext(ctx, s.rebind(

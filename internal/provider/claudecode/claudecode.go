@@ -147,6 +147,13 @@ type Options struct {
 	LoginDir string
 	// Runner drives tmux for the login session.
 	Runner tmuxx.SessionRunner
+	// CLI runs this provider's machine-level CLI invocations — the auth
+	// status check, `claude auth logout`, and the credential-refresh poke
+	// (issue #206). nil defaults to provider.HostCLI (direct host execution,
+	// the pre-seam behavior byte-for-byte); a container-mode server injects a
+	// containerized runner so the host needs no claude binary. This package
+	// never learns which it got — podman stays entirely outside it.
+	CLI provider.CLIRunner
 	// Bus receives provider.auth.changed on login success.
 	Bus *events.Bus
 	// Logger defaults to slog.Default().
@@ -162,6 +169,7 @@ type Provider struct {
 	configPath string // MASTER ~/.claude.json — master-store ops only (login flow, InjectCredentials source)
 	loginDir   string
 	runner     tmuxx.SessionRunner
+	cli        provider.CLIRunner // machine-level CLI seam (issue #206) — never exec directly
 	bus        *events.Bus
 	log        *slog.Logger
 	now        func() time.Time
@@ -240,11 +248,19 @@ func New(o Options) (*Provider, error) {
 	if configPath == "" {
 		configPath = filepath.Join(o.LoginDir, ".claude.json")
 	}
+	// CLI defaults to direct host execution (issue #206) — the same
+	// adapter-owned-default rule as ClaudeBin: a caller that configures
+	// nothing gets exactly the pre-seam behavior.
+	cli := o.CLI
+	if cli == nil {
+		cli = &provider.HostCLI{}
+	}
 	p := &Provider{
 		claudeBin:      claudeBin,
 		configPath:     configPath,
 		loginDir:       o.LoginDir,
 		runner:         o.Runner,
+		cli:            cli,
 		bus:            o.Bus,
 		log:            logger,
 		now:            now,
@@ -336,6 +352,34 @@ func (p *Provider) Efforts() []provider.Option { return slices.Clone(efforts) }
 // SpawnOptions returns a copy of the spawn-options catalog (issue #19), in
 // render order.
 func (p *Provider) SpawnOptions() []provider.OptionSpec { return slices.Clone(spawnOptions) }
+
+// MasterStore is the package-level form of the MasterStoreSpec declaration.
+// It exists so the wiring layer can hand providercli a Spec closure BEFORE
+// the adapter is constructed — the container-decorated login runner is an
+// input to New, so the closure cannot come from the not-yet-existing
+// Provider. Function and method MUST stay one resolver (the single-source
+// rule the method doc pins): a divergence would let the containerized login
+// mount a different store than the adapter's own master-store ops target.
+func MasterStore() provider.MasterStoreSpec {
+	return provider.MasterStoreSpec{
+		EnvVar:     "CLAUDE_CONFIG_DIR",
+		HostDir:    masterConfigDir(),
+		HomeSubdir: ".claude",
+	}
+}
+
+// MasterStoreSpec implements provider.AgentProvider (issue #206): claude's
+// MASTER credential store, resolved freshly per call through masterConfigDir
+// (logout.go) — the ONE resolver every master-store operation shares — so
+// this declaration can never disagree with the logout rm-escalation, the
+// InjectCredentials source, or the refresh poke's env pin. CLAUDE_CONFIG_DIR
+// outranks HOME for ALL claude state (compat §3a), which is what makes the
+// declared override-awareness real (the issue #211 criterion, pinned by the
+// conformance suite's master-store-spec obligation). Delegates to the
+// package-level MasterStore so method and wiring closure are one resolver.
+func (p *Provider) MasterStoreSpec() provider.MasterStoreSpec {
+	return MasterStore()
+}
 
 // SupportsRemoteControl implements provider.RemoteCapable (issue #163):
 // claude-code honors SpawnSpec.Remote — it is the provider whose sessions the

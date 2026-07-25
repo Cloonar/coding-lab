@@ -16,13 +16,13 @@ import (
 // path unchanged: <AgentSockDir>/agent.sock.
 const agentSockName = "agent.sock"
 
-// Container-limit fallbacks — mirror the values SeedDefaultSettings writes
-// for the container_* rows, reachable only when a row is missing or garbled
-// (the same last-resort posture as defaultMaxInstances).
+// Container-limit fallbacks — store's single-source defaults (the same
+// consts SeedDefaultSettings writes), reachable only when a row is missing
+// or garbled (the same last-resort posture as defaultMaxInstances).
 const (
-	defaultContainerMemory = "8g"
-	defaultContainerPids   = 4096
-	defaultContainerNofile = 16384
+	defaultContainerMemory = store.DefaultContainerMemory
+	defaultContainerPids   = store.DefaultContainerPids
+	defaultContainerNofile = store.DefaultContainerNofile
 )
 
 // refuseContainerSpawn is the container-mode spawn gate (issue #205), run

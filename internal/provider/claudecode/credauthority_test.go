@@ -194,46 +194,12 @@ func TestAdoptCredentials_emptyHomeErrors(t *testing.T) {
 	}
 }
 
-// withMasterConfigDir OVERRIDES any inherited CLAUDE_CONFIG_DIR (a stray/instance
-// value) with a single master-pointing entry — the defense the RefreshCredentials
-// env pin relies on, independent of os/exec's duplicate-key dedup order.
-func TestWithMasterConfigDir_overrides(t *testing.T) {
-	in := []string{
-		"PATH=/usr/bin",
-		"CLAUDE_CONFIG_DIR=/stray/instance/.claude",
-		"HOME=/home/op",
-	}
-	out := withMasterConfigDir(in, "/master/.claude")
-
-	var count int
-	for _, kv := range out {
-		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
-			count++
-			if kv != "CLAUDE_CONFIG_DIR=/master/.claude" {
-				t.Errorf("CLAUDE_CONFIG_DIR entry = %q; want the master pin", kv)
-			}
-		}
-		if kv == "CLAUDE_CONFIG_DIR=/stray/instance/.claude" {
-			t.Error("the inherited stray CLAUDE_CONFIG_DIR was not filtered out")
-		}
-	}
-	if count != 1 {
-		t.Errorf("CLAUDE_CONFIG_DIR appears %d times; want exactly 1", count)
-	}
-	// Unrelated entries pass through untouched.
-	if !containsEnv(out, "PATH=/usr/bin") || !containsEnv(out, "HOME=/home/op") {
-		t.Errorf("unrelated env entries were not preserved: %v", out)
-	}
-}
-
-func containsEnv(env []string, want string) bool {
-	for _, kv := range env {
-		if kv == want {
-			return true
-		}
-	}
-	return false
-}
+// The former withMasterConfigDir helper's single-master-pin contract now
+// lives on the CLI-runner seam (provider.CLIInvocation.Env's
+// filter-then-append semantics, issue #206), unit-pinned in
+// internal/provider/hostcli_test.go; TestRefreshCredentials_pokeArgvEnvAndCwd
+// below still proves the end-to-end result — the stub sees exactly ONE
+// master-pointing CLAUDE_CONFIG_DIR entry.
 
 // refreshRecord parses the record file the refresh stub writes.
 type refreshRecord struct {

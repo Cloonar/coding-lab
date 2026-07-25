@@ -1,13 +1,13 @@
 package claudecode
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // Logout drops the machine's current Claude account so an operator can log a
@@ -60,23 +60,25 @@ func (p *Provider) Logout(ctx context.Context) error {
 	return fmt.Errorf("claude logout: still logged in after credentials removal: %s", msg)
 }
 
-// runLogoutCommand runs `claude auth logout` under a defensive timeout and
-// returns its captured stderr. The exit code is deliberately ignored for the
-// success decision (undocumented/unreliable — upstream #30924); a non-zero exit
-// is logged, and the stderr is threaded into the failure message so a genuine
-// stuck logout surfaces the tool's own words.
+// runLogoutCommand runs `claude auth logout` through p.cli (issue #206)
+// under a defensive timeout and returns its captured stderr; stdout is
+// discarded — only the force-refreshed status decides success. The exit code
+// is deliberately ignored for the success decision (undocumented/unreliable —
+// upstream #30924); a non-zero exit is logged, and the stderr is threaded
+// into the failure message so a genuine stuck logout surfaces the tool's own
+// words.
 func (p *Provider) runLogoutCommand(ctx context.Context) string {
 	cctx, cancel := context.WithTimeout(ctx, p.logoutTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, p.claudeBin, "auth", "logout")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	_, stderr, err := p.cli.Run(cctx, provider.CLIInvocation{
+		Argv: []string{p.claudeBin, "auth", "logout"},
+	})
+	if err != nil {
 		p.log.Warn("claude auth logout exited non-zero (success is decided from status, not exit code)",
-			"component", "provider.claudecode", "err", err, "stderr", strings.TrimSpace(stderr.String()))
+			"component", "provider.claudecode", "err", err, "stderr", strings.TrimSpace(string(stderr)))
 	}
-	return stderr.String()
+	return string(stderr)
 }
 
 // masterConfigDir resolves claude's machine-level config dir the same way the

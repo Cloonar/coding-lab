@@ -4,7 +4,8 @@
 // stored state, the HOME rewrite that re-anchors host-derived env values at
 // the container-side mount point, the `podman rm` backstop, and the startup
 // preflight (preflight.go) that refuses container spawns on a host that
-// cannot run them.
+// cannot run them. The same argv renderer also serves issue #206's
+// provider-login shapes — see RunSpec for the three shapes it renders.
 //
 // The tracer-bullet split (#205): tmux stays host-side and untouched —
 // containerizing a run means the pane command BECOMES `podman run -it --rm
@@ -57,12 +58,19 @@ const Home = "/home/agent"
 // reachable behind it.
 const PATH = "/opt/lab/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-// RunSpec is everything RunArgv needs to render a containerized session's
-// pane command. All paths are host paths; the mount inventory (#205 design)
-// binds each one back at its host-identical container path — except the
-// instance home, which moves to Home — so path-valued state (worktree
-// .git links into the bare repo, git cred file paths, LAB_URL's socket
-// path) stays valid inside without rewriting.
+// RunSpec is everything RunArgv needs to render a containerized command.
+// One renderer serves three shapes: the run session (#205 — the full mount
+// inventory, interactive), the login-session pane (#206 — only the tools
+// image, a per-attempt scratch home, and the provider's master credential
+// store; interactive, the login TUI runs on the pane's pty), and the
+// non-interactive provider CLI poke (#206 auth status/logout/refresh —
+// the store bind alone, no host home, NoTTY, because a poke has no pane
+// and writes nothing worth keeping outside the store). All paths are host
+// paths; the run shape's mount inventory (#205 design) binds each one
+// back at its host-identical container path — except the instance home,
+// which moves to Home — so path-valued state (worktree .git links into the
+// bare repo, git cred file paths, LAB_URL's socket path) stays valid
+// inside without rewriting.
 type RunSpec struct {
 	Bin        string // podman binary (config PodmanBin, PATH-resolved by exec)
 	Name       string // container name, from ContainerName(session)
@@ -70,29 +78,64 @@ type RunSpec struct {
 	ToolsImage string // agent-tools image ref, @sha256-digest-pinned (ADR-0051)
 
 	// WorktreeDir is the run's worktree: rw bind at its host-identical path
-	// (the agent edits, the server diffs the same tree) and the container
-	// workdir, mirroring tmux's `new-session -c dir`.
+	// (the agent edits, the server diffs the same tree) and, absent Workdir,
+	// the container workdir, mirroring tmux's `new-session -c dir`. Empty
+	// omits the bind (the login/CLI shapes, issue #206).
 	WorktreeDir string
 	// BareDir is the bare repo: rw bind at its host-identical path because
 	// the worktree's .git file points into it by absolute host path — the
-	// worktree alone would be a broken repo inside.
+	// worktree alone would be a broken repo inside. Empty omits the bind
+	// (the login/CLI shapes, issue #206).
 	BareDir string
 	// AgentDir is the directory holding agent.sock, not the socket file
 	// itself: a bind of the socket inode would go stale when a server
 	// restart re-creates the socket, while a directory mount makes the new
-	// inode visible to a container that outlives the restart.
+	// inode visible to a container that outlives the restart. Empty omits
+	// the bind (the login/CLI shapes, issue #206).
 	AgentDir string
-	// HomeDir is the host instance home (instancehome.HomePath), mounted at
-	// Home — the one deliberately non-host-identical mount (see Home).
+	// HomeDir is the host home mounted at Home — the one deliberately
+	// non-host-identical mount (see Home). The run shape always sets it
+	// (the instance home, instancehome.HomePath); the login shape sets a
+	// per-attempt scratch home; the CLI shape leaves it EMPTY, which omits
+	// the bind — a poke's HOME is the container's own writable layer, and
+	// the nested store bind (StoreDst under Home) creates the /home/agent
+	// parents in that layer by itself.
 	HomeDir string
 	// RuntimeDir is the per-run runtime dir (git cred files, dialog spool,
 	// the --settings file), rw bind at its host-identical path: the git env
-	// and provider argv reference these files by absolute host path.
+	// and provider argv reference these files by absolute host path. Empty
+	// omits the bind (the login/CLI shapes, issue #206).
 	RuntimeDir string
+	// StoreDir is the provider's master credential store on the host,
+	// bound rw at StoreDst when BOTH are set — the login/CLI shapes
+	// (issue #206) put it under Home (e.g. Home + "/.claude"). Nesting
+	// inside the login shape's home bind is safe because podman orders
+	// nested binds by destination, so the store lands on top of the home
+	// bind regardless of -v order; in the home-less CLI shape the bind
+	// target itself creates the /home/agent parents in the container's
+	// writable layer. Setting one of the pair without the other is a
+	// programmer error: RunArgv omits the bind entirely rather than
+	// rendering a half-formed -v, so the mistake surfaces as a visibly
+	// missing store, never as an argv podman misparses.
+	StoreDir string
+	// StoreDst is the container-side mount point of StoreDir (see there);
+	// both empty in the run shape.
+	StoreDst string
 
 	Memory string // e.g. "8g" — value owned by the caller, not defaulted here
 	Pids   int    // --pids-limit
 	Nofile int    // soft+hard RLIMIT_NOFILE; replaces the host prlimit wrapper
+
+	// Workdir is the container workdir when non-empty; empty falls back to
+	// WorktreeDir, so existing run-shape callers are untouched. The
+	// login/CLI shapes set it to Home. When both are empty, -w is omitted
+	// entirely and the image's own workdir applies.
+	Workdir string
+	// NoTTY drops -it: the non-interactive CLI shape (#206 auth
+	// status/logout/refresh pokes) runs under no pane and must not demand
+	// a tty — plain `podman run` stdin semantics apply instead. The zero
+	// value keeps the interactive default the run and login shapes share.
+	NoTTY bool
 
 	// Env holds K=V pairs for non-secret container-side values (PATH, HOME,
 	// LAB_URL, GIT_* paths), emitted as --env K=V in order. Values appear in
@@ -109,12 +152,15 @@ type RunSpec struct {
 }
 
 // RunArgv renders s into the complete `podman run` argv — the containerized
-// pane command. Flag rationale, in argv order:
+// pane command (run and login shapes) or the non-interactive CLI command
+// (NoTTY); see RunSpec for the three shapes. Flag rationale, in argv order:
 //
 //   - --rm: the container is run-scoped state; the exiting client reaps it
 //     so a clean stop leaves nothing for RemoveContainer to do.
-//   - -it: the provider CLI is a TUI on the pane's pty; without a tty and
-//     open stdin it drops to non-interactive mode.
+//   - -it (dropped under NoTTY): the provider CLI is a TUI on the pane's
+//     pty; without a tty and open stdin it drops to non-interactive mode.
+//     The CLI shape has no pane and must not demand a tty, so NoTTY leaves
+//     plain `podman run` semantics.
 //   - --name: deterministic (ContainerName) so Stop's backstop can address
 //     the container with no stored state.
 //   - --userns=keep-id: the agent runs as the service uid inside, so files
@@ -145,13 +191,22 @@ type RunSpec struct {
 //   - --mount type=image: the read-only agent-tools injection at ToolsDst
 //     (ADR-0051 — the destination is a hard contract, see ToolsDst).
 //   - the -v binds and -w: the mount inventory documented on RunSpec.
+//     Every bind renders only when its field is set — the run-only dirs,
+//     the home (empty in the CLI shape), and the store pair, which follows
+//     immediately after the home bind (nesting is by destination, see
+//     StoreDir, so adjacency is for readability, not correctness). -w
+//     prefers Workdir, falls back to WorktreeDir, and vanishes when both
+//     are empty.
 //
 // Then --env K=V per Env entry, --env K per ForwardEnv entry (order
 // preserved — later entries win under podman just as with exec env), the
 // image, and the provider argv verbatim.
 func RunArgv(s RunSpec) []string {
-	args := []string{
-		s.Bin, "run", "--rm", "-it",
+	args := []string{s.Bin, "run", "--rm"}
+	if !s.NoTTY {
+		args = append(args, "-it")
+	}
+	args = append(args,
 		"--name", s.Name,
 		"--userns=keep-id",
 		"--network=pasta",
@@ -159,13 +214,30 @@ func RunArgv(s RunSpec) []string {
 		"--memory", s.Memory,
 		"--pids-limit", strconv.Itoa(s.Pids),
 		"--ulimit", fmt.Sprintf("nofile=%d:%d", s.Nofile, s.Nofile),
-		"--mount", "type=image,src=" + s.ToolsImage + ",dst=" + ToolsDst,
-		"-v", s.WorktreeDir + ":" + s.WorktreeDir,
-		"-v", s.BareDir + ":" + s.BareDir,
-		"-v", s.AgentDir + ":" + s.AgentDir,
-		"-v", s.HomeDir + ":" + Home,
-		"-v", s.RuntimeDir + ":" + s.RuntimeDir,
-		"-w", s.WorktreeDir,
+		"--mount", "type=image,src="+s.ToolsImage+",dst="+ToolsDst,
+	)
+	if s.WorktreeDir != "" {
+		args = append(args, "-v", s.WorktreeDir+":"+s.WorktreeDir)
+	}
+	if s.BareDir != "" {
+		args = append(args, "-v", s.BareDir+":"+s.BareDir)
+	}
+	if s.AgentDir != "" {
+		args = append(args, "-v", s.AgentDir+":"+s.AgentDir)
+	}
+	if s.HomeDir != "" {
+		args = append(args, "-v", s.HomeDir+":"+Home)
+	}
+	if s.StoreDir != "" && s.StoreDst != "" {
+		args = append(args, "-v", s.StoreDir+":"+s.StoreDst)
+	}
+	if s.RuntimeDir != "" {
+		args = append(args, "-v", s.RuntimeDir+":"+s.RuntimeDir)
+	}
+	if s.Workdir != "" {
+		args = append(args, "-w", s.Workdir)
+	} else if s.WorktreeDir != "" {
+		args = append(args, "-w", s.WorktreeDir)
 	}
 	for _, kv := range s.Env {
 		args = append(args, "--env", kv)
@@ -206,34 +278,55 @@ func ContainerName(session string) string {
 	return b.String()
 }
 
-// RewriteHomeEnv re-anchors host-home-derived values at the container-side
-// Home: for each K=V entry whose value IS hostHome or lives under it
-// (hostHome + "/"), that prefix becomes Home. The wiring task feeds it the
-// provider env, whose HOME= and config-dir values (CLAUDE_CONFIG_DIR=,
-// CODEX_HOME=) were derived from the host-side instance home the container
-// mounts at Home instead. Matching is exact-or-path-prefix, never
-// substring: a sibling dir sharing the string prefix ("/…/home2") and a
-// value merely containing the home mid-string are both left alone —
-// rewriting those would corrupt paths that stay host-identical inside the
-// container. Pure: returns a new slice, the input is never mutated.
-func RewriteHomeEnv(env []string, hostHome string) []string {
+// RewritePathPrefix re-anchors one path: a path that IS from, or lives under
+// it (from + "/"), moves onto to; ok reports whether a rewrite happened.
+// Matching is exact-or-path-prefix, never substring — a sibling dir sharing
+// the string prefix ("/…/home2") and a path merely containing from
+// mid-string are both left alone, because rewriting those would corrupt
+// paths that stay host-identical inside the container. This ONE function is
+// the prefix discipline every mount re-anchoring in the tree rides
+// (RewriteHomeEnv, RewriteEnvPrefix, providercli's workdir translation), so
+// an edge-case hardening lands everywhere at once. An empty from returns
+// (path, false): "" would prefix-match everything.
+func RewritePathPrefix(path, from, to string) (string, bool) {
+	if from == "" {
+		return path, false
+	}
+	if path == from {
+		return to, true
+	}
+	if rest, ok := strings.CutPrefix(path, from+"/"); ok {
+		return to + "/" + rest, true
+	}
+	return path, false
+}
+
+// RewriteEnvPrefix re-anchors env values: for each K=V entry whose value
+// RewritePathPrefix moves from → to, the entry is rewritten; everything else
+// — including entries without '=' — passes through untouched. Pure: returns
+// a new slice, the input is never mutated.
+func RewriteEnvPrefix(env []string, from, to string) []string {
 	out := make([]string, len(env))
 	copy(out, env)
-	if hostHome == "" {
-		return out // no anchor to rewrite from; "" would prefix-match everything
-	}
 	for i, kv := range out {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
 		}
-		if v == hostHome {
-			out[i] = k + "=" + Home
-		} else if rest, ok := strings.CutPrefix(v, hostHome+"/"); ok {
-			out[i] = k + "=" + Home + "/" + rest
+		if nv, ok := RewritePathPrefix(v, from, to); ok {
+			out[i] = k + "=" + nv
 		}
 	}
 	return out
+}
+
+// RewriteHomeEnv re-anchors host-home-derived values at the container-side
+// Home: RewriteEnvPrefix with the instance home as the anchor. The wiring
+// task feeds it the provider env, whose HOME= and config-dir values
+// (CLAUDE_CONFIG_DIR=, CODEX_HOME=) were derived from the host-side instance
+// home the container mounts at Home instead.
+func RewriteHomeEnv(env []string, hostHome string) []string {
+	return RewriteEnvPrefix(env, hostHome, Home)
 }
 
 // CmdRunner is the injectable exec seam RemoveContainer and Preflight run

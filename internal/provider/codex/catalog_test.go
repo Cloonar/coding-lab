@@ -61,7 +61,7 @@ func assertFallbackServed(t *testing.T, p *Provider) {
 // through the effort-label rule, defaults, and the first-seen union.
 func TestProbeModels_fixtureMapping(t *testing.T) {
 	script := fakeCodex(t, "cat '"+fixturePath(t)+"'")
-	models, efforts, err := ProbeModels(context.Background(), script)
+	models, efforts, err := ProbeModels(context.Background(), &provider.HostCLI{}, script)
 	if err != nil {
 		t.Fatalf("ProbeModels: %v", err)
 	}

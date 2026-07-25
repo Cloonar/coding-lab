@@ -58,7 +58,9 @@ type Fixture struct {
 // missing-master tolerance (issue #202, inject-credentials), the
 // credential-authority seam's ""-means-master / missing-master-empty-sig
 // conventions and AdoptCredentials' error guards (issue #222,
-// credential-authority), and that SeedWorkspace's per-run Home grants never
+// credential-authority), the master-store declaration's shape and
+// override-aware resolution (issues #206/#211, master-store-spec), and that
+// SeedWorkspace's per-run Home grants never
 // touch the master store (issue #202, seed-home-containment). Tier-1 otherwise
 // covers exactly the declarations
 // lab's core consumes blind: pattern dialect (issue #75 / ADR-0033), the
@@ -87,6 +89,7 @@ func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Run("locate-homeless", func(t *testing.T) { report(t, checkLocateHomeless(p)) })
 	t.Run("inject-credentials", func(t *testing.T) { report(t, checkInjectCredentials(t, p)) })
 	t.Run("credential-authority", func(t *testing.T) { report(t, checkCredentialAuthority(t, p)) })
+	t.Run("master-store-spec", func(t *testing.T) { report(t, checkMasterStoreSpec(t, p)) })
 	t.Run("seeding-exclude-coverage", func(t *testing.T) { report(t, checkSeedingExcludeCoverage(t, p)) })
 	t.Run("seeding-incogni", func(t *testing.T) { report(t, checkSeedingIncogni(t, p)) })
 	t.Run("seed-home-containment", func(t *testing.T) { report(t, checkSeedHomeContainment(t, p)) })
@@ -601,6 +604,58 @@ func checkCredentialAuthority(t *testing.T, p provider.AgentProvider) []error {
 	}
 	if sig, mtime := p.CredentialsSig(home); sig != "" || !mtime.IsZero() {
 		errs = append(errs, fmt.Errorf("credential-authority: after InjectCredentials(home) with a missing master store (which writes nothing), CredentialsSig(home) returned (sig %q, mtime %v); want (\"\", zero time) — InjectCredentials and CredentialsSig must agree about emptiness (issue #222)", sig, mtime))
+	}
+	return errs
+}
+
+// checkMasterStoreSpec pins the master-store declaration (issue #206) — the
+// three facts core consumes blind when it points a containerized provider-CLI
+// run at the machine's MASTER credential store. EnvVar must be non-empty (the
+// override variable the CLI honors over HOME). HomeSubdir must be a single,
+// clean, relative path element: it is joined under a containerized HOME, so a
+// multi-element path, an absolute dir, or an unclean spelling would escape or
+// double-resolve that join. HostDir must be non-empty and absolute (it
+// becomes a mount source, resolved by processes with different cwds). And the
+// resolution must be override-AWARE, freshly per call: repointing the
+// declared EnvVar must move the returned HostDir — the issue #211 acceptance
+// criterion, pinned here so an adapter that caches a construction-time
+// resolution fails loudly. Like the other env-sensitive obligations, every
+// adapter's master resolution is first pointed at fresh temp dirs so the
+// check never reads the host's real environment.
+func checkMasterStoreSpec(t *testing.T, p provider.AgentProvider) []error {
+	var errs []error
+	master := t.TempDir()
+	t.Setenv("HOME", filepath.Join(master, "home"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(master, "claude-config"))
+	t.Setenv("CODEX_HOME", filepath.Join(master, "codex-home"))
+
+	spec := p.MasterStoreSpec()
+	if spec.EnvVar == "" {
+		errs = append(errs, fmt.Errorf("master-store-spec: MasterStoreSpec().EnvVar is empty — the provider must declare the config-dir override variable its CLI honors over HOME, or a containerized login/run cannot pin the master store (issue #206)"))
+	}
+	switch {
+	case spec.HomeSubdir == "":
+		errs = append(errs, fmt.Errorf("master-store-spec: MasterStoreSpec().HomeSubdir is empty — the provider must declare the HOME-relative dir its CLI expects (issue #206)"))
+	case strings.ContainsAny(spec.HomeSubdir, `/\`):
+		errs = append(errs, fmt.Errorf("master-store-spec: MasterStoreSpec().HomeSubdir %q contains a path separator — it must be a single relative path element, joined directly under a containerized HOME (issue #206)", spec.HomeSubdir))
+	case filepath.Clean(spec.HomeSubdir) != spec.HomeSubdir:
+		errs = append(errs, fmt.Errorf("master-store-spec: MasterStoreSpec().HomeSubdir %q is not clean — the HOME join must resolve it verbatim (issue #206)", spec.HomeSubdir))
+	}
+	switch {
+	case spec.HostDir == "":
+		errs = append(errs, fmt.Errorf("master-store-spec: MasterStoreSpec().HostDir is empty — the resolved master store must always exist as a path, even on a host that never logged in (issue #206)"))
+	case !filepath.IsAbs(spec.HostDir):
+		errs = append(errs, fmt.Errorf("master-store-spec: MasterStoreSpec().HostDir %q is not absolute — it is consumed as a mount source by processes with different cwds (issue #206)", spec.HostDir))
+	}
+
+	// Override-aware, per call (issue #211): repoint the declared EnvVar and
+	// the NEXT resolution must follow it.
+	if spec.EnvVar != "" {
+		override := t.TempDir()
+		t.Setenv(spec.EnvVar, override)
+		if got := p.MasterStoreSpec().HostDir; got != override {
+			errs = append(errs, fmt.Errorf("master-store-spec: with %s=%q, MasterStoreSpec().HostDir = %q; want the override — HostDir must be resolved freshly per call through the CLI's own override-aware resolution, never cached (issue #211)", spec.EnvVar, override, got))
+		}
 	}
 	return errs
 }

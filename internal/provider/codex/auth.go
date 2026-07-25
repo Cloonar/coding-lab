@@ -10,10 +10,12 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
-// The auth check shells out to `codex login status` and reads its plain-text
-// verdict. Peeking at ~/.codex/auth.json directly is rejected for the same
-// reason claudecode rejects its credentials file: it couples lab to codex's
-// internal storage and skips the token validation the status command does.
+// The auth check runs `codex login status` (through the CLI-runner seam,
+// issue #206 — on a container-mode server that is the containerized CLI) and
+// reads its plain-text verdict. Peeking at ~/.codex/auth.json directly is
+// rejected for the same reason claudecode rejects its credentials file: it
+// couples lab to codex's internal storage and skips the token validation the
+// status command does.
 //
 // Pinned output shapes (live 0.133.0, 2026-07-10):
 //
@@ -41,13 +43,23 @@ func ParseAuthStatus(out []byte, exitOK bool) provider.AuthStatus {
 	return st
 }
 
-// runStatus executes `{codex} login status`, capturing combined output and
-// the exit code. A plain non-zero exit is a DEFINITIVE logged-out answer
-// (the pinned logged-out shape is exit 1 + "Not logged in"), not an error;
-// only a run failure that isn't an exit status (binary missing, ctx
-// cancelled) is an error.
+// runStatus executes `{codex} login status` through p.cli (issue #206),
+// capturing output and the exit code. A plain non-zero exit is a DEFINITIVE
+// logged-out answer (the pinned logged-out shape is exit 1 + "Not logged
+// in") — recognized by the DIRECT *exec.ExitError type check the CLIRunner
+// contract guarantees survives the seam unwrapped; only a run failure that
+// isn't an exit status (binary missing, ctx cancelled) is an error.
+//
+// Pre-seam this parsed CombinedOutput; the runner separates the streams, so
+// the parse runs over stdout then stderr concatenated. Losing the
+// interleaving is safe by construction: ParseAuthStatus is a pure substring
+// check ("Logged in", the "using " method cut) plus the exit-code verdict —
+// never line-order sensitive.
 func (p *Provider) runStatus(ctx context.Context) (provider.AuthStatus, error) {
-	out, runErr := exec.CommandContext(ctx, p.codexBin, "login", "status").CombinedOutput()
+	stdout, stderr, runErr := p.cli.Run(ctx, provider.CLIInvocation{
+		Argv: []string{p.codexBin, "login", "status"},
+	})
+	out := append(append([]byte(nil), stdout...), stderr...)
 	if runErr != nil {
 		if _, isExit := runErr.(*exec.ExitError); !isExit {
 			return provider.AuthStatus{}, fmt.Errorf("codex login status: %w", runErr)

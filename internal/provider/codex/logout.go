@@ -1,13 +1,13 @@
 package codex
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // Logout drops the machine's current Codex account so an operator can log a
@@ -57,22 +57,24 @@ func (p *Provider) Logout(ctx context.Context) error {
 	return fmt.Errorf("codex logout: still logged in after credentials removal: %s", msg)
 }
 
-// runLogoutCommand runs `codex logout` under a defensive timeout and returns
-// its captured stderr. The exit code is deliberately ignored for the success
-// decision; a non-zero exit is logged, and the stderr is threaded into the
-// failure message so a genuine stuck logout surfaces the tool's own words.
+// runLogoutCommand runs `codex logout` through p.cli (issue #206) under a
+// defensive timeout and returns its captured stderr; stdout is discarded —
+// only the force-refreshed status decides success. The exit code is
+// deliberately ignored for the success decision; a non-zero exit is logged,
+// and the stderr is threaded into the failure message so a genuine stuck
+// logout surfaces the tool's own words.
 func (p *Provider) runLogoutCommand(ctx context.Context) string {
 	cctx, cancel := context.WithTimeout(ctx, p.logoutTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, p.codexBin, "logout")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	_, stderr, err := p.cli.Run(cctx, provider.CLIInvocation{
+		Argv: []string{p.codexBin, "logout"},
+	})
+	if err != nil {
 		p.log.Warn("codex logout exited non-zero (success is decided from status, not exit code)",
-			"component", "provider.codex", "err", err, "stderr", strings.TrimSpace(stderr.String()))
+			"component", "provider.codex", "err", err, "stderr", strings.TrimSpace(string(stderr)))
 	}
-	return stderr.String()
+	return string(stderr)
 }
 
 // credentialsPath resolves codex's machine-level credentials file the same

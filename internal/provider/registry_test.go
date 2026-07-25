@@ -32,8 +32,11 @@ func (s stubProvider) Logout(context.Context) error                  { return ni
 func (s stubProvider) CaptureDeepLink(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
-func (s stubProvider) SeedWorkspace(string, SeedOpts) error       { return nil }
-func (s stubProvider) SeedMeta() SeedMeta                         { return s.seedMeta }
+func (s stubProvider) SeedWorkspace(string, SeedOpts) error { return nil }
+func (s stubProvider) SeedMeta() SeedMeta                   { return s.seedMeta }
+func (s stubProvider) MasterStoreSpec() MasterStoreSpec {
+	return MasterStoreSpec{EnvVar: "STUB_HOME", HostDir: "/stub", HomeSubdir: ".stub"}
+}
 func (s stubProvider) InjectCredentials(string) ([]string, error) { return nil, nil }
 func (s stubProvider) RefreshCredentials(context.Context) error   { return nil }
 func (s stubProvider) CredentialsSig(string) (string, time.Time)  { return "", time.Time{} }

@@ -3,6 +3,8 @@ package providertest
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -71,6 +73,20 @@ func (f *NoLinkFake) SeedMeta() provider.SeedMeta {
 		SkillsDir:       ".codex/skills",
 		ExcludeEntries:  []string{".codex/", "AGENTS.local.md"},
 	}
+}
+
+// MasterStoreSpec implements provider.AgentProvider (issue #206): a
+// codex-shaped declaration for the link-less stand-in, resolved freshly per
+// call like a real adapter's resolver — the declared EnvVar outranks the
+// HOME-derived default (the issue #211 override-follows contract).
+func (f *NoLinkFake) MasterStoreSpec() provider.MasterStoreSpec {
+	spec := provider.MasterStoreSpec{EnvVar: "CODEX_HOME", HomeSubdir: ".codex"}
+	if dir := os.Getenv(spec.EnvVar); dir != "" {
+		spec.HostDir = dir
+	} else {
+		spec.HostDir = filepath.Join(os.Getenv("HOME"), ".codex")
+	}
+	return spec
 }
 
 // Commands declares no slash commands — a stand-in for a provider whose

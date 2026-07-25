@@ -1,16 +1,16 @@
 package codex
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // This file implements the credential-authority seam (issue #222): the
@@ -138,13 +138,16 @@ var refreshProbeArgs = []string{"exec", "--sandbox", "read-only", "--skip-git-re
 
 // RefreshCredentials implements provider.AgentProvider: the loop's blind
 // periodic poke against the MASTER store. It runs `codex exec` (refreshProbeArgs)
-// with CODEX_HOME forced to the master codex home directory (credentialsPath's
-// own directory) — overriding, never merely inheriting, because the lab
-// server's own environment may carry a stray/instance CODEX_HOME (the same
-// tmux-inheritance vector InjectCredentials defends against for a spawned
-// session's env). The working directory is the master codex home when it
-// exists; otherwise the command still runs (from the caller's cwd) and its
-// own failure surfaces — callers are expected to gate the call on
+// through p.cli (issue #206) with CODEX_HOME forced to the master codex home
+// directory (credentialsPath's own directory) — overriding, never merely
+// inheriting, because the lab server's own environment may carry a
+// stray/instance CODEX_HOME (the same tmux-inheritance vector
+// InjectCredentials defends against for a spawned session's env); the
+// runner's filter-then-append semantics (provider.CLIInvocation.Env) make the
+// pin a genuine override, never a same-key duplicate a getenv-first-match
+// libc would resolve wrong. The working directory is the master codex home
+// when it exists; otherwise the command still runs (from the inherited cwd)
+// and its own failure surfaces — callers are expected to gate the call on
 // CredentialsSig("") != "" beforehand.
 //
 // Discards stdout. On failure, returns an error carrying a trimmed tail of
@@ -153,38 +156,20 @@ var refreshProbeArgs = []string{"exec", "--sandbox", "read-only", "--skip-git-re
 func (p *Provider) RefreshCredentials(ctx context.Context) error {
 	masterDir := filepath.Dir(p.credentialsPath())
 
-	cmd := exec.CommandContext(ctx, p.codexBin, refreshProbeArgs...)
-	cmd.Env = overrideEnv(os.Environ(), "CODEX_HOME", masterDir)
-	if info, err := os.Stat(masterDir); err == nil && info.IsDir() {
-		cmd.Dir = masterDir
+	inv := provider.CLIInvocation{
+		Argv: append([]string{p.codexBin}, refreshProbeArgs...),
+		Env:  []string{"CODEX_HOME=" + masterDir},
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
+	if info, err := os.Stat(masterDir); err == nil && info.IsDir() {
+		inv.Dir = masterDir
+	}
+	_, stderr, err := p.cli.Run(ctx, inv)
+	if err != nil {
+		msg := strings.TrimSpace(string(stderr))
 		if msg == "" {
 			msg = "no stderr captured"
 		}
 		return fmt.Errorf("codex exec (credential refresh probe): %w: %s", err, msg)
 	}
 	return nil
-}
-
-// overrideEnv returns environ with every existing entry for key removed and
-// key=value appended. A plain append onto an environ slice that ALREADY
-// carries key (as os.Environ() might) is not enough: some C library
-// getenv() implementations resolve the FIRST matching entry in the exec'd
-// process's environ array, so a naive append could leave a stray inherited
-// value in effect despite the "override" — filtering first is what makes
-// this a genuine override rather than a same-key duplicate.
-func overrideEnv(environ []string, key, value string) []string {
-	prefix := key + "="
-	out := make([]string, 0, len(environ)+1)
-	for _, e := range environ {
-		if strings.HasPrefix(e, prefix) {
-			continue
-		}
-		out = append(out, e)
-	}
-	return append(out, key+"="+value)
 }

@@ -119,6 +119,14 @@ type Options struct {
 	// Runner drives tmux for the login session and the reply/interrupt
 	// recipes.
 	Runner tmuxx.SessionRunner
+	// CLI runs this provider's machine-level CLI invocations — the auth
+	// status check, `codex logout`, the credential-refresh probe, and the
+	// boot-time catalog/version probes (issue #206). nil defaults to
+	// provider.HostCLI (direct host execution, the pre-seam behavior
+	// byte-for-byte); a container-mode server injects a containerized runner
+	// so the host needs no codex binary. This package never learns which it
+	// got — podman stays entirely outside it.
+	CLI provider.CLIRunner
 	// Bus receives provider.auth.changed on login/logout transitions.
 	Bus *events.Bus
 	// Logger defaults to slog.Default().
@@ -134,6 +142,7 @@ type Provider struct {
 	configPath string // MASTER <codexHome>/config.toml — master-store reference only
 	loginDir   string
 	runner     tmuxx.SessionRunner
+	cli        provider.CLIRunner // machine-level CLI seam (issue #206) — never exec directly
 	bus        *events.Bus
 	log        *slog.Logger
 	now        func() time.Time
@@ -206,11 +215,20 @@ func New(o Options) (*Provider, error) {
 	if configPath == "" {
 		configPath = filepath.Join(codexHomeDir(o.LoginDir), "config.toml")
 	}
+	// CLI defaults to direct host execution (issue #206) — the same
+	// adapter-owned-default rule as CodexBin: a caller that configures
+	// nothing gets exactly the pre-seam behavior. Set before probeCatalog
+	// below, which already runs through it.
+	cli := o.CLI
+	if cli == nil {
+		cli = &provider.HostCLI{}
+	}
 	p := &Provider{
 		codexBin:       codexBin,
 		configPath:     configPath,
 		loginDir:       o.LoginDir,
 		runner:         o.Runner,
+		cli:            cli,
 		bus:            o.Bus,
 		log:            logger,
 		now:            now,
@@ -248,6 +266,36 @@ func codexHomeDir(loginDir string) string {
 // returns so a session inheriting a stale $CODEX_HOME cannot reach the master
 // store.
 func instanceCodexHome(home string) string { return filepath.Join(home, ".codex") }
+
+// MasterStore is the package-level form of the MasterStoreSpec declaration,
+// parameterized on the loginDir the adapter itself is handed. It exists so
+// the wiring layer can hand providercli a Spec closure BEFORE the adapter is
+// constructed — the container-decorated login runner is an input to New, so
+// the closure cannot come from the not-yet-existing Provider. Function and
+// method MUST stay one resolver (the single-source rule the method doc
+// pins): a divergence would let the containerized login mount a different
+// store than the adapter's own master-store ops target.
+func MasterStore(loginDir string) provider.MasterStoreSpec {
+	return provider.MasterStoreSpec{
+		EnvVar:     "CODEX_HOME",
+		HostDir:    codexHomeDir(loginDir),
+		HomeSubdir: ".codex",
+	}
+}
+
+// MasterStoreSpec implements provider.AgentProvider (issue #206): codex's
+// MASTER credential store, resolved freshly per call through codexHomeDir
+// ($CODEX_HOME when set, else <loginDir>/.codex — the resolver
+// credentialsPath itself wraps), the same chain logout's rm-escalation
+// target and the refresh probe's CODEX_HOME pin derive from, so this
+// declaration can never disagree with them. The env override outranking the
+// default is what makes the declared override-awareness real (the issue #211
+// criterion, pinned by the conformance suite's master-store-spec obligation).
+// Delegates to the package-level MasterStore so method and wiring closure
+// are one resolver.
+func (p *Provider) MasterStoreSpec() provider.MasterStoreSpec {
+	return MasterStore(p.loginDir)
+}
 
 // ID implements provider.AgentProvider.
 func (p *Provider) ID() string { return ID }

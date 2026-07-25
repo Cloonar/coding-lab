@@ -1,15 +1,15 @@
 package claudecode
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // This file implements the credential-authority seam (issue #222) — the
@@ -127,53 +127,38 @@ func (p *Provider) AdoptCredentials(instanceHome string) error {
 func (p *Provider) RefreshCredentials(ctx context.Context) error {
 	dir := masterConfigDir()
 
-	// argv is the probe-confirmed non-interactive refresh trigger (compat §3b):
+	// Argv is the probe-confirmed non-interactive refresh trigger (compat §3b):
 	// print mode + a real (cheap) model + a minimal prompt. `-p` makes it a
 	// one-shot API call with no TTY, so it runs unattended and exits.
-	cmd := exec.CommandContext(ctx, p.claudeBin, "-p", "--model", "haiku", "ok")
-
+	//
 	// Env: OVERRIDE CLAUDE_CONFIG_DIR to the master dir. The lab server's own
 	// environment may carry a stray/instance CLAUDE_CONFIG_DIR, and the CLI
 	// resolves that variable OVER HOME (compat §3a) — so the pin must be explicit
 	// and must never be empty, or the poke would refresh the wrong (or a
-	// relative, pre-2.1.214) store. Filtering any inherited value guarantees
-	// exactly one, master-pointing entry regardless of exec's dedup semantics.
-	cmd.Env = withMasterConfigDir(os.Environ(), dir)
-
+	// relative, pre-2.1.214) store. The runner's filter-then-append semantics
+	// (provider.CLIInvocation.Env) guarantee exactly one, master-pointing entry
+	// regardless of exec's dedup order; dir is always non-empty here
+	// (masterConfigDir falls back to $HOME/.claude), preserving the never-empty
+	// pin invariant compat §3a documents.
+	//
 	// Working dir: the master config dir (stable, exists after a login). We do
 	// NOT create it here — if it is absent the host never logged in and the CLI's
 	// own chdir/auth failure surfaces as the returned error; the caller gates the
 	// poke on CredentialsSig("") != "" so this is only ever reached for a
 	// populated store.
-	cmd.Dir = dir
-
-	// Discard stdout (the model's reply is irrelevant — only the on-disk rotation
-	// matters); capture stderr for the failure message. A nil Stdout connects the
-	// fd to os.DevNull.
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	//
+	// Stdout is discarded (the model's reply is irrelevant — only the on-disk
+	// rotation matters); stderr feeds the failure message.
+	_, stderr, err := p.cli.Run(ctx, provider.CLIInvocation{
+		Argv: []string{p.claudeBin, "-p", "--model", "haiku", "ok"},
+		Env:  []string{"CLAUDE_CONFIG_DIR=" + dir},
+		Dir:  dir,
+	})
+	if err != nil {
 		return fmt.Errorf("claudecode: credential refresh poke (claude -p --model haiku) failed: %w: %s",
-			err, stderrTail(stderr.String()))
+			err, stderrTail(string(stderr)))
 	}
 	return nil
-}
-
-// withMasterConfigDir returns environ with every CLAUDE_CONFIG_DIR entry removed
-// and a single CLAUDE_CONFIG_DIR=dir appended — an explicit override that does
-// not depend on os/exec's duplicate-key dedup order. dir is always non-empty
-// here (masterConfigDir falls back to $HOME/.claude), preserving the never-empty
-// pin invariant compat §3a documents.
-func withMasterConfigDir(environ []string, dir string) []string {
-	out := make([]string, 0, len(environ)+1)
-	for _, kv := range environ {
-		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return append(out, "CLAUDE_CONFIG_DIR="+dir)
 }
 
 // stderrTail trims a captured stderr buffer to a short, log-friendly tail for a
