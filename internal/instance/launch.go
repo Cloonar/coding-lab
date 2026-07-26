@@ -108,11 +108,11 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// rolls back nothing because nothing exists yet. The resolved image and
 	// limits carry to the spawn branch below.
 	container := repo.Runner == store.RunnerContainer
-	var ctrImage, ctrCgroupParent, ctrMemory string
+	var ctrImage, ctrMemory string
 	var ctrPids, ctrNofile int
 	if container {
 		var err error
-		if ctrImage, ctrCgroupParent, err = s.refuseContainerSpawn(spec.Provider.ID(), repo); err != nil {
+		if ctrImage, err = s.refuseContainerSpawn(spec.Provider.ID(), repo); err != nil {
 			return store.Run{}, err
 		}
 		if ctrMemory, ctrPids, ctrNofile, err = s.effectiveContainerLimits(ctx, repo); err != nil {
@@ -391,22 +391,21 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	if container {
 		env, forward := containerEnv(extraEnv, home, s.containerSockURL())
 		paneArgv := podmanx.RunArgv(podmanx.RunSpec{
-			Bin:          s.podmanBin,
-			Name:         podmanx.ContainerName(name),
-			Image:        ctrImage,
-			ToolsImage:   s.containerToolsImages[spec.Provider.ID()],
-			WorktreeDir:  wtPath,
-			BareDir:      bareDir,
-			AgentDir:     s.agentSockDir,
-			HomeDir:      home,
-			RuntimeDir:   s.homes.RuntimePath(runID),
-			CgroupParent: ctrCgroupParent,
-			Memory:       ctrMemory,
-			Pids:         ctrPids,
-			Nofile:       ctrNofile,
-			Env:          env,
-			ForwardEnv:   forward,
-			Argv:         spawnArgv,
+			Bin:         s.podmanBin,
+			Name:        podmanx.ContainerName(name),
+			Image:       ctrImage,
+			ToolsImage:  s.containerToolsImages[spec.Provider.ID()],
+			WorktreeDir: wtPath,
+			BareDir:     bareDir,
+			AgentDir:    s.agentSockDir,
+			HomeDir:     home,
+			RuntimeDir:  s.homes.RuntimePath(runID),
+			Memory:      ctrMemory,
+			Pids:        ctrPids,
+			Nofile:      ctrNofile,
+			Env:         env,
+			ForwardEnv:  forward,
+			Argv:        spawnArgv,
 		})
 		spawnErr = s.runner.Start(ctx, name, wtPath, paneArgv, secretForwardEnv(extraEnv, forward), tmuxx.WithoutNofileCap())
 	} else {

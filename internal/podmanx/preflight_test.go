@@ -5,30 +5,39 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"slices"
 	"strings"
 	"testing"
 )
 
-// pfFixture is one simulated host: PATH lookups, file contents, and a
-// scripted runner. greenFixture returns a host where every check passes;
-// each table case mutates exactly the piece it breaks.
+// The green fixture's host constants: the service uid, its user-manager
+// runtime dir (the user-manager check's probe target), and the transient
+// scope podman's systemd cgroup manager places the probe container in. The
+// scope path deliberately carries a /container leaf below the scope — crun's
+// real shape — so the green path exercises spawnProbe's normalization down
+// to the libpod-*.scope component, where the cap files actually live.
+const (
+	testUID       = 990
+	testRunUser   = "/run/user/990"
+	probeScopeDir = "/user.slice/user-990.slice/user@990.service/user.slice/libpod-abc123.scope"
+
+	probeRm      = "podman rm --force --ignore --time 0 lab-preflight-probe"
+	probeCreate  = "podman --cgroup-manager=systemd create --name lab-preflight-probe --memory 64m --pids-limit 16 reg/agent-tools@sha256:aa /bin/labctl"
+	probeInit    = "podman init lab-preflight-probe"
+	probeInspect = "podman inspect --format {{.State.Pid}} {{.State.CgroupPath}} lab-preflight-probe"
+)
+
+// pfFixture is one simulated host: PATH lookups, file contents, writable
+// paths, and a scripted runner. greenFixture returns a host where every
+// check passes — including the spawn probe's full podman conversation —
+// and each table case mutates exactly the piece it breaks.
 type pfFixture struct {
 	cfg      PreflightConfig
 	paths    map[string]string
 	files    map[string]string
-	writable map[string]bool // paths the service user can write (cgroup delegation)
+	writable map[string]bool // paths the service user can write (the user-manager probe)
 	runner   *recordingRunner
-
-	// setupCgroups' write seams: every accepted write/mkdir is recorded for
-	// assertions; writeErr scripts a per-path failure.
-	cgWrites []cgWrite
-	mkdirs   []string
-	writeErr map[string]error
 }
-
-type cgWrite struct{ path, data string }
 
 func greenFixture() *pfFixture {
 	return &pfFixture{
@@ -42,32 +51,32 @@ func greenFixture() *pfFixture {
 			"podman": "/usr/bin/podman",
 			"pasta":  "/usr/bin/pasta",
 		},
-		// The ADR-0059 layout: lab runs in a plain, UNDELEGATED lab.service
-		// cgroup (its subtree_control empty), while the lab-payload.service
-		// holder carries the delegation — proc-free at its root
-		// (DelegateSubgroup=main keeps the sleep in main/), and its payload
-		// cgroup carries memory+pids once setupCgroups enables them on the
-		// holder root.
 		files: map[string]string{
 			"/etc/subuid":                       "lab:100000:65536\n",
 			"/etc/subgid":                       "lab:100000:65536\n",
 			"/sys/fs/cgroup/cgroup.controllers": "cpuset cpu io memory hugetlb pids\n",
 			"/proc/self/cgroup":                 "0::/system.slice/lab.service\n",
-			"/sys/fs/cgroup/system.slice/lab.service/cgroup.subtree_control":             "\n",
-			"/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.procs":               "",
-			"/sys/fs/cgroup/system.slice/lab-payload.service/payload/cgroup.controllers": "memory pids\n",
+			// The probe's cap files, at the SCOPE — not at the /container
+			// leaf inspect reports — proving the caps landed as per-scope
+			// properties (MemoryMax/TasksMax, ADR-0060).
+			"/sys/fs/cgroup" + probeScopeDir + "/memory.max": "67108864\n",
+			"/sys/fs/cgroup" + probeScopeDir + "/pids.max":   "16\n",
 		},
-		// Delegate=yes + User=lab chowns the holder's delegated root to the
-		// service user; a missing or non-delegated holder leaves it root-owned
-		// (unwritable).
-		writable: map[string]bool{
-			"/sys/fs/cgroup/system.slice/lab-payload.service": true,
-		},
+		// systemd-logind creates /run/user/<uid> writable for the user
+		// exactly while user@<uid>.service runs — the user-manager
+		// reachability signal.
+		writable: map[string]bool{testRunUser: true},
 		runner: &recordingRunner{script: map[string]cmdResult{
 			"podman version --format {{.Client.Version}}": {out: "5.2.3\n"},
 			// Pull-first (ADR-0054): even a locally-present tools image is
 			// re-pulled so a moved tag reaches the host.
 			"podman pull reg/agent-tools@sha256:aa": {},
+			// The spawn probe's conversation; one rm script answers both the
+			// pre-clean and the deferred cleanup.
+			probeRm:      {},
+			probeCreate:  {},
+			probeInit:    {},
+			probeInspect: {out: "12345 " + probeScopeDir + "/container\n"},
 		}},
 	}
 }
@@ -87,39 +96,22 @@ func (f *pfFixture) deps() Deps {
 			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 		},
 		Writable: func(path string) bool { return f.writable[path] },
-		WriteFile: func(path string, data []byte, _ os.FileMode) error {
-			if err := f.writeErr[path]; err != nil {
-				return err
-			}
-			f.cgWrites = append(f.cgWrites, cgWrite{path, string(data)})
-			// Emulate the kernel's pid-move semantics: writing a pid into a
-			// cgroup.procs file removes it from whichever cgroup listed it,
-			// so a post-adoption re-read of the root sees it gone.
-			if strings.HasSuffix(path, "/cgroup.procs") {
-				pid := strings.TrimSpace(string(data))
-				for name, content := range f.files {
-					if name == path || !strings.HasSuffix(name, "/cgroup.procs") {
-						continue
-					}
-					var kept []string
-					for line := range strings.Lines(content) {
-						if l := strings.TrimSpace(line); l != "" && l != pid {
-							kept = append(kept, l)
-						}
-					}
-					f.files[name] = strings.Join(kept, "\n")
-				}
-			}
-			return nil
-		},
-		Mkdir: func(path string, _ os.FileMode) error {
-			f.mkdirs = append(f.mkdirs, path)
-			return nil
-		},
 		Run:      f.runner.run,
 		Username: "lab",
-		UID:      990,
+		UID:      testUID,
 	}
+}
+
+// probeCalls returns every recorded command that names the probe container —
+// empty when the probe was (correctly) never attempted.
+func (f *pfFixture) probeCalls() [][]string {
+	var out [][]string
+	for _, c := range f.runner.calls {
+		if slices.Contains(c, probeName) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func TestPreflight(t *testing.T) {
@@ -139,23 +131,31 @@ func TestPreflight(t *testing.T) {
 				if r.Error() != "" {
 					t.Errorf("Error() = %q, want empty on OK", r.Error())
 				}
-				// The established ADR-0059 layout rides the Result: the payload
-				// cgroup as --cgroup-parent, the controllers enabled on the
-				// holder root, the payload cgroup created under the holder.
-				if got, want := r.CgroupParent(), "/system.slice/lab-payload.service/payload"; got != want {
-					t.Errorf("CgroupParent() = %q, want %q", got, want)
+				// The exact command sequence, pinned end to end: the spawn
+				// probe's pre-clean, create (with the manager flag and both
+				// caps), init, inspect, and the deferred cleanup — cleanup
+				// runs on success too, so a green preflight leaves no probe
+				// container behind.
+				want := [][]string{
+					{"podman", "version", "--format", "{{.Client.Version}}"},
+					{"podman", "pull", "reg/agent-tools@sha256:aa"},
+					{"podman", "rm", "--force", "--ignore", "--time", "0", probeName},
+					{"podman", "--cgroup-manager=systemd", "create", "--name", probeName,
+						"--memory", "64m", "--pids-limit", "16", "reg/agent-tools@sha256:aa", "/bin/labctl"},
+					{"podman", "init", probeName},
+					{"podman", "inspect", "--format", "{{.State.Pid}} {{.State.CgroupPath}}", probeName},
+					{"podman", "rm", "--force", "--ignore", "--time", "0", probeName},
 				}
-				wantWrite := cgWrite{"/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.subtree_control", "+memory +pids"}
-				if !slices.Contains(f.cgWrites, wantWrite) {
-					t.Errorf("cgroup writes %+v missing the controller enable %+v", f.cgWrites, wantWrite)
+				if len(f.runner.calls) != len(want) {
+					t.Fatalf("calls = %q, want %q", f.runner.calls, want)
 				}
-				if !slices.Contains(f.mkdirs, "/sys/fs/cgroup/system.slice/lab-payload.service/payload") {
-					t.Errorf("mkdirs %q missing the payload cgroup", f.mkdirs)
+				for i := range want {
+					assertArgv(t, f.runner.calls[i], want[i])
 				}
 			},
 		},
 		{
-			name: "podman missing skips the version and image probes",
+			name: "podman missing skips the version, image and probe calls",
 			mutate: func(f *pfFixture) {
 				delete(f.paths, "podman")
 			},
@@ -167,7 +167,7 @@ func TestPreflight(t *testing.T) {
 			},
 		},
 		{
-			name: "podman 3.x is too old and skips the image probes",
+			name: "podman 3.x is too old and skips the image and probe calls",
 			mutate: func(f *pfFixture) {
 				f.runner.script["podman version --format {{.Client.Version}}"] = cmdResult{out: "3.4.7\n"}
 			},
@@ -220,12 +220,17 @@ func TestPreflight(t *testing.T) {
 			wantVersion: "5.2.3",
 		},
 		{
-			name: "cgroup v1 host: controllers file absent",
+			name: "cgroup v1 host: controllers file absent, probe skipped",
 			mutate: func(f *pfFixture) {
 				delete(f.files, "/sys/fs/cgroup/cgroup.controllers")
 			},
 			wantChecks:  []string{CheckCgroup2},
 			wantVersion: "5.2.3",
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				if pc := f.probeCalls(); pc != nil {
+					t.Errorf("probe attempted on a cgroup-v1 host: %q", pc)
+				}
+			},
 		},
 		{
 			name: "no unified entry in /proc/self/cgroup",
@@ -236,102 +241,124 @@ func TestPreflight(t *testing.T) {
 			wantVersion: "5.2.3",
 		},
 		{
-			// The controllers never arrived in the payload cgroup — the
-			// no-false-green posture retargeted at the subtree containers
-			// actually land in (ADR-0059).
-			name: "payload cgroup missing memory",
+			// The user manager is unreachable — user@<uid>.service down, or
+			// lingering never enabled. Without it podman's systemd cgroup
+			// manager has nobody to ask for a scope, so the probe is not even
+			// attempted: its failure would only re-report this root cause.
+			name: "user manager runtime dir not writable",
 			mutate: func(f *pfFixture) {
-				f.files["/sys/fs/cgroup/system.slice/lab-payload.service/payload/cgroup.controllers"] = "cpu pids\n"
+				delete(f.writable, testRunUser)
 			},
-			wantChecks:  []string{CheckDelegation},
+			wantChecks:  []string{CheckUserManager},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Hint, "lab-payload.service") {
-					t.Errorf("hint %q does not name the holder unit", r.Failures[0].Hint)
+				if d := r.Failures[0].Detail; !strings.Contains(d, testRunUser) || !strings.Contains(d, "user@990.service") {
+					t.Errorf("detail %q does not name the runtime dir and the user unit", d)
+				}
+				if h := r.Failures[0].Hint; !strings.Contains(h, "linger") || !strings.Contains(h, "user@990.service") {
+					t.Errorf("hint %q does not name lingering and the user unit", h)
+				}
+				if !r.HasRetryableFailure() {
+					t.Errorf("HasRetryableFailure() = false; the user manager can race a fresh boot and must be retried")
+				}
+				if pc := f.probeCalls(); pc != nil {
+					t.Errorf("probe attempted despite an unreachable user manager: %q", pc)
 				}
 			},
 		},
 		{
-			// The holder is missing or not delegated (Delegate=no, or
-			// lab-payload.service not running): its root stays root-owned, so
-			// lab cannot enable the payload controllers or create the payload
-			// cgroup — the caps would be silently absent (the #205 false green).
-			name: "holder not delegated (not writable)",
+			// The probe container cannot even be created — e.g. podman cannot
+			// reach the user manager's bus. Podman's own stderr (folded into
+			// the error by ExecRunner) must surface in the Detail, and the
+			// deferred cleanup must still run.
+			name: "probe create fails",
 			mutate: func(f *pfFixture) {
-				delete(f.writable, "/sys/fs/cgroup/system.slice/lab-payload.service")
+				f.runner.script[probeCreate] = cmdResult{err: errors.New("exit status 125: cannot connect to user manager bus")}
 			},
-			wantChecks:  []string{CheckHolder},
+			wantChecks:  []string{CheckSpawnProbe},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Detail, "lab-payload.service") {
-					t.Errorf("detail %q does not name the holder unit", r.Failures[0].Detail)
+				if !strings.Contains(r.Failures[0].Detail, "cannot connect to user manager bus") {
+					t.Errorf("detail %q does not quote podman's stderr", r.Failures[0].Detail)
 				}
-				if !strings.Contains(r.Failures[0].Hint, "lab-payload.service") {
-					t.Errorf("hint %q does not name the holder unit", r.Failures[0].Hint)
+				last := f.runner.calls[len(f.runner.calls)-1]
+				assertArgv(t, last, []string{"podman", "rm", "--force", "--ignore", "--time", "0", probeName})
+				for _, c := range f.runner.calls {
+					if c[1] == "init" {
+						t.Errorf("init ran after a failed create: %q", f.runner.calls)
+					}
 				}
 			},
 		},
 		{
-			// A process still sitting at the holder root (systemd < 254
-			// ignoring DelegateSubgroup, or a start-up race): setupCgroups
-			// adopts it into the holder's main/ subgroup so the root is
-			// proc-free before its controllers are enabled.
-			name: "stray holder-root pids adopted into main/",
+			// The container spawned but NOT into a libpod-*.scope: the
+			// systemd cgroup manager did not engage (e.g. a cgroupfs
+			// fallback). The caps would land somewhere unverified — a
+			// failure even though the container "works".
+			name: "probe lands outside a transient scope",
 			mutate: func(f *pfFixture) {
-				f.files["/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.procs"] = "4242\n"
+				f.runner.script[probeInspect] = cmdResult{out: "12345 /user.slice/user-990.slice/somewhere/else\n"}
 			},
+			wantChecks:  []string{CheckSpawnProbe},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				want := cgWrite{"/sys/fs/cgroup/system.slice/lab-payload.service/main/cgroup.procs", "4242"}
-				if !slices.Contains(f.cgWrites, want) {
-					t.Errorf("cgroup writes %+v missing the stray adoption %+v", f.cgWrites, want)
-				}
-				if !slices.Contains(f.mkdirs, "/sys/fs/cgroup/system.slice/lab-payload.service/main") {
-					t.Errorf("mkdirs %q missing the holder main/ subgroup", f.mkdirs)
+				d := r.Failures[0].Detail
+				if !strings.Contains(d, "/user.slice/user-990.slice/somewhere/else") || !strings.Contains(d, "transient scope") {
+					t.Errorf("detail %q does not quote the observed path and name the missing scope", d)
 				}
 			},
 		},
 		{
-			name: "enabling the payload controllers fails",
+			// The no-false-green assertion itself: the scope exists but the
+			// memory cap did not land (memory.max still "max").
+			name: "probe memory.max mismatch",
 			mutate: func(f *pfFixture) {
-				f.writeErr = map[string]error{
-					"/sys/fs/cgroup/system.slice/lab-payload.service/cgroup.subtree_control": errors.New("device or resource busy"),
-				}
+				f.files["/sys/fs/cgroup"+probeScopeDir+"/memory.max"] = "max\n"
 			},
-			wantChecks:  []string{CheckDelegation},
+			wantChecks:  []string{CheckSpawnProbe},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Detail, "cannot enable memory/pids") {
-					t.Errorf("detail %q does not name the failed enable", r.Failures[0].Detail)
+				d := r.Failures[0].Detail
+				if !strings.Contains(d, `"max"`) || !strings.Contains(d, `"67108864"`) || !strings.Contains(d, "memory.max") {
+					t.Errorf("detail %q does not quote got/want for memory.max", d)
 				}
 			},
 		},
 		{
-			// The restart-safety guard at boot: lab's OWN cgroup delegating
-			// controllers is exactly the state that wedged the 2026-07-26
-			// restart — refuse loudly instead of arming the trap again. Named
-			// in issue #237's acceptance criteria.
-			name: "restart guard: lab's own cgroup delegates controllers",
+			name: "probe pids.max mismatch",
 			mutate: func(f *pfFixture) {
-				f.files["/sys/fs/cgroup/system.slice/lab.service/cgroup.subtree_control"] = "memory\n"
+				f.files["/sys/fs/cgroup"+probeScopeDir+"/pids.max"] = "max\n"
 			},
-			wantChecks:  []string{CheckRestartSafety},
+			wantChecks:  []string{CheckSpawnProbe},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if !strings.Contains(r.Failures[0].Hint, "lab-cgroup-hygiene") {
-					t.Errorf("hint %q does not name the hygiene unit", r.Failures[0].Hint)
-				}
-				if r.Cgroups != nil {
-					t.Errorf("Cgroups = %+v, want nil on a guard failure", r.Cgroups)
+				d := r.Failures[0].Detail
+				if !strings.Contains(d, `"max"`) || !strings.Contains(d, `"16"`) || !strings.Contains(d, "pids.max") {
+					t.Errorf("detail %q does not quote got/want for pids.max", d)
 				}
 			},
+		},
+		{
+			// Older podmans report State.CgroupPath empty on a created-but-
+			// not-started container; the probe then reads the scope out of
+			// /proc/<pid>/cgroup's 0:: entry instead. Green end-to-end here
+			// proves the fallback resolves the same scope (the cap files only
+			// exist at probeScopeDir).
+			name: "inspect without CgroupPath falls back to /proc/<pid>/cgroup",
+			mutate: func(f *pfFixture) {
+				f.runner.script[probeInspect] = cmdResult{out: "12345 \n"}
+				f.files["/proc/12345/cgroup"] = "0::" + probeScopeDir + "/container\n"
+			},
+			wantVersion: "5.2.3",
 		},
 		{
 			// issue #207: the dev image is no longer a preflight concern (it is
 			// per-repo-or-global, ensured at spawn), so ONLY a missing tools
 			// image fails here — an unset global dev image is fine, proven both
 			// by the green fixture carrying no dev image and by this check
-			// producing exactly one failure, the tools one.
+			// producing exactly one failure, the tools one. With no configured
+			// ref there is nothing to probe with either — and no spurious
+			// spawn-probe failure on top of the root cause.
 			name: "unconfigured tools image (unset dev image is not a failure)",
 			mutate: func(f *pfFixture) {
 				f.cfg.ToolsImages = nil
@@ -347,24 +374,25 @@ func TestPreflight(t *testing.T) {
 						t.Errorf("unset dev image produced a preflight failure %+v — #207 moved that check to the spawn", fa)
 					}
 				}
+				if pc := f.probeCalls(); pc != nil {
+					t.Errorf("probe attempted with no usable tools ref: %q", pc)
+				}
 			},
 		},
 		{
 			// Pull-first (ADR-0054): the pull happens unconditionally — no
 			// `image exists` short-circuit that would pin the host to the
 			// first digest a moving tag ever resolved to.
-			name: "tools image pull runs even with no local probe first",
-			mutate: func(f *pfFixture) {
-				f.runner.script["podman pull reg/agent-tools@sha256:aa"] = cmdResult{}
-			},
+			name:        "tools image pull runs even with no local probe first",
+			mutate:      func(f *pfFixture) {},
 			wantVersion: "5.2.3",
 			after: func(t *testing.T, f *pfFixture, r Result) {
 				want := [][]string{
 					{"podman", "version", "--format", "{{.Client.Version}}"},
 					{"podman", "pull", "reg/agent-tools@sha256:aa"},
 				}
-				if len(f.runner.calls) != len(want) {
-					t.Fatalf("calls = %q, want %q", f.runner.calls, want)
+				if len(f.runner.calls) < len(want) {
+					t.Fatalf("calls = %q, want at least %q", f.runner.calls, want)
 				}
 				for i := range want {
 					assertArgv(t, f.runner.calls[i], want[i])
@@ -374,8 +402,9 @@ func TestPreflight(t *testing.T) {
 		{
 			// Registry down but the image is cached: degrade to the cache
 			// with a warning instead of refusing spawns — stale tools beat
-			// none.
-			name: "tools pull fails with cached image: OK plus warning",
+			// none. The cached ref counts as USABLE, so the spawn probe still
+			// runs against it.
+			name: "tools pull fails with cached image: OK plus warning, probe runs",
 			mutate: func(f *pfFixture) {
 				f.runner.script["podman pull reg/agent-tools@sha256:aa"] = cmdResult{err: errors.New("connection refused")}
 				f.runner.script["podman image exists reg/agent-tools@sha256:aa"] = cmdResult{}
@@ -386,10 +415,13 @@ func TestPreflight(t *testing.T) {
 				if w := r.Warnings[0]; !strings.Contains(w, "reg/agent-tools@sha256:aa") || !strings.Contains(w, "cached") {
 					t.Errorf("warning %q does not name the ref and the cached fallback", w)
 				}
+				if f.probeCalls() == nil {
+					t.Errorf("probe not attempted despite a usable (cached) tools ref")
+				}
 			},
 		},
 		{
-			name: "tools image pull fails, providers reported in sorted order",
+			name: "tools image pull fails, providers reported in sorted order, probe skipped",
 			mutate: func(f *pfFixture) {
 				f.cfg.ToolsImages = map[string]string{
 					"codex":       "reg/agent-tools@sha256:bb",
@@ -409,6 +441,34 @@ func TestPreflight(t *testing.T) {
 				if d := r.Failures[1].Detail; !strings.Contains(d, "codex") || !strings.Contains(d, "reg/agent-tools@sha256:bb") {
 					t.Errorf("failure[1] detail %q does not name provider and ref", d)
 				}
+				if pc := f.probeCalls(); pc != nil {
+					t.Errorf("probe attempted with no usable tools ref: %q", pc)
+				}
+			},
+		},
+		{
+			// The probe spawns with the FIRST usable ref in provider-sorted
+			// order: an unusable earlier provider (pull failed, no cache) is
+			// reported and skipped over, not allowed to starve the probe.
+			name: "probe uses the first usable ref in provider order",
+			mutate: func(f *pfFixture) {
+				f.cfg.ToolsImages = map[string]string{
+					"claude-code": "reg/agent-tools@sha256:aa",
+					"codex":       "reg/agent-tools@sha256:bb",
+				}
+				f.runner.script["podman pull reg/agent-tools@sha256:aa"] = cmdResult{err: errors.New("manifest unknown")}
+				f.runner.script["podman image exists reg/agent-tools@sha256:aa"] = cmdResult{err: errors.New("exit status 1")}
+				f.runner.script["podman pull reg/agent-tools@sha256:bb"] = cmdResult{}
+				f.runner.script["podman --cgroup-manager=systemd create --name lab-preflight-probe --memory 64m --pids-limit 16 reg/agent-tools@sha256:bb /bin/labctl"] = cmdResult{}
+			},
+			wantChecks:  []string{CheckToolsPull},
+			wantVersion: "5.2.3",
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				for _, c := range f.probeCalls() {
+					if slices.Contains(c, "create") && !slices.Contains(c, "reg/agent-tools@sha256:bb") {
+						t.Errorf("probe create %q did not use the first USABLE ref", c)
+					}
+				}
 			},
 		},
 		{
@@ -416,11 +476,16 @@ func TestPreflight(t *testing.T) {
 			mutate: func(f *pfFixture) {
 				f.paths = map[string]string{}
 				f.files = map[string]string{}
+				f.writable = map[string]bool{}
 				f.cfg.ToolsImages = nil
 			},
+			// Every root cause, once each — and NO spawn-probe failure: the
+			// probe is skipped when its prerequisites already failed, so a
+			// bare host is not additionally blamed for a probe it could
+			// never run.
 			wantChecks: []string{
 				CheckPodman, CheckPasta, CheckSubuid, CheckSubgid,
-				CheckCgroup2, CheckToolsImage,
+				CheckCgroup2, CheckUserManager, CheckToolsImage,
 			},
 		},
 	}
@@ -441,10 +506,13 @@ func TestPreflight(t *testing.T) {
 			if r.OK() != (len(tt.wantChecks) == 0) {
 				t.Errorf("OK() = %v with failures %+v", r.OK(), r.Failures)
 			}
-			// HasPullFailure keys cmd/lab's retry loop (issue #220): true
-			// exactly when a tools-image pull failure is among the failures.
-			if got, want := r.HasPullFailure(), slices.Contains(gotChecks, CheckToolsPull); got != want {
-				t.Errorf("HasPullFailure() = %v, want %v (failures: %+v)", got, want, r.Failures)
+			// HasRetryableFailure keys cmd/lab's retry loop (issue #220):
+			// true exactly when a tools-pull or user-manager failure is
+			// among the failures — everything else (subuid, cgroup2, …) is
+			// host state a retry cannot change.
+			wantRetry := slices.Contains(gotChecks, CheckToolsPull) || slices.Contains(gotChecks, CheckUserManager)
+			if got := r.HasRetryableFailure(); got != wantRetry {
+				t.Errorf("HasRetryableFailure() = %v, want %v (failures: %+v)", got, wantRetry, r.Failures)
 			}
 			if r.Version != tt.wantVersion {
 				t.Errorf("Version = %q, want %q", r.Version, tt.wantVersion)
@@ -467,71 +535,4 @@ func TestPreflight(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestCgroupsVerify drives the per-spawn restart-safety guard (ADR-0059)
-// directly over an injected readFile: the two invariants it re-checks before
-// every spawn, and the vacuous forms hand-built Results rely on. The
-// re-armed-trap case is also reached through Preflight above; the
-// holder-lost-delegation case is Verify-only (setupCgroups would have failed
-// first at boot — it only appears when the holder is restarted AFTER a green
-// preflight, which is exactly what the per-spawn guard exists to catch).
-func TestCgroupsVerify(t *testing.T) {
-	const labDir = "/sys/fs/cgroup/system.slice/lab.service"
-	const payloadDir = "/sys/fs/cgroup/system.slice/lab-payload.service/payload"
-	read := func(m map[string]string) func(string) ([]byte, error) {
-		return func(p string) ([]byte, error) {
-			if s, ok := m[p]; ok {
-				return []byte(s), nil
-			}
-			return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
-		}
-	}
-	cg := func(m map[string]string) *Cgroups {
-		return &Cgroups{Parent: payloadDir, LabDir: labDir, PayloadDir: payloadDir, readFile: read(m)}
-	}
-
-	t.Run("green layout verifies OK", func(t *testing.T) {
-		err := cg(map[string]string{
-			labDir + "/cgroup.subtree_control": "\n",
-			payloadDir + "/cgroup.controllers": "memory pids\n",
-		}).Verify()
-		if err != nil {
-			t.Errorf("Verify() = %v, want nil on the clean layout", err)
-		}
-	})
-
-	t.Run("re-armed trap: lab's own subtree_control non-empty", func(t *testing.T) {
-		err := cg(map[string]string{
-			labDir + "/cgroup.subtree_control": "memory pids\n",
-			payloadDir + "/cgroup.controllers": "memory pids\n",
-		}).Verify()
-		if err == nil || !strings.Contains(err.Error(), labDir) {
-			t.Errorf("Verify() = %v, want an error naming %s", err, labDir)
-		}
-	})
-
-	t.Run("holder lost delegation: payload controllers missing pids", func(t *testing.T) {
-		err := cg(map[string]string{
-			labDir + "/cgroup.subtree_control": "\n",
-			payloadDir + "/cgroup.controllers": "memory\n",
-		}).Verify()
-		if err == nil || !strings.Contains(err.Error(), "lab-payload.service") {
-			t.Errorf("Verify() = %v, want an error naming lab-payload.service", err)
-		}
-	})
-
-	// Vacuous forms: a nil receiver and an empty LabDir (hand-built Results,
-	// degenerate wiring) verify OK with no probe at all.
-	t.Run("nil receiver verifies OK", func(t *testing.T) {
-		var c *Cgroups
-		if err := c.Verify(); err != nil {
-			t.Errorf("nil Verify() = %v, want nil", err)
-		}
-	})
-	t.Run("empty LabDir verifies OK", func(t *testing.T) {
-		if err := (&Cgroups{Parent: payloadDir}).Verify(); err != nil {
-			t.Errorf("empty-LabDir Verify() = %v, want nil", err)
-		}
-	})
 }

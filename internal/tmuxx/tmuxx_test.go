@@ -1,6 +1,8 @@
 package tmuxx
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -203,6 +205,146 @@ func TestIsEnvName(t *testing.T) {
 		if isEnvName(s) {
 			t.Errorf("isEnvName(%q) = true; want false", s)
 		}
+	}
+}
+
+// globalEnvOps is pure, so the reconciliation matrix is pinned directly:
+// a stale baseline value and a missing baseline var are (re-)set, a matching
+// value produces no operation at all, a non-baseline var is unset, and a
+// baseline var the server carries but the desired baseline lacks is left
+// alone in BOTH directions (a TERM the server picked up must survive).
+// Staged-removal markers, continuation-shaped lines, and syntactically
+// invalid names are screened out.
+func TestGlobalEnvOps(t *testing.T) {
+	desired := []string{
+		"PATH=/nix/bin:/bin",
+		"XDG_RUNTIME_DIR=/run/user/1000",
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+	}
+	shown := strings.Join([]string{
+		"PATH=/nix/bin:/bin",                      // matches desired: no op
+		"XDG_RUNTIME_DIR=/run/lab",                // stale (the retired ADR-0057 value): re-pinned
+		"TERM=screen-256color",                    // baseline, absent from desired: untouched
+		"LAB_DB=postgres://user:secret@db",        // non-baseline: unset
+		"-STAGED",                                 // staged-removal marker: ignored
+		"continuation line of a multi-line value", // no NAME= shape: ignored
+		"bad.name=x",                              // invalid env name (a continuation lookalike): ignored
+	}, "\n") + "\n"
+
+	set, unset := globalEnvOps(shown, desired)
+	wantSet := []string{
+		"XDG_RUNTIME_DIR=/run/user/1000",
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+	}
+	if !slices.Equal(set, wantSet) {
+		t.Errorf("set = %q, want %q", set, wantSet)
+	}
+	if want := []string{"LAB_DB"}; !slices.Equal(unset, want) {
+		t.Errorf("unset = %q, want %q", unset, want)
+	}
+
+	// A server already mirroring the baseline yields no operations — the
+	// happy path syncGlobalEnv turns into a single show-environment call.
+	set, unset = globalEnvOps(strings.Join(desired, "\n")+"\n", desired)
+	if len(set)+len(unset) != 0 {
+		t.Errorf("in-sync server: set = %q, unset = %q, want none", set, unset)
+	}
+}
+
+// fakeTmuxBin writes a stand-in tmux: every invocation's args are appended
+// (space-joined, one line each) to the returned log, and show-environment
+// answers the canned global env. Lets the syncGlobalEnv tests observe the
+// exact client calls without a real tmux server.
+func fakeTmuxBin(t *testing.T, showOut string) (bin, log string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin = filepath.Join(dir, "tmux")
+	log = filepath.Join(dir, "calls.log")
+	show := filepath.Join(dir, "show.out")
+	if err := os.WriteFile(show, []byte(showOut), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + log + "\"\n" +
+		"if [ \"$1\" = show-environment ]; then cat \"" + show + "\"; fi\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, log
+}
+
+// loggedCalls reads the fake's log: one space-joined argv per line.
+func loggedCalls(t *testing.T, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("reading fake tmux log: %v", err)
+	}
+	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+}
+
+// A server whose global env already mirrors lab's baseline costs exactly one
+// show-environment call — no set-environment at all (the cheap happy path
+// every Start pays).
+func TestSyncGlobalEnv_inSyncServerIsOneCall(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+	bin, log := fakeTmuxBin(t, strings.Join(baselineEnv(), "\n")+"\n")
+
+	if err := New(bin).syncGlobalEnv(t.Context()); err != nil {
+		t.Fatalf("syncGlobalEnv: %v", err)
+	}
+	calls := loggedCalls(t, log)
+	if len(calls) != 1 || calls[0] != "show-environment -g" {
+		t.Errorf("calls = %q, want exactly [\"show-environment -g\"]", calls)
+	}
+}
+
+// The ADR-0060 adoption case: a surviving server carries the retired
+// layout's XDG_RUNTIME_DIR, no DBUS address, and a pre-#204 secret. One
+// chained set-environment call re-pins the stale value, sets the missing
+// one, and unsets the secret — while matching baseline vars produce no
+// operation.
+func TestSyncGlobalEnv_repinsStaleServer(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+
+	// The server global env: every current baseline entry verbatim, except
+	// XDG_RUNTIME_DIR stale and DBUS_SESSION_BUS_ADDRESS absent; plus a
+	// leaked secret.
+	var shown []string
+	for _, kv := range baselineEnv() {
+		switch name, _, _ := strings.Cut(kv, "="); name {
+		case "XDG_RUNTIME_DIR":
+			shown = append(shown, "XDG_RUNTIME_DIR=/run/lab")
+		case "DBUS_SESSION_BUS_ADDRESS":
+			// a pre-fix server never had it
+		default:
+			shown = append(shown, kv)
+		}
+	}
+	shown = append(shown, "LAB_DB=postgres://user:secret@db/lab")
+	bin, log := fakeTmuxBin(t, strings.Join(shown, "\n")+"\n")
+
+	if err := New(bin).syncGlobalEnv(t.Context()); err != nil {
+		t.Fatalf("syncGlobalEnv: %v", err)
+	}
+	calls := loggedCalls(t, log)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %q, want the show and one chained set call", calls)
+	}
+	for _, want := range []string{
+		"set-environment -g XDG_RUNTIME_DIR /run/user/1000",
+		"set-environment -g DBUS_SESSION_BUS_ADDRESS unix:path=/run/user/1000/bus",
+		"set-environment -g -u LAB_DB",
+	} {
+		if !strings.Contains(calls[1], want) {
+			t.Errorf("chained call %q missing %q", calls[1], want)
+		}
+	}
+	// Matching vars produced no operations: exactly the three above.
+	if got := strings.Count(calls[1], "set-environment"); got != 3 {
+		t.Errorf("chained call carries %d operations, want 3: %q", got, calls[1])
 	}
 }
 

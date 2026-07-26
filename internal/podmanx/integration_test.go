@@ -15,14 +15,19 @@ package podmanx
 // being on PATH) because, unlike every other test in this package, it is not
 // hermetic: it needs an image podman can actually pull (the first run costs a
 // real registry round-trip) and a host where ROOTLESS podman genuinely works
-// — a subuid/subgid range for the user, cgroup v2 with memory+pids
-// delegated, and pasta — none of which the lab dev sandbox has (no podman at
+// — a subuid/subgid range for the user, cgroup v2, a reachable systemd user
+// manager, and pasta — none of which the lab dev sandbox has (no podman at
 // all, confirmed absent from the nix devshell) and none of which default CI
-// is assumed to provide either. podmanx.Preflight (preflight.go) is the
-// production check for exactly that host readiness; this test does not
-// re-verify Preflight, only that RunArgv's argv, once handed to a real tmux
-// pane on a host that clears Preflight, actually produces a running,
-// mount-correct, cleanly-reapable container.
+// is assumed to provide either. The pane argv now always pins
+// --cgroup-manager=systemd (ADR-0060); on a normal dev machine that resolves
+// against the developer's OWN user manager — a real login session provides
+// exactly what production provisions for the lab user via lingering — so the
+// container lands in a libpod-*.scope under user@<uid>.service with no
+// lab-specific setup. podmanx.Preflight (preflight.go) is the production
+// check for exactly that host readiness (including a real spawn probe); this
+// test does not re-verify Preflight, only that RunArgv's argv, once handed
+// to a real tmux pane on a host that clears Preflight, actually produces a
+// running, mount-correct, cleanly-reapable container.
 //
 // Run it explicitly on such a host with:
 //

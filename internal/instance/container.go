@@ -29,8 +29,7 @@ const (
 // BEFORE anything is created — a refused spawn must never park a claim (the
 // AFK worktree IS the claim, so ordering this after AddWorktree would strand
 // the issue behind a host misconfiguration). It doubles as the effective dev
-// image resolver (issue #207), returning that image — plus the payload
-// cgroup's --cgroup-parent value (ADR-0059) — on success: the two
+// image resolver (issue #207), returning that image on success: the two
 // concerns share this pre-claim spot because the dev-image refusal, unlike
 // every host/tools check the startup preflight owns, is PER-REPO — only the
 // spawn knows the repo, so a "no image for this repo" verdict cannot be
@@ -54,27 +53,19 @@ const (
 // 409 case would mean extending httpapi, which this wiring task's scope
 // pins closed. Precedent: the unknown-model/provider 400s, equally "what
 // you asked for, this deployment cannot spawn".
-func (s *Service) refuseContainerSpawn(providerID string, repo store.Repo) (image, cgroupParent string, err error) {
+func (s *Service) refuseContainerSpawn(providerID string, repo store.Repo) (image string, err error) {
 	if s.containerPreflight == nil {
-		return "", "", badRequestf("container runner not configured on this server — set --container-tools-image (and a dev image via the repo's Runner settings or --container-image)")
+		return "", badRequestf("container runner not configured on this server — set --container-tools-image (and a dev image via the repo's Runner settings or --container-image)")
 	}
 	r, done := s.containerPreflight()
 	if !done {
-		return "", "", badRequestf("container preflight has not finished — retry in a moment")
+		return "", badRequestf("container preflight has not finished — retry in a moment")
 	}
 	if !r.OK() {
-		return "", "", badRequestf("%s", r.Error())
-	}
-	// Restart-safety guard (ADR-0059), re-run per spawn — the boot verdict
-	// cannot cover it: something re-arming the cgroup trap under lab.service
-	// AFTER preflight, or the lab-payload.service holder losing its delegation,
-	// would otherwise stay invisible until the next deploy's restart fails (or
-	// the caps silently stop binding). A dirty layout hard-refuses the spawn.
-	if gerr := r.Cgroups.Verify(); gerr != nil {
-		return "", "", badRequestf("container cgroup layout unsafe: %s", gerr)
+		return "", badRequestf("%s", r.Error())
 	}
 	if s.containerToolsImages[providerID] == "" {
-		return "", "", badRequestf("no agent-tools image configured for provider %s — set --container-tools-image %s=<ref>", providerID, providerID)
+		return "", badRequestf("no agent-tools image configured for provider %s — set --container-tools-image %s=<ref>", providerID, providerID)
 	}
 	// Effective dev image (issue #207): the repo's own image_ref override
 	// (digest-pinned by reposvc on save) wins, else the server's global
@@ -86,9 +77,9 @@ func (s *Service) refuseContainerSpawn(providerID string, repo store.Repo) (imag
 		image = s.containerImage
 	}
 	if image == "" {
-		return "", "", badRequestf("no dev image for this repo — set a dev image in the repo's Runner settings or configure a server default with --container-image")
+		return "", badRequestf("no dev image for this repo — set a dev image in the repo's Runner settings or configure a server default with --container-image")
 	}
-	return image, r.CgroupParent(), nil
+	return image, nil
 }
 
 // effectiveContainerLimits resolves a container run's resource caps: the

@@ -65,13 +65,6 @@ func (l *LoginRunner) Start(ctx context.Context, name, dir string, argv []string
 	if msg := l.cfg.structuralRefusal(r); msg != "" {
 		return fmt.Errorf("%w: %s", provider.ErrLoginUnavailable, msg)
 	}
-	// Restart-safety guard (ADR-0059), re-run per spawn: a cgroup layout
-	// dirtied after boot (a re-armed trap under lab.service, or the
-	// lab-payload.service holder losing its delegation) would wedge the next
-	// service restart or void the caps, so it refuses the login pane loudly.
-	if err := r.Cgroups.Verify(); err != nil {
-		return fmt.Errorf("%w: container cgroup layout unsafe: %s", provider.ErrLoginUnavailable, err)
-	}
 
 	// EnsureImage failure is a refusal too: its text already names the ref,
 	// podman's own explanation, and the operator action, so the sentinel wrap
@@ -114,17 +107,16 @@ func (l *LoginRunner) Start(ctx context.Context, name, dir string, argv []string
 		// The labrun- namespace, derived from the session name: the startup
 		// orphan sweep accounts for a live login session's container by
 		// construction, with no stored state (ADR-0052's rule).
-		Name:         podmanx.ContainerName(name),
-		Image:        l.cfg.Image,
-		ToolsImage:   l.cfg.ToolsImage,
-		HomeDir:      scratch,
-		StoreDir:     spec.HostDir,
-		StoreDst:     storeDst,
-		Workdir:      podmanx.Home,
-		CgroupParent: r.CgroupParent(),
-		Memory:       memory,
-		Pids:         pids,
-		Nofile:       nofile,
+		Name:       podmanx.ContainerName(name),
+		Image:      l.cfg.Image,
+		ToolsImage: l.cfg.ToolsImage,
+		HomeDir:    scratch,
+		StoreDir:   spec.HostDir,
+		StoreDst:   storeDst,
+		Workdir:    podmanx.Home,
+		Memory:     memory,
+		Pids:       pids,
+		Nofile:     nofile,
 		// The explicit config-dir pin (spec.EnvVar) is the issue's acceptance
 		// criterion: the CLI must resolve the store at the mount point and
 		// never derive some other path from its HOME-based default.

@@ -203,20 +203,25 @@ func New(bin string, opts ...Option) *Tmux {
 // /usr/share), so they are part of the baseline's meaning, not extras.
 // XDG_RUNTIME_DIR joined the baseline for the container runner (issue #205):
 // the rootless podman client a container pane runs needs it to find its
-// runtime root (pause process, netns state); the service unit sets it exactly
-// where rootless podman is intended to work, and its value names a path,
-// never a secret — passing it through leaks nothing.
+// runtime root (pause process, netns state); lab sets it process-wide at
+// startup (ADR-0060 — the value is /run/user/<uid>, unknowable at nix eval
+// time), and its value names a path, never a secret — passing it through
+// leaks nothing. DBUS_SESSION_BUS_ADDRESS is the user-bus address, joined
+// for ADR-0060: the pane's rootless podman client talks to the lab user's
+// systemd user manager (podman's systemd cgroup manager) through it; like
+// XDG_RUNTIME_DIR it names a path, never a secret.
 // Everything else in the lab process env — notably EnvironmentFile secrets
 // like a LAB_DB DSN — is deliberately absent (issue #204).
 var baselineVars = map[string]bool{
-	"PATH":            true,
-	"HOME":            true,
-	"TERM":            true,
-	"TERMINFO_DIRS":   true,
-	"LANG":            true,
-	"LANGUAGE":        true,
-	"LOCALE_ARCHIVE":  true,
-	"XDG_RUNTIME_DIR": true,
+	"PATH":                     true,
+	"HOME":                     true,
+	"TERM":                     true,
+	"TERMINFO_DIRS":            true,
+	"LANG":                     true,
+	"LANGUAGE":                 true,
+	"LOCALE_ARCHIVE":           true,
+	"XDG_RUNTIME_DIR":          true,
+	"DBUS_SESSION_BUS_ADDRESS": true,
 }
 
 // isBaselineVar reports whether name is a baseline pass-through variable: one
@@ -277,7 +282,7 @@ func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extra
 		return nil
 	}
 
-	if err := t.scrubGlobalEnv(ctx); err != nil {
+	if err := t.syncGlobalEnv(ctx); err != nil {
 		return err
 	}
 
@@ -301,21 +306,37 @@ func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extra
 	return nil
 }
 
-// scrubGlobalEnv sweeps a non-baseline variable out of an already-running
-// tmux server's GLOBAL environment before Start spawns into it. A server born
-// under a pre-#204 lab inherited os.Environ() wholesale as its global env, and
-// — because that server outlives service restarts (parked sessions keep it
-// alive) — a scrubbed client alone cannot fix it: new-session copies the
-// server's global env into each pane. So we drop every non-baseline global
-// var here. On a post-fix server the global env is already baseline-only, so
-// this is one show-environment call that unsets nothing — the cheap happy
-// path.
-func (t *Tmux) scrubGlobalEnv(ctx context.Context) error {
+// syncGlobalEnv reconciles an already-running tmux server's GLOBAL
+// environment with lab's current baseline before Start spawns into it. The
+// server outlives lab restarts by design (KillMode=process — parked sessions
+// keep it alive), and new-session copies the server's global env into each
+// pane, so a scrubbed client alone cannot fix a server born under an older
+// lab. Two reconciliations, both closing that class of drift:
+//
+//   - Scrub (issue #204): a server born under a pre-#204 lab inherited
+//     os.Environ() wholesale — EnvironmentFile secrets included — so every
+//     non-baseline global var is unset.
+//   - Re-pin (ADR-0060): a server born under the retired /run/lab layout
+//     would hand every new pane a stale XDG_RUNTIME_DIR (and no DBUS
+//     address), stranding the pane's podman client after the deploy — while
+//     lab's OWN preflight (fresh process env) passes, a false green split
+//     between surfaces. So every baseline var present in lab's process env is
+//     re-pinned on the server when its global value differs or is absent.
+//     Baseline vars the server carries but lab's env lacks survive (a TERM
+//     the server picked up must not be unset); re-pinning at every Start
+//     makes the server global env mirror lab's current baseline by
+//     construction, closing the class, not just this instance.
+//
+// On a server already in sync this is one show-environment call that changes
+// nothing — the cheap happy path.
+func (t *Tmux) syncGlobalEnv(ctx context.Context) error {
 	out, err := t.cmd(ctx, "show-environment", "-g").Output()
 	if err != nil {
 		// Same classification List uses for list-sessions: an ExitError means
-		// no server is running, so there is no global env to scrub. Anything
-		// else (couldn't exec tmux, etc.) is a real failure.
+		// no server is running, so there is no global env to sync — the server
+		// the new-session call starts implicitly seeds from the (already
+		// baseline) client env. Anything else (couldn't exec tmux, etc.) is a
+		// real failure.
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return nil
@@ -323,31 +344,22 @@ func (t *Tmux) scrubGlobalEnv(ctx context.Context) error {
 		return fmt.Errorf("tmux show-environment: %v", err)
 	}
 
-	var unset []string
-	for line := range strings.Lines(string(out)) {
-		line = strings.TrimSuffix(line, "\n")
-		if strings.HasPrefix(line, "-") {
-			continue // tmux marks a variable staged for removal "-NAME"
-		}
-		name, _, ok := strings.Cut(line, "=")
-		if !ok {
-			continue // not a NAME=... entry
-		}
-		// isEnvName screens out continuation lines of a multi-line value, which
-		// show-environment prints unindented and so cannot be told apart from a
-		// real entry except by shape.
-		if !isEnvName(name) || isBaselineVar(name) {
-			continue
-		}
-		unset = append(unset, name)
-	}
-	if len(unset) == 0 {
+	set, unset := globalEnvOps(string(out), baselineEnv())
+	if len(set)+len(unset) == 0 {
 		return nil
 	}
 
-	// Chain the unsets into one client call: `set-environment -g -u NAME
-	// [; set-environment -g -u NAME]...`, ";" a separate argv element.
+	// Chain the operations into one client call: `set-environment -g NAME
+	// VALUE [; set-environment -g -u NAME]...`, ";" a separate argv element.
+	// Values are separate argv elements too — no quoting hazards.
 	var args []string
+	for _, kv := range set {
+		name, value, _ := strings.Cut(kv, "=")
+		if len(args) > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "set-environment", "-g", name, value)
+	}
 	for _, name := range unset {
 		if len(args) > 0 {
 			args = append(args, ";")
@@ -358,16 +370,54 @@ func (t *Tmux) scrubGlobalEnv(ctx context.Context) error {
 		// An "unknown variable" is a harmless no-op — it can only come from a
 		// multi-line value's continuation line that happened to look like an
 		// entry above — and is ignored. Any OTHER failure would be a silently
-		// unscrubbed secret if swallowed, so it fails Start loudly.
+		// unscrubbed secret (or a silently stale runtime dir) if swallowed, so
+		// it fails Start loudly.
 		if msg := strings.TrimSpace(string(out)); !strings.Contains(msg, "unknown variable") {
-			return fmt.Errorf("tmux set-environment -g -u: %v: %s", err, msg)
+			return fmt.Errorf("tmux set-environment -g: %v: %s", err, msg)
 		}
 	}
 	return nil
 }
 
+// globalEnvOps computes syncGlobalEnv's reconciliation, pure for testing:
+// shown is the raw `show-environment -g` output, desired the K=V baseline
+// from lab's process env (baselineEnv). set returns the desired entries whose
+// server value differs or is absent; unset returns every non-baseline name
+// the server carries. A baseline var absent from desired is deliberately in
+// NEITHER list — the server's value survives. Continuation lines of a
+// multi-line server value are screened by shape (isEnvName); the first line
+// still parses as the value, which can make such a var LOOK different and get
+// re-pinned — harmless, re-pinning is idempotent.
+func globalEnvOps(shown string, desired []string) (set, unset []string) {
+	present := make(map[string]string)
+	for line := range strings.Lines(shown) {
+		line = strings.TrimSuffix(line, "\n")
+		if strings.HasPrefix(line, "-") {
+			continue // tmux marks a variable staged for removal "-NAME"
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || !isEnvName(name) {
+			continue // not a NAME=... entry, or a continuation line
+		}
+		present[name] = value
+		if !isBaselineVar(name) {
+			unset = append(unset, name)
+		}
+	}
+	for _, kv := range desired {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if cur, ok := present[name]; !ok || cur != value {
+			set = append(set, kv)
+		}
+	}
+	return set, unset
+}
+
 // isEnvName reports whether s is a syntactically valid POSIX environment
-// variable name ([A-Za-z_][A-Za-z0-9_]*). scrubGlobalEnv uses it to reject
+// variable name ([A-Za-z_][A-Za-z0-9_]*). globalEnvOps uses it to reject
 // the continuation lines of a multi-line global value, which cannot be real
 // variable names, before treating a show-environment line as an entry.
 func isEnvName(s string) bool {
