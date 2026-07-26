@@ -126,15 +126,6 @@ type RunSpec struct {
 	Pids   int    // --pids-limit
 	Nofile int    // soft+hard RLIMIT_NOFILE; replaces the host prlimit wrapper
 
-	// CgroupParent is the payload cgroup every container lands under, as a
-	// cgroupfs path (Result.CgroupParent — ADR-0059: the payload/ subtree of
-	// the lab-payload.service holder). Every real spawn sets it: the preflight
-	// refuses spawns before a layout exists. Empty omits the flags (hand-built
-	// specs in tests) — podman's default parent is then unwritable for the
-	// rootless service user, so a miswired spec fails the spawn loudly instead
-	// of silently landing uncapped in some subtree the preflight never verified.
-	CgroupParent string
-
 	// Workdir is the container workdir when non-empty; empty falls back to
 	// WorktreeDir, so existing run-shape callers are untouched. The
 	// login/CLI shapes set it to Home. When both are empty, -w is omitted
@@ -182,25 +173,28 @@ type RunSpec struct {
 //     host.containers.internal to the host's global address, so a host
 //     service bound to a wildcard/LAN address stays reachable — only
 //     loopback-bound services are unreachable.)
-//   - --cgroup-manager=cgroupfs + --cgroup-parent (ADR-0059, replacing the
-//     retired --cgroups=split): place the container under the payload cgroup
-//     of the lab-payload.service holder (RunSpec.CgroupParent, established by
-//     the preflight) instead of podman's rootless default of user.slice. The
-//     delegation lives in the never-restarted holder, NOT in lab's own cgroup:
-//     ADR-0058's attempt to carry it on lab.service (DelegateSubgroup=main)
-//     died because systemd spawns lab's main PID into lab.service's cgroup
-//     root regardless, EBUSYing the next restart — the trap cgroup.go
-//     documents. The payload cgroup is the SAME subtree the preflight verified
-//     delegation on, so the caps below verifiably bind; the cgroupfs manager
-//     is pinned because a system service has no systemd user session for
-//     podman's default manager, and the fallback choice must not depend on
-//     podman's environment sniffing.
+//   - --cgroup-manager=systemd (a podman GLOBAL flag, hence its position
+//     before "run" — ADR-0060): each container becomes its own transient
+//     scope, libpod-<id>.scope, under the lab user's systemd user manager,
+//     which performs ALL cgroup placement. The hand-rolled delegated-subtree
+//     layouts of ADR-0058/0059 are retired — both died on the same kernel
+//     wall: cgroup v2's delegation containment rule makes an unprivileged
+//     cross-unit attach require write access to the common ancestor's
+//     cgroup.procs (system.slice, root-owned), so podman's cgroupfs manager
+//     could never move a container into any subtree lab set up, however
+//     correctly delegated. The user manager instead FORWARDS the attach to
+//     PID 1, so the ancestor rule never applies. No --cgroup-parent, ever:
+//     podman's rootless default parent under the user manager is correct,
+//     and a knob would re-open exactly the placement business lab is getting
+//     out of. The manager is pinned explicitly because the choice must not
+//     depend on podman's environment sniffing (house rule, ADR-0058).
 //   - --memory/--pids-limit/--ulimit nofile: per-run blast-radius caps; the
 //     ulimit replaces the host-side prlimit wrapper, which is retired for
 //     container runs (the pane command is now the podman client, and
-//     capping THAT process would be aiming at the wrong target). These caps
-//     only bind because --cgroup-parent lands the payload in the holder's
-//     delegated cgroup subtree.
+//     capping THAT process would be aiming at the wrong target). Under the
+//     systemd manager the caps land as per-scope properties on
+//     libpod-<id>.scope (MemoryMax/TasksMax → the scope cgroup's memory.max
+//     and pids.max), verified end-to-end by the preflight spawn probe.
 //   - --mount type=image: the read-only agent-tools injection at ToolsDst
 //     (ADR-0051 — the destination is a hard contract, see ToolsDst).
 //   - the -v binds and -w: the mount inventory documented on RunSpec.
@@ -215,11 +209,7 @@ type RunSpec struct {
 // preserved — later entries win under podman just as with exec env), the
 // image, and the provider argv verbatim.
 func RunArgv(s RunSpec) []string {
-	args := []string{s.Bin}
-	if s.CgroupParent != "" {
-		args = append(args, "--cgroup-manager=cgroupfs")
-	}
-	args = append(args, "run", "--rm")
+	args := []string{s.Bin, "--cgroup-manager=systemd", "run", "--rm"}
 	if !s.NoTTY {
 		args = append(args, "-it")
 	}
@@ -227,11 +217,6 @@ func RunArgv(s RunSpec) []string {
 		"--name", s.Name,
 		"--userns=keep-id",
 		"--network=pasta",
-	)
-	if s.CgroupParent != "" {
-		args = append(args, "--cgroup-parent="+s.CgroupParent)
-	}
-	args = append(args,
 		"--memory", s.Memory,
 		"--pids-limit", strconv.Itoa(s.Pids),
 		"--ulimit", fmt.Sprintf("nofile=%d:%d", s.Nofile, s.Nofile),

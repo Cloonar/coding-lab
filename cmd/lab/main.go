@@ -273,21 +273,48 @@ func run() int {
 	// mode structurally unavailable" signal for instance/afk/reconcile, and
 	// it also disables their podman-rm backstops on host-only deployments.
 	//
-	// Pull failures are RETRIED (issue #220): deploy.yml refuses to bump the
-	// host pin until the default tools refs resolve, but a registry blip or
-	// a workflow_dispatch re-release can still leave a startup pull that
-	// only time heals — every other preflight check reports host state only
-	// a redeploy (and thus a fresh boot) changes. So the loop re-runs
-	// preflight while a pull failure is present and republishes through the
-	// gate: container spawns unblock the moment the registry serves the
-	// ref, no restart needed. Repeat verdicts log only when the failure set
-	// changes; a steady-state outage stays one warning, not one per minute.
+	// Retryable failures are RETRIED (issue #220, ADR-0060): most preflight
+	// checks report host state only a redeploy (and thus a fresh boot)
+	// changes, but two classes heal with no host change at all. A tools-image
+	// pull: deploy.yml refuses to bump the host pin until the default tools
+	// refs resolve, but a registry blip or a workflow_dispatch re-release can
+	// still leave a startup pull that only time heals. And an unreachable
+	// user manager: logind brings user@<uid>.service up asynchronously for a
+	// lingering user, and lab cannot order on it (the uid is unknown at nix
+	// eval time), so a just-booted host may briefly fail the check and then
+	// heal itself. So the loop re-runs preflight while a retryable failure is
+	// present and republishes through the gate: container spawns unblock the
+	// moment the registry serves the ref (or the manager comes up), no
+	// restart needed. Repeat verdicts log only when the failure set changes;
+	// a steady-state outage stays one warning, not one per minute.
 	var containerPreflight func() (podmanx.Result, bool)
 	if cfg.ContainerImage != "" || len(cfg.ContainerToolsImages) > 0 {
+		// lab OWNS the container runtime env (ADR-0060): rootless podman's
+		// systemd cgroup manager reaches the lab user's user@<uid>.service
+		// manager through XDG_RUNTIME_DIR and the user-bus address, and the
+		// uid is unknown at nix eval time, so the service unit cannot carry
+		// them. Set process-wide, they reach all three consumers at once:
+		// lab's own podman execs (ExecRunner/execStreams leave cmd.Env nil →
+		// process env), the tmux server (tmuxx's baseline filters
+		// os.Environ()), and every pane (the server global env, re-pinned at
+		// adoption — see tmuxx.syncGlobalEnv). Deliberately overwrites
+		// anything inherited: a stale /run/lab value from the retired
+		// ADR-0057 layout must lose. Podman's runroot/tmpdir follow this env
+		// to /run/user/<uid>, whose lifetime linger owns — up from boot,
+		// independent of lab.service.
+		rd := fmt.Sprintf("/run/user/%d", os.Getuid())
+		if err := os.Setenv("XDG_RUNTIME_DIR", rd); err != nil {
+			logger.Error("setting XDG_RUNTIME_DIR", "component", "main", "err", err)
+			return 1
+		}
+		if err := os.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+rd+"/bus"); err != nil {
+			logger.Error("setting DBUS_SESSION_BUS_ADDRESS", "component", "main", "err", err)
+			return 1
+		}
 		gate := &podmanx.Gate{}
 		containerPreflight = gate.Result
 		go func() {
-			const pullRetryEvery = time.Minute
+			const retryEvery = time.Minute
 			var prev []podmanx.Failure
 			for {
 				res := podmanx.Preflight(ctx, podmanx.PreflightConfig{
@@ -318,13 +345,13 @@ func run() int {
 					}
 					prev = res.Failures
 				}
-				if !res.HasPullFailure() {
+				if !res.HasRetryableFailure() {
 					return
 				}
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(pullRetryEvery):
+				case <-time.After(retryEvery):
 				}
 			}
 		}()

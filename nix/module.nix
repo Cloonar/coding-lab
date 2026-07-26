@@ -43,19 +43,19 @@
 #   `environmentFile` and leave `db` at null — lab's precedence is
 #   flag > env > default, so a --db flag would shadow LAB_DB.
 #
-# Container runner (ADR-0052/ADR-0053/ADR-0054; docs/ops.md "Container
-# runner"):
+# Container runner (ADR-0052/ADR-0053/ADR-0054/ADR-0060; docs/ops.md
+# "Container runner"):
 #
 #   services.lab.container.enable provisions everything the startup
 #   preflight verifies for `repos.runner = container`: rootless podman +
-#   passt on the unit PATH, the ADR-0059 cgroup layout (delegation lives in
-#   the never-restarted lab-payload.service holder — lab.service itself stays
-#   undelegated — and the lab-cgroup-hygiene pre-start oneshot keeps it that
-#   way), a preserved /run/lab runtime dir, subuid/subgid ranges for the
-#   service user, and the --container-image / --container-tools-image flags.
-#   Every host mutation gates on the enable switch — never on option
-#   non-emptiness — so a half-filled container block changes nothing on a host
-#   that has opted out.
+#   passt on the unit PATH, lingering for the service user (its permanent
+#   user@<uid>.service manager is the cgroup authority containers run under
+#   as transient libpod-<id>.scope scopes — ADR-0060, which retires the
+#   ADR-0059 lab-payload holder / lab-cgroup-hygiene layout the kernel could
+#   never make work), subuid/subgid ranges for the service user, and the
+#   --container-image / --container-tools-image flags. Every host mutation
+#   gates on the enable switch — never on option non-emptiness — so a
+#   half-filled container block changes nothing on a host that has opted out.
 #
 #   enable defaults to TRUE (ADR-0054): enabling lab means container-ready
 #   provisioning, and toolsImages defaults to the CLI-version tags from
@@ -485,14 +485,15 @@ in
         default = true;
         description = ''
           Container-runner host provisioning: rootless podman + passt on the
-          unit PATH, the lab-payload.service cgroup holder (ADR-0059), a
-          preserved /run/lab runtime dir, subuid/subgid ranges, and the
+          unit PATH, lingering for the service user (its user@<uid>.service
+          manager is the cgroup authority containers run under as transient
+          libpod-<id>.scope scopes, ADR-0060), subuid/subgid ranges, and the
           container image flags. On by default (ADR-0054): enabling lab means
           the host can serve `repos.runner = container` out of the box, with
           {option}`toolsImages` defaulting to the published agent-tools
           images pinned by this source's `versions.env`. Set to `false` for
           a host-only deployment — the unit is then byte-identical to the
-          pre-container output (no podman, no holder unit, no subid ranges,
+          pre-container output (no podman, no lingering, no subid ranges,
           no flags).
         '';
       };
@@ -683,6 +684,24 @@ in
           ];
         };
       })
+      # Lingering for the service user (ADR-0060) — the container cgroup
+      # authority. loginctl enable-linger gives the user a permanent
+      # user@<uid>.service manager started at boot with NO login session, and
+      # rootless podman runs --cgroup-manager=systemd against it: every
+      # container becomes its own transient libpod-<id>.scope scope and
+      # systemd itself performs all cgroup placement, so nothing lab manages
+      # ever delegates controllers. That is what clears the ADR-0058/0059
+      # EBUSY/EACCES wall — the kernel's cgroup-v2 common-ancestor rule lets a
+      # non-root process migrate PIDs only into a delegated subtree it already
+      # lives in, so the cross-unit attach from lab.service into the old
+      # holder EACCESed on every podman create (the 2026-07-26 dev-new
+      # incident). Linger also keeps /run/user/<uid> — the runtime dir + user
+      # bus lab's runtime env points podman at — alive independent of
+      # lab.service, which is what lets containers and podman's runtime state
+      # survive a lab restart by construction (each scope is independent of the
+      # unit). Deliberately a separate mkMerge piece keyed on ${cfg.user}, like
+      # the subuid ranges above, so it lands on operator-brought users too.
+      (lib.mkIf cfg.container.enable { ${cfg.user}.linger = true; })
     ];
     users.groups = lib.mkIf (cfg.group == "lab") { lab = { }; };
 
@@ -700,24 +719,12 @@ in
     systemd.services.lab = {
       description = "lab — phone-first control panel for Claude Code agent sessions";
       wantedBy = [ "multi-user.target" ];
-      # Both container-machinery units must be up before every lab start
-      # (ADR-0059, issue #237): the hygiene oneshot (below) guarantees
-      # lab.service's own cgroup delegates nothing so the executor spawn never
-      # EBUSYs, and the lab-payload.service holder establishes the delegated
-      # payload root that lab's preflight enables controllers on. Wants, not
-      # Requires — if the holder is missing lab still starts and its preflight
-      # reports the actionable cgroup-holder failure (naming lab-payload.service)
-      # instead of systemd vetoing the whole service; a failed hygiene cleanup
-      # likewise must not veto the start, lab's preflight re-checks the layout.
-      after = [ "network.target" ]
-      ++ lib.optionals cfg.container.enable [
-        "lab-cgroup-hygiene.service"
-        "lab-payload.service"
-      ];
-      wants = lib.optionals cfg.container.enable [
-        "lab-cgroup-hygiene.service"
-        "lab-payload.service"
-      ];
+      # No container-machinery ordering (ADR-0060): containers are transient
+      # scopes under the service user's user@<uid>.service manager, and
+      # lab.service deliberately does NOT order After= it — the uid is unknown
+      # at eval time, so preflight treats an unreachable user manager as a
+      # retryable failure instead of letting systemd veto the whole start.
+      after = [ "network.target" ];
 
       # Everything a run needs, resolved from the unit PATH: git (+ssh),
       # tmux, prlimit — and labctl for agent sessions (cfg.package ships it).
@@ -802,11 +809,6 @@ in
       # env, so a running deploy picks this up only after that server restarts.
       environment.SHELL = "${pkgs.bashInteractive}/bin/bash";
 
-      # Rootless podman's runtime root — matches RuntimeDirectory=lab below
-      # (see the RuntimeDirectoryPreserve comment there for why the dir must
-      # survive a service stop).
-      environment.XDG_RUNTIME_DIR = lib.mkIf cfg.container.enable "/run/lab";
-
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
@@ -814,7 +816,12 @@ in
 
         # LOAD-BEARING (design §9 / D4): only the lab process dies on
         # restart; the tmux server and its sessions survive and are
-        # re-adopted. Do not change.
+        # re-adopted. Do not change. Under the container runner it also keeps
+        # the pane podman clients alive across a restart, while conmon and the
+        # containers themselves sit OUTSIDE this unit entirely — they live as
+        # transient libpod-<id>.scope scopes under the service user's
+        # user@<uid>.service manager (ADR-0060), so lab.service carries no
+        # cgroup-delegation or runtime-dir machinery for them.
         KillMode = "process";
         Restart = "on-failure";
         RestartSec = 5;
@@ -832,141 +839,7 @@ in
       // lib.optionalAttrs (cfg.stateDir == "/var/lib/lab") {
         StateDirectory = "lab";
         StateDirectoryMode = "0700";
-      }
-      // lib.optionalAttrs cfg.container.enable {
-        # LOAD-BEARING: lab.service must NEVER delegate — payload delegation
-        # lives in lab-payload.service (ADR-0059, issue #237). systemd attaches
-        # the new main PID directly into THIS unit's cgroup root on every start
-        # (DelegateSubgroup= does not apply to the main-process spawn), while
-        # KillMode=process survivors keep that cgroup populated and armed, so
-        # any controller ever enabled in its subtree_control makes the next
-        # restart fail with "Failed to spawn executor: Device or resource busy"
-        # — the exact #237 incident (the 2026-07-26 dev-new outage that
-        # restart-looped past counter 700). No Delegate=, no DelegateSubgroup=
-        # here, ever; the lab-cgroup-hygiene oneshot enforces the empty subtree.
-
-        # Rootless podman needs XDG_RUNTIME_DIR and a system service gets
-        # none. RuntimeDirectoryPreserve is LOAD-BEARING next to
-        # KillMode=process: podman-attached containers stay alive across a
-        # lab restart/deploy, and a plain RuntimeDirectory would be wiped
-        # underneath them on service stop, destroying rootless podman's
-        # runtime state (pause-process refs, netns bookkeeping) — Preserve is
-        # what makes restart-survival work.
-        RuntimeDirectory = "lab";
-        RuntimeDirectoryPreserve = "yes";
-        RuntimeDirectoryMode = "0700";
       };
-    };
-
-    # lab-payload.service — the "holder" unit that carries the delegated
-    # payload cgroup root (ADR-0059, issue #237). ADR-0058 kept delegation on
-    # lab.service's own unit cgroup; that is structurally broken, because
-    # systemd's DelegateSubgroup= does NOT apply to the main-process spawn, so
-    # every lab.service restart clone3(CLONE_INTO_CGROUP)s the new main PID into
-    # the delegating unit root and the kernel's no-internal-process rule EBUSYs
-    # it (the 2026-07-26 outage). Delegation therefore moves OUT of lab.service
-    # into this never-restarted holder: its own cgroup root delegates the
-    # controllers, lab's rootless preflight enables +memory +pids on the
-    # holder's subtree_control and pins every container under a payload/ sibling
-    # via --cgroup-parent, and because this unit is never restarted the
-    # executor-spawn EBUSY trap (a delegating root + a populated cgroup at
-    # spawn time) can never fire for it.
-    systemd.services.lab-payload = lib.mkIf cfg.container.enable {
-      description = "lab payload cgroup holder — delegated root for container caps (ADR-0059)";
-      wantedBy = [ "multi-user.target" ];
-
-      # LOAD-BEARING: deploys must NEVER restart this unit. Its whole purpose is
-      # that the executor-spawn EBUSY trap can never fire for it — but a restart
-      # with surviving containers keeping the delegated root populated WOULD
-      # fire exactly that trap (the #237 incident, re-armed). restartIfChanged =
-      # false makes `nixos-rebuild switch` leave a running holder untouched even
-      # when its unit text changes.
-      restartIfChanged = false;
-
-      serviceConfig = {
-        # Type=exec: the start job completes only after exec(), i.e. after
-        # sd-executor has already migrated the process into the main/ subgroup
-        # (DelegateSubgroup below) — so lab's After= ordering can never observe
-        # the sleep still sitting at the delegated root.
-        Type = "exec";
-
-        # A trivial, immortal main process: the holder exists only to own the
-        # delegated cgroup; the sleep never does anything else.
-        ExecStart = "${lib.getExe' pkgs.coreutils "sleep"} infinity";
-
-        User = cfg.user;
-        Group = cfg.group;
-
-        # Delegate=yes + User= is the whole mechanism: it chowns the delegated
-        # cgroup dir (plus cgroup.procs / cgroup.subtree_control) to the lab
-        # user, which is exactly what lets lab's rootless preflight enable
-        # +memory +pids on the holder's subtree_control and rootless podman
-        # create the libpod-* children under payload/. The Go preflight
-        # hardcodes this holder's cgroup path (/system.slice/lab-payload.service)
-        # and checks it is writable by the service user as the delegation
-        # signal — so DO NOT set Slice= or otherwise rename/re-slice this unit
-        # without a matching podmanx change.
-        Delegate = true;
-
-        # systemd >= 254: the holder's own trivial main process must sit in a
-        # subgroup so the delegated root itself may carry controllers (cgroup
-        # v2's no-internal-process rule). On older systemd the directive is
-        # ignored, the sleep sits at the root, and lab's preflight adopts it
-        # into main/ before enabling controllers.
-        DelegateSubgroup = "main";
-
-        # Stopping the holder must NEVER take the containers down: they live in
-        # payload/ children of this unit's cgroup and survive across a holder
-        # stop the same way sessions survive a lab restart.
-        KillMode = "process";
-      };
-    };
-
-    # lab-cgroup-hygiene — ADR-0059's guarantee that lab.service's OWN cgroup
-    # subtree delegates NOTHING before every lab start, run as root (a oneshot
-    # without RemainAfterExit deactivates after each run, so each lab start job
-    # pulls a fresh one). It is two things at once:
-    #
-    #   (a) the MIGRATION path off the ADR-0058 layout. On the first
-    #       post-upgrade start lab.service's own cgroup root still carries
-    #       +memory +pids (ADR-0058 delegated it) while surviving processes
-    #       (tmux, and containers under the old payload/) keep the cgroup alive
-    #       — the armed trap — and an undelegated lab.service can never clear
-    #       its own root from inside. Only this root-run pre-start oneshot can.
-    #   (b) standing insurance against anything ever re-arming delegation under
-    #       lab.service after boot.
-    #
-    # Accepted migration cost: pre-0059 survivor containers under the old
-    # lab.service/payload/ lose their --memory/--pids-limit caps when this
-    # clears the root's subtree_control — they are already outside the new
-    # verified holder subtree, the same accepted-uncapped-survivors posture as
-    # ADR-0058's migration, and killing sessions to relabel them would invert
-    # the whole restart-survival feature.
-    systemd.services.lab-cgroup-hygiene = lib.mkIf cfg.container.enable {
-      description = "clear all controller delegation from lab.service's own cgroup subtree";
-      before = [ "lab.service" ];
-      serviceConfig.Type = "oneshot";
-      path = [
-        pkgs.coreutils
-        pkgs.findutils
-      ];
-      script = ''
-        root=/sys/fs/cgroup/system.slice/lab.service
-        [ -d "$root" ] || exit 0
-        # Clear every cgroup.subtree_control under lab.service INCLUDING the
-        # root's own file: `find "$root" -name cgroup.subtree_control` already
-        # matches "$root/cgroup.subtree_control", so the root's delegation is
-        # cleared too (the old main/-scoped sweep missed exactly that file).
-        # Bottom-up (deepest first): a parent's subtree_control cannot drop a
-        # controller while a child still delegates it.
-        find "$root" -name cgroup.subtree_control -printf '%d %p\n' \
-          | sort -rn | cut -d' ' -f2- | while read -r f; do
-          for c in $(cat "$f"); do echo "-$c" > "$f" || true; done
-        done
-        # Prune emptied leftover child cgroups (legacy payload/ / runtime/ chains).
-        find "$root" -mindepth 1 -depth -type d \
-          -exec rmdir --ignore-fail-on-non-empty {} + 2>/dev/null || true
-      '';
     };
   };
 }
