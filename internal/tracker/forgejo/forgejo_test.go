@@ -1018,6 +1018,270 @@ func TestChecks_notFound(t *testing.T) {
 	}
 }
 
+// --- CheckLog --------------------------------------------------------------
+
+const (
+	checkLogSHA      = "abc123def4560000000000000000000000000000"
+	checkLogJobRoute = "/Cloonar/nixos/actions/runs/329/jobs/1"
+	checkLogContext  = "ci/build"
+)
+
+// checkLogHarness wires an httptest server serving pull 72 (head sha
+// checkLogSHA), a single combined-status row for checkLogContext whose
+// target_url the test picks via targetFn (given srv.URL, so the absolute-URL
+// case can point back at the test server), and the per-attempt web log route
+// — GET {job}/attempt/{k}/logs — delegated to logFn, which answers
+// (status, contentType, body) for attempt k. It records every log route path
+// requested and the Authorization header the log requests carried.
+type checkLogHarness struct {
+	client   *Client
+	logAuth  string
+	logPaths []string
+}
+
+func newCheckLogHarness(t *testing.T, targetFn func(srvURL string) string, logFn func(k int) (int, string, string)) *checkLogHarness {
+	t.Helper()
+	h := &checkLogHarness{}
+	var target string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == apiPrefix+"/pulls/72" && r.Method == http.MethodGet:
+			_, _ = fmt.Fprintf(w, `{"number":72,"state":"open","merged":false,"head":{"ref":"afk/63","sha":%q}}`, checkLogSHA)
+		case r.URL.Path == apiPrefix+"/commits/"+checkLogSHA+"/status" && r.Method == http.MethodGet:
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = io.WriteString(w, `{"state":"failure","statuses":[]}`) // paginate-until-empty probe
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"state":"failure","statuses":[{"context":%q,"status":"failure","description":"d","target_url":%q}]}`,
+				checkLogContext, target)
+		case strings.HasPrefix(r.URL.Path, checkLogJobRoute+"/attempt/") && strings.HasSuffix(r.URL.Path, "/logs") && r.Method == http.MethodGet:
+			h.logAuth = r.Header.Get("Authorization")
+			h.logPaths = append(h.logPaths, r.URL.Path)
+			status, ct, body := logFn(attemptOf(t, r.URL.Path))
+			if ct != "" {
+				w.Header().Set("Content-Type", ct)
+			}
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	target = targetFn(srv.URL)
+	h.client = New(srv.Client(), srv.URL+"/api/v1", testToken, "Cloonar", "nixos")
+	return h
+}
+
+// attemptOf extracts the k in {job}/attempt/{k}/logs.
+func attemptOf(t *testing.T, path string) int {
+	t.Helper()
+	s := strings.TrimSuffix(strings.TrimPrefix(path, checkLogJobRoute+"/attempt/"), "/logs")
+	k, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("cannot parse attempt from log path %q: %v", path, err)
+	}
+	return k
+}
+
+// TestCheckLog_happyPath pins the whole flow with an ABSOLUTE target_url: pull
+// 72 → statuses → the one row's Actions job page → probe attempt 1 (200
+// text/plain) then attempt 2 (404), returning attempt 1's body verbatim, with
+// the log request carrying the same token auth the REST calls send.
+func TestCheckLog_happyPath(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(srvURL string) string { return srvURL + checkLogJobRoute },
+		func(k int) (int, string, string) {
+			if k == 1 {
+				return http.StatusOK, "text/plain; charset=utf-8", "attempt-1-log"
+			}
+			return http.StatusNotFound, "", "no such attempt"
+		})
+
+	log, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if string(log) != "attempt-1-log" {
+		t.Errorf("log = %q; want %q", log, "attempt-1-log")
+	}
+	if h.logAuth != "token "+testToken {
+		t.Errorf("log request Authorization = %q; want %q", h.logAuth, "token "+testToken)
+	}
+	want := []string{checkLogJobRoute + "/attempt/1/logs", checkLogJobRoute + "/attempt/2/logs"}
+	if len(h.logPaths) != 2 || h.logPaths[0] != want[0] || h.logPaths[1] != want[1] {
+		t.Errorf("log paths = %v; want %v", h.logPaths, want)
+	}
+}
+
+// TestCheckLog_pathOnlyTargetURL: a path-only target_url (no scheme/host)
+// resolves identically — only its .Path is ever used, rebuilt on the web
+// origin.
+func TestCheckLog_pathOnlyTargetURL(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(k int) (int, string, string) {
+			if k == 1 {
+				return http.StatusOK, "text/plain", "path-only-log"
+			}
+			return http.StatusNotFound, "", ""
+		})
+
+	log, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if string(log) != "path-only-log" {
+		t.Errorf("log = %q; want %q", log, "path-only-log")
+	}
+}
+
+// TestCheckLog_rerunLatestAttemptWins: attempts 1..3 answer 200 with distinct
+// bodies and attempt 4 is the terminating 404, so the newest attempt's log is
+// returned — a rerun serves the latest attempt.
+func TestCheckLog_rerunLatestAttemptWins(t *testing.T) {
+	bodies := map[int]string{1: "first-run", 2: "second-run", 3: "third-run"}
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(k int) (int, string, string) {
+			if b, ok := bodies[k]; ok {
+				return http.StatusOK, "text/plain", b
+			}
+			return http.StatusNotFound, "", ""
+		})
+
+	log, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if string(log) != "third-run" {
+		t.Errorf("log = %q; want the latest attempt %q", log, "third-run")
+	}
+	if len(h.logPaths) != 4 {
+		t.Errorf("probed %d attempts; want 4 (three 200s then the terminating 404)", len(h.logPaths))
+	}
+}
+
+// TestCheckLog_attemptOne404IsMismatch: a 404 on the VERY first attempt means
+// the route the adapter is coupled to has moved — a loud, actionable mismatch,
+// never an empty success.
+func TestCheckLog_attemptOne404IsMismatch(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(int) (int, string, string) { return http.StatusNotFound, "", "not here" })
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "file an issue on coding-lab") {
+		t.Errorf("error %q does not tell the operator to file an issue on coding-lab", err.Error())
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestCheckLog_serverErrorIsMismatch: any non-200/404 status on the log route
+// is a mismatch.
+func TestCheckLog_serverErrorIsMismatch(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(int) (int, string, string) { return http.StatusInternalServerError, "", "boom" })
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "file an issue on coding-lab") {
+		t.Errorf("error %q does not tell the operator to file an issue on coding-lab", err.Error())
+	}
+}
+
+// TestCheckLog_nonPlainContentTypeIsMismatch: a 200 whose media type is not
+// text/plain (an HTML login page, say) is a mismatch — the adapter must never
+// hand an agent a chunk of HTML as if it were a job log.
+func TestCheckLog_nonPlainContentTypeIsMismatch(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(int) (int, string, string) {
+			return http.StatusOK, "text/html; charset=utf-8", "<html><body>login</body></html>"
+		})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+}
+
+// TestCheckLog_unknownContext: a context name no head-commit status row carries
+// is ErrUnknownCheck, before any log route is touched.
+func TestCheckLog_unknownContext(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(int) (int, string, string) {
+			t.Errorf("log route must not be reached for an unknown context")
+			return http.StatusOK, "text/plain", ""
+		})
+
+	_, err := h.client.CheckLog(context.Background(), 72, "ci/does-not-exist")
+	if !errors.Is(err, tracker.ErrUnknownCheck) {
+		t.Fatalf("err = %v; want ErrUnknownCheck", err)
+	}
+}
+
+// TestCheckLog_externalCITargetIsUnsupported: a target_url that is not a
+// Forgejo Actions job page (an external CI service) has no forge-served log to
+// proxy — ErrUnsupported.
+func TestCheckLog_externalCITargetIsUnsupported(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return "https://external-ci.example/build/1" },
+		func(int) (int, string, string) {
+			t.Errorf("log route must not be reached for an external-CI target_url")
+			return http.StatusOK, "text/plain", ""
+		})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if !errors.Is(err, tracker.ErrUnsupported) {
+		t.Fatalf("err = %v; want ErrUnsupported", err)
+	}
+}
+
+// TestCheckLog_unknownPull mirrors TestChecks_notFound: an unknown pull number
+// fails on the first GET and unwraps to tracker.ErrNotFound, token never leaked.
+func TestCheckLog_unknownPull(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"pull request does not exist"}`)
+	})
+
+	_, err := c.CheckLog(context.Background(), 999, checkLogContext)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v; want ErrNotFound", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestCheckLog_noTokenLeakOnLogRouteError forces the log route — the one call
+// that reads a raw body with the token in the request header — to fail (403),
+// and asserts the distinctive token never surfaces in the error.
+func TestCheckLog_noTokenLeakOnLogRouteError(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(int) (int, string, string) { return http.StatusForbidden, "", "denied" })
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
 // --- CreatePull ------------------------------------------------------------
 
 func TestCreatePull(t *testing.T) {

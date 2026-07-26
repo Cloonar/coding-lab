@@ -39,8 +39,10 @@ func FixLabel(n int) string {
 // gitx.NToken (<N>), PRToken (<PR>), and BranchToken (<BRANCH>) placeholders
 // — the instruction set delivered to a just-spawned fix run. The contract
 // lines are the #182 pins: the rejection below the separator is the WORK
-// ORDER; the worktree is DETACHED at the PR head, so the push names its
-// refspec explicitly (a bare `git push` has no upstream to resolve);
+// ORDER; on red checks, `labctl pr logs` comes FIRST — before any local
+// repro or re-push, so the run reads the actual failure instead of guessing
+// (issue #241); the worktree is DETACHED at the PR head, so the push names
+// its refspec explicitly (a bare `git push` has no upstream to resolve);
 // `labctl pr rerequest` is the done-signal (FixDone reads the fix-done
 // marker it posts); and `labctl pr create` is explicitly not the fix run's
 // to run — the PR exists, and a second one would plant a competing
@@ -49,7 +51,7 @@ func FixLabel(n int) string {
 // override slot (the lander rule: the contract is pinned, never operator
 // prose).
 func FixSeedPromptTemplate(incogni bool) string {
-	commit := "4. Commit in Conventional Commits style."
+	commit := "5. Commit in Conventional Commits style."
 	if incogni {
 		commit += " No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links."
 	}
@@ -57,12 +59,13 @@ func FixSeedPromptTemplate(incogni bool) string {
 		"You are an autonomous fix run. Pull request #" + PRToken + " (head branch `" + BranchToken + "`) was rejected in review; resolve every finding, push, re-request review, stop.",
 		"",
 		"1. `labctl issue view " + gitx.NToken + "` and `labctl pr view " + PRToken + "` — read fully.",
-		"2. The rejection review below is your work order — address every finding. Work only in this worktree; it is DETACHED at the PR head.",
-		"3. Run the project's tests, build, and linters; fix what you break.",
+		"2. Run `labctl pr checks " + PRToken + "`. If checks are red, run `labctl pr logs " + PRToken + "` first and read the failing jobs' logs before any local repro or re-push.",
+		"3. The rejection review below is your work order — address every finding. Work only in this worktree; it is DETACHED at the PR head.",
+		"4. Run the project's tests, build, and linters; fix what you break.",
 		commit,
-		"5. `git push origin HEAD:refs/heads/" + BranchToken + "` (detached worktree — push the refspec explicitly).",
-		"6. `labctl pr rerequest " + PRToken + "` — never open a new PR; `labctl pr create` is not yours to run.",
-		"7. Then stop working. Do not start unrelated work.",
+		"6. `git push origin HEAD:refs/heads/" + BranchToken + "` (detached worktree — push the refspec explicitly).",
+		"7. `labctl pr rerequest " + PRToken + "` — never open a new PR; `labctl pr create` is not yours to run.",
+		"8. Then stop working. Do not start unrelated work.",
 	}, "\n")
 }
 

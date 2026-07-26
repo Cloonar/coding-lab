@@ -89,6 +89,25 @@ var ErrUnsupported = errors.New("tracker: operation not supported by this tracke
 // produces it (lab's single Forgejo instance is not rate-limited this way).
 var ErrRateLimited = errors.New("tracker: rate limited by the forge")
 
+// ErrUnknownCheck marks a CheckLog whose context name matches no Checks row on
+// the pull request's CURRENT head. CheckLog resolves the log route from the
+// same head-commit status a Checks() call would report for that name, so a
+// name no head-commit row carries — a typo, or a check that has not registered
+// against the current head yet — has no log to serve and is a loud, typed miss
+// rather than an empty success. The wrapping error names the offending context.
+var ErrUnknownCheck = errors.New("tracker: no check with that context on the pull request head")
+
+// ErrLogAdapterMismatch marks a CheckLog whose forge answered the version-
+// coupled log route with a shape lab's log adapter does not recognize — the
+// undocumented Forgejo web log endpoint the adapter is coupled to moved or
+// changed under a forge upgrade. It is deliberately loud: an adapter that no
+// longer matches the forge must fail with an actionable message (file an issue,
+// then debug from a local repro), NEVER degrade to an empty or partial success
+// a reading agent would mistake for a job that simply produced no output. Only
+// the Forgejo log backend produces it; the wrapping error names the route and
+// the answer it got, never the forge token.
+var ErrLogAdapterMismatch = errors.New("tracker: forge log route did not answer the shape lab's log adapter expects")
+
 // Issue/PR state vocabulary. A merged PR is distinct from a closed-unmerged
 // one (v0 pin): the reaper treats open|merged as a done-signal but a
 // closed-unmerged head-matching PR as "no PR", so the run fails on
@@ -355,6 +374,23 @@ type Tracker interface {
 	// is client-side via ChecksState, NEVER trusted from the forge's own
 	// combined-status verdict (checks.go explains why).
 	Checks(ctx context.Context, number int) ([]Check, error)
+
+	// CheckLog fetches the raw plaintext log of the named check — the Name a
+	// Checks() row reports — on the pull/change request's CURRENT head commit,
+	// resolving that head at query time exactly as Checks does. It reads the
+	// log REGARDLESS of the check's state: a still-running job yields the
+	// partial log captured so far (never an error for "not finished yet"), a
+	// completed job its full output, and a rerun the LATEST attempt's log —
+	// older attempts are not addressable through this seam. An unknown pull
+	// number wraps ErrNotFound (the builtin backend surfaces store.ErrNotFound,
+	// like Checks); a context name no head-commit Checks row carries wraps
+	// ErrUnknownCheck; a binding whose forge serves no job logs to proxy — the
+	// built-in and GitHub backends today — wraps ErrUnsupported; and a forge
+	// answer the version-coupled log adapter does not recognize wraps
+	// ErrLogAdapterMismatch, loud by design rather than a silent empty success.
+	// The forge token never appears in the returned error (ADR-0032's deferred
+	// job-log surface, landed on the Forgejo binding).
+	CheckLog(ctx context.Context, number int, name string) ([]byte, error)
 
 	// CreatePull opens a pull request / change request from head onto base.
 	// Exercised in M5/M6; implemented now for symmetry.

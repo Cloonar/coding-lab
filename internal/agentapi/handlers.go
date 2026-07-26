@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/secrets"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/secretscan"
@@ -259,6 +260,28 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo sto
 		// generic 502/500 folds below, or the built-in binding's refusal would
 		// miscode as an opaque 500.
 		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, tracker.ErrUnknownCheck) {
+		// A CheckLog naming a context no head-commit Checks row carries — a typo,
+		// or a check not yet registered against the current head (ADR-0060): 404
+		// with the error's OWN message, which names the offending context. Unlike
+		// the generic ErrNotFound fold above (opaque "not found"), this keeps the
+		// name in the body so a reading agent sees WHICH check had no log to serve.
+		// Placed with the other typed-miss branches, ahead of the binding-generic
+		// folds.
+		jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		// The version-coupled Forgejo web log route answered a shape lab's log
+		// adapter no longer recognizes — a forge upgrade moved the undocumented
+		// endpoint out from under the coupling (ADR-0060): 502 with the error's
+		// own message VERBATIM. It is deliberately loud and actionable (it names
+		// the route, what it asked, what came back, and says to file an issue then
+		// debug from a local repro), so it is NEVER paraphrased away into a generic
+		// bad-gateway — an agent must always tell "lab is broken" from "no logs".
+		jsonError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if errors.Is(err, tracker.ErrRateLimited) {
@@ -938,6 +961,142 @@ func (s *Server) handlePRChecks(w http.ResponseWriter, r *http.Request) {
 		State:  tracker.ChecksState(rows),
 		Checks: checks,
 	})
+}
+
+// unknownCheckResponse is the 404 body GET /agent/v1/prs/{n}/logs answers when
+// ?check=<ctx> names no Checks row on the PR's head: the error names the
+// unknown context and available lists every context the head DOES carry, in row
+// order, so a reading agent can correct a typo in one round trip instead of
+// re-fetching /checks. Available is non-nil so it marshals as [] (never null)
+// when the head has zero checks — the array-never-nil contract the checks
+// surface already holds.
+type unknownCheckResponse struct {
+	Error     string   `json:"error"`
+	Available []string `json:"available"`
+}
+
+// handlePRLogs is GET /agent/v1/prs/{n}/logs[?check=<context>]: the redacted raw
+// CI logs of PR/CR n's current head — the diagnose leg of the fix-the-red loop
+// (ADR-0060, closing ADR-0032's deferral of the log text behind the red rows).
+// Default mode serves the log of every FAILING check, each under a
+// `=== logs: <name> ===` header line; ?check= serves that one named check's log
+// bare (green or pending included). Zero failing checks in default mode is a
+// truthful 204, not an error (ADR-0032's truthful-empty stance); an unknown
+// ?check= context is a 404 carrying the available contexts.
+//
+// WHICH checks to fetch is policy, decided HERE, not in the backend: the tracker
+// exposes CheckLog as a per-check primitive, and this handler holds the Checks()
+// rows and their normalized states, so the failing-subset default lives once,
+// server-side — the ADR-0032 pattern (backends fetch, lab decides), mirroring
+// handlePRChecks' server-side aggregate.
+//
+// Every target's log is fetched and BUFFERED before the first body byte is
+// written: a mid-fetch failure must become a real status code through
+// writeTrackerError (404 unknown check, 409 unsupported, 502 adapter mismatch,
+// 503 rate-limited), never a torn 200 whose truncated body a reading agent would
+// mistake for the whole log. The redactor is likewise built before any write.
+//
+// Redaction is FAIL-CLOSED (ADR-0060): the response passes through the
+// internal/secrets derived-forms redactor so every lab-vault secret value, in
+// every encoding, becomes [REDACTED:NAME] before a byte leaves the server. A
+// redactor that cannot be built (store or vault error) is a 500 — NEVER a
+// raw-log fallback, because a log endpoint that leaks a vault value even once
+// poisons the well. A nil redactor is the seam's zero-secret fast path (the repo
+// has no secrets), so those logs pass through unredacted.
+func (s *Server) handlePRLogs(w http.ResponseWriter, r *http.Request) {
+	_, repo, ok := s.runRepo(w, r)
+	if !ok {
+		return
+	}
+	n, ok := issueNumber(r)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tk, ok := s.trackerFor(w, r, repo)
+	if !ok {
+		return
+	}
+	rows, err := tk.Checks(r.Context(), n)
+	if err != nil {
+		s.writeTrackerError(w, "loading pull request checks", repo, err)
+		return
+	}
+
+	// Selection: ?check= names one row (any state); absent targets the failing
+	// subset, and zero failing checks is a truthful 204 (ADR-0032).
+	check := r.URL.Query().Get("check")
+	var targets []tracker.Check
+	if check != "" {
+		for _, row := range rows {
+			if row.Name == check {
+				targets = append(targets, row)
+				break
+			}
+		}
+		if len(targets) == 0 {
+			available := make([]string, 0, len(rows))
+			for _, row := range rows {
+				available = append(available, row.Name)
+			}
+			writeJSON(w, http.StatusNotFound, unknownCheckResponse{
+				Error:     fmt.Sprintf("unknown check context %q", check),
+				Available: available,
+			})
+			return
+		}
+	} else {
+		for _, row := range rows {
+			if row.State == tracker.CheckFailure {
+				targets = append(targets, row)
+			}
+		}
+		if len(targets) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
+	// Fetch-and-buffer BEFORE writing any body byte: a fetch failure here is a
+	// real status code (writeTrackerError), never a truncated 200.
+	logs := make([][]byte, len(targets))
+	for i, target := range targets {
+		b, err := tk.CheckLog(r.Context(), n, target.Name)
+		if err != nil {
+			s.writeTrackerError(w, "loading pull request check logs", repo, err)
+			return
+		}
+		logs[i] = b
+	}
+
+	// Fail-closed redaction, built before any write: a redactor that cannot be
+	// built is a 500, never a raw-log fallback (ADR-0060). A nil redactor is the
+	// seam's zero-secret fast path — the repo has no secrets, so pass through.
+	red, err := (&secrets.Source{Values: s.store.AllRepoSecretValues, Decrypt: s.vault.Decrypt}).Redactor(r.Context(), repo.ID)
+	if err != nil {
+		s.internalError(w, "building the log redactor", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	for i, target := range targets {
+		if check == "" {
+			// Default mode delimits each section so multiple logs never run
+			// together; ?check= mode dumps the one raw log bare.
+			_, _ = fmt.Fprintf(w, "=== logs: %s ===\n", target.Name)
+		}
+		text := string(logs[i])
+		if red != nil {
+			text, _ = red.Redact(text) // ignore the hit names; the masked text is all that ships
+		}
+		_, _ = io.WriteString(w, text)
+		if !strings.HasSuffix(text, "\n") {
+			// One added newline so a log with no trailing newline never runs into
+			// the next section's header (or the end of the bare log).
+			_, _ = io.WriteString(w, "\n")
+		}
+	}
 }
 
 // handlePRList is GET /agent/v1/prs: the repo's PRs/CRs as the tracker's

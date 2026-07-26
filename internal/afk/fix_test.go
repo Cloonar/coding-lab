@@ -40,7 +40,7 @@ func TestFixSeedPromptTemplate(t *testing.T) {
 	if strings.Contains(FixSeedPromptTemplate(false), "No AI attribution") {
 		t.Error("non-incogni template carries the incogni sentence")
 	}
-	if !strings.Contains(FixSeedPromptTemplate(true), "4. Commit in Conventional Commits style. No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links.") {
+	if !strings.Contains(FixSeedPromptTemplate(true), "5. Commit in Conventional Commits style. No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links.") {
 		t.Error("incogni sentence not attached to the commit step")
 	}
 }
@@ -63,12 +63,13 @@ func TestFixSeedPrompt(t *testing.T) {
 	for _, want := range []string{
 		"You are an autonomous fix run. Pull request #9 (head branch `afk/7`) was rejected in review; resolve every finding, push, re-request review, stop.",
 		"1. `labctl issue view 7` and `labctl pr view 9` — read fully.",
-		"2. The rejection review below is your work order — address every finding. Work only in this worktree; it is DETACHED at the PR head.",
-		"3. Run the project's tests, build, and linters; fix what you break.",
-		"4. Commit in Conventional Commits style.",
-		"5. `git push origin HEAD:refs/heads/afk/7` (detached worktree — push the refspec explicitly).",
-		"6. `labctl pr rerequest 9` — never open a new PR; `labctl pr create` is not yours to run.",
-		"7. Then stop working. Do not start unrelated work.",
+		"2. Run `labctl pr checks 9`. If checks are red, run `labctl pr logs 9` first and read the failing jobs' logs before any local repro or re-push.",
+		"3. The rejection review below is your work order — address every finding. Work only in this worktree; it is DETACHED at the PR head.",
+		"4. Run the project's tests, build, and linters; fix what you break.",
+		"5. Commit in Conventional Commits style.",
+		"6. `git push origin HEAD:refs/heads/afk/7` (detached worktree — push the refspec explicitly).",
+		"7. `labctl pr rerequest 9` — never open a new PR; `labctl pr create` is not yours to run.",
+		"8. Then stop working. Do not start unrelated work.",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q:\n%s", want, p)
@@ -85,14 +86,14 @@ func TestFixSeedPrompt(t *testing.T) {
 	if strings.Contains(bare, "---") {
 		t.Errorf("empty rejection still appended a separator:\n%s", bare)
 	}
-	if !strings.HasSuffix(bare, "7. Then stop working. Do not start unrelated work.") {
+	if !strings.HasSuffix(bare, "8. Then stop working. Do not start unrelated work.") {
 		t.Errorf("bare prompt does not end at the stop line:\n%s", bare)
 	}
 
 	// incogni appends the attribution sentence to the commit step only.
 	const sentence = "No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links."
 	inc := FixSeedPrompt(7, 9, "afk/7", true, "")
-	if !strings.Contains(inc, "4. Commit in Conventional Commits style. "+sentence) {
+	if !strings.Contains(inc, "5. Commit in Conventional Commits style. "+sentence) {
 		t.Errorf("incogni sentence not attached to the commit step:\n%s", inc)
 	}
 	if strings.Contains(p, sentence) {

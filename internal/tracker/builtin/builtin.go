@@ -227,6 +227,14 @@ func (t *Tracker) Checks(ctx context.Context, number int) ([]tracker.Check, erro
 	return []tracker.Check{}, nil
 }
 
+// CheckLog is unsupported on the built-in tracker: a lab-internal change
+// request has no CI machinery behind it and so no forge-served job log to
+// proxy, so rather than fake output it wraps tracker.ErrUnsupported naming the
+// verb (the review-adjacent refusals' pattern) — distinct from a forge failure.
+func (t *Tracker) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
+	return nil, fmt.Errorf("%w: check logs on the built-in tracker", tracker.ErrUnsupported)
+}
+
 // CreatePull opens a change request from head onto base — the builtin answer
 // to a forge PR create (the agent API's POST /prs routes here for
 // builtin-bound repos). The issues the body closes are parsed with the shared
