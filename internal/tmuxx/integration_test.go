@@ -390,6 +390,55 @@ func TestTmux_startScrubsLegacyServerGlobalEnv(t *testing.T) {
 	}
 }
 
+// The ADR-0060 adoption case end-to-end: a tmux server that survived the
+// deploy was born with the retired layout's XDG_RUNTIME_DIR in its GLOBAL env
+// (and no DBUS_SESSION_BUS_ADDRESS), and new panes inherit the server's
+// global env — not the client's — so without the re-pin every post-deploy
+// pane's podman client would be stranded on the stale path while lab's own
+// preflight (fresh process env) passes. Seed such a server bypassing the
+// wrapper, then drive Start on the SAME socket and assert the new pane sees
+// lab's CURRENT baseline values.
+func TestTmux_startRepinsStaleServerBaseline(t *testing.T) {
+	testutil.RequireTool(t, "tmux")
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/12345")
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/12345/bus")
+	ctx := t.Context()
+	socket := fmt.Sprintf("lab-test-%d-%d", os.Getpid(), socketSeq.Add(1))
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+	dir := t.TempDir()
+
+	// Pre-fix spawn: the implicitly-started server seeds its global env from
+	// this client — the stale runtime dir, no user-bus address.
+	var seedEnv []string
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); name != "XDG_RUNTIME_DIR" && name != "DBUS_SESSION_BUS_ADDRESS" {
+			seedEnv = append(seedEnv, kv)
+		}
+	}
+	seed := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "lab-test-stale-first", "sleep", "600")
+	seed.Env = append(seedEnv, "XDG_RUNTIME_DIR=/run/lab")
+	if out, err := seed.CombinedOutput(); err != nil {
+		t.Fatalf("seed stale server: %v: %s", err, out)
+	}
+
+	// Same socket as the stale server, with the kill-server cleanup above.
+	tm := New("tmux", WithSocket(socket))
+	out := filepath.Join(dir, "env.txt")
+	argv := []string{"sh", "-c", "env > '" + out + "'; sleep 600"}
+	if err := tm.Start(ctx, "lab-test-stale-second", dir, argv, nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	env := waitForFile(t, out)
+	if !strings.Contains(env, "XDG_RUNTIME_DIR=/run/user/12345\n") {
+		t.Errorf("pane still carries the stale server XDG_RUNTIME_DIR:\n%s", env)
+	}
+	if !strings.Contains(env, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/12345/bus") {
+		t.Errorf("pane missing the re-pinned DBUS_SESSION_BUS_ADDRESS:\n%s", env)
+	}
+}
+
 // Login shape: providers call Start with extraEnv == nil and run in $HOME.
 // After the #204 scrub the pane gets baseline-only env, so HOME and PATH —
 // which the login shell and its tools need — must still be present.

@@ -18,16 +18,15 @@ import (
 // enum: they end up in the spawn-refusal message and in logs, and the tests
 // key on them.
 const (
-	CheckPodman        = "podman"                // podman missing, unrunnable, or < 4
-	CheckPasta         = "pasta"                 // pasta missing (the backend --network=pasta pins)
-	CheckSubuid        = "subuid"                // no usable /etc/subuid entry for the service user
-	CheckSubgid        = "subgid"                // no usable /etc/subgid entry for the service user
-	CheckCgroup2       = "cgroup2"               // unified hierarchy not mounted / not in use
-	CheckHolder        = "cgroup-holder"         // lab-payload.service holder cgroup missing or not delegated (ADR-0059)
-	CheckDelegation    = "cgroup-delegation"     // memory/pids not delegated into the payload cgroup (under the holder)
-	CheckRestartSafety = "cgroup-restart-safety" // the layout would wedge the next service restart
-	CheckToolsImage    = "tools-image"           // no agent-tools images configured
-	CheckToolsPull     = "tools-image-pull"      // a configured agent-tools ref does not resolve
+	CheckPodman      = "podman"           // podman missing, unrunnable, or < 4
+	CheckPasta       = "pasta"            // pasta missing (the backend --network=pasta pins)
+	CheckSubuid      = "subuid"           // no usable /etc/subuid entry for the service user
+	CheckSubgid      = "subgid"           // no usable /etc/subgid entry for the service user
+	CheckCgroup2     = "cgroup2"          // unified hierarchy not mounted / not in use
+	CheckUserManager = "user-manager"     // the lab user's systemd user manager is unreachable (ADR-0060)
+	CheckSpawnProbe  = "spawn-probe"      // a real probe container failed to spawn or its caps did not land
+	CheckToolsImage  = "tools-image"      // no agent-tools images configured
+	CheckToolsPull   = "tools-image-pull" // a configured agent-tools ref does not resolve
 )
 
 // PreflightConfig is the container-mode configuration Preflight validates —
@@ -47,23 +46,17 @@ type Deps struct {
 	ReadFile func(string) ([]byte, error)
 	Run      CmdRunner
 	// Writable reports whether the service user can write path — the probe
-	// behind the cgroup-holder check. systemd's Delegate=yes + User=lab chowns
-	// the holder's delegated cgroup directory to the unit's user so it can
-	// create the child cgroups a container needs; a non-delegated (or missing)
-	// cgroup stays root-owned. Read access (ReadFile of cgroup.controllers)
-	// cannot tell the two apart — both are world-readable — so delegation is
-	// detected by write access to the cgroup directory itself.
+	// behind the user-manager check. systemd-logind creates /run/user/<uid>
+	// owned by (and writable for) that user exactly while user@<uid>.service
+	// runs, so write access to the runtime dir is the reachability signal for
+	// the user manager podman's systemd cgroup manager must talk to. Mere
+	// existence cannot tell — root, or a stale mount, could leave the dir in
+	// place without a live manager behind it.
 	Writable func(string) bool
-	// WriteFile and Mkdir are setupCgroups' write seams (ADR-0059): adopting
-	// stray holder-root pids into main/, enabling the payload controllers on
-	// the holder root, creating the payload cgroup. Mkdir must be
-	// MkdirAll-shaped (an existing dir is success — the holder's cgroups
-	// survive restarts by design).
-	WriteFile func(name string, data []byte, perm os.FileMode) error
-	Mkdir     func(name string, perm os.FileMode) error
 	// Username and UID identify the service user for subuid/subgid
 	// matching: shadow(5) keys ranges by either the login name or the
-	// numeric uid, so both are accepted.
+	// numeric uid, so both are accepted. UID also locates the user manager's
+	// runtime dir (/run/user/<uid>) for the user-manager check.
 	Username string
 	UID      int
 }
@@ -76,13 +69,11 @@ type Deps struct {
 // accepted match keys.
 func RealDeps() Deps {
 	d := Deps{
-		LookPath:  exec.LookPath,
-		ReadFile:  os.ReadFile,
-		Run:       ExecRunner(),
-		Writable:  func(path string) bool { return unix.Access(path, unix.W_OK) == nil },
-		WriteFile: os.WriteFile,
-		Mkdir:     func(name string, perm os.FileMode) error { return os.MkdirAll(name, perm) },
-		UID:       os.Getuid(),
+		LookPath: exec.LookPath,
+		ReadFile: os.ReadFile,
+		Run:      ExecRunner(),
+		Writable: func(path string) bool { return unix.Access(path, unix.W_OK) == nil },
+		UID:      os.Getuid(),
 	}
 	if u, err := user.Current(); err == nil {
 		d.Username = u.Username
@@ -109,36 +100,28 @@ type Result struct {
 	Version  string
 	Failures []Failure
 	Warnings []string
-	// Cgroups is the container cgroup layout the preflight established
-	// (ADR-0059) — the spawn sites read RunSpec.CgroupParent from it and run
-	// its Verify guard per spawn. Nil exactly when the cgroup checks failed
-	// (Failures then says why) or on a hand-built Result.
-	Cgroups *Cgroups
 }
 
 // OK reports whether every check passed.
 func (r Result) OK() bool { return len(r.Failures) == 0 }
 
-// CgroupParent is the --cgroup-parent value for RunSpec, "" when no layout
-// was established (only reachable alongside a failed preflight or in tests —
-// a green Preflight always carries one).
-func (r Result) CgroupParent() string {
-	if r.Cgroups == nil {
-		return ""
-	}
-	return r.Cgroups.Parent
-}
-
-// HasPullFailure reports whether any failure is a tools-image pull failure
-// (CheckToolsPull) — the one check whose verdict can change with no host
-// change at all: the agent-tools publish job may still be pushing the tag
-// this boot's pull raced (issue #220), or the registry may be briefly down
-// with no cached image to fall back on. cmd/lab keys its retry loop on
-// this — every other check reports host state that only a redeploy (and
-// thus a fresh boot) changes.
-func (r Result) HasPullFailure() bool {
+// HasRetryableFailure reports whether any failure belongs to a check whose
+// verdict can change with no host change at all — cmd/lab keys its retry
+// loop (issue #220) on this. Two checks qualify:
+//
+//   - CheckToolsPull: the agent-tools publish job may still be pushing the
+//     tag this boot's pull raced, or the registry may be briefly down with
+//     no cached image to fall back on.
+//   - CheckUserManager: systemd-logind brings user@<uid>.service up for a
+//     lingering user asynchronously, and lab.service cannot order After= it
+//     (the uid is unknown at nix eval time), so a just-booted host may
+//     briefly fail this check and then heal itself.
+//
+// Every other check reports host state that only a redeploy (and thus a
+// fresh boot) changes.
+func (r Result) HasRetryableFailure() bool {
 	for _, f := range r.Failures {
-		if f.Check == CheckToolsPull {
+		if f.Check == CheckToolsPull || f.Check == CheckUserManager {
 			return true
 		}
 	}
@@ -162,17 +145,23 @@ func (r Result) Error() string {
 
 // Preflight verifies the host can actually run containerized sessions
 // (#205): podman >= 4 present, pasta present, subuid/subgid ranges for the
-// service user, cgroup v2 with memory+pids delegated (the --memory and
-// --pids-limit caps silently do nothing without it), at least one agent-tools
-// image configured, and every configured agent-tools ref resolvable. The dev
-// image is deliberately NOT checked here (issue #207): it is per-repo-or-
-// global and only the spawn knows the repo, so its presence is ensured at
-// spawn (EnsureImage) — a host with no global default is a valid deployment
-// where every repo pins its own image. Preflight NEVER aborts early — all
-// failures are collected so one refusal names everything wrong at once — and
-// it is safe on a host with no podman at all: that is just Failures, never a
-// panic. A later task calls this at server startup and gates container spawns
-// on Result.OK.
+// service user, cgroup v2 (unified hierarchy) in use, the lab user's systemd
+// user manager reachable (ADR-0060 — every container is a transient scope
+// under it, so no manager means no spawns), at least one agent-tools image
+// configured, every configured agent-tools ref resolvable, and finally a
+// REAL spawn probe (probe.go): create+init a probe container through the
+// systemd cgroup manager and read the caps back out of its scope cgroup.
+// The probe is the no-false-green keystone — the retired cgroup checks
+// verified everything EXCEPT the one operation that could fail (the PID
+// migration into the container cgroup), and validated green on a host that
+// could not spawn a single container. The dev image is deliberately NOT
+// checked here (issue #207): it is per-repo-or-global and only the spawn
+// knows the repo, so its presence is ensured at spawn (EnsureImage) — a host
+// with no global default is a valid deployment where every repo pins its own
+// image. Preflight NEVER aborts early — all failures are collected so one
+// refusal names everything wrong at once — and it is safe on a host with no
+// podman at all: that is just Failures, never a panic. cmd/lab calls this at
+// server startup and gates container spawns on Result.OK.
 func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 	var r Result
 	fail := func(check, detail, hint string) {
@@ -228,32 +217,43 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 		}
 	}
 
-	// 4. cgroup v2 with the ADR-0059 layout established: the lab-payload.service
-	// holder delegated to the lab user (Delegate=yes + User=lab), memory+pids
-	// enabled on its root, and a payload/ cgroup under it actually carrying
-	// those controllers (the pane argv pins --cgroup-parent at that payload
-	// cgroup, so this is exactly where --memory/--pids-limit take effect —
-	// verifying any other subtree would be a false green, #205's original
-	// lesson), plus the restart-safety guard clean. The /proc/self/cgroup path
-	// is still read — it feeds LabDir, the plain lab.service cgroup whose
-	// subtree_control the guard must find empty. setupCgroups (cgroup.go) does
-	// the establishing and returns the first structural Failure; the guard runs
-	// again before every spawn, this pass just surfaces a dirty host at boot.
+	// 4. cgroup v2 (unified hierarchy) in use: the per-scope caps are pure v2
+	// machinery (memory.max/pids.max in the scope cgroup), and podman's
+	// systemd cgroup manager assumes the unified hierarchy. The 0:: entry
+	// confirms this process itself is on it; the path's VALUE feeds nothing
+	// anymore — cgroup placement is entirely systemd's job now (ADR-0060),
+	// so on success there is nothing to record.
+	cgroup2OK := false
 	if _, err := d.ReadFile(cgroupFSRoot + "/cgroup.controllers"); err != nil {
 		fail(CheckCgroup2, "cgroup v2 (unified hierarchy) not mounted", "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
 	} else if self, err := d.ReadFile("/proc/self/cgroup"); err != nil {
 		fail(CheckCgroup2, fmt.Sprintf("cannot read /proc/self/cgroup: %v", err), "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
-	} else if path, ok := unifiedCgroupPath(self); !ok {
+	} else if _, ok := unifiedCgroupPath(self); !ok {
 		fail(CheckCgroup2, "no unified (0::) entry in /proc/self/cgroup", "boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)")
-	} else if cg, failure := setupCgroups(path, d); failure != nil {
-		r.Failures = append(r.Failures, *failure)
-	} else if err := cg.Verify(); err != nil {
-		fail(CheckRestartSafety, err.Error(), "restart the lab service — the lab-cgroup-hygiene unit clears any stale delegation under lab.service before each start (ADR-0059)")
 	} else {
-		r.Cgroups = cg
+		cgroup2OK = true
 	}
 
-	// 5. Agent-tools images configured. Container mode has no default tools
+	// 5. The lab user's systemd user manager reachable (ADR-0060): every
+	// container becomes a transient scope under user@<uid>.service, so an
+	// absent manager means podman's systemd cgroup manager has nobody to ask.
+	// systemd-logind creates /run/user/<uid> owned by the user exactly while
+	// the manager runs — write access to it is the reachability signal (see
+	// Deps.Writable). This check can race a fresh boot (logind brings the
+	// lingering user's manager up asynchronously and lab cannot After= a
+	// uid-templated unit), which is why it is one of the two retryable
+	// failures (HasRetryableFailure).
+	userManagerOK := false
+	runtimeDir := fmt.Sprintf("/run/user/%d", d.UID)
+	if !d.Writable(runtimeDir) {
+		fail(CheckUserManager,
+			fmt.Sprintf("%s is not writable by the service user — user@%d.service is not running (or lingering is not enabled) for %s", runtimeDir, d.UID, subject),
+			fmt.Sprintf("enable lingering for the service user (users.users.<user>.linger = true — the NixOS module ships it with container.enable) and check systemctl status user@%d.service; lab retries this check, since a just-booted host may still be bringing the user manager up", d.UID))
+	} else {
+		userManagerOK = true
+	}
+
+	// 6. Agent-tools images configured. Container mode has no default tools
 	// image on purpose: the tools injection is lab's own (ADR-0051), but the
 	// operator must still point at the built refs, so none configured is
 	// "refuse to spawn", not "pick one for them". The DEV image used to be
@@ -264,7 +264,7 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 		fail(CheckToolsImage, "no agent-tools images configured", "set --container-tools-image provider=ref")
 	}
 
-	// 6. Every configured agent-tools ref resolvable — checked at startup
+	// 7. Every configured agent-tools ref resolvable — checked at startup
 	// so a bad ref surfaces here and not as a failed spawn hours later.
 	// PULL FIRST, deliberately (ADR-0054): the default refs are moving
 	// CLI-version tags, and a same-tag re-push (a labctl refresh shipped
@@ -274,26 +274,42 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 	// When the pull fails but a cached image exists, the host degrades to
 	// the cache with a warning instead of refusing spawns — stale tools
 	// beat none while the registry is unreachable. A pull failure with no
-	// cache is the one failure cmd/lab RETRIES (see HasPullFailure): the
-	// tag may simply not be published yet when a deploy races the
-	// agent-tools publish job. Skipped entirely when podman itself failed
-	// check 1: every probe would just re-report the same root cause.
-	// Providers iterate in sorted order so failure order — and the tests —
-	// are deterministic.
+	// cache is retryable (HasRetryableFailure): the tag may simply not be
+	// published yet when a deploy races the agent-tools publish job.
+	// Skipped entirely when podman itself failed check 1: every probe
+	// would just re-report the same root cause. Providers iterate in
+	// sorted order so failure order — and the tests — are deterministic;
+	// usableRefs collects, in that same order, every ref a spawn could use
+	// (pulled or cached), because the spawn probe below needs one.
+	var usableRefs []string
 	if podmanOK {
 		for _, provider := range slices.Sorted(maps.Keys(cfg.ToolsImages)) {
 			ref := cfg.ToolsImages[provider]
 			pullErr := func() error { _, err := d.Run(ctx, cfg.PodmanBin, "pull", ref); return err }()
 			if pullErr == nil {
+				usableRefs = append(usableRefs, ref)
 				continue
 			}
 			if _, err := d.Run(ctx, cfg.PodmanBin, "image", "exists", ref); err == nil {
 				r.Warnings = append(r.Warnings,
 					fmt.Sprintf("provider %s: tools image %s: pull failed (%v); using the locally cached image — a moved tag will not reach this host until the registry is reachable again", provider, ref, pullErr))
+				usableRefs = append(usableRefs, ref)
 				continue
 			}
 			fail(CheckToolsPull, fmt.Sprintf("provider %s: tools image %s not resolvable: %v", provider, ref, pullErr),
 				"check the ref and registry access from this host; the default tags are published by the agent-tools workflow")
+		}
+	}
+
+	// 8. The spawn probe (probe.go) — the one check that actually spawns.
+	// Run only when its prerequisites passed: a broken podman, hierarchy,
+	// user manager, or ref inventory is ALREADY reported above, and a probe
+	// against a known-broken root cause would only re-report the same thing
+	// under a second check id. Skipping adds no failure for exactly that
+	// reason.
+	if podmanOK && cgroup2OK && userManagerOK && len(usableRefs) > 0 {
+		if f := spawnProbe(ctx, cfg.PodmanBin, usableRefs[0], d); f != nil {
+			r.Failures = append(r.Failures, *f)
 		}
 	}
 

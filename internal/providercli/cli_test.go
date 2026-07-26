@@ -81,11 +81,10 @@ func TestContainerCLIGolden(t *testing.T) {
 		t.Fatalf("container name %q does not match %v (argv: %q)", got[5], cliNameRe, got)
 	}
 	want := []string{
-		testPodmanBin, "--cgroup-manager=cgroupfs", "run", "--rm",
+		testPodmanBin, "--cgroup-manager=systemd", "run", "--rm",
 		"--name", got[5],
 		"--userns=keep-id",
 		"--network=pasta",
-		"--cgroup-parent=" + testCgroupParent,
 		"--memory", "8g",
 		"--pids-limit", "4096",
 		"--ulimit", "nofile=16384:16384",
@@ -277,17 +276,6 @@ func TestContainerCLIStructuralErrors(t *testing.T) {
 			name:     "no dev image",
 			mutate:   func(c *ContainerCLI) { c.cfg.Image = "" },
 			wantText: "no dev image configured — set --container-image",
-		},
-		{
-			// The per-spawn restart-safety guard (ADR-0059): a green verdict
-			// whose cgroup layout has since been dirtied is could-not-run.
-			name: "restart-safety guard: dirty cgroup layout",
-			mutate: func(c *ContainerCLI) {
-				var g podmanx.Gate
-				g.Set(podmanx.Result{Version: "5.0.0", Cgroups: dirtyCgroups(t)})
-				c.cfg.Preflight = g.Result
-			},
-			wantText: "container cgroup layout unsafe",
 		},
 	}
 	for _, tc := range cases {
