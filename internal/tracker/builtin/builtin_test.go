@@ -1082,3 +1082,16 @@ func TestBuiltin_PullComments_unsupported(t *testing.T) {
 		t.Errorf("PullComments err = %v, want ErrUnsupported", err)
 	}
 }
+
+// TestBuiltin_CheckLog_unsupported: a lab-internal CR has no CI behind it and
+// so no forge-served job log to proxy — CheckLog wraps tracker.ErrUnsupported.
+func TestBuiltin_CheckLog_unsupported(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	if _, err := tr.CheckLog(ctx, 1, "ci/build"); !errors.Is(err, tracker.ErrUnsupported) {
+		t.Errorf("CheckLog err = %v, want ErrUnsupported", err)
+	}
+}

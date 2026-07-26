@@ -87,7 +87,7 @@ func LanderSeedPromptTemplate(autoMerge, incogni bool) string {
 	return strings.Join([]string{
 		"You are an autonomous lander run. Validate pull request #" + PRToken + " (head branch `" + BranchToken + "`) against the validation core below, act on the verdict, and stop.",
 		"",
-		"1. Run `labctl pr view " + PRToken + "` and `labctl pr checks " + PRToken + " --wait`.",
+		"1. Run `labctl pr view " + PRToken + "` and `labctl pr checks " + PRToken + " --wait`. If checks are red, run `labctl pr logs " + PRToken + "` first and read the failing jobs' logs before any local repro.",
 		"2. Validate the pull request against the validation core below.",
 		fix,
 		"4. Act on the verdict: " + pass +

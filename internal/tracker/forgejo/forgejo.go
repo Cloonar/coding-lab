@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -423,6 +425,97 @@ func (c *Client) Checks(ctx context.Context, number int) ([]tracker.Check, error
 		out = append(out, toCheck(s))
 	}
 	return out, nil
+}
+
+// checkLogJobPath matches a Forgejo Actions job page's URL path —
+// /{owner}/{repo}/actions/runs/{run}/jobs/{job} — the shape a commit status's
+// target_url carries when the job's logs are served by THIS forge. Only the
+// path is matched (target_url may arrive absolute or path-only, and the log
+// route is rebuilt on the web origin either way), and only a match names logs
+// lab can proxy: an external CI service reports some other URL, or none, whose
+// output is not this forge's to serve.
+var checkLogJobPath = regexp.MustCompile(`^/.+/actions/runs/[0-9]+/jobs/[0-9]+$`)
+
+// checkLogAttemptCap bounds CheckLog's per-attempt log probe. A job with more
+// rerun attempts than this is far past anything a real workflow produces, so
+// walking to the cap without the terminating 404 is treated as the adapter no
+// longer matching the forge — a loud mismatch — rather than an unbounded loop.
+const checkLogAttemptCap = 20
+
+// CheckLog fetches the raw plaintext log of the named check on pull `number`'s
+// CURRENT head commit by proxying Forgejo's undocumented per-attempt web log
+// route. It follows Checks' resolution exactly — GET the pull for head.sha,
+// then the combined-status rows for that SHA — and finds the row whose
+// `context` equals name; a name no row carries is tracker.ErrUnknownCheck.
+// That row's target_url must be a Forgejo Actions job page
+// (/{owner}/{repo}/actions/runs/{run}/jobs/{job}); anything else (an external
+// CI URL, or none) is tracker.ErrUnsupported — those logs are not this forge's
+// to serve.
+//
+// The log itself lives on the WEB origin (baseURL minus its /api/v1 suffix),
+// not the REST API, at <job-path>/attempt/{k}/logs. lab probes attempts k=1,2,…
+// with the same "Authorization: token" the REST calls send (the route serves
+// public repos anonymously today, but the credential is sent so a private repo
+// does not silently break), taking each 200 text/plain body and stopping on the
+// FIRST 404 — the attempt past the last real one — to return the latest
+// attempt's log (a rerun's newest attempt wins). A still-running job's route
+// still answers 200 with the partial log so far, so a job in flight yields what
+// it has, never an error. Any other answer is loud: a 404 on attempt 1 (the
+// route the adapter is coupled to has moved), a non-200 status, a 200 whose
+// media type is not text/plain (an HTML login page, say), or exhausting the
+// attempt cap all wrap tracker.ErrLogAdapterMismatch with an actionable message
+// — and the forge token, living only in the request header, never reaches it.
+func (c *Client) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
+	var fj fjPull
+	if err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &fj); err != nil {
+		return nil, err // 404 → tracker.ErrNotFound, same as Checks
+	}
+	statuses, err := c.fetchCommitStatuses(ctx, fj.Head.Sha)
+	if err != nil {
+		return nil, err
+	}
+	target, found := "", false
+	for _, s := range statuses {
+		if s.Context == name {
+			target, found = s.TargetURL, true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
+	}
+	u, err := url.Parse(target)
+	if err != nil || !checkLogJobPath.MatchString(u.Path) {
+		return nil, fmt.Errorf("%w: check %q does not point at a Forgejo Actions job (target_url %q)",
+			tracker.ErrUnsupported, name, target)
+	}
+
+	webOrigin := strings.TrimSuffix(c.baseURL, "/api/v1")
+	var last []byte
+	for k := 1; ; k++ {
+		if k > checkLogAttemptCap {
+			return nil, fmt.Errorf("%w: GET %s answered no terminating 404 within %d attempts for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
+				tracker.ErrLogAdapterMismatch, u.Path+"/attempt/N/logs", checkLogAttemptCap, name)
+		}
+		logPath := fmt.Sprintf("%s/attempt/%d/logs", u.Path, k)
+		status, mediaType, body, err := c.doRawLog(ctx, webOrigin+logPath)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case status == http.StatusOK && mediaType == "text/plain":
+			last = body
+		case status == http.StatusNotFound:
+			if k == 1 {
+				return nil, fmt.Errorf("%w: GET %s answered 404 for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
+					tracker.ErrLogAdapterMismatch, logPath, name)
+			}
+			return last, nil
+		default:
+			return nil, fmt.Errorf("%w: GET %s answered %d %q for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
+				tracker.ErrLogAdapterMismatch, logPath, status, mediaType, name)
+		}
+	}
 }
 
 // fetchCommitStatuses walks the combined-status endpoint's embedded
@@ -1123,6 +1216,38 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 	}
 	return nil
+}
+
+// doRawLog performs one GET against a FULL url (CheckLog's web log route lives
+// on the web origin, not c.baseURL — hence a whole URL rather than an API
+// path) and returns the response status, parsed media type, and RAW body
+// without JSON-decoding: the one call in this client that reads a body
+// verbatim. It mirrors do()'s hygiene — the per-request timeout, the same
+// "Authorization: token" header, and a token that lives ONLY in that header so
+// it can never reach the URL or a returned error. It classifies nothing itself;
+// CheckLog reads the triple and decides success from mismatch.
+func (c *Client) doRawLog(ctx context.Context, rawURL string) (int, string, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("forgejo GET check log: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "token "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("forgejo GET check log: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, "", nil, fmt.Errorf("forgejo GET check log: read body: %w", err)
+	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return resp.StatusCode, mediaType, body, nil
 }
 
 // statusError is a non-2xx forge answer: the diagnostic line do() always

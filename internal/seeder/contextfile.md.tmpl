@@ -37,6 +37,7 @@ no login.
                                           create the label if missing (idempotent)
     labctl pr view <n>                    show PR n (state, head, url, body, reviews, comments)
     labctl pr create --title T --body B   open a PR/CR for the current branch
+    labctl pr logs <n> [--check <c>]      raw CI logs of PR n's failing checks (--check: one check, any state)
 
 A PR/CR body must reference the issue it resolves with `Closes #<n>`.
 Applying a label the repository does not define is an error — create it

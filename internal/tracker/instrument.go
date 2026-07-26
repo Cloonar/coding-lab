@@ -24,6 +24,7 @@ const (
 	OpPullsForHead      = "pulls_for_head"
 	OpPull              = "pull"
 	OpChecks            = "checks"
+	OpCheckLog          = "check_log"
 	OpCreatePull        = "create_pull"
 	OpMergePull         = "merge_pull"
 	OpReviews           = "reviews"
@@ -129,6 +130,12 @@ func (o *observed) Checks(ctx context.Context, number int) ([]Check, error) {
 	checks, err := o.t.Checks(ctx, number)
 	o.report(OpChecks, err)
 	return checks, err
+}
+
+func (o *observed) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
+	log, err := o.t.CheckLog(ctx, number, name)
+	o.report(OpCheckLog, err)
+	return log, err
 }
 
 func (o *observed) CreatePull(ctx context.Context, head, base, title, body string) (PullRef, error) {

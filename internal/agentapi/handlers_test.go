@@ -40,7 +40,10 @@ type fakeTracker struct {
 	prCommentsErr error             // PullComments-only error (Pull/Reviews can still succeed) — the pr-view partial-failure path
 	pulls         []tracker.PullRef
 	pullDetails   []tracker.PullDetail
-	checks        []tracker.Check // returned by Checks (with f.err)
+	checks        []tracker.Check   // returned by Checks (with f.err)
+	checkLogs     map[string][]byte // returned by CheckLog, keyed by check name
+	checkLogErr   error             // CheckLog-only error (Checks can still succeed) — the log-fetch failure path
+	checkLogCalls []string          // records CheckLog name arguments, in order
 	comments      []commentArgs
 	createdIssue  *issueArgs
 	editedIssues  []editArgs
@@ -127,6 +130,16 @@ func (f *fakeTracker) Pull(_ context.Context, number int) (tracker.PullDetail, e
 }
 func (f *fakeTracker) Checks(context.Context, int) ([]tracker.Check, error) {
 	return f.checks, f.err
+}
+func (f *fakeTracker) CheckLog(_ context.Context, _ int, name string) ([]byte, error) {
+	f.checkLogCalls = append(f.checkLogCalls, name)
+	if f.checkLogErr != nil {
+		return nil, f.checkLogErr
+	}
+	if b, ok := f.checkLogs[name]; ok {
+		return b, nil
+	}
+	return nil, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
 }
 func (f *fakeTracker) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	if f.err != nil {
@@ -1347,6 +1360,194 @@ func TestPRChecks_forge(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "rate limited") {
 		t.Errorf("503 body = %s, want the rate-limit diagnostic", rr.Body.String())
+	}
+}
+
+// TestPRLogs_forge pins GET /agent/v1/prs/{n}/logs (ADR-0060), the diagnose leg
+// of the fix-the-red loop. Default mode fetches ONLY the failing rows' logs, in
+// order, each under a `=== logs: <name> ===` header, and adds a trailing newline
+// so a log with none never runs into the next section; ?check= serves one named
+// log bare (green rows included); an unknown context is a 404 naming it with the
+// available contexts and never touches CheckLog; zero failing checks (all green,
+// or no rows) is a 204; and the fetch failures fold to their pinned codes (502
+// adapter mismatch verbatim, 409 unsupported), with Checks errors folding first
+// (404 on an unknown PR).
+func TestPRLogs_forge(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	rows := []tracker.Check{
+		{Name: "a", State: tracker.CheckSuccess},
+		{Name: "b", State: tracker.CheckFailure},
+		{Name: "c", State: tracker.CheckFailure},
+	}
+
+	// 1. Default mode: only the failing rows b, c are fetched, in order, each
+	// under its header. log-b carries NO trailing newline, proving the handler
+	// adds one; the green row a is never fetched.
+	fk := &fakeTracker{
+		checks:    rows,
+		checkLogs: map[string][]byte{"b": []byte("build failed\nstep 2 blew up"), "c": []byte("tests: 3 failing")},
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("default logs: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("content-type = %q, want text/plain; charset=utf-8", ct)
+	}
+	wantBody := "=== logs: b ===\nbuild failed\nstep 2 blew up\n=== logs: c ===\ntests: 3 failing\n"
+	if rr.Body.String() != wantBody {
+		t.Errorf("default logs body =\n%q\nwant\n%q", rr.Body.String(), wantBody)
+	}
+	if len(fk.checkLogCalls) != 2 || fk.checkLogCalls[0] != "b" || fk.checkLogCalls[1] != "c" {
+		t.Errorf("CheckLog calls = %v, want [b c] (the green row a never fetched)", fk.checkLogCalls)
+	}
+
+	// 2. ?check=a (a is green): the one raw log, no separator header.
+	fk = &fakeTracker{checks: rows, checkLogs: map[string][]byte{"a": []byte("all good\n")}}
+	rr = doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs?check=a", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("check=a logs: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != "all good\n" {
+		t.Errorf("check=a body = %q, want the bare raw log, no separator", rr.Body.String())
+	}
+	if len(fk.checkLogCalls) != 1 || fk.checkLogCalls[0] != "a" {
+		t.Errorf("CheckLog calls = %v, want [a]", fk.checkLogCalls)
+	}
+
+	// 3. ?check=zzz: 404 naming zzz, available listing all three in row order,
+	// and CheckLog never called (selection fails ahead of the fetch phase).
+	fk = &fakeTracker{checks: rows}
+	rr = doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs?check=zzz", token, "")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("check=zzz: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+	var unknown struct {
+		Error     string   `json:"error"`
+		Available []string `json:"available"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &unknown); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(unknown.Error, "zzz") {
+		t.Errorf("error = %q, want it to name zzz", unknown.Error)
+	}
+	if len(unknown.Available) != 3 || unknown.Available[0] != "a" || unknown.Available[1] != "b" || unknown.Available[2] != "c" {
+		t.Errorf("available = %v, want [a b c] in row order", unknown.Available)
+	}
+	if len(fk.checkLogCalls) != 0 {
+		t.Errorf("unknown check reached CheckLog: %v", fk.checkLogCalls)
+	}
+
+	// 4. Default mode, all rows green: 204, empty body.
+	allGreen := &fakeTracker{checks: []tracker.Check{
+		{Name: "a", State: tracker.CheckSuccess}, {Name: "b", State: tracker.CheckSuccess},
+	}}
+	rr = doJSON(t, f.forgeServer(allGreen).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 {
+		t.Fatalf("all green: status = %d, body %q, want 204 empty", rr.Code, rr.Body.String())
+	}
+
+	// 5. Default mode, zero rows: 204.
+	empty := &fakeTracker{checks: []tracker.Check{}}
+	rr = doJSON(t, f.forgeServer(empty).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 {
+		t.Fatalf("zero rows: status = %d, body %q, want 204 empty", rr.Code, rr.Body.String())
+	}
+
+	// 6. Adapter mismatch on the log fetch: 502 with the loud message VERBATIM.
+	mismatch := &fakeTracker{
+		checks: []tracker.Check{{Name: "b", State: tracker.CheckFailure}},
+		checkLogErr: fmt.Errorf("log route /o/r/actions/runs/5/jobs/1/attempt/1/logs answered 200 text/html, not text/plain: "+
+			"file an issue on coding-lab, then debug from local repro: %w", tracker.ErrLogAdapterMismatch),
+	}
+	rr = doJSON(t, f.forgeServer(mismatch).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("adapter mismatch: status = %d, want 502 (body %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "file an issue on coding-lab") {
+		t.Errorf("502 body = %s, want the adapter-mismatch message verbatim", rr.Body.String())
+	}
+
+	// 7. Unsupported on the log fetch → 409.
+	unsupported := &fakeTracker{
+		checks:      []tracker.Check{{Name: "b", State: tracker.CheckFailure}},
+		checkLogErr: fmt.Errorf("%w: this forge does not serve that check's logs", tracker.ErrUnsupported),
+	}
+	rr = doJSON(t, f.forgeServer(unsupported).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not supported") {
+		t.Fatalf("unsupported logs: status = %d, body %q, want 409", rr.Code, rr.Body.String())
+	}
+
+	// 10. Unknown PR: Checks errors first → 404.
+	notFound := &fakeTracker{err: fmt.Errorf("pull 999: %w", tracker.ErrNotFound)}
+	rr = doJSON(t, f.forgeServer(notFound).Handler(), "GET", "/agent/v1/prs/999/logs", token, "")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown PR logs: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPRLogsRedaction pins the redaction seam on the log surface (ADR-0060): a
+// repo secret whose plaintext appears inside a fetched log is masked to
+// [REDACTED:NAME] before the body ships — no unredacted byte leaves the server.
+func TestPRLogsRedaction(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+	const value = "sk-live-4f8a2b9c1d3e5f70"
+	f.seedSecret(t, "repo_f", "DEPLOY_KEY", "", value)
+
+	fk := &fakeTracker{
+		checks:    []tracker.Check{{Name: "deploy", State: tracker.CheckFailure}},
+		checkLogs: map[string][]byte{"deploy": []byte("deploying with " + value + " ...\nfailed")},
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("redacted logs: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, value) {
+		t.Errorf("log body leaked the secret value: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED:DEPLOY_KEY]") {
+		t.Errorf("log body = %s, want the value masked as [REDACTED:DEPLOY_KEY]", body)
+	}
+}
+
+// TestPRLogsFailClosed pins the fail-closed stance (ADR-0060): a corrupt secret
+// blob (raw-SQL-mangled so the vault cannot decrypt it) makes the redactor
+// unbuildable, and the handler answers the opaque 500 envelope rather than
+// falling back to the raw log — no log content leaks.
+func TestPRLogsFailClosed(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+	f.seedSecret(t, "repo_f", "DEPLOY_KEY", "", "sk-live-4f8a2b9c1d3e5f70")
+	// Corrupt the stored ciphertext so vault.Decrypt fails when the redactor is
+	// built — the fail-closed trigger.
+	f.exec(t, `UPDATE repo_secrets SET encrypted_value = ? WHERE repo_id = ?`,
+		[]byte("garble-not-a-valid-ciphertext"), "repo_f")
+
+	const logLine = "top-secret deploy output that must not leak"
+	fk := &fakeTracker{
+		checks:    []tracker.Check{{Name: "deploy", State: tracker.CheckFailure}},
+		checkLogs: map[string][]byte{"deploy": []byte(logLine)},
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("fail-closed: status = %d, want 500 (body %s)", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"error":"internal error"}` {
+		t.Errorf("fail-closed body = %s, want the opaque internal-error envelope", got)
+	}
+	if strings.Contains(rr.Body.String(), logLine) {
+		t.Errorf("fail-closed response leaked log content: %s", rr.Body.String())
 	}
 }
 

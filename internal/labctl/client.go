@@ -9,10 +9,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -248,6 +250,84 @@ func (c *Client) PRChecks(n int) (PRChecksReport, error) {
 	var rep PRChecksReport
 	err := c.do(http.MethodGet, "/agent/v1/prs/"+strconv.Itoa(n)+"/checks", nil, &rep)
 	return rep, err
+}
+
+// errNoFailingChecks is the typed sentinel PRLogs returns for the agent API's
+// 204: default mode found no FAILING check to dump (ADR-0032's truthful-empty
+// stance). It is deliberately not a plain error body — the verb branches on it
+// to print its own "no failing checks" note and exit 1, never a silent exit 0
+// with empty stdout.
+var errNoFailingChecks = errors.New("no failing checks")
+
+// unknownCheckError is the typed 404 PRLogs returns when ?check= names a context
+// no Checks row on the PR head carries: the server's message (which names the
+// bad context) plus every available context in row order, so the verb can list
+// the real names without a second /checks round trip. available may be empty
+// (the head carries zero checks). Distinguished on the wire from the unknown-PR
+// 404 by the presence of the `available` field.
+type unknownCheckError struct {
+	message   string
+	available []string
+}
+
+func (e *unknownCheckError) Error() string { return e.message }
+
+// PRLogs streams the redacted raw CI logs of PR/CR n (ADR-0060, the diagnose leg
+// of the fix-the-red loop). With check == "" the server dumps every FAILING
+// check's log, each under a `=== logs: <name> ===` header; with check set it
+// dumps that one named check's log bare (green or pending included). The 200 body
+// can exceed maxResponseBody, so it comes back as an io.ReadCloser the caller
+// streams straight to stdout — it is NEVER routed through decodeResponse's
+// bounded read, and the CALLER owns the Close. A 204 (default mode, no failing
+// checks) is errNoFailingChecks; a 404 whose body carries an `available` list is
+// an *unknownCheckError naming the context; every other non-2xx folds through the
+// shared error path (envelope message, redirect/HTML proxy detection, "HTTP
+// <status>"). The request is built by hand — do() would cap the body it must not
+// — but the Bearer auth matches do() exactly.
+func (c *Client) PRLogs(n int, check string) (io.ReadCloser, error) {
+	base, err := c.requestBase()
+	if err != nil {
+		return nil, err
+	}
+	path := "/agent/v1/prs/" + strconv.Itoa(n) + "/logs"
+	if check != "" {
+		path += "?check=" + url.QueryEscape(check)
+	}
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	// 200: hand the body back UNREAD for the caller to stream — the log can exceed
+	// maxResponseBody, so it must not go through decodeResponse's bounded read.
+	if resp.StatusCode == http.StatusOK {
+		return resp.Body, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// 204: default mode found no failing check — a typed sentinel, not an error
+	// body, so the verb prints its own note and exits 1 (never a silent 0).
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, errNoFailingChecks
+	}
+	// Every other status carries an ERROR body, safely bounded. A 404 whose body
+	// has an `available` field is the unknown-?check= answer (the unknown-PR 404
+	// has none); anything else folds into the shared error path.
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if resp.StatusCode == http.StatusNotFound {
+		var envelope struct {
+			Error     string    `json:"error"`
+			Available *[]string `json:"available"`
+		}
+		if json.Unmarshal(data, &envelope) == nil && envelope.Available != nil {
+			return nil, &unknownCheckError{message: envelope.Error, available: *envelope.Available}
+		}
+	}
+	return nil, c.errorFromResponse(resp, data)
 }
 
 // PRList lists the repo's PRs: every open one plus the recent-closed window
@@ -490,24 +570,8 @@ func (c *Client) decodeResponse(resp *http.Response, out any) error {
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)
 	}
-	// The agent API never redirects. A 3xx means the request hit something else
-	// in front of lab — typically an SSO/auth proxy that bounces unauthenticated
-	// machine traffic to a login page. Surface the redirect target instead of
-	// following it and choking on HTML (issue #30).
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return c.redirectError(resp)
-	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var envelope struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(data, &envelope) == nil && envelope.Error != "" {
-			return fmt.Errorf("%s", envelope.Error)
-		}
-		if isHTML(resp, data) {
-			return c.proxyHintError(resp.StatusCode)
-		}
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return c.errorFromResponse(resp, data)
 	}
 	// A 2xx whose body is HTML — a proxy serving its login page inline with a
 	// 200 rather than a redirect — is never a real agent-API response. Reject it
@@ -522,6 +586,31 @@ func (c *Client) decodeResponse(resp *http.Response, out any) error {
 		}
 	}
 	return nil
+}
+
+// errorFromResponse maps a non-2xx agent-API response (its body already read) to
+// the plain error the command layer prints. The agent API never redirects, so a
+// 3xx means the request hit something in front of lab — typically an SSO/auth
+// proxy bouncing machine traffic to a login page — and is surfaced as the
+// redirect target rather than followed into HTML (issue #30); a {"error"}
+// envelope is its own message; an HTML body is the proxy hint; anything else is a
+// bare "HTTP <status>". Shared by decodeResponse and PRLogs — the latter reads
+// the body itself (to first peek for the unknown-check envelope) before folding
+// the rest of the taxonomy through here.
+func (c *Client) errorFromResponse(resp *http.Response, data []byte) error {
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return c.redirectError(resp)
+	}
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &envelope) == nil && envelope.Error != "" {
+		return fmt.Errorf("%s", envelope.Error)
+	}
+	if isHTML(resp, data) {
+		return c.proxyHintError(resp.StatusCode)
+	}
+	return fmt.Errorf("HTTP %d", resp.StatusCode)
 }
 
 // noRedirect stops the client at the first redirect so do can report it,

@@ -447,6 +447,15 @@ func (c *Client) Checks(ctx context.Context, number int) ([]tracker.Check, error
 	return out, nil
 }
 
+// CheckLog is the deferred job-log surface on the GitHub backend: proxying
+// GitHub Actions job logs is a server-credentialed read this slice does not
+// implement yet (ADR-0032's deferred logs land first on the Forgejo binding),
+// so rather than fake output it wraps tracker.ErrUnsupported naming the verb —
+// the built-in tracker's refusal style — distinct from a forge failure.
+func (c *Client) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
+	return nil, fmt.Errorf("%w: check logs on the GitHub backend", tracker.ErrUnsupported)
+}
+
 // CreatePull opens a pull request from head into base and returns the created
 // PullRef. (The agent API injects/validates Closes #N and applies incogni
 // sanitization before this call.)

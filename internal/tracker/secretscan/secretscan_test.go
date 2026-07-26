@@ -151,7 +151,8 @@ func (r *recTracker) PullsForHead(context.Context, string, string) ([]tracker.Pu
 func (r *recTracker) Pull(context.Context, int) (tracker.PullDetail, error) {
 	return tracker.PullDetail{}, nil
 }
-func (r *recTracker) Checks(context.Context, int) ([]tracker.Check, error) { return nil, nil }
+func (r *recTracker) Checks(context.Context, int) ([]tracker.Check, error)  { return nil, nil }
+func (r *recTracker) CheckLog(context.Context, int, string) ([]byte, error) { return nil, nil }
 func (r *recTracker) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	r.pulls = append(r.pulls, pullCall{head, base, title, body})
 	return r.pullRet, nil

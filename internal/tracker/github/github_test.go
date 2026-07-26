@@ -842,6 +842,16 @@ func TestChecks_notFound(t *testing.T) {
 	}
 }
 
+// TestCheckLog_unsupported: job logs on the GitHub backend are a deferred slice
+// (ADR-0032's logs land first on Forgejo), so CheckLog wraps
+// tracker.ErrUnsupported rather than faking output.
+func TestCheckLog_unsupported(t *testing.T) {
+	c := New(nil, "https://api.github.com", testToken, "o", "r")
+	if _, err := c.CheckLog(context.Background(), 72, "ci/build"); !errors.Is(err, tracker.ErrUnsupported) {
+		t.Fatalf("CheckLog err = %v, want ErrUnsupported", err)
+	}
+}
+
 // TestChecks_rateLimited mirrors TestPull_rateLimited: a throttled call on
 // the pull lookup unwraps to tracker.ErrRateLimited like every other GitHub
 // client op.

@@ -81,6 +81,12 @@ func TestRunCommandSurface(t *testing.T) {
 		{"pr checks bad n", []string{"pr", "checks", "twelve"}, agentEnv, 1, "", "not a positive integer"},
 		{"pr checks too many", []string{"pr", "checks", "1", "2"}, agentEnv, 1, "", "want <n>"},
 
+		// `pr logs` follows the BINARY-WIDE usage code 2 (NOT `pr checks`' 1
+		// override): bad args, missing positional, or a --check with no value.
+		{"pr logs no n", []string{"pr", "logs"}, agentEnv, 2, "", "want <n>"},
+		{"pr logs bad n", []string{"pr", "logs", "x"}, agentEnv, 2, "", "not a positive integer"},
+		{"pr logs missing check value", []string{"pr", "logs", "3", "--check"}, agentEnv, 2, "", "requires"},
+
 		// secret surface: every mis-shape is the usage code 2 (the CHILD's exit
 		// passes through only once a well-formed exec actually runs).
 		{"secret no sub", []string{"secret"}, agentEnv, 2, "", "Usage"},
@@ -176,6 +182,10 @@ type fakeForge struct {
 	checksSeq    [][]tracker.Check   // consecutive Checks() results (--wait); overrides checks when set
 	checksCall   int                 // index into checksSeq
 
+	checkLogs     map[string][]byte // returned by CheckLog, keyed by check name
+	checkLogErr   error             // CheckLog-only error (Checks can still succeed) — the log-fetch failure path
+	checkLogCalls []string          // records CheckLog name arguments, in order
+
 	reviews []tracker.Review // returned by Reviews
 
 	rerequestErr  error  // returned by RerequestReview when set
@@ -232,6 +242,16 @@ func (f *fakeForge) Checks(context.Context, int) ([]tracker.Check, error) {
 		return f.checksSeq[i], nil
 	}
 	return f.checks, nil
+}
+func (f *fakeForge) CheckLog(_ context.Context, _ int, name string) ([]byte, error) {
+	f.checkLogCalls = append(f.checkLogCalls, name)
+	if f.checkLogErr != nil {
+		return nil, f.checkLogErr
+	}
+	if b, ok := f.checkLogs[name]; ok {
+		return b, nil
+	}
+	return nil, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
 }
 func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	f.createdPull = &[4]string{head, base, title, body}
@@ -1287,6 +1307,14 @@ func TestPRChecksRed(t *testing.T) {
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
+	// Red rows advertise the diagnose leg at the point of need (ADR-0060): the
+	// `labctl pr logs` hint on stderr, never on stdout (the row surface stays pure).
+	if !strings.Contains(stderr, "logs: labctl pr logs 12") {
+		t.Errorf("stderr = %q, want the pr logs hint", stderr)
+	}
+	if strings.Contains(stdout, "labctl pr logs") {
+		t.Errorf("stdout = %q, must not carry the hint (stderr only)", stdout)
+	}
 }
 
 // TestPRChecksGreen: an all-success aggregate exits 0 (green — the loop is done).
@@ -1303,6 +1331,10 @@ func TestPRChecksGreen(t *testing.T) {
 	}
 	if stdout != "state: success\nbuild\tsuccess\tsuccess\t\thttps://ci/build\n" {
 		t.Errorf("stdout = %q", stdout)
+	}
+	// Green never advertises the logs verb — there is nothing red to diagnose.
+	if strings.Contains(stderr, "labctl pr logs") {
+		t.Errorf("stderr = %q, want no pr logs hint on green", stderr)
 	}
 }
 
@@ -1321,6 +1353,10 @@ func TestPRChecksPendingExit3(t *testing.T) {
 	}
 	if stdout != "state: pending\nbuild\tpending\tin_progress\t\thttps://ci/build\n" {
 		t.Errorf("stdout = %q", stdout)
+	}
+	// Pending is not red — no logs hint (the diagnose leg is for failing checks).
+	if strings.Contains(stderr, "labctl pr logs") {
+		t.Errorf("stderr = %q, want no pr logs hint while pending", stderr)
 	}
 }
 
@@ -1394,6 +1430,176 @@ func TestPRChecksWaitTimesOut(t *testing.T) {
 	}
 	if strings.Count(stdout, "state:") != 1 {
 		t.Errorf("stdout has %d state lines, want exactly 1", strings.Count(stdout, "state:"))
+	}
+	// A --wait that times out pending is exit 3, not red — no logs hint.
+	if strings.Contains(stderr, "labctl pr logs") {
+		t.Errorf("stderr = %q, want no pr logs hint on the pending timeout", stderr)
+	}
+}
+
+// TestPRChecksWaitRedHint: --wait that resolves to a RED aggregate (pending then
+// failure) exits 2 AND appends the `labctl pr logs` hint on stderr — the same
+// point-of-need advertisement the single-shot red path emits (ADR-0060), printed
+// with the final report only.
+func TestPRChecksWaitRedHint(t *testing.T) {
+	origInterval, origCap := checksPollInterval, checksWaitCap
+	checksPollInterval = time.Millisecond
+	checksWaitCap = time.Second
+	t.Cleanup(func() { checksPollInterval, checksWaitCap = origInterval, origCap })
+
+	fk := &fakeForge{checksSeq: [][]tracker.Check{
+		{{Name: "ci", State: tracker.CheckPending, RawState: "queued", Summary: "", URL: "https://ci/1"}},
+		{{Name: "ci", State: tracker.CheckFailure, RawState: "failure", Summary: "boom", URL: "https://ci/1"}},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "checks", "12", "--wait"}, f.env())
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (red); stderr %q", code, stderr)
+	}
+	if !strings.Contains(stderr, "logs: labctl pr logs 12") {
+		t.Errorf("stderr = %q, want the pr logs hint on the final red report", stderr)
+	}
+	if strings.Contains(stdout, "labctl pr logs") {
+		t.Errorf("stdout = %q, must not carry the hint (stderr only)", stdout)
+	}
+}
+
+// --- pr logs (ADR-0060) -----------------------------------------------------
+
+// TestPRLogsDefaultDump drives `labctl pr logs <n>` through the REAL agentapi:
+// default mode fetches ONLY the failing rows (b, c), each dumped under a
+// `=== logs: <name> ===` header, and the green row a is never fetched. Exit 0,
+// the log text reaches stdout, stderr stays empty.
+func TestPRLogsDefaultDump(t *testing.T) {
+	fk := &fakeForge{
+		checks: []tracker.Check{
+			{Name: "a", State: tracker.CheckSuccess},
+			{Name: "b", State: tracker.CheckFailure},
+			{Name: "c", State: tracker.CheckFailure},
+		},
+		checkLogs: map[string][]byte{
+			"b": []byte("build failed\nstep 2 blew up"),
+			"c": []byte("tests: 3 failing"),
+		},
+	}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	for _, want := range []string{"=== logs: b ===", "=== logs: c ===", "build failed\nstep 2 blew up", "tests: 3 failing"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+		}
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
+	}
+	if len(fk.checkLogCalls) != 2 || fk.checkLogCalls[0] != "b" || fk.checkLogCalls[1] != "c" {
+		t.Errorf("CheckLog calls = %v, want [b c] (the green row a never fetched)", fk.checkLogCalls)
+	}
+}
+
+// TestPRLogsCheckOneGreen: `--check a` on a green row serves that one log BARE
+// (no `=== logs ===` header), exit 0, stderr empty — any-state fetch by context.
+func TestPRLogsCheckOneGreen(t *testing.T) {
+	fk := &fakeForge{
+		checks: []tracker.Check{
+			{Name: "a", State: tracker.CheckSuccess},
+			{Name: "b", State: tracker.CheckFailure},
+		},
+		checkLogs: map[string][]byte{"a": []byte("all good\n")},
+	}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12", "--check", "a"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "all good\n" {
+		t.Errorf("stdout = %q, want the bare log with no header", stdout)
+	}
+	if strings.Contains(stdout, "=== ") {
+		t.Errorf("stdout = %q, want no section header in --check mode", stdout)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
+	}
+}
+
+// TestPRLogsNoFailingChecks: default mode with all-green rows is the server's
+// 204 — the client's errNoFailingChecks sentinel — so the verb prints a note
+// naming the PR and exits 1 (never a silent exit 0), stdout empty.
+func TestPRLogsNoFailingChecks(t *testing.T) {
+	fk := &fakeForge{checks: []tracker.Check{
+		{Name: "a", State: tracker.CheckSuccess},
+		{Name: "b", State: tracker.CheckSuccess},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty on no failing checks", stdout)
+	}
+	if !strings.Contains(stderr, "pr logs: no failing checks on PR 12") {
+		t.Errorf("stderr = %q, want the no-failing-checks note naming the PR", stderr)
+	}
+}
+
+// TestPRLogsUnknownContext: `--check zzz` names no row — the server's 404 with
+// the available contexts — so the verb prints the context-naming message on line
+// 1 and the real contexts on line 2, exit 1, stdout empty.
+func TestPRLogsUnknownContext(t *testing.T) {
+	fk := &fakeForge{checks: []tracker.Check{
+		{Name: "a", State: tracker.CheckSuccess},
+		{Name: "b", State: tracker.CheckFailure},
+		{Name: "c", State: tracker.CheckFailure},
+	}}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12", "--check", "zzz"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty on unknown context", stdout)
+	}
+	if !strings.Contains(stderr, "zzz") {
+		t.Errorf("stderr = %q, want it to name the unknown context", stderr)
+	}
+	if !strings.Contains(stderr, "available contexts: a, b, c") {
+		t.Errorf("stderr = %q, want the available contexts listed in row order", stderr)
+	}
+}
+
+// TestPRLogsAdapterMismatch: the log-adapter mismatch (a Forgejo upgrade moved
+// the undocumented web log route) is the server's 502 with the loud, actionable
+// message — it must reach the agent's stderr VERBATIM, exit 1.
+func TestPRLogsAdapterMismatch(t *testing.T) {
+	fk := &fakeForge{
+		checks: []tracker.Check{{Name: "b", State: tracker.CheckFailure}},
+		checkLogErr: fmt.Errorf("log route /o/r/actions/runs/5/jobs/1/attempt/1/logs answered 200 text/html, not text/plain: "+
+			"file an issue on coding-lab, then debug from local repro: %w", tracker.ErrLogAdapterMismatch),
+	}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "file an issue on coding-lab") {
+		t.Errorf("stderr = %q, want the adapter-mismatch message verbatim", stderr)
 	}
 }
 

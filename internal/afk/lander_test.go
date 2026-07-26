@@ -143,7 +143,7 @@ func TestLanderSeedPrompt(t *testing.T) {
 	}
 	for _, want := range []string{
 		"You are an autonomous lander run. Validate pull request #9 (head branch `afk/7`)",
-		"1. Run `labctl pr view 9` and `labctl pr checks 9 --wait`.",
+		"1. Run `labctl pr view 9` and `labctl pr checks 9 --wait`. If checks are red, run `labctl pr logs 9` first and read the failing jobs' logs before any local repro.",
 		"2. Validate the pull request against the validation core below.",
 		"3. Fix trivial findings only — formatting, lint, merge conflicts — inline: commit, then `git push origin HEAD:refs/heads/afk/7` (your worktree is DETACHED at the PR head, so push the refspec explicitly — a bare `git push` has no upstream to resolve). Substantive problems are never yours to fix — they belong to the verdict.",
 		"clean PASS → `labctl pr approve 9`, then `labctl pr merge 9`.",

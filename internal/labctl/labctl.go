@@ -19,6 +19,7 @@
 package labctl
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -49,6 +50,9 @@ Usage:
   labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
   labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
                                         pending (exit 0 green/none · 2 red · 3 still pending)
+  labctl pr logs <n> [--check <context>]
+                                        raw CI logs of PR n's failing checks to stdout (--check:
+                                        that one check, any state); pipe through tail/grep
   labctl pr reject <n> <body>           record a rejection verdict on PR n with body as the findings
   labctl pr approve <n> [body]          record a validation-passed verdict on PR n (body optional)
   labctl pr rerequest <n>               signal fix-done on PR n and re-request review from reviewers
@@ -438,6 +442,10 @@ func runPR(args []string, env Env) int {
 		// Hand-rolled env/client setup (NOT withClient) — this verb's exit
 		// contract folds env/usage errors into 1, never withClient's 2.
 		return runPRChecks(args[1:], env)
+	case "logs":
+		// Follows the BINARY-WIDE exit convention (unlike its sibling checks):
+		// missing env is withClient's 2, so it routes through withClient.
+		return runPRLogs(args[1:], env)
 	case "reject":
 		// Exactly <n> <body>: unlike `issue comment`, the body is ONE
 		// positional argument (quote a multi-word body) — the findings are
@@ -700,7 +708,7 @@ func runPRChecks(args []string, env Env) int {
 		if err != nil {
 			return checksErr(env, err.Error())
 		}
-		printChecks(env.Stdout, rep)
+		printChecksReport(env, rep, n)
 		return checksExit(env, rep.State)
 	}
 
@@ -714,7 +722,7 @@ func runPRChecks(args []string, env Env) int {
 			return checksErr(env, err.Error())
 		}
 		if rep.State != checksPending {
-			printChecks(env.Stdout, rep)
+			printChecksReport(env, rep, n)
 			return checksExit(env, rep.State)
 		}
 		// Stop if the next sleep would carry us past the cap: surface the
@@ -772,6 +780,88 @@ func printChecks(w io.Writer, rep PRChecksReport) {
 	for _, c := range rep.Checks {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.Name, c.State, c.RawState, c.Summary, c.URL)
 	}
+}
+
+// printChecksReport prints rep on stdout and, when the aggregate is RED, appends
+// the point-of-need hint at `labctl pr logs <n>` on stderr (ADR-0060: advertise
+// the log verb exactly where an agent hits red). Never on green/none, never on a
+// still-pending timeout (exit 3). The hint lives here in the verb, not in
+// printChecks — stdout stays the pure, agent-parsed row surface (0032 pinned it
+// so), and the hint rides stderr.
+func printChecksReport(env Env, rep PRChecksReport, n int) {
+	printChecks(env.Stdout, rep)
+	if rep.State == checksFailure {
+		_, _ = fmt.Fprintf(env.Stderr, "logs: labctl pr logs %d\n", n)
+	}
+}
+
+// runPRLogs implements `labctl pr logs <n> [--check <context>]` (ADR-0060, the
+// diagnose leg of the fix-the-red loop). Unlike `pr checks`, it follows the
+// BINARY-WIDE exit convention: 0 logs printed · 1 no failing checks / unknown
+// context / any transport-API error · 2 usage (bad args, or missing env via
+// withClient). `--check` REQUIRES a following value and may sit before or after
+// <n> (scanned the way runPRChecks scans --wait); exactly one positional, a
+// positive integer.
+func runPRLogs(args []string, env Env) int {
+	check := ""
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--check" {
+			// --check REQUIRES a value (the following arg); a trailing --check is a
+			// usage error, not a silent no-op.
+			if i+1 >= len(args) {
+				_, _ = fmt.Fprintln(env.Stderr, "labctl pr logs: --check requires a <context> value")
+				return 2
+			}
+			check = args[i+1]
+			i++
+			continue
+		}
+		rest = append(rest, args[i])
+	}
+	if len(rest) != 1 {
+		_, _ = fmt.Fprintln(env.Stderr, "labctl pr logs: want <n> [--check <context>]")
+		return 2
+	}
+	n, err := strconv.Atoi(rest[0])
+	if err != nil || n < 1 {
+		_, _ = fmt.Fprintf(env.Stderr, "labctl pr logs: PR number %q is not a positive integer\n", rest[0])
+		return 2
+	}
+	return withClient(env, "pr logs", func(c *Client) error {
+		body, err := c.PRLogs(n, check)
+		if err != nil {
+			// 204: no failing check to dump — a note naming the PR, exit 1 (never a
+			// silent exit 0), stdout untouched.
+			if errors.Is(err, errNoFailingChecks) {
+				return fmt.Errorf("no failing checks on PR %d", n)
+			}
+			// 404 unknown ?check=: the server's context-naming message on line 1,
+			// the real contexts on line 2 (comma-space, "(none)" when empty).
+			var unknown *unknownCheckError
+			if errors.As(err, &unknown) {
+				return fmt.Errorf("%s\navailable contexts: %s", unknown.message, availableContexts(unknown.available))
+			}
+			return err
+		}
+		defer func() { _ = body.Close() }()
+		// Stream the (already redacted, server-side) log straight to stdout — no
+		// buffer cap; the body can be many MiB and agents pipe through tail/grep.
+		if _, err := io.Copy(env.Stdout, body); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// availableContexts renders an unknown-check error's available list for the
+// verb's second stderr line: comma-space joined, or the literal "(none)" when
+// the PR head carries zero checks.
+func availableContexts(available []string) string {
+	if len(available) == 0 {
+		return "(none)"
+	}
+	return strings.Join(available, ", ")
 }
 
 // withClient builds the Client from LAB_URL/LAB_TOKEN and runs fn. Missing
