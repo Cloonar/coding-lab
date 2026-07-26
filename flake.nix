@@ -368,11 +368,15 @@
             # Lingering is the ADR-0060 container cgroup authority: on for the
             # service user under container.enable (its user@<uid>.service
             # manager is what containers run under as transient scopes), and
-            # absent — the option default of false — when the runner is off.
+            # left at the option default — null, lingering unmanaged — when
+            # the runner is off. Deliberately NOT false: linger is a
+            # tri-state (nullOr bool), and false would have the module
+            # actively disable lingering for a possibly operator-brought
+            # user; opting out of the runner must simply stop managing it.
             assert lib.assertMsg (containerDummy.config.users.users.lab.linger == true)
               "nixos-module check: container.enable must enable lingering for the service user (ADR-0060 — the user@ manager containers run under as transient scopes)";
-            assert lib.assertMsg (containerOffDummy.config.users.users.lab.linger == false)
-              "nixos-module check: with container.enable = false the service user must not linger (the default)";
+            assert lib.assertMsg (containerOffDummy.config.users.users.lab.linger == null)
+              "nixos-module check: with container.enable = false the service user's linger must stay at the unmanaged default (null) — the module must neither enable nor force-disable lingering for a runner-less host";
             pkgs.runCommand "lab-nixos-module-eval"
               {
                 unit = dummy.config.systemd.units."lab.service".text;
