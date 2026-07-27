@@ -176,7 +176,7 @@ func (f *NoLinkFake) LocateTranscript(context.Context, string, string, string) (
 // ReadChat is transcript-less: this fake never locates a transcript, so every
 // read is the pre-transcript idle chat (the issue #92 seam contract: an empty
 // transcriptPath yields an idle empty chat, never an error).
-func (f *NoLinkFake) ReadChat(string, string, string) (provider.Chat, error) {
+func (f *NoLinkFake) ReadChat(provider.ReadSpec) (provider.Chat, error) {
 	return provider.Chat{State: provider.StateIdle}, nil
 }
 func (f *NoLinkFake) Reply(context.Context, string, string) error { return nil }

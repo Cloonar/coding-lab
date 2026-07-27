@@ -46,6 +46,18 @@
   color: var(--muted);
   font-weight: 500;
 }
+/* The context-pressure meter (issue #243 / ADR-0061): a nested `· 62%` span
+   inside the model chip, so it inherits the chip's >=640px-only display gate —
+   the meter hides with the chip below 640px, no gate of its own. Untinted it
+   stays the chip's muted metadata; it warms to amber at >=80% occupancy and red
+   at >=95% (red wins), reusing the shared banner (amber) and danger palette
+   tokens so both themes track. */
+.chat-context-meter.warn {
+  color: var(--banner-text);
+}
+.chat-context-meter.danger {
+  color: var(--danger);
+}
 /* The "N behind" chip (issue #149) — unlike the model chip above, this rides
    at ALL widths (a countless dot would be useless), so it skips the
    >=640px-only display gate entirely; `.chip` already keeps it

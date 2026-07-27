@@ -247,6 +247,13 @@ func TestCompat_RolloutPlainFixture_maps(t *testing.T) {
 	if chat.State != provider.StateNeedsInput {
 		t.Errorf("State = %q; want %q (tail is task_complete)", chat.State, provider.StateNeedsInput)
 	}
+	// Context-pressure meter (issue #243 / ADR-0061): the last usable token_count
+	// carries last_token_usage.total_tokens 11894 / reasoning_output_tokens 0 and a
+	// self-reported 258400 window, so the meter reads 11894 of 258400 (token_count
+	// still never renders as a message — the count above stays 7).
+	if cu := chat.ContextUsage; cu == nil || cu.Used != 11894 || cu.Limit != 258400 {
+		t.Errorf("ContextUsage = %+v; want Used 11894 / Limit 258400 (last token_count's last_token_usage)", cu)
+	}
 
 	m := chat.Messages
 	if m[0].Kind != provider.MessageText || m[0].Role != "user" ||

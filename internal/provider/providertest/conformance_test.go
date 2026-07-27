@@ -306,18 +306,19 @@ func (m *mockProvider) AdoptCredentials(instanceHome string) error {
 }
 
 // ReadChat's default is conforming per the read-chat obligation (issue #92):
-// an empty transcriptPath is the idle pre-transcript read of an active run,
-// and a vanished non-empty path surfaces the ErrTranscriptGone sentinel via
-// the same os-stat route a real adapter's open takes. runID/runtimeDir are
-// ignored — the mock has no live-signal channel, the honest-degradation shape.
-func (m *mockProvider) ReadChat(_, _, transcriptPath string) (provider.Chat, error) {
+// an empty spec.TranscriptPath is the idle pre-transcript read of an active
+// run, and a vanished non-empty path surfaces the ErrTranscriptGone sentinel
+// via the same os-stat route a real adapter's open takes. spec.RunID/RuntimeDir
+// are ignored — the mock has no live-signal channel, the honest-degradation
+// shape — and spec.Model never turns an idle read into an error (issue #243).
+func (m *mockProvider) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
 	if m.readChat != nil {
-		return m.readChat(transcriptPath)
+		return m.readChat(spec.TranscriptPath)
 	}
-	if transcriptPath == "" {
+	if spec.TranscriptPath == "" {
 		return provider.Chat{State: provider.StateIdle}, nil
 	}
-	if _, err := os.Stat(transcriptPath); os.IsNotExist(err) {
+	if _, err := os.Stat(spec.TranscriptPath); os.IsNotExist(err) {
 		return provider.Chat{}, provider.ErrTranscriptGone
 	}
 	return provider.Chat{State: provider.StateIdle}, nil

@@ -123,6 +123,18 @@ export interface ChatMessage {
 /** transcript: whether the file is readable yet. */
 export type TranscriptStatus = 'available' | 'locating' | 'gone';
 
+/**
+ * Raw context-occupancy token counts (issue #243 / ADR-0061): the adapter's
+ * used tokens over the model's raw context limit. The provider ships raw counts
+ * only — the UI does the division and formats the `62%` / `127k of 200k tokens`
+ * strings — and sends null when it can't say (no assistant turn yet, unknown
+ * model).
+ */
+export interface ContextUsage {
+  used: number;
+  limit: number;
+}
+
 export interface MessagesResponse {
   messages: ChatMessage[];
   state: ConversationState;
@@ -149,6 +161,15 @@ export interface MessagesResponse {
    * unchanged.
    */
   transcript_id?: string;
+  /**
+   * Adapter-composed context-occupancy meter (issue #243 / ADR-0061): raw
+   * used/limit token counts the header renders as the model chip's `· 62%`
+   * suffix with a `127k of 200k tokens` title, null when the provider can't
+   * compute it (no assistant turn yet, unknown model). Optional on the client
+   * (older responses omit it) — treat absent as null, exactly like
+   * pending_dialog above.
+   */
+  context_usage?: ContextUsage | null;
 }
 
 /** A window of an instance's messages. after=<seq> tails; before=<seq> pages up. */

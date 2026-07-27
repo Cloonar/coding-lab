@@ -365,10 +365,11 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   real observed directory names. live.
 - **JSONL event grammar**: one event per line; the fields lab maps are a
   small subset (`type`, `subtype`, `content`, `timestamp`, `isMeta`,
-  `isApiErrorMessage`, and `message.{role,content}` where content is a
-  string or a `[]block` of `text|thinking|tool_use|tool_result`). A failed
-  tool is flagged by `is_error` **on the `tool_result` block itself** (its
-  `content` is most often a plain string) — verified against live 2.x
+  `isApiErrorMessage`, `message.{role,content}` where content is a
+  string or a `[]block` of `text|thinking|tool_use|tool_result`, and
+  `message.usage` on assistant events — the context meter, next bullet). A
+  failed tool is flagged by `is_error` **on the `tool_result` block itself**
+  (its `content` is most often a plain string) — verified against live 2.x
   transcripts; an `is_error` on an inner content item is tolerated as a
   secondary signal. Every other key is ignored. Captured shape:
   `testdata/transcript-2.1.198.jsonl` (ids/paths anonymized, field names +
@@ -376,6 +377,23 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   (`text|tool|dialog|lifecycle`) by `ParseTranscript`. fixture (assembled
   from real 2.1.198 line shapes; re-verify live when an upgrade
   misbehaves).
+- **Assistant `usage` object (context-occupancy meter) — live shape
+  2.1.198–2.1.206.** Each assistant event's `message.usage` is the turn's token
+  accounting, a sibling of `role`/`content`/`model`:
+  `{"input_tokens":9,"cache_creation_input_tokens":7374,"cache_read_input_tokens":19409,"output_tokens":353,"server_tool_use":{…},…}`.
+  Since issue #243 / ADR-0061 lab reads the **three prompt-side counts only**
+  (`tUsage`) and sums them into the meter's
+  `Used = input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
+  of the **latest** assistant line with a positive usage; `output_tokens` and
+  `server_tool_use` are deliberately NOT counted (Used is what the next request
+  carries back, not this turn's output), and the `<synthetic>` API-error line
+  carries no `usage` so it never contributes. `Limit` comes from an
+  adapter-private model→window map keyed on the spawn-time catalog value
+  (`opus` 200K, `opus[1m]` 1M, `sonnet` 200K, `fable` 1M, `haiku` 200K —
+  explicit entries, no name heuristic); an unknown model hides the meter.
+  `chat_types.go` (`tUsage` / `tMessage.Usage`), `chat.go` (`foldTranscript`
+  capture + `ReadChat` window lookup). fixture (usage objects present on the
+  assistant events of every `testdata/transcript-*-live-*.jsonl`).
 - **Non-conversational user text (isMeta + local-command echo)**: two kinds
   of `user`-role text are UI breadcrumbs, not turns. (1) `isMeta:true`
   injected context — dropped entirely. (2) A **local slash-command echo** and

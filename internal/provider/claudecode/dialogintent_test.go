@@ -86,7 +86,7 @@ func answerThenRead(t *testing.T, dialog provider.Dialog, answer provider.Dialog
 	if err := os.WriteFile(path, []byte(transcript), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chat, err := p.ReadChat("", "", path)
+	chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -246,11 +246,11 @@ func TestBackstop_deterministicPerParse_andRestartCaveat(t *testing.T) {
 	if err := os.WriteFile(path, []byte(resolvedTranscript(toolAskUserQuestion, "toolu_det", answeredLine)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	first, err := p.ReadChat("", "", path)
+	first, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := p.ReadChat("", "", path)
+	second, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestBackstop_deterministicPerParse_andRestartCaveat(t *testing.T) {
 	// A restarted lab (fresh Provider, empty registry) parses the same bytes
 	// without the warning — the documented advisory-only caveat.
 	fresh, _ := armedRunner(t)
-	chat, err := fresh.ReadChat("", "", path)
+	chat, err := fresh.ReadChat(provider.ReadSpec{TranscriptPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestBackstop_logsForensicsOnFirstMismatch(t *testing.T) {
 	if err := os.WriteFile(path, []byte(resolvedTranscript(toolAskUserQuestion, "toolu_forensic", declinedLine)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.ReadChat("", "", path); err != nil {
+	if _, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path}); err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
 
@@ -392,7 +392,7 @@ func TestBackstop_logsForensicsOnFirstMismatch(t *testing.T) {
 	// Re-parse: the warning still returns (unchanged existing behavior — see
 	// TestBackstop_deterministicPerParse_andRestartCaveat), but no second log
 	// or capture.
-	chat, err := p.ReadChat("", "", path)
+	chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +427,7 @@ func TestBackstop_matchedIntent_noLog(t *testing.T) {
 	if err := os.WriteFile(path, []byte(resolvedTranscript(toolAskUserQuestion, "toolu_match", answeredLine)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chat, err := p.ReadChat("", "", path)
+	chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestBackstop_captureError_loggedNotPanicked(t *testing.T) {
 	if err := os.WriteFile(path, []byte(resolvedTranscript(toolExitPlanMode, "toolu_capfail", planRejectedLine)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chat, err := p.ReadChat("", "", path)
+	chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}

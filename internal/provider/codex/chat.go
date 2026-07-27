@@ -131,19 +131,19 @@ func rolloutCwd(path string) string {
 	return rec.Payload.Cwd
 }
 
-// ReadChat implements provider.AgentProvider. runID and runtimeDir are
-// ignored — codex has no live-signal channel (no LiveSignals capability,
+// ReadChat implements provider.AgentProvider. spec.RunID and spec.RuntimeDir
+// are ignored — codex has no live-signal channel (no LiveSignals capability,
 // ADR-0037); the read is a pure rollout fold, so state composition needs
-// nothing beyond the transcript (issue #92). An empty transcriptPath is the
-// pre-transcript read of an active run: an idle empty chat, never an error.
-// A vanished non-empty transcriptPath yields provider.ErrTranscriptGone; any
-// other read error is returned as-is. Malformed lines are skipped, never
+// nothing beyond the transcript (issue #92). An empty spec.TranscriptPath is
+// the pre-transcript read of an active run: an idle empty chat, never an error.
+// A vanished non-empty spec.TranscriptPath yields provider.ErrTranscriptGone;
+// any other read error is returned as-is. Malformed lines are skipped, never
 // fatal — a rollout is appended live and its tail can be a half-written line.
-func (p *Provider) ReadChat(_, _, transcriptPath string) (provider.Chat, error) {
-	if transcriptPath == "" {
+func (p *Provider) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
+	if spec.TranscriptPath == "" {
 		return provider.Chat{State: provider.StateIdle}, nil
 	}
-	f, err := os.Open(transcriptPath)
+	f, err := os.Open(spec.TranscriptPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return provider.Chat{}, provider.ErrTranscriptGone
@@ -173,6 +173,9 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 		byCall   = map[string]int{} // call_id → index into msgs (output back-patch)
 		lastTurn string             // last task_started/task_complete/turn_aborted seen
 	)
+	// lastUsage tracks the LATEST usable token_count info for the context-pressure
+	// meter (issue #243 / ADR-0061); nil until a usable event lands.
+	var lastUsage *tTokenInfo
 	emit := func(m provider.Message) int {
 		seq++
 		m.Seq = seq
@@ -252,9 +255,17 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 				}
 				emit(provider.Message{Kind: provider.MessageLifecycle, Time: rec.Timestamp, Text: reason})
 				lastTurn = "aborted"
+			case "token_count":
+				// The context-pressure meter (issue #243 / ADR-0061): remember the
+				// LATEST event carrying a usable info block. A degenerate
+				// {"info":null} record (codex writes these) leaves any previously
+				// tracked usage intact — it never clears the meter.
+				if pl.Info != nil && pl.Info.LastTokenUsage != nil && pl.Info.ModelContextWindow > 0 {
+					lastUsage = pl.Info
+				}
 			default:
-				// token_count, patch_apply_end, and unknown event types are
-				// skipped silently (forward-compatible)
+				// patch_apply_end and unknown event types carry no chat content
+				// and are skipped silently (forward-compatible)
 			}
 		default:
 			// session_meta, turn_context, and unknown record types carry no
@@ -264,7 +275,20 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 	if err := sc.Err(); err != nil {
 		return provider.Chat{}, fmt.Errorf("scanning transcript: %w", err)
 	}
-	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastTurn), Cursor: seq}, nil
+	chat := provider.Chat{Messages: msgs, State: deriveState(msgs, lastTurn), Cursor: seq}
+	// Context-pressure meter (issue #243 / ADR-0061). Used mirrors codex's own
+	// tokens_in_context_window = last_token_usage.total_tokens minus
+	// reasoning_output_tokens: reasoning output is dropped from the window between
+	// turns, and the last request's input_tokens already carry the whole
+	// conversation. Limit is codex's self-reported model_context_window — the
+	// ReadSpec.Model is ignored, codex knows its own window. A non-positive Used
+	// (or no usable event) leaves ContextUsage nil, hiding the meter.
+	if lastUsage != nil {
+		if used := lastUsage.LastTokenUsage.TotalTokens - lastUsage.LastTokenUsage.ReasoningOutputTokens; used > 0 {
+			chat.ContextUsage = &provider.ContextUsage{Used: used, Limit: lastUsage.ModelContextWindow}
+		}
+	}
+	return chat, nil
 }
 
 // deriveState reduces the transcript tail to one conversational state

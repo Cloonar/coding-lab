@@ -11,6 +11,7 @@ import {
   errorMessage,
   stopInstance,
   updateRun,
+  type ContextUsage,
   type ConversationState,
   type Provider,
   type Repo,
@@ -35,6 +36,9 @@ export function ChatHeader(props: {
   repo: Repo | undefined;
   providers: Provider[] | undefined;
   state: ConversationState;
+  /** The latest messages response's context-occupancy meter (issue #243 /
+   *  ADR-0061), fed from createMessageFeed; null/undefined hides the meter. */
+  contextUsage: ContextUsage | null | undefined;
   onError: (message: string) => void;
   onChanged: () => void;
   /** One-tap turn Interrupt fired from the header/menu (ADR-0029) — refetch on done. */
@@ -129,6 +133,9 @@ export function ChatHeader(props: {
   // The run's spawn-time model chip (issue #68): catalog pretty labels with the
   // raw id as fallback, hidden entirely for legacy rows with no model. A
   // mid-session /model switch is knowingly not reflected — spawn-time truth only.
+  // The context-pressure meter (issue #243) rides this same chip as a nested
+  // `· 62%` span (contextMeter below), so it inherits the chip's fate — hidden
+  // with it, both by the sub-640px display gate and for a model-less run.
   const modelInfo = (): string | null => {
     const r = props.run;
     if (r === undefined || r.model === '') return null;
@@ -137,6 +144,25 @@ export function ChatHeader(props: {
     if (r.effort === '') return model;
     const effort = p?.efforts.find((o) => o.value === r.effort)?.label ?? r.effort;
     return `${model} · ${effort}`;
+  };
+  // fmtTokens renders a raw token count for the meter's title (issue #243):
+  // 127432 → "127k"; a count below 1000 stays verbatim so a tiny value never
+  // rounds down to "0k".
+  const fmtTokens = (n: number): string => (n < 1000 ? String(n) : `${Math.round(n / 1000)}k`);
+  // The context-pressure meter (issue #243 / ADR-0061): the fraction of the
+  // model's RAW context window the next request roughly carries — a rounded
+  // percentage, a tint band, and an `N of M tokens` title. null (→ no meter)
+  // when the adapter sent no usage or a limit it can't divide by (limit <= 0);
+  // the percentage tints amber at >=80% occupancy and red at >=95% (red wins).
+  const contextMeter = (): { pct: number; tint: 'warn' | 'danger' | ''; title: string } | null => {
+    const cu = props.contextUsage;
+    if (cu === null || cu === undefined || cu.limit <= 0) return null;
+    const ratio = cu.used / cu.limit;
+    return {
+      pct: Math.round(ratio * 100),
+      tint: ratio >= 0.95 ? 'danger' : ratio >= 0.8 ? 'warn' : '',
+      title: `${fmtTokens(cu.used)} of ${fmtTokens(cu.limit)} tokens`,
+    };
   };
   // The open affordance (ADR-0017): the exact deep link when captured, else the
   // provider's generic web fallback, else a tmux-attach for a link-less
@@ -344,12 +370,36 @@ export function ChatHeader(props: {
           </span>
         )}
       </Show>
-      {/* >=640px: the run's spawn-time model, read-only (issue #68). <640px the
-          same string rides the ••• menu's info row instead. */}
+      {/* >=640px: the run's spawn-time model, read-only (issue #68), now
+          carrying the context-pressure meter (issue #243 / ADR-0061) as a
+          nested `· 62%` span INSIDE the chip — so the meter inherits the chip's
+          sub-640px hiding and goes with it. <640px the model string rides the
+          ••• menu's info row instead; the meter is chat-header-only for v1, so
+          that row stays model·effort. */}
       <Show when={modelInfo()}>
         {(info) => (
           <span class="chip mono chat-model-chip" title="Model · effort (set at spawn)">
             {info()}
+            {/* The meter shows only when the chip text renders (this Show) AND
+                the adapter composed a usable occupancy (contextMeter gates
+                limit > 0). A codex run with an empty stored model could carry
+                usage without a chip — nesting the meter here hides it with the
+                chip by construction. Its own title carries the token counts;
+                the chip keeps its outer model·effort title. */}
+            <Show when={contextMeter()}>
+              {(meter) => (
+                <span
+                  classList={{
+                    'chat-context-meter': true,
+                    warn: meter().tint === 'warn',
+                    danger: meter().tint === 'danger',
+                  }}
+                  title={meter().title}
+                >
+                  {` · ${meter().pct}%`}
+                </span>
+              )}
+            </Show>
           </span>
         )}
       </Show>

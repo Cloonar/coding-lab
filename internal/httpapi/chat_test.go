@@ -188,6 +188,48 @@ func TestAPI_ChatMessages_pendingDialog(t *testing.T) {
 	}
 }
 
+// The messages response forwards the adapter-composed context-occupancy meter
+// (issue #243 / ADR-0061): a non-nil ContextUsage rides through as
+// context_usage, and a nil one serializes as an explicit null (no omitempty,
+// mirroring pending_dialog) so the client reads absent-or-null as "unknown".
+func TestAPI_ChatMessages_contextUsage(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(provider.Chat{
+		State:        provider.StateNeedsInput,
+		Cursor:       1,
+		Messages:     []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "hi"}},
+		ContextUsage: &provider.ContextUsage{Used: 127432, Limit: 200000},
+	})
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body := decodeBody(t, resp)
+	cu, ok := body["context_usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("context_usage = %v; want the usage object", body["context_usage"])
+	}
+	if cu["used"].(float64) != 127432 || cu["limit"].(float64) != 200000 {
+		t.Errorf("context_usage = %v; want used 127432 / limit 200000", cu)
+	}
+
+	// A read without usage serializes context_usage as an explicit null (the
+	// key is present — no omitempty — so the client never guesses on a missing
+	// field, exactly as pending_dialog behaves).
+	x.prov.SetChat(provider.Chat{
+		State:    provider.StateNeedsInput,
+		Cursor:   1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "hi"}},
+	})
+	resp = x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body = decodeBody(t, resp)
+	if v, present := body["context_usage"]; !present || v != nil {
+		t.Errorf("context_usage = %v (present=%v); want an explicit null", v, present)
+	}
+}
+
 // The messages response carries a transcript_id, and it changes when the run's
 // transcript rotates (a /clear or /rewind → new sessionId → new file) — the
 // token the SPA keys its stream reset on (issue #34).

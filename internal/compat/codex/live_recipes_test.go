@@ -202,7 +202,7 @@ func TestCompat_Live_locateTranscript(t *testing.T) {
 	// runID/runtimeDir empty: codex's ReadChat is a pure rollout fold with no
 	// live-signal channel (issue #92 / ADR-0037), so the transcript-only read
 	// IS the production read.
-	chat, err := prov.ReadChat("", "", located)
+	chat, err := prov.ReadChat(provider.ReadSpec{TranscriptPath: located})
 	if err != nil {
 		t.Fatalf("ReadChat(%s): %v", located, err)
 	}

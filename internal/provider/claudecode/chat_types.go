@@ -94,6 +94,38 @@ func decodePendingWork(raw json.RawMessage) pendingWorkResult {
 type tMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"` // string | []tBlock
+	// Usage is the assistant event's token accounting, a sibling of role/content
+	// on the message object (compat §5; live shape verified 2.1.198–2.1.206). It
+	// is present on assistant events and absent on user turns and the
+	// <synthetic> API-error assistant line, so it is nil by construction there.
+	// Only the three prompt-side fields the context meter needs are decoded
+	// (tUsage); output_tokens and server_tool_use, which claude also writes here,
+	// are deliberately dropped — the meter's Used excludes them (issue #243 /
+	// ADR-0061).
+	Usage *tUsage `json:"usage"`
+}
+
+// tUsage is the prompt-side slice of an assistant message's usage object (issue
+// #243 / ADR-0061): the three token counts that make up the context OCCUPANCY
+// the meter reports — the fresh prompt tokens plus both cache tiers (read and
+// creation). output_tokens/server_tool_use are omitted on purpose: the meter
+// measures roughly what the NEXT request carries back into the window, which
+// does not include this turn's own output.
+type tUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+// occupancy is the context-occupancy sum the meter reports for one assistant
+// turn: input + cache_read + cache_creation. A nil receiver (a line with no
+// usage object) and an all-zero usage both yield 0, so the fold can skip them
+// without clobbering a real earlier value.
+func (u *tUsage) occupancy() int64 {
+	if u == nil {
+		return 0
+	}
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 }
 
 // blocks normalizes message.content to a block slice: a bare string becomes a
