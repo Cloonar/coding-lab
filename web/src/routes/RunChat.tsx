@@ -320,6 +320,7 @@ function RunChatView() {
     state,
     transcript,
     pendingDialogField,
+    contextUsage,
     hasMore,
     error,
     setError,
@@ -533,6 +534,7 @@ function RunChatView() {
             repo={resourceValue(repo)}
             providers={providers()}
             state={state()}
+            contextUsage={contextUsage()}
             onError={setError}
             onChanged={() => void refetchRun()}
             onInterrupted={() => void refetchMessages()}

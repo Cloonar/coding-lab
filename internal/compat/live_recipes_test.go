@@ -277,7 +277,7 @@ func TestCompat_Live_askUserQuestionRecipe(t *testing.T) {
 
 	// And the production read path maps the resolution onto the tool chip — a
 	// transcript-only ReadChat: the live rig has no lab run or runtime dir.
-	chat, err := rig.prov.ReadChat("", "", rig.transcriptPath(t))
+	chat, err := rig.prov.ReadChat(provider.ReadSpec{TranscriptPath: rig.transcriptPath(t)})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 	if len(raw) == 0 {
 		t.Fatal("no plan approval recorded")
 	}
-	chat, err := rig.prov.ReadChat("", "", rig.transcriptPath(t))
+	chat, err := rig.prov.ReadChat(provider.ReadSpec{TranscriptPath: rig.transcriptPath(t)})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}

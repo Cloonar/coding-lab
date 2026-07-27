@@ -22,7 +22,11 @@ package codex
 //	event_msg:     {"type":"agent_message","message":…,"phase":"commentary|…"}
 //	event_msg:     {"type":"task_started","turn_id":…} / {"type":"task_complete",…}
 //	event_msg:     {"type":"turn_aborted","turn_id":…,"reason":"interrupted",…}
-//	event_msg:     {"type":"token_count",…} / {"type":"patch_apply_end",…} — skipped
+//	event_msg:     {"type":"token_count","info":{"last_token_usage":{"total_tokens":…,
+//	                "reasoning_output_tokens":…},"model_context_window":…}} — READ for
+//	                the context-pressure meter (issue #243 / ADR-0061); the degenerate
+//	                {"info":null} shape codex also writes is tolerated (no meter)
+//	event_msg:     {"type":"patch_apply_end",…} — skipped
 
 import (
 	"encoding/json"
@@ -56,6 +60,32 @@ type tPayload struct {
 	// event_msg
 	Message string `json:"message"` // user_message / agent_message text
 	Reason  string `json:"reason"`  // turn_aborted: "interrupted" | …
+
+	// event_msg / token_count carries the context-pressure meter (issue #243 /
+	// ADR-0061): only this event type populates Info; every other payload leaves
+	// it nil (including the degenerate {"info":null} token_count records).
+	Info *tTokenInfo `json:"info"`
+}
+
+// tTokenInfo is a token_count event's info object (issue #243 / ADR-0061). The
+// context-pressure meter reads ONLY last_token_usage — the latest request's
+// accounting, whose input_tokens already carry the whole conversation — and the
+// self-reported model_context_window. total_token_usage (cumulative session
+// spend) and rate_limits are deliberately NOT decoded: the meter is occupancy,
+// not cumulative cost. Info is nil for the {"info":null} shape codex writes for
+// some token_count records (LastTokenUsage then nil too).
+type tTokenInfo struct {
+	LastTokenUsage     *tTokenUsage `json:"last_token_usage"`
+	ModelContextWindow int64        `json:"model_context_window"`
+}
+
+// tTokenUsage is the subset of a token_count usage object the meter needs:
+// codex's own tokens_in_context_window = total_tokens − reasoning_output_tokens
+// (reasoning output is dropped from the window between turns). The input/cached/
+// output token counts are not decoded — nothing downstream reads them.
+type tTokenUsage struct {
+	TotalTokens           int64 `json:"total_tokens"`
+	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 }
 
 // tSummary is one reasoning summary item; only the summary_text shape is

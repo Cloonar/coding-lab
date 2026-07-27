@@ -108,13 +108,32 @@ func sessionIDForDir(registryDir, dir string) string {
 	return best.SessionID
 }
 
+// contextWindows maps a run's SPAWN-TIME model catalog value — exactly as
+// persisted on runs.model and delivered in ReadSpec.Model — to the model's RAW
+// context-window size, the denominator of the context-occupancy meter (issue
+// #243 / ADR-0061). Explicit entries ONLY, never a name heuristic: fable is a
+// 1M-context model with no `[1m]` (or any) hint, so parsing the name would lie.
+// The `[1m]` distinction lives solely in the spawn value — bare `opus` is the
+// 200K window and `opus[1m]` the 1M opt-in — and bare `opus` still appears on
+// older run rows even though the current catalog (claudecode.go models) ships
+// `opus[1m]`. A value absent here yields a nil meter, never an error. The map is
+// adapter-PRIVATE: model catalogs are provider-owned (provider.go:6-8), and the
+// shared ModelOption type is deliberately NOT widened with a window field.
+var contextWindows = map[string]int64{
+	"opus":     200_000,
+	"opus[1m]": 1_000_000,
+	"sonnet":   200_000,
+	"fable":    1_000_000,
+	"haiku":    200_000,
+}
+
 // ReadChat implements provider.AgentProvider: read the run's conversation and
 // compose its conversational state (issue #92 — "what state is my agent in"
 // is adapter-owned now; core keeps only the lifecycle StateEnded override).
 //
-// Base read: the JSONL transcript at transcriptPath, folded into the
-// universal schema. transcriptPath == "" is an active run whose transcript is
-// not yet located — an idle empty chat, never an error, with the live
+// Base read: the JSONL transcript at spec.TranscriptPath, folded into the
+// universal schema. spec.TranscriptPath == "" is an active run whose transcript
+// is not yet located — an idle empty chat, never an error, with the live
 // signals still consulted (a pending dialog can exist before
 // LocateTranscript first hits). A vanished file yields
 // provider.ErrTranscriptGone (the run ended and claude retired the file)
@@ -123,6 +142,11 @@ func sessionIDForDir(registryDir, dir string) string {
 // as-is. Malformed lines are skipped, never fatal — a transcript is appended
 // live and its tail can be a half-written line.
 //
+// The base read also composes Chat.ContextUsage (issue #243 / ADR-0061): the
+// latest assistant line's prompt-side usage sum over spec.Model's window from
+// contextWindows, nil when there is no assistant usage yet or the model is
+// unknown/empty — computed before the overlay so every return path carries it.
+//
 // Unlike the pure ParseTranscript, the read is INTENT-AWARE (issue #51
 // decision 3): resolved dialog tools are verified against the answers lab
 // recorded at AnswerDialog time, and a mismatch emits a lifecycle warning
@@ -130,7 +154,7 @@ func sessionIDForDir(registryDir, dir string) string {
 // in-memory, so a warning present before a lab restart disappears from parses
 // after it — accepted, the backstop is advisory-only (compat §5).
 //
-// Live-signal overlay (runtimeDir non-empty; "" degrades to the transcript
+// Live-signal overlay (spec.RuntimeDir non-empty; "" degrades to the transcript
 // alone — ended runs, or no runtime dir configured), in the exact precedence
 // core's applyLiveSignals used to apply (ADR-0020): a live spool dialog
 // forces StateQuestion and rides Chat.PendingDialog — the side-channel field,
@@ -138,26 +162,39 @@ func sessionIDForDir(registryDir, dir string) string {
 // tool_use retro-flushes (issues #89/#90); else a pending dialog the
 // transcript itself shows stands on its own (the dormant flushed-tool_use
 // fallback); else a live blocked marker forces StateNeedsInput.
-func (p *Provider) ReadChat(runID, runtimeDir, transcriptPath string) (provider.Chat, error) {
+func (p *Provider) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
 	chat := provider.Chat{State: provider.StateIdle}
-	if transcriptPath != "" {
-		f, err := os.Open(transcriptPath)
+	if spec.TranscriptPath != "" {
+		f, err := os.Open(spec.TranscriptPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return provider.Chat{}, provider.ErrTranscriptGone
 			}
 			return provider.Chat{}, err
 		}
-		chat, err = parseTranscript(f, &p.intents)
+		var used int64
+		chat, used, err = parseTranscript(f, &p.intents)
 		_ = f.Close()
 		if err != nil {
 			return provider.Chat{}, err
 		}
+		// Compose the context-occupancy meter here, on the base chat, so EVERY
+		// return path below carries it (issue #243 / ADR-0061): the live-signal
+		// overlays mutate State/PendingDialog on this same chat value and never
+		// rebuild it, so a meter set here rides through untouched. A positive Used
+		// against a KNOWN model window is the only case that fills it; an
+		// unknown/empty Model, or no assistant usage at all (used == 0), leaves it
+		// nil and the meter hides.
+		if used > 0 {
+			if limit, ok := contextWindows[spec.Model]; ok {
+				chat.ContextUsage = &provider.ContextUsage{Used: used, Limit: limit}
+			}
+		}
 	}
-	if runtimeDir == "" {
+	if spec.RuntimeDir == "" {
 		return chat, nil // signals off — the transcript-only read
 	}
-	if d, ok := p.pendingDialog(runID, runtimeDir, transcriptPath); ok {
+	if d, ok := p.pendingDialog(spec.RunID, spec.RuntimeDir, spec.TranscriptPath); ok {
 		dc := d
 		chat.State = provider.StateQuestion
 		chat.PendingDialog = &dc
@@ -166,7 +203,7 @@ func (p *Provider) ReadChat(runID, runtimeDir, transcriptPath string) (provider.
 	if chat.State == provider.StateQuestion {
 		return chat, nil // a transcript-flushed dialog stands on its own (dormant fallback)
 	}
-	if st, ok := p.blockedState(runID, runtimeDir, transcriptPath); ok {
+	if st, ok := p.blockedState(spec.RunID, spec.RuntimeDir, spec.TranscriptPath); ok {
 		chat.State = st
 	}
 	return chat, nil
@@ -181,17 +218,22 @@ func (p *Provider) ReadChat(runID, runtimeDir, transcriptPath string) (provider.
 // is returned rather than swallowed: silently stopping mid-file would serve a
 // truncated chat — and a cursor that moves backwards — forever.
 func ParseTranscript(r io.Reader) (provider.Chat, error) {
-	return parseTranscript(r, nil)
+	chat, _, err := parseTranscript(r, nil)
+	return chat, err
 }
 
-// parseTranscript is the shared fold; a nil intents skips verification.
-func parseTranscript(r io.Reader, intents *intentRegistry) (provider.Chat, error) {
+// parseTranscript is the shared fold; a nil intents skips verification. The
+// second result is the context-occupancy sum of the latest assistant usage
+// (issue #243 / ADR-0061), 0 when none — ReadChat turns it into
+// Chat.ContextUsage against the spawn-time model window; the pure
+// ParseTranscript above discards it (no model, so no meter).
+func parseTranscript(r io.Reader, intents *intentRegistry) (provider.Chat, int64, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcripts run to a few MB
 	return foldTranscript(sc, intents)
 }
 
-func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, error) {
+func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, int64, error) {
 	// First pass: which tool_use ids have a matching tool_result (i.e. are
 	// answered), and HOW each resolved — the top-level toolUseResult /
 	// toolDenialKind of the event carrying the result block, the same ground
@@ -217,7 +259,7 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return provider.Chat{}, fmt.Errorf("scanning transcript: %w", err)
+		return provider.Chat{}, 0, fmt.Errorf("scanning transcript: %w", err)
 	}
 
 	var (
@@ -225,6 +267,11 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		seq     int64
 		byTool  = map[string]int{} // tool_use id → index into msgs (result back-patch)
 		lastKey string             // classification of the last content-bearing event
+		// used is the context-occupancy sum (input + cache_read + cache_creation)
+		// of the LATEST assistant line carrying a positive usage — the meter's
+		// Used (issue #243 / ADR-0061). 0 when no assistant usage is present,
+		// which leaves ContextUsage nil; ReadChat divides it by the model window.
+		used int64
 		// pending tracks async background work this session spawned — agent /
 		// workflow ids added structurally from toolUseResult markers, removed on
 		// their terminal task-notification or TaskStop (issue #159). While
@@ -299,6 +346,20 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		}
 		if it.Message == nil {
 			continue
+		}
+		// Context-occupancy meter (issue #243 / ADR-0061): remember the prompt-
+		// side token sum of the LATEST assistant line that reports real usage —
+		// roughly what the next request carries back into the window. An absent
+		// usage (the <synthetic> API-error line below carries none) or an
+		// all-zero one yields 0 via occupancy() and must NOT clobber a real
+		// earlier value, so only a positive sum updates; file order then means
+		// the last usable line wins. Gated on the fold's own notion of an
+		// assistant line (Type "assistant", message present), so a malformed or
+		// message-less line the fold already skips contributes no usage either.
+		if it.Type == "assistant" {
+			if sum := it.Message.Usage.occupancy(); sum > 0 {
+				used = sum
+			}
 		}
 		// Pending-work markers on the event's top-level toolUseResult (issue
 		// #159, structural — never message-content prose): an async launch
@@ -428,7 +489,7 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		}
 	}
 
-	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey, len(pending) > 0), Cursor: seq}, nil
+	return provider.Chat{Messages: msgs, State: deriveState(msgs, lastKey, len(pending) > 0), Cursor: seq}, used, nil
 }
 
 // commandEcho classifies (and parses) Claude Code's local-command breadcrumbs:

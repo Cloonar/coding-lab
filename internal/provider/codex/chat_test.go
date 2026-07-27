@@ -127,7 +127,7 @@ func TestLocateTranscript_emptyHomeIgnoresMasterStoreMatch(t *testing.T) {
 // so passing them populated must change nothing.
 func TestReadChat_emptyPathIsIdle(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
-	chat, err := p.ReadChat("run-1", t.TempDir(), "")
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run-1", RuntimeDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("ReadChat(\"\") err = %v; want nil — an unlocated transcript is a fresh spawn, not a failure", err)
 	}
@@ -140,7 +140,7 @@ func TestReadChat_emptyPathIsIdle(t *testing.T) {
 // caller renders "transcript no longer available" from it (issue #92).
 func TestReadChat_gone(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
-	if _, err := p.ReadChat("run-1", "", filepath.Join(t.TempDir(), "vanished.jsonl")); !errors.Is(err, provider.ErrTranscriptGone) {
+	if _, err := p.ReadChat(provider.ReadSpec{RunID: "run-1", TranscriptPath: filepath.Join(t.TempDir(), "vanished.jsonl")}); !errors.Is(err, provider.ErrTranscriptGone) {
 		t.Errorf("ReadChat(missing) err = %v; want ErrTranscriptGone", err)
 	}
 }
@@ -219,6 +219,79 @@ func TestParseTranscript_plainFixture(t *testing.T) {
 	}
 	if chat.Cursor != int64(len(want)) {
 		t.Errorf("cursor = %d; want the highest seq %d", chat.Cursor, len(want))
+	}
+	// This fixture's lone token_count carries the degenerate info:null shape, so
+	// the context-pressure meter stays unknown (issue #243 / ADR-0061).
+	if chat.ContextUsage != nil {
+		t.Errorf("ContextUsage = %+v; want nil (the fixture's token_count is info:null)", chat.ContextUsage)
+	}
+}
+
+// The context-pressure meter (issue #243 / ADR-0061): token_count events feed
+// Chat.ContextUsage. Used = last_token_usage.total_tokens − reasoning_output_tokens
+// (codex's own tokens_in_context_window), Limit = model_context_window. The
+// LATEST usable event wins; a degenerate {"info":null} event never clears a
+// tracked one; a missing window or a non-positive Used yields no meter; and a
+// transcript with no usable token_count leaves the meter nil.
+func TestParseTranscript_contextUsage(t *testing.T) {
+	const meta = `{"timestamp":"2026-07-10T00:00:00.000Z","type":"session_meta","payload":{"id":"x","cwd":"/w","cli_version":"0.133.0"}}`
+	// tc1 mirrors the real rollout-plain-0.133.0 line-15 shape (total 11628,
+	// reasoning 19 → 11609); tc2 is a later, larger usable event.
+	tc1 := `{"timestamp":"t1","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":11467,"reasoning_output_tokens":19,"total_tokens":11628},"model_context_window":258400}}}`
+	tc2 := `{"timestamp":"t2","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":11889,"reasoning_output_tokens":0,"total_tokens":11894},"model_context_window":258400}}}`
+	null := `{"timestamp":"t3","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":null}}`
+	agent := `{"timestamp":"t","type":"event_msg","payload":{"type":"agent_message","message":"hi","phase":"final_answer"}}`
+
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  *provider.ContextUsage
+	}{
+		{
+			"a real token_count sets Used = total − reasoning, Limit = window",
+			[]string{meta, tc1},
+			&provider.ContextUsage{Used: 11609, Limit: 258400},
+		},
+		{
+			"the latest usable token_count wins",
+			[]string{meta, tc1, tc2},
+			&provider.ContextUsage{Used: 11894, Limit: 258400},
+		},
+		{
+			"a null-info token_count never clears an earlier usable one",
+			[]string{meta, tc1, null},
+			&provider.ContextUsage{Used: 11609, Limit: 258400},
+		},
+		{
+			"no token_count at all yields no meter",
+			[]string{meta, agent},
+			nil,
+		},
+		{
+			"a null-info token_count on its own yields no meter",
+			[]string{meta, null},
+			nil,
+		},
+		{
+			"a token_count with no model_context_window is not usable",
+			[]string{meta, `{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":11894}}}}`},
+			nil,
+		},
+		{
+			"a non-positive Used (total == reasoning) yields no meter",
+			[]string{meta, `{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"reasoning_output_tokens":42,"total_tokens":42},"model_context_window":258400}}}`},
+			nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chat, err := ParseTranscript(strings.NewReader(strings.Join(tc.lines, "\n")))
+			if err != nil {
+				t.Fatalf("ParseTranscript: %v", err)
+			}
+			if !reflect.DeepEqual(chat.ContextUsage, tc.want) {
+				t.Errorf("ContextUsage = %+v; want %+v", chat.ContextUsage, tc.want)
+			}
+		})
 	}
 }
 

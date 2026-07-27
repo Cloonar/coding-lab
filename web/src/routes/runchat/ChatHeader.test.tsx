@@ -401,6 +401,84 @@ describe('ChatHeader', () => {
     expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m]');
   });
 
+  // The context-pressure meter (issue #243 / ADR-0061): a nested `· N%` span
+  // inside the model chip, tinting amber at >=80% occupancy and red at >=95%,
+  // with an `N of M tokens` title — hidden with the chip when usage is absent.
+  it('renders the context-pressure meter as a `· N%` suffix nested in the model chip', async () => {
+    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 127432, limit: 200000 } };
+    await mountChat();
+
+    const chip = container.querySelector('.chat-model-chip');
+    // The chip text carries model · effort · pct; the meter is a NESTED span so
+    // it inherits the chip's sub-640px hiding.
+    expect(chip?.textContent).toBe('opus[1m] · max · 64%');
+    const meter = chip?.querySelector('.chat-context-meter');
+    expect(meter?.textContent).toBe(' · 64%');
+    // The title humanizes the token counts (127432 → 127k), never raw numbers.
+    expect(meter?.getAttribute('title')).toBe('127k of 200k tokens');
+    // Occupancy 0.64 is below the amber threshold → no tint band.
+    expect(meter?.classList.contains('warn')).toBe(false);
+    expect(meter?.classList.contains('danger')).toBe(false);
+  });
+
+  it('tints the meter amber at exactly 80% occupancy (the warn threshold)', async () => {
+    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 160000, limit: 200000 } };
+    await mountChat();
+
+    const meter = container.querySelector('.chat-context-meter');
+    expect(meter?.textContent).toBe(' · 80%');
+    expect(meter?.classList.contains('warn')).toBe(true);
+    expect(meter?.classList.contains('danger')).toBe(false);
+  });
+
+  it('keeps the meter untinted just below the amber threshold (0.80)', async () => {
+    // Occupancy 0.799995 rounds to 80% but is below the 0.80 tint boundary, so
+    // the band stays off — the tint keys on the ratio, not the shown percent.
+    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 159999, limit: 200000 } };
+    await mountChat();
+
+    const meter = container.querySelector('.chat-context-meter');
+    expect(meter?.classList.contains('warn')).toBe(false);
+    expect(meter?.classList.contains('danger')).toBe(false);
+  });
+
+  it('tints the meter red at exactly 95% occupancy (red wins over amber)', async () => {
+    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 190000, limit: 200000 } };
+    await mountChat();
+
+    const meter = container.querySelector('.chat-context-meter');
+    expect(meter?.textContent).toBe(' · 95%');
+    expect(meter?.classList.contains('danger')).toBe(true);
+    // Red wins: past 95% the amber band is not also applied.
+    expect(meter?.classList.contains('warn')).toBe(false);
+  });
+
+  it('hides the meter when the response carries no context usage', async () => {
+    await mountChat(); // default fixture: no context_usage
+
+    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m] · max');
+    expect(container.querySelector('.chat-context-meter')).toBeNull();
+  });
+
+  it('hides the meter with the chip for a legacy model-less run even when usage is present', async () => {
+    // A codex run with an empty stored model could carry usage without a chip;
+    // the meter nests in the model chip's Show, so it hides with the chip.
+    h.runOnServer = { ...baseRun(), model: '' };
+    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 100000, limit: 200000 } };
+    await mountChat();
+
+    expect(container.querySelector('.chat-model-chip')).toBeNull();
+    expect(container.querySelector('.chat-context-meter')).toBeNull();
+  });
+
+  it('hides the meter when the limit is 0 (no denominator to divide by)', async () => {
+    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 5000, limit: 0 } };
+    await mountChat();
+
+    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m] · max');
+    expect(container.querySelector('.chat-context-meter')).toBeNull();
+  });
+
   it('renders the "N behind" chip when commits_behind is positive', async () => {
     h.runOnServer = { ...baseRun(), commits_behind: 3 };
     await mountChat();

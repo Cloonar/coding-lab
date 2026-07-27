@@ -10,6 +10,7 @@ import {
   errorMessage,
   getRunMessages,
   type ChatMessage,
+  type ContextUsage,
   type ConversationState,
   type Dialog,
   type MessagesResponse,
@@ -52,6 +53,7 @@ export interface MessageFeed {
   state: Accessor<ConversationState>;
   transcript: Accessor<TranscriptStatus>;
   pendingDialogField: Accessor<Dialog | null>;
+  contextUsage: Accessor<ContextUsage | null>;
   hasMore: Accessor<boolean>;
   exhausted: Accessor<boolean>;
   error: Accessor<string | null>;
@@ -75,6 +77,10 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
   // (ADR-0020) — the authoritative source, since the agent CLI never flushes a
   // pending tool_use to the transcript. null when none is pending.
   const [pendingDialogField, setPendingDialogField] = createSignal<Dialog | null>(null);
+  // The adapter-composed context-occupancy meter (issue #243 / ADR-0061): every
+  // response carries it (null when unknown), so it rides the same envelope as
+  // state/pending dialog below and a light SSE-driven tail refetch keeps it live.
+  const [contextUsage, setContextUsage] = createSignal<ContextUsage | null>(null);
   const [hasMore, setHasMore] = createSignal(false);
   // A before-fetch hit the beginning: never resurrect "Load earlier" from a
   // latest-window has_more, which talks about ITS window, not our accumulated
@@ -136,6 +142,10 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
     setPendingDialogField((prev) =>
       prev !== null && dialog !== null && prev.tool_id === dialog.tool_id ? prev : dialog,
     );
+    // The context-occupancy meter rides this envelope too (issue #243): both
+    // refetch modes call applyEnvelope, so the SSE-driven light tail refetch
+    // updates the meter with no extra wiring.
+    setContextUsage(res.context_usage ?? null);
     setTranscript(res.transcript);
     setTranscriptId(res.transcript_id);
     // Writing transcript_id can synchronously run the rotation effect (Solid
@@ -275,6 +285,7 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
     setMessages([]);
     setState('');
     setPendingDialogField(null);
+    setContextUsage(null);
     // A fresh stream forgets the seen dialog too: a run navigated back into
     // (or rotated) with a still-pending dialog scrolls its card into view.
     seenDialogToolId = null;
@@ -403,6 +414,7 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
     state,
     transcript,
     pendingDialogField,
+    contextUsage,
     hasMore,
     exhausted,
     error,

@@ -526,6 +526,23 @@ type CommandSpec struct {
 	ChatSafe    bool   `json:"chat_safe"` // false: would strand the TUI in a picker lab cannot see
 }
 
+// ContextUsage is adapter-composed context-OCCUPANCY data (issue #243 /
+// ADR-0061): how full the model's context window stands RIGHT NOW, not the
+// cumulative tokens a session has ever spent. Used is the prompt-side token
+// count of the LATEST assistant turn — roughly what the next request carries
+// back into the window — and Limit is the model's RAW context-window size. v1
+// deliberately measures against that raw limit, NOT an auto-compact-adjusted
+// usable window: the whole computation is adapter-owned (each adapter reads its
+// own transcript's token accounting against its own catalog) and refinable
+// later without ever touching the seam. No pre-computed fraction rides here —
+// the UI owns the Used/Limit formatting. Both fields are positive whenever the
+// struct is present; a nil *ContextUsage on Chat is the "unknown" signal, never
+// a zero-valued struct.
+type ContextUsage struct {
+	Used  int64 `json:"used"`
+	Limit int64 `json:"limit"`
+}
+
 // Chat is a conversation read through ReadChat into the universal schema: the
 // ordered transcript-derived messages, the adapter-composed conversational
 // state, and the cursor (the highest Seq present, 0 when empty).
@@ -542,6 +559,45 @@ type Chat struct {
 	// TRANSCRIPT itself shows (the dormant flushed-tool_use fallback) stays in
 	// Messages and does not populate this field.
 	PendingDialog *Dialog `json:"pending_dialog,omitempty"`
+	// ContextUsage is the adapter-composed context-occupancy meter (issue #243
+	// / ADR-0061), composed inside ReadChat exactly like State (ADR-0038
+	// adapter-owned composition): it is derived DATA, deliberately NOT an
+	// optional capability interface — those advertise BEHAVIORS, this is a
+	// value the adapter either can or cannot compute for a given read. nil when
+	// unknown or unsupported: no assistant turn has landed yet, the model is
+	// unknown or absent, or the provider simply cannot say.
+	ContextUsage *ContextUsage `json:"context_usage,omitempty"`
+}
+
+// ReadSpec is the full input to AgentProvider.ReadChat (issue #243 /
+// ADR-0061), following the SpawnSpec precedent (above): a struct, not
+// positional args, so a new read-side input never churns the interface
+// signature again.
+type ReadSpec struct {
+	// RunID keys the adapter's live-signal spool under RuntimeDir; it may be ""
+	// for a transcript-only read that consults no signals.
+	RunID string
+	// RuntimeDir is the run's PRIVATE runtime dir holding the adapter's spooled
+	// live signals (claude-code: the hook spool, compat §9). "" turns live
+	// signals off and the read degrades to the transcript alone — the way core
+	// reads ENDED runs, or a run with no runtime dir configured.
+	RuntimeDir string
+	// TranscriptPath is the resolved provider-native transcript file. "" is an
+	// active run whose transcript is not yet located: the adapter must still
+	// consult its live signals (a pending dialog can exist before
+	// LocateTranscript first hits) and otherwise returns an idle empty chat,
+	// never an error. A non-empty path that no longer exists returns
+	// ErrTranscriptGone, so the caller can render the "transcript no longer
+	// available" state.
+	TranscriptPath string
+	// Model is the run's SPAWN-TIME model catalog value as persisted on the run
+	// row (runs.model, e.g. "opus[1m]"), "" for legacy rows or an unknown
+	// model. Adapters that self-report their own context window (codex) ignore
+	// it; those that need the model to know the window limit read it here. A
+	// mid-session /model switch is knowingly NOT reflected — the spawn-time-
+	// truth convention (web/src/routes/runchat/ChatHeader.tsx). An unknown Model
+	// is never an error, only a hidden meter (ContextUsage stays nil).
+	Model string
 }
 
 // AgentProvider is everything lab needs from a coding agent (design §4d).
@@ -764,21 +820,12 @@ type AgentProvider interface {
 	// ReadChat reads the run's conversation and composes its conversational
 	// state — the adapter owns "what state is my agent in", composed from
 	// whatever its agent's best signals are (issue #92): the transcript at
-	// transcriptPath plus any adapter-private live signals spooled under
-	// runtimeDir for runID (claude-code: the hook spool, compat §9; codex:
-	// nothing — a pure rollout fold). Core owns run lifecycle only (the
+	// spec.TranscriptPath plus any adapter-private live signals spooled under
+	// spec.RuntimeDir for spec.RunID (claude-code: the hook spool, compat §9;
+	// codex: nothing — a pure rollout fold). Core owns run lifecycle only (the
 	// StateEnded override, transcript identity) and never interprets an
-	// adapter's signals.
-	//
-	// transcriptPath may be "" — an active run whose transcript is not yet
-	// located: the adapter must still consult its live signals (a pending
-	// dialog can exist before LocateTranscript first hits) and otherwise
-	// returns an idle empty chat, never an error. runtimeDir may be "" — no
-	// runtime dir configured, or the caller wants a transcript-only read
-	// (core reads ENDED runs this way): live signals are off and the read
-	// degrades to the transcript alone. A non-empty transcriptPath that no
-	// longer exists returns ErrTranscriptGone so the caller can show the
-	// "transcript no longer available" state.
+	// adapter's signals. The empty-string and ErrTranscriptGone rules for each
+	// input are pinned on ReadSpec's fields.
 	//
 	// A live pending dialog is surfaced on Chat.PendingDialog with State =
 	// StateQuestion — the side-channel field, never a synthetic message (its
@@ -786,7 +833,13 @@ type AgentProvider interface {
 	// LocateTranscript's clear/epoch obligation applies here too: reading the
 	// post-clear identity yields the fresh conversation with seq restarted —
 	// a cleared conversation never continues an old seq stream.
-	ReadChat(runID, runtimeDir, transcriptPath string) (Chat, error)
+	//
+	// The adapter also composes Chat.ContextUsage from its transcript + the
+	// spec's Model where it can (issue #243 / ADR-0061): the context-occupancy
+	// meter is optional DATA, so nil is always legal — conformance pins only
+	// that the empty/idle cases carry no meter (an idle empty chat's
+	// ContextUsage is nil).
+	ReadChat(spec ReadSpec) (Chat, error)
 	// Reply delivers a free-text operator reply to the live session (mid-
 	// session send-keys; the argv-only stance covers the initial prompt
 	// only).

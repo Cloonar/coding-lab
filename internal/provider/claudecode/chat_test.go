@@ -10,6 +10,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -173,12 +174,12 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 // signals, so a gone transcript never resurrects as a dialog-only chat.
 func TestReadChat_goneFile(t *testing.T) {
 	p := chatProvider(t)
-	if _, err := p.ReadChat("", "", filepath.Join(t.TempDir(), "absent.jsonl")); err != provider.ErrTranscriptGone {
+	if _, err := p.ReadChat(provider.ReadSpec{TranscriptPath: filepath.Join(t.TempDir(), "absent.jsonl")}); err != provider.ErrTranscriptGone {
 		t.Errorf("ReadChat(absent) err = %v; want ErrTranscriptGone", err)
 	}
 	dir := t.TempDir()
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	if _, err := p.ReadChat("run_1", dir, filepath.Join(dir, "absent.jsonl")); err != provider.ErrTranscriptGone {
+	if _, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: filepath.Join(dir, "absent.jsonl")}); err != provider.ErrTranscriptGone {
 		t.Errorf("ReadChat(absent, live spool dialog) err = %v; want ErrTranscriptGone", err)
 	}
 }
@@ -200,7 +201,7 @@ func TestReadChat_spoolDialogOverridesTranscript(t *testing.T) {
 		[]byte(line(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	chat, err := p.ReadChat("run_1", dir, transcript)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -223,7 +224,7 @@ func TestReadChat_spoolDialogBeforeTranscriptLocated(t *testing.T) {
 	p := spoolTestProvider(t)
 	dir := t.TempDir()
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	chat, err := p.ReadChat("run_1", dir, "")
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -235,7 +236,7 @@ func TestReadChat_spoolDialogBeforeTranscriptLocated(t *testing.T) {
 	}
 
 	// No spool either: the idle empty base, no error.
-	empty, err := p.ReadChat("run_none", dir, "")
+	empty, err := p.ReadChat(provider.ReadSpec{RunID: "run_none", RuntimeDir: dir})
 	if err != nil {
 		t.Fatalf("ReadChat(no transcript, no spool): %v", err)
 	}
@@ -260,7 +261,7 @@ func TestReadChat_emptyRuntimeDirReadsTranscriptOnly(t *testing.T) {
 		[]byte(line(`{"type":"user","message":{"role":"user","content":"go"}}`)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	chat, err := p.ReadChat("run_1", "", transcript)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -280,7 +281,7 @@ func TestReadChat_transcriptDialogDormantFallback(t *testing.T) {
 	if err := os.WriteFile(transcript, []byte(line(colorUseLine)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	chat, err := p.ReadChat("run_1", dir, transcript)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -308,7 +309,7 @@ func TestReadChat_blockedMarkerPrecedence(t *testing.T) {
 	working := filepath.Join(dir, "sess-live.jsonl")
 	writeFileWithModTime(t, working, line(`{"type":"user","message":{"role":"user","content":"go"}}`), t0)
 	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-	chat, err := p.ReadChat("run_1", dir, working)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: working})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -319,7 +320,7 @@ func TestReadChat_blockedMarkerPrecedence(t *testing.T) {
 	// Marker while the transcript tail is a pending dialog: the question wins.
 	pending := filepath.Join(dir, "sess-pending.jsonl")
 	writeFileWithModTime(t, pending, line(colorUseLine), t0)
-	chat, err = p.ReadChat("run_1", dir, pending)
+	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: pending})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -335,7 +336,7 @@ func TestReadChat_spoolDialogWinsOverMarker(t *testing.T) {
 	dir := t.TempDir()
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
 	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-	chat, err := p.ReadChat("run_1", dir, "")
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
@@ -610,7 +611,7 @@ func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
 	writeFileWithModTime(t, transcript,
 		line(agentUseLine)+line(agentAsyncResultLine)+line(turnEndTextLine), t0)
 
-	chat, err := p.ReadChat("run_1", dir, transcript)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat(no signals): %v", err)
 	}
@@ -620,7 +621,7 @@ func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
 
 	// A live spool dialog wins over the hold.
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	chat, err = p.ReadChat("run_1", dir, transcript)
+	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat(spool dialog): %v", err)
 	}
@@ -634,13 +635,128 @@ func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-	chat, err = p.ReadChat("run_1", dir, transcript)
+	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat(blocked marker): %v", err)
 	}
 	if chat.State != provider.StateNeedsInput {
 		t.Errorf("blocked marker over hold: state = %q; want %q", chat.State, provider.StateNeedsInput)
 	}
+}
+
+// usageLine renders an assistant text line carrying a usage object with the
+// three prompt-side token fields the meter reads (input + cache_creation +
+// cache_read). output_tokens and server_tool_use ride along exactly as claude
+// writes them (compat §5) but must NOT be decoded into Used (ADR-0061).
+func usageLine(input, cacheCreation, cacheRead int64) string {
+	return fmt.Sprintf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":%d,"cache_creation_input_tokens":%d,"cache_read_input_tokens":%d,"output_tokens":999,"server_tool_use":{"web_search_requests":0}}}}`,
+		input, cacheCreation, cacheRead)
+}
+
+// The context-occupancy meter (issue #243 / ADR-0061): ReadChat composes
+// Chat.ContextUsage from the LATEST assistant line's prompt-side usage sum over
+// the spawn-time model's window. Every read here degrades to the transcript
+// alone (RuntimeDir "") so the meter is isolated from the live-signal overlay.
+func TestReadChat_contextUsage(t *testing.T) {
+	p := chatProvider(t)
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "sess.jsonl")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// Happy path: two assistant turns with different usage — the LATER turn's
+	// three fields decide Used, and fable's window is the 1M limit.
+	t.Run("latest assistant usage wins", func(t *testing.T) {
+		path := write(t, line(usageLine(9, 7374, 19409))+line(usageLine(11, 500, 40000)))
+		chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path, Model: "fable"})
+		if err != nil {
+			t.Fatalf("ReadChat: %v", err)
+		}
+		if chat.ContextUsage == nil {
+			t.Fatalf("ContextUsage = nil; want the composed meter")
+		}
+		if got, want := chat.ContextUsage.Used, int64(11+500+40000); got != want {
+			t.Errorf("Used = %d; want %d (the LATER turn's sum)", got, want)
+		}
+		if got, want := chat.ContextUsage.Limit, int64(1_000_000); got != want {
+			t.Errorf("Limit = %d; want %d (fable window)", got, want)
+		}
+	})
+
+	// A later assistant line lacking usage (the <synthetic> API-error shape) or
+	// carrying an all-zero usage must NOT clobber the real earlier value.
+	t.Run("usage-less and zero tails keep the real value", func(t *testing.T) {
+		const realSum = 9 + 7374 + 19409
+		real := line(usageLine(9, 7374, 19409))
+		tails := map[string]string{
+			"synthetic error (no usage)": line(`{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: 529"}]}}`),
+			"all-zero usage":             line(usageLine(0, 0, 0)),
+		}
+		for name, tail := range tails {
+			chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: write(t, real+tail), Model: "fable"})
+			if err != nil {
+				t.Fatalf("%s: ReadChat: %v", name, err)
+			}
+			if chat.ContextUsage == nil || chat.ContextUsage.Used != realSum {
+				t.Errorf("%s: ContextUsage = %+v; want the earlier real sum %d", name, chat.ContextUsage, realSum)
+			}
+		}
+	})
+
+	// An unknown or empty model hides the meter even with real usage present.
+	t.Run("unknown and empty model hide the meter", func(t *testing.T) {
+		path := write(t, line(usageLine(9, 7374, 19409)))
+		for _, model := range []string{"gpt-9", ""} {
+			chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path, Model: model})
+			if err != nil {
+				t.Fatalf("model %q: ReadChat: %v", model, err)
+			}
+			if chat.ContextUsage != nil {
+				t.Errorf("model %q: ContextUsage = %+v; want nil (window unknown)", model, chat.ContextUsage)
+			}
+		}
+	})
+
+	// No assistant usage anywhere → nil, even for a known model.
+	t.Run("no assistant usage hides the meter", func(t *testing.T) {
+		path := write(t, line(`{"type":"user","message":{"role":"user","content":"go"}}`)+
+			line(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`))
+		chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path, Model: "fable"})
+		if err != nil {
+			t.Fatalf("ReadChat: %v", err)
+		}
+		if chat.ContextUsage != nil {
+			t.Errorf("ContextUsage = %+v; want nil (no assistant usage present)", chat.ContextUsage)
+		}
+	})
+
+	// The window table keyed on the spawn-time catalog value: bare `opus`
+	// survives on older rows at 200K, `opus[1m]` opts into the 1M window.
+	t.Run("window per spawn-time model value", func(t *testing.T) {
+		path := write(t, line(usageLine(100, 0, 0)))
+		for _, tc := range []struct {
+			model string
+			limit int64
+		}{
+			{"opus", 200_000},
+			{"opus[1m]", 1_000_000},
+			{"sonnet", 200_000},
+			{"haiku", 200_000},
+			{"fable", 1_000_000},
+		} {
+			chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path, Model: tc.model})
+			if err != nil {
+				t.Fatalf("model %q: ReadChat: %v", tc.model, err)
+			}
+			if chat.ContextUsage == nil || chat.ContextUsage.Limit != tc.limit {
+				t.Errorf("model %q: ContextUsage = %+v; want Limit %d", tc.model, chat.ContextUsage, tc.limit)
+			}
+		}
+	})
 }
 
 // An answered dialog stays a DIALOG message carrying the resolved answer in

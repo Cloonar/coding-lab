@@ -493,16 +493,25 @@ func checkReadChat(tb testing.TB, p provider.AgentProvider) []error {
 		if chat.PendingDialog != nil {
 			errs = append(errs, fmt.Errorf("read-chat: %s returned a PendingDialog; want nil — no live signal was armed, so nothing can be pending (issue #92)", what))
 		}
+		if chat.ContextUsage != nil {
+			errs = append(errs, fmt.Errorf("read-chat: %s returned a ContextUsage; want nil — an idle empty chat has no assistant turn to measure, so the occupancy meter must stay hidden (issue #243 / ADR-0061)", what))
+		}
 	}
 
-	chat, err := p.ReadChat("conformance-run-1", "", "")
-	requireIdle(`ReadChat(runID, "", "")`, chat, err)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "conformance-run-1"})
+	requireIdle(`ReadChat(ReadSpec{RunID})`, chat, err)
 
-	chat, err = p.ReadChat("conformance-run-1", tb.TempDir(), "")
-	requireIdle(`ReadChat(runID, emptyRuntimeDir, "")`, chat, err)
+	chat, err = p.ReadChat(provider.ReadSpec{RunID: "conformance-run-1", RuntimeDir: tb.TempDir()})
+	requireIdle(`ReadChat(ReadSpec{RunID, emptyRuntimeDir})`, chat, err)
+
+	// An unknown Model is a hidden meter, never an error: a legacy row, a typo,
+	// or a catalog value this adapter no longer ships must still yield the idle
+	// empty chat with nil ContextUsage (issue #243 / ADR-0061).
+	chat, err = p.ReadChat(provider.ReadSpec{RunID: "conformance-run-1", Model: "definitely-not-a-model"})
+	requireIdle(`ReadChat(ReadSpec{RunID, unknownModel})`, chat, err)
 
 	gone := filepath.Join(tb.TempDir(), "gone.jsonl")
-	if _, err := p.ReadChat("conformance-run-1", "", gone); !errors.Is(err, provider.ErrTranscriptGone) {
+	if _, err := p.ReadChat(provider.ReadSpec{RunID: "conformance-run-1", TranscriptPath: gone}); !errors.Is(err, provider.ErrTranscriptGone) {
 		errs = append(errs, fmt.Errorf("read-chat: ReadChat on a vanished transcript path returned %v; want provider.ErrTranscriptGone — httpapi renders the \"transcript no longer available\" state from that sentinel, and a raw error would 500 (issue #92)", err))
 	}
 	return errs

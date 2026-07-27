@@ -330,7 +330,7 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	if active {
 		dir = s.runtimeDir(run.ID)
 	}
-	chat, err := prov.ReadChat(run.ID, dir, path)
+	chat, err := prov.ReadChat(provider.ReadSpec{RunID: run.ID, RuntimeDir: dir, TranscriptPath: path, Model: run.Model})
 	if err != nil {
 		return View{}, err
 	}

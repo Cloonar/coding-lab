@@ -382,9 +382,22 @@ skipped, half-written tail lines skipped, never fatal).
   `reason`** — a single mid-turn Esc lands as
   `{"type":"turn_aborted","reason":"interrupted",…}` (the §6 interrupt's
   clean rollout marker). live.
-- `event_msg`/`token_count`, `patch_apply_end`, and `turn_context`
-  records are skipped (no chat content; `turn_context` re-states cwd and
-  the sandbox/approval policy per turn). live.
+- `event_msg`/**`token_count`** → the context-pressure meter
+  (`Chat.ContextUsage`, issue #243 / ADR-0061). lab reads ONLY
+  `info.last_token_usage.total_tokens` and `.reasoning_output_tokens` and
+  the self-reported `info.model_context_window`; the LATEST event with a
+  usable `info` wins (`Used = total_tokens − reasoning_output_tokens` —
+  codex's own `tokens_in_context_window`, since reasoning output is dropped
+  from the window between turns; `Limit = model_context_window`, the
+  spawn-time model is ignored — codex knows its own window). The degenerate
+  `{"info":null}` shape codex also writes never clears a tracked value, and
+  a non-positive `Used` yields no meter (`ContextUsage` nil).
+  `total_token_usage` (cumulative session spend) and `rate_limits` are
+  deliberately NOT read — the meter is occupancy, not cost. The plain
+  fixture's last usable record (line 23) reads 11894 of 258400. live.
+- `event_msg`/`patch_apply_end` and `turn_context` records are skipped (no
+  chat content; `turn_context` re-states cwd and the sandbox/approval
+  policy per turn). live.
 - No dialogs are ever derived (`StateQuestion` unreachable) — never-ask
   posture, no structured question tool.
 - Read-through only: lab persists `runs.transcript_path`; a vanished file

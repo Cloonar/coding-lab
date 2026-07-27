@@ -89,6 +89,12 @@ type messagesResponse struct {
 	// new file, compat §5); the SPA keys its stream reset on it. "" while
 	// locating or gone.
 	TranscriptID string `json:"transcript_id"`
+	// ContextUsage is the adapter-composed context-occupancy meter (issue #243
+	// / ADR-0061), forwarded verbatim from the chat read: raw Used/Limit token
+	// counts the web header renders as the model chip's `· 62%` suffix. Null
+	// (no omitempty, mirroring PendingDialog) when the adapter can't say — no
+	// assistant turn yet, unknown model, or an unsupporting provider.
+	ContextUsage *provider.ContextUsage `json:"context_usage"`
 }
 
 // handleRunMessages is GET /api/v1/runs/{id}/messages?after=&before=&limit=.
@@ -130,6 +136,7 @@ func (s *Server) handleRunMessages(w http.ResponseWriter, r *http.Request) {
 	resp.Cursor = chatData.Cursor
 	resp.PendingDialog = chatData.PendingDialog
 	resp.TranscriptID = chatData.TranscriptID
+	resp.ContextUsage = chatData.ContextUsage
 	if len(chatData.Messages) == 0 && chatData.PendingDialog == nil && run.Outcome == store.RunOutcomeActive {
 		resp.Transcript = "locating"
 	}

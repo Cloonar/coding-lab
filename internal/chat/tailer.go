@@ -192,7 +192,7 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			// the staged stat all stand), so the next tick re-detects the same
 			// change and retries the read instead of freezing on a half-observed
 			// change (e.g. the file vanishing mid-rotation).
-			chat, err := prov.ReadChat(run.ID, runtimeDir, path)
+			chat, err := prov.ReadChat(provider.ReadSpec{RunID: run.ID, RuntimeDir: runtimeDir, TranscriptPath: path, Model: run.Model})
 			if err == nil {
 				// Scan + mask FIRST — before setState and, critically, before
 				// gate.observe below: the needs-input push body is built from the

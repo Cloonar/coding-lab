@@ -115,11 +115,13 @@ type Fake struct {
 
 // ReadCall is one recorded ReadChat invocation — the assertion surface for
 // what core passes down the seam (issue #92: runtime dir only for active
-// runs, the resolved transcript path, the run id keying the spool).
+// runs, the resolved transcript path, the run id keying the spool; issue #243:
+// the run's spawn-time model, carried for context-usage composition).
 type ReadCall struct {
 	RunID          string
 	RuntimeDir     string
 	TranscriptPath string
+	Model          string
 }
 
 // credSig is one home's scripted credential signature: the opaque sig string
@@ -527,20 +529,20 @@ func (f *Fake) LocateTranscript(_ context.Context, _, _, home string) (string, e
 // contract); runtimeDir "" turns the signals off (transcript-only). The
 // scripted readErr (e.g. provider.ErrTranscriptGone) fires only for a
 // non-empty path, like a real adapter's vanished-file open.
-func (f *Fake) ReadChat(runID, runtimeDir, transcriptPath string) (provider.Chat, error) {
+func (f *Fake) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.readCalls = append(f.readCalls, ReadCall{RunID: runID, RuntimeDir: runtimeDir, TranscriptPath: transcriptPath})
+	f.readCalls = append(f.readCalls, ReadCall{RunID: spec.RunID, RuntimeDir: spec.RuntimeDir, TranscriptPath: spec.TranscriptPath, Model: spec.Model})
 	var chat provider.Chat
 	switch {
-	case transcriptPath == "":
+	case spec.TranscriptPath == "":
 		chat = provider.Chat{State: provider.StateIdle}
 	case f.readErr != nil:
 		return provider.Chat{}, f.readErr
 	default:
 		chat = f.chat
 	}
-	if runtimeDir == "" {
+	if spec.RuntimeDir == "" {
 		return chat, nil
 	}
 	if f.pendingDialog != nil {
