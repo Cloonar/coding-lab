@@ -1,8 +1,10 @@
 # Claude Code compatibility pins
 
-Pinned version: **Claude Code 2.1.198** — live probe on the dev host,
-2026-07-05, re-confirmed by the M3 acceptance smoke on 2026-07-06. This
-document tracks brief §11 (known-fragile couplings 1–4; item 5 —
+Pinned version: **Claude Code 2.1.220** — bundle-extraction + in-container
+CLI probe, 2026-07-28 (see the 2.1.220 re-verification note below; the live
+recipe suite is the outstanding gate). The prior pin, 2.1.198, was live-probed
+on the dev host 2026-07-05 and re-confirmed by the M3 acceptance smoke on
+2026-07-06. This document tracks brief §11 (known-fragile couplings 1–4; item 5 —
 provider-owned model/effort catalogs — is solved structurally in
 `internal/provider`, D14) plus the four embedded-chat couplings 5–8 added
 by issue #7 / ADR-0016 (transcript location + JSONL schema, the reply,
@@ -37,6 +39,40 @@ repo; observed live:
 - Real claude booted in the freshly **seeded** worktree and reached
   bridge-connected with **no interactive trust prompt** — the folder-trust
   seed (`hasTrustDialogAccepted`) is effective on 2.1.198 (§4). live.
+
+**2.1.220 re-verification (2026-07-28; static bundle extraction +
+in-container CLI probes — the probing container had no go/tmux, so the live
+recipe suite below is still owed).** Motivation: the 2.1.198 image resolves
+the `opus` alias to Opus 4.8; Opus 5 shipped after the pin. 2.1.212 (stable
+channel that day) predates Opus 5 too — 2.1.220 is the first pin candidate
+whose embedded catalog carries `aliases:{opus:{default:"claude-opus-5"}}` and
+`latest_per_family.opus:"claude-opus-5"`. Checked against the sha256-verified
+2.1.220 artifacts (linux-x64-musl = the image input; the glibc twin executed
+for CLI probes):
+
+- §1: all spawn flags present (`--remote-control [name]`, `--permission-mode`,
+  `--model`, `--effort` with `low|medium|high|xhigh|max`,
+  `--remote-control-session-name-prefix`). The provider catalog's family
+  aliases (`opus[1m]`, `sonnet`, `fable`, `haiku`) and every effort level
+  remain valid values. bundle/CLI.
+- §3: `claude auth status --json` exits 0 logged-out and emits the pinned
+  keys (`loggedIn`, `authMethod`, `apiProvider` observed). §3a:
+  `CLAUDE_CONFIG_DIR` honored — the probe wrote under the override dir, not
+  `~/.claude`. CLI.
+- §10: all ten pinned chat-safe rows present with **verbatim-matching**
+  descriptions, including `clear`'s exact row (argHint `[name]`, aliases
+  `reset`,`new`). bundle.
+- §2/§4/§5/§9/§11/§12 static markers all present: the
+  `join(configDir,"sessions")` registry builder (the path was never a literal
+  string — 2.1.198 also greps 0 for `.claude/sessions`), `bridgeSessionId`,
+  `cse_` normalization, `hasTrustDialogAccepted`, `toolUseResult`,
+  `PreToolUse`/`PostToolUse`/`Notification` + `hook_event_name`,
+  `CLAUDE_AFK_TIMEOUT_MS`, and the `ultracode` prompt keyword. bundle.
+- **NOT yet re-verified on 2.1.220** (needs the dev host): the live tmux
+  recipe couplings — run `LAB_COMPAT_LIVE=1 go test ./internal/compat/ -run
+  Live -v` — and the §3b by-hand credential-refresh recipe. Until those pass,
+  the per-section "live (2.1.198/2.1.206)" provenance below is the newest
+  live evidence.
 
 Provenance legend:
 
