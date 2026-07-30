@@ -52,6 +52,11 @@ func TestInstanceBranch(t *testing.T) {
 		{"afk/<N>", "lab/", "escalate-5", "afk/5"}, // so does the escalate-mode lander
 		{"afk/<N>", "lab/", "20260608-1530", "lab/20260608-1530"},
 		{"afk/<N>", "lab/", "debug-20260608-1530", "lab/debug-20260608-1530"},
+		// A scheduled run's label (issue #247 / ADR-0062) is deliberately
+		// outside every parsed namespace, so the manual fallback derives its
+		// branch — the exact string the spawn side composes (manual prefix +
+		// label), which is what keeps re-adoption naming-code-free.
+		{"afk/<N>", "lab/", "sched-3f9a1c-20260730-0600", "lab/sched-3f9a1c-20260730-0600"},
 		{"afk/<N>", "lab/", "lander-x", "lab/lander-x"}, // strict inverse: not a lander label
 		{"afk/<N>", "lab/", "lander-0", "lab/lander-0"},
 		{"afk/<N>", "lab/", "fix-x", "lab/fix-x"}, // strict inverse holds for the #182 prefixes too

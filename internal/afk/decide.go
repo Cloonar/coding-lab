@@ -527,17 +527,22 @@ func EscalationHistory(comments []tracker.Comment, reviews []tracker.Review) str
 // sort key of the fleet spawn pass. Lower means further down the pipeline
 // and launches first: drain the pipeline before filling it. A lander
 // finishes work already claimed and PR'd; a fix run repairs work already
-// validated-and-rejected; new AFK work fills the pipeline from the top.
-// Without the ordering a repo at cap could spend every slot opening new PRs
-// while validated-but-unlanded ones queued behind them. Priority is DATA on
-// the candidate, not control flow spread across loops — that is what makes
-// #182 an addition (a producer emitting StageFix) instead of a third racer.
+// validated-and-rejected; a due Schedule firing is time-anchored (its slot
+// has already passed, while a claimable issue has no clock and is still
+// there next tick — issue #247 / ADR-0062); new AFK work fills the pipeline
+// from the top. Without the ordering a repo at cap could spend every slot
+// opening new PRs while validated-but-unlanded ones queued behind them.
+// Priority is DATA on the candidate, not control flow spread across loops —
+// that is what makes #182 an addition (a producer emitting StageFix) instead
+// of a third racer, and #247 a fourth producer at a new rank with the pass
+// itself untouched.
 type SpawnStage int
 
 const (
-	StageLander  SpawnStage = iota // validate an open claim PR — furthest down the pipeline
-	StageFix                       // repair a rejected claim PR — fix runs AND the escalate runs that conclude the fix pipeline (issue #182)
-	StageNewWork                   // start a fresh ready issue — fills the pipeline
+	StageLander    SpawnStage = iota // validate an open claim PR — furthest down the pipeline
+	StageFix                         // repair a rejected claim PR — fix runs AND the escalate runs that conclude the fix pipeline (issue #182)
+	StageScheduled                   // fire a due Schedule — time-anchored, outranks fresh selection (issue #247 / ADR-0062)
+	StageNewWork                     // start a fresh ready issue — fills the pipeline
 )
 
 // AutoDecision holds the facts the auto-launch predicate weighs for one repo

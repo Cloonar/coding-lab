@@ -9,7 +9,7 @@ package afk
 // loops (and the HTTP toggle/reset kicks) invoke SpawnOnce: producers GATHER
 // candidates and never launch, one pass sorts them by pipeline stage and
 // spends the cap down the list. The rule: drain the pipeline before filling
-// it — lander > fix (#182) > new AFK work.
+// it — lander > fix (#182) > scheduled (#247) > new AFK work.
 
 import (
 	"context"
@@ -87,6 +87,10 @@ func (s *Service) SpawnOnce(ctx context.Context) {
 	// is unchanged.
 	candidates := s.autolandCandidates(ctx, repos, liveCount, loggedIn)
 	candidates = append(candidates, s.newWorkCandidates(ctx, repos, liveCount, loggedIn)...)
+	// The Schedule producer (issue #247 / ADR-0062) emits StageScheduled
+	// candidates for due firings — a fourth gather, appended like the rest:
+	// production order among producers is irrelevant, the sort owns priority.
+	candidates = append(candidates, s.scheduleCandidates(ctx, repos, liveCount, loggedIn)...)
 
 	s.spawnPass(ctx, liveCount, candidates)
 }

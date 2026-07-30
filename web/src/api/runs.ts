@@ -2,7 +2,15 @@ import { request } from './core';
 
 // --- M3: instances & runs ---
 
-export type RunKind = 'manual' | 'afk_manual' | 'afk_auto' | 'lander' | 'fix' | 'escalate';
+export type RunKind =
+  | 'manual'
+  | 'afk_manual'
+  | 'afk_auto'
+  | 'lander'
+  | 'fix'
+  | 'escalate'
+  /** A Schedule's firing (issue #247 / ADR-0062): no issue, no claim. */
+  | 'scheduled';
 export type RunOutcome = 'active' | 'success' | 'death' | 'timeout' | 'stopped' | 'escalated';
 
 /** One row of the runs table, as the API serializes it. */

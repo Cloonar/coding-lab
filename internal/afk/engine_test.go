@@ -317,6 +317,14 @@ func (r *fakeResolver) set(repoID string, trk tracker.Tracker) {
 	r.byM[repoID] = trk
 }
 
+// unbind drops a repo's tracker so TrackerFor fails for it — a broken forge
+// credential, as the reaper sees one.
+func (r *fakeResolver) unbind(repoID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byM, repoID)
+}
+
 func (r *fakeResolver) TrackerFor(_ context.Context, repo store.Repo) (tracker.Tracker, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

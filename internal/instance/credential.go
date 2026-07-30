@@ -71,10 +71,15 @@ func (s *Service) credentialEnv(ctx context.Context, repo store.Repo, opID strin
 // default, the model/effort override-then-base chain) apply to it. A fix run
 // resolves provider/model/effort through this chain like any AFK-kind run
 // (#189 reversed the ADR-0048 authoring-run inheritance — there is no
-// per-spawn request to fall back from). Manual stays base-chain; lander AND
-// escalate stay non-AFK — validation-class runs resolved on the lander chain.
+// per-spawn request to fall back from). A scheduled run (issue #247 /
+// ADR-0062) joins the AFK side too — unattended AFK-class work, so the AFK
+// layers (options bag and remote included) apply, with the per-Schedule
+// overrides layered ABOVE them by the ResolveSchedule* helpers below. Manual
+// stays base-chain; lander AND escalate stay non-AFK — validation-class runs
+// resolved on the lander chain.
 func isAFKKind(kind string) bool {
-	return kind == store.RunKindAFKManual || kind == store.RunKindAFKAuto || kind == store.RunKindFix
+	return kind == store.RunKindAFKManual || kind == store.RunKindAFKAuto ||
+		kind == store.RunKindFix || kind == store.RunKindScheduled
 }
 
 // ResolveProvider resolves the EFFECTIVE agent provider for a spawn of the
@@ -122,6 +127,59 @@ func strOrEmpty(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// ResolveScheduleProvider resolves the effective provider for a scheduled run
+// (issue #247 / ADR-0062): the per-Schedule provider override is the TOPMOST
+// default rung, above the AFK overrides, with skip-layer semantics (ADR-0030)
+// — a set-and-registered override wins like a repo override would; a nil,
+// empty, or stale one (a provider switch orphaned the stored id) falls
+// through to the plain AFK-kind chain instead of failing every firing at
+// 06:00 forever. Deliberately NOT passed as ResolveProvider's reqProvider:
+// the explicit request is strict by contract, and a Schedule's stored
+// override is a default, not an operator's per-spawn pick. Explicit API
+// writes stay strict — an unknown provider is a 400 at save, not here.
+func (s *Service) ResolveScheduleProvider(ctx context.Context, repo store.Repo, override *string) (provider.AgentProvider, error) {
+	if v := strOrEmpty(override); v != "" {
+		if p, ok := s.providers.Get(v); ok {
+			return p, nil
+		}
+	}
+	return s.ResolveProvider(ctx, repo, store.RunKindScheduled, "")
+}
+
+// ResolveScheduleModelEffort resolves a scheduled run's model/effort with the
+// per-Schedule overrides as the topmost skip-layer default rung (issue #247 /
+// ADR-0062), mirroring ResolveModelEffort's two-pass shape: the model
+// override wins when present in the effective provider's catalog, else the
+// plain AFK-kind layering (repo AFK override → global AFK override → repo
+// base → global base → catalog fallback) applies; the effort override then
+// validates against the RESOLVED MODEL's own effort list (the issue-#156
+// per-model discipline — an effort override without a model override layers
+// over whatever model the chain resolved), skip-layering to the same AFK
+// chain when absent or foreign. No layer here is ever strict: a stored value
+// a provider switch orphaned must degrade the firing to the inherited chain,
+// never break it (ADR-0030's exact rationale).
+func (s *Service) ResolveScheduleModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, modelOverride, effortOverride *string) (model, effort string, err error) {
+	models := prov.Models()
+	modelCatalog := modelOptions(models)
+	if v := strOrEmpty(modelOverride); v != "" && provider.HasOption(modelCatalog, v) {
+		model = v
+	} else if model, err = s.layerSpawnDefault(ctx, modelCatalog, "", true, "", repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault, "model"); err != nil {
+		return "", "", err
+	}
+	// The effort catalog is the resolved model's OWN list (issue #156), exactly
+	// as in ResolveModelEffort — including for a model the override picked.
+	effortCatalog, reportedDefault := prov.Efforts(), ""
+	if m, ok := provider.FindModelOption(models, model); ok {
+		effortCatalog, reportedDefault = m.Efforts, m.DefaultEffort
+	}
+	if v := strOrEmpty(effortOverride); v != "" && provider.HasOption(effortCatalog, v) {
+		effort = v
+	} else if effort, err = s.layerSpawnDefault(ctx, effortCatalog, reportedDefault, true, "", repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault, "effort"); err != nil {
+		return "", "", err
+	}
+	return model, effort, nil
 }
 
 // ResolveModelEffort layers the spawn model/effort, run-kind-aware (D12d +

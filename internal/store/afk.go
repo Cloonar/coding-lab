@@ -16,16 +16,18 @@ import (
 
 // ActiveAFKRuns lists every outcome='active' run of the unattended kinds —
 // the two AFK kinds plus lander, fix, and escalate (the reaper owns all four
-// autoland kinds' classification too, issue #182) — ordered by session name
-// so a reaper tick is deterministic (v0 trackAFKRuns returned runs sorted by
-// name).
+// autoland kinds' classification too, issue #182) and scheduled (a Schedule's
+// firing, issue #247 / ADR-0062: unattended and reaper-owned like the rest,
+// so it must be in this list or the reaper never sees the run and its budget
+// clock never fires) — ordered by session name so a reaper tick is
+// deterministic (v0 trackAFKRuns returned runs sorted by name).
 func (s *Store) ActiveAFKRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, s.rebind(
 		`SELECT `+runColumns+` FROM runs
-		 WHERE outcome = ? AND kind IN (?, ?, ?, ?, ?)
+		 WHERE outcome = ? AND kind IN (?, ?, ?, ?, ?, ?)
 		 ORDER BY session_name`),
 		RunOutcomeActive, RunKindAFKManual, RunKindAFKAuto, RunKindLander,
-		RunKindFix, RunKindEscalate)
+		RunKindFix, RunKindEscalate, RunKindScheduled)
 	if err != nil {
 		return nil, fmt.Errorf("active afk runs: %w", err)
 	}
@@ -64,6 +66,31 @@ func (s *Store) ActiveAutoRunForRepo(ctx context.Context, repoID string) (Run, b
 		return Run{}, false, fmt.Errorf("active auto run for repo %q: %w", repoID, err)
 	}
 	return r, true, nil
+}
+
+// ActiveRunForSchedule returns the live (outcome='active') run scheduleID
+// fired, or ErrNotFound when the Schedule has nothing in flight — the
+// skip-on-overlap gate (issue #247 / ADR-0062: a firing that comes due while
+// the previous run is still live is consumed and logged, never queued). It
+// matches on runs.schedule_id, the durable firing link, so a restart between
+// launch and the next pass cannot lose the attribution. Newest first for the
+// pathological case of two live rows (a Schedule deleted and recreated onto a
+// run's link cannot happen — ON DELETE SET NULL clears it — but the LIMIT
+// keeps the reader total either way).
+func (s *Store) ActiveRunForSchedule(ctx context.Context, scheduleID string) (Run, error) {
+	row := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT `+runColumns+` FROM runs
+		 WHERE outcome = ? AND schedule_id = ?
+		 ORDER BY started_at DESC LIMIT 1`),
+		RunOutcomeActive, scheduleID)
+	r, err := scanRun(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, fmt.Errorf("active run for schedule %q: %w", scheduleID, ErrNotFound)
+		}
+		return Run{}, fmt.Errorf("active run for schedule %q: %w", scheduleID, err)
+	}
+	return r, nil
 }
 
 // ActiveRunOnBranch reports whether any outcome='active' run — ANY kind —

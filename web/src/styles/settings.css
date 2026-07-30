@@ -17,3 +17,13 @@
 .token-reveal input[readonly] {
   background: var(--hover);
 }
+
+/* Schedules ----------------------------------------------------------------------- */
+
+/* The server-rendered cadence preview (issue #247 / ADR-0062) is an ordinary
+   hint line while the expression parses, and turns danger-colored when it does
+   not — a cadence nothing can fire is the one thing the editor must not let
+   read as a neutral note. */
+.cadence-preview.invalid {
+  color: var(--danger);
+}

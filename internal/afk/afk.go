@@ -73,6 +73,13 @@ const (
 	defaultSweepMinutes    = 10
 )
 
+// defaultScheduleBudgetMinutes is a scheduled run's budget when its Schedule
+// carries no override (issue #247 / ADR-0062): scheduled runs are
+// investigation-sized, not implementation-sized — they investigate and file
+// issues for the pipeline, so they get a quarter of the AFK default, and
+// budget expiry is their COMPLETION, not a timeout-failure.
+const defaultScheduleBudgetMinutes = 30
+
 // TrackerResolver resolves a repo-scoped Tracker — the seam the engine goes
 // through so tests can inject fakes. *tracker.Registry satisfies it.
 type TrackerResolver interface {
@@ -196,6 +203,34 @@ type Service struct {
 	// session under it; the reaper re-reads the row and fresh liveness under
 	// it before claiming a terminal outcome.
 	runsMu sync.Mutex
+
+	// Schedule due-ness memo (issue #247 / ADR-0062), IN-MEMORY by design:
+	// the pending-firing memo dying with the process IS the no-catch-up rule
+	// applied consistently — a restart drops an at-cap pending firing, and
+	// everything durable lives on the Schedule row (last_fired_at, the
+	// failure counter, paused).
+	//
+	// INVARIANT: every field in this block is touched ONLY from
+	// scheduleCandidates and the launch closures it emits, all of which run
+	// inside the spawn pass under spawnMu — that serialization is these
+	// fields' only guard, so no other code path may read or write them.
+	//
+	// schedulePending maps a schedule ID to the due time of the one owed
+	// firing (at-cap firings retry from here each pass; overlap-skips and
+	// supersessions consume/replace the entry). scheduleChecked is the cron
+	// evaluation high-water mark per schedule ID, seeded at NOW on a
+	// schedule's first sighting: first sighting arms the cadence
+	// forward-only, so a match between engine start and the first pass is
+	// lost (at most one tick — the no-catch-up rule applied consistently),
+	// and a re-enabled or re-created Schedule never re-fires slots consumed
+	// before its mark was dropped. scheduleEngineStart is ONLY the startup
+	// missed-slot log's boundary, never a walk floor. scheduleMissedLogged
+	// flips after the first pass's missed-slot sweep (the startup Warn fires
+	// once).
+	schedulePending      map[string]time.Time
+	scheduleChecked      map[string]time.Time
+	scheduleMissedLogged bool
+	scheduleEngineStart  time.Time
 }
 
 // New validates o and returns a Service.
@@ -254,6 +289,13 @@ func New(o Options) (*Service, error) {
 		metrics:            o.Metrics,
 		notify:             o.Notify,
 		now:                now,
+		schedulePending:    map[string]time.Time{},
+		scheduleChecked:    map[string]time.Time{},
+		// Construction time bounds the startup missed-slot log alone: slots
+		// between last_fired_at and this instant were lost to downtime
+		// (ADR-0062 no catch-up). The cron walk itself floors at each
+		// schedule's first sighting, never here.
+		scheduleEngineStart: now(),
 	}, nil
 }
 

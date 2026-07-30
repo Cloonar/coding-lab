@@ -13,7 +13,7 @@ import (
 
 // NewID returns `<prefix>_<32 lowercase hex>` built from 16 bytes of
 // crypto/rand. Canonical prefixes: usr, cred, repo, run, tok, rtok, iss,
-// cmt, lbl, cr, sec.
+// cmt, lbl, cr, sec, sched.
 func NewID(prefix string) string {
 	var b [16]byte
 	mustRead(b[:])

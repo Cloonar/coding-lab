@@ -26,8 +26,15 @@ type LaunchSpec struct {
 	Repo     store.Repo
 	Provider provider.AgentProvider
 
-	Kind        string // store.RunKindManual | RunKindAFKManual | RunKindAFKAuto | RunKindLander
-	IssueNumber *int   // AFK/lander runs: the claimed issue; manual: nil
+	Kind        string // store.RunKindManual | RunKindAFKManual | RunKindAFKAuto | RunKindLander | RunKindFix | RunKindEscalate | RunKindScheduled
+	IssueNumber *int   // AFK/lander runs: the claimed issue; manual and scheduled: nil
+
+	// ScheduleID links a scheduled run to the Schedule it is a firing of
+	// (issue #247 / ADR-0062) — identity, exactly like IssueNumber is for an
+	// AFK run: skip-on-overlap and the per-Schedule failure counter attribute
+	// the run through the persisted runs.schedule_id column, never by parsing
+	// the session label. nil for every other kind.
+	ScheduleID *string
 
 	// AdoptBranch checks out the EXISTING Branch DETACHED, at its origin tip
 	// (gitx.AddWorktreeExisting), instead of forking a fresh one — the lander
@@ -311,6 +318,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		Kind:           spec.Kind,
 		Provider:       spec.Provider.ID(),
 		IssueNumber:    spec.IssueNumber,
+		ScheduleID:     spec.ScheduleID,
 		Branch:         branch,
 		WorktreePath:   wtPath,
 		SessionName:    name,

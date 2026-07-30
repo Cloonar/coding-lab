@@ -91,7 +91,7 @@ An AFK run's wall-clock budget — `afk_budget_minutes` (default 120, per-repo o
 _Avoid_: idle timeout, deadline extension, reset-on-restart
 
 **Three-strikes pause**:
-Three consecutive AFK failures (death or timeout) pause a repo's auto runs until an explicit human Reset from the UI. Only AFK-run outcomes feed the counter: a **lander run**'s outcome never moves it in either direction — a lander death or timeout must not pause unrelated AFK work, and a lander's reject-success must not clear the strikes the rejected work earned (ADR-0049). The **budget clock** stays shared across all run kinds.
+Three consecutive AFK failures (death or timeout) pause a repo's auto runs until an explicit human Reset from the UI. Only AFK-run outcomes feed the counter: a **lander run**'s outcome never moves it in either direction — a lander death or timeout must not pause unrelated AFK work, and a lander's reject-success must not clear the strikes the rejected work earned (ADR-0049) — and a **scheduled run**'s outcome never moves it in either direction either, feeding its **Schedule**'s own consecutive-failure counter instead, just as this pause never stops a repo's Schedules (ADR-0062). The **budget clock** stays shared across all run kinds.
 _Avoid_: auto-retry, backoff, cooldown
 
 **Neutral Stop**:
@@ -109,6 +109,18 @@ _Avoid_: auto-requeue, auto-retry, re-queue, respin
 **Escalation**:
 The fix-forward loop's terminal hand-off (#182): at the attempt bound with the PR still rejected, the poller spawns an **escalate run** — a lander-class run that writes the round-history digest to the linked issue, flips its label `ready-for-agent` → `ready-for-human`, and posts the terminal `labctl pr escalate` marker, all agent-executed on the run-token boundary (the engine never writes to a forge; the engine's part is the push notification off the run's `escalated` outcome). An escalated-outcome run makes its PR permanently invisible to **Autoland**; re-entry is exactly one path — a human running the interactive land-pr skill. The hand-off is itself bounded (`MaxEscalateAttempts`, 3): terminality is written only when the marker lands, so an escalate run that dies first leaves the PR rejected-at-bound and would otherwise be re-escalated every tick, forever, ahead of new work and un-braked by three-strikes. Past that bound autoland goes quiet on the PR and says so at error level.
 _Avoid_: give up, abandon, dead-letter, auto-close
+
+**Schedule**:
+The per-repo domain object that gives lab a cadence: a name, the cadence itself stored as a cron expression (server-local time, edited phone-first as daily/weekly/monthly presets that render to cron, with a raw-cron escape hatch previewed server-side from the same parser), a freeform prompt, an ordered selection of built-in **flows**, an enabled flag, optional budget/model/effort/provider overrides, and its own consecutive-failure counter and paused state (`schedules` table, `runs.schedule_id` linking a firing's run). A due firing gathers a **scheduled run** candidate for the fleet's **spawn pass** — never an independent launch path, because a second launch path is exactly the cap race ADR-0049 removed. Two rules keep a cadence from stacking unattended cost: skip-on-overlap (a firing due while the Schedule's previous run is still live is skipped loudly — consumed, never queued behind it) and no catch-up (slots missed while the server was down are gone, startup only logs per Schedule which ones were; the next cron match fires normally) (ADR-0062).
+_Avoid_: task, job, cron entry, timer, recurring run
+
+**Scheduled run**:
+The fourth unattended run kind (`runs.kind = 'scheduled'`, attributed to its **Schedule** by `runs.schedule_id`), spawned by a due firing with full spawn parity to an **AFK run** — its own worktree and branch off freshly-fetched `origin/<default>`, a **run token**, **skills bundle** plus context-file seeding, the repo's **Runner** and **dev image**, **incogni mode** screening — and inheriting them by construction, not by new code. Its initial prompt is the Schedule's freeform prompt plus the selected **flows**' blocks in fixed catalog order, and its knobs resolve by per-schedule overrides sitting as one more skip-layer rung above the **AFK default** layering. It carries no issue, no **claim**, and no **done-signal**: a PR is not expected, so the reaper never reads a pull listing for it, and termination is the **budget clock** alone (default 30 minutes, per-schedule override), expiry classifying the run success through **guarded teardown**. Session death before expiry is a failure feeding that Schedule's own three-strikes — three consecutive deaths pause the Schedule until a human re-enables it — never the repo's AFK counter, and the repo's **three-strikes pause** never stops Schedules (ADR-0062).
+_Avoid_: cron run, periodic run, batch run
+
+**Flow**:
+A built-in, lab-vendored block of routing instructions appended to a **Schedule**'s freeform prompt at spawn, in fixed catalog order rather than selection order — composition is deterministic and catalog-owned, so two Schedules selecting the same flows brief their runs identically. It is pure prompt text composed provider-agnostically, the same mechanism precedent as the ultracode directive (ADR-0021), and versioned with the binary in the **skills bundle** spirit so the `labctl` verbs and label names it names stay correct as lab evolves. The shipped catalog is two: the **autolander flow** (investigate per the prompt, then file fully-specified `ready-for-agent` issues and stop — the ordinary AFK machinery claims them and, where **Autoland** is on, lands them) and the **human-triage flow** (the same, labeled `needs-triage` for the triage state machine), both baking in dedup against that Schedule's own earlier open issues. Selecting zero flows is legal — a pure-prompt Schedule. Flows are text, not machinery: neither Autoland nor the **lander run** changes for them (ADR-0062).
+_Avoid_: workflow, pipeline, playbook, template
 
 ### Trackers
 
@@ -182,6 +194,10 @@ _Avoid_: reminder, alert, nag, bus subscriber
 The single push fired when the reaper's terminal classification of an **AFK run** is success — its **done-signal** landed. It rides the reaper's idempotent **claim**, so it sends exactly once per run with no debounce state (a reaped row leaves the active set and is never a reap candidate again). Title names the PR/**change request** by the repo's **tracker binding** (`<repo>~<label> opened PR #n` on `forge`, `… opened change request #n` on `builtin`), body is that pull's title (degrading to the bare number form when the detail fetch fails), tag = run ID so it replaces the same run's **needs-input trigger** item on the lock screen, route is the run's PWA-internal chat path — never the forge URL. Deaths, timeouts, a **neutral Stop**, and the **three-strikes pause**: no send.
 _Avoid_: forge link-out, completion email, per-outcome alerts
 
+**Schedule-paused trigger**:
+The single push fired when a **Schedule**'s own three-strikes pauses it — `Schedule <name> paused after 3 failures` — riding the same Web Push machinery as the other two through the afk notification seam. It sends once, at the pause transition, and it is the only push a Schedule ever costs: firings and **scheduled run** completions stay silent, so a healthy weekly Schedule is worth zero notifications. Route is PWA-internal — the repo's Schedules settings, never a forge URL (ADR-0062).
+_Avoid_: failure alert, error notification, per-firing push
+
 ## Relationships
 
 - An **instance** is manual or an **AFK run**; every instance runs in its own worktree forked from the **reference repo**'s freshly-fetched `origin/<default>` — no fallback base, ever.
@@ -200,6 +216,8 @@ _Avoid_: forge link-out, completion email, per-outcome alerts
 - The **VAPID key** signs every send to a **push subscription**; unlike the **master key**, it never touches the vault — a subscription is device-level trust, not a stored credential, and rotating the **VAPID key** strands every **push subscription** until each device re-enables.
 - The **needs-input trigger** rides the tailer's **conversational state** edge and broadcasts to every **push subscription** — device targeting, re-reminders, and escalation are all non-features in the v1 model.
 - The **done-signal trigger** rides the reaper's idempotent **claim** and broadcasts to every **push subscription** exactly once when a run reaps as success — never on a death, timeout, or **neutral Stop**.
+- A **Schedule**'s due firing gathers a **scheduled run** candidate for the one **spawn pass** at stage rank `lander > fix > scheduled > new AFK` — in-flight claim work still drains first, but a time-anchored firing outranks fresh AFK selection because its slot has already passed — and the repo's live-instance cap binds it like every other candidate; a firing due while that Schedule's previous run is still live is skipped loudly rather than queued, and slots missed while the server was down are never caught up.
+- A **scheduled run** has no **claim** and no **done-signal**: its **budget clock** alone terminates it, expiry classifying as success and session death before expiry as failure, and those outcomes feed only its **Schedule**'s own three-strikes — independent of the repo's **three-strikes pause** in both directions, exactly the independence a **lander run** has — with the **Schedule-paused trigger** the one new push in the model.
 
 ## Example dialogue
 

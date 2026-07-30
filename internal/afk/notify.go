@@ -12,6 +12,7 @@ package afk
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -84,4 +85,36 @@ func (s *Service) escalationNotification(ctx context.Context, trk tracker.Tracke
 		Tag:   run.ID,
 		Route: "/runs/" + run.ID,
 	}
+}
+
+// schedulePausedNotification builds the ONE push the scheduled kind ever
+// fires (issue #247 / ADR-0062): the per-Schedule three-strikes pause
+// transition, sent once because it rides the guarded pause write's changed
+// edge at the reap chokepoint. Firings and completions stay silent — a
+// healthy weekly Schedule must cost zero notifications. The count in both
+// lines derives from PauseThreshold so the copy can never drift from the
+// pause rule it announces. Tag is the schedule ID so a re-pause after a
+// re-enable replaces the stale lock-screen item for the same Schedule; Route
+// is the repo's PWA-internal schedules settings path — where the human
+// re-enable lives — never a forge URL.
+func schedulePausedNotification(scheduleName, scheduleID string, repo store.Repo) Notification {
+	return Notification{
+		Title: fmt.Sprintf("Schedule %s paused after %d failures", scheduleName, PauseThreshold),
+		Body: fmt.Sprintf("%s scheduled runs in %s died in a row; re-enable the schedule from the repo settings.",
+			countWord(PauseThreshold), repo.Name),
+		Tag:   scheduleID,
+		Route: "/repos/" + repo.ID + "/settings/schedules",
+	}
+}
+
+// countWord spells a small count out for the sentence-leading position the
+// pause body puts it in ("Three scheduled runs…" reads as prose where "3
+// scheduled runs…" reads as a log line), degrading to digits rather than
+// growing a numeral library if PauseThreshold ever outruns the table.
+func countWord(n int) string {
+	words := []string{"Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"}
+	if n >= 0 && n < len(words) {
+		return words[n]
+	}
+	return strconv.Itoa(n)
 }
