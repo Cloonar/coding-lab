@@ -5,6 +5,7 @@
 // per-icon deep imports — the app icon system.
 
 import Bot from 'lucide-solid/icons/bot';
+import CalendarClock from 'lucide-solid/icons/calendar-clock';
 import ContainerIcon from 'lucide-solid/icons/container';
 import GitBranch from 'lucide-solid/icons/git-branch';
 import LockKeyhole from 'lucide-solid/icons/lock-keyhole';
@@ -56,6 +57,12 @@ export const REPO_SETTINGS_CATEGORIES: SettingsCategory[] = [
     title: 'Secrets',
     description: 'Write-only secrets for agents.',
     icon: LockKeyhole,
+  },
+  {
+    slug: 'schedules',
+    title: 'Schedules',
+    description: 'Cron-fired scheduled runs: prompt, flows, cadence.',
+    icon: CalendarClock,
   },
   {
     slug: 'danger',

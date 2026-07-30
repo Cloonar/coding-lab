@@ -406,6 +406,20 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("POST /api/v1/repos/{id}/afk/reset", s.requireAuth(s.handleAFKReset))
 	}
 
+	// Schedules (issue #247 / ADR-0062): per-repo cadence CRUD, the human
+	// re-enable of a struck-out Schedule, the built-in flow catalog, and the
+	// server-rendered cron preview the form reads instead of re-implementing
+	// cron. Store-backed and always mounted, like the settings routes below —
+	// a Schedule is a row, and the one engine touch (the re-enable's
+	// spawn-pass kick) is nil-guarded rather than gating the whole surface.
+	api.HandleFunc("GET /api/v1/repos/{id}/schedules", s.requireAuth(s.handleScheduleList))
+	api.HandleFunc("POST /api/v1/repos/{id}/schedules", s.requireAuth(s.handleScheduleCreate))
+	api.HandleFunc("PATCH /api/v1/repos/{id}/schedules/{sid}", s.requireAuth(s.handleScheduleUpdate))
+	api.HandleFunc("DELETE /api/v1/repos/{id}/schedules/{sid}", s.requireAuth(s.handleScheduleDelete))
+	api.HandleFunc("POST /api/v1/repos/{id}/schedules/{sid}/reenable", s.requireAuth(s.handleScheduleReenable))
+	api.HandleFunc("GET /api/v1/schedule-flows", s.requireAuth(s.handleScheduleFlows))
+	api.HandleFunc("GET /api/v1/cron/preview", s.requireAuth(s.handleCronPreview))
+
 	// M5 PAT CRUD (D7) and settings — store-backed, always mounted.
 	api.HandleFunc("GET /api/v1/tokens", s.requireAuth(s.handleTokenList))
 	api.HandleFunc("POST /api/v1/tokens", s.requireAuth(s.handleTokenCreate))

@@ -22,6 +22,7 @@ const KIND_LABELS: Record<RunKind, string> = {
   lander: 'Lander',
   fix: 'Fix',
   escalate: 'Escalate',
+  scheduled: 'Scheduled',
 };
 
 const OUTCOMES: RunOutcome[] = ['active', 'success', 'death', 'timeout', 'stopped', 'escalated'];
@@ -113,7 +114,10 @@ function RunCard(props: { run: Run }) {
     const custom = props.run.title?.trim() ?? '';
     if (custom !== '') return custom;
     // AFK runs title from the persisted issue number (restart-proof); the
-    // session label is the fallback for both AFK and manual runs.
+    // session label is the fallback for both AFK and manual runs. A scheduled
+    // run (issue #247) is anchored to no issue, so issue_number is null and it
+    // falls through to the label path below, which renders its
+    // 'sched-<id>-<stamp>' label as '<schedule> · <firing time>'.
     if (props.run.kind !== 'manual' && props.run.issue_number !== null) {
       return `AFK #${props.run.issue_number}`;
     }

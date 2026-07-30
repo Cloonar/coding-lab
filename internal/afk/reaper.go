@@ -97,7 +97,24 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 		}
 		trk, err := s.trackers.TrackerFor(ctx, repo)
 		if err != nil {
+			// The kinds with a done-signal wait for the tracker to heal (never
+			// classified on missing data), but the scheduled kind makes ZERO
+			// forge reads by design — stranding it here would let a broken
+			// forge credential hold its cap slot past the deadline forever and
+			// overlap-skip every future firing. Reap the repo's scheduled runs
+			// with no tracker (reapRun never touches it for the kind: the
+			// done-signal push excludes it and an escalated outcome cannot
+			// occur); every other kind keeps the skip-until-healed semantics.
 			s.log.Warn("afk watcher: tracker", "component", "afk", "repo", repo.Name, "err", err)
+			for _, run := range byRepo[repoID] {
+				if run.Kind != store.RunKindScheduled {
+					continue
+				}
+				outcome, alive, claimed := s.classifyAndClaim(ctx, run, false, false, now)
+				if claimed {
+					s.reapRun(ctx, nil, repo, run, outcome, alive, tracker.PullRef{}, now)
+				}
+			}
 			continue
 		}
 		for _, run := range byRepo[repoID] {
@@ -118,27 +135,37 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			// so PullsForHead's LIVE-branch contract holds for every kind.
 			// Base is repo.DefaultBranch because that is the base the agent
 			// API pins for EVERY lab-created PR (the caller names neither).
-			pulls, err := trk.PullsForHead(ctx, run.Branch, repo.DefaultBranch)
-			if err != nil {
-				// Per-run isolation (tighter than the old per-repo skip): a
-				// run whose tracker can't be read this tick is never
-				// classified on missing data — it is reclassified next tick.
-				// Only this run waits; its repo's other runs still get their
-				// own reads this tick.
-				s.log.Warn("afk watcher: pulls for head", "component", "afk", "repo", repo.Name, "session", run.SessionName, "err", err)
-				continue
-			}
-			// donePull is the winning pull, meaningful only at a success/
-			// escalated outcome (it feeds the done-signal and escalation
-			// notifications).
-			donePull, prPresent := tracker.DonePull(pulls, run.Branch)
-			done, escalated := prPresent, false
-			switch run.Kind {
-			case store.RunKindLander, store.RunKindFix, store.RunKindEscalate:
-				var readable bool
-				done, escalated, readable = s.verdictDoneSignal(ctx, trk, repo, run, donePull, prPresent)
-				if !readable {
-					continue // comments unreadable this tick — NEVER classify on missing data
+			//
+			// The scheduled kind (issue #247 / ADR-0062) has NO done-signal:
+			// no PR is expected, so the reaper makes ZERO forge reads for it
+			// — done stays false and the budget clock alone terminates the
+			// run (its timeout is promoted to success at the claim site).
+			var donePull tracker.PullRef
+			done, escalated := false, false
+			if run.Kind != store.RunKindScheduled {
+				pulls, err := trk.PullsForHead(ctx, run.Branch, repo.DefaultBranch)
+				if err != nil {
+					// Per-run isolation (tighter than the old per-repo skip): a
+					// run whose tracker can't be read this tick is never
+					// classified on missing data — it is reclassified next tick.
+					// Only this run waits; its repo's other runs still get their
+					// own reads this tick.
+					s.log.Warn("afk watcher: pulls for head", "component", "afk", "repo", repo.Name, "session", run.SessionName, "err", err)
+					continue
+				}
+				// donePull is the winning pull, meaningful only at a success/
+				// escalated outcome (it feeds the done-signal and escalation
+				// notifications).
+				var prPresent bool
+				donePull, prPresent = tracker.DonePull(pulls, run.Branch)
+				done = prPresent
+				switch run.Kind {
+				case store.RunKindLander, store.RunKindFix, store.RunKindEscalate:
+					var readable bool
+					done, escalated, readable = s.verdictDoneSignal(ctx, trk, repo, run, donePull, prPresent)
+					if !readable {
+						continue // comments unreadable this tick — NEVER classify on missing data
+					}
 				}
 			}
 			outcome, alive, claimed := s.classifyAndClaim(ctx, run, done, escalated, now)
@@ -318,6 +345,21 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done, esc
 	if outcome == OutcomeSuccess && escalated {
 		outcome = OutcomeEscalated
 	}
+	// The scheduled promotion (issue #247 / ADR-0062), the escalated one's
+	// sibling at the same claim site: a scheduled run has no done-signal —
+	// budget expiry IS its completion — so the timeout Classify returns for
+	// an expired scheduled run is promoted to success (empty failure reason
+	// comes with the outcome) before the claim. A death observed at/after
+	// the deadline promotes the same way: past the deadline the budget clock
+	// has already terminated the run — what the session did in the final
+	// unobserved seconds cannot un-complete it, and Classify's !alive-over-
+	// expired priority (right for the kinds with a done-signal) would turn
+	// every delayed reap of a finished run into an unfair strike. A death
+	// BEFORE the deadline stays a death. Classify itself stays kind-blind.
+	if run.Kind == store.RunKindScheduled &&
+		(outcome == OutcomeTimeout || (outcome == OutcomeDeath && !now.Before(deadline))) {
+		outcome = OutcomeSuccess
+	}
 	if outcome == OutcomeRunning {
 		return outcome, alive, false
 	}
@@ -354,8 +396,8 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done, esc
 // RESET the counter — clearing the strikes broken AFK runs earned and
 // re-arming the very brake that evidence should trip (a reject is evidence
 // FOR the pause, not against it). The same both-ways argument covers the
-// escalate run: its 'escalated' outcome is it DOING ITS JOB, never health
-// evidence either way. The counter is unattended-run health alone; only the
+// escalate run: its 'escalated' outcome is it WORKING AS INTENDED, never
+// health evidence either way. The counter is unattended-run health alone; only the
 // failure counter separates — the budget clock stays deliberately shared. A
 // neutral Stop never reaches here (classifyAndClaim refuses a stopped run
 // under runsMu). now is the tick time the claim stamped as ended_at, so the
@@ -363,9 +405,14 @@ func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done, esc
 //
 // This chokepoint is also where the pushes fire — beside the metrics report,
 // once per claim: the done-signal push on an AFK success, the escalation push
-// on an escalated outcome (#182). trk and donePull are meaningful only at
-// those outcomes (donePull is the winning pull the notification names);
-// death, timeout, and the three-strikes pause never send.
+// on an escalated outcome (#182), and the schedule-paused push at the
+// per-Schedule pause transition (#247 — the ONE scheduled-kind trigger; its
+// firings and completions stay silent). trk and donePull are meaningful only
+// at the success/escalated outcomes (donePull is the winning pull the
+// notification names); death, timeout, and the repo three-strikes pause
+// never send. For a scheduled reap trk may be NIL — the kind's tracker can
+// be unresolvable and no path below reads it: the done-signal push excludes
+// the kind and an escalated outcome cannot occur for it.
 func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.Repo, run store.Run, outcome Outcome, alive bool, donePull tracker.PullRef, now time.Time) {
 	// The reaper half of the M8 terminal-outcome metrics (the neutral Stop
 	// is the other half — StopAFK). The outcome row is already written, so
@@ -446,6 +493,66 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 						"component", "afk", "repo", repo.Name, "failures", n)
 				}
 				s.publish(EventRepoChanged, repo.ID)
+			}
+		}
+	}
+
+	// The per-Schedule three-strikes accounting (issue #247 / ADR-0062), in
+	// the same chokepoint position — and deliberately DISJOINT from the repo
+	// counter above, in both directions: a broken Schedule pausing unrelated
+	// AFK work, or a healthy Schedule's budget completions clearing strikes
+	// broken AFK runs earned, would couple counters that measure different
+	// things (the same independence the lander earned in ADR-0049). A
+	// budget-expiry completion (the promoted success) resets the Schedule's
+	// counter — publishing repo.changed on a real reset, exactly like the
+	// repo-counter arm above, so the settings UI drops its strike badge; a
+	// session death before expiry increments it, and the third consecutive
+	// death pauses the Schedule until a human re-enables it — the pause edge
+	// fires the ONE schedule push and a repo.changed so the settings UI
+	// shows the paused banner. Neither timeout nor a death observed past the
+	// deadline can reach here for the kind (both promoted at the claim site)
+	// and a neutral Stop never enters reapRun. run.ScheduleID nil means the
+	// Schedule was deleted mid-run (ON DELETE SET NULL): nothing left to
+	// account against; an ErrNotFound from any write is the deletion racing
+	// the reap — log at Debug and move on, the run row itself is already
+	// terminal either way.
+	if run.Kind == store.RunKindScheduled && run.ScheduleID != nil {
+		scheduleID := *run.ScheduleID
+		switch outcome {
+		case OutcomeSuccess:
+			changed, err := s.store.ResetScheduleFailures(ctx, scheduleID)
+			if err != nil {
+				s.log.Warn("afk reap: reset schedule failures", "component", "afk", "schedule", scheduleID, "err", err)
+			} else if changed {
+				s.publish(EventRepoChanged, repo.ID)
+			}
+		case OutcomeDeath:
+			n, err := s.store.IncrementScheduleFailures(ctx, scheduleID)
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				s.log.Debug("afk reap: schedule deleted mid-run", "component", "afk", "schedule", scheduleID)
+			case err != nil:
+				s.log.Warn("afk reap: increment schedule failures", "component", "afk", "schedule", scheduleID, "err", err)
+			case n >= PauseThreshold:
+				// The guarded one-statement pause: a human ReenableSchedule
+				// landing between the increment above and this write zeroes
+				// the counter, the WHERE no longer clears the threshold, and
+				// the re-enable wins — never paused-with-zero-strikes.
+				changed, err := s.store.PauseScheduleIfStruck(ctx, scheduleID, PauseThreshold)
+				if err != nil {
+					s.log.Warn("afk reap: pause schedule", "component", "afk", "schedule", scheduleID, "err", err)
+				} else if changed {
+					name := scheduleID
+					if sched, err := s.store.ScheduleByID(ctx, scheduleID); err == nil {
+						name = sched.Name
+					}
+					s.log.Warn("schedule paused after consecutive failures — re-enable from the repo settings to re-arm",
+						"component", "afk", "repo", repo.Name, "schedule", name, "failures", n)
+					if s.notify != nil {
+						s.notify(schedulePausedNotification(name, scheduleID, repo))
+					}
+					s.publish(EventRepoChanged, repo.ID)
+				}
 			}
 		}
 	}

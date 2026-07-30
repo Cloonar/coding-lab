@@ -16,6 +16,7 @@ export * from './api/chat';
 export * from './api/spawn';
 export * from './api/issues';
 export * from './api/secrets';
+export * from './api/schedules';
 export * from './api/afk';
 export * from './api/tokens';
 export * from './api/push';

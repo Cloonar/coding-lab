@@ -8,7 +8,7 @@ import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
 import type { MemoryHistory } from '@solidjs/router';
-import type { CredentialListItem, Provider, Repo, RepoSecret } from '../../api';
+import type { CredentialListItem, Provider, Repo, RepoSecret, Schedule } from '../../api';
 import App from '../../App';
 import RepoSettingsRoute from './index';
 
@@ -127,6 +127,52 @@ export function baseRepo(): Repo {
   };
 }
 
+/**
+ * The real built-in flow catalog (issue #247 / ADR-0062), in catalog order —
+ * the same two keys, labels and descriptions internal/afk/flows.go ships, so
+ * a section test asserting canonical flow order is asserting the real thing.
+ */
+export const SCHEDULE_FLOWS = [
+  {
+    key: 'autolander',
+    label: 'Autolander',
+    description:
+      'Files each finding as a fully specified issue labeled ready-for-agent, for the AFK pipeline to claim and land.',
+  },
+  {
+    key: 'human-triage',
+    label: 'Human triage',
+    description:
+      'Files each finding as an issue labeled needs-triage, for a human to triage before any agent claims it.',
+  },
+];
+
+/** A Schedule row with every key present, overridable per test. */
+export function baseSchedule(over: Partial<Schedule> = {}): Schedule {
+  return {
+    id: 'sched_1',
+    repo_id: REPO_ID,
+    name: 'Weekly dependency check',
+    cadence: '30 6 * * 1,4',
+    prompt: 'Investigate available dependency updates.',
+    flows: ['autolander'],
+    enabled: true,
+    budget_minutes: null,
+    model: null,
+    effort: null,
+    provider: null,
+    consecutive_failures: 0,
+    paused: false,
+    last_fired_at: null,
+    created_at: '2026-07-20T00:00:00.000Z',
+    updated_at: '2026-07-20T00:00:00.000Z',
+    ...over,
+  };
+}
+
+/** The cron expression the preview stub answers as unparseable. */
+export const BAD_CRON = 'bad';
+
 export function jsonResponse(status: number, body: unknown) {
   const text = JSON.stringify(body);
   return {
@@ -157,6 +203,12 @@ export interface RepoSettingsHarnessState {
   deleteRequests: string[];
   /** Repo DELETE status — 204 by default; a Danger test flips it to 409. */
   deleteStatus: number;
+  /** The repo's Schedules (issue #247), mutated by the stub's own handlers. */
+  schedules: Schedule[];
+  /** Every schedule POST/PATCH payload, for exact-body assertions. */
+  scheduleBodies: Record<string, unknown>[];
+  /** Cron expressions the preview endpoint was asked about, in order. */
+  cronPreviewExprs: string[];
 }
 export const h = {} as RepoSettingsHarnessState;
 
@@ -238,7 +290,7 @@ export function stubApi(): void {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         h.secretRequestBodies.push(body);
         const id = secretMatch[1];
-        // Rotate clears the exposure flag (RotateRepoSecret's job, issue #108) —
+        // Rotate clears the exposure flag (RotateRepoSecret's doing, issue #108) —
         // the mock mirrors the real server so the refetch-clears-the-badge
         // behavior is exercisable here.
         const updated: RepoSecret = {
@@ -254,6 +306,85 @@ export function stubApi(): void {
         const id = secretMatch[1];
         h.secretsOnServer = h.secretsOnServer.filter((s) => s.id !== id);
         return Promise.resolve(jsonResponse(204, undefined));
+      }
+      // Schedules (issue #247 / ADR-0062): per-repo cadence CRUD over the
+      // mutable h.schedules array, plus the two read-only surfaces the editor
+      // needs — the built-in flow catalog and the server-rendered cron
+      // preview, which is the ONLY thing that ever says when a cadence fires.
+      if (url === `/api/v1/repos/${REPO_ID}/schedules` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { schedules: h.schedules }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/schedules` && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        h.scheduleBodies.push(body);
+        // A name is unique per repo — the real 409 the section must surface.
+        if (h.schedules.some((s) => s.name === body.name)) {
+          return Promise.resolve(jsonResponse(409, { error: 'name already taken' }));
+        }
+        const created = baseSchedule({
+          id: `sched_${h.schedules.length + 1}`,
+          name: String(body.name ?? ''),
+          cadence: String(body.cadence ?? ''),
+          prompt: String(body.prompt ?? ''),
+          flows: (body.flows as string[] | undefined) ?? [],
+          enabled: (body.enabled as boolean | undefined) ?? true,
+        });
+        h.schedules = [...h.schedules, created];
+        return Promise.resolve(jsonResponse(201, created));
+      }
+      const reenableMatch = /^\/api\/v1\/repos\/repo_1\/schedules\/([^/]+)\/reenable$/.exec(url);
+      if (reenableMatch && method === 'POST') {
+        const id = reenableMatch[1];
+        const fresh = {
+          ...(h.schedules.find((s) => s.id === id) as Schedule),
+          paused: false,
+          consecutive_failures: 0,
+        };
+        h.schedules = h.schedules.map((s) => (s.id === id ? fresh : s));
+        return Promise.resolve(jsonResponse(200, fresh));
+      }
+      const scheduleMatch = /^\/api\/v1\/repos\/repo_1\/schedules\/([^/]+)$/.exec(url);
+      if (scheduleMatch && method === 'PATCH') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        h.scheduleBodies.push(body);
+        const id = scheduleMatch[1];
+        const updated = { ...(h.schedules.find((s) => s.id === id) as Schedule), ...body };
+        h.schedules = h.schedules.map((s) => (s.id === id ? updated : s));
+        return Promise.resolve(jsonResponse(200, updated));
+      }
+      if (scheduleMatch && method === 'DELETE') {
+        const id = scheduleMatch[1];
+        h.schedules = h.schedules.filter((s) => s.id !== id);
+        return Promise.resolve(jsonResponse(204, undefined));
+      }
+      if (url === '/api/v1/schedule-flows' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { flows: SCHEDULE_FLOWS }));
+      }
+      if (url.startsWith('/api/v1/cron/preview?expr=') && method === 'GET') {
+        const expr = decodeURIComponent(url.slice('/api/v1/cron/preview?expr='.length));
+        h.cronPreviewExprs.push(expr);
+        // Always a 200, valid or not — an unparseable expression is normal
+        // while the operator is still typing one.
+        if (expr === BAD_CRON) {
+          return Promise.resolve(
+            jsonResponse(200, {
+              expr,
+              valid: false,
+              error: 'cron: expected 5 fields, got 1',
+              next: null,
+              next_display: null,
+            }),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(200, {
+            expr,
+            valid: true,
+            error: null,
+            next: ['2026-08-03T06:00:00+02:00', '2026-08-06T06:00:00+02:00'],
+            next_display: ['Mon 2026-08-03 06:00', 'Thu 2026-08-06 06:00'],
+          }),
+        );
       }
       // AppShell mounts the side rail once authenticated; it fetches the
       // instance list for the ACTIVE rail + attention badge.
@@ -396,6 +527,27 @@ export function secretsSection(): HTMLElement {
   return section as HTMLElement;
 }
 
+/** The Schedules section's <section>, scoped the same way secretsSection() is. */
+export function schedulesSection(): HTMLElement {
+  const header = Array.from(container.querySelectorAll('section h2')).find(
+    (h2) => h2.textContent === 'Schedules',
+  );
+  if (!header) throw new Error('missing Schedules section heading');
+  const section = header.closest('section');
+  if (!section) throw new Error('Schedules heading has no enclosing <section>');
+  return section as HTMLElement;
+}
+
+/**
+ * Waits out the cadence editor's preview debounce and lets the resulting
+ * request land. Real timers on purpose: the debounce is the behavior under
+ * test, and faking the clock here would also fake the harness's own flush.
+ */
+export async function settlePreview(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 450));
+  await settle();
+}
+
 /** Submits the (single) form inside root — scoped so it never hits a sibling form. */
 export function submitFormWithin(root: ParentNode): void {
   const form = root.querySelector('form');
@@ -483,6 +635,9 @@ export function installRepoSettingsHooks(): void {
     h.secretRequestBodies = [];
     h.deleteRequests = [];
     h.deleteStatus = 204;
+    h.schedules = [];
+    h.scheduleBodies = [];
+    h.cronPreviewExprs = [];
     stubApi();
   });
 

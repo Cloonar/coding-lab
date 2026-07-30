@@ -38,6 +38,7 @@ describe('repo-settings deep links', () => {
     runner: () => container.querySelector('button[name="runner"]'),
     autoland: () => container.querySelector('input[name="autoland_enabled"]'),
     secrets: () => buttonByText('+ Add secret'),
+    schedules: () => buttonByText('+ Add schedule'),
     danger: () => buttonByText('Delete repository'),
   };
 
@@ -79,6 +80,7 @@ describe('repo-settings mobile index', () => {
       'Runner',
       'Autoland',
       'Secrets',
+      'Schedules',
       'Danger zone',
     ]);
     // Danger: pinned last, danger class (icon + title tint in CSS).

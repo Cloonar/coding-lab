@@ -28,6 +28,10 @@ import (
 // terminal hand-off once the fix-attempt bound is spent. 'escalate' is a
 // kind of its own rather than a lander mode flag because the reaper's
 // done-signal rule is per-kind and the run's mode must survive a restart.
+// 'scheduled' is a Schedule's firing (issue #247 / ADR-0062): an AFK-run
+// sibling with no issue, no claim, and no done-signal, terminated by its
+// budget clock alone — the reaper never reads the pull listing for it, and
+// budget expiry classifies success rather than timeout-failure.
 const (
 	RunKindManual    = "manual"
 	RunKindAFKManual = "afk_manual"
@@ -35,6 +39,7 @@ const (
 	RunKindLander    = "lander"
 	RunKindFix       = "fix"
 	RunKindEscalate  = "escalate"
+	RunKindScheduled = "scheduled"
 )
 
 // Run outcomes (design §3a). 'active' is the only non-terminal value; the
@@ -54,11 +59,18 @@ const (
 
 // Run is one row of runs — every §3a column. Nil pointers are NULL.
 type Run struct {
-	ID           string
-	RepoID       string
-	Kind         string // manual|afk_manual|afk_auto|lander|fix|escalate
-	Provider     string
-	IssueNumber  *int
+	ID          string
+	RepoID      string
+	Kind        string // manual|afk_manual|afk_auto|lander|fix|escalate|scheduled
+	Provider    string
+	IssueNumber *int
+	// ScheduleID is the Schedule this run is a firing of (issue #247 /
+	// ADR-0062), nil for every other kind. It is identity, exactly like
+	// IssueNumber above is for an AFK run: skip-on-overlap and the per-Schedule
+	// failure counter both attribute a run to its Schedule through this column
+	// rather than re-parsing the session label. ON DELETE SET NULL — deleting a
+	// Schedule never kills its live run, it only orphans the link.
+	ScheduleID   *string
 	Branch       string
 	WorktreePath string
 	SessionName  string
@@ -104,7 +116,7 @@ func (r Run) DisplayName() string {
 const runColumns = `id, repo_id, kind, provider, issue_number, branch,
 	worktree_path, session_name, model, effort, deep_link_url, transcript_path,
 	started_at, budget_deadline, ended_at, outcome, failure_reason, title, remote,
-	cred_sig`
+	cred_sig, schedule_id`
 
 // CreateRun inserts r exactly as given (the caller has derived every field:
 // session name, branch, worktree path, resolved model/effort). Timestamps are
@@ -130,12 +142,12 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	}
 	_, err := s.db.ExecContext(ctx, s.rebind(
 		`INSERT INTO runs (`+runColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.RepoID, r.Kind, r.Provider, r.IssueNumber, r.Branch,
 		r.WorktreePath, r.SessionName, r.Model, r.Effort, r.DeepLinkURL,
 		r.TranscriptPath, fmtTime(r.StartedAt), fmtNullTime(r.BudgetDeadline),
 		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason, r.Title, r.Remote,
-		credSig)
+		credSig, r.ScheduleID)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return Run{}, fmt.Errorf("create run %q: %w", r.SessionName, ErrNotFound)
@@ -350,11 +362,12 @@ func scanRun(scan func(dest ...any) error) (Run, error) {
 		failure    sql.NullString
 		title      sql.NullString
 		credSig    sql.NullString
+		scheduleID sql.NullString
 	)
 	if err := scan(&r.ID, &r.RepoID, &r.Kind, &r.Provider, &issueN, &r.Branch,
 		&r.WorktreePath, &r.SessionName, &r.Model, &r.Effort, &deepLink,
 		&transcript, &started, &budget, &ended, &r.Outcome, &failure, &title,
-		&r.Remote, &credSig); err != nil {
+		&r.Remote, &credSig, &scheduleID); err != nil {
 		return Run{}, err
 	}
 	r.IssueNumber = nullInt(issueN)
@@ -362,6 +375,7 @@ func scanRun(scan func(dest ...any) error) (Run, error) {
 	r.TranscriptPath = nullStr(transcript)
 	r.FailureReason = nullStr(failure)
 	r.Title = nullStr(title)
+	r.ScheduleID = nullStr(scheduleID)
 	// cred_sig is nullable; a NULL scans as the zero-value sql.NullString, so
 	// .String is "" without needing the Valid check — "" IS "never stamped".
 	r.CredSig = credSig.String

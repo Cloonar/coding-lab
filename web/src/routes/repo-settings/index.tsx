@@ -22,6 +22,7 @@ import BranchesSection from './sections/Branches';
 import DangerZone from './sections/Danger';
 import GeneralSection from './sections/General';
 import IntegrationsSection from './sections/Integrations';
+import SchedulesSection from './sections/Schedules';
 import RepoSecretsSection from './sections/Secrets';
 import RunnerSection from './sections/Runner';
 
@@ -141,6 +142,14 @@ function RepoSettingsView() {
                   </Match>
                   <Match when={params.section === 'secrets'}>
                     <RepoSecretsSection repoId={r().id} />
+                  </Match>
+                  <Match when={params.section === 'schedules'}>
+                    <SchedulesSection
+                      repo={r}
+                      providers={providers() ?? []}
+                      settings={settings() ?? {}}
+                      onSaved={refetch}
+                    />
                   </Match>
                   <Match when={params.section === 'danger'}>
                     <DangerZone repo={r} />
