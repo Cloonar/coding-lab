@@ -313,6 +313,9 @@ func TestFlowCatalogMutationSafety(t *testing.T) {
 	mine[0] = Flow{Key: "clobbered", Label: "x", Description: "x", Instructions: "x"}
 	mine[1].Instructions = "wiped"
 	mine = append(mine[:0], mine[1:]...)
+	if len(mine) != len(before)-1 {
+		t.Fatalf("caller-side truncation did not happen: len %d, want %d", len(mine), len(before)-1)
+	}
 
 	after := FlowCatalog()
 	if len(after) != len(before) {
