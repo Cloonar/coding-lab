@@ -20,6 +20,24 @@ via `.git/info/exclude`). See `docs/agent-brief.md`, decision D13.
   genericised so it stays accurate for this Go repo. Referenced by `docs/agents/issue-tracker.md`.
   A future upstream bump must **not** delete these — they are not part of mattpocock/skills.
 
+## Local prompt tuning (2026-08, Claude 5 family)
+
+On top of the vendored rev, these files carry local edits tuning the prompts for the
+Claude 5 models (more literal instruction-following, longer default deliverables). An
+upstream bump replaces upstream skill directories wholesale — re-apply these afterwards:
+
+- `grill-me/SKILL.md` — questions explicitly wait for feedback before continuing (matches
+  `grill-with-docs`).
+- `to-prd/SKILL.md` — "don't interview" scoped to *re*-interviewing so it no longer
+  contradicts the step-2 module check; user-story instruction de-inflated ("LONG …
+  extremely extensive" produces padded lists on models that already write long).
+- `triage/AGENT-BRIEF.md` — tracker-neutral wording (was GitHub/`gh`-specific).
+- `land-pr/validation-core.md` (cloonar-local, survives bumps anyway) — explicit bar for
+  `CONCERNS`, so higher-recall reviewers don't stall autoland's auto-merge on nitpicks.
+
+The recommended model/effort per workflow stage lives in the root `README.md`
+("Model selection for the agent workflow").
+
 ## Bundle contents
 
 Upstream (mattpocock/skills): `caveman`, `diagnose`, `grill-me`, `grill-with-docs`,
