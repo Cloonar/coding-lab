@@ -652,7 +652,7 @@ func TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered(t *testing.T) {
 			t.Fatalf("missing %s section", name)
 		}
 	}
-	if !(bodyIdx < secretsIdx && secretsIdx < importsIdx && importsIdx < skillsIdx) {
+	if bodyIdx >= secretsIdx || secretsIdx >= importsIdx || importsIdx >= skillsIdx {
 		t.Errorf("sections out of order: body=%d secrets=%d imports=%d skills=%d", bodyIdx, secretsIdx, importsIdx, skillsIdx)
 	}
 }
