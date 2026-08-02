@@ -83,7 +83,7 @@ Full example — sops-provided master key, Postgres DSN via `environmentFile`:
 - Unit PATH includes git, tmux, **openssh**, util-linux, `package` (for `labctl`), the fixed tools baseline (`gawk`, `gnutar`, `gzip`, `xz`, `zstd`, `unzip`, `curl`, `jq`, `file`, `patch`, `procps` (`ps`), `ripgrep` (`rg`), and `nix` via `config.nix.package` — so a session can run a project flake's devshell for per-project toolchains), every non-null `agentPackages` value, and `extraPackages`. The baseline is fixed, not an option (a contract every provider's session can assume; `extraPackages` is the additive knob); language toolchains are deliberately excluded and come from each project's flake. On a container-mode host every `agentPackages` value may be `null` — the agent-tools images are the CLI distribution there (ADR-0057). openssh is load-bearing: origins are SSH remotes and git forks `ssh` off PATH — without it every fetch dies with "cannot run ssh".
 - `ExecStart` uses systemd escaping (`escapeSystemdExecArgs`), not shell quoting — `%` and `$` in a DSN survive.
 
-**nixpkgs pin**: the flake input must ship `go_1_26`. Currently `github:NixOS/nixpkgs/nixos-unstable`, locked at `d407951447dcd00442e97087bf374aad70c04cea`. Record pin changes here.
+**nixpkgs pin**: the flake input must ship `go_1_26`. Currently `github:NixOS/nixpkgs/nixos-unstable`, locked at `148bab9c1c3c53136ecb44a6ea356a0ed5b39b06`. Record pin changes here.
 
 **Debugging sessions**: the module installs tmux system-wide; attach to a live agent session with `sudo -u lab tmux attach -t '<repo>~<label>'` (detach with `C-b d` — never kill the pane; Stop from the UI so the guarded teardown runs).
 
