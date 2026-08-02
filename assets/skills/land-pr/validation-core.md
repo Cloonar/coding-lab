@@ -92,6 +92,14 @@ yourself).
   is resolved. Where no human is in the loop (an autoland lander), any
   `CONCERNS` caps the outcome at approve-only — auto-merge needs a clean
   `PASS`.
+
+  **The bar for a CONCERN:** a finding a maintainer would genuinely want to
+  see before or shortly after landing — a possible behavioral issue, missing
+  test coverage on changed logic, a risky pattern. Style preferences, naming
+  nits, and hypothetical hardening do **not** rise to CONCERNS — a correct
+  diff whose only findings are of that kind is a `PASS`. (This bar matters
+  because any CONCERNS suppresses an autoland lander's auto-merge: reserve it
+  for findings worth that cost.)
 - **`FAIL`** — must not land. Findings are actionable: say what to fix, and
   where.
 
