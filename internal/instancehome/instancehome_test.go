@@ -45,6 +45,19 @@ func TestRuntimePathShape(t *testing.T) {
 	}
 }
 
+func TestImportsPathShape(t *testing.T) {
+	m := newTestManager(t)
+	const runID = "run_deadbeefdeadbeefdeadbeefdeadbeef"
+	want := filepath.Join(m.Root(), runID, "imports")
+	if got := m.ImportsPath(runID); got != want {
+		t.Errorf("ImportsPath(%q) = %q, want %q", runID, got, want)
+	}
+	// Pure derivation, no I/O — like HomePath/RuntimePath.
+	if _, err := os.Stat(m.Root()); !os.IsNotExist(err) {
+		t.Errorf("ImportsPath created %q; want no I/O until Materialize", m.Root())
+	}
+}
+
 func TestMaterializeCreatesTree0700(t *testing.T) {
 	m := newTestManager(t)
 	const runID = "run_aaaa"
@@ -57,9 +70,10 @@ func TestMaterializeCreatesTree0700(t *testing.T) {
 		t.Errorf("Materialize returned %q, want %q", home, want)
 	}
 
-	// The whole per-run tree: root, run dir, home, and the per-run runtime
-	// dir (issue #205) — all 0700.
-	for _, dir := range []string{m.Root(), filepath.Join(m.Root(), runID), home, m.RuntimePath(runID)} {
+	// The whole per-run tree: root, run dir, home, the per-run runtime dir
+	// (issue #205), and the imports dir (issue #261 — created for every run,
+	// import-less ones included, so the tree's shape is uniform) — all 0700.
+	for _, dir := range []string{m.Root(), filepath.Join(m.Root(), runID), home, m.RuntimePath(runID), m.ImportsPath(runID)} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("stat %s: %v", dir, err)
@@ -81,12 +95,15 @@ func TestMaterializeTightensExistingLooseDirs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, runID, "runtime"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, runID, "imports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	m := New(root)
 	home, err := m.Materialize(runID)
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	for _, dir := range []string{root, filepath.Join(root, runID), home, m.RuntimePath(runID)} {
+	for _, dir := range []string{root, filepath.Join(root, runID), home, m.RuntimePath(runID), m.ImportsPath(runID)} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -163,6 +180,86 @@ func TestWipeRemovesWholeTreeIncludingNestedFiles(t *testing.T) {
 	// Root itself survives — Wipe only removes this run's subtree.
 	if _, err := os.Stat(m.Root()); err != nil {
 		t.Errorf("Wipe removed the instances root: %v", err)
+	}
+}
+
+// writeProtectedSnapshot builds a read-only import snapshot (issue #261)
+// under the run's imports dir and strips every write bit from it — the exact
+// shape the host runner's best-effort `chmod a-w` leaves behind (ADR-0063):
+// unwritable FILES inside unwritable DIRECTORIES. The directory half is what
+// defeats a plain os.RemoveAll, because an unwritable directory refuses the
+// unlink of its own children however writable those children are.
+func writeProtectedSnapshot(t *testing.T, m *Manager, runID, name string) string {
+	t.Helper()
+	dir := filepath.Join(m.ImportsPath(runID), name)
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{filepath.Join(dir, "README.md"), filepath.Join(sub, "lib.go")} {
+		if err := os.WriteFile(f, []byte("snapshot\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(f, 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{sub, dir} {
+		if err := os.Chmod(d, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestWipeRemovesWriteProtectedTree is the issue #261 hardening: a run's
+// imports/ holds write-protected snapshots, so Wipe must restore the write
+// bits as it goes instead of failing on the first unwritable directory and
+// stranding the whole per-run tree.
+func TestWipeRemovesWriteProtectedTree(t *testing.T) {
+	m := newTestManager(t)
+	const runID = "run_jjjj"
+	if _, err := m.Materialize(runID); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	dir := writeProtectedSnapshot(t, m, runID, "libcore")
+	// Precondition: both an unwritable file and an unwritable directory are
+	// present — the test is worthless if the setup did not take.
+	for _, p := range []string{dir, filepath.Join(dir, "README.md")} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o222 != 0 {
+			t.Fatalf("%s is mode %04o, want no write bits", p, fi.Mode().Perm())
+		}
+	}
+
+	if err := m.Wipe(runID); err != nil {
+		t.Fatalf("Wipe over a write-protected import snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(m.Root(), runID)); !os.IsNotExist(err) {
+		t.Errorf("write-protected per-run tree survived Wipe (err %v)", err)
+	}
+}
+
+// SweepAll's orphan reap meets the same write-protected snapshots the
+// synchronous Wipe does — a crashed launch leaves them behind exactly as it
+// leaves the rest of the tree — so its removal must be hardened identically.
+func TestSweepAllReapsWriteProtectedOrphan(t *testing.T) {
+	m := newTestManager(t)
+	const orphan = "run_44444444444444444444444444444444"
+	if _, err := m.Materialize(orphan); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	writeProtectedSnapshot(t, m, orphan, "libcore")
+	ageDir(t, filepath.Join(m.Root(), orphan))
+
+	if err := m.SweepAll(func(string) bool { return false }); err != nil {
+		t.Fatalf("SweepAll over a write-protected orphan: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(m.Root(), orphan)); !os.IsNotExist(err) {
+		t.Errorf("write-protected orphan survived SweepAll (err %v)", err)
 	}
 }
 

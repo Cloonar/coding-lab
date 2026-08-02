@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -157,6 +158,73 @@ func TestStart_containerRunner_podmanPaneArgv(t *testing.T) {
 	}
 	if sess.Dir != wt {
 		t.Errorf("container pane cwd = %q, want the worktree %q", sess.Dir, wt)
+	}
+}
+
+// Read-only imports under the container runner (issue #261 / ADR-0063): each
+// materialized snapshot renders as `-v <path>:<path>:ro` — the mount
+// inventory's FIRST read-only bind, at a host-identical path so the absolute
+// path the seeded context file prints is the path the agent uses inside — fed
+// from RunSpec.ImportDirs, asserted here through the same exact-argv
+// comparison as TestStart_containerRunner_podmanPaneArgv. And the snapshot
+// tree stays WRITABLE host-side: the :ro mount is the enforcement under this
+// runner, while lab itself must still be able to re-materialize in place for
+// /pull-base (the host runner's advisory `chmod a-w` would only get in the
+// way of that).
+func TestStart_containerRunner_importsAreReadOnlyBinds(t *testing.T) {
+	f := newFixture(t)
+	f.enableContainer(t)
+	f.addImportTarget(t, "libcore", store.CloneStatusReady)
+
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	name := "proj~20260608-1530"
+	sess, live := f.runner.Session(name)
+	if !live {
+		t.Fatal("session not live after container Start")
+	}
+	dest := filepath.Join(f.homes.ImportsPath(run.ID), "libcore")
+	if !slices.Contains(sess.Argv, dest+":"+dest+":ro") {
+		t.Errorf("pane argv carries no read-only import bind for %s:\n  %q", dest, sess.Argv)
+	}
+
+	wt := filepath.Join(f.worktreeRoot, "proj-20260608-1530")
+	wantArgv := podmanx.RunArgv(podmanx.RunSpec{
+		Bin:         testPodmanBin,
+		Name:        podmanx.ContainerName(name),
+		Image:       testDevImage,
+		ToolsImage:  testToolsImage,
+		WorktreeDir: wt,
+		BareDir:     f.bare(),
+		AgentDir:    "/var/lib/lab-test/agent",
+		HomeDir:     f.homes.HomePath(run.ID),
+		RuntimeDir:  f.homes.RuntimePath(run.ID),
+		ImportDirs:  []string{dest},
+		Memory:      "8g",
+		Pids:        4096,
+		Nofile:      16384,
+		Env: []string{
+			"LAB_URL=unix:///var/lib/lab-test/agent/agent.sock",
+			"HOME=" + podmanx.Home,
+			"PATH=" + podmanx.PATH,
+		},
+		ForwardEnv: []string{"LAB_TOKEN", "TERM"},
+		Argv:       f.wantSpawnArgv(name, run.Model, run.Effort, "", run.ID),
+	})
+	if !slices.Equal(sess.Argv, wantArgv) {
+		t.Errorf("container pane argv =\n  %q\nwant\n  %q", sess.Argv, wantArgv)
+	}
+
+	for _, p := range []string{dest, filepath.Join(dest, "f0.txt")} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if fi.Mode().Perm()&0o200 == 0 {
+			t.Errorf("%s is mode %04o — container-mode snapshots must stay writable host-side", p, fi.Mode().Perm())
+		}
 	}
 }
 

@@ -39,6 +39,14 @@ type Seeder struct{}
 // New returns a Seeder.
 func New() *Seeder { return &Seeder{} }
 
+// ImportRef describes one read-only import for the context file: a snapshot
+// of another lab repo materialized outside the worktree at spawn.
+type ImportRef struct {
+	Name   string // the imported repo's name
+	Path   string // absolute path of the snapshot directory
+	Commit string // snapshotted commit (12-char short hash)
+}
+
 // Opts parametrizes SeedWorkspace — the growth point for later per-spawn
 // seeding knobs (mirrors provider.SeedOpts).
 type Opts struct {
@@ -50,6 +58,16 @@ type Opts struct {
 	// descriptions; nil or empty yields no section, so a secret-less repo's
 	// context file is byte-identical to before this field existed.
 	Secrets []store.RepoSecret
+
+	// Imports is the repo's read-only-import INVENTORY (issue #261): one
+	// ImportRef per snapshot the launch path has already materialized
+	// outside this worktree. The seeder never creates or refreshes a
+	// snapshot — it only renders the inventory it is handed. The caller
+	// passes them ordered by name, and renderContextFile appends a
+	// Read-only imports section in that given order; nil or empty yields no
+	// section, so an import-less repo's context file is byte-identical to
+	// before this field existed.
+	Imports []ImportRef
 }
 
 // SeedWorkspace seeds worktree for a run on repo, driven by the provider's
@@ -72,5 +90,5 @@ func (s *Seeder) SeedWorkspace(worktree string, repo store.Repo, meta provider.S
 	if err := seedSkills(worktree, meta.SkillsDir); err != nil {
 		return err
 	}
-	return seedContextFile(worktree, repo, meta, opts.Secrets)
+	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Imports)
 }

@@ -7,7 +7,10 @@
 // agent process sees a HOME and a credential/spool surface scoped to that run
 // alone — never the host's, and never another run's (a shared runtime dir
 // would expose other runs' materialized git credentials inside the
-// container).
+// container). Since issue #261 a third sibling joins them:
+// <root>/<runID>/imports, the run's read-only import snapshots (ADR-0063) —
+// mounted read-only rather than rw, and the reason Wipe/SweepAll must cope
+// with write-protected trees.
 //
 // Its lifecycle deliberately mirrors internal/vault's credential
 // Materializer: Materialize writes the tree at launch, Wipe removes it
@@ -115,6 +118,20 @@ func (m *Manager) RuntimePath(runID string) string {
 	return filepath.Join(m.root, runID, "runtime")
 }
 
+// ImportsPath returns <root>/<runID>/imports — the run's read-only import
+// snapshots (issue #261 / ADR-0063), one subdirectory per imported repo
+// holding a .git-less copy of that repo's origin/<default> taken at spawn,
+// each with a sibling <name>.commit file recording the snapshotted commit for
+// /pull-base. The third sibling of home and runtime, for the same reason they
+// live here: the snapshots are per-run, never shared and never cached across
+// runs, so Wipe/SweepAll cover them for free and the container runner can
+// bind-mount exactly this run's snapshots — read-only, at their host-identical
+// paths. Pure path derivation like HomePath/RuntimePath; the directory need
+// not exist yet.
+func (m *Manager) ImportsPath(runID string) string {
+	return filepath.Join(m.root, runID, "imports")
+}
+
 // checkRunID validates runID with the same defensiveness vault's
 // checkNameParts applies to credential/op ids: non-empty and free of the
 // path separators, NUL, and dot that could let a hand-fed value escape
@@ -131,14 +148,19 @@ func checkRunID(runID string) error {
 	return nil
 }
 
-// Materialize creates <root>, <root>/<runID>, <root>/<runID>/home, and
-// <root>/<runID>/runtime — all mode 0700 (owner-only: HOME may end up
-// holding provider credentials or config the agent process itself writes,
-// and runtime holds materialized git credential files, issue #205) —
-// tightening the mode on any that already existed looser, exactly as
-// vault.NewMaterializer tightens its runtime dir. It returns
-// HomePath(runID). Calling it again for the same runID is a no-op beyond
-// re-tightening perms.
+// Materialize creates <root>, <root>/<runID>, <root>/<runID>/home,
+// <root>/<runID>/runtime, and <root>/<runID>/imports — all mode 0700
+// (owner-only: HOME may end up holding provider credentials or config the
+// agent process itself writes, and runtime holds materialized git credential
+// files, issue #205) — tightening the mode on any that already existed
+// looser, exactly as vault.NewMaterializer tightens its runtime dir. It
+// returns HomePath(runID). Calling it again for the same runID is a no-op
+// beyond re-tightening perms.
+//
+// The imports dir (issue #261) is created unconditionally, even for a run
+// whose repo declares no read-only imports: an empty directory costs nothing
+// and keeps the per-run tree's shape uniform, so nothing downstream has to
+// ask whether this run happens to have imports before deriving a path.
 func (m *Manager) Materialize(runID string) (string, error) {
 	if err := checkRunID(runID); err != nil {
 		return "", err
@@ -156,6 +178,9 @@ func (m *Manager) Materialize(runID string) (string, error) {
 	}
 	if err := mkdirTight(filepath.Join(runDir, "runtime")); err != nil {
 		return "", fmt.Errorf("runtime dir for run %s: %w", runID, err)
+	}
+	if err := mkdirTight(filepath.Join(runDir, "imports")); err != nil {
+		return "", fmt.Errorf("imports dir for run %s: %w", runID, err)
 	}
 	return home, nil
 }
@@ -192,10 +217,69 @@ func (m *Manager) Wipe(runID string) error {
 			m.preWipe(runID)
 		}
 	}
-	if err := os.RemoveAll(runDir); err != nil {
+	if err := removeTree(runDir); err != nil {
 		return fmt.Errorf("wipe instance home for run %s: %w", runID, err)
 	}
 	return nil
+}
+
+// removeTree removes dir recursively, hardened against WRITE-PROTECTED
+// content (issue #261): a run's imports/ holds read-only import snapshots,
+// which the host runner strips write bits from (ADR-0063's best-effort
+// `chmod a-w`) and which can also carry read-only modes from the imported
+// repo's own files — and an unwritable DIRECTORY refuses the unlink of its
+// children, so a plain RemoveAll fails at the first one and would strand the
+// whole per-run tree. The fast path is still one RemoveAll; only on failure
+// does the tree get walked to restore owner write+traverse, then removed
+// again. Exactly one retry: a second failure is a real I/O problem (a
+// different owner, a read-only mount), not a permission bit this process can
+// fix, so it surfaces rather than looping. The makeWritable/restoreWritable
+// pair below mirrors internal/gitx/materialize.go's identically-named helpers
+// (package-private there, deliberately re-implemented here rather than
+// exported — one small copy per package beats a dependency edge).
+func removeTree(dir string) error {
+	err := os.RemoveAll(dir)
+	if err == nil {
+		return nil
+	}
+	if rerr := restoreWritable(dir); rerr != nil {
+		return err // the original removal failure is the interesting one
+	}
+	return os.RemoveAll(dir)
+}
+
+// makeWritable gives the owner write (and, for a directory, the traverse and
+// list bits needed to unlink its children) on one path. Symlinks are left
+// alone — chmod would follow them out of the tree.
+func makeWritable(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return nil
+	}
+	want := info.Mode().Perm() | 0o200
+	if info.IsDir() {
+		want |= 0o700
+	}
+	if want == info.Mode().Perm() {
+		return nil
+	}
+	return os.Chmod(path, want)
+}
+
+// restoreWritable applies makeWritable to root and everything beneath it.
+// Directories are fixed on the way down — WalkDir calls the callback for a
+// directory before reading it — so a subtree that was write- and read-
+// protected becomes walkable as the walk proceeds.
+func restoreWritable(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return makeWritable(path)
+	})
 }
 
 // SweepAll GCs orphaned instance-home trees: for every entry of <root> that
@@ -246,7 +330,10 @@ func (m *Manager) SweepAll(keep func(runID string) bool) error {
 		if m.preWipe != nil {
 			m.preWipe(name)
 		}
-		if err := os.RemoveAll(filepath.Join(m.root, name)); err != nil {
+		// removeTree, not a bare RemoveAll: an orphan reaped here carries the
+		// same write-protected import snapshots (issue #261) a synchronous
+		// Wipe would have had to clear.
+		if err := removeTree(filepath.Join(m.root, name)); err != nil {
 			errs = append(errs, err)
 		}
 	}

@@ -10,6 +10,7 @@ export * from './api/core';
 export * from './api/auth';
 export * from './api/credentials';
 export * from './api/repos';
+export * from './api/imports';
 export * from './api/providers';
 export * from './api/runs';
 export * from './api/chat';

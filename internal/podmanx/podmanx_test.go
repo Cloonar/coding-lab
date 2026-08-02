@@ -33,9 +33,15 @@ func TestRunArgvGolden(t *testing.T) {
 		AgentDir:    "/var/lib/lab/agent",
 		HomeDir:     "/var/lib/lab/instances/run_1/home",
 		RuntimeDir:  "/var/lib/lab/runtime/run_1",
-		Memory:      "8g",
-		Pids:        4096,
-		Nofile:      16384,
+		// Two read-only import snapshots (issue #261), in the caller's order
+		// (the launch path sorts by import name).
+		ImportDirs: []string{
+			"/var/lib/lab/instances/run_1/imports/libcore",
+			"/var/lib/lab/instances/run_1/imports/webapp",
+		},
+		Memory: "8g",
+		Pids:   4096,
+		Nofile: 16384,
 		Env: []string{
 			"PATH=" + PATH,
 			"HOME=" + Home,
@@ -58,6 +64,9 @@ func TestRunArgvGolden(t *testing.T) {
 		"-v", "/var/lib/lab/agent:/var/lib/lab/agent",
 		"-v", "/var/lib/lab/instances/run_1/home:/home/agent",
 		"-v", "/var/lib/lab/runtime/run_1:/var/lib/lab/runtime/run_1",
+		// The inventory's only READ-ONLY binds, at host-identical paths.
+		"-v", "/var/lib/lab/instances/run_1/imports/libcore:/var/lib/lab/instances/run_1/imports/libcore:ro",
+		"-v", "/var/lib/lab/instances/run_1/imports/webapp:/var/lib/lab/instances/run_1/imports/webapp:ro",
 		"-w", "/var/lib/lab/worktrees/myrepo-1",
 		"--env", "PATH=" + PATH,
 		"--env", "HOME=/home/agent",
@@ -226,7 +235,9 @@ func binds(argv []string) []string {
 // field must never render a half-formed "-v :" for podman to reject (or
 // worse, interpret). With only HomeDir set the home bind is the sole -v;
 // with nothing set (the CLI shape before its store pair) there is no -v
-// at all.
+// at all. An empty ImportDirs (an import-less run, and both issue #206
+// shapes) contributes nothing either — the rw inventory is untouched by
+// issue #261 unless a repo actually declares imports.
 func TestRunArgvOmitsEmptyBinds(t *testing.T) {
 	got := RunArgv(RunSpec{Bin: "podman", Image: "img", HomeDir: "/h"})
 	assertArgv(t, binds(got), []string{"/h:" + Home})
@@ -234,6 +245,12 @@ func TestRunArgvOmitsEmptyBinds(t *testing.T) {
 	if got := binds(RunArgv(RunSpec{Bin: "podman", Image: "img"})); got != nil {
 		t.Fatalf("binds with no dirs set = %q, want none", got)
 	}
+	if got := binds(RunArgv(RunSpec{Bin: "podman", Image: "img", ImportDirs: []string{}})); got != nil {
+		t.Fatalf("binds with an empty ImportDirs = %q, want none", got)
+	}
+	// Set, it renders one :ro bind per entry, in order and nowhere else.
+	got = RunArgv(RunSpec{Bin: "podman", Image: "img", HomeDir: "/h", ImportDirs: []string{"/imp/a", "/imp/b"}})
+	assertArgv(t, binds(got), []string{"/h:" + Home, "/imp/a:/imp/a:ro", "/imp/b:/imp/b:ro"})
 }
 
 // TestRunArgvStoreHalfSet: a half-set store pair is a programmer error;

@@ -7,6 +7,7 @@
 import Bot from 'lucide-solid/icons/bot';
 import CalendarClock from 'lucide-solid/icons/calendar-clock';
 import ContainerIcon from 'lucide-solid/icons/container';
+import FolderInput from 'lucide-solid/icons/folder-input';
 import GitBranch from 'lucide-solid/icons/git-branch';
 import LockKeyhole from 'lucide-solid/icons/lock-keyhole';
 import PlaneLanding from 'lucide-solid/icons/plane-landing';
@@ -63,6 +64,12 @@ export const REPO_SETTINGS_CATEGORIES: SettingsCategory[] = [
     title: 'Schedules',
     description: 'Cron-fired scheduled runs: prompt, flows, cadence.',
     icon: CalendarClock,
+  },
+  {
+    slug: 'imports',
+    title: 'Imports',
+    description: "Other lab repos this repo's instances may read as read-only snapshots.",
+    icon: FolderInput,
   },
   {
     slug: 'danger',

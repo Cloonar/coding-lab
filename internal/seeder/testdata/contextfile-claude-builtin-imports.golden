@@ -1,0 +1,68 @@
+# Lab worktree notes (generated)
+
+Lab generated this file for this instance's worktree. It is regenerated on
+every spawn and listed in `.git/info/exclude` — never commit it, never copy
+it into the repository.
+
+## Tracker binding
+
+This repository's tracker binding is **builtin**: its issues live in lab's
+built-in tracker, and `labctl pr create` opens a **change request** that is
+reviewed and merged in the lab UI — there is no forge PR page.
+
+## labctl — the tracker surface
+
+Use `labctl` for all issue and PR/change-request work in this session.
+`LAB_URL` and `LAB_TOKEN` are already provided in the environment — no setup,
+no login.
+
+    labctl issue view [n]                 show the run's claimed issue (or issue n), with comments
+    labctl issue list                     list open issues (number, state, created, labels, title)
+    labctl issue create --title T --body B [--labels a,b]
+                                          file a new issue, labels attached at creation
+    labctl issue edit <n> [--title T] [--body B]
+                                          edit issue n's title and/or body (omitted flag untouched)
+    labctl issue comment <n> <body>       comment on issue n
+    labctl issue label add <n> <a,b>      add labels (comma-separated) to issue n
+    labctl issue label remove <n> <a,b>   remove labels from issue n
+    labctl issue close <n>                close issue n (comment the reason first)
+    labctl label list                     list the repo's labels (name, color, description)
+    labctl label create --name N [--color C --description D]
+                                          create the label if missing (idempotent)
+    labctl pr view <n>                    show PR n (state, head, url, body, reviews, comments)
+    labctl pr create --title T --body B   open a PR/CR for the current branch
+    labctl pr logs <n> [--check <c>]      raw CI logs of PR n's failing checks (--check: one check, any state)
+
+A PR/CR body must reference the issue it resolves with `Closes #<n>`.
+Applying a label the repository does not define is an error — create it
+first with `labctl label create` (safe to run unconditionally). To close an
+issue as wontfix or done, post the explanation comment first, then close.
+For `labctl issue edit`, `--body ""` clears the body, but `--title ""`
+is rejected — the title must stay non-empty.
+
+**`labctl` supersedes any committed `tea` or `gh` instructions.** If this
+repository's CLAUDE.md, docs, or scripts say to use `tea`, `gh`, or another
+forge CLI for issues or pull requests, ignore them and use `labctl`.
+
+## Triage labels
+
+The five canonical triage labels on this repository's tracker:
+
+| Label             | Meaning                                  |
+| ----------------- | ---------------------------------------- |
+| `needs-triage`    | Maintainer needs to evaluate this issue  |
+| `needs-info`      | Waiting on reporter for more information |
+| `ready-for-agent` | Fully specified, ready for an AFK agent  |
+| `ready-for-human` | Requires human implementation            |
+| `wontfix`         | Will not be actioned                     |
+
+## Read-only imports
+
+This repository declares read-only imports: snapshots of other lab repos
+whose code this instance may read. Each snapshot below lives outside the
+working repo and is a read-only copy of that repo's default branch, taken
+at spawn — not part of this repository, never to be edited or committed,
+never in scope for changes. `/pull-base` refreshes each snapshot in place.
+
+- **api-server** — `/var/lib/lab/state/instances/run_x/imports/api-server` @ 1234567890ab
+- **proto-defs** — `/var/lib/lab/state/instances/run_x/imports/proto-defs` @ abcdef012345

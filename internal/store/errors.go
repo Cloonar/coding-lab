@@ -8,6 +8,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	sqlite "modernc.org/sqlite"
@@ -33,6 +34,11 @@ var ErrCredentialGone = errors.New("credential no longer exists")
 // ValidSecretName (design §12: repo_secrets.name must be shell/env-safe).
 var ErrInvalidSecretName = errors.New("store: invalid secret name")
 
+// ErrHasImporters is the sentinel for a repo delete refused because other
+// repos still import it (issue #261): repo_imports.target_repo_id carries no
+// delete action, so DeleteRepo checks and refuses before the FK would.
+var ErrHasImporters = errors.New("repository has importers")
+
 // ReferencedError is the concrete error DeleteCredential returns when refused:
 // it carries the number of referencing repos for the API's 409 body.
 // errors.Is(err, ErrReferenced) matches it; errors.As recovers the count.
@@ -50,6 +56,17 @@ func (e *ReferencedError) Error() string {
 
 // Is makes errors.Is(err, ErrReferenced) true for any ReferencedError.
 func (e *ReferencedError) Is(target error) bool { return target == ErrReferenced }
+
+// ImportersError refuses a repo delete while other repos import it; Importers
+// carries the importing repos' names so the refusal can name them.
+type ImportersError struct{ Importers []string }
+
+func (e *ImportersError) Error() string {
+	return fmt.Sprintf("repository is imported by %s", strings.Join(e.Importers, ", "))
+}
+
+// Is makes errors.Is(err, ErrHasImporters) true for any ImportersError.
+func (e *ImportersError) Is(target error) bool { return target == ErrHasImporters }
 
 // SQLite extended result codes (modernc.org/sqlite/lib values, inlined so the
 // generated lib package is not imported for three constants).
