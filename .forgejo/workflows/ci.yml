@@ -12,7 +12,7 @@
 # in ci-nix.yml, path-gated to nix/dependency changes; it stays authoritative
 # (and the deploy re-runs it as a backstop). See ADR-0023 and docs/ops.md.
 #
-# Pins (match nixpkgs at the current flake.lock, rev d407951…): Go from go.mod
+# Pins (match nixpkgs at the current flake.lock, rev 148bab9…): Go from go.mod
 # (`go 1.26`), Node 24 (`pkgs.nodejs`), golangci-lint 2.12.2
 # (`nix eval nixpkgs#golangci-lint.version`). Drift between flake.lock bumps is
 # acceptable — the authoritative untagged lint and full suite re-run in the nix
@@ -80,7 +80,7 @@ jobs:
       - name: golangci-lint (untagged — matches the flake's golangci-lint check)
         run: |
           # Pinned to the version nixpkgs ships at the current flake.lock
-          # (`nix eval nixpkgs#golangci-lint.version` @ d407951 → 2.12.2). Run
+          # (`nix eval nixpkgs#golangci-lint.version` @ 148bab9 → 2.12.2). Run
           # untagged, CGO_ENABLED=0 (job env) — the placeholder embed_ui.go
           # variant, same as the flake's whole-program lint.
           set -eux
