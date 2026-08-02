@@ -210,6 +210,17 @@ func (s *Server) writeRepoError(w http.ResponseWriter, doing string, err error) 
 		writeError(w, http.StatusConflict, reposvc.ErrCloneNotFailed.Error())
 	case errors.Is(err, reposvc.ErrHasLiveInstances):
 		writeError(w, http.StatusConflict, reposvc.ErrHasLiveInstances.Error())
+	case errors.Is(err, store.ErrHasImporters):
+		// Delete refused while other repos still import this one (issue
+		// #261 / ADR-0063): name them so the operator knows which imports
+		// to remove first — force never bypasses this guard, so the message
+		// says so rather than implying a retry-with-force would help.
+		msg := store.ErrHasImporters.Error()
+		var imp *store.ImportersError
+		if errors.As(err, &imp) && len(imp.Importers) > 0 {
+			msg = imp.Error() + " — remove those imports first"
+		}
+		writeError(w, http.StatusConflict, msg)
 	default:
 		s.internalError(w, doing, err)
 	}

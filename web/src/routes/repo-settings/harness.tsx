@@ -8,7 +8,14 @@ import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
 import type { MemoryHistory } from '@solidjs/router';
-import type { CredentialListItem, Provider, Repo, RepoSecret, Schedule } from '../../api';
+import type {
+  CredentialListItem,
+  Provider,
+  Repo,
+  RepoImport,
+  RepoSecret,
+  Schedule,
+} from '../../api';
 import App from '../../App';
 import RepoSettingsRoute from './index';
 
@@ -128,6 +135,19 @@ export function baseRepo(): Repo {
 }
 
 /**
+ * Two more registered repos (issue #261's Imports picker candidates), beyond
+ * baseRepo() itself: repo_2 is ready, repo_3 is still cloning — the picker
+ * must offer both (it is not the spawn-time clone-status guard), so a
+ * still-cloning candidate stays selectable by construction here.
+ */
+export function otherRepos(): Repo[] {
+  return [
+    { ...baseRepo(), id: 'repo_2', name: 'other-repo', clone_status: 'ready' },
+    { ...baseRepo(), id: 'repo_3', name: 'third-repo', clone_status: 'cloning' },
+  ];
+}
+
+/**
  * The real built-in flow catalog (issue #247 / ADR-0062), in catalog order —
  * the same two keys, labels and descriptions internal/afk/flows.go ships, so
  * a section test asserting canonical flow order is asserting the real thing.
@@ -193,6 +213,9 @@ export function jsonResponse(status: number, body: unknown) {
  */
 export interface RepoSettingsHarnessState {
   repoOnServer: Repo;
+  /** GET /repos (issue #261): the registered-repo catalog the Imports
+   *  picker draws candidates from — baseRepo() plus otherRepos() by default. */
+  reposOnServer: Repo[];
   providersOnServer: Provider[];
   settingsOnServer: Record<string, unknown>;
   credentialsOnServer: CredentialListItem[];
@@ -209,6 +232,16 @@ export interface RepoSettingsHarnessState {
   scheduleBodies: Record<string, unknown>[];
   /** Cron expressions the preview endpoint was asked about, in order. */
   cronPreviewExprs: string[];
+  /** This repo's declared imports (issue #261), sorted by name like the real API. */
+  importsOnServer: RepoImport[];
+  /** Every imports POST body, for exact target_repo_id assertions. */
+  importPostBodies: Record<string, unknown>[];
+  /** Forces the next imports POST to answer 400 with this message — the
+   *  self-import/unknown-target 400s the client-side picker already
+   *  excludes by construction, so a test reaches them this way instead. */
+  importPostError: string | null;
+  /** Full URLs of DELETE .../imports/:targetId calls. */
+  importDeleteRequests: string[];
 }
 export const h = {} as RepoSettingsHarnessState;
 
@@ -240,6 +273,12 @@ export function stubApi(): void {
       // resolve against (provider_default / spawn_provider_default_afk).
       if (url === '/api/v1/settings' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { ...h.settingsOnServer }));
+      }
+      // The registered-repo catalog (issue #261): the Imports picker's
+      // candidate list. Kept separate from h.repoOnServer, which only ever
+      // answers the single-repo GET below.
+      if (url === '/api/v1/repos' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { repos: h.reposOnServer }));
       }
       if (url === `/api/v1/repos/${REPO_ID}` && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { ...h.repoOnServer }));
@@ -305,6 +344,47 @@ export function stubApi(): void {
       if (secretMatch && method === 'DELETE') {
         const id = secretMatch[1];
         h.secretsOnServer = h.secretsOnServer.filter((s) => s.id !== id);
+        return Promise.resolve(jsonResponse(204, undefined));
+      }
+      // Repo imports (issue #261): directional, consumer-declared read-only
+      // snapshots. GET lists {id, name} sorted by name; POST is idempotent
+      // (adding an existing import also 201s); self-import and an unknown
+      // target both 400 — h.importPostError lets a test force that 400 past
+      // the picker's own client-side filtering (see its doc comment).
+      if (url === `/api/v1/repos/${REPO_ID}/imports` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { imports: h.importsOnServer }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/imports` && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        h.importPostBodies.push(body);
+        if (h.importPostError !== null) {
+          return Promise.resolve(jsonResponse(400, { error: h.importPostError }));
+        }
+        const targetID = String(body.target_repo_id);
+        const target = h.reposOnServer.find((r) => r.id === targetID);
+        if (targetID === REPO_ID) {
+          return Promise.resolve(
+            jsonResponse(400, { error: 'imports: a repository cannot import itself' }),
+          );
+        }
+        if (target === undefined) {
+          return Promise.resolve(
+            jsonResponse(400, { error: `imports: unknown target repository "${targetID}"` }),
+          );
+        }
+        const created: RepoImport = { id: target.id, name: target.name };
+        if (!h.importsOnServer.some((imp) => imp.id === created.id)) {
+          h.importsOnServer = [...h.importsOnServer, created].sort((a, b) =>
+            a.name.localeCompare(b.name),
+          );
+        }
+        return Promise.resolve(jsonResponse(201, created));
+      }
+      const importMatch = /^\/api\/v1\/repos\/repo_1\/imports\/([^/]+)$/.exec(url);
+      if (importMatch && method === 'DELETE') {
+        h.importDeleteRequests.push(url);
+        const id = importMatch[1];
+        h.importsOnServer = h.importsOnServer.filter((imp) => imp.id !== id);
         return Promise.resolve(jsonResponse(204, undefined));
       }
       // Schedules (issue #247 / ADR-0062): per-repo cadence CRUD over the
@@ -538,6 +618,17 @@ export function schedulesSection(): HTMLElement {
   return section as HTMLElement;
 }
 
+/** The Imports section's <section>, scoped the same way secretsSection() is. */
+export function importsSection(): HTMLElement {
+  const header = Array.from(container.querySelectorAll('section h2')).find(
+    (h2) => h2.textContent === 'Imports',
+  );
+  if (!header) throw new Error('missing Imports section heading');
+  const section = header.closest('section');
+  if (!section) throw new Error('Imports heading has no enclosing <section>');
+  return section as HTMLElement;
+}
+
 /**
  * Waits out the cadence editor's preview debounce and lets the resulting
  * request land. Real timers on purpose: the debounce is the behavior under
@@ -620,6 +711,7 @@ export function setDesktop(matches: boolean): void {
 export function installRepoSettingsHooks(): void {
   beforeEach(() => {
     h.repoOnServer = baseRepo();
+    h.reposOnServer = [baseRepo(), ...otherRepos()];
     h.providersOnServer = baseProviders();
     h.settingsOnServer = {
       provider_default: 'claude-code',
@@ -638,6 +730,10 @@ export function installRepoSettingsHooks(): void {
     h.schedules = [];
     h.scheduleBodies = [];
     h.cronPreviewExprs = [];
+    h.importsOnServer = [];
+    h.importPostBodies = [];
+    h.importPostError = null;
+    h.importDeleteRequests = [];
     stubApi();
   });
 

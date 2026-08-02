@@ -3,8 +3,10 @@ package instance
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
@@ -82,8 +84,10 @@ type LaunchSpec struct {
 }
 
 // Launch runs the v0-pinned spawn sequence for a fully-derived spec:
-// startguard.Mark → per-run tree materialization (home + runtime, issues
-// #202/#205) → credential materialization into the per-run runtime dir →
+// startguard.Mark → per-run tree materialization (home + runtime + imports,
+// issues #202/#205/#261) → credential materialization into the per-run runtime
+// dir → read-only import snapshots, in parallel, refusing the spawn before the
+// claim if any target fails (issue #261) →
 // gitx.AddWorktree (fail-loud fetch, no fallback base) → workspace seeding
 // (provider trust/MCP, then lab's skills bundle + CLAUDE.local.md) → runs
 // row + run token → tmux spawn (SeedPrompt, when set, carried as the spawn
@@ -191,6 +195,24 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	}
 	gitEnv := append(append([]string{}, s.gitEnv...), credEnv...)
 
+	// The repo's read-only imports (issue #261 / ADR-0063), materialized HERE
+	// — after the git env exists (each import fetch authenticates with its own
+	// target's credential, built inside) and BEFORE AddWorktree, which is the
+	// claim. A target-side failure (dead remote, rotated credential, a target
+	// whose own clone has not finished) therefore refuses the spawn with
+	// nothing claimed: an AFK spec's issue stays selectable instead of parked
+	// behind another repo's outage, the same refusal-before-claim rule the
+	// container gate above obeys. Because Launch is the ONE path every run kind
+	// goes through, spawn parity across manual/AFK/lander/fix/escalate/
+	// scheduled runs is by construction, not by keeping call sites in step. The
+	// refusal names the failing target; the cleanup is wipeHome alone, since
+	// the snapshots live INSIDE the per-run tree.
+	importRefs, importDirs, err := s.materializeImports(ctx, repo, runID, runMat)
+	if err != nil {
+		wipeHome()
+		return store.Run{}, &StartFailedError{cause: err}
+	}
+
 	// AddWorktree: fail-loud fetch → fork from origin/<default>, NO fallback
 	// base. A failure here created nothing beyond the per-run tree (the run
 	// row/token do not exist yet) — wipe it and stop. An adopt-branch spec
@@ -281,8 +303,11 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// The generic seeder consumes the SAME provider's declared shapes (issue
 	// #51 decision 8): skills dir, context-file name, exclude entries — plus
 	// the repo's secret inventory (issue #104) for the generated Secrets
-	// section.
-	if err := s.seeder.SeedWorkspace(wtPath, repo, spec.Provider.SeedMeta(), seeder.Opts{Secrets: secrets}); err != nil {
+	// section and this run's materialized read-only imports (issue #261) for
+	// the Read-only imports section. An import the agent cannot find is not an
+	// import, so the refs carry the name, the absolute snapshot path, and the
+	// commit it was taken at.
+	if err := s.seeder.SeedWorkspace(wtPath, repo, spec.Provider.SeedMeta(), seeder.Opts{Secrets: secrets, Imports: importRefs}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -408,12 +433,16 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 			AgentDir:    s.agentSockDir,
 			HomeDir:     home,
 			RuntimeDir:  s.homes.RuntimePath(runID),
-			Memory:      ctrMemory,
-			Pids:        ctrPids,
-			Nofile:      ctrNofile,
-			Env:         env,
-			ForwardEnv:  forward,
-			Argv:        spawnArgv,
+			// The read-only import snapshots (issue #261): one `:ro` bind each
+			// at its host-identical path, in store order (by name), so the
+			// path the seeded context file printed is the path inside.
+			ImportDirs: importDirs,
+			Memory:     ctrMemory,
+			Pids:       ctrPids,
+			Nofile:     ctrNofile,
+			Env:        env,
+			ForwardEnv: forward,
+			Argv:       spawnArgv,
 		})
 		spawnErr = s.runner.Start(ctx, name, wtPath, paneArgv, secretForwardEnv(extraEnv, forward), tmuxx.WithoutNofileCap())
 	} else {
@@ -432,6 +461,189 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	s.ArmCapture(created)
 	s.publishRunChanged(repo.ID, created.ID)
 	return created, nil
+}
+
+// materializeImports materializes every read-only import the repo declares
+// (issue #261 / ADR-0063) into this run's private imports dir and returns the
+// seeder's inventory (name, absolute path, short commit — ordered by name,
+// which is the store's order) plus the snapshot directories in the same order
+// for the container runner's `:ro` binds. An import-less repo — the common
+// case — costs one indexed query and returns (nil, nil, nil), so nothing about
+// a launch changes for it.
+//
+// Every failure refuses the launch, shaped as `read-only import "<target>":
+// <cause>`: the caller cannot tell WHICH sibling broke from gitx's error
+// (which only ever knew a directory), and "which target, what to fix" is the
+// whole point of the message. Two things must therefore happen before any work
+// starts: the not-clone-ready check runs over ALL targets first, so a
+// misconfiguration refuses without firing a single fetch, and only then do the
+// fetches run — one goroutine per target, because spawn latency should be the
+// slowest target's fetch, not the sum of all of them. A plain WaitGroup over
+// an indexed result slice is the whole concurrency story (no shared writes, no
+// errgroup dependency); the first error IN TARGET ORDER wins, so a two-target
+// failure names the same target on every run.
+func (s *Service) materializeImports(ctx context.Context, repo store.Repo, runID string, runMat *vault.Materializer) ([]seeder.ImportRef, []string, error) {
+	targets, err := s.store.RepoImports(ctx, repo.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(targets) == 0 {
+		return nil, nil, nil
+	}
+	// A target whose own clone has not finished has no reference repo to
+	// export from. Refused up front — before any goroutine, any fetch, and
+	// any file — because this one is a state problem, not an outage: the
+	// operator either waits for that repo's clone or drops the import.
+	for _, t := range targets {
+		if t.CloneStatus != store.CloneStatusReady {
+			return nil, nil, fmt.Errorf("read-only import %q: the imported repository is not ready (clone status %q) — wait for its clone to finish, or remove the import from this repo's settings", t.Name, t.CloneStatus)
+		}
+	}
+
+	refs := make([]seeder.ImportRef, len(targets))
+	errs := make([]error, len(targets))
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			refs[i], errs[i] = s.materializeImport(ctx, t, runID, runMat)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			return nil, nil, fmt.Errorf("read-only import %q: %w", targets[i].Name, err)
+		}
+	}
+
+	// Host runner only: a host pane has no mount namespace, so read-only-ness
+	// there is advisory (ADR-0063) — strip the write bits and log on failure,
+	// never refuse. What it buys is that the same path holds the same content
+	// under both runners, so nothing an agent or a generated context file
+	// knows about an import is runner-specific. Under the container runner the
+	// snapshots stay writable HOST-side on purpose: the `:ro` bind is the
+	// enforcement, and /pull-base must be able to re-materialize in place.
+	if repo.Runner != store.RunnerContainer {
+		for _, ref := range refs {
+			if err := protectSnapshot(ref.Path); err != nil {
+				s.log.Warn("write-protecting import snapshot", "component", "instance",
+					"run", runID, "import", ref.Name, "err", err)
+			}
+		}
+	}
+
+	dirs := make([]string, len(refs))
+	for i, ref := range refs {
+		dirs[i] = ref.Path
+	}
+	return refs, dirs, nil
+}
+
+// materializeImport materializes ONE import target: the target's own vault
+// credential (that is what makes the feature credential-free — no second
+// acquisition path, no new credential kind), then gitx's fetch → resolve →
+// clear-and-extract into <state>/instances/<runID>/imports/<target name>, then
+// the sidecar recording the snapshotted commit. Errors travel up bare; the
+// caller names the target.
+//
+// The sidecar <name>.commit is a SIBLING of the snapshot directory, not a file
+// inside it: the directory is a byte-faithful export of the target's tree
+// (mounted read-only, write-protected on the host runner), so lab's own
+// bookkeeping must not appear inside it — an agent reading the import would
+// see a file the imported repo does not have. /pull-base reads it back to
+// report what each snapshot moved from.
+func (s *Service) materializeImport(ctx context.Context, target store.Repo, runID string, runMat *vault.Materializer) (seeder.ImportRef, error) {
+	credEnv, cleanup, err := s.importCredentialEnv(ctx, target, runID, runMat)
+	if err != nil {
+		return seeder.ImportRef{}, err
+	}
+	// The import credential is needed for THIS fetch only — unlike the run's
+	// own credential, no spawned process ever uses it — so it goes as soon as
+	// the fetch is done rather than living inside the container for the whole
+	// session.
+	defer cleanup()
+
+	dest := filepath.Join(s.homes.ImportsPath(runID), target.Name)
+	gitEnv := append(append([]string{}, s.gitEnv...), credEnv...)
+	commit, err := s.git.MaterializeSnapshot(ctx, s.bareDir(target.ID), dest, target.DefaultBranch, gitEnv)
+	if err != nil {
+		return seeder.ImportRef{}, err
+	}
+	if err := os.WriteFile(dest+".commit", []byte(commit+"\n"), 0o600); err != nil {
+		return seeder.ImportRef{}, fmt.Errorf("record snapshot commit: %w", err)
+	}
+	return seeder.ImportRef{Name: target.Name, Path: dest, Commit: shortCommit(commit)}, nil
+}
+
+// importCredentialEnv materializes an import TARGET's git credential into the
+// launching run's runtime dir and returns the git env plus the cleanup that
+// removes exactly those files. The op id is (run, target)-unique rather than
+// the plain run id every other credential materialization in this file uses,
+// because a run can materialize several credentials at once here: vault keys
+// its files by (credID, opID), so two imports sharing one credential would
+// otherwise write the same filenames and the first cleanup would unlink the
+// second's live key mid-fetch. A credential-less target yields no env and a
+// no-op cleanup (a public target over https needs none).
+func (s *Service) importCredentialEnv(ctx context.Context, target store.Repo, runID string, runMat *vault.Materializer) ([]string, func(), error) {
+	noop := func() {}
+	opID := runID + "-import-" + target.ID
+	cleanup := noop
+	if target.CredentialID != nil {
+		credID := *target.CredentialID
+		cleanup = func() {
+			if err := runMat.Cleanup(credID, opID); err != nil {
+				s.log.Warn("cleaning import credential", "component", "instance",
+					"run", runID, "import", target.Name, "err", err)
+			}
+		}
+	}
+	env, err := s.credentialEnv(ctx, target, opID, runMat)
+	if err != nil {
+		cleanup() // a partial materialization leaves nothing behind
+		return nil, noop, err
+	}
+	return env, cleanup, nil
+}
+
+// protectSnapshot strips the write bits from a materialized snapshot tree
+// (dirs → 0555, files → their mode minus 0222, symlinks skipped so the chmod
+// never follows one out of the snapshot). BEST-EFFORT by design, and only on
+// the host runner: ADR-0063 makes read-only-ness advisory there because a host
+// pane has no mount namespace and that runner is the labeled "unsandboxed —
+// full host access" break-glass, whose agent can already read and write every
+// repo on the box. Refusing a launch over a failed chmod would trade a real
+// spawn for an enforcement gap that runner does not close anyway; the caller
+// logs and continues. Directories keep r-x, so the walk can still descend
+// after chmod'ing a directory on the way in — and instancehome.Wipe restores
+// the write bits when the tree is removed.
+func protectSnapshot(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() {
+			return os.Chmod(path, 0o555)
+		}
+		return os.Chmod(path, info.Mode().Perm()&^0o222)
+	})
+}
+
+// shortCommit is the 12-char short hash the context file prints for an import
+// snapshot — long enough to be unambiguous, short enough to read. Anything
+// already shorter (never a real commit id) passes through untouched.
+func shortCommit(commit string) string {
+	if len(commit) <= 12 {
+		return commit
+	}
+	return commit[:12]
 }
 
 // injectBeforePrompt places the dialog-capture --settings flag among the spawn

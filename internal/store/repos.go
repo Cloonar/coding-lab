@@ -518,13 +518,58 @@ func (s *Store) TouchRepoOpened(ctx context.Context, id string, openedAt time.Ti
 	return nil
 }
 
-// DeleteRepo removes the repo row; runs, issues, labels, and change requests
-// cascade (FK ON DELETE CASCADE — the sqlite open recipe enables enforcement).
-// The M3 guard (refuse while worktrees/instances exist unless forced) is the
-// API layer's seam; the store delete is unconditional.
+// DeleteRepo removes the repo row unless another repo still declares it a
+// read-only import target (repo_imports.target_repo_id, migration 0021, has
+// no delete action for exactly this reason): in that case it returns an
+// *ImportersError (matches ErrHasImporters, issue #261) naming the importing
+// repos, checked and refused before the delete. Its own import declarations
+// (repo_imports.repo_id) cascade with it, along with runs, issues, labels,
+// and change requests (FK ON DELETE CASCADE — the sqlite open recipe enables
+// enforcement). The M3 guard (refuse while worktrees/instances exist unless
+// forced) and the live-instance side of the imports guard are the API
+// layer's seams; this is only the referential one, and otherwise the store
+// delete is unconditional.
 func (s *Store) DeleteRepo(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM repos WHERE id = ?`), id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("delete repo %q: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, s.rebind(
+		`SELECT r.name FROM repo_imports i JOIN repos r ON r.id = i.repo_id
+		 WHERE i.target_repo_id = ? ORDER BY r.name`), id)
+	if err != nil {
+		return fmt.Errorf("delete repo %q: list importers: %w", id, err)
+	}
+	var importers []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("delete repo %q: list importers: %w", id, err)
+		}
+		importers = append(importers, name)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("delete repo %q: list importers: %w", id, err)
+	}
+	_ = rows.Close()
+	if len(importers) > 0 {
+		return fmt.Errorf("delete repo %q: %w", id, &ImportersError{Importers: importers})
+	}
+
+	res, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM repos WHERE id = ?`), id)
+	if err != nil {
+		if isForeignKeyViolation(err) {
+			// Lost a race with an import insert after the check above
+			// (postgres, read-committed): the FK held the line. The
+			// transaction is aborted at this point, so re-querying importer
+			// names is not possible — report the refusal with an empty list
+			// rather than block on a query that would itself fail.
+			return fmt.Errorf("delete repo %q: %w", id, &ImportersError{})
+		}
 		return fmt.Errorf("delete repo %q: %w", id, err)
 	}
 	n, err := res.RowsAffected()
@@ -533,6 +578,9 @@ func (s *Store) DeleteRepo(ctx context.Context, id string) error {
 	}
 	if n == 0 {
 		return fmt.Errorf("delete repo %q: %w", id, ErrNotFound)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete repo %q: %w", id, err)
 	}
 	return nil
 }

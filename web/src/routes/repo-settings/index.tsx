@@ -21,6 +21,7 @@ import AutolandSection from './sections/Autoland';
 import BranchesSection from './sections/Branches';
 import DangerZone from './sections/Danger';
 import GeneralSection from './sections/General';
+import ImportsSection from './sections/Imports';
 import IntegrationsSection from './sections/Integrations';
 import SchedulesSection from './sections/Schedules';
 import RepoSecretsSection from './sections/Secrets';
@@ -150,6 +151,9 @@ function RepoSettingsView() {
                       settings={settings() ?? {}}
                       onSaved={refetch}
                     />
+                  </Match>
+                  <Match when={params.section === 'imports'}>
+                    <ImportsSection repoId={r().id} />
                   </Match>
                   <Match when={params.section === 'danger'}>
                     <DangerZone repo={r} />

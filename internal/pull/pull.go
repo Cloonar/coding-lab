@@ -4,8 +4,11 @@
 // resolves the run's base branch, serializes against other pulls of the SAME
 // run, materializes the repo's git credential, merges the freshly-fetched
 // origin/<base> into the run's LIVE worktree under the repo's configured real
-// author identity (D15 measure 5), and renders the compact digest the chat
-// layer pastes to the agent. It does NOT own command interception, tmux
+// author identity (D15 measure 5), re-materializes the run's read-only import
+// snapshots in place (ADR-0063 — /pull-base is their ONLY refresh), and
+// renders the compact digest the chat layer pastes to the agent: one repair
+// verb for "make my world current", covering the run's whole world rather
+// than just its base branch. It does NOT own command interception, tmux
 // messaging, or error presentation — the chat/HTTP layer classifies the
 // typed gitx errors (*gitx.ConflictError / gitx.ErrMergeConflict) this
 // service passes through verbatim.
@@ -15,13 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
@@ -82,6 +88,14 @@ type Options struct {
 	ReposDir     string
 	GitEnv       []string
 	Logger       *slog.Logger
+
+	// Homes locates each run's read-only import snapshots (issue #261) —
+	// ImportsPath(runID) is the directory the spawn materialized them into and
+	// the one /pull-base re-materializes them in. Nil is tolerated the way a
+	// nil Bus is: a service without it simply refreshes nothing, warning once
+	// per pull of a repo that actually declares imports (an import-less repo,
+	// the common case, never notices). Production wires it in cmd/lab.
+	Homes *instancehome.Manager
 }
 
 // Service orchestrates base-branch pulls into live run worktrees under a
@@ -92,6 +106,7 @@ type Service struct {
 	vault    *vault.Vault
 	mat      *vault.Materializer
 	bus      *events.Bus
+	homes    *instancehome.Manager
 	reposDir string
 	gitEnv   []string
 	log      *slog.Logger
@@ -116,23 +131,62 @@ func New(o Options) *Service {
 		vault:    o.Vault,
 		mat:      o.Materializer,
 		bus:      o.Bus,
+		homes:    o.Homes,
 		reposDir: o.ReposDir,
 		gitEnv:   o.GitEnv,
 		log:      logger,
 	}
 }
 
-// Result describes one PullBase outcome for the chat/HTTP layer. UpToDate and
-// FastForward mirror gitx.PullResult (when both are false the pull created a
-// real merge commit); Digest is the agent-facing text, empty when UpToDate.
+// Result describes one PullBase outcome for the chat/HTTP layer. FastForward
+// mirrors gitx.PullResult (with UpToDate false and FastForward false the pull
+// created a real merge commit); Digest is the agent-facing text, empty when
+// UpToDate.
+//
+// UpToDate is the "nothing to tell the agent" flag — the 200-notice path — and
+// since ADR-0063 it spans the run's whole world, not just its base branch: it
+// is true only when the base was already current AND every read-only import
+// refreshed to the same commit it already had AND no refresh failed. A base
+// that did not move while a snapshot did leaves UpToDate false with
+// OldHead == NewHead, and the digest says exactly that.
 type Result struct {
 	Base        string // base branch name the pull targeted
 	OldHead     string // worktree HEAD before
-	NewHead     string // worktree HEAD after (== OldHead when UpToDate)
+	NewHead     string // worktree HEAD after (== OldHead when the base did not move)
 	UpToDate    bool
 	FastForward bool
 	Digest      string // agent-facing digest text; empty when UpToDate
+
+	// Imports is one entry per read-only import this pull re-materialized, in
+	// the declaration's name order — empty for a repo that declares none, and
+	// for a declared target this run was not spawned with (ADR-0063: the mount
+	// inventory is fixed at spawn, so there is nothing to refresh).
+	Imports []ImportChange
 }
+
+// ImportChange is one read-only import's refresh outcome (ADR-0063), rendered
+// as a single digest line. Old is the commit the snapshot carried BEFORE this
+// refresh, read from the sidecar the spawn wrote — empty when that sidecar is
+// missing or unreadable, or when the two commits cannot be related at all —
+// and New the commit it carries now (empty on failure). Commits counts what
+// arrived over old..new, and is 0 whenever Old is empty or equal to New.
+// Failed marks a refresh that did not happen: Reason carries the first line of
+// the cause, and the snapshot on disk is still the one the run was spawned
+// with, because gitx destroys nothing until the new commit is known.
+type ImportChange struct {
+	Name    string
+	Old     string
+	New     string
+	Commits int
+	Failed  bool
+	Reason  string
+}
+
+// moved reports whether this import's line is one the agent must act on: its
+// snapshot's content changed under it, or the refresh failed and what it holds
+// is older than it may assume. An unchanged import is neither, so a pull whose
+// imports are all unchanged is as silent as a pull with no imports at all.
+func (c ImportChange) moved() bool { return c.Failed || c.Old != c.New }
 
 // PullBase merges the current origin/<base> into the run's live worktree and
 // digests what came in. The contract the chat/HTTP layer relies on:
@@ -145,11 +199,24 @@ type Result struct {
 //     the fetch — still before the merge touches the worktree.
 //   - git refuses the pull (fetch failure, dirty-clobber refusal, or a
 //     conflict as *gitx.ConflictError matching gitx.ErrMergeConflict) → that
-//     error, verbatim; gitx guarantees the worktree is left as it found it.
-//   - already up to date → Result with UpToDate=true, empty Digest, and NO
-//     run.changed published (nothing changed).
+//     error, verbatim; gitx guarantees the worktree is left as it found it,
+//     and the read-only imports are left alone too (see below).
+//   - nothing at all changed — base already current AND every import
+//     unchanged → Result with UpToDate=true, empty Digest, and NO run.changed
+//     published.
 //   - success → Result carrying the rendered digest, with run.changed
-//     published so the behind-badge and runs rail refresh.
+//     published so the behind-badge and runs rail refresh. "Success" includes
+//     a pull that only moved a read-only import: the base can be current while
+//     a sibling repo's snapshot is a week old, and the agent has to be told.
+//
+// The read-only import refresh (ADR-0063) runs after the base merge and only
+// when that merge SUCCEEDED. A refused pull returns its typed error above with
+// no digest to hang import lines on, and its failure semantics — a conflict
+// aborted with the worktree exactly as gitx found it — must not be muddied by
+// having rewritten the run's snapshots on the way out. Once the merge is in,
+// the refresh runs regardless of whether it brought anything in, and can only
+// add to the result: a broken refresh is reported on its own digest line and
+// logged, never returned as an error.
 //
 // Everything from taking the per-run lock onward runs on a
 // cancellation-immune context: a caller (a phone, a dropped HTTP connection)
@@ -210,8 +277,33 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 		UpToDate:    pr.UpToDate,
 		FastForward: pr.FastForward,
 	}
+	// The merge is in (or was a no-op): now the run's read-only imports, which
+	// refresh on EVERY successful /pull-base — the base moving and a sibling's
+	// snapshot moving are independent facts, and the operator asked for both to
+	// be current. Nothing below can fail the pull.
+	res.Imports = s.refreshImports(ctx, repo, run)
+	movedImports := false
+	for _, ic := range res.Imports {
+		if ic.moved() {
+			movedImports = true
+			break
+		}
+	}
+
+	if pr.UpToDate && !movedImports {
+		// Nothing came in and nothing moved: no digest, no event, worktree and
+		// snapshots exactly as they were.
+		return res, nil
+	}
 	if pr.UpToDate {
-		// Nothing came in: no digest, no event, worktree untouched.
+		// The base was already current, but a snapshot moved (or its refresh
+		// failed). There IS something to tell the agent, so this is no longer
+		// the silent path: UpToDate drops to false and the digest is the
+		// imports block under a first line that says plainly that nothing was
+		// pulled (OldHead == NewHead, so there is no range to render).
+		res.UpToDate = false
+		res.Digest = renderDigest(res, gitx.RangeSummary{})
+		s.publishRunChanged(run.RepoID, run.ID)
 		return res, nil
 	}
 
@@ -228,9 +320,198 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 	return res, nil
 }
 
-// renderDigest renders the agent-facing digest for a pull that moved HEAD — a
-// pure function of the pull result and the range summary. Shape (compact on
-// purpose; the caps above bound it to a few KB):
+// refreshImports re-materializes, in place, every read-only import this run
+// was SPAWNED with (ADR-0063) and returns one ImportChange per refreshed
+// import in the declaration's name order — /pull-base is the feature's only
+// refresh verb, so this is the one place a live run's snapshots ever move.
+//
+// What refreshes is decided by the FILESYSTEM, not by the declaration alone: a
+// declared target with no snapshot directory is skipped SILENTLY, because the
+// run's mount inventory was fixed at spawn — an import declared mid-run has no
+// mount to fill, and writing one now would produce a directory no container
+// can see. The mirror case needs no code at all: a snapshot whose declaration
+// was retracted mid-run is simply never iterated, so it stays mounted and
+// frozen. A settings change takes effect at the next spawn, one rule with no
+// partial-effect middle ground.
+//
+// Nothing here can fail the pull, and nothing here is undone by a later
+// failure: each import's snapshot and sidecar are rewritten as it succeeds, so
+// a dead third target leaves the first two genuinely refreshed and says so in
+// the digest. The refreshes run SEQUENTIALLY, unlike the spawn path's parallel
+// materialization: a /pull-base is operator-paced and a repo's import list is
+// single digits, so ordered code that is trivial to follow beats saving a
+// fetch or two.
+func (s *Service) refreshImports(ctx context.Context, repo store.Repo, run store.Run) []ImportChange {
+	targets, err := s.store.RepoImports(ctx, run.RepoID)
+	if err != nil {
+		// A store read failing here means the whole process is in trouble, and
+		// the pull that just landed is real regardless — so the failure is
+		// logged and the digest simply carries no imports block.
+		s.log.Warn("reading read-only imports to refresh", "component", "pull", "run", run.ID, "err", err)
+		return nil
+	}
+	if len(targets) == 0 {
+		return nil // the common case: one indexed query and nothing else
+	}
+	if s.homes == nil {
+		s.log.Warn("read-only imports declared but no instance-home manager is wired; snapshots not refreshed",
+			"component", "pull", "run", run.ID)
+		return nil
+	}
+
+	importsDir := s.homes.ImportsPath(run.ID)
+	changes := make([]ImportChange, 0, len(targets))
+	for _, t := range targets {
+		dest := filepath.Join(importsDir, t.Name)
+		if fi, err := os.Stat(dest); err != nil || !fi.IsDir() {
+			continue // declared after this run spawned: no mount to fill
+		}
+		changes = append(changes, s.refreshImport(ctx, repo, run, t, dest))
+	}
+	return changes
+}
+
+// refreshImport re-materializes ONE import snapshot in place and reports what
+// it did. The ordering is the guarantee: gitx fetches and resolves before it
+// clears anything, so a dead target (host down, credential rotated, branch
+// gone) leaves the spawn's snapshot intact and the agent keeps a stale-but-real
+// sibling rather than an empty directory; and the sidecar is only rewritten
+// once the new tree is actually on disk.
+//
+// repo is the run's OWN repo — the consumer, whose runner decides whether the
+// refreshed tree gets write-protected again — while target is the imported
+// repo, whose reference clone, default branch and credential drive the fetch.
+func (s *Service) refreshImport(ctx context.Context, repo store.Repo, run store.Run, target store.Repo, dest string) ImportChange {
+	c := ImportChange{Name: target.Name, Old: snapshotCommit(dest)}
+
+	// The TARGET's own credential — that is what makes the feature
+	// credential-free — under an op id unique per (run, target): vault keys
+	// materialized files by (credID, opID), so several imports sharing one
+	// credential would otherwise write the same filenames and one cleanup would
+	// unlink another's live key. Same reasoning as instance.importCredentialEnv.
+	credEnv, cleanup, err := s.credentialEnv(ctx, target, "pull-"+run.ID+"-import-"+target.ID)
+	if err != nil {
+		return s.failedImport(c, run, err)
+	}
+	defer cleanup()
+
+	env := append(append([]string{}, s.gitEnv...), credEnv...)
+	bare := s.bareDir(target.ID)
+	commit, err := s.git.MaterializeSnapshot(ctx, bare, dest, target.DefaultBranch, env)
+	if err != nil {
+		return s.failedImport(c, run, err)
+	}
+	c.New = commit
+
+	// The sidecar goes first, so the NEXT /pull-base reports its range from
+	// here even if something below trips. A failed rewrite is logged, never
+	// reported as a failed refresh: the snapshot on disk really did move, and
+	// telling the agent otherwise would send it back to a file that is already
+	// fresh — the cost is one later digest line reporting a wider range.
+	if err := os.WriteFile(dest+".commit", []byte(commit+"\n"), 0o600); err != nil {
+		s.log.Warn("recording refreshed import snapshot commit", "component", "pull",
+			"run", run.ID, "import", target.Name, "err", err)
+	}
+
+	// One call for the count: the fetch above just moved origin/<default> to
+	// exactly the commit that was extracted, so CommitsBehind's
+	// `<old>..origin/<default>` IS the range that arrived. An old commit the
+	// target's object store no longer holds (a force-push, a rewritten history)
+	// cannot be related to the new one at all, so the line drops to "refreshed
+	// to <new>" rather than printing a range that resolves nowhere.
+	if c.Old != "" && c.Old != c.New {
+		n, err := s.git.CommitsBehind(ctx, bare, c.Old, target.DefaultBranch, env)
+		if err != nil {
+			s.log.Warn("counting refreshed import snapshot commits", "component", "pull",
+				"run", run.ID, "import", target.Name, "from", c.Old, "err", err)
+			c.Old = ""
+		} else {
+			c.Commits = n
+		}
+	}
+
+	// Host runner: re-apply the advisory write protection the spawn applied
+	// (ADR-0063) — the fresh extraction wrote git's own 0644/0755 modes back
+	// over it. Best-effort exactly as at spawn: a failed chmod is logged, never
+	// reported as a failed refresh, because the snapshot itself is correct and
+	// that runner is full-host-access break-glass anyway. Under the container
+	// runner the tree stays writable host-side on purpose: the `:ro` bind is
+	// the enforcement, and this very code has to be able to rewrite it.
+	if repo.Runner != store.RunnerContainer {
+		if err := protectSnapshot(dest); err != nil {
+			s.log.Warn("re-protecting refreshed import snapshot", "component", "pull",
+				"run", run.ID, "import", target.Name, "err", err)
+		}
+	}
+	return c
+}
+
+// failedImport marks c as a failed refresh and logs the cause. The digest gets
+// only the first line — git's stderr can run to a paragraph and an import line
+// has one line to spend — while the log keeps the whole error.
+func (s *Service) failedImport(c ImportChange, run store.Run, err error) ImportChange {
+	s.log.Warn("refreshing read-only import snapshot", "component", "pull",
+		"run", run.ID, "import", c.Name, "err", err)
+	c.Failed, c.New, c.Commits = true, "", 0
+	c.Reason = firstLine(err.Error())
+	return c
+}
+
+// snapshotCommit reads the commit sidecar written beside the snapshot
+// directory by the spawn (internal/instance/launch.go) or by a previous
+// refresh. Any failure — absent, unreadable, empty — reads as an unknown
+// previous commit (""), which renders as "refreshed to <new>": lab's own
+// bookkeeping going missing must not stop the refresh or fake a range.
+func snapshotCommit(dest string) string {
+	b, err := os.ReadFile(dest + ".commit")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// firstLine is the digest's one-line rendering of a refresh failure.
+func firstLine(msg string) string {
+	if i := strings.IndexByte(msg, '\n'); i >= 0 {
+		msg = msg[:i]
+	}
+	if msg = strings.TrimSpace(msg); msg == "" {
+		return "unknown error"
+	}
+	return msg
+}
+
+// protectSnapshot strips the write bits from a refreshed snapshot tree (dirs →
+// 0555, files → their mode minus 0222, symlinks skipped so the chmod never
+// follows one out of the snapshot) — a package-private copy of the identically
+// named helper in internal/instance/launch.go, which applies it at spawn. One
+// small copy per package beats a dependency edge on the launch service (cf.
+// credentialEnv, which every git-touching service owns its own version of);
+// the two must agree, because a snapshot's modes should not depend on whether
+// it was last written by a spawn or by a /pull-base. Best-effort by design:
+// see the call site.
+func protectSnapshot(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() {
+			return os.Chmod(path, 0o555)
+		}
+		return os.Chmod(path, info.Mode().Perm()&^0o222)
+	})
+}
+
+// renderDigest renders the agent-facing digest for a pull that changed
+// something — a pure function of the pull result and the range summary. Shape
+// (compact on purpose; the caps above bound it to a few KB):
 //
 //	Lab pulled origin/<base> into this worktree: <old12>..<new12> (fast-forward | merge commit).
 //	Incoming commits (<total>):
@@ -240,13 +521,35 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 //	<status>\t<path>
 //	… and <N> more         (only when files were capped)
 //	Prior reads of these files may be stale — … git log/git diff pointers.
+//
+// A pull whose base did NOT move (OldHead == NewHead — it is here only because
+// a read-only import did) has no range, no commits and no files to report, so
+// that whole block collapses to one honest line:
+//
+//	Lab refreshed this run's read-only imports; origin/<base> was already up to date.
+//
+// Either way the run's read-only imports (ADR-0063) append a block of their
+// own — and ONLY when there are any, so an import-less repo's digest is
+// byte-identical to what it rendered before the feature existed:
+//
+//	Imports refreshed:
+//	- <name>: unchanged
+//	- <name>: <old12>..<new12> (<N> commits)
+//	- <name>: refreshed to <new12>          (previous commit unknown — no sidecar)
+//	- <name>: refresh failed — <reason>     (the snapshot is intact, still the old one)
+//	Prior reads of moved snapshots may be stale — …   (only when one moved or failed)
 func renderDigest(r Result, sum gitx.RangeSummary) string {
+	var b strings.Builder
+	if r.OldHead == r.NewHead {
+		fmt.Fprintf(&b, "Lab refreshed this run's read-only imports; origin/%s was already up to date.", r.Base)
+		writeImports(&b, r.Imports)
+		return b.String()
+	}
 	rng := shortSHA(r.OldHead) + ".." + shortSHA(r.NewHead)
 	shape := "merge commit"
 	if r.FastForward {
 		shape = "fast-forward"
 	}
-	var b strings.Builder
 	fmt.Fprintf(&b, "Lab pulled origin/%s into this worktree: %s (%s).\n", r.Base, rng, shape)
 	fmt.Fprintf(&b, "Incoming commits (%d):\n", sum.TotalCommits)
 	for _, subject := range sum.Subjects {
@@ -263,7 +566,46 @@ func renderDigest(r Result, sum gitx.RangeSummary) string {
 		fmt.Fprintf(&b, "… and %d more\n", n)
 	}
 	fmt.Fprintf(&b, "Prior reads of these files may be stale — re-read anything you rely on before acting on it. For detail: git log %s --oneline, git diff %s", rng, rng)
+	writeImports(&b, r.Imports)
 	return b.String()
+}
+
+// writeImports appends the imports block to b, or nothing at all when the pull
+// refreshed no imports. Every line it writes is prefixed with its own newline
+// rather than terminated by one: the base block deliberately ends without a
+// trailing newline, and so does this one, so the two compose without a blank
+// line and an import-less digest keeps its exact former bytes.
+func writeImports(b *strings.Builder, imports []ImportChange) {
+	if len(imports) == 0 {
+		return
+	}
+	b.WriteString("\nImports refreshed:")
+	moved := false
+	for _, c := range imports {
+		b.WriteString("\n- " + c.Name + ": " + importLine(c))
+		moved = moved || c.moved()
+	}
+	if moved {
+		b.WriteString("\nPrior reads of moved snapshots may be stale — re-read anything you rely on from them.")
+	}
+}
+
+// importLine renders one import's outcome. The four cases are exhaustive over
+// ImportChange: a failure (the snapshot is still the spawn's), a refresh whose
+// starting point is unknown (no sidecar, or a previous commit the target's
+// object store no longer has — either way there is no range worth printing), a
+// no-op, and a real move.
+func importLine(c ImportChange) string {
+	switch {
+	case c.Failed:
+		return "refresh failed — " + c.Reason
+	case c.Old == "":
+		return "refreshed to " + shortSHA(c.New)
+	case c.Old == c.New:
+		return "unchanged"
+	default:
+		return fmt.Sprintf("%s..%s (%d commits)", shortSHA(c.Old), shortSHA(c.New), c.Commits)
+	}
 }
 
 // shortSHA is the digest's sha abbreviation: the first 12 characters.

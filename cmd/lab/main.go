@@ -248,8 +248,9 @@ func run() int {
 	trackerReg.SetCRMerger(mergeSvc)
 
 	// /pull-base lab command service (issue #149): merges origin/<base> into a
-	// run's LIVE worktree and renders the agent-facing digest; the HTTP reply
-	// path intercepts the command and delegates here. Same store/git/vault/
+	// run's LIVE worktree, re-materializes its read-only import snapshots
+	// (issue #261), and renders the agent-facing digest; the HTTP reply path
+	// intercepts the command and delegates here. Same store/git/vault/
 	// materializer/bus plumbing as crmerge — the two are siblings on the bare
 	// reference clones.
 	pullSvc := pull.New(pull.Options{
@@ -260,6 +261,10 @@ func run() int {
 		Bus:          bus,
 		ReposDir:     reposDir,
 		Logger:       logger,
+		// Plus the instancehome Manager (issue #261): /pull-base is the only
+		// refresh for a run's read-only import snapshots, and this is what
+		// locates them.
+		Homes: homes,
 	})
 
 	// Container runner preflight (issue #205): with any container config

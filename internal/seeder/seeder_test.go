@@ -56,6 +56,16 @@ var testSecrets = []store.RepoSecret{
 	{Name: "DEPLOY_TOKEN"},
 }
 
+// testImports is the read-only-imports fixture (issue #261) used by the
+// Read-only-imports-section tests: two snapshots, already ordered by name as
+// the real caller (the launch path, another agent's slice) is documented to
+// hand them, with realistic absolute snapshot paths under an instance's state
+// dir.
+var testImports = []ImportRef{
+	{Name: "api-server", Path: "/var/lib/lab/state/instances/run_x/imports/api-server", Commit: "1234567890ab"},
+	{Name: "proto-defs", Path: "/var/lib/lab/state/instances/run_x/imports/proto-defs", Commit: "abcdef012345"},
+}
+
 // newWorktree builds a REAL linked worktree (bare-style main checkout +
 // `git worktree add`), the shape every Launch seeds: its .git is a gitdir
 // pointer whose commondir leads back to the shared git dir, so the exclude
@@ -194,7 +204,7 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 }
 
 func TestRenderContextFile_forgeBinding(t *testing.T) {
-	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil)
+	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -353,7 +363,7 @@ func TestRenderContextFile_claudeGoldenByteIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil)
+			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -457,7 +467,7 @@ func TestSeedWorkspace_nonNativeAppendsSkillsIndex(t *testing.T) {
 // native-discovery-WITH-skills absence is asserted in the golden test above.)
 func TestRenderContextFile_noIndexWithoutSkillsDir(t *testing.T) {
 	meta := provider.SeedMeta{ContextFileName: "AGENTS.local.md", NativeSkillDiscovery: false}
-	got, err := renderContextFile(builtinRepo, meta, nil)
+	got, err := renderContextFile(builtinRepo, meta, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -478,7 +488,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 		"empty": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -496,7 +506,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 // and the `labctl secret list` pointer. Byte-pinned against a NEW golden
 // (contextfile-claude-builtin-secrets.golden) captured for this shape.
 func TestRenderContextFile_withSecrets(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -523,12 +533,77 @@ func TestRenderContextFile_withSecrets(t *testing.T) {
 	}
 }
 
+// Zero imports — nil, an explicit empty slice, with no secrets, and with
+// secrets present — must render byte-identical to the corresponding claude
+// golden (issue #261): the new Opts.Imports / renderContextFile parameter is
+// a pure addition, never a behavior change for an import-less repo. Mirrors
+// TestRenderContextFile_zeroSecretsByteIdentical's proof shape.
+func TestRenderContextFile_zeroImportsByteIdentical(t *testing.T) {
+	cases := []struct {
+		name    string
+		secrets []store.RepoSecret
+		golden  string
+	}{
+		{"noSecrets", nil, "contextfile-claude-builtin.golden"},
+		{"withSecrets", testSecrets, "contextfile-claude-builtin-secrets.golden"},
+	}
+	for _, tc := range cases {
+		want := readGolden(t, tc.golden)
+		for name, imports := range map[string][]ImportRef{
+			"nil":   nil,
+			"empty": {},
+		} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, imports)
+				if err != nil {
+					t.Fatalf("renderContextFile: %v", err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("render with %s imports != %s\n%s", name, tc.golden, byteDiff(got, want))
+				}
+			})
+		}
+	}
+}
+
+// With imports, a claude-shaped (native-discovery) render carries the full
+// Read-only imports section: the heading, each import's name/path/commit
+// bullet, and the never-to-be-edited norm. Byte-pinned against a NEW golden
+// (contextfile-claude-builtin-imports.golden) captured for this shape, the
+// same way TestRenderContextFile_withSecrets pins the secrets shape.
+func TestRenderContextFile_withImports(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, testImports)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-imports.golden"); !bytes.Equal(got, want) {
+		t.Errorf("render != contextfile-claude-builtin-imports.golden\n%s", byteDiff(got, want))
+	}
+
+	gotStr := string(got)
+	wantContains := []string{
+		"## Read-only imports",
+		"api-server",
+		"/var/lib/lab/state/instances/run_x/imports/api-server",
+		"1234567890ab",
+		"proto-defs",
+		"/var/lib/lab/state/instances/run_x/imports/proto-defs",
+		"abcdef012345",
+		"never to be edited or committed",
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("Read-only imports section missing %q", want)
+		}
+	}
+}
+
 // Non-native-discovery meta (the fake codex shape) with secrets: BOTH the
 // Secrets section and the generated skills index appear, and the Secrets
 // section comes FIRST — repo-driven content before the provider-driven tail
 // (the append order documented on appendSecretsSection).
 func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets)
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -550,6 +625,38 @@ func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T)
 	}
 }
 
+// Non-native-discovery meta with BOTH secrets and imports: all three sections
+// appear, IN ORDER — template body, then Secrets, then Read-only imports,
+// then Seeded skills — repo-driven content (secrets, then imports) before the
+// provider-driven tail (mirrors TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered,
+// extended with the imports section per the ordering documented on
+// appendSecretsSection and appendImportsSection).
+func TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered(t *testing.T) {
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, testImports)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+
+	bodyIdx := strings.Index(gotStr, "## Tracker binding")
+	secretsIdx := strings.Index(gotStr, "## Secrets")
+	importsIdx := strings.Index(gotStr, "## Read-only imports")
+	skillsIdx := strings.Index(gotStr, "## Seeded skills")
+	for name, idx := range map[string]int{
+		"template body (## Tracker binding)": bodyIdx,
+		"## Secrets":                         secretsIdx,
+		"## Read-only imports":               importsIdx,
+		"## Seeded skills":                   skillsIdx,
+	} {
+		if idx == -1 {
+			t.Fatalf("missing %s section", name)
+		}
+	}
+	if bodyIdx >= secretsIdx || secretsIdx >= importsIdx || importsIdx >= skillsIdx {
+		t.Errorf("sections out of order: body=%d secrets=%d imports=%d skills=%d", bodyIdx, secretsIdx, importsIdx, skillsIdx)
+	}
+}
+
 // The full seed path writes the Secrets section to disk when Opts.Secrets is
 // non-empty (mirrors TestSeedWorkspace_onDiskMatchesGolden's mechanics).
 func TestSeedWorkspace_onDiskWithSecretsMatchesGolden(t *testing.T) {
@@ -563,6 +670,23 @@ func TestSeedWorkspace_onDiskWithSecretsMatchesGolden(t *testing.T) {
 	}
 	if want := readGolden(t, "contextfile-claude-builtin-secrets.golden"); !bytes.Equal(got, want) {
 		t.Errorf("on-disk CLAUDE.local.md with secrets != golden\n%s", byteDiff(got, want))
+	}
+}
+
+// The full seed path writes the Read-only imports section to disk when
+// Opts.Imports is non-empty (mirrors TestSeedWorkspace_onDiskWithSecretsMatchesGolden's
+// mechanics, issue #261).
+func TestSeedWorkspace_onDiskWithImportsMatchesGolden(t *testing.T) {
+	wt, _ := newWorktree(t)
+	if err := New().SeedWorkspace(wt, builtinRepo, claudeGoldenMeta, Opts{Imports: testImports}); err != nil {
+		t.Fatalf("SeedWorkspace: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-imports.golden"); !bytes.Equal(got, want) {
+		t.Errorf("on-disk CLAUDE.local.md with imports != golden\n%s", byteDiff(got, want))
 	}
 }
 

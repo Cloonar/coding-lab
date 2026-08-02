@@ -329,6 +329,14 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("PATCH /api/v1/repos/{id}", s.requireAuth(s.handleRepoUpdate))
 		api.HandleFunc("DELETE /api/v1/repos/{id}", s.requireAuth(s.handleRepoDelete))
 		api.HandleFunc("POST /api/v1/repos/{id}/clone/retry", s.requireAuth(s.handleRepoCloneRetry))
+
+		// Read-only imports (issue #261 / ADR-0063): the repo-scoped
+		// declarations of which other repos' origin/<default> this repo's
+		// instances may read. list/add/remove — same sub-resource shape as
+		// secrets above.
+		api.HandleFunc("GET /api/v1/repos/{id}/imports", s.requireAuth(s.handleRepoImportsList))
+		api.HandleFunc("POST /api/v1/repos/{id}/imports", s.requireAuth(s.handleRepoImportsAdd))
+		api.HandleFunc("DELETE /api/v1/repos/{id}/imports/{target}", s.requireAuth(s.handleRepoImportsRemove))
 	}
 
 	// M3 instance lifecycle (operator auth; CSRF guards the mutations).

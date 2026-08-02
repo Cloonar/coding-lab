@@ -106,6 +106,20 @@ type RunSpec struct {
 	// and provider argv reference these files by absolute host path. Empty
 	// omits the bind (the login/CLI shapes, issue #206).
 	RuntimeDir string
+	// ImportDirs are the run's read-only import snapshots (issue #261 /
+	// ADR-0063), one READ-ONLY bind per entry at its host-identical path:
+	// `-v <dir>:<dir>:ro`. This is the mount inventory's first :ro bind —
+	// every other bind here is rw, and the agent-tools injection is
+	// read-only by mount TYPE (--mount type=image), not by bind option. The
+	// snapshot is a dead copy of another lab repo's default branch, so the
+	// container must be able to read it and must have no write path back;
+	// host-identical paths keep the absolute path the seeded context file
+	// prints identical inside and out. Empty (the ordinary import-less run,
+	// and both issue #206 shapes) omits the binds entirely. Order is the
+	// caller's — the launch path passes them sorted by import name — and is
+	// rendered verbatim so an argv comparison stays deterministic. Run shape
+	// only.
+	ImportDirs []string
 	// StoreDir is the provider's master credential store on the host,
 	// bound rw at StoreDst when BOTH are set — the login/CLI shapes
 	// (issue #206) put it under Home (e.g. Home + "/.claude"). Nesting
@@ -201,9 +215,10 @@ type RunSpec struct {
 //     Every bind renders only when its field is set — the run-only dirs,
 //     the home (empty in the CLI shape), and the store pair, which follows
 //     immediately after the home bind (nesting is by destination, see
-//     StoreDir, so adjacency is for readability, not correctness). -w
-//     prefers Workdir, falls back to WorktreeDir, and vanishes when both
-//     are empty.
+//     StoreDir, so adjacency is for readability, not correctness). The
+//     read-only import snapshots (ImportDirs, issue #261) render last among
+//     the binds, one `:ro` bind each in the caller's order. -w prefers
+//     Workdir, falls back to WorktreeDir, and vanishes when both are empty.
 //
 // Then --env K=V per Env entry, --env K per ForwardEnv entry (order
 // preserved — later entries win under podman just as with exec env), the
@@ -239,6 +254,9 @@ func RunArgv(s RunSpec) []string {
 	}
 	if s.RuntimeDir != "" {
 		args = append(args, "-v", s.RuntimeDir+":"+s.RuntimeDir)
+	}
+	for _, d := range s.ImportDirs {
+		args = append(args, "-v", d+":"+d+":ro")
 	}
 	if s.Workdir != "" {
 		args = append(args, "-w", s.Workdir)
