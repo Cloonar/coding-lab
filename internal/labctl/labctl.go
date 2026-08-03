@@ -802,6 +802,13 @@ func printChecksReport(env Env, rep PRChecksReport, n int) {
 // withClient). `--check` REQUIRES a following value and may sit before or after
 // <n> (scanned the way runPRChecks scans --wait); exactly one positional, a
 // positive integer.
+//
+// A log the forge could only serve from an OLDER rerun attempt (issue #259)
+// carries a fallback notice back from PRLogs; each is printed to STDERR, one
+// per line in the house `labctl pr logs: <text>` prefix, BEFORE the body
+// starts streaming. stdout stays byte-clean either way (ADR-0060, ADR-0032) —
+// the notice is metadata about the log, never a byte of it — and the exit code
+// is unchanged (0: logs were printed).
 func runPRLogs(args []string, env Env) int {
 	check := ""
 	var rest []string
@@ -829,7 +836,7 @@ func runPRLogs(args []string, env Env) int {
 		return 2
 	}
 	return withClient(env, "pr logs", func(c *Client) error {
-		body, err := c.PRLogs(n, check)
+		body, notices, err := c.PRLogs(n, check)
 		if err != nil {
 			// 204: no failing check to dump — a note naming the PR, exit 1 (never a
 			// silent exit 0), stdout untouched.
@@ -845,6 +852,13 @@ func runPRLogs(args []string, env Env) int {
 			return err
 		}
 		defer func() { _ = body.Close() }()
+		// Fallback provenance (issue #259) rides stderr, one notice per line in the
+		// house `labctl pr logs: <text>` prefix, printed BEFORE the first body byte
+		// — stdout stays the byte-clean pipe/grep surface even when every log it
+		// carries is a stale attempt.
+		for _, notice := range notices {
+			_, _ = fmt.Fprintf(env.Stderr, "labctl pr logs: %s\n", notice)
+		}
 		// Stream the (already redacted, server-side) log straight to stdout — no
 		// buffer cap; the body can be many MiB and agents pipe through tail/grep.
 		if _, err := io.Copy(env.Stdout, body); err != nil {

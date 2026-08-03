@@ -132,10 +132,10 @@ func (o *observed) Checks(ctx context.Context, number int) ([]Check, error) {
 	return checks, err
 }
 
-func (o *observed) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
-	log, err := o.t.CheckLog(ctx, number, name)
+func (o *observed) CheckLog(ctx context.Context, number int, name string) (CheckLogResult, error) {
+	res, err := o.t.CheckLog(ctx, number, name)
 	o.report(OpCheckLog, err)
-	return log, err
+	return res, err
 }
 
 func (o *observed) CreatePull(ctx context.Context, head, base, title, body string) (PullRef, error) {

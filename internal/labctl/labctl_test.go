@@ -182,9 +182,15 @@ type fakeForge struct {
 	checksSeq    [][]tracker.Check   // consecutive Checks() results (--wait); overrides checks when set
 	checksCall   int                 // index into checksSeq
 
-	checkLogs     map[string][]byte // returned by CheckLog, keyed by check name
+	checkLogs     map[string][]byte // returned by CheckLog as a plain attempt-1 result, keyed by check name
 	checkLogErr   error             // CheckLog-only error (Checks can still succeed) — the log-fetch failure path
 	checkLogCalls []string          // records CheckLog name arguments, in order
+	// checkLogResults scripts FULL CheckLog results — fallback provenance
+	// included — for the tests that care about it; consulted ahead of checkLogs,
+	// which stays the plain-body shorthand every other log test uses (mirrors
+	// internal/agentapi/handlers_test.go's fakeTracker, same reason: the notice
+	// surviving an actual HTTP round trip is the point of these tests).
+	checkLogResults map[string]tracker.CheckLogResult
 
 	reviews []tracker.Review // returned by Reviews
 
@@ -243,15 +249,18 @@ func (f *fakeForge) Checks(context.Context, int) ([]tracker.Check, error) {
 	}
 	return f.checks, nil
 }
-func (f *fakeForge) CheckLog(_ context.Context, _ int, name string) ([]byte, error) {
+func (f *fakeForge) CheckLog(_ context.Context, _ int, name string) (tracker.CheckLogResult, error) {
 	f.checkLogCalls = append(f.checkLogCalls, name)
 	if f.checkLogErr != nil {
-		return nil, f.checkLogErr
+		return tracker.CheckLogResult{}, f.checkLogErr
+	}
+	if res, ok := f.checkLogResults[name]; ok {
+		return res, nil
 	}
 	if b, ok := f.checkLogs[name]; ok {
-		return b, nil
+		return tracker.CheckLogResult{Log: b, Attempt: 1}, nil
 	}
-	return nil, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
+	return tracker.CheckLogResult{}, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
 }
 func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	f.createdPull = &[4]string{head, base, title, body}
@@ -1600,6 +1609,104 @@ func TestPRLogsAdapterMismatch(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "file an issue on coding-lab") {
 		t.Errorf("stderr = %q, want the adapter-mismatch message verbatim", stderr)
+	}
+}
+
+// TestPRLogsUpstreamError is the mismatch test's twin (issue #259): when NO
+// attempt served a log because the forge itself errored, the server's other 502
+// must reach stderr verbatim too — naming the route it asked for and the raw
+// upstream status, and NOT claiming lab's adapter drifted off this forge
+// version. The two 502s are told apart by their text alone, and this one has to
+// send the reader at the forge rather than at lab, which is the whole point of
+// splitting them: a message that misnames the culprit sent the issue's reporter
+// hunting a Forgejo incompatibility that never existed.
+func TestPRLogsUpstreamError(t *testing.T) {
+	fk := &fakeForge{
+		checks: []tracker.Check{{Name: "b", State: tracker.CheckFailure}},
+		checkLogErr: fmt.Errorf("%w: GET /o/r/actions/runs/5/jobs/1/attempt/1/logs answered 500 \"text/plain\" for check %q — "+
+			"the forge failed to serve this log; this is a forge-side error, not a lab adapter mismatch", tracker.ErrLogUpstream, "b"),
+	}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12"}, f.env())
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "/attempt/1/logs") || !strings.Contains(stderr, "500") {
+		t.Errorf("stderr = %q, want the requested log route and the raw upstream status", stderr)
+	}
+	if !strings.Contains(stderr, "forge-side error") {
+		t.Errorf("stderr = %q, want it named as a forge-side error", stderr)
+	}
+	if strings.Contains(stderr, "does not match this forge version") {
+		t.Errorf("stderr = %q blames lab's adapter for a forge-side failure", stderr)
+	}
+}
+
+// TestPRLogsCheckFallbackNotice drives `--check` through the REAL agentapi
+// (issue #259): the one target's log could only be served from an older rerun
+// attempt, so the response carries one X-Lab-Log-Notice header. Pins that the
+// notice survives an actual HTTP round trip byte-for-byte: stdout is EXACTLY
+// the bare log (no notice bytes anywhere in it), exit 0, and stderr is EXACTLY
+// the `labctl pr logs: ` prefix plus the server's rendered sentence — em-dash
+// included. This is deliberately an exact-match assertion, not a substring
+// check: a lossy round trip (mangled em-dash, reordered fields, a dropped
+// header) must fail this test rather than quietly pass a looser one.
+func TestPRLogsCheckFallbackNotice(t *testing.T) {
+	fk := &fakeForge{
+		checks: []tracker.Check{{Name: "build", State: tracker.CheckFailure}},
+		checkLogResults: map[string]tracker.CheckLogResult{
+			"build": {Log: []byte("compiling...\nboom\n"), Attempt: 1, FallbackFrom: 3, FallbackStatus: 500},
+		},
+	}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12", "--check", "build"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if stdout != "compiling...\nboom\n" {
+		t.Errorf("stdout = %q, want the bare log with no notice bytes in it", stdout)
+	}
+	wantStderr := "labctl pr logs: check \"build\": served rerun attempt 1; attempt 3's log route answered HTTP 500 — the latest attempt's logs are unavailable\n"
+	if stderr != wantStderr {
+		t.Errorf("stderr = %q, want exactly %q", stderr, wantStderr)
+	}
+}
+
+// TestPRLogsDefaultFallbackNotices drives default mode through the REAL
+// agentapi with TWO failing checks that both fell back: one notice line per
+// check on stderr, in target order, while stdout keeps the exact
+// `=== logs: <name> ===` section format untouched by any notice text.
+func TestPRLogsDefaultFallbackNotices(t *testing.T) {
+	fk := &fakeForge{
+		checks: []tracker.Check{
+			{Name: "a", State: tracker.CheckSuccess},
+			{Name: "b", State: tracker.CheckFailure},
+			{Name: "c", State: tracker.CheckFailure},
+		},
+		checkLogResults: map[string]tracker.CheckLogResult{
+			"b": {Log: []byte("build failed\nstep 2 blew up"), Attempt: 1, FallbackFrom: 2, FallbackStatus: 500},
+			"c": {Log: []byte("tests: 3 failing"), Attempt: 2, FallbackFrom: 4, FallbackStatus: 503},
+		},
+	}
+	f := newAgentFixture(t, store.TrackerBindingForge,
+		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+
+	code, stdout, stderr := run(t, []string{"pr", "logs", "12"}, f.env())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	wantStdout := "=== logs: b ===\nbuild failed\nstep 2 blew up\n=== logs: c ===\ntests: 3 failing\n"
+	if stdout != wantStdout {
+		t.Errorf("stdout = %q, want %q (unchanged by the fallback)", stdout, wantStdout)
+	}
+	wantStderr := "labctl pr logs: check \"b\": served rerun attempt 1; attempt 2's log route answered HTTP 500 — the latest attempt's logs are unavailable\n" +
+		"labctl pr logs: check \"c\": served rerun attempt 2; attempt 4's log route answered HTTP 503 — the latest attempt's logs are unavailable\n"
+	if stderr != wantStderr {
+		t.Errorf("stderr = %q, want exactly %q", stderr, wantStderr)
 	}
 }
 

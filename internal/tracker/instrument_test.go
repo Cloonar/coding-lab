@@ -27,8 +27,8 @@ func (f failingTracker) Pull(context.Context, int) (PullDetail, error) {
 	return PullDetail{}, f.err
 }
 func (f failingTracker) Checks(context.Context, int) ([]Check, error) { return nil, f.err }
-func (f failingTracker) CheckLog(context.Context, int, string) ([]byte, error) {
-	return nil, f.err
+func (f failingTracker) CheckLog(context.Context, int, string) (CheckLogResult, error) {
+	return CheckLogResult{}, f.err
 }
 func (f failingTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, f.err

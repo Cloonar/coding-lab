@@ -1099,12 +1099,18 @@ func TestCheckLog_happyPath(t *testing.T) {
 			return http.StatusNotFound, "", "no such attempt"
 		})
 
-	log, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
 	if err != nil {
 		t.Fatalf("CheckLog: %v", err)
 	}
-	if string(log) != "attempt-1-log" {
-		t.Errorf("log = %q; want %q", log, "attempt-1-log")
+	if string(res.Log) != "attempt-1-log" {
+		t.Errorf("log = %q; want %q", res.Log, "attempt-1-log")
+	}
+	if res.Attempt != 1 {
+		t.Errorf("Attempt = %d; want 1", res.Attempt)
+	}
+	if res.FallbackFrom != 0 {
+		t.Errorf("FallbackFrom = %d; want 0 (attempt 1 IS the latest)", res.FallbackFrom)
 	}
 	if h.logAuth != "token "+testToken {
 		t.Errorf("log request Authorization = %q; want %q", h.logAuth, "token "+testToken)
@@ -1128,12 +1134,12 @@ func TestCheckLog_pathOnlyTargetURL(t *testing.T) {
 			return http.StatusNotFound, "", ""
 		})
 
-	log, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
 	if err != nil {
 		t.Fatalf("CheckLog: %v", err)
 	}
-	if string(log) != "path-only-log" {
-		t.Errorf("log = %q; want %q", log, "path-only-log")
+	if string(res.Log) != "path-only-log" {
+		t.Errorf("log = %q; want %q", res.Log, "path-only-log")
 	}
 }
 
@@ -1151,12 +1157,15 @@ func TestCheckLog_rerunLatestAttemptWins(t *testing.T) {
 			return http.StatusNotFound, "", ""
 		})
 
-	log, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
 	if err != nil {
 		t.Fatalf("CheckLog: %v", err)
 	}
-	if string(log) != "third-run" {
-		t.Errorf("log = %q; want the latest attempt %q", log, "third-run")
+	if string(res.Log) != "third-run" {
+		t.Errorf("log = %q; want the latest attempt %q", res.Log, "third-run")
+	}
+	if res.Attempt != 3 {
+		t.Errorf("Attempt = %d; want 3", res.Attempt)
 	}
 	if len(h.logPaths) != 4 {
 		t.Errorf("probed %d attempts; want 4 (three 200s then the terminating 404)", len(h.logPaths))
@@ -1183,19 +1192,139 @@ func TestCheckLog_attemptOne404IsMismatch(t *testing.T) {
 	}
 }
 
-// TestCheckLog_serverErrorIsMismatch: any non-200/404 status on the log route
-// is a mismatch.
-func TestCheckLog_serverErrorIsMismatch(t *testing.T) {
+// TestCheckLog_serverErrorFallsBackToOlderAttempt is the issue-#259 bug in one
+// fixture: a run retried while the forge was unwell has a real attempt 2 with
+// no stored log blob, so its route 500s while attempt 1 still serves the full
+// log. The probe must NOT die on that (it used to, as a mismatch) — it serves
+// attempt 1 and reports, out of band, that attempt 2 is what the reader is not
+// getting and why.
+func TestCheckLog_serverErrorFallsBackToOlderAttempt(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(k int) (int, string, string) {
+			switch k {
+			case 1:
+				return http.StatusOK, "text/plain", "attempt-1-log"
+			case 2:
+				return http.StatusInternalServerError, "", "boom"
+			default:
+				return http.StatusNotFound, "", ""
+			}
+		})
+
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if err != nil {
+		t.Fatalf("CheckLog: %v; want the older attempt served, not an error", err)
+	}
+	if string(res.Log) != "attempt-1-log" {
+		t.Errorf("log = %q; want attempt 1's body %q", res.Log, "attempt-1-log")
+	}
+	if res.Attempt != 1 {
+		t.Errorf("Attempt = %d; want 1 (the newest attempt that answered)", res.Attempt)
+	}
+	if res.FallbackFrom != 2 || res.FallbackStatus != http.StatusInternalServerError {
+		t.Errorf("FallbackFrom/FallbackStatus = %d/%d; want 2/500 (the newer attempt that failed)",
+			res.FallbackFrom, res.FallbackStatus)
+	}
+}
+
+// TestCheckLog_noFallbackWhenNewerAttemptServes: a 5xx does not terminate the
+// probe — the first 404 still does — so a broken attempt 2 sandwiched between
+// serving attempts 1 and 3 costs nothing: attempt 3 is served and NO fallback
+// is reported, because the log handed over IS the latest one.
+func TestCheckLog_noFallbackWhenNewerAttemptServes(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(k int) (int, string, string) {
+			switch k {
+			case 1:
+				return http.StatusOK, "text/plain", "a1"
+			case 2:
+				return http.StatusInternalServerError, "", "boom"
+			case 3:
+				return http.StatusOK, "text/plain", "a3"
+			default:
+				return http.StatusNotFound, "", ""
+			}
+		})
+
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if string(res.Log) != "a3" {
+		t.Errorf("log = %q; want the latest attempt %q (the 5xx must not stop the probe)", res.Log, "a3")
+	}
+	if res.Attempt != 3 {
+		t.Errorf("Attempt = %d; want 3", res.Attempt)
+	}
+	if res.FallbackFrom != 0 {
+		t.Errorf("FallbackFrom = %d; want 0 — the served log IS the latest attempt", res.FallbackFrom)
+	}
+}
+
+// TestCheckLog_everyAttemptServerErrorIsUpstream: when no attempt ever answers
+// a log, the forge — not lab's adapter — is why, so this is ErrLogUpstream with
+// the route and the raw status, and explicitly NOT the mismatch prose that
+// would send the reader off to debug lab. With no attempt answering 404 either,
+// the probe honestly walks the full attempt cap before giving up; the cap is
+// incidental here, so the error still names the outage rather than the cap.
+func TestCheckLog_everyAttemptServerErrorIsUpstream(t *testing.T) {
 	h := newCheckLogHarness(t,
 		func(string) string { return checkLogJobRoute },
 		func(int) (int, string, string) { return http.StatusInternalServerError, "", "boom" })
 
 	_, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
-	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
-		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	if !errors.Is(err, tracker.ErrLogUpstream) {
+		t.Fatalf("err = %v; want ErrLogUpstream", err)
 	}
-	if !strings.Contains(err.Error(), "file an issue on coding-lab") {
-		t.Errorf("error %q does not tell the operator to file an issue on coding-lab", err.Error())
+	if want := checkLogJobRoute + "/attempt/1/logs"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the requested log route %q", err.Error(), want)
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error %q does not name the raw upstream status 500", err.Error())
+	}
+	if strings.Contains(err.Error(), "does not match this forge version") {
+		t.Errorf("error %q blames lab's adapter for a forge-side failure", err.Error())
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+	if len(h.logPaths) != checkLogAttemptCap {
+		t.Errorf("probed %d attempts; want the full cap %d (no 404 ever terminated the probe)",
+			len(h.logPaths), checkLogAttemptCap)
+	}
+}
+
+// TestCheckLog_serverErrorThen404IsUpstream: the probe terminates normally on
+// the 404, but nothing answered before it — so there is no older attempt to
+// fall back to and the FIRST server error (the earliest evidence of the
+// outage) is what the ErrLogUpstream message names.
+func TestCheckLog_serverErrorThen404IsUpstream(t *testing.T) {
+	h := newCheckLogHarness(t,
+		func(string) string { return checkLogJobRoute },
+		func(k int) (int, string, string) {
+			if k == 1 {
+				return http.StatusInternalServerError, "", "boom"
+			}
+			return http.StatusNotFound, "", ""
+		})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogContext)
+	if !errors.Is(err, tracker.ErrLogUpstream) {
+		t.Fatalf("err = %v; want ErrLogUpstream", err)
+	}
+	if want := checkLogJobRoute + "/attempt/1/logs"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name attempt 1's log route %q", err.Error(), want)
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error %q does not name the raw upstream status 500", err.Error())
+	}
+	if strings.Contains(err.Error(), "does not match this forge version") {
+		t.Errorf("error %q blames lab's adapter for a forge-side failure", err.Error())
+	}
+	if len(h.logPaths) != 2 {
+		t.Errorf("probed %d attempts; want 2 (the 5xx, then the terminating 404)", len(h.logPaths))
 	}
 }
 

@@ -342,8 +342,8 @@ func (s *stubForgeTracker) Pull(_ context.Context, number int) (tracker.PullDeta
 func (s *stubForgeTracker) Checks(context.Context, int) ([]tracker.Check, error) {
 	return []tracker.Check{}, nil
 }
-func (s *stubForgeTracker) CheckLog(context.Context, int, string) ([]byte, error) {
-	return nil, nil
+func (s *stubForgeTracker) CheckLog(context.Context, int, string) (tracker.CheckLogResult, error) {
+	return tracker.CheckLogResult{}, nil
 }
 
 func (s *stubForgeTracker) CreatePull(context.Context, string, string, string, string) (tracker.PullRef, error) {
