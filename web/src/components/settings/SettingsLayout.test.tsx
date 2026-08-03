@@ -1,15 +1,17 @@
 // SettingsLayout contract (issue #198): mobile bare index = tappable category
-// rows (danger styled + last); mobile section = back header + children;
-// desktop bare index = redirect to the first slug — including LIVE when the
-// viewport grows to desktop while the index sits open; unknown slug = bounce
-// to base (desktop re-redirects to the first slug); desktop section =
-// master-detail with a plain-text nav (no icons), active link marked.
+// rows (danger styled + last), each carrying its vendored Icon at size 20 and
+// aria-hidden (ADR-0019, issue #199 — the row's text is the accessible name);
+// mobile section = back header + children; desktop bare index = redirect to
+// the first slug — including LIVE when the viewport grows to desktop while the
+// index sits open; unknown slug = bounce to base (desktop re-redirects to the
+// first slug); desktop section = master-detail with a plain-text nav (no
+// icons), active link marked.
 
 import { MemoryRouter, Route, createMemoryHistory, useParams } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MemoryHistory } from '@solidjs/router';
-import type { SettingsCategory, SettingsIcon } from './categories';
+import type { SettingsCategory } from './categories';
 import SettingsLayout from './SettingsLayout';
 
 // --- controllable matchMedia fake (harness stubMatchMedia idiom, single
@@ -48,29 +50,27 @@ function setDesktop(matches: boolean): void {
 
 // --- fixtures ---
 
-/** Stub icon: records its name/size so rows can be asserted on. */
-const icon =
-  (name: string): SettingsIcon =>
-  (props) => <svg class={props.class} data-icon={name} width={props.size} height={props.size} />;
-
+// Real vendored icon names (the ones the shipped registries use for these
+// categories): the layout renders the actual glyphs, so there is nothing to
+// stub.
 const CATEGORIES: SettingsCategory[] = [
   {
     slug: 'general',
     title: 'General',
     description: 'Spawn defaults and identity.',
-    icon: icon('general'),
+    icon: 'settings-2',
   },
   {
     slug: 'notifications',
     title: 'Notifications',
     description: 'Push devices for this account.',
-    icon: icon('bell'),
+    icon: 'bell',
   },
   {
     slug: 'danger',
     title: 'Danger zone',
     description: 'Delete things for good.',
-    icon: icon('warn'),
+    icon: 'triangle-alert',
     danger: true,
   },
 ];
@@ -148,8 +148,13 @@ describe('SettingsLayout', () => {
       'Notifications',
       'Danger zone',
     ]);
-    // Icons render at size 20, no color prop — currentColor tints them.
-    expect(rows[0]?.querySelector('svg[data-icon="general"]')?.getAttribute('width')).toBe('20');
+    // The row icon: size 20, no color prop (currentColor tints it through the
+    // class), and aria-hidden — the row's own text is the accessible name.
+    const rowIcon = rows[0]?.querySelector('svg.settings-index-icon');
+    expect(rowIcon).not.toBeNull();
+    expect(rowIcon?.getAttribute('width')).toBe('20');
+    expect(rowIcon?.getAttribute('height')).toBe('20');
+    expect(rowIcon?.getAttribute('aria-hidden')).toBe('true');
     // Danger: last row, danger class (icon + title tint in CSS).
     expect(rows[2]?.classList.contains('danger')).toBe(true);
     expect(rows[0]?.classList.contains('danger')).toBe(false);
