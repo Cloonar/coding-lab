@@ -91,9 +91,7 @@ function stubApi(): void {
         );
       }
       if (url === '/api/v1/repos' && method === 'GET') {
-        return Promise.resolve(
-          jsonResponse(200, { repos: [{ id: REPO_ID, name: 'coding-lab' }] }),
-        );
+        return Promise.resolve(jsonResponse(200, { repos: [{ id: REPO_ID, name: 'coding-lab' }] }));
       }
       // AppShell mounts the side rail once authenticated; it fetches the
       // instance list for the ACTIVE rail + attention badge.
