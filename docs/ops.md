@@ -311,7 +311,7 @@ Two Forgejo Actions gates run on pull requests (ADR-0023):
 
 **Native gate** (ci.yml) — the runner needs:
 
-- `actions/setup-go@v5` and `actions/setup-node@v4` to resolve — from the same source as the existing `actions/checkout@v4` (Forgejo's `DEFAULT_ACTIONS_URL` mirror, or an admin-set github). Pin actions by **tag** (`@v5`/`@v4`), never by a GitHub commit SHA: the mirror's SHAs differ from github's.
+- `actions/setup-go@v7` and `actions/setup-node@v7` to resolve — from the same source as the existing `actions/checkout@v7` (Forgejo's `DEFAULT_ACTIONS_URL` mirror, or an admin-set github). Pin actions by **tag** (`@v7`), never by a GitHub commit SHA: the mirror's SHAs differ from github's.
 - The runner's **actions cache backend enabled** (the default — `cache.enabled: true` injects `ACTIONS_CACHE_URL`). `setup-go` caches the Go module + build cache by default and `setup-node` caches `~/.npm` (`cache: npm`); with no cache backend reachable those steps fail rather than silently skip.
 - Outbound egress for `proxy.golang.org` (Go modules), `registry.npmjs.org` (npm), the actions source, and `raw.githubusercontent.com` + `github.com` (the pinned golangci-lint installer and release binary). No nix, no `cache.nixos.org`, no Determinate installer on this gate.
 - `git`, `tmux`, and `prlimit` (util-linux) on PATH for `go test` (real subprocesses, the D17 bar). `git` and `prlimit` ship on the stock image; `tmux` does not, so the job `apt-get install`s it — the runner therefore also needs apt reachable and either runs as root or has `sudo`.

@@ -49,7 +49,7 @@ jobs:
       # nix/module.nix — the wait step derives the expected agent-tools
       # registry tags from the former and the default dev-image ref (issue
       # #230) from the latter.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install nix
         run: |
