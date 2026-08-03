@@ -32,13 +32,25 @@ export type IconName =
   | 'more-horizontal'
   | 'pencil'
   | 'chevron-down'
+  | 'chevron-left'
+  | 'chevron-right'
   | 'chevrons-left'
   | 'chevrons-right'
   | 'history'
   | 'git-branch'
   | 'share'
   | 'square-plus'
-  | 'panel-right';
+  | 'panel-right'
+  | 'bell'
+  | 'bot'
+  | 'calendar-clock'
+  | 'container'
+  | 'folder-input'
+  | 'lock-keyhole'
+  | 'plane-landing'
+  | 'plug'
+  | 'settings-2'
+  | 'triangle-alert';
 
 // name -> the svg children for that glyph. Functions (not shared nodes) so a
 // glyph used in several places produces its own DOM each time. Each returned
@@ -143,6 +155,8 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     </>
   ),
   'chevron-down': () => <path d="m6 9 6 6 6-6" />,
+  'chevron-left': () => <path d="m15 18-6-6 6-6" />,
+  'chevron-right': () => <path d="m9 18 6-6-6-6" />,
   'chevrons-left': () => (
     <>
       <path d="m11 17-5-5 5-5" />
@@ -192,6 +206,84 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     <>
       <rect width="18" height="18" x="3" y="3" rx="2" />
       <path d="M15 3v18" />
+    </>
+  ),
+  bell: () => (
+    <>
+      <path d="M10.268 21a2 2 0 0 0 3.464 0" />
+      <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />
+    </>
+  ),
+  bot: () => (
+    <>
+      <path d="M12 8V4H8" />
+      <rect width="16" height="12" x="4" y="8" rx="2" />
+      <path d="M2 14h2" />
+      <path d="M20 14h2" />
+      <path d="M15 13v2" />
+      <path d="M9 13v2" />
+    </>
+  ),
+  'calendar-clock': () => (
+    <>
+      <path d="M16 14v2.2l1.6 1" />
+      <path d="M16 2v3" />
+      <path d="M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338" />
+      <path d="M3 9h5.859" />
+      <path d="M8 2v3" />
+      <circle cx="16" cy="16" r="6" />
+    </>
+  ),
+  container: () => (
+    <>
+      <path d="M22 7.7c0-.6-.4-1.2-.8-1.5l-6.3-3.9a1.72 1.72 0 0 0-1.7 0l-10.3 6c-.5.2-.9.8-.9 1.4v6.6c0 .5.4 1.2.8 1.5l6.3 3.9a1.72 1.72 0 0 0 1.7 0l10.3-6c.5-.3.9-1 .9-1.5Z" />
+      <path d="M10 21.9V14L2.1 9.1" />
+      <path d="m10 14 11.9-6.9" />
+      <path d="M14 19.8v-8.1" />
+      <path d="M18 17.5V9.4" />
+    </>
+  ),
+  'folder-input': () => (
+    <>
+      <path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1" />
+      <path d="M2 13h10" />
+      <path d="m9 16 3-3-3-3" />
+    </>
+  ),
+  'lock-keyhole': () => (
+    <>
+      <circle cx="12" cy="16" r="1" />
+      <rect x="3" y="10" width="18" height="12" rx="2" />
+      <path d="M7 10V7a5 5 0 0 1 10 0v3" />
+    </>
+  ),
+  'plane-landing': () => (
+    <>
+      <path d="M2 22h20" />
+      <path d="M3.77 10.77 2 9l2-4.5 1.1.55c.55.28.9.84.9 1.45s.35 1.17.9 1.45L8 8.5l3-6 1.05.53a2 2 0 0 1 1.09 1.52l.72 5.4a2 2 0 0 0 1.09 1.52l4.4 2.2c.42.22.78.55 1.01.96l.6 1.03c.49.88-.06 1.98-1.06 2.1l-1.18.15c-.47.06-.95-.02-1.37-.24L4.29 11.15a2 2 0 0 1-.52-.38Z" />
+    </>
+  ),
+  plug: () => (
+    <>
+      <path d="M12 22v-5" />
+      <path d="M15 8V2" />
+      <path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z" />
+      <path d="M9 8V2" />
+    </>
+  ),
+  'settings-2': () => (
+    <>
+      <path d="M14 17H5" />
+      <path d="M19 7h-9" />
+      <circle cx="17" cy="17" r="3" />
+      <circle cx="7" cy="7" r="3" />
+    </>
+  ),
+  'triangle-alert': () => (
+    <>
+      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
     </>
   ),
 };

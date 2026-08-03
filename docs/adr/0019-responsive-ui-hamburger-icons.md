@@ -79,6 +79,15 @@ Accepted. A pure SPA diff: `web/src/base.css`, `TopBar.tsx`, `InstanceList.tsx`,
 accessible name. Adds **no** runtime npm dependency. A future Codex/Gemini
 provider inherits all of it for free — the chrome is provider-agnostic.
 
+The settings IA rework (#198) briefly crossed the no-icon-package line: its
+section/category icons and the settings layout's chevrons came from
+`lucide-solid` deep imports, so the SPA carried two delivery mechanisms for the
+same Lucide designs. Issue #199 folded that back in rather than superseding this
+ADR — the twelve glyphs those screens needed are vendored into `Icon`, the
+package is dropped, and the SPA's runtime dependency set is again
+`solid-js` + `@solidjs/router`. The decision above stands unamended: `Icon` is
+the single icon entry point.
+
 ## Considered options
 
 - **A bottom tab bar for mobile navigation.** Rejected: the chat view (`/runs/:id`)
