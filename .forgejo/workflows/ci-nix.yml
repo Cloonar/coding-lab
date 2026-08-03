@@ -34,7 +34,7 @@ jobs:
   flake-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: install nix + flake check
         run: |
           curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \

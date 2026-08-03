@@ -28,7 +28,7 @@ jobs:
     env:
       CGO_ENABLED: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Ensure go test subprocess deps (git, tmux, prlimit)
         run: |
@@ -46,7 +46,7 @@ jobs:
           fi
           tmux -V && git --version && prlimit --version
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
@@ -67,7 +67,7 @@ jobs:
           mkdir -p internal/webui
           cp -r web/dist internal/webui/dist
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod # `go 1.26` — the go.mod gate
           # module + build cache (keyed on go.sum) is on by default.
@@ -106,7 +106,7 @@ jobs:
   #         POSTGRES_PASSWORD: lab
   #         POSTGRES_DB: lab_test
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v7
   #     - name: store suite against postgres
   #       env:
   #         LAB_TEST_POSTGRES_DSN: postgres://lab:lab@postgres:5432/lab_test?sslmode=disable

@@ -104,7 +104,7 @@ jobs:
       # hostname from the OCI spec entirely, so crun never makes the call.
       SMOKE_EXTRA_RUN_ARGS: "--uts=host --mount type=bind,source=/proc,destination=/proc"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # build.sh fetches the pinned CLI artifacts into
       # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
@@ -117,7 +117,7 @@ jobs:
       # never a risk: build.sh ignores and refetches anything failing its
       # sha256 pin.
       - name: Restore pinned CLI artifacts cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: containers/agent-tools/artifacts
           key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
@@ -184,7 +184,7 @@ jobs:
       - name: Save pinned CLI artifacts cache
         if: always()
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: containers/agent-tools/artifacts
           key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
@@ -232,7 +232,7 @@ jobs:
           fi
           echo "FORGE_REGISTRY_TOKEN is present — proceeding to build, smoke test, and publish."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # build.sh fetches the pinned CLI artifacts into
       # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
@@ -245,7 +245,7 @@ jobs:
       # never a risk: build.sh ignores and refetches anything failing its
       # sha256 pin.
       - name: Restore pinned CLI artifacts cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: containers/agent-tools/artifacts
           key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
@@ -386,7 +386,7 @@ jobs:
       - name: Save pinned CLI artifacts cache
         if: always()
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: containers/agent-tools/artifacts
           key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
