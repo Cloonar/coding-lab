@@ -1,19 +1,9 @@
 // The per-repo settings categories (issue #198): the subpages of
 // /repos/:id/settings/:section, in display order. SettingsLayout renders the
 // mobile index rows and the desktop master-detail nav from this list. Danger
-// is pinned last (danger: true tints it via CSS). Icon values are lucide-solid
-// per-icon deep imports — the app icon system.
+// is pinned last (danger: true tints it via CSS). Icon values are vendored
+// Icon names — the app icon system (ADR-0019, issue #199).
 
-import Bot from 'lucide-solid/icons/bot';
-import CalendarClock from 'lucide-solid/icons/calendar-clock';
-import ContainerIcon from 'lucide-solid/icons/container';
-import FolderInput from 'lucide-solid/icons/folder-input';
-import GitBranch from 'lucide-solid/icons/git-branch';
-import LockKeyhole from 'lucide-solid/icons/lock-keyhole';
-import PlaneLanding from 'lucide-solid/icons/plane-landing';
-import Plug from 'lucide-solid/icons/plug';
-import Settings2 from 'lucide-solid/icons/settings-2';
-import TriangleAlert from 'lucide-solid/icons/triangle-alert';
 import type { SettingsCategory } from '../../components/settings/categories';
 
 export const REPO_SETTINGS_CATEGORIES: SettingsCategory[] = [
@@ -21,61 +11,61 @@ export const REPO_SETTINGS_CATEGORIES: SettingsCategory[] = [
     slug: 'general',
     title: 'General',
     description: 'Name, git author identity, Incogni.',
-    icon: Settings2,
+    icon: 'settings-2',
   },
   {
     slug: 'integrations',
     title: 'Integrations',
     description: 'Git credential, tracker binding, forge token.',
-    icon: Plug,
+    icon: 'plug',
   },
   {
     slug: 'branches',
     title: 'Branches',
     description: 'Default branch and branch naming.',
-    icon: GitBranch,
+    icon: 'git-branch',
   },
   {
     slug: 'agents',
     title: 'Agents',
     description: 'Spawn and AFK defaults, auto-spawn, budget.',
-    icon: Bot,
+    icon: 'bot',
   },
   {
     slug: 'runner',
     title: 'Runner',
     description: 'Container or host execution, resource limits.',
-    icon: ContainerIcon,
+    icon: 'container',
   },
   {
     slug: 'autoland',
     title: 'Autoland',
     description: 'Lander validation and merge policy for claim PRs.',
-    icon: PlaneLanding,
+    icon: 'plane-landing',
   },
   {
     slug: 'secrets',
     title: 'Secrets',
     description: 'Write-only secrets for agents.',
-    icon: LockKeyhole,
+    icon: 'lock-keyhole',
   },
   {
     slug: 'schedules',
     title: 'Schedules',
     description: 'Cron-fired scheduled runs: prompt, flows, cadence.',
-    icon: CalendarClock,
+    icon: 'calendar-clock',
   },
   {
     slug: 'imports',
     title: 'Imports',
     description: "Other lab repos this repo's instances may read as read-only snapshots.",
-    icon: FolderInput,
+    icon: 'folder-input',
   },
   {
     slug: 'danger',
     title: 'Danger zone',
     description: 'Delete this repository.',
-    icon: TriangleAlert,
+    icon: 'triangle-alert',
     danger: true,
   },
 ];

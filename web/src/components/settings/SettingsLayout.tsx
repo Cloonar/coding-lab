@@ -11,8 +11,7 @@
 import { A, Navigate } from '@solidjs/router';
 import { For, Match, Show, Switch } from 'solid-js';
 import type { JSX } from 'solid-js';
-import ChevronLeft from 'lucide-solid/icons/chevron-left';
-import ChevronRight from 'lucide-solid/icons/chevron-right';
+import Icon from '../Icon';
 import { createMediaQuery } from '../../lib/media';
 import type { SettingsCategory } from './categories';
 
@@ -51,14 +50,15 @@ export default function SettingsLayout(props: {
                       href={`${props.base}/${c.slug}`}
                       classList={{ 'settings-index-row': true, danger: c.danger === true }}
                     >
-                      {/* No color prop: the icon inherits currentColor, so the
-                          danger modifier tints it through CSS alone. */}
-                      <c.icon size={20} class="settings-index-icon" />
+                      {/* Icon takes no color prop: the glyph strokes with
+                          currentColor, so the danger modifier tints it
+                          through CSS alone. */}
+                      <Icon name={c.icon} size={20} class="settings-index-icon" />
                       <span class="settings-index-text">
                         <span class="settings-index-title">{c.title}</span>
                         <span class="settings-index-desc">{c.description}</span>
                       </span>
-                      <ChevronRight size={18} class="settings-index-chevron" />
+                      <Icon name="chevron-right" size={18} class="settings-index-chevron" />
                     </A>
                   )}
                 </For>
@@ -82,7 +82,7 @@ export default function SettingsLayout(props: {
               <>
                 <div class="settings-back-head">
                   <A href={props.base} class="settings-back-link" aria-label="All settings">
-                    <ChevronLeft size={20} />
+                    <Icon name="chevron-left" size={20} />
                   </A>
                   <h2>{category().title}</h2>
                 </div>
