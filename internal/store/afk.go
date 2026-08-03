@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ActiveAFKRuns lists every outcome='active' run of the unattended kinds —
@@ -113,10 +114,10 @@ func (s *Store) ActiveRunOnBranch(ctx context.Context, repoID, branch string) (b
 	return n > 0, nil
 }
 
-// AutolandAttempts reads the spawn-intent counter for (repoID, branch, kind)
-// — the fix-forward loop's attempt bounds (issue #182 / ADR-0048). Absent row
-// means zero, the most permissive value, so a repo that has never spawned the
-// kind needs no seeding.
+// AutolandAttempts reads the spawn-intent counter for (repoID, pullNumber,
+// kind) — the fix-forward loop's attempt bounds (issue #182 / ADR-0048).
+// Absent row means zero, the most permissive value, so a PR that has never
+// spawned the kind needs no seeding.
 //
 // This, NOT a count of runs rows, is the bounds' source of truth. A runs row
 // records a spawn that reached a live session: Start's rollback deletes it on
@@ -125,54 +126,227 @@ func (s *Store) ActiveRunOnBranch(ctx context.Context, repoID, branch string) (b
 // one. Counting rows therefore lets a deterministically-failing launch retry
 // every tick forever, never burning an attempt and never reaching escalation.
 // RecordAutolandAttempt burns the attempt at the launch chokepoint instead.
-func (s *Store) AutolandAttempts(ctx context.Context, repoID, branch, kind string) (int, error) {
+//
+// The key is the PR, not the claim branch (issue #188 / migration 0022):
+// afk/<N> claim branches derive from the ISSUE number, so discarding an
+// escalated run and letting a fresh AFK run re-claim the issue reuses the
+// branch — and the brand-new PR opened on it inherited the discarded PR's
+// spent budget, starting life out of fix attempts without ever having been
+// validated once. Only the pull number tells one PR on a reused branch from
+// the next.
+func (s *Store) AutolandAttempts(ctx context.Context, repoID string, pullNumber int, kind string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, s.rebind(
 		`SELECT attempts FROM autoland_attempts
-		 WHERE repo_id = ? AND branch = ? AND kind = ?`),
-		repoID, branch, kind).Scan(&n)
+		 WHERE repo_id = ? AND pull_number = ? AND kind = ?`),
+		repoID, pullNumber, kind).Scan(&n)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, nil
 	case err != nil:
-		return 0, fmt.Errorf("autoland %s attempts for branch %q in repo %q: %w", kind, branch, repoID, err)
+		return 0, fmt.Errorf("autoland %s attempts for pull %d in repo %q: %w", kind, pullNumber, repoID, err)
 	}
 	return n, nil
 }
 
-// RecordAutolandAttempt burns one attempt for (repoID, branch, kind) — called
-// once per launch the autoland pass actually reaches the launch pad with, for
-// the bounded kinds only (issue #182 / ADR-0048). Idempotent by upsert, never
-// by run identity: two attempts on one branch are two attempts, which is the
-// whole point of bounding intents rather than surviving rows.
-func (s *Store) RecordAutolandAttempt(ctx context.Context, repoID, branch, kind string) error {
+// RecordAutolandAttempt burns one attempt for (repoID, pullNumber, kind) —
+// called once per launch the autoland pass actually reaches the launch pad
+// with, for the bounded kinds only (issue #182 / ADR-0048). Idempotent by
+// upsert, never by run identity: two attempts on one PR are two attempts,
+// which is the whole point of bounding intents rather than surviving rows.
+// Keyed on the pull rather than the claim branch for the reason
+// AutolandAttempts spells out (issue #188): a requeued issue reuses its
+// afk/<N> branch, and the new PR must not be born owing the old PR's budget.
+func (s *Store) RecordAutolandAttempt(ctx context.Context, repoID string, pullNumber int, kind string) error {
 	_, err := s.db.ExecContext(ctx, s.rebind(
-		`INSERT INTO autoland_attempts (repo_id, branch, kind, attempts)
+		`INSERT INTO autoland_attempts (repo_id, pull_number, kind, attempts)
 		 VALUES (?, ?, ?, 1)
-		 ON CONFLICT (repo_id, branch, kind)
+		 ON CONFLICT (repo_id, pull_number, kind)
 		 DO UPDATE SET attempts = autoland_attempts.attempts + 1`),
-		repoID, branch, kind)
+		repoID, pullNumber, kind)
 	if err != nil {
-		return fmt.Errorf("record autoland %s attempt for branch %q in repo %q: %w", kind, branch, repoID, err)
+		return fmt.Errorf("record autoland %s attempt for pull %d in repo %q: %w", kind, pullNumber, repoID, err)
 	}
 	return nil
 }
 
-// EscalatedRunOnBranch reports whether an outcome='escalated' run exists for
-// (repoID, branch) — the poller's permanent-terminality gate (issue #182 /
-// ADR-0048). An escalated-outcome run makes the PR invisible to autoland
-// forever, even if the escalate marker comment is later deleted from the
-// forge: this store row, not the comment, is the durable terminal signal.
-func (s *Store) EscalatedRunOnBranch(ctx context.Context, repoID, branch string) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, s.rebind(
-		`SELECT COUNT(*) FROM runs
-		 WHERE outcome = ? AND repo_id = ? AND branch = ?`),
-		RunOutcomeEscalated, repoID, branch).Scan(&n)
+// EscalatedRunForPull returns the moment autoland's terminality was recorded
+// for (repoID, pullNumber) — the newest outcome='escalated' run's ended_at,
+// falling back to started_at for a row that somehow reached the outcome
+// without one — and ok=false when no such run exists (issue #188 / ADR-0048's
+// amendment).
+//
+// It returns a TIME, not a bool, because terminality stopped being permanent.
+// An escalated run says "as of these N attempts, agents could not finish
+// this", and a human re-arm (RearmPull) is new information that supersedes the
+// statement; the gate is therefore relational — terminal iff an escalation
+// signal exists AFTER the last re-arm — and the caller needs this instant to
+// compare against PullRearmedAt. A bool would throw away the only fact the
+// comparison needs. The escalated row itself is never deleted or rewritten:
+// supersession, not erasure, because the row is the record of what happened.
+//
+// No branch parameter: (repo_id, pull_number) already identifies the PR within
+// the repo, and a redundant branch predicate would only add a way for the two
+// to disagree — which is precisely the failure this issue is fixing.
+//
+// The newest row is computed in GO, never with ORDER BY ... LIMIT 1, and that
+// is deliberate. Two reasons, both worth the extra scan (there are at most
+// MaxEscalateAttempts escalated rows per PR, so it is trivially cheap):
+//
+//   - The instant we want is COALESCE(ended_at, started_at), so ordering must
+//     use the coalesce too. Ordering by ended_at while selecting the fallback
+//     — the natural way to write it — silently picks the wrong row whenever a
+//     later-started run ended earlier, which the interleaving of concurrent
+//     escalate attempts makes entirely ordinary.
+//   - A lexicographic ORDER BY over these columns is only correct because
+//     store.go's pinned timeFormat is fixed-width UTC ("…T15:04:05.000Z"), an
+//     invariant one careless writer away from breaking: a raw INSERT rendered
+//     with time.RFC3339Nano drops trailing zeros, and "…:00Z" then sorts AFTER
+//     "…:00.500Z" — later text for an earlier instant. Parsing with the
+//     store's own parser and taking the max over time.Time depends on no such
+//     invariant.
+//
+// Upgrade path, stated so it is not mistaken for an oversight: a run row
+// predating migration 0022 has pull_number NULL and can therefore never match
+// this query (SQL equality against NULL is never true). That is safe. ADR-0048
+// writes outcome='escalated' ONLY for an escalate run whose escalate marker
+// comment actually landed, so every pre-0022 escalated PR still carries that
+// marker and stays terminal through the comment half of the poller's gate. The
+// only PRs that lose terminality across the upgrade are the ones whose human
+// deliberately deleted the marker — itself a statement of intent, and the
+// same statement a re-arm would have made explicitly.
+func (s *Store) EscalatedRunForPull(ctx context.Context, repoID string, pullNumber int) (time.Time, bool, error) {
+	doing := fmt.Sprintf("escalated run for pull %d in repo %q", pullNumber, repoID)
+	rows, err := s.db.QueryContext(ctx, s.rebind(
+		`SELECT started_at, ended_at FROM runs
+		 WHERE outcome = ? AND repo_id = ? AND pull_number = ?`),
+		RunOutcomeEscalated, repoID, pullNumber)
 	if err != nil {
-		return false, fmt.Errorf("escalated run on branch %q for repo %q: %w", branch, repoID, err)
+		return time.Time{}, false, fmt.Errorf("%s: %w", doing, err)
 	}
-	return n > 0, nil
+	defer func() { _ = rows.Close() }()
+
+	var newest time.Time
+	found := false
+	for rows.Next() {
+		var (
+			started string
+			ended   sql.NullString
+		)
+		if err := rows.Scan(&started, &ended); err != nil {
+			return time.Time{}, false, fmt.Errorf("%s: %w", doing, err)
+		}
+		at, err := parseTime(started)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("%s: %w", doing, err)
+		}
+		if ended.Valid {
+			if at, err = parseTime(ended.String); err != nil {
+				return time.Time{}, false, fmt.Errorf("%s: %w", doing, err)
+			}
+		}
+		if !found || at.After(newest) {
+			newest, found = at, true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return time.Time{}, false, fmt.Errorf("%s: %w", doing, err)
+	}
+	return newest, found, nil
+}
+
+// PullRearmedAt returns the moment (repoID, pullNumber) was last re-armed; a
+// zero Time means never (issue #188 / ADR-0048's amendment). It is the right
+// half of the terminality comparison: the poller folds an escalation signal —
+// EscalatedRunForPull's instant, or an escalate marker comment's CreatedAt —
+// as terminal only when that instant is AFTER this one.
+//
+// An absent row is not an error, mirroring AutolandAttempts' absent-row-means-
+// zero rule: "never re-armed" is the overwhelmingly common state and the zero
+// Time answers it exactly — every real escalation instant is after it, so the
+// comparison keeps working with no special case at the call site.
+func (s *Store) PullRearmedAt(ctx context.Context, repoID string, pullNumber int) (time.Time, error) {
+	var at string
+	err := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT rearmed_at FROM autoland_rearms
+		 WHERE repo_id = ? AND pull_number = ?`),
+		repoID, pullNumber).Scan(&at)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return time.Time{}, nil
+	case err != nil:
+		return time.Time{}, fmt.Errorf("rearm moment for pull %d in repo %q: %w", pullNumber, repoID, err)
+	}
+	t, err := parseTime(at)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("rearm moment for pull %d in repo %q: %w", pullNumber, repoID, err)
+	}
+	return t, nil
+}
+
+// RearmPull records a human re-arm of (repoID, pullNumber) at instant at and
+// zeroes the PR's fix and escalate attempt budgets, atomically (issue #188 /
+// ADR-0048's amendment). at is normalized through the store's
+// storedTime/fmtTime path before it is written, exactly as CreateRun does, so
+// PullRearmedAt hands back precisely the instant the database holds rather
+// than a value that differs from the caller's by sub-millisecond noise the
+// comparison would then have to tolerate.
+//
+// The two halves are ONE transaction because either alone is a bug that looks
+// like a silent no-op. Clearing terminality while leaving the fix budget spent
+// means the very next lander rejection escalates again immediately — the
+// worst possible outcome, since to the human it reads as "the re-arm did not
+// work" rather than "the re-arm worked and the agents failed again". Zeroing
+// the budget without the supersession record leaves the PR invisible to the
+// poller, so the restored budget is never spent at all.
+//
+// Upsert rather than insert: re-arm is indefinitely repeatable and only the
+// newest gesture matters, so the table keeps one row per PR holding the LATEST
+// moment (migration 0022) — earlier re-arms are superseded by the same
+// relation the gate itself uses, and there is no history to prune.
+//
+// Zeroing is a DELETE, not an UPDATE ... SET attempts = 0: an absent row
+// already means zero (AutolandAttempts), so deleting IS zeroing, and it needs
+// no per-kind enumeration that a future third bounded kind would silently fall
+// out of.
+//
+// A repoID that does not exist maps to ErrNotFound via the autoland_rearms FK
+// — the package's convention for a write against a vanished parent (CreateRun,
+// AddIssueLabel). Defensive only: the httpapi caller has already loaded the
+// repo to authorize the action, so this is the vanished-between-check-and-write
+// race, not the ordinary path.
+func (s *Store) RearmPull(ctx context.Context, repoID string, pullNumber int, at time.Time) error {
+	at = storedTime(at)
+	doing := fmt.Sprintf("rearm pull %d in repo %q", pullNumber, repoID)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%s: %w", doing, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, s.rebind(
+		`INSERT INTO autoland_rearms (repo_id, pull_number, rearmed_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT (repo_id, pull_number)
+		 DO UPDATE SET rearmed_at = ?`),
+		repoID, pullNumber, fmtTime(at), fmtTime(at)); err != nil {
+		if isForeignKeyViolation(err) {
+			return fmt.Errorf("%s: %w", doing, ErrNotFound)
+		}
+		return fmt.Errorf("%s: %w", doing, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, s.rebind(
+		`DELETE FROM autoland_attempts WHERE repo_id = ? AND pull_number = ?`),
+		repoID, pullNumber); err != nil {
+		return fmt.Errorf("%s: %w", doing, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%s: %w", doing, err)
+	}
+	return nil
 }
 
 // IncrementRepoFailures adds one to a repo's consecutive-failure counter and

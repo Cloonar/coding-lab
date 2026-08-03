@@ -233,6 +233,56 @@ func TestCreateRunCredSig(t *testing.T) {
 	}
 }
 
+// TestRunPullNumberRoundTrip pins runs.pull_number (issue #188 / migration
+// 0022): the PR an autoland run works, stamped at insert and read back through
+// the shared column list. nil is the meaningful default — a manual run, or a
+// row predating 0022, touches no PR — and it must survive as NULL rather than
+// collapsing to 0, because pull 0 does not exist and the terminality gate
+// compares on equality: a run that silently claimed pull 0 would be a run
+// claiming a PR nobody opened.
+func TestRunPullNumberRoundTrip(t *testing.T) {
+	st := openTestSQLite(t)
+	ctx := context.Background()
+	repo := seedRepoForRuns(t, st)
+	now := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+
+	plain := manualRun(repo.ID, "proj~nopull", "lab/nopull", now)
+	if created, err := st.CreateRun(ctx, plain); err != nil {
+		t.Fatalf("CreateRun without a pull: %v", err)
+	} else if created.PullNumber != nil {
+		t.Errorf("CreateRun returned PullNumber = %v, want nil", created.PullNumber)
+	}
+	if got, err := st.RunByID(ctx, plain.ID); err != nil {
+		t.Fatalf("RunByID: %v", err)
+	} else if got.PullNumber != nil {
+		t.Errorf("non-autoland run read back PullNumber = %v, want nil", *got.PullNumber)
+	}
+
+	pull := 42
+	lander := manualRun(repo.ID, "proj~lander-42", "afk/7", now.Add(time.Minute))
+	lander.Kind = RunKindLander
+	lander.PullNumber = &pull
+	created, err := st.CreateRun(ctx, lander)
+	if err != nil {
+		t.Fatalf("CreateRun with a pull: %v", err)
+	}
+	if created.PullNumber == nil || *created.PullNumber != pull {
+		t.Errorf("CreateRun returned PullNumber = %v, want %d", created.PullNumber, pull)
+	}
+	// Every read path scans the same column list; check a second one so a
+	// mis-ordered scan cannot pass on RunByID alone.
+	got, err := st.RunBySession(ctx, "proj~lander-42")
+	if err != nil {
+		t.Fatalf("RunBySession: %v", err)
+	}
+	if got.PullNumber == nil || *got.PullNumber != pull {
+		t.Errorf("RunBySession PullNumber = %v, want %d", got.PullNumber, pull)
+	}
+	if got.Branch != "afk/7" || got.Kind != RunKindLander {
+		t.Errorf("neighbouring columns shifted: branch=%q kind=%q", got.Branch, got.Kind)
+	}
+}
+
 // TestRunRemoteRoundTrip pins runs.remote (issue #163): the resolved value the
 // launcher stamped, read back verbatim in both directions. It is a plain bool,
 // not a tri-state — a run row records what WAS resolved, so there is nothing to

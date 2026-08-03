@@ -270,6 +270,61 @@ func TestVerdictWords(t *testing.T) {
 	}
 }
 
+// TestDropSupersededEscalations pins the supersession filter (issue #188):
+// only escalate markers, only ones NOT after the re-arm, order preserved, and
+// nothing at all dropped when the PR was never re-armed. The bodies are
+// identified by their marker word so a row reads as the thread it models.
+func TestDropSupersededEscalations(t *testing.T) {
+	at := func(d time.Duration, body string) tracker.Comment {
+		return tracker.Comment{Body: body, CreatedAt: t0.Add(d)}
+	}
+	var (
+		reject   = at(time.Minute, tracker.VerdictReject+"\n\nfindings")
+		escalate = at(2*time.Minute, tracker.VerdictEscalate+"\n\ndigest")
+		fresh    = at(9*time.Minute, tracker.VerdictEscalate+"\n\nround 2 digest")
+		prose    = at(3*time.Minute, "just prose")
+		quoted   = at(4*time.Minute, "prose quoting "+tracker.VerdictEscalate+" mid-line")
+	)
+	tests := []struct {
+		name      string
+		comments  []tracker.Comment
+		rearmedAt time.Time
+		want      []tracker.Comment
+	}{
+		{"no comments", nil, t0, nil},
+		{"never re-armed drops nothing", []tracker.Comment{reject, escalate}, time.Time{},
+			[]tracker.Comment{reject, escalate}},
+		{"the natural thread loses its digest and resurfaces the reject",
+			[]tracker.Comment{reject, escalate}, t0.Add(5 * time.Minute),
+			[]tracker.Comment{reject}},
+		{"an escalation after the re-arm survives",
+			[]tracker.Comment{reject, escalate, fresh}, t0.Add(5 * time.Minute),
+			[]tracker.Comment{reject, fresh}},
+		{"the tie resolves for the human — equal instants are superseded",
+			[]tracker.Comment{escalate}, t0.Add(2 * time.Minute), nil},
+		{"non-escalate markers and plain prose are never dropped",
+			[]tracker.Comment{reject, prose, quoted}, t0.Add(5 * time.Minute),
+			[]tracker.Comment{reject, prose, quoted}},
+		{"order-independent: a stale digest AFTER a live one still goes",
+			[]tracker.Comment{fresh, escalate}, t0.Add(5 * time.Minute),
+			[]tracker.Comment{fresh}},
+		{"the digest-only thread is emptied", []tracker.Comment{escalate}, t0.Add(5 * time.Minute), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DropSupersededEscalations(tt.comments, tt.rearmedAt)
+			if len(got) != len(tt.want) {
+				t.Fatalf("DropSupersededEscalations = %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d] = %v, want %v (order is preserved)", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestLiveReview pins the conservative "no review" gate: any non-dismissed
 // review suppresses, a dismissed one is a superseded verdict and does not.
 func TestLiveReview(t *testing.T) {

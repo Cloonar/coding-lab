@@ -28,11 +28,19 @@ const (
 // runResponse is the pinned run JSON shape. Nullable columns render as JSON
 // null (no omitempty) so the SPA always sees every key.
 type runResponse struct {
-	ID           string  `json:"id"`
-	RepoID       string  `json:"repo_id"`
-	Kind         string  `json:"kind"`
-	Provider     string  `json:"provider"`
-	IssueNumber  *int    `json:"issue_number"`
+	ID          string `json:"id"`
+	RepoID      string `json:"repo_id"`
+	Kind        string `json:"kind"`
+	Provider    string `json:"provider"`
+	IssueNumber *int   `json:"issue_number"`
+	// PullNumber is the PR this autoland run works, nil for every other run
+	// kind (issue #188): the SPA needs it to offer the re-arm action on an
+	// escalated run's row, the one place an escalated PR is visible in the
+	// UI. Bare null like IssueNumber above, NOT omitempty — the shape this
+	// struct pins is "every key, always", so a key that appears only on three
+	// of seven kinds would make the SPA's Run type optional-vs-nullable for
+	// no reason the wire format justifies.
+	PullNumber   *int    `json:"pull_number"`
 	Branch       string  `json:"branch"`
 	WorktreePath string  `json:"worktree_path"`
 	SessionName  string  `json:"session_name"`
@@ -82,6 +90,7 @@ func runJSON(r store.Run) runResponse {
 		Kind:          r.Kind,
 		Provider:      r.Provider,
 		IssueNumber:   r.IssueNumber,
+		PullNumber:    r.PullNumber,
 		Branch:        r.Branch,
 		WorktreePath:  r.WorktreePath,
 		SessionName:   r.SessionName,

@@ -176,6 +176,7 @@ func (s *Service) LaunchFix(ctx context.Context, repoID string, prNumber int, he
 		Kind:           store.RunKindFix,
 		AdoptBranch:    true,
 		IssueNumber:    &issueN,
+		PullNumber:     &prNumber,
 		SessionName:    gitx.ComposeSessionName(repo.Name, FixLabel(issueN)),
 		Branch:         headBranch,
 		WorktreePath:   s.fixWorktreePath(repo.Name, issueN),

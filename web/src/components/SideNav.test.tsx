@@ -37,6 +37,7 @@ function instance(overrides: Partial<Instance>): Instance {
     kind: 'manual',
     provider: 'claude-code',
     issue_number: null,
+    pull_number: null,
     branch: 'lab/x',
     worktree_path: '/wt/x',
     session_name: 'proj~dom-20260706-1500',

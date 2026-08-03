@@ -78,15 +78,16 @@ func runsOfKind(f *fixture, repo store.Repo, kind string) []store.Run {
 	return out
 }
 
-// seedTerminalFixRun writes one already-ended fix run row for (repo, branch)
-// — a burned attempt: FixRunCountForBranch counts SPAWNS with any outcome,
-// so tests seed the bound without driving whole fix rounds.
-func seedTerminalFixRun(f *fixture, repo store.Repo, branch, session, outcome string) {
+// seedTerminalFixRun writes one already-ended fix run row for (repo, pull,
+// branch) — a burned attempt: the bound counts SPAWNS with any outcome, so
+// tests seed it without driving whole fix rounds. The row carries the pull
+// number a real fix launch stamps on it (issue #188).
+func seedTerminalFixRun(f *fixture, repo store.Repo, pullNumber int, branch, session, outcome string) {
 	f.t.Helper()
 	id := ids.NewID("run")
 	if _, err := f.st.CreateRun(f.t.Context(), store.Run{
 		ID: id, RepoID: repo.ID, Kind: store.RunKindFix, Provider: "claude-code",
-		Branch: branch, WorktreePath: "/wt/" + session, SessionName: session,
+		Branch: branch, PullNumber: &pullNumber, WorktreePath: "/wt/" + session, SessionName: session,
 		Model: "m", Effort: "e", StartedAt: clockTime, Outcome: store.RunOutcomeActive,
 	}); err != nil {
 		f.t.Fatalf("CreateRun: %v", err)
@@ -96,9 +97,31 @@ func seedTerminalFixRun(f *fixture, repo store.Repo, branch, session, outcome st
 	}
 	// The row is the run's history; the ATTEMPT is what the bound counts (a
 	// row can be rolled back out of existence, an attempt cannot). A seeded
-	// past fix run therefore has to burn its attempt too.
-	if err := f.st.RecordAutolandAttempt(f.t.Context(), repo.ID, branch, store.RunKindFix); err != nil {
+	// past fix run therefore has to burn its attempt too — against the PULL,
+	// which is what the counter is keyed on since issue #188.
+	if err := f.st.RecordAutolandAttempt(f.t.Context(), repo.ID, pullNumber, store.RunKindFix); err != nil {
 		f.t.Fatalf("RecordAutolandAttempt: %v", err)
+	}
+}
+
+// seedEscalatedRun writes one already-ended outcome='escalated' run row for
+// (repo, pull, branch) — the DURABLE half of terminality, exactly the row an
+// escalate run leaves behind once its marker lands (issue #182), stamped with
+// the pull number the gate now keys on (issue #188). endedAt is the moment
+// terminality was recorded: the instant EscalatedRunForPull hands back and the
+// re-arm comparison is made against.
+func seedEscalatedRun(f *fixture, repo store.Repo, pullNumber int, branch, session string, endedAt time.Time) {
+	f.t.Helper()
+	id := ids.NewID("run")
+	if _, err := f.st.CreateRun(f.t.Context(), store.Run{
+		ID: id, RepoID: repo.ID, Kind: store.RunKindEscalate, Provider: "claude-code",
+		Branch: branch, PullNumber: &pullNumber, WorktreePath: "/wt/" + session, SessionName: session,
+		Model: "m", Effort: "e", StartedAt: clockTime, Outcome: store.RunOutcomeActive,
+	}); err != nil {
+		f.t.Fatalf("CreateRun: %v", err)
+	}
+	if err := f.st.EndRun(f.t.Context(), id, store.RunOutcomeEscalated, endedAt, ""); err != nil {
+		f.t.Fatalf("EndRun: %v", err)
 	}
 }
 
@@ -320,7 +343,7 @@ func launchFixFixture(f *fixture, rejection string) store.Run {
 	// Production burns the attempt in autolandLaunch, the pass's chokepoint —
 	// not inside LaunchFix — so a direct-entry fixture must burn it too, or the
 	// bound reads one attempt short of what the poller would see.
-	if err := f.st.RecordAutolandAttempt(f.t.Context(), f.repo.ID, "afk/7", store.RunKindFix); err != nil {
+	if err := f.st.RecordAutolandAttempt(f.t.Context(), f.repo.ID, 1, store.RunKindFix); err != nil {
 		f.t.Fatalf("RecordAutolandAttempt: %v", err)
 	}
 	run, err := f.st.RunBySession(f.t.Context(), "proj~fix-7")
@@ -338,7 +361,7 @@ func launchEscalateFixture(f *fixture, history string) store.Run {
 	if err := f.svc.LaunchEscalate(f.t.Context(), f.repo.ID, 1, "afk/7", 7, history); err != nil {
 		f.t.Fatalf("LaunchEscalate: %v", err)
 	}
-	if err := f.st.RecordAutolandAttempt(f.t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate); err != nil {
+	if err := f.st.RecordAutolandAttempt(f.t.Context(), f.repo.ID, 1, store.RunKindEscalate); err != nil {
 		f.t.Fatalf("RecordAutolandAttempt: %v", err)
 	}
 	run, err := f.st.RunBySession(f.t.Context(), "proj~escalate-7")
@@ -669,8 +692,8 @@ func TestSpawnOnce_atFixBoundSpawnsEscalate(t *testing.T) {
 	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 2: still broken")
 	// Two attempts already burned — SPAWNS with any outcome count, so a dead
 	// fix run burns one exactly like a rejected one.
-	seedTerminalFixRun(f, f.repo, "afk/7", "proj~fix-7-r1", store.RunOutcomeDeath)
-	seedTerminalFixRun(f, f.repo, "afk/7", "proj~fix-7-r2", store.RunOutcomeSuccess)
+	seedTerminalFixRun(f, f.repo, 1, "afk/7", "proj~fix-7-r1", store.RunOutcomeDeath)
+	seedTerminalFixRun(f, f.repo, 1, "afk/7", "proj~fix-7-r2", store.RunOutcomeSuccess)
 
 	// A bogus lander_provider vetoes the escalate candidate: the gate is the
 	// lander chain, strict on the operator-named id.
@@ -716,9 +739,6 @@ func TestSpawnOnce_atFixBoundSpawnsEscalate(t *testing.T) {
 	}
 }
 
-// Escalated terminality: after escalation the PR is invisible to autoland
-// FOREVER — by the durable run row even if the marker comment was deleted,
-// and by the marker at ANY comment position even without a row.
 // An escalate run that dies BEFORE posting its marker writes no 'escalated'
 // row, so the poller re-derives the identical rejected-at-bound state and
 // escalates again. Nothing else brakes that: escalate is excluded from the
@@ -745,7 +765,7 @@ func TestSpawnOnce_escalateArmIsBounded(t *testing.T) {
 	// exactly the thing that cannot be relied upon here.
 	for round := 1; round <= MaxEscalateAttempts; round++ {
 		f.svc.SpawnOnce(t.Context())
-		n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate)
+		n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindEscalate)
 		if err != nil {
 			t.Fatalf("round %d: AutolandAttempts: %v", round, err)
 		}
@@ -757,14 +777,14 @@ func TestSpawnOnce_escalateArmIsBounded(t *testing.T) {
 		}
 		f.svc.ReapOnce(t.Context(), f.clock.Now().Add(time.Duration(round)*time.Minute))
 	}
-	if esc, err := f.st.EscalatedRunOnBranch(t.Context(), f.repo.ID, "afk/7"); err != nil || esc {
-		t.Fatalf("EscalatedRunOnBranch = %v (err %v), want false — no marker ever landed", esc, err)
+	if _, esc, err := f.st.EscalatedRunForPull(t.Context(), f.repo.ID, 1); err != nil || esc {
+		t.Fatalf("EscalatedRunForPull ok = %v (err %v), want false — no marker ever landed", esc, err)
 	}
 
 	// The bound is spent: the PR still reads rejected-at-bound, but the poller
 	// must go quiet rather than spawn escalate attempt MaxEscalateAttempts+1.
 	f.svc.SpawnOnce(t.Context())
-	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate); err != nil || n != MaxEscalateAttempts {
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindEscalate); err != nil || n != MaxEscalateAttempts {
 		t.Errorf("escalate attempts = %d (err %v), want %d — the arm must not respawn past its bound", n, err, MaxEscalateAttempts)
 	}
 	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
@@ -804,7 +824,7 @@ func TestSpawnOnce_failedFixLaunchBurnsAttempt(t *testing.T) {
 	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 0 {
 		t.Fatalf("fix run rows = %d, want 0 — the launch failed, so no row survives", n)
 	}
-	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindFix); err != nil || n != 1 {
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindFix); err != nil || n != 1 {
 		t.Fatalf("AutolandAttempts(fix) = %d (err %v), want 1 — the ATTEMPT burns it, not the surviving row", n, err)
 	}
 
@@ -814,13 +834,19 @@ func TestSpawnOnce_failedFixLaunchBurnsAttempt(t *testing.T) {
 	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 0 {
 		t.Errorf("fix run rows = %d, want still 0 — the bound is spent, no respawn", n)
 	}
-	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindEscalate); err != nil || n != 1 {
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindEscalate); err != nil || n != 1 {
 		t.Errorf("AutolandAttempts(escalate) = %d (err %v), want 1 — the loop moved on to the hand-off", n, err)
 	}
 }
 
+// Escalated terminality, both sources: an escalated PR is invisible to
+// autoland by the durable run row even when a human deleted the marker
+// comment, and by the marker at ANY comment position even without a row.
+// Terminal until superseded (issue #188) — the re-arm cases are
+// TestSpawnOnce_rearmLiftsTerminality; here nothing has re-armed, so the
+// suppression stands pass after pass.
 func TestSpawnOnce_escalatedIsTerminal(t *testing.T) {
-	t.Run("escalated-outcome run row blocks forever", func(t *testing.T) {
+	t.Run("escalated-outcome run row blocks until re-armed", func(t *testing.T) {
 		f := newFixture(t)
 		autolandOn(f, f.repo)
 		originClaimBranch(f, f.repo, "afk/7")
@@ -828,21 +854,11 @@ func TestSpawnOnce_escalatedIsTerminal(t *testing.T) {
 		// Rejected-state on the thread (the marker itself deleted by a
 		// human): without the row this would spawn a fix run.
 		f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
-		id := ids.NewID("run")
-		if _, err := f.st.CreateRun(t.Context(), store.Run{
-			ID: id, RepoID: f.repo.ID, Kind: store.RunKindEscalate, Provider: "claude-code",
-			Branch: "afk/7", WorktreePath: "/wt/proj-escalate-7", SessionName: "proj~escalate-7-old",
-			Model: "m", Effort: "e", StartedAt: clockTime, Outcome: store.RunOutcomeActive,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := f.st.EndRun(t.Context(), id, store.RunOutcomeEscalated, clockTime, ""); err != nil {
-			t.Fatal(err)
-		}
+		seedEscalatedRun(f, f.repo, 1, "afk/7", "proj~escalate-7-old", clockTime)
 
 		f.svc.SpawnOnce(t.Context())
 		if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
-			t.Errorf("escalated PR spawned %d runs, want 0 forever (the row is the durable gate)", len(active))
+			t.Errorf("escalated PR spawned %d runs, want 0 (the row is the durable gate)", len(active))
 		}
 	})
 	t.Run("escalate marker blocks at any position", func(t *testing.T) {
@@ -851,8 +867,8 @@ func TestSpawnOnce_escalatedIsTerminal(t *testing.T) {
 		originClaimBranch(f, f.repo, "afk/7")
 		f.trk.addPull("afk/7", tracker.PullOpen)
 		f.trk.addPullComment(1, tracker.VerdictEscalate+"\n\ndigest")
-		// A later rejection does not resurrect the loop: escalate wins from
-		// ANY position, not only as the last word.
+		// A later rejection does not resurrect the loop: an un-superseded
+		// escalate marker wins from ANY position, not only as the last word.
 		f.trk.addPullComment(1, tracker.VerdictReject+"\n\na human re-rejected")
 
 		f.svc.SpawnOnce(t.Context())
@@ -860,6 +876,346 @@ func TestSpawnOnce_escalatedIsTerminal(t *testing.T) {
 			t.Errorf("escalate-marked PR spawned %d runs, want 0 (marker alone is terminal)", len(active))
 		}
 	})
+}
+
+// --- terminality is PR-scoped and supersedable (issue #188) -----------------------
+
+// The case that motivated the whole issue. afk/<N> claim branches derive from
+// the ISSUE number, so discarding an escalated run and letting a fresh AFK run
+// re-claim issue 7 REUSES afk/7 — and under the old branch-keyed gate the
+// brand-new PR was invisible from birth and born owing the discarded PR's
+// spent budget, without ever having been validated once. No re-arm is involved
+// or needed: PR #101 has simply never escalated.
+func TestSpawnOnce_requeuedPRIsVirginDespiteEscalatedPredecessor(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo) // max_fix_attempts 2
+	originClaimBranch(f, f.repo, "afk/7")
+	// The discarded predecessor: PR #100 on afk/7, escalated, both fix
+	// attempts spent. Its history stays exactly as it was — supersession is
+	// never erasure — it simply does not speak for a different PR.
+	seedEscalatedRun(f, f.repo, 100, "afk/7", "proj~escalate-7-old", clockTime)
+	seedTerminalFixRun(f, f.repo, 100, "afk/7", "proj~fix-7-r1", store.RunOutcomeSuccess)
+	seedTerminalFixRun(f, f.repo, 100, "afk/7", "proj~fix-7-r2", store.RunOutcomeDeath)
+	// The requeue: a brand-new, verdict-less PR on the SAME branch.
+	f.trk.addPullNumbered(101, "afk/7", tracker.PullOpen)
+
+	f.svc.SpawnOnce(t.Context())
+
+	landers := landerRuns(f, f.repo)
+	if len(landers) != 1 {
+		t.Fatalf("lander runs = %d, want exactly 1 — a virgin PR gets its round-1 lander whatever the branch's history", len(landers))
+	}
+	if landers[0].PullNumber == nil || *landers[0].PullNumber != 101 {
+		t.Errorf("lander pull_number = %v, want 101 (the gate needs the PR stamped on the row)", landers[0].PullNumber)
+	}
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 101, store.RunKindFix); err != nil || n != 0 {
+		t.Errorf("fix attempts on the new PR = %d (err %v), want 0 — a requeued PR is born with a full budget", n, err)
+	}
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 100, store.RunKindFix); err != nil || n != 2 {
+		t.Errorf("fix attempts on the discarded PR = %d (err %v), want the 2 it really spent — history is never rewritten", n, err)
+	}
+}
+
+// Re-arm lifts terminality for each source independently and for both at once:
+// the run row alone (the human deleted the marker comment), the marker comment
+// alone (an escalate run that posted its marker but whose row was never
+// written, or a pre-migration row), and both together. In every shape the PR is
+// suppressed before the gesture and a fix candidate after it — the escalation
+// signal is not erased, it is simply older than the re-arm.
+func TestSpawnOnce_rearmLiftsTerminality(t *testing.T) {
+	rearmAt := clockTime.Add(time.Minute)
+	for _, tc := range []struct {
+		name  string
+		setup func(f *fixture)
+	}{
+		{"run row only, marker deleted from the thread", func(f *fixture) {
+			seedEscalatedRun(f, f.repo, 1, "afk/7", "proj~escalate-7-old", clockTime)
+			f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
+		}},
+		{"marker comment only, no escalated row", func(f *fixture) {
+			f.trk.addPullComment(1, tracker.VerdictEscalate+"\n\ndigest")
+			f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
+		}},
+		{"both sources present", func(f *fixture) {
+			seedEscalatedRun(f, f.repo, 1, "afk/7", "proj~escalate-7-old", clockTime)
+			f.trk.addPullComment(1, tracker.VerdictEscalate+"\n\ndigest")
+			f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			autolandOn(f, f.repo)
+			originClaimBranch(f, f.repo, "afk/7")
+			f.trk.addPull("afk/7", tracker.PullOpen)
+			tc.setup(f)
+
+			f.svc.SpawnOnce(t.Context())
+			if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+				t.Fatalf("escalated PR spawned %d runs before the re-arm, want 0", len(active))
+			}
+
+			if err := f.st.RearmPull(t.Context(), f.repo.ID, 1, rearmAt); err != nil {
+				t.Fatalf("RearmPull: %v", err)
+			}
+			f.svc.SpawnOnce(t.Context())
+			// Exactly one live run, and a FIX one: the rejection is visible
+			// again AND the restored budget is what pays for the round (an
+			// escalate run here would mean the budget stayed spent).
+			active := activeRuns(f)
+			if len(active) != 1 || active[0].Kind != store.RunKindFix {
+				t.Fatalf("active runs after the re-arm = %+v, want exactly one %s run", active, store.RunKindFix)
+			}
+		})
+	}
+}
+
+// The NATURAL post-escalation thread, which every other re-arm test dodges by
+// putting the rejection last: `labctl pr escalate` posts its marker LAST (the
+// escalate seed's step 5), so the digest is the last verdict word and the
+// reject that caused it sits underneath. The supersession filter has to drop
+// the digest from the COMMENT slice, not merely from the word list — because
+// RejectionContext re-derives the words itself and renders its lander section
+// only while the last known word is reject. Filtering one and not the other
+// spawns a fix run carrying an EMPTY work order: a run told to repair findings
+// it was never given. So this asserts the work order's CONTENT, not the action.
+func TestSpawnOnce_rearmOnEscalateLastThreadCarriesTheWorkOrder(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullCommentAt(1, clockTime, tracker.VerdictReject+"\n\nfindings: broken tests")
+	f.trk.addPullCommentAt(1, clockTime.Add(time.Minute), tracker.VerdictEscalate+"\n\nround history digest")
+
+	f.svc.SpawnOnce(t.Context())
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Fatalf("escalated PR spawned %d runs before the re-arm, want 0", len(active))
+	}
+
+	if err := f.st.RearmPull(t.Context(), f.repo.ID, 1, clockTime.Add(2*time.Minute)); err != nil {
+		t.Fatalf("RearmPull: %v", err)
+	}
+	f.svc.SpawnOnce(t.Context())
+
+	fixes := runsOfKind(f, f.repo, store.RunKindFix)
+	if len(fixes) != 1 {
+		t.Fatalf("fix runs = %d, want 1 — dropping the digest resurfaces the reject as the last word", len(fixes))
+	}
+	sess, live := f.runner.Session(fixes[0].SessionName)
+	if !live {
+		t.Fatal("fix session not live")
+	}
+	want := FixSeedPrompt(7, 1, "afk/7", false, "Lander rejection:\nfindings: broken tests")
+	if last := sess.Argv[len(sess.Argv)-1]; last != want {
+		t.Errorf("seed argv = %q,\nwant the rejection findings as the work order — an empty one means the filter reached the words but not the comments", last)
+	}
+}
+
+// The one shape where the escalate digest is a PR's ONLY marker: rejected-state
+// reached purely through a human changes-requested review. Filtering leaves
+// zero verdict words, which must NOT read as virgin — the virgin gate is a
+// conjunction (no words AND no live review), and the human's review is live, so
+// HumanRejected carries the PR into rejected-state instead. A round-1 lander
+// here would re-validate ground a human has already judged.
+func TestSpawnOnce_rearmOnDigestOnlyThreadWithHumanRejection(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addReviewFrom(1, "human", tracker.ReviewChangesRequested, false, "please split the migration")
+	f.trk.addPullCommentAt(1, clockTime, tracker.VerdictEscalate+"\n\ndigest")
+
+	f.svc.SpawnOnce(t.Context())
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Fatalf("escalated PR spawned %d runs before the re-arm, want 0", len(active))
+	}
+
+	if err := f.st.RearmPull(t.Context(), f.repo.ID, 1, clockTime.Add(time.Minute)); err != nil {
+		t.Fatalf("RearmPull: %v", err)
+	}
+	f.svc.SpawnOnce(t.Context())
+
+	if n := len(landerRuns(f, f.repo)); n != 0 {
+		t.Errorf("lander runs = %d, want 0 — an emptied word list must not read as a VIRGIN PR", n)
+	}
+	fixes := runsOfKind(f, f.repo, store.RunKindFix)
+	if len(fixes) != 1 {
+		t.Fatalf("fix runs = %d, want 1 (the live human changes-requested is rejected-state)", len(fixes))
+	}
+	sess, live := f.runner.Session(fixes[0].SessionName)
+	if !live {
+		t.Fatal("fix session not live")
+	}
+	want := FixSeedPrompt(7, 1, "afk/7", false, "Review by human (changes requested):\nplease split the migration")
+	if last := sess.Argv[len(sess.Argv)-1]; last != want {
+		t.Errorf("seed argv = %q, want the human rejection as the work order", last)
+	}
+}
+
+// The filter is a supersession, never an amnesty: an escalate marker dated
+// AFTER the re-arm survives it and still suppresses. Pinned separately from
+// TestSpawnOnce_rearmIsRepeatable's sequence so a filter that started dropping
+// escalate markers unconditionally fails one test that says exactly that.
+func TestSpawnOnce_escalationAfterRearmStillSuppresses(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	// A rejection the PR would unambiguously act on without the marker, so
+	// "nothing spawned" can only mean the fresh escalation held.
+	f.trk.addPullCommentAt(1, clockTime, tracker.VerdictReject+"\n\nfindings")
+	if err := f.st.RearmPull(t.Context(), f.repo.ID, 1, clockTime.Add(time.Minute)); err != nil {
+		t.Fatalf("RearmPull: %v", err)
+	}
+	f.trk.addPullCommentAt(1, clockTime.Add(2*time.Minute), tracker.VerdictEscalate+"\n\nfresh digest")
+
+	f.svc.SpawnOnce(t.Context())
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Errorf("PR escalated AFTER its re-arm spawned %d runs, want 0 — the filter must not be a blanket amnesty", len(active))
+	}
+}
+
+// Repeatable in both directions, indefinitely: a fresh escalation dated AFTER
+// a re-arm is terminal again (the gate re-checks a relation, it does not
+// consume a one-shot clear), and a second re-arm lifts that one too.
+func TestSpawnOnce_rearmIsRepeatable(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo)
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	// Round 1's hand-off, then the live rejection it handed off. Every
+	// assertion below turns on that rejection: without terminality this PR is
+	// unambiguously a fix candidate, so "nothing spawned" can only mean the
+	// gate held.
+	f.trk.addPullCommentAt(1, clockTime, tracker.VerdictEscalate+"\n\nround 1 digest")
+	f.trk.addPullCommentAt(1, clockTime.Add(time.Minute), tracker.VerdictReject+"\n\nfindings")
+
+	f.svc.SpawnOnce(t.Context())
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Fatalf("escalated PR spawned %d runs before any re-arm, want 0", len(active))
+	}
+
+	// Re-arm #1 supersedes the round-1 marker: the PR is a fix candidate.
+	if err := f.st.RearmPull(t.Context(), f.repo.ID, 1, clockTime.Add(2*time.Minute)); err != nil {
+		t.Fatalf("RearmPull: %v", err)
+	}
+	f.svc.SpawnOnce(t.Context())
+	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 1 {
+		t.Fatalf("fix runs after re-arm #1 = %d, want 1", n)
+	}
+	for _, run := range activeRuns(f) {
+		f.runner.Kill(run.SessionName)
+	}
+	f.svc.ReapOnce(t.Context(), f.clock.Now().Add(3*time.Minute))
+
+	// The agents failed again and escalated again — a marker NEWER than the
+	// re-arm, with the rejection re-stated after it. Terminal once more: the
+	// gate re-evaluates a relation every pass, it does not consume a one-shot
+	// clear that a second escalation would then have to re-arm around.
+	f.trk.addPullCommentAt(1, clockTime.Add(4*time.Minute), tracker.VerdictEscalate+"\n\nround 2 digest")
+	f.trk.addPullCommentAt(1, clockTime.Add(5*time.Minute), tracker.VerdictReject+"\n\nstill broken")
+	f.svc.SpawnOnce(t.Context())
+	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
+		t.Fatalf("re-escalated PR spawned %d runs, want 0 — a fresh escalation after a re-arm is terminal again", len(active))
+	}
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindFix); err != nil || n != 1 {
+		t.Fatalf("fix attempts across the terminal pass = %d (err %v), want still round 1's 1 — nothing reached the launch pad", n, err)
+	}
+
+	// Re-arm #2 lifts it again — the upsert keeps only the newest gesture, so
+	// re-arming is indefinitely repeatable with no history to prune. Asserted
+	// on the ATTEMPT counter, not on a surviving runs row: round 1's dead fix
+	// run left its unmerged worktree behind (the guarded teardown keeps it),
+	// so round 2's launch fails on the launch pad — which is exactly the case
+	// the intent counter exists for, and it still proves the poller decided to
+	// spawn. RearmPull zeroed the counter, so reading 1 here can only be this
+	// pass's burn.
+	if err := f.st.RearmPull(t.Context(), f.repo.ID, 1, clockTime.Add(6*time.Minute)); err != nil {
+		t.Fatalf("RearmPull: %v", err)
+	}
+	f.svc.SpawnOnce(t.Context())
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindFix); err != nil || n != 1 {
+		t.Errorf("fix attempts after re-arm #2 = %d (err %v), want 1 — the second gesture lifts the second escalation", n, err)
+	}
+}
+
+// The trap the issue names as the worst outcome: clearing terminality while
+// leaving the budget spent would re-escalate on the very first rejection and
+// read to the human as "the re-arm silently did not work". RearmPull zeroes
+// both halves in one operation — this proves that is visible THROUGH the
+// poller, not just in the store: at a fully spent bound, the re-armed PR's
+// live rejection spawns a FIX run, never a second escalate run.
+func TestSpawnOnce_rearmRestoresTheFixBudget(t *testing.T) {
+	f := newFixture(t)
+	autolandOn(f, f.repo) // max_fix_attempts 2
+	originClaimBranch(f, f.repo, "afk/7")
+	f.trk.addPull("afk/7", tracker.PullOpen)
+	f.trk.addPullComment(1, tracker.VerdictReject+"\n\nround 2: still broken")
+	// Both fix attempts spent and the hand-off already made: rejected-at-bound
+	// with an escalated row, exactly where the fix-forward loop leaves a PR.
+	seedTerminalFixRun(f, f.repo, 1, "afk/7", "proj~fix-7-r1", store.RunOutcomeSuccess)
+	seedTerminalFixRun(f, f.repo, 1, "afk/7", "proj~fix-7-r2", store.RunOutcomeSuccess)
+	seedEscalatedRun(f, f.repo, 1, "afk/7", "proj~escalate-7-old", clockTime)
+
+	if err := f.st.RearmPull(t.Context(), f.repo.ID, 1, clockTime.Add(time.Minute)); err != nil {
+		t.Fatalf("RearmPull: %v", err)
+	}
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindFix); err != nil || n != 0 {
+		t.Fatalf("fix attempts after the re-arm = %d (err %v), want 0", n, err)
+	}
+
+	f.svc.SpawnOnce(t.Context())
+	if n := len(runsOfKind(f, f.repo, store.RunKindFix)); n != 3 {
+		t.Fatalf("fix run rows = %d, want 3 (the 2 seeded history rows plus a fresh one) — the restored budget must be spendable", n)
+	}
+	if n := len(runsOfKind(f, f.repo, store.RunKindEscalate)); n != 1 {
+		t.Errorf("escalate run rows = %d, want still the 1 seeded — re-escalating on the first rejection is the silent-failure trap", n)
+	}
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindFix); err != nil || n != 1 {
+		t.Errorf("fix attempts after the round = %d (err %v), want 1 — the budget restarted from zero", n, err)
+	}
+}
+
+// The diagnosis path (issue #188): the gate used to `continue` silently, so a
+// suppressed PR looked like "autoland just ignores this one" with no way in
+// short of reading the runs table. One Info line per pass per escalated PR,
+// naming the repo, the pull, the branch, and WHICH source tripped it.
+func TestSpawnOnce_suppressionIsLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		setup  func(f *fixture)
+	}{
+		{"marker source", "marker", func(f *fixture) {
+			f.trk.addPullComment(1, tracker.VerdictEscalate+"\n\ndigest")
+		}},
+		{"run-row source", "run", func(f *fixture) {
+			seedEscalatedRun(f, f.repo, 1, "afk/7", "proj~escalate-7-old", clockTime)
+			f.trk.addPullComment(1, tracker.VerdictReject+"\n\nfindings")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			autolandOn(f, f.repo)
+			originClaimBranch(f, f.repo, "afk/7")
+			f.trk.addPull("afk/7", tracker.PullOpen)
+			tc.setup(f)
+			rec := recordLogs(f)
+
+			f.svc.SpawnOnce(t.Context())
+
+			got := rec.matching("autoland suppressed")
+			if len(got) != 1 {
+				t.Fatalf("suppression log lines = %d, want exactly 1", len(got))
+			}
+			for key, want := range map[string]string{
+				"repo": "proj", "pull": "1", "branch": "afk/7", "source": tc.source,
+			} {
+				if got[0].attrs[key] != want {
+					t.Errorf("log attr %q = %q, want %q", key, got[0].attrs[key], want)
+				}
+			}
+		})
+	}
 }
 
 // fix-done as the last word spawns the re-validation lander (DecideAutoland
@@ -978,7 +1334,7 @@ func TestReap_fixDeathBurnsAttemptStrikesAndEscalatesNext(t *testing.T) {
 	if n := f.failures(f.repo); n != 1 {
 		t.Errorf("failures = %d, want 1 (a fix death strikes — three-strikes accounting applies, #182)", n)
 	}
-	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, "afk/7", store.RunKindFix); err != nil || n != 1 {
+	if n, err := f.st.AutolandAttempts(t.Context(), f.repo.ID, 1, store.RunKindFix); err != nil || n != 1 {
 		t.Errorf("AutolandAttempts(fix) = %d (err %v), want 1 — the dead spawn burned the attempt", n, err)
 	}
 
@@ -996,7 +1352,7 @@ func TestReap_fixDeathBurnsAttemptStrikesAndEscalatesNext(t *testing.T) {
 // An escalate run whose marker lands ends outcome 'escalated' — not success —
 // fires the escalation push exactly once off the idempotent claim, tears down
 // like any reap, leaves the failure counter alone in BOTH directions, and its
-// terminal row then blocks the poller forever.
+// terminal row then blocks the poller until a human re-arms the PR.
 func TestReap_escalateMarkerEndsEscalatedAndNotifiesOnce(t *testing.T) {
 	f := newFixture(t)
 	autolandOn(f, f.repo) // forge binding: the push noun is "PR"
@@ -1069,7 +1425,8 @@ func TestReap_escalateMarkerEndsEscalatedAndNotifiesOnce(t *testing.T) {
 	if notes.count() != 1 {
 		t.Errorf("second sweep re-sent the escalation push: count = %d, want 1", notes.count())
 	}
-	// And the escalated row is the poller's permanent gate.
+	// And the escalated row — stamped with the PR the run worked — is the
+	// durable half of the poller's terminality gate.
 	f.svc.SpawnOnce(t.Context())
 	if active, _ := f.st.ActiveRunsByRepo(t.Context(), f.repo.ID); len(active) != 0 {
 		t.Errorf("escalated PR spawned %d runs after the terminal reap, want 0", len(active))

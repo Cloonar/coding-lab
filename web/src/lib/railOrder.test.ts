@@ -13,6 +13,7 @@ function inst(id: string, state: ConversationState, startedAt: string): Instance
     kind: 'manual',
     provider: 'claude-code',
     issue_number: null,
+    pull_number: null,
     branch: `lab/${id}`,
     worktree_path: `/wt/${id}`,
     session_name: `proj~${id}`,

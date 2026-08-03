@@ -45,9 +45,12 @@ const (
 // Run outcomes (design §3a). 'active' is the only non-terminal value; the
 // terminal outcomes are set once, at the Stop/reap/reconcile chokepoint.
 // 'escalated' (issue #182 / ADR-0048) is written only for a RunKindEscalate
-// run whose escalate marker landed — the poller's permanent-terminality
-// gate, distinct from 'success' so EscalatedRunOnBranch can find it without
-// also matching every ordinary successful run on the branch.
+// run whose escalate marker landed — the poller's terminality gate, distinct
+// from 'success' so EscalatedRunForPull can find it without also matching
+// every ordinary successful run on the PR. Terminality is no longer permanent
+// (issue #188 / ADR-0048's amendment): the row stays history forever, but a
+// human re-arm can supersede it, so the gate reads the row's MOMENT rather
+// than its mere existence.
 const (
 	RunOutcomeActive    = "active"
 	RunOutcomeSuccess   = "success"
@@ -97,6 +100,19 @@ type Run struct {
 	// back into the master store before any wipe. "" = never stamped (a
 	// pre-upgrade row, or no provider credentials existed at launch).
 	CredSig string
+	// PullNumber is the pull request this run works (issue #188 / migration
+	// 0022), set by the three autoland kinds — lander, fix, escalate — whose
+	// launch paths already hold the PR they are validating, re-engaging, or
+	// escalating. nil for every other kind (manual/afk_manual/afk_auto/scheduled
+	// never touch a PR this way) and for every row predating 0022. It is run
+	// identity in exactly the sense ScheduleID above is a firing's, and it is
+	// PERSISTED rather than re-derived for the same reason: the
+	// escalation-terminality gate (EscalatedRunForPull) has to tell one PR on a
+	// reused claim branch from the next across restarts, and the branch alone
+	// cannot — afk/<N> derives from the ISSUE number, so a requeued issue's
+	// brand-new PR shares its predecessor's branch. Only the PR number
+	// distinguishes them.
+	PullNumber *int
 }
 
 // DisplayName is the run's user-facing name: the title overlay when non-blank
@@ -116,7 +132,7 @@ func (r Run) DisplayName() string {
 const runColumns = `id, repo_id, kind, provider, issue_number, branch,
 	worktree_path, session_name, model, effort, deep_link_url, transcript_path,
 	started_at, budget_deadline, ended_at, outcome, failure_reason, title, remote,
-	cred_sig, schedule_id`
+	cred_sig, schedule_id, pull_number`
 
 // CreateRun inserts r exactly as given (the caller has derived every field:
 // session name, branch, worktree path, resolved model/effort). Timestamps are
@@ -142,12 +158,12 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	}
 	_, err := s.db.ExecContext(ctx, s.rebind(
 		`INSERT INTO runs (`+runColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.RepoID, r.Kind, r.Provider, r.IssueNumber, r.Branch,
 		r.WorktreePath, r.SessionName, r.Model, r.Effort, r.DeepLinkURL,
 		r.TranscriptPath, fmtTime(r.StartedAt), fmtNullTime(r.BudgetDeadline),
 		fmtNullTime(r.EndedAt), r.Outcome, r.FailureReason, r.Title, r.Remote,
-		credSig, r.ScheduleID)
+		credSig, r.ScheduleID, r.PullNumber)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return Run{}, fmt.Errorf("create run %q: %w", r.SessionName, ErrNotFound)
@@ -363,14 +379,16 @@ func scanRun(scan func(dest ...any) error) (Run, error) {
 		title      sql.NullString
 		credSig    sql.NullString
 		scheduleID sql.NullString
+		pullN      sql.NullInt64
 	)
 	if err := scan(&r.ID, &r.RepoID, &r.Kind, &r.Provider, &issueN, &r.Branch,
 		&r.WorktreePath, &r.SessionName, &r.Model, &r.Effort, &deepLink,
 		&transcript, &started, &budget, &ended, &r.Outcome, &failure, &title,
-		&r.Remote, &credSig, &scheduleID); err != nil {
+		&r.Remote, &credSig, &scheduleID, &pullN); err != nil {
 		return Run{}, err
 	}
 	r.IssueNumber = nullInt(issueN)
+	r.PullNumber = nullInt(pullN)
 	r.DeepLinkURL = nullStr(deepLink)
 	r.TranscriptPath = nullStr(transcript)
 	r.FailureReason = nullStr(failure)

@@ -1362,8 +1362,10 @@ func (s *Server) handlePRReject(w http.ResponseWriter, r *http.Request) {
 // labctl issue label steps), not a forge review request, so this handler is
 // reject's twin, not rerequest's. ADR-0048 reserved the `escalate` word for
 // exactly this marker (issue #182); the poller's Escalated fold (decide.go)
-// treats its presence as permanent — rule 1 blocks every candidate kind on
-// this branch forever after. The autoland ENGINE never writes to the forge
+// blocks every candidate kind on THIS PULL REQUEST while the marker stands —
+// scoped to the pull, not the claim branch, and standing only until a human
+// re-arms the PR, which supersedes this marker without erasing it (issue #188
+// / ADR-0048's amendment). The autoland ENGINE never writes to the forge
 // (it only spawns runs), so this agent-executed verb is the escalation
 // outcome's only PR write. Error mapping, sanitize, and credentialing all
 // match reject: unknown → 404, built-in binding → 409 (ErrUnsupported),

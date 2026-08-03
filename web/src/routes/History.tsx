@@ -5,10 +5,26 @@
 // run's issue number. Newest first, straight from GET /runs; the outcome
 // filter narrows client-side; run.changed refetches. (Formerly /runs; /runs
 // now redirects here, and /runs/:id stays the chat.)
+//
+// An escalated autoland run (kind lander/fix/escalate) carrying a
+// pull_number also states the consequence — which PR autoland is ignoring —
+// and a Re-arm action (issue #188) that POSTs
+// .../autoland/pulls/{pull}/rearm and refetches the page on success. Before
+// this, the suppression was invisible: a bare 'escalated' chip with no way
+// back in.
 
 import { A, useSearchParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource } from 'solid-js';
-import { errorMessage, listRuns, listRepos, type Run, type RunKind, type RunOutcome } from '../api';
+import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
+import {
+  errorMessage,
+  listRuns,
+  listRepos,
+  rearmPull,
+  type Run,
+  type RunKind,
+  type RunOutcome,
+} from '../api';
+import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
 import { createLiveResource } from '../lib/liveResource';
@@ -46,7 +62,7 @@ function HistoryView() {
   };
 
   const [repos] = createResource(() => listRepos());
-  const [runs] = createLiveResource(
+  const [runs, { refetch }] = createLiveResource(
     repoFilter,
     (repo) => listRuns({ repo: repo === '' ? undefined : repo, limit: RUNS_LIMIT }),
     [{ type: 'run.changed' }],
@@ -100,7 +116,9 @@ function HistoryView() {
         </Match>
         <Match when={runs()}>
           <div class="card-list">
-            <For each={visible()}>{(run) => <RunCard run={run} />}</For>
+            <For each={visible()}>
+              {(run) => <RunCard run={run} onRearmed={() => void refetch()} />}
+            </For>
           </div>
         </Match>
       </Switch>
@@ -108,7 +126,7 @@ function HistoryView() {
   );
 }
 
-function RunCard(props: { run: Run }) {
+function RunCard(props: { run: Run; onRearmed: () => void }) {
   const title = () => {
     // A user-set title wins over everything (issue #111 rename overlay).
     const custom = props.run.title?.trim() ?? '';
@@ -124,6 +142,33 @@ function RunCard(props: { run: Run }) {
     const label = instanceTitle(sessionLabel(props.run.session_name));
     return label === '' ? props.run.branch : label;
   };
+
+  // Escalation is terminal history on the run row itself (never rewritten —
+  // see internal/httpapi/autoland.go), so a re-arm never changes this run's
+  // own fields; `busy`/`rearmError` are local to the card, same shape as
+  // AFKStrip's reset. onRearmed() still refetches the page: the human's
+  // gesture kicks an immediate autoland pass server-side, and the operator
+  // should not have to wait for the next run.changed event to see it land.
+  const [busy, setBusy] = createSignal(false);
+  const [rearmError, setRearmError] = createSignal<string | null>(null);
+
+  const rearm = async () => {
+    const repoID = props.run.repo_id;
+    const pull = props.run.pull_number;
+    if (pull === null) return; // guarded by the Show below; keeps TS honest
+    const onRearmed = props.onRearmed;
+    setBusy(true);
+    setRearmError(null);
+    try {
+      await rearmPull(repoID, pull);
+      onRearmed();
+    } catch (err) {
+      setRearmError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <article class="card run-card">
       <div class="card-head">
@@ -143,6 +188,21 @@ function RunCard(props: { run: Run }) {
       </div>
       <Show when={props.run.failure_reason}>
         <p class="run-failure">{props.run.failure_reason}</p>
+      </Show>
+      {/* The chip alone only names the outcome; this states the consequence
+          (which PR is suppressed) and the way back in (issue #188). */}
+      <Show when={props.run.outcome === 'escalated' && props.run.pull_number !== null}>
+        <div class="run-escalated">
+          <p class="run-escalated-note">
+            Autoland is ignoring PR #{props.run.pull_number} until it is re-armed.
+          </p>
+          <ErrorBanner message={rearmError()} onDismiss={() => setRearmError(null)} />
+          <div class="card-actions">
+            <button type="button" class="run-rearm" onClick={() => void rearm()} disabled={busy()}>
+              {busy() ? 'Re-arming…' : 'Re-arm'}
+            </button>
+          </div>
+        </div>
       </Show>
       <A href={`/runs/${props.run.id}`} class="card-link run-open" title="Open the chat">
         Open chat →

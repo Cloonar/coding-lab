@@ -412,6 +412,12 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("POST /api/v1/repos/{id}/afk/start", s.requireAuth(s.handleAFKStart))
 		api.HandleFunc("PUT /api/v1/repos/{id}/afk/auto", s.requireAuth(s.handleAFKAuto))
 		api.HandleFunc("POST /api/v1/repos/{id}/afk/reset", s.requireAuth(s.handleAFKReset))
+		// Human re-arm of an escalated PR (issue #188 / ADR-0048's amendment).
+		// Registered here, inside this s.afk != nil block, on the human-
+		// authenticated `api` mux — never on the disjoint /agent/v1/ run-token
+		// surface (internal/agentapi) below. See autoland.go's header comment
+		// for why that placement is load-bearing.
+		api.HandleFunc("POST /api/v1/repos/{id}/autoland/pulls/{pull}/rearm", s.requireAuth(s.handleAutolandRearm))
 	}
 
 	// Schedules (issue #247 / ADR-0062): per-repo cadence CRUD, the human

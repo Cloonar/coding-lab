@@ -23,33 +23,51 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
-// logRecorder captures log messages so the loud-by-contract lines (missed
-// slots, overlap skips, supersession) are assertable.
+// logRecorder captures log records so the loud-by-contract lines (missed
+// slots, overlap skips, supersession, autoland's terminality suppression) are
+// assertable. Attrs are captured alongside the message because issue #188's
+// suppression line IS its attrs — a bare "autoland suppressed" would diagnose
+// nothing without the repo/pull/branch/source it names.
 type logRecorder struct {
 	mu   sync.Mutex
-	msgs []string
+	recs []loggedRecord
+}
+
+// loggedRecord is one captured record flattened to its message plus a
+// key→rendered-value map of its attrs.
+type loggedRecord struct {
+	msg   string
+	attrs map[string]string
 }
 
 func (h *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
 func (h *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	rec := loggedRecord{msg: r.Message, attrs: make(map[string]string, r.NumAttrs())}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.String()
+		return true
+	})
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.msgs = append(h.msgs, r.Message)
+	h.recs = append(h.recs, rec)
 	return nil
 }
 func (h *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *logRecorder) WithGroup(string) slog.Handler      { return h }
 
-func (h *logRecorder) count(msg string) int {
+func (h *logRecorder) count(msg string) int { return len(h.matching(msg)) }
+
+// matching snapshots every captured record whose message contains msg.
+func (h *logRecorder) matching(msg string) []loggedRecord {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	n := 0
-	for _, m := range h.msgs {
-		if strings.Contains(m, msg) {
-			n++
+	var out []loggedRecord
+	for _, r := range h.recs {
+		if strings.Contains(r.msg, msg) {
+			out = append(out, r)
 		}
 	}
-	return n
+	return out
 }
 
 // recordLogs swaps the service logger for a recorder (same-package test

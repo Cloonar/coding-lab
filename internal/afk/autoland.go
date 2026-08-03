@@ -10,7 +10,8 @@ package afk
 // is DecideAutoland (decide.go): a virgin claim PR gets its round-1 lander
 // (#181, unchanged), a fix-done PR its re-validation lander, a rejected PR a
 // fix run under the attempt bound and the terminal escalate run at it, and an
-// escalated PR nothing, forever.
+// escalated PR nothing — for as long as that escalation stands, which since
+// issue #188 means "until a human re-arms the PR" rather than "forever".
 
 import (
 	"context"
@@ -109,7 +110,6 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 				s.log.Warn("spawn: pull comments", "component", "afk", "repo", repo.Name, "pull", pull.Number, "err", err)
 				continue
 			}
-			words := VerdictWords(comments)
 			// The runs-store facts. ANY active run on the branch — the
 			// authoring AFK run still idling at its composer, or an autoland
 			// run already working it — suppresses every candidate (the gate
@@ -119,17 +119,64 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 				s.log.Warn("spawn: active run on branch", "component", "afk", "repo", repo.Name, "branch", pull.HeadBranch, "err", err)
 				continue
 			}
-			// Escalated is the OR of both sources (#182): the escalate word at
-			// ANY comment position, or an escalated-outcome run row — a human
-			// can delete the marker comment but never the row, so the row is
-			// the durable half; the marker short-circuits the store read.
+			// The re-arm instant this PR's terminality is judged against
+			// (issue #188 / ADR-0048's amendment), read ONCE before either
+			// source: escalation stopped being a permanent property of a
+			// branch or a PR and became a supersedable statement about a
+			// moment — "as of these N attempts, agents could not finish this"
+			// — so the gate is relational. A zero Time means never re-armed,
+			// which every real escalation instant is after, so the common case
+			// needs no special handling. One primary-key lookup, and cheap
+			// enough that hoisting it above the short-circuit costs nothing.
+			rearmedAt, err := s.store.PullRearmedAt(ctx, repo.ID, pull.Number)
+			if err != nil {
+				s.log.Warn("spawn: pull rearm moment", "component", "afk", "repo", repo.Name, "pull", pull.Number, "err", err)
+				continue
+			}
+			// Everything the poller READS about verdict state is read through
+			// the supersession filter, so the re-arm cannot be honoured in one
+			// reading and forgotten in another: the words below (virginity and
+			// every last-word fold), the marker half of Escalated, and the fix
+			// run's work order all see the same thread. The RAW comments stay
+			// in hand for EscalationHistory alone — a re-escalation's digest
+			// should narrate the earlier rounds, and history is not superseded.
+			//
+			// .After is strict inside the filter, so an escalation and a re-arm
+			// at the identical stored instant resolve as NOT terminal. That tie
+			// is reachable — the store truncates every timestamp to
+			// milliseconds — and the human's gesture is the newest information
+			// by construction: a re-arm is only ever made in response to an
+			// escalation that had already happened.
+			liveComments := DropSupersededEscalations(comments, rearmedAt)
+			words := VerdictWords(liveComments)
+			// Escalated is still the OR of both sources (#182) — a human can
+			// delete the marker comment but never the run row, so the row is
+			// the durable half. The marker half is once again just "an escalate
+			// word is present", because the superseded ones are already gone
+			// from the slice; it stays FIRST because it is free (no store read)
+			// and the run query is spent only when it is clear, exactly as
+			// before. The run half has no filter to lean on and so makes the
+			// same comparison inline.
 			escalated := slices.Contains(words, verdictWordEscalate)
+			source := "marker"
 			if !escalated {
-				escalated, err = s.store.EscalatedRunOnBranch(ctx, repo.ID, pull.HeadBranch)
+				at, ok, err := s.store.EscalatedRunForPull(ctx, repo.ID, pull.Number)
 				if err != nil {
-					s.log.Warn("spawn: escalated run on branch", "component", "afk", "repo", repo.Name, "branch", pull.HeadBranch, "err", err)
+					s.log.Warn("spawn: escalated run for pull", "component", "afk", "repo", repo.Name, "pull", pull.Number, "err", err)
 					continue
 				}
+				escalated, source = ok && at.After(rearmedAt), "run"
+			}
+			if escalated {
+				// The diagnosis path (issue #188): the gate used to suppress
+				// silently, so "autoland just ignores this PR" could only be
+				// explained by reading the runs table by hand. Info, and once
+				// per pass per escalated PR — that repetition IS the point,
+				// since the operator's first question comes long after the
+				// escalation itself scrolled away.
+				s.log.Info("spawn: autoland suppressed, escalation terminal on pull",
+					"component", "afk", "repo", repo.Name, "pull", pull.Number,
+					"branch", pull.HeadBranch, "source", source)
 			}
 			st := PullVerdictState{
 				Words:          words,
@@ -145,11 +192,13 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 			// permissive value — the ONLY action a real count can change is
 			// ActionFix (to escalate at the bound), so the count query is
 			// spent exactly when the zero-count decision says fix, never on
-			// the pass's virgin/validated/escalated majority.
+			// the pass's virgin/validated/escalated majority. Keyed on the PR
+			// since issue #188: the budget belongs to the pull request, not to
+			// the reusable afk/<N> claim branch.
 			if action == ActionFix {
-				n, err := s.store.AutolandAttempts(ctx, repo.ID, pull.HeadBranch, store.RunKindFix)
+				n, err := s.store.AutolandAttempts(ctx, repo.ID, pull.Number, store.RunKindFix)
 				if err != nil {
-					s.log.Warn("spawn: fix attempt count", "component", "afk", "repo", repo.Name, "branch", pull.HeadBranch, "err", err)
+					s.log.Warn("spawn: fix attempt count", "component", "afk", "repo", repo.Name, "pull", pull.Number, "err", err)
 					continue
 				}
 				st.FixSpawns = n
@@ -161,9 +210,9 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 			// the bound). Both entry paths land here — the fix bound spent
 			// above, or MaxFixAttempts=0 escalating on the first decision.
 			if action == ActionEscalate {
-				n, err := s.store.AutolandAttempts(ctx, repo.ID, pull.HeadBranch, store.RunKindEscalate)
+				n, err := s.store.AutolandAttempts(ctx, repo.ID, pull.Number, store.RunKindEscalate)
 				if err != nil {
-					s.log.Warn("spawn: escalate attempt count", "component", "afk", "repo", repo.Name, "branch", pull.HeadBranch, "err", err)
+					s.log.Warn("spawn: escalate attempt count", "component", "afk", "repo", repo.Name, "pull", pull.Number, "err", err)
 					continue
 				}
 				st.EscalateSpawns = n
@@ -208,8 +257,13 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 			case ActionFix:
 				// The work order is captured at gather time, from the same
 				// comment/review reads the decision folded — the launch never
-				// re-reads the forge.
-				rejection := RejectionContext(comments, reviews)
+				// re-reads the forge. Filtered, and that is load-bearing rather
+				// than incidental: RejectionContext gates its whole lander
+				// section on the last known word being reject, so a re-armed
+				// PR's superseded escalate digest would otherwise leave this
+				// fix run with an EMPTY work order — a run spawned to repair
+				// findings it was never told (issue #188).
+				rejection := RejectionContext(liveComments, reviews)
 				out = append(out, spawnCandidate{
 					stage: StageFix,
 					repo:  repo,
@@ -220,7 +274,10 @@ func (s *Service) autolandCandidates(ctx context.Context, repos []store.Repo, li
 				})
 			case ActionEscalate:
 				// StageFix rank, deliberately: escalation concludes the fix
-				// pipeline and must not queue behind new work.
+				// pipeline and must not queue behind new work. The RAW thread,
+				// unlike every other reading here: a re-escalation's digest
+				// must narrate the rounds that came before the re-arm too, and
+				// history is the one thing supersession does not touch.
 				history := EscalationHistory(comments, reviews)
 				out = append(out, spawnCandidate{
 					stage: StageFix,
@@ -273,7 +330,12 @@ func (s *Service) autolandLaunch(repo store.Repo, pullNumber int, branch, verb s
 			return spawnAtCap
 		}
 		if verb == store.RunKindFix || verb == store.RunKindEscalate {
-			if rerr := s.store.RecordAutolandAttempt(ctx, repo.ID, branch, verb); rerr != nil {
+			// Burned against the PULL, not the branch (issue #188): afk/<N>
+			// derives from the issue number, so a requeued issue reuses its
+			// branch and a branch-keyed burn would leave the next PR born owing
+			// the discarded one's budget. branch stays in the log lines — it is
+			// still the useful context for a human reading them.
+			if rerr := s.store.RecordAutolandAttempt(ctx, repo.ID, pullNumber, verb); rerr != nil {
 				// Log only: a counter write that fails must not also lose the
 				// launch. The next pass re-reads the counter, so a dropped
 				// increment costs one extra attempt, never correctness.
