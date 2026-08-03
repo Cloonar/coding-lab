@@ -57,3 +57,17 @@
   background: var(--banner-bg);
   color: var(--banner-text);
 }
+
+/* The escalated card's suppression note + Re-arm action (issue #188): the
+   chip alone only names the outcome, this states which PR autoland is
+   ignoring — same amber "notice" tone as .chip.outcome-escalated, same
+   margin/size rhythm as .run-failure. */
+.run-escalated-note {
+  margin: 0.55rem 0 0;
+  font-size: 0.85rem;
+  color: var(--banner-text);
+}
+
+.run-escalated .card-actions {
+  margin-top: 0.55rem;
+}

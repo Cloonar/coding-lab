@@ -219,6 +219,16 @@ func (f *fakeTracker) addPull(head, state string) {
 	f.pulls = append(f.pulls, tracker.PullRef{Number: len(f.pulls) + 1, HeadBranch: head, State: state})
 }
 
+// addPullNumbered scripts a pull with an EXPLICIT number instead of addPull's
+// positional one — the requeue shape (issue #188): a brand-new PR opened on a
+// claim branch a discarded, escalated PR already used, where the numbers are
+// the ONLY thing that tells the two apart.
+func (f *fakeTracker) addPullNumbered(n int, head, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls = append(f.pulls, tracker.PullRef{Number: n, HeadBranch: head, State: state})
+}
+
 func (f *fakeTracker) pullsCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -261,12 +271,20 @@ func (f *fakeTracker) addReviewFrom(n int, reviewer, state string, dismissed boo
 }
 
 func (f *fakeTracker) addPullComment(n int, body string) {
+	f.addPullCommentAt(n, clockTime, body)
+}
+
+// addPullCommentAt is addPullComment with the comment's CreatedAt scriptable:
+// the escalation-terminality fold (issue #188) compares an escalate marker's
+// timestamp against the PR's re-arm moment, so a test has to be able to date a
+// marker on either side of one.
+func (f *fakeTracker) addPullCommentAt(n int, at time.Time, body string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.pullComments == nil {
 		f.pullComments = map[int][]tracker.Comment{}
 	}
-	f.pullComments[n] = append(f.pullComments[n], tracker.Comment{Author: "lander", Body: body, CreatedAt: clockTime})
+	f.pullComments[n] = append(f.pullComments[n], tracker.Comment{Author: "lander", Body: body, CreatedAt: at})
 }
 
 func (f *fakeTracker) failPullComments(err error) {

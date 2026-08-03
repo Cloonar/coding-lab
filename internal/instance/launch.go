@@ -31,6 +31,18 @@ type LaunchSpec struct {
 	Kind        string // store.RunKindManual | RunKindAFKManual | RunKindAFKAuto | RunKindLander | RunKindFix | RunKindEscalate | RunKindScheduled
 	IssueNumber *int   // AFK/lander runs: the claimed issue; manual and scheduled: nil
 
+	// PullNumber is the PR an autoland run works (issue #188 / migration 0022 /
+	// ADR-0048's amendment) — the lander validating it, the fix run
+	// re-engaging it, the escalate run handing it off; all three launch paths
+	// already hold it. nil for manual/afk_manual/afk_auto/scheduled, which
+	// touch no PR. Like IssueNumber and ScheduleID it is run IDENTITY stamped
+	// onto the row rather than re-derived, and for a sharper reason than
+	// either: the escalation-terminality gate (store.EscalatedRunForPull) is
+	// PR-scoped, and afk/<N> claim branches derive from the ISSUE number — so a
+	// requeued issue's brand-new PR shares its predecessor's branch and ONLY
+	// the pull number tells the two apart, across restarts included.
+	PullNumber *int
+
 	// ScheduleID links a scheduled run to the Schedule it is a firing of
 	// (issue #247 / ADR-0062) — identity, exactly like IssueNumber is for an
 	// AFK run: skip-on-overlap and the per-Schedule failure counter attribute
@@ -343,6 +355,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		Kind:           spec.Kind,
 		Provider:       spec.Provider.ID(),
 		IssueNumber:    spec.IssueNumber,
+		PullNumber:     spec.PullNumber,
 		ScheduleID:     spec.ScheduleID,
 		Branch:         branch,
 		WorktreePath:   wtPath,

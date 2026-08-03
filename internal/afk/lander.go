@@ -282,6 +282,7 @@ func (s *Service) LaunchLander(ctx context.Context, repoID string, prNumber int,
 		Kind:           store.RunKindLander,
 		AdoptBranch:    true,
 		IssueNumber:    &issueN,
+		PullNumber:     &prNumber,
 		SessionName:    gitx.ComposeSessionName(repo.Name, LanderLabel(issueN)),
 		Branch:         headBranch,
 		WorktreePath:   s.landerWorktreePath(repo.Name, issueN),
@@ -316,7 +317,9 @@ func (s *Service) escalateWorktreePath(repoName string, n int) string {
 // validation class and deliberately share the knobs; there is no separate
 // escalate override. Its own `labctl pr
 // escalate` marker is its done-signal (EscalateDelivered), which the reaper
-// maps to outcome 'escalated' — the poller's permanent-terminality gate.
+// maps to outcome 'escalated' — the poller's terminality gate, PR-scoped via
+// the stamped PullNumber and supersedable by a later human re-arm (issue #188
+// / ADR-0048's amendment; the row itself is history and is never rewritten).
 func (s *Service) LaunchEscalate(ctx context.Context, repoID string, prNumber int, headBranch string, issueN int, history string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -368,6 +371,7 @@ func (s *Service) LaunchEscalate(ctx context.Context, repoID string, prNumber in
 		Kind:           store.RunKindEscalate,
 		AdoptBranch:    true,
 		IssueNumber:    &issueN,
+		PullNumber:     &prNumber,
 		SessionName:    gitx.ComposeSessionName(repo.Name, EscalateLabel(issueN)),
 		Branch:         headBranch,
 		WorktreePath:   s.escalateWorktreePath(repo.Name, issueN),

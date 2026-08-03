@@ -20,6 +20,11 @@ export interface Run {
   kind: RunKind;
   provider: string;
   issue_number: number | null;
+  /**
+   * The PR this run worked, for an autoland run (`kind` lander/fix/escalate)
+   * only — null, not omitted, on every other kind (issue #188).
+   */
+  pull_number: number | null;
   branch: string;
   worktree_path: string;
   session_name: string;

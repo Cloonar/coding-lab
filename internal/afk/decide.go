@@ -223,11 +223,15 @@ func FixDone(pullState string, prPresent bool, verdicts []string) bool {
 // LAST verdict word being escalate means the run's terminal `labctl pr
 // escalate` marker landed — (true, true), which the reaper maps to outcome
 // 'escalated' (store.RunOutcomeEscalated), not 'success': the escalated
-// outcome is the poller's permanent-terminality gate, so the distinction must
-// survive here. Not delivered → (false, false). Sound at spawn: an escalate
-// candidate exists only in rejected-state, and any escalate word on the PR
-// would have made it Escalated (DecideAutoland case 1) — the last word at
-// spawn is never escalate.
+// outcome is the durable half of the poller's terminality gate, so the
+// distinction must survive here. Terminal is no longer the same as permanent
+// (issue #188) — a human re-arm supersedes the row without erasing it — but
+// that is the GATE's reading of the outcome, not this signal's: an escalate
+// run that delivered its marker delivered it, re-armed later or not. Not
+// delivered → (false, false). Sound at spawn: an escalate candidate exists
+// only in rejected-state, and any escalate marker NEWER than the PR's last
+// re-arm would have made it Escalated (DecideAutoland case 1) — so the last
+// word at spawn is never a live escalate.
 func EscalateDelivered(pullState string, prPresent bool, verdicts []string) (done, viaMarker bool) {
 	if !prPresent {
 		return false, false
@@ -256,6 +260,74 @@ func VerdictWords(comments []tracker.Comment) []string {
 		}
 	}
 	return words
+}
+
+// DropSupersededEscalations returns comments with every escalate-marker
+// comment the PR's last re-arm superseded — one whose CreatedAt is NOT after
+// rearmedAt — removed, order otherwise preserved (issue #188 / ADR-0048's
+// amendment). Terminality stopped being a permanent property of the marker: an
+// escalate comment says "as of these N attempts, agents could not finish
+// this", and a human re-arm is new information that invalidates the statement.
+// The comment itself is never deleted or rewritten on the forge — supersession,
+// not erasure; this is only what the POLLER is allowed to still see.
+//
+// It is deliberately the poller's ONE supersession mechanism. The filtered
+// slice feeds VerdictWords (hence PullVerdictState.Words, the virgin test and
+// every last-word reading), the Escalated derivation — with the markers gone,
+// "an escalate word is present" IS the marker half again, exactly the pre-#188
+// shape — and the fix run's work order. One filter, three readings that cannot
+// disagree about which escalations still count.
+//
+// Filtering the COMMENTS rather than just the words is what makes the fix
+// whole. RejectionContext re-derives VerdictWords internally and renders its
+// lander section only while the last known word is reject, so a filter applied
+// to PullVerdictState.Words alone would spawn a fix run onto a re-armed PR and
+// hand it an EMPTY work order — the same class of silent half-fix as clearing
+// terminality while leaving the attempt budget spent.
+//
+// Why dropping them is right, case by case:
+//
+//   - Never re-armed (rearmedAt zero): every real CreatedAt is after it, so
+//     nothing is dropped and every reading is identical to the pre-#188 one.
+//     An un-re-armed PR cannot take a different path through any of this.
+//   - The natural post-escalation thread is "…, reject, escalate" — the
+//     escalate seed posts its marker LAST, so it is the last word. Dropping the
+//     digest resurfaces the reject underneath it, which is precisely the
+//     rejected-state the re-arm means to restore, now with the budget RearmPull
+//     zeroed in the same operation.
+//   - A fresh escalation after the re-arm postdates it, survives the filter,
+//     and is terminal again — indefinitely repeatable, never an amnesty.
+//   - A PR whose ONLY marker is the escalate digest reached rejected-state
+//     purely through a human changes-requested review. Filtering leaves no
+//     words at all, yet the PR is still not judged VIRGIN, because the virgin
+//     gate is a conjunction: no words AND no live native review. The human's
+//     review is live, so HumanRejected carries it back into rejected-state
+//     instead (DecideAutoland case 5), never into a round-1 lander.
+//
+// The judgement is per comment and therefore order-independent, which the
+// comparison needs and LastVerdictWord's positional recency would not give.
+// That positional reading is sound only because the active-run gate
+// (DecideAutoland case 2) serializes marker WRITERS per branch — an argument
+// about the order lab wrote in — whereas this compares against a re-arm instant
+// recorded outside that gate entirely, so a tracker that ever returned comments
+// unsorted must not be able to change the answer.
+//
+// The word is derived, never spelled (verdictWordEscalate), and bodies are
+// judged by tracker.ParseVerdict exactly as VerdictWords judges them — this
+// package spells no marker word of its own (see verdictWord). CreatedAt is
+// load-bearing, and the forge binding — autoland's only binding, ADR-0048 —
+// fills it from the comment's created_at (forgejo.toComment).
+func DropSupersededEscalations(comments []tracker.Comment, rearmedAt time.Time) []tracker.Comment {
+	// Never aliases the caller's backing array: the raw thread stays intact for
+	// EscalationHistory, which narrates superseded rounds on purpose.
+	out := comments[:0:0]
+	for _, c := range comments {
+		if w, ok := tracker.ParseVerdict(c.Body); ok && w == verdictWordEscalate && !c.CreatedAt.After(rearmedAt) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // LiveReview reports whether any non-dismissed review exists — the poller's
@@ -315,17 +387,31 @@ func HumanRejected(reviews []tracker.Review) bool {
 // forge-bound, ready, unpaused) and the pull-half ones (open, claim branch)
 // stay the caller's, unchanged from #181.
 type PullVerdictState struct {
-	Words          []string // VerdictWords in comment order (oldest first)
-	LiveReview     bool     // any non-dismissed native review — the conservative virgin gate (LiveReview)
-	HumanRejected  bool     // some reviewer's latest live verdict requests changes (HumanRejected)
-	Escalated      bool     // escalate word present (ANY position) OR an escalated-outcome run exists — the caller ORs both sources, because a human can delete the marker comment but never the run row
-	RunOnBranch    bool     // an active run of ANY kind works the branch
-	FixSpawns      int      // fix launches EVER attempted for this branch (autoland_attempts) — intents, never rejection verdicts and never surviving runs rows: a fix run that dies on the launch pad still burns an attempt (ADR-0048)
-	MaxFixAttempts int      // the repo's per-branch fix-attempt bound (repos.max_fix_attempts)
-	EscalateSpawns int      // escalate launches EVER attempted for this branch (autoland_attempts), bounded by MaxEscalateAttempts
+	Words         []string // VerdictWords in comment order (oldest first), over the supersession-filtered thread (DropSupersededEscalations) — an escalate digest a later re-arm superseded is not verdict state any more, so the reject underneath it is the last word again
+	LiveReview    bool     // any non-dismissed native review — the conservative virgin gate (LiveReview)
+	HumanRejected bool     // some reviewer's latest live verdict requests changes (HumanRejected)
+	// Escalated is the supersession fold the caller computes from both
+	// terminality sources (issue #188 / ADR-0048's amendment): terminal iff an
+	// escalation signal exists strictly AFTER this PR's last human re-arm
+	// (store.PullRearmedAt) — an escalate marker comment surviving
+	// DropSupersededEscalations, or an escalated-outcome run whose recorded
+	// moment postdates the re-arm (store.EscalatedRunForPull). Both sources,
+	// because a human can delete the marker comment but never the run row; the
+	// run half is PR-scoped, not branch-scoped, so a requeued issue's brand-new
+	// PR on a reused afk/<N> branch inherits nothing from its predecessor.
+	//
+	// Words above is filtered by the SAME call, so the two can never disagree
+	// about which escalations still count: when this is false, no escalate word
+	// the caller kept is a live one.
+	Escalated      bool
+	RunOnBranch    bool // an active run of ANY kind works the branch
+	FixSpawns      int  // fix launches EVER attempted for this PR (autoland_attempts) — intents, never rejection verdicts and never surviving runs rows: a fix run that dies on the launch pad still burns an attempt (ADR-0048)
+	MaxFixAttempts int  // the repo's per-PR fix-attempt bound (repos.max_fix_attempts)
+	EscalateSpawns int  // escalate launches EVER attempted for this PR (autoland_attempts), bounded by MaxEscalateAttempts
 }
 
-// MaxEscalateAttempts bounds escalate launches per branch (issue #182).
+// MaxEscalateAttempts bounds escalate launches per PR (issue #182; PR-keyed
+// rather than branch-keyed since issue #188).
 //
 // The escalate arm needs a bound of its own, and it is not optional. Its
 // terminality is written by the reaper only once the escalate run POSTS its
@@ -362,9 +448,19 @@ const (
 // pure over PullVerdictState — the fix-forward loop's whole spawn rule in one
 // table-tested function. Priority order, every case load-bearing:
 //
-//  1. Escalated → nothing, forever. Terminal by either source (marker or
-//     escalated-outcome run); re-entry is exactly one path — a human running
-//     the interactive land-pr skill.
+//  1. Escalated → nothing, for as long as it holds. Terminal by either source
+//     (marker or escalated-outcome run), but terminality is a statement about
+//     a moment, not a permanent property of the PR (issue #188 / ADR-0048's
+//     amendment): the caller's fold already discounts any signal older than
+//     the PR's last human re-arm, so this case reads the LIVE answer and needs
+//     no state of its own. Words is discounted by the same filter, which is
+//     what lets a re-armed PR fall through to the case that actually applies
+//     to it — usually 5, the reject the escalate digest was sitting on top of.
+//     Re-entry is two paths — a human running the
+//     interactive land-pr skill, or an explicit human re-arm (which restores
+//     the attempt budgets in the same operation). Both are human gestures; the
+//     gesture IS the new information that makes re-engagement fix-forward
+//     rather than the blind auto-requeue ADR-0024 forbids.
 //  2. An active run on the branch (any kind) → nothing this tick. This gate
 //     is what serializes marker writers per branch; every last-word reading
 //     in the done-signals leans on it.

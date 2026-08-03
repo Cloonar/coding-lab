@@ -162,6 +162,7 @@ function baseRun(id: string): Run {
     kind: 'manual',
     provider: 'claude-code',
     issue_number: null,
+    pull_number: null,
     branch: `lab/${id}`,
     worktree_path: `/wt/${id}`,
     session_name: `proj~dom-20260706-1500-${id}`,

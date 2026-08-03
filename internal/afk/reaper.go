@@ -303,8 +303,11 @@ func (s *Service) verdictDoneSignal(ctx context.Context, trk tracker.Tracker, re
 // escalated is EscalateDelivered's viaMarker (only an escalate run's
 // done-signal ever sets it): a success whose signal was the escalate marker
 // is promoted to OutcomeEscalated here, still under runsMu and with the same
-// claim semantics, so the terminal row IS the poller's permanent-terminality
-// gate (issue #182). A merge-first escalate success stays plain success.
+// claim semantics, so the terminal row IS the durable half of the poller's
+// terminality gate (issue #182) — durable, but no longer permanent: the row is
+// history and is never rewritten, while a later human re-arm supersedes it for
+// the gate's purposes (issue #188, store.EscalatedRunForPull vs.
+// store.PullRearmedAt). A merge-first escalate success stays plain success.
 func (s *Service) classifyAndClaim(ctx context.Context, run store.Run, done, escalated bool, now time.Time) (outcome Outcome, alive, claimed bool) {
 	s.runsMu.Lock()
 	defer s.runsMu.Unlock()

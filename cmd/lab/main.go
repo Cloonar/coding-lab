@@ -63,6 +63,9 @@ const usage = `lab — phone-first control panel for Claude Code agents
 
 Usage: lab [flags]
        lab hash-password   read a password from stdin (or prompt, echo off) and print its argon2id PHC hash
+       lab autoland rearm -repo <id> -pull <n> [-url <base>] [-token-file <path>]
+                           return an escalated PR to the autoland poller's view, budgets restored
+                           (operator PAT; LAB_URL / LAB_PAT / LAB_PAT_FILE)
 
 Flags (env overrides in parentheses; flag > env > default):
   -addr string             listen address (LAB_ADDR; default ":8080")
@@ -104,6 +107,16 @@ func main() {
 	// vault, or any of the rest of the server bootstrap.
 	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
 		os.Exit(runHashPassword(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	// `lab autoland rearm` (issue #188) joins it on exactly the same terms: an
+	// operator-side verb that talks to a RUNNING lab over its human-
+	// authenticated HTTP API, so it must never touch config.Parse, a DB, a
+	// vault, or the server bootstrap below. Dispatching here, on the literal
+	// first arg, is what guarantees that. It lives on cmd/lab rather than
+	// labctl on purpose — see autoland.go's file comment; the placement is the
+	// security boundary that keeps re-arm out of the run-token surface.
+	if len(os.Args) > 1 && os.Args[1] == "autoland" {
+		os.Exit(runAutoland(os.Args[2:], os.Getenv, os.Stdout, os.Stderr))
 	}
 	os.Exit(run())
 }

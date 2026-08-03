@@ -19,6 +19,7 @@ export * from './api/issues';
 export * from './api/secrets';
 export * from './api/schedules';
 export * from './api/afk';
+export * from './api/autoland';
 export * from './api/tokens';
 export * from './api/push';
 export * from './api/settings';

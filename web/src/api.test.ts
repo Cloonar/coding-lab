@@ -45,6 +45,7 @@ import {
   providerLoginCode,
   providerLoginStart,
   providerLogout,
+  rearmPull,
   replyRun,
   reportPresence,
   resetAFK,
@@ -959,6 +960,36 @@ describe('AFK endpoints', () => {
     expect(result).toEqual([{ number: 8, title: 'b' }]);
     expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/ready?claimable=1');
     expect(requestInit(mock).method).toBe('GET');
+  });
+});
+
+describe('Autoland endpoints (issue #188)', () => {
+  it('POST .../autoland/pulls/{pull}/rearm carries the CSRF header', async () => {
+    const response = {
+      repo_id: 'repo_1',
+      pull_number: 42,
+      rearmed_at: '2026-08-03T00:00:00.000Z',
+    };
+    const mock = stubFetch(jsonResponse(200, response));
+
+    const result = await rearmPull('repo_1', 42);
+
+    expect(result).toEqual(response);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/autoland/pulls/42/rearm');
+    const init = requestInit(mock);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+    expect(init.body).toBeUndefined();
+  });
+
+  it('surfaces the 400/404 error messages verbatim', async () => {
+    stubFetch(jsonResponse(400, { error: 'pull must be a positive integer' }));
+
+    const err = await rearmPull('repo_1', 0).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+    expect((err as ApiError).message).toBe('pull must be a positive integer');
   });
 });
 
