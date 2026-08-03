@@ -125,8 +125,9 @@ func (s *Service) effectiveContainerLimits(ctx context.Context, repo store.Repo)
 // Per entry: LAB_TOKEN → forward by name. LAB_URL → REPLACED with sockURL:
 // a container reaches lab only over the bind-mounted unix socket — a TCP
 // --agent-url is deliberately unreachable, pasta's netns has no route back
-// to the host's loopback (the #205 no-host-route isolation), so honoring it
-// would strand labctl. Everything else passes as K=V, then
+// to the host's loopback OR wildcard-bound services (the #205/#216
+// no-host-route isolation), so honoring it would strand labctl. Everything
+// else passes as K=V, then
 // podmanx.RewriteHomeEnv re-anchors HOME= and every host-home-derived value
 // (CLAUDE_CONFIG_DIR, CODEX_HOME) at the container-side Home mount. Appended
 // after the walk: PATH= podmanx.PATH (tools bin first, ADR-0051 — the

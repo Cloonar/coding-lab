@@ -21,6 +21,12 @@ const (
 	testRunUser   = "/run/user/990"
 	probeScopeDir = "/user.slice/user-990.slice/user@990.service/user.slice/libpod-abc123.scope"
 
+	// The pasta capability probe (check 2), keyed exactly as the runner sees
+	// it. The option precedes --version deliberately: reversed, --version
+	// would exit zero on every passt ever built and the check would be a
+	// guaranteed false green.
+	pastaProbe = "pasta --map-guest-addr none --version"
+
 	probeRm      = "podman rm --force --ignore --time 0 lab-preflight-probe"
 	probeCreate  = "podman --cgroup-manager=systemd create --name lab-preflight-probe --memory 64m --pids-limit 16 reg/agent-tools@sha256:aa /bin/labctl"
 	probeInit    = "podman init lab-preflight-probe"
@@ -68,6 +74,11 @@ func greenFixture() *pfFixture {
 		writable: map[string]bool{testRunUser: true},
 		runner: &recordingRunner{script: map[string]cmdResult{
 			"podman version --format {{.Client.Version}}": {out: "5.2.3\n"},
+			// pasta's capability probe: the option comes BEFORE --version, so
+			// a passt too old for --map-guest-addr fails getopt_long before
+			// --version can exit zero. A modern passt parses "none", then
+			// prints its version blob to stdout and exits zero.
+			pastaProbe: {out: "pasta 2024_11_27.a999ffe\n"},
 			// Pull-first (ADR-0054): even a locally-present tools image is
 			// re-pulled so a moved tag reaches the host.
 			"podman pull reg/agent-tools@sha256:aa": {},
@@ -131,13 +142,15 @@ func TestPreflight(t *testing.T) {
 				if r.Error() != "" {
 					t.Errorf("Error() = %q, want empty on OK", r.Error())
 				}
-				// The exact command sequence, pinned end to end: the spawn
-				// probe's pre-clean, create (with the manager flag and both
-				// caps), init, inspect, and the deferred cleanup — cleanup
-				// runs on success too, so a green preflight leaves no probe
-				// container behind.
+				// The exact command sequence, pinned end to end: the podman
+				// version probe, pasta's capability probe (check 2, hence
+				// before the pull), then the spawn probe's pre-clean, create
+				// (with the manager flag and both caps), init, inspect, and
+				// the deferred cleanup — cleanup runs on success too, so a
+				// green preflight leaves no probe container behind.
 				want := [][]string{
 					{"podman", "version", "--format", "{{.Client.Version}}"},
+					{"pasta", "--map-guest-addr", "none", "--version"},
 					{"podman", "pull", "reg/agent-tools@sha256:aa"},
 					{"podman", "rm", "--force", "--ignore", "--time", "0", probeName},
 					{"podman", "--cgroup-manager=systemd", "create", "--name", probeName,
@@ -161,8 +174,15 @@ func TestPreflight(t *testing.T) {
 			},
 			wantChecks: []string{CheckPodman},
 			after: func(t *testing.T, f *pfFixture, r Result) {
-				if len(f.runner.calls) != 0 {
-					t.Errorf("commands ran despite podman missing: %q", f.runner.calls)
+				// Not a single podman invocation: the binary is not there, so
+				// running it could only produce a second report of one root
+				// cause. pasta's own probe is unrelated and still runs — a
+				// broken podman says nothing about the host's passt.
+				for _, c := range f.runner.calls {
+					if c[0] == "podman" {
+						t.Errorf("podman commands ran despite podman missing: %q", f.runner.calls)
+						break
+					}
 				}
 			},
 		},
@@ -177,18 +197,104 @@ func TestPreflight(t *testing.T) {
 				if !strings.Contains(r.Failures[0].Hint, "3.4.7") {
 					t.Errorf("hint %q does not name the found version", r.Failures[0].Hint)
 				}
-				if len(f.runner.calls) != 1 {
-					t.Errorf("calls = %q, want only the version probe", f.runner.calls)
+				// Only the two capability probes of checks 1 and 2 — no pull,
+				// no spawn probe: everything downstream of a too-old podman
+				// would just re-report it.
+				want := [][]string{
+					{"podman", "version", "--format", "{{.Client.Version}}"},
+					{"pasta", "--map-guest-addr", "none", "--version"},
+				}
+				if len(f.runner.calls) != len(want) {
+					t.Fatalf("calls = %q, want %q", f.runner.calls, want)
+				}
+				for i := range want {
+					assertArgv(t, f.runner.calls[i], want[i])
 				}
 			},
 		},
 		{
+			// A host with no pasta at all is blamed exactly once. The
+			// capability probe is NOT attempted: exec'ing a binary that is not
+			// on PATH could only fail, and that second failure would land
+			// under the same check id — two entries, one root cause, which is
+			// precisely what the collect-everything contract forbids.
 			name: "pasta missing",
 			mutate: func(f *pfFixture) {
 				delete(f.paths, "pasta")
 			},
 			wantChecks:  []string{CheckPasta},
 			wantVersion: "5.2.3",
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				for _, c := range f.runner.calls {
+					if c[0] == "pasta" {
+						t.Errorf("capability probe ran despite pasta missing: %q", c)
+					}
+				}
+				if h := r.Failures[0].Hint; !strings.Contains(h, "install passt") {
+					t.Errorf("hint %q does not tell the operator to install passt", h)
+				}
+			},
+		},
+		{
+			// pasta is installed but predates --map-guest-addr entirely
+			// (before passt 2024_08_21). getopt_long returns '?' for the
+			// unknown option before --version can exit, so the probe exits
+			// non-zero — which is the whole reason the option precedes
+			// --version. Without this check the host would pass preflight and
+			// then fail EVERY container at start: podman's back-compat retry
+			// for --map-guest-addr fires only for the default podman itself
+			// appended, never for the user-supplied one in the run argv.
+			name: "pasta too old: option unknown",
+			mutate: func(f *pfFixture) {
+				f.runner.script[pastaProbe] = cmdResult{err: errors.New("exit status 1: unrecognized option '--map-guest-addr'")}
+			},
+			wantChecks:  []string{CheckPasta},
+			wantVersion: "5.2.3",
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				// The operator action, not just the diagnosis: an old passt is
+				// host state, so the hint must name the upgrade and the
+				// release that makes it enough.
+				if h := r.Failures[0].Hint; !strings.Contains(h, "passt") || !strings.Contains(h, "2025_04_15") {
+					t.Errorf("hint %q does not name the passt upgrade and the release that makes the option usable", h)
+				}
+				// ExecRunner folds pasta's stderr into the error, so the
+				// detail quotes pasta's own words rather than paraphrasing.
+				d := r.Failures[0].Detail
+				if !strings.Contains(d, "unrecognized option '--map-guest-addr'") {
+					t.Errorf("detail %q does not carry pasta's own explanation", d)
+				}
+				if !strings.Contains(d, "--map-guest-addr") {
+					t.Errorf("detail %q does not name the rejected option", d)
+				}
+				// Nothing a retry can heal: only a new passt on the host can.
+				if r.HasRetryableFailure() {
+					t.Errorf("HasRetryableFailure() = true; an old passt is host state no retry changes")
+				}
+			},
+		},
+		{
+			// The subtle half of the floor, and the reason the probe passes
+			// the VALUE rather than reading a version: passt 2024_08_21
+			// through 2025_03_20 recognize --map-guest-addr but reject "none"
+			// — conf_nat() fell through its own literal branch into inet_pton
+			// and died. Such a host answers `pasta --help` with a line
+			// advertising the option, and any version gate keyed on "when was
+			// --map-guest-addr added" calls it green; only running the exact
+			// option/value pair the run argv uses tells the truth.
+			name: "pasta recognizes --map-guest-addr but rejects none",
+			mutate: func(f *pfFixture) {
+				f.runner.script[pastaProbe] = cmdResult{err: errors.New("exit status 1: Invalid address to remap to host: none")}
+			},
+			wantChecks:  []string{CheckPasta},
+			wantVersion: "5.2.3",
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				if d := r.Failures[0].Detail; !strings.Contains(d, "Invalid address to remap to host: none") {
+					t.Errorf("detail %q does not carry pasta's own explanation", d)
+				}
+				if h := r.Failures[0].Hint; !strings.Contains(h, "2025_04_15") {
+					t.Errorf("hint %q does not name the release that makes the option usable", h)
+				}
+			},
 		},
 		{
 			name: "subuid entry for another user only",
@@ -389,6 +495,7 @@ func TestPreflight(t *testing.T) {
 			after: func(t *testing.T, f *pfFixture, r Result) {
 				want := [][]string{
 					{"podman", "version", "--format", "{{.Client.Version}}"},
+					{"pasta", "--map-guest-addr", "none", "--version"},
 					{"podman", "pull", "reg/agent-tools@sha256:aa"},
 				}
 				if len(f.runner.calls) < len(want) {

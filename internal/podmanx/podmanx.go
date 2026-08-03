@@ -181,12 +181,50 @@ type RunSpec struct {
 //     it writes into the shared mounts (worktree, home, runtime) are owned
 //     by the same uid host-side and the server can tail/diff them without
 //     any chown dance.
-//   - --network=pasta: full egress with no route back to the host's
-//     loopback services — the agent talks to lab only through the mounted
-//     unix socket, never a host port. (Caveat: pasta still maps
-//     host.containers.internal to the host's global address, so a host
-//     service bound to a wildcard/LAN address stays reachable — only
-//     loopback-bound services are unreachable.)
+//   - --network=pasta:--map-guest-addr,none: full egress with no route
+//     back to host services — the agent talks to lab only through the
+//     mounted unix socket, never a host port. The :--map-guest-addr,none
+//     suffix is podman's network-option syntax — options after the ':',
+//     comma-separated, leading dashes kept — and it COMPOSES with podman's
+//     own pasta defaults rather than replacing them: podman skips only the
+//     default it would otherwise append (--map-guest-addr 169.254.1.2),
+//     but still adds --no-map-gw, -t none, -u none, -T none, -U none, and
+//     --dns-forward 169.254.1.1, so egress and DNS stay untouched. Without
+//     it, podman maps host.containers.internal to the host's global
+//     address (pasta(1), not loopback), so any wildcard-bound host service
+//     — lab's own --addr :8080 included — stays reachable from inside;
+//     --no-map-gw alone only closes the loopback path (issue #216).
+//     Nothing inside needs the mapping: the agent reaches lab over the
+//     mounted socket, and a TCP --agent-url is deliberately unreachable. A
+//     passt too old for --map-guest-addr fails the container at start; the
+//     startup preflight refuses spawns on such a host, since podman's own
+//     back-compat retry covers only the default it added itself, not a
+//     user-supplied option.
+//   - --add-host, pinning host.containers.internal AND host.docker.internal
+//     at 127.0.0.1: dropping the pasta mapping above is necessary but NOT
+//     sufficient, because podman does not then leave the /etc/hosts names
+//     alone — with no mapped address it falls back (libpod's
+//     GetHostContainersInternalIPExcluding → util.GetLocalIPExcluding) to
+//     the first OTHER global-unicast host address, RFC1918 included, since
+//     only loopback/link-local/multicast are ruled out. So on any host with
+//     a bridge, a second NIC, or a VPN the name simply re-points and stays
+//     live: measured on the dev host, where the container's own address is
+//     the host's primary (now correctly unreachable) but the fallback lands
+//     on the bridge address, which lab's wildcard --addr :8080 answers on
+//     too — the #216 leak would have survived the pasta option completely
+//     intact. A user --add-host claims the name first, and podman's
+//     addEntriesIfNotExists then skips its automatic entry for any name
+//     already taken; both names must be pinned because that entry carries
+//     both. 127.0.0.1 rather than a black-hole address so the names still
+//     resolve — nothing inside meets a DNS failure — while every connect
+//     refuses at once and none can reach the host. Two flags, one name
+//     each, never podman's "name;name:ip" form: parseExtraHosts splits on
+//     ';' only on recent podman and the preflight floor is podman >= 4.
+//     The residual, not to be over-trusted: pasta still grants full egress,
+//     so a wildcard-bound host service stays reachable by RAW IP on any
+//     such non-shadowed address, names bypassed entirely — binding
+//     co-located services to 127.0.0.1 is the actual control there, and
+//     egress filtering is deliberately out of scope for #216.
 //   - --cgroup-manager=systemd (a podman GLOBAL flag, hence its position
 //     before "run" — ADR-0060): each container becomes its own transient
 //     scope, libpod-<id>.scope, under the lab user's systemd user manager,
@@ -231,7 +269,9 @@ func RunArgv(s RunSpec) []string {
 	args = append(args,
 		"--name", s.Name,
 		"--userns=keep-id",
-		"--network=pasta",
+		"--network=pasta:--map-guest-addr,none",
+		"--add-host", "host.containers.internal:127.0.0.1",
+		"--add-host", "host.docker.internal:127.0.0.1",
 		"--memory", s.Memory,
 		"--pids-limit", strconv.Itoa(s.Pids),
 		"--ulimit", fmt.Sprintf("nofile=%d:%d", s.Nofile, s.Nofile),
