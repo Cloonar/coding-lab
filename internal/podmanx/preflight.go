@@ -19,7 +19,7 @@ import (
 // key on them.
 const (
 	CheckPodman      = "podman"           // podman missing, unrunnable, or < 4
-	CheckPasta       = "pasta"            // pasta missing (the backend --network=pasta pins)
+	CheckPasta       = "pasta"            // pasta missing, or too old for the argv's --map-guest-addr
 	CheckSubuid      = "subuid"           // no usable /etc/subuid entry for the service user
 	CheckSubgid      = "subgid"           // no usable /etc/subgid entry for the service user
 	CheckCgroup2     = "cgroup2"          // unified hierarchy not mounted / not in use
@@ -144,11 +144,12 @@ func (r Result) Error() string {
 }
 
 // Preflight verifies the host can actually run containerized sessions
-// (#205): podman >= 4 present, pasta present, subuid/subgid ranges for the
-// service user, cgroup v2 (unified hierarchy) in use, the lab user's systemd
-// user manager reachable (ADR-0060 — every container is a transient scope
-// under it, so no manager means no spawns), at least one agent-tools image
-// configured, every configured agent-tools ref resolvable, and finally a
+// (#205): podman >= 4 present, pasta present and new enough to accept the
+// --map-guest-addr option the run argv passes it, subuid/subgid ranges for
+// the service user, cgroup v2 (unified hierarchy) in use, the lab user's
+// systemd user manager reachable (ADR-0060 — every container is a transient
+// scope under it, so no manager means no spawns), at least one agent-tools
+// image configured, every configured agent-tools ref resolvable, and finally a
 // REAL spawn probe (probe.go): create+init a probe container through the
 // systemd cgroup manager and read the caps back out of its scope cgroup.
 // The probe is the no-false-green keystone — the retired cgroup checks
@@ -188,10 +189,55 @@ func Preflight(ctx context.Context, cfg PreflightConfig, d Deps) Result {
 		}
 	}
 
-	// 2. pasta present: the argv pins --network=pasta (not slirp4netns), so
-	// its absence means every container spawn dies at start.
+	// 2. pasta present AND new enough for the option the argv hands it. The
+	// argv pins --network=pasta:--map-guest-addr,none (not slirp4netns), so a
+	// missing pasta kills every spawn at start — and so does a pasta too old
+	// for --map-guest-addr none. That option has TWO floors, which is exactly
+	// why this check probes the option/value pair instead of parsing a
+	// version: passt 2024_08_21 added --map-guest-addr (podman began
+	// appending it by default in 5.3), but conf_nat() then fell through its
+	// own "none" branch into inet_pton and died "Invalid address to remap to
+	// host: none" until passt 2025_04_15 added the missing return. Releases
+	// in that window ACCEPT the option and REJECT the value — a version gate,
+	// or a grep of `pasta --help`, would call them green and hand every spawn
+	// a container that cannot start. Podman does carry a backwards-compat retry for
+	// that option, but it fires ONLY for the default podman itself added: the
+	// retry explicitly checks the value is its own 169.254.1.2, so a
+	// user-supplied --map-guest-addr none is never retried and the container
+	// simply fails to start, once per spawn, on a host preflight already
+	// called green. Catching it here is the whole point of preflight.
+	//
+	// The capability probe is `pasta --map-guest-addr none --version`, judged
+	// solely on exit status zero. The argument ORDER is load-bearing — do not
+	// "simplify" this into a false green:
+	//
+	//   - passt parses options with getopt_long, left to right, in one pass.
+	//     --map-guest-addr none is seen FIRST: conf_nat() accepts the literal
+	//     "none" (pasta(1): "If addr is 'none', no address is mapped") and
+	//     returns without error. Only then does --version print to stdout and
+	//     exit EXIT_SUCCESS — nothing is spawned, no namespace is created, no
+	//     privilege is needed, so this is safe to run at server startup.
+	//   - a passt too old for the option makes getopt_long return '?', which
+	//     passt handles as usage(argv[0], stderr, EXIT_FAILURE): non-zero
+	//     exit, its own explanation on stderr.
+	//   - REVERSED (`--version --map-guest-addr none`) the probe is worthless:
+	//     --version exits before the unknown option is ever parsed, and every
+	//     passt, however ancient, reports green.
+	//
+	// It passes the EXACT option/value pair the run argv uses, so it tests
+	// acceptance directly instead of inferring it from a parsed date-version
+	// — there is deliberately no version parsing anywhere in this check.
+	//
+	// The probe runs only when the lookup succeeded: a missing pasta is
+	// already reported above, and blaming one host twice under one check id
+	// would break the "collect all failures, one root cause each" contract.
 	if _, err := d.LookPath("pasta"); err != nil {
 		fail(CheckPasta, "pasta not found on PATH", "install passt (provides pasta)")
+	} else if _, err := d.Run(ctx, "pasta", "--map-guest-addr", "none", "--version"); err != nil {
+		// %v on the error carries pasta's own stderr: ExecRunner folds it in.
+		fail(CheckPasta,
+			fmt.Sprintf("pasta rejects --map-guest-addr none, the option the run argv passes it: %v", err),
+			"upgrade passt to 2025_04_15 or newer (the release that made --map-guest-addr none work)")
 	}
 
 	// 3. subuid/subgid ranges: rootless podman cannot set up the user
