@@ -98,7 +98,7 @@ var ErrRateLimited = errors.New("tracker: rate limited by the forge")
 var ErrUnknownCheck = errors.New("tracker: no check with that context on the pull request head")
 
 // ErrLogAdapterMismatch marks a CheckLog whose forge answered the version-
-// coupled log route with a shape lab's log adapter does not recognize — the
+// coupled log route with a SHAPE lab's log adapter does not recognize — the
 // undocumented Forgejo web log endpoint the adapter is coupled to moved or
 // changed under a forge upgrade. It is deliberately loud: an adapter that no
 // longer matches the forge must fail with an actionable message (file an issue,
@@ -106,7 +106,29 @@ var ErrUnknownCheck = errors.New("tracker: no check with that context on the pul
 // a reading agent would mistake for a job that simply produced no output. Only
 // the Forgejo log backend produces it; the wrapping error names the route and
 // the answer it got, never the forge token.
+//
+// Shape is the whole of its application, narrowed deliberately (issue #259): a
+// 200 that is not text/plain (an HTML login page), a 404 on attempt 1, a
+// target_url that stops matching the Actions job shape, a status outside
+// 200/404/5xx, and the attempt-probe cap walked without its terminating 404.
+// A 5xx is NOT one of these — the route is exactly where the adapter expects
+// it and the forge simply failed to answer, which is ErrLogUpstream.
 var ErrLogAdapterMismatch = errors.New("tracker: forge log route did not answer the shape lab's log adapter expects")
+
+// ErrLogUpstream marks a CheckLog whose forge answered the log route with a
+// SERVER error (5xx) on every attempt that could have carried the log. The
+// adapter asked correctly and the forge failed to serve — most often a run
+// retried during a forge outage, whose newer attempt exists as a job but has
+// no stored log blob behind it. It is a sibling of ErrLogAdapterMismatch, not
+// a case of it: folding a forge-side 500 into "lab's adapter does not match
+// this forge version" sends the reader to debug the wrong system, and the
+// recoveries differ — wait and retry, or read an older attempt, versus file an
+// issue against the adapter. Only the Forgejo log backend produces it, and
+// only after the fallback has failed too: a 5xx on a NEWER attempt while an
+// older one still serves 200 is not an error at all, it is a
+// CheckLogResult.FallbackFrom notice. The wrapping error names the route and
+// the raw upstream status, never the forge token.
+var ErrLogUpstream = errors.New("tracker: forge log route answered an upstream server error")
 
 // Issue/PR state vocabulary. A merged PR is distinct from a closed-unmerged
 // one (v0 pin): the reaper treats open|merged as a done-signal but a
@@ -271,6 +293,23 @@ type Check struct {
 	URL      string // for humans reading transcripts; the agent cannot browse
 }
 
+// CheckLogResult is one check's fetched log plus the provenance a caller needs
+// to tell the operator WHICH attempt they are reading. The log BODY is never
+// annotated with any of it — stdout stays a clean pipe/parse surface (ADR-0060)
+// — so the facts ride out of band here, and the wire turns them into a response
+// header rather than a line the agent's grep would have to skip.
+type CheckLogResult struct {
+	Log []byte
+	// Attempt is the rerun attempt whose log Log carries (1-based); 0 when the
+	// backend has no attempt notion.
+	Attempt int
+	// FallbackFrom is a NEWER attempt whose log route answered a server error,
+	// forcing Log back to an older attempt; 0 when Log is the latest attempt.
+	FallbackFrom int
+	// FallbackStatus is the upstream HTTP status FallbackFrom answered.
+	FallbackStatus int
+}
+
 // Label is one repo label in lab's vocabulary. Callers speak label NAMES
 // only — the forge client's name-to-ID resolution and the builtin tracker's
 // label ids stay behind the seam. Color is a #rrggbb swatch; both bindings
@@ -380,17 +419,30 @@ type Tracker interface {
 	// resolving that head at query time exactly as Checks does. It reads the
 	// log REGARDLESS of the check's state: a still-running job yields the
 	// partial log captured so far (never an error for "not finished yet"), a
-	// completed job its full output, and a rerun the LATEST attempt's log —
-	// older attempts are not addressable through this seam. An unknown pull
-	// number wraps ErrNotFound (the builtin backend surfaces store.ErrNotFound,
-	// like Checks); a context name no head-commit Checks row carries wraps
-	// ErrUnknownCheck; a binding whose forge serves no job logs to proxy — the
-	// built-in and GitHub backends today — wraps ErrUnsupported; and a forge
-	// answer the version-coupled log adapter does not recognize wraps
-	// ErrLogAdapterMismatch, loud by design rather than a silent empty success.
-	// The forge token never appears in the returned error (ADR-0032's deferred
-	// job-log surface, landed on the Forgejo binding).
-	CheckLog(ctx context.Context, number int, name string) ([]byte, error)
+	// completed job its full output, and a rerun the latest attempt whose log
+	// the forge will actually serve — older attempts are not addressable
+	// through this seam, they are only fallen BACK to.
+	//
+	// The result is a CheckLogResult, not a bare body, because "which attempt
+	// is this?" is a fact the caller has to be able to pass on (issue #259): a
+	// newer attempt whose log route answers a server error does not fail the
+	// read — the newest attempt that did answer is served, with FallbackFrom /
+	// FallbackStatus recording what was skipped and why, so a reader is never
+	// silently handed an older run's output as if it were the latest. Only
+	// when NO attempt answers does the error path run.
+	//
+	// An unknown pull number wraps ErrNotFound (the builtin backend surfaces
+	// store.ErrNotFound, like Checks); a context name no head-commit Checks row
+	// carries wraps ErrUnknownCheck; a binding whose forge serves no job logs to
+	// proxy — the built-in and GitHub backends today — wraps ErrUnsupported; a
+	// forge answer the version-coupled log adapter does not recognize wraps
+	// ErrLogAdapterMismatch; and a forge that answered only server errors wraps
+	// ErrLogUpstream. All four are loud by design rather than a silent empty
+	// success, and the last two stay distinct so the reader knows whether to
+	// debug lab or the forge. The forge token never appears in the returned
+	// error (ADR-0032's deferred job-log surface, landed on the Forgejo
+	// binding).
+	CheckLog(ctx context.Context, number int, name string) (CheckLogResult, error)
 
 	// CreatePull opens a pull request / change request from head onto base.
 	// Exercised in M5/M6; implemented now for symmetry.

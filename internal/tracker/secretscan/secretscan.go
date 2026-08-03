@@ -275,7 +275,7 @@ func (s *scanner) Checks(ctx context.Context, number int) ([]tracker.Check, erro
 	return s.inner.Checks(ctx, number)
 }
 
-func (s *scanner) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
+func (s *scanner) CheckLog(ctx context.Context, number int, name string) (tracker.CheckLogResult, error) {
 	return s.inner.CheckLog(ctx, number, name)
 }
 

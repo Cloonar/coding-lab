@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -41,16 +42,20 @@ type fakeTracker struct {
 	pulls         []tracker.PullRef
 	pullDetails   []tracker.PullDetail
 	checks        []tracker.Check   // returned by Checks (with f.err)
-	checkLogs     map[string][]byte // returned by CheckLog, keyed by check name
+	checkLogs     map[string][]byte // returned by CheckLog as a plain attempt-1 result, keyed by check name
 	checkLogErr   error             // CheckLog-only error (Checks can still succeed) — the log-fetch failure path
 	checkLogCalls []string          // records CheckLog name arguments, in order
-	comments      []commentArgs
-	createdIssue  *issueArgs
-	editedIssues  []editArgs
-	labelAdds     []labelsArgs
-	labelRemoves  []labelsArgs
-	ensured       []tracker.Label
-	closed        []int
+	// checkLogResults scripts FULL CheckLog results — fallback provenance
+	// included — for the tests that care about it; consulted ahead of checkLogs,
+	// which stays the plain-body shorthand every other log test uses.
+	checkLogResults map[string]tracker.CheckLogResult
+	comments        []commentArgs
+	createdIssue    *issueArgs
+	editedIssues    []editArgs
+	labelAdds       []labelsArgs
+	labelRemoves    []labelsArgs
+	ensured         []tracker.Label
+	closed          []int
 }
 
 type pullArgs struct{ head, base, title, body string }
@@ -131,15 +136,18 @@ func (f *fakeTracker) Pull(_ context.Context, number int) (tracker.PullDetail, e
 func (f *fakeTracker) Checks(context.Context, int) ([]tracker.Check, error) {
 	return f.checks, f.err
 }
-func (f *fakeTracker) CheckLog(_ context.Context, _ int, name string) ([]byte, error) {
+func (f *fakeTracker) CheckLog(_ context.Context, _ int, name string) (tracker.CheckLogResult, error) {
 	f.checkLogCalls = append(f.checkLogCalls, name)
 	if f.checkLogErr != nil {
-		return nil, f.checkLogErr
+		return tracker.CheckLogResult{}, f.checkLogErr
+	}
+	if res, ok := f.checkLogResults[name]; ok {
+		return res, nil
 	}
 	if b, ok := f.checkLogs[name]; ok {
-		return b, nil
+		return tracker.CheckLogResult{Log: b, Attempt: 1}, nil
 	}
-	return nil, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
+	return tracker.CheckLogResult{}, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
 }
 func (f *fakeTracker) CreatePull(_ context.Context, head, base, title, body string) (tracker.PullRef, error) {
 	if f.err != nil {
@@ -1491,6 +1499,167 @@ func TestPRLogs_forge(t *testing.T) {
 	}
 }
 
+// TestPRLogsFallbackNotice pins the out-of-band fallback provenance (issue
+// #259): when the forge could only serve a check's log from an OLDER rerun
+// attempt, the 200 carries one X-Lab-Log-Notice header per such check naming the
+// check, the attempt served, the newer attempt that failed and its HTTP status —
+// and the BODY is byte-for-byte what it would have been without any fallback,
+// because stdout stays a clean pipe/grep surface (ADR-0060).
+func TestPRLogsFallbackNotice(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	// 1. ?check= mode, the one target fell back: exactly one notice, and the body
+	// is the bare log — nothing about the fallback leaks into it.
+	one := &fakeTracker{
+		checks: []tracker.Check{{Name: "build", State: tracker.CheckFailure}},
+		checkLogResults: map[string]tracker.CheckLogResult{
+			"build": {Log: []byte("compiling...\nboom\n"), Attempt: 1, FallbackFrom: 3, FallbackStatus: 500},
+		},
+	}
+	rr := doJSON(t, f.forgeServer(one).Handler(), "GET", "/agent/v1/prs/12/logs?check=build", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("fallback check=build: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != "compiling...\nboom\n" {
+		t.Errorf("body = %q, want the bare log untouched by the notice", rr.Body.String())
+	}
+	wantNotice := `check "build": served rerun attempt 1; attempt 3's log route answered HTTP 500 — the latest attempt's logs are unavailable`
+	got := rr.Header().Values(logNoticeHeader)
+	if len(got) != 1 || got[0] != wantNotice {
+		t.Fatalf("%s = %q, want exactly [%q]", logNoticeHeader, got, wantNotice)
+	}
+
+	// 2. No fallback anywhere: the header must be ABSENT, not empty — a notice on
+	// a current log would train readers to ignore it.
+	none := &fakeTracker{
+		checks:    []tracker.Check{{Name: "build", State: tracker.CheckFailure}},
+		checkLogs: map[string][]byte{"build": []byte("all good\n")},
+	}
+	rr = doJSON(t, f.forgeServer(none).Handler(), "GET", "/agent/v1/prs/12/logs?check=build", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("no fallback: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if v := rr.Header().Values(logNoticeHeader); len(v) != 0 {
+		t.Errorf("%s = %q on a latest-attempt log, want no header at all", logNoticeHeader, v)
+	}
+
+	// 3. Default mode, BOTH failing checks fell back: the header repeats once per
+	// check, in target order, while the body keeps the exact `=== logs: <name>
+	// ===` section format — and the notice text appears in NO part of it.
+	both := &fakeTracker{
+		checks: []tracker.Check{
+			{Name: "a", State: tracker.CheckSuccess},
+			{Name: "b", State: tracker.CheckFailure},
+			{Name: "c", State: tracker.CheckFailure},
+		},
+		checkLogResults: map[string]tracker.CheckLogResult{
+			"b": {Log: []byte("build failed\nstep 2 blew up"), Attempt: 1, FallbackFrom: 2, FallbackStatus: 500},
+			"c": {Log: []byte("tests: 3 failing"), Attempt: 2, FallbackFrom: 4, FallbackStatus: 503},
+		},
+	}
+	rr = doJSON(t, f.forgeServer(both).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("default fallback: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	wantNotices := []string{
+		`check "b": served rerun attempt 1; attempt 2's log route answered HTTP 500 — the latest attempt's logs are unavailable`,
+		`check "c": served rerun attempt 2; attempt 4's log route answered HTTP 503 — the latest attempt's logs are unavailable`,
+	}
+	got = rr.Header().Values(logNoticeHeader)
+	if len(got) != len(wantNotices) {
+		t.Fatalf("%s = %q, want one value per fallen-back check: %q", logNoticeHeader, got, wantNotices)
+	}
+	for i, want := range wantNotices {
+		if got[i] != want {
+			t.Errorf("%s[%d] = %q, want %q", logNoticeHeader, i, got[i], want)
+		}
+	}
+	wantBody := "=== logs: b ===\nbuild failed\nstep 2 blew up\n=== logs: c ===\ntests: 3 failing\n"
+	if rr.Body.String() != wantBody {
+		t.Errorf("default fallback body =\n%q\nwant the unchanged section format\n%q", rr.Body.String(), wantBody)
+	}
+	for _, notice := range wantNotices {
+		if strings.Contains(rr.Body.String(), notice) {
+			t.Errorf("notice leaked into the body: %q", rr.Body.String())
+		}
+	}
+	if strings.Contains(rr.Body.String(), "rerun attempt") {
+		t.Errorf("body carries fallback prose, want it byte-clean: %q", rr.Body.String())
+	}
+}
+
+// TestPRLogsFallbackNoticeSanitized pins the untrusted half of the notice: the
+// check name comes from the forge, so a name carrying a CR/LF header-injection
+// payload must reach the wire with no CR or LF in it — the value is made safe
+// where it is built, never left to whatever writer ships it — and the rest of
+// the response stays intact.
+func TestPRLogsFallbackNoticeSanitized(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	const evil = "build\r\nX-Injected: pwned\r\n\r\nnot-a-header"
+	fk := &fakeTracker{
+		checks: []tracker.Check{{Name: evil, State: tracker.CheckFailure}},
+		checkLogResults: map[string]tracker.CheckLogResult{
+			evil: {Log: []byte("boom\n"), Attempt: 1, FallbackFrom: 2, FallbackStatus: 500},
+		},
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs?check="+url.QueryEscape(evil), token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("injection check: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	got := rr.Header().Values(logNoticeHeader)
+	if len(got) != 1 {
+		t.Fatalf("%s = %q, want exactly one value", logNoticeHeader, got)
+	}
+	if strings.ContainsAny(got[0], "\r\n") {
+		t.Errorf("notice carries CR/LF, header injection possible: %q", got[0])
+	}
+	if rr.Header().Get("X-Injected") != "" {
+		t.Errorf("injected header materialized: %q", rr.Header().Get("X-Injected"))
+	}
+	if !strings.Contains(got[0], "build") || !strings.Contains(got[0], "attempt 2's log route answered HTTP 500") {
+		t.Errorf("notice = %q, want the sanitized name and the fallback facts", got[0])
+	}
+	if rr.Body.String() != "boom\n" {
+		t.Errorf("body = %q, want the bare log — sanitizing the header changes nothing else", rr.Body.String())
+	}
+}
+
+// TestPRLogsUpstreamError pins the second 502 (issue #259): a forge that failed
+// to SERVE the log (5xx on every attempt) is an upstream fault, answered with
+// the sentinel's own message verbatim — never paraphrased, and never carrying
+// the adapter-mismatch wording, since the two 502s are told apart by their text
+// alone and send the reader to debug different systems.
+func TestPRLogsUpstreamError(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+
+	fk := &fakeTracker{
+		checks: []tracker.Check{{Name: "b", State: tracker.CheckFailure}},
+		checkLogErr: fmt.Errorf("%w: GET /o/r/actions/runs/5/jobs/1/attempt/1/logs answered 500 \"text/html\" for check %q — "+
+			"the forge failed to serve this log; this is a forge-side error, not a lab adapter mismatch", tracker.ErrLogUpstream, "b"),
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("upstream log failure: status = %d, want 502 (body %s)", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "answered 500") || !strings.Contains(body, "not a lab adapter mismatch") {
+		t.Errorf("502 body = %s, want the ErrLogUpstream message verbatim", body)
+	}
+	if strings.Contains(body, "does not match this forge version") {
+		t.Errorf("502 body = %s, want no adapter-mismatch wording on a forge-side failure", body)
+	}
+}
+
 // TestPRLogsRedaction pins the redaction seam on the log surface (ADR-0060): a
 // repo secret whose plaintext appears inside a fetched log is masked to
 // [REDACTED:NAME] before the body ships — no unredacted byte leaves the server.
@@ -1516,6 +1685,40 @@ func TestPRLogsRedaction(t *testing.T) {
 	}
 	if !strings.Contains(body, "[REDACTED:DEPLOY_KEY]") {
 		t.Errorf("log body = %s, want the value masked as [REDACTED:DEPLOY_KEY]", body)
+	}
+}
+
+// TestPRLogsFallbackRedaction pins that the fallback path is not a second byte
+// route: a log served from an OLDER attempt goes through exactly the same
+// redactor as any other (the non-negotiable in issue #259's contract), so the
+// same secret is masked and the notice still rides alongside it.
+func TestPRLogsFallbackRedaction(t *testing.T) {
+	f := newFixture(t)
+	f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+	f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+	token := f.seedToken(t, "run_f", nil)
+	const value = "sk-live-4f8a2b9c1d3e5f70"
+	f.seedSecret(t, "repo_f", "DEPLOY_KEY", "", value)
+
+	fk := &fakeTracker{
+		checks: []tracker.Check{{Name: "deploy", State: tracker.CheckFailure}},
+		checkLogResults: map[string]tracker.CheckLogResult{
+			"deploy": {Log: []byte("deploying with " + value + " ...\nfailed"), Attempt: 1, FallbackFrom: 2, FallbackStatus: 500},
+		},
+	}
+	rr := doJSON(t, f.forgeServer(fk).Handler(), "GET", "/agent/v1/prs/12/logs", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("fallback redacted logs: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, value) {
+		t.Errorf("fallback log body leaked the secret value: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED:DEPLOY_KEY]") {
+		t.Errorf("fallback log body = %s, want the value masked as [REDACTED:DEPLOY_KEY]", body)
+	}
+	if v := rr.Header().Values(logNoticeHeader); len(v) != 1 {
+		t.Errorf("%s = %q, want the fallback notice on the redacted response too", logNoticeHeader, v)
 	}
 }
 

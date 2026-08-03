@@ -438,9 +438,39 @@ var checkLogJobPath = regexp.MustCompile(`^/.+/actions/runs/[0-9]+/jobs/[0-9]+$`
 
 // checkLogAttemptCap bounds CheckLog's per-attempt log probe. A job with more
 // rerun attempts than this is far past anything a real workflow produces, so
-// walking to the cap without the terminating 404 is treated as the adapter no
-// longer matching the forge — a loud mismatch — rather than an unbounded loop.
+// walking to the cap without the terminating 404 is a shape surprise, not a
+// loop to run forever: it ends as a loud tracker.ErrLogAdapterMismatch — unless
+// every probed attempt answered a server error and none a log, which is the
+// forge failing rather than the adapter drifting (tracker.ErrLogUpstream).
 const checkLogAttemptCap = 20
+
+// checkLogProbe records ONE attempt's unhelpful answer — which attempt, what
+// status, what media type — so the probe loop can still report precisely what
+// the forge said after it has walked past it. The loop keeps two: the FIRST
+// server error (the one the error message names, the earliest evidence of the
+// outage) and the NEWEST (the one a fallback notice names, since it is the
+// attempt the reader is NOT getting).
+type checkLogProbe struct {
+	attempt   int
+	status    int
+	mediaType string
+}
+
+// checkLogUpstreamErr is the error for "the forge, not lab, is why there is no
+// log": it names the exact route and the raw status behind it, and says in
+// words that this is upstream. It must never read like ErrLogAdapterMismatch —
+// blaming the adapter for a forge-side 500 sends the reader to debug lab when
+// the fix is to retry or read an older attempt (issue #259). The forge token
+// lives only in the request header and so cannot reach this string.
+func checkLogUpstreamErr(jobPath string, p checkLogProbe, name string) error {
+	return fmt.Errorf("%w: GET %s answered %d %q for check %q — the forge failed to serve this log (a retried run whose attempt has no stored log blob answers this way); this is a forge-side error, not a lab adapter mismatch",
+		tracker.ErrLogUpstream, checkLogAttemptPath(jobPath, p.attempt), p.status, p.mediaType, name)
+}
+
+// checkLogAttemptPath builds the per-attempt web log route under a job page.
+func checkLogAttemptPath(jobPath string, k int) string {
+	return fmt.Sprintf("%s/attempt/%d/logs", jobPath, k)
+}
 
 // CheckLog fetches the raw plaintext log of the named check on pull `number`'s
 // CURRENT head commit by proxying Forgejo's undocumented per-attempt web log
@@ -457,22 +487,42 @@ const checkLogAttemptCap = 20
 // with the same "Authorization: token" the REST calls send (the route serves
 // public repos anonymously today, but the credential is sent so a private repo
 // does not silently break), taking each 200 text/plain body and stopping on the
-// FIRST 404 — the attempt past the last real one — to return the latest
-// attempt's log (a rerun's newest attempt wins). A still-running job's route
-// still answers 200 with the partial log so far, so a job in flight yields what
-// it has, never an error. Any other answer is loud: a 404 on attempt 1 (the
-// route the adapter is coupled to has moved), a non-200 status, a 200 whose
-// media type is not text/plain (an HTML login page, say), or exhausting the
-// attempt cap all wrap tracker.ErrLogAdapterMismatch with an actionable message
-// — and the forge token, living only in the request header, never reaches it.
-func (c *Client) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
+// FIRST 404 — the attempt past the last real one — to return the NEWEST
+// attempt that answered (a rerun's latest attempt wins). A still-running job's
+// route still answers 200 with the partial log so far, so a job in flight
+// yields what it has, never an error.
+//
+// A 5xx on an attempt does not end the probe and is not a mismatch (issue
+// #259): a run retried while the forge was unwell has a real attempt 2 with no
+// stored log blob behind it, so its route 500s while attempt 1 still serves the
+// full log. Folding that into "lab's adapter does not match this forge version"
+// killed a recoverable read AND named the wrong culprit. So a server error is
+// recorded and probing CONTINUES (the first 404 stays the single terminator,
+// which is what lets an attempt-3 log still win over a broken attempt 2), and
+// on termination:
+//
+//   - a 200 was seen → serve the newest one; if a server error was seen on a
+//     NEWER attempt than the served one, the result carries FallbackFrom /
+//     FallbackStatus so the caller can tell the reader they are looking at an
+//     older run than the latest.
+//   - no 200 at all, only server errors → tracker.ErrLogUpstream naming the
+//     FIRST failing attempt's route and status. The forge failed; lab is fine.
+//
+// Everything left is the shape surprise ADR-0060's version-coupling pin is
+// about, and stays a loud tracker.ErrLogAdapterMismatch with its actionable
+// message: a 404 on attempt 1 (the route the adapter is coupled to has moved),
+// a status that is neither 200/404 nor 5xx, a 200 whose media type is not
+// text/plain (an HTML login page, say), or exhausting the attempt cap without
+// the terminating 404 having appeared. The forge token, living only in the
+// request header, never reaches any of these messages.
+func (c *Client) CheckLog(ctx context.Context, number int, name string) (tracker.CheckLogResult, error) {
 	var fj fjPull
 	if err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &fj); err != nil {
-		return nil, err // 404 → tracker.ErrNotFound, same as Checks
+		return tracker.CheckLogResult{}, err // 404 → tracker.ErrNotFound, same as Checks
 	}
 	statuses, err := c.fetchCommitStatuses(ctx, fj.Head.Sha)
 	if err != nil {
-		return nil, err
+		return tracker.CheckLogResult{}, err
 	}
 	target, found := "", false
 	for _, s := range statuses {
@@ -482,37 +532,60 @@ func (c *Client) CheckLog(ctx context.Context, number int, name string) ([]byte,
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
+		return tracker.CheckLogResult{}, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
 	}
 	u, err := url.Parse(target)
 	if err != nil || !checkLogJobPath.MatchString(u.Path) {
-		return nil, fmt.Errorf("%w: check %q does not point at a Forgejo Actions job (target_url %q)",
+		return tracker.CheckLogResult{}, fmt.Errorf("%w: check %q does not point at a Forgejo Actions job (target_url %q)",
 			tracker.ErrUnsupported, name, target)
 	}
 
 	webOrigin := strings.TrimSuffix(c.baseURL, "/api/v1")
-	var last []byte
+	var served tracker.CheckLogResult     // the newest 200 text/plain so far
+	var firstErr, newestErr checkLogProbe // the first and newest 5xx so far
 	for k := 1; ; k++ {
 		if k > checkLogAttemptCap {
-			return nil, fmt.Errorf("%w: GET %s answered no terminating 404 within %d attempts for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
+			// Nothing served and the forge only ever errored: upstream, not shape
+			// — the cap is incidental here, the outage is the story.
+			if served.Attempt == 0 && firstErr.attempt != 0 {
+				return tracker.CheckLogResult{}, checkLogUpstreamErr(u.Path, firstErr, name)
+			}
+			return tracker.CheckLogResult{}, fmt.Errorf("%w: GET %s answered no terminating 404 within %d attempts for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
 				tracker.ErrLogAdapterMismatch, u.Path+"/attempt/N/logs", checkLogAttemptCap, name)
 		}
-		logPath := fmt.Sprintf("%s/attempt/%d/logs", u.Path, k)
+		logPath := checkLogAttemptPath(u.Path, k)
 		status, mediaType, body, err := c.doRawLog(ctx, webOrigin+logPath)
 		if err != nil {
-			return nil, err
+			return tracker.CheckLogResult{}, err
 		}
 		switch {
 		case status == http.StatusOK && mediaType == "text/plain":
-			last = body
+			served = tracker.CheckLogResult{Log: body, Attempt: k}
+		case status >= 500 && status <= 599:
+			probe := checkLogProbe{attempt: k, status: status, mediaType: mediaType}
+			if firstErr.attempt == 0 {
+				firstErr = probe
+			}
+			newestErr = probe
 		case status == http.StatusNotFound:
 			if k == 1 {
-				return nil, fmt.Errorf("%w: GET %s answered 404 for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
+				return tracker.CheckLogResult{}, fmt.Errorf("%w: GET %s answered 404 for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
 					tracker.ErrLogAdapterMismatch, logPath, name)
 			}
-			return last, nil
+			if served.Attempt == 0 {
+				// Every attempt before this terminator answered 5xx — a 200 would
+				// have set served, anything else returned above — so there is no
+				// log to fall back to and the forge is why.
+				return tracker.CheckLogResult{}, checkLogUpstreamErr(u.Path, firstErr, name)
+			}
+			if newestErr.attempt > served.Attempt {
+				// The reader is getting an older run than the latest; say so out of
+				// band rather than silently passing it off as current.
+				served.FallbackFrom, served.FallbackStatus = newestErr.attempt, newestErr.status
+			}
+			return served, nil
 		default:
-			return nil, fmt.Errorf("%w: GET %s answered %d %q for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
+			return tracker.CheckLogResult{}, fmt.Errorf("%w: GET %s answered %d %q for check %q — lab's Forgejo log adapter does not match this forge version; file an issue on coding-lab, then debug from local repro",
 				tracker.ErrLogAdapterMismatch, logPath, status, mediaType, name)
 		}
 	}

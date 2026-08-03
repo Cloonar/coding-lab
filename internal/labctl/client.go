@@ -252,6 +252,14 @@ func (c *Client) PRChecks(n int) (PRChecksReport, error) {
 	return rep, err
 }
 
+// logNoticeHeader is the wire NAME of the fallback-provenance response header
+// GET /prs/{n}/logs sets once per fetched log the forge could only serve from
+// an OLDER rerun attempt (issue #259) — internal/agentapi/handlers.go's
+// logNoticeHeader constant, declared again HERE rather than imported: labctl
+// is the agent-side client of a wire contract, not a Go-level consumer of
+// agentapi's internals, so the two packages agree on a string, not a symbol.
+const logNoticeHeader = "X-Lab-Log-Notice"
+
 // errNoFailingChecks is the typed sentinel PRLogs returns for the agent API's
 // 204: default mode found no FAILING check to dump (ADR-0032's truthful-empty
 // stance). It is deliberately not a plain error body — the verb branches on it
@@ -284,10 +292,18 @@ func (e *unknownCheckError) Error() string { return e.message }
 // shared error path (envelope message, redirect/HTML proxy detection, "HTTP
 // <status>"). The request is built by hand — do() would cap the body it must not
 // — but the Bearer auth matches do() exactly.
-func (c *Client) PRLogs(n int, check string) (io.ReadCloser, error) {
+//
+// The second return is the response's logNoticeHeader values (issue #259): one
+// per fetched log the forge could only serve from an OLDER rerun attempt because
+// the newer attempt's log route answered a server error. It is metadata ABOUT
+// the body, never part of it — read off the 200 response's headers, never spliced
+// into the stream — so a caller can tell the operator which logs are stale
+// without the body losing its byte-clean pipe/grep property. nil on every path
+// but the 200 (including every error return above).
+func (c *Client) PRLogs(n int, check string) (io.ReadCloser, []string, error) {
 	base, err := c.requestBase()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	path := "/agent/v1/prs/" + strconv.Itoa(n) + "/logs"
 	if check != "" {
@@ -295,24 +311,25 @@ func (c *Client) PRLogs(n int, check string) (io.ReadCloser, error) {
 	}
 	req, err := http.NewRequest(http.MethodGet, base+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// 200: hand the body back UNREAD for the caller to stream — the log can exceed
-	// maxResponseBody, so it must not go through decodeResponse's bounded read.
+	// maxResponseBody, so it must not go through decodeResponse's bounded read —
+	// plus whatever fallback notices rode in as headers alongside it.
 	if resp.StatusCode == http.StatusOK {
-		return resp.Body, nil
+		return resp.Body, resp.Header.Values(logNoticeHeader), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// 204: default mode found no failing check — a typed sentinel, not an error
 	// body, so the verb prints its own note and exits 1 (never a silent 0).
 	if resp.StatusCode == http.StatusNoContent {
-		return nil, errNoFailingChecks
+		return nil, nil, errNoFailingChecks
 	}
 	// Every other status carries an ERROR body, safely bounded. A 404 whose body
 	// has an `available` field is the unknown-?check= answer (the unknown-PR 404
@@ -324,10 +341,10 @@ func (c *Client) PRLogs(n int, check string) (io.ReadCloser, error) {
 			Available *[]string `json:"available"`
 		}
 		if json.Unmarshal(data, &envelope) == nil && envelope.Available != nil {
-			return nil, &unknownCheckError{message: envelope.Error, available: *envelope.Available}
+			return nil, nil, &unknownCheckError{message: envelope.Error, available: *envelope.Available}
 		}
 	}
-	return nil, c.errorFromResponse(resp, data)
+	return nil, nil, c.errorFromResponse(resp, data)
 }
 
 // PRList lists the repo's PRs: every open one plus the recent-closed window

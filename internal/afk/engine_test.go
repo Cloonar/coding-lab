@@ -129,8 +129,8 @@ func (f *fakeTracker) Pull(_ context.Context, n int) (tracker.PullDetail, error)
 	return tracker.PullDetail{Number: n, Title: f.pullTitles[n]}, nil
 }
 func (f *fakeTracker) Checks(context.Context, int) ([]tracker.Check, error) { return nil, nil }
-func (f *fakeTracker) CheckLog(context.Context, int, string) ([]byte, error) {
-	return nil, nil
+func (f *fakeTracker) CheckLog(context.Context, int, string) (tracker.CheckLogResult, error) {
+	return tracker.CheckLogResult{}, nil
 }
 func (f *fakeTracker) CreatePull(context.Context, string, string, string, string) (tracker.PullRef, error) {
 	return tracker.PullRef{}, errors.New("not implemented")

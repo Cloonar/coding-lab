@@ -452,8 +452,8 @@ func (c *Client) Checks(ctx context.Context, number int) ([]tracker.Check, error
 // implement yet (ADR-0032's deferred logs land first on the Forgejo binding),
 // so rather than fake output it wraps tracker.ErrUnsupported naming the verb —
 // the built-in tracker's refusal style — distinct from a forge failure.
-func (c *Client) CheckLog(ctx context.Context, number int, name string) ([]byte, error) {
-	return nil, fmt.Errorf("%w: check logs on the GitHub backend", tracker.ErrUnsupported)
+func (c *Client) CheckLog(ctx context.Context, number int, name string) (tracker.CheckLogResult, error) {
+	return tracker.CheckLogResult{}, fmt.Errorf("%w: check logs on the GitHub backend", tracker.ErrUnsupported)
 }
 
 // CreatePull opens a pull request from head into base and returns the created

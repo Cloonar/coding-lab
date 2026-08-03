@@ -284,6 +284,23 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, doing string, repo sto
 		jsonError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	if errors.Is(err, tracker.ErrLogUpstream) {
+		// The forge answered the log route with a SERVER error on every attempt
+		// that could have carried the log (issue #259): 502 with the error's own
+		// message VERBATIM, on exactly the mismatch branch's terms. Both are 502
+		// because in both lab asked the forge honestly and got an answer it cannot
+		// turn into a log — the fault is upstream of this handler either way — and
+		// both keep their own words because the TEXT is the only thing that tells
+		// them apart, while the recoveries are opposite: a mismatch means lab's
+		// version-coupled adapter drifted off the route (file an issue on
+		// coding-lab, then debug from a local repro), this means the route is
+		// exactly where it belongs and the forge failed to serve it (retry later,
+		// or read an older attempt). Paraphrasing either into a generic bad-gateway
+		// destroys that signal and sends the reader to debug the wrong system —
+		// which is the misattribution this branch exists to end.
+		jsonError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	if errors.Is(err, tracker.ErrRateLimited) {
 		// A forge rate limit (GitHub 403/429 with a spent hourly budget) is a
 		// transient upstream throttle, not a lab fault: 503 with the reset hint
@@ -975,6 +992,54 @@ type unknownCheckResponse struct {
 	Available []string `json:"available"`
 }
 
+// logNoticeHeader carries GET /agent/v1/prs/{n}/logs' fallback provenance: one
+// repeated response header per fetched log the forge could only serve from an
+// OLDER rerun attempt (issue #259), naming the check, the attempt actually
+// served, and the newer attempt's failing status. It is a HEADER and never a
+// line in the body because the log body is a byte-clean pipe/grep surface all
+// the way to the agent's stdout (ADR-0060's no-truncation pin): a notice spliced
+// into the text would be indistinguishable from log output to everything
+// downstream. `X-Lab-<Thing>` matches the operator API's X-Lab-Csrf convention.
+const logNoticeHeader = "X-Lab-Log-Notice"
+
+// maxLogNoticeName bounds the forge-supplied check name a notice quotes. The
+// rest of the value is lab's own fixed prose plus three integers, so bounding
+// the name is what bounds the whole header.
+const maxLogNoticeName = 200
+
+// logNoticeName makes a forge-supplied check name safe to put in a response
+// header value: every byte below 0x20 or equal to 0x7f becomes a space, and the
+// result is truncated to maxLogNoticeName bytes. Check names are UNTRUSTED —
+// they arrive as a commit status' context string from the forge and flow
+// straight onto lab's wire — so a name carrying CR/LF is a header-injection
+// payload (a smuggled second header, or an early end of the header block) and an
+// unbounded one is a header no proxy in front of lab is obliged to pass on.
+// net/http happens to fold CR and LF in header values to spaces as it writes
+// them, but nothing here leans on that: the value is made inherently safe and
+// bounded at the point it is BUILT, so the property survives any writer that
+// ships it and any future rework of this response.
+func logNoticeName(name string) string {
+	if len(name) > maxLogNoticeName {
+		name = name[:maxLogNoticeName]
+	}
+	b := []byte(name)
+	for i, c := range b {
+		if c < 0x20 || c == 0x7f {
+			b[i] = ' '
+		}
+	}
+	return string(b)
+}
+
+// logNotice renders one fallen-back CheckLogResult's provenance — the exact
+// logNoticeHeader value. Both response modes emit the same sentence, so a
+// reading agent (or `labctl pr logs`, which prints these to stderr) parses one
+// shape regardless of how the logs were selected.
+func logNotice(name string, res tracker.CheckLogResult) string {
+	return fmt.Sprintf("check %q: served rerun attempt %d; attempt %d's log route answered HTTP %d — the latest attempt's logs are unavailable",
+		logNoticeName(name), res.Attempt, res.FallbackFrom, res.FallbackStatus)
+}
+
 // handlePRLogs is GET /agent/v1/prs/{n}/logs[?check=<context>]: the redacted raw
 // CI logs of PR/CR n's current head — the diagnose leg of the fix-the-red loop
 // (ADR-0060, closing ADR-0032's deferral of the log text behind the red rows).
@@ -993,8 +1058,18 @@ type unknownCheckResponse struct {
 // Every target's log is fetched and BUFFERED before the first body byte is
 // written: a mid-fetch failure must become a real status code through
 // writeTrackerError (404 unknown check, 409 unsupported, 502 adapter mismatch,
-// 503 rate-limited), never a torn 200 whose truncated body a reading agent would
-// mistake for the whole log. The redactor is likewise built before any write.
+// 502 upstream log failure, 503 rate-limited), never a torn 200 whose truncated
+// body a reading agent would mistake for the whole log. The redactor is likewise
+// built before any write.
+//
+// A log the forge could only serve from an OLDER rerun attempt — a newer
+// attempt's log route answered a server error (issue #259) — is served, not
+// failed, and its provenance rides out of band as one repeated logNoticeHeader
+// per such check, in BOTH modes. Setting them is free precisely because of the
+// buffer-first discipline above: nothing is written until every fetch has
+// returned, so the header block is still open. The BODY is untouched — stdout
+// stays a byte-clean pipe/grep surface (ADR-0060) — so a reader is told they are
+// looking at an older run without a single byte of lab's prose entering the log.
 //
 // Redaction is FAIL-CLOSED (ADR-0060): the response passes through the
 // internal/secrets derived-forms redactor so every lab-vault secret value, in
@@ -1058,15 +1133,18 @@ func (s *Server) handlePRLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch-and-buffer BEFORE writing any body byte: a fetch failure here is a
-	// real status code (writeTrackerError), never a truncated 200.
-	logs := make([][]byte, len(targets))
+	// real status code (writeTrackerError), never a truncated 200. The whole
+	// CheckLogResult is kept, not just its bytes: which attempt answered, and
+	// which newer one did not, is provenance the response owes the reader
+	// (issue #259) and it only survives to the header block if it survives here.
+	results := make([]tracker.CheckLogResult, len(targets))
 	for i, target := range targets {
-		b, err := tk.CheckLog(r.Context(), n, target.Name)
+		res, err := tk.CheckLog(r.Context(), n, target.Name)
 		if err != nil {
 			s.writeTrackerError(w, "loading pull request check logs", repo, err)
 			return
 		}
-		logs[i] = b
+		results[i] = res
 	}
 
 	// Fail-closed redaction, built before any write: a redactor that cannot be
@@ -1079,6 +1157,14 @@ func (s *Server) handlePRLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// One notice per log that came from an older attempt, added (not set) so the
+	// header repeats — a default-mode response fetching several fallen-back
+	// checks names every one of them, in target order.
+	for i, target := range targets {
+		if results[i].FallbackFrom != 0 {
+			w.Header().Add(logNoticeHeader, logNotice(target.Name, results[i]))
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	for i, target := range targets {
 		if check == "" {
@@ -1086,7 +1172,7 @@ func (s *Server) handlePRLogs(w http.ResponseWriter, r *http.Request) {
 			// together; ?check= mode dumps the one raw log bare.
 			_, _ = fmt.Fprintf(w, "=== logs: %s ===\n", target.Name)
 		}
-		text := string(logs[i])
+		text := string(results[i].Log)
 		if red != nil {
 			text, _ = red.Redact(text) // ignore the hit names; the masked text is all that ships
 		}

@@ -27,9 +27,11 @@ func (stubTracker) Pulls(context.Context) ([]PullRef, error)         { return ni
 func (stubTracker) PullsForHead(context.Context, string, string) ([]PullRef, error) {
 	return nil, nil
 }
-func (stubTracker) Pull(context.Context, int) (PullDetail, error)         { return PullDetail{}, nil }
-func (stubTracker) Checks(context.Context, int) ([]Check, error)          { return nil, nil }
-func (stubTracker) CheckLog(context.Context, int, string) ([]byte, error) { return nil, nil }
+func (stubTracker) Pull(context.Context, int) (PullDetail, error) { return PullDetail{}, nil }
+func (stubTracker) Checks(context.Context, int) ([]Check, error)  { return nil, nil }
+func (stubTracker) CheckLog(context.Context, int, string) (CheckLogResult, error) {
+	return CheckLogResult{}, nil
+}
 func (stubTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, nil
 }
