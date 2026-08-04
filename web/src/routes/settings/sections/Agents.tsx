@@ -19,7 +19,7 @@ import {
   type TextSettingKey,
 } from '../../../api';
 import Select, { type SelectOption } from '../../../components/Select';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { providerFor } from '../../../lib/spawn';
@@ -257,12 +257,8 @@ export default function Agents(props: {
 
   return (
     <form onSubmit={(e) => void form.save(e)} class="stack">
-      <ErrorBanner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Show when={form.note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{form.note()}</span>
-        </div>
-      </Show>
+      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
+      <Banner message={form.note()} variant="success" />
 
       <SectionCard title="Spawn defaults">
         <Select

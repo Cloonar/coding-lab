@@ -15,7 +15,7 @@ import { budgetRemaining, parseAFKLabel } from '../lib/afk';
 import { stateBadge } from '../lib/conversation';
 import { runDisplayTitle, sessionLabel } from '../lib/instanceLabel';
 import { orderRail } from '../lib/railOrder';
-import ErrorBanner from './ErrorBanner';
+import Banner from './Banner';
 import Icon from './Icon';
 
 export default function SideNav(props: {
@@ -135,7 +135,7 @@ export default function SideNav(props: {
         </A>
       </div>
 
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <div class="rail-foot">
         <span class="muted rail-user">{auth()?.username}</span>
         <button type="button" class="rail-logout" onClick={() => void doLogout()} disabled={busy()}>

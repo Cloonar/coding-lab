@@ -10,7 +10,9 @@ import { Match, Show, Switch, createResource } from 'solid-js';
 import type { JSX } from 'solid-js';
 import { useParams } from '@solidjs/router';
 import { errorMessage, getSettings, listProviders, type Settings } from '../../api';
+import Banner from '../../components/Banner';
 import RequireAuth from '../../components/RequireAuth';
+import SectionHead from '../../components/SectionHead';
 import SettingsLayout from '../../components/settings/SettingsLayout';
 import { GLOBAL_SETTINGS_CATEGORIES } from './categories';
 import General from './sections/General';
@@ -44,9 +46,7 @@ function SettingsView() {
   const formGate = (render: (current: Settings) => JSX.Element): JSX.Element => (
     <Switch>
       <Match when={settings.error !== undefined}>
-        <div class="banner error" role="alert">
-          <span class="banner-text">{errorMessage(settings.error)}</span>
-        </div>
+        <Banner message={errorMessage(settings.error)} />
       </Match>
       <Match when={settings()}>
         <Show when={settings()} keyed>
@@ -62,11 +62,7 @@ function SettingsView() {
         base="/settings"
         categories={GLOBAL_SETTINGS_CATEGORIES}
         section={params.section}
-        indexTitle={
-          <div class="section-head">
-            <h2>Settings</h2>
-          </div>
-        }
+        indexTitle={<SectionHead title="Settings" />}
       >
         <Switch>
           {/* Device-local: no settings payload, so no keyed gate. */}

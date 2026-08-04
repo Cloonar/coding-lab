@@ -17,7 +17,8 @@ import {
   type RepoImport,
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
+import FormCard from '../../../components/FormCard';
 import ListRowCard from '../../../components/ListRowCard';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
@@ -69,7 +70,7 @@ export default function ImportsSection(props: { repoId: string }) {
         </>
       }
     >
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Show when={showAdd()}>
         <AddImportForm
           repoId={props.repoId}
@@ -82,9 +83,7 @@ export default function ImportsSection(props: { repoId: string }) {
       </Show>
       <Switch>
         <Match when={imports.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(imports.error)}</span>
-          </div>
+          <Banner message={errorMessage(imports.error)} />
         </Match>
         <Match when={imports()?.length === 0}>
           <EmptyState>
@@ -133,23 +132,28 @@ function AddImportForm(props: { repoId: string; options: SelectOption[]; onAdded
   };
 
   return (
-    <div class="card form-card">
-      <h2>New import</h2>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <form onSubmit={(e) => void submit(e)}>
-        <Select
-          skin="field"
-          label="Repository"
-          name="target_repo_id"
-          value={targetId()}
-          options={props.options}
-          onChange={setTargetId}
-        />
-        <button type="submit" class="primary wide" disabled={busy() || targetId() === ''}>
-          {busy() ? 'Adding…' : 'Add import'}
-        </button>
-      </form>
-    </div>
+    <FormCard
+      title="New import"
+      wide
+      submitLabel="Add import"
+      busyLabel="Adding…"
+      error={error()}
+      onDismissError={() => setError(null)}
+      onSubmit={(e) => void submit(e)}
+      busy={busy()}
+      // FormCard ORs `busy` in already, so this carries only the extra
+      // condition: no target picked yet.
+      disabled={targetId() === ''}
+    >
+      <Select
+        skin="field"
+        label="Repository"
+        name="target_repo_id"
+        value={targetId()}
+        options={props.options}
+        onChange={setTargetId}
+      />
+    </FormCard>
   );
 }
 

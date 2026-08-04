@@ -22,9 +22,10 @@ import {
   type Repo,
 } from '../api';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import ParkedSection from '../components/ParkedSection';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
 import { createLiveResource } from '../lib/liveResource';
@@ -83,15 +84,11 @@ function ReposView() {
 
   return (
     <main class="page">
-      <div class="section-head">
-        <h2>Repositories</h2>
-      </div>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <SectionHead title="Repositories" />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={repos.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(repos.error)}</span>
-          </div>
+          <Banner message={errorMessage(repos.error)} />
         </Match>
         <Match when={repos()?.length === 0}>
           <EmptyState>
@@ -180,12 +177,15 @@ function RepoCard(props: {
         <CloneProgressBar progress={props.progress} />
       </Show>
       <Show when={props.repo.clone_status === 'error'}>
-        <div class="banner error clone-error" role="alert">
-          <span class="banner-text">{props.repo.clone_error ?? 'clone failed'}</span>
-          <button type="button" onClick={() => props.onRetry()}>
-            Retry
-          </button>
-        </div>
+        <Banner
+          message={props.repo.clone_error ?? 'clone failed'}
+          class="clone-error"
+          action={
+            <button type="button" onClick={() => props.onRetry()}>
+              Retry
+            </button>
+          }
+        />
       </Show>
       <Show when={props.repo.clone_status === 'ready'}>
         <ParkedSection repoID={props.repo.id} />

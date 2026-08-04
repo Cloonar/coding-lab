@@ -12,7 +12,7 @@ import {
   type CreateRepoRequest,
   type TrackerBinding,
 } from '../api';
-import ErrorBanner from '../components/ErrorBanner';
+import FormCard from '../components/FormCard';
 import RequireAuth from '../components/RequireAuth';
 import Select from '../components/Select';
 import { deriveRepoName } from '../lib/repoName';
@@ -78,117 +78,121 @@ function AddRepoView() {
 
   return (
     <main class="page">
-      <div class="card form-card">
-        <h2>Add repository</h2>
-        <p class="muted">
-          lab clones a bare mirror it owns; runs get their own worktrees. Private remotes need a git
-          credential — <A href="/credentials">add one</A> first if the list is empty.
-        </p>
-        <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-        <form onSubmit={(e) => void submit(e)}>
-          <label class="field">
-            <span>Remote URL</span>
-            <input
-              type="text"
-              name="remote_url"
-              required
-              autocomplete="off"
-              spellcheck={false}
-              placeholder="git@git.cloonar.com:Cloonar/coding-lab.git"
-              value={url()}
-              onInput={(e) => setUrl(e.currentTarget.value)}
-            />
-          </label>
-          <label class="field">
-            <span>Name</span>
-            <input
-              type="text"
-              name="name"
-              autocomplete="off"
-              spellcheck={false}
-              value={shownName()}
-              onInput={(e) => {
-                setNameTouched(true);
-                setName(e.currentTarget.value);
-              }}
-            />
-            <small class="hint">
-              {nameTouched()
-                ? 'Custom name — the server validates it.'
-                : 'Auto-derived from the URL — edit to override.'}
-            </small>
-          </label>
-          <label class="field">
-            <span>Git credential</span>
-            <select
-              name="credential_id"
-              value={credentialId()}
-              onChange={(e) => setCredentialId(e.currentTarget.value)}
-            >
-              <option value="">None (public remote)</option>
-              <For each={gitCredentials()}>
-                {(c) => (
-                  <option value={c.id}>
-                    {c.name} ({c.kind === 'ssh_key' ? 'SSH key' : 'HTTPS token'})
-                  </option>
-                )}
-              </For>
-            </select>
-          </label>
-          <Select
-            skin="field"
-            label="Agent"
-            name="provider"
-            value={provider()}
-            options={providerOptions()}
-            inheritLabel="Global default"
-            onChange={setProvider}
+      <FormCard
+        title="Add repository"
+        intro={
+          <p class="muted">
+            lab clones a bare mirror it owns; runs get their own worktrees. Private remotes need a
+            git credential — <A href="/credentials">add one</A> first if the list is empty.
+          </p>
+        }
+        error={error()}
+        onDismissError={() => setError(null)}
+        onSubmit={(e) => void submit(e)}
+        busy={busy()}
+        wide
+        submitLabel="Add repository"
+        busyLabel="Adding…"
+      >
+        <label class="field">
+          <span>Remote URL</span>
+          <input
+            type="text"
+            name="remote_url"
+            required
+            autocomplete="off"
+            spellcheck={false}
+            placeholder="git@git.cloonar.com:Cloonar/coding-lab.git"
+            value={url()}
+            onInput={(e) => setUrl(e.currentTarget.value)}
           />
-          <label class="field">
-            <span>Tracker binding</span>
-            <select
-              name="tracker_binding"
-              value={binding()}
-              onChange={(e) => setBinding(e.currentTarget.value as BindingChoice)}
-            >
-              <option value="auto">Auto (forge when detected, else builtin)</option>
-              <option value="forge">Forge (Forgejo / GitHub issues + PRs)</option>
-              <option value="builtin">Builtin (lab's own issues + CRs)</option>
-            </select>
-          </label>
-          <Show when={binding() !== 'builtin'}>
-            <label class="field">
-              <span>Forge credential</span>
-              <select
-                name="forge_credential_id"
-                value={forgeCredentialId()}
-                onChange={(e) => setForgeCredentialId(e.currentTarget.value)}
-              >
-                <option value="">None</option>
-                <For each={forgeCredentials()}>{(c) => <option value={c.id}>{c.name}</option>}</For>
-              </select>
-              <small class="hint">Forge API token for issues and PRs — never given to runs.</small>
-            </label>
-          </Show>
-          <label class="check">
-            <input
-              type="checkbox"
-              name="incogni"
-              checked={incogni()}
-              onChange={(e) => setIncogni(e.currentTarget.checked)}
-            />
-            <span>Incogni</span>
-          </label>
-          <small class="hint hint-block">
-            Strips AI attribution from this repo's output: neutral branch names (issue-N, wip/),
-            sanitized PR bodies, your git identity. It cannot hide the forge account of the token
-            used, nor style or timing signals.
+        </label>
+        <label class="field">
+          <span>Name</span>
+          <input
+            type="text"
+            name="name"
+            autocomplete="off"
+            spellcheck={false}
+            value={shownName()}
+            onInput={(e) => {
+              setNameTouched(true);
+              setName(e.currentTarget.value);
+            }}
+          />
+          <small class="hint">
+            {nameTouched()
+              ? 'Custom name — the server validates it.'
+              : 'Auto-derived from the URL — edit to override.'}
           </small>
-          <button type="submit" class="primary wide" disabled={busy()}>
-            {busy() ? 'Adding…' : 'Add repository'}
-          </button>
-        </form>
-      </div>
+        </label>
+        <label class="field">
+          <span>Git credential</span>
+          <select
+            name="credential_id"
+            value={credentialId()}
+            onChange={(e) => setCredentialId(e.currentTarget.value)}
+          >
+            <option value="">None (public remote)</option>
+            <For each={gitCredentials()}>
+              {(c) => (
+                <option value={c.id}>
+                  {c.name} ({c.kind === 'ssh_key' ? 'SSH key' : 'HTTPS token'})
+                </option>
+              )}
+            </For>
+          </select>
+        </label>
+        <Select
+          skin="field"
+          label="Agent"
+          name="provider"
+          value={provider()}
+          options={providerOptions()}
+          inheritLabel="Global default"
+          onChange={setProvider}
+        />
+        <label class="field">
+          <span>Tracker binding</span>
+          <select
+            name="tracker_binding"
+            value={binding()}
+            onChange={(e) => setBinding(e.currentTarget.value as BindingChoice)}
+          >
+            <option value="auto">Auto (forge when detected, else builtin)</option>
+            <option value="forge">Forge (Forgejo / GitHub issues + PRs)</option>
+            <option value="builtin">Builtin (lab's own issues + CRs)</option>
+          </select>
+        </label>
+        <Show when={binding() !== 'builtin'}>
+          <label class="field">
+            <span>Forge credential</span>
+            <select
+              name="forge_credential_id"
+              value={forgeCredentialId()}
+              onChange={(e) => setForgeCredentialId(e.currentTarget.value)}
+            >
+              <option value="">None</option>
+              <For each={forgeCredentials()}>{(c) => <option value={c.id}>{c.name}</option>}</For>
+            </select>
+            <small class="hint">Forge API token for issues and PRs — never given to runs.</small>
+          </label>
+        </Show>
+        <label class="check">
+          <input
+            type="checkbox"
+            name="incogni"
+            checked={incogni()}
+            onChange={(e) => setIncogni(e.currentTarget.checked)}
+          />
+          <span>Incogni</span>
+        </label>
+        <small class="hint hint-block">
+          Strips AI attribution from this repo's output: neutral branch names (issue-N, wip/),
+          sanitized PR bodies, your git identity. It cannot hide the forge account of the token
+          used, nor style or timing signals.
+        </small>
+      </FormCard>
     </main>
   );
 }

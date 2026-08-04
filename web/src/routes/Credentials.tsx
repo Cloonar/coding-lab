@@ -17,10 +17,12 @@ import {
 } from '../api';
 import ProviderAuthCard from '../components/ProviderAuthCard';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
+import FormCard from '../components/FormCard';
 import ListRowCard from '../components/ListRowCard';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
@@ -70,12 +72,14 @@ function CredentialsView() {
           {(provider) => <ProviderAuthCard provider={provider} activeRuns={liveCount()} />}
         </For>
       </div>
-      <div class="section-head">
-        <h2>Credentials</h2>
-        <button type="button" class="primary" onClick={() => setShowCreate(!showCreate())}>
-          {showCreate() ? 'Cancel' : '+ Add credential'}
-        </button>
-      </div>
+      <SectionHead
+        title="Credentials"
+        action={
+          <button type="button" class="primary" onClick={() => setShowCreate(!showCreate())}>
+            {showCreate() ? 'Cancel' : '+ Add credential'}
+          </button>
+        }
+      />
       <Show when={showCreate()}>
         <CreateCredentialCard
           onCreated={() => {
@@ -86,9 +90,7 @@ function CredentialsView() {
       </Show>
       <Switch>
         <Match when={credentials.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(credentials.error)}</span>
-          </div>
+          <Banner message={errorMessage(credentials.error)} />
         </Match>
         <Match when={credentials()?.length === 0}>
           <EmptyState>
@@ -133,40 +135,42 @@ function CreateCredentialCard(props: { onCreated: () => void }) {
   };
 
   return (
-    <div class="card form-card">
-      <h2>New credential</h2>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <form onSubmit={(e) => void submit(e)}>
-        <label class="field">
-          <span>Name</span>
-          <input
-            type="text"
-            name="name"
-            required
-            autocomplete="off"
-            placeholder="forgejo-deploy-key"
-            value={name()}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-        </label>
-        <label class="field">
-          <span>Kind</span>
-          <select
-            name="kind"
-            value={kind()}
-            onChange={(e) => setKind(e.currentTarget.value as CredentialKind)}
-          >
-            <option value="ssh_key">SSH key (git over SSH)</option>
-            <option value="https_token">HTTPS token (git over HTTPS)</option>
-            <option value="forge_token">Forge API token (issues + PRs)</option>
-          </select>
-        </label>
-        <PayloadFields kind={kind()} draft={draft} />
-        <button type="submit" class="primary wide" disabled={busy()}>
-          {busy() ? 'Saving…' : 'Save credential'}
-        </button>
-      </form>
-    </div>
+    <FormCard
+      title="New credential"
+      wide
+      error={error()}
+      onDismissError={() => setError(null)}
+      onSubmit={(e) => void submit(e)}
+      busy={busy()}
+      submitLabel="Save credential"
+      busyLabel="Saving…"
+    >
+      <label class="field">
+        <span>Name</span>
+        <input
+          type="text"
+          name="name"
+          required
+          autocomplete="off"
+          placeholder="forgejo-deploy-key"
+          value={name()}
+          onInput={(e) => setName(e.currentTarget.value)}
+        />
+      </label>
+      <label class="field">
+        <span>Kind</span>
+        <select
+          name="kind"
+          value={kind()}
+          onChange={(e) => setKind(e.currentTarget.value as CredentialKind)}
+        >
+          <option value="ssh_key">SSH key (git over SSH)</option>
+          <option value="https_token">HTTPS token (git over HTTPS)</option>
+          <option value="forge_token">Forge API token (issues + PRs)</option>
+        </select>
+      </label>
+      <PayloadFields kind={kind()} draft={draft} />
+    </FormCard>
   );
 }
 
@@ -233,7 +237,7 @@ function CredentialCard(props: { credential: CredentialListItem; onChanged: () =
       }
       sub={<>Created {createdOn(props.credential.created_at)}</>}
     >
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={mode() === 'rename'}>
           <form onSubmit={rename}>

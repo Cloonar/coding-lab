@@ -19,9 +19,11 @@ import {
   type LabelPatch,
 } from '../api';
 import Crumbs, { type Crumb } from '../components/Crumbs';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
+import SectionCard from '../components/SectionCard';
+import SectionHead from '../components/SectionHead';
 import { canMutateTracker } from '../lib/issues';
 import { DEFAULT_LABEL_COLOR, normalizeHex } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
@@ -96,23 +98,17 @@ function RepoLabelsView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <div class="section-head">
-        <h2>{repoData()?.name ?? 'Repository'} · Labels</h2>
-      </div>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <SectionHead title={<>{repoData()?.name ?? 'Repository'} · Labels</>} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={repo.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(repo.error)}</span>
-          </div>
+          <Banner message={errorMessage(repo.error)} />
         </Match>
         <Match when={repo() !== undefined && !builtin()}>
           <p class="muted forge-note">Managed on the forge — labels live there.</p>
         </Match>
         <Match when={labels.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(labels.error)}</span>
-          </div>
+          <Banner message={errorMessage(labels.error)} />
         </Match>
         <Match when={labels()}>
           <div class="stack">
@@ -178,8 +174,7 @@ function RepoLabelsView() {
                 </button>
               }
             >
-              <section class="card">
-                <h2>New label</h2>
+              <SectionCard title="New label">
                 <LabelForm
                   repoID={params.id}
                   onDone={() => {
@@ -188,7 +183,7 @@ function RepoLabelsView() {
                   }}
                   onCancel={() => setCreating(false)}
                 />
-              </section>
+              </SectionCard>
             </Show>
           </div>
         </Match>
@@ -258,7 +253,7 @@ function LabelForm(props: {
 
   return (
     <form class="label-form" onSubmit={(e) => void submit(e)}>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <label class="field">
         <span>Name</span>
         <input

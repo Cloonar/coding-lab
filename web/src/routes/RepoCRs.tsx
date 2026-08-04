@@ -7,10 +7,12 @@
 import { A, useParams, useSearchParams } from '@solidjs/router';
 import { For, Match, Switch, createResource } from 'solid-js';
 import { errorMessage, getRepo, listCRs, type CRStateFilter, type CRSummary } from '../api';
+import Banner from '../components/Banner';
 import ClosesChips from '../components/ClosesChips';
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import EmptyState from '../components/EmptyState';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { formatDateTime } from '../lib/issues';
 import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
@@ -61,14 +63,16 @@ function RepoCRsView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <div class="section-head">
-        <h2>{repoData()?.name ?? 'Repository'} · Change requests</h2>
-        <div class="head-actions">
-          <A href={`/repos/${params.id}/issues`} class="card-link">
-            Issues
-          </A>
-        </div>
-      </div>
+      <SectionHead
+        title={<>{repoData()?.name ?? 'Repository'} · Change requests</>}
+        action={
+          <div class="head-actions">
+            <A href={`/repos/${params.id}/issues`} class="card-link">
+              Issues
+            </A>
+          </div>
+        }
+      />
 
       <div class="filter-row" role="group" aria-label="Filter by state">
         <For each={STATE_FILTERS}>
@@ -86,9 +90,7 @@ function RepoCRsView() {
 
       <Switch>
         <Match when={page.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(page.error)}</span>
-          </div>
+          <Banner message={errorMessage(page.error)} />
         </Match>
         <Match when={page() !== undefined && page()!.length === 0}>
           <EmptyState>{emptyText()}</EmptyState>

@@ -381,18 +381,19 @@
   }
 }
 
+/* The page-level head row. It is produced by exactly one place now —
+   SectionHead (components/SectionHead.tsx) — whose always-present `.spacer`
+   does the right-aligning, so `justify-content: space-between` would be
+   redundant at two children and wrong at three or more: it would spread the
+   controls across the row instead of clustering them at the right edge. */
 .section-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.65rem;
   margin-bottom: var(--space-3);
 }
 
-.section-head h2 {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
+/* `.section-head h2` is reset alongside the other head rows in cards.css. */
 
 .center-note {
   color: var(--muted);

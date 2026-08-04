@@ -110,7 +110,7 @@ describe('RepoSettings imports section', () => {
     expect(importsSection().textContent).toContain('No imports declared');
   });
 
-  it('a 400 from the add-import POST surfaces in the ErrorBanner', async () => {
+  it('a 400 from the add-import POST surfaces in the Banner', async () => {
     // The picker already excludes self and already-imported targets, so the
     // real self-import/unknown-target 400s can't be reached by driving the
     // UI normally — h.importPostError forces the response the server would

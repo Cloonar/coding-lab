@@ -25,8 +25,9 @@ import {
   type RunOutcome,
 } from '../api';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
 import { createLiveResource } from '../lib/liveResource';
 
@@ -78,36 +79,46 @@ function HistoryView() {
 
   return (
     <main class="page">
-      <div class="section-head">
-        <h2>History</h2>
-        <label class="field runs-filter">
-          <select
-            name="outcome-filter"
-            value={outcomeFilter()}
-            onInput={(e) => setParams({ outcome: e.currentTarget.value || undefined })}
-            aria-label="Filter by outcome"
-          >
-            <option value="">All outcomes</option>
-            <For each={OUTCOMES}>{(outcome) => <option value={outcome}>{outcome}</option>}</For>
-          </select>
-        </label>
-        <label class="field runs-filter">
-          <select
-            name="repo-filter"
-            value={repoFilter()}
-            onInput={(e) => setParams({ repo: e.currentTarget.value || undefined })}
-            aria-label="Filter by repository"
-          >
-            <option value="">All repositories</option>
-            <For each={repos() ?? []}>{(repo) => <option value={repo.id}>{repo.name}</option>}</For>
-          </select>
-        </label>
-      </div>
+      <SectionHead
+        title="History"
+        // The two filters go in as a bare fragment, NOT wrapped in
+        // `.head-actions`: the head row's own 0.65rem gap is what separates
+        // them, where `.head-actions` would impose its 0.75rem. They cluster at
+        // the right edge now (the row lost `justify-content: space-between`,
+        // which used to spread them across it) — matching every other
+        // multi-control head in the app.
+        action={
+          <>
+            <label class="field runs-filter">
+              <select
+                name="outcome-filter"
+                value={outcomeFilter()}
+                onInput={(e) => setParams({ outcome: e.currentTarget.value || undefined })}
+                aria-label="Filter by outcome"
+              >
+                <option value="">All outcomes</option>
+                <For each={OUTCOMES}>{(outcome) => <option value={outcome}>{outcome}</option>}</For>
+              </select>
+            </label>
+            <label class="field runs-filter">
+              <select
+                name="repo-filter"
+                value={repoFilter()}
+                onInput={(e) => setParams({ repo: e.currentTarget.value || undefined })}
+                aria-label="Filter by repository"
+              >
+                <option value="">All repositories</option>
+                <For each={repos() ?? []}>
+                  {(repo) => <option value={repo.id}>{repo.name}</option>}
+                </For>
+              </select>
+            </label>
+          </>
+        }
+      />
       <Switch>
         <Match when={runs.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(runs.error)}</span>
-          </div>
+          <Banner message={errorMessage(runs.error)} />
         </Match>
         <Match when={runs()?.length === 0}>
           <EmptyState>No runs yet.</EmptyState>
@@ -197,7 +208,7 @@ function RunCard(props: { run: Run; onRearmed: () => void }) {
           <p class="run-escalated-note">
             Autoland is ignoring PR #{props.run.pull_number} until it is re-armed.
           </p>
-          <ErrorBanner message={rearmError()} onDismiss={() => setRearmError(null)} />
+          <Banner message={rearmError()} onDismiss={() => setRearmError(null)} />
           <div class="card-actions">
             <button type="button" class="run-rearm" onClick={() => void rearm()} disabled={busy()}>
               {busy() ? 'Re-arming…' : 'Re-arm'}

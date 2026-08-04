@@ -53,7 +53,7 @@
 // Tokens and Imports hold a boolean signal, Schedules a
 // `'delete' | 'reenable' | null` so it can tell which of its two buttons is
 // working, Credentials a shared local `run()` helper that also drives an
-// inline ErrorBanner and a view/rename/replace mode. Folding them together
+// inline Banner and a view/rename/replace mode. Folding them together
 // would either change behaviour or need one knob per call site. The shared
 // thing here is the markup, not the wiring.
 

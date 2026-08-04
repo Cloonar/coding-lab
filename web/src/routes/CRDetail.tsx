@@ -15,8 +15,10 @@ import { For, Match, Show, Switch, createMemo, createResource, createSignal } fr
 import { closeCR, errorMessage, getCR, getRepo, mergeCR, type CRDetail as CR } from '../api';
 import ClosesChips from '../components/ClosesChips';
 import Crumbs, { type Crumb } from '../components/Crumbs';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import RequireAuth from '../components/RequireAuth';
+import SectionCard from '../components/SectionCard';
+import SectionHead from '../components/SectionHead';
 import { classifyDiff, groupDiffFiles, type DiffFileGroup } from '../lib/crs';
 import { formatDateTime } from '../lib/issues';
 import { createLiveResource } from '../lib/liveResource';
@@ -105,22 +107,22 @@ function CRDetailView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={cr.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(cr.error)}</span>
-          </div>
+          <Banner message={errorMessage(cr.error)} />
         </Match>
         <Match when={cr()}>
           {(c) => (
             <>
-              <div class="section-head">
-                <h2>
-                  <span class="mono muted issue-number">CR #{c().number}</span> {c().title}
-                </h2>
-                <span class={`chip state-${c().state}`}>{c().state}</span>
-              </div>
+              <SectionHead
+                title={
+                  <>
+                    <span class="mono muted issue-number">CR #{c().number}</span> {c().title}
+                  </>
+                }
+                action={<span class={`chip state-${c().state}`}>{c().state}</span>}
+              />
               <p class="muted card-sub mono cr-branches">
                 {c().head_branch} → {c().base_branch}
               </p>
@@ -184,8 +186,7 @@ function CRDetailView() {
                   </Show>
                 </section>
 
-                <section class="card diff-card">
-                  <h2>Diff</h2>
+                <SectionCard title="Diff" class="diff-card">
                   <Show when={c().diff_truncated === true}>
                     <p class="diff-truncated">
                       Diff truncated — the change is larger than the view limit.
@@ -202,7 +203,7 @@ function CRDetailView() {
                       <For each={files()}>{(file) => <DiffFileSection file={file} />}</For>
                     </Show>
                   </Show>
-                </section>
+                </SectionCard>
               </div>
             </>
           )}

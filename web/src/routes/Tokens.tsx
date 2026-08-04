@@ -13,9 +13,11 @@ import {
   type CreatedApiToken,
 } from '../api';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
+import FormCard from '../components/FormCard';
 import ListRowCard from '../components/ListRowCard';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 
 function onDate(timestamp: string): string {
   const date = new Date(timestamp);
@@ -37,10 +39,8 @@ function TokensView() {
 
   return (
     <main class="page">
-      <div class="section-head">
-        <h2>API tokens</h2>
-      </div>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <SectionHead title="API tokens" />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <CreateTokenCard
         onCreated={(token) => {
           setCreated(token);
@@ -52,9 +52,7 @@ function TokensView() {
       </Show>
       <Switch>
         <Match when={tokens.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(tokens.error)}</span>
-          </div>
+          <Banner message={errorMessage(tokens.error)} />
         </Match>
         <Match when={tokens()?.length === 0}>
           <EmptyState>No API tokens yet — create one for scripts and automation.</EmptyState>
@@ -94,27 +92,28 @@ function CreateTokenCard(props: { onCreated: (token: CreatedApiToken) => void })
   };
 
   return (
-    <div class="card form-card">
-      <h2>New token</h2>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <form onSubmit={(e) => void submit(e)}>
-        <label class="field">
-          <span>Name</span>
-          <input
-            type="text"
-            name="token-name"
-            required
-            autocomplete="off"
-            placeholder="ci-deploy"
-            value={name()}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-        </label>
-        <button type="submit" class="primary" disabled={busy()}>
-          {busy() ? 'Creating…' : 'Create token'}
-        </button>
-      </form>
-    </div>
+    <FormCard
+      title="New token"
+      error={error()}
+      onDismissError={() => setError(null)}
+      onSubmit={(e) => void submit(e)}
+      busy={busy()}
+      submitLabel="Create token"
+      busyLabel="Creating…"
+    >
+      <label class="field">
+        <span>Name</span>
+        <input
+          type="text"
+          name="token-name"
+          required
+          autocomplete="off"
+          placeholder="ci-deploy"
+          value={name()}
+          onInput={(e) => setName(e.currentTarget.value)}
+        />
+      </label>
+    </FormCard>
   );
 }
 
@@ -140,11 +139,10 @@ function TokenReveal(props: { token: CreatedApiToken; onDone: () => void }) {
 
   return (
     <div class="card token-reveal">
-      <div class="banner success" role="status">
-        <span class="banner-text">
-          Token "{props.token.name}" created — copy it and store it now. It will not be shown again.
-        </span>
-      </div>
+      <Banner
+        message={`Token "${props.token.name}" created — copy it and store it now. It will not be shown again.`}
+        variant="success"
+      />
       <label class="field">
         <span>Token (shown once)</span>
         <input

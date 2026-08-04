@@ -15,7 +15,7 @@ import {
   type PushDevice,
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import ListRowCard from '../../../components/ListRowCard';
 import SectionCard from '../../../components/SectionCard';
 import { install } from '../../../lib/install';
@@ -213,12 +213,8 @@ function NotificationsReady(props: { registration: ServiceWorkerRegistration }) 
         Get a push when an AFK run needs you or finishes. Enable it once per browser — every device
         you enable is listed below.
       </small>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <Show when={note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{note()}</span>
-        </div>
-      </Show>
+      <Banner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={note()} variant="success" />
       {/* Always offered — even when already granted it re-syncs this browser's
           subscription (the server upsert is idempotent). */}
       <button type="button" class="primary" disabled={busy()} onClick={() => void enable()}>
