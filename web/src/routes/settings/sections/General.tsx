@@ -5,9 +5,9 @@
 // snapshot, buildPatch diffs against that seed and sends only dirty fields
 // (trimmed), and the unsaved-changes guard is armed off the same buildPatch.
 
-import { Show, createSignal } from 'solid-js';
+import { createSignal } from 'solid-js';
 import { updateSettings, type Settings, type TextSettingKey } from '../../../api';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 
@@ -58,12 +58,8 @@ export default function General(props: { initial: Settings; onSaved: () => void 
 
   return (
     <form onSubmit={(e) => void form.save(e)} class="stack">
-      <ErrorBanner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Show when={form.note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{form.note()}</span>
-        </div>
-      </Show>
+      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
+      <Banner message={form.note()} variant="success" />
 
       <SectionCard title="Git author">
         <label class="field">

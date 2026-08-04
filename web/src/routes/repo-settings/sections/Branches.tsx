@@ -2,10 +2,9 @@
 // per-section form — drafts seeded via createSeededDrafts, saved as a
 // dirty-fields-only PATCH through useSettingsForm.
 
-import { Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Repo, type RepoPatch } from '../../../api';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { createSeededDrafts } from '../../../lib/seededDrafts';
@@ -47,12 +46,8 @@ export default function BranchesSection(props: { repo: Accessor<Repo>; onSaved: 
 
   return (
     <form onSubmit={(e) => void form.save(e)} class="stack">
-      <ErrorBanner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Show when={form.note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{form.note()}</span>
-        </div>
-      </Show>
+      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
+      <Banner message={form.note()} variant="success" />
 
       <SectionCard title="Branches">
         <label class="field">

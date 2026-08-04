@@ -9,7 +9,7 @@
 import { Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Repo, type RepoPatch, type Runner, type Settings } from '../../../api';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
@@ -46,7 +46,7 @@ export default function RunnerSection(props: {
   // The per-repo dev image override (issue #207): nullable, same '' ↔ null
   // shape as the limits above. The server resolves and digest-pins the ref on
   // save (https registries only) — a bad ref surfaces as a 400 in the
-  // section's ErrorBanner via useSettingsForm, not a client-side check here.
+  // section's Banner via useSettingsForm, not a client-side check here.
   const [imageRef, setImageRef] = drafts.field((r) => r.image_ref ?? '');
 
   // The inherited global defaults (issue #205), read from GET /settings —
@@ -96,12 +96,8 @@ export default function RunnerSection(props: {
 
   return (
     <form onSubmit={(e) => void form.save(e)} class="stack">
-      <ErrorBanner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Show when={form.note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{form.note()}</span>
-        </div>
-      </Show>
+      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
+      <Banner message={form.note()} variant="success" />
 
       <SectionCard title="Runner">
         <Select

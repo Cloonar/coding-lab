@@ -13,7 +13,7 @@ import {
   type CreatedApiToken,
 } from '../api';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import FormCard from '../components/FormCard';
 import RequireAuth from '../components/RequireAuth';
 
@@ -40,7 +40,7 @@ function TokensView() {
       <div class="section-head">
         <h2>API tokens</h2>
       </div>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <CreateTokenCard
         onCreated={(token) => {
           setCreated(token);
@@ -52,9 +52,7 @@ function TokensView() {
       </Show>
       <Switch>
         <Match when={tokens.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(tokens.error)}</span>
-          </div>
+          <Banner message={errorMessage(tokens.error)} />
         </Match>
         <Match when={tokens()?.length === 0}>
           <EmptyState>No API tokens yet — create one for scripts and automation.</EmptyState>
@@ -141,11 +139,10 @@ function TokenReveal(props: { token: CreatedApiToken; onDone: () => void }) {
 
   return (
     <div class="card token-reveal">
-      <div class="banner success" role="status">
-        <span class="banner-text">
-          Token "{props.token.name}" created — copy it and store it now. It will not be shown again.
-        </span>
-      </div>
+      <Banner
+        message={`Token "${props.token.name}" created — copy it and store it now. It will not be shown again.`}
+        variant="success"
+      />
       <label class="field">
         <span>Token (shown once)</span>
         <input

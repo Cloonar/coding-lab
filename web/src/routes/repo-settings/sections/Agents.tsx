@@ -6,7 +6,7 @@
 import { For, Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Provider, type Repo, type RepoPatch, type Settings } from '../../../api';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
@@ -157,12 +157,8 @@ export default function AgentsSection(props: {
 
   return (
     <form onSubmit={(e) => void form.save(e)} class="stack">
-      <ErrorBanner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Show when={form.note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{form.note()}</span>
-        </div>
-      </Show>
+      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
+      <Banner message={form.note()} variant="success" />
 
       <SectionCard title="Spawn defaults">
         <Select

@@ -20,7 +20,7 @@ import {
   type Label,
 } from '../api';
 import Crumbs, { type Crumb } from '../components/Crumbs';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import LabelChip from '../components/LabelChip';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
@@ -114,19 +114,15 @@ function IssueDetailView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Show when={repo.error !== undefined}>
         {/* The repo lookup failing must not blank a loaded issue: the view
             degrades to read-only (binding unknown) with the failure visible. */}
-        <div class="banner error" role="alert">
-          <span class="banner-text">{errorMessage(repo.error)}</span>
-        </div>
+        <Banner message={errorMessage(repo.error)} />
       </Show>
       <Switch>
         <Match when={issue.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(issue.error)}</span>
-          </div>
+          <Banner message={errorMessage(issue.error)} />
         </Match>
         <Match when={issue()}>
           {(i) => (

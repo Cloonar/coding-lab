@@ -1,7 +1,7 @@
 // FormCard contract: the `<form>` IS the card — one element with
 // `class="card form-card"`, no wrapper around it — and its children are, in
 // this exact order, the optional `<h2>`, the optional `intro`, the
-// `<ErrorBanner>`, the caller's `children`, and then the submit button (bare,
+// `<Banner>`, the caller's `children`, and then the submit button (bare,
 // or inside a trailing `.card-actions` row when `actions` is passed).
 //
 // Order is the assertion that matters. Issue #281 promises no visual change,
