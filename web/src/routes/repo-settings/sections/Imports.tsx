@@ -18,6 +18,7 @@ import {
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
 import ErrorBanner from '../../../components/ErrorBanner';
+import ListRowCard from '../../../components/ListRowCard';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 
@@ -175,14 +176,13 @@ function ImportRow(props: {
   };
 
   return (
-    <article class="card">
-      <div class="card-head">
-        <span class="card-title">{props.imp.name}</span>
-        <span class="spacer" />
+    <ListRowCard
+      title={props.imp.name}
+      actions={
         <button type="button" class="danger small" onClick={() => void remove()} disabled={busy()}>
           {busy() ? 'Working…' : 'Remove'}
         </button>
-      </div>
-    </article>
+      }
+    />
   );
 }
