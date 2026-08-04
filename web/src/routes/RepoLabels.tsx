@@ -19,7 +19,7 @@ import {
   type LabelPatch,
 } from '../api';
 import Crumbs, { type Crumb } from '../components/Crumbs';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
 import { canMutateTracker } from '../lib/issues';
@@ -99,20 +99,16 @@ function RepoLabelsView() {
       <div class="section-head">
         <h2>{repoData()?.name ?? 'Repository'} · Labels</h2>
       </div>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={repo.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(repo.error)}</span>
-          </div>
+          <Banner message={errorMessage(repo.error)} />
         </Match>
         <Match when={repo() !== undefined && !builtin()}>
           <p class="muted forge-note">Managed on the forge — labels live there.</p>
         </Match>
         <Match when={labels.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(labels.error)}</span>
-          </div>
+          <Banner message={errorMessage(labels.error)} />
         </Match>
         <Match when={labels()}>
           <div class="stack">
@@ -258,7 +254,7 @@ function LabelForm(props: {
 
   return (
     <form class="label-form" onSubmit={(e) => void submit(e)}>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <label class="field">
         <span>Name</span>
         <input

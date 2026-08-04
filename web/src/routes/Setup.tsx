@@ -5,7 +5,7 @@ import { Navigate } from '@solidjs/router';
 import { Match, Switch, createSignal } from 'solid-js';
 import { errorMessage, setup } from '../api';
 import { useAuth } from '../auth';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 
 export default function Setup() {
   const { auth } = useAuth();
@@ -57,7 +57,7 @@ function SetupForm() {
         </h1>
         <h2>First-run setup</h2>
         <p class="muted">Create the admin account for this lab instance.</p>
-        <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+        <Banner message={error()} onDismiss={() => setError(null)} />
         <form onSubmit={(e) => void submit(e)}>
           <label class="field">
             <span>Username</span>

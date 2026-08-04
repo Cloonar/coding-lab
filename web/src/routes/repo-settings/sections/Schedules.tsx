@@ -41,7 +41,7 @@ import {
   type Settings,
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import FormCard from '../../../components/FormCard';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
@@ -183,12 +183,8 @@ export default function SchedulesSection(props: {
         </>
       }
     >
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <Show when={note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{note()}</span>
-        </div>
-      </Show>
+      <Banner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={note()} variant="success" />
       <Show when={showCreate()}>
         <ScheduleEditor
           repo={props.repo}
@@ -202,9 +198,7 @@ export default function SchedulesSection(props: {
       </Show>
       <Switch>
         <Match when={schedules.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(schedules.error)}</span>
-          </div>
+          <Banner message={errorMessage(schedules.error)} />
         </Match>
         <Match when={schedules()?.length === 0}>
           <EmptyState>
@@ -313,12 +307,14 @@ function ScheduleRow(props: {
         </For>
       </div>
       <Show when={props.schedule.paused}>
-        <div class="banner error" role="alert">
-          <span class="banner-text">Paused after 3 failures</span>
-          <button type="button" onClick={() => void reenable()} disabled={busy() !== null}>
-            {busy() === 'reenable' ? 'Re-enabling…' : 'Re-enable'}
-          </button>
-        </div>
+        <Banner
+          message="Paused after 3 failures"
+          action={
+            <button type="button" onClick={() => void reenable()} disabled={busy() !== null}>
+              {busy() === 'reenable' ? 'Re-enabling…' : 'Re-enable'}
+            </button>
+          }
+        />
       </Show>
       <Show when={props.open}>
         <ScheduleEditor
@@ -560,11 +556,7 @@ function ScheduleEditor(props: {
         </button>
       }
     >
-      <Show when={note()}>
-        <div class="banner success" role="status">
-          <span class="banner-text">{note()}</span>
-        </div>
-      </Show>
+      <Banner message={note()} variant="success" />
       <label class="field">
         <span>Name</span>
         <input

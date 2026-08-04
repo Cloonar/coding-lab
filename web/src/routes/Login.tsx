@@ -5,7 +5,7 @@ import { Navigate } from '@solidjs/router';
 import { Match, Switch, createSignal } from 'solid-js';
 import { errorMessage, login } from '../api';
 import { useAuth } from '../auth';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 
 export default function Login() {
   const { auth } = useAuth();
@@ -54,7 +54,7 @@ function LoginForm() {
           lab<span class="brand-dot">.</span>
         </h1>
         <h2>Log in</h2>
-        <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+        <Banner message={error()} onDismiss={() => setError(null)} />
         <form onSubmit={(e) => void submit(e)}>
           <label class="field">
             <span>Username</span>

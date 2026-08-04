@@ -7,7 +7,7 @@
 import { For, Show, createSignal } from 'solid-js';
 import { discardParked, errorMessage, listParked, type ParkedEntry } from '../api';
 import { createLiveResource } from '../lib/liveResource';
-import ErrorBanner from './ErrorBanner';
+import Banner from './Banner';
 
 export default function ParkedSection(props: { repoID: string }) {
   const [parked, { refetch }] = createLiveResource(
@@ -37,7 +37,7 @@ export default function ParkedSection(props: { repoID: string }) {
         <summary>
           Parked · <span class="parked-count">{parked()!.length}</span>
         </summary>
-        <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+        <Banner message={error()} onDismiss={() => setError(null)} />
         <ul class="parked-list">
           <For each={parked()}>
             {(entry) => (

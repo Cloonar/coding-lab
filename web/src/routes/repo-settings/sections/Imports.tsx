@@ -17,7 +17,7 @@ import {
   type RepoImport,
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import FormCard from '../../../components/FormCard';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
@@ -69,7 +69,7 @@ export default function ImportsSection(props: { repoId: string }) {
         </>
       }
     >
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Show when={showAdd()}>
         <AddImportForm
           repoId={props.repoId}
@@ -82,9 +82,7 @@ export default function ImportsSection(props: { repoId: string }) {
       </Show>
       <Switch>
         <Match when={imports.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(imports.error)}</span>
-          </div>
+          <Banner message={errorMessage(imports.error)} />
         </Match>
         <Match when={imports()?.length === 0}>
           <EmptyState>

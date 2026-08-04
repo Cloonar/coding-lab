@@ -37,7 +37,7 @@ import {
 } from '../api';
 import AFKStrip from '../components/AFKStrip';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import Icon from '../components/Icon';
 import RequireAuth from '../components/RequireAuth';
 import Select, { type SelectOption } from '../components/Select';
@@ -349,7 +349,7 @@ function NewRunView() {
 
   return (
     <main class="page newrun">
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Show when={loggedOut()}>
         <p class="newrun-warn" role="alert">
           {providerName()} is logged out — <A href="/credentials">reconnect</A>.
@@ -358,9 +358,7 @@ function NewRunView() {
 
       <Switch>
         <Match when={repos.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(repos.error)}</span>
-          </div>
+          <Banner message={errorMessage(repos.error)} />
         </Match>
         {/* Zero repos: the composer is hidden and the empty state carries the
             "No repositories yet" text the login/setup round-trip and the
