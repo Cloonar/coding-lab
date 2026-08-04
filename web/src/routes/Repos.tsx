@@ -21,6 +21,7 @@ import {
   type Instance,
   type Repo,
 } from '../api';
+import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import ParkedSection from '../components/ParkedSection';
 import RequireAuth from '../components/RequireAuth';
@@ -93,9 +94,9 @@ function ReposView() {
           </div>
         </Match>
         <Match when={repos()?.length === 0}>
-          <p class="empty">
+          <EmptyState>
             No repositories yet — <A href="/repos/new">add one</A> to get started.
-          </p>
+          </EmptyState>
         </Match>
         <Match when={repos()}>
           <div class="card-list">

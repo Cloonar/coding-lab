@@ -46,6 +46,7 @@ import {
   type Provider,
   type RunCommand,
 } from '../api';
+import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import ToolPanel, { type PanelTarget } from '../components/ToolPanel';
@@ -557,16 +558,16 @@ function RunChatView() {
                   messages().length === 0
                 }
               >
-                <p class="empty">Ready — your first message starts the conversation.</p>
+                <EmptyState>Ready — your first message starts the conversation.</EmptyState>
               </Match>
               <Match when={transcript() === 'locating' && messages().length === 0}>
-                <p class="empty">Waiting for the transcript…</p>
+                <EmptyState>Waiting for the transcript…</EmptyState>
               </Match>
               <Match when={transcript() === 'gone'}>
-                <p class="empty">Transcript no longer available.</p>
+                <EmptyState>Transcript no longer available.</EmptyState>
               </Match>
               <Match when={messages().length === 0}>
-                <p class="empty">No messages yet.</p>
+                <EmptyState>No messages yet.</EmptyState>
               </Match>
               <Match when={messages().length > 0}>
                 <Show when={hasMore()}>

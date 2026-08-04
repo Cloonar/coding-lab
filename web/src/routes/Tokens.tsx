@@ -12,6 +12,7 @@ import {
   type ApiToken,
   type CreatedApiToken,
 } from '../api';
+import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 
@@ -55,7 +56,7 @@ function TokensView() {
           </div>
         </Match>
         <Match when={tokens()?.length === 0}>
-          <p class="empty">No API tokens yet — create one for scripts and automation.</p>
+          <EmptyState>No API tokens yet — create one for scripts and automation.</EmptyState>
         </Match>
         <Match when={tokens()}>
           <div class="card-list">

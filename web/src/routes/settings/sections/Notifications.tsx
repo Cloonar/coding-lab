@@ -14,6 +14,7 @@ import {
   testPushDevice,
   type PushDevice,
 } from '../../../api';
+import EmptyState from '../../../components/EmptyState';
 import ErrorBanner from '../../../components/ErrorBanner';
 import SectionCard from '../../../components/SectionCard';
 import { install } from '../../../lib/install';
@@ -227,7 +228,7 @@ function NotificationsReady(props: { registration: ServiceWorkerRegistration }) 
           <small class="hint hint-block">{errorMessage(devices.error)}</small>
         </Match>
         <Match when={devices()?.length === 0}>
-          <p class="empty">No devices yet — enable notifications above.</p>
+          <EmptyState>No devices yet — enable notifications above.</EmptyState>
         </Match>
         <Match when={devices()}>
           <div class="card-list">

@@ -17,6 +17,7 @@ import {
   type IssueSummary,
 } from '../api';
 import Crumbs, { type Crumb } from '../components/Crumbs';
+import EmptyState from '../components/EmptyState';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
 import {
@@ -220,13 +221,13 @@ function RepoIssuesView() {
           </div>
         </Match>
         <Match when={page() !== undefined && visible().length === 0}>
-          <p class="empty">
+          <EmptyState>
             {emptyText()}
             <Show when={canMutate()}>
               {' '}
               <A href={`/repos/${params.id}/issues/new`}>New issue</A>
             </Show>
-          </p>
+          </EmptyState>
         </Match>
         <Match when={page()}>
           <div class="card-list">

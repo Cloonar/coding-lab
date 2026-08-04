@@ -13,6 +13,7 @@ import {
   rotateRepoSecret,
   type RepoSecret,
 } from '../../../api';
+import EmptyState from '../../../components/EmptyState';
 import ErrorBanner from '../../../components/ErrorBanner';
 import SectionCard from '../../../components/SectionCard';
 
@@ -64,7 +65,9 @@ export default function RepoSecretsSection(props: { repoId: string }) {
           </div>
         </Match>
         <Match when={secrets()?.length === 0}>
-          <p class="empty">No secrets yet — add one for agents to use via labctl secret exec.</p>
+          <EmptyState>
+            No secrets yet — add one for agents to use via labctl secret exec.
+          </EmptyState>
         </Match>
         <Match when={secrets()}>
           <div class="card-list">
