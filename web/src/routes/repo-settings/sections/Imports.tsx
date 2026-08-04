@@ -16,6 +16,7 @@ import {
   removeRepoImport,
   type RepoImport,
 } from '../../../api';
+import EmptyState from '../../../components/EmptyState';
 import ErrorBanner from '../../../components/ErrorBanner';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
@@ -85,10 +86,10 @@ export default function ImportsSection(props: { repoId: string }) {
           </div>
         </Match>
         <Match when={imports()?.length === 0}>
-          <p class="empty">
+          <EmptyState>
             No imports declared — add another lab repo for this repo's instances to read as a
             read-only snapshot.
-          </p>
+          </EmptyState>
         </Match>
         <Match when={imports()}>
           <div class="card-list">

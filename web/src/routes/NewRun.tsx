@@ -36,6 +36,7 @@ import {
   type StartInstanceRequest,
 } from '../api';
 import AFKStrip from '../components/AFKStrip';
+import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import Icon from '../components/Icon';
 import RequireAuth from '../components/RequireAuth';
@@ -365,9 +366,9 @@ function NewRunView() {
             "No repositories yet" text the login/setup round-trip and the
             Playwright smoke assert on `/`. */}
         <Match when={noRepos()}>
-          <p class="empty">
+          <EmptyState>
             No repositories yet — <A href="/repos/new">add one</A> to get started.
-          </p>
+          </EmptyState>
         </Match>
         <Match when={hasRepos()}>
           <div class="composer">
