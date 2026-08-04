@@ -62,9 +62,13 @@ var builtinCommands = []provider.CommandSpec{
 	{Name: "add-dir", Description: "Add a new working directory", ArgHint: "<path>", Source: commandSourceBuiltin},
 	{Name: "agents", Description: "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/", Source: commandSourceBuiltin},
 	{Name: "config", Description: "Open settings", ArgHint: "[key=value]", Source: commandSourceBuiltin},
-	{Name: "doctor", Description: "Diagnose and verify your Claude Code installation and settings", Source: commandSourceBuiltin},
+	// doctor's operator-facing text moved to the bundle's `menuDescription`
+	// key (its `description` is now a long model-facing prompt); the
+	// menuDescription is what the TUI menu shows, so it is what this row
+	// pins. Drift found 2026-08-04, present identically on 2.1.220 — compat §10.
+	{Name: "doctor", Description: "Health-check your setup and fix issues: installation, unused extensions, duplicated or bloated memory files, slow hooks, updates, permissions", Source: commandSourceBuiltin},
 	{Name: "exit", Description: "Exit the CLI", Source: commandSourceBuiltin},
-	{Name: "feedback", Description: "Submit feedback, report a bug, or share your conversation", ArgHint: "[report]", Source: commandSourceBuiltin},
+	{Name: "feedback", Description: "Send feedback to Anthropic or report a bug", ArgHint: "[report]", Source: commandSourceBuiltin},
 	{Name: "hooks", Description: "View hook configurations for tool events", Source: commandSourceBuiltin},
 	{Name: "ide", Description: "Manage IDE integrations and show status", ArgHint: "[open]", Source: commandSourceBuiltin},
 	{Name: "install-github-app", Description: "Set up Claude GitHub Actions for a repository", Source: commandSourceBuiltin},
@@ -81,7 +85,7 @@ var builtinCommands = []provider.CommandSpec{
 	{Name: "statusline", Description: "Set up Claude Code's status line UI", Source: commandSourceBuiltin},
 	{Name: "terminal-setup", Description: "Install Shift+Enter key binding for newlines", Source: commandSourceBuiltin},
 	{Name: "upgrade", Description: "Upgrade to Max for higher rate limits and more Opus", Source: commandSourceBuiltin},
-	{Name: "usage-credits", Description: "Configure usage credits to keep working when you hit a limit", Source: commandSourceBuiltin},
+	{Name: "usage-credits", Description: "Configure usage credits or request them from your admin when you hit a limit", Source: commandSourceBuiltin},
 }
 
 // BuiltinCommands returns a copy of the pinned builtin table, in pinned order

@@ -275,20 +275,38 @@ func TestCompat_Live_askUserQuestionRecipe(t *testing.T) {
 		t.Errorf("fruits answer (sorted) = %q; want %q (full: %v)", got, "Apple, Cherry", rec.Answers)
 	}
 
-	// And the production read path maps the resolution onto the tool chip — a
-	// transcript-only ReadChat: the live rig has no lab run or runtime dir.
+	// And the production read path keeps the resolution ON the dialog message:
+	// since issue #56 an answered dialog stays a DIALOG message whose Outcome
+	// carries the recorded answers, never a demoted tool chip. Transcript-only
+	// ReadChat: the live rig has no lab run or runtime dir.
 	chat, err := rig.prov.ReadChat(provider.ReadSpec{TranscriptPath: rig.transcriptPath(t)})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
 	found := false
+	var seen []provider.DialogOutcome // what the dialogs did carry, for the failure message
 	for _, m := range chat.Messages {
-		if m.Tool != nil && m.Tool.Name == "AskUserQuestion" && strings.Contains(m.Tool.Output, `"Which color do you prefer?"="Blue"`) {
+		if m.Kind != provider.MessageDialog || m.Dialog == nil ||
+			m.Dialog.Kind != provider.DialogKindQuestion || m.Dialog.Outcome == nil {
+			continue
+		}
+		seen = append(seen, *m.Dialog.Outcome)
+		// One QuestionResult per question, in DIALOG order. The single-select
+		// Chosen is exact; the multi-select one is compared as a SET, for the
+		// same recording-order reason as the recorded answer above.
+		res := m.Dialog.Outcome.Results
+		if len(res) != 2 {
+			continue
+		}
+		fruits := slices.Clone(res[1].Chosen)
+		slices.Sort(fruits)
+		if res[0].Question == "Which color do you prefer?" && slices.Equal(res[0].Chosen, []string{"Blue"}) &&
+			res[1].Question == "Which fruits do you like?" && slices.Equal(fruits, []string{"Apple", "Cherry"}) {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("ReadChat shows no AskUserQuestion chip with the recorded answers")
+		t.Errorf("ReadChat shows no answered AskUserQuestion dialog whose Outcome records Blue and {Apple, Cherry}; outcomes: %+v", seen)
 	}
 }
 
@@ -339,13 +357,22 @@ func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
+	// The approval rides the DIALOG message's Outcome (issue #56 — never a
+	// demoted tool chip): Approved alone, since a rejection would record the
+	// typed Feedback or a bare Dismissed instead.
 	approved := false
+	var seen []provider.DialogOutcome // what the dialogs did carry, for the failure message
 	for _, m := range chat.Messages {
-		if m.Tool != nil && m.Tool.Name == "ExitPlanMode" && strings.HasPrefix(m.Tool.Output, "User has approved your plan") {
+		if m.Kind != provider.MessageDialog || m.Dialog == nil ||
+			m.Dialog.Kind != provider.DialogKindPlan || m.Dialog.Outcome == nil {
+			continue
+		}
+		seen = append(seen, *m.Dialog.Outcome)
+		if m.Dialog.Outcome.Approved && !m.Dialog.Outcome.Dismissed && m.Dialog.Outcome.Feedback == "" {
 			approved = true
 		}
 	}
 	if !approved {
-		t.Error("ReadChat shows no approved ExitPlanMode chip")
+		t.Errorf("ReadChat shows no ExitPlanMode dialog whose Outcome records the approval; outcomes: %+v", seen)
 	}
 }
