@@ -27,6 +27,7 @@ import {
 import EmptyState from '../components/EmptyState';
 import Banner from '../components/Banner';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
 import { createLiveResource } from '../lib/liveResource';
 
@@ -78,31 +79,43 @@ function HistoryView() {
 
   return (
     <main class="page">
-      <div class="section-head">
-        <h2>History</h2>
-        <label class="field runs-filter">
-          <select
-            name="outcome-filter"
-            value={outcomeFilter()}
-            onInput={(e) => setParams({ outcome: e.currentTarget.value || undefined })}
-            aria-label="Filter by outcome"
-          >
-            <option value="">All outcomes</option>
-            <For each={OUTCOMES}>{(outcome) => <option value={outcome}>{outcome}</option>}</For>
-          </select>
-        </label>
-        <label class="field runs-filter">
-          <select
-            name="repo-filter"
-            value={repoFilter()}
-            onInput={(e) => setParams({ repo: e.currentTarget.value || undefined })}
-            aria-label="Filter by repository"
-          >
-            <option value="">All repositories</option>
-            <For each={repos() ?? []}>{(repo) => <option value={repo.id}>{repo.name}</option>}</For>
-          </select>
-        </label>
-      </div>
+      <SectionHead
+        title="History"
+        // The two filters go in as a bare fragment, NOT wrapped in
+        // `.head-actions`: the head row's own 0.65rem gap is what separates
+        // them, where `.head-actions` would impose its 0.75rem. They cluster at
+        // the right edge now (the row lost `justify-content: space-between`,
+        // which used to spread them across it) — matching every other
+        // multi-control head in the app.
+        action={
+          <>
+            <label class="field runs-filter">
+              <select
+                name="outcome-filter"
+                value={outcomeFilter()}
+                onInput={(e) => setParams({ outcome: e.currentTarget.value || undefined })}
+                aria-label="Filter by outcome"
+              >
+                <option value="">All outcomes</option>
+                <For each={OUTCOMES}>{(outcome) => <option value={outcome}>{outcome}</option>}</For>
+              </select>
+            </label>
+            <label class="field runs-filter">
+              <select
+                name="repo-filter"
+                value={repoFilter()}
+                onInput={(e) => setParams({ repo: e.currentTarget.value || undefined })}
+                aria-label="Filter by repository"
+              >
+                <option value="">All repositories</option>
+                <For each={repos() ?? []}>
+                  {(repo) => <option value={repo.id}>{repo.name}</option>}
+                </For>
+              </select>
+            </label>
+          </>
+        }
+      />
       <Switch>
         <Match when={runs.error !== undefined}>
           <Banner message={errorMessage(runs.error)} />

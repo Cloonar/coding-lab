@@ -24,6 +24,8 @@ import Banner from '../components/Banner';
 import LabelChip from '../components/LabelChip';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
+import SectionCard from '../components/SectionCard';
+import SectionHead from '../components/SectionHead';
 import { canMutateTracker, formatDateTime } from '../lib/issues';
 import { sameLabelSet, toggleLabel } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
@@ -127,12 +129,14 @@ function IssueDetailView() {
         <Match when={issue()}>
           {(i) => (
             <>
-              <div class="section-head">
-                <h2>
-                  <span class="mono muted issue-number">#{i().number}</span> {i().title}
-                </h2>
-                <span class={`chip state-${i().state}`}>{i().state}</span>
-              </div>
+              <SectionHead
+                title={
+                  <>
+                    <span class="mono muted issue-number">#{i().number}</span> {i().title}
+                  </>
+                }
+                action={<span class={`chip state-${i().state}`}>{i().state}</span>}
+              />
               <p class="muted card-sub">
                 opened {formatDateTime(i().created_at)} · updated {formatDateTime(i().updated_at)}
               </p>
@@ -204,8 +208,7 @@ function IssueDetailView() {
                   </Show>
                 </section>
 
-                <section class="card">
-                  <h2>Comments ({i().comments.length})</h2>
+                <SectionCard title={`Comments (${i().comments.length})`}>
                   <Show
                     when={i().comments.length > 0}
                     fallback={<p class="muted">No comments yet.</p>}
@@ -232,7 +235,7 @@ function IssueDetailView() {
                       onPosted={() => void refetch()}
                     />
                   </Show>
-                </section>
+                </SectionCard>
               </div>
             </>
           )}

@@ -85,10 +85,7 @@
   margin-bottom: var(--space-3);
 }
 
-.settings-back-head h2 {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
+/* `.settings-back-head h2` is reset alongside the other head rows in cards.css. */
 
 .settings-back-link {
   display: inline-flex;

@@ -62,7 +62,9 @@ button.chip-toggle.on {
 
 .ready-list {
   list-style: none;
-  margin: 0.35rem 0 0;
+  /* Gap above comes from SectionCard's .section-card-head (#275/#280) —
+     don't re-add it here. */
+  margin: 0;
   padding: 0;
 }
 
@@ -129,7 +131,9 @@ button.chip-toggle.on {
 
 .comment-list {
   list-style: none;
-  margin: 0.6rem 0 0;
+  /* Gap above comes from SectionCard's .section-card-head (#275/#280) —
+     don't re-add it here. */
+  margin: 0;
   padding: 0;
 }
 

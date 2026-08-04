@@ -25,6 +25,7 @@ import EmptyState from '../components/EmptyState';
 import Banner from '../components/Banner';
 import ParkedSection from '../components/ParkedSection';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
 import { createLiveResource } from '../lib/liveResource';
@@ -83,9 +84,7 @@ function ReposView() {
 
   return (
     <main class="page">
-      <div class="section-head">
-        <h2>Repositories</h2>
-      </div>
+      <SectionHead title="Repositories" />
       <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={repos.error !== undefined}>

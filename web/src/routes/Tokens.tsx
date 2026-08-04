@@ -16,6 +16,7 @@ import EmptyState from '../components/EmptyState';
 import Banner from '../components/Banner';
 import FormCard from '../components/FormCard';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 
 function onDate(timestamp: string): string {
   const date = new Date(timestamp);
@@ -37,9 +38,7 @@ function TokensView() {
 
   return (
     <main class="page">
-      <div class="section-head">
-        <h2>API tokens</h2>
-      </div>
+      <SectionHead title="API tokens" />
       <Banner message={error()} onDismiss={() => setError(null)} />
       <CreateTokenCard
         onCreated={(token) => {
