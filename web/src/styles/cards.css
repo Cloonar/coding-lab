@@ -45,6 +45,26 @@
   flex-wrap: wrap;
 }
 
+/* Mirrors `.section-head h2` (shell.css): the row's height must never depend on
+   heading font metrics. Headings load Source Serif 4 with font-display: swap, so
+   an unreset heading margin makes the row grow/shrink mid font-load. */
+.card-head h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* SectionCard's head row (issue #275). The gap below the head used to fall out
+   of the heading's own bottom margin by accident — spelling it out here is what
+   lets `.hint-block` drop the negative top margin that was calibrated to that
+   heading and, in a flex row sized by a 36px button, dragged the hint text up
+   into the button. Deliberately NOT on `.card-head`: that class is also the head
+   row of a *list row* card (Tokens, History, Credentials, RepoCRs, notification
+   devices …), where it must keep hugging its `.card-sub` (margin: 0.15rem 0 0).
+   Only the section head takes the bottom margin. */
+.section-card-head {
+  margin-bottom: var(--space-3);
+}
+
 .card-title {
   font-weight: 650;
   font-size: 1.05rem;

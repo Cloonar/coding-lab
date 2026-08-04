@@ -14,6 +14,7 @@ import {
   type RepoSecret,
 } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 
 function secretUpdatedOn(timestamp: string): string {
   const date = new Date(timestamp);
@@ -32,18 +33,20 @@ export default function RepoSecretsSection(props: { repoId: string }) {
   const [error, setError] = createSignal<string | null>(null);
 
   return (
-    <section class="card">
-      <div class="card-head">
-        <h2>Secrets</h2>
-        <span class="spacer" />
+    <SectionCard
+      title="Secrets"
+      action={
         <button type="button" class="primary small" onClick={() => setShowCreate(!showCreate())}>
           {showCreate() ? 'Cancel' : '+ Add secret'}
         </button>
-      </div>
-      <small class="hint hint-block">
-        Values are write-only — lab never reads or shows them again after saving. Agents use them
-        via <code>labctl secret exec</code>.
-      </small>
+      }
+      hint={
+        <>
+          Values are write-only — lab never reads or shows them again after saving. Agents use them
+          via <code>labctl secret exec</code>.
+        </>
+      }
+    >
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Show when={showCreate()}>
         <CreateSecretForm
@@ -78,7 +81,7 @@ export default function RepoSecretsSection(props: { repoId: string }) {
           </div>
         </Match>
       </Switch>
-    </section>
+    </SectionCard>
   );
 }
 

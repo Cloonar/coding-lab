@@ -7,6 +7,7 @@ import { Show, createSignal } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { ApiError, deleteRepo, errorMessage, type Repo } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 
 export default function DangerZone(props: { repo: Accessor<Repo> }) {
   const navigate = useNavigate();
@@ -33,8 +34,7 @@ export default function DangerZone(props: { repo: Accessor<Repo> }) {
   };
 
   return (
-    <section class="card danger-zone">
-      <h2>Danger zone</h2>
+    <SectionCard title="Danger zone" class="danger-zone">
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Show when={needsForce()}>
         <label class="check">
@@ -52,6 +52,6 @@ export default function DangerZone(props: { repo: Accessor<Repo> }) {
           {busy() ? 'Deleting…' : 'Delete repository'}
         </button>
       </div>
-    </section>
+    </SectionCard>
   );
 }

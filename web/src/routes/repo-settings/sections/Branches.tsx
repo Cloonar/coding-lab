@@ -6,6 +6,7 @@ import { Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Repo, type RepoPatch } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { createSeededDrafts } from '../../../lib/seededDrafts';
 
@@ -53,8 +54,7 @@ export default function BranchesSection(props: { repo: Accessor<Repo>; onSaved: 
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Branches</h2>
+      <SectionCard title="Branches">
         <label class="field">
           <span>Default branch</span>
           <input
@@ -100,7 +100,7 @@ export default function BranchesSection(props: { repo: Accessor<Repo>; onSaved: 
             Literal prefix for manual instance branches, e.g. lab/ or wip/.
           </small>
         </label>
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save changes'}

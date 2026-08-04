@@ -12,6 +12,7 @@ import {
   type TrackerBinding,
 } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { createSeededDrafts } from '../../../lib/seededDrafts';
 
@@ -68,8 +69,7 @@ export default function IntegrationsSection(props: {
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Credentials & tracker</h2>
+      <SectionCard title="Credentials & tracker">
         <label class="field">
           <span>Git credential</span>
           <select
@@ -113,7 +113,7 @@ export default function IntegrationsSection(props: {
             runs.
           </small>
         </label>
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save changes'}

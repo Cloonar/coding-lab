@@ -15,6 +15,7 @@ import {
   type PushDevice,
 } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import { install } from '../../../lib/install';
 
 export default function Notifications() {
@@ -28,13 +29,11 @@ export default function Notifications() {
           is in hand. Placed above Notifications because on iOS installing is
           the prerequisite for enabling push at all. */}
       <Show when={install.settingsRowVisible()}>
-        <section class="card">
-          <h2>Install app</h2>
-          <small class="hint hint-block">Add lab to your Home Screen for a full-screen app.</small>
+        <SectionCard title="Install app" hint="Add lab to your Home Screen for a full-screen app.">
           <button type="button" class="primary" onClick={() => install.openFromSettings()}>
             Install app
           </button>
-        </section>
+        </SectionCard>
       </Show>
       {/* Device-local, not part of the saved settings PATCH — its own card. */}
       <NotificationsSection />
@@ -95,8 +94,7 @@ function onDate(timestamp: string): string {
 function NotificationsSection() {
   const [env] = createResource(detectPushEnv);
   return (
-    <section class="card">
-      <h2>Notifications</h2>
+    <SectionCard title="Notifications">
       <Switch fallback={<small class="hint hint-block">Checking push support…</small>}>
         <Match when={env()?.kind === 'unsupported'}>
           <small class="hint hint-block">
@@ -116,7 +114,7 @@ function NotificationsSection() {
           />
         </Match>
       </Switch>
-    </section>
+    </SectionCard>
   );
 }
 

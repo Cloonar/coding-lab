@@ -8,6 +8,7 @@
 import { Show, createSignal } from 'solid-js';
 import { updateSettings, type Settings, type TextSettingKey } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 
 const TEXT_KEYS: TextSettingKey[] = ['git_author_name', 'git_author_email'];
@@ -64,8 +65,7 @@ export default function General(props: { initial: Settings; onSaved: () => void 
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Git author</h2>
+      <SectionCard title="Git author">
         <label class="field">
           <span>Author name</span>
           <input
@@ -88,7 +88,7 @@ export default function General(props: { initial: Settings; onSaved: () => void 
             onInput={(e) => setDraft('git_author_email', e.currentTarget.value)}
           />
         </label>
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save settings'}

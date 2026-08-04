@@ -218,7 +218,9 @@ describe('Settings notifications (issue #98)', () => {
 // (The eligibility truth table itself is unit-tested in lib/install.test.ts.)
 describe('Settings install app row (issue #142)', () => {
   function installCard(): HTMLElement | null {
-    const headings = Array.from(container.querySelectorAll('section.card > h2'));
+    // Descendant, not direct child: SectionCard (issue #275) nests the title
+    // `<h2>` inside the `.card-head.section-card-head` row.
+    const headings = Array.from(container.querySelectorAll('section.card h2'));
     const h2 = headings.find((el) => el.textContent === 'Install app');
     return (h2?.closest('section.card') as HTMLElement | undefined) ?? null;
   }
