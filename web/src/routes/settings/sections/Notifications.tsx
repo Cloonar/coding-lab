@@ -16,6 +16,7 @@ import {
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
 import Banner from '../../../components/Banner';
+import ListRowCard from '../../../components/ListRowCard';
 import SectionCard from '../../../components/SectionCard';
 import { install } from '../../../lib/install';
 
@@ -230,24 +231,31 @@ function NotificationsReady(props: { registration: ServiceWorkerRegistration }) 
           <div class="card-list">
             <For each={devices()}>
               {(device) => (
-                <article class="card">
-                  <div class="card-head">
-                    <span class="card-title">
+                <ListRowCard
+                  title={
+                    <>
                       {device.label}
                       <Show when={device.endpoint === localEndpoint()}>
                         <span class="muted"> · this device</span>
                       </Show>
-                    </span>
-                    <span class="spacer" />
-                    <button type="button" class="small" onClick={() => void sendTest(device)}>
-                      Send test
-                    </button>
-                    <button type="button" class="danger small" onClick={() => void remove(device)}>
-                      Remove
-                    </button>
-                  </div>
-                  <p class="muted card-sub">Added {onDate(device.created_at)}</p>
-                </article>
+                    </>
+                  }
+                  actions={
+                    <>
+                      <button type="button" class="small" onClick={() => void sendTest(device)}>
+                        Send test
+                      </button>
+                      <button
+                        type="button"
+                        class="danger small"
+                        onClick={() => void remove(device)}
+                      >
+                        Remove
+                      </button>
+                    </>
+                  }
+                  sub={<>Added {onDate(device.created_at)}</>}
+                />
               )}
             </For>
           </div>

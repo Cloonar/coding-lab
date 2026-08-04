@@ -43,6 +43,7 @@ import {
 import EmptyState from '../../../components/EmptyState';
 import Banner from '../../../components/Banner';
 import FormCard from '../../../components/FormCard';
+import ListRowCard from '../../../components/ListRowCard';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import {
@@ -278,28 +279,30 @@ function ScheduleRow(props: {
   };
 
   return (
-    <article class="card">
-      <div class="card-head">
-        <span class="card-title">{props.schedule.name}</span>
-        <span class="spacer" />
-        <button
-          type="button"
-          class="small"
-          onClick={() => props.onToggle()}
-          disabled={busy() !== null}
-        >
-          {props.open ? 'Close' : 'Edit'}
-        </button>
-        <button
-          type="button"
-          class="danger small"
-          onClick={() => void remove()}
-          disabled={busy() !== null}
-        >
-          {busy() === 'delete' ? 'Working…' : 'Delete'}
-        </button>
-      </div>
-      <p class="muted card-sub">{cadenceSummary(props.schedule.cadence)}</p>
+    <ListRowCard
+      title={props.schedule.name}
+      actions={
+        <>
+          <button
+            type="button"
+            class="small"
+            onClick={() => props.onToggle()}
+            disabled={busy() !== null}
+          >
+            {props.open ? 'Close' : 'Edit'}
+          </button>
+          <button
+            type="button"
+            class="danger small"
+            onClick={() => void remove()}
+            disabled={busy() !== null}
+          >
+            {busy() === 'delete' ? 'Working…' : 'Delete'}
+          </button>
+        </>
+      }
+      sub={cadenceSummary(props.schedule.cadence)}
+    >
       <div class="chip-row">
         <span class="chip">{props.schedule.enabled ? 'enabled' : 'disabled'}</span>
         <For each={props.schedule.flows}>
@@ -327,7 +330,7 @@ function ScheduleRow(props: {
           onCancel={() => props.onToggle()}
         />
       </Show>
-    </article>
+    </ListRowCard>
   );
 }
 

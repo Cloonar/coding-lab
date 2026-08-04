@@ -19,6 +19,7 @@ import ProviderAuthCard from '../components/ProviderAuthCard';
 import EmptyState from '../components/EmptyState';
 import Banner from '../components/Banner';
 import FormCard from '../components/FormCard';
+import ListRowCard from '../components/ListRowCard';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
 import SectionHead from '../components/SectionHead';
@@ -224,15 +225,18 @@ function CredentialCard(props: { credential: CredentialListItem; onChanged: () =
   };
 
   return (
-    <article class="card">
-      <div class="card-head">
-        <span class="card-title">{props.credential.name}</span>
-        <span class="chip mono">{KIND_LABELS[props.credential.kind]}</span>
-        <Show when={props.credential.referenced}>
-          <span class="chip in-use">in use</span>
-        </Show>
-      </div>
-      <p class="muted card-sub">Created {createdOn(props.credential.created_at)}</p>
+    <ListRowCard
+      title={props.credential.name}
+      badges={
+        <>
+          <span class="chip mono">{KIND_LABELS[props.credential.kind]}</span>
+          <Show when={props.credential.referenced}>
+            <span class="chip in-use">in use</span>
+          </Show>
+        </>
+      }
+      sub={<>Created {createdOn(props.credential.created_at)}</>}
+    >
       <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={mode() === 'rename'}>
@@ -301,6 +305,6 @@ function CredentialCard(props: { credential: CredentialListItem; onChanged: () =
           </div>
         </Match>
       </Switch>
-    </article>
+    </ListRowCard>
   );
 }

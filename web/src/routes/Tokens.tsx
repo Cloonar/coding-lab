@@ -15,6 +15,7 @@ import {
 import EmptyState from '../components/EmptyState';
 import Banner from '../components/Banner';
 import FormCard from '../components/FormCard';
+import ListRowCard from '../components/ListRowCard';
 import RequireAuth from '../components/RequireAuth';
 import SectionHead from '../components/SectionHead';
 
@@ -191,20 +192,22 @@ function TokenCard(props: {
   };
 
   return (
-    <article class="card token-card">
-      <div class="card-head">
-        <span class="card-title">{props.token.name}</span>
-        <span class="spacer" />
+    <ListRowCard
+      class="token-card"
+      title={props.token.name}
+      actions={
         <button type="button" class="danger small" onClick={() => void remove()} disabled={busy()}>
           {busy() ? 'Deleting…' : 'Delete'}
         </button>
-      </div>
-      <p class="muted card-sub">
-        Created {onDate(props.token.created_at)} ·{' '}
-        {props.token.last_used_at === null
-          ? 'never used'
-          : `last used ${onDate(props.token.last_used_at)}`}
-      </p>
-    </article>
+      }
+      sub={
+        <>
+          Created {onDate(props.token.created_at)} ·{' '}
+          {props.token.last_used_at === null
+            ? 'never used'
+            : `last used ${onDate(props.token.last_used_at)}`}
+        </>
+      }
+    />
   );
 }
