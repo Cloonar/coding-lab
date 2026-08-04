@@ -6,6 +6,7 @@ import { Match, Show, Switch, onCleanup, type ParentProps } from 'solid-js';
 import { setUnauthorizedHandler } from './api';
 import { AuthProvider, useAuth } from './auth';
 import AppShell from './components/AppShell';
+import Banner from './components/Banner';
 import { EventsProvider } from './events';
 
 function Shell(props: ParentProps) {
@@ -30,9 +31,7 @@ function Shell(props: ParentProps) {
     >
       <Match when={auth.state === 'errored'}>
         <main class="page">
-          <div class="banner error" role="alert">
-            <span class="banner-text">Network error — is lab still running?</span>
-          </div>
+          <Banner message="Network error — is lab still running?" />
           <button type="button" onClick={() => void refresh()}>
             Retry
           </button>

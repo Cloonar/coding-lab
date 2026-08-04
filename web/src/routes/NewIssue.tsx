@@ -6,6 +6,7 @@
 import { useNavigate, useParams } from '@solidjs/router';
 import { Match, Show, Switch, createResource, createSignal } from 'solid-js';
 import { createIssue, errorMessage, getRepo, listLabels, type CreateIssueRequest } from '../api';
+import Banner from '../components/Banner';
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import FormCard from '../components/FormCard';
 import LabelPicker from '../components/LabelPicker';
@@ -86,9 +87,7 @@ function NewIssueView() {
       <SectionHead title={<>{repoData()?.name ?? 'Repository'} · New issue</>} />
       <Switch>
         <Match when={repo.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(repo.error)}</span>
-          </div>
+          <Banner message={errorMessage(repo.error)} />
         </Match>
         <Match when={repo() !== undefined && !builtin()}>
           <p class="muted forge-note">Managed on the forge — create issues there.</p>

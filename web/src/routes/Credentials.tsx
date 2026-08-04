@@ -17,7 +17,7 @@ import {
 } from '../api';
 import ProviderAuthCard from '../components/ProviderAuthCard';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import FormCard from '../components/FormCard';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
@@ -89,9 +89,7 @@ function CredentialsView() {
       </Show>
       <Switch>
         <Match when={credentials.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(credentials.error)}</span>
-          </div>
+          <Banner message={errorMessage(credentials.error)} />
         </Match>
         <Match when={credentials()?.length === 0}>
           <EmptyState>
@@ -235,7 +233,7 @@ function CredentialCard(props: { credential: CredentialListItem; onChanged: () =
         </Show>
       </div>
       <p class="muted card-sub">Created {createdOn(props.credential.created_at)}</p>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={mode() === 'rename'}>
           <form onSubmit={rename}>

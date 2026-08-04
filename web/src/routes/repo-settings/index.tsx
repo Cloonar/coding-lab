@@ -9,6 +9,7 @@
 import { useParams } from '@solidjs/router';
 import { Match, Show, Switch, createResource } from 'solid-js';
 import { errorMessage, getRepo, getSettings, listCredentials, listProviders } from '../../api';
+import Banner from '../../components/Banner';
 import Crumbs, { type Crumb } from '../../components/Crumbs';
 import RequireAuth from '../../components/RequireAuth';
 import SectionHead from '../../components/SectionHead';
@@ -74,9 +75,7 @@ function RepoSettingsView() {
       <Crumbs segments={crumbs()} />
       <Switch>
         <Match when={repo.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(repo.error)}</span>
-          </div>
+          <Banner message={errorMessage(repo.error)} />
         </Match>
         <Match when={repo.error === undefined}>
           <SettingsLayout

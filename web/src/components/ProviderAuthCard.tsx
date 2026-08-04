@@ -30,7 +30,7 @@ import {
   type ProviderAuthStatus,
 } from '../api';
 import { createLiveResource } from '../lib/liveResource';
-import ErrorBanner from './ErrorBanner';
+import Banner from './Banner';
 
 export default function ProviderAuthCard(props: { provider: Provider; activeRuns?: number }) {
   const [status, { refetch, mutate }] = createLiveResource(
@@ -168,7 +168,7 @@ export default function ProviderAuthCard(props: { provider: Provider; activeRuns
           Refresh
         </button>
       </div>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={status.error !== undefined}>
           <p class="muted card-sub">{errorMessage(status.error)}</p>

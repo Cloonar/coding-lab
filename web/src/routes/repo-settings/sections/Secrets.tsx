@@ -14,7 +14,7 @@ import {
   type RepoSecret,
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import FormCard from '../../../components/FormCard';
 import SectionCard from '../../../components/SectionCard';
 
@@ -49,7 +49,7 @@ export default function RepoSecretsSection(props: { repoId: string }) {
         </>
       }
     >
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Show when={showCreate()}>
         <CreateSecretForm
           repoId={props.repoId}
@@ -61,9 +61,7 @@ export default function RepoSecretsSection(props: { repoId: string }) {
       </Show>
       <Switch>
         <Match when={secrets.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(secrets.error)}</span>
-          </div>
+          <Banner message={errorMessage(secrets.error)} />
         </Match>
         <Match when={secrets()?.length === 0}>
           <EmptyState>

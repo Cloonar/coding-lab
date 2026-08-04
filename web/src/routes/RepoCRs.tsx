@@ -7,6 +7,7 @@
 import { A, useParams, useSearchParams } from '@solidjs/router';
 import { For, Match, Switch, createResource } from 'solid-js';
 import { errorMessage, getRepo, listCRs, type CRStateFilter, type CRSummary } from '../api';
+import Banner from '../components/Banner';
 import ClosesChips from '../components/ClosesChips';
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import EmptyState from '../components/EmptyState';
@@ -89,9 +90,7 @@ function RepoCRsView() {
 
       <Switch>
         <Match when={page.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(page.error)}</span>
-          </div>
+          <Banner message={errorMessage(page.error)} />
         </Match>
         <Match when={page() !== undefined && page()!.length === 0}>
           <EmptyState>{emptyText()}</EmptyState>

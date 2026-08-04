@@ -17,6 +17,7 @@ import {
   type Repo,
   type Run,
 } from '../api';
+import Banner from './Banner';
 import { afkStartHint, isAFKPaused } from '../lib/afk';
 import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
@@ -98,17 +99,20 @@ export default function AFKStrip(props: {
   return (
     <div class="afk-strip">
       <Show when={paused()}>
-        <div class="banner error afk-strip-paused" role="alert">
-          <span class="banner-text">Paused after 3 failures</span>
-          <button
-            type="button"
-            class="afk-strip-reset"
-            onClick={() => void reset()}
-            disabled={busy() !== null}
-          >
-            {busy() === 'reset' ? 'Resetting…' : 'Reset'}
-          </button>
-        </div>
+        <Banner
+          message="Paused after 3 failures"
+          class="afk-strip-paused"
+          action={
+            <button
+              type="button"
+              class="afk-strip-reset"
+              onClick={() => void reset()}
+              disabled={busy() !== null}
+            >
+              {busy() === 'reset' ? 'Resetting…' : 'Reset'}
+            </button>
+          }
+        />
       </Show>
       <div class="afk-strip-row">
         <button

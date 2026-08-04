@@ -9,7 +9,7 @@
 // the submit button all live HERE. A call site passes `title`, `error` /
 // `onDismissError`, `submitLabel` / `busyLabel` and its `busy` signal, and must
 // NOT re-add a `<div class="card form-card">` around this, its own `<h2>`, its
-// own `<ErrorBanner>`, or its own `<button type="submit">`. Seven sites hand-
+// own `<Banner>`, or its own `<button type="submit">`. Seven sites hand-
 // rolled that same shell and drifted: one of them (Schedules, which also
 // cancels) wraps the button in `.card-actions` while the other six leave it
 // bare, five ask for `primary wide` and two for `primary`, and one disables the
@@ -31,7 +31,7 @@
 // (cards.css) exists to style exactly that paragraph.
 //
 // Why the `<form>` IS the card, rather than a `<div class="card form-card">`
-// wrapping one: six sites render `div.card.form-card > (h2, ErrorBanner, form)`
+// wrapping one: six sites render `div.card.form-card > (h2, Banner, form)`
 // while NewIssue already renders `form.card.form-card` with the banner inside
 // the form, and one shape had to win. Form-as-card is the CSS-safe one and it
 // keeps NewIssue's existing `form.form-card` assertion meaningful. Checked
@@ -46,7 +46,7 @@
 // nothing on screen.
 
 import { Show, type JSX } from 'solid-js';
-import ErrorBanner from './ErrorBanner';
+import Banner from './Banner';
 
 export default function FormCard(props: {
   /** Card heading; the `<h2>` is omitted entirely when this is not passed. */
@@ -93,7 +93,7 @@ export default function FormCard(props: {
           already renders nothing, and no wrapper means the omitted case emits
           no element at all. Position is the whole point — above the banner. */}
       {props.intro}
-      <ErrorBanner message={props.error} onDismiss={() => props.onDismissError()} />
+      <Banner message={props.error} onDismiss={() => props.onDismissError()} />
       {props.children}
       {/* The button is written out in both branches on purpose: a helper that
           returns JSX and is called from two prop positions is a Solid footgun,

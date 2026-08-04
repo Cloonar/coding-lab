@@ -15,7 +15,7 @@ import { For, Match, Show, Switch, createMemo, createResource, createSignal } fr
 import { closeCR, errorMessage, getCR, getRepo, mergeCR, type CRDetail as CR } from '../api';
 import ClosesChips from '../components/ClosesChips';
 import Crumbs, { type Crumb } from '../components/Crumbs';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import RequireAuth from '../components/RequireAuth';
 import SectionCard from '../components/SectionCard';
 import SectionHead from '../components/SectionHead';
@@ -107,12 +107,10 @@ function CRDetailView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={cr.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(cr.error)}</span>
-          </div>
+          <Banner message={errorMessage(cr.error)} />
         </Match>
         <Match when={cr()}>
           {(c) => (

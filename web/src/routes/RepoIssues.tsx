@@ -16,6 +16,7 @@ import {
   type IssueStateFilter,
   type IssueSummary,
 } from '../api';
+import Banner from '../components/Banner';
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import EmptyState from '../components/EmptyState';
 import LabelChip from '../components/LabelChip';
@@ -219,9 +220,7 @@ function RepoIssuesView() {
 
       <Switch>
         <Match when={page.error !== undefined}>
-          <div class="banner error" role="alert">
-            <span class="banner-text">{errorMessage(page.error)}</span>
-          </div>
+          <Banner message={errorMessage(page.error)} />
         </Match>
         <Match when={page() !== undefined && visible().length === 0}>
           <EmptyState>

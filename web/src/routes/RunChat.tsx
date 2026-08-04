@@ -47,7 +47,7 @@ import {
   type RunCommand,
 } from '../api';
 import EmptyState from '../components/EmptyState';
-import ErrorBanner from '../components/ErrorBanner';
+import Banner from '../components/Banner';
 import RequireAuth from '../components/RequireAuth';
 import ToolPanel, { type PanelTarget } from '../components/ToolPanel';
 import { isFileView } from '../components/ToolViews';
@@ -118,7 +118,7 @@ function RunChatView() {
 
   // A reply's informational notice (issue #149) — e.g. "already up to date
   // with origin/main". Never an error: its own dismissible banner, separate
-  // signal, neutral styling (ErrorBanner's `notice` variant).
+  // signal, neutral styling (Banner's `notice` variant).
   const [notice, setNotice] = createSignal<string | null>(null);
   // What the tool detail panel is showing (issue #145, superseding the inline
   // <details> expansion): a group (keyed by its first tool's seq — decision 12)
@@ -522,8 +522,8 @@ function RunChatView() {
       <div class="chat-column">
         {/* The banners sit above the body so the mobile overlay header (§2), which
           is absolutely positioned within .chat-body, can never paint over them. */}
-        <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-        <ErrorBanner message={notice()} onDismiss={() => setNotice(null)} variant="notice" />
+        <Banner message={error()} onDismiss={() => setError(null)} />
+        <Banner message={notice()} onDismiss={() => setNotice(null)} variant="notice" />
 
         {/* .chat-body is the positioning context for the quick-return header (§2):
           on mobile the header overlays the stream's top and slides via translateY

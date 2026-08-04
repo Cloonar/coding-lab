@@ -6,7 +6,7 @@ import { useNavigate } from '@solidjs/router';
 import { Show, createSignal } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { ApiError, deleteRepo, errorMessage, type Repo } from '../../../api';
-import ErrorBanner from '../../../components/ErrorBanner';
+import Banner from '../../../components/Banner';
 import SectionCard from '../../../components/SectionCard';
 
 export default function DangerZone(props: { repo: Accessor<Repo> }) {
@@ -35,7 +35,7 @@ export default function DangerZone(props: { repo: Accessor<Repo> }) {
 
   return (
     <SectionCard title="Danger zone" class="danger-zone">
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+      <Banner message={error()} onDismiss={() => setError(null)} />
       <Show when={needsForce()}>
         <label class="check">
           <input
