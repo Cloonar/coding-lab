@@ -10,6 +10,7 @@ import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { canMutateTracker } from '../lib/issues';
 import { toggleLabel } from '../lib/labels';
 import { resourceValue } from '../lib/resource';
@@ -82,9 +83,7 @@ function NewIssueView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <div class="section-head">
-        <h2>{repoData()?.name ?? 'Repository'} · New issue</h2>
-      </div>
+      <SectionHead title={<>{repoData()?.name ?? 'Repository'} · New issue</>} />
       <Switch>
         <Match when={repo.error !== undefined}>
           <div class="banner error" role="alert">

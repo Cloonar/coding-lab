@@ -45,10 +45,14 @@
   flex-wrap: wrap;
 }
 
-/* Mirrors `.section-head h2` (shell.css): the row's height must never depend on
-   heading font metrics. Headings load Source Serif 4 with font-display: swap, so
-   an unreset heading margin makes the row grow/shrink mid font-load. */
-.card-head h2 {
+/* One reset for every head row in the app, now that all three are
+   component-owned: SectionHead's `.section-head`, SectionCard's `.card-head`
+   and SettingsLayout's mobile back-head. A head row's height must never depend
+   on heading font metrics — headings load Source Serif 4 with font-display:
+   swap, so an unreset heading margin makes the row grow/shrink mid font-load. */
+.section-head h2,
+.card-head h2,
+.settings-back-head h2 {
   margin: 0;
   overflow-wrap: anywhere;
 }

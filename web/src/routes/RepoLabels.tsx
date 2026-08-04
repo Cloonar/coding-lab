@@ -22,6 +22,8 @@ import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
+import SectionCard from '../components/SectionCard';
+import SectionHead from '../components/SectionHead';
 import { canMutateTracker } from '../lib/issues';
 import { DEFAULT_LABEL_COLOR, normalizeHex } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
@@ -96,9 +98,7 @@ function RepoLabelsView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <div class="section-head">
-        <h2>{repoData()?.name ?? 'Repository'} · Labels</h2>
-      </div>
+      <SectionHead title={<>{repoData()?.name ?? 'Repository'} · Labels</>} />
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Switch>
         <Match when={repo.error !== undefined}>
@@ -178,8 +178,7 @@ function RepoLabelsView() {
                 </button>
               }
             >
-              <section class="card">
-                <h2>New label</h2>
+              <SectionCard title="New label">
                 <LabelForm
                   repoID={params.id}
                   onDone={() => {
@@ -188,7 +187,7 @@ function RepoLabelsView() {
                   }}
                   onCancel={() => setCreating(false)}
                 />
-              </section>
+              </SectionCard>
             </Show>
           </div>
         </Match>

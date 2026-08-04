@@ -11,6 +11,7 @@ import { Match, Show, Switch, createResource } from 'solid-js';
 import { errorMessage, getRepo, getSettings, listCredentials, listProviders } from '../../api';
 import Crumbs, { type Crumb } from '../../components/Crumbs';
 import RequireAuth from '../../components/RequireAuth';
+import SectionHead from '../../components/SectionHead';
 import SettingsLayout from '../../components/settings/SettingsLayout';
 import { createLiveResource } from '../../lib/liveResource';
 import { remoteHost } from '../../lib/repoName';
@@ -86,20 +87,22 @@ function RepoSettingsView() {
               <Show when={resourceValue(repo)}>
                 {(r) => (
                   <>
-                    <div class="section-head">
-                      <h2>{r().name}</h2>
-                      <Show when={r().clone_status !== 'ready'}>
-                        <span
-                          classList={{
-                            chip: true,
-                            'status-cloning': r().clone_status === 'cloning',
-                            'status-error': r().clone_status === 'error',
-                          }}
-                        >
-                          {r().clone_status === 'cloning' ? 'cloning' : 'clone failed'}
-                        </span>
-                      </Show>
-                    </div>
+                    <SectionHead
+                      title={r().name}
+                      action={
+                        <Show when={r().clone_status !== 'ready'}>
+                          <span
+                            classList={{
+                              chip: true,
+                              'status-cloning': r().clone_status === 'cloning',
+                              'status-error': r().clone_status === 'error',
+                            }}
+                          >
+                            {r().clone_status === 'cloning' ? 'cloning' : 'clone failed'}
+                          </span>
+                        </Show>
+                      }
+                    />
                     <p class="muted card-sub mono">{remoteHost(r().remote_url)}</p>
                   </>
                 )}

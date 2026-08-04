@@ -17,6 +17,8 @@ import ClosesChips from '../components/ClosesChips';
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
+import SectionCard from '../components/SectionCard';
+import SectionHead from '../components/SectionHead';
 import { classifyDiff, groupDiffFiles, type DiffFileGroup } from '../lib/crs';
 import { formatDateTime } from '../lib/issues';
 import { createLiveResource } from '../lib/liveResource';
@@ -115,12 +117,14 @@ function CRDetailView() {
         <Match when={cr()}>
           {(c) => (
             <>
-              <div class="section-head">
-                <h2>
-                  <span class="mono muted issue-number">CR #{c().number}</span> {c().title}
-                </h2>
-                <span class={`chip state-${c().state}`}>{c().state}</span>
-              </div>
+              <SectionHead
+                title={
+                  <>
+                    <span class="mono muted issue-number">CR #{c().number}</span> {c().title}
+                  </>
+                }
+                action={<span class={`chip state-${c().state}`}>{c().state}</span>}
+              />
               <p class="muted card-sub mono cr-branches">
                 {c().head_branch} → {c().base_branch}
               </p>
@@ -184,8 +188,7 @@ function CRDetailView() {
                   </Show>
                 </section>
 
-                <section class="card diff-card">
-                  <h2>Diff</h2>
+                <SectionCard title="Diff" class="diff-card">
                   <Show when={c().diff_truncated === true}>
                     <p class="diff-truncated">
                       Diff truncated — the change is larger than the view limit.
@@ -202,7 +205,7 @@ function CRDetailView() {
                       <For each={files()}>{(file) => <DiffFileSection file={file} />}</For>
                     </Show>
                   </Show>
-                </section>
+                </SectionCard>
               </div>
             </>
           )}

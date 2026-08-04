@@ -19,6 +19,7 @@ import ProviderAuthCard from '../components/ProviderAuthCard';
 import ErrorBanner from '../components/ErrorBanner';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
@@ -68,12 +69,14 @@ function CredentialsView() {
           {(provider) => <ProviderAuthCard provider={provider} activeRuns={liveCount()} />}
         </For>
       </div>
-      <div class="section-head">
-        <h2>Credentials</h2>
-        <button type="button" class="primary" onClick={() => setShowCreate(!showCreate())}>
-          {showCreate() ? 'Cancel' : '+ Add credential'}
-        </button>
-      </div>
+      <SectionHead
+        title="Credentials"
+        action={
+          <button type="button" class="primary" onClick={() => setShowCreate(!showCreate())}>
+            {showCreate() ? 'Cancel' : '+ Add credential'}
+          </button>
+        }
+      />
       <Show when={showCreate()}>
         <CreateCredentialCard
           onCreated={() => {

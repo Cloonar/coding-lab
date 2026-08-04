@@ -19,6 +19,8 @@ import {
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import LabelChip from '../components/LabelChip';
 import RequireAuth from '../components/RequireAuth';
+import SectionCard from '../components/SectionCard';
+import SectionHead from '../components/SectionHead';
 import {
   availableLabelNames,
   canMutateTracker,
@@ -136,19 +138,21 @@ function RepoIssuesView() {
   return (
     <main class="page">
       <Crumbs segments={crumbs()} />
-      <div class="section-head">
-        <h2>{repoData()?.name ?? 'Repository'} · Issues</h2>
-        <Show when={canMutate()}>
-          <div class="head-actions">
-            <A href={`/repos/${params.id}/labels`} class="card-link">
-              Labels
-            </A>
-            <A href={`/repos/${params.id}/issues/new`} class="card-link">
-              + New issue
-            </A>
-          </div>
-        </Show>
-      </div>
+      <SectionHead
+        title={<>{repoData()?.name ?? 'Repository'} · Issues</>}
+        action={
+          <Show when={canMutate()}>
+            <div class="head-actions">
+              <A href={`/repos/${params.id}/labels`} class="card-link">
+                Labels
+              </A>
+              <A href={`/repos/${params.id}/issues/new`} class="card-link">
+                + New issue
+              </A>
+            </div>
+          </Show>
+        }
+      />
       <Show when={pageData() !== undefined && !canMutate()}>
         <p class="muted forge-note">
           <Show
@@ -165,8 +169,7 @@ function RepoIssuesView() {
       </Show>
 
       <Show when={(readyData()?.length ?? 0) > 0}>
-        <section class="card ready-queue">
-          <h2>Ready for agent ({readyData()!.length})</h2>
+        <SectionCard title={`Ready for agent (${readyData()!.length})`} class="ready-queue">
           <ul class="ready-list">
             <For each={readyData()}>
               {(issue) => (
@@ -179,7 +182,7 @@ function RepoIssuesView() {
               )}
             </For>
           </ul>
-        </section>
+        </SectionCard>
       </Show>
 
       <div class="filter-row" role="group" aria-label="Filter by state">
