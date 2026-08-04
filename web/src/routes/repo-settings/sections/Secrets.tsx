@@ -15,6 +15,7 @@ import {
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
 import ErrorBanner from '../../../components/ErrorBanner';
+import FormCard from '../../../components/FormCard';
 import SectionCard from '../../../components/SectionCard';
 
 function secretUpdatedOn(timestamp: string): string {
@@ -113,53 +114,55 @@ function CreateSecretForm(props: { repoId: string; onCreated: () => void }) {
   };
 
   return (
-    <div class="card form-card">
-      <h2>New secret</h2>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <form onSubmit={(e) => void submit(e)}>
-        <label class="field">
-          <span>Name</span>
-          <input
-            type="text"
-            name="secret-name"
-            required
-            autocomplete="off"
-            spellcheck={false}
-            class="mono"
-            placeholder="API_KEY"
-            value={name()}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-          <small class="hint">
-            Uppercase letters, digits, underscores; must start with a letter.
-          </small>
-        </label>
-        <label class="field">
-          <span>Description</span>
-          <input
-            type="text"
-            name="secret-description"
-            autocomplete="off"
-            value={description()}
-            onInput={(e) => setDescription(e.currentTarget.value)}
-          />
-        </label>
-        <label class="field">
-          <span>Value</span>
-          <input
-            type="password"
-            name="secret-value"
-            required
-            autocomplete="off"
-            value={value()}
-            onInput={(e) => setValue(e.currentTarget.value)}
-          />
-        </label>
-        <button type="submit" class="primary wide" disabled={busy()}>
-          {busy() ? 'Saving…' : 'Save secret'}
-        </button>
-      </form>
-    </div>
+    <FormCard
+      title="New secret"
+      wide
+      submitLabel="Save secret"
+      busyLabel="Saving…"
+      error={error()}
+      onDismissError={() => setError(null)}
+      onSubmit={(e) => void submit(e)}
+      busy={busy()}
+    >
+      <label class="field">
+        <span>Name</span>
+        <input
+          type="text"
+          name="secret-name"
+          required
+          autocomplete="off"
+          spellcheck={false}
+          class="mono"
+          placeholder="API_KEY"
+          value={name()}
+          onInput={(e) => setName(e.currentTarget.value)}
+        />
+        <small class="hint">
+          Uppercase letters, digits, underscores; must start with a letter.
+        </small>
+      </label>
+      <label class="field">
+        <span>Description</span>
+        <input
+          type="text"
+          name="secret-description"
+          autocomplete="off"
+          value={description()}
+          onInput={(e) => setDescription(e.currentTarget.value)}
+        />
+      </label>
+      <label class="field">
+        <span>Value</span>
+        <input
+          type="password"
+          name="secret-value"
+          required
+          autocomplete="off"
+          value={value()}
+          onInput={(e) => setValue(e.currentTarget.value)}
+        />
+      </label>
+    </FormCard>
   );
 }
 

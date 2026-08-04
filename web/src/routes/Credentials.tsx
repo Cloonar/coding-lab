@@ -18,6 +18,7 @@ import {
 import ProviderAuthCard from '../components/ProviderAuthCard';
 import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
+import FormCard from '../components/FormCard';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
 import SectionHead from '../components/SectionHead';
@@ -135,40 +136,42 @@ function CreateCredentialCard(props: { onCreated: () => void }) {
   };
 
   return (
-    <div class="card form-card">
-      <h2>New credential</h2>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <form onSubmit={(e) => void submit(e)}>
-        <label class="field">
-          <span>Name</span>
-          <input
-            type="text"
-            name="name"
-            required
-            autocomplete="off"
-            placeholder="forgejo-deploy-key"
-            value={name()}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-        </label>
-        <label class="field">
-          <span>Kind</span>
-          <select
-            name="kind"
-            value={kind()}
-            onChange={(e) => setKind(e.currentTarget.value as CredentialKind)}
-          >
-            <option value="ssh_key">SSH key (git over SSH)</option>
-            <option value="https_token">HTTPS token (git over HTTPS)</option>
-            <option value="forge_token">Forge API token (issues + PRs)</option>
-          </select>
-        </label>
-        <PayloadFields kind={kind()} draft={draft} />
-        <button type="submit" class="primary wide" disabled={busy()}>
-          {busy() ? 'Saving…' : 'Save credential'}
-        </button>
-      </form>
-    </div>
+    <FormCard
+      title="New credential"
+      wide
+      error={error()}
+      onDismissError={() => setError(null)}
+      onSubmit={(e) => void submit(e)}
+      busy={busy()}
+      submitLabel="Save credential"
+      busyLabel="Saving…"
+    >
+      <label class="field">
+        <span>Name</span>
+        <input
+          type="text"
+          name="name"
+          required
+          autocomplete="off"
+          placeholder="forgejo-deploy-key"
+          value={name()}
+          onInput={(e) => setName(e.currentTarget.value)}
+        />
+      </label>
+      <label class="field">
+        <span>Kind</span>
+        <select
+          name="kind"
+          value={kind()}
+          onChange={(e) => setKind(e.currentTarget.value as CredentialKind)}
+        >
+          <option value="ssh_key">SSH key (git over SSH)</option>
+          <option value="https_token">HTTPS token (git over HTTPS)</option>
+          <option value="forge_token">Forge API token (issues + PRs)</option>
+        </select>
+      </label>
+      <PayloadFields kind={kind()} draft={draft} />
+    </FormCard>
   );
 }
 

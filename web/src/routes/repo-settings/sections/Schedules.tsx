@@ -42,6 +42,7 @@ import {
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
 import ErrorBanner from '../../../components/ErrorBanner';
+import FormCard from '../../../components/FormCard';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import {
@@ -545,241 +546,241 @@ function ScheduleEditor(props: {
   };
 
   return (
-    <div class="card form-card">
-      <h2>{props.schedule === null ? 'New schedule' : 'Edit schedule'}</h2>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+    <FormCard
+      title={props.schedule === null ? 'New schedule' : 'Edit schedule'}
+      submitLabel={props.schedule === null ? 'Create schedule' : 'Save schedule'}
+      busyLabel="Saving…"
+      error={error()}
+      onDismissError={() => setError(null)}
+      onSubmit={(e) => void submit(e)}
+      busy={busy()}
+      actions={
+        <button type="button" onClick={() => props.onCancel()} disabled={busy()}>
+          Cancel
+        </button>
+      }
+    >
       <Show when={note()}>
         <div class="banner success" role="status">
           <span class="banner-text">{note()}</span>
         </div>
       </Show>
-      <form onSubmit={(e) => void submit(e)}>
-        <label class="field">
-          <span>Name</span>
-          <input
-            type="text"
-            name="schedule-name"
-            autocomplete="off"
-            placeholder="Weekly dependency check"
-            value={name()}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-        </label>
-
-        <label class="field">
-          <span>Prompt</span>
-          <textarea
-            name="schedule-prompt"
-            rows="6"
-            value={prompt()}
-            onInput={(e) => setPrompt(e.currentTarget.value)}
-            placeholder="What should the run investigate?"
-          />
-        </label>
-        {/* The example picker fills the prompt above and immediately falls back
-            to its placeholder row — it is a starter, not a stored choice, so it
-            never carries a selected value. */}
-        <Select
-          skin="field"
-          label="Examples"
-          name="schedule-example"
-          value=""
-          options={PROMPT_EXAMPLES.map((example) => ({
-            value: example.key,
-            label: example.label,
-          }))}
-          inheritLabel="Start from an example…"
-          onChange={applyExample}
+      <label class="field">
+        <span>Name</span>
+        <input
+          type="text"
+          name="schedule-name"
+          autocomplete="off"
+          placeholder="Weekly dependency check"
+          value={name()}
+          onInput={(e) => setName(e.currentTarget.value)}
         />
+      </label>
 
+      <label class="field">
+        <span>Prompt</span>
+        <textarea
+          name="schedule-prompt"
+          rows="6"
+          value={prompt()}
+          onInput={(e) => setPrompt(e.currentTarget.value)}
+          placeholder="What should the run investigate?"
+        />
+      </label>
+      {/* The example picker fills the prompt above and immediately falls back
+          to its placeholder row — it is a starter, not a stored choice, so it
+          never carries a selected value. */}
+      <Select
+        skin="field"
+        label="Examples"
+        name="schedule-example"
+        value=""
+        options={PROMPT_EXAMPLES.map((example) => ({
+          value: example.key,
+          label: example.label,
+        }))}
+        inheritLabel="Start from an example…"
+        onChange={applyExample}
+      />
+
+      <div class="field">
+        <span>Flows</span>
+        <div class="label-picker" role="group" aria-label="Flows">
+          <For each={props.flows}>
+            {(flow) => (
+              <button
+                type="button"
+                name={`flow-${flow.key}`}
+                classList={{ 'chip-toggle': true, on: selected().includes(flow.key) }}
+                aria-pressed={selected().includes(flow.key)}
+                title={flow.description}
+                onClick={() => toggleFlow(flow.key)}
+              >
+                {selected().includes(flow.key) ? '✓ ' : ''}
+                {flow.label}
+              </button>
+            )}
+          </For>
+        </div>
+        <small class="hint">
+          Flows append routing instructions to the prompt, in catalog order. None is fine — that is
+          a prompt-only schedule.
+        </small>
+      </div>
+
+      <label class="field">
+        <span>Cadence</span>
+        <select
+          name="cadence_mode"
+          value={mode()}
+          onChange={(e) => setMode(e.currentTarget.value as CadenceMode)}
+        >
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="advanced">Advanced (cron)</option>
+        </select>
+      </label>
+      <Show when={mode() !== 'advanced'}>
+        <label class="field">
+          <span>Time</span>
+          <input
+            type="time"
+            name="cadence_time"
+            value={time()}
+            onInput={(e) => setTime(e.currentTarget.value)}
+          />
+        </label>
+      </Show>
+      <Show when={mode() === 'weekly'}>
         <div class="field">
-          <span>Flows</span>
-          <div class="label-picker" role="group" aria-label="Flows">
-            <For each={props.flows}>
-              {(flow) => (
+          <span>Weekdays</span>
+          <div class="label-picker" role="group" aria-label="Weekdays">
+            <For each={WEEKDAYS}>
+              {(day) => (
                 <button
                   type="button"
-                  name={`flow-${flow.key}`}
-                  classList={{ 'chip-toggle': true, on: selected().includes(flow.key) }}
-                  aria-pressed={selected().includes(flow.key)}
-                  title={flow.description}
-                  onClick={() => toggleFlow(flow.key)}
+                  name={`weekday-${day.value}`}
+                  classList={{ 'chip-toggle': true, on: weekdays().includes(day.value) }}
+                  aria-pressed={weekdays().includes(day.value)}
+                  onClick={() => toggleWeekday(day.value)}
                 >
-                  {selected().includes(flow.key) ? '✓ ' : ''}
-                  {flow.label}
+                  {day.label}
                 </button>
               )}
             </For>
           </div>
-          <small class="hint">
-            Flows append routing instructions to the prompt, in catalog order. None is fine — that
-            is a prompt-only schedule.
-          </small>
         </div>
-
+      </Show>
+      <Show when={mode() === 'monthly'}>
         <label class="field">
-          <span>Cadence</span>
+          <span>Day of month</span>
           <select
-            name="cadence_mode"
-            value={mode()}
-            onChange={(e) => setMode(e.currentTarget.value as CadenceMode)}
+            name="cadence_day"
+            value={String(monthDay())}
+            onChange={(e) => setMonthDay(Number(e.currentTarget.value))}
           >
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
-            <option value="advanced">Advanced (cron)</option>
+            <For each={Array.from({ length: MONTH_DAY_MAX }, (_, i) => i + 1)}>
+              {(day) => <option value={String(day)}>{day}</option>}
+            </For>
           </select>
-        </label>
-        <Show when={mode() !== 'advanced'}>
-          <label class="field">
-            <span>Time</span>
-            <input
-              type="time"
-              name="cadence_time"
-              value={time()}
-              onInput={(e) => setTime(e.currentTarget.value)}
-            />
-          </label>
-        </Show>
-        <Show when={mode() === 'weekly'}>
-          <div class="field">
-            <span>Weekdays</span>
-            <div class="label-picker" role="group" aria-label="Weekdays">
-              <For each={WEEKDAYS}>
-                {(day) => (
-                  <button
-                    type="button"
-                    name={`weekday-${day.value}`}
-                    classList={{ 'chip-toggle': true, on: weekdays().includes(day.value) }}
-                    aria-pressed={weekdays().includes(day.value)}
-                    onClick={() => toggleWeekday(day.value)}
-                  >
-                    {day.label}
-                  </button>
-                )}
-              </For>
-            </div>
-          </div>
-        </Show>
-        <Show when={mode() === 'monthly'}>
-          <label class="field">
-            <span>Day of month</span>
-            <select
-              name="cadence_day"
-              value={String(monthDay())}
-              onChange={(e) => setMonthDay(Number(e.currentTarget.value))}
-            >
-              <For each={Array.from({ length: MONTH_DAY_MAX }, (_, i) => i + 1)}>
-                {(day) => <option value={String(day)}>{day}</option>}
-              </For>
-            </select>
-            <small class="hint">
-              Days 29–31 skip the months that are too short — write those as a cron expression under
-              Advanced.
-            </small>
-          </label>
-        </Show>
-        <Show when={mode() === 'advanced'}>
-          <label class="field">
-            <span>Cron expression</span>
-            <input
-              type="text"
-              name="cadence_expr"
-              class="mono"
-              autocomplete="off"
-              spellcheck={false}
-              placeholder="30 6 * * 1"
-              value={rawCron()}
-              onInput={(e) => setRawCron(e.currentTarget.value)}
-            />
-            <small class="hint">
-              Five fields, minute granularity: minute hour day-of-month month day-of-week.
-            </small>
-          </label>
-        </Show>
-        {/* Always visible, every mode: the server's own answer to "when does
-            this actually fire", so a preset and a hand-written expression are
-            checked by exactly the same parser the engine uses. */}
-        <Show when={cadence() !== '' && preview()} keyed>
-          {(fired) => (
-            <small
-              classList={{
-                hint: true,
-                'hint-block': true,
-                'cadence-preview': true,
-                invalid: !fired.valid,
-              }}
-            >
-              {fired.valid
-                ? `Next: ${(fired.next_display ?? []).join(', ')}`
-                : (fired.error ?? 'This cadence never fires.')}
-            </small>
-          )}
-        </Show>
-
-        <label class="field">
-          <span>Budget (minutes)</span>
-          <input
-            type="number"
-            name="schedule_budget_minutes"
-            min="1"
-            step="1"
-            autocomplete="off"
-            placeholder="30"
-            value={budget()}
-            onInput={(e) => setBudget(e.currentTarget.value)}
-          />
           <small class="hint">
-            A scheduled run has no done-signal: the budget clock is what ends it, and expiry counts
-            as a success.
+            Days 29–31 skip the months that are too short — write those as a cron expression under
+            Advanced.
           </small>
         </label>
-        <Select
-          skin="field"
-          label="Agent"
-          name="schedule_provider"
-          value={provider()}
-          options={providerOptions()}
-          inheritLabel="Inherit repo AFK agent"
-          onChange={setProvider}
-        />
-        <Select
-          skin="field"
-          label="Model"
-          name="schedule_model"
-          value={model()}
-          options={effectiveProvider()?.models ?? []}
-          inheritLabel="Inherit repo AFK default"
-          onChange={setModel}
-        />
-        <Select
-          skin="field"
-          label="Effort"
-          name="schedule_effort"
-          value={effort()}
-          options={effectiveProvider()?.efforts ?? []}
-          inheritLabel="Inherit repo AFK default"
-          onChange={setEffort}
-        />
-        <label class="check">
+      </Show>
+      <Show when={mode() === 'advanced'}>
+        <label class="field">
+          <span>Cron expression</span>
           <input
-            type="checkbox"
-            name="schedule_enabled"
-            checked={enabled()}
-            onChange={(e) => setEnabled(e.currentTarget.checked)}
+            type="text"
+            name="cadence_expr"
+            class="mono"
+            autocomplete="off"
+            spellcheck={false}
+            placeholder="30 6 * * 1"
+            value={rawCron()}
+            onInput={(e) => setRawCron(e.currentTarget.value)}
           />
-          <span>Enabled</span>
+          <small class="hint">
+            Five fields, minute granularity: minute hour day-of-month month day-of-week.
+          </small>
         </label>
+      </Show>
+      {/* Always visible, every mode: the server's own answer to "when does
+          this actually fire", so a preset and a hand-written expression are
+          checked by exactly the same parser the engine uses. */}
+      <Show when={cadence() !== '' && preview()} keyed>
+        {(fired) => (
+          <small
+            classList={{
+              hint: true,
+              'hint-block': true,
+              'cadence-preview': true,
+              invalid: !fired.valid,
+            }}
+          >
+            {fired.valid
+              ? `Next: ${(fired.next_display ?? []).join(', ')}`
+              : (fired.error ?? 'This cadence never fires.')}
+          </small>
+        )}
+      </Show>
 
-        <div class="card-actions">
-          <button type="submit" class="primary" disabled={busy()}>
-            {busy() ? 'Saving…' : props.schedule === null ? 'Create schedule' : 'Save schedule'}
-          </button>
-          <button type="button" onClick={() => props.onCancel()} disabled={busy()}>
-            Cancel
-          </button>
-        </div>
-      </form>
-    </div>
+      <label class="field">
+        <span>Budget (minutes)</span>
+        <input
+          type="number"
+          name="schedule_budget_minutes"
+          min="1"
+          step="1"
+          autocomplete="off"
+          placeholder="30"
+          value={budget()}
+          onInput={(e) => setBudget(e.currentTarget.value)}
+        />
+        <small class="hint">
+          A scheduled run has no done-signal: the budget clock is what ends it, and expiry counts as
+          a success.
+        </small>
+      </label>
+      <Select
+        skin="field"
+        label="Agent"
+        name="schedule_provider"
+        value={provider()}
+        options={providerOptions()}
+        inheritLabel="Inherit repo AFK agent"
+        onChange={setProvider}
+      />
+      <Select
+        skin="field"
+        label="Model"
+        name="schedule_model"
+        value={model()}
+        options={effectiveProvider()?.models ?? []}
+        inheritLabel="Inherit repo AFK default"
+        onChange={setModel}
+      />
+      <Select
+        skin="field"
+        label="Effort"
+        name="schedule_effort"
+        value={effort()}
+        options={effectiveProvider()?.efforts ?? []}
+        inheritLabel="Inherit repo AFK default"
+        onChange={setEffort}
+      />
+      <label class="check">
+        <input
+          type="checkbox"
+          name="schedule_enabled"
+          checked={enabled()}
+          onChange={(e) => setEnabled(e.currentTarget.checked)}
+        />
+        <span>Enabled</span>
+      </label>
+    </FormCard>
   );
 }
