@@ -1,10 +1,14 @@
 # Claude Code compatibility pins
 
-Pinned version: **Claude Code 2.1.220** — bundle-extraction + in-container
-CLI probe, 2026-07-28 (see the 2.1.220 re-verification note below; the live
-recipe suite is the outstanding gate). The prior pin, 2.1.198, was live-probed
-on the dev host 2026-07-05 and re-confirmed by the M3 acceptance smoke on
-2026-07-06. This document tracks brief §11 (known-fragile couplings 1–4; item 5 —
+Pinned version: **Claude Code 2.1.221** — bundle extraction + CLI probes +
+the **live tmux recipe suite**, 2026-08-04 (see the 2.1.221 re-verification
+note below). This is the first bump since 2.1.198 whose live gate was actually
+run rather than deferred: the suite was driven green against the OUTGOING
+2.1.220 binary first, so the incoming version had a baseline to diff against
+instead of an unknown — that is what closes the debt #235 recorded. The pin
+before 2.1.220, 2.1.198, was live-probed on the dev host 2026-07-05 and
+re-confirmed by the M3 acceptance smoke on 2026-07-06. This document tracks
+brief §11 (known-fragile couplings 1–4; item 5 —
 provider-owned model/effort catalogs — is solved structurally in
 `internal/provider`, D14) plus the four embedded-chat couplings 5–8 added
 by issue #7 / ADR-0016 (transcript location + JSONL schema, the reply,
@@ -68,10 +72,66 @@ for CLI probes):
   `cse_` normalization, `hasTrustDialogAccepted`, `toolUseResult`,
   `PreToolUse`/`PostToolUse`/`Notification` + `hook_event_name`,
   `CLAUDE_AFK_TIMEOUT_MS`, and the `ultracode` prompt keyword. bundle.
-- **NOT yet re-verified on 2.1.220** (needs the dev host): the live tmux
-  recipe couplings — run `LAB_COMPAT_LIVE=1 go test ./internal/compat/ -run
-  Live -v` — and the §3b by-hand credential-refresh recipe. Until those pass,
-  the per-section "live (2.1.198/2.1.206)" provenance below is the newest
+- **The live gate that this note left open was CLOSED on 2026-08-04**, as the
+  first half of the 2.1.221 bump below: `LAB_COMPAT_LIVE=1 go test
+  ./internal/compat/ -run Live -v` was run against the real **2.1.220** binary
+  and passed all six live tests with **zero skips** — the baseline #235 asked
+  for. The §3b by-hand credential-refresh recipe remains NOT re-run (it
+  rotates the host's real OAuth family; see "Live re-verification" below).
+
+**2.1.221 re-verification (2026-08-04; bundle extraction + CLI probes + the
+live tmux recipe suite).** Motivation: 2.1.221 fixes a **Bash tool
+permission-check bypass** in exactly the mode lab spawns — `--permission-mode
+auto` — where zsh could execute hidden commands inside `[[ ]]` regex
+conditionals without prompting. Lab's runs are unattended, so that classifier
+is the only guard; reachability is conditional on the operator's dev image
+shipping zsh, and the full reasoning is recorded in §1 so it is not
+re-derived. Note the channel shape at the time of the bump: 2.1.220 had become
+the `stable` dist-tag and 2.1.221 was `latest`/`next`, so this bump again
+takes `latest` over `stable`, deliberately and for a stated reason.
+
+Checked against the sha256-verified 2.1.221 artifacts. The
+`linux-x64-musl` artifact — the image input — was verified by **re-deriving**
+its digest from the downloaded bytes
+(`15b068e06eafff9b64583b46cdc065ac18b0d0d13950c2a83c6ee854f301a32f`, matching
+Anthropic's per-version `manifest.json`) and then **executed** through Alpine's
+musl loader, the same proof `Containerfile.claude`'s pre-patch sanity run
+makes; it reports `2.1.221 (Claude Code)`. The glibc twin
+(`60db8e88…f087ada`) was used for the CLI probes and the live suite, since
+this host has no musl loader on its default interpreter path.
+
+- **§1: no drift.** Every spawn flag lab uses is present and unchanged. The
+  full `--help` diff 2.1.220 → 2.1.221 is **one added line**, `--autocompact
+  <auto|tokens>`, which lab does not use; all twelve probed subcommand helps
+  are byte-identical. `--permission-mode` still accepts `auto` (full value
+  list unchanged on both: `acceptEdits, auto, bypassPermissions, manual,
+  dontAsk, plan`) and `--effort` still accepts `low|medium|high|xhigh|max`.
+  CLI.
+- **§1: the embedded model catalog is intact** — `aliases:{opus:{default:
+  "claude-opus-5",…}}` and `latest_per_family:{…opus:"claude-opus-5"…}`
+  extract byte-identically from both binaries, so the reason the 2.1.220 pin
+  was taken survives the bump. bundle (static byte-match, not a live
+  `--model opus[1m]` turn).
+- **§3/§3a: no drift.** `claude auth status --json` emits the same key set on
+  both versions (`loggedIn, authMethod, apiProvider, email, orgId, orgName,
+  subscriptionType` logged in; the first three logged out), and
+  `CLAUDE_CONFIG_DIR` is still honored — given a throwaway dir both binaries
+  report logged-out and write their own state inside it rather than reading
+  `~/.claude`. CLI.
+- **§5/§7/§8/§12 (non-remote arm): live, and green on BOTH versions.** The
+  live recipe suite was run twice — once per binary — and produced identical
+  verdicts: six tests, **zero skips**, all passing, including the two that
+  drive a real dialog through `DialogKeystrokes`/`AnswerDialog` and read the
+  recorded answers back out of the transcript. Both recipe tests spawn
+  **without** `--remote-control`, so this is live evidence on §12's arm. The
+  transcript shapes `ParseTranscript` saw were unchanged; the Esc-retract fix
+  noted in §8 produced no new shape.
+- **Not re-driven, so not claimed:** the §12 *pending*-`tool_use` flush A/B
+  (the recipes read the transcript after resolve, which does not exercise the
+  pre-resolve flush), the §2 deep-link registry (an ad-hoc spawn probe was
+  attempted and failed identically on BOTH versions — a broken probe, not
+  drift, so it settles nothing either way), and the §3b credential-refresh
+  recipe. Their provenance below is unchanged and still names its own older
   live evidence.
 
 Provenance legend:
@@ -86,7 +146,7 @@ Provenance legend:
   stronger than a fixture (it is the shipped binary's own contract) but
   not observed end to end in a live flow.
 
-## 1. Spawn argv (`--remote-control` — optional since issue #163) — live (2.1.198; no-remote arm live 2.1.206)
+## 1. Spawn argv (`--remote-control` — optional since issue #163) — live (2.1.198; no-remote arm live 2.1.206); flags re-probed on 2.1.221 (2026-08-04)
 
 ```
 {claude} [--remote-control <session>] --permission-mode auto [--model M] [--effort E]
@@ -102,6 +162,26 @@ Provenance legend:
 - `--remote-control [name]` exists on 2.1.198; the session name is an
   *optional argument to the flag* (matches v0 usage). live.
 - `--permission-mode <mode>` exists. live.
+- **`auto` is the mode whose classifier 2.1.221 fixed a bypass in — the
+  reason this pin was taken.** 2.1.221: *"Fixed a Bash tool permission-check
+  bypass where zsh could execute hidden commands in `[[ ]]` regex
+  conditionals; affected commands now prompt for permission."* Reachability is
+  **conditional**, written down here so the next sweep does not re-derive it:
+  lab always spawns `--permission-mode auto` and lab's runs are *unattended*,
+  so that classifier is the only guard and nobody is watching it — but **the
+  shell is not lab's to choose**. `grep -rn zsh` over this repo returns zero
+  hits, and the agent-tools image (`containers/agent-tools/Containerfile.claude`)
+  is `FROM scratch`: the `claude` binary, `labctl`, and a musl loader, with no
+  shell at all. The session shell comes from the operator-supplied dev image
+  (`--container-image`, `internal/config/config.go:174`), which lab does not
+  pin. So on a bash-only dev image the specific bypass is **not reachable**; on
+  a dev image shipping zsh as the session shell it **is**, with a blast radius
+  of one container instance and its mounted worktree. Defense in depth worth
+  taking — not an incident. The companion 2.1.221 fix (PowerShell permission
+  checks mishandling quote characters in paths on Windows) cannot reach lab at
+  all: lab spawns Linux containers only.
+- The `--permission-mode` value rename `default` → `manual` (a 2.1.220-era
+  change) does not touch lab: lab pins `auto`, whose name did not move.
 - `--remote-control-session-name-prefix <prefix>` (default: hostname) is
   new since v0 — unused by lab, noted for the future.
 - Flag order model-then-effort is lab's own pinned M3 constant (v0
@@ -142,7 +222,7 @@ Provenance legend:
   graceful exit only (SIGKILL leaves stale files ⇒ pid-alive +
   newest-startedAt filtering).
 
-## 3. Auth status + login flow — status live (2.1.198), URL shape fixture (2.1.150)
+## 3. Auth status + login flow — status live (2.1.198), URL shape fixture (2.1.150); status re-probed on 2.1.221 (2026-08-04)
 
 - `claude auth status --json`: exits 0 when logged in on 2.1.198;
   top-level keys observed live: `apiProvider`, `authMethod`, `email`,
@@ -166,7 +246,7 @@ Provenance legend:
   20s, loginPoll 1s, authTTL 30s, bridgeTimeout 30s, poll cadence 200ms,
   login code cap 4096.
 
-## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214 2026-07-22; 2.1.198 re-probed 2026-07-23)
+## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214 2026-07-22; 2.1.198 re-probed 2026-07-23; 2.1.220 + 2.1.221 re-probed 2026-08-04)
 
 - `CLAUDE_CONFIG_DIR` outranks HOME for **all** claude state: with it set,
   `.claude.json`, `projects/` (transcripts), `backups/`, and the
@@ -691,7 +771,7 @@ send-keys recipe above is unchanged. The UI shows **no queue affordance**:
 no optimistic echo, no "queued" hint — the reply becomes visible only
 when the transcript reflects it.
 
-## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08; multi-select re-driven 2026-07-09)
+## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08; multi-select re-driven 2026-07-09; whole suite re-driven live on 2.1.220 AND 2.1.221, 2026-08-04)
 
 An interactive dialog is an **unanswered** `tool_use` in the transcript (or,
 live, the §9 spool — one mapper, two sources) for a recognised tool. Option
@@ -928,6 +1008,27 @@ counter (issue #7 decision 12) — intervention neutrality is structural
 is tmux-hermetic; the claude-side Escape-interrupts-the-turn behavior is
 re-verified live on upgrades.
 
+**Two 2.1.221 notes that live next to this recipe** (neither changed a pin;
+both are recorded so the next sweep does not re-investigate them):
+
+- 2.1.221: *"Fixed @-mentioned files being silently dropped when pressing Esc
+  to retract a prompt and resubmitting it."* This moves what Esc does to a
+  **composed-but-unsent** prompt, which is a different keystroke context from
+  lab's interrupt (Escape sent at a *working* session to stop a turn). Lab
+  never composes-then-retracts: `Provider.Interrupt` sends a bare `Escape`
+  and the composer content is the operator's, sent via the reply recipe (§6).
+  Re-verified on 2.1.221 alongside the §7 recipes — the live suite drives a
+  real dialog and reads the transcript back, and no new transcript shape
+  appeared that `ParseTranscript` had not seen.
+- 2.1.221: *"Fixed `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=0` not disabling
+  interrupted-turn auto-resume; falsy values are now honored."* Lab does
+  **not** set this variable (`grep -rn CLAUDE_CODE_RESUME internal/` → no
+  hits), so lab stays on the default path and the fix changes nothing for it.
+  It is noted *here*, next to the interrupt, because interrupted-turn
+  auto-resume is precisely what lab's Escape produces — if lab ever wants an
+  interrupt that does NOT auto-resume, this env knob is the seam, and it only
+  honors falsy values from 2.1.221 onward.
+
 ## 9. Dialog-capture hook contract — live end-to-end (2.1.198)
 
 Because a pending dialog is invisible in the transcript live (§5,
@@ -1031,7 +1132,7 @@ When a Claude Code upgrade breaks live dialog capture, re-verify: the settings
 and that `--settings` still merges additively — then update the port, the
 fixtures, the tests, and this section in one commit.
 
-## 10. Builtin slash-command catalog — bundle extraction (2.1.198, 2026-07-08)
+## 10. Builtin slash-command catalog — bundle extraction (2.1.198, 2026-07-08; re-scraped 2.1.220 + 2.1.221, 2026-08-04)
 
 The command catalog (issue #51 decision 5; `claudecode/commands.go`, served
 as `GET /api/v1/runs/{id}/commands`) merges a **pinned builtin table** with
@@ -1071,7 +1172,7 @@ the per-row reason:
 | `add-dir` | interactive UI; would widen the session beyond lab's worktree isolation |
 | `agents` | 2.1.198 ships a removal stub (description literally starts "(removed)"); zero value in chat |
 | `config` | opens the settings panel (aliases `settings`) |
-| `doctor` | interactive diagnostics UI |
+| `doctor` | **Reason corrected 2026-08-04** — it is no longer an "interactive diagnostics UI"; by 2.1.221 it is a bundled prompt-skill that runs as a MODEL TURN, so the old reason was factually wrong and would have argued for ChatSafe=true. The verdict stays `false` on the curation rule's *second* clause: its remit is mutating operator-global and project config (disable "dead weight" MCP servers/plugins, deduplicate and trim CLAUDE.md files, rewrite settings) — the same "targeting user-global settings, invasive from lab" objection that excludes `statusline`. |
 | `exit` | quits the CLI — kills the session lab manages (aliases `quit`; description getter env-dependent, pinned to "Exit the CLI") |
 | `feedback` | interactive submission UI |
 | `hooks` | interactive viewer — and lab injects its own hooks (§9) |
@@ -1097,6 +1198,156 @@ here so the next re-extraction doesn't hunt for them): `output-style`, `vim`,
 internal/hidden/experimental commands (`btw`, `fork`, `radio`, `stickers`,
 `heapdump`, `teleport`, …) — the table pins the operator-relevant surface,
 not the bundle's entire command registry; re-curate on upgrade.
+
+### 2.1.221 re-scrape (2026-08-04) — no drift, and the size of the standing gap
+
+Re-extracted from the sha256-verified **2.1.221 linux-x64-musl artifact** (the
+image input itself, not a twin) and A/B'd against the outgoing 2.1.220 binary
+with the same extractor, so a difference could not be an artifact of the regex:
+
+- **Nothing drifted between 2.1.220 and 2.1.221.** Every check below produced
+  the same answer on both binaries, so this bump introduced no §10 movement at
+  all. All 33 pinned rows are present on 2.1.221; all 33 argHints are verbatim.
+- **But the re-scrape found three pinned DESCRIPTIONS that are stale — a
+  pre-existing miss, not this bump.** `doctor`, `feedback`, and
+  `usage-credits` no longer carry the text pinned from the 2.1.198 scrape, and
+  they are equally stale on **2.1.220**, so the drift landed sometime between
+  2.1.198 and 2.1.220 and went unnoticed because the 2.1.220 pass re-checked
+  only the **ten chat-safe rows** (see its note above, which says exactly
+  that). All three are curated-out rows, so nothing chat-facing ever served
+  the wrong text, and `TestCompat_BuiltinCommands_pinned` did not catch it
+  because it pins `clear`'s row plus the chat-safe set. `commands.go` is
+  updated to the 2.1.221 text, quoted verbatim in the commit message:
+
+  | row | pinned text (2.1.198, now wrong) | 2.1.221 bundle text (now pinned) |
+  | --- | --- | --- |
+  | `feedback` | "Submit feedback, report a bug, or share your conversation" | "Send feedback to Anthropic or report a bug" |
+  | `usage-credits` | "Configure usage credits to keep working when you hit a limit" | "Configure usage credits or request them from your admin when you hit a limit" |
+  | `doctor` | "Diagnose and verify your Claude Code installation and settings" | "Health-check your setup and fix issues: installation, unused extensions, duplicated or bloated memory files, slow hooks, updates, permissions" |
+
+  `doctor` is a **shape** change, not just a wording one, and it is the
+  method-level lesson of this sweep: its row now carries **two** description
+  keys — an operator-facing `menuDescription` (the text above, what the TUI
+  menu renders) and a `description` that has become a long *model-facing*
+  prompt. The old pinned sentence is gone from the bundle entirely. This row
+  pins the `menuDescription`, because §10's table is operator autocomplete
+  metadata. Checked deliberately: of the 33 pinned rows only `doctor` carries
+  a `menuDescription` at 2.1.221 (the other 18 rows that have one are claude's
+  bundled *skills*, which lab never pins), so no other row can be silently
+  shadowed the same way.
+- **Method corrections — read these before the next re-scrape.** This section's
+  stated method is no longer sufficient on its own, and the 2026-08-04 sweep
+  found three separate ways to get a clean-looking but wrong answer:
+  1. The documented `tr -c '[:print:]' '\n'` strings dump **drops any string
+     inside a printable run longer than the tool's line limit**, which is most
+     of a 30 MB single-line minified bundle. Use it as corroboration only; a
+     brace-balanced parse of the JS definitions is the load-bearing read.
+  2. A forward regex over `description:"…"` **misses rows that renamed the
+     key** (`doctor` → `menuDescription`) and reports them as *absent* rather
+     than *changed*. The check that actually settles drift is the REVERSE
+     direction: take each pinned string and grep the raw binary for it. That
+     is what caught all three stale rows here.
+  3. Some rows carry `get description()` instead of a literal, so a
+     field-level diff cannot see them at all. §10 already flagged `init`,
+     `exit`, `model`, `terminal-setup` — **add `login` to that list**. Their
+     getter *bodies* were extracted and diffed textually A/B: byte-identical,
+     and every pinned text is still the default branch. Worth knowing:
+     `exit`'s getter now branches on background-session kind ("Detach from
+     this background session (it keeps running)" vs the pinned "Exit the
+     CLI"), and `terminal-setup` now has four branches rather than two.
+- **Alias drift (documented here, never served):** `resume` gained
+  `aliases:["continue"]` and `feedback` carries `aliases:["share"]`; the alias
+  lists above predate both. Aliases are documentation only, so nothing served
+  changed.
+- **`/status` specifically: byte-identical.** This was the one expected
+  break — 2.1.221's changelog says `/status` now shows the session kind
+  (`interactive`, or a background job that is `attached`/`unattended`). The
+  behavior moved; the **description string did not**. The pinned text
+  ("Show Claude Code status including version, model, account, API
+  connectivity, and tool statuses") occurs in the 2.1.221 bundle exactly as in
+  2.1.220, in the same `status` command definition. A behavior change need not
+  move the description — but this is what the verbatim pin exists to catch, so
+  it was checked rather than assumed. (Related: the registry entry §12 quotes
+  already carries a `"kind":"interactive"` field, so "session kind" is not a
+  new concept in the CLI, only newly surfaced in `/status`.)
+- **The whole type-literal command registry is byte-identical between 2.1.220
+  and 2.1.221**: 105 rows on each, zero added, zero removed, zero description
+  changes. The only bundle movement is in claude's own *bundled skills*
+  (a separate registry, 31 → 32 rows: `artifact-diagramming` and `prototype`
+  added, `code-review` removed) — those are claude-side skills, not builtins,
+  and lab's catalog reaches skills only by scanning the worktree, so they
+  touch nothing here.
+
+**The standing gap, measured and deliberately left standing.** The pinned table
+is 33 rows; the 2.1.221 registry carries **105**. That 72-row delta is
+**pre-existing and not this bump's drift** — it is byte-identical on 2.1.220,
+so it accumulated between 2.1.198 and 2.1.220 and no earlier pass measured it.
+Nearly all of the delta is correctly out: hidden rows (`isHidden` set),
+capability-gated rows whose `isEnabled` predicate is false outside a cloud or
+IDE context, billing/rate-limit interstitials, terminal-only settings
+(`theme`, `color`, `tui`, `scroll-speed`, `keybindings`, `voice`, `fast`,
+`effort`), and provider-setup flows (`setup-bedrock`, `setup-vertex`). The rows
+a future curation pass should weigh — recorded here **as deliberately omitted
+today**, so the next sweep neither re-hunts them nor assumes they were missed:
+
+| candidate | verdict today, and why |
+| --- | --- |
+| `help` | The strongest add candidate: executes inline, returns to the prompt. Omitted only because widening the *served* composer surface is a product decision, not a pin bump — see the note below. |
+| `skills`, `insights`, `recap` | Inline/prompt-type rows that would plausibly be ChatSafe. Same reason as `help`. |
+| `fork` | **ChatSafe=false, and it stays out.** See the dedicated decision below. |
+| `cd` | ChatSafe=false — "Move this session to a new working directory" relocates the session out of the worktree lab created for it, breaking worktree isolation and the §5 transcript-slug identity in one move. |
+| `background`, `stop`, `tasks`, `subtask`, `daemon`, `branch` | ChatSafe=false — session-lifecycle commands that fight lab's own management of the run (lab owns start/stop, the done-signal, and the claim). |
+| `diff`, `copy` | ChatSafe=false — `diff` opens a viewer lab cannot render; `copy` targets a clipboard that does not exist on the server-side tmux pane. |
+
+Deliberately NOT widening the served table in this commit: adding rows changes
+what the composer offers every operator, which is a product change that wants
+its own issue and its own review, whereas this commit is a pin bump plus the
+re-verification the bump procedure demands (issue #273 scope: "if you find
+yourself rewriting the adapter, stop and report"). The gap is now *measured*
+and written down, which it was not before.
+
+**`/fork` — explicit ChatSafe decision: `false`, not served, not pinned.**
+
+It is a **real, visible, enabled** row in a lab session, not dormant
+experimental noise — the check matters, because "hidden anyway" would have
+been the lazy reason. It ships as **two** `local-jsx` definitions, neither
+hidden, both gated `isEnabled:()=>!Nb()`, where `Nb()` requires
+`CLAUDE_CODE_COORDINATOR_MODE` — which lab does not set, so the gate is open in
+every lab session. Both texts are byte-identical to 2.1.220:
+
+```
+"Copy this conversation into a new background session and keep working here"   argumentHint: "[prompt]"
+"Spawn a background agent that inherits the full conversation"                 argumentHint: "<directive>"
+```
+
+Only the first carries a `load:` handler, so **which of the two an operator
+would actually see is not established by static reading** — noted rather than
+guessed, and it does not change the verdict, since both describe the same
+hazard.
+
+The verdict rests on the curation rule's **second** clause (fights lab's own
+management of the session), on three independent grounds:
+
+1. **Transcript identity.** A fork spawns a session lab did not spawn and
+   cannot supervise, whose transcript sits outside the run ↔ transcript
+   mapping §5 depends on. This is exactly the hazard that already disqualifies
+   `/resume`.
+2. **Worktree leakage.** 2.1.221 sharpened this one: the changelog records that
+   *"sessions forked with `/fork` create a new worktree of their own instead of
+   working in the original session's checkout."* Every lab instance **already
+   is** a linked git worktree lab created and will prune
+   (`internal/gitx/worktree.go` — `git worktree add -b <branch> <path>
+   origin/<base>`). A fork cutting its own worktree inside that leaves a
+   checkout lab never registered, outside the instance lifecycle, invisible to
+   the run's diff and PR, and never cleaned up.
+3. **Unsupervised background session** — the same objection as
+   `background`/`tasks`.
+
+Three clauses point the same way, so this is settled rather than a judgement
+call to re-litigate each sweep; revisit only if lab ever grows a way to adopt a
+claude-created worktree as a real instance. **`/subtask` inherits the identical
+verdict** — it shares `/fork`'s spawn path in the bundle, so it leaks the same
+unsupervised session.
 
 Scanned sources merged after the builtins (both ChatSafe — a custom
 command/skill is a prompt template, claude runs it as a normal turn):
@@ -1183,7 +1434,7 @@ line. The env name is undocumented bundle-internal surface (`lZe` on
 strings-dump technique) — then update the adapter, the tests, and this
 section in one commit.
 
-## 12. Spawning WITHOUT `--remote-control` — live (2.1.206, 2026-07-14)
+## 12. Spawning WITHOUT `--remote-control` — live (2.1.206, 2026-07-14); recipe arm re-driven live on 2.1.220 + 2.1.221 (2026-08-04)
 
 Issue #163 turns `--remote-control` into a lab-gated knob (default off), which
 puts four couplings on trial: the process lifecycle (the AFK done-signal's
@@ -1389,7 +1640,13 @@ the transcript back and asserts the RECORDED answers (§5 `toolUseResult`)
 match the intent — the same comparison the backstop makes. They exist so the
 next Claude Code upgrade re-verifies the §7 recipes with one command instead
 of a by-hand TUI session; they need tmux + a logged-in claude and take a few
-minutes. (They watch the pane via `capture-pane` to know WHEN the picker is
+minutes. **Run them against the OUTGOING pin first, then the incoming one, and
+diff** — that is what makes a result readable: on the 2.1.221 bump the same
+six tests passed with zero skips on both binaries, so "green" meant "no drift"
+rather than "green for some other reason". Confirm from the `-v` output that
+the tests actually RAN: every one of them carries its own skip-gate (no
+`LAB_COMPAT_LIVE=1`, no tmux, no `claude` on PATH, not logged in) and **a
+skipped run is not a pass**. (They watch the pane via `capture-pane` to know WHEN the picker is
 up — that is the verification harness observing its own probe, not a
 production scrape; the recipes themselves stay blind.)
 
