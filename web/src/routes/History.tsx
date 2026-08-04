@@ -24,6 +24,7 @@ import {
   type RunKind,
   type RunOutcome,
 } from '../api';
+import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import RequireAuth from '../components/RequireAuth';
 import SectionHead from '../components/SectionHead';
@@ -122,10 +123,10 @@ function HistoryView() {
           </div>
         </Match>
         <Match when={runs()?.length === 0}>
-          <p class="empty">No runs yet.</p>
+          <EmptyState>No runs yet.</EmptyState>
         </Match>
         <Match when={runs() !== undefined && visible().length === 0}>
-          <p class="empty">No {outcomeFilter()} runs.</p>
+          <EmptyState>No {outcomeFilter()} runs.</EmptyState>
         </Match>
         <Match when={runs()}>
           <div class="card-list">

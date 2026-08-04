@@ -9,6 +9,7 @@ import { For, Match, Switch, createResource } from 'solid-js';
 import { errorMessage, getRepo, listCRs, type CRStateFilter, type CRSummary } from '../api';
 import ClosesChips from '../components/ClosesChips';
 import Crumbs, { type Crumb } from '../components/Crumbs';
+import EmptyState from '../components/EmptyState';
 import RequireAuth from '../components/RequireAuth';
 import SectionHead from '../components/SectionHead';
 import { formatDateTime } from '../lib/issues';
@@ -93,7 +94,7 @@ function RepoCRsView() {
           </div>
         </Match>
         <Match when={page() !== undefined && page()!.length === 0}>
-          <p class="empty">{emptyText()}</p>
+          <EmptyState>{emptyText()}</EmptyState>
         </Match>
         <Match when={page()}>
           <div class="card-list">

@@ -40,6 +40,7 @@ import {
   type SchedulePatch,
   type Settings,
 } from '../../../api';
+import EmptyState from '../../../components/EmptyState';
 import ErrorBanner from '../../../components/ErrorBanner';
 import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
@@ -205,10 +206,10 @@ export default function SchedulesSection(props: {
           </div>
         </Match>
         <Match when={schedules()?.length === 0}>
-          <p class="empty">
+          <EmptyState>
             No schedules yet — add one to investigate something on a cadence instead of remembering
             to.
-          </p>
+          </EmptyState>
         </Match>
         <Match when={schedules()}>
           <div class="card-list">

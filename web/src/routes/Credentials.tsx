@@ -16,6 +16,7 @@ import {
   type CredentialListItem,
 } from '../api';
 import ProviderAuthCard from '../components/ProviderAuthCard';
+import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
 import PayloadFields, { createPayloadDraft } from '../components/PayloadFields';
 import RequireAuth from '../components/RequireAuth';
@@ -92,7 +93,9 @@ function CredentialsView() {
           </div>
         </Match>
         <Match when={credentials()?.length === 0}>
-          <p class="empty">No credentials yet — add an SSH key or token to clone private repos.</p>
+          <EmptyState>
+            No credentials yet — add an SSH key or token to clone private repos.
+          </EmptyState>
         </Match>
         <Match when={credentials()}>
           <div class="card-list">
