@@ -177,8 +177,7 @@ describe('ListRowCard', () => {
       <ListRowCard
         title={
           <>
-            Pixel 8
-            <span class="muted"> · this device</span>
+            Pixel 8<span class="muted"> · this device</span>
           </>
         }
       />
