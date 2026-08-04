@@ -10,6 +10,7 @@ import { Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Repo, type RepoPatch, type Runner, type Settings } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { createSeededDrafts } from '../../../lib/seededDrafts';
@@ -102,8 +103,7 @@ export default function RunnerSection(props: {
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Runner</h2>
+      <SectionCard title="Runner">
         <Select
           skin="field"
           label="Runner"
@@ -118,11 +118,9 @@ export default function RunnerSection(props: {
             only; use the container runner once available.
           </small>
         </Show>
-      </section>
+      </SectionCard>
 
-      <section class="card">
-        <h2>Dev image</h2>
-        <small class="hint hint-block">Applies to container runs only.</small>
+      <SectionCard title="Dev image" hint="Applies to container runs only.">
         <label class="field">
           <span>Image reference</span>
           <input
@@ -137,11 +135,9 @@ export default function RunnerSection(props: {
             Resolved and pinned to a digest on save. Blank inherits the server's default image.
           </small>
         </label>
-      </section>
+      </SectionCard>
 
-      <section class="card">
-        <h2>Container limits</h2>
-        <small class="hint hint-block">Limits apply to container runs only.</small>
+      <SectionCard title="Container limits" hint="Limits apply to container runs only.">
         <label class="field">
           <span>Memory</span>
           <input
@@ -182,7 +178,7 @@ export default function RunnerSection(props: {
           />
           <small class="hint">Inherit global default — currently {nofileDefault()}</small>
         </label>
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save changes'}

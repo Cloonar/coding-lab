@@ -7,6 +7,7 @@ import { For, Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Provider, type Repo, type RepoPatch, type Settings } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { createSeededDrafts } from '../../../lib/seededDrafts';
@@ -163,8 +164,7 @@ export default function AgentsSection(props: {
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Spawn defaults</h2>
+      <SectionCard title="Spawn defaults">
         <Select
           skin="field"
           label="Agent"
@@ -216,14 +216,17 @@ export default function AgentsSection(props: {
         >
           {(name) => <small class="hint hint-block">{name()} ignores this.</small>}
         </Show>
-      </section>
+      </SectionCard>
 
-      <section class="card">
-        <h2>AFK defaults</h2>
-        <small class="hint hint-block">
-          Overrides for unattended AFK runs on this repo. Blank / unchecked inherits the global AFK
-          default.
-        </small>
+      <SectionCard
+        title="AFK defaults"
+        hint={
+          <>
+            Overrides for unattended AFK runs on this repo. Blank / unchecked inherits the global
+            AFK default.
+          </>
+        }
+      >
         <Select
           skin="field"
           label="AFK agent"
@@ -308,10 +311,9 @@ export default function AgentsSection(props: {
           The run is detected as done only by an open PR on its branch — a prompt that never opens a
           PR burns its budget, counts as a failure, and three failures auto-pause the repo's AFK.
         </small>
-      </section>
+      </SectionCard>
 
-      <section class="card">
-        <h2>AFK</h2>
+      <SectionCard title="AFK">
         <label class="check">
           <input
             type="checkbox"
@@ -347,7 +349,7 @@ export default function AgentsSection(props: {
             onInput={(e) => setMaxInstances(e.currentTarget.value)}
           />
         </label>
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save changes'}

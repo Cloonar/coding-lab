@@ -6,6 +6,7 @@ import { Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Repo, type RepoPatch } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { createSeededDrafts } from '../../../lib/seededDrafts';
 import { normText } from '../shared';
@@ -60,8 +61,7 @@ export default function GeneralSection(props: { repo: Accessor<Repo>; onSaved: (
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Identity</h2>
+      <SectionCard title="Identity">
         <label class="field">
           <span>Name</span>
           <input
@@ -97,10 +97,9 @@ export default function GeneralSection(props: { repo: Accessor<Repo>; onSaved: (
           />
           <small class="hint">Blank → global setting.</small>
         </label>
-      </section>
+      </SectionCard>
 
-      <section class="card">
-        <h2>Incogni</h2>
+      <SectionCard title="Incogni">
         <label class="check">
           <input
             type="checkbox"
@@ -115,7 +114,7 @@ export default function GeneralSection(props: { repo: Accessor<Repo>; onSaved: (
           pattern or prefix above — adjust those yourself if needed. It cannot hide the forge
           account of the token used, nor style or timing signals.
         </small>
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save changes'}

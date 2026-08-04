@@ -259,7 +259,9 @@ export function cardByHeading(heading: string): HTMLElement {
 
 /** Like cardByHeading but returns null instead of throwing (parity tests). */
 export function cardByHeadingOrNull(heading: string): HTMLElement | null {
-  const headings = Array.from(container.querySelectorAll('section.card > h2'));
+  // Descendant, not direct child: SectionCard (issue #275) nests the title
+  // `<h2>` inside the `.card-head.section-card-head` row.
+  const headings = Array.from(container.querySelectorAll('section.card h2'));
   const h2 = headings.find((el) => el.textContent === heading);
   return (h2?.closest('section.card') as HTMLElement | undefined) ?? null;
 }

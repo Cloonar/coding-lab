@@ -41,6 +41,7 @@ import {
   type Settings,
 } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import {
   MONTH_DAY_MAX,
@@ -166,18 +167,20 @@ export default function SchedulesSection(props: {
     (flows() ?? []).find((flow) => flow.key === key)?.label ?? key;
 
   return (
-    <section class="card">
-      <div class="card-head">
-        <h2>Schedules</h2>
-        <span class="spacer" />
+    <SectionCard
+      title="Schedules"
+      action={
         <button type="button" class="primary small" onClick={toggleCreate}>
           {showCreate() ? 'Cancel' : '+ Add schedule'}
         </button>
-      </div>
-      <small class="hint hint-block">
-        A schedule fires a scheduled run on its cadence — the prompt and the selected flows brief
-        it, and it ends when its budget expires. Cadences run in the server's local time.
-      </small>
+      }
+      hint={
+        <>
+          A schedule fires a scheduled run on its cadence — the prompt and the selected flows brief
+          it, and it ends when its budget expires. Cadences run in the server's local time.
+        </>
+      }
+    >
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Show when={note()}>
         <div class="banner success" role="status">
@@ -229,7 +232,7 @@ export default function SchedulesSection(props: {
           </div>
         </Match>
       </Switch>
-    </section>
+    </SectionCard>
   );
 }
 

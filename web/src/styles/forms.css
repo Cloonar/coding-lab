@@ -53,7 +53,7 @@
   display: block;
   font-size: 0.82rem;
   color: var(--muted);
-  margin: -0.35rem 0 0.9rem;
+  margin: 0 0 0.9rem;
 }
 
 select:focus-visible,

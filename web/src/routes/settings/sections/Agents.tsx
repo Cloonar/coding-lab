@@ -20,6 +20,7 @@ import {
 } from '../../../api';
 import Select, { type SelectOption } from '../../../components/Select';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { providerFor } from '../../../lib/spawn';
 
@@ -263,8 +264,7 @@ export default function Agents(props: {
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Spawn defaults</h2>
+      <SectionCard title="Spawn defaults">
         <Select
           skin="field"
           label="Agent"
@@ -330,14 +330,17 @@ export default function Agents(props: {
         {/* Not seeded server-side (issue #124): absent from GET renders as a
             blank input, distinct from an explicit 0 ("never"). */}
         <For each={SPAWN_INT_FIELDS}>{intFieldRow}</For>
-      </section>
+      </SectionCard>
 
-      <section class="card">
-        <h2>AFK defaults</h2>
-        <small class="hint hint-block">
-          Used for unattended AFK runs. Leave a field on “Same as default” to inherit the spawn
-          default above.
-        </small>
+      <SectionCard
+        title="AFK defaults"
+        hint={
+          <>
+            Used for unattended AFK runs. Leave a field on “Same as default” to inherit the spawn
+            default above.
+          </>
+        }
+      >
         <Select
           skin="field"
           label="AFK agent"
@@ -417,12 +420,11 @@ export default function Agents(props: {
           The run is detected as done only by an open PR on its branch — a prompt that never opens a
           PR burns its budget, counts as a failure, and three failures auto-pause the repo's AFK.
         </small>
-      </section>
+      </SectionCard>
 
-      <section class="card">
-        <h2>Capacity & AFK</h2>
+      <SectionCard title="Capacity & AFK">
         <For each={CAPACITY_INT_FIELDS}>{intFieldRow}</For>
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save settings'}

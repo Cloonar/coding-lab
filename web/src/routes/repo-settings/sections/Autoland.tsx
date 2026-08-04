@@ -7,6 +7,7 @@ import { Show } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import { updateRepo, type Provider, type Repo, type RepoPatch, type Settings } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 import { createSeededDrafts } from '../../../lib/seededDrafts';
@@ -113,8 +114,7 @@ export default function AutolandSection(props: {
         </div>
       </Show>
 
-      <section class="card">
-        <h2>Autoland</h2>
+      <SectionCard title="Autoland">
         <label class="check">
           <input
             type="checkbox"
@@ -179,7 +179,7 @@ export default function AutolandSection(props: {
           inheritLabel="Inherit repo default"
           onChange={setLanderEffort}
         />
-      </section>
+      </SectionCard>
 
       <button type="submit" class="primary wide" disabled={form.busy()}>
         {form.busy() ? 'Saving…' : 'Save changes'}

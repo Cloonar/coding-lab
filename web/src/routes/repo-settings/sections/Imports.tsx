@@ -17,6 +17,7 @@ import {
   type RepoImport,
 } from '../../../api';
 import ErrorBanner from '../../../components/ErrorBanner';
+import SectionCard from '../../../components/SectionCard';
 import Select, { type SelectOption } from '../../../components/Select';
 
 /**
@@ -53,17 +54,19 @@ export default function ImportsSection(props: { repoId: string }) {
   });
 
   return (
-    <section class="card">
-      <div class="card-head">
-        <h2>Imports</h2>
-        <span class="spacer" />
+    <SectionCard
+      title="Imports"
+      action={
         <button type="button" class="primary small" onClick={() => setShowAdd(!showAdd())}>
           {showAdd() ? 'Cancel' : '+ Add import'}
         </button>
-      </div>
-      <small class="hint hint-block">
-        Other lab repos this repo's instances may read as read-only snapshots, mounted at spawn.
-      </small>
+      }
+      hint={
+        <>
+          Other lab repos this repo's instances may read as read-only snapshots, mounted at spawn.
+        </>
+      }
+    >
       <ErrorBanner message={error()} onDismiss={() => setError(null)} />
       <Show when={showAdd()}>
         <AddImportForm
@@ -102,7 +105,7 @@ export default function ImportsSection(props: { repoId: string }) {
           </div>
         </Match>
       </Switch>
-    </section>
+    </SectionCard>
   );
 }
 
