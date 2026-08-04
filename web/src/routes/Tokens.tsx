@@ -14,6 +14,7 @@ import {
 } from '../api';
 import EmptyState from '../components/EmptyState';
 import ErrorBanner from '../components/ErrorBanner';
+import FormCard from '../components/FormCard';
 import RequireAuth from '../components/RequireAuth';
 
 function onDate(timestamp: string): string {
@@ -93,27 +94,28 @@ function CreateTokenCard(props: { onCreated: (token: CreatedApiToken) => void })
   };
 
   return (
-    <div class="card form-card">
-      <h2>New token</h2>
-      <ErrorBanner message={error()} onDismiss={() => setError(null)} />
-      <form onSubmit={(e) => void submit(e)}>
-        <label class="field">
-          <span>Name</span>
-          <input
-            type="text"
-            name="token-name"
-            required
-            autocomplete="off"
-            placeholder="ci-deploy"
-            value={name()}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-        </label>
-        <button type="submit" class="primary" disabled={busy()}>
-          {busy() ? 'Creating…' : 'Create token'}
-        </button>
-      </form>
-    </div>
+    <FormCard
+      title="New token"
+      error={error()}
+      onDismissError={() => setError(null)}
+      onSubmit={(e) => void submit(e)}
+      busy={busy()}
+      submitLabel="Create token"
+      busyLabel="Creating…"
+    >
+      <label class="field">
+        <span>Name</span>
+        <input
+          type="text"
+          name="token-name"
+          required
+          autocomplete="off"
+          placeholder="ci-deploy"
+          value={name()}
+          onInput={(e) => setName(e.currentTarget.value)}
+        />
+      </label>
+    </FormCard>
   );
 }
 
