@@ -7,7 +7,7 @@ import { useNavigate, useParams } from '@solidjs/router';
 import { Match, Show, Switch, createResource, createSignal } from 'solid-js';
 import { createIssue, errorMessage, getRepo, listLabels, type CreateIssueRequest } from '../api';
 import Crumbs, { type Crumb } from '../components/Crumbs';
-import ErrorBanner from '../components/ErrorBanner';
+import FormCard from '../components/FormCard';
 import LabelPicker from '../components/LabelPicker';
 import RequireAuth from '../components/RequireAuth';
 import { canMutateTracker } from '../lib/issues';
@@ -95,8 +95,15 @@ function NewIssueView() {
           <p class="muted forge-note">Managed on the forge — create issues there.</p>
         </Match>
         <Match when={repo()}>
-          <form class="card form-card" onSubmit={(e) => void submit(e)}>
-            <ErrorBanner message={error()} onDismiss={() => setError(null)} />
+          <FormCard
+            error={error()}
+            onDismissError={() => setError(null)}
+            onSubmit={(e) => void submit(e)}
+            busy={busy()}
+            wide
+            submitLabel="Create issue"
+            busyLabel="Creating…"
+          >
             <label class="field">
               <span>Title</span>
               <input
@@ -128,10 +135,7 @@ function NewIssueView() {
                 />
               </div>
             </Show>
-            <button type="submit" class="primary wide" disabled={busy()}>
-              {busy() ? 'Creating…' : 'Create issue'}
-            </button>
-          </form>
+          </FormCard>
         </Match>
       </Switch>
     </main>
