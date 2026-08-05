@@ -60,7 +60,7 @@
 #   enable defaults to TRUE (ADR-0054): enabling lab means container-ready
 #   provisioning, and toolsImages defaults to the CLI-version tags from
 #   containers/agent-tools/versions.env — the committed pin the publish
-#   job (.forgejo/workflows/agent-tools.yml, path-gated) builds from, so
+#   job (.github/workflows/agent-tools.yml, path-gated) builds from, so
 #   the default refs only move when the agent-tools inputs change and
 #   always name an already-published image. A host that must not run
 #   containers sets container.enable = false and gets the byte-identical
@@ -500,11 +500,11 @@ in
 
       toolsImageRepo = lib.mkOption {
         type = lib.types.nonEmptyStr;
-        default = "git.cloonar.com/cloonar/agent-tools";
+        default = "ghcr.io/cloonar/agent-tools";
         description = ''
           OCI repository (registry/namespace/name, no tag) the default
           {option}`toolsImages` refs point into — where
-          `.forgejo/workflows/agent-tools.yml` publishes. The lab host pulls
+          `.github/workflows/agent-tools.yml` publishes. The lab host pulls
           from it anonymously (the module provisions no registry
           credentials), which the publish job verifies after every push.
           Only consulted by the {option}`toolsImages` default; an explicit
@@ -519,7 +519,7 @@ in
           codex = agentToolsDefault "codex" "CODEX_VERSION";
         };
         defaultText = lib.literalExpression ''{ "claude-code" = "''${toolsImageRepo}:claude-''${CLAUDE_CODE_VERSION}"; codex = "''${toolsImageRepo}:codex-''${CODEX_VERSION}"; } — the CLI versions from containers/agent-tools/versions.env'';
-        example = lib.literalExpression ''{ "claude-code" = "git.cloonar.com/cloonar/agent-tools:claude-code@sha256:…"; }'';
+        example = lib.literalExpression ''{ "claude-code" = "ghcr.io/cloonar/agent-tools:claude-code@sha256:…"; }'';
         description = ''
           Agent-tools OCI image refs (--container-tools-image), keyed by lab
           provider ID — the same strings the provider registry, the DB

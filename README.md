@@ -158,7 +158,7 @@ lab is itself a product of the workflow it hosts: this codebase is the productio
 
 ## Contributing
 
-Issues and pull requests live on [git.cloonar.com/Cloonar/coding-lab](https://git.cloonar.com/Cloonar/coding-lab). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev environment, test suites, CI gates, and the project's conventions (Conventional Commits, the `CONTEXT.md` vocabulary, ADRs).
+Issues and pull requests live on [github.com/Cloonar/coding-lab](https://github.com/Cloonar/coding-lab). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev environment, test suites, CI gates, and the project's conventions (Conventional Commits, the `CONTEXT.md` vocabulary, ADRs).
 
 ## License
 

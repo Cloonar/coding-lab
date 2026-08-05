@@ -37,10 +37,10 @@ The Go tests are integration-heavy by design: they run against real git repos, r
 
 ## CI
 
-Two Forgejo Actions gates run on pull requests (ADR-0023):
+Two GitHub Actions gates run on pull requests (ADR-0023), both required checks:
 
-- **native** (`.forgejo/workflows/ci.yml`) — runs on every PR, and is the required check: SPA eslint + prettier + vitest + `vite build`, the `ui`-tagged Go build and test suite, and golangci-lint. Typically 2–4 min.
-- **flake-check** (`.forgejo/workflows/ci-nix.yml`) — the full `nix flake check`, path-gated to nix and Go-dependency changes (`**/*.nix`, `flake.lock`, `go.mod`, `go.sum`). A dependency bump must go through it: it revalidates `nix/package.nix`'s `vendorHash`, which the native gate cannot catch.
+- **native** (`.github/workflows/ci.yml`) — runs on every PR: SPA eslint + prettier + vitest + `vite build`, the `ui`-tagged Go build and test suite, and golangci-lint. Typically 2–4 min.
+- **flake-check** (`.github/workflows/ci-nix.yml`) — the full `nix flake check`, path-gated to nix and Go-dependency changes (`**/*.nix`, `flake.lock`, `go.mod`, `go.sum`). A dependency bump must go through it: it revalidates `nix/package.nix`'s `vendorHash`, which the native gate cannot catch. On a PR touching none of those paths the same check name is reported by a no-op twin (`.github/workflows/ci-nix-noop.yml`) instead, so a required check never hangs a PR at "Expected".
 
 A third path-gated workflow (`agent-tools.yml`) builds and smoke-tests the agent-tools OCI images when `containers/**` changes.
 

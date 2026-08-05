@@ -326,10 +326,10 @@
                   "claude-code"
                   "codex"
                 ]
-                && lib.hasPrefix "git.cloonar.com/cloonar/agent-tools:claude-" defaultsDummy.config.services.lab.container.toolsImages."claude-code"
-                && lib.hasPrefix "git.cloonar.com/cloonar/agent-tools:codex-" defaultsDummy.config.services.lab.container.toolsImages.codex
+                && lib.hasPrefix "ghcr.io/cloonar/agent-tools:claude-" defaultsDummy.config.services.lab.container.toolsImages."claude-code"
+                && lib.hasPrefix "ghcr.io/cloonar/agent-tools:codex-" defaultsDummy.config.services.lab.container.toolsImages.codex
               )
-              "nixos-module check: the default toolsImages must carry claude-code + codex refs into git.cloonar.com/cloonar/agent-tools with claude-/codex- tag prefixes (#220)";
+              "nixos-module check: the default toolsImages must carry claude-code + codex refs into ghcr.io/cloonar/agent-tools with claude-/codex- tag prefixes (#220)";
             # Explicit defaultImage = null (per-repo image refs, ADR-0053):
             # the tools flag renders, the image flag does not. Reads only the
             # ExecStart string — never forces the dummy's unfree agent
@@ -466,8 +466,8 @@
                 # the invariant; systemd (the service user's user@ manager)
                 # places every container in its own transient scope.
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '--container-tools-image'
-                grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:claude-'
-                grep '^ExecStart=' "$unitPath" | grep -qF 'git.cloonar.com/cloonar/agent-tools:codex-'
+                grep '^ExecStart=' "$unitPath" | grep -qF 'ghcr.io/cloonar/agent-tools:claude-'
+                grep '^ExecStart=' "$unitPath" | grep -qF 'ghcr.io/cloonar/agent-tools:codex-'
                 grep '^ExecStart=' "$unitPath" | grep -qF -- '"--container-image" "docker.io/library/buildpack-deps:stable-scm@sha256:07554a82a7a29ce00a048e0b29d18f454b5721b41940d43ee3be1ef59d55b114"'
                 # lab.service must NEVER delegate — under ADR-0060 systemd (the
                 # user@ manager) performs all cgroup placement, so lab.service

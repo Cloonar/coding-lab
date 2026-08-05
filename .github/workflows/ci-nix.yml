@@ -20,6 +20,12 @@
 # daemonless `--init none`. Runner prerequisites — outbound egress for the
 # installer, proxy.golang.org, registry.npmjs.org, cache.nixos.org and the
 # flake inputs — are documented in docs/ops.md.
+#
+# Because this job is path-gated (below), it does not run on every PR, so it
+# cannot by itself satisfy a *required* status check — a PR that touches none
+# of these paths would leave `flake-check` pending forever. ci-nix-noop.yml is
+# its twin: same workflow name, same job id, inverse (paths-ignore) trigger,
+# so `flake-check` always reports from one workflow or the other.
 name: ci-nix
 
 on:
@@ -29,6 +35,10 @@ on:
       - flake.lock
       - go.mod
       - go.sum
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   flake-check:

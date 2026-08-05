@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues live on Forgejo at git.cloonar.com/Cloonar/coding-lab, managed with the `tea` CLI. See `docs/agents/issue-tracker.md`.
+Issues live on GitHub at github.com/Cloonar/coding-lab, managed with `labctl`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
