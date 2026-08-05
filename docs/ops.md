@@ -44,7 +44,7 @@ Full example — sops-provided master key, Postgres DSN via `environmentFile`:
 
 ```nix
 {
-  inputs.coding-lab.url = "git+https://git.cloonar.com/Cloonar/coding-lab";
+  inputs.coding-lab.url = "github:Cloonar/coding-lab";
 
   # in the host config:
   imports = [ coding-lab.nixosModules.lab ];

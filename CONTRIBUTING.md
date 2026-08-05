@@ -1,6 +1,6 @@
 # Contributing
 
-Issues and pull requests live on the project's Forgejo instance: [git.cloonar.com/Cloonar/coding-lab](https://git.cloonar.com/Cloonar/coding-lab). A PR that resolves an issue references it with `Closes #N` in the body.
+Issues and pull requests live on GitHub: [github.com/Cloonar/coding-lab](https://github.com/Cloonar/coding-lab). A PR that resolves an issue references it with `Closes #N` in the body.
 
 The project is licensed under the [GNU AGPL-3.0](LICENSE); by contributing you agree that your contributions are licensed under the same terms.
 
