@@ -1,27 +1,22 @@
 # lab
 
-`lab` is a self-hosted server with a phone-first web interface for managing remote coding agents against git repositories. The operator adds repositories and credentials in the UI, then starts **manual instances** (interactive agent sessions, driven from lab's own chat — and optionally spawned with the provider's remote control, which for claude-code adds a claude.ai deep link) or **AFK runs** (unattended sessions that resolve one `ready-for-agent` issue and open a PR) — from any device. Repos without a usable forge tracker get a built-in issue tracker with lab-internal change requests, reviewable and mergeable from the phone.
+**lab** is a self-hosted server with a phone-first web interface for running coding agents against your git repositories — interactively or unattended.
 
-This is the production rewrite of the `lab` prototype vendored read-only at [`docs/reference/lab-v0/`](docs/reference/lab-v0/README.md), which serves as the behavioral specification for the session/worktree/AFK core.
+You add repositories and credentials in the UI, then start **manual instances** (interactive agent sessions you drive from lab's built-in chat, from any device) or **AFK runs** (unattended sessions that pick up one `ready-for-agent` issue, resolve it, and open a pull request). Repositories without a usable forge tracker get a built-in issue tracker with lab-internal change requests — reviewable and mergeable from your phone.
 
-## Status
+## Features
 
-All eight milestones are shipped.
+- **Manual instances** — interactive agent sessions, each in its own git worktree on its own branch. Drive them through lab's embedded chat (messages, tool activity, answerable dialogs, interrupt), or hop into the provider's own web surface via a captured deep link (claude.ai for Claude Code).
+- **AFK runs** — unattended sessions that claim one `ready-for-agent` issue from the repo's tracker, resolve it, and open a PR. Budget clock, three-strikes pause, guarded teardown, restart-safe re-adoption.
+- **Multiple agent providers** — Claude Code and Codex ship today, behind an `AgentProvider` seam designed so a new provider is one adapter, zero refactor (see [`docs/agents/provider-authoring.md`](docs/agents/provider-authoring.md)).
+- **Tracker integration** — Forgejo and GitHub forges, or lab's built-in tracker (issues, labels, comments, change requests with diff view and merge from the UI). Agents talk to whichever tracker the repo binds through one CLI: `labctl`.
+- **Container or host runner** — per repo, sessions run either in a rootless podman container (your dev image + lab's injected agent tools) or directly on the host.
+- **Credentials vault** — SSH keys, HTTPS tokens, and forge API tokens encrypted at rest (AES-256-GCM, operator-owned master key file); secrets are never displayed back and never land in URLs or repo config.
+- **Incogni mode** — per-repo leak-proofing for agent-authored content: neutral branch names, attribution off, server-side body sanitization, and a pre-push guard.
+- **Operable by default** — single static Go binary with the SPA embedded, SQLite (default) or PostgreSQL, live updates over SSE, PWA with Web Push, `/healthz` `/readyz` `/metrics`.
+- **Nix-first packaging** — a flake with `packages.{lab,labctl}`, a full NixOS module, and a devshell; but the binary runs on any Linux.
 
-| Milestone | Scope | Status |
-|---|---|---|
-| M1 | Walking skeleton: flake (Go + embedded SPA), NixOS module, admin auth + sessions + CSRF, proxy-auth, SQLite/Postgres store + goose migrations, healthz/readyz, SSE heartbeat, CI | **shipped** |
-| M2 | Credentials vault (AES-256-GCM, master key file) + repos: async bare clones with SSE progress, forge detection, guarded removal | **shipped** |
-| M3 | Sessions core: manual instances, deep-link capture, guarded teardown, Parked view + Discard, startup re-adoption, fragile-couplings pinned against Claude Code 2.1.198 ([`internal/compat/compat.md`](internal/compat/compat.md)) | **shipped** |
-| M4 | Trackers: `Tracker` seam, Forgejo REST client, built-in issues/labels/comments, per-repo tracker binding, five triage labels seeded | **shipped** |
-| M5 | AFK engine + `labctl`: run tokens, agent API, scheduler/reaper/claims, persisted budget clock, three-strikes pause, PATs | **shipped** |
-| M6 | Change requests: CR create/diff/merge (ff or merge commit), `Closes #N`, CR as done-signal | **shipped** |
-| M7 | Incogni mode (all seven measures incl. the pre-push guard) + skills bundle seeding + `CLAUDE.local.md` | **shipped** |
-| M8 | Hardening: `/metrics`, PWA, Playwright smoke, full ops docs, definition-of-done pass | **shipped** |
-
-Verification status per definition-of-done item — including what is automated versus what needs a real host — is tracked in [`docs/definition-of-done.md`](docs/definition-of-done.md).
-
-## Architecture
+## How it works
 
 ```
 ┌─ SolidJS SPA (embedded static) ── PWA, SSE client
@@ -36,26 +31,63 @@ Verification status per definition-of-done item — including what is automated 
 │   ├─ RepoService        add(clone)/settings/remove; bare reference clones
 │   ├─ CredentialVault    AES-256-GCM at rest; materialize-for-op; master key file
 │   ├─ InstanceService    start/stop manual instances; deep-link capture
-│   ├─ AFKEngine          scheduler + reaper + claims (ported from v0)
-│   ├─ GitEngine          fetch/worktree/branch/teardown/sweep (ported from v0)
-│   ├─ TrackerRegistry    Tracker interface → forgejo | builtin   (github: #1)
+│   ├─ AFKEngine          scheduler + reaper + claims
+│   ├─ GitEngine          fetch/worktree/branch/teardown/sweep
+│   ├─ TrackerRegistry    Tracker interface → forgejo | github | builtin
 │   ├─ ProviderRegistry   AgentProvider interface → claude-code | codex
-│   ├─ SessionRunner      tmux wrapper (ported from v0) + prlimit cap
+│   ├─ SessionRunner      tmux wrapper + prlimit cap / rootless podman
 │   ├─ Seeder             trust, settings, skills bundle, CLAUDE.local.md, incogni
 │   └─ Store              SQLite/Postgres repositories + goose migrations
 │
-└─ External: tmux · git · ssh · claude CLI · Forgejo REST · (GitHub REST #1)
+└─ External: tmux · git · ssh · agent CLIs · forge REST APIs
 ```
 
-Source-of-truth layering (load-bearing): **tmux** answers "is the session alive"; **git refs** answer "what is claimed / what work exists"; **the tracker** answers "is there a PR / is the issue open"; **the DB** stores configuration, credentials, the built-in tracker, and run *history*. Reconciliation (startup + throttled sweep) re-derives live state; the DB is never the only witness to something the world can contradict.
+Source-of-truth layering (load-bearing): **tmux** answers "is the session alive"; **git refs** answer "what is claimed / what work exists"; **the tracker** answers "is there a PR / is the issue open"; **the DB** stores configuration, credentials, the built-in tracker, and run *history*. Reconciliation (startup + throttled sweep) re-derives live state; the DB is never the only witness to something the world can contradict. A service restart or deploy never kills a running session — lab re-adopts surviving sessions on startup.
 
-## Dev quickstart
+The unattended loop end to end: you label an issue `ready-for-agent` → the AFK scheduler claims it by creating a branch → the session gets a seeded prompt, the repo worktree, and `labctl` with a run token scoped to that one repo → the agent resolves the issue and opens a PR (or a lab-internal change request) referencing `Closes #N` → the reaper sees the PR as the done-signal and tears the run down under the guarded rule (dirty or unmerged work is parked, never destroyed) → you review and merge from your phone.
+
+## Getting started
+
+**[`docs/getting-started.md`](docs/getting-started.md)** walks the whole first session: install → login → credentials → first repo → first interactive instance → first unattended run. The short version:
+
+### Requirements
+
+Any Linux host. On PATH: `git`, `tmux`, `ssh` (openssh), `prlimit` (util-linux). Provider CLIs (`claude`, `codex`) are only needed for host-runner repos — with the container runner (the default on the NixOS module) they come from lab's published agent-tools images instead.
+
+### NixOS (recommended)
+
+```nix
+{
+  inputs.coding-lab.url = "git+https://git.cloonar.com/Cloonar/coding-lab";
+
+  # in the host config:
+  imports = [ coding-lab.nixosModules.lab ];
+  services.lab = {
+    enable = true;
+    baseUrl = "https://lab.example.com";   # set when behind TLS
+  };
+}
+```
+
+The module makes the host container-ready out of the box and asserts the load-bearing unit invariants (sessions survive service restarts). All options, secrets wiring (sops / `LoadCredential`), and reverse-proxy setup: [`docs/ops.md`](docs/ops.md).
+
+### Bare metal
+
+```sh
+git clone https://git.cloonar.com/Cloonar/coding-lab && cd coding-lab
+make lab labctl          # static binaries → bin/lab, bin/labctl  (needs Go 1.26 + Node)
+./bin/lab                # listens on :8080, state in ~/.local/state/lab, sqlite
+```
+
+Migrations apply on startup and the vault master key is auto-generated on first start; open the web UI and the first-run wizard creates the operator account. A systemd unit template and the full flag/env configuration reference are in [`docs/ops.md`](docs/ops.md).
+
+### Developing
 
 ```sh
 nix develop        # go, gopls, golangci-lint, node, git, tmux, util-linux, sqlite
 make lab           # build SPA + server binary with embedded UI → bin/lab
 make labctl        # agent-side CLI → bin/labctl
-make test          # go test ./...
+make test          # go test ./... (real git/tmux/prlimit integration tests)
 make lint          # golangci-lint run
 ```
 
@@ -66,11 +98,11 @@ go run ./cmd/lab        # API on :8080
 cd web && npm run dev   # Vite dev server; proxies /api and /healthz → :8080
 ```
 
-`nix flake check` is the CI truth: package builds (which carry the Go test suite against real git/tmux/prlimit and the SPA vitest suite), golangci-lint, and an eval-proven NixOS module with its unit invariants asserted.
+`nix flake check` is the CI truth: package builds (which carry the Go test suite against real git/tmux/prlimit and the SPA vitest suite), golangci-lint, and an eval-proven NixOS module with its unit invariants asserted. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Surfaces at a glance
 
-**Operator API** (`/api/v1`, session cookie or `lab_pat_…` bearer token, CSRF-guarded for ambient auth): first-run setup + login, PAT CRUD, credentials CRUD (no secret readback; delete 409s while referenced), repos (add → async bare clone with SSE progress, settings PATCH, guarded delete, clone retry), instances (start/stop/stop-all), Parked list + Discard, AFK (start / auto toggle / three-strikes reset), built-in issues + comments + labels + ready queue, change requests (list, detail with live diff, merge, close), run history, provider catalog + Claude auth (status / login start / login code), runtime settings, and `GET /api/v1/events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `clone.progress`, `claude.auth.changed`, `issue.changed`, `cr.changed`, `heartbeat`).
+**Operator API** (`/api/v1`, session cookie or `lab_pat_…` bearer token, CSRF-guarded for ambient auth): first-run setup + login, PAT CRUD, credentials CRUD (no secret readback; delete 409s while referenced), repos (add → async bare clone with SSE progress, settings PATCH, guarded delete, clone retry), instances (start/stop/stop-all), Parked list + Discard, AFK (start / auto toggle / three-strikes reset), built-in issues + comments + labels + ready queue, change requests (list, detail with live diff, merge, close), run history, provider catalog + provider auth (status / login start / login code), runtime settings, and `GET /api/v1/events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `clone.progress`, `claude.auth.changed`, `issue.changed`, `cr.changed`, `heartbeat`).
 
 **Agent API** (`/agent/v1`, run-token auth, scoped to the run's repo): issue view (the run's claimed issue) / list / create / comment / close, label add/remove/list, idempotent label create, PR create — routes everything to the repo's tracker binding (forge or built-in), injects/validates `Closes #N` on PR create, and applies incogni sanitization server-side to every agent-authored body.
 
@@ -93,22 +125,6 @@ labctl pr create --title T --body B   open a PR/CR for the current branch
 
 **Probes**: `/healthz` (liveness, always 200), `/readyz` (503 while the DB is unreachable), `/metrics` (Prometheus). All three are mounted outside auth.
 
-## Model selection for the agent workflow
-
-Recommended claude-code model/effort settings per stage of the grill → PRD → issues → triage → AFK → land workflow, in the provider catalog's own values (as of the Claude 5 family, 2026-08):
-
-| Stage | Lab surface | Model | Effort | Why |
-|---|---|---|---|---|
-| Grilling, `/to-prd`, `/to-issues` | manual instance | `fable` | `high` | Highest-leverage thinking stage: design sessions are low token volume, a human is present, and question/slicing quality compounds through every later stage. Fable's edge — scoping ambiguous problems — is exactly what grilling is. |
-| Triage, interactive `/land-pr` | manual instance | `opus[1m]` | `high` | Brief-writing and bug reproduction want strong reasoning, but not frontier pricing. |
-| AFK runs | repo AFK model/effort defaults | `opus[1m]` | `xhigh` | Opus is the agentic-coding workhorse and `xhigh` its documented setting for unattended coding; nobody waits on latency. A good agent brief removes exactly the ambiguity Fable would otherwise be for. |
-| Autoland lander + escalate | repo `lander_model` / `lander_effort` | `opus[1m]` | `high` | The unattended gate in front of the default branch. Review accuracy holds at `high`; don't go below it on an auto-merging path. |
-
-- Keep `fable` off unattended surfaces (AFK, lander): ~2× Opus pricing, and its safety classifiers can occasionally refuse benign security-adjacent work — interactively that's a nudge, in a pipeline it's a stalled run.
-- `sonnet` at `xhigh` is a credible budget tier for small, well-briefed AFK slices (dependency bumps, mechanical changes) if per-issue model routing ever exists; while model/effort stay per-repo, the practical AFK default remains `opus[1m]`.
-- `haiku` has no role in the workflow (lab uses it internally only for the credential-refresh poke).
-- Roadmap idea: a Fable escalation tier — rerun an issue on `fable` after Opus has failed it twice, before routing it to `ready-for-human`.
-
 ## Layout
 
 ```
@@ -119,15 +135,31 @@ internal/              config, store, vault, gitx, tmuxx, startguard, provider,
 web/                   SolidJS SPA (Vite, TypeScript, vitest)
 migrations/            goose migrations, sqlite + postgres (parity-tested)
 assets/skills/         vendored skills bundle, embedded and seeded per worktree
+containers/            agent-tools OCI images (provider CLI + labctl injection)
 nix/, flake.nix        packages, NixOS module, devshell, checks
-docs/                  brief, ADRs, ops, definition of done, read-only v0 reference
+docs/                  getting started, ops, ADRs, agent docs, v0 reference
 ```
 
 ## Documentation
 
+- [`docs/getting-started.md`](docs/getting-started.md) — first-session walkthrough: install, first repo, first instance, first AFK run.
+- [`docs/ops.md`](docs/ops.md) — deployment (NixOS + bare metal), configuration reference, state-dir layout, backup/restore, container runner, CI runner prerequisites, observability.
+- [`docs/model-selection.md`](docs/model-selection.md) — recommended model/effort settings per stage of the agent workflow.
 - [`CONTEXT.md`](CONTEXT.md) — the domain glossary; identifiers and UI copy use these terms verbatim.
-- [`docs/adr/`](docs/adr/) — decisions 0001–0013 for this rewrite (repo/language, nix, store layering, auth, SPA/API, vault, repos, sessions/provider seam, tracker seam, AFK port, CR merge, incogni/skills, hardening/metrics/PWA).
-- [`docs/agent-brief.md`](docs/agent-brief.md) — the product contract (decision log D1–D17, milestones, production bar).
-- [`docs/ops.md`](docs/ops.md) — deployment (NixOS + bare metal), configuration reference, state-dir layout, backup/restore, CI runner prerequisites, observability.
-- [`docs/definition-of-done.md`](docs/definition-of-done.md) — the brief §15 checklist with per-item verification.
-- [`docs/reference/lab-v0/`](docs/reference/lab-v0/README.md) — the v0 prototype, **read-only**: behavioral spec and ADR rationale.
+- [`docs/adr/`](docs/adr/) — every significant design decision as an ADR, from repo/language choice through the container runner and read-only imports.
+- [`docs/agents/`](docs/agents/) — docs consumed by coding agents working *on* this repo (issue-tracker conventions, triage labels, provider authoring).
+- [`docs/definition-of-done.md`](docs/definition-of-done.md) — the production checklist with per-item verification: what is automated, what needs a real host.
+- [`docs/agent-brief.md`](docs/agent-brief.md) — the original product contract this codebase was built from (historical, see below).
+- [`docs/reference/lab-v0/`](docs/reference/lab-v0/README.md) — the v0 prototype, **read-only**: the behavioral spec for the session/worktree/AFK core.
+
+## History
+
+lab is itself a product of the workflow it hosts: this codebase is the production rewrite of a working prototype (vendored read-only at `docs/reference/lab-v0/`), implemented end to end by a coding agent from a settled product brief ([`docs/agent-brief.md`](docs/agent-brief.md)), milestone by milestone, with the decisions recorded as ADRs along the way. The brief and the v0 reference are kept as historical documents — [`docs/ops.md`](docs/ops.md) and the ADRs describe the system as it is today.
+
+## Contributing
+
+Issues and pull requests live on [git.cloonar.com/Cloonar/coding-lab](https://git.cloonar.com/Cloonar/coding-lab). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev environment, test suites, CI gates, and the project's conventions (Conventional Commits, the `CONTEXT.md` vocabulary, ADRs).
+
+## License
+
+[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0). You are free to use, modify, and redistribute lab — including commercially — but if you distribute it or offer a modified version over a network, you must make your source changes available under the same license. The vendored agent-skills bundle under [`assets/skills/`](assets/skills/README.md) includes material from [mattpocock/skills](https://github.com/mattpocock/skills), MIT-licensed (GPL-compatible) — its notice is kept at [`assets/skills/LICENSE.upstream`](assets/skills/LICENSE.upstream).

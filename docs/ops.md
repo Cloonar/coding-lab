@@ -1,6 +1,6 @@
 # lab — operations
 
-Deployment, configuration, state, backup, CI, and observability for the `lab` server. The product contract is [`agent-brief.md`](agent-brief.md); design decisions are in [`adr/`](adr/).
+Deployment, configuration, state, backup, CI, and observability for the `lab` server. New here? Start with [`getting-started.md`](getting-started.md). Design decisions are in [`adr/`](adr/); the original product contract is [`agent-brief.md`](agent-brief.md).
 
 ## Deployment
 
