@@ -290,7 +290,9 @@ jobs:
             echo "verified ${ref} pulls anonymously (${got})"
             # The scratch root exists only to force this one round-trip; drop
             # it before the next provider's so the pulls stay independent.
-            rm -rf "$scratch"
+            # Through `podman unshare`: rootless podman writes pulled layers
+            # as subuid-mapped owners, which a plain rm cannot remove.
+            podman unshare rm -rf "$scratch"
           done
 
       # Same fetch-banking as the smoke job's save step.
