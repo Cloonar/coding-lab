@@ -205,15 +205,29 @@ func setAuthorIdentity(t *testing.T, x *crTestServer, name, email string) {
 // goroutine drains asynchronously).
 func waitForBusEvent(t *testing.T, log *busLog, want string) events.Event {
 	t.Helper()
+	return waitForBusEventN(t, log, want, 1)
+}
+
+// waitForBusEventN is waitForBusEvent for the nth event of a type, and returns
+// it. Awaiting a type the test has already seen needs the count: a plain "is
+// one there?" wait is satisfied by the earlier event and returns without
+// waiting at all, so any assertion behind it races the recorder's drain.
+func waitForBusEventN(t *testing.T, log *busLog, want string, n int) events.Event {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
+		seen := 0
 		for _, e := range log.snapshot() {
-			if e.Type == want {
+			if e.Type != want {
+				continue
+			}
+			if seen++; seen == n {
 				return e
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no %s event on the bus within 5s (got %+v)", want, log.snapshot())
+			t.Fatalf("got %d %s events on the bus within 5s, want %d (got %+v)",
+				seen, want, n, log.snapshot())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
