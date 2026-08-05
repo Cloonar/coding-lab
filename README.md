@@ -4,6 +4,12 @@
 
 You add repositories and credentials in the UI, then start **manual instances** (interactive agent sessions you drive from lab's built-in chat, from any device) or **AFK runs** (unattended sessions that pick up one `ready-for-agent` issue, resolve it, and open a pull request). Repositories without a usable forge tracker get a built-in issue tracker with lab-internal change requests — reviewable and mergeable from your phone.
 
+<p align="center">
+  <img src="docs/assets/start.png" width="30%" alt="Start screen: describe a task, pick the repo, provider, model, and effort, then send — or start an AFK run" />
+  <img src="docs/assets/chat.png" width="30%" alt="Chat view: the rendered agent conversation with collapsible tool calls and a reply box" />
+  <img src="docs/assets/side-menu.png" width="30%" alt="Side menu: active runs, repos, run history, credentials, tokens, and settings" />
+</p>
+
 ## Features
 
 - **Manual instances** — interactive agent sessions, each in its own git worktree on its own branch. Drive them through lab's embedded chat (messages, tool activity, answerable dialogs, interrupt), or hop into the provider's own web surface via a captured deep link (claude.ai for Claude Code).
