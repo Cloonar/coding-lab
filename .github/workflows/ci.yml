@@ -116,6 +116,6 @@ jobs:
   #         LAB_TEST_POSTGRES_DSN: postgres://lab:lab@postgres:5432/lab_test?sslmode=disable
   #       run: |
   #         curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
-  #           | sh -s -- install linux --no-confirm --init none
+  #           | sh -s -- install linux --no-confirm
   #         . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
   #         nix develop --command go test ./internal/store/...

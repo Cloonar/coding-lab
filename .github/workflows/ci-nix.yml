@@ -16,10 +16,13 @@
 # the SPA's vitest/build coverage already runs in the native gate.
 #
 # Like ci.yml did before the split, this runs on the stock `ubuntu-latest`
-# runner (no nix) and installs it in-job: the Determinate nix-installer,
-# daemonless `--init none`. Runner prerequisites — outbound egress for the
-# installer, proxy.golang.org, registry.npmjs.org, cache.nixos.org and the
-# flake inputs — are documented in docs/ops.md.
+# runner (no nix) and installs it in-job with the Determinate nix-installer,
+# default (daemon) init: the job runs as the non-root `runner` user, so store
+# access must go through the nix-daemon — `--init none` belongs to
+# root-in-container runners (the Forgejo deploy), not here. Runner
+# prerequisites — outbound egress for the installer, proxy.golang.org,
+# registry.npmjs.org, cache.nixos.org and the flake inputs — are documented
+# in docs/ops.md.
 #
 # Because this job is path-gated (below), it does not run on every PR, so it
 # cannot by itself satisfy a *required* status check — a PR that touches none
@@ -48,6 +51,6 @@ jobs:
       - name: install nix + flake check
         run: |
           curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
-            | sh -s -- install linux --no-confirm --init none
+            | sh -s -- install linux --no-confirm
           . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
           nix flake check -L
