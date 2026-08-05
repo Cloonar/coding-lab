@@ -1,0 +1,303 @@
+# agent-tools = build, injection-smoke-test, and (on release) publish the
+# per-provider "agent-tools" OCI images (issue #203). Each image is a
+# self-contained bundle of one agent CLI plus a static `labctl`, meant to be
+# injected read-only into an arbitrary dev container at run time via
+# `podman run --mount type=image,...` (the container runner, issue #205, is the
+# consumer). It carries the ADR-0033 tools-baseline idea across the
+# container-isolation boundary: instead of putting the agent CLI on a session's
+# host PATH, the CLI travels *inside* a mountable image so any base image gets
+# it without being rebuilt.
+#
+# Two legs, on disjoint events, deliberately asymmetric on secrets:
+#
+#   * PR leg (job `smoke`, `pull_request`): builds both images locally and runs
+#     the injection smoke test — NO push, and it holds NO write credential:
+#     `permissions: contents: read`, and the job body references no `secrets.*`
+#     at all. A PR from any branch, forks included, exercises the full
+#     build+inject path without ever touching a registry credential, so an
+#     untrusted PR can neither publish nor read a token.
+#
+#   * Release leg (job `publish`, `push` to main + `workflow_dispatch`): builds,
+#     re-runs the smoke test (cheap insurance that exactly what we push passes
+#     injection), then pushes digest-pinned tags to ghcr.io and verifies they
+#     pull back anonymously. `pull_request` never reaches this job, so the
+#     `packages: write` token it holds is out of reach of a fork PR. Both legs
+#     are path-gated (containers/** or this file) so unrelated merges to main
+#     don't re-release (issue #220 settled this deliberately: images rebuild
+#     only when their inputs change, and the consuming pin — versions.env,
+#     which the NixOS module's toolsImages default reads — moves only together
+#     with a build). `workflow_dispatch` is the manual re-release knob:
+#     `labctl` is built from the repo *inside* the image build, so a labctl
+#     change that should be baked into fresh images is shipped by dispatching
+#     this workflow — even with no containers/** diff; the lab server re-pulls
+#     the tags at every preflight, so the refresh reaches hosts on their next
+#     restart.
+#
+# Tags and the pinning contract. Tags are `<provider>-<cli-version>`
+# (`claude-<CLAUDE_CODE_VERSION>`, `codex-<CODEX_VERSION>`), the versions read
+# from containers/agent-tools/versions.env — the single source of truth the
+# build scripts also source, and what the NixOS module's toolsImages default
+# derives its refs from (ADR-0054): a deployment pinned to a lab rev names
+# exactly the tags that rev's versions.env pins, and deploy.yml refuses to
+# bump the host pin until those tags resolve in the registry. Strict consumers
+# pin the **digest** this job emits, not the tag. A same-tag re-push (e.g. a
+# labctl refresh via dispatch, same CLI version) produces a NEW digest under
+# the SAME tag, so the tag is a moving reference and only the digest is
+# immutable — which is why the digest, not the tag, is the strict pinning
+# contract (issue #205 pins by `@sha256:...`).
+#
+# Registry and auth. REGISTRY is hardcoded `ghcr.io`. It is deliberately NOT
+# derived from the Actions context: GitHub's container registry is a different
+# host from `github.server_url` (github.com), so there is nothing there to
+# derive it from. OWNER stays derived — `github.repository_owner` lowercased,
+# because OCI refs must be lowercase — which also keeps a fork honest by
+# publishing into its own namespace instead of silently at ours. For this repo
+# that is `ghcr.io/cloonar/agent-tools`. Auth is the built-in
+# `secrets.GITHUB_TOKEN` plus the publish job's `packages: write` permission:
+# there is no operator-provisioned registry secret to rotate, and nothing to
+# provision before a fresh clone of this repo can release. The one thing that
+# token cannot do is set package *visibility* — a ghcr package is private
+# until a human flips it — which is exactly what the anonymous-pull verify
+# step at the end of the publish job exists to catch.
+#
+# Runner assumptions. `ubuntu-latest` is a full VM with podman preinstalled:
+# default overlay storage, default (OCI-runtime) build isolation, real cgroups
+# and a real /proc. This workflow configures none of that — it asserts podman
+# is present and dumps `podman info`, so a runner-image change that moves the
+# storage driver or the default runtime out from under us shows up in the log
+# instead of as a mystery build failure.
+#
+# See issue #203, ADR-0033 (agent packages + tools baseline), and docs/ops.md
+# § "Agent-tools images" for the consumer contract.
+name: agent-tools
+
+on:
+  pull_request:
+    paths:
+      - "containers/**"
+      - ".github/workflows/agent-tools.yml"
+  push:
+    branches: [main]
+    paths:
+      - "containers/**"
+      - ".github/workflows/agent-tools.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR-only cancellation. A superseded PR run is pure waste, so cancel it. A
+  # publish run must never be cancelled mid-flight: it pushes the providers'
+  # tags one after another, so a kill between them leaves the registry holding
+  # half a release, and a kill between the push and the anonymous-pull verify
+  # skips the check that the tags are actually consumable.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # PR leg — local build + injection smoke test only. No push, no secrets.
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # Read-only, and nothing here reads a secret: this is the leg fork PRs run.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # build.sh fetches the pinned CLI artifacts into
+      # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
+      # a restored cache skips the CDNs entirely — repeated pulls of the claude
+      # binary tripped per-IP throttling on downloads.claude.ai; this keeps CI
+      # to one pull per version. Split restore/save (not actions/cache) because
+      # the paired action only saves on job SUCCESS, which would discard a good
+      # fetch whenever a later step fails — exactly the runs that most need the
+      # artifact banked. Wrong/partial files are never a risk: build.sh ignores
+      # and refetches anything failing its sha256 pin.
+      - name: Restore pinned CLI artifacts cache
+        uses: actions/cache/restore@v6
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
+          restore-keys: |
+            agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-
+            agent-tools-artifacts-
+
+      - name: Ensure podman
+        run: |
+          # podman ships on the ubuntu-latest image and needs no configuration
+          # here — the runner is a full VM, so the stock overlay storage driver
+          # and the stock build isolation both work. Assert it is present and
+          # record the config actually in effect: if a runner-image change
+          # moves the storage driver or the default OCI runtime, this step's
+          # output is the evidence.
+          set -eux
+          podman version
+          podman info
+
+      - name: "claude: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh claude
+          containers/agent-tools/smoke-test.sh claude
+
+      - name: "codex: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh codex
+          containers/agent-tools/smoke-test.sh codex
+
+      # Bank whatever build.sh fetched even when an earlier step failed (the
+      # run-id key suffix keeps keys unique — cache entries are immutable).
+      # continue-on-error: a cold, fully-failed run fetched nothing, and the
+      # then-missing path must not repaint the job.
+      - name: Save pinned CLI artifacts cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
+
+  # Release leg — build, re-smoke, then push digest-pinned tags to ghcr.io.
+  publish:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # The only write scope this workflow ever holds, and only on the leg that
+    # `pull_request` cannot reach. `contents: read` is spelled out so declaring
+    # `packages: write` does not leave the rest of the token at the default.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # build.sh fetches the pinned CLI artifacts into
+      # containers/agent-tools/artifacts/ and sha256-verifies before reuse, so
+      # a restored cache skips the CDNs entirely — repeated pulls of the claude
+      # binary tripped per-IP throttling on downloads.claude.ai; this keeps CI
+      # to one pull per version. Split restore/save (not actions/cache) because
+      # the paired action only saves on job SUCCESS, which would discard a good
+      # fetch whenever a later step fails — exactly the runs that most need the
+      # artifact banked. Wrong/partial files are never a risk: build.sh ignores
+      # and refetches anything failing its sha256 pin.
+      - name: Restore pinned CLI artifacts cache
+        uses: actions/cache/restore@v6
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}
+          restore-keys: |
+            agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-
+            agent-tools-artifacts-
+
+      - name: Ensure podman
+        run: |
+          # Same presence assertion + effective-config dump as the PR leg's
+          # smoke job — see that step for the rationale.
+          set -eux
+          podman version
+          podman info
+
+      - name: "claude: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh claude
+          containers/agent-tools/smoke-test.sh claude
+
+      - name: "codex: build + injection smoke test"
+        run: |
+          set -euo pipefail
+          containers/agent-tools/build.sh codex
+          containers/agent-tools/smoke-test.sh codex
+
+      - name: Publish digest-pinned images to ghcr.io
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # No `set -x` in this step — it handles the registry token. Login is
+          # --password-stdin; the token value is never echoed or put on argv.
+          set -euo pipefail
+
+          # REGISTRY is hardcoded: ghcr.io is a different host from
+          # github.server_url, so there is nothing to derive it from. OWNER =
+          # repo owner lowercased (OCI refs must be lowercase), derived so a
+          # fork pushes into its own namespace. Here: ghcr.io/cloonar.
+          REGISTRY="ghcr.io"
+          OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+
+          # The built-in token, scoped by this job's `packages: write`; the
+          # login user is the identity the run acts as. Token piped on stdin,
+          # never as an argument.
+          podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin <<<"$GITHUB_TOKEN"
+
+          # versions.env is the single source of truth for the CLI versions the
+          # build scripts pinned; the tags must match what was built.
+          . containers/agent-tools/versions.env
+
+          for entry in "claude:${CLAUDE_CODE_VERSION}" "codex:${CODEX_VERSION}"; do
+            p="${entry%%:*}"
+            ver="${entry#*:}"
+            local_ref="localhost/agent-tools:${p}-${ver}"
+            remote_ref="${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
+
+            podman tag "$local_ref" "$remote_ref"
+            podman push --digestfile "/tmp/digest.${p}" "$remote_ref"
+
+            digest="$(cat "/tmp/digest.${p}")"
+            pinned="${REGISTRY}/${OWNER}/agent-tools@${digest}"
+
+            # The digest-pinned reference is the pinning contract (issue #205):
+            # emit it to the log and to the job summary. The version tag is only
+            # human-facing.
+            echo "published ${p}: ${pinned}  (tag ${p}-${ver})"
+            echo "- \`${p}\` \`${ver}\` → \`${pinned}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Verify anonymous pull of the published tags
+        run: |
+          # The deployment contract check (issue #220): the NixOS module
+          # provisions NO registry credentials, so the lab host's preflight
+          # pulls the default toolsImages refs anonymously. A ghcr package is
+          # PRIVATE until a human makes it public — and a private package
+          # passes the authenticated push above and then fails on every host —
+          # so prove the anonymous path here, against the CLI-version tags the
+          # module's default derives from versions.env. A scratch storage root
+          # (never the job's store, which already holds these images) forces a
+          # real registry round-trip; logout drops the push credential.
+          set -euo pipefail
+
+          REGISTRY="ghcr.io"
+          OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+
+          podman logout "$REGISTRY"
+
+          . containers/agent-tools/versions.env
+
+          for entry in "claude:${CLAUDE_CODE_VERSION}" "codex:${CODEX_VERSION}"; do
+            p="${entry%%:*}"
+            ver="${entry#*:}"
+            ref="${REGISTRY}/${OWNER}/agent-tools:${p}-${ver}"
+            scratch="$(mktemp -d)"
+            if ! podman --root "${scratch}/root" --runroot "${scratch}/run" pull "$ref"; then
+              echo "::error::anonymous pull of ${ref} failed — the agent-tools package is not publicly readable (or the push did not land)."
+              echo "Fix (one-time, manual — the GITHUB_TOKEN cannot set package visibility): on the ${OWNER} organization, go to Packages → agent-tools → Package settings → Change visibility → Public. The lab host pulls without credentials."
+              exit 1
+            fi
+            got="$(podman --root "${scratch}/root" --runroot "${scratch}/run" image inspect --format '{{.Digest}}' "$ref")"
+            want="$(cat "/tmp/digest.${p}")"
+            if [ "$got" != "$want" ]; then
+              echo "::error::${ref} resolved to ${got}, but this run pushed ${want} — the tag moved between push and verify."
+              exit 1
+            fi
+            echo "verified ${ref} pulls anonymously (${got})"
+            # The scratch root exists only to force this one round-trip; drop
+            # it before the next provider's so the pulls stay independent.
+            rm -rf "$scratch"
+          done
+
+      # Same fetch-banking as the smoke job's save step.
+      - name: Save pinned CLI artifacts cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: containers/agent-tools/artifacts
+          key: agent-tools-artifacts-${{ hashFiles('containers/agent-tools/versions.env') }}-${{ github.run_id }}

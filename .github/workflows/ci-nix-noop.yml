@@ -1,0 +1,44 @@
+# Twin of ci-nix.yml's `flake-check` required status check.
+#
+# On GitHub, a *required* status check that never runs leaves the PR pending
+# on "Expected" forever. ci-nix.yml is path-gated (nix files, flake.lock,
+# go.mod, go.sum) so it does not run on every PR — a docs-only PR would hang
+# waiting for a check that will never post. This workflow reports the same
+# check name (`name: ci-nix` / job id `flake-check`) with the inverse
+# trigger (`paths-ignore` mirroring the real workflow's `paths`), so
+# `flake-check` always reports — from the real job or from this no-op.
+#
+# Subtlety: `paths` and `paths-ignore` are not strict complements. A PR
+# touching *both* a gated file and an ungated one satisfies both filters, so
+# both workflows run and two `flake-check` checks report — harmless, since
+# this twin always exits 0. The case that would matter cannot happen: if no
+# changed file matches `paths`, the real job is skipped, but then every
+# changed file also fails to match `paths-ignore`, so the twin runs.
+# Coverage is total.
+name: ci-nix
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.nix"
+      - flake.lock
+      - go.mod
+      - go.sum
+
+concurrency:
+  # Literal prefix, NOT ${{ github.workflow }}: that expands to the `name:`
+  # above, which this file deliberately shares with the real ci-nix.yml — so
+  # the expression form would put both workflows in the SAME group, and on a
+  # PR where both run (the both-filters-match case above) the later starter
+  # would cancel the earlier. A cancelled run reports a cancelled
+  # `flake-check`, which is exactly the wedged required check this twin
+  # exists to prevent.
+  group: ci-nix-noop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: no-op — real flake-check is path-gated, see header comment
+        run: echo "ci-nix is path-gated (nix/go.mod/go.sum); nothing relevant changed, so this no-op satisfies the required flake-check status check."

@@ -36,9 +36,9 @@ esac
 image_ref="localhost/agent-tools:${provider}-${version}"
 
 # SMOKE_EXTRA_RUN_ARGS: optional extra `podman run` arguments, split on
-# whitespace (so no arg may contain spaces). CI sets it to accommodate its
-# nested job container (see .forgejo/workflows/agent-tools.yml); leave it
-# empty on any real host.
+# whitespace (so no arg may contain spaces). An escape hatch for hand-running
+# the smoke test on an unusual podman host — nothing sets it: CI leaves it
+# unset, and a real host needs it empty.
 extra_run_args=()
 if [ -n "${SMOKE_EXTRA_RUN_ARGS:-}" ]; then
   read -r -a extra_run_args <<<"${SMOKE_EXTRA_RUN_ARGS}"

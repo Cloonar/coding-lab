@@ -1,23 +1,60 @@
-# Deploy = bump the coding-lab pin in Cloonar/nixos after a merge to main.
+# Deploy = bump the coding-lab pin in the private Cloonar/nixos repo, on a
+# 5-minute poll.
 #
-# Trigger is push:main only, so this never runs on PRs and never re-runs the
-# flake-check gate (that lives in ci.yml on pull_request). CI and this deploy
-# fire on disjoint events, so they can't share a `needs:` — the "green CI"
-# gate is instead enforced two ways: branch protection requires the PR's
-# flake-check status before it can merge to main, and `test-configuration`
-# below rebuilds the full NixOS config with the new pin and fails the deploy
-# if it breaks, before anything is pushed.
+# This is the only workflow left on Forgejo (issue #1): CI moved to GitHub —
+# ci, ci-nix and agent-tools now live in .github/workflows/ and run against
+# github.com/Cloonar/coding-lab. Deploy stayed behind because
+# NIXOS_PIN_TOKEN did: it grants write to the private Cloonar/nixos repo on
+# git.cloonar.com, and the point of the split is that the public GitHub repo
+# never holds that credential. The two halves therefore live on different
+# forges, and everything below follows from that.
+#
+# Why a poll instead of push:main. main only ever moves on GitHub now; this
+# side is a mirror, so a push trigger would either never fire or fire on
+# whatever the mirror happened to receive, whenever it happened to receive
+# it. A schedule is the only event this forge reliably owns, so the job asks
+# GitHub every 5 minutes whether main has moved past the pin. (Forgejo runs
+# schedules from the default branch's copy of this file — a mirror that has
+# fallen behind still polls; it just polls with a stale copy of this
+# workflow, never with a stale rev, see below.) workflow_dispatch is the
+# manual re-run knob for when you don't want to wait out the interval.
+#
+# Why the rev is read from GitHub and not from here. `github.sha` on this
+# side is this workflow's own mirror rev: possibly behind GitHub main,
+# possibly a rev whose images were never built. So this job has no
+# actions/checkout at all, deliberately — it resolves GitHub main's HEAD with
+# `git ls-remote` and reads containers/agent-tools/versions.env and
+# nix/module.nix out of an anonymous shallow fetch of exactly that rev. The
+# pinned sha, the probed agent-tools tags and the probed dev-image digest all
+# come from one consistent commit, and the Forgejo checkout is never read.
+#
+# Why a no-op poll costs seconds. 288 runs a day, nearly all of them no-ops,
+# so the cheap idempotency check runs first: resolve the sha, clone
+# Cloonar/nixos, apply the sed, and if `git diff --quiet` says the pin is
+# already that rev, print "pin already current" and stop — two clones, no nix
+# install, no registry probes. Only a run that actually moves the pin goes on
+# to install nix, fetch the rev, probe the registries and rebuild the NixOS
+# config. The bump is *staged* before those gates but *pushed* only after
+# them, so the gate ordering is unchanged: nothing reaches Cloonar/nixos
+# until every default ref resolves and test-configuration is green.
+#
+# Green CI still gates the merge on the PR — GitHub branch protection
+# requires the PR's checks before main can move — and this run additionally
+# rebuilds the full NixOS config with the new pin (`test-configuration`) and
+# fails without pushing if it breaks.
 #
 # Ordering with agent-tools (issue #220 / ADR-0054): the NixOS module's
-# toolsImages default names the CLI-version tags this commit's versions.env
-# pins, and a merge that changes the agent-tools inputs triggers their
-# publish job on the SAME push this deploy runs on. The "Wait for the
-# agent-tools and default dev-image refs" step below refuses to bump the pin
-# until every default ref resolves in the registry — anonymously, which is
-# also the deployment contract (hosts pull without credentials) — so the pin
-# only ever advances to a rev whose images are already published and
-# pullable. For merges that don't touch agent-tools the tags long exist and
-# the step passes instantly.
+# toolsImages default names the CLI-version tags the pinned rev's
+# versions.env pins, and a merge that changes the agent-tools inputs starts
+# their publish job on GitHub at the moment main moves — so a poll can easily
+# see the new rev before its images exist. The "Wait for the agent-tools and
+# default dev-image refs" step below refuses to bump the pin until every
+# default ref resolves in the registry — anonymously, which is also the
+# deployment contract (hosts pull without credentials) — so the pin only ever
+# advances to a rev whose images are already published and pullable. For revs
+# that don't touch agent-tools the tags long exist and the step passes
+# instantly; while a publish is in flight the poll waits, and a poll that
+# times out leaves the pin where it was and retries five minutes later.
 #
 # That same step also probes container.defaultImage's default (issue #230):
 # the digest-pinned docker.io dev image a fresh host falls back to for any
@@ -26,51 +63,120 @@
 # pick up the new pin — not as a failed deploy — so the wait step resolves
 # it anonymously here, same as the agent-tools refs, before the pin moves.
 # This knowingly adds docker.io to the deploy path's probe dependencies,
-# alongside this repo's own registry; accepted because the alternative is a
+# alongside the agent-tools registry; accepted because the alternative is a
 # failure mode that only shows up after the pin has already shipped.
 #
-# Like ci.yml, this runs on the stock `ubuntu-latest` runner and installs nix
-# in-job (Determinate installer, daemonless `--init none`), because
-# test-configuration needs nix (and the wait step runs skopeo out of nixpkgs).
-# Whatever that script needs beyond nix (e.g. KVM for VM tests) must be
-# available on the runner. Same egress prerequisites as ci.yml — see
-# docs/ops.md.
+# Cutover caveat (issue #1): agent-tools publishes to ghcr.io now, and until
+# that ghcr package is flipped public the anonymous probe cannot resolve it —
+# these polls fail every 5 minutes and the pin correctly stays put. The red
+# window is knowingly tolerated and self-healing: the first poll after the
+# package is made public resolves the refs and bumps the pin, with no change
+# needed here.
+#
+# Like the GitHub CI jobs, this runs on the stock `ubuntu-latest` runner and
+# installs nix in-job (Determinate installer, daemonless `--init none`) — on
+# the bump path only — because test-configuration needs nix (and the wait
+# step runs skopeo out of nixpkgs). Whatever that script needs beyond nix
+# (e.g. KVM for VM tests) must be available on the runner. Same egress
+# prerequisites as the nix CI gate — see docs/ops.md.
 name: deploy
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# A bump run (probe wait + test-configuration) can outlive the 5-minute
+# interval. Serialize: at most one run in flight, at most one queued behind
+# it, so overlapping polls can't race each other into a rejected push.
+concurrency:
+  group: deploy-nixos-pin
+  cancel-in-progress: false
 
 jobs:
   bump-nixos-pin:
     runs-on: ubuntu-latest
     steps:
-      # Checked out for containers/agent-tools/versions.env and
-      # nix/module.nix — the wait step derives the expected agent-tools
-      # registry tags from the former and the default dev-image ref (issue
-      # #230) from the latter.
-      - uses: actions/checkout@v7
+      - name: Resolve GitHub main's HEAD (the rev to pin)
+        run: |
+          # The rev this deploy pins is GitHub main's HEAD, not github.sha —
+          # see the header. ls-remote is the cheap half of that: one ref
+          # lookup, no clone, and it runs before anything else in the job so
+          # a no-op poll can exit a few seconds later. Anonymous: the repo is
+          # public.
+          set -euo pipefail
+          sha="$(git ls-remote https://github.com/Cloonar/coding-lab.git refs/heads/main | cut -f1)"
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::could not resolve refs/heads/main on github.com/Cloonar/coding-lab — got '${sha}'"
+            exit 1
+          fi
+          echo "GitHub main is at ${sha}"
+          printf 'SHA=%s\n' "$sha" >> "$GITHUB_ENV"
+
+      - name: Stage the pin bump in Cloonar/nixos (early exit if current)
+        id: pin
+        env:
+          NIXOS_TOKEN: ${{ secrets.NIXOS_PIN_TOKEN }}
+        run: |
+          # The idempotency check, first thing after the sha lookup: at a
+          # 5-minute cadence almost every run ends here, so it must not cost
+          # more than a clone. The edit is left staged in the working tree
+          # and pushed by the last step, after the gates.
+          set -euo pipefail
+          # Nothing checks out into this workspace any more, so nothing
+          # cleans it either — be explicit rather than trusting the runner to
+          # hand us an empty directory.
+          rm -rf nixos gh-rev
+          git clone "https://oauth2:${NIXOS_TOKEN}@git.cloonar.com/Cloonar/nixos.git" nixos
+          cd nixos
+          sed -i "s|rev = \"[0-9a-f]\{40\}\";|rev = \"${SHA}\";|" \
+            hosts/dev-new/modules/coding-lab/default.nix
+          git diff --quiet && { echo "pin already current"; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git --no-pager diff --stat
 
       - name: Install nix
+        if: steps.pin.outputs.changed == 'true'
         run: |
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
             | sh -s -- install linux --no-confirm --init none
 
+      - name: Fetch the pinned rev from GitHub
+        if: steps.pin.outputs.changed == 'true'
+        run: |
+          # containers/agent-tools/versions.env and nix/module.nix, read from
+          # the exact rev being pinned: the wait step derives the expected
+          # agent-tools registry tags from the former and the default
+          # dev-image ref (issue #230) from the latter. Fetching the sha
+          # rather than the branch keeps those files consistent with the pin
+          # even if main moves while this run is in flight. Anonymous and
+          # shallow — no credential belongs on this path, and one commit of
+          # one branch is all it reads.
+          set -euo pipefail
+          rm -rf gh-rev
+          git init --quiet gh-rev
+          cd gh-rev
+          git remote add origin https://github.com/Cloonar/coding-lab.git
+          git fetch --quiet --depth 1 origin "$SHA"
+          git checkout --quiet --detach FETCH_HEAD
+          git --no-pager log -1 --format='fetched %H %s'
+
       - name: Wait for the agent-tools and default dev-image refs this rev pins
+        if: steps.pin.outputs.changed == 'true'
         run: |
           # Refuse to advance the host pin until the default toolsImages refs
           # AND the module's default dev-image ref (issue #230) resolve — see
           # the header comment. skopeo inspect runs with no credentials on
           # purpose: it proves the exact anonymous pull every host's
           # preflight performs. The deadline is shared across every ref
-          # probed below: it covers a same-push agent-tools image build
-          # (~15 min), and for the docker.io dev-image ref a failure that
-          # takes this long means the pinned digest has gone stale/GC'd or
-          # docker.io itself is unreachable — a long-published tag doesn't
-          # need 30 minutes to show up. On timeout the deploy fails and the
-          # pin stays, which is the honest outcome — a bumped pin would ship
-          # a server whose default refs don't resolve.
+          # probed below: it covers an agent-tools image build started by the
+          # same merge (~15 min), and for the docker.io dev-image ref a
+          # failure that takes this long means the pinned digest has gone
+          # stale/GC'd or docker.io itself is unreachable — a long-published
+          # tag doesn't need 30 minutes to show up. On timeout the deploy
+          # fails and the pin stays, which is the honest outcome — a bumped
+          # pin would ship a server whose default refs don't resolve.
           #
           # skopeo's stderr is captured and printed on every retry and in the
           # deadline error (issue #224): a probe can fail for reasons that have
@@ -84,10 +190,19 @@ jobs:
           set -euo pipefail
           set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
 
+          cd gh-rev
           . containers/agent-tools/versions.env
 
-          REGISTRY="$(printf '%s' '${{ github.server_url }}' | sed -E 's#^https?://##')"
-          OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          # Hardcoded, not derived from the Actions context. The old
+          # github.server_url / github.repository_owner derivation resolves to
+          # git.cloonar.com/cloonar on this forge, and since the split that is
+          # simply the wrong registry: agent-tools is built and pushed by the
+          # GitHub workflow to ghcr.io, and the NixOS module's toolsImageRepo
+          # default names ghcr.io too. The Actions context here describes the
+          # forge this deploy happens to run on, which is no longer the forge
+          # the images live on — so the probe must name the registry
+          # explicitly or it would prove the wrong pull.
+          AGENT_TOOLS_REPO="ghcr.io/cloonar/agent-tools"
 
           # ^out matters: skopeo has multiple outputs (man + out) and
           # --print-out-paths prints one path per line — without the selector
@@ -127,8 +242,8 @@ jobs:
           dev_image_probe="$(printf '%s' "$dev_image" | sed -E 's/:[A-Za-z0-9._-]+@sha256:/@sha256:/')"
 
           for ref in \
-            "docker://${REGISTRY}/${OWNER}/agent-tools:claude-${CLAUDE_CODE_VERSION}" \
-            "docker://${REGISTRY}/${OWNER}/agent-tools:codex-${CODEX_VERSION}" \
+            "docker://${AGENT_TOOLS_REPO}:claude-${CLAUDE_CODE_VERSION}" \
+            "docker://${AGENT_TOOLS_REPO}:codex-${CODEX_VERSION}" \
             "docker://${dev_image_probe}"
           do
             until err="$("$skopeo" inspect --no-tags "$ref" 2>&1 >/dev/null)"; do
@@ -142,18 +257,18 @@ jobs:
             echo "resolved ${ref}"
           done
 
-      - name: Bump the pin in Cloonar/nixos
-        env:
-          NIXOS_TOKEN: ${{ secrets.NIXOS_PIN_TOKEN }}
-          SHA: ${{ github.sha }}
+      - name: Push the pin bump to Cloonar/nixos
+        if: steps.pin.outputs.changed == 'true'
         run: |
+          # The staged sed from the first steps is still in the clone's
+          # working tree; the clone's origin still carries the token, so the
+          # push needs no further credential. test-configuration stays the
+          # last gate before anything leaves this runner. A push rejected
+          # because Cloonar/nixos moved meanwhile fails the run and changes
+          # nothing — the next poll re-clones and re-applies.
           set -euo pipefail
           set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
-          git clone "https://oauth2:${NIXOS_TOKEN}@git.cloonar.com/Cloonar/nixos.git" nixos
           cd nixos
-          sed -i "s|rev = \"[0-9a-f]\{40\}\";|rev = \"${SHA}\";|" \
-            hosts/dev-new/modules/coding-lab/default.nix
-          git diff --quiet && { echo "pin already current"; exit 0; }
           ./scripts/test-configuration dev-new          # integration gate (needs nix)
           git config user.name  "coding-lab-bot"
           git config user.email "bot@cloonar.com"
