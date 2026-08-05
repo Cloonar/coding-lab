@@ -574,7 +574,7 @@ func TestScheduleReenable(t *testing.T) {
 	resp = x.do("DELETE", base+"/"+id, nil, h)
 	wantStatus(t, resp, http.StatusNoContent)
 	_ = resp.Body.Close()
-	waitForBusEvent(t, log, afk.EventRepoChanged)
+	waitForBusEventN(t, log, afk.EventRepoChanged, 2)
 	if n := len(log.snapshot()); n != 2 {
 		t.Fatalf("published %d events, want 2 (the re-enable transition and the delete): %+v", n, log.snapshot())
 	}
