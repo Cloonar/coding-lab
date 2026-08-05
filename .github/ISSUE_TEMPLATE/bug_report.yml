@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a defect in lab — the server, the web UI, or labctl.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. New issues arrive with the `needs-triage` label, and the maintainer moves them through the triage state machine from there — see [docs/agents/triage-labels.md](https://github.com/Cloonar/coding-lab/blob/main/docs/agents/triage-labels.md).
+
+        Do not report security vulnerabilities here. Open a [private security advisory](https://github.com/Cloonar/coding-lab/security/advisories/new) instead; [SECURITY.md](https://github.com/Cloonar/coding-lab/blob/main/SECURITY.md) describes the process.
+  - type: input
+    id: lab-version
+    attributes:
+      label: lab version or commit
+      description: The `version` field of lab's `lab starting` startup log line, `labctl --version` for the agent CLI, or the commit the binary was built from.
+      placeholder: "version=v0.4.0, or commit 2520f51"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment-flavor
+    attributes:
+      label: Deployment flavor
+      description: How this host runs lab.
+      options:
+        - NixOS module (services.lab)
+        - Bare metal (make lab, ./bin/lab)
+        - Other or not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Runner
+      description: The affected repo's pick of where an instance's pane command executes. `host` runs the provider CLI directly on the host — the unsandboxed break-glass. `container` runs the pane command as rootless podman in the repo's dev image.
+      options:
+        - host
+        - container
+        - Not sure or not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: tracker-binding
+    attributes:
+      label: Tracker binding
+      description: The affected repo's tracker backend — `forge` (a forge REST client, Forgejo or GitHub, selected by the forge credential's flavor) or `builtin`.
+      options:
+        - forge (GitHub)
+        - forge (Forgejo)
+        - builtin
+        - Not sure or not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The shortest path from a known state to the behavior above.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: relevant-logs
+    attributes:
+      label: Relevant logs
+      description: Server log lines, `labctl` output, or the browser console. Redact secrets first — run tokens (`lab_run_…`), provider credentials, and the master key must never appear in a public issue.
+      render: shell
+    validations:
+      required: false

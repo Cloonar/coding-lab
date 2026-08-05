@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a change to what lab does.
+title: "[feature] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New issues arrive with the `needs-triage` label, and the maintainer moves them through the triage state machine from there — see [docs/agents/triage-labels.md](https://github.com/Cloonar/coding-lab/blob/main/docs/agents/triage-labels.md).
+  - type: textarea
+    id: problem-statement
+    attributes:
+      label: Problem statement
+      description: What does not work today, from the operator's perspective.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior
+      description: What lab should do instead, concretely enough to tell whether it is done.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives-considered
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed, and why you set them aside.
+    validations:
+      required: false
+  - type: textarea
+    id: domain-vocabulary
+    attributes:
+      label: Domain vocabulary
+      description: Which terms from [CONTEXT.md](https://github.com/Cloonar/coding-lab/blob/main/CONTEXT.md) this request touches — instance, runner, AFK run, tracker binding, provider, and so on. If the concept you need is not in the glossary, that is a signal worth naming here rather than inventing parallel language.
+    validations:
+      required: false
