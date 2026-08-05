@@ -35,20 +35,41 @@
         default = self.nixosModules.lab;
       };
 
-      devShells = eachSystem (pkgs: {
-        default = pkgs.mkShell {
-          packages = with pkgs; [
-            go_1_26
-            gopls
-            golangci-lint
-            nodejs
-            tmux
-            util-linux # prlimit
-            sqlite
-            git
-          ];
-        };
-      });
+      devShells = eachSystem (
+        pkgs:
+        let
+          # The docs site's entire toolchain (ADR-0066), pinned by flake.lock
+          # like everything else — which is the whole reason there is no
+          # requirements.txt beside mkdocs.yml to keep in sync with it.
+          # `python3.withPackages` is what puts `mkdocs` on PATH: nixpkgs'
+          # mkdocs-material installs no console script of its own and only
+          # propagates mkdocs, so the binary belongs to the environment rather
+          # than to either package.
+          mkdocsEnv = pkgs.python3.withPackages (ps: [ ps.mkdocs-material ]);
+        in
+        {
+          default = pkgs.mkShell {
+            packages =
+              (with pkgs; [
+                go_1_26
+                gopls
+                golangci-lint
+                nodejs
+                tmux
+                util-linux # prlimit
+                sqlite
+                git
+              ])
+              ++ [ mkdocsEnv ]; # `mkdocs serve` without leaving the dev shell
+          };
+
+          # What the docs gate enters (.github/workflows/docs.yml). The same
+          # mkdocs, without realizing the Go toolchain, node and sqlite to
+          # render markdown — closure the docs job has no use for and would
+          # pay for on every run.
+          docs = pkgs.mkShell { packages = [ mkdocsEnv ]; };
+        }
+      );
 
       # `nix flake check` is the CI truth (design §10): package builds carry
       # the go test suite (real git/tmux/prlimit in nativeCheckInputs) and the

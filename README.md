@@ -108,7 +108,7 @@ Same startup behavior as above (migrations, auto-generated master key, first-run
 ### Developing
 
 ```sh
-nix develop        # go, gopls, golangci-lint, node, git, tmux, util-linux, sqlite
+nix develop        # go, gopls, golangci-lint, node, git, tmux, util-linux, sqlite, mkdocs
 make lab           # build SPA + server binary with embedded UI → bin/lab
 make labctl        # agent-side CLI → bin/labctl
 make test          # go test ./... (real git/tmux/prlimit integration tests)
@@ -165,6 +165,8 @@ docs/                  getting started, ops, ADRs, agent docs, v0 reference
 ```
 
 ## Documentation
+
+Published as a searchable site at **[cloonar.github.io/coding-lab](https://cloonar.github.io/coding-lab/)**, built from the last release tag. It is a rendering of the files below, not a second copy of them — the repo stays the source of truth (ADR-0066).
 
 - [`docs/getting-started.md`](docs/getting-started.md) — first-session walkthrough: install, first repo, first instance, first AFK run.
 - [`docs/ops.md`](docs/ops.md) — deployment (NixOS + bare metal), configuration reference, state-dir layout, backup/restore, container runner, CI runner prerequisites, observability.

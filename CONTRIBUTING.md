@@ -9,10 +9,12 @@ The project is licensed under the [GNU AGPL-3.0](LICENSE); by contributing you a
 The devshell has everything:
 
 ```sh
-nix develop        # go, gopls, golangci-lint, node, git, tmux, util-linux, sqlite
+nix develop        # go, gopls, golangci-lint, node, git, tmux, util-linux, sqlite, mkdocs
 ```
 
 Without nix you need: Go 1.26, Node 24, golangci-lint, and `git`, `tmux`, `prlimit` (util-linux) on PATH — the Go suite shells out to the real binaries.
+
+The docs site (ADR-0066) renders from this same checkout: `mkdocs serve` previews it live, and `nix develop .#docs --command mkdocs build --strict` is exactly what CI runs — `.#docs` is a lean shell holding only the mkdocs toolchain.
 
 ## Build, test, lint
 
@@ -42,7 +44,7 @@ Two GitHub Actions gates run on pull requests (ADR-0023), both required checks:
 - **native** (`.github/workflows/ci.yml`) — runs on every PR: SPA eslint + prettier + vitest + `vite build`, the `ui`-tagged Go build and test suite, and golangci-lint. Typically 2–4 min.
 - **flake-check** (`.github/workflows/ci-nix.yml`) — the full `nix flake check`, path-gated to nix and Go-dependency changes (`**/*.nix`, `flake.lock`, `go.mod`, `go.sum`). A dependency bump must go through it: it revalidates `nix/package.nix`'s `vendorHash`, which the native gate cannot catch. On a PR touching none of those paths the same check name is reported by a no-op twin (`.github/workflows/ci-nix-noop.yml`) instead, so a required check never hangs a PR at "Expected".
 
-A third path-gated workflow (`agent-tools.yml`) builds and smoke-tests the agent-tools OCI images when `containers/**` changes.
+Two further path-gated workflows are **not** required checks. `agent-tools.yml` builds and smoke-tests the agent-tools OCI images when `containers/**` changes. `docs.yml` builds the documentation site with `mkdocs build --strict` when `docs/**`, `mkdocs.yml`, `mkdocs_hooks.py`, the three root markdown files it injects, or the flake files change — `--strict` makes a broken internal link or a missing anchor fail the PR. On a `v*` tag it publishes the site to GitHub Pages ([cloonar.github.io/coding-lab](https://cloonar.github.io/coding-lab/)); merging to main does not (ADR-0066).
 
 ## Conventions
 

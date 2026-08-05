@@ -6,6 +6,10 @@ containers/agent-tools/artifacts/
 web/dist/
 internal/webui/dist/
 web/node_modules/
+# `mkdocs build` output; the site is published from CI, never from the repo.
+# The bytecode cache is mkdocs importing mkdocs_hooks.py — same build residue.
+/site/
+__pycache__/
 
 # playwright
 web/e2e/.run/

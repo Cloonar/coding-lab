@@ -1,0 +1,187 @@
+# docs = build the MkDocs site as a PR check and publish it to GitHub Pages on
+# release tags (issue #13). The site at https://cloonar.github.io/coding-lab/ is
+# a *rendering* of markdown that already lives in this repo — docs/, plus the
+# three root files a hooks script injects into the build — not a second home for
+# it. Nothing is authored for the site alone: if a page is not in the repo it is
+# not on the site, and fixing the site means fixing the repo. That is the whole
+# reason this is a workflow and not a wiki.
+#
+# Three triggers, two legs, deliberately asymmetric on privilege:
+#
+#   * Publish leg (`push` of a `v*` tag, or a manual `workflow_dispatch`): job
+#     `build` renders the site and uploads it as a Pages artifact, and job
+#     `deploy` — the only place in this file that ever holds a write credential
+#     — hands that artifact to Pages. This is the only path that publishes.
+#
+#   * PR leg (`pull_request`, path-gated below): `build` runs unchanged,
+#     `--strict` and all, and stops at the artifact. `deploy` is `if`-gated to
+#     tag pushes and dispatches, so no pull request can reach it, and the
+#     `pages: write` / `id-token: write` pair it carries is out of reach of a
+#     fork PR. `build` itself is `contents: read` and references no `secrets.*`,
+#     so the leg an untrusted PR executes is incapable of publishing anything.
+#
+# Why tags, not every push to main. The published site tracks *releases*, not
+# the tip of the default branch. Someone reading cloonar.github.io/coding-lab is
+# almost always running the binaries the last `v*` tag produced (release.yml
+# builds them), and documentation describing unreleased behaviour is worse than
+# slightly stale documentation — it sends a reader looking for a flag their
+# `lab` does not have. Merging to main is therefore not a publish event; cutting
+# a release is. `workflow_dispatch` is the escape hatch for when that rule needs
+# breaking — a dead link, a wrong command, anything worth correcting before the
+# next tag — and it republishes on demand without inventing a second trigger.
+#
+# Why the pull_request leg exists at all. Two independent reasons, either one
+# sufficient. First, the argument release.yml makes for its own PR leg: a
+# `workflow_dispatch` button only appears once the workflow file is on the
+# DEFAULT branch, so the very PR that introduces this file cannot dispatch it,
+# and without a PR leg the first thing to ever exercise the recipe would be a
+# `v*` tag — i.e. a real release, discovering a typo in public. Second, and this
+# is what earns the leg permanently rather than once: `--strict` turns a broken
+# internal link, a page missing from the nav, or an unparseable config into a
+# failed build, which is exactly the check a docs PR wants on its own merits. So
+# the PR leg is both the rehearsal for the deploy and the gate that keeps the
+# docs tree internally consistent.
+#
+# Path filter. Everything that can change the rendered site, and nothing else:
+# docs/**, mkdocs.yml and mkdocs_hooks.py, the three root markdown files
+# (README.md, CONTEXT.md, CONTRIBUTING.md — gated because the hooks script
+# injects them into the build, so they are site inputs even though they do not
+# live under docs/), flake.nix and flake.lock (the mkdocs toolchain is pinned
+# there, so a flake bump can break the render), and this file itself.
+#
+# The PR leg uploads the Pages artifact too, on every trigger. It costs one step
+# and makes the PR a full rehearsal of the deploy payload rather than a partial
+# one: whatever would fail at upload time — an empty site/, a path the artifact
+# packer rejects — fails on the PR instead of on the tag. The artifact then goes
+# nowhere, because `deploy` never runs.
+#
+# Why nix. The mkdocs toolchain (mkdocs 1.6.1 + Material 9.7.6) is pinned by
+# flake.lock — the same lockfile that pins everything else here, so there is one
+# pinning mechanism to keep honest rather than a requirements.txt living beside
+# it and drifting from it. It also means the `mkdocs serve` a contributor runs
+# in `nix develop .#docs` is the same mkdocs this job builds with, so "it
+# rendered on my machine" is a claim worth something. `.#docs` specifically, not
+# the default shell: `devShells.docs` is lean, holding only the mkdocs
+# toolchain, so this job does not realize the Go toolchain and node just to turn
+# markdown into HTML. Nix is installed in-job with the Determinate installer at
+# default (daemon) init, verbatim from ci-nix.yml — see the run step below.
+#
+# Not a required check, so no no-op twin. ci-nix.yml is path-gated AND required,
+# a combination GitHub cannot express on its own: a PR touching none of its
+# paths would hang forever on an "Expected" check that never posts, which is the
+# only reason ci-nix-noop.yml exists — same check name, inverse trigger, so
+# `flake-check` always reports from one workflow or the other. This workflow is
+# path-gated but deliberately NOT in the repo's required set, so a PR that
+# changes nothing under the filter simply has no `docs` check at all. Nothing
+# pends and nothing hangs, and a twin here would only manufacture a green check
+# that proved nothing was built.
+#
+# One-time admin step this workflow cannot perform. GitHub Pages must be enabled
+# for the repository with its source set to "GitHub Actions" (Settings → Pages).
+# No token scope lets a workflow flip that switch, so it is a maintainer action
+# taken once after this file merges. Until then `deploy` fails loudly inside
+# `actions/deploy-pages` rather than silently no-opping — the right failure
+# mode, since a red tag run is discoverable and a green run that published
+# nothing is not.
+#
+# No `actions/configure-pages`. Its job is to hand the build a site URL and base
+# path derived from the repository's Pages settings; mkdocs.yml hardcodes
+# `site_url: https://cloonar.github.io/coding-lab/`, so it has nothing to tell
+# us and would only add a link to the action chain. Actions are pinned by major
+# tag, as everywhere else in this repo (`actions/checkout@v7` is the in-repo
+# precedent); there was no prior Pages workflow here, so the `@v5` pins below
+# set that precedent rather than follow one.
+#
+# Concurrency. Grouped per workflow+ref, cancellation on PR runs only — the
+# repo-wide pattern, carrying release.yml's asymmetry for the same reason. A
+# superseded PR run is pure waste, so kill it; a deploy must never be killed
+# mid-flight, because a cancelled `deploy-pages` leaves the Pages deployment in
+# whatever partial state the API had reached and the recovery is a manual
+# re-dispatch.
+#
+# See issue #13, CONTRIBUTING.md § CI, and docs/ops.md for the other gates.
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - mkdocs.yml
+      - mkdocs_hooks.py
+      - README.md
+      - CONTEXT.md
+      - CONTRIBUTING.md
+      - flake.nix
+      - flake.lock
+      - ".github/workflows/docs.yml"
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR-only cancellation — see the header: a superseded PR run is waste, a
+  # half-finished Pages deployment is damage.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Runs on every trigger. Read-only and secret-free by construction: this is
+  # the leg fork PRs execute, so it must not be able to publish anything. The
+  # Pages privilege lives exclusively in `deploy` below.
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install nix + build the site
+        run: |
+          # One `run:` block, not two steps: the installer's profile script is
+          # sourced into *this* shell to put nix on PATH, and shell environment
+          # does not survive to the next step.
+          #
+          # Installer invocation copied verbatim from ci-nix.yml, including the
+          # default (daemon) init: the hosted runner's job user is not root, so
+          # store access has to go through the nix-daemon. `--init none` belongs
+          # to root-in-container runners (the Forgejo deploy), not here.
+          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+            | sh -s -- install linux --no-confirm
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+          # `.#docs` is the lean mkdocs-only devShell (see header) — the default
+          # shell would drag in Go and node to render markdown. `--strict` is
+          # the actual gate this check exists to be: without it mkdocs reports
+          # broken internal links and nav problems as warnings and exits 0, so
+          # the check would be green while the published site was broken. With
+          # it, a dangling link fails the PR.
+          nix develop .#docs --command mkdocs build --strict
+
+      # Uploaded on every trigger, PRs included: that is what makes the PR leg a
+      # full rehearsal of the deploy payload rather than a partial one. `site`
+      # is mkdocs' default output dir.
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  # Publish leg — tag pushes and manual dispatches only. `pull_request` is
+  # excluded by this `if`, which is what keeps the Pages credential unreachable
+  # from a fork PR.
+  deploy:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    # The only write scope in this file, on the only job that needs it.
+    # `pages: write` publishes the deployment; `id-token: write` is what lets
+    # the deploy-pages action mint the OIDC token Pages authenticates it with.
+    # Spelled out alone, so declaring them drops every other scope to none.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # No checkout: the artifact came from `build`, and this job needs only
+      # that artifact and its OIDC token.
+      - uses: actions/deploy-pages@v5
+        id: deployment
