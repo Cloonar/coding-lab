@@ -141,7 +141,7 @@ rec {
 
     meta = {
       description = "Phone-first control panel for Claude Code agent sessions";
-      homepage = "https://git.cloonar.com/Cloonar/coding-lab";
+      homepage = "https://github.com/Cloonar/coding-lab";
       mainProgram = "lab";
       platforms = lib.platforms.linux;
     };
@@ -162,7 +162,7 @@ rec {
 
     meta = {
       description = "Agent-side CLI for lab (run-token API client)";
-      homepage = "https://git.cloonar.com/Cloonar/coding-lab";
+      homepage = "https://github.com/Cloonar/coding-lab";
       mainProgram = "labctl";
       platforms = lib.platforms.linux;
     };

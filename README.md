@@ -58,7 +58,7 @@ Any Linux host. On PATH: `git`, `tmux`, `ssh` (openssh), `prlimit` (util-linux).
 
 ```nix
 {
-  inputs.coding-lab.url = "git+https://git.cloonar.com/Cloonar/coding-lab";
+  inputs.coding-lab.url = "github:Cloonar/coding-lab";
 
   # in the host config:
   imports = [ coding-lab.nixosModules.lab ];
@@ -74,7 +74,7 @@ The module makes the host container-ready out of the box and asserts the load-be
 ### Bare metal
 
 ```sh
-git clone https://git.cloonar.com/Cloonar/coding-lab && cd coding-lab
+git clone https://github.com/Cloonar/coding-lab && cd coding-lab
 make lab labctl          # static binaries → bin/lab, bin/labctl  (needs Go 1.26 + Node)
 ./bin/lab                # listens on :8080, state in ~/.local/state/lab, sqlite
 ```
