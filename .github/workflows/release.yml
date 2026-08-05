@@ -1,0 +1,255 @@
+# release = build the static linux binaries and attach them to a GitHub Release
+# (issue #10). Until this exists the only non-nix install path is clone + build
+# (Go 1.26 + Node 24), which is a lot to ask of someone evaluating the thing;
+# the assets this workflow publishes are what the README's install one-liner
+# actually downloads.
+#
+# Three triggers, two legs, deliberately asymmetric on privilege:
+#
+#   * Release leg (`push` of a `v*` tag): job `build` produces the four
+#     binaries plus checksums.txt, and job `release` — the only place in this
+#     file that ever holds a write credential — turns them into a GitHub
+#     Release. This is the only path that creates anything.
+#
+#   * Dry run (`workflow_dispatch`, and `pull_request` touching this file):
+#     `build` runs unchanged and stops at the workflow artifact. `release` is
+#     `if`-gated on a tag push, so neither a dispatch nor a PR can reach it,
+#     and the `contents: write` token it carries is out of reach of a fork PR.
+#     The build job itself is `contents: read` and references no `secrets.*`.
+#
+# Why the pull_request leg exists at all. A `workflow_dispatch` button only
+# appears once the workflow file is on the DEFAULT branch — so the very PR that
+# introduces this file cannot dispatch it, and without a PR leg the first thing
+# to ever exercise the recipe would be the first `v*` tag, i.e. a real release,
+# discovering a typo in public. The path-gated PR leg closes that: it is what
+# proves the build on the PR that changes the build, before any tag exists.
+# Gated to this one path because the job is expensive and nothing else in the
+# repo can break it in a way ci.yml (which runs the same SPA-then-Go recipe on
+# every PR) does not already catch first.
+#
+# Concurrency. Grouped per workflow+ref, cancellation on PR runs only. A
+# superseded PR run is pure waste, so kill it. A release run must never be
+# cancelled mid-flight: `gh release create` publishes the release and uploads
+# its assets in one call, and a kill partway through leaves a tagged, visible,
+# notification-generating release holding some or none of its binaries. A
+# half-published release is strictly worse than a slow one, and the recovery is
+# manual. Same rule, same reasoning, as agent-tools.yml's publish leg.
+#
+# One job, no matrix. The SPA build (`npm ci` + `vite build`) is
+# architecture-independent and is the expensive part of the job; the two Go
+# cross-compiles that follow are cheap. A per-arch matrix would rebuild the
+# byte-identical SPA on both runners for no benefit and then need a third job
+# to reunite the halves for one checksums file — so `build` does the SPA once
+# and loops over GOARCH in a single job. A genuinely different platform (a
+# non-linux GOOS needing its own SPA-independent handling) is what would
+# justify splitting it; a second GOARCH is not.
+#
+# Cross-compile, not nix. `nix build .#lab` yields the same static binary, but
+# only for the builder's architecture: an arm64 artifact from nix needs an
+# arm64 builder or qemu emulation, both of which cost real time here. With
+# `CGO_ENABLED=0` there is no native toolchain in the picture at all, so
+# `GOOS=linux GOARCH=arm64 go build` is a plain cross-compile producing exactly
+# the same artifact for free. Nix stays authoritative for `nix flake check` and
+# the NixOS module (ADR-0023); it is deliberately not the release path.
+#
+# Version. `-X main.version=…` (the ldflags nix/package.nix also uses) is
+# stamped from the TAG — `v0.1.0` → `0.1.0` — never from an in-repo constant.
+# That is the whole reason no version-sync mechanism is needed: nix/package.nix
+# pins its own `version` for the nix world, and anything keeping the two in
+# lockstep would be one more step to forget at tag time. The tag is the single
+# source of truth for what a released binary reports, and the in-repo constant
+# is free to drift. Dry runs stamp `0.0.0-dev+<short sha>` so a dispatched or
+# PR-built binary can never be mistaken for a released one.
+#
+# Asset names are a contract — do NOT version-qualify them. The five assets are
+# `lab-linux-amd64`, `lab-linux-arm64`, `labctl-linux-amd64`,
+# `labctl-linux-arm64`, `checksums.txt`. GitHub's
+# `releases/latest/download/<asset>` redirect resolves only names that are
+# identical across releases, and that redirect is the URL the README's install
+# instructions hardcode. Folding the version into these names looks tidier and
+# silently breaks every documented install command — and the breakage surfaces
+# on the release *after* the change, not the one that made it. Arch
+# qualification stays; version qualification never does.
+#
+# Auth and tooling. Built-in `secrets.GITHUB_TOKEN` only, scoped by the release
+# job's `contents: write` (spelled out alone, so declaring it does not leave
+# the rest of the token at the default): no operator-provisioned secret to
+# rotate, and nothing to provision before a fresh clone of this repo can cut a
+# release. Publishing goes through the `gh` CLI rather than a third-party
+# release action — `gh` is preinstalled on `ubuntu-latest`, and driving the
+# tool directly matches this repo's posture (agent-tools.yml drives raw
+# `podman`) instead of taking a supply-chain dependency for one API call.
+#
+# See issue #10 and CONTRIBUTING.md § CI for the other gates.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR-only cancellation — see the header: a superseded PR run is waste, a
+  # half-published release is damage.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Runs on every trigger. Read-only and secret-free by construction: this is
+  # the leg fork PRs execute, so it must not be able to publish anything.
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24" # matches ci.yml / the flake's `pkgs.nodejs`
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod # `go 1.26` — the go.mod gate, as in ci.yml
+
+      - name: Derive release version from the tag
+        run: |
+          # The tag is the single source of truth (see header). `v0.1.0` →
+          # `0.1.0`; anything that is not a tag push is a dry run and gets a
+          # version no release could ever collide with.
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev+${GITHUB_SHA:0:7}"
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "building version ${VERSION}"
+
+      - name: Build the SPA
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build
+
+      - name: Embed the SPA dist (go:embed target, same as `make build-ui`)
+        run: |
+          # go:embed cannot reach outside its package dir, so the dist tree is
+          # copied in rather than referenced. Identical to ci.yml's step and to
+          # the Makefile's build-ui target — `lab` is built with `-tags ui`
+          # below and will not compile without this.
+          set -eux
+          rm -rf internal/webui/dist
+          mkdir -p internal/webui
+          cp -r web/dist internal/webui/dist
+
+      - name: Cross-compile lab + labctl for linux/amd64 + linux/arm64
+        run: |
+          # CGO_ENABLED=0 is what makes both the static linking and the
+          # toolchain-free cross-compile possible; the assert step below is the
+          # gate that keeps it true. ldflags match nix/package.nix: `-s -w`
+          # strips the symbol table and DWARF, `-X main.version` stamps the
+          # `var version` in each main package. `lab` needs `-tags ui` (the
+          # embedded SPA); `labctl` is the slim agent-side CLI and does not.
+          set -euxo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -tags ui -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/lab-linux-${arch}" ./cmd/lab
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/labctl-linux-${arch}" ./cmd/labctl
+          done
+
+      - name: Assert every binary is statically linked
+        run: |
+          # A real gate, not a log dump. The install path these assets serve is
+          # "download and run on an unknown linux" — a dynamically linked
+          # binary would work on this runner and fail on a user's host with a
+          # different libc. If CGO ever creeps back in (a new import pulling in
+          # net/os-user's cgo paths, a stray CGO_ENABLED=1), this must go red at
+          # build time rather than in someone's terminal. `file` ships on the
+          # runner image.
+          set -euo pipefail
+          rc=0
+          for f in dist/*; do
+            desc="$(file -b "$f")"
+            echo "${f}: ${desc}"
+            case "$desc" in
+              *"statically linked"*) ;;
+              *)
+                echo "::error file=${f}::not statically linked — CGO leaked into the release build (${desc})"
+                rc=1
+                ;;
+            esac
+          done
+          exit $rc
+
+      - name: Generate checksums.txt
+        working-directory: dist
+        run: |
+          # Bare filenames, not paths: the file is written from inside dist/ so
+          # that `sha256sum -c checksums.txt` works verbatim in whatever
+          # directory a user downloaded the assets into. Naming the binaries
+          # explicitly keeps checksums.txt out of its own listing.
+          set -euxo pipefail
+          sha256sum \
+            lab-linux-amd64 lab-linux-arm64 \
+            labctl-linux-amd64 labctl-linux-arm64 \
+            > checksums.txt
+          cat checksums.txt
+
+      # The whole release payload, one artifact. On a dry run this is the
+      # deliverable — download it to inspect what a tag push would have
+      # published. The zip round-trip drops the executable bit, which costs
+      # nothing: GitHub release assets carry no file mode either, and the docs
+      # tell users to `chmod +x` after downloading.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Release leg — tag pushes only. `workflow_dispatch` and `pull_request` are
+  # excluded by this `if`, which is what keeps the write token unreachable from
+  # a fork PR.
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The only write scope in this file, on the only job that needs it.
+    # Spelled out alone: declaring one permission drops every other scope to
+    # none, which is exactly the intent — this job creates a release and does
+    # nothing else.
+    permissions:
+      contents: write
+    steps:
+      # No checkout: the assets came from `build`, and `gh release create`
+      # needs only the tag (already on the remote) and the token.
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Load-bearing, precisely because there is no checkout above: `gh`
+          # resolves the target repo from --repo, then GH_REPO, then the git
+          # remote of the working directory. With no remote to find it aborts
+          # with "failed to determine base repository", so this env var is what
+          # buys the checkout-free job. Derived, so a fork releases at itself.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # --generate-notes is GitHub's own changelog from the commits since
+          # the previous tag; the repo uses Conventional Commits, so that
+          # reads well without a changelog tool to maintain. The tag is the
+          # ref that triggered this run, so the release name matches it
+          # exactly. `dist/*` uploads all five assets under the bare names the
+          # header pins as the contract.
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --generate-notes dist/*
