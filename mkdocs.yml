@@ -1,0 +1,116 @@
+# The docs site (ADR-0066) is a *rendering* of this repository, never a second
+# copy of it. Nothing under `docs/` is duplicated for the site's benefit and no
+# root-level file is symlinked or vendored in: `mkdocs_hooks.py` injects
+# README.md / CONTEXT.md / CONTRIBUTING.md as virtual pages at build time,
+# generates the ADR index from the directory listing, and rewrites every
+# relative link so the same Markdown reads correctly both on GitHub and here.
+# Read that file before changing anything below — the two halves are a pair.
+#
+# The toolchain is pinned by flake.lock (`nix develop .#docs`), which is why
+# there is no requirements.txt beside this file. Build the way CI does:
+#
+#     nix develop .#docs --command mkdocs build --strict
+#
+site_name: lab
+site_description: >-
+  A self-hosted server with a phone-first web interface for running coding
+  agents against your git repositories — interactively or unattended.
+site_url: https://cloonar.github.io/coding-lab/
+repo_url: https://github.com/Cloonar/coding-lab
+repo_name: Cloonar/coding-lab
+
+# No "edit this page" link. Three of the pages on this site (index, glossary,
+# contributing) are injected from the repo root and a fourth (the ADR index) is
+# generated from a directory listing — none of them has a file at the docs_dir
+# path an edit link would point at, so the button would 404 or, worse, offer to
+# edit a file that does not exist. A button that lies on half the site is worse
+# than no button; the repo link in the header already gets you to the source.
+edit_uri: ""
+
+theme:
+  name: material
+  # Deliberately short. This is reference documentation for a Go project, not a
+  # product page: every feature here earns its place.
+  features:
+    - content.code.copy # the docs are full of commands meant to be pasted
+    - navigation.top # ops.md is ~500 lines; a way back up is not a luxury
+    - search.highlight # marks the hit in the page you land on
+    - search.suggest # completes the query — cheap, and the corpus is jargon-dense
+  palette:
+    # Follow the reader's OS preference by default, with a manual override —
+    # `media` picks the initial scheme, the toggle flips it and persists.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  # Naming any plugin drops MkDocs' implicit default, so search has to be
+  # listed back explicitly — Material's search is the site's only index.
+  - search
+
+# Exactly what the existing content already uses, and nothing else: fenced code
+# blocks, tables, raw HTML (README's screenshot row), and admonitions. The three
+# pymdownx entries are what Material's own code blocks are built on — dropping
+# any of them degrades highlighting and the copy button silently.
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+hooks:
+  - mkdocs_hooks.py
+
+# Gitignore syntax, evaluated per file, last match wins. Written as
+# exclude-then-negate rather than as a list of today's filenames so the default
+# for a NEW file under docs/agents/ is "not published": agent-facing conventions
+# are written for agents working on this repo and read from the checkout, and
+# only provider-authoring.md is documentation a human reader wants. The link
+# rewriter turns every link *to* an excluded file into a GitHub blob URL, so
+# excluding something here can never dangle a link — the two agree by
+# construction because the hook reads this build's file collection.
+exclude_docs: |
+  /agents/**
+  !/agents/provider-authoring.md
+  /reference/**
+  /agent-brief.md
+
+# The ADRs are built, linked, and searchable, but 68 numbered entries would bury
+# the eight pages a reader actually navigates to. The generated adr/index.md is
+# the sidebar entry instead. The pattern keys on the leading digit every ADR
+# filename carries, which is precisely what index.md does not have.
+not_in_nav: |
+  /adr/[0-9]*.md
+
+# --strict is the whole point of this block. Left at their defaults these three
+# are INFO and a broken build looks green. At `warn` they become build failures
+# under --strict, which turns MkDocs' own resolver into the test suite for the
+# hook's link rewriting: every source-relative path the hook emits is validated
+# against the real file collection, anchors included.
+validation:
+  omitted_files: warn
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Operations: ops.md
+  - Model selection: model-selection.md
+  - Definition of done: definition-of-done.md
+  - Glossary: context.md
+  - Contributing:
+      - Contributing: contributing.md
+      - Provider authoring: agents/provider-authoring.md
+  - Decisions (ADRs): adr/index.md
