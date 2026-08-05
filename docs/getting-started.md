@@ -7,7 +7,8 @@ A first session with lab, end to end: install, log in, add a credential and a re
 Pick one:
 
 - **NixOS**: import `nixosModules.lab` from the flake and set `services.lab.enable = true;` — see the README quickstart and the full option table in [`ops.md` § Deployment](ops.md#deployment). The module provisions everything the container runner needs (rootless podman, subuid ranges, lingering) out of the box.
-- **Bare metal**: build `bin/lab` and `bin/labctl` with `make lab labctl` (or `nix build .#lab`), make sure `git`, `tmux`, `ssh`, and `prlimit` are on PATH, and run `./bin/lab`. Defaults: listen on `:8080`, state in `~/.local/state/lab`, SQLite. A systemd unit template is in [`ops.md` § Bare metal](ops.md#bare-metal).
+- **Download a release binary**: grab `lab-linux-amd64`/`lab-linux-arm64` (and `labctl-linux-…` for host-runner sessions) from the [latest release](https://github.com/Cloonar/coding-lab/releases/latest), verify against `checksums.txt`, `chmod +x`, and put it on PATH (`~/.local/bin` or `/usr/local/bin`); `git`, `tmux`, `ssh`, and `prlimit` still have to be there too. Then run `lab`. See the README's [Download a release binary](../README.md#download-a-release-binary) section.
+- **Build from source**: build `bin/lab` and `bin/labctl` with `make lab labctl` (or `nix build .#lab`), make sure `git`, `tmux`, `ssh`, and `prlimit` are on PATH, and run `./bin/lab`. Defaults: listen on `:8080`, state in `~/.local/state/lab`, SQLite. A systemd unit template is in [`ops.md` § Bare metal](ops.md#bare-metal).
 
 On first start lab applies its database migrations and auto-generates the vault master key (`master.key`, 0600) in the state directory. Nothing else to prepare.
 

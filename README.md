@@ -77,7 +77,25 @@ Any Linux host. On PATH: `git`, `tmux`, `ssh` (openssh), `prlimit` (util-linux).
 
 The module makes the host container-ready out of the box and asserts the load-bearing unit invariants (sessions survive service restarts). All options, secrets wiring (sops / `LoadCredential`), and reverse-proxy setup: [`docs/ops.md`](docs/ops.md).
 
-### Bare metal
+### Download a release binary
+
+Every [release](https://github.com/Cloonar/coding-lab/releases) publishes static linux binaries (amd64, arm64) plus a `checksums.txt`:
+
+```sh
+curl -LO https://github.com/Cloonar/coding-lab/releases/latest/download/lab-linux-amd64
+curl -LO https://github.com/Cloonar/coding-lab/releases/latest/download/checksums.txt
+grep lab-linux-amd64 checksums.txt | sha256sum -c -
+chmod +x lab-linux-amd64
+mkdir -p ~/.local/bin
+mv lab-linux-amd64 ~/.local/bin/lab   # or /usr/local/bin for a system install
+~/.local/bin/lab                      # listens on :8080, state in ~/.local/state/lab, sqlite
+```
+
+Swap `amd64` for `arm64` on an aarch64 host. `labctl` — the agent-side CLI — ships the same way, as `labctl-linux-amd64` / `labctl-linux-arm64`; grab it too when this host runs sessions itself, but a host that only runs the server doesn't need it. See [Requirements](#requirements) above for what else needs to be on PATH.
+
+Migrations apply on startup and the vault master key is auto-generated on first start; open the web UI and the first-run wizard creates the operator account. A systemd unit template and the full flag/env configuration reference are in [`docs/ops.md`](docs/ops.md).
+
+### Build from source
 
 ```sh
 git clone https://github.com/Cloonar/coding-lab && cd coding-lab
@@ -85,7 +103,7 @@ make lab labctl          # static binaries → bin/lab, bin/labctl  (needs Go 1.
 ./bin/lab                # listens on :8080, state in ~/.local/state/lab, sqlite
 ```
 
-Migrations apply on startup and the vault master key is auto-generated on first start; open the web UI and the first-run wizard creates the operator account. A systemd unit template and the full flag/env configuration reference are in [`docs/ops.md`](docs/ops.md).
+Same startup behavior as above (migrations, auto-generated master key, first-run wizard).
 
 ### Developing
 

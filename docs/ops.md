@@ -127,7 +127,7 @@ Sharp edges (all enforced server-side):
 
 Any Linux host works:
 
-1. Build or download `lab` and `labctl` (static binaries, CGO-free): `make lab labctl` or `nix build .#lab`.
+1. Build or download `lab` and `labctl` (static binaries, CGO-free): `make lab labctl`, `nix build .#lab`, or the prebuilt release binaries ([README § Download a release binary](../README.md#download-a-release-binary)).
 2. Ensure on PATH: `git`, `tmux`, `ssh` (openssh), `prlimit` (util-linux) — and `labctl` (agent sessions resolve it from PATH). Provider CLIs (`claude`, `codex`) are required only for host-runner repos and for servers with no container config at all; a container-mode host needs none of them — the agent-tools image is the CLI distribution there ([Container runner](#container-runner), ADR-0057).
 3. Run `lab` with the flags below (defaults: `--state-dir ~/.local/state/lab`, sqlite). Migrations apply on startup; the master key is auto-generated 0600 on first start.
 
