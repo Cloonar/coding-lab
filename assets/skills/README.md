@@ -10,6 +10,10 @@ via `.git/info/exclude`). See `docs/agent-brief.md`, decision D13.
   consolidates point tests into table/contract tests.
 - **Vendored from**: the installed (patched) home-manager state on 2026-07-05, i.e. the
   exact bundle in production use on the dev host.
+- **License**: the upstream skills are MIT-licensed (© Matt Pocock); the required notice
+  is vendored alongside them as [`LICENSE.upstream`](LICENSE.upstream) and must travel
+  with the bundle. The cloonar-local skills below are part of this project and covered
+  by the repository's own license (`/LICENSE`).
 
 ## Cloonar-local skills (not from upstream)
 
@@ -35,8 +39,8 @@ upstream bump replaces upstream skill directories wholesale — re-apply these a
 - `land-pr/validation-core.md` (cloonar-local, survives bumps anyway) — explicit bar for
   `CONCERNS`, so higher-recall reviewers don't stall autoland's auto-merge on nitpicks.
 
-The recommended model/effort per workflow stage lives in the root `README.md`
-("Model selection for the agent workflow").
+The recommended model/effort per workflow stage lives in
+[`docs/model-selection.md`](../../docs/model-selection.md).
 
 ## Bundle contents
 
