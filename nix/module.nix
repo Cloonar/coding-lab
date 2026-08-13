@@ -119,6 +119,10 @@ let
     "--onecli-gateway-url"
     cfg.onecli.gatewayUrl
   ]
+  ++ lib.optionals (cfg.onecli.caFile != null) [
+    "--onecli-ca-file"
+    cfg.onecli.caFile
+  ]
   ++ lib.optionals (cfg.seedUser != null) [
     "--seed-user"
     cfg.seedUser
@@ -446,6 +450,28 @@ in
           must not be bound strictly to loopback on hosts that run
           {option}`container.enable`. Independently settable from
           {option}`url` / {option}`apiKeyFile` — no pairing requirement.
+        '';
+      };
+
+      caFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/var/lib/lab/onecli-ca.pem";
+        description = ''
+          Path to the PEM file holding the OneCLI gateway's interception CA
+          certificate on the host (--onecli-ca-file), composed with the
+          host's system CA bundle into a per-run trust bundle (issue #24)
+          rather than replacing the system roots outright — a bare
+          interception CA would break every direct HTTPS call a run makes
+          off the gateway (git push to the forge, api.anthropic.com). The
+          same host file reaches a `container`-runner run through the
+          per-run runtime dir's existing host-identical bind mount, so this
+          is one setting rather than a separate host and container path.
+          `null` (the default) is fine when {option}`gatewayUrl` is also
+          unset; with {option}`gatewayUrl` set and this left `null`, lab
+          refuses to spawn a run rather than start one whose HTTPS is
+          broken. Independently settable from {option}`url` /
+          {option}`apiKeyFile` — no pairing requirement with those two.
         '';
       };
     };

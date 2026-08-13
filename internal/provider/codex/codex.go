@@ -342,6 +342,24 @@ var seedMeta = provider.SeedMeta{
 		`co-authored-by:.*<[^>]*@openai\.com>`,
 		`generated with.*codex`,
 	},
+	// DirectAPIHosts is deliberately UNSET (issue #24), and the empty list is
+	// the honest answer rather than a gap: the only openai host this adapter
+	// has ever verified against a live CLI is the DEVICE-LOGIN one
+	// (auth.openai.com — login.go's pinned scrape, compat §"Device-code
+	// login"), which is the operator's browser flow on the host, not the
+	// endpoint a run streams turns to; codex resolves its model traffic from
+	// whichever auth mode it happens to run under, and nothing in this package
+	// or its compat pin establishes that host. A guessed hostname is strictly
+	// worse than none — it would exempt an address the run never dials while
+	// the real one stays proxied, and read as verified to the next reader.
+	// Empty is harmless: noProxyValue simply adds no entry for codex.
+	//
+	// Declaring it (once someone has confirmed the host against a live codex,
+	// the ADR-0008 bar every fragile CLI coupling here is held to) would keep a
+	// gateway-wired codex run's model stream OFF the credential gateway, the
+	// way claudecode's declaration does — until then such a run's LLM traffic
+	// goes through the proxy, so a gateway outage can stall it.
+	DirectAPIHosts: nil,
 }
 
 // SeedMeta implements provider.AgentProvider: codex's seeding shapes,
@@ -352,6 +370,10 @@ func (p *Provider) SeedMeta() provider.SeedMeta {
 	m.ExcludeEntries = slices.Clone(m.ExcludeEntries)
 	m.SeededPathPatterns = slices.Clone(m.SeededPathPatterns)
 	m.ScrubPatterns = slices.Clone(m.ScrubPatterns)
+	// Clones a nil slice to nil today (DirectAPIHosts is unset above) — kept in
+	// the list so filling that declaration in never silently hands callers the
+	// package var's own backing array.
+	m.DirectAPIHosts = slices.Clone(m.DirectAPIHosts)
 	return m
 }
 

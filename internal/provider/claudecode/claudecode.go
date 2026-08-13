@@ -328,6 +328,14 @@ var seedMeta = provider.SeedMeta{
 		`generated with.*claude`,
 		`claude-session:`,
 	},
+	// The one host a claude-code run must reach DIRECTLY (issue #24): the
+	// Messages API endpoint the CLI streams every turn to. It rides in a
+	// gateway-wired run's NO_PROXY so a credential-gateway outage cannot take
+	// the model connection down with it (ADR-0067 rules LLM traffic out of the
+	// gateway's scope). The literal belongs HERE and nowhere else — core naming
+	// it is the ADR-0033 neutrality violation this declaration exists to undo.
+	// Bare hostname: no scheme, no port.
+	DirectAPIHosts: []string{"api.anthropic.com"},
 }
 
 // SeedMeta implements provider.AgentProvider: claude-code's seeding shapes,
@@ -338,6 +346,7 @@ func (p *Provider) SeedMeta() provider.SeedMeta {
 	m.ExcludeEntries = slices.Clone(m.ExcludeEntries)
 	m.SeededPathPatterns = slices.Clone(m.SeededPathPatterns)
 	m.ScrubPatterns = slices.Clone(m.ScrubPatterns)
+	m.DirectAPIHosts = slices.Clone(m.DirectAPIHosts)
 	return m
 }
 

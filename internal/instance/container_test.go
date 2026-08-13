@@ -600,7 +600,11 @@ func TestStart_hostRunner_unchangedByContainerSeam(t *testing.T) {
 }
 
 // containerEnv's exhaustive contract (pure — see the function doc for the
-// secret/non-secret rule it implements).
+// secret/non-secret rule it implements). Since issue #24 this doubles as the
+// gateway PARITY guard: the spawn env below carries no proxy bundle, which is
+// every lab with OneCLI unconfigured, and the split it produces is the
+// pre-gateway one entry for entry. A change to the gateway wiring that shows
+// up here has broken a lab that never asked for a gateway.
 func TestContainerEnv(t *testing.T) {
 	const hostHome = "/state/instances/run_1/home"
 	const sockURL = "unix:///state/agent/agent.sock"
@@ -654,6 +658,94 @@ func TestContainerEnv(t *testing.T) {
 	}
 	if !slices.Equal(forward, []string{"TERM"}) {
 		t.Errorf("forward over empty spawnEnv = %q, want [TERM]", forward)
+	}
+}
+
+// The credential gateway's bundle through containerEnv (issue #24 /
+// ADR-0067). Two claims, and the first is the security one: HTTPS_PROXY and
+// https_proxy carry the repo's agent-identity token as userinfo, so they must
+// travel by NAME (tmux -e, podman copies the value out of the pane env) and
+// their VALUES must appear in no argv-bound entry — while the rest of the
+// bundle, being paths and hostnames, stays deliberately visible as K=V so an
+// operator can read a run's command line and see what it trusts and what it
+// exempts. The second is that the trust-bundle path survives RewriteHomeEnv
+// untouched: the bundle lives in the run's RUNTIME dir, a sibling of the
+// instance home that the runner binds at its host-identical path, so the same
+// absolute path is valid on both sides of the container boundary.
+func TestContainerEnv_gatewayBundle(t *testing.T) {
+	const (
+		hostHome   = "/state/instances/run_1/home"
+		runtimeDir = "/state/instances/run_1/runtime"
+		sockURL    = "unix:///state/agent/agent.sock"
+		proxyToken = "onecli-proxy-token"
+		proxyURL   = "http://" + proxyToken + "@10.88.0.1:10255"
+		// A composed noProxyValue output; its last entry stands in for the
+		// resolving provider's declared DirectAPIHosts (issue #24 — core names
+		// no provider's API host, ADR-0033).
+		noProxy = "127.0.0.1,git.example.com,api.provider.example.com"
+	)
+	bundle := filepath.Join(runtimeDir, trustBundleName)
+
+	// Exactly what spawnEnv assembles for a gateway-wired run: the pre-#24
+	// layers, the proxy bundle as its own layer after the provider env, then
+	// the author identity last.
+	spawnEnv := append([]string{
+		"GIT_ASKPASS=" + runtimeDir + "/cred.run_1.askpass",
+		"LAB_URL=http://127.0.0.1:8080",
+		"LAB_TOKEN=lab_run_secret",
+		"HOME=" + hostHome,
+		"CLAUDE_CONFIG_DIR=" + hostHome + "/.claude",
+	}, proxyBundleEnv(proxyURL, bundle, noProxy)...)
+	spawnEnv = append(spawnEnv, "GIT_AUTHOR_NAME=Dominik")
+
+	env, forward := containerEnv(spawnEnv, hostHome, sockURL)
+
+	wantEnv := []string{
+		"GIT_ASKPASS=" + runtimeDir + "/cred.run_1.askpass",
+		"LAB_URL=" + sockURL,
+		"HOME=" + podmanx.Home,
+		"CLAUDE_CONFIG_DIR=" + podmanx.Home + "/.claude",
+		"NO_PROXY=" + noProxy,
+		"no_proxy=" + noProxy,
+		"SSL_CERT_FILE=" + bundle,
+		"NODE_EXTRA_CA_CERTS=" + bundle,
+		"REQUESTS_CA_BUNDLE=" + bundle,
+		"GIT_SSL_CAINFO=" + bundle,
+		"GIT_AUTHOR_NAME=Dominik",
+		"PATH=" + podmanx.PATH,
+	}
+	if !slices.Equal(env, wantEnv) {
+		t.Errorf("env =\n  %q\nwant\n  %q", env, wantEnv)
+	}
+	wantForward := []string{"LAB_TOKEN", "HTTPS_PROXY", "https_proxy", "TERM"}
+	if !slices.Equal(forward, wantForward) {
+		t.Errorf("forward = %q, want %q", forward, wantForward)
+	}
+	// Neither the assembled proxy URL nor the bare token may appear in any
+	// argv-bound entry — the token check is the sharper one, since a future
+	// bug that re-renders the URL differently would still leak the credential.
+	for _, kv := range env {
+		if strings.Contains(kv, proxyToken) {
+			t.Errorf("agent proxy token leaked into env entry %q", kv)
+		}
+	}
+	// The four CA variables keep the HOST path: RewriteHomeEnv is anchored on
+	// the instance home, and the runtime dir is a sibling, not a child.
+	for _, name := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "GIT_SSL_CAINFO"} {
+		if got := envValue(env, name); got != bundle {
+			t.Errorf("%s = %q, want the host-identical trust-bundle path %q (RewriteHomeEnv must not touch the runtime dir)", name, got, bundle)
+		}
+	}
+
+	// tmux -e carries the proxy pair's VALUES beside LAB_TOKEN's — the other
+	// half of the split, and the only place those values exist.
+	wantSecrets := []string{
+		"LAB_TOKEN=lab_run_secret",
+		"HTTPS_PROXY=" + proxyURL,
+		"https_proxy=" + proxyURL,
+	}
+	if got := secretForwardEnv(spawnEnv, forward); !slices.Equal(got, wantSecrets) {
+		t.Errorf("secretForwardEnv = %q, want %q", got, wantSecrets)
 	}
 }
 

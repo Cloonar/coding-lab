@@ -135,9 +135,9 @@ func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 
 // spawnEnv assembles a session's extra environment (design §3a/§6/M3 contract):
 // the repo credential's git env + LAB_URL + LAB_TOKEN + HOME (the run's private
-// instance home) + the provider credential-injection env + the git
-// author/committer identity when configured. The forge token is never included
-// (§3a).
+// instance home) + the provider credential-injection env + the credential
+// gateway's proxy bundle + the git author/committer identity when configured.
+// The forge token is never included (§3a).
 //
 // HOME is the issue #202 isolation seam: it is the run's private per-run home,
 // so the spawned CLI reads/writes ONLY under it — the machine's master
@@ -147,10 +147,24 @@ func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 // the instance back at the master store (CLAUDE_CONFIG_DIR=<home>/.claude for
 // claude; CODEX_HOME=<home>/.codex for codex). Appended AFTER HOME
 // so a provider entry always wins over it.
-func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken, home string, injEnv []string) ([]string, error) {
+//
+// proxyEnv is the credential-gateway bundle (issue #24 / ADR-0067,
+// proxyBundleEnv): HTTPS_PROXY/https_proxy pointed at the sidecar with this
+// run's agent token folded in, NO_PROXY's direct-traffic exemptions, and the
+// four CA-path variables naming the run's trust bundle. It is its own layer
+// and it sits HERE, after the provider layer and before the author identity,
+// for a reason that is about grouping rather than precedence: no provider and
+// no credential layer sets any of these names, so nothing in this function can
+// shadow anything else and the order carries no fight to win. What it does
+// carry is a reading order — the two "what this run's processes need to reach
+// the outside" layers adjacent, with the author identity staying last exactly
+// as it has been. An empty or nil bundle — every lab with OneCLI unconfigured
+// — makes this a no-op append, so the output is byte-identical to before #24.
+func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken, home string, injEnv, proxyEnv []string) ([]string, error) {
 	env := append([]string{}, credEnv...)
 	env = append(env, "LAB_URL="+s.labURL, "LAB_TOKEN="+runToken, "HOME="+home)
 	env = append(env, injEnv...)
+	env = append(env, proxyEnv...)
 	author, err := s.authorEnv(ctx, repo)
 	if err != nil {
 		return nil, err

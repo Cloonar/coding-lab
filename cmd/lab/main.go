@@ -243,6 +243,18 @@ func run() int {
 			return 1
 		}
 	}
+	// The same client as the instance service's gateway seam (issue #24), and
+	// it is declared as the INTERFACE with an explicit nil-pointer guard for a
+	// reason worth stating: assigning a nil *onecli.Client straight into an
+	// interface-typed field yields a NON-nil interface holding a nil pointer.
+	// instance.gatewayActive() would then read "gateway configured" on a lab
+	// that configured nothing, and every spawn on that lab would refuse — the
+	// exact opposite of ADR-0067's "off when unset". Do not collapse this back
+	// into a one-line field assignment.
+	var oneCLIGateway instance.GatewayAPI
+	if oneCLIClient != nil {
+		oneCLIGateway = oneCLIClient
+	}
 	// Per-run private HOME lifecycle (issue #202): <state>/instances holds one
 	// private HOME per run — the isolation seam a run's provider credential copy,
 	// config, and transcripts live under. New does no I/O (the dirs are created
@@ -573,6 +585,14 @@ func run() int {
 			ContainerToolsImages: cfg.ContainerToolsImages,
 			ContainerPreflight:   containerPreflight,
 			AgentSockDir:         agentapi.SocketDir(cfg.StateDir),
+			// OneCLI credential-gateway run wiring (issue #24 / ADR-0067): the
+			// pre-claim fail-closed precheck, the per-run trust bundle, and the
+			// proxy env bundle every run kind gets. All three are zero when the
+			// integration is unconfigured, which leaves the launch path exactly
+			// as it was.
+			OneCLI:           oneCLIGateway,
+			OneCLIGatewayURL: cfg.OneCLIGatewayURL,
+			OneCLICAFile:     cfg.OneCLICAFile,
 		})
 		if err != nil {
 			logger.Error("building instance service", "component", "main", "err", err)

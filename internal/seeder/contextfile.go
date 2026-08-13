@@ -37,23 +37,31 @@ var contextFileTmpl string
 var contextFileTemplate = template.Must(template.New("context-file").Parse(contextFileTmpl))
 
 // renderContextFile renders the context-file body for repo, driven by the
-// provider's meta, the repo's secrets metadata, and the repo's read-only
-// imports. The base template is rendered exactly as always; then, ONLY when
-// secrets is non-empty, a Secrets section is appended (issue #104); then,
-// ONLY when imports is non-empty, a Read-only imports section is appended
-// (issue #261); then, ONLY for a provider that does not discover seeded
-// skills natively yet does seed them (!meta.NativeSkillDiscovery &&
+// provider's meta, the repo's secrets metadata, the run's credential-gateway
+// wiring, and the repo's read-only imports. The base template is rendered
+// exactly as always; then ONE Secrets section at most — the GATEWAY one when
+// gateway is non-nil (issue #24), the legacy one when it is nil and secrets
+// is non-empty (issue #104), never both, see appendGatewaySecretsSection;
+// then, ONLY when imports is non-empty, a Read-only imports section is
+// appended (issue #261); then, ONLY for a provider that does not discover
+// seeded skills natively yet does seed them (!meta.NativeSkillDiscovery &&
 // meta.SkillsDir != ""), a generated skills index is appended (issue #79 /
-// ADR-0035). A native-discovery provider with a secret-less, import-less
-// repo — or one seeding no skills at all — gets byte-for-byte the template
-// render, which is exactly what the testdata goldens pin.
-func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, imports []ImportRef) ([]byte, error) {
+// ADR-0035). A native-discovery provider with a gateway-less, secret-less,
+// import-less repo — or one seeding no skills at all — gets byte-for-byte the
+// template render, which is exactly what the testdata goldens pin.
+func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, imports []ImportRef) ([]byte, error) {
 	var b bytes.Buffer
 	data := struct{ Binding, ForgeKind string }{repo.TrackerBinding, repo.ForgeKind}
 	if err := contextFileTemplate.Execute(&b, data); err != nil {
 		return nil, fmt.Errorf("rendering context file: %w", err)
 	}
-	if len(secrets) > 0 {
+	// Mutually exclusive by construction, not by convention: a gateway-wired
+	// run is told the value never enters the run, and the legacy section's
+	// norm for handling a value it does hold would contradict that outright.
+	switch {
+	case gateway != nil:
+		appendGatewaySecretsSection(&b, gateway.Services)
+	case len(secrets) > 0:
 		appendSecretsSection(&b, secrets)
 	}
 	if len(imports) > 0 {
@@ -120,10 +128,15 @@ func appendSkillsIndex(buf *bytes.Buffer, skillsDir string, index []skillEntry) 
 //     file — so an agent whose push is blocked knows what happened and that
 //     the fix is rewriting the offending commits, not retrying.
 //
+// This is the GATEWAY-LESS path, and only that: when Opts.Gateway is non-nil
+// the run's secrets never enter it at all, and appendGatewaySecretsSection
+// renders the section in this one's place (issue #24) — see there for why the
+// two must never both appear.
+//
 // Appended in Go for the same structural reason as appendSkillsIndex: a
-// secret-less repo's byte-identity is then guaranteed by the len(secrets) == 0
-// check in renderContextFile, never by a template conditional that must stay
-// inert. Section order in renderContextFile is template body → secrets →
+// secret-less repo's byte-identity is then guaranteed by renderContextFile's
+// secrets branch simply not firing, never by a template conditional that must
+// stay inert. Section order in renderContextFile is template body → secrets →
 // read-only imports → skills index: repo-driven content (what THIS repo
 // holds) precedes the provider-driven tail (what THIS provider needs
 // indexed), the same "what this repo is, then what this agent gets" ordering
@@ -160,6 +173,93 @@ func appendSecretsSection(buf *bytes.Buffer, secrets []store.RepoSecret) {
 	buf.WriteString("Every `git push` is scanned server-side against these values (plain or\n")
 	buf.WriteString("encoded); a push whose diff carries one is refused, naming the secret and\n")
 	buf.WriteString("file. Remove the value and rewrite the offending commits, then push again.\n")
+}
+
+// appendGatewaySecretsSection writes the GATEWAY flavor of the "## Secrets"
+// section onto buf, one bullet per granted service name (issue #24 /
+// ADR-0067: a run's outbound HTTPS leaves through lab's credential gateway,
+// which matches the request against this repository's grants and injects the
+// real credential at the network layer, so the instance holds no secret value
+// at all). The section teaches that inversion, because an agent that does not
+// know it burns its budget clock rediscovering it:
+//
+//   - the value is not here and no amount of looking will produce it: there
+//     is nothing in this environment to read, print, or exfiltrate, which is
+//     the property the whole design exists for (ADR-0067's first pin) and the
+//     reason the legacy "never echo a value" drill has nothing to protect;
+//   - the norm that follows: call a granted service's API exactly as its docs
+//     say and send a PLACEHOLDER where a credential is required — hunting for
+//     a key in the environment, a file, or a secret manager is wasted effort,
+//     and its absence is a design property, not a misconfiguration to report;
+//   - the spawn-time grant inventory: one bullet per service the caller
+//     resolved, in the caller's order — or, when nothing is granted yet, the
+//     line saying so and naming OneCLI's dashboard as where an operator
+//     attaches grants, so a 401 from an ungranted service reads as "not
+//     granted" rather than "broken" and does not become a debugging session
+//     the run cannot win from inside;
+//   - the caveat issue #24 documents rather than solves: a tool that ignores
+//     proxy environment variables bypasses the gateway and gets 401/403 from
+//     the real API — a tool problem, not an access problem, and not a leak
+//     either, since the environment never held a real key;
+//   - the enforcement pointer (issue #106), kept alive across the rewrite:
+//     pushes are still scanned server-side and a leaking push is still
+//     refused naming secret + file.
+//
+// It REPLACES appendSecretsSection rather than joining it — renderContextFile
+// emits one or the other, never both. Two "## Secrets" headings would be two
+// contradictory norms in one file ("route every use through `labctl secret
+// exec`" against "there is no value to route"), and which one an agent obeyed
+// would come down to which it read last. lab's own repo_secrets system does
+// stay live in parallel until #27 retires it, but a gateway-wired run's
+// context file is not where that parallelism belongs: this run's secrets come
+// from the gateway.
+//
+// Appended in Go for the same structural reason as its neighbours: with
+// Opts.Gateway nil, renderContextFile takes the untouched legacy path, so a
+// deployment with OneCLI unconfigured renders byte-for-byte what it rendered
+// before this section existed. That makes issue #24's "with OneCLI
+// unconfigured, spawn behaves exactly as today" a property of a branch in Go,
+// never of a template conditional someone must keep inert.
+//
+// The seeder stays metadata-only here, and more strictly than for legacy
+// secrets: it is handed granted service NAMES and nothing else. GatewayRef
+// carries no proxy URL and no proxy token — that bundle is the launch path's
+// business, injected into the session env — so no field reachable from this
+// function is credential-shaped in the first place.
+//
+// Shape mirrors appendSecretsSection: a blank line separates the section from
+// whatever precedes it, then the heading, then paragraphs each blank-line-
+// separated with the inventory (or the nothing-granted line) among them,
+// ending in exactly one trailing "\n".
+func appendGatewaySecretsSection(buf *bytes.Buffer, services []string) {
+	buf.WriteString("\n## Secrets\n\n")
+	buf.WriteString("This repository's secrets are injected by lab's credential gateway at the\n")
+	buf.WriteString("network layer. The environment holds NO secret value — there is nothing to\n")
+	buf.WriteString("read, print, or exfiltrate. Outbound HTTPS is routed through the gateway\n")
+	buf.WriteString("(`HTTPS_PROXY`), which matches each request against this repository's grants\n")
+	buf.WriteString("and injects the real credential on the way out.\n\n")
+	buf.WriteString("So call a granted service's API exactly as its own docs say. Where a\n")
+	buf.WriteString("credential is required, send a placeholder — the gateway replaces it with\n")
+	buf.WriteString("the real one. Do not look for a key in the environment, in a file, or in a\n")
+	buf.WriteString("secret manager: there is none, and its absence is not a misconfiguration.\n\n")
+	if len(services) == 0 {
+		buf.WriteString("No services are granted to this repository yet — an operator attaches\n")
+		buf.WriteString("grants in OneCLI's dashboard. Until then a 401 from an ungranted service\n")
+		buf.WriteString("is the expected answer, and not something this run can fix from inside.\n\n")
+	} else {
+		buf.WriteString("Services granted to this repository:\n\n")
+		for _, svc := range services {
+			fmt.Fprintf(buf, "- `%s`\n", svc)
+		}
+		buf.WriteString("\n")
+	}
+	buf.WriteString("Known caveat: a tool that ignores proxy environment variables bypasses the\n")
+	buf.WriteString("gateway and gets 401/403 from the real API. That means the tool is not\n")
+	buf.WriteString("honoring `HTTPS_PROXY`, not that access is missing — prefer a tool that\n")
+	buf.WriteString("does; curl, git, node, and Python's requests all honor it. Nothing leaks\n")
+	buf.WriteString("on that path either: the environment never held a real key.\n\n")
+	buf.WriteString("Every `git push` is still scanned server-side for known secret values; a\n")
+	buf.WriteString("push whose diff carries one is refused, naming the secret and file.\n")
 }
 
 // appendImportsSection writes the "## Read-only imports" section onto buf,
@@ -205,13 +305,14 @@ func appendImportsSection(buf *bytes.Buffer, imports []ImportRef) {
 // (idempotent re-seed). A provider that declares no context file (name empty)
 // gets none — the write is skipped. meta flows through so the render can append
 // the non-native skills index (issue #79); secrets flows through so it can
-// append the Secrets section (issue #104); imports flows through so it can
-// append the Read-only imports section (issue #261).
-func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, imports []ImportRef) error {
+// append the Secrets section (issue #104); gateway flows through so it can
+// append the gateway Secrets section in its place (issue #24); imports flows
+// through so it can append the Read-only imports section (issue #261).
+func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, imports []ImportRef) error {
 	if meta.ContextFileName == "" {
 		return nil
 	}
-	body, err := renderContextFile(repo, meta, secrets, imports)
+	body, err := renderContextFile(repo, meta, secrets, gateway, imports)
 	if err != nil {
 		return err
 	}

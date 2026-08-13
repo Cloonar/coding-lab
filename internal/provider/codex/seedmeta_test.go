@@ -26,6 +26,13 @@ func TestSeedMeta_pinnedGolden(t *testing.T) {
 			`co-authored-by:.*<[^>]*@openai\.com>`,
 			`generated with.*codex`,
 		},
+		// Pinned ABSENT (issue #24): codex's model-traffic host is not
+		// established by anything this adapter has verified against a live CLI
+		// — only the device-login host is — so the declaration stays empty
+		// rather than guessing, and a gateway-wired codex run simply gets no
+		// direct-host NO_PROXY entry. See the declaration's note in codex.go;
+		// filling it in must update this pin.
+		DirectAPIHosts: nil,
 	}
 	got := (&Provider{}).SeedMeta()
 	if !reflect.DeepEqual(got, want) {

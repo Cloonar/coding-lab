@@ -174,9 +174,15 @@ func checkSeedMetaClone(p provider.AgentProvider) []error {
 	origExclude := slices.Clone(first.ExcludeEntries)
 	origPaths := slices.Clone(first.SeededPathPatterns)
 	origScrub := slices.Clone(first.ScrubPatterns)
+	// DirectAPIHosts (issue #24) is checked like its neighbours, and an adapter
+	// that declares none passes vacuously — the empty declaration is legal
+	// (provider.SeedMeta.DirectAPIHosts), so this obligation is only about the
+	// clone discipline, never about declaring a host.
+	origDirect := slices.Clone(first.DirectAPIHosts)
 	_ = corrupt(first.ExcludeEntries, mutationSentinel)
 	_ = corrupt(first.SeededPathPatterns, mutationSentinel)
 	_ = corrupt(first.ScrubPatterns, mutationSentinel)
+	_ = corrupt(first.DirectAPIHosts, mutationSentinel)
 	second := p.SeedMeta()
 	if !slices.Equal(second.ExcludeEntries, origExclude) {
 		errs = append(errs, aliased("SeedMeta().ExcludeEntries"))
@@ -186,6 +192,9 @@ func checkSeedMetaClone(p provider.AgentProvider) []error {
 	}
 	if !slices.Equal(second.ScrubPatterns, origScrub) {
 		errs = append(errs, aliased("SeedMeta().ScrubPatterns"))
+	}
+	if !slices.Equal(second.DirectAPIHosts, origDirect) {
+		errs = append(errs, aliased("SeedMeta().DirectAPIHosts"))
 	}
 
 	optionSentinel := provider.Option{Value: mutationSentinel, Label: mutationSentinel}
