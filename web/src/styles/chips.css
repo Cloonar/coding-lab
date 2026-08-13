@@ -39,6 +39,14 @@
   color: var(--err-text);
 }
 
+/* Partial/warning status (issue #23: credential-gateway degraded state) — the
+   same amber "notice" tone as .chip.outcome-escalated / .chip.status-cloning,
+   generalized here since it isn't tied to a run or a clone. */
+.chip.status-warn {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+
 /* Clone progress -------------------------------------------------------------- */
 
 .clone-progress {

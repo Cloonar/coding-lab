@@ -8,6 +8,7 @@
 import { createSignal } from 'solid-js';
 import { updateSettings, type Settings, type TextSettingKey } from '../../../api';
 import Banner from '../../../components/Banner';
+import CredentialGatewayStatus from '../../../components/CredentialGatewayStatus';
 import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
 
@@ -57,38 +58,45 @@ export default function General(props: { initial: Settings; onSaved: () => void 
   });
 
   return (
-    <form onSubmit={(e) => void form.save(e)} class="stack">
-      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Banner message={form.note()} variant="success" />
+    <>
+      <form onSubmit={(e) => void form.save(e)} class="stack">
+        <Banner message={form.error()} onDismiss={() => form.setError(null)} />
+        <Banner message={form.note()} variant="success" />
 
-      <SectionCard title="Git author">
-        <label class="field">
-          <span>Author name</span>
-          <input
-            type="text"
-            name="git_author_name"
-            autocomplete="off"
-            value={draft('git_author_name')}
-            onInput={(e) => setDraft('git_author_name', e.currentTarget.value)}
-          />
-          <small class="hint">Used for commits unless a repo overrides it.</small>
-        </label>
-        <label class="field">
-          <span>Author email</span>
-          <input
-            type="text"
-            name="git_author_email"
-            autocomplete="off"
-            spellcheck={false}
-            value={draft('git_author_email')}
-            onInput={(e) => setDraft('git_author_email', e.currentTarget.value)}
-          />
-        </label>
-      </SectionCard>
+        <SectionCard title="Git author">
+          <label class="field">
+            <span>Author name</span>
+            <input
+              type="text"
+              name="git_author_name"
+              autocomplete="off"
+              value={draft('git_author_name')}
+              onInput={(e) => setDraft('git_author_name', e.currentTarget.value)}
+            />
+            <small class="hint">Used for commits unless a repo overrides it.</small>
+          </label>
+          <label class="field">
+            <span>Author email</span>
+            <input
+              type="text"
+              name="git_author_email"
+              autocomplete="off"
+              spellcheck={false}
+              value={draft('git_author_email')}
+              onInput={(e) => setDraft('git_author_email', e.currentTarget.value)}
+            />
+          </label>
+        </SectionCard>
 
-      <button type="submit" class="primary wide" disabled={form.busy()}>
-        {form.busy() ? 'Saving…' : 'Save settings'}
-      </button>
-    </form>
+        <button type="submit" class="primary wide" disabled={form.busy()}>
+          {form.busy() ? 'Saving…' : 'Save settings'}
+        </button>
+      </form>
+
+      {/* Read-only — not part of the settings PATCH, so it lives outside the
+          form (issue #23): confirms the OneCLI sidecar is reachable before a
+          run depends on it. */}
+      <CredentialGatewayStatus />
+    </>
   );
 }

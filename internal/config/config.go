@@ -39,6 +39,36 @@ type Config struct {
 	MasterKeyFile string // path to the vault master key file
 	VAPIDKeyFile  string // path to the web push VAPID key file (RFC 8292)
 
+	// OneCLIURL is the base URL lab itself uses to reach the OneCLI
+	// sidecar's REST API — its dashboard/API port, default 10254 — typically
+	// loopback (e.g. http://127.0.0.1:10254). "" means the OneCLI
+	// integration is off. Deliberately separate from OneCLIGatewayURL (issue
+	// #23): the address lab uses to reach the REST API and the address a
+	// container must use to reach the gateway proxy are two different
+	// addresses, not the same one at a different path. Must be set together
+	// with OneCLIAPIKeyFile — see the pairing check at the bottom of Parse.
+	OneCLIURL string
+	// OneCLIAPIKeyFile is a path to a 0600 file holding the OneCLI API key.
+	// "" when unset. Parse stays pure (package doc comment): this file is
+	// read — and its permissions checked — at startup in cmd/lab, not here,
+	// exactly as SeedPasswordHashFile is read at seed time rather than at
+	// Parse. Must be set together with OneCLIURL (issue #23): a key file
+	// with no URL to send it to is dead config, and a URL with no key
+	// cannot authenticate.
+	OneCLIAPIKeyFile string
+	// OneCLIGatewayURL is the OneCLI gateway proxy URL — its default port
+	// 10255 — that a later epic (#24) injects into runs as HTTPS_PROXY. It
+	// is deliberately separate from OneCLIURL: the address lab itself uses
+	// (loopback) is not the address a rootless-podman container can use,
+	// because host.containers.internal is pinned to 127.0.0.1 inside lab's
+	// containers (ADR-0052) — a container needs a host-reachable address
+	// instead. Independently settable from OneCLIURL / OneCLIAPIKeyFile:
+	// it is consumed by #24's run wiring and by the gateway reachability
+	// probe, neither of which needs the REST API, so it is deliberately NOT
+	// part of the OneCLIURL/OneCLIAPIKeyFile pairing rule — do not "fix" it
+	// into that pairing.
+	OneCLIGatewayURL string
+
 	// ProviderBin maps a provider id to a binary-path override. A missing
 	// entry means the adapter uses its own default (a PATH lookup); config.go
 	// no longer owns any provider default (issue #78). Always non-nil after
@@ -151,7 +181,8 @@ func (p *providerMapFlag) Set(value string) error {
 // LAB_PROVIDER_BIN_<ID>, LAB_PROVIDER_CONFIG_<ID>, LAB_CLAUDE_CONFIG (a deprecated alias for
 // LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_CONTAINER_IMAGE, LAB_CONTAINER_TOOLS_IMAGE,
 // LAB_BASE_URL, LAB_AGENT_URL, LAB_SEED_USER,
-// LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE. providerIDs
+// LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE, LAB_ONECLI_URL,
+// LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL. providerIDs
 // is the caller's list of registered provider ids: the generic per-provider
 // flags are validated against it (an unknown id is a parse error), and the
 // LAB_PROVIDER_*_<ID> env forms are read only for ids it contains.
@@ -165,6 +196,10 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		db            = fs.String("db", "", "database DSN: sqlite:<path> or postgres://… (default sqlite:<state-dir>/lab.db; env LAB_DB)")
 		masterKeyFile = fs.String("master-key-file", "", "vault master key file (default <state-dir>/master.key; env LAB_MASTER_KEY_FILE)")
 		vapidKeyFile  = fs.String("vapid-key-file", "", "web push VAPID key file (default <state-dir>/vapid.key; env LAB_VAPID_KEY_FILE)")
+
+		oneCLIURL        = fs.String("onecli-url", "", "OneCLI sidecar REST API base URL, e.g. http://127.0.0.1:10254; empty disables the OneCLI integration; must be set with --onecli-api-key-file (env LAB_ONECLI_URL)")
+		oneCLIAPIKeyFile = fs.String("onecli-api-key-file", "", "path to a 0600 file holding the OneCLI API key; must be set with --onecli-url (env LAB_ONECLI_API_KEY_FILE)")
+		oneCLIGatewayURL = fs.String("onecli-gateway-url", "", "OneCLI gateway proxy URL injected into runs as HTTPS_PROXY, e.g. http://10.88.0.1:10255 — NOT host.containers.internal, which container runs pin to 127.0.0.1 (env LAB_ONECLI_GATEWAY_URL)")
 
 		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
 		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
@@ -342,6 +377,33 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 	hasPasswordHashSource := cfg.SeedPasswordHash != "" || cfg.SeedPasswordHashFile != ""
 	if (cfg.SeedUser != "") != hasPasswordHashSource {
 		return Config{}, fmt.Errorf("--seed-user and a seed password hash source (--seed-password-hash-file or --seed-password-hash) must be set together")
+	}
+
+	cfg.OneCLIURL = pick("onecli-url", *oneCLIURL, "LAB_ONECLI_URL", "")
+	if cfg.OneCLIURL != "" {
+		if err := validateHTTPURL("--onecli-url", cfg.OneCLIURL); err != nil {
+			return Config{}, err
+		}
+	}
+	cfg.OneCLIAPIKeyFile = pick("onecli-api-key-file", *oneCLIAPIKeyFile, "LAB_ONECLI_API_KEY_FILE", "")
+	// Half a OneCLI REST config = dead config (issue #23), modeled on the
+	// --seed-user / seed-password-hash-source pairing rule above: a URL with
+	// no key file cannot authenticate, and a key file with no URL has
+	// nowhere to send it. Both unset (the default) leaves the integration
+	// off; both set is valid.
+	if (cfg.OneCLIURL != "") != (cfg.OneCLIAPIKeyFile != "") {
+		return Config{}, fmt.Errorf("--onecli-url and --onecli-api-key-file must be set together or not at all")
+	}
+
+	// --onecli-gateway-url is deliberately NOT part of the pairing above: it
+	// is consumed by #24's run wiring and by the gateway reachability probe,
+	// neither of which needs the OneCLI REST API, so it stays independently
+	// settable. Do not "fix" it into the OneCLIURL/OneCLIAPIKeyFile pairing.
+	cfg.OneCLIGatewayURL = pick("onecli-gateway-url", *oneCLIGatewayURL, "LAB_ONECLI_GATEWAY_URL", "")
+	if cfg.OneCLIGatewayURL != "" {
+		if err := validateHTTPURL("--onecli-gateway-url", cfg.OneCLIGatewayURL); err != nil {
+			return Config{}, err
+		}
 	}
 
 	return cfg, nil

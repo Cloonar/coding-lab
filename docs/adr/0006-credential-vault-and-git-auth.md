@@ -8,7 +8,7 @@ The load-bearing split: a repository has **two** credential slots. `credential_i
 
 ## Status
 
-Accepted. Implements D9 (with D10's boundary); shipped in M2.
+Accepted. Implements D9 (with D10's boundary); shipped in M2. Superseded in part by [ADR-0067](0067-onecli-credential-gateway.md) (issue #23): the external-secret-manager rejection below is overturned for **repo secrets** only, which move behind the OneCLI credential gateway so their values never enter an instance at all — everything decided here for git credentials and the master key, the vault and its per-op materialization included, stands unchanged.
 
 ## Considered options
 

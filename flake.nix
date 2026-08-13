@@ -196,6 +196,27 @@
                 };
               };
 
+              # Text-level dummy (realized, same no-real-agent-CLIs rule):
+              # pins that all three OneCLI settings serialize, and — via the
+              # default unit's negative grep below — that an unconfigured host
+              # emits none of them, which is what "integration entirely off
+              # when unset" means at the unit level (issue #23). gatewayUrl is
+              # deliberately a non-loopback address: lab's container argv pins
+              # host.containers.internal to 127.0.0.1 (ADR-0052 / #216), so
+              # loopback here would pin the one value a container run cannot
+              # reach.
+              oneCLIDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  onecli = {
+                    url = "http://127.0.0.1:10254";
+                    apiKeyFile = "/run/secrets/lab-onecli-api-key";
+                    gatewayUrl = "http://10.88.0.1:10255";
+                  };
+                };
+              };
+
               # Third text-level dummy (realized): container mode explicitly
               # OFF. Since #220 flipped container.enable's default to true,
               # the opt-OUT is the non-default path — this dummy's unit text
@@ -402,11 +423,13 @@
               {
                 unit = dummy.config.systemd.units."lab.service".text;
                 agentUrlUnit = agentUrlDummy.config.systemd.units."lab.service".text;
+                oneCLIUnit = oneCLIDummy.config.systemd.units."lab.service".text;
                 containerUnit = containerDummy.config.systemd.units."lab.service".text;
                 containerOffUnit = containerOffDummy.config.systemd.units."lab.service".text;
                 passAsFile = [
                   "unit"
                   "agentUrlUnit"
+                  "oneCLIUnit"
                   "containerUnit"
                   "containerOffUnit"
                 ];
@@ -465,6 +488,20 @@
                 fi
                 # ...while an explicitly-set agentUrl must still serialize.
                 grep '^ExecStart=' "$agentUrlUnitPath" | grep -qF -- '"--agent-url" "unix:///run/lab/agent.sock"'
+
+                # OneCLI credential gateway (issue #23, ADR-0067): all three
+                # settings are optional and default to null, so an operator who
+                # has not opted in must get a unit with no --onecli-* flag at
+                # all — "integration entirely off when unset" is a property of
+                # the rendered argv, not just of the Go default.
+                if grep '^ExecStart=' "$unitPath" | grep -qF -- '--onecli-'; then
+                  echo "default unit must not pass any --onecli-* flag (integration off when unset, issue #23)" >&2
+                  exit 1
+                fi
+                # ...while each explicitly-set OneCLI option must serialize.
+                grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-url" "http://127.0.0.1:10254"'
+                grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-api-key-file" "/run/secrets/lab-onecli-api-key"'
+                grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-gateway-url" "http://10.88.0.1:10255"'
 
                 # Text-level PATH serialization (issue #74): prove the path list
                 # actually lands on the unit's Environment=PATH line — the

@@ -34,6 +34,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -98,6 +99,16 @@ Flags (env overrides in parentheses; flag > env > default):
   -container-tools-image provider=ref[,provider=ref…]
                            agent-tools injection image per provider id,
                            @sha256-pinned per ADR-0051 (LAB_CONTAINER_TOOLS_IMAGE)
+  -onecli-url string       OneCLI sidecar REST API base, e.g. http://127.0.0.1:10254;
+                           set together with -onecli-api-key-file; unset leaves
+                           the integration off (LAB_ONECLI_URL)
+  -onecli-api-key-file string
+                           file holding the OneCLI API key, 0600 or stricter;
+                           never generated (LAB_ONECLI_API_KEY_FILE)
+  -onecli-gateway-url string
+                           OneCLI gateway proxy URL handed to runs as HTTPS_PROXY,
+                           e.g. http://10.88.0.1:10255; independent of the pair
+                           above (LAB_ONECLI_GATEWAY_URL)
 `
 
 func main() {
@@ -189,6 +200,48 @@ func run() int {
 	if err != nil {
 		logger.Error("preparing runtime dir", "component", "main", "err", err)
 		return 1
+	}
+	// OneCLI credential gateway (issue #23 / ADR-0067): the REST client lab
+	// itself speaks to the sidecar with, built beside the vault because it is
+	// the same kind of thing — a credential read at startup, from a file the
+	// operator provisions, that decides what lab may do for the rest of the
+	// process's life.
+	//
+	// The integration is entirely OFF when unconfigured. --onecli-url and
+	// --onecli-api-key-file are enforced as a pair by config.Parse, so an empty
+	// URL means the operator asked for nothing: the client stays nil, the key
+	// file is never opened, and every OneCLI-aware surface reports "off" rather
+	// than an error (ADR-0067: an unconfigured lab is not an unhealthy lab).
+	//
+	// When it IS configured both failures below are FATAL, in the same shape as
+	// the master key above, and that is the point of the file contract rather
+	// than an accident of style. LoadAPIKey is a verbatim mirror of vault.Load's
+	// master-key-file rule (ADR-0006): a OneCLI project key is authority over
+	// every credential in the project, so a key file readable by group or other
+	// is a silent, permanent compromise — degrading to "OneCLI off" would leave
+	// that file exactly as exposed while hiding the reason, and an operator who
+	// deployed the flags would learn about it from a health page instead of a
+	// failed start. New's own refusals (unparseable base URL, a key with an
+	// embedded newline) are fatal for the mirror-image reason: they must not
+	// resurface as a confusing 4xx during a spawn hours later.
+	//
+	// Nothing is logged on success, deliberately: a startup line echoing the
+	// configured URLs would be handy, but a proxy URL may legitimately carry
+	// userinfo credentials and this file has no business deciding how to redact
+	// one. GET /api/v1/onecli/health is the visibility surface, and it redacts
+	// (internal/httpapi/onecli.go).
+	var oneCLIClient *onecli.Client
+	if cfg.OneCLIURL != "" {
+		apiKey, keyErr := onecli.LoadAPIKey(cfg.OneCLIAPIKeyFile)
+		if keyErr != nil {
+			logger.Error("onecli api key", "component", "main", "err", keyErr)
+			return 1
+		}
+		oneCLIClient, err = onecli.New(onecli.Options{BaseURL: cfg.OneCLIURL, APIKey: apiKey})
+		if err != nil {
+			logger.Error("building onecli client", "component", "main", "err", err)
+			return 1
+		}
 	}
 	// Per-run private HOME lifecycle (issue #202): <state>/instances holds one
 	// private HOME per run — the isolation seam a run's provider credential copy,
@@ -773,6 +826,12 @@ func run() int {
 		ProxyAuthHeader: cfg.ProxyAuthHeader,
 		TrustedProxies:  cfg.TrustedProxies,
 		AgentHandler:    agent.Handler(),
+		// OneCLI health visibility (issue #23 / ADR-0067). All three are
+		// zero when the integration is unconfigured, and the health endpoint
+		// mounts anyway to say so — see internal/httpapi/onecli.go.
+		OneCLI:           oneCLIClient,
+		OneCLIAPIURL:     cfg.OneCLIURL,
+		OneCLIGatewayURL: cfg.OneCLIGatewayURL,
 	})
 	if err != nil {
 		logger.Error("building http api", "component", "main", "err", err)
