@@ -116,20 +116,38 @@ func (s *Service) effectiveContainerLimits(ctx context.Context, repo store.Repo)
 // tokens/keys are secret and travel by NAME only (--env K — podman copies
 // the value from the pane environment tmux seeded via `new-session -e`, so
 // it never enters any argv); values that are paths, URLs, or identity
-// strings are non-secret and ride --env K=V in the visible argv. Everything
-// spawnEnv produces today is path/identity-shaped (GIT_SSH_COMMAND/
-// GIT_ASKPASS name files whose CONTENTS are the secret — and those files
-// live in the bind-mounted per-run runtime dir — GIT_AUTHOR_* are public
-// identity) except LAB_TOKEN, the one credential-by-value.
+// strings are non-secret and ride --env K=V in the visible argv.
 //
-// Per entry: LAB_TOKEN → forward by name. LAB_URL → REPLACED with sockURL:
-// a container reaches lab only over the bind-mounted unix socket — a TCP
-// --agent-url is deliberately unreachable, pasta's netns has no route back
-// to the host's loopback OR wildcard-bound services (the #205/#216
-// no-host-route isolation), so honoring it would strand labctl. Everything
+// TWO entries in spawnEnv's output are credentials by value, and both are
+// forwarded by name: LAB_TOKEN, and the credential gateway's
+// HTTPS_PROXY/https_proxy pair (issue #24 / ADR-0067), whose URLs carry the
+// repo's agent-identity token as userinfo. The proxy pair is recognized
+// through gateway.go's isProxySecretEnv rather than re-listed here — one
+// classification, one place, no second copy to drift. Everything else
+// spawnEnv produces is path/identity-shaped: GIT_SSH_COMMAND/GIT_ASKPASS name
+// files whose CONTENTS are the secret (those files live in the bind-mounted
+// per-run runtime dir), GIT_AUTHOR_* are public identity, and the gateway
+// bundle's own NO_PROXY/no_proxy (hostnames) and four CA variables (a path)
+// are public by construction and deliberately VISIBLE in the argv, so an
+// operator reading a run's command line can see what it trusts and what it
+// exempts.
+//
+// Per entry: LAB_TOKEN and the proxy pair → forward by name. LAB_URL →
+// REPLACED with sockURL: a container reaches lab only over the bind-mounted
+// unix socket — a TCP --agent-url is deliberately unreachable, pasta's netns
+// has no route back to the host's loopback OR wildcard-bound services (the
+// #205/#216 no-host-route isolation), so honoring it would strand labctl.
+// Everything
 // else passes as K=V, then
 // podmanx.RewriteHomeEnv re-anchors HOME= and every host-home-derived value
-// (CLAUDE_CONFIG_DIR, CODEX_HOME) at the container-side Home mount. Appended
+// (CLAUDE_CONFIG_DIR, CODEX_HOME) at the container-side Home mount. That
+// rewrite is anchored on the instance HOME (<state>/instances/<run>/home) and
+// therefore leaves the trust-bundle path in the four CA variables ALONE: the
+// bundle lives in the run's RUNTIME dir (<state>/instances/<run>/runtime),
+// a sibling, which the runner binds rw at its host-identical path — so the
+// same absolute path resolves to the same file inside and outside, exactly as
+// the git credential files beside it already do. No new mount, no new podman
+// flag, and nothing here to translate. Appended
 // after the walk: PATH= podmanx.PATH (tools bin first, ADR-0051 — the
 // lab-pinned CLI must win over the dev image's own) into env, and TERM into
 // forward (the provider TUI needs the pane's real TERM; tmux sets it in the
@@ -137,10 +155,10 @@ func (s *Service) effectiveContainerLimits(ctx context.Context, repo store.Repo)
 func containerEnv(spawnEnv []string, hostHome, sockURL string) (env, forward []string) {
 	for _, kv := range spawnEnv {
 		name, _, _ := strings.Cut(kv, "=")
-		switch name {
-		case "LAB_TOKEN":
-			forward = append(forward, "LAB_TOKEN")
-		case "LAB_URL":
+		switch {
+		case name == "LAB_TOKEN" || isProxySecretEnv(name):
+			forward = append(forward, name)
+		case name == "LAB_URL":
 			env = append(env, "LAB_URL="+sockURL)
 		default:
 			env = append(env, kv)
@@ -154,7 +172,8 @@ func containerEnv(spawnEnv []string, hostHome, sockURL string) (env, forward []s
 
 // secretForwardEnv extracts from spawnEnv the K=V entries of the name-only
 // forwards — the ONLY entries a container pane's tmux `new-session -e` env
-// carries (LAB_TOKEN=… in practice; TERM has no spawnEnv entry and reaches
+// carries (in practice LAB_TOKEN, plus the gateway's HTTPS_PROXY/https_proxy
+// on a gateway-wired run; TERM has no spawnEnv entry and reaches
 // the pane from tmux itself). The principled split of #205: the podman argv
 // carries every non-secret value, tmux -e carries every secret value, and
 // nothing rides both. Handing the full spawnEnv to tmux instead would leak

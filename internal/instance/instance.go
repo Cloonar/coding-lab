@@ -25,11 +25,13 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
+	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
@@ -68,6 +70,24 @@ type repoScopedPayload struct {
 // *seeder.Seeder; tests substitute a failing stub to drive the rollback.
 type WorkspaceSeeder interface {
 	SeedWorkspace(worktree string, repo store.Repo, meta provider.SeedMeta, opts seeder.Opts) error
+}
+
+// GatewayAPI is the OneCLI REST seam the launch path resolves a run's
+// credential-gateway wiring through (issue #24 / ADR-0067): the repo's agent
+// identity, that identity's proxy token, and the grants on it. Satisfied by
+// *onecli.Client; nil = the integration is unconfigured, which is the normal
+// state of a lab and must stay indistinguishable from a lab built before this
+// existed (gatewayActive is the one gate).
+//
+// Narrow on purpose, like WorkspaceSeeder and ConversationStater beside it:
+// three methods is exactly what a spawn needs, so a test drives the whole
+// gateway precheck with a struct literal and no HTTP, and the pool/attach/
+// detach half of internal/onecli (the #25 grant picker's surface) cannot be
+// reached from a launch even by accident.
+type GatewayAPI interface {
+	EnsureAgent(ctx context.Context, name string) (onecli.Agent, error)
+	AgentToken(ctx context.Context, agentID string) (onecli.AgentToken, error)
+	ListGrants(ctx context.Context, agentID string) ([]onecli.Grant, error)
 }
 
 // Options configures a Service. Everything except Logger, GitEnv, CaptureCtx,
@@ -146,6 +166,34 @@ type Options struct {
 	// LAB_URL rewrite: a container always talks over this mounted socket.
 	AgentSockDir string
 
+	// --- OneCLI credential-gateway wiring (issue #24 / ADR-0067). All
+	// optional, and the same shape as the container block above: with OneCLI
+	// nil or OneCLIGatewayURL empty the wiring is structurally OFF — no
+	// precheck runs, no trust bundle is written, no proxy env is assembled,
+	// the seeder is handed no GatewayRef, and every spawn is byte-identical to
+	// a lab that never had these fields. That parity is the acceptance
+	// criterion of issue #24, so it is expressed as one gate (gatewayActive)
+	// rather than as a nil-check per call site.
+
+	// OneCLI is the REST seam a spawn resolves its repo's agent identity,
+	// proxy token and grants through. Production passes *onecli.Client; nil is
+	// the unconfigured lab.
+	OneCLI GatewayAPI
+	// OneCLIGatewayURL is the gateway PROXY address (--onecli-gateway-url,
+	// e.g. http://10.88.0.1:10255) a run's HTTPS_PROXY points at, with the
+	// run's agent token folded in as userinfo. Deliberately NOT derived from
+	// the REST URL: ADR-0067 keeps the two independently settable because the
+	// address lab dials is loopback and a containerized run cannot reach
+	// lab's loopback (ADR-0052's host.containers.internal pin).
+	OneCLIGatewayURL string
+	// OneCLICAFile is the host path of the gateway's interception CA
+	// (--onecli-ca-file), composed with the host's system roots into each
+	// run's trust bundle. Empty WITH a gateway URL set is a spawn refusal
+	// (prepareGateway) rather than a config error at Parse: the two settings
+	// are independent in cmd/lab, and this is the one place that knows a run
+	// is about to be pointed at a TLS-terminating proxy it could not verify.
+	OneCLICAFile string
+
 	// GitEnv is prepended to every git subprocess (before the per-credential
 	// env). Production leaves it nil; tests pass testutil.HermeticGitEnv so
 	// service-driven worktree ops never read the developer's git config.
@@ -193,6 +241,35 @@ type Service struct {
 	podmanRun            podmanx.CmdRunner
 	containerPreflight   func() (podmanx.Result, bool)
 	agentSockDir         string
+
+	// OneCLI credential-gateway wiring (issue #24 / ADR-0067; see the Options
+	// fields). onecli nil or oneCLIGatewayURL empty = the integration is off.
+	onecli           GatewayAPI
+	oneCLIGatewayURL string
+	oneCLICAFile     string
+
+	// proxyTokens caches this process's minted proxy token per OneCLI AGENT
+	// ID (i.e. per repo), and it is load-bearing rather than an optimization.
+	// onecli.Client.AgentToken is a POST that REGENERATES the agent's token,
+	// so minting per spawn would invalidate the token every already-running
+	// run of that repo still holds: the second instance of a repo would
+	// silently 401 the first one's gateway calls, and the symptom (a run whose
+	// credentials stop working the moment a colleague starts another run) is
+	// about as far from its cause as a symptom gets. Mint once, reuse forever.
+	//
+	// The residual, stated honestly because it is real and accepted rather
+	// than unnoticed: a lab RESTART empties this map, so the next spawn mints
+	// a fresh token and every run that outlived the restart keeps a token the
+	// gateway no longer honors — its proxied calls then fail per request.
+	// That is the same end state ADR-0067 already accepts for a gateway
+	// outage ("already-running instances keep their env and fail per-request"),
+	// reached by a different road, and the run's own operator sees it as the
+	// gateway refusing the run rather than as silence. The token is NOT
+	// persisted to fix that: it is a credential, and lab's vault is
+	// git-credential/master-key territory (ADR-0006) that this epic
+	// deliberately does not extend.
+	proxyMu     sync.Mutex
+	proxyTokens map[string]string
 
 	// afkStop is the M5 AFK engine's neutral-Stop delegation (design §4c),
 	// wired once at startup via SetAFKStopper; nil refuses AFK stops.
@@ -286,7 +363,29 @@ func New(o Options) (*Service, error) {
 		podmanRun:            podmanRun,
 		containerPreflight:   o.ContainerPreflight,
 		agentSockDir:         o.AgentSockDir,
+
+		onecli:           o.OneCLI,
+		oneCLIGatewayURL: o.OneCLIGatewayURL,
+		oneCLICAFile:     o.OneCLICAFile,
+		proxyTokens:      map[string]string{},
 	}, nil
+}
+
+// gatewayActive reports whether this lab has the OneCLI run wiring turned on.
+// The gate is BOTH halves: the REST client (--onecli-url + the paired
+// --onecli-api-key-file, which is what makes Options.OneCLI non-nil in
+// cmd/lab) AND --onecli-gateway-url.
+//
+// The second half is not redundant with the first. ADR-0067 makes the gateway
+// URL independently settable — the REST address lab dials is loopback, and a
+// containerized run cannot reach lab's loopback — so a lab CAN legitimately be
+// configured with the REST pair and no gateway URL (issue #23's health surface
+// is exactly such a deployment). Such a lab has nothing to point HTTPS_PROXY
+// at, so the wiring stays OFF and its spawns are unchanged. It must NOT become
+// a spawn refusal: the fail-closed pin is about a gateway that was configured
+// and is unreachable, never about a gateway nobody asked for.
+func (s *Service) gatewayActive() bool {
+	return s.onecli != nil && s.oneCLIGatewayURL != ""
 }
 
 // bareDir is the repo's bare reference clone (design §7).

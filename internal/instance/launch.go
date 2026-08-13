@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
@@ -95,9 +97,12 @@ type LaunchSpec struct {
 	SeedPrompt string
 }
 
-// Launch runs the v0-pinned spawn sequence for a fully-derived spec:
+// Launch runs the v0-pinned spawn sequence for a fully-derived spec: the
+// credential-gateway precheck, which refuses the spawn before the claim when
+// the gateway is configured and unreachable (issue #24 / ADR-0067) →
 // startguard.Mark → per-run tree materialization (home + runtime + imports,
-// issues #202/#205/#261) → credential materialization into the per-run runtime
+// issues #202/#205/#261) → the run's gateway trust bundle → credential
+// materialization into the per-run runtime
 // dir → read-only import snapshots, in parallel, refusing the spawn before the
 // claim if any target fails (issue #261) →
 // gitx.AddWorktree (fail-loud fetch, no fallback base) → workspace seeding
@@ -154,6 +159,21 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		}
 	}
 
+	// The credential-gateway precheck (issue #24 / ADR-0067), in the SAME
+	// pre-claim spot and for the same reason as the container gate above and
+	// the read-only-import materialization below: for an AFK spec AddWorktree
+	// IS the claim, so a refusal landing any later would park the issue behind
+	// a host/config problem — an unreachable sidecar would take the issue out
+	// of the selectable queue instead of just refusing the spawn. Nothing
+	// exists yet, so a refusal here rolls back nothing. The resolved wiring
+	// (proxy URL + granted service names) carries down to the trust bundle,
+	// the spawn env, and the seeder; the zero value means this lab has no
+	// gateway and every step below behaves as it did before #24.
+	gw, err := s.prepareGateway(ctx, repo)
+	if err != nil {
+		return store.Run{}, err
+	}
+
 	// Sweep guard spans worktree-creation → session-live (§4b). Cleared on
 	// every return via defer (success or rollback), matching v0's
 	// markStarting/defer clearStarting.
@@ -194,6 +214,47 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// re-pinning for this run — never a reason to block a launch.
 	if err := runMat.SeedKnownHosts(s.mat.KnownHostsPath()); err != nil {
 		s.log.Warn("seeding per-run known_hosts", "component", "instance", "run", runID, "err", err)
+	}
+
+	// The gateway trust bundle and this run's proxy env (issue #24 /
+	// ADR-0067), written HERE: after vault.NewMaterializer above, which
+	// MkdirAll'd the run's runtime dir 0700 (writeTrustBundle deliberately
+	// does no MkdirAll of its own, so it would fail against a directory
+	// nobody mounts), and still BEFORE AddWorktree, keeping the whole gateway
+	// story on the pre-claim side of the launch. The container runner already
+	// binds that dir rw at its HOST-IDENTICAL path (podmanx.RunSpec.RuntimeDir),
+	// which is what makes the bundle path in the env valid on both sides of
+	// the container boundary — no new mount, no new podman flag, no path
+	// translation.
+	//
+	// A failure is a *BadRequestError (400), not a StartFailedError (500), and
+	// the choice is deliberate: the realistic members of this error set are
+	// operator config — an --onecli-ca-file that does not exist, is
+	// unreadable, or is a DER blob / an HTML error page rather than a PEM, or
+	// a host with no system CA bundle at all — which is exactly the
+	// refuseContainerSpawn posture of naming an operator-fixable
+	// host/config mismatch as a client error with the text verbatim. The one
+	// genuine I/O member (the write itself, e.g. a full disk) is thereby
+	// misfiled as a 400; that costs the operator nothing, since both mappings
+	// surface the same message and it names the path, whereas the reverse
+	// choice would misfile the COMMON case as a lab fault. wipeHome is the
+	// whole cleanup — nothing else exists yet.
+	//
+	// The resolving provider's declaration is read ONCE here and consumed
+	// twice: DirectAPIHosts by the NO_PROXY list just below (issue #24 — the
+	// hosts this run must reach directly, declared by the provider precisely so
+	// core never names one, ADR-0033) and the seeding shapes by the generic
+	// seeder further down. SeedMeta() clones its slices per call, so a second
+	// call would only mint a second copy of the same static declaration.
+	seedMeta := spec.Provider.SeedMeta()
+	var proxyEnv []string
+	if gw.active() {
+		bundlePath, err := writeTrustBundle(s.homes.RuntimePath(runID), s.oneCLICAFile)
+		if err != nil {
+			wipeHome()
+			return store.Run{}, badRequestf("%s", err)
+		}
+		proxyEnv = proxyBundleEnv(gw.proxyURL, bundlePath, noProxyValue(s.labURL, repo.RemoteURL, seedMeta.DirectAPIHosts))
 	}
 
 	// Materialize the repo's GIT credential (opID = run id) into the per-run
@@ -319,7 +380,19 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// the Read-only imports section. An import the agent cannot find is not an
 	// import, so the refs carry the name, the absolute snapshot path, and the
 	// commit it was taken at.
-	if err := s.seeder.SeedWorkspace(wtPath, repo, spec.Provider.SeedMeta(), seeder.Opts{Secrets: secrets, Imports: importRefs}); err != nil {
+	//
+	// The gateway ref (issue #24) switches that Secrets section to the
+	// gateway's — the run holds no secret VALUE, only grants on its repo's
+	// agent identity — and carries the granted service names, metadata the
+	// context file documents. NIL when the wiring is off, and that nil IS the
+	// parity guarantee: a non-nil ref with an empty slice would flip the
+	// render to the gateway section on a lab that has no gateway, which is the
+	// exact byte-for-byte regression #24's acceptance criterion forbids.
+	var gwRef *seeder.GatewayRef
+	if gw.active() {
+		gwRef = &seeder.GatewayRef{Services: gw.services}
+	}
+	if err := s.seeder.SeedWorkspace(wtPath, repo, seedMeta, seeder.Opts{Secrets: secrets, Imports: importRefs, Gateway: gwRef}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -382,7 +455,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, err
 	}
 
-	extraEnv, err := s.spawnEnv(ctx, repo, credEnv, token, home, injEnv)
+	extraEnv, err := s.spawnEnv(ctx, repo, credEnv, token, home, injEnv, proxyEnv)
 	if err != nil {
 		rollback(true)
 		return store.Run{}, err
@@ -474,6 +547,178 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	s.ArmCapture(created)
 	s.publishRunChanged(repo.ID, created.ID)
 	return created, nil
+}
+
+// gatewayWiring is a run's RESOLVED credential-gateway wiring (issue #24 /
+// ADR-0067). The zero value means "this lab has no gateway", which is what
+// every step of Launch checks through active() — so the unwired path has one
+// shape, not one per call site.
+type gatewayWiring struct {
+	// proxyURL is SECRET-BEARING: it carries the repo's agent-identity token
+	// as userinfo (gatewayProxyURL). It must never be logged, never enter an
+	// error, and never reach an argv — containerEnv's isProxySecretEnv split
+	// is the enforcement on the one path where it could.
+	proxyURL string
+	// services are the granted service names, for the seeded context file
+	// only. Documentation, not capability: the run's access comes from the
+	// grants themselves, which live in OneCLI.
+	services []string
+}
+
+// active reports whether a run is gateway-wired. Keyed on proxyURL because
+// that is the field a wired run cannot be missing — an empty service list is
+// the normal state of a freshly created agent identity.
+func (w gatewayWiring) active() bool { return w.proxyURL != "" }
+
+// prepareGateway resolves a run's credential-gateway wiring, or refuses the
+// spawn (issue #24 / ADR-0067's fail-closed pin). Launch calls it BEFORE the
+// start guard and long before AddWorktree — see the call site for why the
+// ordering is not negotiable.
+//
+// It lives here, next to the launch sequence it is a step of, rather than in
+// gateway.go: that file's header pins it as the PURE core (no Service field,
+// no dial, no log) precisely so a table test can own the exact-output
+// contracts, and this function is the impure half — it dials the sidecar,
+// mints a credential, and logs.
+//
+// Every refusal is a *BadRequestError → 400, the mapping refuseContainerSpawn
+// documents for operator-fixable spawn refusals: what is wrong here is always
+// the deployment (no CA file, a sidecar that is down, an API key that lost its
+// project), the operator's own text is the actionable part, and rendering that
+// as a 500 would file a host problem as a lab fault. Messages name the REPO,
+// because ADR-0067's refusal is supposed to say which run it is refusing and
+// whose secrets are missing — and quoting the onecli error verbatim is safe by
+// that package's construction: its errors carry method, escaped path and
+// status, never the base URL and never the key (see internal/onecli's do).
+//
+// The one step that does NOT fail closed is the grant listing; its reason is
+// at the call below.
+func (s *Service) prepareGateway(ctx context.Context, repo store.Repo) (gatewayWiring, error) {
+	if !s.gatewayActive() {
+		return gatewayWiring{}, nil
+	}
+	// No CA, no gateway. A run pointed at a TLS-terminating proxy whose
+	// interception CA it does not trust has broken HTTPS in a way nothing
+	// inside the run can diagnose: every proxied request fails certificate
+	// verification, and the agent reads that as the world being down rather
+	// than as lab having handed it half a configuration. Refuse where the flag
+	// that fixes it can be named.
+	if s.oneCLICAFile == "" {
+		return gatewayWiring{}, badRequestf("onecli gateway: --onecli-gateway-url is set but --onecli-ca-file is not, so a run for repo %s could not verify the gateway's intercepted TLS — set --onecli-ca-file to the sidecar's interception CA certificate (PEM) on this host", repo.Name)
+	}
+	// ADR-0067's fail-closed pin, landing at the spawn: a run that starts
+	// without credential injection does not fail cleanly, it fails minutes in
+	// as 401s from services the agent is certain it was granted, and burns its
+	// budget clock on a permissions bug that does not exist. The probe's own
+	// message already names the address and what to check.
+	if err := onecli.ProbeGateway(ctx, s.oneCLIGatewayURL); err != nil {
+		return gatewayWiring{}, badRequestf("refusing to spawn for repo %s without credential-gateway access: %s", repo.Name, err)
+	}
+	// The agent identity is named by the repo's STORE ID, never its name.
+	// Grants are attached to the agent (ADR-0067: the grant set IS the
+	// per-repo secret assignment), so the name a run authenticates under has
+	// to survive a repo rename — keying on the name would silently create a
+	// second, grant-less agent the first time an operator renamed a repo, and
+	// the symptom would be "my secrets vanished" with nothing pointing at the
+	// rename. EnsureAgent is idempotent and 409-tolerant, so calling it on
+	// every spawn from every kind of run is the whole mapping.
+	agent, err := s.onecli.EnsureAgent(ctx, repo.ID)
+	if err != nil {
+		return gatewayWiring{}, badRequestf("onecli gateway: resolving the agent identity for repo %s: %s", repo.Name, err)
+	}
+	token, err := s.proxyToken(ctx, agent.ID)
+	if err != nil {
+		return gatewayWiring{}, badRequestf("onecli gateway: obtaining the proxy token for repo %s's agent identity: %s", repo.Name, err)
+	}
+	proxyURL, err := gatewayProxyURL(s.oneCLIGatewayURL, token)
+	if err != nil {
+		return gatewayWiring{}, badRequestf("%s", err)
+	}
+
+	// Grants: BEST EFFORT, the one step here that does not fail closed, and
+	// the asymmetry is the point rather than an oversight. The grant list is
+	// DOCUMENTATION — it renders the context file's inventory of what this
+	// repo may reach. A run that reached the gateway and holds a valid token
+	// has exactly the secret access its grants describe whether or not lab
+	// could render the inventory, so refusing here would trade a working run
+	// for a missing paragraph. Documentation must never be the reason a run
+	// refuses to start. An empty list is not a failure at all: a freshly
+	// created agent identity has no grants yet, and #25's picker is how it
+	// gets them.
+	var services []string
+	grants, err := s.onecli.ListGrants(ctx, agent.ID)
+	if err != nil {
+		s.log.Warn("listing onecli grants for the run's context file; seeding it without the service inventory",
+			"component", "instance", "repo", repo.ID, "agent", agent.ID, "err", err)
+	} else {
+		services = grantServiceNames(grants)
+	}
+
+	// One line, and deliberately three IDs and a count: enough to correlate a
+	// run with the identity it authenticated as, and nothing that could ever
+	// carry a credential. NEVER the token, NEVER the proxy URL (it contains
+	// the token), NEVER the assembled env bundle.
+	s.log.Info("credential gateway wired for run", "component", "instance",
+		"repo", repo.ID, "agent", agent.ID, "services", len(services))
+	return gatewayWiring{proxyURL: proxyURL, services: services}, nil
+}
+
+// proxyToken returns the proxy token for OneCLI agent identity agentID,
+// minting it AT MOST ONCE per lab process (see the proxyTokens field for why
+// that is a correctness property and not a cache optimization:
+// onecli.AgentToken is a POST that regenerates, so a second mint silently
+// invalidates every already-running run of the same repo).
+//
+// The lock is held ACROSS the mint, on purpose. The obvious "check, unlock,
+// mint, relock, store" shape would let two concurrent spawns of the same repo
+// — the AFK engine and a manual Start racing, which is an ordinary Tuesday —
+// both mint, and the loser's token would be dead on arrival. Since the whole
+// point is that exactly one mint ever happens per agent, the critical section
+// has to contain the call. The cost is that a cold mint serializes concurrent
+// spawns of OTHER repos behind one HTTP round trip; a per-agent lock map would
+// avoid that and buy nothing worth the extra state, because the warm path —
+// every spawn after the first for a given repo — takes the lock, reads a map,
+// and returns without any I/O at all.
+func (s *Service) proxyToken(ctx context.Context, agentID string) (string, error) {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+	if tok, ok := s.proxyTokens[agentID]; ok {
+		return tok, nil
+	}
+	minted, err := s.onecli.AgentToken(ctx, agentID)
+	if err != nil {
+		return "", err
+	}
+	if s.proxyTokens == nil {
+		s.proxyTokens = make(map[string]string, 1)
+	}
+	s.proxyTokens[agentID] = minted.Token
+	return minted.Token, nil
+}
+
+// grantServiceNames renders an agent identity's grants as the service names
+// the seeded context file lists: the grant's Name when it has one, else its
+// ID, so a grant whose display name upstream never filled in still appears as
+// something an operator can look up rather than vanishing from the inventory.
+//
+// SORTED, because the seeder renders them in caller order and a run's context
+// file should be identical across spawns of the same repo — OneCLI's listing
+// order is not promised anywhere, and a file that reshuffles between two runs
+// of the same repo is a diff an operator has to read and discard every time.
+func grantServiceNames(grants []onecli.Grant) []string {
+	if len(grants) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(grants))
+	for _, g := range grants {
+		if g.Name != "" {
+			names = append(names, g.Name)
+			continue
+		}
+		names = append(names, g.ID)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // materializeImports materializes every read-only import the repo declares
