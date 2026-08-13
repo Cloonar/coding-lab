@@ -9,7 +9,7 @@ import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
 import type { MemoryHistory } from '@solidjs/router';
-import type { Provider, PushDevice } from '../../api';
+import type { OneCLIHealth, Provider, PushDevice } from '../../api';
 import App from '../../App';
 import SettingsRoute from './index';
 
@@ -91,6 +91,9 @@ export interface SettingsHarnessState {
   createdSubBodies: Record<string, unknown>[];
   deletedSubIDs: string[];
   testedSubIDs: string[];
+  // Credential-gateway health (issue #23) — General mounts its status card
+  // unconditionally, so every settings suite needs a default response.
+  oneCLIHealthOnServer: OneCLIHealth;
 }
 export const h = {} as SettingsHarnessState;
 
@@ -160,6 +163,10 @@ export function stubApi(): void {
         h.deletedSubIDs.push(id);
         h.subsOnServer = h.subsOnServer.filter((s) => s.id !== id);
         return Promise.resolve(jsonResponse(204));
+      }
+      // Credential-gateway health (issue #23) — General's status card.
+      if (url === '/api/v1/onecli/health' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, h.oneCLIHealthOnServer));
       }
       return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
     }),
@@ -331,6 +338,11 @@ export function installSettingsHooks(): void {
     h.createdSubBodies = [];
     h.deletedSubIDs = [];
     h.testedSubIDs = [];
+    h.oneCLIHealthOnServer = {
+      state: 'off',
+      api: { configured: false, reachable: false },
+      gateway: { configured: false, reachable: false },
+    };
     stubApi();
   });
 

@@ -21,6 +21,7 @@ import {
   fetchRunCommands,
   getCR,
   getIssue,
+  getOneCLIHealth,
   getRun,
   getSettings,
   getSpawnDefaults,
@@ -1100,6 +1101,40 @@ describe('settings endpoints', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(400);
     expect((err as ApiError).message).toBe('afk_tick_seconds must be a positive integer');
+  });
+});
+
+describe('credential-gateway health (issue #23)', () => {
+  it('GET /onecli/health parses the state + component envelope', async () => {
+    const body = {
+      state: 'degraded',
+      api: { configured: true, reachable: true, url: 'http://127.0.0.1:10254' },
+      gateway: {
+        configured: true,
+        reachable: false,
+        url: 'http://10.88.0.1:10255',
+        error: 'dial tcp 10.88.0.1:10255: connect: connection refused',
+      },
+    };
+    const mock = stubFetch(jsonResponse(200, body));
+
+    await expect(getOneCLIHealth()).resolves.toEqual(body);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/onecli/health');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET /onecli/health tolerates the off state with url/error omitted', async () => {
+    const body = {
+      state: 'off',
+      api: { configured: false, reachable: false },
+      gateway: {
+        configured: false,
+        reachable: false,
+      },
+    };
+    stubFetch(jsonResponse(200, body));
+
+    await expect(getOneCLIHealth()).resolves.toEqual(body);
   });
 });
 

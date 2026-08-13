@@ -24,6 +24,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
@@ -122,6 +123,27 @@ type Options struct {
 	// unmounted.
 	Presence *presence.Registry
 
+	// OneCLI is the credential-gateway REST client (issue #23 / ADR-0067).
+	// Nil means the integration is unconfigured — unlike every other optional
+	// dependency here that leaves its routes unmounted, the health route
+	// mounts anyway and reports state "off": an unconfigured lab is not an
+	// unhealthy lab, and the SPA and any monitoring probe must read one
+	// response shape either way.
+	OneCLI *onecli.Client
+	// OneCLIAPIURL is --onecli-url verbatim, echoed back by the health
+	// endpoint so an operator can see WHICH address lab is dialing. It is
+	// reporting only — the client above already resolved its own base — so a
+	// nil OneCLI with a non-empty URL still reports the API component as
+	// unconfigured.
+	OneCLIAPIURL string
+	// OneCLIGatewayURL is --onecli-gateway-url: the proxy URL a later epic
+	// (#24) hands runs as HTTPS_PROXY. Lab's own REST client never touches it,
+	// so it is deliberately independent of the two fields above (ADR-0067's
+	// pairing rule stops at the REST config); empty leaves the gateway
+	// component unconfigured. Non-empty, it is probed at the TCP level only —
+	// no CONNECT, no credential spend (onecli.ProbeGateway).
+	OneCLIGatewayURL string
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -165,6 +187,10 @@ type Server struct {
 	crmerge   *crmerge.Service
 	pull      *pull.Service
 	presence  *presence.Registry
+
+	onecli           *onecli.Client
+	oneCLIAPIURL     string
+	oneCLIGatewayURL string
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -235,27 +261,32 @@ func New(o Options) (*Server, error) {
 	}
 
 	s := &Server{
-		store:         o.Store,
-		bus:           o.Bus,
-		log:           logger,
-		metrics:       m,
-		vault:         o.Vault,
-		repos:         o.Repos,
-		instances:     o.Instances,
-		reconcile:     o.Reconcile,
-		chat:          o.Chat,
-		providers:     o.Providers,
-		homes:         o.Homes,
-		tracker:       o.Tracker,
-		afk:           o.AFK,
-		push:          o.Push,
-		git:           o.Git,
-		mat:           o.Materializer,
-		reposDir:      o.ReposDir,
-		gitEnv:        o.GitEnv,
-		crmerge:       o.CRMerge,
-		pull:          o.Pull,
-		presence:      o.Presence,
+		store:     o.Store,
+		bus:       o.Bus,
+		log:       logger,
+		metrics:   m,
+		vault:     o.Vault,
+		repos:     o.Repos,
+		instances: o.Instances,
+		reconcile: o.Reconcile,
+		chat:      o.Chat,
+		providers: o.Providers,
+		homes:     o.Homes,
+		tracker:   o.Tracker,
+		afk:       o.AFK,
+		push:      o.Push,
+		git:       o.Git,
+		mat:       o.Materializer,
+		reposDir:  o.ReposDir,
+		gitEnv:    o.GitEnv,
+		crmerge:   o.CRMerge,
+		pull:      o.Pull,
+		presence:  o.Presence,
+
+		onecli:           o.OneCLI,
+		oneCLIAPIURL:     o.OneCLIAPIURL,
+		oneCLIGatewayURL: o.OneCLIGatewayURL,
+
 		proxyAuth:     o.ProxyAuth,
 		proxyHeader:   o.ProxyAuthHeader,
 		trusted:       o.TrustedProxies,
@@ -440,6 +471,19 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("DELETE /api/v1/tokens/{id}", s.requireAuth(s.handleTokenDelete))
 	api.HandleFunc("GET /api/v1/settings", s.requireAuth(s.handleSettingsGet))
 	api.HandleFunc("PATCH /api/v1/settings", s.requireAuth(s.handleSettingsPatch))
+
+	// OneCLI credential gateway health (issue #23 / ADR-0067). Mounted
+	// UNCONDITIONALLY — deliberately unlike every dependency-gated surface
+	// above, and for the same reason the settings routes are: the answer
+	// exists whether or not the dependency does. With nothing configured this
+	// reports state "off", which is the ADR's distinction between "not
+	// configured" and "configured and unreachable"; a nil guard here would
+	// collapse the first case into a 404, indistinguishable to the SPA and to
+	// a monitoring probe from "this lab is too old to have the endpoint". GET
+	// only, so csrfMiddleware waives it by method (csrf.go) and requireAuth is
+	// the whole guard — which it must be, since the body echoes the configured
+	// URLs back to the caller.
+	api.HandleFunc("GET /api/v1/onecli/health", s.requireAuth(s.handleOneCLIHealth))
 
 	// Web Push (issue #98): the VAPID public key plus subscription CRUD/test
 	// (operator auth; CSRF guards the mutations). Mounted only when the

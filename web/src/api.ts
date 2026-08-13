@@ -24,3 +24,4 @@ export * from './api/tokens';
 export * from './api/push';
 export * from './api/settings';
 export * from './api/crs';
+export * from './api/onecli';
