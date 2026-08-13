@@ -20,6 +20,9 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `listenAddr` | `":8080"` | Passed as `--addr`. |
 | `baseUrl` | `null` | Passed as `--base-url`. Drives Secure-cookie detection and the CSRF Origin check — set it whenever lab sits behind TLS. |
 | `agentUrl` | `null` | Passed as `--agent-url`. Session-facing base URL handed to `labctl` as `LAB_URL`. `null` (the default) leaves it unset, and lab hands every spawned session `unix://<state-dir>/agent/agent.sock` — the agent API's own unix socket (see [Agent socket](#agent-socket)), which never touches the network or any SSO/auth proxy in front of `baseUrl`. Set it only when sessions run off-host and must reach lab over TCP; never point it at the external/SSO-fronted origin (issue #30's failure mode). Container-runner sessions ignore a TCP value and always get the unix socket. |
+| `onecli.url` | `null` | Passed as `--onecli-url`. Base URL of the OneCLI sidecar's REST API, as lab itself reaches it (typically loopback). Must be set together with `onecli.apiKeyFile`; `null` (the default) leaves the OneCLI integration off (see [OneCLI credential gateway](#onecli-credential-gateway)). |
+| `onecli.apiKeyFile` | `null` | Passed as `--onecli-api-key-file`. Path to a file holding the OneCLI API key — carries `masterKeyFile`'s permission contract (0600 or stricter, refuses startup otherwise) but, unlike it, is never auto-generated: the key is minted in OneCLI's own dashboard. |
+| `onecli.gatewayUrl` | `null` | Passed as `--onecli-gateway-url`. OneCLI's gateway proxy URL, injected into runs as `HTTPS_PROXY` — deliberately separate from `onecli.url`: a `container`-runner run can't reach the loopback address lab itself dials, so this typically points at a different, container-reachable address. Independently settable — no pairing requirement with the other two `onecli.*` options. |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps lab's derived sqlite default **and** lets a `LAB_DB` entry in `environmentFile` take effect (precedence is flag > env > default — a `--db` flag would shadow `LAB_DB`). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
@@ -186,6 +189,9 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--trusted-proxies` | — | (empty) | Comma-separated CIDRs of trusted reverse proxies (also gates `X-Forwarded-Proto` / `X-Forwarded-For` trust). |
 | `--base-url` | `LAB_BASE_URL` | (empty) | Absolute http(s) external URL. Drives Secure cookies and the CSRF Origin check. Does **not** feed `LAB_URL` — agent traffic never derives from it (see `--agent-url`). |
 | `--agent-url` | `LAB_AGENT_URL` | (empty) | Session-facing URL handed to `labctl` as `LAB_URL` — absolute http(s), or `unix:///abs/path` for a custom socket. Precedence: `--agent-url` when set, else `unix://<state-dir>/agent/agent.sock` (see [Agent socket](#agent-socket)) — the old `--base-url` / loopback-TCP fallbacks are gone (they were issue #30's SSO-proxy hairpin failure mode; the socket always exists, so there's nothing left to fall back through). `labctl` accepts `LAB_URL=unix:///abs/path` in every subcommand alongside http(s); set `--agent-url` only for off-host sessions that must reach lab over TCP, or to point runs at a different socket path. |
+| `--onecli-url` | `LAB_ONECLI_URL` | (empty) | OneCLI REST API base as lab itself reaches it, e.g. `http://127.0.0.1:10254`. Must be set together with `--onecli-api-key-file`; unset leaves the OneCLI integration off (see [OneCLI credential gateway](#onecli-credential-gateway)). |
+| `--onecli-api-key-file` | `LAB_ONECLI_API_KEY_FILE` | (empty) | File holding the OneCLI API key, 0600 or stricter — loose perms refuse startup, same contract as `--master-key-file`. Never auto-generated. |
+| `--onecli-gateway-url` | `LAB_ONECLI_GATEWAY_URL` | (empty) | Gateway proxy URL a run is handed as `HTTPS_PROXY`, e.g. `http://10.88.0.1:10255`. Independent of `--onecli-url` — a containerized run can't reach the loopback address lab itself uses to reach the REST API. |
 
 The per-provider host settings (`--provider-bin` / `--provider-config` and their `--claude` / `--claude-config` aliases) resolve **per provider entry**, highest wins: **generic flag > generic env > alias flag > alias env** — the generic form always beats the claude-named alias for the same setting, and within each pair a flag beats its env. The registered provider IDs come from `cmd/lab`, so a new provider's binary and config path are two entries under its ID with no config change (ADR-0034).
 
@@ -238,6 +244,84 @@ A repo whose **tracker binding** is `forge` reads and writes issues/PRs through 
 | **GitHub** | `api.github.com` for github.com; a GitHub Enterprise instance's real API root verbatim (`ghe.example.com/api/v3`, or `api.ghe.example.com` under subdomain isolation) — no derivation | **fine-grained PAT**: Issues (RW), Pull requests (RW), Metadata (R). **classic PAT**: `repo`. |
 
 The flavor is the routing authority: an unrecognized host (a second Forgejo instance, a GHE host — `forge_kind` detects as `none`) still binds `forge` when the operator selects it, and resolves from the credential alone. A `github.com` (or `git.cloonar.com`) remote whose credential flavor disagrees with the host is refused as a configuration conflict rather than silently 404-ing. Git push auth is a **separate** git credential (SSH key or HTTPS token); the forge token is only ever the tracker's REST auth. GitHub calls count against the account's hourly rate limit (~5000 req/h per user; a polling repo spends ~480/h at 30s ticks) — when a repo is throttled lab logs and skips the tick, and the AFK loop self-heals once the window resets.
+
+## OneCLI credential gateway
+
+[OneCLI](https://onecli.sh) (`github.com/onecli/onecli`) is a sidecar credential gateway: a run's outbound HTTPS is routed through its proxy, which matches the request and injects the real credential at the network layer, so the run's own environment never holds a secret value. Scope is **repo secrets only** — git push/pull credentials (the vault, `--master-key-file`, [ADR-0006](adr/0006-credential-vault-and-git-auth.md)) and provider (Claude/Codex) auth are untouched, and LLM traffic is not routed through it. The integration is **entirely off** unless `--onecli-url` and `--onecli-api-key-file` are both set (below); with neither set lab behaves exactly as it does today. Design rationale, the full-gateway decision, and the dashboard-exposure decision are recorded in [ADR-0067](adr/0067-onecli-credential-gateway.md).
+
+### Deploying the sidecar
+
+OneCLI ships a community edition — Postgres + the OneCLI app — as a Docker Compose stack. Quick start, unmodified from upstream:
+
+```console
+$ git clone https://github.com/onecli/onecli && cd onecli
+$ docker compose -f docker/docker-compose.yml up -d --wait
+```
+
+It exposes two ports — **10254** (dashboard/API) and **10255** (gateway proxy) — and the shipped compose file binds both to `${ONECLI_BIND_HOST:-127.0.0.1}` by default. When both ports can live on the same interface, that's the whole config: set `ONECLI_BIND_HOST` in `.env` (plus `ONECLI_APP_PORT` / `ONECLI_GATEWAY_PORT` for non-default ports).
+
+They usually can't share an interface (see the blockquote below), and `ONECLI_BIND_HOST` is a single variable — it cannot give the two ports different interfaces. For that, override the `ports:` list instead:
+
+```yaml
+# docker-compose.override.yml — bind each OneCLI port to its own interface.
+services:
+  onecli:
+    ports: !override
+      - "127.0.0.1:10254:10254"     # dashboard/API: lab and the operator only
+      - "10.88.0.1:10255:10255"     # gateway: must be reachable from container runs
+```
+
+Compose merges a service's `ports:` list by **appending** across files, not replacing — an override that just repeats `ports:` produces four published ports (the base file's two plus these two), not two. The `!override` tag replaces the list instead of appending to it.
+
+> **Load-bearing: the gateway port cannot be loopback-only when the `container` runner is in use.** lab's container argv pins `host.containers.internal` and `host.docker.internal` to `127.0.0.1` *inside* the container and drops pasta's default `--map-guest-addr` mapping (see [Container runner](#container-runner)) — deliberate hardening so every loopback-bound host service, lab's own included, is unreachable from a spawned container. A containerized run therefore **cannot** reach a OneCLI gateway bound to `127.0.0.1`, and pointing `--onecli-gateway-url` at `host.containers.internal` (or `host.docker.internal`) does not work around it either: inside the container both names resolve to the container's own loopback, same as any other loopback address. Bind 10255 to an address the container's network namespace can actually route to instead — a bridge address, a second NIC, or the host's LAN IP — and pass that same address as `--onecli-gateway-url`. Egress from a container pane is otherwise unrestricted, so such an address is reachable by raw IP once it isn't one of the two shadowed names — the same residual [Container runner](#container-runner) already documents for any other co-located host service. This is the **deliberate exception** to that section's own standing advice to bind co-located host services to `127.0.0.1`: the gateway is the one host service a container run must reach on purpose, so it cannot follow the rule everything else on the host should. The security trade is real, not free: an interface wider than loopback is reachable by anything else on that interface too, so scope it as narrowly as the deployment allows and treat the per-agent `Proxy-Authorization` token — not the bind address — as the actual authorization boundary. The `host` runner (the default) has no such constraint: a host-runner pane runs directly on the host, so binding 10255 to loopback is fine there.
+
+### Wiring lab to it
+
+1. Mint an API key in the OneCLI dashboard (Settings → API Keys, backed by `GET`/`POST /v1/user/api-key`) — project keys look like `oc_proj_*`.
+2. Write it to a file lab can read and lock its permissions down. Same contract as `--master-key-file`: lab refuses to start on anything looser than 0600, and it never auto-generates this file — there's nothing to generate, the key comes from OneCLI's dashboard, not lab.
+
+   ```console
+   $ install -m 0600 /dev/stdin /var/lib/lab/onecli-api-key <<< "oc_proj_xxxxxxxxxxxx"
+   ```
+
+3. Set the three flags:
+
+   ```console
+   $ lab --onecli-url http://127.0.0.1:10254 \
+         --onecli-api-key-file /var/lib/lab/onecli-api-key \
+         --onecli-gateway-url http://10.88.0.1:10255 \
+         ...
+   ```
+
+   NixOS:
+
+   ```nix
+   services.lab.onecli = {
+     url = "http://127.0.0.1:10254";
+     apiKeyFile = "/run/secrets/lab-onecli-api-key";     # sops/LoadCredential, 0600
+     gatewayUrl = "http://10.88.0.1:10255";
+   };
+   ```
+
+`--onecli-url` and `--onecli-api-key-file` must be set together — lab refuses to start with only one. `--onecli-gateway-url` is independent of the other two (it feeds a run's `HTTPS_PROXY`, never lab's own REST client) and may be set, left unset, or changed on its own.
+
+### Checking it works
+
+`GET /api/v1/onecli/health` — an authenticated operator endpoint — always answers 200, with a body reporting `state`: `off` (integration unconfigured — not an error), `ok`, `degraded`, or `unreachable`, plus per-component detail for `api` and `gateway`. `state` is derived from reachability alone; the `api` component additionally carries the sidecar's own `status` word verbatim, uninterpreted — a sidecar can answer 200 while calling itself degraded, and lab shows you that word rather than guessing which words mean healthy:
+
+```console
+$ curl -s --cookie "lab_session=$TOKEN" https://lab.example.com/api/v1/onecli/health
+{"state":"ok","api":{"configured":true,"reachable":true,"url":"http://127.0.0.1:10254","status":"ok"},"gateway":{"configured":true,"reachable":true,"url":"http://10.88.0.1:10255"}}
+```
+
+See also [Observability](#observability).
+
+### Operational notes
+
+- It's a second process to run, back up, and upgrade. Its Postgres volume holds the encrypted secret store — back it up on its own schedule, with the same seriousness as `lab.db` / `master.key` ([Backup & restore](#backup-restore)).
+- Pin `ONECLI_VERSION` in `.env` rather than tracking `latest` — an unpinned `docker compose up` can land an upgrade mid-shift.
+- The dashboard runs in local single-user mode (no `NEXTAUTH_SECRET` configured) with **no login** — that's exactly why its port stays bound to loopback (10254 above), never widened the way 10255 sometimes must be.
+- Exposing the dashboard behind lab's own domain isn't built yet — subpath proxying was evaluated and rejected (OneCLI's Next.js app ships no `basePath`; a fork was sized at ~6 files and rejected as a standing maintenance burden). [ADR-0067](adr/0067-onecli-credential-gateway.md) records the decision; a later epic adds a real exposure mode (off/subdomain/port).
 
 ## State directory layout
 
@@ -444,6 +528,7 @@ Preflight (below) stays the runtime authority on host readiness regardless of di
 - `GET /readyz` — readiness; 503 `database unavailable` while the DB is unreachable (2s probe timeout), 200 `ok` otherwise.
 - `GET /metrics` — Prometheus text format. All three endpoints are mounted outside auth and CSRF — probes must work with the DB down.
 - Logs: slog JSON on stdout (journald under systemd). Keys: `component`, `repo`, `session`, `run`, `err`. Secrets, tokens, key material, and DSN passwords never appear in logs.
+- `GET /api/v1/onecli/health` — authenticated OneCLI gateway health (`off`/`ok`/`degraded`/`unreachable`); see [OneCLI credential gateway](#onecli-credential-gateway).
 
 ## Metrics
 
