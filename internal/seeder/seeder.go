@@ -47,6 +47,23 @@ type ImportRef struct {
 	Commit string // snapshotted commit (12-char short hash)
 }
 
+// GatewayRef describes the run's credential-gateway wiring for the context
+// file (ADR-0067, issue #24): this repository's agent identity holds grants in
+// the OneCLI project pool, the run's outbound HTTPS leaves through the gateway
+// proxy, and the credential is injected there — so the instance holds no
+// secret value at all and the file has to teach that inversion rather than the
+// old "use a value carefully" norm.
+//
+// The ref deliberately carries NOTHING credential-shaped: no proxy URL, no
+// proxy token, no value. Configuring the proxy is the launch path's job (the
+// HTTPS_PROXY / CA-trust env bundle it injects into the session env); all the
+// render needs — and therefore all the seeder is handed — is which services
+// the operator granted, so there is no credential-shaped field here that a
+// future render could accidentally print.
+type GatewayRef struct {
+	Services []string // granted service names, caller-ordered
+}
+
 // Opts parametrizes SeedWorkspace — the growth point for later per-spawn
 // seeding knobs (mirrors provider.SeedOpts).
 type Opts struct {
@@ -68,6 +85,18 @@ type Opts struct {
 	// section, so an import-less repo's context file is byte-identical to
 	// before this field existed.
 	Imports []ImportRef
+
+	// Gateway is the run's credential-gateway wiring (issue #24), or nil when
+	// this deployment has none — OneCLI's three settings are optional and the
+	// integration is entirely off while they are unset (ADR-0067). Non-nil
+	// makes renderContextFile append the GATEWAY Secrets section INSTEAD of
+	// the legacy one, whatever Secrets holds; nil leaves the render exactly
+	// as it was, legacy Secrets section and all, which is how issue #24's
+	// "with OneCLI unconfigured, spawn behaves exactly as today" acceptance
+	// criterion is made structural rather than incidental. Metadata only,
+	// like Secrets and more strictly: a GatewayRef carries granted service
+	// NAMES and nothing else — no proxy URL, no proxy token, no value.
+	Gateway *GatewayRef
 }
 
 // SeedWorkspace seeds worktree for a run on repo, driven by the provider's
@@ -90,5 +119,5 @@ func (s *Seeder) SeedWorkspace(worktree string, repo store.Repo, meta provider.S
 	if err := seedSkills(worktree, meta.SkillsDir); err != nil {
 		return err
 	}
-	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Imports)
+	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Gateway, opts.Imports)
 }

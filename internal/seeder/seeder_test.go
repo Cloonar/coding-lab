@@ -66,6 +66,14 @@ var testImports = []ImportRef{
 	{Name: "proto-defs", Path: "/var/lib/lab/state/instances/run_x/imports/proto-defs", Commit: "abcdef012345"},
 }
 
+// testGatewayServices is the granted-service fixture (issue #24 / ADR-0067):
+// the services this repo's OneCLI agent identity holds grants for, in the
+// order the caller resolved them — deliberately NOT alphabetical, so the
+// tests pin that the render preserves the caller's order instead of imposing
+// one of its own. Names only, because a GatewayRef carries nothing else: the
+// seeder never sees a proxy URL, a proxy token, or a secret value.
+var testGatewayServices = []string{"stripe", "api.github.com"}
+
 // newWorktree builds a REAL linked worktree (bare-style main checkout +
 // `git worktree add`), the shape every Launch seeds: its .git is a gitdir
 // pointer whose commondir leads back to the shared git dir, so the exclude
@@ -204,7 +212,7 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 }
 
 func TestRenderContextFile_forgeBinding(t *testing.T) {
-	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil, nil)
+	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -363,7 +371,7 @@ func TestRenderContextFile_claudeGoldenByteIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil, nil)
+			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -467,7 +475,7 @@ func TestSeedWorkspace_nonNativeAppendsSkillsIndex(t *testing.T) {
 // native-discovery-WITH-skills absence is asserted in the golden test above.)
 func TestRenderContextFile_noIndexWithoutSkillsDir(t *testing.T) {
 	meta := provider.SeedMeta{ContextFileName: "AGENTS.local.md", NativeSkillDiscovery: false}
-	got, err := renderContextFile(builtinRepo, meta, nil, nil)
+	got, err := renderContextFile(builtinRepo, meta, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -488,7 +496,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 		"empty": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets, nil)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets, nil, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -506,7 +514,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 // and the `labctl secret list` pointer. Byte-pinned against a NEW golden
 // (contextfile-claude-builtin-secrets.golden) captured for this shape.
 func TestRenderContextFile_withSecrets(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -554,7 +562,7 @@ func TestRenderContextFile_zeroImportsByteIdentical(t *testing.T) {
 			"empty": {},
 		} {
 			t.Run(tc.name+"/"+name, func(t *testing.T) {
-				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, imports)
+				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, imports)
 				if err != nil {
 					t.Fatalf("renderContextFile: %v", err)
 				}
@@ -572,7 +580,7 @@ func TestRenderContextFile_zeroImportsByteIdentical(t *testing.T) {
 // (contextfile-claude-builtin-imports.golden) captured for this shape, the
 // same way TestRenderContextFile_withSecrets pins the secrets shape.
 func TestRenderContextFile_withImports(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, testImports)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, testImports)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -603,7 +611,7 @@ func TestRenderContextFile_withImports(t *testing.T) {
 // section comes FIRST — repo-driven content before the provider-driven tail
 // (the append order documented on appendSecretsSection).
 func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil)
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -632,7 +640,7 @@ func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T)
 // extended with the imports section per the ordering documented on
 // appendSecretsSection and appendImportsSection).
 func TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, testImports)
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, testImports)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -687,6 +695,211 @@ func TestSeedWorkspace_onDiskWithImportsMatchesGolden(t *testing.T) {
 	}
 	if want := readGolden(t, "contextfile-claude-builtin-imports.golden"); !bytes.Equal(got, want) {
 		t.Errorf("on-disk CLAUDE.local.md with imports != golden\n%s", byteDiff(got, want))
+	}
+}
+
+// The gateway is opt-in and OFF by default: with Opts.Gateway nil the render
+// is byte-for-byte what it was before issue #24 — for a secret-less repo AND
+// for one with repo_secrets rows, whose LEGACY Secrets section must still
+// render exactly as it did. That is issue #24's "with OneCLI unconfigured,
+// spawn behaves exactly as today" acceptance criterion at the seeder's
+// boundary, pinned against the untouched goldens rather than against prose.
+func TestRenderContextFile_nilGatewayByteIdentical(t *testing.T) {
+	cases := []struct {
+		name    string
+		secrets []store.RepoSecret
+		golden  string
+	}{
+		{"noSecrets", nil, "contextfile-claude-builtin.golden"},
+		{"withSecrets", testSecrets, "contextfile-claude-builtin-secrets.golden"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil)
+			if err != nil {
+				t.Fatalf("renderContextFile: %v", err)
+			}
+			if want := readGolden(t, tc.golden); !bytes.Equal(got, want) {
+				t.Errorf("nil-Gateway render != %s\n%s", tc.golden, byteDiff(got, want))
+			}
+		})
+	}
+}
+
+// With a gateway, a claude-shaped (native-discovery) render carries the
+// GATEWAY Secrets section: the heading, the no-value-in-the-environment
+// property, the placeholder-auth norm, one bullet per granted service IN THE
+// CALLER'S ORDER, the proxy-ignoring-tool caveat, and the surviving
+// server-side push scan (issue #106). Byte-pinned against a NEW golden
+// (contextfile-claude-builtin-gateway.golden), the same way
+// TestRenderContextFile_withSecrets pins the legacy shape — and asserting the
+// legacy teaching is gone, which is an explicit issue #24 acceptance
+// criterion, not a nicety.
+func TestRenderContextFile_withGateway(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: testGatewayServices}, nil)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-gateway.golden"); !bytes.Equal(got, want) {
+		t.Errorf("render != contextfile-claude-builtin-gateway.golden\n%s", byteDiff(got, want))
+	}
+
+	gotStr := string(got)
+	wantContains := []string{
+		"## Secrets",
+		"injected by lab's credential gateway at the\nnetwork layer",
+		"The environment holds NO secret value",
+		"(`HTTPS_PROXY`)",
+		"send a placeholder — the gateway replaces",
+		"its absence is not a misconfiguration",
+		"Services granted to this repository:",
+		"- `stripe`",
+		"- `api.github.com`",
+		"a tool that ignores proxy environment variables bypasses",
+		"401/403 from the real API",
+		"the environment never held a real key",
+		"scanned server-side for known secret values",
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("gateway Secrets section missing %q", want)
+		}
+	}
+	// The legacy teaching is GONE — not merely deprioritized.
+	for _, gone := range []string{"labctl secret exec", "labctl secret list", "operator-managed secrets", "Quote the child command"} {
+		if strings.Contains(gotStr, gone) {
+			t.Errorf("gateway render still carries the legacy secrets teaching %q", gone)
+		}
+	}
+	// Caller order, not the seeder's: stripe was handed first even though it
+	// sorts last.
+	if first, second := strings.Index(gotStr, "- `stripe`"), strings.Index(gotStr, "- `api.github.com`"); first >= second {
+		t.Errorf("granted services rendered out of caller order: stripe at %d, api.github.com at %d", first, second)
+	}
+}
+
+// A gateway with NO grants yet still renders the section — the norm is the
+// same whether or not anything is attached — but with the nothing-granted
+// line in place of an inventory, so a 401 from an ungranted service reads as
+// "an operator has not attached it in OneCLI's dashboard" rather than as a
+// break the run should try to fix from inside.
+func TestRenderContextFile_gatewayWithoutServices(t *testing.T) {
+	for name, services := range map[string][]string{
+		"nil":   nil,
+		"empty": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: services}, nil)
+			if err != nil {
+				t.Fatalf("renderContextFile: %v", err)
+			}
+			gotStr := string(got)
+			if !strings.Contains(gotStr, "## Secrets") {
+				t.Fatal("no-grants gateway render dropped the `## Secrets` section")
+			}
+			for _, want := range []string{
+				"No services are granted to this repository yet",
+				"an operator attaches\ngrants in OneCLI's dashboard",
+				"not something this run can fix from inside",
+			} {
+				if !strings.Contains(gotStr, want) {
+					t.Errorf("no-grants gateway render missing %q", want)
+				}
+			}
+			if strings.Contains(gotStr, "Services granted to this repository:") {
+				t.Error("no-grants gateway render still announces an inventory")
+			}
+			if n := strings.Count(gotStr, "\n- "); n != 0 {
+				t.Errorf("no-grants gateway render has %d bullet line(s); want none", n)
+			}
+		})
+	}
+}
+
+// The gateway section REPLACES the legacy one, never joins it: with
+// Opts.Gateway set AND repo_secrets rows present, the file carries exactly
+// ONE `## Secrets` heading, it is the gateway one, and neither the legacy
+// prose nor the legacy inventory survives. Two headings would be two
+// contradictory norms in one file (see appendGatewaySecretsSection), and the
+// repo_secrets rows keep existing until #27 — so this is the case that has to
+// be pinned, not assumed.
+func TestRenderContextFile_gatewayReplacesLegacySecrets(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, &GatewayRef{Services: testGatewayServices}, nil)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+	if n := strings.Count(gotStr, "## Secrets"); n != 1 {
+		t.Errorf("gateway + repo secrets render has %d `## Secrets` headings; want exactly 1", n)
+	}
+	if !strings.Contains(gotStr, "injected by lab's credential gateway") {
+		t.Error("the surviving `## Secrets` section is not the gateway one")
+	}
+	for _, gone := range []string{"labctl secret exec", "labctl secret list", "API_KEY", "DEPLOY_TOKEN", "This repository's secrets:"} {
+		if strings.Contains(gotStr, gone) {
+			t.Errorf("legacy Secrets section leaked into a gateway render: %q", gone)
+		}
+	}
+	// The gateway golden is the whole answer here: the repo's secrets change
+	// nothing about the render once a gateway is wired.
+	if want := readGolden(t, "contextfile-claude-builtin-gateway.golden"); !bytes.Equal(got, want) {
+		t.Errorf("gateway + repo secrets render != the gateway golden\n%s", byteDiff(got, want))
+	}
+}
+
+// Non-native-discovery meta with gateway + imports: the gateway section
+// occupies exactly the slot the legacy one did — template body, then Secrets,
+// then Read-only imports, then Seeded skills — so replacing the section's
+// CONTENT never reshuffles the file (mirrors
+// TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered).
+func TestRenderContextFile_nonNativeWithGatewayAndImportsOrdered(t *testing.T) {
+	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, testImports)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+
+	bodyIdx := strings.Index(gotStr, "## Tracker binding")
+	secretsIdx := strings.Index(gotStr, "## Secrets")
+	importsIdx := strings.Index(gotStr, "## Read-only imports")
+	skillsIdx := strings.Index(gotStr, "## Seeded skills")
+	for name, idx := range map[string]int{
+		"template body (## Tracker binding)": bodyIdx,
+		"## Secrets":                         secretsIdx,
+		"## Read-only imports":               importsIdx,
+		"## Seeded skills":                   skillsIdx,
+	} {
+		if idx == -1 {
+			t.Fatalf("missing %s section", name)
+		}
+	}
+	if bodyIdx >= secretsIdx || secretsIdx >= importsIdx || importsIdx >= skillsIdx {
+		t.Errorf("sections out of order: body=%d secrets=%d imports=%d skills=%d", bodyIdx, secretsIdx, importsIdx, skillsIdx)
+	}
+	if !strings.Contains(gotStr, "- `stripe`") {
+		t.Error("non-native render missing the granted-service inventory bullet")
+	}
+	if strings.Contains(gotStr, "labctl secret exec") {
+		t.Error("non-native gateway render still carries the legacy `labctl secret exec` teaching")
+	}
+}
+
+// The full seed path writes the gateway Secrets section to disk when
+// Opts.Gateway is non-nil (mirrors TestSeedWorkspace_onDiskWithSecretsMatchesGolden's
+// mechanics, issue #24) — the field the launch path will populate reaches the
+// file, not just renderContextFile's parameter.
+func TestSeedWorkspace_onDiskWithGatewayMatchesGolden(t *testing.T) {
+	wt, _ := newWorktree(t)
+	opts := Opts{Gateway: &GatewayRef{Services: testGatewayServices}}
+	if err := New().SeedWorkspace(wt, builtinRepo, claudeGoldenMeta, opts); err != nil {
+		t.Fatalf("SeedWorkspace: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-gateway.golden"); !bytes.Equal(got, want) {
+		t.Errorf("on-disk CLAUDE.local.md with a gateway != golden\n%s", byteDiff(got, want))
 	}
 }
 
