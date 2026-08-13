@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -213,14 +214,23 @@ func TestEnsureAgent(t *testing.T) {
 	}
 }
 
-// TestEnsureAgentSendsTheNameOnly pins wire.go assumption 4: the create body is
-// {"name": …} and nothing else. Lab's agent identity IS the name.
-func TestEnsureAgentSendsTheNameOnly(t *testing.T) {
+// TestEnsureAgentCreateBody pins wire.go assumption 4 — the one assumption
+// verified against a real OneCLI build: the create body is {"name": …,
+// "identifier": …} and nothing else. The name is sent VERBATIM (lab's agent
+// identity IS the name, and listing resolution matches it exactly); the
+// identifier is the derived slug OneCLI's validation requires — a bare
+// {"name": …} body is 400-rejected with "Invalid input: expected string,
+// received undefined", which is the regression this test exists to catch. The
+// underscore in lab's repo_<32 hex> names is illegal in the slug, so the two
+// fields genuinely differ.
+func TestEnsureAgentCreateBody(t *testing.T) {
+	const name = "repo_0123456789abcdef0123456789abcdef"
+
 	api := &agentsAPI{}
 	s := newStub(t, api.handler(t))
 	c := newTestClient(t, s.URL)
 
-	if _, err := c.EnsureAgent(context.Background(), "coding-lab"); err != nil {
+	if _, err := c.EnsureAgent(context.Background(), name); err != nil {
 		t.Fatalf("EnsureAgent: %v", err)
 	}
 	reqs := s.requests()
@@ -234,8 +244,56 @@ func TestEnsureAgentSendsTheNameOnly(t *testing.T) {
 	if got := post.Header.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", got)
 	}
-	if got := strings.TrimSpace(post.Body); got != `{"name":"coding-lab"}` {
-		t.Errorf("create body = %s, want {\"name\":\"coding-lab\"}", got)
+	want := `{"name":"` + name + `","identifier":"repo-0123456789abcdef0123456789abcdef"}`
+	if got := strings.TrimSpace(post.Body); got != want {
+		t.Errorf("create body = %s, want %s", got, want)
+	}
+}
+
+// TestAgentIdentifier pins the slug derivation: every output must match
+// OneCLI's ^[a-z0-9][a-z0-9-]{0,49}$ and be deterministic in the name, because
+// EnsureAgent's 409-race resolution relies on "same name ⇒ same identifier".
+func TestAgentIdentifier(t *testing.T) {
+	slug := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		// The only shape lab actually sends: a repo store ID, whose underscore
+		// is the character that made sending the name verbatim impossible.
+		{"repo_0123456789abcdef0123456789abcdef", "repo-0123456789abcdef0123456789abcdef"},
+		{"coding-lab", "coding-lab"},
+		{"Coding Lab", "coding-lab"},
+		{"__repo", "repo"},                                 // a slug must start alphanumeric
+		{"grüße", "gr--e"},                                 // non-ASCII maps per rune, not per byte
+		{strings.Repeat("a", 60), strings.Repeat("a", 50)}, // capped at the slug maximum
+	} {
+		got := agentIdentifier(tc.name)
+		if got != tc.want {
+			t.Errorf("agentIdentifier(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+		if !slug.MatchString(got) {
+			t.Errorf("agentIdentifier(%q) = %q, which is not a valid OneCLI identifier slug", tc.name, got)
+		}
+	}
+}
+
+// TestEnsureAgentRefusesAnUnsluggableName: a name deriving an empty slug must
+// fail locally and loudly, before OneCLI turns it into an opaque 400 — and
+// must not issue the doomed POST.
+func TestEnsureAgentRefusesAnUnsluggableName(t *testing.T) {
+	api := &agentsAPI{}
+	s := newStub(t, api.handler(t))
+	c := newTestClient(t, s.URL)
+
+	_, err := c.EnsureAgent(context.Background(), "___")
+	if err == nil || !strings.Contains(err.Error(), "identifier slug") {
+		t.Fatalf("error = %v, want the identifier-slug refusal", err)
+	}
+	for _, req := range s.requests() {
+		if req.Method == http.MethodPost {
+			t.Errorf("a POST was issued for an unsluggable name: %+v", req)
+		}
 	}
 }
 

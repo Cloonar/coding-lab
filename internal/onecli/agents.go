@@ -131,7 +131,14 @@ func (c *Client) EnsureAgent(ctx context.Context, name string) (Agent, error) {
 
 // createAgent POSTs a new agent and decodes the created object.
 func (c *Client) createAgent(ctx context.Context, name string) (Agent, error) {
-	body, err := c.do(ctx, http.MethodPost, c.agentsURL(), wireCreateAgent{Name: name})
+	req := newWireCreateAgent(name)
+	if req.Identifier == "" {
+		// A name with no alphanumeric in it derives an empty slug, which OneCLI's
+		// validation would 400. Lab's repo names (repo_<32 hex>) cannot get here;
+		// failing locally keeps the error attributable if something else does.
+		return Agent{}, fmt.Errorf("onecli: agent name %q contains no character usable in an identifier slug", name)
+	}
+	body, err := c.do(ctx, http.MethodPost, c.agentsURL(), req)
 	if err != nil {
 		return Agent{}, err
 	}

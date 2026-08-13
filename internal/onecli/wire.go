@@ -40,8 +40,15 @@ package onecli
 //     decodeList accepts both because this is the likeliest place a real build
 //     differs, and guessing wrong here would turn every list into an empty
 //     slice — a silent wrong answer rather than a loud one.
-//  4. POST /agents takes {"name": "<name>"} and answers with the created
-//     agent object.
+//  4. POST /agents takes {"name": "<name>", "identifier": "<slug>"} and
+//     answers with the created agent object. This one is VERIFIED against a
+//     real build, the hard way: the original reading ({"name"} alone) was
+//     rejected by OneCLI's request validation, which requires a second field,
+//     "identifier" — a slug matching ^[a-z0-9][a-z0-9-]{0,49}$. Lab still
+//     treats the NAME as the agent's identity (listing answers carry both, and
+//     every match in agents.go is by exact name); the identifier is derived
+//     from the name by agentIdentifier below, deterministically, so the same
+//     repo always sends the same slug and a duplicate create still 409s.
 //  5. GET /agents/{id}/grants answers either with {"secrets": […],
 //     "connections": […]} or with a flat list whose rows name their own kind
 //     under "kind" or "type"; decodeGrants accepts both.
@@ -113,11 +120,46 @@ func (c *Client) connectionsURL() *url.URL { return c.base.JoinPath(segConnectio
 
 // --- request shapes --------------------------------------------------------
 
-// wireCreateAgent is the POST /agents body. Lab creates agents by NAME only —
-// the per-repo agent identity of issue #23 is exactly a name — so nothing else
-// is sent, and any field OneCLI defaults is left to OneCLI.
+// wireCreateAgent is the POST /agents body: the name lab identifies the agent
+// by (the per-repo agent identity of issue #23 is exactly a name) plus the
+// identifier slug OneCLI's validation requires (assumption 4 above). Nothing
+// else is sent; any field OneCLI defaults is left to OneCLI.
 type wireCreateAgent struct {
-	Name string `json:"name"`
+	Name       string `json:"name"`
+	Identifier string `json:"identifier"`
+}
+
+// newWireCreateAgent builds the create body for a name, deriving the
+// identifier so no caller outside this file has to know the slug rule exists.
+func newWireCreateAgent(name string) wireCreateAgent {
+	return wireCreateAgent{Name: name, Identifier: agentIdentifier(name)}
+}
+
+// agentIdentifier derives OneCLI's required identifier slug
+// (^[a-z0-9][a-z0-9-]{0,49}$) from an agent name, deterministically: lowercase
+// the name, map every byte outside [a-z0-9-] to "-", strip the hyphens that
+// mapping may have put in front (a slug must start alphanumeric), and cap the
+// result at 50 characters. Determinism is load-bearing — EnsureAgent's
+// 409-race resolution assumes the same name always produces the same create
+// body, so "identifier already taken" can only ever mean "this agent already
+// exists", never a collision between two different repos: lab's names are
+// repo_<32 hex>, whose derivations (repo-<32 hex>, 37 chars) differ wherever
+// the names do.
+func agentIdentifier(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	slug := strings.TrimLeft(b.String(), "-")
+	if len(slug) > 50 {
+		slug = slug[:50]
+	}
+	return slug
 }
 
 // --- response shapes -------------------------------------------------------
