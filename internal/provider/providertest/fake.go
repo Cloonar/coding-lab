@@ -165,6 +165,11 @@ func New() *Fake {
 				`generated with.*claude`,
 				`claude-session:`,
 			},
+			// claude-code's declared direct API host (issue #24): the fake
+			// mirrors the real declaration so a test driving the launch path
+			// sees a non-empty DirectAPIHosts in the run's NO_PROXY, exactly as
+			// production does.
+			DirectAPIHosts: []string{"api.anthropic.com"},
 		},
 		// Claude-shaped enriched catalog (issue #156): every model carries
 		// the full shared efforts list and no reported default, mirroring

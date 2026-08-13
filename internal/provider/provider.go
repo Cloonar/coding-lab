@@ -233,6 +233,36 @@ type SeedMeta struct {
 	// run any registered provider on any repo, so a marker only one OTHER
 	// provider declares must still be caught.
 	ScrubPatterns []string
+	// DirectAPIHosts are the hosts this provider's CLI must reach DIRECTLY —
+	// the hosts an egress proxy must never intercept. internal/instance folds
+	// them into a gateway-wired run's NO_PROXY (issue #24's noProxyValue,
+	// beside the lab host and the repo's forge host) so a credential-gateway
+	// outage can never take the model connection down with it: ADR-0067 rules
+	// LLM traffic out of the gateway's scope, and this declaration is where
+	// that ruling becomes a fact about a run's environment.
+	//
+	// Entries are BARE HOSTNAMES — no scheme, no port, no path — because that
+	// is what a NO_PROXY entry is (a bare host matches every port on that host
+	// in Go, curl, and requests, so a port would only narrow the exemption to
+	// the one the URL happened to name). Empty is legal and must stay
+	// HARMLESS: a provider declaring nothing contributes no NO_PROXY entry,
+	// never a broken one.
+	//
+	// Why the PROVIDER declares this and core does not: core naming one
+	// provider's API host is exactly what ADR-0033's neutrality guard exists to
+	// prevent (TestCoreAttributionNeutrality fails the build on a
+	// provider-naming literal in a core package), and a core constant would be
+	// WRONG as well as impolite — with a second provider registered, every run
+	// would exempt the first provider's host and proxy its own model traffic,
+	// silently. Only the adapter knows which endpoint its CLI streams to.
+	//
+	// Unlike ScrubPatterns, it is the RESOLVING provider's list that applies,
+	// never the union across the registry: a run streams to its OWN provider's
+	// API and no other, so exempting a host that run never dials would widen
+	// its proxy bypass for nothing. The union exists for ScrubPatterns because
+	// a marker ANY provider can emit must be caught wherever it appears; a host
+	// only another provider's CLI would call is not that kind of fact.
+	DirectAPIHosts []string
 }
 
 // MasterStoreSpec is the provider-declared description of its MASTER

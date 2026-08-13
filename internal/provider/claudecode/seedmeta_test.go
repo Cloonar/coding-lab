@@ -33,6 +33,11 @@ func TestSeedMeta_pinnedGolden(t *testing.T) {
 			`generated with.*claude`,
 			`claude-session:`,
 		},
+		// The host a claude-code run reaches DIRECTLY, folded into a
+		// gateway-wired run's NO_PROXY (issue #24 / ADR-0067). Pinned here
+		// because this literal must live in the adapter and nowhere else —
+		// ADR-0033's neutrality guard fails the build if core names it.
+		DirectAPIHosts: []string{"api.anthropic.com"},
 	}
 	got := (&Provider{}).SeedMeta()
 	if !reflect.DeepEqual(got, want) {
@@ -47,11 +52,13 @@ func TestSeedMeta_returnsClones(t *testing.T) {
 	m.ExcludeEntries[0] = "mutated"
 	m.SeededPathPatterns[0] = "mutated"
 	m.ScrubPatterns[0] = "mutated"
+	m.DirectAPIHosts[0] = "mutated"
 
 	fresh := (&Provider{}).SeedMeta()
 	if fresh.ExcludeEntries[0] != ".claude/" ||
 		fresh.SeededPathPatterns[0] != `^\.claude/skills/` ||
-		fresh.ScrubPatterns[0] != `co-authored-by:[[:space:]]*claude` {
+		fresh.ScrubPatterns[0] != `co-authored-by:[[:space:]]*claude` ||
+		fresh.DirectAPIHosts[0] != "api.anthropic.com" {
 		t.Errorf("SeedMeta() shares backing arrays across calls: %#v", fresh)
 	}
 }
