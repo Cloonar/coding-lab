@@ -26,6 +26,7 @@ func TestParse(t *testing.T) {
 		OneCLIURL:            "",
 		OneCLIAPIKeyFile:     "",
 		OneCLIGatewayURL:     "",
+		OneCLICAFile:         "",
 		ProviderBin:          map[string]string{},
 		ProviderConfig:       map[string]string{},
 		TmuxBin:              "tmux",
@@ -589,6 +590,29 @@ func TestParse(t *testing.T) {
 				c.OneCLIURL = "http://127.0.0.1:10254"
 				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
 				c.OneCLIGatewayURL = "http://10.88.0.1:10255"
+			}),
+		},
+		// --- OneCLI interception CA file (issue #24) ---
+		{
+			name: "onecli-ca-file flag alone is valid, no pairing required",
+			args: []string{"--onecli-ca-file", "/var/lib/lab/onecli-ca.pem"},
+			want: with(func(c *Config) {
+				c.OneCLICAFile = "/var/lib/lab/onecli-ca.pem"
+			}),
+		},
+		{
+			name: "onecli-ca-file env alone is valid",
+			env:  map[string]string{"LAB_ONECLI_CA_FILE": "/var/lib/lab/onecli-ca.pem"},
+			want: with(func(c *Config) {
+				c.OneCLICAFile = "/var/lib/lab/onecli-ca.pem"
+			}),
+		},
+		{
+			name: "onecli-ca-file flag beats env",
+			args: []string{"--onecli-ca-file", "/flag/onecli-ca.pem"},
+			env:  map[string]string{"LAB_ONECLI_CA_FILE": "/env/onecli-ca.pem"},
+			want: with(func(c *Config) {
+				c.OneCLICAFile = "/flag/onecli-ca.pem"
 			}),
 		},
 		// --- seed user (issue #134, hashed per issue #137) ---

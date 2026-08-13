@@ -68,6 +68,30 @@ type Config struct {
 	// part of the OneCLIURL/OneCLIAPIKeyFile pairing rule — do not "fix" it
 	// into that pairing.
 	OneCLIGatewayURL string
+	// OneCLICAFile is a path to the PEM file holding the OneCLI gateway's
+	// interception CA certificate on the host. Consumed by the run wiring
+	// (issue #24), which composes it with the host's system CA bundle into a
+	// per-run trust bundle and points the run's SSL_CERT_FILE,
+	// NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, and GIT_SSL_CAINFO at that
+	// bundle — never at the interception CA alone, which would break every
+	// direct HTTPS call the run's NO_PROXY keeps off the gateway. For a
+	// container-runner run the same file reaches the container through the
+	// per-run runtime dir's existing host-identical bind mount, so this is
+	// one setting rather than a host path plus a separate container path.
+	// It is a config setting rather than something fetched from the OneCLI
+	// sidecar because the certificate must exist as a host FILE regardless —
+	// the env vars above point at a path, and a container bind mount needs a
+	// source path, neither of which a fetched-at-runtime value would give —
+	// and fetching it over the REST API would mean binding new OneCLI API
+	// surface, which ADR-0067 pins closed ("the client binding is
+	// deliberately partial"). Like OneCLIGatewayURL, it is deliberately NOT
+	// part of the OneCLIURL/OneCLIAPIKeyFile pairing rule and must not be
+	// "fixed" into it. Unlike OneCLIGatewayURL, though, it is not fully
+	// independent: when OneCLIGatewayURL is set and this is empty, a spawn
+	// refuses rather than starting a run whose HTTPS is silently broken —
+	// enforced in internal/instance, not here (Parse stays pure; see the
+	// package doc comment).
+	OneCLICAFile string
 
 	// ProviderBin maps a provider id to a binary-path override. A missing
 	// entry means the adapter uses its own default (a PATH lookup); config.go
@@ -182,7 +206,7 @@ func (p *providerMapFlag) Set(value string) error {
 // LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_CONTAINER_IMAGE, LAB_CONTAINER_TOOLS_IMAGE,
 // LAB_BASE_URL, LAB_AGENT_URL, LAB_SEED_USER,
 // LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE, LAB_ONECLI_URL,
-// LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL. providerIDs
+// LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL, LAB_ONECLI_CA_FILE. providerIDs
 // is the caller's list of registered provider ids: the generic per-provider
 // flags are validated against it (an unknown id is a parse error), and the
 // LAB_PROVIDER_*_<ID> env forms are read only for ids it contains.
@@ -200,6 +224,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		oneCLIURL        = fs.String("onecli-url", "", "OneCLI sidecar REST API base URL, e.g. http://127.0.0.1:10254; empty disables the OneCLI integration; must be set with --onecli-api-key-file (env LAB_ONECLI_URL)")
 		oneCLIAPIKeyFile = fs.String("onecli-api-key-file", "", "path to a 0600 file holding the OneCLI API key; must be set with --onecli-url (env LAB_ONECLI_API_KEY_FILE)")
 		oneCLIGatewayURL = fs.String("onecli-gateway-url", "", "OneCLI gateway proxy URL injected into runs as HTTPS_PROXY, e.g. http://10.88.0.1:10255 — NOT host.containers.internal, which container runs pin to 127.0.0.1 (env LAB_ONECLI_GATEWAY_URL)")
+		oneCLICAFile     = fs.String("onecli-ca-file", "", "path to the PEM file holding the OneCLI gateway's interception CA certificate on the host; composed with the host's system CA bundle into a run's trust bundle (env LAB_ONECLI_CA_FILE)")
 
 		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
 		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
@@ -405,6 +430,14 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 			return Config{}, err
 		}
 	}
+
+	// --onecli-ca-file: a path is a path, exactly like --master-key-file (see
+	// its field doc). No filesystem access and no pairing/presence validation
+	// here — Parse does shape validation only. The file is read later, by the
+	// run wiring that needs it (issue #24), and the OneCLIGatewayURL-without-
+	// OneCLICAFile refusal lives there too (internal/instance), not in this
+	// pure function.
+	cfg.OneCLICAFile = pick("onecli-ca-file", *oneCLICAFile, "LAB_ONECLI_CA_FILE", "")
 
 	return cfg, nil
 }
