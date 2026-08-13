@@ -23,6 +23,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `onecli.url` | `null` | Passed as `--onecli-url`. Base URL of the OneCLI sidecar's REST API, as lab itself reaches it (typically loopback). Must be set together with `onecli.apiKeyFile`; `null` (the default) leaves the OneCLI integration off (see [OneCLI credential gateway](#onecli-credential-gateway)). |
 | `onecli.apiKeyFile` | `null` | Passed as `--onecli-api-key-file`. Path to a file holding the OneCLI API key — carries `masterKeyFile`'s permission contract (0600 or stricter, refuses startup otherwise) but, unlike it, is never auto-generated: the key is minted in OneCLI's own dashboard. |
 | `onecli.gatewayUrl` | `null` | Passed as `--onecli-gateway-url`. OneCLI's gateway proxy URL, injected into runs as `HTTPS_PROXY` — deliberately separate from `onecli.url`: a `container`-runner run can't reach the loopback address lab itself dials, so this typically points at a different, container-reachable address. Independently settable — no pairing requirement with the other two `onecli.*` options. |
+| `onecli.caFile` | `null` | Passed as `--onecli-ca-file`. Path to the PEM file holding the OneCLI gateway's interception CA certificate on the host, composed with the host's system CA bundle into a per-run trust bundle (see [OneCLI credential gateway](#onecli-credential-gateway)). No pairing requirement with `onecli.url` / `onecli.apiKeyFile`, but with `onecli.gatewayUrl` set and this left `null`, lab refuses to spawn a run rather than start one whose HTTPS is broken. |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps lab's derived sqlite default **and** lets a `LAB_DB` entry in `environmentFile` take effect (precedence is flag > env > default — a `--db` flag would shadow `LAB_DB`). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
@@ -192,6 +193,7 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--onecli-url` | `LAB_ONECLI_URL` | (empty) | OneCLI REST API base as lab itself reaches it, e.g. `http://127.0.0.1:10254`. Must be set together with `--onecli-api-key-file`; unset leaves the OneCLI integration off (see [OneCLI credential gateway](#onecli-credential-gateway)). |
 | `--onecli-api-key-file` | `LAB_ONECLI_API_KEY_FILE` | (empty) | File holding the OneCLI API key, 0600 or stricter — loose perms refuse startup, same contract as `--master-key-file`. Never auto-generated. |
 | `--onecli-gateway-url` | `LAB_ONECLI_GATEWAY_URL` | (empty) | Gateway proxy URL a run is handed as `HTTPS_PROXY`, e.g. `http://10.88.0.1:10255`. Independent of `--onecli-url` — a containerized run can't reach the loopback address lab itself uses to reach the REST API. |
+| `--onecli-ca-file` | `LAB_ONECLI_CA_FILE` | (empty) | Path to the PEM file holding the OneCLI gateway's interception CA certificate on the host. Independent of `--onecli-url` / `--onecli-api-key-file`; with `--onecli-gateway-url` set and this unset, a spawn refuses rather than start a run whose HTTPS is broken (see [OneCLI credential gateway](#onecli-credential-gateway)). |
 
 The per-provider host settings (`--provider-bin` / `--provider-config` and their `--claude` / `--claude-config` aliases) resolve **per provider entry**, highest wins: **generic flag > generic env > alias flag > alias env** — the generic form always beats the claude-named alias for the same setting, and within each pair a flag beats its env. The registered provider IDs come from `cmd/lab`, so a new provider's binary and config path are two entries under its ID with no config change (ADR-0034).
 
@@ -247,7 +249,7 @@ The flavor is the routing authority: an unrecognized host (a second Forgejo inst
 
 ## OneCLI credential gateway
 
-[OneCLI](https://onecli.sh) (`github.com/onecli/onecli`) is a sidecar credential gateway: a run's outbound HTTPS is routed through its proxy, which matches the request and injects the real credential at the network layer, so the run's own environment never holds a secret value. Scope is **repo secrets only** — git push/pull credentials (the vault, `--master-key-file`, [ADR-0006](adr/0006-credential-vault-and-git-auth.md)) and provider (Claude/Codex) auth are untouched, and LLM traffic is not routed through it. The integration is **entirely off** unless `--onecli-url` and `--onecli-api-key-file` are both set (below); with neither set lab behaves exactly as it does today. Design rationale, the full-gateway decision, and the dashboard-exposure decision are recorded in [ADR-0067](adr/0067-onecli-credential-gateway.md).
+[OneCLI](https://onecli.sh) (`github.com/onecli/onecli`) is a sidecar credential gateway: a run's outbound HTTPS is routed through its proxy, which matches the request and injects the real credential at the network layer, so the run's own environment never holds a secret value. Scope is **repo secrets only** — git push/pull credentials (the vault, `--master-key-file`, [ADR-0006](adr/0006-credential-vault-and-git-auth.md)) and provider (Claude/Codex) auth are untouched, and LLM traffic is not routed through it. The integration is **entirely off** unless `--onecli-url` and `--onecli-api-key-file` are both set (below); with neither set lab behaves exactly as it does today. Design rationale, the full-gateway decision, and the dashboard-exposure decision are recorded in [ADR-0067](adr/0067-onecli-credential-gateway.md). What a wired run's environment actually holds, and what a spawn refuses on, is [further down](#what-a-gateway-wired-run-gets).
 
 ### Deploying the sidecar
 
@@ -305,6 +307,55 @@ Compose merges a service's `ports:` list by **appending** across files, not repl
 
 `--onecli-url` and `--onecli-api-key-file` must be set together — lab refuses to start with only one. `--onecli-gateway-url` is independent of the other two (it feeds a run's `HTTPS_PROXY`, never lab's own REST client) and may be set, left unset, or changed on its own.
 
+`--onecli-ca-file` names the PEM file holding the OneCLI gateway's interception CA certificate on the host. Lab does not point a run's `SSL_CERT_FILE` at that file alone — a bare interception CA as the sole trust root would break every direct HTTPS call the run still makes off the gateway (git push to the forge, `api.anthropic.com`), which is exactly the traffic the run's `NO_PROXY` keeps off the gateway in the first place. Instead lab composes it with the host's system CA bundle into a per-run trust bundle and points `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, and `GIT_SSL_CAINFO` at that bundle (issue #24). With `--onecli-gateway-url` set and `--onecli-ca-file` left unset, a spawn refuses with an actionable error rather than starting a run whose HTTPS is silently broken.
+
+### What a gateway-wired run gets
+
+A run is **gateway-wired** only when all of `--onecli-url`, `--onecli-api-key-file` **and** `--onecli-gateway-url` are set. The REST pair alone is a perfectly reasonable deployment — you get the health surface and nothing else — and it leaves runs untouched: there is nothing to point `HTTPS_PROXY` at, so the wiring stays off, and that is *not* a spawn refusal. With every `onecli.*` option unset a spawn is byte-for-byte what it was before this integration existed.
+
+A wired run's session environment gains exactly these entries, and nothing else:
+
+| Variable | Value | Visible in the `podman` argv? |
+|---|---|---|
+| `HTTPS_PROXY`, `https_proxy` | `--onecli-gateway-url` with this repo's **agent identity** proxy token folded in as userinfo | **No.** It is a credential. On a `container`-runner run it is seeded into the pane environment by tmux `-e` and forwarded into the container by NAME only (`--env K`), exactly like `LAB_TOKEN` — so the value never appears in the podman argv, in `ps` output for the pane, or in podman's logs. |
+| `NO_PROXY`, `no_proxy` | the lab host, the repo's forge host, and the resolving provider's declared direct API hosts — bare hostnames, comma-joined, no spaces | Yes, deliberately: hostnames are public, and you should be able to read a run's command line and see what it exempts. |
+| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` | `<state>/instances/<runID>/runtime/onecli-ca-bundle.pem` — all four the same path | Yes, same reason. |
+
+Both case spellings are set on purpose: curl reads lowercase `https_proxy` only, some Node HTTP stacks read the uppercase spelling only, and Go and python-requests read either. `HTTP_PROXY`/`http_proxy` are deliberately **not** set — the gateway fronts outbound HTTPS, and plaintext http is not routed through it. `NO_PROXY`/`no_proxy` are omitted entirely rather than set empty when the list would be blank, because several clients read a *present* `NO_PROXY` as an authoritative exemption list and stop consulting anything else.
+
+**The trust bundle** is written per run at spawn: the host's system CA roots (first readable, non-empty file of `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`, `/etc/pki/tls/cacert.pem`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/ssl/cert.pem` — Go's own search list, in Go's order), then the contents of `--onecli-ca-file`. A `container`-runner run reaches it through the per-run runtime dir's **existing** bind mount at its host-identical path ([Container runner](#container-runner)) — no new mount, no new podman flag, and the same absolute path is valid inside and outside the container, exactly like the materialized git credential files beside it. Mode is 0644, because a CA bundle is public material and under `--userns=keep-id` a 0600 file owned by the lab user may not be readable by the agent.
+
+**What `NO_PROXY` exempts, and why a gateway outage cannot break the run's lifelines.** Three sources, each protecting traffic a run cannot lose without losing the ability to report what went wrong:
+
+- **The lab host**, read off `LAB_URL`, so `labctl` and the agent API keep working. A `unix://` `LAB_URL` (the default) contributes no entry and needs none — a unix socket is never proxied. A container run's `LAB_URL` is always rewritten to the mounted socket, so this entry matters for a `host`-runner run with an explicit TCP `--agent-url`.
+- **The repo's forge host**, read off its git remote (`https://…`, `ssh://…`, and the scp-like `git@host:owner/repo.git` are all understood; a local-path remote yields no entry and is fine). `git push`, `git fetch` and the tracker are authenticated by the vault's git credential materialized per operation ([ADR-0006](adr/0006-credential-vault-and-git-auth.md)) — never by a gateway grant — so forge traffic has nothing to gain from the proxy and everything to lose.
+- **The resolving provider's declared direct API hosts**, so the agent keeps streaming. LLM traffic is out of the gateway's scope by design. `claude-code` declares `api.anthropic.com`; **`codex` declares nothing today** — its model host has never been confirmed against a live CLI, and a guessed hostname would be worse than none — so a gateway-wired `codex` run's LLM traffic *does* go through the proxy and a gateway outage can stall it. Treat that as the known gap it is when choosing a provider for a wired lab.
+
+Ports are stripped from the lab and forge entries on purpose: a bare host in `NO_PROXY` matches every port on that host, and the thing being exempted is the host (lab on 8080 and on its socket; the forge on 443 and on its ssh port).
+
+**The run's context file changes too.** A gateway-wired run's generated context file (`CLAUDE.md` and friends) renders a **Secrets** section that teaches the gateway model — the environment holds no secret value; call a granted service's API as its docs say and send a placeholder where a credential goes; here are the services granted to this repo — instead of the legacy `labctl secret exec` section. An **unwired** run still renders the legacy section verbatim, because lab's own `repo_secrets` stays live in parallel until a later epic retires it. The service inventory is read at spawn and is best-effort: if the grant listing fails, the run still starts and the section simply omits the inventory. Attaching a grant in OneCLI's dashboard therefore shows up in the *next* run's context file, not the live one — but it takes effect at the gateway immediately, since the grant, not the paragraph, is the capability.
+
+**Known caveat, documented rather than solved.** A tool that ignores proxy environment variables bypasses the gateway and gets a 401/403 from the real API. That is a tool problem wearing an access problem's clothes, and it is **not** a leak: the environment never held a real key, so the bypassing tool has nothing to send. curl, git, node and python-requests all honour the variables; a hand-rolled client with a hard-coded transport may not. Closing it properly would need egress filtering, which lab does not do (see [Container runner](#container-runner)).
+
+### When a spawn refuses
+
+Every gateway refusal lands **before the claim** — before the worktree and branch exist — so an unreachable sidecar refuses a spawn without parking an AFK issue. All of them surface as a `400` with the text below quoted verbatim, and nothing survives the refusal: no worktree, no branch, no run row, and the run's per-run directory is wiped on the way out.
+
+| Message (abridged) | What it means | Fix |
+|---|---|---|
+| `--onecli-gateway-url is set but --onecli-ca-file is not, so a run for repo <repo> could not verify the gateway's intercepted TLS` | The proxy terminates TLS and the run would trust nothing it presents. | Set `--onecli-ca-file` to the sidecar's interception CA (PEM) on this host. |
+| `refusing to spawn for repo <repo> without credential-gateway access: onecli gateway probe: dialing <host:port>: …; check that the OneCLI gateway is running and that its proxy port is bound on an interface lab can reach` | The fail-closed pin, at the spawn: nothing is listening at `--onecli-gateway-url`. | Bring the sidecar up, or fix its 10255 bind — see the blockquote in [Deploying the sidecar](#deploying-the-sidecar). `GET /api/v1/onecli/health` reports the same fact before anyone spawns. |
+| `onecli gateway: resolving the agent identity for repo <repo>: …` | The REST API rejected or could not serve ensure-agent. | Usually the API key or its project: re-check `--onecli-url` / `--onecli-api-key-file` against the dashboard. |
+| `onecli gateway: obtaining the proxy token for repo <repo>'s agent identity: …` | The agent exists but its token could not be minted. | Same place — the sidecar's API. |
+| `onecli gateway: the gateway URL must include a host …` / `must be an http(s) URL, got scheme …` | `--onecli-gateway-url` is malformed. | It must be a full `http(s)://host:port`, and a host a **container** run can route to — not `127.0.0.1`, and not `host.containers.internal`. |
+| `onecli gateway: reading the gateway CA file <path>: …` | The CA file is missing or unreadable by the lab user. | Fix the path or its permissions. |
+| `onecli gateway: the gateway CA file <path> carries no "-----BEGIN CERTIFICATE-----" block — it must be the sidecar's CA certificate in PEM form, not DER and not a key` | The file exists but is not a PEM certificate — a DER blob, a downloaded HTML error page, a private key, or an empty file from a failed provisioning step. | Re-export the CA in PEM. |
+| `onecli gateway: no system CA bundle found on this host — tried …; a run's trust bundle must carry the system roots as well as the gateway CA, and lab refuses to build one without them` | The host has no CA store (or a zero-byte one). Lab will **not** fall back to the gateway CA alone: that run could verify nothing it reaches directly. | Install the distro's CA certificates package. |
+
+One step deliberately does **not** refuse: listing the agent identity's grants. That list is documentation for the context file, and a run holding a valid token has exactly the access its grants describe whether or not lab could render the inventory. A failure there logs a warning and the run starts.
+
+**The restart residual, stated plainly.** Lab mints a repo's proxy token at most once per lab process, because OneCLI's token endpoint *regenerates* — minting per spawn would invalidate the token every already-running run of that repo still holds. The cost is that a lab **restart** re-mints: any run that outlives a restart keeps a token the gateway no longer honours, and its proxied calls then fail per request with a proxy auth error. This is the same end state as a gateway outage, and the token is not persisted to avoid it (it is a credential, and lab's vault is git-credential territory). If you restart lab while wired runs are live, expect their secret-backed API calls to start failing; everything on their `NO_PROXY` list — the tracker, `git push`, the model stream — is unaffected. Stopping and re-starting the affected run is the fix.
+
 ### Checking it works
 
 `GET /api/v1/onecli/health` — an authenticated operator endpoint — always answers 200, with a body reporting `state`: `off` (integration unconfigured — not an error), `ok`, `degraded`, or `unreachable`, plus per-component detail for `api` and `gateway`. `state` is derived from reachability alone; the `api` component additionally carries the sidecar's own `status` word verbatim, uninterpreted — a sidecar can answer 200 while calling itself degraded, and lab shows you that word rather than guessing which words mean healthy:
@@ -313,6 +364,41 @@ Compose merges a service's `ports:` list by **appending** across files, not repl
 $ curl -s --cookie "lab_session=$TOKEN" https://lab.example.com/api/v1/onecli/health
 {"state":"ok","api":{"configured":true,"reachable":true,"url":"http://127.0.0.1:10254","status":"ok"},"gateway":{"configured":true,"reachable":true,"url":"http://10.88.0.1:10255"}}
 ```
+
+That proves the sidecar answers. It does **not** prove injection — the health probe deliberately opens a TCP connection and stops there, because a `CONNECT` probe would have to mint an agent token, and minting regenerates it. Injection is proved once, live, from inside a run:
+
+**Proving injection end to end.** Do this on a repo whose runner is `container` (see [Container runner](#container-runner)) — that is the path where the trust bundle crosses a mount boundary and the proxy value crosses the tmux/podman split, so it is the one worth proving. Attach to a live run and work inside the pane:
+
+```console
+$ tmux attach -t myrepo~1
+```
+
+```console
+# 1. The wiring is present. Print the gateway ADDRESS only — never the whole
+#    value, which carries this run's proxy token.
+$ echo "${HTTPS_PROXY:+set}, gateway ${HTTPS_PROXY##*@}"
+set, gateway 10.88.0.1:10255
+
+# 2. The trust bundle is the system roots PLUS one, not the gateway CA alone.
+#    A count in the hundreds is right; a count of 1 means something is wrong.
+$ grep -c 'BEGIN CERTIFICATE' "$SSL_CERT_FILE"
+152
+
+# 3. The acceptance test: an HTTPS call to a GRANTED service, sending a
+#    placeholder where the credential goes.
+$ curl -sS -o /dev/null -w '%{http_code}\n' \
+       -H 'Authorization: Bearer placeholder' \
+       https://api.github.com/user
+200
+```
+
+A `200` with real data back is the whole criterion: the placeholder went out, the gateway replaced it, and the run never held the key. Reading the failures:
+
+- **`401` / `403`** — the request reached the real API un-injected. Either the service is not granted to this repo's **agent identity** (attach the grant in OneCLI's dashboard; it takes effect at the gateway immediately), or the tool ignored `HTTPS_PROXY` (the [known caveat](#what-a-gateway-wired-run-gets) — retry with `curl` to tell the two apart).
+- **A proxy-auth rejection** (`407`, or whatever the gateway answers a bad token with) — the gateway did not accept this run's token. Most often the restart residual above: lab was restarted after this run started.
+- **`curl: (60) SSL certificate problem`**, Node's `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, Go's `x509: certificate signed by unknown authority` — the trust bundle is not in play. Check that `--onecli-ca-file` really is the sidecar's *interception* CA, and that the tool reads one of the four CA variables lab sets.
+- **`curl: (7) Failed to connect`** to the gateway address — the proxy port is not reachable from the container's network namespace; see the blockquote in [Deploying the sidecar](#deploying-the-sidecar).
+- **`git push` or `labctl` failing at the same time** means the problem is *not* the gateway: both are on the run's `NO_PROXY` list and never touch it. Look at the forge credential or the agent socket instead.
 
 See also [Observability](#observability).
 
@@ -344,8 +430,10 @@ See also [Observability](#observability).
                              created at launch, wiped at stop/rollback, swept at boot
   instances/<runID>/runtime/ 0700 — per-run runtime dir (issue #205): the run's
                              materialized git credential files, known_hosts,
-                             dialog spool, and --settings file; same lifecycle
-                             as home/, bind-mounted into the run's container
+                             dialog spool, --settings file, and (gateway-wired
+                             runs only) onecli-ca-bundle.pem, 0644; same
+                             lifecycle as home/, bind-mounted into the run's
+                             container at its host-identical path
   logins/                    0700 — per-attempt scratch HOMEs for containerized
                              provider login (ADR-0057); wiped at login teardown
 ```
