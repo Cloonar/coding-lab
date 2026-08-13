@@ -23,6 +23,9 @@ func TestParse(t *testing.T) {
 		DB:                   "sqlite:/home/u/.local/state/lab/lab.db",
 		MasterKeyFile:        "/home/u/.local/state/lab/master.key",
 		VAPIDKeyFile:         "/home/u/.local/state/lab/vapid.key",
+		OneCLIURL:            "",
+		OneCLIAPIKeyFile:     "",
+		OneCLIGatewayURL:     "",
 		ProviderBin:          map[string]string{},
 		ProviderConfig:       map[string]string{},
 		TmuxBin:              "tmux",
@@ -474,6 +477,119 @@ func TestParse(t *testing.T) {
 			name:    "agent url bare host:port hints http(s)",
 			args:    []string{"--agent-url", "127.0.0.1:8080"},
 			wantErr: "http(s)",
+		},
+		// --- OneCLI REST API and gateway config (issue #23) ---
+		{
+			name: "onecli settings all unset leaves the integration off",
+			want: defaults,
+		},
+		{
+			name: "onecli-url and onecli-api-key-file flags land in Config",
+			args: []string{"--onecli-url", "http://127.0.0.1:10254", "--onecli-api-key-file", "/run/secrets/onecli-api-key"},
+			want: with(func(c *Config) {
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-url and onecli-api-key-file env land in Config",
+			env: map[string]string{
+				"LAB_ONECLI_URL":          "http://127.0.0.1:10254",
+				"LAB_ONECLI_API_KEY_FILE": "/run/secrets/onecli-api-key",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-url flag beats env",
+			args: []string{"--onecli-url", "http://127.0.0.1:10254", "--onecli-api-key-file", "/flag/onecli-api-key"},
+			env: map[string]string{
+				"LAB_ONECLI_URL":          "http://127.0.0.1:19999",
+				"LAB_ONECLI_API_KEY_FILE": "/env/onecli-api-key",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/flag/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-api-key-file flag beats env",
+			args: []string{"--onecli-url", "http://127.0.0.1:10254", "--onecli-api-key-file", "/flag/onecli-api-key"},
+			env: map[string]string{
+				"LAB_ONECLI_URL":          "http://127.0.0.1:10254",
+				"LAB_ONECLI_API_KEY_FILE": "/env/onecli-api-key",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/flag/onecli-api-key"
+			}),
+		},
+		{
+			name:    "onecli-url without onecli-api-key-file errors",
+			args:    []string{"--onecli-url", "http://127.0.0.1:10254"},
+			wantErr: "--onecli-url and --onecli-api-key-file must be set together or not at all",
+		},
+		{
+			name:    "onecli-api-key-file without onecli-url errors",
+			args:    []string{"--onecli-api-key-file", "/run/secrets/onecli-api-key"},
+			wantErr: "--onecli-url and --onecli-api-key-file must be set together or not at all",
+		},
+		{
+			name:    "onecli-url must be http(s)",
+			args:    []string{"--onecli-url", "ftp://127.0.0.1:10254", "--onecli-api-key-file", "/run/secrets/onecli-api-key"},
+			wantErr: "http(s)",
+		},
+		{
+			name:    "onecli-url must be absolute",
+			args:    []string{"--onecli-url", "localhost:10254", "--onecli-api-key-file", "/run/secrets/onecli-api-key"},
+			wantErr: "http(s)",
+		},
+		{
+			name: "onecli-gateway-url flag alone is valid, no pairing required",
+			args: []string{"--onecli-gateway-url", "http://10.88.0.1:10255"},
+			want: with(func(c *Config) {
+				c.OneCLIGatewayURL = "http://10.88.0.1:10255"
+			}),
+		},
+		{
+			name: "onecli-gateway-url env alone is valid",
+			env:  map[string]string{"LAB_ONECLI_GATEWAY_URL": "http://10.88.0.1:10255"},
+			want: with(func(c *Config) {
+				c.OneCLIGatewayURL = "http://10.88.0.1:10255"
+			}),
+		},
+		{
+			name: "onecli-gateway-url flag beats env",
+			args: []string{"--onecli-gateway-url", "http://10.88.0.1:10255"},
+			env:  map[string]string{"LAB_ONECLI_GATEWAY_URL": "http://10.88.0.1:19999"},
+			want: with(func(c *Config) {
+				c.OneCLIGatewayURL = "http://10.88.0.1:10255"
+			}),
+		},
+		{
+			name:    "onecli-gateway-url must be http(s)",
+			args:    []string{"--onecli-gateway-url", "ftp://10.88.0.1:10255"},
+			wantErr: "http(s)",
+		},
+		{
+			name:    "onecli-gateway-url must be absolute",
+			args:    []string{"--onecli-gateway-url", "localhost:10255"},
+			wantErr: "http(s)",
+		},
+		{
+			name: "onecli-url and onecli-api-key-file together with onecli-gateway-url set too",
+			args: []string{
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+				"--onecli-gateway-url", "http://10.88.0.1:10255",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+				c.OneCLIGatewayURL = "http://10.88.0.1:10255"
+			}),
 		},
 		// --- seed user (issue #134, hashed per issue #137) ---
 		{

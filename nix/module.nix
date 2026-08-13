@@ -107,6 +107,18 @@ let
     "--agent-url"
     cfg.agentUrl
   ]
+  ++ lib.optionals (cfg.onecli.url != null) [
+    "--onecli-url"
+    cfg.onecli.url
+  ]
+  ++ lib.optionals (cfg.onecli.apiKeyFile != null) [
+    "--onecli-api-key-file"
+    cfg.onecli.apiKeyFile
+  ]
+  ++ lib.optionals (cfg.onecli.gatewayUrl != null) [
+    "--onecli-gateway-url"
+    cfg.onecli.gatewayUrl
+  ]
   ++ lib.optionals (cfg.seedUser != null) [
     "--seed-user"
     cfg.seedUser
@@ -383,6 +395,59 @@ in
         or deleting it strands every push subscription — each device must
         re-enable from its settings page.
       '';
+    };
+
+    onecli = {
+      url = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "http://127.0.0.1:10254";
+        description = ''
+          Base URL of the OneCLI sidecar's REST API (--onecli-url) — its
+          dashboard/API port, default 10254 — as lab itself reaches it,
+          typically loopback. `null` (the default) keeps the OneCLI
+          integration off. Must be set together with {option}`apiKeyFile`;
+          lab refuses to start with only one of the two set. Deliberately
+          separate from {option}`gatewayUrl`: the address lab itself uses to
+          reach the REST API and the address a container must use to reach
+          the gateway proxy are two different addresses, not the same one at
+          a different path.
+        '';
+      };
+
+      apiKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/run/secrets/lab-onecli-api-key";
+        description = ''
+          Path to a file holding the OneCLI API key (--onecli-api-key-file).
+          Carries {option}`masterKeyFile`'s enforcement contract — 0600 or
+          stricter, lab refuses to start on looser permissions — see the
+          header comment for the sops-nix / LoadCredential patterns. Unlike
+          {option}`masterKeyFile`, lab never auto-generates this file: the
+          key is minted in OneCLI's own dashboard. Must be set together with
+          {option}`url`; lab refuses to start with only one of the two set.
+        '';
+      };
+
+      gatewayUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "http://10.88.0.1:10255";
+        description = ''
+          OneCLI sidecar's gateway proxy URL (--onecli-gateway-url) — its
+          default port 10255 — injected into runs as `HTTPS_PROXY`.
+          Deliberately separate from {option}`url`: lab itself dials the REST
+          API on loopback, but a `container`-runner run cannot reach
+          loopback — lab's container argv pins `host.containers.internal`
+          and `host.docker.internal` to 127.0.0.1 (ADR-0052 / issue #216),
+          so a containerized run needs a host address routable from the
+          container's netns instead. Consequently the sidecar's gateway port
+          must not be bound strictly to loopback on hosts that run
+          {option}`container.enable`. Independently settable from
+          {option}`url` / {option}`apiKeyFile` — no pairing requirement.
+        '';
+      };
     };
 
     seedUser = lib.mkOption {
