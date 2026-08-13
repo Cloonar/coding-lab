@@ -3,7 +3,7 @@ package onecli
 // The agent operations. A OneCLI "agent" is an identity the gateway proxy
 // authenticates a client as; lab's model (issue #23) maps ONE OneCLI agent to
 // one lab repo, so the repo's grants are exactly that agent's grants and a run
-// spawned for the repo carries that agent's proxy token. Everything here
+// spawned for the repo carries that agent's access token. Everything here
 // exists to make that mapping safe to establish lazily, from many goroutines,
 // forever.
 
@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 )
 
 // Health is GET /v1/health's answer: the sidecar's own liveness word and, when
@@ -44,19 +43,35 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 	return Health{Status: wire.Status, Version: wire.Version}, nil //nolint:staticcheck // S1016: wire→domain mapping stays explicit so the two shapes can diverge
 }
 
-// Agent is one OneCLI agent identity: the id every other call addresses it by,
-// and the name lab maps to a repo.
+// Agent is one OneCLI agent identity: the id grants are addressed by, the
+// name lab maps to a repo, and the agent's gateway access token.
+//
+// Token is a SECRET. OneCLI's agent listing carries each agent's stable
+// access token (wire.go point 4) — the credential a run presents to the
+// gateway proxy — and this type carries it to exactly one consumer, the
+// spawn's gateway wiring. Never log an Agent with %v/%+v/%#v, never fold one
+// into an error, never put the token in a URL that gets reported anywhere.
+//
+// Lab deliberately READS the token and never regenerates it. Upstream has a
+// regenerate endpoint, but calling it at spawn would invalidate the token
+// every already-running run of the same repo still holds — the second
+// instance of a repo would silently 401 the first one's gateway calls, and
+// the symptom (a run whose credentials stop working the moment a colleague
+// starts another run) is about as far from its cause as a symptom gets. A
+// stable read has no such failure mode, and it also survives lab restarts
+// with no state at all.
 type Agent struct {
-	ID   string
-	Name string
+	ID    string
+	Name  string
+	Token string
 }
 
 // ListAgents lists the agents in the current project (the project the API key
 // belongs to, or the one named by Options.ProjectID). Grants are NOT requested
 // — the documented ?include=grants-summary is deliberately not used, because
 // the only consumer that needs grants asks for them per agent through
-// ListGrants, and a summary would be a second undocumented wire shape to keep
-// true for no gain.
+// ListGrants, and a summary would be a second wire shape to keep true for no
+// gain.
 func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
 	body, err := c.do(ctx, http.MethodGet, c.agentsURL(), nil)
 	if err != nil {
@@ -68,7 +83,7 @@ func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
 	}
 	out := make([]Agent, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Agent{ID: r.ID, Name: r.Name}) //nolint:staticcheck // S1016: wire→domain mapping stays explicit (see wire.go)
+		out = append(out, Agent{ID: r.ID, Name: r.Name, Token: r.AccessToken}) //nolint:staticcheck // S1016: wire→domain mapping stays explicit (see wire.go)
 	}
 	return out, nil
 }
@@ -84,25 +99,26 @@ func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
 //  1. List, and return the agent whose name matches EXACTLY. The match is
 //     case-sensitive because a name is an identifier here, not prose — lab
 //     repo names differing only in case are different repos, and folding them
-//     together would hand one repo another repo's credentials.
+//     together would hand one repo another repo's credentials. The listing
+//     row carries the agent's access token, so the steady state — every spawn
+//     after the first — is one GET and done.
 //  2. Otherwise POST. Between (1) and (2) another lab goroutine (or another
 //     lab process against the same OneCLI project) may create the same name.
-//  3. If the POST answers 409 Conflict, that race happened and we lost it:
+//  3. A successful create is ALWAYS followed by a re-list: the create answer
+//     does not carry the access token (wire.go point 5), and an Agent without
+//     its token is useless to the one caller this exists for. The re-list
+//     reads the same stable token every other caller reads — nothing is
+//     regenerated, so the creator cannot invalidate anyone (see Agent).
+//  4. If the POST answers 409 Conflict, that race happened and we lost it:
 //     re-list ONCE and return the winner. The re-list is the entire reason
 //     this is safe under concurrency — a 409 means the name exists, so a
 //     second list must see it.
-//  4. If the re-list still does not contain the name, that is an ERROR, never
+//  5. If the re-list still does not contain the name, that is an ERROR, never
 //     a zero Agent and a nil error. A 409 for a name that then does not exist
 //     means the conflict was about something other than this name (or the
 //     listing is filtered) and lab's assumption is broken; reporting success
-//     would hand the caller an empty agent id and, downstream, a run wired to
-//     no identity at all.
-//
-// The same re-list resolves the other way this can go wrong: a POST that
-// succeeds but answers a shape this package cannot read an id out of (see
-// wire.go). Rather than return an agent with an empty ID — useless to every
-// caller, since grants and tokens are addressed by id — it resolves the name
-// through a list and errors if even that does not produce one.
+//     would hand the caller an empty agent and, downstream, a run wired to no
+//     identity at all.
 func (c *Client) EnsureAgent(ctx context.Context, name string) (Agent, error) {
 	if name == "" {
 		return Agent{}, errors.New("onecli: agent name must not be empty")
@@ -116,12 +132,9 @@ func (c *Client) EnsureAgent(ctx context.Context, name string) (Agent, error) {
 		return agent, nil
 	}
 
-	created, err := c.createAgent(ctx, name)
-	switch {
-	case err == nil && created.ID != "":
-		return created, nil
+	switch err := c.createAgent(ctx, name); {
 	case err == nil:
-		return c.resolveAgent(ctx, name, "the create succeeded but its answer carried no agent id")
+		return c.resolveAgent(ctx, name, "the create succeeded (the create answer carries no access token)")
 	case isConflict(err):
 		return c.resolveAgent(ctx, name, "the create answered 409 Conflict (another caller won the race)")
 	default:
@@ -129,29 +142,20 @@ func (c *Client) EnsureAgent(ctx context.Context, name string) (Agent, error) {
 	}
 }
 
-// createAgent POSTs a new agent and decodes the created object.
-func (c *Client) createAgent(ctx context.Context, name string) (Agent, error) {
+// createAgent POSTs a new agent. The answer body is deliberately not decoded:
+// it never carries the access token, so every successful create is resolved
+// by re-listing anyway (EnsureAgent step 3), and a second decode path would
+// be one more wire shape to keep true for nothing.
+func (c *Client) createAgent(ctx context.Context, name string) error {
 	req := newWireCreateAgent(name)
 	if req.Identifier == "" {
 		// A name with no alphanumeric in it derives an empty slug, which OneCLI's
 		// validation would 400. Lab's repo names (repo_<32 hex>) cannot get here;
 		// failing locally keeps the error attributable if something else does.
-		return Agent{}, fmt.Errorf("onecli: agent name %q contains no character usable in an identifier slug", name)
+		return fmt.Errorf("onecli: agent name %q contains no character usable in an identifier slug", name)
 	}
-	body, err := c.do(ctx, http.MethodPost, c.agentsURL(), req)
-	if err != nil {
-		return Agent{}, err
-	}
-	// A create that answers 204/empty is not a failure of the WRITE — the caller
-	// resolves the name by listing instead (see EnsureAgent step 4).
-	if len(body) == 0 {
-		return Agent{}, nil
-	}
-	wire, err := decodeOne[wireAgent](body, "agent")
-	if err != nil {
-		return Agent{}, err
-	}
-	return Agent{ID: wire.ID, Name: wire.Name}, nil //nolint:staticcheck // S1016: wire→domain mapping stays explicit (see wire.go)
+	_, err := c.do(ctx, http.MethodPost, c.agentsURL(), req)
+	return err
 }
 
 // resolveAgent re-lists and returns the agent named name, or an error that
@@ -178,50 +182,4 @@ func findAgent(agents []Agent, name string) (Agent, bool) {
 		}
 	}
 	return Agent{}, false
-}
-
-// AgentToken is a minted proxy token for an agent: the credential a run
-// presents to the gateway on port 10255. ExpiresAt is the zero time when the
-// server reported no expiry — which means "no expiry reported", NOT "already
-// expired"; a caller scheduling a refresh must check IsZero before comparing.
-//
-// The Token field is a secret. It exists to be handed to a run's proxy
-// configuration and nothing else: never log it, never fold it into an error,
-// never put it in a URL.
-type AgentToken struct {
-	Token     string
-	ExpiresAt time.Time
-}
-
-// AgentToken mints (or regenerates) the agent's proxy token. This is a WRITE:
-// the documented endpoint is a POST that regenerates, so calling it
-// invalidates whatever token the agent had. Callers must treat it as such and
-// not use it as a read-my-token probe.
-func (c *Client) AgentToken(ctx context.Context, agentID string) (AgentToken, error) {
-	if agentID == "" {
-		return AgentToken{}, errors.New("onecli: agent id must not be empty")
-	}
-	body, err := c.do(ctx, http.MethodPost, c.agentTokenURL(agentID), nil)
-	if err != nil {
-		return AgentToken{}, err
-	}
-	wire, err := decodeOne[wireToken](body, "agent token")
-	if err != nil {
-		return AgentToken{}, err
-	}
-	if wire.Token == "" {
-		// Never echo the body — this endpoint's body is a credential by design.
-		return AgentToken{}, fmt.Errorf("onecli: the token answer for agent %q carried no token; this OneCLI build's wire shape differs from the one assumed in internal/onecli/wire.go", agentID)
-	}
-	token := AgentToken{Token: wire.Token}
-	if raw := wire.expiresAt(); raw != "" {
-		expires, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			// The value is not echoed: if the field mapping is wrong, whatever
-			// landed in it could be anything, including the token itself.
-			return AgentToken{}, fmt.Errorf("onecli: the token answer for agent %q carried an expiry that is not RFC3339; see internal/onecli/wire.go", agentID)
-		}
-		token.ExpiresAt = expires
-	}
-	return token, nil
 }

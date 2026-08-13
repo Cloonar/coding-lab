@@ -61,15 +61,20 @@ func (a *agentsAPI) handler(t *testing.T) http.HandlerFunc {
 				return
 			}
 			var req struct {
-				Name string `json:"name"`
+				Name       string `json:"name"`
+				Identifier string `json:"identifier"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decoding POST /agents body: %v", err)
 			}
-			created := wireAgent{ID: "ag_created", Name: req.Name}
-			a.agents = append(a.agents, created)
+			// The listing row carries the agent's access token; the create
+			// ANSWER does not (wire.go point 5) — modeling that asymmetry is
+			// what forces the client's create path to resolve by re-listing.
+			a.agents = append(a.agents, wireAgent{ID: "ag_created", Name: req.Name, AccessToken: "oc_agent_created"})
 			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, jsonEncode(t, created))
+			_, _ = io.WriteString(w, jsonEncode(t, map[string]string{
+				"id": "ag_created", "name": req.Name, "identifier": req.Identifier,
+			}))
 
 		default:
 			t.Errorf("unexpected method %s %s", r.Method, r.URL.Path)
@@ -103,20 +108,23 @@ func TestEnsureAgent(t *testing.T) {
 		wantPosts int
 	}{
 		{
-			// The steady state: every spawn after the first. One list, no write.
-			// A POST here would create a duplicate identity for the repo.
+			// The steady state: every spawn after the first. One list, no write —
+			// and the listing row's access token rides along, because the spawn
+			// path reads it from here and never regenerates.
 			name:      "existing agent is returned without a POST",
-			agents:    []wireAgent{{ID: "ag_1", Name: "other"}, {ID: "ag_2", Name: name}},
-			want:      Agent{ID: "ag_2", Name: name},
+			agents:    []wireAgent{{ID: "ag_1", Name: "other", AccessToken: "oc_agent_other"}, {ID: "ag_2", Name: name, AccessToken: "oc_agent_2"}},
+			want:      Agent{ID: "ag_2", Name: name, Token: "oc_agent_2"},
 			wantGets:  1,
 			wantPosts: 0,
 		},
 		{
-			// First spawn for a repo: the create leg.
-			name:      "missing agent is created",
+			// First spawn for a repo: create, then re-list — the create answer
+			// carries no access token, so the token can only come from the
+			// second GET.
+			name:      "missing agent is created and resolved with its token",
 			agents:    []wireAgent{{ID: "ag_1", Name: "other"}},
-			want:      Agent{ID: "ag_created", Name: name},
-			wantGets:  1,
+			want:      Agent{ID: "ag_created", Name: name, Token: "oc_agent_created"},
+			wantGets:  2,
 			wantPosts: 1,
 		},
 		{
@@ -124,8 +132,8 @@ func TestEnsureAgent(t *testing.T) {
 			// WINNER's agent, with exactly one POST from us and no duplicate.
 			name:       "409 conflict re-lists and returns the winner",
 			postStatus: http.StatusConflict,
-			afterPost:  []wireAgent{{ID: "ag_winner", Name: name}},
-			want:       Agent{ID: "ag_winner", Name: name},
+			afterPost:  []wireAgent{{ID: "ag_winner", Name: name, AccessToken: "oc_agent_winner"}},
+			want:       Agent{ID: "ag_winner", Name: name, Token: "oc_agent_winner"},
 			wantGets:   2,
 			wantPosts:  1,
 		},
@@ -140,20 +148,21 @@ func TestEnsureAgent(t *testing.T) {
 			wantPosts:  1,
 		},
 		{
-			// The write landed but the answer's shape is not one this package can
-			// read an id out of. An Agent with an empty ID is useless downstream
-			// (grants and tokens are addressed by id), so resolve it by listing.
-			name:      "create answering without an id resolves by re-listing",
+			// The create answer's body is ignored entirely (only the re-list
+			// matters), so an unreadable answer changes nothing.
+			name:      "create answer body is ignored in favor of the re-list",
 			postBody:  `{"created":true}`,
-			afterPost: []wireAgent{{ID: "ag_resolved", Name: name}},
-			want:      Agent{ID: "ag_resolved", Name: name},
+			afterPost: []wireAgent{{ID: "ag_resolved", Name: name, AccessToken: "oc_agent_resolved"}},
+			want:      Agent{ID: "ag_resolved", Name: name, Token: "oc_agent_resolved"},
 			wantGets:  2,
 			wantPosts: 1,
 		},
 		{
-			name:      "create answering without an id and no listing match is an error",
+			// …but a create whose agent then never appears in the listing is a
+			// broken assumption and must be loud, exactly like the 409 variant.
+			name:      "create with the agent still absent from the listing is an error",
 			postBody:  `{"created":true}`,
-			wantErr:   "carried no agent id",
+			wantErr:   "still absent from the project listing",
 			wantGets:  2,
 			wantPosts: 1,
 		},
@@ -172,8 +181,8 @@ func TestEnsureAgent(t *testing.T) {
 			// credentials.
 			name:      "name match is case-sensitive",
 			agents:    []wireAgent{{ID: "ag_1", Name: "Coding-Lab"}},
-			want:      Agent{ID: "ag_created", Name: name},
-			wantGets:  1,
+			want:      Agent{ID: "ag_created", Name: name, Token: "oc_agent_created"},
+			wantGets:  2,
 			wantPosts: 1,
 		},
 	} {
@@ -234,8 +243,8 @@ func TestEnsureAgentCreateBody(t *testing.T) {
 		t.Fatalf("EnsureAgent: %v", err)
 	}
 	reqs := s.requests()
-	if len(reqs) != 2 {
-		t.Fatalf("stub saw %d requests, want 2 (list, create): %+v", len(reqs), reqs)
+	if len(reqs) != 3 {
+		t.Fatalf("stub saw %d requests, want 3 (list, create, token-resolving re-list): %+v", len(reqs), reqs)
 	}
 	post := reqs[1]
 	if post.Method != http.MethodPost || post.Path != "/v1/agents" {
@@ -343,14 +352,14 @@ func TestEnsureAgentConcurrentCreatesExactlyOne(t *testing.T) {
 		case http.MethodPost:
 			if len(agents) > 0 {
 				w.WriteHeader(http.StatusConflict)
-				_, _ = io.WriteString(w, `{"error":"an agent with that name already exists"}`)
+				_, _ = io.WriteString(w, `{"error":"an agent with that identifier already exists"}`)
 				return
 			}
 			created++
-			agent := wireAgent{ID: "ag_only", Name: name}
-			agents = append(agents, agent)
+			// The listing row carries the token; the create answer does not.
+			agents = append(agents, wireAgent{ID: "ag_only", Name: name, AccessToken: "oc_agent_only"})
 			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, jsonEncode(t, agent))
+			_, _ = io.WriteString(w, jsonEncode(t, map[string]string{"id": "ag_only", "name": name}))
 		}
 	})
 	c := newTestClient(t, s.URL)
@@ -383,8 +392,8 @@ func TestEnsureAgentConcurrentCreatesExactlyOne(t *testing.T) {
 	got := 0
 	for agent := range results {
 		got++
-		if (agent != Agent{ID: "ag_only", Name: name}) {
-			t.Errorf("agent = %#v, want the single created agent", agent)
+		if (agent != Agent{ID: "ag_only", Name: name, Token: "oc_agent_only"}) {
+			t.Errorf("agent = %#v, want the single created agent with its stable token", agent)
 		}
 	}
 	if got != n {

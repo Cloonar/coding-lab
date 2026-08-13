@@ -21,10 +21,9 @@ import (
 //     when the gateway is unreachable, and a run that starts against a dead
 //     proxy fails later, opaquely, with every outbound request broken.
 //   - It does NOT speak CONNECT and does NOT authenticate. A CONNECT probe
-//     would need an agent's proxy token, which means minting one — a WRITE
-//     that regenerates the agent's credential (see AgentToken) — just to
-//     answer "is it up". Spending a credential on a health check is how health
-//     checks start causing outages.
+//     would need an agent's access token — a per-repo CREDENTIAL (see Agent)
+//     — just to answer "is it up". Spending a credential on a health check is
+//     how health checks start causing outages.
 //
 // The gateway URL is a proxy URL, not the API base, so it never goes through
 // apiRoot: no /v1, no path. Only scheme, host and port are read. An

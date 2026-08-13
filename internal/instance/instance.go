@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
@@ -74,19 +73,19 @@ type WorkspaceSeeder interface {
 
 // GatewayAPI is the OneCLI REST seam the launch path resolves a run's
 // credential-gateway wiring through (issue #24 / ADR-0067): the repo's agent
-// identity, that identity's proxy token, and the grants on it. Satisfied by
+// identity — whose listing row carries the stable gateway access token the
+// run authenticates with — and the grants on it. Satisfied by
 // *onecli.Client; nil = the integration is unconfigured, which is the normal
 // state of a lab and must stay indistinguishable from a lab built before this
 // existed (gatewayActive is the one gate).
 //
 // Narrow on purpose, like WorkspaceSeeder and ConversationStater beside it:
-// three methods is exactly what a spawn needs, so a test drives the whole
+// two methods is exactly what a spawn needs, so a test drives the whole
 // gateway precheck with a struct literal and no HTTP, and the pool/attach/
 // detach half of internal/onecli (the #25 grant picker's surface) cannot be
 // reached from a launch even by accident.
 type GatewayAPI interface {
 	EnsureAgent(ctx context.Context, name string) (onecli.Agent, error)
-	AgentToken(ctx context.Context, agentID string) (onecli.AgentToken, error)
 	ListGrants(ctx context.Context, agentID string) ([]onecli.Grant, error)
 }
 
@@ -248,29 +247,6 @@ type Service struct {
 	oneCLIGatewayURL string
 	oneCLICAFile     string
 
-	// proxyTokens caches this process's minted proxy token per OneCLI AGENT
-	// ID (i.e. per repo), and it is load-bearing rather than an optimization.
-	// onecli.Client.AgentToken is a POST that REGENERATES the agent's token,
-	// so minting per spawn would invalidate the token every already-running
-	// run of that repo still holds: the second instance of a repo would
-	// silently 401 the first one's gateway calls, and the symptom (a run whose
-	// credentials stop working the moment a colleague starts another run) is
-	// about as far from its cause as a symptom gets. Mint once, reuse forever.
-	//
-	// The residual, stated honestly because it is real and accepted rather
-	// than unnoticed: a lab RESTART empties this map, so the next spawn mints
-	// a fresh token and every run that outlived the restart keeps a token the
-	// gateway no longer honors — its proxied calls then fail per request.
-	// That is the same end state ADR-0067 already accepts for a gateway
-	// outage ("already-running instances keep their env and fail per-request"),
-	// reached by a different road, and the run's own operator sees it as the
-	// gateway refusing the run rather than as silence. The token is NOT
-	// persisted to fix that: it is a credential, and lab's vault is
-	// git-credential/master-key territory (ADR-0006) that this epic
-	// deliberately does not extend.
-	proxyMu     sync.Mutex
-	proxyTokens map[string]string
-
 	// afkStop is the M5 AFK engine's neutral-Stop delegation (design §4c),
 	// wired once at startup via SetAFKStopper; nil refuses AFK stops.
 	afkStop AFKStopper
@@ -367,7 +343,6 @@ func New(o Options) (*Service, error) {
 		onecli:           o.OneCLI,
 		oneCLIGatewayURL: o.OneCLIGatewayURL,
 		oneCLICAFile:     o.OneCLICAFile,
-		proxyTokens:      map[string]string{},
 	}, nil
 }
 

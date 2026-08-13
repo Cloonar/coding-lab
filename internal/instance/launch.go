@@ -579,7 +579,7 @@ func (w gatewayWiring) active() bool { return w.proxyURL != "" }
 // gateway.go: that file's header pins it as the PURE core (no Service field,
 // no dial, no log) precisely so a table test can own the exact-output
 // contracts, and this function is the impure half — it dials the sidecar,
-// mints a credential, and logs.
+// resolves a credential, and logs.
 //
 // Every refusal is a *BadRequestError → 400, the mapping refuseContainerSpawn
 // documents for operator-fixable spawn refusals: what is wrong here is always
@@ -626,11 +626,17 @@ func (s *Service) prepareGateway(ctx context.Context, repo store.Repo) (gatewayW
 	if err != nil {
 		return gatewayWiring{}, badRequestf("onecli gateway: resolving the agent identity for repo %s: %s", repo.Name, err)
 	}
-	token, err := s.proxyToken(ctx, agent.ID)
-	if err != nil {
-		return gatewayWiring{}, badRequestf("onecli gateway: obtaining the proxy token for repo %s's agent identity: %s", repo.Name, err)
+	// The agent's gateway access token rides in OneCLI's agent listing, so
+	// EnsureAgent already carries it — STABLE, the same value every spawn and
+	// every lab process reads. Lab deliberately never calls the regenerate
+	// endpoint: regenerating at spawn would invalidate the token every
+	// already-running run of this repo still holds (see onecli.Agent). An
+	// empty token means this OneCLI build's listing no longer carries it —
+	// a wire mismatch, and fail-closed is ADR-0067's rule for this precheck.
+	if agent.Token == "" {
+		return gatewayWiring{}, badRequestf("onecli gateway: the agent identity for repo %s carries no access token in OneCLI's agent listing; this OneCLI build's wire shape differs from the one verified in internal/onecli/wire.go", repo.Name)
 	}
-	proxyURL, err := gatewayProxyURL(s.oneCLIGatewayURL, token)
+	proxyURL, err := gatewayProxyURL(s.oneCLIGatewayURL, agent.Token)
 	if err != nil {
 		return gatewayWiring{}, badRequestf("%s", err)
 	}
@@ -661,39 +667,6 @@ func (s *Service) prepareGateway(ctx context.Context, repo store.Repo) (gatewayW
 	s.log.Info("credential gateway wired for run", "component", "instance",
 		"repo", repo.ID, "agent", agent.ID, "services", len(services))
 	return gatewayWiring{proxyURL: proxyURL, services: services}, nil
-}
-
-// proxyToken returns the proxy token for OneCLI agent identity agentID,
-// minting it AT MOST ONCE per lab process (see the proxyTokens field for why
-// that is a correctness property and not a cache optimization:
-// onecli.AgentToken is a POST that regenerates, so a second mint silently
-// invalidates every already-running run of the same repo).
-//
-// The lock is held ACROSS the mint, on purpose. The obvious "check, unlock,
-// mint, relock, store" shape would let two concurrent spawns of the same repo
-// — the AFK engine and a manual Start racing, which is an ordinary Tuesday —
-// both mint, and the loser's token would be dead on arrival. Since the whole
-// point is that exactly one mint ever happens per agent, the critical section
-// has to contain the call. The cost is that a cold mint serializes concurrent
-// spawns of OTHER repos behind one HTTP round trip; a per-agent lock map would
-// avoid that and buy nothing worth the extra state, because the warm path —
-// every spawn after the first for a given repo — takes the lock, reads a map,
-// and returns without any I/O at all.
-func (s *Service) proxyToken(ctx context.Context, agentID string) (string, error) {
-	s.proxyMu.Lock()
-	defer s.proxyMu.Unlock()
-	if tok, ok := s.proxyTokens[agentID]; ok {
-		return tok, nil
-	}
-	minted, err := s.onecli.AgentToken(ctx, agentID)
-	if err != nil {
-		return "", err
-	}
-	if s.proxyTokens == nil {
-		s.proxyTokens = make(map[string]string, 1)
-	}
-	s.proxyTokens[agentID] = minted.Token
-	return minted.Token, nil
 }
 
 // grantServiceNames renders an agent identity's grants as the service names

@@ -57,23 +57,27 @@ func (c *Client) ListGrants(ctx context.Context, agentID string) ([]Grant, error
 	return decodeGrants(body)
 }
 
-// AttachGrant gives the agent access to the resource. The grant is fully
-// addressed by the URL, so no request body is sent; a 200 and a 204 are both
-// success (see do). PUT is idempotent by construction — re-granting something
-// already granted is a no-op, which is what makes this safe to call from a
-// picker that just replays an operator's whole selection.
+// AttachGrant gives the agent access to the resource. The resource is
+// addressed by the URL; a secret attach sends no body, a connection attach
+// sends the whole-app {"access":"full"} body OneCLI's validation requires
+// (wire.go point 7 — lab's grant model is binary, so the per-tool "custom"
+// arm is never sent). A 200 and a 204 are both success (see do). PUT is
+// idempotent by construction — re-granting something already granted is a
+// no-op, which is what makes this safe to call from a picker that just
+// replays an operator's whole selection.
 func (c *Client) AttachGrant(ctx context.Context, agentID string, kind GrantKind, resourceID string) error {
 	return c.writeGrant(ctx, http.MethodPut, agentID, kind, resourceID)
 }
 
-// DetachGrant revokes the agent's access to the resource. Like AttachGrant it
-// is addressed entirely by URL and tolerates 200 or 204.
+// DetachGrant revokes the agent's access to the resource. Addressed entirely
+// by URL for both kinds (no body) and tolerates 200 or 204.
 func (c *Client) DetachGrant(ctx context.Context, agentID string, kind GrantKind, resourceID string) error {
 	return c.writeGrant(ctx, http.MethodDelete, agentID, kind, resourceID)
 }
 
 // writeGrant is the shared attach/detach path: validate, then one request
-// whose method is the only difference between the two verbs.
+// whose method — and, for a connection attach, the required access body — is
+// the only difference between the two verbs.
 func (c *Client) writeGrant(ctx context.Context, method, agentID string, kind GrantKind, resourceID string) error {
 	if agentID == "" {
 		return errors.New("onecli: agent id must not be empty")
@@ -84,6 +88,10 @@ func (c *Client) writeGrant(ctx context.Context, method, agentID string, kind Gr
 	if err := validGrantKind(kind); err != nil {
 		return err
 	}
-	_, err := c.do(ctx, method, c.agentGrantURL(agentID, kind, resourceID), nil)
+	var body any
+	if method == http.MethodPut && kind == GrantConnection {
+		body = wireConnectionGrantAttach{Access: grantAccessFull}
+	}
+	_, err := c.do(ctx, method, c.agentGrantURL(agentID, kind, resourceID), body)
 	return err
 }

@@ -8,23 +8,22 @@
 // touches it at the TCP level only.
 //
 // Scope is deliberately the subset issue #23's later epics consume — health,
-// the idempotent per-repo agent mapping, the project's secret/connection pool,
-// an agent's grants, and an agent's proxy token. It is not a full binding of
-// OneCLI's API and should not grow into one: every endpoint added here is one
-// more undocumented wire shape lab has to keep true (see below).
+// the idempotent per-repo agent mapping (which carries each agent's gateway
+// access token; lab reads it and never regenerates it, see Agent), the
+// project's secret/connection pool, and an agent's grants. It is not a full
+// binding of OneCLI's API and should not grow into one: every endpoint added
+// here is one more wire shape lab has to keep true (see below).
 //
-// # The wire shapes are an assumption, and wire.go is where to fix them
+// # The wire shapes live in wire.go, and wire.go is where to fix them
 //
 // OneCLI community edition documents its REST SURFACE — base URL, bearer auth,
 // the X-Project-Id context header, and the paths — at https://onecli.sh/docs
 // and https://onecli.sh/docs/llms.txt. It does NOT publish the JSON field
-// names of its responses, and this package was written without a live
-// instance to read them off. Every request/response struct in this package is
-// therefore a good-faith reading of that surface, not a verified contract, and
-// every one of them — together with every path — lives in wire.go so that a
-// mismatch against a real OneCLI build is a one-file fix. wire.go carries an
-// explicit list of the assumptions made. Nothing in this package pretends to
-// a "spec version": there is no published schema to pin.
+// names of its responses. Every path and request/response shape this package
+// uses lives in wire.go, VERIFIED against the OneCLI 1.45.0 source (the
+// original good-faith reading was falsified by the first live spawn — see
+// wire.go's header for the history), so that a mismatch against a future
+// OneCLI build is a one-file fix.
 //
 // # Secret hygiene
 //
@@ -65,9 +64,10 @@ const (
 	maxResponseBody = 1 << 20 // 1 MiB
 
 	// errBodySnippetMax caps how much of a non-2xx body is folded into an
-	// *APIError. It is a diagnostic aid, not a transcript: POST /agents/{id}/token
-	// answers with a credential, and an error path on such an endpoint must not
-	// be able to spill an unbounded body into lab's logs.
+	// *APIError. It is a diagnostic aid, not a transcript: the agent listing
+	// answers with credentials (each agent's access token), and an error path
+	// on such an endpoint must not be able to spill an unbounded body into
+	// lab's logs.
 	errBodySnippetMax = 512
 )
 
@@ -257,18 +257,30 @@ func newAPIError(method, path string, resp *http.Response) *APIError {
 	}
 }
 
-// errorMessage extracts a human message from an error body: the JSON envelope's
-// error/message field when present, otherwise a collapsed snippet. The snippet
-// is already bounded by the caller's LimitReader — the bound is the point, since
-// a body on a token endpoint could contain a credential.
+// errorMessage extracts a human message from an error body. OneCLI has two
+// verified error spellings (wire.go point 9): the global handler's nested
+// {"error":{"message":…,"type":…}} and route-level validation's flat
+// {"error":"…"}; a bare {"message":…} is kept as a tolerated third. Anything
+// else becomes a collapsed snippet, already bounded by the caller's
+// LimitReader — the bound is the point, since an unexpected body could
+// contain anything, including a credential.
 func errorMessage(body []byte) string {
 	var envelope struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
 	}
 	if json.Unmarshal(body, &envelope) == nil {
-		if envelope.Error != "" {
-			return envelope.Error
+		if len(envelope.Error) > 0 {
+			var flat string
+			if json.Unmarshal(envelope.Error, &flat) == nil && flat != "" {
+				return flat
+			}
+			var nested struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(envelope.Error, &nested) == nil && nested.Message != "" {
+				return nested.Message
+			}
 		}
 		if envelope.Message != "" {
 			return envelope.Message
