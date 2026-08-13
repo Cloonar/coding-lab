@@ -14,10 +14,11 @@ package instance
 //
 //   - onecliREST — an httptest.Server driving a REAL *onecli.Client. Highest
 //     fidelity: it exercises wire.go's paths and JSON shapes, EnsureAgent's
-//     list → create → 409-tolerant resolve, the token decode, and decodeGrants.
-//     Used for the success paths (the wired env bundle, the mint-once cache,
-//     the grant inventory), where "does lab talk to OneCLI correctly" is part
-//     of the claim.
+//     list → create → token-resolving re-list, the access-token read (the
+//     listing carries it; nothing is ever regenerated), and decodeGrants.
+//     Used for the success paths (the wired env bundle, the stable-token
+//     property, the grant inventory), where "does lab talk to OneCLI
+//     correctly" is part of the claim.
 //   - gatewayAPIStub — a hand-written GatewayAPI struct stub. Used wherever a
 //     test must FORCE a failure at an exact step or count calls precisely; a
 //     scripted error is one field there, versus a second stub server teaching
@@ -70,7 +71,8 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
-// testProxyToken is the agent-identity token the hand-written seam stub mints.
+// testProxyToken is the agent-identity access token the hand-written seam
+// stub's agent carries (the listing-borne credential EnsureAgent reads).
 // Deliberately distinctive so a leak assertion — the token must appear in no
 // error string and in no argv element — cannot pass by accident.
 const testProxyToken = "onecli-proxy-token-do-not-leak"
@@ -88,22 +90,19 @@ var gatewayEnvNames = []string{
 
 // --- the GatewayAPI seam stub ----------------------------------------------
 
-// gatewayAPIStub is a hand-written GatewayAPI (instance.go's three-method
+// gatewayAPIStub is a hand-written GatewayAPI (instance.go's two-method
 // seam): it records what a spawn asked for and answers with scripted values or
 // scripted errors. Used where a test must force one step to fail or count
 // calls exactly — the REST stub below is the fidelity one.
 type gatewayAPIStub struct {
 	mu sync.Mutex
 
-	agent     onecli.Agent // the identity EnsureAgent answers with
+	agent     onecli.Agent // the identity EnsureAgent answers with (Token included)
 	ensureErr error
-	token     string // the proxy token AgentToken answers with
-	tokenErr  error
 	grants    []onecli.Grant
 	grantsErr error
 
 	ensured    []string // the NAME each EnsureAgent call carried, in order
-	mints      int
 	grantCalls int
 }
 
@@ -117,16 +116,6 @@ func (s *gatewayAPIStub) EnsureAgent(_ context.Context, name string) (onecli.Age
 	return s.agent, nil
 }
 
-func (s *gatewayAPIStub) AgentToken(_ context.Context, _ string) (onecli.AgentToken, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mints++
-	if s.tokenErr != nil {
-		return onecli.AgentToken{}, s.tokenErr
-	}
-	return onecli.AgentToken{Token: s.token}, nil
-}
-
 func (s *gatewayAPIStub) ListGrants(_ context.Context, _ string) ([]onecli.Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -137,11 +126,11 @@ func (s *gatewayAPIStub) ListGrants(_ context.Context, _ string) ([]onecli.Grant
 	return s.grants, nil
 }
 
-// counts returns the stub's call tallies: ensures, token mints, grant listings.
-func (s *gatewayAPIStub) counts() (ensures, mints, grants int) {
+// counts returns the stub's call tallies: ensures and grant listings.
+func (s *gatewayAPIStub) counts() (ensures, grants int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.ensured), s.mints, s.grantCalls
+	return len(s.ensured), s.grantCalls
 }
 
 // ensuredNames returns the agent names EnsureAgent was called with, in order.
@@ -151,12 +140,12 @@ func (s *gatewayAPIStub) ensuredNames() []string {
 	return append([]string(nil), s.ensured...)
 }
 
-// newGatewayStub is the ordinary happy stub: one agent identity, a mintable
-// token, and whatever grants the case wants rendered into its context file.
+// newGatewayStub is the ordinary happy stub: one agent identity carrying its
+// listing-borne access token, and whatever grants the case wants rendered
+// into its context file.
 func newGatewayStub(grants ...onecli.Grant) *gatewayAPIStub {
 	return &gatewayAPIStub{
-		agent:  onecli.Agent{ID: "ag_proj", Name: "ag_proj"},
-		token:  testProxyToken,
+		agent:  onecli.Agent{ID: "ag_proj", Name: "ag_proj", Token: testProxyToken},
 		grants: grants,
 	}
 }
@@ -171,11 +160,13 @@ const (
 )
 
 // onecliREST is an httptest stand-in for OneCLI's REST API, answering exactly
-// the four requests one spawn makes (list agents, create agent, mint token,
-// list grants) in the wire shapes internal/onecli/wire.go assumes. It exists so
-// the launch path can be driven through a REAL *onecli.Client: the spawn then
-// exercises wire.go's paths, EnsureAgent's list/create/409 logic and the token
-// decode, none of which a struct stub would touch.
+// the requests one spawn makes — list agents (rows carry each agent's
+// accessToken, the credential the run authenticates with), create agent (its
+// answer carries NO token, forcing the client's token-resolving re-list), and
+// list grants — in the wire shapes internal/onecli/wire.go verified against
+// the 1.45.0 source. There is deliberately NO token endpoint: the client must
+// never regenerate (that would invalidate concurrent runs' tokens), so a POST
+// to any token path lands in the default branch and fails the test.
 type onecliREST struct {
 	*httptest.Server
 
@@ -183,9 +174,7 @@ type onecliREST struct {
 	agents     []string // agent names the project holds, in creation order
 	lists      int
 	creates    int
-	mints      int
 	grantLists int
-	tokenPaths []string // the path each mint was addressed at
 	grantsBody string
 }
 
@@ -196,7 +185,7 @@ func newOneCLIREST(t *testing.T, grantsBody string) *onecliREST {
 	t.Helper()
 	r := &onecliREST{grantsBody: grantsBody}
 	if r.grantsBody == "" {
-		r.grantsBody = `{"secrets":[],"connections":[]}`
+		r.grantsBody = `{"agentId":"` + restAgentID + `","mode":"grants","secrets":[],"connections":[]}`
 	}
 	r.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
@@ -207,27 +196,28 @@ func newOneCLIREST(t *testing.T, grantsBody string) *onecliREST {
 			r.lists++
 			rows := make([]string, 0, len(r.agents))
 			for _, name := range r.agents {
-				rows = append(rows, fmt.Sprintf(`{"id":%q,"name":%q}`, restAgentID, name))
+				rows = append(rows, fmt.Sprintf(`{"id":%q,"name":%q,"accessToken":%q}`, restAgentID, name, restToken))
 			}
-			_, _ = fmt.Fprintf(w, `{"agents":[%s]}`, strings.Join(rows, ","))
+			_, _ = fmt.Fprintf(w, `[%s]`, strings.Join(rows, ","))
 
 		case req.Method == http.MethodPost && req.URL.Path == "/v1/agents":
 			r.creates++
 			body, _ := io.ReadAll(req.Body)
 			var create struct {
-				Name string `json:"name"`
+				Name       string `json:"name"`
+				Identifier string `json:"identifier"`
 			}
 			if err := json.Unmarshal(body, &create); err != nil {
 				t.Errorf("decoding POST /v1/agents body %q: %v", body, err)
 			}
+			if create.Identifier == "" {
+				// The real build's Zod validation: identifier is required.
+				t.Errorf("POST /v1/agents body %q carries no identifier — the real build 400s this", body)
+			}
 			r.agents = append(r.agents, create.Name)
 			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprintf(w, `{"id":%q,"name":%q}`, restAgentID, create.Name)
-
-		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/token"):
-			r.mints++
-			r.tokenPaths = append(r.tokenPaths, req.URL.Path)
-			_, _ = fmt.Fprintf(w, `{"token":%q}`, restToken)
+			// The create answer carries no accessToken (wire.go point 5).
+			_, _ = fmt.Fprintf(w, `{"id":%q,"name":%q,"identifier":%q}`, restAgentID, create.Name, create.Identifier)
 
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/grants"):
 			r.grantLists++
@@ -242,12 +232,11 @@ func newOneCLIREST(t *testing.T, grantsBody string) *onecliREST {
 	return r
 }
 
-// counts returns the stub's tallies: agent listings, creates, token mints,
-// grant listings.
-func (r *onecliREST) counts() (lists, creates, mints, grants int) {
+// counts returns the stub's tallies: agent listings, creates, grant listings.
+func (r *onecliREST) counts() (lists, creates, grants int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.lists, r.creates, r.mints, r.grantLists
+	return r.lists, r.creates, r.grantLists
 }
 
 // created returns the agent names the project ended up holding.
@@ -255,13 +244,6 @@ func (r *onecliREST) created() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.agents...)
-}
-
-// mintPaths returns the paths the token mints were addressed at.
-func (r *onecliREST) mintPaths() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.tokenPaths...)
 }
 
 // client is a real *onecli.Client bound to the stub.
@@ -434,8 +416,8 @@ func TestLaunch_GatewayUnconfiguredParity(t *testing.T) {
 	if got != baseline {
 		t.Errorf("context file with a gateway-less OneCLI client differs from the unwired baseline:\ngot\n%s\nwant\n%s", got, baseline)
 	}
-	if ensures, mints, grants := stub.counts(); ensures != 0 || mints != 0 || grants != 0 {
-		t.Errorf("the gateway seam was called (%d ensures, %d mints, %d grant listings) on a lab with no --onecli-gateway-url; want none", ensures, mints, grants)
+	if ensures, grants := stub.counts(); ensures != 0 || grants != 0 {
+		t.Errorf("the gateway seam was called (%d ensures, %d grant listings) on a lab with no --onecli-gateway-url; want none", ensures, grants)
 	}
 }
 
@@ -443,13 +425,13 @@ func TestLaunch_GatewayUnconfiguredParity(t *testing.T) {
 
 // The full env bundle a gateway-wired host run spawns with, driven end to end
 // through a REAL *onecli.Client against the REST stub (so EnsureAgent's
-// list→create, the token decode and the grants read are all genuinely
-// exercised). Everything a run needs is asserted from the outside: the proxy
-// URL carries the minted token as userinfo and points at the configured
-// gateway, the four CA variables name one bundle inside the run's private
-// runtime dir, that bundle exists and carries BOTH halves, and NO_PROXY exempts
-// the lab host, the repo's forge host and the resolving provider's declared
-// direct API hosts.
+// list→create→re-list, the listing-borne token read and the grants read are
+// all genuinely exercised). Everything a run needs is asserted from the
+// outside: the proxy URL carries the agent's access token as userinfo and
+// points at the configured gateway, the four CA variables name one bundle
+// inside the run's private runtime dir, that bundle exists and carries BOTH
+// halves, and NO_PROXY exempts the lab host, the repo's forge host and the
+// resolving provider's declared direct API hosts.
 //
 // Launch is called directly rather than through Start so the spec can carry a
 // FORGE remote (the fixture repo's own remote is a file:// path, which
@@ -483,7 +465,7 @@ func TestLaunch_GatewayWiredHostRunner(t *testing.T) {
 	}
 
 	// HTTPS_PROXY (both spellings) points at the CONFIGURED gateway with the
-	// minted token as userinfo.
+	// agent's listing-borne access token as userinfo.
 	wantProxy := proxyURLFor(gatewayURL, restToken)
 	for _, name := range []string{"HTTPS_PROXY", "https_proxy"} {
 		if got := envValue(sess.ExtraEnv, name); got != wantProxy {
@@ -495,7 +477,7 @@ func TestLaunch_GatewayWiredHostRunner(t *testing.T) {
 		t.Fatalf("HTTPS_PROXY does not parse: %v", err)
 	}
 	if u.User.Username() != restToken {
-		t.Errorf("HTTPS_PROXY userinfo username = %q, want the minted token", u.User.Username())
+		t.Errorf("HTTPS_PROXY userinfo username = %q, want the agent's access token", u.User.Username())
 	}
 	if want := strings.TrimPrefix(gatewayURL, "http://"); u.Host != want {
 		t.Errorf("HTTPS_PROXY host = %q, want the configured gateway %q", u.Host, want)
@@ -531,18 +513,16 @@ func TestLaunch_GatewayWiredHostRunner(t *testing.T) {
 		}
 	}
 
-	// The REST conversation was exactly one spawn's worth: list, create, mint,
-	// grants — the create addressed by the repo's STORE ID and the mint
-	// addressed at the agent the create returned.
-	lists, creates, mints, grants := rest.counts()
-	if lists != 1 || creates != 1 || mints != 1 || grants != 1 {
-		t.Errorf("REST calls = %d lists, %d creates, %d mints, %d grant listings; want 1 of each", lists, creates, mints, grants)
+	// The REST conversation was exactly a first spawn's worth: list (miss),
+	// create — addressed by the repo's STORE ID — then the token-resolving
+	// re-list, then grants. No token endpoint exists on the stub, so a
+	// regenerate attempt would already have failed the test loudly.
+	lists, creates, grants := rest.counts()
+	if lists != 2 || creates != 1 || grants != 1 {
+		t.Errorf("REST calls = %d lists, %d creates, %d grant listings; want 2/1/1", lists, creates, grants)
 	}
 	if names := rest.created(); !slices.Equal(names, []string{repo.ID}) {
 		t.Errorf("created agents = %q, want exactly the repo's store id [%q]", names, repo.ID)
-	}
-	if paths := rest.mintPaths(); !slices.Equal(paths, []string{"/v1/agents/" + restAgentID + "/token"}) {
-		t.Errorf("token mint paths = %q, want the created agent's token endpoint", paths)
 	}
 
 	// The seeder was handed the gateway ref, so the context file teaches the
@@ -660,10 +640,10 @@ func TestLaunch_GatewayUnreachableRefusesBeforeTheClaim(t *testing.T) {
 	if snap := f.guard.Snapshot(); len(snap) != 0 {
 		t.Errorf("startguard marked despite a pre-guard refusal: %v", snap)
 	}
-	// The probe fails closed BEFORE any REST call: no identity was resolved and
-	// no credential was minted for a run that will not exist.
-	if ensures, mints, grants := stub.counts(); ensures != 0 || mints != 0 || grants != 0 {
-		t.Errorf("the REST seam was called (%d ensures, %d mints, %d grant listings) after an unreachable probe; want none", ensures, mints, grants)
+	// The probe fails closed BEFORE any REST call: no identity (and with it no
+	// credential) was resolved for a run that will not exist.
+	if ensures, grants := stub.counts(); ensures != 0 || grants != 0 {
+		t.Errorf("the REST seam was called (%d ensures, %d grant listings) after an unreachable probe; want none", ensures, grants)
 	}
 }
 
@@ -673,16 +653,15 @@ func TestLaunch_GatewayUnreachableRefusesBeforeTheClaim(t *testing.T) {
 // refusal-before-claim assertion is the package's existing one
 // (assertNothingClaimed). Each row is a *BadRequestError whose message is
 // actionable — it names the repo and the flag or the upstream reason — and NO
-// row's error may contain the proxy token, including the last one, where the
-// token really was minted before the refusal happened. That last row is the
-// sharp version of the claim: a credential existed in the process and still
-// reached no error string.
+// row's error may contain the access token, including the last row, where the
+// agent identity (token and all) really was resolved before the refusal
+// happened. That last row is the sharp version of the claim: a credential
+// existed in the process and still reached no error string.
 func TestLaunch_GatewayRefusals(t *testing.T) {
 	cases := []struct {
-		name      string
-		wire      func(t *testing.T, f *fixture, api *gatewayAPIStub)
-		wantMsg   []string
-		wantMints int // token mints the refusal must have taken
+		name    string
+		wire    func(t *testing.T, f *fixture, api *gatewayAPIStub)
+		wantMsg []string
 	}{
 		{
 			// A run pointed at a TLS-terminating proxy whose CA it cannot verify
@@ -706,30 +685,21 @@ func TestLaunch_GatewayRefusals(t *testing.T) {
 			},
 		},
 		{
-			name: "AgentToken fails",
-			wire: func(_ *testing.T, _ *fixture, api *gatewayAPIStub) {
-				api.tokenErr = errors.New("onecli POST /v1/agents/ag_proj/token: unexpected status 500: (no message)")
-			},
+			// The identity resolved but carries no access token: a run cannot
+			// authenticate to the gateway without one, so it does not start —
+			// and the message names the wire seam, because an empty token in
+			// the listing means the OneCLI build changed shape.
+			name: "the agent identity carries no access token",
+			wire: func(_ *testing.T, _ *fixture, api *gatewayAPIStub) { api.agent.Token = "" },
 			wantMsg: []string{
-				"obtaining the proxy token for repo proj",
-				"unexpected status 500",
+				"carries no access token in OneCLI's agent listing",
+				"internal/onecli/wire.go",
 			},
-			wantMints: 1,
 		},
 		{
-			// The mint "succeeded" and answered nothing usable: a run cannot
-			// authenticate to the gateway without a token, so it does not start.
-			name: "AgentToken answers an empty token",
-			wire: func(_ *testing.T, _ *fixture, api *gatewayAPIStub) { api.token = "" },
-			wantMsg: []string{
-				"the agent identity's proxy token is empty",
-			},
-			wantMints: 1,
-		},
-		{
-			// The precheck passed and the token IS minted; the trust bundle is
-			// what refuses. Operator config, so still a 400, and still no
-			// credential in the message.
+			// The precheck passed and the identity (token included) is in hand;
+			// the trust bundle is what refuses. Operator config, so still a 400,
+			// and still no credential in the message.
 			name: "the gateway CA file is not PEM",
 			wire: func(t *testing.T, f *fixture, _ *gatewayAPIStub) {
 				f.svc.oneCLICAFile = writeFile(t, filepath.Join(t.TempDir(), "ca.der"),
@@ -738,7 +708,6 @@ func TestLaunch_GatewayRefusals(t *testing.T) {
 			wantMsg: []string{
 				"carries no \"-----BEGIN CERTIFICATE-----\" block",
 			},
-			wantMints: 1,
 		},
 	}
 	for _, tc := range cases {
@@ -764,25 +733,24 @@ func TestLaunch_GatewayRefusals(t *testing.T) {
 			// No credential, ever, in an error string — the promise gateway.go's
 			// header is written on.
 			if strings.Contains(err.Error(), testProxyToken) {
-				t.Errorf("refusal %q leaked the agent identity's proxy token", err)
-			}
-			if _, mints, _ := api.counts(); mints != tc.wantMints {
-				t.Errorf("token mints = %d, want %d", mints, tc.wantMints)
+				t.Errorf("refusal %q leaked the agent identity's access token", err)
 			}
 			assertNothingClaimed(t, f)
 		})
 	}
 }
 
-// --- 7. the token is minted at most once per agent --------------------------
+// --- 7. the token is read, never regenerated ---------------------------------
 
-// onecli.AgentToken is a POST that REGENERATES: a second mint would invalidate
-// the token every already-running run of the same repo still holds, so the
-// per-agent cache is a correctness property, not an optimization. Two
-// successive spawns of the same repo must therefore hit the token endpoint
-// exactly ONCE — and both runs must carry the same proxy URL, which is the
-// symptom the property protects.
-func TestLaunch_GatewayTokenMintedOncePerAgent(t *testing.T) {
+// The agent's access token is STABLE: it rides in OneCLI's agent listing and
+// lab only ever reads it — a regenerate at spawn would invalidate the token
+// every already-running run of the same repo still holds, and (unlike the
+// in-process mint cache this property once rested on) the read survives a lab
+// restart with no state at all. Two successive spawns of the same repo must
+// therefore touch no token endpoint whatsoever (the REST stub has none — a
+// regenerate POST fails the test in its default branch) and both runs must
+// carry the same proxy URL, which is the symptom the property protects.
+func TestLaunch_GatewayTokenIsStableAcrossSpawns(t *testing.T) {
 	f := newFixture(t)
 	rest := newOneCLIREST(t, "")
 	gatewayURL := f.enableGateway(t, rest.client(t))
@@ -796,14 +764,12 @@ func TestLaunch_GatewayTokenMintedOncePerAgent(t *testing.T) {
 		t.Fatalf("Start(b): %v", err)
 	}
 
-	lists, creates, mints, _ := rest.counts()
-	if mints != 1 {
-		t.Errorf("token mints across two spawns = %d, want exactly 1 (a second mint invalidates the first run's token)", mints)
-	}
 	// The identity mapping is re-established per spawn (idempotent by
-	// construction) but creates exactly one agent.
-	if lists != 2 || creates != 1 {
-		t.Errorf("agent listings/creates = %d/%d, want 2/1 (ensure per spawn, create once)", lists, creates)
+	// construction) but creates exactly one agent: the first spawn lists,
+	// creates and re-lists for the token; the second lists once and is done.
+	lists, creates, _ := rest.counts()
+	if lists != 3 || creates != 1 {
+		t.Errorf("agent listings/creates = %d/%d, want 3/1 (list+create+re-list, then one warm list)", lists, creates)
 	}
 
 	want := proxyURLFor(gatewayURL, restToken)
@@ -813,7 +779,7 @@ func TestLaunch_GatewayTokenMintedOncePerAgent(t *testing.T) {
 			t.Fatalf("session %s not live", run.SessionName)
 		}
 		if got := envValue(sess.ExtraEnv, "HTTPS_PROXY"); got != want {
-			t.Errorf("%s HTTPS_PROXY = %q, want the one minted token %q", run.SessionName, got, want)
+			t.Errorf("%s HTTPS_PROXY = %q, want the one stable token %q", run.SessionName, got, want)
 		}
 	}
 }
@@ -857,10 +823,13 @@ func TestLaunch_GatewayGrantsBestEffort(t *testing.T) {
 
 	t.Run("granted names reach the context file, sorted", func(t *testing.T) {
 		f := newFixture(t)
-		// The REST stub answers the SPLIT grants shape, unsorted, with one row
-		// whose display name upstream never filled in — its id must stand in for
-		// the name rather than vanishing from the inventory.
-		rest := newOneCLIREST(t, `{"secrets":[{"id":"sec_2","name":"stripe"},{"id":"sec_1","name":"acme-registry"}],"connections":[{"id":"conn_9","name":""}]}`)
+		// The REST stub answers the verified grants shape, unsorted, with one
+		// connection row whose label AND provider upstream never filled in —
+		// its id must stand in for the name rather than vanishing from the
+		// inventory.
+		rest := newOneCLIREST(t, `{"agentId":"`+restAgentID+`","mode":"grants",`+
+			`"secrets":[{"secretId":"sec_2","name":"stripe","type":"generic","scope":"project"},{"secretId":"sec_1","name":"acme-registry","type":"generic","scope":"project"}],`+
+			`"connections":[{"connectionId":"conn_9","provider":"","label":null,"scope":"project"}]}`)
 		f.enableGateway(t, rest.client(t))
 
 		if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {

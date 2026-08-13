@@ -16,6 +16,9 @@ import (
 )
 
 // Secret is one secret in the project pool — metadata only, never a value.
+// Provider is the provider enum the secret is scoped to ("anthropic",
+// "openai", "generic"); upstream calls this field "type" on the wire, but
+// provider is what it means, and it matches Connection.Provider's role.
 type Secret struct {
 	ID       string
 	Name     string
@@ -24,6 +27,8 @@ type Secret struct {
 
 // Connection is one provider connection in the project pool (an OAuth-style
 // link to a third party, as opposed to a raw secret) — again metadata only.
+// Name is upstream's "label" (the operator-facing display name), falling back
+// to the provider slug when the label is unset (wire.go point 8).
 type Connection struct {
 	ID       string
 	Name     string
@@ -36,13 +41,13 @@ func (c *Client) ListSecrets(ctx context.Context) ([]Secret, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := decodeList[wireResource](body, segSecrets)
+	rows, err := decodeList[wireSecret](body, segSecrets)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Secret, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Secret{ID: r.ID, Name: r.Name, Provider: r.Provider}) //nolint:staticcheck // S1016: wire→domain mapping stays explicit (see wire.go)
+		out = append(out, Secret{ID: r.ID, Name: r.Name, Provider: r.Type})
 	}
 	return out, nil
 }
@@ -56,13 +61,13 @@ func (c *Client) ListConnections(ctx context.Context) ([]Connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := decodeList[wireResource](body, segConnections)
+	rows, err := decodeList[wireConnection](body, segConnections)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Connection, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Connection{ID: r.ID, Name: r.Name, Provider: r.Provider}) //nolint:staticcheck // S1016: wire→domain mapping stays explicit (see wire.go)
+		out = append(out, Connection{ID: r.ID, Name: displayName(r.Label, r.Provider), Provider: r.Provider})
 	}
 	return out, nil
 }

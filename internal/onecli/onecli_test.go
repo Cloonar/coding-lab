@@ -9,9 +9,11 @@ package onecli
 //
 // One honest caveat, worth stating where the tests live: the stubs answer with
 // the wire shapes declared in wire.go, so these tests prove the client is
-// SELF-CONSISTENT with its assumptions about OneCLI's JSON — not that those
-// assumptions match a real OneCLI build. wire.go says the same thing in more
-// detail and is the single place to correct if they turn out to differ.
+// SELF-CONSISTENT with wire.go's picture of OneCLI's JSON. That picture was
+// verified against the OneCLI 1.45.0 source (see wire.go's header) — the stub
+// bodies below are transcriptions of what that build actually answers — but a
+// future OneCLI bump can still drift, and wire.go stays the single place to
+// correct when it does.
 
 import (
 	"bytes"
@@ -109,15 +111,6 @@ func newTestClient(t *testing.T, baseURL string, tweak ...func(*Options)) *Clien
 		t.Fatalf("New(%+v): %v", opts.BaseURL, err)
 	}
 	return c
-}
-
-func mustTime(t *testing.T, s string) time.Time {
-	t.Helper()
-	parsed, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		t.Fatalf("parsing %q: %v", s, err)
-	}
-	return parsed
 }
 
 // --- New -------------------------------------------------------------------
@@ -276,16 +269,23 @@ func operationCases(t *testing.T) []operationCase {
 			want: Health{Status: "ok", Version: "1.4.2"},
 		},
 		{
-			name: "ListAgents enveloped", wantMethod: http.MethodGet, wantPath: "/v1/agents",
-			status: http.StatusOK, respBody: `{"agents":[{"id":"ag_1","name":"coding-lab"},{"id":"ag_2","name":"web"}]}`,
-			call: func(ctx context.Context, c *Client) (any, error) { return c.ListAgents(ctx) },
-			want: []Agent{{ID: "ag_1", Name: "coding-lab"}, {ID: "ag_2", Name: "web"}},
+			// The verified list shape is a bare array whose rows carry the
+			// agent's stable gateway access token (wire.go point 4); the token
+			// must thread into Agent.Token, because the spawn path reads it
+			// from here and never regenerates.
+			name: "ListAgents bare array", wantMethod: http.MethodGet, wantPath: "/v1/agents",
+			status:   http.StatusOK,
+			respBody: `[{"id":"ag_1","name":"coding-lab","identifier":"coding-lab","accessToken":"oc_agent_tok1","isDefault":true},{"id":"ag_2","name":"web","accessToken":"oc_agent_tok2"}]`,
+			call:     func(ctx context.Context, c *Client) (any, error) { return c.ListAgents(ctx) },
+			want:     []Agent{{ID: "ag_1", Name: "coding-lab", Token: "oc_agent_tok1"}, {ID: "ag_2", Name: "web", Token: "oc_agent_tok2"}},
 		},
 		{
-			name: "ListAgents bare array", wantMethod: http.MethodGet, wantPath: "/v1/agents",
-			status: http.StatusOK, respBody: `[{"id":"ag_1","name":"coding-lab"}]`,
+			// Envelope tolerance (wire.go point 3): kept for drift, not observed
+			// on the verified build.
+			name: "ListAgents enveloped", wantMethod: http.MethodGet, wantPath: "/v1/agents",
+			status: http.StatusOK, respBody: `{"agents":[{"id":"ag_1","name":"coding-lab","accessToken":"oc_agent_tok1"}]}`,
 			call: func(ctx context.Context, c *Client) (any, error) { return c.ListAgents(ctx) },
-			want: []Agent{{ID: "ag_1", Name: "coding-lab"}},
+			want: []Agent{{ID: "ag_1", Name: "coding-lab", Token: "oc_agent_tok1"}},
 		},
 		{
 			name: "ListAgents generic data envelope", wantMethod: http.MethodGet, wantPath: "/v1/agents",
@@ -294,41 +294,44 @@ func operationCases(t *testing.T) []operationCase {
 			want: []Agent{{ID: "ag_1", Name: "coding-lab"}},
 		},
 		{
+			// The verified row calls the provider enum "type" (wire.go point 8);
+			// lab's Secret.Provider maps from it.
 			name: "ListSecrets", wantMethod: http.MethodGet, wantPath: "/v1/secrets",
-			status: http.StatusOK, respBody: `{"secrets":[{"id":"sec_1","name":"DEPLOY_TOKEN","provider":"generic"}]}`,
+			status: http.StatusOK, respBody: `[{"id":"sec_1","name":"DEPLOY_TOKEN","type":"anthropic","valueSource":"static"}]`,
 			call: func(ctx context.Context, c *Client) (any, error) { return c.ListSecrets(ctx) },
-			want: []Secret{{ID: "sec_1", Name: "DEPLOY_TOKEN", Provider: "generic"}},
+			want: []Secret{{ID: "sec_1", Name: "DEPLOY_TOKEN", Provider: "anthropic"}},
 		},
 		{
+			// Connections have no "name" on the wire: the display name is the
+			// nullable "label", falling back to the provider slug.
 			name: "ListConnections", wantMethod: http.MethodGet, wantPath: "/v1/connections",
-			status: http.StatusOK, respBody: `{"connections":[{"id":"con_1","name":"GitHub","provider":"github"}]}`,
-			call: func(ctx context.Context, c *Client) (any, error) { return c.ListConnections(ctx) },
-			want: []Connection{{ID: "con_1", Name: "GitHub", Provider: "github"}},
+			status:   http.StatusOK,
+			respBody: `[{"id":"con_1","provider":"github","label":"GitHub","status":"connected"},{"id":"con_2","provider":"linear","label":null}]`,
+			call:     func(ctx context.Context, c *Client) (any, error) { return c.ListConnections(ctx) },
+			want: []Connection{
+				{ID: "con_1", Name: "GitHub", Provider: "github"},
+				{ID: "con_2", Name: "linear", Provider: "linear"},
+			},
 		},
 		{
-			name: "ListGrants split shape", wantMethod: http.MethodGet, wantPath: "/v1/agents/ag_1/grants",
+			// The verified grants answer (wire.go point 6): rows name their id
+			// by kind (secretId/connectionId), a connection's name is its label.
+			name: "ListGrants", wantMethod: http.MethodGet, wantPath: "/v1/agents/ag_1/grants",
 			status: http.StatusOK,
-			respBody: `{"secrets":[{"id":"sec_1","name":"DEPLOY_TOKEN"}],` +
-				`"connections":[{"id":"con_1","name":"GitHub"}]}`,
+			respBody: `{"agentId":"ag_1","mode":"grants",` +
+				`"connections":[{"connectionId":"con_1","provider":"github","label":"GitHub","scope":"project","access":"full","allow":[],"ask":[]},` +
+				`{"connectionId":"con_2","provider":"linear","label":null,"scope":"project","access":"full","allow":[],"ask":[]}],` +
+				`"secrets":[{"secretId":"sec_1","name":"DEPLOY_TOKEN","type":"generic","scope":"project"}]}`,
 			call: func(ctx context.Context, c *Client) (any, error) { return c.ListGrants(ctx, "ag_1") },
 			want: []Grant{
 				{Kind: GrantSecret, ID: "sec_1", Name: "DEPLOY_TOKEN"},
 				{Kind: GrantConnection, ID: "con_1", Name: "GitHub"},
-			},
-		},
-		{
-			name: "ListGrants flat shape with singular kinds", wantMethod: http.MethodGet, wantPath: "/v1/agents/ag_1/grants",
-			status:   http.StatusOK,
-			respBody: `[{"kind":"secret","id":"sec_1","name":"DEPLOY_TOKEN"},{"type":"connection","id":"con_1","name":"GitHub"}]`,
-			call:     func(ctx context.Context, c *Client) (any, error) { return c.ListGrants(ctx, "ag_1") },
-			want: []Grant{
-				{Kind: GrantSecret, ID: "sec_1", Name: "DEPLOY_TOKEN"},
-				{Kind: GrantConnection, ID: "con_1", Name: "GitHub"},
+				{Kind: GrantConnection, ID: "con_2", Name: "linear"},
 			},
 		},
 		{
 			name: "ListGrants empty", wantMethod: http.MethodGet, wantPath: "/v1/agents/ag_1/grants",
-			status: http.StatusOK, respBody: `{"secrets":[],"connections":[]}`,
+			status: http.StatusOK, respBody: `{"agentId":"ag_1","mode":"grants","secrets":[],"connections":[]}`,
 			call: func(ctx context.Context, c *Client) (any, error) { return c.ListGrants(ctx, "ag_1") },
 			want: []Grant{},
 		},
@@ -360,24 +363,6 @@ func operationCases(t *testing.T) []operationCase {
 				return nil, c.DetachGrant(ctx, "ag_1", GrantConnection, "con_1")
 			},
 		},
-		{
-			name: "AgentToken with snake_case expiry", wantMethod: http.MethodPost, wantPath: "/v1/agents/ag_1/token",
-			status: http.StatusOK, respBody: `{"token":"oc_agent_abc","expires_at":"2026-09-01T10:30:00Z"}`,
-			call: func(ctx context.Context, c *Client) (any, error) { return c.AgentToken(ctx, "ag_1") },
-			want: AgentToken{Token: "oc_agent_abc", ExpiresAt: mustTime(t, "2026-09-01T10:30:00Z")},
-		},
-		{
-			name: "AgentToken with camelCase expiry", wantMethod: http.MethodPost, wantPath: "/v1/agents/ag_1/token",
-			status: http.StatusOK, respBody: `{"token":"oc_agent_abc","expiresAt":"2026-09-01T10:30:00Z"}`,
-			call: func(ctx context.Context, c *Client) (any, error) { return c.AgentToken(ctx, "ag_1") },
-			want: AgentToken{Token: "oc_agent_abc", ExpiresAt: mustTime(t, "2026-09-01T10:30:00Z")},
-		},
-		{
-			name: "AgentToken without expiry", wantMethod: http.MethodPost, wantPath: "/v1/agents/ag_1/token",
-			status: http.StatusOK, respBody: `{"token":"oc_agent_abc"}`,
-			call: func(ctx context.Context, c *Client) (any, error) { return c.AgentToken(ctx, "ag_1") },
-			want: AgentToken{Token: "oc_agent_abc"},
-		},
 	}
 }
 
@@ -405,21 +390,56 @@ func TestOperationsHappyPath(t *testing.T) {
 	}
 }
 
-// TestAttachGrantSendsNoBody pins wire.go assumption 7: the grant is addressed
-// entirely by the URL, so no request body is sent (and therefore no
-// Content-Type either).
-func TestAttachGrantSendsNoBody(t *testing.T) {
-	s := newStub(t, jsonHandler(http.StatusNoContent, ""))
-	c := newTestClient(t, s.URL)
-	if err := c.AttachGrant(context.Background(), "ag_1", GrantSecret, "sec_1"); err != nil {
-		t.Fatalf("AttachGrant: %v", err)
-	}
-	req := s.only(t)
-	if req.Body != "" {
-		t.Errorf("request body = %q, want empty", req.Body)
-	}
-	if ct := req.Header.Get("Content-Type"); ct != "" {
-		t.Errorf("Content-Type = %q, want it absent on a bodyless request", ct)
+// TestGrantWriteBodies pins wire.go point 7: a secret attach and every detach
+// are addressed entirely by the URL (no body, no Content-Type), while a
+// connection attach carries the whole-app {"access":"full"} body OneCLI's
+// validation requires — a bodyless connection PUT is a 422 on the real build.
+func TestGrantWriteBodies(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		call     func(context.Context, *Client) error
+		wantBody string // "" ⇒ bodyless, and Content-Type must be absent too
+	}{
+		{
+			name: "secret attach is bodyless",
+			call: func(ctx context.Context, c *Client) error { return c.AttachGrant(ctx, "ag_1", GrantSecret, "sec_1") },
+		},
+		{
+			name: "connection attach sends the whole-app access body",
+			call: func(ctx context.Context, c *Client) error {
+				return c.AttachGrant(ctx, "ag_1", GrantConnection, "con_1")
+			},
+			wantBody: `{"access":"full"}`,
+		},
+		{
+			name: "secret detach is bodyless",
+			call: func(ctx context.Context, c *Client) error { return c.DetachGrant(ctx, "ag_1", GrantSecret, "sec_1") },
+		},
+		{
+			name: "connection detach is bodyless",
+			call: func(ctx context.Context, c *Client) error {
+				return c.DetachGrant(ctx, "ag_1", GrantConnection, "con_1")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStub(t, jsonHandler(http.StatusNoContent, ""))
+			c := newTestClient(t, s.URL)
+			if err := tc.call(context.Background(), c); err != nil {
+				t.Fatalf("grant write: %v", err)
+			}
+			req := s.only(t)
+			if got := strings.TrimSpace(req.Body); got != tc.wantBody {
+				t.Errorf("request body = %q, want %q", got, tc.wantBody)
+			}
+			wantCT := ""
+			if tc.wantBody != "" {
+				wantCT = "application/json"
+			}
+			if ct := req.Header.Get("Content-Type"); ct != wantCT {
+				t.Errorf("Content-Type = %q, want %q", ct, wantCT)
+			}
+		})
 	}
 }
 
@@ -466,7 +486,6 @@ func TestEmptyIdentifiersRejectedWithoutRequest(t *testing.T) {
 		call func() error
 	}{
 		{"ListGrants", func() error { _, err := c.ListGrants(ctx, ""); return err }},
-		{"AgentToken", func() error { _, err := c.AgentToken(ctx, ""); return err }},
 		{"AttachGrant no agent", func() error { return c.AttachGrant(ctx, "", GrantSecret, "sec_1") }},
 		{"AttachGrant no resource", func() error { return c.AttachGrant(ctx, "ag_1", GrantSecret, "") }},
 		{"DetachGrant no agent", func() error { return c.DetachGrant(ctx, "", GrantSecret, "sec_1") }},
@@ -491,7 +510,10 @@ func TestNon2xxBecomesAPIError(t *testing.T) {
 		body        string
 		wantMessage string
 	}{
-		{"401 error envelope", http.StatusUnauthorized, `{"error":"invalid api key"}`, "invalid api key"},
+		{"400 flat error envelope", http.StatusBadRequest, `{"error":"invalid api key"}`, "invalid api key"},
+		// The global handler's verified spelling (wire.go point 9) — the shape
+		// the unrecognized-URL 404 arrives in.
+		{"404 nested error envelope", http.StatusNotFound, `{"error":{"message":"Unrecognized request URL (POST: /v1/x).","type":"invalid_request_error"}}`, "Unrecognized request URL (POST: /v1/x)."},
 		{"404 message envelope", http.StatusNotFound, `{"message":"agent not found"}`, "agent not found"},
 		{"500 plain text", http.StatusInternalServerError, "upstream exploded", "upstream exploded"},
 		{"502 html from a stray proxy", http.StatusBadGateway, "<html><body>nginx</body></html>", "<html><body>nginx</body></html>"},
@@ -571,31 +593,31 @@ func TestClientPrintsRedacted(t *testing.T) {
 	}
 }
 
-// TestTokenErrorsNeverEchoTheBody: the token endpoint's body IS a credential,
-// so the two failure paths that inspect it must describe the shape mismatch
-// without quoting what came back.
-func TestTokenErrorsNeverEchoTheBody(t *testing.T) {
-	for _, tc := range []struct {
-		name, body, secret string
-	}{
-		{"no token field", `{"credential":"oc_agent_LEAKED"}`, "oc_agent_LEAKED"},
-		{"unparseable expiry", `{"token":"oc_agent_ok","expires_at":"oc_agent_LEAKED"}`, "oc_agent_LEAKED"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := newStub(t, jsonHandler(http.StatusOK, tc.body))
-			c := newTestClient(t, s.URL)
+// TestEnsureAgentErrorsNeverEchoAccessTokens: the agent LISTING carries every
+// agent's gateway access token, so the failure path that inspected a listing
+// and found the name absent must describe the miss without quoting rows.
+func TestEnsureAgentErrorsNeverEchoAccessTokens(t *testing.T) {
+	const leaked = "oc_agent_LEAKED"
+	calls := 0
+	s := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			calls++
+			_, _ = io.WriteString(w, `[{"id":"ag_other","name":"other","accessToken":"`+leaked+`"}]`)
+		case http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"identifier already exists"}`)
+		}
+	})
+	c := newTestClient(t, s.URL)
 
-			_, err := c.AgentToken(context.Background(), "ag_1")
-			if err == nil {
-				t.Fatal("AgentToken succeeded, want an error")
-			}
-			if strings.Contains(err.Error(), tc.secret) {
-				t.Errorf("error %q echoes the response body", err)
-			}
-			if !strings.Contains(err.Error(), "internal/onecli/wire.go") {
-				t.Errorf("error %q does not point at wire.go, the one place to fix a wire mismatch", err)
-			}
-		})
+	_, err := c.EnsureAgent(context.Background(), "coding-lab")
+	if err == nil {
+		t.Fatal("EnsureAgent succeeded, want the still-absent error")
+	}
+	if strings.Contains(err.Error(), leaked) {
+		t.Errorf("error %q echoes an access token from the listing", err)
 	}
 }
 
@@ -615,17 +637,24 @@ func TestUnknownListShapeIsLoud(t *testing.T) {
 	}
 }
 
-// TestUnknownGrantKindIsLoud: a grant row lab cannot classify must not be
-// silently dropped from a list an operator makes access decisions from.
-func TestUnknownGrantKindIsLoud(t *testing.T) {
+// TestUnknownGrantsShapeIsLoud: a grants answer this package does not
+// recognize — an array, or an object carrying neither known key — must never
+// read as "this repo has no grants"; the inventory an operator makes access
+// decisions from must fail loudly instead.
+func TestUnknownGrantsShapeIsLoud(t *testing.T) {
 	for _, body := range []string{
-		`[{"kind":"ssh-key","id":"x","name":"n"}]`,
-		`[{"id":"x","name":"n"}]`,
+		`[{"kind":"secret","id":"x","name":"n"}]`,
+		`{"grants":[{"id":"x","name":"n"}]}`,
 	} {
 		s := newStub(t, jsonHandler(http.StatusOK, body))
 		c := newTestClient(t, s.URL)
-		if got, err := c.ListGrants(context.Background(), "ag_1"); err == nil {
+		got, err := c.ListGrants(context.Background(), "ag_1")
+		if err == nil {
 			t.Errorf("ListGrants(%s) succeeded with %#v, want a loud error", body, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "internal/onecli/wire.go") {
+			t.Errorf("error %q does not point at wire.go", err)
 		}
 	}
 }

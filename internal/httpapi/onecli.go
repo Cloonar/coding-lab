@@ -19,9 +19,9 @@ package httpapi
 //
 // Probes are the two weakest checks that still prove what an operator needs:
 // the REST API through the client's own Health call, and the gateway through a
-// bare TCP dial (onecli.ProbeGateway — no CONNECT, no proxy token, because
-// minting one is a WRITE that regenerates the agent's credential, and spending
-// a credential on a health check is how health checks start causing outages).
+// bare TCP dial (onecli.ProbeGateway — no CONNECT, no access token, because
+// an agent's token is a per-repo credential, and spending a credential on a
+// health check is how health checks start causing outages).
 
 import (
 	"context"
