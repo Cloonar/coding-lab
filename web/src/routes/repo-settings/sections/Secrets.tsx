@@ -2,6 +2,11 @@
 // #198). Device-local/immediate by design: every action (create, rotate,
 // delete) talks to the server the moment it happens, so there is no
 // useSettingsForm and no unsaved-changes guard here.
+//
+// Issue #25 puts the credential-gateway grant picker ABOVE this card and
+// leaves the card itself untouched: the two secret stores coexist on this
+// subpage until #27 retires lab's own `repo_secrets`, and the picker leading
+// is what says which one an operator should reach for first.
 
 import { A } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
@@ -17,6 +22,7 @@ import EmptyState from '../../../components/EmptyState';
 import Banner from '../../../components/Banner';
 import FormCard from '../../../components/FormCard';
 import SectionCard from '../../../components/SectionCard';
+import RepoSecretGrantsSection from './SecretGrants';
 
 function secretUpdatedOn(timestamp: string): string {
   const date = new Date(timestamp);
@@ -35,55 +41,58 @@ export default function RepoSecretsSection(props: { repoId: string }) {
   const [error, setError] = createSignal<string | null>(null);
 
   return (
-    <SectionCard
-      title="Secrets"
-      action={
-        <button type="button" class="primary small" onClick={() => setShowCreate(!showCreate())}>
-          {showCreate() ? 'Cancel' : '+ Add secret'}
-        </button>
-      }
-      hint={
-        <>
-          Values are write-only — lab never reads or shows them again after saving. Agents use them
-          via <code>labctl secret exec</code>.
-        </>
-      }
-    >
-      <Banner message={error()} onDismiss={() => setError(null)} />
-      <Show when={showCreate()}>
-        <CreateSecretForm
-          repoId={props.repoId}
-          onCreated={() => {
-            setShowCreate(false);
-            void refetch();
-          }}
-        />
-      </Show>
-      <Switch>
-        <Match when={secrets.error !== undefined}>
-          <Banner message={errorMessage(secrets.error)} />
-        </Match>
-        <Match when={secrets()?.length === 0}>
-          <EmptyState>
-            No secrets yet — add one for agents to use via labctl secret exec.
-          </EmptyState>
-        </Match>
-        <Match when={secrets()}>
-          <div class="card-list">
-            <For each={secrets()}>
-              {(secret) => (
-                <SecretRow
-                  repoId={props.repoId}
-                  secret={secret}
-                  onChanged={() => void refetch()}
-                  onError={setError}
-                />
-              )}
-            </For>
-          </div>
-        </Match>
-      </Switch>
-    </SectionCard>
+    <>
+      <RepoSecretGrantsSection repoId={props.repoId} />
+      <SectionCard
+        title="Secrets"
+        action={
+          <button type="button" class="primary small" onClick={() => setShowCreate(!showCreate())}>
+            {showCreate() ? 'Cancel' : '+ Add secret'}
+          </button>
+        }
+        hint={
+          <>
+            Values are write-only — lab never reads or shows them again after saving. Agents use
+            them via <code>labctl secret exec</code>.
+          </>
+        }
+      >
+        <Banner message={error()} onDismiss={() => setError(null)} />
+        <Show when={showCreate()}>
+          <CreateSecretForm
+            repoId={props.repoId}
+            onCreated={() => {
+              setShowCreate(false);
+              void refetch();
+            }}
+          />
+        </Show>
+        <Switch>
+          <Match when={secrets.error !== undefined}>
+            <Banner message={errorMessage(secrets.error)} />
+          </Match>
+          <Match when={secrets()?.length === 0}>
+            <EmptyState>
+              No secrets yet — add one for agents to use via labctl secret exec.
+            </EmptyState>
+          </Match>
+          <Match when={secrets()}>
+            <div class="card-list">
+              <For each={secrets()}>
+                {(secret) => (
+                  <SecretRow
+                    repoId={props.repoId}
+                    secret={secret}
+                    onChanged={() => void refetch()}
+                    onError={setError}
+                  />
+                )}
+              </For>
+            </div>
+          </Match>
+        </Switch>
+      </SectionCard>
+    </>
   );
 }
 

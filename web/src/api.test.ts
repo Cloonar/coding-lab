@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   answerRun,
   ApiError,
+  attachRepoOneCLIGrant,
   authState,
   closeCR,
   createCredential,
@@ -15,6 +16,7 @@ import {
   deleteLabel,
   deleteRepo,
   deleteToken,
+  detachRepoOneCLIGrant,
   discardParked,
   errorMessage,
   extractSpawnDefaults,
@@ -23,6 +25,7 @@ import {
   getIssue,
   getOneCLIDashboard,
   getOneCLIHealth,
+  getOneCLIPool,
   getRun,
   getSettings,
   getSpawnDefaults,
@@ -35,6 +38,7 @@ import {
   listParked,
   listProviders,
   listReadyIssues,
+  listRepoOneCLIGrants,
   listRepos,
   listRuns,
   listTokens,
@@ -1163,6 +1167,75 @@ describe('onecli dashboard exposure (issue #26)', () => {
 
     expect(exposure).toEqual({ mode: 'off' });
     expect(exposure.url).toBeUndefined();
+  });
+});
+
+describe('onecli grant picker (issue #25)', () => {
+  it('GET /onecli/pool parses a populated pool of both kinds', async () => {
+    const body = {
+      configured: true,
+      secrets: [{ id: 'sec_1', name: 'STRIPE_KEY', provider: 'stripe' }],
+      connections: [{ id: 'conn_1', name: 'GitHub App', provider: 'github' }],
+    };
+    const mock = stubFetch(jsonResponse(200, body));
+
+    await expect(getOneCLIPool()).resolves.toEqual(body);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/onecli/pool');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET /onecli/pool tolerates the unconfigured state with empty arrays', async () => {
+    const body = { configured: false, secrets: [], connections: [] };
+    stubFetch(jsonResponse(200, body));
+
+    await expect(getOneCLIPool()).resolves.toEqual(body);
+  });
+
+  it('GET /repos/{id}/onecli/grants parses grants of both kinds', async () => {
+    const body = {
+      configured: true,
+      grants: [
+        { kind: 'secrets', id: 'sec_1', name: 'STRIPE_KEY' },
+        { kind: 'connections', id: 'conn_1', name: 'GitHub App' },
+      ],
+    };
+    const mock = stubFetch(jsonResponse(200, body));
+
+    await expect(listRepoOneCLIGrants('repo_1')).resolves.toEqual(body);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/onecli/grants');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('PUT /repos/{id}/onecli/grants/{kind}/{resourceId} carries the CSRF header', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    await expect(attachRepoOneCLIGrant('repo_1', 'secrets', 'sec_1')).resolves.toBeUndefined();
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/onecli/grants/secrets/sec_1');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PUT');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+  });
+
+  it('DELETE /repos/{id}/onecli/grants/{kind}/{resourceId} resolves on 204', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    await expect(detachRepoOneCLIGrant('repo_1', 'connections', 'conn_1')).resolves.toBeUndefined();
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/onecli/grants/connections/conn_1');
+    const init = requestInit(mock);
+    expect(init.method).toBe('DELETE');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+  });
+
+  it('a non-2xx from the grant endpoints surfaces as ApiError (gateway unreachable)', async () => {
+    stubFetch(jsonResponse(502, { error: 'onecli gateway unreachable' }));
+
+    const err = await getOneCLIPool().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(502);
+    expect((err as ApiError).message).toBe('onecli gateway unreachable');
   });
 });
 

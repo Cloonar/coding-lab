@@ -10,6 +10,10 @@ import { afterEach, beforeEach, vi } from 'vitest';
 import type { MemoryHistory } from '@solidjs/router';
 import type {
   CredentialListItem,
+  OneCLIDashboardExposure,
+  OneCLIGrant,
+  OneCLIGrantKind,
+  OneCLIPool,
   Provider,
   Repo,
   RepoImport,
@@ -45,6 +49,21 @@ export function baseProviders(): Provider[] {
       ],
     },
   ];
+}
+
+/**
+ * The lab-wide OneCLI project pool (issue #25) the credential-gateway grant
+ * picker offers: one stored secret and one app connection, so both halves of
+ * the pool render. Configured and non-empty by default — that is the normal
+ * path, and every other Secrets-section suite mounts the picker alongside the
+ * legacy card, so the default must not be one of the exceptional states.
+ */
+export function baseOneCLIPool(): OneCLIPool {
+  return {
+    configured: true,
+    secrets: [{ id: 'sec_pool_1', name: 'ANTHROPIC_API_KEY', provider: 'anthropic' }],
+    connections: [{ id: 'conn_pool_1', name: 'GitHub app', provider: 'github' }],
+  };
 }
 
 /** A second provider with its own catalogs (agent-selection tests). */
@@ -242,6 +261,32 @@ export interface RepoSettingsHarnessState {
   importPostError: string | null;
   /** Full URLs of DELETE .../imports/:targetId calls. */
   importDeleteRequests: string[];
+  /** GET /onecli/pool (issue #25): the lab-wide OneCLI project pool the grant
+   *  picker toggles — baseOneCLIPool() by default. Set `configured: false` for
+   *  the "integration not set up in this lab" state, or both arrays empty for
+   *  the reachable-but-empty pool. */
+  poolOnServer: OneCLIPool;
+  /** This repo's credential-gateway grants, mutated by the stub's own
+   *  attach/detach handlers exactly as the real server would. */
+  grantsOnServer: OneCLIGrant[];
+  /** `"<METHOD> <url>"` for every grant attach/detach, in order — the picker
+   *  applies each toggle immediately, so this is what an exact-call assertion
+   *  reads. */
+  grantRequests: string[];
+  /** GET /onecli/dashboard: the resolved dashboard exposure the picker's
+   *  link-out is composed from, and the ONLY source it may compose one from
+   *  (ADR-0067's 2026-08-14 amendment). `null` makes that read answer 502
+   *  instead — the exposure-unknown path, where no link may render and the
+   *  picker itself must still work. */
+  dashboardExposure: OneCLIDashboardExposure | null;
+  /** Forces BOTH gateway reads (pool and grants) to answer 502 with this
+   *  message — what the real server answers when OneCLI is configured but
+   *  erroring, i.e. the unreachable state the picker must render as a
+   *  retryable banner rather than an endless loading line. */
+  gatewayReadError: string | null;
+  /** Forces every grant attach/detach to answer 400 with this message — the
+   *  server-side refusal a toggle must surface without flipping the row. */
+  grantWriteError: string | null;
 }
 export const h = {} as RepoSettingsHarnessState;
 
@@ -387,6 +432,62 @@ export function stubApi(): void {
         h.importsOnServer = h.importsOnServer.filter((imp) => imp.id !== id);
         return Promise.resolve(jsonResponse(204, undefined));
       }
+      // Credential gateway (issue #25): the lab-wide OneCLI project pool, this
+      // repo's grant set over it, and the dashboard exposure the picker's
+      // link-out is composed from. h.gatewayReadError turns the two READS into
+      // the 502 the real server answers when OneCLI is configured but
+      // erroring — "unconfigured" is a 200 with configured:false instead, and
+      // conflating the two is exactly what the section must not do.
+      if (url === '/api/v1/onecli/pool' && method === 'GET') {
+        if (h.gatewayReadError !== null) {
+          return Promise.resolve(jsonResponse(502, { error: h.gatewayReadError }));
+        }
+        return Promise.resolve(jsonResponse(200, { ...h.poolOnServer }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/onecli/grants` && method === 'GET') {
+        if (h.gatewayReadError !== null) {
+          return Promise.resolve(jsonResponse(502, { error: h.gatewayReadError }));
+        }
+        // One integration, one configured flag: the grants read reports the
+        // same "is the gateway set up" answer the pool read does.
+        return Promise.resolve(
+          jsonResponse(200, { configured: h.poolOnServer.configured, grants: h.grantsOnServer }),
+        );
+      }
+      // Built from REPO_ID rather than spelled out, so renaming the fixture
+      // repo can never silently stop matching and turn every toggle into an
+      // "unexpected fetch" the way a hardcoded id would.
+      const grantMatch = new RegExp(
+        `^/api/v1/repos/${REPO_ID}/onecli/grants/([^/]+)/([^/]+)$`,
+      ).exec(url);
+      if (grantMatch && (method === 'PUT' || method === 'DELETE')) {
+        h.grantRequests.push(`${method} ${url}`);
+        if (h.grantWriteError !== null) {
+          return Promise.resolve(jsonResponse(400, { error: h.grantWriteError }));
+        }
+        const kind = (grantMatch[1] ?? '') as OneCLIGrantKind;
+        const id = grantMatch[2] ?? '';
+        if (method === 'PUT') {
+          // Attach is idempotent (see attachRepoOneCLIGrant): a repeat PUT
+          // still 204s and still leaves exactly one row.
+          if (!h.grantsOnServer.some((g) => g.kind === kind && g.id === id)) {
+            const half = kind === 'secrets' ? h.poolOnServer.secrets : h.poolOnServer.connections;
+            const entry = half.find((e) => e.id === id);
+            h.grantsOnServer = [...h.grantsOnServer, { kind, id, name: entry?.name ?? id }];
+          }
+        } else {
+          h.grantsOnServer = h.grantsOnServer.filter((g) => !(g.kind === kind && g.id === id));
+        }
+        return Promise.resolve(jsonResponse(204, undefined));
+      }
+      if (url === '/api/v1/onecli/dashboard' && method === 'GET') {
+        if (h.dashboardExposure === null) {
+          return Promise.resolve(
+            jsonResponse(502, { error: 'onecli: dashboard exposure unknown' }),
+          );
+        }
+        return Promise.resolve(jsonResponse(200, { ...h.dashboardExposure }));
+      }
       // Schedules (issue #247 / ADR-0062): per-repo cadence CRUD over the
       // mutable h.schedules array, plus the two read-only surfaces the editor
       // needs — the built-in flow catalog and the server-rendered cron
@@ -510,6 +611,14 @@ export async function mountSettings(path: string = `/repos/${REPO_ID}/settings`)
   await settle();
 }
 
+/** Tear down the current mount — for tests that remount within one `it`
+ *  (routes/settings/harness.tsx's precedent, same three lines). */
+export function unmount(): void {
+  dispose?.();
+  dispose = undefined;
+  container.remove();
+}
+
 export function input(name: string): HTMLInputElement {
   const el = container.querySelector<HTMLInputElement>(`input[name="${name}"]`);
   if (!el) throw new Error(`missing input[name="${name}"]`);
@@ -604,6 +713,19 @@ export function secretsSection(): HTMLElement {
   if (!header) throw new Error('missing Secrets section heading');
   const section = header.closest('section');
   if (!section) throw new Error('Secrets heading has no enclosing <section>');
+  return section as HTMLElement;
+}
+
+/** The credential-gateway grant picker's <section> (issue #25), scoped the
+ *  same way secretsSection() is — it renders ABOVE the legacy Secrets card on
+ *  the same subpage, so the two must never be queried as one. */
+export function grantsSection(): HTMLElement {
+  const header = Array.from(container.querySelectorAll('section h2')).find(
+    (h2) => h2.textContent === 'Credential gateway',
+  );
+  if (!header) throw new Error('missing Credential gateway section heading');
+  const section = header.closest('section');
+  if (!section) throw new Error('Credential gateway heading has no enclosing <section>');
   return section as HTMLElement;
 }
 
@@ -734,6 +856,14 @@ export function installRepoSettingsHooks(): void {
     h.importPostBodies = [];
     h.importPostError = null;
     h.importDeleteRequests = [];
+    h.poolOnServer = baseOneCLIPool();
+    h.grantsOnServer = [];
+    h.grantRequests = [];
+    // An exposed dashboard by default, so the picker's link-out renders on the
+    // normal path; `mode: 'off'` and `null` are the two opt-in alternatives.
+    h.dashboardExposure = { mode: 'port', url: 'https://lab.example.com:8443' };
+    h.gatewayReadError = null;
+    h.grantWriteError = null;
     stubApi();
   });
 
