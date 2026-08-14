@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -50,7 +51,16 @@ type stubPoolRow struct {
 	Provider string
 }
 
-// oneCLIGrantStub answers the five OneCLI REST paths this slice drives, keeps
+// stubAgent is one agent identity the stub's project holds. The project is
+// keyed by IDENTIFIER, never by Name, because that is upstream's own uniqueness
+// rule and lab's match key since issue #35 — a stub keyed by name would let a
+// name-matching regression pass.
+type stubAgent struct {
+	ID   string
+	Name string
+}
+
+// oneCLIGrantStub answers the six OneCLI REST paths this slice drives, keeps
 // the project state the handlers mutate (agent identities and their grants),
 // and records every request. Safe for concurrent use; the handlers under test
 // issue their calls serially, but httptest serves each on its own goroutine.
@@ -61,7 +71,7 @@ type oneCLIGrantStub struct {
 	calls       []stubCall
 	secrets     []stubPoolRow
 	connections []stubPoolRow
-	agents      map[string]string          // agent identity name → id
+	agents      map[string]*stubAgent      // agent IDENTIFIER → the identity
 	grants      map[string]map[string]bool // agent identity id → "kind/resourceID"
 	nextAgent   int
 
@@ -74,7 +84,7 @@ type oneCLIGrantStub struct {
 func newOneCLIGrantStub(t *testing.T) *oneCLIGrantStub {
 	t.Helper()
 	stub := &oneCLIGrantStub{
-		agents: map[string]string{},
+		agents: map[string]*stubAgent{},
 		grants: map[string]map[string]bool{},
 	}
 
@@ -83,6 +93,7 @@ func newOneCLIGrantStub(t *testing.T) *oneCLIGrantStub {
 	mux.HandleFunc("GET /v1/connections", stub.handleConnections)
 	mux.HandleFunc("GET /v1/agents", stub.handleListAgents)
 	mux.HandleFunc("POST /v1/agents", stub.handleCreateAgent)
+	mux.HandleFunc("PATCH /v1/agents/{id}", stub.handleRenameAgent)
 	mux.HandleFunc("GET /v1/agents/{id}/grants", stub.handleListGrants)
 	mux.HandleFunc("PUT /v1/agents/{id}/grants/{kind}/{rid}", stub.handleAttach)
 	mux.HandleFunc("DELETE /v1/agents/{id}/grants/{kind}/{rid}", stub.handleDetach)
@@ -133,42 +144,59 @@ func (s *oneCLIGrantStub) seedPool(secrets, connections []stubPoolRow) {
 	s.secrets, s.connections = secrets, connections
 }
 
-// seedAgent creates an agent identity named name (the repo's store id) and
-// returns its OneCLI id, without going through the API — the "this repo
-// already has an identity" starting state.
-func (s *oneCLIGrantStub) seedAgent(name string) string {
+// seedAgent creates the agent identity carrying identifier, under the display
+// name name, and returns its OneCLI id — without going through the API, the
+// "this repo already has an identity" starting state. The two are separate
+// arguments so a test can seed the pre-#35 shape: the derived identifier with
+// the repo's store id still sitting in the name.
+func (s *oneCLIGrantStub) seedAgent(identifier, name string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createAgentLocked(name)
+	return s.createAgentLocked(identifier, name).ID
 }
 
-func (s *oneCLIGrantStub) createAgentLocked(name string) string {
-	if id, ok := s.agents[name]; ok {
-		return id
+func (s *oneCLIGrantStub) createAgentLocked(identifier, name string) *stubAgent {
+	if agent, ok := s.agents[identifier]; ok {
+		return agent
 	}
 	s.nextAgent++
-	id := fmt.Sprintf("agt_%d", s.nextAgent)
-	s.agents[name] = id
-	s.grants[id] = map[string]bool{}
-	return id
+	agent := &stubAgent{ID: fmt.Sprintf("agt_%d", s.nextAgent), Name: name}
+	s.agents[identifier] = agent
+	s.grants[agent.ID] = map[string]bool{}
+	return agent
 }
 
-// seedGrant attaches a resource to an agent identity directly.
-func (s *oneCLIGrantStub) seedGrant(agentName, kind, resourceID string) {
+// seedGrant attaches a resource to an agent identity directly, creating the
+// identity when the case did not seed one. Its display name is then the
+// identifier itself — a placeholder no assertion reads, since a test that cares
+// about the name seeds the identity with seedAgent.
+func (s *oneCLIGrantStub) seedGrant(identifier, kind, resourceID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := s.createAgentLocked(agentName)
-	s.grants[id][kind+"/"+resourceID] = true
+	agent := s.createAgentLocked(identifier, identifier)
+	s.grants[agent.ID][kind+"/"+resourceID] = true
 }
 
-func (s *oneCLIGrantStub) hasGrant(agentName, kind, resourceID string) bool {
+func (s *oneCLIGrantStub) hasGrant(identifier, kind, resourceID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id, ok := s.agents[agentName]
+	agent, ok := s.agents[identifier]
 	if !ok {
 		return false
 	}
-	return s.grants[id][kind+"/"+resourceID]
+	return s.grants[agent.ID][kind+"/"+resourceID]
+}
+
+// agentName reports the display name the identity carrying identifier now
+// holds upstream — the assertion behind "an ensure heals a stale name".
+func (s *oneCLIGrantStub) agentName(identifier string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	agent, ok := s.agents[identifier]
+	if !ok {
+		return ""
+	}
+	return agent.Name
 }
 
 // calledCount counts recorded requests with exactly this method and path.
@@ -244,20 +272,22 @@ func (s *oneCLIGrantStub) handleConnections(w http.ResponseWriter, _ *http.Reque
 	s.writeJSON(w, http.StatusOK, rows)
 }
 
-// handleListAgents serves GET /v1/agents — rows carrying the access token,
-// exactly as the real listing does (wire.go point 4).
+// handleListAgents serves GET /v1/agents — rows carrying both human-facing
+// fields and the access token, exactly as the real listing does (wire.go point
+// 4).
 func (s *oneCLIGrantStub) handleListAgents(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	rows := make([]map[string]any, 0, len(s.agents))
-	for name, id := range s.agents {
-		rows = append(rows, map[string]any{"id": id, "name": name, "accessToken": testProxyToken})
+	for identifier, agent := range s.agents {
+		rows = append(rows, map[string]any{"id": agent.ID, "name": agent.Name, "identifier": identifier, "accessToken": testProxyToken})
 	}
 	s.mu.Unlock()
 	s.writeJSON(w, http.StatusOK, rows)
 }
 
-// handleCreateAgent serves POST /v1/agents: 409 on a duplicate name, else 201
-// with a body that deliberately carries NO access token (wire.go point 5).
+// handleCreateAgent serves POST /v1/agents: 409 on a duplicate IDENTIFIER —
+// the only field upstream constrains unique — else 201 with a body that
+// deliberately carries NO access token (wire.go points 4 and 5).
 func (s *oneCLIGrantStub) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name       string `json:"name"`
@@ -268,15 +298,41 @@ func (s *oneCLIGrantStub) handleCreateAgent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.mu.Lock()
-	_, exists := s.agents[req.Name]
+	_, exists := s.agents[req.Identifier]
 	if exists {
 		s.mu.Unlock()
 		s.writeJSON(w, http.StatusConflict, map[string]any{"error": "identifier already taken"})
 		return
 	}
-	id := s.createAgentLocked(req.Name)
+	agent := s.createAgentLocked(req.Identifier, req.Name)
 	s.mu.Unlock()
-	s.writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": req.Name, "identifier": req.Identifier})
+	s.writeJSON(w, http.StatusCreated, map[string]any{"id": agent.ID, "name": req.Name, "identifier": req.Identifier})
+}
+
+// handleRenameAgent serves PATCH /v1/agents/{id} (wire.go point 10): the
+// display name and nothing else, answered with {"success":true}. There is
+// deliberately no way to move an identifier through it — upstream's is
+// immutable, so a rename structurally cannot restate what a repo's grants hang
+// off.
+func (s *oneCLIGrantStub) handleRenameAgent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		s.writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
+		return
+	}
+	id := r.PathValue("id")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, agent := range s.agents {
+		if agent.ID == id {
+			agent.Name = req.Name
+			s.writeJSON(w, http.StatusOK, map[string]any{"success": true})
+			return
+		}
+	}
+	s.writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown agent"})
 }
 
 // grantsDocLocked renders GET /v1/agents/{id}/grants's answer (wire.go point
@@ -353,6 +409,12 @@ func newOneCLIGrantServer(t *testing.T, stub *oneCLIGrantStub) (*testServer, sto
 	x.setup("op", "password123")
 	return x, seedTrackerRepo(t, x, "grant-picker", nil)
 }
+
+// agentKey is the identifier a repo's agent identity is matched by. Derived
+// rather than spelled out: the rule lives in exactly one place
+// (onecli.AgentIdentifier), and a second copy of it here is the drift that
+// would let a repo end up with two identities, only one carrying its grants.
+func agentKey(repo store.Repo) string { return onecli.AgentIdentifier(repo.ID) }
 
 // grantPath builds the mutation URL the SPA sends.
 func grantPath(repo store.Repo, kind, resourceID string) string {
@@ -580,8 +642,8 @@ func TestOneCLIGrantListReportsBothKinds(t *testing.T) {
 		[]stubPoolRow{{ID: "con_1", Name: "Acme GitHub", Provider: "github"}},
 	)
 	x, repo := newOneCLIGrantServer(t, stub)
-	stub.seedGrant(repo.ID, "secrets", "sec_1")
-	stub.seedGrant(repo.ID, "connections", "con_1")
+	stub.seedGrant(agentKey(repo), "secrets", "sec_1")
+	stub.seedGrant(agentKey(repo), "connections", "con_1")
 
 	resp := x.do("GET", grantsPath(repo), nil, nil)
 	wantStatus(t, resp, http.StatusOK)
@@ -602,13 +664,47 @@ func TestOneCLIGrantListReportsBothKinds(t *testing.T) {
 	}
 }
 
+// TestOneCLIGrantListAdoptsALegacyAgentIdentity is issue #35's zero-migration
+// promise at the HTTP layer. An identity created before the inversion carries
+// the repo's STORE ID in its NAME, and nothing anywhere rewrites it; what makes
+// it findable today is its IDENTIFIER, which lab has always derived from that
+// same store id and so is byte-identical to the one derived now. A read that
+// missed it would report "no grants yet" for a repo that has them — inviting
+// the operator to attach a second copy of everything, and leaving the first set
+// attached to an identity nothing points at any more.
+func TestOneCLIGrantListAdoptsALegacyAgentIdentity(t *testing.T) {
+	stub := newOneCLIGrantStub(t)
+	stub.seedPool([]stubPoolRow{{ID: "sec_1", Name: "DEPLOY_TOKEN", Provider: "generic"}}, nil)
+	x, repo := newOneCLIGrantServer(t, stub)
+	// The pre-#35 row: today's derived identifier, the store id still sitting
+	// in the display name.
+	stub.seedAgent(agentKey(repo), repo.ID)
+	stub.seedGrant(agentKey(repo), "secrets", "sec_1")
+
+	resp := x.do("GET", grantsPath(repo), nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	grants := entriesOf(t, decodeBody(t, resp), "grants")
+	if len(grants) != 1 || grants[0]["id"] != "sec_1" || grants[0]["name"] != "DEPLOY_TOKEN" {
+		t.Fatalf("grants = %#v, want the legacy identity's one secret", grants)
+	}
+	// Adoption is a MATCH, never a write: the read created nothing and renamed
+	// nothing, which is what keeps opening a picker free of side effects.
+	if n := stub.calledCount("POST", "/v1/agents"); n != 0 {
+		t.Errorf("the read created %d agent identities (calls %+v)", n, stub.allCalls())
+	}
+	if got := stub.agentName(agentKey(repo)); got != repo.ID {
+		t.Errorf("the read renamed the identity to %q; only a mutation may write", got)
+	}
+}
+
 // --- attach -----------------------------------------------------------------
 
 // TestOneCLIGrantAttach walks the picker's write path: the first attach
-// creates the repo's agent identity — named by the repo's STORE ID, the one
-// key internal/instance's launch path also uses — and issues the kind-
-// qualified PUT; a repeat is a no-op that neither creates a second identity
-// nor fails.
+// creates the repo's agent identity — identified by the slug derived from the
+// repo's STORE ID, the one key internal/instance's launch path also uses, and
+// named by the repo so the OneCLI dashboard reads as a list of repositories —
+// and issues the kind-qualified PUT; a repeat is a no-op that neither creates a
+// second identity nor fails.
 func TestOneCLIGrantAttach(t *testing.T) {
 	stub := newOneCLIGrantStub(t)
 	stub.seedPool(
@@ -623,8 +719,9 @@ func TestOneCLIGrantAttach(t *testing.T) {
 		t.Errorf("204 carried a body: %q", body)
 	}
 
-	// The identity was created, and its name is the repo's store id — never
-	// the display name, which a rename would change out from under the grants.
+	// The identity was created under the derived identifier — the key the
+	// grants hang off, which a rename cannot move — and carries the repo's
+	// display name, which is the half a rename is free to change.
 	create := stub.call(t, "POST", "/v1/agents")
 	var created struct {
 		Name       string `json:"name"`
@@ -633,13 +730,13 @@ func TestOneCLIGrantAttach(t *testing.T) {
 	if err := json.Unmarshal([]byte(create.Body), &created); err != nil {
 		t.Fatalf("decode create body %q: %v", create.Body, err)
 	}
-	if created.Name != repo.ID {
-		t.Fatalf("created agent identity named %q, want the repo's store id %q", created.Name, repo.ID)
+	if created.Identifier != agentKey(repo) {
+		t.Fatalf("created agent identity carries identifier %q, want the one derived from the repo's store id %q", created.Identifier, agentKey(repo))
 	}
-	if created.Identifier == "" {
-		t.Errorf("create body carries no identifier slug: %q", create.Body)
+	if created.Name != repo.Name {
+		t.Fatalf("created agent identity named %q, want the repo's display name %q", created.Name, repo.Name)
 	}
-	if !stub.hasGrant(repo.ID, "secrets", "sec_1") {
+	if !stub.hasGrant(agentKey(repo), "secrets", "sec_1") {
 		t.Fatalf("the secret was not attached (calls %+v)", stub.allCalls())
 	}
 	stub.call(t, "PUT", "/v1/agents/agt_1/grants/secrets/sec_1")
@@ -665,12 +762,54 @@ func TestOneCLIGrantAttach(t *testing.T) {
 	if n := stub.calledCount("PUT", "/v1/agents/agt_1/grants/secrets/sec_1"); n != 2 {
 		t.Fatalf("the repeat attach issued %d PUTs, want 2", n)
 	}
+	// Nor did any of the three attaches rename: the identity was created with
+	// the repo's current name, so every later ensure finds it already right.
+	// The rename is a heal for drift, never a write per click.
+	if n := stub.calledCount("PATCH", "/v1/agents/agt_1"); n != 0 {
+		t.Errorf("the attaches issued %d renames of an already-current name, want none", n)
+	}
 
 	// And the read now reports both.
 	resp = x.do("GET", grantsPath(repo), nil, nil)
 	wantStatus(t, resp, http.StatusOK)
 	if grants := entriesOf(t, decodeBody(t, resp), "grants"); len(grants) != 2 {
 		t.Fatalf("grants after two attaches = %#v, want two", grants)
+	}
+}
+
+// TestOneCLIGrantAttachHealsALegacyAgentName pins the other half of the attach
+// path's #35 contract: the click hands EnsureAgent the repo's DISPLAY name, so
+// it stomps whatever the identity was carrying — here the store id a pre-#35
+// lab wrote — while the identifier the grants hang off does not move. Two
+// things are bought at once and neither costs a call: the operator's existing
+// grants keep the identity they are attached to (no second, grant-less copy),
+// and the OneCLI dashboard row stops reading as a hex blob.
+func TestOneCLIGrantAttachHealsALegacyAgentName(t *testing.T) {
+	stub := newOneCLIGrantStub(t)
+	stub.seedPool([]stubPoolRow{{ID: "sec_1", Name: "DEPLOY_TOKEN", Provider: "generic"}}, nil)
+	x, repo := newOneCLIGrantServer(t, stub)
+	agentID := stub.seedAgent(agentKey(repo), repo.ID)
+
+	resp := x.do("PUT", grantPath(repo, "secrets", "sec_1"), nil, csrfHeaders(x.ts.URL))
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+
+	if n := stub.calledCount("POST", "/v1/agents"); n != 0 {
+		t.Fatalf("the attach created %d identities beside the legacy one (calls %+v)", n, stub.allCalls())
+	}
+	stub.call(t, "PUT", "/v1/agents/"+agentID+"/grants/secrets/sec_1")
+	if got := stub.agentName(agentKey(repo)); got != repo.Name {
+		t.Errorf("agent display name = %q, want the attach to have healed it to the repo's name %q", got, repo.Name)
+	}
+	// The rename carries the name and NOTHING else — upstream's identifier is
+	// immutable, so the one write lab aims at an existing identity is
+	// structurally incapable of moving that identity's match key.
+	rename := stub.call(t, "PATCH", "/v1/agents/"+agentID)
+	if !strings.Contains(rename.Body, `"name":"`+repo.Name+`"`) {
+		t.Errorf("rename body = %q, want it to carry the repo's display name", rename.Body)
+	}
+	if strings.Contains(rename.Body, "identifier") {
+		t.Errorf("rename body = %q, want it to say nothing about the identifier", rename.Body)
 	}
 }
 
@@ -684,8 +823,8 @@ func TestOneCLIGrantDetach(t *testing.T) {
 		stub := newOneCLIGrantStub(t)
 		stub.seedPool([]stubPoolRow{{ID: "sec_1", Name: "DEPLOY_TOKEN", Provider: "generic"}}, nil)
 		x, repo := newOneCLIGrantServer(t, stub)
-		agentID := stub.seedAgent(repo.ID)
-		stub.seedGrant(repo.ID, "secrets", "sec_1")
+		agentID := stub.seedAgent(agentKey(repo), repo.Name)
+		stub.seedGrant(agentKey(repo), "secrets", "sec_1")
 
 		resp := x.do("DELETE", grantPath(repo, "secrets", "sec_1"), nil, csrfHeaders(x.ts.URL))
 		wantStatus(t, resp, http.StatusNoContent)
@@ -693,7 +832,7 @@ func TestOneCLIGrantDetach(t *testing.T) {
 			t.Errorf("204 carried a body: %q", body)
 		}
 		stub.call(t, "DELETE", "/v1/agents/"+agentID+"/grants/secrets/sec_1")
-		if stub.hasGrant(repo.ID, "secrets", "sec_1") {
+		if stub.hasGrant(agentKey(repo), "secrets", "sec_1") {
 			t.Fatal("the grant survived the detach")
 		}
 		if n := stub.calledCount("POST", "/v1/agents"); n != 0 {
@@ -822,8 +961,8 @@ func TestOneCLIGrantResponsesNeverCarryTheProxyToken(t *testing.T) {
 		[]stubPoolRow{{ID: "con_1", Name: "Acme GitHub", Provider: "github"}},
 	)
 	x, repo := newOneCLIGrantServer(t, stub)
-	stub.seedAgent(repo.ID)
-	stub.seedGrant(repo.ID, "secrets", "sec_1")
+	stub.seedAgent(agentKey(repo), repo.Name)
+	stub.seedGrant(agentKey(repo), "secrets", "sec_1")
 
 	requests := []struct {
 		method, path string

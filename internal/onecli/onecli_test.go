@@ -197,10 +197,17 @@ func TestBaseURLKeepsReverseProxySubpath(t *testing.T) {
 
 // --- headers ---------------------------------------------------------------
 
-// TestEveryRequestCarriesAuthAndAccept walks the whole operation surface and
-// asserts the three-header contract on each one — including Health, which the
-// API does not require auth for and which is therefore the easiest one to
-// accidentally special-case.
+// TestEveryRequestCarriesAuthAndAccept walks the single-request operation
+// surface and asserts the three-header contract on each one — including Health,
+// which the API does not require auth for and which is therefore the easiest
+// one to accidentally special-case.
+//
+// The two agent writes that resolve before they act — EnsureAgent's rename and
+// DeleteAgent, both of which list first — issue two requests and cannot be
+// expressed in this table. They are not an exception to the contract: every
+// request in the package is built by the one do(), which is what makes the
+// contract structural rather than per-operation, and agents_test.go pins their
+// method, path and body.
 func TestEveryRequestCarriesAuthAndAccept(t *testing.T) {
 	for _, tc := range operationCases(t) {
 		t.Run(tc.name, func(t *testing.T) {
@@ -272,12 +279,15 @@ func operationCases(t *testing.T) []operationCase {
 			// The verified list shape is a bare array whose rows carry the
 			// agent's stable gateway access token (wire.go point 4); the token
 			// must thread into Agent.Token, because the spawn path reads it
-			// from here and never regenerates.
+			// from here and never regenerates. The identifier threads through
+			// too — it is what every match resolves on — and the second row,
+			// which carries none, is the shape a hand-made agent has: nameable,
+			// but never matchable to a repo.
 			name: "ListAgents bare array", wantMethod: http.MethodGet, wantPath: "/v1/agents",
 			status:   http.StatusOK,
 			respBody: `[{"id":"ag_1","name":"coding-lab","identifier":"coding-lab","accessToken":"oc_agent_tok1","isDefault":true},{"id":"ag_2","name":"web","accessToken":"oc_agent_tok2"}]`,
 			call:     func(ctx context.Context, c *Client) (any, error) { return c.ListAgents(ctx) },
-			want:     []Agent{{ID: "ag_1", Name: "coding-lab", Token: "oc_agent_tok1"}, {ID: "ag_2", Name: "web", Token: "oc_agent_tok2"}},
+			want:     []Agent{{ID: "ag_1", Identifier: "coding-lab", Name: "coding-lab", Token: "oc_agent_tok1"}, {ID: "ag_2", Name: "web", Token: "oc_agent_tok2"}},
 		},
 		{
 			// Envelope tolerance (wire.go point 3): kept for drift, not observed
@@ -490,7 +500,9 @@ func TestEmptyIdentifiersRejectedWithoutRequest(t *testing.T) {
 		{"AttachGrant no resource", func() error { return c.AttachGrant(ctx, "ag_1", GrantSecret, "") }},
 		{"DetachGrant no agent", func() error { return c.DetachGrant(ctx, "", GrantSecret, "sec_1") }},
 		{"DetachGrant no resource", func() error { return c.DetachGrant(ctx, "ag_1", GrantSecret, "") }},
-		{"EnsureAgent no name", func() error { _, err := c.EnsureAgent(ctx, ""); return err }},
+		{"EnsureAgent no identifier", func() error { _, err := c.EnsureAgent(ctx, "", "coding-lab"); return err }},
+		{"EnsureAgent no display name", func() error { _, err := c.EnsureAgent(ctx, "coding-lab", ""); return err }},
+		{"DeleteAgent no identifier", func() error { _, err := c.DeleteAgent(ctx, ""); return err }},
 	} {
 		if err := tc.call(); err == nil {
 			t.Errorf("%s with an empty identifier succeeded, want refusal", tc.name)
@@ -595,7 +607,7 @@ func TestClientPrintsRedacted(t *testing.T) {
 
 // TestEnsureAgentErrorsNeverEchoAccessTokens: the agent LISTING carries every
 // agent's gateway access token, so the failure path that inspected a listing
-// and found the name absent must describe the miss without quoting rows.
+// and found the identifier absent must describe the miss without quoting rows.
 func TestEnsureAgentErrorsNeverEchoAccessTokens(t *testing.T) {
 	const leaked = "oc_agent_LEAKED"
 	calls := 0
@@ -604,7 +616,7 @@ func TestEnsureAgentErrorsNeverEchoAccessTokens(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			calls++
-			_, _ = io.WriteString(w, `[{"id":"ag_other","name":"other","accessToken":"`+leaked+`"}]`)
+			_, _ = io.WriteString(w, `[{"id":"ag_other","name":"other","identifier":"other","accessToken":"`+leaked+`"}]`)
 		case http.MethodPost:
 			w.WriteHeader(http.StatusConflict)
 			_, _ = io.WriteString(w, `{"error":"identifier already exists"}`)
@@ -612,7 +624,7 @@ func TestEnsureAgentErrorsNeverEchoAccessTokens(t *testing.T) {
 	})
 	c := newTestClient(t, s.URL)
 
-	_, err := c.EnsureAgent(context.Background(), "coding-lab")
+	_, err := c.EnsureAgent(context.Background(), "coding-lab", "Coding Lab")
 	if err == nil {
 		t.Fatal("EnsureAgent succeeded, want the still-absent error")
 	}

@@ -79,13 +79,20 @@ type WorkspaceSeeder interface {
 // state of a lab and must stay indistinguishable from a lab built before this
 // existed (gatewayActive is the one gate).
 //
+// The identity is resolved by the IDENTIFIER derived from the repo's store ID
+// (onecli.AgentIdentifier) — the match key, immutable and unique upstream —
+// while displayName is the repo's own name riding along so the OneCLI
+// dashboard reads as a list of repositories rather than of store ids. Which
+// of the two is load-bearing is the whole of issue #35, and prepareGateway's
+// call site carries the reasoning.
+//
 // Narrow on purpose, like WorkspaceSeeder and ConversationStater beside it:
 // two methods is exactly what a spawn needs, so a test drives the whole
 // gateway precheck with a struct literal and no HTTP, and the pool/attach/
 // detach half of internal/onecli (the #25 grant picker's surface) cannot be
 // reached from a launch even by accident.
 type GatewayAPI interface {
-	EnsureAgent(ctx context.Context, name string) (onecli.Agent, error)
+	EnsureAgent(ctx context.Context, identifier, displayName string) (onecli.Agent, error)
 	ListGrants(ctx context.Context, agentID string) ([]onecli.Grant, error)
 }
 

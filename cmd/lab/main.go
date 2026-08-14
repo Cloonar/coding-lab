@@ -276,6 +276,16 @@ func run() int {
 	if oneCLIClient != nil {
 		oneCLIGateway = oneCLIClient
 	}
+	// The same client again as the repo lifecycle's agent seam (issue #35: an
+	// agent is created with its repo, converged at startup and deleted with it),
+	// and guarded the same way for the reason spelled out just above — a nil
+	// *onecli.Client in an interface field is a NON-nil interface, which would
+	// make reposvc.oneCLIActive() true on a lab that configured no OneCLI and
+	// turn three silent no-ops into a warning per repo create, boot and delete.
+	var oneCLIAgents reposvc.OneCLIAgents
+	if oneCLIClient != nil {
+		oneCLIAgents = oneCLIClient
+	}
 	// Per-run private HOME lifecycle (issue #202): <state>/instances holds one
 	// private HOME per run — the isolation seam a run's provider credential copy,
 	// config, and transcripts live under. New does no I/O (the dirs are created
@@ -812,6 +822,10 @@ func run() int {
 		// https-only default client — that exact construction is the production
 		// wiring the imageref package documents.
 		PinImageRef: (&imageref.Resolver{}).Pin,
+		// OneCLI makes repo create/startup/delete the touchpoints that keep each
+		// repo's credential-gateway agent in step with its row (issue #35). Nil
+		// on a lab with no --onecli-url, where all three are silent no-ops.
+		OneCLI: oneCLIAgents,
 	}
 	if instanceSvc != nil {
 		// Preserve live-session credential files across the restart heal — the

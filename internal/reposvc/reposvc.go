@@ -27,6 +27,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -93,6 +94,38 @@ func badRequestf(format string, args ...any) *BadRequestError {
 	return &BadRequestError{msg: fmt.Sprintf(format, args...)}
 }
 
+// OneCLIAgents is the OneCLI REST seam the repo lifecycle keeps a repo's
+// credential-gateway identity in step through (issue #35 / ADR-0067): the agent
+// a repo's grants hang off is created with the repo, converged at startup, and
+// deleted with it. Satisfied by *onecli.Client; nil = the integration is
+// unconfigured, which is the normal state of a lab and must leave every path
+// here indistinguishable from a lab built before this existed — no behavior
+// change and, just as importantly, no log line (oneCLIActive is the one gate).
+//
+// The agent is addressed by the IDENTIFIER derived from the repo's STORE ID
+// (onecli.AgentIdentifier) — unique and immutable upstream — while the repo's
+// NAME rides along as a display string lab owns and overwrites. Which of the
+// two is load-bearing is the whole of issue #35: matching on the name would
+// hand a renamed repo a second, grant-less agent, with "my secrets vanished"
+// as the only symptom. Every call site here derives the identifier rather than
+// passing a repo id through, since EnsureAgent refuses anything that is not
+// already a well-formed slug.
+//
+// Narrow on purpose, like instance.GatewayAPI: two methods is everything the
+// three lifecycle hooks need, so a test drives all of them from a struct
+// literal with no HTTP, and the grant pool/attach half of internal/onecli (the
+// #25 picker's surface) cannot be reached from a repo create or delete even by
+// accident.
+//
+// The Agent EnsureAgent answers with carries the repo's live gateway access
+// token. reposvc has no use for it and drops it at every call site (assigned to
+// _): never keep it, and never log an onecli.Agent — no %v, no %+v, not folded
+// into an error.
+type OneCLIAgents interface {
+	EnsureAgent(ctx context.Context, identifier, displayName string) (onecli.Agent, error)
+	DeleteAgent(ctx context.Context, identifier string) (bool, error)
+}
+
 // Options configures a Service. Everything except Logger, GitEnv and Now is
 // required.
 type Options struct {
@@ -149,6 +182,15 @@ type Options struct {
 	// FAILS rather than persisting an unpinned ref: storing what spawn cannot
 	// trust is never the safe fallback.
 	PinImageRef func(ctx context.Context, ref string) (string, error)
+	// OneCLI is the credential-gateway agent seam (issue #35): repo create,
+	// startup heal and repo delete become the touchpoints that keep a repo's
+	// OneCLI identity in step with its row. Production passes *onecli.Client.
+	// nil — the lab with no OneCLI configured, which is most of them — makes all
+	// three SILENT no-ops: not a degraded mode to warn about, just a feature
+	// nobody turned on. Injected from cmd/lab as the interface with an explicit
+	// nil-pointer guard; a nil *onecli.Client assigned straight in would be a
+	// non-nil interface and this gate would read backwards.
+	OneCLI OneCLIAgents
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -171,6 +213,7 @@ type Service struct {
 	pinImageRef    func(ctx context.Context, ref string) (string, error) // nil = no-pinner degraded state (image_ref updates fail)
 	metrics        *metrics.Metrics                                      // nil-safe report methods
 	providers      *provider.Registry                                    // nil in the no-provider degraded boot
+	oneCLI         OneCLIAgents                                          // nil = OneCLI unconfigured (oneCLIActive)
 
 	// mu guards jobs: the single-flight registry of running clone jobs,
 	// keyed by repo id.
@@ -221,9 +264,23 @@ func New(o Options) (*Service, error) {
 		pinImageRef:    o.PinImageRef,
 		metrics:        o.Metrics,
 		providers:      o.Providers,
+		oneCLI:         o.OneCLI,
 		jobs:           make(map[string]*cloneJob),
 	}, nil
 }
+
+// oneCLIActive reports whether this lab has the OneCLI integration configured.
+// One predicate for all three lifecycle hooks (Add, StartupHeal, Delete), in
+// the spirit of instance.gatewayActive(): "off" is the normal state of a lab
+// and the hooks must be invisible in it, so the check belongs in one named
+// place rather than as a nil test per call site that can drift.
+//
+// Unlike instance's gate there is no second half to check: the repo lifecycle
+// talks only to the REST API, never to the gateway PROXY address a run dials
+// (ADR-0067 keeps the two independently settable), so a lab configured with
+// the REST pair alone — issue #23's health-only deployment — still keeps its
+// agents in step even though no spawn there wires a gateway.
+func (s *Service) oneCLIActive() bool { return s.oneCLI != nil }
 
 // Close cancels every running clone job and waits for them to finish.
 // Interrupted repos stay in clone_status 'cloning'; StartupHeal repairs
@@ -372,6 +429,34 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 	}
 	s.publishRepoChanged(created.ID)
 	s.startCloneJob(created)
+
+	// Eager agent creation (issue #35): a repo's OneCLI identity now exists from
+	// the moment the repo does, which is what lets an operator pre-provision the
+	// repo's secrets from the OneCLI dashboard — or through the grant picker —
+	// before it has ever spawned. Without it the first spawn doubles as the
+	// "make my repo appear over there" step, and an operator preparing a repo
+	// finds nothing to attach grants to.
+	//
+	// Best-effort, and the asymmetry is deliberate: a sidecar that is down must
+	// never block repo creation, because the SPAWN is the fail-closed
+	// enforcement point (ADR-0067 — a run that starts without credential
+	// injection is the failure worth refusing, not a repo row). The lazy ensures
+	// at spawn and at grant-attach stay as backstops — they still have to, for
+	// every repo created before OneCLI was configured — so all a warn here costs
+	// is one later round-trip.
+	//
+	// It runs AFTER startCloneJob because that call only registers the job and
+	// returns, while this one is a synchronous round-trip bounded by
+	// internal/onecli's 30s per-request timeout: ensuring first would hold the
+	// clone at the starting line for the whole of a wedged sidecar's timeout,
+	// and the clone needs nothing from the agent.
+	if s.oneCLIActive() {
+		// The returned Agent's token is a live gateway credential; dropped here
+		// and never logged (see OneCLIAgents).
+		if _, err := s.oneCLI.EnsureAgent(ctx, onecli.AgentIdentifier(created.ID), created.Name); err != nil {
+			s.log.Warn("ensuring onecli agent for new repo", "component", "reposvc", "repo", created.ID, "err", err)
+		}
+	}
 	return created, nil
 }
 
@@ -679,6 +764,38 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) error {
 		s.log.Warn("removing bare repo dir", "component", "reposvc", "repo", id, "err", err)
 	}
 	s.publishRepoChanged(id)
+
+	// The repo's OneCLI identity goes with the repo (issue #35): an agent that
+	// outlives its repo keeps that repo's grants attached to an identifier
+	// nothing will ever derive again — standing access to the project's shared
+	// credentials that no lab surface can show or revoke. Detached from ctx for
+	// the same reason the store delete above is: past the point of no return, a
+	// client hanging up must not decide how far the teardown got. The identifier
+	// derives from the store id we were handed, so nothing needs reading back
+	// after the row is gone.
+	//
+	// Best-effort, warn-and-orphan: an unreachable sidecar leaves the agent
+	// behind, which is exactly the status quo for every repo deleted before this
+	// existed — never a reason to keep a repo the operator asked to remove.
+	// (false, nil) — nothing carried that identifier — is ORDINARY and must not
+	// warn: a repo created before OneCLI was configured never got an agent, and
+	// a delete with nothing to delete has done its job. The warn path is also
+	// where upstream's 400 "Cannot delete the default agent" lands: lab-created
+	// agents are never the default, so that answer means the identifier resolved
+	// to an agent lab did not create — something to report, never to work
+	// around. What a successful delete does upstream: the agent's grants cascade
+	// away with it while the project's secret POOL is untouched — deleting a
+	// repo revokes its access to the shared credentials, it does not destroy
+	// them for the repos and tools still using them.
+	//
+	// Ordered after the publish so a wedged sidecar cannot hold the repo.changed
+	// event (and every client's refetch) behind a network round-trip: the agent
+	// is not part of any repo state a client reads back.
+	if s.oneCLIActive() {
+		if _, err := s.oneCLI.DeleteAgent(context.WithoutCancel(ctx), onecli.AgentIdentifier(id)); err != nil {
+			s.log.Warn("deleting onecli agent for removed repo", "component", "reposvc", "repo", id, "err", err)
+		}
+	}
 	return nil
 }
 
@@ -765,10 +882,72 @@ func (s *Service) StartupHeal(ctx context.Context) error {
 	// how hook-content changes between lab versions roll out. Install is
 	// idempotent and safe on foreign hooks, so this converges every restart.
 	s.reconcileGuardHooks(ctx)
+
+	// Converge the OneCLI agent identities LAST, after the guard reconcile
+	// above: that pass is local filesystem work every repo needs and must not
+	// queue behind a network call to a sidecar that may still be booting, while
+	// this one reads the repo NAMES the clone healing above may just have
+	// touched. Nothing downstream depends on it, which is what makes it the
+	// right thing to put at the end of the boot path.
+	s.reconcileOneCLIAgents(ctx)
 	if err := s.mat.CleanupAll(s.credentialKeep); err != nil {
 		s.log.Warn("sweeping runtime dir", "component", "reposvc", "err", err)
 	}
 	return nil
+}
+
+// oneCLIAgentHealTimeout bounds the WHOLE startup agent sweep, not one call.
+// Priced for the expected case rather than the happy one: the sidecar comes up
+// in parallel with lab in the same compose stack, so "not listening yet" is
+// routine — and it fails instantly with connection refused, so a hundred repos
+// cost microseconds and the bound is never approached. What the bound is for is
+// the other shape, a sidecar that ACCEPTS and then hangs, where
+// internal/onecli's own 30s per-request timeout would otherwise be paid once
+// per repo with lab's boot waiting behind all of it.
+const oneCLIAgentHealTimeout = 30 * time.Second
+
+// reconcileOneCLIAgents converges every repo's OneCLI agent at startup (issue
+// #35): a missing agent is created and a stale display name healed in place —
+// EnsureAgent does both — so a lab that ran before OneCLI was configured, or
+// renamed a repo while the sidecar was down, catches up on the next boot with
+// no stored state and no operator action.
+//
+// One-way on purpose: it NEVER deletes. A OneCLI project is SHARED surface —
+// NanoClaw's agents, agents an operator created by hand, another lab's — so a
+// reconcile that removed whatever it does not recognize would destroy another
+// tool's identity, and the grants attached to it, the first time lab booted
+// against a shared project. Repo deletion is the only path that removes an
+// agent, and it removes exactly the one identifier it derived.
+//
+// It stops at the FIRST failure and warns ONCE. Every error reachable here is
+// sidecar-level — unreachable, wedged, wrong API key — so it is the same error
+// waiting for every remaining repo: pressing on would render one outage as a
+// wall of identical warnings and bury whatever else the boot logged. The
+// warning names the repo it stopped on and how many it never reached, which is
+// what separates "OneCLI is down" from "one repo is odd".
+//
+// And it never fails boot: StartupHeal's error return is fatal in cmd/lab (see
+// the call site), and a credential sidecar that is slow to start is not a
+// reason to refuse to run a lab — every skipped repo is ensured again lazily at
+// its next spawn or grant-attach.
+func (s *Service) reconcileOneCLIAgents(ctx context.Context) {
+	if !s.oneCLIActive() {
+		return
+	}
+	repos, err := s.store.Repos(ctx)
+	if err != nil {
+		s.log.Warn("reconciling onecli agents: list repos", "component", "reposvc", "err", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, oneCLIAgentHealTimeout)
+	defer cancel()
+	for i, repo := range repos {
+		// Token dropped, never logged (see OneCLIAgents).
+		if _, err := s.oneCLI.EnsureAgent(ctx, onecli.AgentIdentifier(repo.ID), repo.Name); err != nil {
+			s.log.Warn("reconciling onecli agents", "component", "reposvc", "repo", repo.ID, "err", err, "skipped", len(repos)-i-1)
+			return
+		}
+	}
 }
 
 // installGuardHook writes the pre-push guard AND pins the bare repo's local
