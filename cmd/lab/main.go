@@ -109,6 +109,27 @@ Flags (env overrides in parentheses; flag > env > default):
                            OneCLI gateway proxy URL handed to runs as HTTPS_PROXY,
                            e.g. http://10.88.0.1:10255; independent of the pair
                            above (LAB_ONECLI_GATEWAY_URL)
+  -onecli-ca-file string   path to the PEM file holding the OneCLI gateway's
+                           interception CA certificate on the host; composed
+                           into a run's trust bundle (LAB_ONECLI_CA_FILE)
+  -onecli-dashboard string
+                           OneCLI dashboard exposure: off (default, nothing
+                           exposed), port (lab reverse-proxies it on its own
+                           authenticated listener) or subdomain (your reverse
+                           proxy fronts it and delegates auth to lab)
+                           (LAB_ONECLI_DASHBOARD)
+  -onecli-dashboard-addr string
+                           listen address for -onecli-dashboard=port, e.g.
+                           :8443 (LAB_ONECLI_DASHBOARD_ADDR)
+  -onecli-dashboard-url string
+                           browser-facing dashboard origin, e.g.
+                           https://onecli.example.com; required for
+                           -onecli-dashboard=subdomain, an optional override
+                           in port mode (LAB_ONECLI_DASHBOARD_URL)
+  -session-cookie-domain string
+                           Domain attribute for lab's session cookie, e.g.
+                           example.com; empty (default) keeps the cookie
+                           host-only (LAB_SESSION_COOKIE_DOMAIN)
 `
 
 func main() {
@@ -846,12 +867,23 @@ func run() int {
 		ProxyAuthHeader: cfg.ProxyAuthHeader,
 		TrustedProxies:  cfg.TrustedProxies,
 		AgentHandler:    agent.Handler(),
+		// The session cookie's Domain (issue #26): "" in every deployment but
+		// --onecli-dashboard=subdomain, which needs the parent domain so lab's
+		// session reaches onecli.<domain> and forward-auth can see it.
+		SessionCookieDomain: cfg.SessionCookieDomain,
 		// OneCLI health visibility (issue #23 / ADR-0067). All three are
 		// zero when the integration is unconfigured, and the health endpoint
 		// mounts anyway to say so — see internal/httpapi/onecli.go.
 		OneCLI:           oneCLIClient,
 		OneCLIAPIURL:     cfg.OneCLIURL,
 		OneCLIGatewayURL: cfg.OneCLIGatewayURL,
+		// The dashboard exposure (issue #26). config.Parse already validated
+		// the mode word and its companions; httpapi resolves them once into the
+		// browser-facing URL its exposure endpoint reports, and refuses to
+		// build on any combination config would not have produced.
+		OneCLIDashboardMode: cfg.OneCLIDashboard,
+		OneCLIDashboardAddr: cfg.OneCLIDashboardAddr,
+		OneCLIDashboardURL:  cfg.OneCLIDashboardURL,
 	})
 	if err != nil {
 		logger.Error("building http api", "component", "main", "err", err)
@@ -922,17 +954,46 @@ func run() int {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// The OneCLI dashboard proxy (issue #26): --onecli-dashboard=port makes lab
+	// itself the authenticated way in, on a THIRD listener carrying a
+	// whole-origin reverse proxy to the sidecar's dashboard. Nil in every other
+	// mode, which is the ordinary case — off is the default. It is a plain TCP
+	// listener like the main one, so TLS is terminated the same way (in front of
+	// lab, by the operator's proxy); lab terminates none itself, here or there.
+	// No CloseStreams hook: the dashboard has no SSE (ADR-0067 verified the
+	// approvals flow long-polls over fetch), so nothing holds Shutdown open.
+	var dashSrv *http.Server
+	dashHandler, err := api.OneCLIDashboardProxy()
+	if err != nil {
+		logger.Error("building the onecli dashboard proxy", "component", "main", "err", err)
+		return 1
+	}
+	if dashHandler != nil {
+		dashSrv = &http.Server{
+			Addr:              cfg.OneCLIDashboardAddr,
+			Handler:           dashHandler,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+	}
+
 	logger.Info("lab starting",
 		"component", "main",
 		"version", version,
 		"addr", cfg.Addr,
 		"agent_sock", sock,
 		"db", dbBackend(cfg.DB),
-		"state_dir", cfg.StateDir)
+		"state_dir", cfg.StateDir,
+		"onecli_dashboard", cfg.OneCLIDashboard,
+		"onecli_dashboard_addr", cfg.OneCLIDashboardAddr)
 
-	errCh := make(chan error, 2)
+	// Buffered for every listener, so a goroutine whose server returns after
+	// another already reported never blocks forever on an unread channel.
+	errCh := make(chan error, 3)
 	go func() { errCh <- srv.ListenAndServe() }()
 	go func() { errCh <- agentSrv.Serve(agentLn) }()
+	if dashSrv != nil {
+		go func() { errCh <- dashSrv.ListenAndServe() }()
+	}
 
 	select {
 	case err := <-errCh:
@@ -952,6 +1013,12 @@ func run() int {
 		if err := agentSrv.Shutdown(shutdownCtx); err != nil {
 			logger.Error("agent socket shutdown failed", "component", "main", "err", err)
 			failed = true
+		}
+		if dashSrv != nil {
+			if err := dashSrv.Shutdown(shutdownCtx); err != nil {
+				logger.Error("onecli dashboard proxy shutdown failed", "component", "main", "err", err)
+				failed = true
+			}
 		}
 		// Cancel running clone jobs; interrupted repos heal on next start.
 		repoSvc.Close()

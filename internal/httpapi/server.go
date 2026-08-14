@@ -144,9 +144,43 @@ type Options struct {
 	// no CONNECT, no credential spend (onecli.ProbeGateway).
 	OneCLIGatewayURL string
 
+	// OneCLIDashboardMode is --onecli-dashboard verbatim: "off" (or "", which
+	// means the same), "port", or "subdomain" — the resolved mode word,
+	// mirroring internal/config's exported constants and passed through by
+	// cmd/lab as a plain string (onecli_dashboard.go says why this package does
+	// not import config). Anything else fails New rather than falling back:
+	// a typo must not resolve to a quietly unexposed dashboard.
+	OneCLIDashboardMode string
+	// OneCLIDashboardAddr is --onecli-dashboard-addr, the address port mode's
+	// reverse-proxy listener binds. This package neither opens nor owns that
+	// listener (cmd/lab does); the only thing read here is its PORT, to derive
+	// the browser-facing URL below. The host half is deliberately discarded —
+	// see resolveOneCLIDashboard.
+	OneCLIDashboardAddr string
+	// OneCLIDashboardURL is --onecli-dashboard-url: the browser-facing origin
+	// of the exposed dashboard. Required in subdomain mode, where only the
+	// operator's reverse proxy knows what it is; optional in port mode, where a
+	// non-empty value overrides the derivation verbatim (a lab whose second
+	// listener is itself fronted by a proxy is exactly that case). Ignored when
+	// the dashboard is off.
+	OneCLIDashboardURL string
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
+
+	// SessionCookieDomain is --session-cookie-domain: the Domain attribute lab
+	// stamps on its session cookie. "" (the default) omits the attribute,
+	// making the cookie host-only — right for every topology but one.
+	// --onecli-dashboard=subdomain (issue #26) fronts the OneCLI dashboard at
+	// onecli.<domain> and delegates auth back to lab through forward-auth, so
+	// lab's cookie has to be visible there too: "example.com" here makes the
+	// browser attach it to lab.example.com and onecli.example.com alike.
+	//
+	// It stays opt-in because widening it is a real widening — every host under
+	// the domain then sees the cookie, including ones lab knows nothing about.
+	// What it does not require is loosening SameSite; see createSession.
+	SessionCookieDomain string
 
 	ProxyAuth       bool
 	ProxyAuthHeader string
@@ -192,8 +226,17 @@ type Server struct {
 	oneCLIAPIURL     string
 	oneCLIGatewayURL string
 
+	// The dashboard exposure, resolved ONCE in New: the canonical mode word and
+	// the browser-facing URL ("" when nothing is exposed). Neither input can
+	// change while the process lives, so the handler answers from two strings
+	// with nothing left to parse and nothing left to fail.
+	oneCLIDashboardMode string
+	oneCLIDashboardURL  string
+
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
+
+	sessionCookieDomain string // Domain attribute on the session cookie, "" = host-only
 
 	proxyAuth   bool
 	proxyHeader string
@@ -287,6 +330,8 @@ func New(o Options) (*Server, error) {
 		oneCLIAPIURL:     o.OneCLIAPIURL,
 		oneCLIGatewayURL: o.OneCLIGatewayURL,
 
+		sessionCookieDomain: o.SessionCookieDomain,
+
 		proxyAuth:     o.ProxyAuth,
 		proxyHeader:   o.ProxyAuthHeader,
 		trusted:       o.TrustedProxies,
@@ -315,6 +360,17 @@ func New(o Options) (*Server, error) {
 		s.baseOriginHTTPS = u.Scheme == "https"
 	}
 
+	// The dashboard exposure is resolved here, after the base URL was validated
+	// above (port mode derives the browser-facing host from it), and every
+	// failure it reports aborts startup. See resolveOneCLIDashboard for why a
+	// fallback to "off" would be the worst answer available.
+	mode, dashURL, err := resolveOneCLIDashboard(
+		o.OneCLIDashboardMode, o.OneCLIDashboardAddr, o.OneCLIDashboardURL, o.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	s.oneCLIDashboardMode, s.oneCLIDashboardURL = mode, dashURL
+
 	// Startup warning (design §5): if this configuration can never produce
 	// a Secure cookie — no in-process TLS, base URL not https, and no
 	// trusted proxy that could assert X-Forwarded-Proto — say so loudly.
@@ -335,6 +391,16 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	api.HandleFunc("POST /api/v1/auth/logout", s.requireAuth(s.handleLogout))
 	api.HandleFunc("GET /api/v1/auth/state", s.handleAuthState)
+	// The forward-auth probe (issue #26): 204 iff the request carries a valid
+	// lab identity, 401 otherwise. Mounted UNCONDITIONALLY, not gated on
+	// --onecli-dashboard, for the same reason the health route below is not —
+	// the answer exists in every configuration. Its whole contract is "does
+	// this request carry a valid lab session", a question that is meaningful
+	// whatever the dashboard setting says and useful to any forward-auth proxy
+	// fronting anything else. Gating it would also make a mode change a ROUTE
+	// change, so a proxy pointed at a lab someone reconfigured would read a 404
+	// as a failure of the wrong kind. Body: onecli_dashboard.go.
+	api.HandleFunc("GET /api/v1/auth/check", s.requireAuth(s.handleAuthCheck))
 	api.HandleFunc("GET /api/v1/me", s.requireAuth(s.handleMe))
 	api.HandleFunc("GET /api/v1/events", s.requireAuth(s.handleEvents))
 
@@ -484,6 +550,18 @@ func (s *Server) Handler() http.Handler {
 	// the whole guard — which it must be, since the body echoes the configured
 	// URLs back to the caller.
 	api.HandleFunc("GET /api/v1/onecli/health", s.requireAuth(s.handleOneCLIHealth))
+
+	// The resolved dashboard exposure (issue #26): the active mode plus, when
+	// the dashboard is exposed, its browser-facing URL — so the SPA's grant
+	// picker (#25) can render or hide a link without knowing the topology.
+	// Unconditional for the same reason as the health route above, and
+	// deliberately a SEPARATE endpoint rather than one more field on it: this
+	// answer is static process configuration resolved in New, while health
+	// spends up to 3s on two live probes, and a consumer that only wants "where
+	// is the dashboard" must not pay that. GET, so csrfMiddleware waives it by
+	// method and requireAuth is the whole guard — which it must be, since the
+	// body names an internal origin.
+	api.HandleFunc("GET /api/v1/onecli/dashboard", s.requireAuth(s.handleOneCLIDashboard))
 
 	// Web Push (issue #98): the VAPID public key plus subscription CRUD/test
 	// (operator auth; CSRF guards the mutations). Mounted only when the

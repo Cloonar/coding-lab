@@ -107,6 +107,10 @@ let
     "--agent-url"
     cfg.agentUrl
   ]
+  ++ lib.optionals (cfg.sessionCookieDomain != null) [
+    "--session-cookie-domain"
+    cfg.sessionCookieDomain
+  ]
   ++ lib.optionals (cfg.onecli.url != null) [
     "--onecli-url"
     cfg.onecli.url
@@ -122,6 +126,21 @@ let
   ++ lib.optionals (cfg.onecli.caFile != null) [
     "--onecli-ca-file"
     cfg.onecli.caFile
+  ]
+  # Emitted only when non-"off": --onecli-dashboard off would be harmless
+  # (lab's own default) but noisy, and this matches how every other optional
+  # flag above only renders when it says something the default doesn't.
+  ++ lib.optionals (cfg.onecli.dashboard != "off") [
+    "--onecli-dashboard"
+    cfg.onecli.dashboard
+  ]
+  ++ lib.optionals (cfg.onecli.dashboardAddr != null) [
+    "--onecli-dashboard-addr"
+    cfg.onecli.dashboardAddr
+  ]
+  ++ lib.optionals (cfg.onecli.dashboardUrl != null) [
+    "--onecli-dashboard-url"
+    cfg.onecli.dashboardUrl
   ]
   ++ lib.optionals (cfg.seedUser != null) [
     "--seed-user"
@@ -354,6 +373,29 @@ in
       '';
     };
 
+    sessionCookieDomain = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "example.com";
+      description = ''
+        `Domain` attribute on lab's session cookie (--session-cookie-domain).
+        `null` (the default) omits `Domain` entirely, which makes the cookie
+        host-only — correct for every topology except
+        {option}`onecli.dashboard` = `"subdomain"`, which puts the dashboard
+        at a DIFFERENT host, `onecli.<domain>`, fronted by the operator's own
+        reverse proxy that delegates auth back to lab via forward-auth
+        (checking lab's session cookie): a host-only cookie minted for the
+        main domain would never reach that other host. Set this to the
+        PARENT domain (e.g. `example.com`, not `onecli.example.com`) only
+        when using that mode — widening a cookie's reach is a real trade, not
+        the default posture, so this stays `null` unless
+        {option}`onecli.dashboard` or {option}`onecli.dashboardUrl` names a
+        reason. A bare domain is required: no scheme, port, or path (those
+        aren't part of the cookie `Domain` attribute); a single leading dot
+        is accepted like any modern browser accepts it, but is not required.
+      '';
+    };
+
     db = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -472,6 +514,82 @@ in
           refuses to spawn a run rather than start one whose HTTPS is
           broken. Independently settable from {option}`url` /
           {option}`apiKeyFile` — no pairing requirement with those two.
+        '';
+      };
+
+      dashboard = lib.mkOption {
+        type = lib.types.enum [
+          "off"
+          "port"
+          "subdomain"
+        ];
+        default = "off";
+        example = "port";
+        description = ''
+          How the OneCLI dashboard — OneCLI's own Next.js app on its
+          dashboard/API port — is exposed through lab's own auth
+          (--onecli-dashboard). `off` (the default) exposes nothing.
+
+          `port` has lab open a SECOND listener
+          ({option}`dashboardAddr`) that reverse-proxies the whole {option}`url`
+          origin behind a lab-session gate; it needs
+          {option}`services.lab.baseUrl` set too, because an unauthenticated
+          browser hitting that listener is bounced to lab's login there. No
+          cookie configuration is needed in this mode — lab's session cookie
+          is host-scoped, not port-scoped, so it already works on the second
+          port.
+
+          `subdomain` instead has the OPERATOR's own reverse proxy front
+          `onecli.<domain>` and delegate auth back to lab via forward-auth
+          against `GET /api/v1/auth/check`; it needs
+          {option}`services.lab.sessionCookieDomain` set to the parent domain
+          so lab's cookie reaches that other host, and {option}`dashboardUrl`
+          so lab can report the browser-facing origin to its own UI.
+
+          A fourth mode — proxying the dashboard under a path prefix on lab's
+          own origin — was researched and REJECTED in ADR-0067 (no basePath
+          support upstream, and both apps claim `/settings`), so there is no
+          such mode here.
+
+          Either non-`off` mode also requires the OneCLI integration itself
+          ({option}`url` + {option}`apiKeyFile`) — lab refuses to start
+          otherwise, same as every other refusal described above.
+        '';
+      };
+
+      dashboardAddr = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = ":8443";
+        description = ''
+          Listen address for lab's SECOND listener in `dashboard = "port"`
+          mode (--onecli-dashboard-addr) — distinct from
+          {option}`services.lab.listenAddr` (lab's main listener) and from
+          {option}`url` (the proxy's upstream target in this mode: OneCLI's
+          own dashboard/API port). Required when {option}`dashboard` is
+          `"port"`; lab refuses to start otherwise. Meaningless — and
+          rejected by lab at startup — outside that mode.
+        '';
+      };
+
+      dashboardUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "https://onecli.example.com";
+        description = ''
+          Browser-facing dashboard origin (--onecli-dashboard-url). Required
+          when {option}`dashboard` is `"subdomain"`, where lab has no
+          listener of its own to derive an origin from — the operator's
+          reverse proxy fronts the dashboard on a domain only the operator
+          knows, and delegates auth back to lab (forward-auth), so lab must
+          be told what that origin is. Optional in `"port"` mode, where lab
+          would otherwise derive the browser-facing origin from
+          {option}`services.lab.baseUrl`'s host plus {option}`dashboardAddr`'s
+          port; setting this OVERRIDES that derivation, for an operator who
+          terminates TLS for the second port on a different external port
+          than the one lab listens on internally (e.g. behind a load
+          balancer that remaps ports). Rejected by lab at startup when
+          {option}`dashboard` is `"off"` — nothing is exposed for it to name.
         '';
       };
     };
@@ -732,6 +850,25 @@ in
       {
         assertion = (cfg.seedUser != null) == (seedHashSourceCount == 1);
         message = "services.lab.seedUser must be set together with exactly one of services.lab.seedPasswordHash or services.lab.seedPasswordHashFile — not both, not neither. lab itself refuses to start on this mismatch; this assertion catches a typo'd deploy at `nixos-rebuild` eval instead of after the service has already restarted.";
+      }
+      # The four services.lab.onecli.dashboard assertions below mirror lab's
+      # own startup refusals (see the option's description) — an eval-time
+      # failure here instead of a crash-looping unit after the first restart.
+      {
+        assertion = cfg.onecli.dashboard != "off" -> cfg.onecli.url != null;
+        message = "services.lab.onecli.dashboard is ${cfg.onecli.dashboard} but services.lab.onecli.url is unset — every non-\"off\" dashboard mode requires the OneCLI integration itself (services.lab.onecli.url and services.lab.onecli.apiKeyFile). lab itself refuses to start on this mismatch.";
+      }
+      {
+        assertion = cfg.onecli.dashboard == "port" -> cfg.onecli.dashboardAddr != null;
+        message = "services.lab.onecli.dashboard is \"port\" but services.lab.onecli.dashboardAddr is unset — port mode needs a listen address for lab's second, authenticated listener. lab itself refuses to start on this mismatch.";
+      }
+      {
+        assertion = cfg.onecli.dashboard == "port" -> cfg.baseUrl != null;
+        message = "services.lab.onecli.dashboard is \"port\" but services.lab.baseUrl is unset — port mode bounces unauthenticated browsers on the second listener to services.lab.baseUrl for login. lab itself refuses to start on this mismatch.";
+      }
+      {
+        assertion = cfg.onecli.dashboard == "subdomain" -> cfg.onecli.dashboardUrl != null;
+        message = "services.lab.onecli.dashboard is \"subdomain\" but services.lab.onecli.dashboardUrl is unset — subdomain mode has no listener of its own to derive a browser-facing origin from, so it must be told the origin explicitly. lab itself refuses to start on this mismatch.";
       }
       # Deliberately no assertion on container.defaultImage (null + per-repo
       # image refs is a valid deployment, ADR-0053), no key validation, no

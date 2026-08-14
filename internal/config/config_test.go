@@ -27,6 +27,10 @@ func TestParse(t *testing.T) {
 		OneCLIAPIKeyFile:     "",
 		OneCLIGatewayURL:     "",
 		OneCLICAFile:         "",
+		OneCLIDashboard:      "off",
+		OneCLIDashboardAddr:  "",
+		OneCLIDashboardURL:   "",
+		SessionCookieDomain:  "",
 		ProviderBin:          map[string]string{},
 		ProviderConfig:       map[string]string{},
 		TmuxBin:              "tmux",
@@ -614,6 +618,297 @@ func TestParse(t *testing.T) {
 			want: with(func(c *Config) {
 				c.OneCLICAFile = "/flag/onecli-ca.pem"
 			}),
+		},
+		// --- OneCLI dashboard exposure (issue #26) ---
+		{
+			name: "onecli dashboard defaults to off with all companions empty",
+			want: defaults,
+		},
+		{
+			name: "onecli-dashboard=off explicit is equivalent to the default",
+			args: []string{"--onecli-dashboard", "off"},
+			want: defaults,
+		},
+		{
+			name: "onecli-dashboard=port with a valid full config lands in Config",
+			args: []string{
+				"--onecli-dashboard", "port",
+				"--onecli-dashboard-addr", ":8443",
+				"--base-url", "https://lab.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "port"
+				c.OneCLIDashboardAddr = ":8443"
+				c.BaseURL = "https://lab.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			// The dashboard-url override is optional in port mode (it
+			// overrides the origin lab would otherwise derive from BaseURL +
+			// OneCLIDashboardAddr's port) — setting it must not upset the
+			// rest of port mode's validation.
+			name: "onecli-dashboard=port with the optional dashboard-url override lands in Config",
+			args: []string{
+				"--onecli-dashboard", "port",
+				"--onecli-dashboard-addr", ":8443",
+				"--onecli-dashboard-url", "https://dash.example.com:9443",
+				"--base-url", "https://lab.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "port"
+				c.OneCLIDashboardAddr = ":8443"
+				c.OneCLIDashboardURL = "https://dash.example.com:9443"
+				c.BaseURL = "https://lab.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-dashboard=subdomain with a valid full config lands in Config",
+			args: []string{
+				"--onecli-dashboard", "subdomain",
+				"--onecli-dashboard-url", "https://onecli.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "subdomain"
+				c.OneCLIDashboardURL = "https://onecli.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-dashboard env sets the mode",
+			args: []string{
+				"--onecli-dashboard-url", "https://onecli.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			env: map[string]string{"LAB_ONECLI_DASHBOARD": "subdomain"},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "subdomain"
+				c.OneCLIDashboardURL = "https://onecli.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-dashboard-addr env sets the address",
+			args: []string{
+				"--onecli-dashboard", "port",
+				"--base-url", "https://lab.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			env: map[string]string{"LAB_ONECLI_DASHBOARD_ADDR": ":8443"},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "port"
+				c.OneCLIDashboardAddr = ":8443"
+				c.BaseURL = "https://lab.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-dashboard-url env sets the url",
+			args: []string{
+				"--onecli-dashboard", "subdomain",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			env: map[string]string{"LAB_ONECLI_DASHBOARD_URL": "https://onecli.example.com"},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "subdomain"
+				c.OneCLIDashboardURL = "https://onecli.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "session-cookie-domain env sets the domain",
+			env:  map[string]string{"LAB_SESSION_COOKIE_DOMAIN": "example.com"},
+			want: with(func(c *Config) {
+				c.SessionCookieDomain = "example.com"
+			}),
+		},
+		{
+			// The flag wins even though its own value ("subdomain") requires
+			// different companions than the env value ("port") would — proof
+			// that the env side is never even consulted once the flag is set.
+			name: "onecli-dashboard flag beats env",
+			args: []string{
+				"--onecli-dashboard", "subdomain",
+				"--onecli-dashboard-url", "https://onecli.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			env: map[string]string{"LAB_ONECLI_DASHBOARD": "port"},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "subdomain"
+				c.OneCLIDashboardURL = "https://onecli.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-dashboard-addr flag beats env",
+			args: []string{
+				"--onecli-dashboard", "port",
+				"--onecli-dashboard-addr", ":8443",
+				"--base-url", "https://lab.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			env: map[string]string{"LAB_ONECLI_DASHBOARD_ADDR": ":9999"},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "port"
+				c.OneCLIDashboardAddr = ":8443"
+				c.BaseURL = "https://lab.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "onecli-dashboard-url flag beats env",
+			args: []string{
+				"--onecli-dashboard", "subdomain",
+				"--onecli-dashboard-url", "https://onecli.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			env: map[string]string{"LAB_ONECLI_DASHBOARD_URL": "https://wrong.example.com"},
+			want: with(func(c *Config) {
+				c.OneCLIDashboard = "subdomain"
+				c.OneCLIDashboardURL = "https://onecli.example.com"
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+			}),
+		},
+		{
+			name: "session-cookie-domain flag beats env",
+			args: []string{"--session-cookie-domain", "flag.example.com"},
+			env:  map[string]string{"LAB_SESSION_COOKIE_DOMAIN": "env.example.com"},
+			want: with(func(c *Config) {
+				c.SessionCookieDomain = "flag.example.com"
+			}),
+		},
+		{
+			// pick's fallback only fires when the flag was never set at all;
+			// an explicit empty value carries the same intent as leaving it
+			// unset, so it must still resolve to "off" rather than "".
+			name: "onecli-dashboard explicit empty string normalizes to off",
+			args: []string{"--onecli-dashboard", ""},
+			want: defaults,
+		},
+		{
+			name:    "onecli-dashboard unknown mode is rejected",
+			args:    []string{"--onecli-dashboard", "bogus"},
+			wantErr: "want one of off, port, subdomain",
+		},
+		{
+			name:    "onecli-dashboard-addr set outside port mode is dead config",
+			args:    []string{"--onecli-dashboard-addr", ":8443"},
+			wantErr: "the listen address is only used in port mode",
+		},
+		{
+			name:    "onecli-dashboard-url set while off is dead config",
+			args:    []string{"--onecli-dashboard-url", "https://onecli.example.com"},
+			wantErr: "nothing is exposed for it to name",
+		},
+		{
+			name: "onecli-dashboard=subdomain without the OneCLI integration errors",
+			args: []string{
+				"--onecli-dashboard", "subdomain",
+				"--onecli-dashboard-url", "https://onecli.example.com",
+			},
+			wantErr: "requires the OneCLI integration",
+		},
+		{
+			name: "onecli-dashboard=port without a listen address errors",
+			args: []string{
+				"--onecli-dashboard", "port",
+				"--base-url", "https://lab.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			wantErr: "requires --onecli-dashboard-addr",
+		},
+		{
+			name: "onecli-dashboard=port without a base url errors",
+			args: []string{
+				"--onecli-dashboard", "port",
+				"--onecli-dashboard-addr", ":8443",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			wantErr: "requires --base-url",
+		},
+		{
+			name: "onecli-dashboard=subdomain without the browser-facing url errors",
+			args: []string{
+				"--onecli-dashboard", "subdomain",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			wantErr: "requires --onecli-dashboard-url",
+		},
+		{
+			name: "onecli-dashboard-url must be http(s)",
+			args: []string{
+				"--onecli-dashboard", "subdomain",
+				"--onecli-dashboard-url", "ftp://onecli.example.com",
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+			},
+			wantErr: "http(s)",
+		},
+		{
+			name: "session-cookie-domain bare domain is accepted",
+			args: []string{"--session-cookie-domain", "example.com"},
+			want: with(func(c *Config) {
+				c.SessionCookieDomain = "example.com"
+			}),
+		},
+		{
+			// RFC 6265 §4.1.2.3: a single leading dot is legal and browsers
+			// ignore it, so it is accepted verbatim rather than stripped.
+			name: "session-cookie-domain leading dot is accepted",
+			args: []string{"--session-cookie-domain", ".example.com"},
+			want: with(func(c *Config) {
+				c.SessionCookieDomain = ".example.com"
+			}),
+		},
+		{
+			name:    "session-cookie-domain rejects a scheme",
+			args:    []string{"--session-cookie-domain", "https://example.com"},
+			wantErr: "want a bare domain",
+		},
+		{
+			name:    "session-cookie-domain rejects a port",
+			args:    []string{"--session-cookie-domain", "example.com:8080"},
+			wantErr: "want a bare domain",
+		},
+		{
+			name:    "session-cookie-domain rejects a path",
+			args:    []string{"--session-cookie-domain", "example.com/x"},
+			wantErr: "want a bare domain",
+		},
+		{
+			name:    "session-cookie-domain rejects embedded whitespace",
+			args:    []string{"--session-cookie-domain", "example .com"},
+			wantErr: "want a bare domain",
+		},
+		{
+			name:    "session-cookie-domain rejects a bare dot",
+			args:    []string{"--session-cookie-domain", "."},
+			wantErr: "want a bare domain",
 		},
 		// --- seed user (issue #134, hashed per issue #137) ---
 		{

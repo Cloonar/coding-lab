@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 // Defaults for the flags that have fixed defaults (path-shaped defaults
@@ -21,6 +22,19 @@ const (
 	DefaultProxyAuthHeader = "Remote-User"
 	DefaultMaxInstances    = 6
 	DefaultSessionNofile   = 16384
+	DefaultOneCLIDashboard = OneCLIDashboardOff
+)
+
+// OneCLI dashboard exposure modes (issue #26 / ADR-0067). The dashboard is
+// OneCLI's own Next.js app on its dashboard/API port, and these are the three
+// ways lab can put it in front of an operator. A fourth — proxying it under a
+// path prefix on lab's own origin — was researched and REJECTED in ADR-0067
+// (no basePath support upstream, and both apps claim /settings), so do not
+// add one here.
+const (
+	OneCLIDashboardOff       = "off"
+	OneCLIDashboardPort      = "port"
+	OneCLIDashboardSubdomain = "subdomain"
 )
 
 // aliasProviderID is the single provider id the deprecated -claude /
@@ -93,6 +107,39 @@ type Config struct {
 	// package doc comment).
 	OneCLICAFile string
 
+	// OneCLIDashboard is the resolved OneCLI dashboard exposure mode: always
+	// one of OneCLIDashboardOff, OneCLIDashboardPort, or
+	// OneCLIDashboardSubdomain after Parse — never "" (an empty flag or env
+	// value resolves to "off", same as leaving it unset; see the pick call
+	// and the comment beside it). off is the default: nothing about the
+	// dashboard is exposed, and OneCLIDashboardAddr/OneCLIDashboardURL below
+	// must both be empty in that mode. See ADR-0067 for why there are
+	// exactly three modes and not a fourth path-prefix mode.
+	OneCLIDashboard string
+	// OneCLIDashboardAddr is the listen address for lab's SECOND listener in
+	// port mode — a separately authenticated reverse proxy in front of the
+	// dashboard, distinct from Addr (lab's main listener) and from OneCLIURL
+	// (the existing address lab already uses to reach OneCLI's own
+	// dashboard/API port, and the proxy's upstream target in this mode: see
+	// the comment on OneCLIDashboardURL for why this task does not add a
+	// second OneCLI-side address). "" unless OneCLIDashboard is "port".
+	OneCLIDashboardAddr string
+	// OneCLIDashboardURL is the browser-facing dashboard origin. Required in
+	// subdomain mode, where lab has no listener of its own to derive an
+	// origin from — the operator's reverse proxy fronts the dashboard on a
+	// domain only the operator knows, and delegates auth back to lab
+	// (forward-auth), so lab must be told what that origin is. Optional in
+	// port mode, where lab would otherwise derive the browser-facing origin
+	// from BaseURL's host plus OneCLIDashboardAddr's port; setting this
+	// OVERRIDES that derivation, for the operator who terminates TLS for the
+	// second port on a different external port than the one lab listens on
+	// internally (e.g. behind a load balancer that remaps ports). This is
+	// NOT paired with OneCLIURL the way OneCLIAPIKeyFile is: the reverse-
+	// proxy target in port mode is the existing OneCLIURL, not a second
+	// setting — ADR-0067 pins the OneCLI client/address surface closed, so
+	// there is nothing here for a new setting to pair with.
+	OneCLIDashboardURL string
+
 	// ProviderBin maps a provider id to a binary-path override. A missing
 	// entry means the adapter uses its own default (a PATH lookup); config.go
 	// no longer owns any provider default (issue #78). Always non-nil after
@@ -155,6 +202,20 @@ type Config struct {
 	// exactly the issue #30 failure mode.
 	AgentURL string
 
+	// SessionCookieDomain is the Domain attribute set on lab's session
+	// cookie. "" (the default) omits Domain entirely, which makes the cookie
+	// host-only — correct for every topology except one: OneCLIDashboard
+	// subdomain mode puts the dashboard at a DIFFERENT host,
+	// onecli.<domain>, fronted by the operator's own reverse proxy which
+	// delegates auth to lab (forward-auth checking lab's session cookie); a
+	// host-only cookie scoped to lab's own host would never reach it, so
+	// that mode needs the parent domain instead. Widening a cookie's scope
+	// is a real trade-off — every host under the domain now receives it on
+	// every request — so this is never derived automatically from BaseURL
+	// or OneCLIDashboardURL, only ever set explicitly by the operator who
+	// means to make that trade.
+	SessionCookieDomain string
+
 	// SeedUser is the username of the initial operator user to seed at
 	// startup. "" means no seeding. Must be set together with a seed password
 	// hash source (SeedPasswordHash or SeedPasswordHashFile).
@@ -206,8 +267,10 @@ func (p *providerMapFlag) Set(value string) error {
 // LAB_PROVIDER_CONFIG_CLAUDE_CODE), LAB_CONTAINER_IMAGE, LAB_CONTAINER_TOOLS_IMAGE,
 // LAB_BASE_URL, LAB_AGENT_URL, LAB_SEED_USER,
 // LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE, LAB_ONECLI_URL,
-// LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL, LAB_ONECLI_CA_FILE. providerIDs
-// is the caller's list of registered provider ids: the generic per-provider
+// LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL, LAB_ONECLI_CA_FILE,
+// LAB_ONECLI_DASHBOARD, LAB_ONECLI_DASHBOARD_ADDR, LAB_ONECLI_DASHBOARD_URL,
+// LAB_SESSION_COOKIE_DOMAIN. providerIDs is the caller's list of registered
+// provider ids: the generic per-provider
 // flags are validated against it (an unknown id is a parse error), and the
 // LAB_PROVIDER_*_<ID> env forms are read only for ids it contains.
 func Parse(args []string, getenv func(string) string, providerIDs []string) (Config, error) {
@@ -226,6 +289,10 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		oneCLIGatewayURL = fs.String("onecli-gateway-url", "", "OneCLI gateway proxy URL injected into runs as HTTPS_PROXY, e.g. http://10.88.0.1:10255 — NOT host.containers.internal, which container runs pin to 127.0.0.1 (env LAB_ONECLI_GATEWAY_URL)")
 		oneCLICAFile     = fs.String("onecli-ca-file", "", "path to the PEM file holding the OneCLI gateway's interception CA certificate on the host; composed with the host's system CA bundle into a run's trust bundle (env LAB_ONECLI_CA_FILE)")
 
+		oneCLIDashboard     = fs.String("onecli-dashboard", "", "OneCLI dashboard exposure: off (default, nothing exposed), port (lab reverse-proxies it on its own authenticated listener) or subdomain (your reverse proxy fronts it and delegates auth to lab) (env LAB_ONECLI_DASHBOARD)")
+		oneCLIDashboardAddr = fs.String("onecli-dashboard-addr", "", "listen address for --onecli-dashboard=port, e.g. :8443 (env LAB_ONECLI_DASHBOARD_ADDR)")
+		oneCLIDashboardURL  = fs.String("onecli-dashboard-url", "", "browser-facing dashboard origin, e.g. https://onecli.example.com; required for --onecli-dashboard=subdomain, an optional override in port mode (env LAB_ONECLI_DASHBOARD_URL)")
+
 		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
 		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
 		prlimitBin = fs.String("prlimit", "prlimit", "prlimit binary (PATH lookup by default)")
@@ -243,6 +310,8 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 
 		baseURL  = fs.String("base-url", "", "external base URL, e.g. https://lab.example.com (env LAB_BASE_URL)")
 		agentURL = fs.String("agent-url", "", "session-facing base URL handed to labctl as LAB_URL, http(s) or unix:///abs/path; defaults to unix://<state-dir>/agent/agent.sock (env LAB_AGENT_URL)")
+
+		sessionCookieDomain = fs.String("session-cookie-domain", "", "Domain attribute for lab's session cookie, e.g. example.com; empty (default) keeps the cookie host-only (env LAB_SESSION_COOKIE_DOMAIN)")
 
 		seedUser             = fs.String("seed-user", "", "username of the initial operator user to seed at startup (env LAB_SEED_USER)")
 		seedPasswordHash     = fs.String("seed-password-hash", "", "PHC-encoded argon2id hash of the initial operator password, given inline (env LAB_SEED_PASSWORD_HASH)")
@@ -438,6 +507,76 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 	// OneCLICAFile refusal lives there too (internal/instance), not in this
 	// pure function.
 	cfg.OneCLICAFile = pick("onecli-ca-file", *oneCLICAFile, "LAB_ONECLI_CA_FILE", "")
+
+	// --- OneCLI dashboard exposure (issue #26 / ADR-0067) -------------------
+	// Resolved immediately after the OneCLI REST/gateway/CA block above,
+	// because the validation below reads cfg.OneCLIURL (rule 4) and
+	// cfg.BaseURL (rule 6), both already settled by this point (BaseURL at
+	// the top of Parse, OneCLIURL just above).
+	cfg.OneCLIDashboard = pick("onecli-dashboard", *oneCLIDashboard, "LAB_ONECLI_DASHBOARD", OneCLIDashboardOff)
+	if cfg.OneCLIDashboard == "" {
+		// pick's fallback only fires when the flag was never set at all, so an
+		// explicit --onecli-dashboard="" would otherwise slip through here as
+		// "" rather than "off" — the same intent as leaving it unset, so fold
+		// it in too.
+		cfg.OneCLIDashboard = OneCLIDashboardOff
+	}
+	cfg.OneCLIDashboardAddr = pick("onecli-dashboard-addr", *oneCLIDashboardAddr, "LAB_ONECLI_DASHBOARD_ADDR", "")
+	// --onecli-dashboard-url is deliberately NOT part of a pairing rule with
+	// --onecli-url the way --onecli-api-key-file is paired with it above: the
+	// reverse-proxy target in port mode is the existing --onecli-url — there
+	// is no second OneCLI-side address to introduce, ADR-0067 pins that
+	// surface closed — so this setting only ever names a BROWSER-facing
+	// origin (the override of the derived-from-BaseURL default in port mode,
+	// or the required origin in subdomain mode). Its own presence rules are
+	// enforced below, on their own terms.
+	cfg.OneCLIDashboardURL = pick("onecli-dashboard-url", *oneCLIDashboardURL, "LAB_ONECLI_DASHBOARD_URL", "")
+
+	switch cfg.OneCLIDashboard {
+	case OneCLIDashboardOff, OneCLIDashboardPort, OneCLIDashboardSubdomain:
+		// recognized
+	default:
+		return Config{}, fmt.Errorf("--onecli-dashboard %q: want one of off, port, subdomain", cfg.OneCLIDashboard)
+	}
+	if cfg.OneCLIDashboardAddr != "" && cfg.OneCLIDashboard != OneCLIDashboardPort {
+		return Config{}, fmt.Errorf("--onecli-dashboard-addr is set but --onecli-dashboard is %q: the listen address is only used in port mode", cfg.OneCLIDashboard)
+	}
+	if cfg.OneCLIDashboardURL != "" && cfg.OneCLIDashboard == OneCLIDashboardOff {
+		return Config{}, fmt.Errorf("--onecli-dashboard-url is set but --onecli-dashboard is off: nothing is exposed for it to name")
+	}
+	if cfg.OneCLIDashboard != OneCLIDashboardOff && cfg.OneCLIURL == "" {
+		return Config{}, fmt.Errorf("--onecli-dashboard=%s requires the OneCLI integration: set --onecli-url and --onecli-api-key-file", cfg.OneCLIDashboard)
+	}
+	if cfg.OneCLIDashboard == OneCLIDashboardPort && cfg.OneCLIDashboardAddr == "" {
+		return Config{}, fmt.Errorf("--onecli-dashboard=port requires --onecli-dashboard-addr, the address lab's authenticated dashboard proxy listens on")
+	}
+	if cfg.OneCLIDashboard == OneCLIDashboardPort && cfg.BaseURL == "" {
+		return Config{}, fmt.Errorf("--onecli-dashboard=port requires --base-url, the origin the proxy sends unauthenticated browsers to for login")
+	}
+	if cfg.OneCLIDashboard == OneCLIDashboardSubdomain && cfg.OneCLIDashboardURL == "" {
+		return Config{}, fmt.Errorf("--onecli-dashboard=subdomain requires --onecli-dashboard-url, the browser-facing origin your reverse proxy fronts (e.g. https://onecli.example.com)")
+	}
+	if cfg.OneCLIDashboardURL != "" {
+		if err := validateHTTPURL("--onecli-dashboard-url", cfg.OneCLIDashboardURL); err != nil {
+			return Config{}, err
+		}
+	}
+
+	cfg.SessionCookieDomain = pick("session-cookie-domain", *sessionCookieDomain, "LAB_SESSION_COOKIE_DOMAIN", "")
+	if cfg.SessionCookieDomain != "" {
+		// A cookie Domain is a bare domain, never an origin: no scheme (it's
+		// not a URL), no port (cookies don't carry one), no path (Domain and
+		// Path are separate cookie attributes). A single leading dot
+		// (.example.com) IS legal, per RFC 6265 §4.1.2.3 — modern browsers
+		// ignore it and match identically to the dotless form — so it is
+		// accepted verbatim below, never stripped: normalizing it here would
+		// just be extra code reproducing what the browser already does. "."
+		// alone, though, names no domain at all, so it is rejected like any
+		// value carrying a scheme, port, or path.
+		if cfg.SessionCookieDomain == "." || strings.ContainsAny(cfg.SessionCookieDomain, "/:") || strings.ContainsFunc(cfg.SessionCookieDomain, unicode.IsSpace) {
+			return Config{}, fmt.Errorf("--session-cookie-domain %q: want a bare domain like example.com, with no scheme, port or path", cfg.SessionCookieDomain)
+		}
+	}
 
 	return cfg, nil
 }

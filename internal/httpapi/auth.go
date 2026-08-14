@@ -263,10 +263,21 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request, u store.U
 	if err := s.store.CreateWebSession(r.Context(), ws); err != nil {
 		return err
 	}
+	// Domain is s.sessionCookieDomain, which is "" in every topology but
+	// --onecli-dashboard=subdomain (issue #26). Empty omits the attribute
+	// entirely, leaving the cookie host-only — the narrower default, and the
+	// right one whenever nothing else under the parent domain needs it.
+	//
+	// Widening the Domain does NOT weaken SameSite, and Strict must stay:
+	// sibling subdomains share a registrable domain, so lab.example.com and
+	// onecli.example.com are SAME-site, and a Strict cookie rides along to both.
+	// Nobody has to relax this to Lax to make subdomain mode work — doing so
+	// would trade a real CSRF property for nothing.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
+		Domain:   s.sessionCookieDomain,
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -276,11 +287,26 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request, u store.U
 }
 
 // clearSessionCookie expires the session cookie on the client.
+//
+// The Domain here is load-bearing, not symmetry for its own sake, and it is
+// exactly the kind of line a later reader "simplifies" away. A browser
+// replaces (and so deletes) a stored cookie only when the expiring Set-Cookie
+// matches it on name, Path AND Domain (RFC 6265 §5.3); an expiring cookie with
+// no Domain attribute is a *host-only* cookie, a different cookie, and it lands
+// beside the live parent-domain one instead of overwriting it. In subdomain
+// mode that turns logout into a no-op on the client: the browser keeps
+// attaching the session cookie to every request to the domain and every host
+// under it. handleLogout also deletes the session row, so today the leftover
+// value is already dead server-side — but the promise logout makes is that the
+// credential is gone from the client too, and any future clear path that does
+// not also delete the row (a re-auth, an expiry sweep) would turn this gap into
+// a live session an operator believes they ended.
 func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
+		Domain:   s.sessionCookieDomain,
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
