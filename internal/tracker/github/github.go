@@ -21,6 +21,14 @@
 //     label (ADR-0014 parity).
 //   - Pagination follows the Link rel="next" header (per_page=100), with the
 //     same maxPages loud-truncation guard as the Forgejo client.
+//   - Job logs are an Actions-API read rather than a web route: a check run
+//     carries no job id, so CheckLog joins the matched check run to its
+//     Actions job through the workflow-run and job listings for the head SHA,
+//     then GETs actions/jobs/{job_id}/logs — which answers a REDIRECT to a
+//     short-lived signed URL on a foreign host, followed explicitly here with
+//     this client's credentials stripped the moment a hop leaves the API host.
+//     The Forgejo sibling instead reads a per-attempt web route named by a
+//     commit status's target_url.
 //   - A rate-limited 403/429 (X-RateLimit-Remaining: 0 or Retry-After) unwraps
 //     to tracker.ErrRateLimited; a 404 unwraps to tracker.ErrNotFound.
 package github
@@ -32,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"sort"
@@ -64,6 +73,21 @@ const (
 
 	// apiVersion is the pinned GitHub REST API version header value.
 	apiVersion = "2022-11-28"
+
+	// actionsAppSlug is the app.slug GitHub reports on check runs created by
+	// the built-in GitHub Actions app. It is what tells CheckLog whether a
+	// matched check run is an Actions JOB — whose log GitHub stores and will
+	// serve — or some other GitHub App's verdict row, which has no log behind
+	// it to fetch at all.
+	actionsAppSlug = "github-actions"
+
+	// maxLogRedirects bounds the redirect chain the raw job-log fetch follows.
+	// The Actions job-log route answers exactly one redirect to a short-lived
+	// signed blob URL in practice; a handful of hops leaves room for a storage
+	// backend that bounces once more, while a chain longer than this is a shape
+	// surprise (or a loop), not a route worth chasing further — it ends as a
+	// loud tracker.ErrLogAdapterMismatch.
+	maxLogRedirects = 5
 )
 
 // Client is a GitHub REST client scoped to a single {owner}/{repo}. It
@@ -166,12 +190,24 @@ type ghPull struct {
 // (commits/{sha}/check-runs) — a GitHub Actions workflow job, or any other
 // GitHub App's check run, against a commit. This is the ONLY place Actions
 // results appear: the legacy combined-status API below cannot see them.
+//
+// ID and App exist for CheckLog, not for Checks' mapping. The id is the JOIN
+// KEY onto the Actions job that owns the log: a check run carries no job id,
+// but every Actions job carries a check_run_url ending in one, so matching on
+// the id — never on the job name — is what keeps two same-named jobs from
+// different workflows on one commit from resolving to the wrong log. The app
+// slug is what says whether there is a log to fetch at all: only the Actions
+// app's check runs have a stored job log behind them (actionsAppSlug).
 type ghCheckRun struct {
+	ID         int64  `json:"id"`
 	Name       string `json:"name"`
 	Status     string `json:"status"`     // queued|in_progress|completed|... — not "completed" ⇒ CheckPending
 	Conclusion string `json:"conclusion"` // set only once status=="completed"
 	HTMLURL    string `json:"html_url"`
-	Output     struct {
+	App        struct {
+		Slug string `json:"slug"` // "github-actions" for Actions; absent/empty ⇒ no fetchable log
+	} `json:"app"`
+	Output struct {
 		Title string `json:"title"`
 	} `json:"output"`
 }
@@ -201,6 +237,46 @@ type ghStatus struct {
 type ghStatusPage struct {
 	State    string     `json:"state"`
 	Statuses []ghStatus `json:"statuses"`
+}
+
+// ghWorkflowRun is one row from the Actions workflow-runs list
+// (actions/runs?head_sha={sha}) — one workflow's run against a commit. It is
+// decoded down to what CheckLog's check-run-to-job join needs: the run id, to
+// address the run's jobs, and its rerun counter, which stands in as the
+// served attempt when a job row does not carry its own.
+type ghWorkflowRun struct {
+	ID         int64 `json:"id"`
+	RunAttempt int   `json:"run_attempt"` // 1-based rerun counter of the workflow run
+}
+
+// ghWorkflowRunsPage is one page of the Actions workflow-runs response: like
+// the Checks API, the rows are nested under a field (workflow_runs) rather
+// than being a bare JSON array, so this endpoint goes through fetchNested.
+type ghWorkflowRunsPage struct {
+	TotalCount   int             `json:"total_count"`
+	WorkflowRuns []ghWorkflowRun `json:"workflow_runs"`
+}
+
+// ghJob is one row from a workflow run's jobs list
+// (actions/runs/{run_id}/jobs) — the unit whose log the Actions API serves,
+// addressed by ID. CheckRunURL is the back-reference onto the Checks API row
+// the job published (…/check-runs/{check_run_id}); its last path segment is
+// the id CheckLog joins on, since a check run carries no job id in the other
+// direction. Name is decoded for completeness but deliberately NOT matched on:
+// two workflows may publish same-named jobs against one commit, and only the
+// id disambiguates them.
+type ghJob struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	RunAttempt  int    `json:"run_attempt"` // the attempt this job belongs to; 0 ⇒ fall back to the run's
+	CheckRunURL string `json:"check_run_url"`
+}
+
+// ghJobsPage is one page of a workflow run's jobs response: the rows are
+// nested under jobs, so this endpoint goes through fetchNested too.
+type ghJobsPage struct {
+	TotalCount int     `json:"total_count"`
+	Jobs       []ghJob `json:"jobs"`
 }
 
 // --- Tracker methods -------------------------------------------------------
@@ -428,11 +504,11 @@ func (c *Client) Checks(ctx context.Context, number int) ([]tracker.Check, error
 	}
 	sha := gh.Head.Sha
 
-	runs, err := fetchNested(ctx, c, c.checkRunsPath(sha), func(p ghCheckRunsPage) []ghCheckRun { return p.CheckRuns })
+	runs, err := fetchNested(ctx, c, c.checkRunsPath(sha), nil, func(p ghCheckRunsPage) []ghCheckRun { return p.CheckRuns })
 	if err != nil {
 		return nil, err
 	}
-	statuses, err := fetchNested(ctx, c, c.statusPath(sha), func(p ghStatusPage) []ghStatus { return p.Statuses })
+	statuses, err := fetchNested(ctx, c, c.statusPath(sha), nil, func(p ghStatusPage) []ghStatus { return p.Statuses })
 	if err != nil {
 		return nil, err
 	}
@@ -447,13 +523,208 @@ func (c *Client) Checks(ctx context.Context, number int) ([]tracker.Check, error
 	return out, nil
 }
 
-// CheckLog is the deferred job-log surface on the GitHub backend: proxying
-// GitHub Actions job logs is a server-credentialed read this slice does not
-// implement yet (ADR-0032's deferred logs land first on the Forgejo binding),
-// so rather than fake output it wraps tracker.ErrUnsupported naming the verb —
-// the built-in tracker's refusal style — distinct from a forge failure.
+// CheckLog fetches the raw log of the named check on pull `number`'s CURRENT
+// head commit by proxying the GitHub Actions job-log route (ADR-0032's
+// deferred job-log surface, landed on the Forgejo binding first). It opens
+// exactly as Checks does — a fresh GET of the pull for head.sha, so a push or
+// rebase that landed moments before the read is reflected and an unknown
+// number fails right there with tracker.ErrNotFound — then reads the check-run
+// rows for that SHA and resolves `name` against them BEFORE any log is
+// fetched:
+//
+//   - exactly one check run carries the name → that row is the log's subject;
+//   - SEVERAL check runs carry it → tracker.ErrUnsupported naming how many and
+//     their check-run ids. Checks() reports both rows and the name is the only
+//     selector this seam has, so nothing tells lab which log was meant;
+//     serving either one is precisely the silent wrong-log serve this method
+//     refuses to risk, so it fails loud instead of guessing;
+//   - NO check run carries it → and only then are the legacy combined-status
+//     rows read. Skipping that second request on the check-run happy path is
+//     deliberate: there it is pure cost. A status row with that context is an
+//     external CI service's (many predate Checks), whose output GitHub never
+//     stored and so cannot serve — tracker.ErrUnsupported naming the check and
+//     its target_url, the same "not this forge's to serve" stance the Forgejo
+//     sibling takes on an external target_url. No row of either kind is
+//     tracker.ErrUnknownCheck naming the context.
+//
+// The matched check run must be the Actions app's (app.slug ==
+// actionsAppSlug). Another GitHub App's check run — or one with no app at all
+// — is a verdict GitHub stores, not a job whose output it keeps, so there is
+// no log to fetch and that is tracker.ErrUnsupported naming the check and the
+// app slug.
+//
+// Actions addresses logs by JOB id, which a check run does not carry, so the
+// run is joined to its job through the Actions API: the workflow runs on the
+// head SHA (actions/runs?head_sha=…), then each run's jobs
+// (actions/runs/{run_id}/jobs?filter=latest), taking the job whose
+// check_run_url ends in the matched check run's id. The join is on that id and
+// never on the job NAME — two same-named jobs in different workflows on one
+// commit is exactly the case a name match would resolve wrongly and silently.
+// An Actions check run that no job on the head points back at is the
+// adapter-shape surprise tracker.ErrLogAdapterMismatch exists for.
+//
+// The log itself is GET actions/jobs/{job_id}/logs, which answers a redirect
+// to a short-lived SIGNED URL on a foreign host; doRawLog follows that
+// explicitly, strips this client's credentials on any hop leaving the API
+// host, and never names the signed URL — itself a credential — in an error. A
+// still-running job's route answers 200 with the partial log captured so far,
+// so an in-flight job yields what it has and NEVER an error for "not finished
+// yet": that is the seam's contract pin, not an accident of this route.
+//
+// Attempt semantics are MINIMUM VIABLE, deliberately: lab serves the LATEST
+// attempt's job log only (filter=latest on the jobs listing), with Attempt
+// filled from the job's run_attempt — its workflow run's when the job row
+// carries none — and performs no older-attempt fallback walk, so FallbackFrom
+// and FallbackStatus stay zero. The Forgejo sibling's probe loop exists for a
+// specific Forgejo bug (a newer attempt 500s while an older one still serves,
+// issue #259) that GitHub is not known to have; per-attempt reads do exist
+// under actions/runs/{run_id}/attempts/{k}/… if that ever changes. The
+// consequence is the safe half of the trade: because this backend never serves
+// an older attempt, it can never pass a fallback off as the latest.
+//
+// The forge token lives only in a request header and so reaches none of these
+// errors, in keeping with every other call on this client.
 func (c *Client) CheckLog(ctx context.Context, number int, name string) (tracker.CheckLogResult, error) {
-	return tracker.CheckLogResult{}, fmt.Errorf("%w: check logs on the GitHub backend", tracker.ErrUnsupported)
+	var gh ghPull
+	if _, err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &gh); err != nil {
+		return tracker.CheckLogResult{}, err // 404 → tracker.ErrNotFound, same as Checks
+	}
+	sha := gh.Head.Sha
+
+	runs, err := fetchNested(ctx, c, c.checkRunsPath(sha), nil, func(p ghCheckRunsPage) []ghCheckRun { return p.CheckRuns })
+	if err != nil {
+		return tracker.CheckLogResult{}, err
+	}
+	var matched []ghCheckRun
+	for _, r := range runs {
+		if r.Name == name {
+			matched = append(matched, r)
+		}
+	}
+	switch {
+	case len(matched) > 1:
+		ids := make([]string, 0, len(matched))
+		for _, r := range matched {
+			ids = append(ids, strconv.FormatInt(r.ID, 10))
+		}
+		return tracker.CheckLogResult{}, fmt.Errorf("%w: check %q is ambiguous on head %s — %d check runs carry that name (check-run ids %s) and the name is the only selector this seam has, so lab refuses to guess which log you meant",
+			tracker.ErrUnsupported, name, sha, len(matched), strings.Join(ids, ", "))
+	case len(matched) == 0:
+		// Only now is the legacy surface worth a request: on the check-run happy
+		// path above it can contribute nothing, so it is never asked.
+		statuses, err := fetchNested(ctx, c, c.statusPath(sha), nil, func(p ghStatusPage) []ghStatus { return p.Statuses })
+		if err != nil {
+			return tracker.CheckLogResult{}, err
+		}
+		for _, s := range statuses {
+			if s.Context == name {
+				return tracker.CheckLogResult{}, fmt.Errorf("%w: check %q is a legacy commit status reported by an external CI service (target_url %q) — GitHub never stored that output and so has no log to serve",
+					tracker.ErrUnsupported, name, s.TargetURL)
+			}
+		}
+		return tracker.CheckLogResult{}, fmt.Errorf("check %q: %w", name, tracker.ErrUnknownCheck)
+	}
+
+	run := matched[0]
+	if run.App.Slug != actionsAppSlug {
+		return tracker.CheckLogResult{}, fmt.Errorf("%w: check %q is a check run of GitHub App %q, not %q — a non-Actions app's check run is a verdict, not a job, so there is no log for lab to fetch",
+			tracker.ErrUnsupported, name, appSlugLabel(run.App.Slug), actionsAppSlug)
+	}
+
+	job, attempt, err := c.actionsJobForCheckRun(ctx, sha, name, run.ID)
+	if err != nil {
+		return tracker.CheckLogResult{}, err
+	}
+	body, err := c.doRawLog(ctx, job.ID, name)
+	if err != nil {
+		return tracker.CheckLogResult{}, err
+	}
+	// FallbackFrom/FallbackStatus stay zero: this backend serves the latest
+	// attempt only, so there is never an older one it fell back to.
+	return tracker.CheckLogResult{Log: body, Attempt: attempt}, nil
+}
+
+// appSlugLabel renders a check run's app slug for an error message, naming the
+// absent-app case in words instead of printing an empty string the reader
+// would have to interpret.
+func appSlugLabel(slug string) string {
+	if slug == "" {
+		return "(none)"
+	}
+	return slug
+}
+
+// actionsJobForCheckRun resolves a matched Actions check run to the Actions
+// job whose log lab will fetch, plus the attempt that job belongs to. GitHub
+// exposes no check-run-to-job lookup, so the join runs the other way: every
+// workflow run on the head SHA is listed, then each run's jobs, and the job
+// whose check_run_url names checkRunID wins — the FIRST such job, since a
+// check run is published by exactly one job. Matching on that id rather than
+// on the job name is the whole point: two workflows publishing same-named jobs
+// against one commit is ordinary, and a name match would silently serve
+// whichever one it walked into first.
+//
+// The jobs listing is filter=latest, so only the latest attempt's jobs are
+// considered — CheckLog's deliberate minimum-viable attempt semantics. The
+// returned attempt is the job's own run_attempt, falling back to its parent
+// workflow run's when the job row carries none (an older API version, or a
+// shape that predates the field).
+//
+// Walking every run and finding no job is the adapter-shape surprise
+// tracker.ErrLogAdapterMismatch is for: the check run says GitHub Actions, yet
+// nothing on the Actions side points back at it, which is what a drifted join
+// looks like. The error counts what was walked so the reader can see the
+// search was exhaustive, not a near miss.
+func (c *Client) actionsJobForCheckRun(ctx context.Context, sha, name string, checkRunID int64) (ghJob, int, error) {
+	runQuery := url.Values{}
+	runQuery.Set("head_sha", sha)
+	wruns, err := fetchNested(ctx, c, c.actionsRunsPath(), runQuery, func(p ghWorkflowRunsPage) []ghWorkflowRun { return p.WorkflowRuns })
+	if err != nil {
+		return ghJob{}, 0, err
+	}
+	jobQuery := url.Values{}
+	jobQuery.Set("filter", "latest")
+	jobsWalked := 0
+	for _, wr := range wruns {
+		jobs, err := fetchNested(ctx, c, c.actionsRunJobsPath(wr.ID), jobQuery, func(p ghJobsPage) []ghJob { return p.Jobs })
+		if err != nil {
+			return ghJob{}, 0, err
+		}
+		jobsWalked += len(jobs)
+		for _, j := range jobs {
+			if id, ok := checkRunIDFromURL(j.CheckRunURL); !ok || id != checkRunID {
+				continue
+			}
+			attempt := j.RunAttempt
+			if attempt == 0 {
+				attempt = wr.RunAttempt
+			}
+			return j, attempt, nil
+		}
+	}
+	return ghJob{}, 0, fmt.Errorf("%w: check %q (check run %d) is a %s check run, but none of the %d Actions job(s) across the %d workflow run(s) on head %s points back at it — lab's GitHub log adapter does not match this API version; file an issue on coding-lab, then debug from local repro",
+		tracker.ErrLogAdapterMismatch, name, checkRunID, actionsAppSlug, jobsWalked, len(wruns), sha)
+}
+
+// checkRunIDFromURL extracts the check-run id from an Actions job's
+// check_run_url (…/repos/{owner}/{repo}/check-runs/{id}) by parsing its LAST
+// path segment. Only that segment is trusted — the host and prefix vary
+// between github.com and a GHE instance, so pattern-matching the whole URL
+// would couple the join to a deployment shape it does not care about. A URL
+// that does not parse, or whose last segment is not a number, reports ok=false
+// and simply does not match any check run (CheckLog turns an exhausted walk
+// into tracker.ErrLogAdapterMismatch, never a wrong-log serve).
+func checkRunIDFromURL(raw string) (int64, bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return 0, false
+	}
+	last := u.Path[strings.LastIndex(u.Path, "/")+1:]
+	id, err := strconv.ParseInt(last, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
 }
 
 // CreatePull opens a pull request from head into base and returns the created
@@ -822,6 +1093,22 @@ func (c *Client) statusPath(sha string) string {
 	return c.repoPath("/commits/" + url.PathEscape(sha) + "/status")
 }
 
+// actionsRunsPath, actionsRunJobsPath, and actionsJobLogsPath are CheckLog's
+// three Actions-API routes: the workflow runs on a commit (filtered by a
+// head_sha query, not a path segment), one run's jobs, and one job's log blob.
+// The ids come from GitHub's own responses rather than operator input, but
+// they are rendered as plain decimals, so nothing escapable can enter the path
+// (repoPath escapes owner/repo the same way it does for every other route).
+func (c *Client) actionsRunsPath() string { return c.repoPath("/actions/runs") }
+
+func (c *Client) actionsRunJobsPath(runID int64) string {
+	return c.repoPath("/actions/runs/" + strconv.FormatInt(runID, 10) + "/jobs")
+}
+
+func (c *Client) actionsJobLogsPath(jobID int64) string {
+	return c.repoPath("/actions/jobs/" + strconv.FormatInt(jobID, 10) + "/logs")
+}
+
 // --- mapping ---------------------------------------------------------------
 
 // derivePullState collapses GitHub's (state, merged) into the three-valued
@@ -1061,19 +1348,26 @@ func fetchPages[T any](ctx context.Context, c *Client, path string, base url.Val
 
 // fetchNested walks a paginated GitHub endpoint whose response body is a JSON
 // OBJECT with the page's rows nested under one field (the Checks API's
-// check_runs, the legacy status API's statuses) — unlike fetchPages, which
-// assumes a bare JSON array and so cannot decode either of these endpoints.
-// It otherwise follows the exact same convention: per_page=pageLimit, walk
-// while the Link header advertises rel="next", with the same maxPages
-// loud-truncation guard as fetchPages against a pathological or
-// non-paginating endpoint.
-func fetchNested[P any, T any](ctx context.Context, c *Client, path string, rows func(P) []T) ([]T, error) {
+// check_runs, the legacy status API's statuses, the Actions API's
+// workflow_runs and jobs) — unlike fetchPages, which assumes a bare JSON array
+// and so cannot decode any of these endpoints. It otherwise follows the exact
+// same convention: the caller's base query merged under per_page=pageLimit and
+// the page cursor (fetchPages' merge, verbatim — a base is what carries the
+// Actions listings' head_sha and filter=latest), walking while the Link header
+// advertises rel="next", with the same maxPages loud-truncation guard as
+// fetchPages against a pathological or non-paginating endpoint.
+func fetchNested[P any, T any](ctx context.Context, c *Client, path string, base url.Values, rows func(P) []T) ([]T, error) {
 	var all []T
 	for page := 1; ; page++ {
 		if page > maxPages {
 			return nil, fmt.Errorf("github GET %s: listing exceeds %d pages; refusing to silently truncate", path, maxPages)
 		}
 		q := url.Values{}
+		for k, vs := range base {
+			for _, v := range vs {
+				q.Add(k, v)
+			}
+		}
 		q.Set("per_page", strconv.Itoa(pageLimit))
 		q.Set("page", strconv.Itoa(page))
 		var body P
@@ -1177,6 +1471,154 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 	}
 	return resp.Header, nil
+}
+
+// setLogHeaders applies this client's API credential and pinned GitHub
+// headers to a request — the same trio do() sets. It exists because the raw
+// log fetch has to make that choice PER HOP: the credential goes on a request
+// aimed at the API host and on nothing else.
+func (c *Client) setLogHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", apiVersion)
+}
+
+// doRawLog GETs the Actions job-log route and returns the log bytes verbatim —
+// the one call in this client that reads a body without JSON-decoding it. It
+// mirrors do()'s hygiene (the same per-request timeout, the same Bearer and
+// pinned-API-version headers on the first hop, a token that lives ONLY in that
+// header) and adds the two things that route needs and no other call does.
+//
+// First, the redirect walk. GitHub answers this route with a redirect to a
+// short-lived SIGNED URL on a foreign blob host, so the hops are followed
+// EXPLICITLY here: a shallow copy of c.httpClient gets a CheckRedirect that
+// returns http.ErrUseLastResponse, which is why the shared client itself is
+// never touched — its redirect behavior belongs to every other call on this
+// client. Each Location is resolved against the current request URL (a
+// relative Location is legal) and followed up to maxLogRedirects hops; a 3xx
+// with no usable Location, or one hop too many, is a shape surprise and ends
+// as tracker.ErrLogAdapterMismatch. On any hop whose host differs from the API
+// host, the Authorization and GitHub-specific headers are DROPPED — Go's own
+// redirect rule, and the security pin of this route: the forge token must
+// never reach the signed-URL host.
+//
+// Second, the silence. The signed URL is itself a credential — anyone holding
+// it can read the log for as long as it lives — so it must never appear in an
+// error, a log line, or anywhere else. Every error out of this path names the
+// API route (the actions/jobs/{job_id}/logs path) and the status, and NEVER
+// the redirect target, not even to say it was unparseable. The forge token is
+// under the same ban and is structurally incapable of leaking here: it only
+// ever exists as a request header value.
+func (c *Client) doRawLog(ctx context.Context, jobID int64, name string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	path := c.actionsJobLogsPath(jobID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("github GET %s: build request: %w", path, err)
+	}
+	c.setLogHeaders(req)
+	apiHost := req.URL.Host
+
+	client := *c.httpClient // shallow copy: never mutate the shared client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	for hops := 0; ; hops++ {
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("github GET %s: %w", path, err)
+		}
+		if resp.StatusCode < 300 || resp.StatusCode > 399 {
+			return readRawLog(path, name, resp)
+		}
+		location := resp.Header.Get("Location")
+		_ = resp.Body.Close()
+		if hops >= maxLogRedirects {
+			return nil, fmt.Errorf("%w: GET %s still redirected (status %d) after %d hops for check %q — lab's GitHub log adapter does not match this API version; file an issue on coding-lab, then debug from local repro",
+				tracker.ErrLogAdapterMismatch, path, resp.StatusCode, maxLogRedirects, name)
+		}
+		if location == "" {
+			return nil, fmt.Errorf("%w: GET %s answered %d with no Location header for check %q — lab's GitHub log adapter does not match this API version; file an issue on coding-lab, then debug from local repro",
+				tracker.ErrLogAdapterMismatch, path, resp.StatusCode, name)
+		}
+		ref, err := url.Parse(location)
+		if err != nil {
+			// The Location is (or would be) the signed URL: report that it did not
+			// parse, never what it said.
+			return nil, fmt.Errorf("%w: GET %s answered %d with an unparseable Location header for check %q — lab's GitHub log adapter does not match this API version; file an issue on coding-lab, then debug from local repro",
+				tracker.ErrLogAdapterMismatch, path, resp.StatusCode, name)
+		}
+		target := req.URL.ResolveReference(ref)
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("github GET %s: build redirect request: %w", path, err)
+		}
+		if strings.EqualFold(target.Host, apiHost) {
+			c.setLogHeaders(req) // still the API: same call, same credential
+		}
+		// Otherwise the hop leaves the API host and carries NO credential.
+	}
+}
+
+// readRawLog classifies the final (non-redirect) answer of the job-log route
+// and reads the log body on success. It closes the response body and, like
+// every error on this path, names the API route and the status — never the
+// signed URL that served them.
+//
+// A 200 must look like a log blob. The accept-set is deliberately wider than
+// the Forgejo sibling's strict text/plain: the signed BLOB host, not GitHub's
+// API, sets the Content-Type there, and it legitimately answers
+// application/octet-stream or omits the header entirely, so text/plain,
+// application/octet-stream, and an absent/empty type all count as the log.
+// Anything else at 200 — text/html for a login or error page, say — is a shape
+// surprise, because a body lab would hand an agent as "the log" must not be a
+// web page. The rest of the classification:
+//
+//   - 5xx → tracker.ErrLogUpstream naming the route and the raw status. GitHub
+//     failed to serve; lab's adapter asked correctly, and the reader should
+//     retry rather than debug lab (issue #259's distinction, mirrored from the
+//     Forgejo sibling's checkLogUpstreamErr).
+//   - 403/429 → the ordinary newStatusError classification, so a THROTTLED
+//     call unwraps to tracker.ErrRateLimited exactly like every other op on
+//     this client, while a plain non-throttled 403 (a token that cannot read
+//     this repo's Actions) stays an ordinary upstream error.
+//   - 404 → tracker.ErrLogAdapterMismatch, with an honest DUAL-cause message:
+//     most often GitHub simply has no log blob for that job (Actions logs
+//     expire, and a job that never started never produced one), and only maybe
+//     is it lab's adapter having drifted from this API version. It is
+//     deliberately NOT routed through newStatusError: that would unwrap to
+//     tracker.ErrNotFound, which on this seam means "no such pull request".
+//   - anything else → tracker.ErrLogAdapterMismatch naming the status.
+func readRawLog(path, name string, resp *http.Response) ([]byte, error) {
+	defer func() { _ = resp.Body.Close() }()
+
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+		switch mediaType {
+		case "", "text/plain", "application/octet-stream":
+		default:
+			return nil, fmt.Errorf("%w: GET %s answered 200 %q for check %q — that is not a log blob (an HTML login or error page answers this way); lab's GitHub log adapter does not match this API version; file an issue on coding-lab, then debug from local repro",
+				tracker.ErrLogAdapterMismatch, path, mediaType, name)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("github GET %s: read body: %w", path, err)
+		}
+		return body, nil
+	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
+		return nil, fmt.Errorf("%w: GET %s answered %d for check %q — GitHub failed to serve this log; this is a forge-side error, not a lab adapter mismatch",
+			tracker.ErrLogUpstream, path, resp.StatusCode, name)
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
+		return nil, newStatusError(http.MethodGet, path, resp)
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, fmt.Errorf("%w: GET %s answered 404 for check %q — GitHub has no log blob for this job: Actions logs expire, and a job that never started has none. If the job is recent and did run, lab's GitHub log adapter may instead not match this API version; file an issue on coding-lab, then debug from local repro",
+			tracker.ErrLogAdapterMismatch, path, name)
+	default:
+		return nil, fmt.Errorf("%w: GET %s answered %d for check %q — lab's GitHub log adapter does not match this API version; file an issue on coding-lab, then debug from local repro",
+			tracker.ErrLogAdapterMismatch, path, resp.StatusCode, name)
+	}
 }
 
 // statusError is a non-2xx GitHub answer: the diagnostic line do() always

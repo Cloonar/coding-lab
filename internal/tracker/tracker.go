@@ -103,9 +103,10 @@ var ErrUnknownCheck = errors.New("tracker: no check with that context on the pul
 // changed under a forge upgrade. It is deliberately loud: an adapter that no
 // longer matches the forge must fail with an actionable message (file an issue,
 // then debug from a local repro), NEVER degrade to an empty or partial success
-// a reading agent would mistake for a job that simply produced no output. Only
-// the Forgejo log backend produces it; the wrapping error names the route and
-// the answer it got, never the forge token.
+// a reading agent would mistake for a job that simply produced no output. Both
+// forge log backends produce it; the wrapping error names the route and the
+// answer it got, never the forge token — and on GitHub never the short-lived
+// signed URL that route redirects to, which is itself a credential.
 //
 // Shape is the whole of its application, narrowed deliberately (issue #259): a
 // 200 that is not text/plain (an HTML login page), a 404 on attempt 1, a
@@ -113,6 +114,19 @@ var ErrUnknownCheck = errors.New("tracker: no check with that context on the pul
 // 200/404/5xx, and the attempt-probe cap walked without its terminating 404.
 // A 5xx is NOT one of these — the route is exactly where the adapter expects
 // it and the forge simply failed to answer, which is ErrLogUpstream.
+//
+// On GitHub the same sentinel covers that binding's own shape surprises on the
+// Actions job-log path: a check run the Actions app owns that NO job on the
+// head commit points back at (the check-run-to-job join the adapter is coupled
+// to has drifted), a 200 whose media type is not plaintext-ish (an HTML login
+// or error page where a log blob belongs), a 3xx carrying no usable Location,
+// a redirect chain past the adapter's hop cap, a 404 on the job-log route, and
+// any other unexpected status. The 404 is the one whose message is deliberately
+// DUAL-cause: GitHub most often simply has no log blob for that job — Actions
+// logs expire, and a job that never started never produced one — and only maybe
+// has lab's adapter drifted, so the wording must not send a reader to debug lab
+// for an expired log. The 5xx pin holds here too: a server error on the route
+// is ErrLogUpstream, not a mismatch.
 var ErrLogAdapterMismatch = errors.New("tracker: forge log route did not answer the shape lab's log adapter expects")
 
 // ErrLogUpstream marks a CheckLog whose forge answered the log route with a
@@ -123,11 +137,15 @@ var ErrLogAdapterMismatch = errors.New("tracker: forge log route did not answer 
 // a case of it: folding a forge-side 500 into "lab's adapter does not match
 // this forge version" sends the reader to debug the wrong system, and the
 // recoveries differ — wait and retry, or read an older attempt, versus file an
-// issue against the adapter. Only the Forgejo log backend produces it, and
-// only after the fallback has failed too: a 5xx on a NEWER attempt while an
-// older one still serves 200 is not an error at all, it is a
-// CheckLogResult.FallbackFrom notice. The wrapping error names the route and
-// the raw upstream status, never the forge token.
+// issue against the adapter. The Forgejo log backend produces it only after
+// the fallback has failed too: a 5xx on a NEWER attempt while an older one
+// still serves 200 is not an error at all, it is a
+// CheckLogResult.FallbackFrom notice. The GitHub log backend produces it on a
+// 5xx from the Actions job-log route, with NO fallback walk behind it — that
+// backend serves the latest attempt only (filter=latest on the jobs listing),
+// so there is no older attempt it could have fallen back to and the upstream
+// error is immediately the reader's answer. The wrapping error names the route
+// and the raw upstream status, never the forge token.
 var ErrLogUpstream = errors.New("tracker: forge log route answered an upstream server error")
 
 // Issue/PR state vocabulary. A merged PR is distinct from a closed-unmerged
@@ -433,15 +451,23 @@ type Tracker interface {
 	//
 	// An unknown pull number wraps ErrNotFound (the builtin backend surfaces
 	// store.ErrNotFound, like Checks); a context name no head-commit Checks row
-	// carries wraps ErrUnknownCheck; a binding whose forge serves no job logs to
-	// proxy — the built-in and GitHub backends today — wraps ErrUnsupported; a
-	// forge answer the version-coupled log adapter does not recognize wraps
-	// ErrLogAdapterMismatch; and a forge that answered only server errors wraps
-	// ErrLogUpstream. All four are loud by design rather than a silent empty
-	// success, and the last two stay distinct so the reader knows whether to
-	// debug lab or the forge. The forge token never appears in the returned
-	// error (ADR-0032's deferred job-log surface, landed on the Forgejo
-	// binding).
+	// carries wraps ErrUnknownCheck; and ErrUnsupported covers two distinct
+	// refusals. A binding with no job logs to proxy AT ALL — the built-in one,
+	// which has no CI behind it — wraps it for every call; a forge binding wraps
+	// it PER CHECK, for a check whose log is not that forge's to serve. On
+	// Forgejo that is a status whose target_url points at an external CI
+	// service; on GitHub it is the same idea in that forge's three shapes — a
+	// legacy commit status reported by external CI, a non-Actions GitHub App's
+	// check run (a stored verdict, not a job with output), and a name SEVERAL
+	// check runs on the head share, which is ambiguous: the check name is the
+	// only selector this seam has, so the backend refuses rather than risk
+	// silently serving the wrong log. A forge answer the version-coupled log
+	// adapter does not recognize wraps ErrLogAdapterMismatch; and a forge that
+	// answered only server errors wraps ErrLogUpstream. All of them are loud by
+	// design rather than a silent empty success, and the last two stay distinct
+	// so the reader knows whether to debug lab or the forge. The forge token
+	// never appears in the returned error (ADR-0032's deferred job-log surface,
+	// landed on the Forgejo binding first and since on the GitHub one).
 	CheckLog(ctx context.Context, number int, name string) (CheckLogResult, error)
 
 	// CreatePull opens a pull request / change request from head onto base.

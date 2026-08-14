@@ -842,16 +842,6 @@ func TestChecks_notFound(t *testing.T) {
 	}
 }
 
-// TestCheckLog_unsupported: job logs on the GitHub backend are a deferred slice
-// (ADR-0032's logs land first on Forgejo), so CheckLog wraps
-// tracker.ErrUnsupported rather than faking output.
-func TestCheckLog_unsupported(t *testing.T) {
-	c := New(nil, "https://api.github.com", testToken, "o", "r")
-	if _, err := c.CheckLog(context.Background(), 72, "ci/build"); !errors.Is(err, tracker.ErrUnsupported) {
-		t.Fatalf("CheckLog err = %v, want ErrUnsupported", err)
-	}
-}
-
 // TestChecks_rateLimited mirrors TestPull_rateLimited: a throttled call on
 // the pull lookup unwraps to tracker.ErrRateLimited like every other GitHub
 // client op.
@@ -866,6 +856,1046 @@ func TestChecks_rateLimited(t *testing.T) {
 	_, err := c.Checks(context.Background(), 72)
 	if !errors.Is(err, tracker.ErrRateLimited) {
 		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
+// --- CheckLog --------------------------------------------------------------
+
+const (
+	// checkLogSHA is the head commit every CheckLog fixture resolves pull 72 to,
+	// and checkLogName is the check the tests ask for. The name deliberately
+	// carries a space and parentheses: a check-run name is MATCHED against
+	// listing rows, never escaped into a route, so nothing in the flow may start
+	// quoting or splitting it.
+	checkLogSHA  = "feedface0123456789abcdef0123456789abcd12"
+	checkLogName = "build (ubuntu-latest)"
+
+	// The join keys the fixtures share: the check run the name resolves to, a
+	// second check-run id used as the decoy every wrong-join test points at, the
+	// workflow run that owns the publishing job, and that job's id.
+	checkLogCheckRunID      = 987654321
+	checkLogOtherCheckRunID = 111222333
+	checkLogRunID           = 424242
+	checkLogJobID           = 55667788
+
+	// The job's own run_attempt and its workflow run's are deliberately
+	// DIFFERENT so the happy path proves Attempt is read off the JOB row, and
+	// the id-join test proves the documented fallback to the run's.
+	checkLogAttempt    = 3
+	checkLogRunAttempt = 7
+
+	// checkLogBody is what the blob host serves as the log.
+	checkLogBody = "==> build (ubuntu-latest)\nstep 4/7 failed\nexit status 1\n"
+
+	// checkLogSigMarker rides the query of the signed URL the job-log route
+	// redirects to. That URL is itself a credential — anyone holding it can read
+	// the log for as long as it lives — so it must never surface in an error;
+	// making the marker distinctive is what gives
+	// TestCheckLog_noCredentialLeakOnErrorPaths something real to assert on.
+	checkLogSigMarker = "SIGNED-BLOB-SIGNATURE-xyz"
+	checkLogSigQuery  = "?sig=" + checkLogSigMarker
+)
+
+// The default wire bodies of one CheckLog fixture, plus the variants more than
+// one test needs. A test that varies a listing supplies its own JSON inline.
+var (
+	// checkLogCheckRunsBody: exactly one completed Actions check run carrying
+	// the requested name — the happy-path Checks API page.
+	checkLogCheckRunsBody = fmt.Sprintf(`{"total_count":1,"check_runs":[
+	  {"id":%d,"name":%q,"status":"completed","conclusion":"failure","html_url":"https://github.com/octocat/hello-world/runs/%d","app":{"slug":"github-actions"},"output":{"title":"3 failed"}}
+	]}`, checkLogCheckRunID, checkLogName, checkLogCheckRunID)
+
+	// checkLogRunsBody: the one workflow run on the head SHA.
+	checkLogRunsBody = fmt.Sprintf(`{"total_count":1,"workflow_runs":[{"id":%d,"run_attempt":%d}]}`,
+		checkLogRunID, checkLogRunAttempt)
+
+	// checkLogJobsBody: that run's one job, whose check_run_url's LAST SEGMENT
+	// is the id the join runs on.
+	checkLogJobsBody = fmt.Sprintf(`{"total_count":1,"jobs":[
+	  {"id":%d,"name":%q,"run_attempt":%d,"check_run_url":"https://api.github.com/repos/octocat/hello-world/check-runs/%d"}
+	]}`, checkLogJobID, checkLogName, checkLogAttempt, checkLogCheckRunID)
+
+	// checkLogNoRunsBody: a head commit with no check runs at all, which is what
+	// sends CheckLog on to the legacy combined-status surface.
+	checkLogNoRunsBody = `{"total_count":0,"check_runs":[]}`
+
+	// checkLogOtherStatusBody / checkLogExternalStatusBody: legacy
+	// combined-status pages that do NOT and DO carry the requested context.
+	checkLogOtherStatusBody = `{"state":"success","statuses":[
+	  {"context":"external/other","state":"success","description":"","target_url":"https://external-ci.example/builds/1"}
+	]}`
+	checkLogExternalStatusBody = fmt.Sprintf(`{"state":"failure","statuses":[
+	  {"context":%q,"state":"failure","description":"the external service ran it","target_url":"https://external-ci.example/builds/9"}
+	]}`, checkLogName)
+
+	// checkLogOtherAppBody / checkLogNoAppBody: the requested name on a check run
+	// that is not the Actions app's — another app's, and one with no app object
+	// at all.
+	checkLogOtherAppBody = fmt.Sprintf(`{"total_count":1,"check_runs":[
+	  {"id":%d,"name":%q,"status":"completed","conclusion":"failure","app":{"slug":"sonarcloud"},"output":{"title":""}}
+	]}`, checkLogCheckRunID, checkLogName)
+	checkLogNoAppBody = fmt.Sprintf(`{"total_count":1,"check_runs":[
+	  {"id":%d,"name":%q,"status":"completed","conclusion":"failure","output":{"title":""}}
+	]}`, checkLogCheckRunID, checkLogName)
+
+	// checkLogAmbiguousBody: two check runs on the head sharing the requested
+	// name, which the name alone cannot tell apart.
+	checkLogAmbiguousBody = fmt.Sprintf(`{"total_count":2,"check_runs":[
+	  {"id":%d,"name":%q,"status":"completed","conclusion":"failure","app":{"slug":"github-actions"},"output":{"title":""}},
+	  {"id":%d,"name":%q,"status":"completed","conclusion":"success","app":{"slug":"github-actions"},"output":{"title":""}}
+	]}`, checkLogCheckRunID, checkLogName, checkLogOtherCheckRunID, checkLogName)
+
+	// checkLogStrayJobsBody: a jobs page whose only job points back at a
+	// DIFFERENT check run, so the join walks the head and finds nothing.
+	checkLogStrayJobsBody = fmt.Sprintf(`{"total_count":1,"jobs":[
+	  {"id":%d,"name":%q,"run_attempt":%d,"check_run_url":"https://api.github.com/repos/octocat/hello-world/check-runs/%d"}
+	]}`, checkLogJobID, checkLogName, checkLogAttempt, checkLogOtherCheckRunID)
+)
+
+func checkLogStatusPath() string { return apiPrefix + "/commits/" + checkLogSHA + "/status" }
+
+func checkLogRunsPath() string { return apiPrefix + "/actions/runs" }
+
+func checkLogJobsPath(runID int64) string {
+	return apiPrefix + "/actions/runs/" + strconv.FormatInt(runID, 10) + "/jobs"
+}
+
+func checkLogLogsPath(jobID int64) string {
+	return apiPrefix + "/actions/jobs/" + strconv.FormatInt(jobID, 10) + "/logs"
+}
+
+// staticJSON answers a listing that does not vary by request.
+func staticJSON(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }
+}
+
+// blobStatus answers the signed-URL host with one status and a short body — the
+// forge-side failures the log classification has to tell apart.
+func blobStatus(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+// checkLogReq is one request a CheckLog fixture host received: the path and
+// query the client built, plus the three headers this seam cares about — the
+// forge credential and the two GitHub-specific headers, which must ride every
+// hop aimed at the API host and NO hop that leaves it.
+type checkLogReq struct {
+	path    string
+	query   string
+	auth    string
+	accept  string
+	version string
+}
+
+func recordCheckLogReq(r *http.Request) checkLogReq {
+	return checkLogReq{
+		path:    r.URL.Path,
+		query:   r.URL.RawQuery,
+		auth:    r.Header.Get("Authorization"),
+		accept:  r.Header.Get("Accept"),
+		version: r.Header.Get("X-GitHub-Api-Version"),
+	}
+}
+
+// checkLogFixture varies one wire fixture off the happy-path shape: pull 72 on
+// checkLogSHA, one Actions check run named checkLogName, one workflow run whose
+// one job points back at it, and a job-log route answering GitHub's own
+// redirect to a signed URL on the blob host. A zero field keeps that default —
+// except statuses, where empty means the legacy combined-status endpoint is not
+// part of this fixture and requesting it FAILS the test, which is how "the
+// status read is skipped on the check-run path" stays pinned.
+type checkLogFixture struct {
+	checkRuns string                                                       // GET commits/{sha}/check-runs
+	statuses  string                                                       // GET commits/{sha}/status
+	runs      http.HandlerFunc                                             // GET actions/runs
+	jobs      http.HandlerFunc                                             // GET actions/runs/{run_id}/jobs
+	log       func(w http.ResponseWriter, r *http.Request, blobURL string) // GET actions/jobs/{job_id}/logs
+	blob      http.HandlerFunc                                             // the signed-URL host
+}
+
+// checkLogHarness is the TWO hosts a GitHub job-log fetch spans: the API host,
+// and a separate host standing in for the short-lived signed blob URL the
+// Actions log route redirects to. Two genuinely different hosts is the only
+// thing that makes the credential-stripping assertions real — a redirect back
+// to the same server would prove nothing at all. Every request either host saw
+// is recorded, in order.
+type checkLogHarness struct {
+	client   *Client
+	blobURL  string // origin of the signed-log host (scheme://host, no path)
+	apiReqs  []checkLogReq
+	blobReqs []checkLogReq
+}
+
+func newCheckLogHarness(t *testing.T, fx checkLogFixture) *checkLogHarness {
+	t.Helper()
+	h := &checkLogHarness{}
+
+	// The blob host starts FIRST so the API handler can name its URL in a
+	// Location header.
+	blobSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.blobReqs = append(h.blobReqs, recordCheckLogReq(r))
+		if fx.blob != nil {
+			fx.blob(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, checkLogBody)
+	}))
+	t.Cleanup(blobSrv.Close)
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.apiReqs = append(h.apiReqs, recordCheckLogReq(r))
+		isJobs := strings.HasPrefix(r.URL.Path, apiPrefix+"/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs")
+		isLog := strings.HasPrefix(r.URL.Path, apiPrefix+"/actions/jobs/") && strings.HasSuffix(r.URL.Path, "/logs")
+		switch {
+		case r.URL.Path == apiPrefix+"/pulls/72" && r.Method == http.MethodGet:
+			_, _ = fmt.Fprintf(w, `{"number":72,"title":"feat: thing","state":"open","merged_at":null,
+			  "head":{"ref":"afk/20","sha":%q},
+			  "html_url":"https://github.com/octocat/hello-world/pull/72"}`, checkLogSHA)
+		case r.URL.Path == apiPrefix+"/commits/"+checkLogSHA+"/check-runs" && r.Method == http.MethodGet:
+			body := fx.checkRuns
+			if body == "" {
+				body = checkLogCheckRunsBody
+			}
+			_, _ = io.WriteString(w, body)
+		case r.URL.Path == checkLogStatusPath() && r.Method == http.MethodGet:
+			if fx.statuses == "" {
+				t.Errorf("legacy status endpoint requested; this fixture matches a check run, and there that read can contribute nothing")
+				http.Error(w, "unexpected", http.StatusInternalServerError)
+				return
+			}
+			_, _ = io.WriteString(w, fx.statuses)
+		case r.URL.Path == checkLogRunsPath() && r.Method == http.MethodGet:
+			if fx.runs != nil {
+				fx.runs(w, r)
+				return
+			}
+			_, _ = io.WriteString(w, checkLogRunsBody)
+		case isJobs && r.Method == http.MethodGet:
+			if fx.jobs != nil {
+				fx.jobs(w, r)
+				return
+			}
+			_, _ = io.WriteString(w, checkLogJobsBody)
+		case isLog && r.Method == http.MethodGet:
+			if fx.log != nil {
+				fx.log(w, r, h.blobURL)
+				return
+			}
+			// GitHub's own answer: a redirect to a short-lived signed URL on the
+			// blob host. The job id rides into the blob path so a fixture can
+			// serve a distinct body per job.
+			job := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, apiPrefix+"/actions/jobs/"), "/logs")
+			http.Redirect(w, r, h.blobURL+"/blobs/job-"+job+checkLogSigQuery, http.StatusFound)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(apiSrv.Close)
+
+	h.blobURL = blobSrv.URL
+	h.client = New(apiSrv.Client(), apiSrv.URL, testToken, "octocat", "hello-world")
+	return h
+}
+
+// paths returns the API-host request paths, in request order.
+func (h *checkLogHarness) paths() []string {
+	out := make([]string, len(h.apiReqs))
+	for i, r := range h.apiReqs {
+		out[i] = r.path
+	}
+	return out
+}
+
+// requested reports whether the API host saw a request for path.
+func (h *checkLogHarness) requested(path string) bool {
+	for _, r := range h.apiReqs {
+		if r.path == path {
+			return true
+		}
+	}
+	return false
+}
+
+// actionsRequested reports whether ANY Actions-API request was made — how the
+// name-resolution failures pin that CheckLog gave up before spending the join
+// walk, let alone fetching a log.
+func (h *checkLogHarness) actionsRequested() bool {
+	for _, r := range h.apiReqs {
+		if strings.HasPrefix(r.path, apiPrefix+"/actions/") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCheckLog_happyPath pins the whole flow end to end: the fresh pull lookup
+// for head.sha, the check-run resolution, the two Actions listings that join the
+// matched check run to the job that published it, and the job-log route's
+// redirect onto a signed URL on a DIFFERENT host. It asserts the exact ordered
+// request sequence AND each hop's query — the head_sha and filter=latest bases
+// are what keep the join scoped to this commit's latest attempt — that every API
+// hop carried the Bearer credential while the blob hop carried none at all, that
+// the served bytes and Attempt (the JOB row's run_attempt, not its run's) come
+// back with no fallback recorded, and that the legacy combined-status endpoint
+// was NEVER asked: on the check-run path it can contribute nothing and is pure
+// cost.
+func TestCheckLog_happyPath(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{})
+
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if string(res.Log) != checkLogBody {
+		t.Errorf("log = %q; want %q", res.Log, checkLogBody)
+	}
+	if res.Attempt != checkLogAttempt {
+		t.Errorf("Attempt = %d; want %d (the job row's run_attempt)", res.Attempt, checkLogAttempt)
+	}
+	if res.FallbackFrom != 0 || res.FallbackStatus != 0 {
+		t.Errorf("FallbackFrom/FallbackStatus = %d/%d; want 0/0 — this backend serves the latest attempt only, so it can never have fallen back",
+			res.FallbackFrom, res.FallbackStatus)
+	}
+
+	wantPaths := []string{
+		apiPrefix + "/pulls/72",
+		apiPrefix + "/commits/" + checkLogSHA + "/check-runs",
+		checkLogRunsPath(),
+		checkLogJobsPath(checkLogRunID),
+		checkLogLogsPath(checkLogJobID),
+	}
+	wantQueries := []string{
+		"",
+		"page=1&per_page=100",
+		"head_sha=" + checkLogSHA + "&page=1&per_page=100",
+		"filter=latest&page=1&per_page=100",
+		"",
+	}
+	if got := h.paths(); len(got) != len(wantPaths) {
+		t.Fatalf("API requests = %v; want %v", got, wantPaths)
+	}
+	for i := range wantPaths {
+		if h.apiReqs[i].path != wantPaths[i] {
+			t.Errorf("API request[%d] path = %q; want %q", i, h.apiReqs[i].path, wantPaths[i])
+		}
+		if h.apiReqs[i].query != wantQueries[i] {
+			t.Errorf("API request[%d] (%s) query = %q; want %q", i, h.apiReqs[i].path, h.apiReqs[i].query, wantQueries[i])
+		}
+		if want := "Bearer " + testToken; h.apiReqs[i].auth != want {
+			t.Errorf("API request[%d] (%s) Authorization = %q; want %q", i, h.apiReqs[i].path, h.apiReqs[i].auth, want)
+		}
+	}
+	if len(h.blobReqs) != 1 {
+		t.Fatalf("blob host saw %d requests; want exactly 1 (the followed redirect)", len(h.blobReqs))
+	}
+	if h.blobReqs[0].auth != "" {
+		t.Errorf("blob hop Authorization = %q; want no header at all — the forge token must never reach the signed-URL host", h.blobReqs[0].auth)
+	}
+	if h.requested(checkLogStatusPath()) {
+		t.Errorf("legacy status endpoint was requested (%v); want it never asked once a check run matched", h.paths())
+	}
+}
+
+// TestCheckLog_unknownCheck: a name that no check run and no legacy status row
+// carries is tracker.ErrUnknownCheck naming the context. It also pins WHERE the
+// legacy surface is read — only here, after the check-run match came up empty,
+// which is exactly the request the happy path must not make — and that no
+// Actions request is spent on a name that resolves to nothing.
+func TestCheckLog_unknownCheck(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{
+		checkRuns: `{"total_count":1,"check_runs":[
+		  {"id":5,"name":"some-other-check","status":"completed","conclusion":"success","app":{"slug":"github-actions"},"output":{"title":""}}
+		]}`,
+		statuses: checkLogOtherStatusBody,
+	})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrUnknownCheck) {
+		t.Fatalf("err = %v; want ErrUnknownCheck", err)
+	}
+	if !strings.Contains(err.Error(), checkLogName) {
+		t.Errorf("error %q should name the requested check %q", err, checkLogName)
+	}
+	if !h.requested(checkLogStatusPath()) {
+		t.Errorf("API requests = %v; want the legacy status endpoint read once no check run matched", h.paths())
+	}
+	if h.actionsRequested() {
+		t.Errorf("API requests = %v; want no Actions request for a name that matches nothing", h.paths())
+	}
+}
+
+// TestCheckLog_legacyCommitStatusIsUnsupported: the name matches only a legacy
+// combined-status row — an external CI service's, many of which predate Checks —
+// whose output GitHub never stored and so cannot serve. That is
+// tracker.ErrUnsupported naming the check and its target_url ("not this forge's
+// to serve"), never an adapter mismatch and never an empty success, and it costs
+// no Actions request.
+func TestCheckLog_legacyCommitStatusIsUnsupported(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{
+		checkRuns: checkLogNoRunsBody,
+		statuses:  checkLogExternalStatusBody,
+	})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrUnsupported) {
+		t.Fatalf("err = %v; want ErrUnsupported", err)
+	}
+	if errors.Is(err, tracker.ErrUnknownCheck) {
+		t.Errorf("err = %v; want NOT ErrUnknownCheck — the check exists, its log is just not GitHub's to serve", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, checkLogName) || !strings.Contains(msg, "https://external-ci.example/builds/9") {
+		t.Errorf("error %q should name the check and the external target_url the operator must go read", msg)
+	}
+	if h.actionsRequested() {
+		t.Errorf("API requests = %v; want no Actions request for a legacy status row", h.paths())
+	}
+}
+
+// TestCheckLog_nonActionsAppIsUnsupported: only the GitHub Actions app's check
+// runs have a stored job log behind them. Another app's check run — or one with
+// no app object at all — is a VERDICT, not a job, so there is nothing to fetch:
+// tracker.ErrUnsupported naming the app slug (the absent case in words, not as
+// an empty string the reader would have to interpret), decided before any
+// Actions request is spent.
+func TestCheckLog_nonActionsAppIsUnsupported(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		checkRuns string
+		wantSlug  string
+	}{
+		{name: "another GitHub App", checkRuns: checkLogOtherAppBody, wantSlug: `"sonarcloud"`},
+		{name: "no app object at all", checkRuns: checkLogNoAppBody, wantSlug: `"(none)"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCheckLogHarness(t, checkLogFixture{checkRuns: tc.checkRuns})
+
+			_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+			if !errors.Is(err, tracker.ErrUnsupported) {
+				t.Fatalf("err = %v; want ErrUnsupported", err)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.wantSlug) || !strings.Contains(msg, checkLogName) {
+				t.Errorf("error %q should name the check %q and the app slug %s", msg, checkLogName, tc.wantSlug)
+			}
+			if h.actionsRequested() {
+				t.Errorf("API requests = %v; want no Actions request for a non-Actions check run", h.paths())
+			}
+		})
+	}
+}
+
+// TestCheckLog_ambiguousNameIsUnsupported: two check runs on the head share the
+// requested name, and the name is the only selector this seam has — nothing
+// tells lab which log was meant. Serving either is the silent wrong-log serve
+// this method refuses to risk, so it fails loud with tracker.ErrUnsupported
+// naming BOTH check-run ids (the operator's only way to tell the two apart) and
+// spends no Actions request.
+func TestCheckLog_ambiguousNameIsUnsupported(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{checkRuns: checkLogAmbiguousBody})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrUnsupported) {
+		t.Fatalf("err = %v; want ErrUnsupported", err)
+	}
+	msg := err.Error()
+	for _, id := range []string{strconv.Itoa(checkLogCheckRunID), strconv.Itoa(checkLogOtherCheckRunID)} {
+		if !strings.Contains(msg, id) {
+			t.Errorf("error %q should name check-run id %s — both ambiguous rows must be identified", msg, id)
+		}
+	}
+	if !strings.Contains(msg, checkLogName) {
+		t.Errorf("error %q should name the ambiguous check %q", msg, checkLogName)
+	}
+	if h.actionsRequested() {
+		t.Errorf("API requests = %v; want no Actions request once the name is known to be ambiguous", h.paths())
+	}
+}
+
+// TestCheckLog_joinsOnCheckRunIDNotJobName is the issue's central "no silent
+// wrong-log serve" constraint. Two workflow runs sit on the head: the one walked
+// FIRST owns a job whose NAME is exactly the requested check name but whose
+// check_run_url points at a different check run, and the one walked SECOND owns
+// the job that actually published the matched check run, under an unrelated
+// name. A name-matching join would stop at the first job and hand the operator
+// another workflow's log with nothing to hint anything went wrong, so the log
+// served here MUST be the second run's job's. The second job row also omits
+// run_attempt, pinning the documented fallback to its parent workflow run's.
+func TestCheckLog_joinsOnCheckRunIDNotJobName(t *testing.T) {
+	const (
+		decoyRunID    = 111
+		decoyJobID    = 700
+		matchedRunID  = 222
+		matchedJobID  = 800
+		matchedAttemp = 4
+	)
+	h := newCheckLogHarness(t, checkLogFixture{
+		runs: func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprintf(w, `{"total_count":2,"workflow_runs":[
+			  {"id":%d,"run_attempt":1},
+			  {"id":%d,"run_attempt":%d}
+			]}`, decoyRunID, matchedRunID, matchedAttemp)
+		},
+		jobs: func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case checkLogJobsPath(decoyRunID):
+				// The requested NAME exactly, a DIFFERENT check-run id.
+				_, _ = fmt.Fprintf(w, `{"total_count":1,"jobs":[
+				  {"id":%d,"name":%q,"run_attempt":1,"check_run_url":"https://api.github.com/repos/octocat/hello-world/check-runs/%d"}
+				]}`, decoyJobID, checkLogName, checkLogOtherCheckRunID)
+			case checkLogJobsPath(matchedRunID):
+				// An unrelated name, the MATCHING check-run id, and no run_attempt.
+				_, _ = fmt.Fprintf(w, `{"total_count":1,"jobs":[
+				  {"id":%d,"name":"some other workflow's job","check_run_url":"https://api.github.com/repos/octocat/hello-world/check-runs/%d"}
+				]}`, matchedJobID, checkLogCheckRunID)
+			default:
+				t.Errorf("unexpected jobs request %s", r.URL.Path)
+				http.Error(w, "unexpected", http.StatusInternalServerError)
+			}
+		},
+		blob: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			if !strings.Contains(r.URL.Path, strconv.Itoa(matchedJobID)) {
+				t.Errorf("log fetched from blob path %q; want job %d's — the join matched on the job NAME, not the check-run id", r.URL.Path, matchedJobID)
+				_, _ = io.WriteString(w, "wrong-job-log")
+				return
+			}
+			_, _ = io.WriteString(w, "matched-job-log")
+		},
+	})
+
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if string(res.Log) != "matched-job-log" {
+		t.Errorf("log = %q; want %q — the job whose check_run_url carries the matched check-run id", res.Log, "matched-job-log")
+	}
+	if res.Attempt != matchedAttemp {
+		t.Errorf("Attempt = %d; want %d (the job row carries none, so the parent workflow run's stands in)", res.Attempt, matchedAttemp)
+	}
+	if h.requested(checkLogLogsPath(decoyJobID)) {
+		t.Fatalf("the same-named decoy job's log route was requested (%v); the join must be on the check-run id alone", h.paths())
+	}
+	if !h.requested(checkLogLogsPath(matchedJobID)) {
+		t.Errorf("API requests = %v; want the log route of job %d", h.paths(), matchedJobID)
+	}
+}
+
+// TestCheckLog_noJobPointsBackIsAdapterMismatch: the check run says GitHub
+// Actions, yet no job on the head points back at it — what a drifted join looks
+// like. That is tracker.ErrLogAdapterMismatch (NOT ErrUnsupported, which would
+// tell the operator this forge cannot serve such logs, and NOT ErrNotFound,
+// which on this seam means "no such pull request"), the error counts what was
+// walked so the reader sees the search was exhaustive, and no log is fetched.
+func TestCheckLog_noJobPointsBackIsAdapterMismatch(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{jobs: staticJSON(checkLogStrayJobsBody)})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+	if errors.Is(err, tracker.ErrUnsupported) || errors.Is(err, tracker.ErrNotFound) {
+		t.Errorf("err = %v; want neither ErrUnsupported nor ErrNotFound — an exhausted join is an adapter surprise, not a missing pull or an unsupported forge", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, strconv.Itoa(checkLogCheckRunID)) || !strings.Contains(msg, checkLogName) {
+		t.Errorf("error %q should name the check %q and check-run id %d", msg, checkLogName, checkLogCheckRunID)
+	}
+	for _, req := range h.apiReqs {
+		if strings.HasSuffix(req.path, "/logs") {
+			t.Errorf("log route %q was requested; want the join to fail before any log is fetched", req.path)
+		}
+	}
+}
+
+// TestCheckLog_inFlightJobServesPartialLog is a contract pin, not an accident of
+// the route: a still-running job's log route answers 200 with whatever it has
+// captured so far, and lab returns those partial bytes with a NIL error. "Not
+// finished yet" is never an error on this seam — the fix-the-red loop reads a
+// running job's output while it runs.
+func TestCheckLog_inFlightJobServesPartialLog(t *testing.T) {
+	const partial = "==> build (ubuntu-latest)\nstep 2/7 running\n"
+	h := newCheckLogHarness(t, checkLogFixture{
+		checkRuns: fmt.Sprintf(`{"total_count":1,"check_runs":[
+		  {"id":%d,"name":%q,"status":"in_progress","conclusion":null,"app":{"slug":"github-actions"},"output":{"title":""}}
+		]}`, checkLogCheckRunID, checkLogName),
+		blob: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, partial)
+		},
+	})
+
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if err != nil {
+		t.Fatalf("CheckLog on an in-flight job: %v; want the partial log and a nil error", err)
+	}
+	if string(res.Log) != partial {
+		t.Errorf("log = %q; want the partial body %q", res.Log, partial)
+	}
+	if res.Attempt != checkLogAttempt {
+		t.Errorf("Attempt = %d; want %d", res.Attempt, checkLogAttempt)
+	}
+}
+
+// TestCheckLog_foreignRedirectDropsGitHubHeaders: the hop that leaves the API
+// host carries the forge token nowhere — and neither the vnd.github Accept nor
+// the pinned X-GitHub-Api-Version, which belong to the API and to nothing else.
+// The API hop that produced the redirect is asserted to have carried all three,
+// so the test cannot pass by dropping headers everywhere.
+func TestCheckLog_foreignRedirectDropsGitHubHeaders(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{})
+
+	if _, err := h.client.CheckLog(context.Background(), 72, checkLogName); err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	logHop := h.apiReqs[len(h.apiReqs)-1]
+	if logHop.path != checkLogLogsPath(checkLogJobID) {
+		t.Fatalf("last API request = %q; want the job-log route %q", logHop.path, checkLogLogsPath(checkLogJobID))
+	}
+	if logHop.auth != "Bearer "+testToken || logHop.accept != "application/vnd.github+json" || logHop.version != apiVersion {
+		t.Fatalf("API log hop headers = auth %q, accept %q, version %q; want the full GitHub trio",
+			logHop.auth, logHop.accept, logHop.version)
+	}
+	if len(h.blobReqs) != 1 {
+		t.Fatalf("blob host saw %d requests; want exactly 1", len(h.blobReqs))
+	}
+	blobHop := h.blobReqs[0]
+	if blobHop.auth != "" || blobHop.accept != "" || blobHop.version != "" {
+		t.Errorf("blob hop headers = auth %q, accept %q, version %q; want all three absent — the hop left the API host",
+			blobHop.auth, blobHop.accept, blobHop.version)
+	}
+	if !strings.Contains(blobHop.query, checkLogSigMarker) {
+		t.Errorf("blob hop query = %q; want the signed URL's query preserved verbatim", blobHop.query)
+	}
+}
+
+// TestCheckLog_sameHostRedirectKeepsCredential is the other half of the rule: a
+// redirect that stays on the API host is still the same authenticated call, so
+// the credential must survive it — dropping headers on EVERY hop would break a
+// GHE deployment that bounces the log route internally. The Location here is
+// path-relative, which is legal and must resolve against the current request.
+func TestCheckLog_sameHostRedirectKeepsCredential(t *testing.T) {
+	const innerPath = apiPrefix + "/actions/jobs/55667788/logs-blob"
+	var innerAuth string
+	var innerSeen bool
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case apiPrefix + "/pulls/72":
+			_, _ = fmt.Fprintf(w, `{"number":72,"state":"open","merged_at":null,"head":{"ref":"afk/20","sha":%q}}`, checkLogSHA)
+		case apiPrefix + "/commits/" + checkLogSHA + "/check-runs":
+			_, _ = io.WriteString(w, checkLogCheckRunsBody)
+		case checkLogRunsPath():
+			_, _ = io.WriteString(w, checkLogRunsBody)
+		case checkLogJobsPath(checkLogRunID):
+			_, _ = io.WriteString(w, checkLogJobsBody)
+		case checkLogLogsPath(checkLogJobID):
+			http.Redirect(w, r, innerPath+checkLogSigQuery, http.StatusFound)
+		case innerPath:
+			innerSeen = true
+			innerAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, checkLogBody)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	})
+
+	res, err := c.CheckLog(context.Background(), 72, checkLogName)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if !innerSeen {
+		t.Fatal("the same-host redirect target was never requested")
+	}
+	if want := "Bearer " + testToken; innerAuth != want {
+		t.Errorf("same-host redirect Authorization = %q; want %q — the hop never left the API host", innerAuth, want)
+	}
+	if string(res.Log) != checkLogBody {
+		t.Errorf("log = %q; want %q", res.Log, checkLogBody)
+	}
+}
+
+// TestCheckLog_redirectWithoutLocationIsAdapterMismatch: a 3xx with nothing to
+// follow is a shape lab's adapter cannot act on — a loud
+// tracker.ErrLogAdapterMismatch naming the API route and the status, never a
+// silent empty log.
+func TestCheckLog_redirectWithoutLocationIsAdapterMismatch(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{
+		log: func(w http.ResponseWriter, r *http.Request, _ string) {
+			w.WriteHeader(http.StatusFound) // 302, no Location header at all
+		},
+	})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, checkLogLogsPath(checkLogJobID)) || !strings.Contains(msg, "302") {
+		t.Errorf("error %q should name the API log route and the status it answered", msg)
+	}
+	if len(h.blobReqs) != 0 {
+		t.Errorf("blob host saw %d requests; want none — there was no Location to follow", len(h.blobReqs))
+	}
+}
+
+// TestCheckLog_redirectLoopIsAdapterMismatch: a chain that keeps redirecting
+// ends after maxLogRedirects hops as a loud tracker.ErrLogAdapterMismatch — the
+// adapter bounds the walk instead of looping forever, and the error names the
+// cap and the API route while the signed URL stays unmentioned.
+func TestCheckLog_redirectLoopIsAdapterMismatch(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{
+		blob: func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/blobs/again"+checkLogSigQuery, http.StatusFound)
+		},
+	})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, strconv.Itoa(maxLogRedirects)) || !strings.Contains(msg, checkLogLogsPath(checkLogJobID)) {
+		t.Errorf("error %q should name the hop cap and the API log route", msg)
+	}
+	if strings.Contains(msg, checkLogSigMarker) {
+		t.Fatalf("signed blob URL leaked into error: %q", msg)
+	}
+	if len(h.blobReqs) != maxLogRedirects {
+		t.Errorf("blob host saw %d requests; want %d (the hop cap)", len(h.blobReqs), maxLogRedirects)
+	}
+}
+
+// TestCheckLog_mediaTypesAt200: the blob host — not GitHub's API — sets the
+// Content-Type on the served log, and it legitimately says text/plain, says
+// application/octet-stream, or omits the header entirely; all three are the log.
+// text/html is not: a body lab hands an agent as "the log" must never be a login
+// or error page, so that is tracker.ErrLogAdapterMismatch naming the media type
+// it refused.
+func TestCheckLog_mediaTypesAt200(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		wantErr     bool
+	}{
+		{name: "text/plain", contentType: "text/plain; charset=utf-8"},
+		{name: "application/octet-stream", contentType: "application/octet-stream"},
+		{name: "absent Content-Type", contentType: ""},
+		{name: "text/html is not a log blob", contentType: "text/html; charset=utf-8", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCheckLogHarness(t, checkLogFixture{
+				blob: func(w http.ResponseWriter, r *http.Request) {
+					if tc.contentType == "" {
+						// nil (not "") suppresses net/http's content sniffing, which
+						// would otherwise invent a header the real blob host omits.
+						w.Header()["Content-Type"] = nil
+					} else {
+						w.Header().Set("Content-Type", tc.contentType)
+					}
+					_, _ = io.WriteString(w, checkLogBody)
+				},
+			})
+
+			res, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+			if tc.wantErr {
+				if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+					t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+				}
+				if !strings.Contains(err.Error(), "text/html") {
+					t.Errorf("error %q should name the media type it refused", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CheckLog: %v", err)
+			}
+			if string(res.Log) != checkLogBody {
+				t.Errorf("log = %q; want %q", res.Log, checkLogBody)
+			}
+		})
+	}
+}
+
+// TestCheckLog_upstream5xxIsLogUpstreamNotMismatch pins issue #259's attribution
+// distinction on this backend: the forge failed to serve a log lab asked for
+// correctly, so the reader should retry the forge — NOT debug lab's adapter.
+// Both directions are asserted, because a single errors.Is would pass on an
+// error that wrapped both.
+func TestCheckLog_upstream5xxIsLogUpstreamNotMismatch(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{
+		blob: blobStatus(http.StatusBadGateway, "upstream storage unavailable"),
+	})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrLogUpstream) {
+		t.Fatalf("err = %v; want ErrLogUpstream", err)
+	}
+	if errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Errorf("err = %v; want NOT ErrLogAdapterMismatch — a forge-side 5xx must not read as lab's adapter having drifted", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "502") || !strings.Contains(msg, checkLogLogsPath(checkLogJobID)) {
+		t.Errorf("error %q should name the status and the API log route", msg)
+	}
+}
+
+// TestCheckLog_logRoute404IsAdapterMismatchNotNotFound: an expired or absent log
+// blob must NOT masquerade as tracker.ErrNotFound, which on this seam means "no
+// such pull request" — the operator would go looking for the wrong thing. It is
+// tracker.ErrLogAdapterMismatch with an honest dual-cause message: most often
+// the blob simply expired (or the job never started), and only maybe is it lab's
+// adapter having drifted.
+func TestCheckLog_logRoute404IsAdapterMismatchNotNotFound(t *testing.T) {
+	h := newCheckLogHarness(t, checkLogFixture{
+		blob: blobStatus(http.StatusNotFound, "not found"),
+	})
+
+	_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if !errors.Is(err, tracker.ErrLogAdapterMismatch) {
+		t.Fatalf("err = %v; want ErrLogAdapterMismatch", err)
+	}
+	if errors.Is(err, tracker.ErrNotFound) {
+		t.Errorf("err = %v; want NOT ErrNotFound — on this seam that means the PULL does not exist", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "expire") || !strings.Contains(msg, "adapter") {
+		t.Errorf("error %q should name BOTH causes: an expired/absent log blob, and a possibly drifted adapter", msg)
+	}
+}
+
+// TestCheckLog_rateLimited: a throttled call unwraps to tracker.ErrRateLimited
+// wherever the throttle lands — on the opening pull lookup like every other op
+// on this client, and on the job-log route, which does its own transport and so
+// has to classify a 403 the same way rather than calling it an adapter mismatch.
+func TestCheckLog_rateLimited(t *testing.T) {
+	t.Run("on the pull lookup", func(t *testing.T) {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", "1720000000")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"API rate limit exceeded"}`)
+		})
+
+		_, err := c.CheckLog(context.Background(), 72, checkLogName)
+		if !errors.Is(err, tracker.ErrRateLimited) {
+			t.Fatalf("err = %v; want ErrRateLimited", err)
+		}
+	})
+
+	t.Run("on the log route", func(t *testing.T) {
+		h := newCheckLogHarness(t, checkLogFixture{
+			log: func(w http.ResponseWriter, r *http.Request, _ string) {
+				w.Header().Set("X-RateLimit-Remaining", "0")
+				w.Header().Set("X-RateLimit-Reset", "1720000000")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = io.WriteString(w, `{"message":"API rate limit exceeded"}`)
+			},
+		})
+
+		_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+		if !errors.Is(err, tracker.ErrRateLimited) {
+			t.Fatalf("err = %v; want ErrRateLimited", err)
+		}
+		if errors.Is(err, tracker.ErrLogAdapterMismatch) {
+			t.Errorf("err = %v; want NOT ErrLogAdapterMismatch — a throttle is a wait, not a drifted adapter", err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "1720000000") {
+			t.Errorf("error %q should carry the reset hint", msg)
+		}
+		if strings.Contains(msg, testToken) {
+			t.Fatalf("token leaked into error: %q", msg)
+		}
+	})
+}
+
+// TestCheckLog_unknownPullIsNotFound: CheckLog opens exactly as Checks does, so
+// an unknown number fails right there on the pull lookup with
+// tracker.ErrNotFound — the seam's "no such pull request" — and no log request
+// is attempted.
+func TestCheckLog_unknownPullIsNotFound(t *testing.T) {
+	var paths []string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+	})
+
+	_, err := c.CheckLog(context.Background(), 999, checkLogName)
+	if !errors.Is(err, tracker.ErrNotFound) {
+		t.Fatalf("err = %v; want ErrNotFound", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+	if len(paths) != 1 || paths[0] != apiPrefix+"/pulls/999" {
+		t.Errorf("requests = %v; want only the pull lookup %q", paths, apiPrefix+"/pulls/999")
+	}
+}
+
+// TestCheckLog_actionsListingsPaginate: both Actions listings are ordinary
+// paginated GitHub lists, so the join walks EVERY page — a match on page 2 of a
+// run's jobs must be found, not silently missed — and the base query each
+// listing rides on (head_sha for the runs, filter=latest for the jobs) has to
+// survive onto page 2 as well: a page-2 request that dropped head_sha would list
+// the whole repo's runs and a dropped filter=latest would resurrect stale
+// attempts' jobs.
+func TestCheckLog_actionsListingsPaginate(t *testing.T) {
+	const (
+		firstRunID  = 111
+		secondRunID = 222
+	)
+	h := newCheckLogHarness(t, checkLogFixture{
+		runs: func(w http.ResponseWriter, r *http.Request) {
+			switch page := r.URL.Query().Get("page"); page {
+			case "1":
+				setNextLink(w, r)
+				_, _ = fmt.Fprintf(w, `{"total_count":2,"workflow_runs":[{"id":%d,"run_attempt":1}]}`, firstRunID)
+			case "2":
+				_, _ = fmt.Fprintf(w, `{"total_count":2,"workflow_runs":[{"id":%d,"run_attempt":2}]}`, secondRunID)
+			default:
+				t.Errorf("unexpected workflow-runs page %q (should have stopped)", page)
+				_, _ = io.WriteString(w, `{"total_count":0,"workflow_runs":[]}`)
+			}
+		},
+		jobs: func(w http.ResponseWriter, r *http.Request) {
+			page := r.URL.Query().Get("page")
+			switch {
+			case r.URL.Path == checkLogJobsPath(firstRunID) && page == "1":
+				_, _ = fmt.Fprintf(w, `{"total_count":1,"jobs":[
+				  {"id":701,"name":"unrelated","run_attempt":1,"check_run_url":"https://api.github.com/repos/octocat/hello-world/check-runs/%d"}
+				]}`, checkLogOtherCheckRunID)
+			case r.URL.Path == checkLogJobsPath(secondRunID) && page == "1":
+				setNextLink(w, r)
+				_, _ = fmt.Fprintf(w, `{"total_count":2,"jobs":[
+				  {"id":702,"name":"also unrelated","run_attempt":%d,"check_run_url":"https://api.github.com/repos/octocat/hello-world/check-runs/%d"}
+				]}`, checkLogAttempt, checkLogOtherCheckRunID)
+			case r.URL.Path == checkLogJobsPath(secondRunID) && page == "2":
+				_, _ = io.WriteString(w, checkLogJobsBody) // the match, on the LAST page
+			default:
+				t.Errorf("unexpected jobs request %s?%s", r.URL.Path, r.URL.RawQuery)
+				http.Error(w, "unexpected", http.StatusInternalServerError)
+			}
+		},
+	})
+
+	res, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+	if err != nil {
+		t.Fatalf("CheckLog: %v", err)
+	}
+	if string(res.Log) != checkLogBody {
+		t.Errorf("log = %q; want %q (the match sits on the last page of the last run's jobs)", res.Log, checkLogBody)
+	}
+
+	var gotRuns, gotJobs []string
+	for _, req := range h.apiReqs {
+		switch {
+		case req.path == checkLogRunsPath():
+			gotRuns = append(gotRuns, req.query)
+		case strings.HasSuffix(req.path, "/jobs"):
+			gotJobs = append(gotJobs, req.path+"?"+req.query)
+		}
+	}
+	wantRuns := []string{
+		"head_sha=" + checkLogSHA + "&page=1&per_page=100",
+		"head_sha=" + checkLogSHA + "&page=2&per_page=100",
+	}
+	wantJobs := []string{
+		checkLogJobsPath(firstRunID) + "?filter=latest&page=1&per_page=100",
+		checkLogJobsPath(secondRunID) + "?filter=latest&page=1&per_page=100",
+		checkLogJobsPath(secondRunID) + "?filter=latest&page=2&per_page=100",
+	}
+	if len(gotRuns) != len(wantRuns) {
+		t.Fatalf("workflow-runs requests = %v; want %v", gotRuns, wantRuns)
+	}
+	for i := range wantRuns {
+		if gotRuns[i] != wantRuns[i] {
+			t.Errorf("workflow-runs request[%d] query = %q; want %q (the head_sha base must survive onto page 2)", i, gotRuns[i], wantRuns[i])
+		}
+	}
+	if len(gotJobs) != len(wantJobs) {
+		t.Fatalf("jobs requests = %v; want %v", gotJobs, wantJobs)
+	}
+	for i := range wantJobs {
+		if gotJobs[i] != wantJobs[i] {
+			t.Errorf("jobs request[%d] = %q; want %q (the filter=latest base must survive onto page 2)", i, gotJobs[i], wantJobs[i])
+		}
+	}
+}
+
+// TestCheckLog_noCredentialLeakOnErrorPaths sweeps every way this call can fail
+// and asserts two things about the returned message: the forge token never
+// appears (it lives only in a request header), and neither does the signed blob
+// URL — which is itself a credential, so naming it in an error, a log line, or
+// anywhere else would hand out read access to the log for as long as it lives.
+// The fixture's redirect target carries a distinctive signature marker so the
+// assertion has something real to catch.
+func TestCheckLog_noCredentialLeakOnErrorPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fx   checkLogFixture
+	}{
+		{name: "unknown check", fx: checkLogFixture{checkRuns: checkLogNoRunsBody, statuses: checkLogOtherStatusBody}},
+		{name: "legacy commit status", fx: checkLogFixture{checkRuns: checkLogNoRunsBody, statuses: checkLogExternalStatusBody}},
+		{name: "non-Actions app", fx: checkLogFixture{checkRuns: checkLogOtherAppBody}},
+		{name: "ambiguous name", fx: checkLogFixture{checkRuns: checkLogAmbiguousBody}},
+		{name: "join miss", fx: checkLogFixture{jobs: staticJSON(checkLogStrayJobsBody)}},
+		{name: "log route 5xx", fx: checkLogFixture{blob: blobStatus(http.StatusInternalServerError, "boom")}},
+		{name: "log route 404", fx: checkLogFixture{blob: blobStatus(http.StatusNotFound, "gone")}},
+		{name: "log route 418", fx: checkLogFixture{blob: blobStatus(http.StatusTeapot, "surprise")}},
+		{
+			name: "log route throttled",
+			fx: checkLogFixture{log: func(w http.ResponseWriter, r *http.Request, _ string) {
+				w.Header().Set("Retry-After", "60")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, `{"message":"secondary rate limit"}`)
+			}},
+		},
+		{
+			name: "200 text/html",
+			fx: checkLogFixture{blob: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = io.WriteString(w, "<html><body>sign in</body></html>")
+			}},
+		},
+		{
+			name: "redirect without Location",
+			fx: checkLogFixture{log: func(w http.ResponseWriter, r *http.Request, _ string) {
+				w.WriteHeader(http.StatusFound)
+			}},
+		},
+		{
+			name: "redirect loop",
+			fx: checkLogFixture{blob: func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/blobs/again"+checkLogSigQuery, http.StatusFound)
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCheckLogHarness(t, tc.fx)
+
+			_, err := h.client.CheckLog(context.Background(), 72, checkLogName)
+			if err == nil {
+				t.Fatal("expected an error from this fixture")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, testToken) {
+				t.Errorf("forge token leaked into error: %q", msg)
+			}
+			if strings.Contains(msg, checkLogSigMarker) {
+				t.Errorf("signed blob URL leaked into error: %q", msg)
+			}
+			if strings.Contains(msg, h.blobURL) {
+				t.Errorf("signed-URL host leaked into error: %q", msg)
+			}
+		})
 	}
 }
 
