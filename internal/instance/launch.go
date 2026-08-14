@@ -614,15 +614,27 @@ func (s *Service) prepareGateway(ctx context.Context, repo store.Repo) (gatewayW
 	if err := onecli.ProbeGateway(ctx, s.oneCLIGatewayURL); err != nil {
 		return gatewayWiring{}, badRequestf("refusing to spawn for repo %s without credential-gateway access: %s", repo.Name, err)
 	}
-	// The agent identity is named by the repo's STORE ID, never its name.
-	// Grants are attached to the agent (ADR-0067: the grant set IS the
-	// per-repo secret assignment), so the name a run authenticates under has
-	// to survive a repo rename — keying on the name would silently create a
-	// second, grant-less agent the first time an operator renamed a repo, and
-	// the symptom would be "my secrets vanished" with nothing pointing at the
-	// rename. EnsureAgent is idempotent and 409-tolerant, so calling it on
-	// every spawn from every kind of run is the whole mapping.
-	agent, err := s.onecli.EnsureAgent(ctx, repo.ID)
+	// The agent identity is MATCHED by the identifier derived from the repo's
+	// STORE ID, never by a name. Grants are attached to the agent (ADR-0067:
+	// the grant set IS the per-repo secret assignment), so the key a run
+	// authenticates under has to survive a repo rename — matching on a name
+	// would silently create a second, grant-less agent the first time an
+	// operator renamed a repo, and the symptom would be "my secrets vanished"
+	// with nothing pointing at the rename.
+	//
+	// The repo's NAME rides along as the DISPLAY name only, and passing it here
+	// is also what HEALS a rename: EnsureAgent stomps a stale name in place
+	// (onecli.Agent), so a spawn is one of the touchpoints that keeps the
+	// OneCLI dashboard readable, at no extra call. EnsureAgent stays idempotent
+	// and 409-tolerant, so calling it on every spawn from every kind of run is
+	// the whole mapping.
+	//
+	// It is passed unguarded because a repo's name is non-empty by construction
+	// (reposvc.Add refuses a repo whose name it cannot derive); if that ever
+	// stopped holding, EnsureAgent's own refusal is the right answer, and a
+	// fallback here would paper a broken invariant over with a placeholder
+	// nobody could trace back to a repo.
+	agent, err := s.onecli.EnsureAgent(ctx, onecli.AgentIdentifier(repo.ID), repo.Name)
 	if err != nil {
 		return gatewayWiring{}, badRequestf("onecli gateway: resolving the agent identity for repo %s: %s", repo.Name, err)
 	}

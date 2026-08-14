@@ -44,7 +44,14 @@ package onecli
 //     the agent's GATEWAY CREDENTIAL, stable until explicitly regenerated —
 //     which is why lab reads it from the listing and never calls the
 //     regenerate endpoint (see agents.go on why regenerating at spawn would
-//     invalidate concurrent runs).
+//     invalidate concurrent runs). The two human-facing fields are NOT
+//     interchangeable: "identifier" is constrained @@unique([projectId,
+//     identifier]) and no endpoint can change it once the agent exists, while
+//     "name" carries no uniqueness at all and is freely mutable (point 10).
+//     That asymmetry is the whole reason issue #35 inverted lab's use of them
+//     — the identifier is the MATCH KEY, the name is display — because
+//     matching on a mutable, non-unique field is a bug waiting for the first
+//     rename typed into the dashboard.
 //  5. POST /agents takes {"name": 1–255 chars, "identifier": a slug matching
 //     ^[a-z0-9][a-z0-9-]{0,49}$} — both REQUIRED (the identifier's absence is
 //     the 400 the original guess shipped) — and answers 201 with
@@ -68,6 +75,21 @@ package onecli
 //  9. Errors are {"error":{"message":…,"type":…}} from the global handler,
 //     or {"error":"…"} from route-level validation; onecli.go's errorMessage
 //     accepts both. A CONFLICT is HTTP 409.
+// 10. PATCH /agents/{id} takes {"name": 1–255 chars, trimmed} and NOTHING
+//     else — the identifier is immutable, so the one write that touches an
+//     existing agent structurally cannot move its match key — and answers
+//     {"success":true}, or 404 when the agent is gone. Lab does not decode
+//     that answer: the status is the whole fact, and the name it just sent is
+//     the name it reports.
+// 11. DELETE /agents/{id} answers 204. The agent's grants cascade away with it
+//     (onDelete: Cascade on the agent_secrets and agent app-connection join
+//     rows) while the project's secret/connection POOL is untouched — a
+//     deleted agent takes its attachments, never the credentials themselves.
+//     Deleting the project's DEFAULT agent answers 400 "Cannot delete the
+//     default agent"; agents lab creates are never default (upstream's
+//     createAgent does not set the flag), so that 400 can only mean lab was
+//     pointed at an agent it did not create — a guardrail to REPORT, never one
+//     to work around.
 //
 // POST /agents/{id}/regenerate-token exists upstream ({"accessToken":…}) but
 // is deliberately NOT bound here: lab reads the stable token from the listing
@@ -110,6 +132,14 @@ func (c *Client) healthURL() *url.URL { return c.base.JoinPath(segHealth) }
 
 func (c *Client) agentsURL() *url.URL { return c.base.JoinPath(segAgents) }
 
+// agentURL addresses ONE agent — the rename (point 10) and delete (point 11)
+// target. Both are addressed by the agent's upstream id, never by its
+// identifier: the identifier is what lab MATCHES on, the id is what upstream
+// routes on, and the caller has already resolved one to the other by listing.
+func (c *Client) agentURL(agentID string) *url.URL {
+	return c.base.JoinPath(segAgents, url.PathEscape(agentID))
+}
+
 func (c *Client) agentGrantsURL(agentID string) *url.URL {
 	return c.base.JoinPath(segAgents, url.PathEscape(agentID), segGrants)
 }
@@ -128,35 +158,55 @@ func (c *Client) connectionsURL() *url.URL { return c.base.JoinPath(segConnectio
 
 // --- request shapes --------------------------------------------------------
 
-// wireCreateAgent is the POST /agents body: the name lab identifies the agent
-// by (the per-repo agent identity of issue #23 is exactly a name) plus the
-// identifier slug OneCLI's validation requires (point 5 above). Nothing else
-// is sent; any field OneCLI defaults is left to OneCLI.
+// wireCreateAgent is the POST /agents body: the identifier lab matches the
+// agent by ever after, plus the display name OneCLI's validation requires
+// (point 5 above). Nothing else is sent; any field OneCLI defaults is left to
+// OneCLI.
 type wireCreateAgent struct {
 	Name       string `json:"name"`
 	Identifier string `json:"identifier"`
 }
 
-// newWireCreateAgent builds the create body for a name, deriving the
-// identifier so no caller outside this file has to know the slug rule exists.
-func newWireCreateAgent(name string) wireCreateAgent {
-	return wireCreateAgent{Name: name, Identifier: agentIdentifier(name)}
+// newWireCreateAgent builds the create body from the two independent strings
+// the caller holds: the identifier it derived from the repo (AgentIdentifier)
+// and the name a human reads in OneCLI's dashboard. They no longer come from
+// one string — since issue #35 the identifier is the caller's match key, so
+// deriving it from the display name here would make the key move whenever a
+// repo is renamed, which is exactly the failure the inversion removes.
+func newWireCreateAgent(identifier, name string) wireCreateAgent {
+	return wireCreateAgent{Name: name, Identifier: identifier}
 }
 
-// agentIdentifier derives OneCLI's required identifier slug
-// (^[a-z0-9][a-z0-9-]{0,49}$) from an agent name, deterministically: lowercase
-// the name, map every byte outside [a-z0-9-] to "-", strip the hyphens that
-// mapping may have put in front (a slug must start alphanumeric), and cap the
-// result at 50 characters. Determinism is load-bearing — EnsureAgent's
-// 409-race resolution assumes the same name always produces the same create
-// body, so "identifier already taken" can only ever mean "this agent already
-// exists", never a collision between two different repos: lab's names are
-// repo_<32 hex>, whose derivations (repo-<32 hex>, 37 chars) differ wherever
-// the names do.
-func agentIdentifier(name string) string {
+// wireRenameAgent is the PATCH /agents/{id} body (point 10): the display name
+// and nothing else. There is no identifier field to send even in principle —
+// upstream's identifier is immutable — so the one shape lab writes to an
+// existing agent is structurally incapable of moving that agent's match key.
+type wireRenameAgent struct {
+	Name string `json:"name"`
+}
+
+// AgentIdentifier derives OneCLI's identifier slug (^[a-z0-9][a-z0-9-]{0,49}$)
+// deterministically: lowercase the input, map every byte outside [a-z0-9-] to
+// "-", strip the hyphens that mapping may have put in front (a slug must start
+// alphanumeric), and cap the result at 50 characters.
+//
+// It is EXPORTED because the identifier is the MATCH KEY since issue #35, not
+// a create-body detail: every lab call site that addresses a repo's agent —
+// repo create, startup heal, spawn, the grant picker, repo delete — derives it
+// from the repo's store ID, and the rule may exist in exactly one place. A
+// second copy of it elsewhere in lab is one drift away from a repo owning two
+// agents, only one of which carries its grants.
+//
+// Determinism stays load-bearing for EnsureAgent's 409-race resolution: the
+// same repo store ID always derives the same identifier, so "identifier
+// already taken" can only ever mean "this repo's agent already exists", never
+// a collision between two repos. Lab's inputs are repo_<32 hex>, whose
+// derivations (repo-<32 hex>, 37 characters, comfortably inside the 50 cap)
+// differ wherever the store IDs do.
+func AgentIdentifier(raw string) string {
 	var b strings.Builder
-	b.Grow(len(name))
-	for _, r := range strings.ToLower(name) {
+	b.Grow(len(raw))
+	for _, r := range strings.ToLower(raw) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
 			b.WriteRune(r)
 		} else {
@@ -193,9 +243,17 @@ type wireHealth struct {
 // it into Agent.Token and the hygiene rules there apply. The create answer
 // (point 5) is a subset of this shape without the token, which is why a
 // creator resolves the full row by re-listing.
+//
+// Identifier is decoded because it is the field agents.go MATCHES on; Name
+// rides along as display only. A build that stopped answering "identifier"
+// would make every match miss, so every ensure would attempt a create, take
+// the 409, re-list and still find nothing — the loud "still absent from the
+// project listing" refusal rather than a duplicate agent or a run wired to the
+// wrong identity. That is the failure this file's whole existence buys.
 type wireAgent struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
+	Identifier  string `json:"identifier"`
 	AccessToken string `json:"accessToken"`
 }
 

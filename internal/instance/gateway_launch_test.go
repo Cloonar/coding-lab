@@ -102,14 +102,24 @@ type gatewayAPIStub struct {
 	grants    []onecli.Grant
 	grantsErr error
 
-	ensured    []string // the NAME each EnsureAgent call carried, in order
+	ensured    []ensureCall // both arguments of each EnsureAgent call, in order
 	grantCalls int
 }
 
-func (s *gatewayAPIStub) EnsureAgent(_ context.Context, name string) (onecli.Agent, error) {
+// ensureCall is one EnsureAgent call's arguments. BOTH are recorded because
+// they play opposite roles since issue #35 — identifier is the match key the
+// repo's grants hang off, displayName is the string lab overwrites upstream
+// with — and the identity test's whole claim is about which of them moves when
+// a repo is renamed.
+type ensureCall struct {
+	identifier  string
+	displayName string
+}
+
+func (s *gatewayAPIStub) EnsureAgent(_ context.Context, identifier, displayName string) (onecli.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ensured = append(s.ensured, name)
+	s.ensured = append(s.ensured, ensureCall{identifier: identifier, displayName: displayName})
 	if s.ensureErr != nil {
 		return onecli.Agent{}, s.ensureErr
 	}
@@ -133,19 +143,21 @@ func (s *gatewayAPIStub) counts() (ensures, grants int) {
 	return len(s.ensured), s.grantCalls
 }
 
-// ensuredNames returns the agent names EnsureAgent was called with, in order.
-func (s *gatewayAPIStub) ensuredNames() []string {
+// ensureCalls returns the arguments EnsureAgent was called with, in order.
+func (s *gatewayAPIStub) ensureCalls() []ensureCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]string(nil), s.ensured...)
+	return append([]ensureCall(nil), s.ensured...)
 }
 
 // newGatewayStub is the ordinary happy stub: one agent identity carrying its
 // listing-borne access token, and whatever grants the case wants rendered
-// into its context file.
+// into its context file. The identity's own identifier and name are plausible
+// fillers — a launch reads only the ID and the token off what EnsureAgent
+// answers, and what it PASSED is recorded separately (ensureCalls).
 func newGatewayStub(grants ...onecli.Grant) *gatewayAPIStub {
 	return &gatewayAPIStub{
-		agent:  onecli.Agent{ID: "ag_proj", Name: "ag_proj", Token: testProxyToken},
+		agent:  onecli.Agent{ID: "ag_proj", Identifier: "ag-proj", Name: "proj", Token: testProxyToken},
 		grants: grants,
 	}
 }
@@ -161,21 +173,34 @@ const (
 
 // onecliREST is an httptest stand-in for OneCLI's REST API, answering exactly
 // the requests one spawn makes — list agents (rows carry each agent's
-// accessToken, the credential the run authenticates with), create agent (its
-// answer carries NO token, forcing the client's token-resolving re-list), and
-// list grants — in the wire shapes internal/onecli/wire.go verified against
-// the 1.45.0 source. There is deliberately NO token endpoint: the client must
-// never regenerate (that would invalidate concurrent runs' tokens), so a POST
-// to any token path lands in the default branch and fails the test.
+// identifier, the field the client matches on, and its accessToken, the
+// credential the run authenticates with), create agent (its answer carries NO
+// token, forcing the client's token-resolving re-list), and list grants — in
+// the wire shapes internal/onecli/wire.go verified against the 1.45.0 source.
+//
+// Two endpoints are deliberately ABSENT, and each absence is an assertion. There
+// is no token endpoint: the client must never regenerate (that would invalidate
+// concurrent runs' tokens). And there is no PATCH /agents/{id}: a spawn renames
+// an identity only when the row's name has drifted from the repo's, which on
+// these paths can only happen if lab wrote one name and then ensured another.
+// Either request lands in the default branch and fails the test.
 type onecliREST struct {
 	*httptest.Server
 
 	mu         sync.Mutex
-	agents     []string // agent names the project holds, in creation order
+	agents     []restAgent // the agents the project holds, in creation order
 	lists      int
 	creates    int
 	grantLists int
 	grantsBody string
+}
+
+// restAgent is one agent the stub's project holds, in the two fields that are
+// no longer interchangeable (issue #35): the identifier every later ensure
+// matches on, and the display name lab owns.
+type restAgent struct {
+	identifier string
+	name       string
 }
 
 // newOneCLIREST starts the stub. grantsBody is the raw body GET
@@ -195,8 +220,8 @@ func newOneCLIREST(t *testing.T, grantsBody string) *onecliREST {
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/agents":
 			r.lists++
 			rows := make([]string, 0, len(r.agents))
-			for _, name := range r.agents {
-				rows = append(rows, fmt.Sprintf(`{"id":%q,"name":%q,"accessToken":%q}`, restAgentID, name, restToken))
+			for _, a := range r.agents {
+				rows = append(rows, fmt.Sprintf(`{"id":%q,"name":%q,"identifier":%q,"accessToken":%q}`, restAgentID, a.name, a.identifier, restToken))
 			}
 			_, _ = fmt.Fprintf(w, `[%s]`, strings.Join(rows, ","))
 
@@ -214,7 +239,7 @@ func newOneCLIREST(t *testing.T, grantsBody string) *onecliREST {
 				// The real build's Zod validation: identifier is required.
 				t.Errorf("POST /v1/agents body %q carries no identifier — the real build 400s this", body)
 			}
-			r.agents = append(r.agents, create.Name)
+			r.agents = append(r.agents, restAgent{identifier: create.Identifier, name: create.Name})
 			w.WriteHeader(http.StatusCreated)
 			// The create answer carries no accessToken (wire.go point 5).
 			_, _ = fmt.Fprintf(w, `{"id":%q,"name":%q,"identifier":%q}`, restAgentID, create.Name, create.Identifier)
@@ -239,11 +264,12 @@ func (r *onecliREST) counts() (lists, creates, grants int) {
 	return r.lists, r.creates, r.grantLists
 }
 
-// created returns the agent names the project ended up holding.
-func (r *onecliREST) created() []string {
+// created returns the agents the project ended up holding, identifier and
+// display name both, so a caller can pin which of the two the spawn keyed on.
+func (r *onecliREST) created() []restAgent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.agents...)
+	return append([]restAgent(nil), r.agents...)
 }
 
 // client is a real *onecli.Client bound to the stub.
@@ -514,15 +540,17 @@ func TestLaunch_GatewayWiredHostRunner(t *testing.T) {
 	}
 
 	// The REST conversation was exactly a first spawn's worth: list (miss),
-	// create — addressed by the repo's STORE ID — then the token-resolving
-	// re-list, then grants. No token endpoint exists on the stub, so a
-	// regenerate attempt would already have failed the test loudly.
+	// create — identified by the slug derived from the repo's STORE ID, named
+	// by the repo — then the token-resolving re-list, then grants. Neither a
+	// token endpoint nor a rename endpoint exists on the stub, so a regenerate
+	// or a redundant PATCH would already have failed the test loudly.
 	lists, creates, grants := rest.counts()
 	if lists != 2 || creates != 1 || grants != 1 {
 		t.Errorf("REST calls = %d lists, %d creates, %d grant listings; want 2/1/1", lists, creates, grants)
 	}
-	if names := rest.created(); !slices.Equal(names, []string{repo.ID}) {
-		t.Errorf("created agents = %q, want exactly the repo's store id [%q]", names, repo.ID)
+	wantAgents := []restAgent{{identifier: onecli.AgentIdentifier(repo.ID), name: repo.Name}}
+	if gotAgents := rest.created(); !slices.Equal(gotAgents, wantAgents) {
+		t.Errorf("created agents = %+v, want exactly one keyed by the repo's store id and named by the repo %+v", gotAgents, wantAgents)
 	}
 
 	// The seeder was handed the gateway ref, so the context file teaches the
@@ -536,15 +564,23 @@ func TestLaunch_GatewayWiredHostRunner(t *testing.T) {
 	}
 }
 
-// --- 3. the agent identity is the repo's store id ---------------------------
+// --- 3. the agent identity is keyed by the repo's store id ------------------
 
-// ADR-0067 maps one OneCLI agent identity per lab repo, and the name that
-// mapping keys on must survive a repo RENAME: grants live on the agent, so
-// keying on repo.Name would silently create a second, grant-less identity the
+// ADR-0067 maps one OneCLI agent identity per lab repo, and the key that
+// mapping MATCHES on must survive a repo RENAME: grants live on the agent, so
+// matching on repo.Name would silently create a second, grant-less identity the
 // first time an operator renamed a repo — surfacing as "my secrets vanished"
-// with nothing pointing at the rename. Two launches, the second under a
-// different repo NAME, must ensure the same identity: the store id, both times.
-func TestLaunch_GatewayAgentIdentityIsRepoStoreID(t *testing.T) {
+// with nothing pointing at the rename. The identifier derived from the store id
+// is that key (issue #35), and it is the one thing the store id contributes:
+// two launches, the second under a different repo NAME, must ensure the same
+// identifier both times.
+//
+// The repo's name is not unused, though — it rides along as the DISPLAY name,
+// which is what makes a spawn a rename-healing touchpoint rather than a call
+// that leaves the OneCLI dashboard showing whatever the repo was called the
+// first time anyone spawned. So the second half of the claim is the mirror of
+// the first: the display name FOLLOWS the rename while the identifier does not.
+func TestLaunch_GatewayAgentIdentityIsDerivedFromRepoStoreID(t *testing.T) {
 	f := newFixture(t)
 	stub := newGatewayStub()
 	f.enableGateway(t, stub)
@@ -567,13 +603,25 @@ func TestLaunch_GatewayAgentIdentityIsRepoStoreID(t *testing.T) {
 	renamed.Name = "renamed-proj" // the operator renamed the repo between spawns
 	launch(t, renamed, "after")
 
-	names := stub.ensuredNames()
-	if want := []string{f.repo.ID, f.repo.ID}; !slices.Equal(names, want) {
-		t.Errorf("EnsureAgent names = %q, want the repo's STORE ID both times %q", names, want)
+	// The identifier is derived rather than written out, because the derivation
+	// rule lives in exactly one place (onecli.AgentIdentifier) and a second copy
+	// of it here is precisely the drift that would give one repo two agents.
+	identifier := onecli.AgentIdentifier(f.repo.ID)
+	want := []ensureCall{
+		{identifier: identifier, displayName: f.repo.Name},
+		{identifier: identifier, displayName: renamed.Name},
 	}
-	for _, n := range names {
-		if n == f.repo.Name || n == renamed.Name {
-			t.Errorf("EnsureAgent was called with the repo NAME %q — a rename would strand the repo's grants", n)
+	calls := stub.ensureCalls()
+	if !slices.Equal(calls, want) {
+		t.Errorf("EnsureAgent calls = %+v, want the SAME identifier both times with each spawn's current repo name %+v", calls, want)
+	}
+	// The guard the whole mapping rests on, kept separate from the comparison
+	// above so it survives any rewrite of it: whatever else moves, the match key
+	// is never a name. Both names are checked, since the point is that neither
+	// the old nor the new one may key the identity.
+	for _, c := range calls {
+		if c.identifier == f.repo.Name || c.identifier == renamed.Name {
+			t.Errorf("EnsureAgent matched on the repo NAME %q — a rename would strand the repo's grants", c.identifier)
 		}
 	}
 }

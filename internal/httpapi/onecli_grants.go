@@ -38,6 +38,7 @@ import (
 	"net/http"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
+	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
 // oneCLINotConfiguredMessage is what a mutation answers when the integration
@@ -58,7 +59,7 @@ type oneCLIGrantAPI interface {
 	ListSecrets(ctx context.Context) ([]onecli.Secret, error)
 	ListConnections(ctx context.Context) ([]onecli.Connection, error)
 	ListAgents(ctx context.Context) ([]onecli.Agent, error)
-	EnsureAgent(ctx context.Context, name string) (onecli.Agent, error)
+	EnsureAgent(ctx context.Context, identifier, displayName string) (onecli.Agent, error)
 	ListGrants(ctx context.Context, agentID string) ([]onecli.Grant, error)
 	AttachGrant(ctx context.Context, agentID string, kind onecli.GrantKind, resourceID string) error
 	DetachGrant(ctx context.Context, agentID string, kind onecli.GrantKind, resourceID string) error
@@ -183,7 +184,7 @@ func (s *Server) handleOneCLIGrantList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID, found, err := oneCLIAgentIdentityID(r.Context(), api, repo.ID)
+	agentID, found, err := oneCLIAgentIdentityID(r.Context(), api, repo)
 	if err != nil {
 		s.writeOneCLIGatewayError(w, "resolving the repo's OneCLI agent identity", err)
 		return
@@ -211,8 +212,9 @@ func (s *Server) handleOneCLIGrantList(w http.ResponseWriter, r *http.Request) {
 // handleOneCLIGrantAttach is PUT
 // /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}: 204, no body.
 //
-// This is the ONE path that may create the repo's agent identity, and the
-// lazy creation is deliberate — an identity exists once someone decides the
+// This is the ONE path here that may create the repo's agent identity — or
+// rename one, since EnsureAgent brings a stale display name back in line — and
+// the lazy creation is deliberate: an identity exists once someone decides the
 // repo should reach something, which is exactly this click. EnsureAgent is
 // idempotent and 409-tolerant, and AttachGrant is a PUT, so replaying a whole
 // selection is safe.
@@ -231,7 +233,7 @@ func (s *Server) handleOneCLIGrantAttach(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	agentID, err := ensureOneCLIAgentIdentityID(r.Context(), api, repo.ID)
+	agentID, err := ensureOneCLIAgentIdentityID(r.Context(), api, repo)
 	if err != nil {
 		s.writeOneCLIGatewayError(w, "resolving the repo's OneCLI agent identity", err)
 		return
@@ -264,7 +266,7 @@ func (s *Server) handleOneCLIGrantDetach(w http.ResponseWriter, r *http.Request)
 	// take something away from it is absurd, and it would turn "revoke
 	// everything" — a picker replaying an empty selection — into a machine that
 	// manufactures identities.
-	agentID, found, err := oneCLIAgentIdentityID(r.Context(), api, repo.ID)
+	agentID, found, err := oneCLIAgentIdentityID(r.Context(), api, repo)
 	if err != nil {
 		s.writeOneCLIGatewayError(w, "resolving the repo's OneCLI agent identity", err)
 		return
@@ -318,35 +320,43 @@ func oneCLIGrantTarget(w http.ResponseWriter, r *http.Request) (onecli.GrantKind
 // creating it, returning its id and whether it exists at all. found=false is
 // an ordinary state, not an error.
 //
-// The name matched on is the repo's STORE ID, and the match is exact and
+// The field matched on is the identity's IDENTIFIER, derived from the repo's
+// STORE ID (onecli.AgentIdentifier), and the match is exact and
 // case-sensitive — the same rule internal/onecli's own findAgent applies, and
-// the same one internal/instance's launch path establishes the mapping with. A
-// divergence in either direction is silent and expensive: a looser match could
-// hand one repo another repo's credentials, and a different key would create a
-// second, grant-less identity whose symptom is "my secrets vanished".
+// the same one internal/instance's launch path establishes the mapping with.
+// The agent's NAME is display text lab overwrites (issue #35) and is matched on
+// nowhere. A divergence in either direction is silent and expensive: a looser
+// match could hand one repo another repo's credentials, and a different key
+// would create a second, grant-less identity whose symptom is "my secrets
+// vanished".
 //
 // It returns the ID as a bare string, never the onecli.Agent it came from.
 // That is the structural half of this file's no-token-in-a-response rule: a
 // handler that never holds an Agent cannot serialize one by accident.
-func oneCLIAgentIdentityID(ctx context.Context, api oneCLIGrantAPI, repoID string) (string, bool, error) {
+func oneCLIAgentIdentityID(ctx context.Context, api oneCLIGrantAPI, repo store.Repo) (string, bool, error) {
 	agents, err := api.ListAgents(ctx)
 	if err != nil {
 		return "", false, err
 	}
+	identifier := onecli.AgentIdentifier(repo.ID)
 	for _, a := range agents {
-		if a.Name == repoID {
+		if a.Identifier == identifier {
 			return a.ID, true, nil
 		}
 	}
 	return "", false, nil
 }
 
-// ensureOneCLIAgentIdentityID is the attach path's resolver: same mapping,
-// but creating the identity when it does not exist yet. It drops the Agent for
-// the same reason its read-only sibling does — the caller needs an id, and
-// anything more is a credential it has no business holding.
-func ensureOneCLIAgentIdentityID(ctx context.Context, api oneCLIGrantAPI, repoID string) (string, error) {
-	identity, err := api.EnsureAgent(ctx, repoID)
+// ensureOneCLIAgentIdentityID is the attach path's resolver: same match key,
+// but creating the identity when it does not exist yet. It hands EnsureAgent
+// the repo's NAME as the display name, which makes the attach click one of the
+// touchpoints that heals a rename — the identity keeps the identifier its
+// grants hang off, and its dashboard row catches up with what the operator
+// clicking here is looking at. It drops the Agent for the same reason its
+// read-only sibling does: the caller needs an id, and anything more is a
+// credential it has no business holding.
+func ensureOneCLIAgentIdentityID(ctx context.Context, api oneCLIGrantAPI, repo store.Repo) (string, error) {
+	identity, err := api.EnsureAgent(ctx, onecli.AgentIdentifier(repo.ID), repo.Name)
 	if err != nil {
 		return "", err
 	}
