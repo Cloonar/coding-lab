@@ -563,6 +563,20 @@ func (s *Server) Handler() http.Handler {
 	// body names an internal origin.
 	api.HandleFunc("GET /api/v1/onecli/dashboard", s.requireAuth(s.handleOneCLIDashboard))
 
+	// The per-repo grant picker (issue #25): the lab-wide credential pool, a
+	// repo's current grants, and the attach/detach pair that changes them —
+	// all of them a proxy of OneCLI's REST API, which the browser can never
+	// reach itself (the project API key must not leave lab). Unconditional for
+	// the same reason as the two routes above: an unconfigured lab answers the
+	// reads with configured:false rather than a 404 the SPA cannot tell from an
+	// older lab, and answers the mutations with a 409 that says so. The
+	// mutations are PUT/DELETE, so csrfMiddleware guards them as it guards
+	// every other mutation on this mux.
+	api.HandleFunc("GET /api/v1/onecli/pool", s.requireAuth(s.handleOneCLIPool))
+	api.HandleFunc("GET /api/v1/repos/{id}/onecli/grants", s.requireAuth(s.handleOneCLIGrantList))
+	api.HandleFunc("PUT /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}", s.requireAuth(s.handleOneCLIGrantAttach))
+	api.HandleFunc("DELETE /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}", s.requireAuth(s.handleOneCLIGrantDetach))
+
 	// Web Push (issue #98): the VAPID public key plus subscription CRUD/test
 	// (operator auth; CSRF guards the mutations). Mounted only when the
 	// sender was built.
