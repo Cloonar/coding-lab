@@ -403,7 +403,7 @@ $ curl -sS -o /dev/null -w '%{http_code}\n' \
 A `200` with real data back is the whole criterion: the placeholder went out, the gateway replaced it, and the run never held the key. Reading the failures:
 
 - **`401` / `403`** — the request reached the real API un-injected. Either the service is not granted to this repo's **agent identity** (attach the grant in OneCLI's dashboard; it takes effect at the gateway immediately), or the tool ignored `HTTPS_PROXY` (the [known caveat](#what-a-gateway-wired-run-gets) — retry with `curl` to tell the two apart).
-- **A proxy-auth rejection** (`407`, or whatever the gateway answers a bad token with) — the gateway did not accept this run's token. Most often the restart residual above: lab was restarted after this run started.
+- **A proxy-auth rejection** (`407`, or whatever the gateway answers a bad token with) — the gateway did not accept this run's token. Most often the token was regenerated **in OneCLI's own dashboard** after this run started (see above) — restarting lab itself is harmless to it.
 - **`curl: (60) SSL certificate problem`**, Node's `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, Go's `x509: certificate signed by unknown authority` — the trust bundle is not in play. Check that `--onecli-ca-file` really is the sidecar's *interception* CA, and that the tool reads one of the four CA variables lab sets.
 - **`curl: (7) Failed to connect`** to the gateway address — the proxy port is not reachable from the container's network namespace; see the blockquote in [Deploying the sidecar](#deploying-the-sidecar).
 - **`git push` or `labctl` failing at the same time** means the problem is *not* the gateway: both are on the run's `NO_PROXY` list and never touch it. Look at the forge credential or the agent socket instead.
@@ -641,6 +641,32 @@ Drop the `Accept` header and the same request answers `401` instead. That is the
 | `--onecli-dashboard-url "…": want an absolute http(s) URL` | It parses as something other than an absolute `http(s)://host…` — a bare `host:port`, a scheme typo, a path fragment. | Write the full origin, scheme included. One trailing slash is fine (lab trims it); anything past it is a path prefix, the one shape this feature does not support. |
 | `--session-cookie-domain "…": want a bare domain like example.com, with no scheme, port or path` | A cookie `Domain` is a bare domain, not a URL: no scheme, no port (cookies carry none), no path (`Domain` and `Path` are separate attributes). | `example.com`. A single leading dot (`.example.com`) is legal and accepted verbatim; `.` alone, or any value containing `/`, `:`, or whitespace, is not. |
 
+### Grant picker
+
+The dashboard ([above](#dashboard-exposure)) is where a secret or connection is *created* — a value has to live somewhere, and that somewhere is OneCLI, once, by design. Lab's own per-repo settings work one layer up: an operator picks, per repo, which of the pool's already-created secrets and connections that repo's runs may use. The pick becomes a **grant** on the repo's **agent identity** — there is no parallel lab-side assignment model, because the grant set *is* the assignment (ADR-0067).
+
+Four authenticated endpoints carry it, all under session/PAT auth like the rest of `/api/v1`:
+
+```console
+$ curl -s --cookie "lab_session=$TOKEN" https://lab.example.com/api/v1/onecli/pool
+{"configured":true,"secrets":[{"id":"sec_1","name":"DEPLOY_TOKEN","provider":"generic"}],"connections":[{"id":"con_1","name":"GitHub","provider":"github"}]}
+
+$ curl -s --cookie "lab_session=$TOKEN" \
+       https://lab.example.com/api/v1/repos/repo_4b1f0c7a9d3e42a8b6c5d0e1f2a3b4c5/onecli/grants
+{"configured":true,"grants":[{"kind":"secrets","id":"sec_1","name":"DEPLOY_TOKEN"}]}
+
+$ curl -s -o /dev/null -w '%{http_code}\n' -X PUT \
+       --cookie "lab_session=$TOKEN" \
+       https://lab.example.com/api/v1/repos/repo_4b1f0c7a9d3e42a8b6c5d0e1f2a3b4c5/onecli/grants/connections/con_1
+204
+```
+
+`GET /api/v1/onecli/pool` lists the whole project pool — everything an operator *could* grant, metadata only (id, name, provider; never a value). `GET /api/v1/repos/{id}/onecli/grants` lists what one repo's agent identity already has. `PUT`/`DELETE /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}` attach or detach a single `secrets` or `connections` resource — an unrecognized `{kind}` is a `400` before any OneCLI call is made. The attach path lazily creates the repo's agent identity on first grant, named by the repo's **store ID** exactly like every other agent-identity path (ADR-0067); the two read paths never create one, so a repo with no grants yet just reports an empty list rather than a freshly-minted, grant-less identity nobody asked for.
+
+These four routes follow the same "not configured is not unhealthy" rule [health](#checking-it-works) is pinned to, and it is what makes *unconfigured*, *unreachable*, and *empty* three distinguishable answers rather than one confusing blank screen: with no `--onecli-url`/`--onecli-api-key-file` set, the two GETs still answer `200` with `configured:false` and empty arrays, while the two mutations answer `409` — none of the four routes ever 404s, since they mount unconditionally. A configured OneCLI that is unreachable or errors answers `502` with `{"error":"…"}` carrying the underlying failure.
+
+**OneCLI stays the single source of truth.** Lab keeps no mirror of the pool or of any repo's grants, so an operator creating, rotating, or deleting a secret's value in OneCLI's dashboard needs no reconciliation on lab's side — the next `pool` or `grants` read simply reflects it. This is also why **value CRUD lives only in the dashboard**: lab's picker is a selection surface over ids and names, never a secrets manager, and it will not grow into one — creating a new secret, rotating one, or setting up a provider connection all happen in OneCLI's dashboard ([Dashboard exposure](#dashboard-exposure)), and lab links out to it rather than rebuilding it. Consistent with that, the agent identity's own proxy token is never included in any of these four responses.
+
 ### Operational notes
 
 - It's a second process to run, back up, and upgrade. Its Postgres volume holds the encrypted secret store — back it up on its own schedule, with the same seriousness as `lab.db` / `master.key` ([Backup & restore](#backup-restore)).
@@ -857,6 +883,10 @@ Preflight (below) stays the runtime authority on host readiness regardless of di
 - Logs: slog JSON on stdout (journald under systemd). Keys: `component`, `repo`, `session`, `run`, `err`. Secrets, tokens, key material, and DSN passwords never appear in logs.
 - `GET /api/v1/onecli/health` — authenticated OneCLI gateway health (`off`/`ok`/`degraded`/`unreachable`); see [OneCLI credential gateway](#onecli-credential-gateway).
 - `GET /api/v1/onecli/dashboard` — authenticated; the resolved dashboard exposure, `{"mode":"off|port|subdomain","url":"…"}` with `url` omitted when the mode is `off`. Static process configuration resolved once at startup, deliberately **not** folded into `/onecli/health`: it probes nothing, so a dead sidecar cannot take the web UI's link-out with it. See [Dashboard exposure](#dashboard-exposure).
+- `GET /api/v1/onecli/pool` — authenticated; the whole OneCLI project pool, `{"configured":bool,"secrets":[…],"connections":[…]}`, metadata only and never a value. See [Grant picker](#grant-picker).
+- `GET /api/v1/repos/{id}/onecli/grants` — authenticated; that repo's current grants, `{"configured":bool,"grants":[{"kind","id","name"}]}`. See [Grant picker](#grant-picker).
+- `PUT /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}` — authenticated; attaches a secret or connection (`{kind}` is `secrets` or `connections`) to the repo's **agent identity**, creating it lazily on first grant; `204` on success. See [Grant picker](#grant-picker).
+- `DELETE /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}` — authenticated; detaches one; `204` on success. See [Grant picker](#grant-picker).
 - `GET /api/v1/auth/check` — authenticated; `204` for any valid lab identity, `401` for none, empty body either way. The forward-auth probe `--onecli-dashboard=subdomain` is built on (nginx `auth_request`, caddy `forward_auth`); see [Dashboard exposure](#dashboard-exposure).
 
 ## Metrics
