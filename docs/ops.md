@@ -24,6 +24,10 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `onecli.apiKeyFile` | `null` | Passed as `--onecli-api-key-file`. Path to a file holding the OneCLI API key — carries `masterKeyFile`'s permission contract (0600 or stricter, refuses startup otherwise) but, unlike it, is never auto-generated: the key is minted in OneCLI's own dashboard. |
 | `onecli.gatewayUrl` | `null` | Passed as `--onecli-gateway-url`. OneCLI's gateway proxy URL, injected into runs as `HTTPS_PROXY` — deliberately separate from `onecli.url`: a `container`-runner run can't reach the loopback address lab itself dials, so this typically points at a different, container-reachable address. Independently settable — no pairing requirement with the other two `onecli.*` options. |
 | `onecli.caFile` | `null` | Passed as `--onecli-ca-file`. Path to the PEM file holding the OneCLI gateway's interception CA certificate on the host, composed with the host's system CA bundle into a per-run trust bundle (see [OneCLI credential gateway](#onecli-credential-gateway)). No pairing requirement with `onecli.url` / `onecli.apiKeyFile`, but with `onecli.gatewayUrl` set and this left `null`, lab refuses to spawn a run rather than start one whose HTTPS is broken. |
+| `onecli.dashboard` | `"off"` | Passed as `--onecli-dashboard`. How OneCLI's own dashboard is reached through lab's auth: `"off"` (nothing exposed — the default), `"port"` (lab reverse-proxies it on a second authenticated listener), or `"subdomain"` (your reverse proxy fronts it and delegates auth to lab). Any non-`off` mode requires `onecli.url`; see [Dashboard exposure](#dashboard-exposure) for the modes, the proxy snippets, and the startup refusals. |
+| `onecli.dashboardAddr` | `null` | Passed as `--onecli-dashboard-addr`. Listen address for lab's second listener in `port` mode, e.g. `":8443"` — distinct from `listenAddr` (lab's own) and from `onecli.url` (the proxy's upstream). Required in `port` mode; set in any other mode it fails at startup as dead config. |
+| `onecli.dashboardUrl` | `null` | Passed as `--onecli-dashboard-url`. The **browser-facing** dashboard origin lab reports to the web UI, e.g. `"https://onecli.example.com"` — never an address lab dials. Required in `subdomain` mode (lab has no listener there to derive one from); in `port` mode it *overrides* the derivation from `baseUrl`'s host plus `dashboardAddr`'s port, for a deployment that remaps the port in front of lab. |
+| `sessionCookieDomain` | `null` | Passed as `--session-cookie-domain`. `Domain` attribute on lab's session cookie, e.g. `"example.com"`; `null` (the default) omits the attribute, keeping the cookie host-only. Set it **only** for `onecli.dashboard = "subdomain"`, where the cookie must reach a sibling host — and read the warning in [Dashboard exposure](#dashboard-exposure) first: every host under the domain then receives lab's session cookie. |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps lab's derived sqlite default **and** lets a `LAB_DB` entry in `environmentFile` take effect (precedence is flag > env > default — a `--db` flag would shadow `LAB_DB`). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (`LAB_DB` with a password-bearing postgres DSN, etc.). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. lab auto-generates it 0600 when absent and refuses to start on loose permissions or malformed content. |
@@ -194,6 +198,10 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--onecli-api-key-file` | `LAB_ONECLI_API_KEY_FILE` | (empty) | File holding the OneCLI API key, 0600 or stricter — loose perms refuse startup, same contract as `--master-key-file`. Never auto-generated. |
 | `--onecli-gateway-url` | `LAB_ONECLI_GATEWAY_URL` | (empty) | Gateway proxy URL a run is handed as `HTTPS_PROXY`, e.g. `http://10.88.0.1:10255`. Independent of `--onecli-url` — a containerized run can't reach the loopback address lab itself uses to reach the REST API. |
 | `--onecli-ca-file` | `LAB_ONECLI_CA_FILE` | (empty) | Path to the PEM file holding the OneCLI gateway's interception CA certificate on the host. Independent of `--onecli-url` / `--onecli-api-key-file`; with `--onecli-gateway-url` set and this unset, a spawn refuses rather than start a run whose HTTPS is broken (see [OneCLI credential gateway](#onecli-credential-gateway)). |
+| `--onecli-dashboard` | `LAB_ONECLI_DASHBOARD` | `off` | How OneCLI's own dashboard is reached through lab's auth: `off` (nothing exposed), `port` (lab reverse-proxies it on its own authenticated listener), or `subdomain` (your reverse proxy fronts it and delegates auth to lab). Any non-`off` mode requires `--onecli-url`. The modes, their proxy snippets, and their startup refusals are in [Dashboard exposure](#dashboard-exposure). |
+| `--onecli-dashboard-addr` | `LAB_ONECLI_DASHBOARD_ADDR` | (empty) | Listen address for lab's **second** listener in `port` mode, e.g. `:8443` — distinct from `--addr` and from `--onecli-url` (which is the proxy's upstream, not a second OneCLI-side setting). Required in `port` mode; set in any other mode it refuses startup as dead config. |
+| `--onecli-dashboard-url` | `LAB_ONECLI_DASHBOARD_URL` | (empty) | Browser-facing dashboard origin, e.g. `https://onecli.example.com` — what lab reports to the web UI, never an address lab dials. Required in `subdomain` mode; an optional override in `port` mode, where lab otherwise derives it from `--base-url`'s host plus `--onecli-dashboard-addr`'s port. Refused while the mode is `off`. |
+| `--session-cookie-domain` | `LAB_SESSION_COOKIE_DOMAIN` | (empty) | `Domain` attribute on lab's session cookie — a bare domain (`example.com`), no scheme, port, or path. Empty omits the attribute, keeping the cookie host-only, which is right in every topology except `--onecli-dashboard=subdomain`, where a sibling host has to receive it. Widening it is a real trade, not a formality — see [Dashboard exposure](#dashboard-exposure). |
 
 The per-provider host settings (`--provider-bin` / `--provider-config` and their `--claude` / `--claude-config` aliases) resolve **per provider entry**, highest wins: **generic flag > generic env > alias flag > alias env** — the generic form always beats the claude-named alias for the same setting, and within each pair a flag beats its env. The registered provider IDs come from `cmd/lab`, so a new provider's binary and config path are two entries under its ID with no config change (ADR-0034).
 
@@ -402,12 +410,243 @@ A `200` with real data back is the whole criterion: the placeholder went out, th
 
 See also [Observability](#observability).
 
+### Dashboard exposure
+
+The **dashboard** is OneCLI's own Next.js app, served on the sidecar's dashboard/API port — 10254 above, the same port lab's REST client dials. It is the only surface in this deployment where secret and connection *values* are created and edited, and that is by design rather than by omission: lab has no value-CRUD screen and will not grow one, because a screen that accepts a value is a screen that has to hold it, and not holding values is the entire property this integration buys. Lab's own UI works one level up — attaching and detaching **grants** on a repo's **agent identity** — so an operator adding a new API key needs the dashboard.
+
+*How* they reach it is a deployment question rather than a fixed answer, which is why it is configuration: a single-host lab reached over SSH, a phone-first operator on a mobile network, and a lab already behind a wildcard-TLS reverse proxy each want something different, and none of the three is wrong. `--onecli-dashboard` picks one. Serving the dashboard under a path prefix on lab's own origin is deliberately **not** on the menu — OneCLI's Next.js app ships no `basePath`, so its asset and route URLs are absolute and both apps claim `/settings`; the upstream fork that would fix that was sized at roughly six files and rejected on permanence rather than size, in [ADR-0067](adr/0067-onecli-credential-gateway.md).
+
+| Mode | What is exposed | What you run | Who authenticates |
+|---|---|---|---|
+| `off` (default) | Nothing. 10254 stays on loopback and lab opens no extra listener. | Nothing — an SSH tunnel on the occasions you need the dashboard. | Your SSH access; the tunnel is the boundary. |
+| `port` | Lab's own **second listener**, whole-origin reverse proxy onto `--onecli-url`. | Lab, with one more listen address (and whatever already terminates TLS in front of it). | Lab, on its own session cookie — a PAT or trusted-proxy identity works too. |
+| `subdomain` | `onecli.example.com`, fronted by **your** reverse proxy. | Your nginx/caddy, delegating auth back to lab. | Lab, via `GET /api/v1/auth/check` forward-auth. |
+
+Every non-`off` mode requires `--onecli-url`: the dashboard lives on the port lab already dials, so there is no second OneCLI-side address to configure and none is offered.
+
+**`off` — the SSH tunnel, and the path that never goes away.** The default exposes nothing. OneCLI's dashboard has no login of its own (local single-user mode, see [Operational notes](#operational-notes)), so its port stays bound to loopback and the way in is a tunnel from the machine you are sitting at:
+
+```console
+$ ssh -N -L 10254:127.0.0.1:10254 operator@lab.example.com
+```
+
+Then browse `http://127.0.0.1:10254` — the tunnel's local end — for as long as that `ssh` process lives. This needs **no lab configuration at all**: `--onecli-dashboard` can stay unset, and the tunnel works whether or not lab is running. It also stays available in every mode: `port` and `subdomain` **add** an authenticated front door onto the same loopback-bound sidecar, they never remove this one. Which is the other half of the honest reading — lab's proxy cannot take away a route the operator left open, so "the dashboard is only reachable through lab" is a property of binding 10254 to loopback, not of anything in lab's code.
+
+**`port` — lab is the way in.** Lab opens a second HTTP server on `--onecli-dashboard-addr` and serves an authenticated reverse proxy onto `--onecli-url` there:
+
+```console
+$ lab --onecli-url http://127.0.0.1:10254 \
+      --onecli-api-key-file /var/lib/lab/onecli-api-key \
+      --onecli-dashboard port \
+      --onecli-dashboard-addr :8443 \
+      --base-url https://lab.example.com \
+      ...
+```
+
+NixOS:
+
+```nix
+services.lab = {
+  baseUrl = "https://lab.example.com";          # required by port mode
+  onecli = {
+    url = "http://127.0.0.1:10254";
+    apiKeyFile = "/run/secrets/lab-onecli-api-key";
+    dashboard = "port";
+    dashboardAddr = ":8443";
+  };
+};
+```
+
+On that listener every path is the dashboard's — there is no route table, because whole-origin proxying is exactly what makes this work where the rejected path-prefix proxy could not: the app's absolute URLs land back on the origin they came from. Method, path, query, and body cross verbatim, and the one thing lab strips is **its own session cookie** — a lab credential the dashboard has no use for and should never be handed. OneCLI's own cookies, and an `Authorization: Bearer` header a script may be carrying for OneCLI's REST API on the same origin, all ride through untouched.
+
+The gate is one question — does this request carry a valid lab identity:
+
+- **Valid session** (or PAT, or trusted-proxy header) → proxied.
+- **No identity, and a browser navigation** — a `GET`/`HEAD` that accepts `text/html` → `302` to `<base-url>/login?next=onecli-dashboard&path=<escaped path+query>`, and the SPA returns the operator to the dashboard once they have logged in. `next` is a fixed *keyword* and `path` is a path-and-query, never a URL: the origin bounced back to always comes from lab's own configuration, so the round trip is structurally incapable of becoming an open redirect. This is also why `--base-url` is required in this mode rather than merely recommended — it *is* the bounce destination.
+- **No identity, anything else** — a `POST`, an XHR, an asset fetch from a page whose session expired → `401`. A `302` there just hands a JSON parser a login page.
+
+**No cookie configuration is needed in this mode**, which reliably surprises people: RFC 6265 cookies are host-scoped, not port-scoped, so the session cookie lab already sets on `lab.example.com` is sent to `lab.example.com:8443` with no changes whatsoever. Leave `--session-cookie-domain` empty. `SameSite=Strict` survives for the same reason — another port on the same host is still same-site — and on this listener that attribute *is* the CSRF defense, which is why lab's usual `X-Lab-Csrf` header requirement is deliberately absent here (the dashboard is a foreign application that would never send it, and requiring it would reject every mutation the dashboard makes).
+
+Two caveats, both worth knowing before picking this mode:
+
+- **TLS.** The second listener is served exactly the way lab's main listener is — lab terminates no TLS itself. Put it behind the same TLS-terminating proxy you already run for lab (see [Reverse proxy / Authelia](#reverse-proxy-authelia)), or accept plain HTTP on a network you trust. There is no `--onecli-dashboard-cert` and there will not be one.
+- **Port blocking.** Non-443 ports are blocked outright on plenty of corporate and mobile networks, so a phone-first operator can find this mode unreachable at exactly the moment they need it — mid-incident, on cellular, nowhere near a laptop. That is the honest argument for `subdomain`, and it is not hypothetical.
+
+`--onecli-dashboard-url` is optional here. Lab otherwise derives the browser-facing origin it reports from `--base-url`'s host plus `--onecli-dashboard-addr`'s **port** — the bind address's host half is thrown away deliberately, since `:8443` and `127.0.0.1:8443` are not things a browser can type. Set the flag when something in front of lab remaps the port (a load balancer publishing `https://lab.example.com:9443` onto lab's internal `:8443`, say) and lab reports your value verbatim instead of the derivation.
+
+**`subdomain` — your reverse proxy fronts it, lab answers the auth question.** The dashboard gets its own host, `onecli.example.com`, and the proxy that already terminates TLS for lab terminates it there too. Lab opens no listener in this mode; it contributes three things, and all three are load-bearing:
+
+1. **`GET /api/v1/auth/check`** — the forward-auth probe. `204` for a request carrying any valid lab identity, `401` for one carrying none, empty body either way (both proxies discard it anyway, and an endpoint that returns nothing cannot be made into a leak by a proxy that is *designed* to call it on an anonymous visitor's behalf).
+2. **`--session-cookie-domain example.com`** — lab's session cookie is host-only by default, scoped to `lab.example.com`, and would never be sent to `onecli.example.com` at all. Without this the forward-auth subrequest carries no credential and every visit 401s.
+3. **`--onecli-dashboard-url https://onecli.example.com`** — lab has no listener here to derive an origin from, and only you know what your proxy published. This is what the web UI's link-out reads.
+
+```console
+$ lab --onecli-url http://127.0.0.1:10254 \
+      --onecli-api-key-file /var/lib/lab/onecli-api-key \
+      --onecli-dashboard subdomain \
+      --onecli-dashboard-url https://onecli.example.com \
+      --session-cookie-domain example.com \
+      --base-url https://lab.example.com \
+      ...
+```
+
+NixOS:
+
+```nix
+services.lab = {
+  baseUrl = "https://lab.example.com";
+  sessionCookieDomain = "example.com";
+  onecli = {
+    url = "http://127.0.0.1:10254";
+    apiKeyFile = "/run/secrets/lab-onecli-api-key";
+    dashboard = "subdomain";
+    dashboardUrl = "https://onecli.example.com";
+  };
+};
+```
+
+`SameSite=Strict` stays exactly as it is, and nothing here asks you to relax it: sibling subdomains share a registrable domain, so `lab.example.com` and `onecli.example.com` are **same-site** and a Strict cookie rides to both. A guide that tells you to drop to `Lax` to make a subdomain work is trading a real CSRF property for nothing.
+
+> **Widening the cookie `Domain` widens it for everything under that domain.** `--session-cookie-domain example.com` means *every* host under `example.com` receives lab's session cookie on every request — including hosts you do not operate, hosts a colleague spins up, and whatever ends up answering for a stale DNS record. That cookie is a lab credential: anything holding it can act as the operator against lab's entire API. Do not set this on a domain carrying untrusted or loosely-governed hosts; put lab and the dashboard under a domain (or a delegated subdomain) whose host inventory you actually control. Lab never derives it from `--base-url` or `--onecli-dashboard-url` for exactly this reason — the trade has to be made on purpose.
+
+**nginx.** `lab.example.com` is lab itself on `127.0.0.1:8080`, its own server block unchanged from [Reverse proxy / Authelia](#reverse-proxy-authelia); this is the dashboard's block beside it, with the sidecar on `127.0.0.1:10254`:
+
+```nginx
+# Belongs at http {} level — it is what lets a proxied WebSocket upgrade
+# through while leaving ordinary requests alone.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name onecli.example.com;
+
+    ssl_certificate     /etc/ssl/certs/onecli.example.com.pem;
+    ssl_certificate_key /etc/ssl/private/onecli.example.com.key;
+
+    # The forward-auth subrequest. lab answers 204 for a valid identity and
+    # 401 for none; nginx reads the status and discards the body.
+    location = /lab-auth-check {
+        internal;
+        proxy_pass              http://127.0.0.1:8080/api/v1/auth/check;
+        proxy_pass_request_body off;
+        proxy_set_header        Content-Length "";
+        proxy_set_header        Host $host;
+        # Load-bearing: the session cookie IS the credential being checked.
+        # nginx forwards it by default; setting it explicitly keeps that fact
+        # visible to the next person editing this block.
+        proxy_set_header        Cookie $http_cookie;
+    }
+
+    # A 401 from the subrequest becomes lab's login page rather than a bare
+    # error. `next` is the fixed keyword lab's SPA understands; `path` is a
+    # path-and-query only, never a URL — the origin the operator is sent back
+    # to always comes from lab's own configuration, so this cannot be turned
+    # into an open redirect. (nginx has no built-in percent-encoder: a query
+    # string containing its own `&` round-trips only up to that character, and
+    # the operator lands on the dashboard root instead. Harmless.)
+    error_page 401 = @lab_login;
+    location @lab_login {
+        return 302 https://lab.example.com/login?next=onecli-dashboard&path=$request_uri;
+    }
+
+    location / {
+        auth_request /lab-auth-check;
+
+        proxy_pass http://127.0.0.1:10254;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+**caddy.** Same topology, same two hosts:
+
+```caddyfile
+# lab's own site is served exactly as it already is
+# (`reverse_proxy 127.0.0.1:8080`); this is the dashboard's site beside it.
+onecli.example.com {
+	# The forward-auth probe. Caddy reissues the request against lab as a
+	# GET on this path, carrying the browser's headers — the session cookie
+	# among them — and admits the original request on any 2xx (lab's 204).
+	forward_auth 127.0.0.1:8080 {
+		uri /api/v1/auth/check
+
+		# Without this, lab's 401 JSON envelope would be copied straight to
+		# the browser. Send the operator to lab's login instead. `next` is
+		# the fixed keyword lab's SPA understands and `path` is a
+		# path-and-query only, never a URL — the origin returned to always
+		# comes from lab's own configuration, so this cannot become an open
+		# redirect.
+		@denied status 401
+		handle_response @denied {
+			redir * https://lab.example.com/login?next=onecli-dashboard&path={http.request.uri}
+		}
+	}
+
+	reverse_proxy 127.0.0.1:10254
+}
+```
+
+**Checking the exposure.** Two endpoints answer for this whole section, and `curl` proves both. The forward-auth probe, without and with a session:
+
+```console
+$ curl -s -o /dev/null -w '%{http_code}\n' https://lab.example.com/api/v1/auth/check
+401
+$ curl -s -o /dev/null -w '%{http_code}\n' \
+       --cookie "lab_session=$TOKEN" https://lab.example.com/api/v1/auth/check
+204
+```
+
+The `204` is the whole lab-side contract `subdomain` mode rests on. If it 401s while your browser is logged in, the cookie is not reaching lab — check `--session-cookie-domain`, and that you copied a live session token. Then the resolved exposure, which is what the web UI reads to decide whether to render a link-out at all:
+
+```console
+$ curl -s --cookie "lab_session=$TOKEN" https://lab.example.com/api/v1/onecli/dashboard
+{"mode":"subdomain","url":"https://onecli.example.com"}
+```
+
+`mode` is always one of `off`, `port`, `subdomain`; `url` is **omitted** rather than sent empty when the mode is `off` (`{"mode":"off"}`), so a consumer testing for the key and one testing for a non-empty string reach the same conclusion. The answer is static process configuration resolved once at startup and never probes the sidecar — which is why it is a separate endpoint from `GET /api/v1/onecli/health` (see [Checking it works](#checking-it-works)) rather than one more field on it: a dead sidecar must not be able to take the link with it.
+
+In `port` mode the bounce is visible from the command line too — a browser-shaped request carrying no cookie:
+
+```console
+$ curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+       -H 'Accept: text/html' https://lab.example.com:8443/
+302 https://lab.example.com/login?next=onecli-dashboard&path=%2F
+```
+
+Drop the `Accept` header and the same request answers `401` instead. That is the non-navigation branch, not a fault.
+
+**When lab refuses to start.** Every misconfiguration below is caught while flags and environment are resolved, *before* the listener opens — a wrong exposure is a boot error, never a lab that starts and quietly exposes nothing.
+
+| Message | What it means | Fix |
+|---|---|---|
+| `--onecli-dashboard "…": want one of off, port, subdomain` | The mode word is not one of the three. There is no fourth, path-prefix mode ([ADR-0067](adr/0067-onecli-credential-gateway.md)). | Spell it `off`, `port`, or `subdomain`; an explicitly empty value is read as `off`. |
+| `--onecli-dashboard-addr is set but --onecli-dashboard is "…": the listen address is only used in port mode` | Dead config: nothing would listen on that address in `off` or `subdomain`. | Drop the flag, or switch the mode to `port`. |
+| `--onecli-dashboard-url is set but --onecli-dashboard is off: nothing is exposed for it to name` | Dead config again: a browser-facing origin for a dashboard nobody can reach. | Drop the flag, or pick a mode. |
+| `--onecli-dashboard=<mode> requires the OneCLI integration: set --onecli-url and --onecli-api-key-file` | The dashboard *is* the sidecar's dashboard/API port — with no OneCLI configured there is nothing to expose. | Wire the REST pair first ([Wiring lab to it](#wiring-lab-to-it)). |
+| `--onecli-dashboard=port requires --onecli-dashboard-addr, the address lab's authenticated dashboard proxy listens on` | Port mode with no port. | Add `--onecli-dashboard-addr :8443` (any free `[host:]port`). |
+| `--onecli-dashboard=port requires --base-url, the origin the proxy sends unauthenticated browsers to for login` | The unauthenticated bounce needs somewhere to bounce to, and lab will not guess its own external origin. | Set `--base-url` to lab's public https URL — worth setting regardless (Secure cookies, CSRF Origin check). |
+| `--onecli-dashboard=subdomain requires --onecli-dashboard-url, the browser-facing origin your reverse proxy fronts (e.g. https://onecli.example.com)` | Lab owns no listener in this mode, so there is nothing to derive the origin from. | Give it the origin your proxy publishes. |
+| `--onecli-dashboard-url "…": want an absolute http(s) URL` | It parses as something other than an absolute `http(s)://host…` — a bare `host:port`, a scheme typo, a path fragment. | Write the full origin, scheme included. One trailing slash is fine (lab trims it); anything past it is a path prefix, the one shape this feature does not support. |
+| `--session-cookie-domain "…": want a bare domain like example.com, with no scheme, port or path` | A cookie `Domain` is a bare domain, not a URL: no scheme, no port (cookies carry none), no path (`Domain` and `Path` are separate attributes). | `example.com`. A single leading dot (`.example.com`) is legal and accepted verbatim; `.` alone, or any value containing `/`, `:`, or whitespace, is not. |
+
 ### Operational notes
 
 - It's a second process to run, back up, and upgrade. Its Postgres volume holds the encrypted secret store — back it up on its own schedule, with the same seriousness as `lab.db` / `master.key` ([Backup & restore](#backup-restore)).
 - Pin `ONECLI_VERSION` in `.env` rather than tracking `latest` — an unpinned `docker compose up` can land an upgrade mid-shift.
 - The dashboard runs in local single-user mode (no `NEXTAUTH_SECRET` configured) with **no login** — that's exactly why its port stays bound to loopback (10254 above), never widened the way 10255 sometimes must be.
-- Exposing the dashboard behind lab's own domain isn't built yet — subpath proxying was evaluated and rejected (OneCLI's Next.js app ships no `basePath`; a fork was sized at ~6 files and rejected as a standing maintenance burden). [ADR-0067](adr/0067-onecli-credential-gateway.md) records the decision; a later epic adds a real exposure mode (off/subdomain/port).
+- Exposing the dashboard behind lab's own auth **is** configuration now: `--onecli-dashboard` picks `off` (the default — an SSH tunnel), `port` (lab reverse-proxies it on a second authenticated listener), or `subdomain` (your reverse proxy fronts it and delegates auth to lab). The modes, their proxy snippets, the cookie-scope warning, and the startup refusals are in [Dashboard exposure](#dashboard-exposure). Subpath proxying under lab's own origin stays rejected — OneCLI's Next.js app ships no `basePath`; the fork was sized at ~6 files and rejected as a standing maintenance burden ([ADR-0067](adr/0067-onecli-credential-gateway.md)).
 
 ## State directory layout
 
@@ -617,6 +856,8 @@ Preflight (below) stays the runtime authority on host readiness regardless of di
 - `GET /metrics` — Prometheus text format. All three endpoints are mounted outside auth and CSRF — probes must work with the DB down.
 - Logs: slog JSON on stdout (journald under systemd). Keys: `component`, `repo`, `session`, `run`, `err`. Secrets, tokens, key material, and DSN passwords never appear in logs.
 - `GET /api/v1/onecli/health` — authenticated OneCLI gateway health (`off`/`ok`/`degraded`/`unreachable`); see [OneCLI credential gateway](#onecli-credential-gateway).
+- `GET /api/v1/onecli/dashboard` — authenticated; the resolved dashboard exposure, `{"mode":"off|port|subdomain","url":"…"}` with `url` omitted when the mode is `off`. Static process configuration resolved once at startup, deliberately **not** folded into `/onecli/health`: it probes nothing, so a dead sidecar cannot take the web UI's link-out with it. See [Dashboard exposure](#dashboard-exposure).
+- `GET /api/v1/auth/check` — authenticated; `204` for any valid lab identity, `401` for none, empty body either way. The forward-auth probe `--onecli-dashboard=subdomain` is built on (nginx `auth_request`, caddy `forward_auth`); see [Dashboard exposure](#dashboard-exposure).
 
 ## Metrics
 

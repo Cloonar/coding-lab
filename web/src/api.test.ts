@@ -21,6 +21,7 @@ import {
   fetchRunCommands,
   getCR,
   getIssue,
+  getOneCLIDashboard,
   getOneCLIHealth,
   getRun,
   getSettings,
@@ -1135,6 +1136,33 @@ describe('credential-gateway health (issue #23)', () => {
     stubFetch(jsonResponse(200, body));
 
     await expect(getOneCLIHealth()).resolves.toEqual(body);
+  });
+});
+
+describe('onecli dashboard exposure (issue #26)', () => {
+  it('GET /onecli/dashboard parses port mode with its browser-facing URL', async () => {
+    const body = { mode: 'port', url: 'https://lab.example.com:8443' };
+    const mock = stubFetch(jsonResponse(200, body));
+
+    await expect(getOneCLIDashboard()).resolves.toEqual(body);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/onecli/dashboard');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET /onecli/dashboard parses subdomain mode', async () => {
+    const body = { mode: 'subdomain', url: 'https://onecli.example.com' };
+    stubFetch(jsonResponse(200, body));
+
+    await expect(getOneCLIDashboard()).resolves.toEqual(body);
+  });
+
+  it('GET /onecli/dashboard tolerates off, which carries no url key at all', async () => {
+    stubFetch(jsonResponse(200, { mode: 'off' }));
+
+    const exposure = await getOneCLIDashboard();
+
+    expect(exposure).toEqual({ mode: 'off' });
+    expect(exposure.url).toBeUndefined();
   });
 });
 

@@ -204,7 +204,9 @@
               # deliberately a non-loopback address: lab's container argv pins
               # host.containers.internal to 127.0.0.1 (ADR-0052 / #216), so
               # loopback here would pin the one value a container run cannot
-              # reach.
+              # reach. Also exercises onecli.dashboard = "port" (issue #26):
+              # baseUrl is already set by `common`, so this proves port mode's
+              # two flags serialize alongside the other onecli.* settings.
               oneCLIDummy = mkDummy {
                 services.lab = {
                   agentPackages."claude-code" = null;
@@ -213,6 +215,28 @@
                     url = "http://127.0.0.1:10254";
                     apiKeyFile = "/run/secrets/lab-onecli-api-key";
                     gatewayUrl = "http://10.88.0.1:10255";
+                    dashboard = "port";
+                    dashboardAddr = ":8443";
+                  };
+                };
+              };
+
+              # Fourth text-level dummy (realized): onecli.dashboard =
+              # "subdomain" (issue #26) — the OTHER exposure mode, which needs
+              # dashboardUrl (no listener of lab's own to derive an origin
+              # from) and sessionCookieDomain (the cookie must reach the
+              # operator's separate onecli.<domain> host) instead of port's
+              # dashboardAddr/baseUrl pairing.
+              oneCLIDashboardSubdomainDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  sessionCookieDomain = "example.com";
+                  onecli = {
+                    url = "http://127.0.0.1:10254";
+                    apiKeyFile = "/run/secrets/lab-onecli-api-key";
+                    dashboard = "subdomain";
+                    dashboardUrl = "https://onecli.example.com";
                   };
                 };
               };
@@ -243,6 +267,44 @@
                   agentPackages."claude-code" = pkgs.hello;
                 };
               }; # must fail the new claudePackage/agentPackages conflict assertion
+
+              # Eval-only onecli.dashboard dummies (issue #26) — each isolates
+              # exactly one of the four assertions mirroring lab's own startup
+              # refusals, by setting every OTHER precondition so only the one
+              # under test can fail. `common` already supplies baseUrl, so the
+              # port-mode-needs-baseUrl case is the only one that must force
+              # it back to null.
+              dashboardNoUrlDummy = mkDummy {
+                services.lab.onecli = {
+                  dashboard = "subdomain";
+                  dashboardUrl = "https://onecli.example.com";
+                };
+              }; # non-off dashboard with no onecli.url must fail eval
+              dashboardPortNoAddrDummy = mkDummy {
+                services.lab.onecli = {
+                  url = "http://127.0.0.1:10254";
+                  apiKeyFile = "/run/secrets/lab-onecli-api-key";
+                  dashboard = "port";
+                };
+              }; # port mode with no dashboardAddr must fail eval
+              dashboardPortNoBaseUrlDummy = mkDummy {
+                services.lab = {
+                  baseUrl = lib.mkForce null;
+                  onecli = {
+                    url = "http://127.0.0.1:10254";
+                    apiKeyFile = "/run/secrets/lab-onecli-api-key";
+                    dashboard = "port";
+                    dashboardAddr = ":8443";
+                  };
+                };
+              }; # port mode with no baseUrl must fail eval
+              dashboardSubdomainNoUrlDummy = mkDummy {
+                services.lab.onecli = {
+                  url = "http://127.0.0.1:10254";
+                  apiKeyFile = "/run/secrets/lab-onecli-api-key";
+                  dashboard = "subdomain";
+                };
+              }; # subdomain mode with no dashboardUrl must fail eval
 
               # Eval-only container dummies (issue #218) — config-inspected,
               # never built, so like the other eval-only dummies they skip the
@@ -324,6 +386,20 @@
               "nixos-module check: agentPackages.\"claude-code\" = null must drop claude while the codex default and baseline survive (per-key merge)";
             assert lib.assertMsg (lib.any (m: lib.hasInfix "claudePackage" m && lib.hasInfix "agentPackages" m) (failedAssertionMessages conflictDummy))
               "nixos-module check: claudePackage + explicit agentPackages.\"claude-code\" must fail eval with a message naming both options";
+            # onecli.dashboard (issue #26): the four assertions mirroring
+            # lab's own startup refusals must each fail eval in isolation.
+            assert lib.assertMsg
+              (lib.any (m: lib.hasInfix "services.lab.onecli.dashboard" m && lib.hasInfix "services.lab.onecli.url" m) (failedAssertionMessages dashboardNoUrlDummy))
+              "nixos-module check: onecli.dashboard != \"off\" with no onecli.url must fail eval with a message naming both options";
+            assert lib.assertMsg
+              (lib.any (m: lib.hasInfix "services.lab.onecli.dashboard" m && lib.hasInfix "services.lab.onecli.dashboardAddr" m) (failedAssertionMessages dashboardPortNoAddrDummy))
+              "nixos-module check: onecli.dashboard = \"port\" with no dashboardAddr must fail eval with a message naming both options";
+            assert lib.assertMsg
+              (lib.any (m: lib.hasInfix "services.lab.onecli.dashboard" m && lib.hasInfix "services.lab.baseUrl" m) (failedAssertionMessages dashboardPortNoBaseUrlDummy))
+              "nixos-module check: onecli.dashboard = \"port\" with no baseUrl must fail eval with a message naming both options";
+            assert lib.assertMsg
+              (lib.any (m: lib.hasInfix "services.lab.onecli.dashboard" m && lib.hasInfix "services.lab.onecli.dashboardUrl" m) (failedAssertionMessages dashboardSubdomainNoUrlDummy))
+              "nixos-module check: onecli.dashboard = \"subdomain\" with no dashboardUrl must fail eval with a message naming both options";
             assert lib.assertMsg (lib.any (lib.hasInfix "claudePackage") dummy.config.warnings)
               "nixos-module check: setting the deprecated claudePackage must emit a deprecation warning";
             assert lib.assertMsg (!lib.any (lib.hasInfix "claudePackage") defaultsDummy.config.warnings)
@@ -424,12 +500,14 @@
                 unit = dummy.config.systemd.units."lab.service".text;
                 agentUrlUnit = agentUrlDummy.config.systemd.units."lab.service".text;
                 oneCLIUnit = oneCLIDummy.config.systemd.units."lab.service".text;
+                oneCLIDashboardSubdomainUnit = oneCLIDashboardSubdomainDummy.config.systemd.units."lab.service".text;
                 containerUnit = containerDummy.config.systemd.units."lab.service".text;
                 containerOffUnit = containerOffDummy.config.systemd.units."lab.service".text;
                 passAsFile = [
                   "unit"
                   "agentUrlUnit"
                   "oneCLIUnit"
+                  "oneCLIDashboardSubdomainUnit"
                   "containerUnit"
                   "containerOffUnit"
                 ];
@@ -502,6 +580,33 @@
                 grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-url" "http://127.0.0.1:10254"'
                 grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-api-key-file" "/run/secrets/lab-onecli-api-key"'
                 grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-gateway-url" "http://10.88.0.1:10255"'
+
+                # OneCLI dashboard exposure (issue #26, ADR-0067). Default
+                # unit: no --session-cookie-domain either — it is not
+                # --onecli-*-prefixed, so it needs its own negative guard
+                # alongside the generic one above.
+                if grep '^ExecStart=' "$unitPath" | grep -qF -- '--session-cookie-domain'; then
+                  echo "default unit must not pass --session-cookie-domain (host-only cookie by default, issue #26)" >&2
+                  exit 1
+                fi
+                # port mode: dashboard mode + its listen address serialize
+                # alongside the other onecli.* settings above.
+                grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-dashboard" "port"'
+                grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '"--onecli-dashboard-addr" ":8443"'
+                if grep '^ExecStart=' "$oneCLIUnitPath" | grep -qF -- '--onecli-dashboard-url'; then
+                  echo "port-mode unit must not pass --onecli-dashboard-url when unset (it's an optional override in that mode)" >&2
+                  exit 1
+                fi
+                # subdomain mode: dashboard mode, its browser-facing origin,
+                # and the session cookie Domain widening it needs all
+                # serialize together.
+                grep '^ExecStart=' "$oneCLIDashboardSubdomainUnitPath" | grep -qF -- '"--onecli-dashboard" "subdomain"'
+                grep '^ExecStart=' "$oneCLIDashboardSubdomainUnitPath" | grep -qF -- '"--onecli-dashboard-url" "https://onecli.example.com"'
+                grep '^ExecStart=' "$oneCLIDashboardSubdomainUnitPath" | grep -qF -- '"--session-cookie-domain" "example.com"'
+                if grep '^ExecStart=' "$oneCLIDashboardSubdomainUnitPath" | grep -qF -- '--onecli-dashboard-addr'; then
+                  echo "subdomain-mode unit must not pass --onecli-dashboard-addr (port mode's own listener address)" >&2
+                  exit 1
+                fi
 
                 # Text-level PATH serialization (issue #74): prove the path list
                 # actually lands on the unit's Environment=PATH line — the
