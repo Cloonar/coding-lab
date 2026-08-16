@@ -42,7 +42,14 @@ Add a repo by its remote URL and pick the git credential for it. Lab clones it a
 - **Runner** — per repo, sessions run on the **host** (provider CLI directly on the host — unsandboxed) or in a **container** (rootless podman; your chosen dev image with lab's agent tools injected). Pick the dev image per repo, or rely on the global default. Details: [`ops.md` § Container runner](ops.md#container-runner).
 - **Triage labels** — lab seeds the five canonical triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) on the repo's tracker; `ready-for-agent` is the one the AFK engine watches.
 
-## 6. Start a manual instance
+## 6. Give the repo secrets (optional)
+
+Skip this on a first pass — nothing else depends on it. When an agent needs API keys (a deploy token, a third-party service), the repo's settings → **Secrets** offer two ways in, and neither ever displays a value back:
+
+- **Credential gateway** — with the [OneCLI sidecar](ops.md#onecli-credential-gateway) wired up, this card lists every secret and connection in your OneCLI pool as per-repo toggles. Grant one and the repo's runs get it *at the network layer*: the run's outbound HTTPS goes through the gateway, which injects the real credential on the way out — the agent just calls the service's API, and its environment never holds the value. Creating and rotating values happens in OneCLI's own dashboard; lab's card only picks which repo may use what.
+- **Secrets** — write-only per-repo values stored in lab's vault, for when you're not running the gateway. In a session the agent runs `labctl secret exec NAME -- <cmd>` to execute one command with the value injected as `$NAME` (output redacted), and `labctl secret scan` checks an outgoing diff for leaked values.
+
+## 7. Start a manual instance
 
 From the repo, start an **instance**: an interactive agent session in its own fresh git worktree on its own branch, forked from the repo's default branch. Optionally override the model and effort per spawn (defaults are configurable globally and per repo; recommendations in [`model-selection.md`](model-selection.md)).
 
@@ -52,7 +59,7 @@ Inside the session, the agent has `labctl` on PATH with a run token scoped to th
 
 When you **Stop** an instance, the **guarded teardown** rule applies: a clean, merged worktree is removed; anything dirty or unmerged is kept and shown in the **Parked** view, where discarding is an explicit per-entry human action. Lab never destroys uncommitted work on its own.
 
-## 7. Run an issue AFK
+## 8. Run an issue AFK
 
 The unattended loop:
 
@@ -64,7 +71,7 @@ The unattended loop:
 
 Everything is observable from the phone throughout: the runs rail shows each instance's live conversational state, run history records every outcome, and Web Push can notify you when a session needs input.
 
-## 8. Where to go next
+## 9. Where to go next
 
 - [`ops.md`](ops.md) — reverse proxy / SSO, secrets management, backup & restore, metrics, the container runner, incogni mode.
 - [`model-selection.md`](model-selection.md) — which model/effort to use at which stage of the workflow.

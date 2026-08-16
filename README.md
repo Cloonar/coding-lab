@@ -18,6 +18,7 @@ You add repositories and credentials in the UI, then start **manual instances** 
 - **Tracker integration** — Forgejo and GitHub forges, or lab's built-in tracker (issues, labels, comments, change requests with diff view and merge from the UI). Agents talk to whichever tracker the repo binds through one CLI: `labctl`.
 - **Container or host runner** — per repo, sessions run either in a rootless podman container (your dev image + lab's injected agent tools) or directly on the host.
 - **Credentials vault** — SSH keys, HTTPS tokens, and forge API tokens encrypted at rest (AES-256-GCM, operator-owned master key file); secrets are never displayed back and never land in URLs or repo config.
+- **Repo secrets for agents** — two ways to hand a run API keys, neither of which puts a readable value in the session: per-repo grants against a [OneCLI](https://onecli.sh) credential gateway (the real credential is injected at the network layer, on the way out) or write-only vault-stored secrets used via `labctl secret exec` with redacted output and a pre-push leak scan.
 - **Incogni mode** — per-repo leak-proofing for agent-authored content: neutral branch names, attribution off, server-side body sanitization, and a pre-push guard.
 - **Operable by default** — single static Go binary with the SPA embedded, SQLite (default) or PostgreSQL, live updates over SSE, PWA with Web Push, `/healthz` `/readyz` `/metrics`.
 - **Nix-first packaging** — a flake with `packages.{lab,labctl}`, a full NixOS module, and a devshell; but the binary runs on any Linux.
@@ -126,9 +127,9 @@ cd web && npm run dev   # Vite dev server; proxies /api and /healthz → :8080
 
 ## Surfaces at a glance
 
-**Operator API** (`/api/v1`, session cookie or `lab_pat_…` bearer token, CSRF-guarded for ambient auth): first-run setup + login, PAT CRUD, credentials CRUD (no secret readback; delete 409s while referenced), repos (add → async bare clone with SSE progress, settings PATCH, guarded delete, clone retry), instances (start/stop/stop-all), Parked list + Discard, AFK (start / auto toggle / three-strikes reset), built-in issues + comments + labels + ready queue, change requests (list, detail with live diff, merge, close), run history, provider catalog + provider auth (status / login start / login code), runtime settings, and `GET /api/v1/events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `clone.progress`, `claude.auth.changed`, `issue.changed`, `cr.changed`, `heartbeat`).
+**Operator API** (`/api/v1`, session cookie or `lab_pat_…` bearer token, CSRF-guarded for ambient auth): first-run setup + login, PAT CRUD, credentials CRUD (no secret readback; delete 409s while referenced), repos (add → async bare clone with SSE progress, settings PATCH, guarded delete, clone retry), instances (start/stop/stop-all), Parked list + Discard, AFK (start / auto toggle / three-strikes reset), built-in issues + comments + labels + ready queue, change requests (list, detail with live diff, merge, close), run history, provider catalog + provider auth (status / login start / login code), per-repo secrets (write-only, vault-sealed; list never echoes a value), OneCLI credential-gateway health + pool + per-repo grants, runtime settings, and `GET /api/v1/events` (SSE: `repo.changed`, `run.changed`, `parked.changed`, `clone.progress`, `provider.auth.changed`, `issue.changed`, `cr.changed`, `heartbeat`).
 
-**Agent API** (`/agent/v1`, run-token auth, scoped to the run's repo): issue view (the run's claimed issue) / list / create / comment / close, label add/remove/list, idempotent label create, PR create — routes everything to the repo's tracker binding (forge or built-in), injects/validates `Closes #N` on PR create, and applies incogni sanitization server-side to every agent-authored body.
+**Agent API** (`/agent/v1`, run-token auth, scoped to the run's repo): issue view (the run's claimed issue) / list / get / create / edit / comment / close, label add/remove/list, idempotent label create, the PR lifecycle (create, list, view, checks, logs, merge, reject, approve, rerequest, escalate, comment), and repo secrets (metadata list, value fetch for `secret exec`, outgoing-diff scan) — routes everything to the repo's tracker binding (forge or built-in), injects/validates `Closes #N` on PR create, and applies incogni sanitization server-side to every agent-authored body.
 
 **`labctl`** (on every session's PATH; reads `LAB_URL`/`LAB_TOKEN` from the session env):
 
@@ -145,6 +146,26 @@ labctl label list                     list the repo's labels (name, color, descr
 labctl label create --name N [--color C --description D]
                                       create the label if missing (idempotent)
 labctl pr create --title T --body B   open a PR/CR for the current branch
+labctl pr view <n>                    show PR n (number, title, state, head, url, body, reviews, comments)
+labctl pr list                        list open PRs plus the ~50 most recently closed (number, state, head, url)
+labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
+labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
+                                      pending (exit 0 green/none · 2 red · 3 still pending)
+labctl pr logs <n> [--check <context>]
+                                      raw CI logs of PR n's failing checks to stdout (--check:
+                                      that one check, any state); pipe through tail/grep
+labctl pr reject <n> <body>           record a rejection verdict on PR n with body as the findings
+labctl pr approve <n> [body]          record a validation-passed verdict on PR n (body optional)
+labctl pr rerequest <n>               signal fix-done on PR n and re-request review from reviewers
+                                      whose latest verdict requested changes
+labctl pr escalate <n> <body>         record the escalate-mode lander's terminal marker on PR n
+labctl pr comment <n> <body>          post a plain discussion comment on PR n (no Closes # injection)
+labctl secret list                    list the repo's secrets (name, description; never values)
+labctl secret exec <NAME...> -- <cmd> [args...]
+                                      run cmd with each named secret injected as $NAME in its env;
+                                      child output is redacted — values appear as [REDACTED:NAME]
+labctl secret scan <rev-arg>...       scan the outgoing diff for secret values; findings or ANY
+                                      failure exit 1 (fail closed)
 ```
 
 **Probes**: `/healthz` (liveness, always 200), `/readyz` (503 while the DB is unreachable), `/metrics` (Prometheus). All three are mounted outside auth.
