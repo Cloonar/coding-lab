@@ -3,6 +3,8 @@
 **Audience**: the implementing agent (Fable 5, ultracode) building the MVP end to end in this repository.
 **Status**: all decisions below are settled with the product owner (2026-07-05). Do not re-litigate them. Where this brief is silent, make the smallest choice consistent with the decision log and record it as an ADR.
 
+> **Historical snapshot (2026-07-05).** This brief is the MVP planning record and is kept verbatim; the project has moved past it. Known drift: this repo's own tracker is now GitHub via `labctl` (never `tea`/Forgejo — see `docs/agents/issue-tracker.md`), CI runs on GitHub Actions split into a native gate and a path-gated nix gate (ADR-0023/0064), and the "fast-follow" items shipped long ago (GitHub tracker: ADR-0015; Codex provider: ADR-0037). Where this brief conflicts with `docs/agents/`, the ADRs, or the code, those win.
+
 ---
 
 ## 1. Mission

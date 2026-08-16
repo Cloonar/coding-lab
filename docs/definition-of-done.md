@@ -46,7 +46,7 @@ Legend — *Automated*: runs in the standard suites. *Manual residue*: authored 
 
 ## 9. CI green; `nix flake check` green; metrics visible; docs complete
 
-- [x] **Automated**: CI is exactly `nix flake check` (`.github/workflows/ci.yml`) = package builds carrying the Go suite (real git/tmux/prlimit in the sandbox) + SPA vitest, golangci-lint, and the NixOS module eval check. `/metrics` is mounted outside auth (`internal/httpapi/server.go`) with the HTTP request/duration collectors live since M1 (`internal/metrics/metrics_test.go`); the full metric catalog lands in `docs/ops.md` § Metrics.
+- [x] **Automated**: CI is split into two gates (ADR-0023): the required check is the fast **native** gate (`.github/workflows/ci.yml` — Go build + tests with real git/tmux/prlimit, SPA lint + vitest + build, golangci-lint, no nix), and the hermetic `nix flake check` gate (`ci-nix.yml`, path-gated to nix/dependency changes; the deploy re-runs it as a backstop) = package builds carrying the Go suite + SPA vitest, golangci-lint, and the NixOS module eval check. `/metrics` is mounted outside auth (`internal/httpapi/server.go`) with the HTTP request/duration collectors live since M1 (`internal/metrics/metrics_test.go`); the full metric catalog lands in `docs/ops.md` § Metrics.
 - **Docs**: `README.md` (status, architecture, quickstart, surfaces), `CONTEXT.md` (glossary incl. every brief §6 term and the M1–M8 coinages plus Chat/Transcript/Conversational state), `docs/adr/0001`–`0016`, `docs/ops.md` (deployment, configuration reference, state dir, backup/restore, CI runners, observability, incogni honesty note), and this file.
 
 ## 10. Embedded chat: view and reply to an instance's conversation from the phone (issue #7 / ADR-0016)

@@ -1,6 +1,6 @@
 # Provider Authoring
 
-How to add a new `AgentProvider` adapter (Codex, Gemini, …) and prove it's done: implement the seam, then pass the two-tier conformance bar (issue #80 / ADR-0036).
+How to add a new `AgentProvider` adapter (Gemini, …) and prove it's done: implement the seam, then pass the two-tier conformance bar (issue #80 / ADR-0036). Two adapters ship today — `claude-code` and `codex` (`internal/provider/claudecode/`, `internal/provider/codex/`) — and both are working reference implementations of everything below.
 
 ## Hard requirements — no escape hatch
 
@@ -20,7 +20,9 @@ How to add a new `AgentProvider` adapter (Codex, Gemini, …) and prove it's don
 7. Verify core neutrality: `internal/provider/neutrality_test.go` and `web/src/providerNeutral.test.ts` must both stay clean.
 8. Register the provider in `cmd/lab/main.go`.
 
-Definition of done: **Tier 1 green in CI, Tier 2 evidenced in the committed compat record** (ADR-0036). Issue #2 (Codex) adopts this bar.
+Definition of done: **Tier 1 green in CI, Tier 2 evidenced in the committed compat record** (ADR-0036). Both shipped adapters passed this bar; `internal/compat/codex/compat.md` (issue #2 / ADR-0037) is the reference example of a compat record.
+
+Beyond the required interface there are **optional capability interfaces** (`internal/provider/provider.go`): `ConnectingReporter`, `DeepLinker`, `LiveSignals`, `LoginCodeReporter`, `RemoteCapable`. Implement one only when the CLI genuinely supports the behavior — core detects each by type assertion and degrades gracefully when absent (ADR-0017).
 
 ## Tier 1 — the conformance suite (CI, every adapter)
 
@@ -33,10 +35,17 @@ Subtests assert:
 - **seedmeta-clone** — `SeedMeta`/`Models`/`Efforts`/`SpawnOptions` return defensively-cloned slices.
 - **catalogs** — model/effort catalogs are non-empty with unique non-empty values; spawn-option specs are typed with valid defaults.
 - **spawn-argv** — `argv(prompt) == argv(no prompt) + [prompt]`; every declared spawn option round-trips.
+- **spawn-remote** — a `RemoteCapable` adapter's argv differs between remote on/off exactly as its interface declares; a non-`RemoteCapable` adapter produces an IDENTICAL argv for both values (no undeclared coupling).
 - **auth-flow** — `AuthFlow().Kind` is a recognized `AuthFlow*` constant.
 - **login-session** — the id charset and `tmuxx.IsLoginSession(tmuxx.LoginSessionName(ID()))` hold (issue #77 / ADR-0034).
+- **read-chat** — `ReadChat` on a fresh spawn (empty transcript path, runtime dir absent or empty) yields an idle read, never an error; a transcript path that no longer exists surfaces `provider.ErrTranscriptGone`, not a raw error.
+- **locate-homeless** — `LocateTranscript` with no per-run instance HOME is a miss (`"", nil`) — never an error, never a fall back to the machine's master store (issue #202).
+- **inject-credentials** — with no master credential present, `InjectCredentials` returns nil and writes nothing to the master store; the injector only ever copies FROM the master, never into it.
+- **credential-authority** — the credential-authority obligations (`CredentialsSig`, `AdoptCredentials`, …; `internal/provider/provider.go`) hold against a genuinely absent master store. `RefreshCredentials` shells out to the live CLI, so it's pinned in adapter-side unit tests, not here.
+- **master-store-spec** — `MasterStoreSpec` returns a non-empty absolute `HostDir`, resolved freshly per call and honoring its declared `EnvVar` override (issue #211).
 - **seeding-exclude-coverage** — in a real temp linked worktree, the provider's `SeedWorkspace` plus the real `internal/seeder` run, in production order, leave `git status --porcelain` empty; the context file/skills dir exist; every seeded path matches a `SeededPathPattern`.
 - **seeding-incogni** — same, with `SeedOpts{Incogni: true}`: no tracked-file writes.
+- **seed-home-containment** — seeding against a temp instance Home leaves the machine's master store untouched: HOME-global trust grants (claude's `~/.claude.json`, codex's `config.toml` + `AGENTS.md`) land under the run's private Home.
 - **scrub-markers** — every `AttributionSample` is stripped by the adapter's own `ScrubPatterns` through both real engines (RE2 via `provider.CompileScrubPatterns`, POSIX BRE via a real `grep -i`, skipped when absent) and by `provider.NewRegistry(p).ScrubRegexps()` — the union path the agent-API sanitizer actually runs (ADR-0033).
 
 A deliberately-broken fake adapter lives in the suite's own tests; failures name the obligation they broke.

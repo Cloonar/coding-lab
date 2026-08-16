@@ -103,14 +103,18 @@ validation:
   unrecognized_links: warn
   anchors: warn
 
+# Ordered usage-first: the pages a person *using* lab reads come before the
+# pages a person *developing* lab reads. Definition of done lives under
+# Contributing for that reason — it is a development quality gate, not a
+# usage page.
 nav:
   - Home: index.md
   - Getting started: getting-started.md
   - Operations: ops.md
   - Model selection: model-selection.md
-  - Definition of done: definition-of-done.md
   - Glossary: context.md
   - Contributing:
       - Contributing: contributing.md
+      - Definition of done: definition-of-done.md
       - Provider authoring: agents/provider-authoring.md
   - Decisions (ADRs): adr/index.md

@@ -23,6 +23,12 @@ via `.git/info/exclude`). See `docs/agent-brief.md`, decision D13.
   asides (pre-commit dry-build gate, `secrets.yaml`, `bento-upgrade` deploy, "no PR CI")
   genericised so it stays accurate for this Go repo. Referenced by `docs/agents/issue-tracker.md`.
   A future upstream bump must **not** delete these — they are not part of mattpocock/skills.
+- **`update-docs`** — syncs the documentation with code changes made since the last
+  recorded docs sync (`docs/.docs-sync` marker: SHA + date). Generic by design (the
+  bundle is seeded into every repo lab manages): it follows the repo's own
+  `docs/agents/docs-map.md` when one exists — this repo commits one — and otherwise
+  derives the code-area → doc mapping by searching the doc tree for the changed
+  identifiers. Written for this project (2026-08-16).
 
 ## Local prompt tuning (2026-08, Claude 5 family)
 
