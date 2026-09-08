@@ -207,7 +207,7 @@ func TestBackstop_planApprovedAsIntended_silent(t *testing.T) {
 
 func TestBackstop_planRejectedWithFeedbackAsIntended_silent(t *testing.T) {
 	chat := answerThenRead(t, planTestDialog("toolu_plan"),
-		provider.DialogAnswer{Index: 3, OtherText: "Also add the current date to the note"},
+		provider.DialogAnswer{Index: 2, OtherText: "Also add the current date to the note"},
 		resolvedTranscript(toolExitPlanMode, "toolu_plan", planRejectedLine))
 	if w := backstopWarnings(chat); len(w) != 0 {
 		t.Errorf("rejected-with-feedback-as-intended plan emitted warnings: %+v", w)
@@ -223,7 +223,7 @@ func TestBackstop_planOutcomeFlips_warn(t *testing.T) {
 	}
 	// Reject intended, approval recorded.
 	chat = answerThenRead(t, planTestDialog("toolu_p2"),
-		provider.DialogAnswer{Index: 3, OtherText: "change it"},
+		provider.DialogAnswer{Index: 2, OtherText: "change it"},
 		resolvedTranscript(toolExitPlanMode, "toolu_p2", planApprovedLine))
 	if w := backstopWarnings(chat); len(w) != 1 || !strings.Contains(w[0].Text, "approved plan") {
 		t.Errorf("reject→approved: warnings = %+v; want one", w)

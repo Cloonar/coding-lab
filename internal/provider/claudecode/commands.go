@@ -54,8 +54,13 @@ var builtinCommands = []provider.CommandSpec{
 		Source: commandSourceBuiltin, ChatSafe: true},
 	{Name: "init", Description: "Initialize a new CLAUDE.md file with codebase documentation",
 		Source: commandSourceBuiltin, ChatSafe: true},
-	{Name: "review", Description: "Review a GitHub pull request; for your working diff use /code-review",
-		ArgHint: "[pr number]", Source: commandSourceBuiltin, ChatSafe: true},
+	// `review` was a chat-safe builtin (type prompt) through 2.1.221; 2.1.223
+	// made `/review` an ALIAS of `/code-review`, and by 2.1.265 the bundle
+	// carries no `review` builtin definition at all (reverse-grep: 0
+	// occurrences). Its replacement `/code-review` is a bundled SKILL, which §10
+	// deliberately excludes from the pinned table (lab reaches skills only by
+	// scanning the worktree), so `review` drops out of the builtin catalog
+	// rather than being rewritten. Re-verified 2026-09-09 — compat §10.
 	{Name: "security-review", Description: "Complete a security review of the pending changes on the current branch",
 		Source: commandSourceBuiltin, ChatSafe: true},
 	// --- curated out (ChatSafe=false): reasons per row in compat §10 --------
@@ -75,10 +80,14 @@ var builtinCommands = []provider.CommandSpec{
 	{Name: "login", Description: "Sign in with your Anthropic account", Source: commandSourceBuiltin},
 	{Name: "logout", Description: "Sign out from your Anthropic account", Source: commandSourceBuiltin},
 	{Name: "mcp", Description: "Manage MCP servers", ArgHint: "[reconnect <server>|enable|disable [<server>|all]]", Source: commandSourceBuiltin},
-	{Name: "memory", Description: "Open a memory file in your editor", Source: commandSourceBuiltin},
+	// memory: description reworded 2.1.221 → 2.1.265 ("Open a memory file in
+	// your editor" → the text below; reverse-grep of the old text: 0 on 2.1.265).
+	{Name: "memory", Description: "Edit CLAUDE.md files and memory settings", Source: commandSourceBuiltin},
 	{Name: "model", Description: "Set the AI model for Claude Code", ArgHint: "<model>", Source: commandSourceBuiltin},
 	{Name: "permissions", Description: "Manage allow and deny tool permission rules", Source: commandSourceBuiltin},
-	{Name: "plan", Description: "Enable plan mode or view the current session plan", ArgHint: "[open|share|<description>]", Source: commandSourceBuiltin},
+	// plan: argHint dropped its `share` verb 2.1.221 → 2.1.265
+	// ("[open|share|<description>]" → "[open|<description>]").
+	{Name: "plan", Description: "Enable plan mode or view the current session plan", ArgHint: "[open|<description>]", Source: commandSourceBuiltin},
 	{Name: "privacy-settings", Description: "View and update your privacy settings", Source: commandSourceBuiltin},
 	{Name: "resume", Description: "Resume a previous conversation", ArgHint: "[conversation id or search term]", Source: commandSourceBuiltin},
 	{Name: "rewind", Description: "Restore the code and/or conversation to a previous point", Source: commandSourceBuiltin},

@@ -198,18 +198,17 @@ func TestDialogKeystrokes_flatAcceptsSingleAnswersElement(t *testing.T) {
 }
 
 // The plan picker rejects out-of-range rows and requires feedback text on the
-// free-text row (row 3), mirroring the question rules.
+// free-text row (row 2 of the three-row picker), mirroring the question rules.
 func TestDialogKeystrokes_planValidation(t *testing.T) {
 	d := provider.Dialog{Kind: provider.DialogKindPlan, Answerable: true, Options: []provider.DialogOption{
 		{Label: "Approve — auto-accept edits"},
 		{Label: "Approve — review each edit"},
-		{Label: "Reject — refine the plan"},
 		{Label: "Reject with feedback", IsOther: true},
 	}}
-	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Index: 4}); !errors.Is(err, ErrDialogNotAnswerable) {
+	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Index: 3}); !errors.Is(err, ErrDialogNotAnswerable) {
 		t.Errorf("out of range: err = %v; want ErrDialogNotAnswerable", err)
 	}
-	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Index: 3}); !errors.Is(err, ErrInvalidReply) {
+	if _, err := DialogKeystrokes(d, provider.DialogAnswer{Index: 2}); !errors.Is(err, ErrInvalidReply) {
 		t.Errorf("feedback row without text: err = %v; want ErrInvalidReply", err)
 	}
 }

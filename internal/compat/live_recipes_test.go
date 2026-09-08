@@ -327,14 +327,14 @@ func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 	// varies with session state, and the prompt "Would you like to proceed?"
 	// line-wraps in the pane — both unreliable needles; live 2026-07-08). The
 	// dialog Options are lab's own semantic labels (planPickerOptions) — the
-	// recipe couples to the index, not the label.
+	// recipe couples to the index, not the label. Three rows since 2.1.221 (the
+	// "refine on the web" row is gone under lab's no-remote spawn) — compat §7.
 	rig.waitPane(t, 180*time.Second, "Yes, manually approve edits")
 	dialog := provider.Dialog{
 		Kind: provider.DialogKindPlan, Prompt: "plan", Answerable: true,
 		Options: []provider.DialogOption{
 			{Label: "Approve — auto-accept edits"},
 			{Label: "Approve — review each edit"},
-			{Label: "Reject — refine the plan"},
 			{Label: "Reject with feedback", IsOther: true},
 		},
 	}

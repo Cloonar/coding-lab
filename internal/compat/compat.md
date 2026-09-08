@@ -1,13 +1,21 @@
 # Claude Code compatibility pins
 
-Pinned version: **Claude Code 2.1.221** — bundle extraction + CLI probes +
-the **live tmux recipe suite**, 2026-08-04 (see the 2.1.221 re-verification
-note below). This is the first bump since 2.1.198 whose live gate was actually
-run rather than deferred: the suite was driven green against the OUTGOING
-2.1.220 binary first, so the incoming version had a baseline to diff against
-instead of an unknown — that is what closes the debt #235 recorded. The pin
-before 2.1.220, 2.1.198, was live-probed on the dev host 2026-07-05 and
-re-confirmed by the M3 acceptance smoke on 2026-07-06. This document tracks
+Pinned version: **Claude Code 2.1.265** — bundle extraction + CLI probes +
+the **live tmux recipe suite**, driven green against the OUTGOING 2.1.221
+binary first and then the incoming 2.1.265, 2026-09-09 (see the 2.1.265
+re-verification note below). This bump took `latest` (2.1.265) over `stable`
+(2.1.236) for the auto-mode classifier hardening that lands only after 2.1.236
+(see the 2.1.265 note); its motivation is the same class as the 2.1.221 bump —
+a run of Bash/Read permission-check bypasses fixed in `--permission-mode auto`,
+the mode lab spawns unattended. It also **found and fixed a latent §7 break**:
+the ExitPlanMode picker has lost its fourth row under lab's no-remote spawn on
+both the outgoing 2.1.221 and the incoming 2.1.265, so the pinned four-row
+model would have wrapped a "reject with feedback" into a silent APPROVE — see
+§7. The 2.1.221 pin before it was the first bump since 2.1.198 whose live gate
+was actually run rather than deferred (against the outgoing 2.1.220 first,
+closing the debt #235 recorded). The pin before 2.1.220, 2.1.198, was
+live-probed on the dev host 2026-07-05 and re-confirmed by the M3 acceptance
+smoke on 2026-07-06. This document tracks
 brief §11 (known-fragile couplings 1–4; item 5 —
 provider-owned model/effort catalogs — is solved structurally in
 `internal/provider`, D14) plus the four embedded-chat couplings 5–8 added
@@ -134,6 +142,98 @@ this host has no musl loader on its default interpreter path.
   recipe. Their provenance below is unchanged and still names its own older
   live evidence.
 
+**2.1.265 re-verification (2026-09-09; bundle extraction + CLI probes + the
+live tmux recipe suite, driven twice — once per binary).** Motivation: 2.1.265
+is upstream `latest`; `stable` was 2.1.236 that day. Latest was taken over
+stable for the same reason as the 2.1.221 bump — a run of **Bash/Read
+permission-check bypasses fixed in `--permission-mode auto`, the mode lab
+spawns unattended** — and those fixes land *after* 2.1.236: a Read/Write/Edit
+symlink-swap TOCTOU (2.1.251), the auto-mode "Containment Escape" rule plus a
+`permissions.ask` rule skipped inside a subshell and `Read()`/`Edit()` deny
+rules not covering `< file` redirects (2.1.257), `Read()` deny rules not
+covering option-value file args like `--ignore-revs-file=.env` (2.1.259), a
+parenthesis-in-path rule silently dropped leaving a "read-only" folder writable
+(2.1.260), and the `rm -rf` safety prompt widened to positional/`sh -c` forms
+(2.1.261). Reachability is the same conditional as 2.1.221 (lab ships no shell;
+the session shell is the operator's dev image), so this is defense in depth,
+not an incident.
+
+Checked against the sha256-verified 2.1.265 artifacts. The `linux-x64-musl`
+artifact — the image input — had its digest **re-derived** from the downloaded
+bytes
+(`77b792470cd157517fbeedb349f31c8f9c40adb3aa0f21ef6086f54b007a2223`, matching
+Anthropic's per-version `manifest.json`); the glibc twin
+(`e14738e3…595bdeeb`, also re-derived and matching) served the CLI probes and
+the live suite, since this host has no musl loader on its default interpreter
+path.
+
+- **§7 (plan picker): DRIFT FOUND AND FIXED — the picker lost a row, on BOTH
+  binaries.** Driven live under lab's no-remote spawn (`--model haiku
+  --permission-mode auto`), the ExitPlanMode approval picker is now **three**
+  rows on 2.1.221 AND 2.1.265: "Yes, auto-accept edits" / "Yes, manually
+  approve edits" / "Tell Claude what to change" (the free-text row). The fourth
+  row the 2.1.198 pin recorded ("No, refine with Ultraplan on Claude Code on
+  the web") is gone — ultraplan was removed upstream at 2.1.222, and under
+  lab's default no-remote spawn the web row was already absent on the outgoing
+  2.1.221 too, so **this drift predated the bump** and went unseen because the
+  live recipe test only ever drives index 0 (approve, Enter — valid on any row
+  count). The four-row `planPickerOptions` shipped a latent **reject→approve
+  inversion**: its IsOther "Reject with feedback" sat at index 3, whose Down×3
+  recipe WRAPS (Up/Down wrap, universal §7 rule) past the three real rows back
+  onto row 0 and silently approves. `planPickerOptions` is now three rows;
+  index 0/1 approve, index 2 is the free-text feedback row. Re-driven end to
+  end on both binaries: index 0 (Enter) and index 1 (Down,Enter) record the
+  plan object (approve); index 2 (Down,Down,type,Enter) recorded a rejection
+  carrying the typed feedback "tighten the tests" verbatim, identical on both.
+  See §7. live (both).
+- **§1: no flag drift.** Every spawn flag lab uses is present and unchanged on
+  2.1.265. `--permission-mode` still accepts `auto` (full list unchanged:
+  `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`) and `--effort`
+  still accepts `low|medium|high|xhigh|max`. The `--help` diff 2.1.221 → 2.1.265
+  is **additive only** — `--cloud`, `--environment`, `--permission-prompts
+  <host|none>`, `--restricted`, `--system-prompt-snapshot`, `--teleport`, and
+  the background-session subcommands (`attach`, `logs`, `stop`, `respawn`,
+  `rm`) — none used by lab. CLI.
+- **§1: the embedded model catalog is intact, with the `fable` alias bumped.**
+  `aliases:{opus:{default:"claude-opus-5",…}}` and
+  `latest_per_family.opus:"claude-opus-5"` extract byte-identically from both
+  binaries, so the 2.1.220 reason for the opus alias survives. The one movement
+  is `latest_per_family.fable:"claude-fable-5"` → `"claude-fable-5-1"` (2.1.257
+  made Fable 5.1 the default `fable`); lab's `fable` option and its 1M window
+  map (`chat.go`) are alias-keyed and unaffected. bundle.
+- **§3/§3a: no drift, additive keys only.** `claude auth status --json` on
+  2.1.265 emits the pinned keys plus `analyticsDisabled` and (logged out)
+  `projectsDirectory`; lab reads only `loggedIn`/`email`/`authMethod` and
+  `ParseAuthStatus` ignores the rest. `CLAUDE_CONFIG_DIR` is still honored (both
+  binaries wrote `.claude.json` + `backups/` under the override dir). The live
+  `authStatus`, `authLogout`, and `configDirResolution` tests passed on both.
+  CLI/live.
+- **§10 (slash commands): re-scraped, three pinned rows updated — see the
+  2.1.265 re-scrape subsection in §10.** `review` left the builtin table
+  (became a `/code-review` alias, a bundled skill); `memory` and `plan` had
+  text/argHint reworded.
+- **§5/§6/§8/§12 (non-remote arm): live, and green on BOTH versions.** The live
+  recipe suite ran twice, once per binary: six tests, **zero skips**, all
+  passing, with identical verdicts, including the two that drive a real dialog
+  through `DialogKeystrokes`/`AnswerDialog` and read the recorded answers back
+  out of the transcript. Both recipe tests spawn **without** `--remote-control`
+  (§12's arm). The transcript shapes `ParseTranscript` saw were unchanged.
+  Escape interrupted a working turn on both (§8), recording "Request
+  interrupted by user".
+- **§11 (`CLAUDE_AFK_TIMEOUT_MS`): no drift, standing gap persists.** A picker
+  spawned with `{"env":{"CLAUDE_AFK_TIMEOUT_MS":"5000"}}` via `--settings` did
+  **not** self-resolve on EITHER binary (0 `afkTimeoutMs` lines, picker held
+  past 30s) — the same non-firing §12 recorded on 2.1.206. Identical on both,
+  so the bump introduces no §11 drift; the env constant is still present in
+  both bundles. The pre-existing open question (whether the auto-advance still
+  fires at all under lab's spawn shape) is unchanged and still owed — it does
+  not block this bump because the manual-run policy defeats the timeout anyway.
+- **Not re-driven, so not claimed:** the §12 *pending*-`tool_use` flush A/B, the
+  §2 deep-link **capture** (the registry file itself was observed present on
+  both, with `bridgeSessionId`/`kind:"interactive"`/`cwd`; the timed capture
+  path was not driven), and the §3b credential-refresh recipe (it rotates the
+  host's real OAuth family). Their provenance below is unchanged.
+
 Provenance legend:
 
 - **live** — observed on the installed Claude Code 2.1.198 during the M3
@@ -146,7 +246,7 @@ Provenance legend:
   stronger than a fixture (it is the shipped binary's own contract) but
   not observed end to end in a live flow.
 
-## 1. Spawn argv (`--remote-control` — optional since issue #163) — live (2.1.198; no-remote arm live 2.1.206); flags re-probed on 2.1.221 (2026-08-04)
+## 1. Spawn argv (`--remote-control` — optional since issue #163) — live (2.1.198; no-remote arm live 2.1.206); flags re-probed on 2.1.221 + 2.1.265 (2026-09-09)
 
 ```
 {claude} [--remote-control <session>] --permission-mode auto [--model M] [--effort E]
@@ -222,7 +322,7 @@ Provenance legend:
   graceful exit only (SIGKILL leaves stale files ⇒ pid-alive +
   newest-startedAt filtering).
 
-## 3. Auth status + login flow — status live (2.1.198), URL shape fixture (2.1.150); status re-probed on 2.1.221 (2026-08-04)
+## 3. Auth status + login flow — status live (2.1.198), URL shape fixture (2.1.150); status re-probed on 2.1.221 + 2.1.265 (2026-09-09)
 
 - `claude auth status --json`: exits 0 when logged in on 2.1.198;
   top-level keys observed live: `apiProvider`, `authMethod`, `email`,
@@ -246,7 +346,7 @@ Provenance legend:
   20s, loginPoll 1s, authTTL 30s, bridgeTimeout 30s, poll cadence 200ms,
   login code cap 4096.
 
-## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214 2026-07-22; 2.1.198 re-probed 2026-07-23; 2.1.220 + 2.1.221 re-probed 2026-08-04)
+## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214 2026-07-22; 2.1.198 re-probed 2026-07-23; 2.1.220 + 2.1.221 + 2.1.265 re-probed)
 
 - `CLAUDE_CONFIG_DIR` outranks HOME for **all** claude state: with it set,
   `.claude.json`, `projects/` (transcripts), `backups/`, and the
@@ -771,7 +871,7 @@ send-keys recipe above is unchanged. The UI shows **no queue affordance**:
 no optimistic echo, no "queued" hint — the reply becomes visible only
 when the transcript reflects it.
 
-## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08; multi-select re-driven 2026-07-09; whole suite re-driven live on 2.1.220 AND 2.1.221, 2026-08-04)
+## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08; multi-select re-driven 2026-07-09; whole suite re-driven live on 2.1.220, 2.1.221 AND 2.1.265; plan picker → 3 rows 2026-09-09)
 
 An interactive dialog is an **unanswered** `tool_use` in the transcript (or,
 live, the §9 spool — one mapper, two sources) for a recognised tool. Option
@@ -943,38 +1043,50 @@ every answer; the model then re-asked). Enter alone commits.
 **`ExitPlanMode` (plan approval)** — answerable since issue #51 (previously
 plan text + deep-link hint; ADR-0016's free-text-reply description and issue
 #17's lock-only stance are both superseded). `Kind=plan`, Prompt = the
-(truncated) plan markdown, Options = **four rows pinned 1:1 by INDEX** with
+(truncated) plan markdown, Options = **three rows pinned 1:1 by INDEX** with
 the live picker:
 
 ```
 Claude has written up a plan and is ready to execute. Would you like to proceed?
-❯ 1. Yes, and use auto mode          / Yes, auto-accept edits   (row 0 TUI text VARIES)
+❯ 1. Yes, auto-accept edits          (row 0 TUI text VARIES with session state)
   2. Yes, manually approve edits
-  3. No, refine with Ultraplan on Claude Code on the web
-  4. Tell Claude what to change        ← free-text feedback row (IsOther)
+  3. Tell Claude what to change        ← free-text row (Enter declines; type-then-Enter rejects with feedback) (IsOther)
 ```
 
+- **THE PICKER LOST A ROW (re-verified live 2026-09-09 on BOTH 2.1.221 and
+  2.1.265).** Through the 2.1.198 pin the picker showed a fourth row, "No,
+  refine with Ultraplan on Claude Code on the web", between "manually approve"
+  and the free-text row. Ultraplan was removed upstream at 2.1.222, and under
+  lab's default **no-remote** spawn the web row was already absent on the
+  outgoing 2.1.221 too — so this drift predated the 2.1.265 bump and went
+  unseen because the live recipe test only ever drives index 0 (Enter, valid on
+  any row count). The picker is now exactly three rows on both binaries.
+- **Why the fourth row must never be re-pinned**: with four options lab's
+  IsOther "Reject with feedback" sat at index 3, and its `[Down×3][…]` recipe
+  **WRAPS** (Up/Down wrap — universal rule above) past the three real rows back
+  onto row 0, silently **approving** the plan. The 4-row model shipped that
+  reject→approve inversion latent on 2.1.221; the 3-row model removes it.
 - **Labels are lab's, not the TUI's**: the `DialogOption` labels lab surfaces
   are its OWN operator-facing wording — `Approve — auto-accept edits`,
-  `Approve — review each edit`, `Reject — refine the plan`, `Reject with
-  feedback` — NOT a mirror of the TUI text. Two live runs on 2026-07-08 under
-  the **same** spawn flag showed **row 0's TUI label vary with session state**
+  `Approve — review each edit`, `Reject with feedback` — NOT a mirror of the
+  TUI text. Live runs showed **row 0's TUI label vary with session state**
   ("Yes, and use auto mode" → "Yes, auto-accept edits"; the bundle builds the
-  set from the permission mode + auto-mode state — option values
-  `yes-accept-edits[-keep-context]`, `yes-auto-clear-context`,
-  `yes-resume-auto-mode`, `no`, …). Mirroring that drifting text would desync
-  the SPA's rendered buttons run to run; the recipe couples only to the
-  **index**, and the stable semantic is what matters: **rows 0–1 approve,
-  rows 2–3 reject**, row 3 the free-text feedback row. The §5 backstop
+  set from the permission mode + auto-mode state). Mirroring that drifting text
+  would desync the SPA's rendered buttons run to run; the recipe couples only
+  to the **index**, and the stable semantic is what matters: **indexes 0–1
+  approve, index 2 is the free-text feedback row**. The §5 backstop
   (approve-vs-denial, never label) catches a genuine index-order change.
 - **No review screen** — Enter on the chosen row resolves the plan directly.
-- Recipe: `[Down×idx][Enter]` (no climb); row 3 takes the type-first free-text
-  path (`[Down×3][PasteText][Enter]`) and rejects the plan with the typed
-  feedback. Rows 0–1 approve, rows 2–3 reject; the row shape was
-  identical on a revised-plan picker (stable across re-presentations).
+- Recipe: `[Down×idx][Enter]` (no climb); index 2 (IsOther) takes the
+  type-first free-text path (`[Down×2][PasteText][Enter]`) and rejects the plan
+  with the typed feedback. Indexes 0–1 approve, index 2 rejects. Driven end to
+  end 2026-09-09 on both binaries: index 0 (Enter) and index 1 (Down,Enter)
+  recorded the plan object; index 2 (Down,Down,"tighten the tests",Enter)
+  recorded the rejection carrying that feedback verbatim, identical on both.
 - Recorded outcomes (§5): approved → content "User has approved your plan…",
-  `toolUseResult` object; rejected via row 4 → the denial string with the
-  feedback after "the user said:\n".
+  `toolUseResult` object; rejected via the free-text row → the denial string
+  with the feedback after "the user said:\n" (Enter on the empty row records a
+  bare "User rejected tool use", so the recipe requires feedback text on it).
 
 **Timeout**: any of these pickers left unanswered resolves ITSELF after 60s
 (§5 afkTimeout) — an answer sent after that 409s on the tool_id re-read, and
@@ -1132,7 +1244,7 @@ When a Claude Code upgrade breaks live dialog capture, re-verify: the settings
 and that `--settings` still merges additively — then update the port, the
 fixtures, the tests, and this section in one commit.
 
-## 10. Builtin slash-command catalog — bundle extraction (2.1.198, 2026-07-08; re-scraped 2.1.220 + 2.1.221, 2026-08-04)
+## 10. Builtin slash-command catalog — bundle extraction (2.1.198, 2026-07-08; re-scraped 2.1.220, 2.1.221 + 2.1.265)
 
 The command catalog (issue #51 decision 5; `claudecode/commands.go`, served
 as `GET /api/v1/runs/{id}/commands`) merges a **pinned builtin table** with
@@ -1363,7 +1475,51 @@ command/skill is a prompt template, claude runs it as a normal turn):
 
 Missing dirs are silently empty; only real I/O failures error.
 
-## 11. Dialog auto-dismiss timeout (CLAUDE_AFK_TIMEOUT_MS) — live (2.1.198, 2026-07-10)
+### 2.1.265 re-scrape (2026-09-09) — three pinned rows updated, `/review` gone
+
+Re-extracted from the sha256-verified 2.1.265 `linux-x64-musl` artifact with a
+brace-balanced parse of the command definitions, and A/B'd against the outgoing
+2.1.221 binary with the same extractor. The reverse-grep check (take each pinned
+string, grep the raw binary for it) — the method §10's 2026-08-04 note made
+load-bearing — is what caught every change below.
+
+- **`review` LEFT the builtin table (chat-safe → removed).** 2.1.223 made
+  `/review` an alias of `/code-review`; by 2.1.265 the bundle carries **no**
+  `review` builtin definition (reverse-grep of the pinned description: 0 on
+  2.1.265, 2 on 2.1.221). Its replacement `/code-review` is a bundled **skill**,
+  which §10 excludes by rule (lab reaches skills only by scanning the worktree,
+  and this is claude's bundled skill registry, not the builtin one). So `review`
+  is dropped from `commands.go` and from the chat-safe set in
+  `TestCompat_BuiltinCommands_pinned` (10 → 9 chat-safe rows) rather than
+  rewritten. This narrows lab's served composer surface by one row — a change
+  forced by upstream removing the builtin, not a discretionary curation. If an
+  operator surface for `/code-review` is later wanted, that is a deliberate
+  product decision (add it as a served skill), the same boundary the standing
+  gap draws for the add-candidates below.
+- **Two curated-out descriptions reworded** (reverse-grep of the old text: 0 on
+  2.1.265), `commands.go` updated:
+
+  | row | pinned text (2.1.221, now wrong) | 2.1.265 bundle text (now pinned) |
+  | --- | --- | --- |
+  | `memory` | "Open a memory file in your editor" | "Edit CLAUDE.md files and memory settings" |
+  | `plan` (argHint) | "[open\|share\|<description>]" | "[open\|<description>]" |
+
+- **New builtins, all deliberately left OUT of the pinned table** (the standing
+  gap is a subset by design; new bundle rows never force an add). Recorded here
+  so the next sweep neither re-hunts them nor assumes they were missed:
+  `list-agents` (aliases `peers`; "List subagents, teammates, and other Claude
+  sessions you can message" — an inline add-candidate, same "product decision"
+  hold as `help`), `advisor`, `cloud-plugins`, `plugin-types`, `skill-doctor`,
+  and `import` gained a `cursor` argHint value. `design` was removed from the
+  bundle. `add-dir` gained a second (`local`) variant (cosmetic; the pinned
+  description is unchanged). `usage` gained a `menuDescription` while its pinned
+  chat-safe description ("…and activity stats") is still present verbatim.
+- **The chat-safe rows that stayed pinned are all byte-identical on 2.1.265**
+  (`clear`, `compact`, `context`, `usage`, `status`, `export`, `release-notes`,
+  `init`, `security-review` — reverse-grep hit each). `clear`'s exact row (the
+  §10 anchor, argHint `[name]`, role clear) is unchanged.
+
+## 11. Dialog auto-dismiss timeout (CLAUDE_AFK_TIMEOUT_MS) — live (2.1.198, 2026-07-10; re-probed 2.1.221 + 2.1.265 2026-09-09 — see caveat)
 
 The 60s picker self-resolve (§5 afkTimeout, §7 Timeout) is the DEFAULT of an
 undocumented env knob, not a constant — and lab defeats it for manual runs
@@ -1434,7 +1590,19 @@ line. The env name is undocumented bundle-internal surface (`lZe` on
 strings-dump technique) — then update the adapter, the tests, and this
 section in one commit.
 
-## 12. Spawning WITHOUT `--remote-control` — live (2.1.206, 2026-07-14); recipe arm re-driven live on 2.1.220 + 2.1.221 (2026-08-04)
+**2.1.265 caveat (2026-09-09):** a re-probe with
+`{"env":{"CLAUDE_AFK_TIMEOUT_MS":"5000"}}` via `--settings` did NOT self-resolve
+on EITHER 2.1.221 or 2.1.265 — the picker held past 30s with zero `afkTimeoutMs`
+lines, the same non-firing §12 recorded on 2.1.206. The `CLAUDE_AFK_TIMEOUT_MS`
+constant is still present in both bundles, and the auto-advance is gated in the
+shipped JS on session state (`!hasExternalRacer && …`), so a plain scratch
+session under lab's spawn shape may no longer arm it. This is **identical on the
+outgoing and incoming pins**, so the bump introduces no §11 drift, and lab's
+manual-run policy defeats the timeout regardless — but the run-A/B recipe above
+should no longer be trusted to fire the 5s timeout as written until the racer
+gating is understood. Owed, not blocking.
+
+## 12. Spawning WITHOUT `--remote-control` — live (2.1.206, 2026-07-14); recipe arm re-driven live on 2.1.220, 2.1.221 + 2.1.265
 
 Issue #163 turns `--remote-control` into a lab-gated knob (default off), which
 puts four couplings on trial: the process lifecycle (the AFK done-signal's
