@@ -550,15 +550,15 @@ func TestCompat_DialogKeystrokes_multiQuestion(t *testing.T) {
 	}
 }
 
-// Plan-approval keystrokes (compat.md §7, live 2026-07-08): four pinned rows,
-// no review screen, no climb (Enter on the chosen row resolves directly). Row
-// 3 follows the Other path: type the feedback first, then Enter.
+// Plan-approval keystrokes (compat.md §7, three rows re-verified live on both
+// 2.1.221 and 2.1.265, 2026-09-09): no review screen, no climb (Enter on the
+// chosen row resolves directly). Row 2 (the free-text row) follows the Other
+// path: type the feedback first, then Enter.
 func TestCompat_DialogKeystrokes_plan(t *testing.T) {
 	plan := provider.Dialog{Kind: provider.DialogKindPlan, Answerable: true, Prompt: "# Plan",
 		Options: []provider.DialogOption{
 			{Label: "Approve — auto-accept edits"},
 			{Label: "Approve — review each edit"},
-			{Label: "Reject — refine the plan"},
 			{Label: "Reject with feedback", IsOther: true},
 		}}
 	got, err := claudecode.DialogKeystrokes(plan, provider.DialogAnswer{Index: 0})
@@ -571,11 +571,11 @@ func TestCompat_DialogKeystrokes_plan(t *testing.T) {
 		t.Errorf("plan approve recipe = %v; want %v", got, want)
 	}
 
-	got, err = claudecode.DialogKeystrokes(plan, provider.DialogAnswer{Index: 3, OtherText: "tighten the tests"})
+	got, err = claudecode.DialogKeystrokes(plan, provider.DialogAnswer{Index: 2, OtherText: "tighten the tests"})
 	if err != nil {
 		t.Fatalf("plan feedback: %v", err)
 	}
-	want = []claudecode.KeyOp{{Named: []string{"Down"}}, {Named: []string{"Down"}}, {Named: []string{"Down"}},
+	want = []claudecode.KeyOp{{Named: []string{"Down"}}, {Named: []string{"Down"}},
 		{Text: "tighten the tests"}, {Named: []string{"Enter"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("plan feedback recipe = %v; want %v", got, want)
@@ -640,16 +640,16 @@ func TestCompat_HookPayload_planDialog_maps(t *testing.T) {
 	if !strings.HasPrefix(d.Prompt, "# Plan: Add README.md note") {
 		t.Errorf("Prompt = %q; want the plan markdown", d.Prompt)
 	}
-	// The four rows, 1:1 by index with the real picker — lab's own semantic
-	// labels (the TUI's row-0 text drifts with session state; compat §7).
+	// The three rows, 1:1 by index with the real picker — lab's own semantic
+	// labels (the TUI's row-0 text drifts with session state; compat §7). The
+	// picker dropped its fourth "refine on the web" row (see planPickerOptions).
 	wantRows := []string{
 		"Approve — auto-accept edits",
 		"Approve — review each edit",
-		"Reject — refine the plan",
 		"Reject with feedback",
 	}
 	if len(d.Options) != len(wantRows) {
-		t.Fatalf("options = %+v; want the 4 pinned rows", d.Options)
+		t.Fatalf("options = %+v; want the 3 pinned rows", d.Options)
 	}
 	for i, want := range wantRows {
 		if d.Options[i].Label != want {
@@ -659,11 +659,11 @@ func TestCompat_HookPayload_planDialog_maps(t *testing.T) {
 			t.Errorf("row %d carries an invented description %q; the live picker shows none", i, d.Options[i].Description)
 		}
 	}
-	if d.Options[0].IsOther || d.Options[1].IsOther || d.Options[2].IsOther {
-		t.Errorf("rows 0-2 must not be free-text rows: %+v", d.Options)
+	if d.Options[0].IsOther || d.Options[1].IsOther {
+		t.Errorf("rows 0-1 must not be free-text rows: %+v", d.Options)
 	}
-	if !d.Options[3].IsOther {
-		t.Errorf("row 3 = %+v; want the free-text feedback row (IsOther)", d.Options[3])
+	if !d.Options[2].IsOther {
+		t.Errorf("row 2 = %+v; want the free-text feedback row (IsOther)", d.Options[2])
 	}
 }
 
@@ -887,8 +887,10 @@ func TestCompat_BuiltinCommands_pinned(t *testing.T) {
 		t.Errorf("clear row = %+v; want [name]/role=clear/chat-safe/builtin", clear)
 	}
 
+	// `review` left the chat-safe set with 2.1.265: it is no longer a builtin
+	// (became a `/code-review` alias, itself a bundled skill — compat §10).
 	wantSafe := []string{"clear", "compact", "context", "usage", "status", "export",
-		"release-notes", "init", "review", "security-review"}
+		"release-notes", "init", "security-review"}
 	var gotSafe []string
 	for _, c := range cmds {
 		if c.Source != "builtin" {

@@ -105,32 +105,46 @@ func askUserQuestionDialog(b tBlock) provider.Dialog {
 	return d
 }
 
-// planPickerOptions are the four rows of the ExitPlanMode approval picker,
-// pinned 1:1 by INDEX — LIVE-VERIFIED 2026-07-08 on 2.1.198 under lab's exact
-// spawn shape (`claude --remote-control <name> --permission-mode auto`), the
-// ADR-0020 process (compat §7). The rows are TUI-owned (nothing in the tool
-// input carries them), so like the keystroke recipes they are write-side
-// pinned constants; the never-scrape rule is untouched.
+// planPickerOptions are the three rows of the ExitPlanMode approval picker,
+// pinned 1:1 by INDEX — RE-VERIFIED LIVE on 2026-09-09 against BOTH 2.1.221 and
+// 2.1.265 under lab's spawn shape (`claude --model haiku --permission-mode
+// auto`, remote-control default OFF since issue #163), the ADR-0020 process
+// (compat §7). The rows are TUI-owned (nothing in the tool input carries them),
+// so like the keystroke recipes they are write-side pinned constants; the
+// never-scrape rule is untouched.
 //
-// The recipe navigates by index, and the APPROVE/REJECT semantic per index is
-// stable: rows 0–1 approve (0 auto-accepts edits, 1 reviews each edit), rows
-// 2–3 reject (2 refines the plan, 3 is the free-text feedback row — IsOther,
-// type-first inline fill like the question Other row — which rejects with the
-// typed feedback). The LABELS below are lab's OWN operator-facing wording, NOT
-// a mirror of the TUI text: two live runs under the SAME spawn flag showed
-// row 0's TUI label vary with session state ("Yes, and use auto mode" →
-// "Yes, auto-accept edits" — the shipped JS builds the row set from the
-// permission mode + auto-mode state: option values yes-accept-edits,
-// yes-auto-clear-context, yes-resume-auto-mode, no, …). Mirroring that drifting
-// text would desync the SPA's rendered buttons from run to run; lab's stable
-// semantic labels don't, and the recipe couples only to the index. The §5
-// backstop (approve-vs-denial, never label text) catches a genuine index-order
-// change.
+// THE PICKER LOST A ROW. Through the 2.1.198 pin the live picker showed FOUR
+// rows, the third being "No, refine with Ultraplan on Claude Code on the web".
+// Under lab's default no-remote spawn that web row is gone on both 2.1.221 (the
+// outgoing pin — so this drift predates the bump, undetected because the live
+// recipe test only ever drives index 0) and 2.1.265 (ultraplan removed upstream
+// at 2.1.222). The live picker is now exactly three rows:
+//
+//	❯ 1. Yes, auto-accept edits        (row 0 TUI text VARIES with session state)
+//	  2. Yes, manually approve edits
+//	  3. Tell Claude what to change     (free-text row: Enter declines, type-then-Enter rejects with feedback)
+//
+// The recipe navigates by index; the APPROVE/REJECT semantic per index is
+// stable and was driven end to end on both binaries: index 0 (Enter) and index
+// 1 (Down,Enter) APPROVE and record the plan object; index 2 is the free-text
+// row (IsOther), reached with Down,Down — a type-first fill then Enter records a
+// rejection carrying the typed feedback verbatim (both binaries recorded
+// "tighten the tests"). This is why the fourth row MUST NOT be pinned: with four
+// options, lab's IsOther feedback row would sit at index 3, whose Down×3 recipe
+// WRAPS past the three real rows back onto row 0 and silently APPROVES — the
+// exact reject→approve inversion the 4-row model shipped latent on 2.1.221.
+//
+// The LABELS below are lab's OWN operator-facing wording, NOT a mirror of the
+// TUI text: live runs showed row 0's TUI label vary with session state ("Yes,
+// and use auto mode" → "Yes, auto-accept edits" — the shipped JS builds the row
+// set from the permission mode + auto-mode state). Mirroring that drifting text
+// would desync the SPA's rendered buttons from run to run; lab's stable semantic
+// labels don't, and the recipe couples only to the index. The §5 backstop
+// (approve-vs-denial, never label text) catches a genuine index-order change.
 func planPickerOptions() []provider.DialogOption {
 	return []provider.DialogOption{
 		{Label: "Approve — auto-accept edits"},
 		{Label: "Approve — review each edit"},
-		{Label: "Reject — refine the plan"},
 		{Label: "Reject with feedback", IsOther: true},
 	}
 }

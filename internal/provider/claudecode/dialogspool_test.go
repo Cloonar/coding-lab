@@ -239,8 +239,8 @@ func TestPendingDialog_multiQuestionAndPlanAnswerable(t *testing.T) {
 	if !ok || !d.Answerable || d.Kind != provider.DialogKindPlan {
 		t.Fatalf("plan spool = %+v,%v; want an answerable plan dialog", d, ok)
 	}
-	if len(d.Options) != 4 || !d.Options[3].IsOther {
-		t.Errorf("plan options = %+v; want the four pinned picker rows with the feedback row last", d.Options)
+	if len(d.Options) != 3 || !d.Options[2].IsOther {
+		t.Errorf("plan options = %+v; want the three pinned picker rows with the feedback row last (compat §7)", d.Options)
 	}
 }
 
