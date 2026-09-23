@@ -89,7 +89,8 @@ func testProvider(t *testing.T, run tmuxx.SessionRunner) (*Provider, *events.Bus
 	p.loginTimeout = 500 * time.Millisecond
 	p.loginPoll = 10 * time.Millisecond
 	p.bridgeTimeout = 300 * time.Millisecond
-	p.keyDelay = 0 // no inter-keystroke sleep in unit tests
+	p.keyDelay = 0    // no inter-keystroke sleep in unit tests
+	p.settleDelay = 0 // no pre-first-key settle either
 	return p, bus
 }
 

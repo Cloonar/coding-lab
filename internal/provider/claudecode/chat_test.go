@@ -839,6 +839,14 @@ func TestParseTranscript_answeredDialogOutcomes(t *testing.T) {
 				line(resolutionLine(`"Error: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nAdd tests first"`, true)),
 			want: provider.DialogOutcome{Feedback: "Add tests first"},
 		},
+		// Live 2026-09-23 on 2.1.265 AND 2.1.280: claude may append a memory
+		// note AFTER the typed feedback inside the same denial string; it is
+		// claude's text, not the operator's, and must not reach Feedback.
+		"plan rejected with feedback and appended note": {
+			lines: line(planUseLine) +
+				line(resolutionLine(`"Error: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nAdd tests first\n\nNote: The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions."`, true)),
+			want: provider.DialogOutcome{Feedback: "Add tests first"},
+		},
 	}
 	for name, c := range cases {
 		got, err := ParseTranscript(strings.NewReader(c.lines))

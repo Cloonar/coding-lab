@@ -63,6 +63,18 @@ const (
 	// ran against a real picker before this issue.
 	defaultDialogKeyDelay = 250 * time.Millisecond
 
+	// defaultDialogSettleDelay is the gap between a picker being presented and
+	// the FIRST key of the answer recipe (compat §7). LIVE-VERIFIED on 2.1.280,
+	// 2026-09-23: an Enter sent the instant the plan picker appeared was DROPPED
+	// — the picker stayed up, cursor on row 0, in 4 of 5 unpaced drives (the
+	// outgoing 2.1.265 accepted it 3 of 3) — while a Down sent just as fast was
+	// honoured (the row-2 recipe Down,Down,type,Enter passed every time). Only
+	// the committing key is guarded, so a one-key recipe (index 0 = bare Enter)
+	// was the one that broke. With 300ms and 1000ms before the first key, 6 of
+	// 6 drives resolved; 500ms carries margin over the smallest tested value.
+	// keyDelay still paces every op AFTER the first.
+	defaultDialogSettleDelay = 500 * time.Millisecond
+
 	// pollInterval is the cadence of both the registry poll and the pane
 	// scrape (v0-pinned 200ms).
 	pollInterval = 200 * time.Millisecond
@@ -181,6 +193,7 @@ type Provider struct {
 	authTTL        time.Duration
 	logoutTimeout  time.Duration // defensive cap on the non-interactive `claude auth logout`
 	keyDelay       time.Duration // inter-op gap in the dialog-answer recipe (compat §7)
+	settleDelay    time.Duration // gap before the recipe's FIRST key (compat §7, 2.1.280)
 
 	// authMu guards the lazy login-status cache. The ~0.75s status command
 	// runs while holding it; that brief serialisation is accepted for a
@@ -271,6 +284,7 @@ func New(o Options) (*Provider, error) {
 		authTTL:        defaultAuthTTL,
 		logoutTimeout:  defaultLogoutTimeout,
 		keyDelay:       defaultDialogKeyDelay,
+		settleDelay:    defaultDialogSettleDelay,
 		capturing:      map[string]bool{},
 	}
 	// Wire the mismatch backstop's forensic instrumentation (issue #165 item

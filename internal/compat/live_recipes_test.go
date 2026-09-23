@@ -202,7 +202,10 @@ func (r *liveRecipeRig) waitRecordedResult(t *testing.T, timeout time.Duration, 
 		}
 		time.Sleep(time.Second)
 	}
-	t.Fatalf("no matching toolUseResult landed in %s within %s", path, timeout)
+	// Harness-only pane observation (see the file comment): what the TUI
+	// shows when the ground truth never lands is the first diagnostic.
+	pane, _ := r.tm.CapturePane(context.Background(), r.session)
+	t.Fatalf("no matching toolUseResult landed in %s within %s; pane:\n%s", path, timeout, pane)
 	return nil
 }
 
@@ -317,9 +320,7 @@ func TestCompat_Live_askUserQuestionRecipe(t *testing.T) {
 func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 	rig := newLiveRecipeRig(t, "lab-compat-live-plan", "--permission-mode", "auto")
 
-	prompt := `Enter plan mode now using the EnterPlanMode tool. Then produce a two-line plan for adding a README.md ` +
-		`note to this folder and call ExitPlanMode to present the plan for approval. Do not implement anything before approval.`
-	if err := rig.prov.Reply(context.Background(), rig.session, prompt); err != nil {
+	if err := rig.prov.Reply(context.Background(), rig.session, livePlanPrompt); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
@@ -330,15 +331,7 @@ func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 	// recipe couples to the index, not the label. Three rows since 2.1.221 (the
 	// "refine on the web" row is gone under lab's no-remote spawn) — compat §7.
 	rig.waitPane(t, 180*time.Second, "Yes, manually approve edits")
-	dialog := provider.Dialog{
-		Kind: provider.DialogKindPlan, Prompt: "plan", Answerable: true,
-		Options: []provider.DialogOption{
-			{Label: "Approve — auto-accept edits"},
-			{Label: "Approve — review each edit"},
-			{Label: "Reject with feedback", IsOther: true},
-		},
-	}
-	if err := rig.prov.AnswerDialog(context.Background(), rig.session, dialog, provider.DialogAnswer{Index: 0}); err != nil {
+	if err := rig.prov.AnswerDialog(context.Background(), rig.session, livePlanDialog(), provider.DialogAnswer{Index: 0}); err != nil {
 		t.Fatalf("AnswerDialog: %v", err)
 	}
 
@@ -374,5 +367,109 @@ func TestCompat_Live_exitPlanModeApproval(t *testing.T) {
 	}
 	if !approved {
 		t.Errorf("ReadChat shows no ExitPlanMode dialog whose Outcome records the approval; outcomes: %+v", seen)
+	}
+}
+
+// livePlanPrompt asks haiku to raise the ExitPlanMode picker (compat §7) —
+// shared by every plan-picker live test so they drive the same shape.
+const livePlanPrompt = `Enter plan mode now using the EnterPlanMode tool. Then produce a two-line plan for adding a README.md ` +
+	`note to this folder and call ExitPlanMode to present the plan for approval. Do not implement anything before approval.`
+
+// livePlanDialog is the plan dialog as lab renders it: the pinned three-row
+// planPickerOptions (index 0/1 approve, index 2 the IsOther feedback row). The
+// labels are lab's own; the recipe couples to the INDEX — compat §7.
+func livePlanDialog() provider.Dialog {
+	return provider.Dialog{
+		Kind: provider.DialogKindPlan, Prompt: "plan", Answerable: true,
+		Options: []provider.DialogOption{
+			{Label: "Approve — auto-accept edits"},
+			{Label: "Approve — review each edit"},
+			{Label: "Reject with feedback", IsOther: true},
+		},
+	}
+}
+
+// TestCompat_Live_exitPlanModeRows drives the plan picker's OTHER two rows —
+// the ones TestCompat_Live_exitPlanModeApproval (index 0, Enter — valid on ANY
+// row count) leaves alone. The 2.1.265 bump found the picker had silently lost
+// a row on the OUTGOING pin too, and the four-row model's Down×3 "reject with
+// feedback" recipe wrapped back onto row 0 and APPROVED (compat §7); that went
+// unseen precisely because only index 0 was ever driven by the suite. Now the
+// semantic of every pinned index is asserted from the recorded ground truth:
+// index 1 (Down,Enter) must record the plan OBJECT (approve); index 2 (Down,
+// Down, type-first feedback, Enter) must record the §5 denial STRING carrying
+// the typed feedback verbatim after "the user said:\n". Each row gets its own
+// fresh spawn — a fresh picker opens on row 0 (the §7 no-climb rule), so a
+// recipe is only meaningful from a fresh picker.
+func TestCompat_Live_exitPlanModeRows(t *testing.T) {
+	const feedback = "tighten the tests"
+	cases := []struct {
+		name    string
+		answer  provider.DialogAnswer
+		approve bool
+	}{
+		{name: "index1-approve-review-each-edit", answer: provider.DialogAnswer{Index: 1}, approve: true},
+		{name: "index2-reject-with-feedback", answer: provider.DialogAnswer{Index: 2, OtherText: feedback}, approve: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newLiveRecipeRig(t, "lab-compat-live-"+tc.name, "--permission-mode", "auto")
+			if err := rig.prov.Reply(context.Background(), rig.session, livePlanPrompt); err != nil {
+				t.Fatalf("Reply: %v", err)
+			}
+			rig.waitPane(t, 180*time.Second, "Yes, manually approve edits")
+			if err := rig.prov.AnswerDialog(context.Background(), rig.session, livePlanDialog(), tc.answer); err != nil {
+				t.Fatalf("AnswerDialog: %v", err)
+			}
+
+			if tc.approve {
+				// Approval: toolUseResult is the plan OBJECT (compat §5).
+				rig.waitRecordedResult(t, 90*time.Second, func(raw json.RawMessage) bool {
+					var rec struct {
+						Plan string `json:"plan"`
+					}
+					return raw[0] == '{' && json.Unmarshal(raw, &rec) == nil && rec.Plan != ""
+				})
+			} else {
+				// Rejection: toolUseResult is the denial STRING with the typed
+				// feedback riding inside it (compat §5) — a plan OBJECT here
+				// would be the reject→approve inversion §7 guards against.
+				raw := rig.waitRecordedResult(t, 90*time.Second, func(raw json.RawMessage) bool {
+					var s string
+					return raw[0] == '"' && json.Unmarshal(raw, &s) == nil && strings.Contains(s, feedback)
+				})
+				var denial string
+				_ = json.Unmarshal(raw, &denial)
+				if !strings.Contains(denial, "the user said:\n"+feedback) {
+					t.Errorf("denial string does not carry the feedback marker + typed text:\n%s", denial)
+				}
+			}
+
+			// The production read path must agree with the ground truth: the
+			// DIALOG message's Outcome carries the approval, or the feedback.
+			chat, err := rig.prov.ReadChat(provider.ReadSpec{TranscriptPath: rig.transcriptPath(t)})
+			if err != nil {
+				t.Fatalf("ReadChat: %v", err)
+			}
+			found := false
+			var seen []provider.DialogOutcome
+			for _, m := range chat.Messages {
+				if m.Kind != provider.MessageDialog || m.Dialog == nil ||
+					m.Dialog.Kind != provider.DialogKindPlan || m.Dialog.Outcome == nil {
+					continue
+				}
+				o := *m.Dialog.Outcome
+				seen = append(seen, o)
+				if tc.approve && o.Approved && !o.Dismissed && o.Feedback == "" {
+					found = true
+				}
+				if !tc.approve && !o.Approved && o.Feedback == feedback {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("ReadChat shows no ExitPlanMode dialog whose Outcome matches (approve=%v, feedback=%q); outcomes: %+v", tc.approve, feedback, seen)
+			}
+		})
 	}
 }
