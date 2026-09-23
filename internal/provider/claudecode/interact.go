@@ -102,6 +102,13 @@ func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog 
 		return err
 	}
 	p.intents.record(sessionName, dialog, answer, ops)
+	// Settle before the FIRST key: 2.1.280 drops a committing Enter that lands
+	// as the picker mounts (compat §7, live 2026-09-23 — see
+	// defaultDialogSettleDelay). Navigation keys were not observed dropped, but
+	// the guard is applied uniformly: the recipe is blind to which key is first.
+	if p.settleDelay > 0 && !sleepOrDone(ctx, p.settleDelay) {
+		return ctx.Err()
+	}
 	for i, op := range ops {
 		if i > 0 && p.keyDelay > 0 {
 			if !sleepOrDone(ctx, p.keyDelay) {

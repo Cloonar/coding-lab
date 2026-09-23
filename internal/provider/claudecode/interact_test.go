@@ -102,6 +102,23 @@ func TestAnswerDialog_pacedRespectsCancel(t *testing.T) {
 	}
 }
 
+// The pre-first-key settle (compat §7, 2.1.280: an Enter that lands as the
+// picker mounts is dropped) sits BEFORE any op and honours cancellation: a
+// cancelled context plays nothing at all — not even the first key.
+func TestAnswerDialog_settleRespectsCancel(t *testing.T) {
+	p, f := armedRunner(t)
+	p.settleDelay = time.Hour // make the settle effectively block
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d := provider.Dialog{Answerable: true, Options: []provider.DialogOption{{Label: "a"}, {Label: "b"}, {Label: "Other", IsOther: true}}}
+	if err := p.AnswerDialog(ctx, chatSession, d, provider.DialogAnswer{Index: 0}); err == nil {
+		t.Fatal("AnswerDialog with a cancelled context = nil; want context error")
+	}
+	if log := f.KeyLog(chatSession); len(log) != 0 {
+		t.Errorf("played %d ops despite the cancelled settle; want 0 (nothing before the settle)", len(log))
+	}
+}
+
 func TestAnswerDialog_refusesUnanswerable(t *testing.T) {
 	p, _ := armedRunner(t)
 	d := provider.Dialog{Answerable: false, Kind: provider.DialogKindPlan}

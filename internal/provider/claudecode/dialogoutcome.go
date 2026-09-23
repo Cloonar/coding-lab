@@ -26,6 +26,18 @@ import (
 // marker, Feedback stays empty.
 const planFeedbackMarker = "the user said:\n"
 
+// planFeedbackNoteMarker opens the boilerplate note claude appends AFTER the
+// typed feedback inside the same denial string — "…the user said:\n<feedback>
+// \n\nNote: The user's next message may contain a correction or preference.
+// Pay close attention — if they explain what went wrong or how they'd prefer
+// you to work, consider saving that to memory for future sessions." — a fixed
+// bundle constant present on 2.1.265 and 2.1.280 (compat §5; found live
+// 2026-09-23 on BOTH binaries by the §7 row-2 recipe test — the 2026-09-09
+// by-hand drive saw the feedback bare, so the append is session-state gated).
+// Only its stable opening is pinned; everything from it onward is claude's
+// text, not the operator's, and is cut from Feedback.
+const planFeedbackNoteMarker = "\n\nNote: The user's next message may contain"
+
 // outcomeFor derives an answered dialog's Outcome from its recorded
 // resolution. Never nil: the caller only reaches here for a tool_use whose
 // tool_result exists (first-pass resolutions map), and a non-nil Outcome IS
@@ -60,6 +72,11 @@ func planOutcome(denial string, isDenial bool, res resolvedTool) *provider.Dialo
 		// denial — no marker, empty Feedback (a plain "keep planning").
 		if i := strings.LastIndex(denial, planFeedbackMarker); i >= 0 {
 			out.Feedback = denial[i+len(planFeedbackMarker):]
+			// Cut claude's appended memory note (if any) — it follows the
+			// operator's text inside the same string and is not feedback.
+			if j := strings.Index(out.Feedback, planFeedbackNoteMarker); j >= 0 {
+				out.Feedback = out.Feedback[:j]
+			}
 		}
 		return out
 	}

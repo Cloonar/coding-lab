@@ -134,6 +134,13 @@ func askUserQuestionDialog(b tBlock) provider.Dialog {
 // WRAPS past the three real rows back onto row 0 and silently APPROVES — the
 // exact reject→approve inversion the 4-row model shipped latent on 2.1.221.
 //
+// RE-DRIVEN 2026-09-23 on 2.1.265 AND 2.1.280 by the live suite itself —
+// TestCompat_Live_exitPlanModeRows now drives index 1 and index 2 (index 0 was
+// always covered), so a row-count drift can no longer hide behind a row-0-only
+// gate. Same three rows, same semantics on both. What did move: the row-2
+// denial string may now carry claude's appended memory note AFTER the typed
+// feedback (planFeedbackNoteMarker in dialogoutcome.go cuts it) — compat §5.
+//
 // The LABELS below are lab's OWN operator-facing wording, NOT a mirror of the
 // TUI text: live runs showed row 0's TUI label vary with session state ("Yes,
 // and use auto mode" → "Yes, auto-accept edits" — the shipped JS builds the row
