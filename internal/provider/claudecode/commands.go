@@ -79,7 +79,10 @@ var builtinCommands = []provider.CommandSpec{
 	{Name: "install-github-app", Description: "Set up Claude GitHub Actions for a repository", Source: commandSourceBuiltin},
 	{Name: "login", Description: "Sign in with your Anthropic account", Source: commandSourceBuiltin},
 	{Name: "logout", Description: "Sign out from your Anthropic account", Source: commandSourceBuiltin},
-	{Name: "mcp", Description: "Manage MCP servers", ArgHint: "[reconnect <server>|enable|disable [<server>|all]]", Source: commandSourceBuiltin},
+	// mcp: argHint reworded 2.1.280 → 2.1.284 ("[reconnect <server>|enable|disable
+	// [<server>|all]]" → the text below; `/mcp reconnect all` landed in 2.1.284,
+	// reverse-grep of the old text: 0 on 2.1.284).
+	{Name: "mcp", Description: "Manage MCP servers", ArgHint: "[reconnect (<server>|all)|enable|disable [<server>|all]]", Source: commandSourceBuiltin},
 	// memory: description reworded 2.1.221 → 2.1.265 ("Open a memory file in
 	// your editor" → the text below; reverse-grep of the old text: 0 on 2.1.265).
 	{Name: "memory", Description: "Edit CLAUDE.md files and memory settings", Source: commandSourceBuiltin},
