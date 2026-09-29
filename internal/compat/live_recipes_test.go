@@ -112,6 +112,13 @@ func newLiveRecipeRig(t *testing.T, name string, extraArgs ...string) *liveRecip
 	// clobbers the just-seeded entry (the documented SeedTrust concurrency
 	// caveat — harmless in production, where spawns don't race exits on the
 	// same config write). Accept it like an operator would and continue.
+	//
+	// The dialog opens with the cursor on "No, exit" (observed on 2.1.265,
+	// 2.1.280 and 2.1.284 — compat §4 / the 2.1.280 note), so a bare Enter
+	// QUITS claude and the composer never comes: move to "Yes, I trust this
+	// folder" first. The two keys go in separate send-keys calls with a pause
+	// between them — a Down+Enter burst can act on the pre-move row (an
+	// upstream burst-input fix landed only in 2.1.281).
 	deadline := time.Now().Add(90 * time.Second)
 	for {
 		pane, err := rig.tm.CapturePane(context.Background(), name)
@@ -119,6 +126,10 @@ func newLiveRecipeRig(t *testing.T, name string, extraArgs ...string) *liveRecip
 			break
 		}
 		if err == nil && strings.Contains(pane, "Yes, I trust this folder") {
+			if err := rig.tm.SendNamedKeys(context.Background(), name, "Down"); err != nil {
+				t.Fatalf("moving to the trust row: %v", err)
+			}
+			time.Sleep(300 * time.Millisecond)
 			if err := rig.tm.SendNamedKeys(context.Background(), name, "Enter"); err != nil {
 				t.Fatalf("accepting trust dialog: %v", err)
 			}

@@ -1,17 +1,23 @@
 # Claude Code compatibility pins
 
-Pinned version: **Claude Code 2.1.280** — bundle extraction + CLI probes +
-the **live tmux recipe suite**, driven green against the OUTGOING 2.1.265
-binary first and then the incoming 2.1.280, 2026-09-23 (see the 2.1.280
-re-verification note below). This bump took `latest` (2.1.280) over `stable`
-(2.1.267) for the same class of reason as the 2.1.221 and 2.1.265 bumps — a run
-of Bash/Read/Write permission-check fixes in `--permission-mode auto`, the mode
-lab spawns unattended, that land only after 2.1.267 (see the 2.1.280 note). The
-live gate this time drove **every** plan-picker row, not just row 0 — the gap
-the 2.1.265 note left open — via a new recipe test, and that **found a §5 shape
-drift present on the OUTGOING pin too**: the plan-rejection denial string now
-carries claude's appended memory note after the operator's typed feedback, so
-`Outcome.Feedback` was no longer verbatim; fixed in `planOutcome` (§5, §7). The
+Pinned version: **Claude Code 2.1.284** — bundle extraction + CLI probes +
+the **live tmux recipe suite**, driven green against the OUTGOING 2.1.280
+binary first and then the incoming 2.1.284, 2026-09-29 (see the 2.1.284
+re-verification note below). This bump took `latest` (2.1.284) over `stable`
+(2.1.277) for the same class of reason as the 2.1.221, 2.1.265 and 2.1.280
+bumps — auto-mode permission-check fixes (a substitution-only recursive `rm`
+running unprompted, NUL-byte rules widening to a wildcard, mid-pattern `:*`
+Bash rules skipped, the dangerous-`rm` check widened) that land only after
+2.1.277 (see the 2.1.284 note). Recipe verdicts were identical on both
+binaries; the one pinned-surface drift was a §10 argHint (`mcp`, fixed in
+`commands.go`), and the model catalog moved `sonnet` → Sonnet 5.5 (alias-keyed
+in lab, no change — but see the §1 note on the ADR-0061 `sonnet` window). The
+2.1.280 bump before it drove **every** plan-picker row for the first time and
+**found a §5 shape drift present on the OUTGOING pin too**: the plan-rejection
+denial string carries claude's appended memory note after the operator's typed
+feedback, so `Outcome.Feedback` was no longer verbatim; fixed in `planOutcome`
+(§5, §7); it also found that 2.1.280 drops a committing Enter sent the instant
+the plan picker mounts (fixed with the pre-first-key settle in `AnswerDialog`). The
 2.1.265 bump before it found and fixed the latent §7 four-row break (the picker
 had lost its fourth row under lab's no-remote spawn, wrapping "reject with
 feedback" into a silent APPROVE). The 2.1.221 pin before that was the first
@@ -346,6 +352,127 @@ PR leg, as the procedure already states.)
   (it rotates the host's real OAuth family). Their provenance below is
   unchanged.
 
+**2.1.284 re-verification (2026-09-29; bundle extraction + CLI probes + the
+live tmux recipe suite driven once per binary, plus the §11 run-A/B recipe
+once per binary).** Motivation: 2.1.284 is upstream `latest`; `stable` was
+2.1.277 that day. Latest was taken over stable for the same class of reason as
+the 2.1.221, 2.1.265 and 2.1.280 bumps — **permission-check fixes in
+`--permission-mode auto`, the mode lab spawns unattended** — and the relevant
+ones land *after* 2.1.277. 2.1.281: a recursive `rm` whose target is only
+command-substitution output (`rm -rf "$(pwd)"`) ran unprompted in auto and
+skip-permissions mode (it now asks even with a Bash allow rule), a permission
+rule containing a NUL byte expanded into a wildcard match (now matches
+nothing), Bash rules with a mid-pattern `:*` were skipped in settings files,
+and managed `permissions`/`autoMode` blocks were ignored entirely when one
+nested value was invalid. 2.1.282: the dangerous-`rm` check widened (a variable
+followed by a top-level directory name, a variable derived from the working
+directory, a backslash-only target), the auto-mode denial message now makes a
+denial cover the outcome rather than the exact command, and the dangerous-`rm`
+prompt in auto mode now waits 2 minutes and then **denies with a rewrite hint
+so unattended sessions keep going** (`CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT=1`
+opts out) — the one change here that lands squarely on lab's AFK runs, and in
+the direction lab wants. 2.1.284: a "Yes, but ask again next time" answer on
+auto mode's prompt before a read outside the working directories. Two default
+changes in the window are no-ops for lab and recorded so nobody re-derives
+them: 2.1.283 made interactive sessions **start** in auto mode when no
+permission mode is configured (lab pins `--permission-mode auto` explicitly,
+§1), and 2.1.282 made auto mode use the server-side classifier by default on
+a direct Anthropic API connection with telemetry off (`CLAUDE_CODE_AUTO_MODE_SERVER=0`
+opts out; lab sets neither). Reachability is the same conditional as before
+(lab ships no shell; the session shell is the operator's dev image), so this
+is defense in depth, not an incident.
+
+Checked against the sha256-verified 2.1.284 artifacts. The `linux-x64-musl`
+artifact — the image input — had its digest **re-derived** from the downloaded
+bytes: `1c5e4d7431c1e70c45efdce69ea74c2c9a2ad309f16555f7dc563f4743d978a0`,
+matching Anthropic's per-version `manifest.json` (build 2026-09-28, commit
+`2b8ce618`); the outgoing 2.1.280 musl artifact (`8d25ffbf…`) was re-fetched
+and re-derived the same way for the A/B. As on the 2.1.280 bump, both binaries
+ran on this NixOS host with their `PT_INTERP` rewritten to a nix musl loader —
+the same patchelf step `Containerfile.claude` performs. (The local
+`build.sh`/`smoke-test.sh` leg again could not run here — `docker.io` pulls
+are refused by this host's credential gateway — so the injection smoke is CI's
+PR leg, as the procedure states.)
+
+- **§5/§6/§7/§8/§12 (non-remote arm): live, and green on BOTH versions with
+  identical verdicts.** The whole suite — seven tests — ran once per binary
+  against the patched musl artifacts: **zero skips**, all passing, on 2.1.280
+  first and then 2.1.284, and again on both after the harness fix below. Every
+  plan-picker row (0 via `exitPlanModeApproval`, 1 and 2 via
+  `exitPlanModeRows`) and the two-question AskUserQuestion form recorded the
+  intended answers on both; the 2.1.280 `settleDelay` stays in place (its
+  necessity was not re-A/B'd without it). Run B of §11 also shows the picker
+  footer and layout unchanged on 2.1.284. live (both).
+- **§7/§4 HARNESS LOSS FOUND AND FIXED (not a recipe drift):** the first
+  2.1.284 drive failed `exitPlanModeRows/index2` without ever reaching the
+  recipe — the spawn landed on the folder-trust dialog (the documented
+  `SeedTrust` concurrency caveat: index1's claude exiting rewrote the scratch
+  `~/.claude.json` from its startup snapshot and clobbered the seed), and the
+  rig's fallback pressed a bare Enter on a dialog whose **default row is "No,
+  exit"** (the 2.1.280 note's §4 observation), so claude quit and the composer
+  never came. index1 had passed on the same binary and the second full drive
+  passed all seven on both with no dialog shown, so this is timing, not
+  version. The rig now moves to "Yes, I trust this folder" first — Down, a
+  300ms pause, then Enter in **separate** send-keys calls, because a Down+Enter
+  burst can act on the pre-move row (an upstream burst-input fix landed only in
+  2.1.281, so the burst is unsafe on the outgoing pin). The dialog's default row
+  is "No, exit" on 2.1.265, 2.1.280 and 2.1.284 alike. live (both).
+- **§1: no flag drift.** `--permission-mode` still accepts `auto` (full list
+  unchanged: `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`) and
+  `--effort` still accepts `low|medium|high|xhigh|max`. The top-level `--help`
+  diff 2.1.280 → 2.1.284 is three additive/wording changes — `--agents <json>`
+  became `<json-or-file>` (a file path is accepted with `--print`), a new
+  `--client-data-url <url>` (a signed configuration document; the
+  `CLAUDE_CODE_CLIENT_DATA_URL` env twin), and `--model`'s example text was
+  dropped — and all 18 subcommand helps (`agents attach auth auto-mode doctor
+  gateway import install logs mcp plugin project respawn rm setup-token stop
+  ultrareview update`) are byte-identical. None of the changed surface is used
+  by lab. CLI.
+- **§1: the embedded model catalog moved — `sonnet` now defaults to Sonnet
+  5.5.** `aliases.sonnet.default` / `latest_per_family.sonnet` went
+  `"claude-sonnet-5"` → `"claude-sonnet-5-5"` (2.1.284: "Added Claude Sonnet
+  5.5, now the default Sonnet model on the Anthropic API — 1M context");
+  `opus` stays `claude-opus-5-5`, `fable` `claude-fable-5-1`, `haiku`
+  `claude-haiku-4-5`. Lab's `sonnet` option is alias-keyed, so it resolves to
+  Sonnet 5.5 with no lab change — the same mechanism by which the 2.1.280 pin
+  picked up Opus 5.5. **ADR-0061 observation, recorded, NOT changed here:**
+  the bundle's own native-1M gate is "the resolved model's catalog entry
+  carries `context.native_1m` AND the connection is first-party
+  (`api.anthropic.com` / no `ANTHROPIC_BASE_URL`)" — no `[1m]` suffix involved
+  (the suffix path is separate and keyed on `supports_1m_suffix`, which the
+  Opus entries carry and the Sonnet entries do not). Sonnet 5.5's entry is
+  `context:{window:1e6,native_1m:!0,…}`, so a lab `sonnet` spawn on a
+  first-party login runs with a **1M** window while `contextWindows`
+  (`chat.go`) pins `sonnet` at 200K, over-reporting the header meter's
+  occupancy 5×. Sonnet 5's entry carried the same flags on 2.1.280 (Sonnet 5
+  launched "with a native 1M-token context window"), so this is a standing
+  ADR-0061 denominator question rather than drift introduced by this pin —
+  filed as a follow-up issue, not folded into the bump. bundle.
+- **§3/§3a: no drift, no new keys.** `claude auth status --json` on 2.1.284
+  emits exactly the 2.1.280 logged-in key set (`analyticsDisabled apiProvider
+  authMethod configDirectory email loggedIn orgId orgName projectsDirectory
+  subscriptionType`); the logged-out shape was not re-probed. `CLAUDE_CONFIG_DIR`
+  is still honoured (both binaries wrote `.claude.json` under the override dir
+  in both layouts). The live `authStatus`, `authLogout`, and
+  `configDirResolution` tests passed on both. CLI/live.
+- **§10 (slash commands): re-scraped, ONE pinned-row drift — `mcp`'s argHint
+  — fixed in `commands.go`; name set unchanged.** See the 2.1.284 re-scrape
+  subsection in §10. bundle.
+- **§2/§4/§5/§9/§11/§12 static markers all present on 2.1.284** (counts
+  2.1.280 → 2.1.284): `bridgeSessionId` 38 → 38, `cse_` 37 → 38,
+  `hasTrustDialogAccepted` 9 → 9, `hasCompletedOnboarding` 13 → 13,
+  `includeCoAuthoredBy` 11 → 11, `toolUseResult` 59 → 61, `PreToolUse`
+  120 → 130, `PostToolUse` 95 → 97, `hook_event_name` 21 → 22,
+  `CLAUDE_AFK_TIMEOUT_MS` 5 → 5, `afkTimeoutMs` 6 → 6, `ultracode` 51 → 56,
+  the `"sessions"` registry key 8 → 8, and the §5 plan-feedback note marker
+  ("Note: The user's next message may contain a correction") 1 → 1. bundle.
+- **§11 (`CLAUDE_AFK_TIMEOUT_MS`): runs A and B re-driven on both binaries,
+  both fire as written** — see the 2.1.284 re-probe note in §11. live (both).
+- **Not re-driven, so not claimed:** the §12 *pending*-`tool_use` flush A/B,
+  the §2 deep-link **capture** path, the §3b credential-refresh recipe (it
+  rotates the host's real OAuth family), and the logged-out `auth status`
+  shape. Their provenance below is unchanged.
+
 Provenance legend:
 
 - **live** — observed on the installed Claude Code 2.1.198 during the M3
@@ -358,7 +485,7 @@ Provenance legend:
   stronger than a fixture (it is the shipped binary's own contract) but
   not observed end to end in a live flow.
 
-## 1. Spawn argv (`--remote-control` — optional since issue #163) — live (2.1.198; no-remote arm live 2.1.206); flags re-probed on 2.1.221 + 2.1.265 (2026-09-09) + 2.1.280 (2026-09-23)
+## 1. Spawn argv (`--remote-control` — optional since issue #163) — live (2.1.198; no-remote arm live 2.1.206); flags re-probed on 2.1.221 + 2.1.265 (2026-09-09) + 2.1.280 (2026-09-23) + 2.1.284 (2026-09-29)
 
 ```
 {claude} [--remote-control <session>] --permission-mode auto [--model M] [--effort E]
@@ -396,6 +523,13 @@ Provenance legend:
   change) does not touch lab: lab pins `auto`, whose name did not move.
 - `--remote-control-session-name-prefix <prefix>` (default: hostname) is
   new since v0 — unused by lab, noted for the future.
+- **`--model` values are alias-keyed against claude's embedded catalog**, so a
+  family default moving upstream reaches lab with no change: `opus` → Opus 5.5
+  since 2.1.280, `sonnet` → Sonnet 5.5 since 2.1.284 (see the 2.1.284 note).
+  The ADR-0061 context-window map (`chat.go` `contextWindows`) is NOT
+  alias-following — it pins `sonnet` at 200K while the Sonnet 5/5.5 catalog
+  entries are `native_1m` on a first-party connection; recorded in the 2.1.284
+  note as a standing denominator question, not a pin break.
 - Flag order model-then-effort is lab's own pinned M3 constant (v0
   appended effort-then-model; claude accepts both orders). Snapshot test:
   `TestCompat_SpawnArgvSnapshot`.
@@ -434,7 +568,7 @@ Provenance legend:
   graceful exit only (SIGKILL leaves stale files ⇒ pid-alive +
   newest-startedAt filtering).
 
-## 3. Auth status + login flow — status live (2.1.198), URL shape fixture (2.1.150); status re-probed on 2.1.221 + 2.1.265 (2026-09-09) + 2.1.280 (2026-09-23)
+## 3. Auth status + login flow — status live (2.1.198), URL shape fixture (2.1.150); status re-probed on 2.1.221 + 2.1.265 (2026-09-09) + 2.1.280 (2026-09-23) + 2.1.284 (2026-09-29)
 
 - `claude auth status --json`: exits 0 when logged in on 2.1.198;
   top-level keys observed live: `apiProvider`, `authMethod`, `email`,
@@ -443,7 +577,8 @@ Provenance legend:
   fixture: `testdata/auth-status-2.1.198.json`; parse pinned by
   `TestCompat_AuthStatusFixture_parses`. Additive keys since: `analyticsDisabled`
   + (logged out) `projectsDirectory` on 2.1.265, and `configDirectory` (the
-  resolved config dir, both states) on 2.1.280 — all ignored by lab. 2.1.280
+  resolved config dir, both states) on 2.1.280, and none on 2.1.284 (logged-in
+  key set identical to 2.1.280) — all ignored by lab. 2.1.280
   also leaves a `.claude.json.lock` beside `.claude.json` under the config dir.
 - Stdout is parsed **regardless of exit code** — older claudes exit
   non-zero when logged out while still emitting `{"loggedIn":false}`,
@@ -461,7 +596,7 @@ Provenance legend:
   20s, loginPoll 1s, authTTL 30s, bridgeTimeout 30s, poll cadence 200ms,
   login code cap 4096.
 
-## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214 2026-07-22; 2.1.198 re-probed 2026-07-23; 2.1.220 + 2.1.221 + 2.1.265 + 2.1.280 re-probed)
+## 3a. Config-dir resolution (`CLAUDE_CONFIG_DIR`) — live (2.1.214 2026-07-22; 2.1.198 re-probed 2026-07-23; 2.1.220 + 2.1.221 + 2.1.265 + 2.1.280 + 2.1.284 re-probed)
 
 - `CLAUDE_CONFIG_DIR` outranks HOME for **all** claude state: with it set,
   `.claude.json`, `projects/` (transcripts), `backups/`, and the
@@ -995,7 +1130,7 @@ send-keys recipe above is unchanged. The UI shows **no queue affordance**:
 no optimistic echo, no "queued" hint — the reply becomes visible only
 when the transcript reflects it.
 
-## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08; multi-select re-driven 2026-07-09; whole suite re-driven live on 2.1.220, 2.1.221, 2.1.265 AND 2.1.280; plan picker → 3 rows 2026-09-09; every plan row + the pre-first-key settle 2026-09-23)
+## 7. Dialog keystroke recipes — live (2.1.198, 2026-07-08; multi-select re-driven 2026-07-09; whole suite re-driven live on 2.1.220, 2.1.221, 2.1.265, 2.1.280 AND 2.1.284; plan picker → 3 rows 2026-09-09; every plan row + the pre-first-key settle 2026-09-23; every row re-driven 2026-09-29)
 
 An interactive dialog is an **unanswered** `tool_use` in the transcript (or,
 live, the §9 spool — one mapper, two sources) for a recognised tool. Option
@@ -1387,7 +1522,7 @@ When a Claude Code upgrade breaks live dialog capture, re-verify: the settings
 and that `--settings` still merges additively — then update the port, the
 fixtures, the tests, and this section in one commit.
 
-## 10. Builtin slash-command catalog — bundle extraction (2.1.198, 2026-07-08; re-scraped 2.1.220, 2.1.221, 2.1.265 + 2.1.280)
+## 10. Builtin slash-command catalog — bundle extraction (2.1.198, 2026-07-08; re-scraped 2.1.220, 2.1.221, 2.1.265, 2.1.280 + 2.1.284)
 
 The command catalog (issue #51 decision 5; `claudecode/commands.go`, served
 as `GET /api/v1/runs/{id}/commands`) merges a **pinned builtin table** with
@@ -1688,7 +1823,40 @@ binary's raw strings dump, plus a name-set diff of the
   same "widening the served surface is a product decision" rule —
   deliberately NOT pinned; new bundle rows never force an add.
 
-## 11. Dialog auto-dismiss timeout (CLAUDE_AFK_TIMEOUT_MS) — live (2.1.198, 2026-07-10; re-probed 2.1.221 + 2.1.265 2026-09-09 — see caveat; runs A and B re-driven 2.1.265 + 2.1.280 2026-09-23, caveat closed)
+### 2.1.284 re-scrape (2026-09-29) — one pinned argHint reworded (`mcp`), name set unchanged
+
+Re-extracted from the sha256-verified 2.1.284 `linux-x64-musl` artifact and
+A/B'd against the outgoing 2.1.280 artifact with the reverse-grep method (all 44
+distinct pinned descriptions and argHints from `commands.go` grepped verbatim in
+each binary's raw strings dump, plus a name-set diff of the
+`type:"local|local-jsx|prompt"` command definitions):
+
+- **`mcp`'s argHint reworded (curated-out row, `commands.go` updated).** The
+  pinned `[reconnect <server>|enable|disable [<server>|all]]` hits 2 on 2.1.280
+  and **0 on 2.1.284**; the 2.1.284 `local-jsx` definition reads
+  `[reconnect (<server>|all)|enable|disable [<server>|all]]` (2.1.284: "Added
+  `/mcp reconnect all`"). The description "Manage MCP servers" is unchanged
+  (3 hits on both). The row is not chat-safe, so the served composer surface
+  does not move; `TestCompat_BuiltinCommands_pinned` needs no edit.
+- **The other 43 pinned strings all hit on 2.1.284**, with identical counts
+  save three cosmetic movements: `[name]` 132 → 131 and `<path>` 93 → 99
+  (unrelated strings sharing the text; `clear`'s and `add-dir`'s own
+  definitions are byte-identical on both), and `config`'s "Open settings"
+  3 → 2 (the third 2.1.280 hit was release-notes prose, now rotated out; the
+  `local-jsx` definition itself is unchanged). `clear`'s exact row (the §10
+  anchor) is unchanged. The chat-safe set stays the nine rows 2.1.265 left.
+- **Builtin name set: nothing added or removed.** This bump's name extractor
+  (a `{type:"local|local-jsx|prompt",name:"…"` prefix match on the raw binary,
+  not the brace-balanced parse the 2.1.265/2.1.280 re-scrapes used) yields the
+  **same 99 primary names on both binaries**, `output-style` included — so the
+  2.1.280 → 2.1.284 name-set diff is empty; the count differs from the 2.1.280
+  note's 100 because a definition whose keys do not start `type, name` (the
+  `config` `local-jsx` variant is one such shape) is invisible to the prefix
+  match, not because the bundle lost a row. The add-candidates (`help`,
+  `list-agents`, `output-style`) stay held by the "widening the served surface
+  is a product decision" rule.
+
+## 11. Dialog auto-dismiss timeout (CLAUDE_AFK_TIMEOUT_MS) — live (2.1.198, 2026-07-10; re-probed 2.1.221 + 2.1.265 2026-09-09 — see caveat; runs A and B re-driven 2.1.265 + 2.1.280 2026-09-23, caveat closed; runs A and B re-driven 2.1.280 + 2.1.284 2026-09-29)
 
 The 60s picker self-resolve (§5 afkTimeout, §7 Timeout) is the DEFAULT of an
 undocumented env knob, not a constant — and lab defeats it for manual runs
@@ -1788,7 +1956,21 @@ policy (§11 policy bullet) is safe on the new pin now that the timer is live
 again. Harness note: the trust dialog opens on "No, exit" on both binaries; the
 probe script answers it with Down,Enter (a bare Enter quits claude).
 
-## 12. Spawning WITHOUT `--remote-control` — live (2.1.206, 2026-07-14); recipe arm re-driven live on 2.1.220, 2.1.221, 2.1.265 + 2.1.280
+**2.1.284 re-probe (2026-09-29) — runs A and B fire as written on both
+binaries.** Same recipe, same throwaway-dir-under-tmux rig, driven once per
+binary on the PT_INTERP-patched musl artifacts. Run A (`5000`): the undriven
+single-select `AskUserQuestion` self-resolved on **2.1.280 AND 2.1.284**, each
+transcript carrying exactly one `afkTimeoutMs:5000` line with `answers:{}` and
+the pane reading "No response after 5s — continued without an answer". Run B
+(`2147483647`): on both binaries the undriven picker was **byte-identical at
++30s/+62s/+95s** to the picker-up capture, still rendered at +95s, with zero
+`afkTimeoutMs` lines — no immediate-fire hazard at the cap, so the manual-run
+policy (§11 policy bullet) is safe on the new pin. Harness note: this probe
+seeds the folder-trust key directly (`hasTrustDialogAccepted`, §4) instead of
+answering the dialog; the live recipe rig's dialog fallback now also moves to
+the trust row before committing (see the 2.1.284 note).
+
+## 12. Spawning WITHOUT `--remote-control` — live (2.1.206, 2026-07-14); recipe arm re-driven live on 2.1.220, 2.1.221, 2.1.265, 2.1.280 + 2.1.284
 
 Issue #163 turns `--remote-control` into a lab-gated knob (default off), which
 puts four couplings on trial: the process lifecycle (the AFK done-signal's
@@ -2006,6 +2188,21 @@ the tests actually RAN: every one of them carries its own skip-gate (no
 skipped run is not a pass**. (They watch the pane via `capture-pane` to know WHEN the picker is
 up — that is the verification harness observing its own probe, not a
 production scrape; the recipes themselves stay blind.)
+
+**Running the suite from inside a lab instance (how the 2.1.284 bump did it).**
+The rig resolves everything off `$HOME`: it seeds trust into
+`$HOME/.claude.json` and reads transcripts under `$HOME/.claude/projects`,
+while a lab instance pins `CLAUDE_CONFIG_DIR=$HOME/.claude` (§3a) and keeps
+its `.claude.json` inside it — so a bare run inside an instance seeds the
+wrong file and every spawn lands on the trust dialog. Use a scratch HOME per
+binary: symlink `<scratch>/.claude` → the instance's real config dir (one
+credential store, no OAuth-family duplication), copy the real `.claude.json`
+to `<scratch>/.claude.json`, and run with `HOME=<scratch>`, every `CLAUDE*`
+variable of the outer session unset (`CLAUDE_CONFIG_DIR` included, or the
+spawned claude is "nested"), and the binary under test first on `PATH`. On a
+NixOS host the sha256-verified `linux-x64-musl` artifact runs after
+`patchelf --set-interpreter <nixpkgs musl>/lib/ld-musl-x86_64.so.1` (the
+`Containerfile.claude` step; `nix build nixpkgs#musl` provides the loader).
 
 **Credential refresh trigger re-verification (issue #222).** The non-interactive
 refresh poke (§3b) has no automated live test — it rotates the host's real OAuth
