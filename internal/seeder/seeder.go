@@ -64,6 +64,24 @@ type GatewayRef struct {
 	Services []string // granted service names, caller-ordered
 }
 
+// BastionRef describes the run's SSH-bastion wiring for the context file
+// (ADR-0068, issue #39): this repository's Warpgate role reaches the SSH
+// targets listed, the run connects to each by alias through the bastion, and
+// the target's credential stays in Warpgate — so the instance holds no key
+// for any of those hosts and the file has to say so, or an agent spends its
+// budget clock looking for one.
+//
+// The ref deliberately carries NOTHING credential-shaped, and nothing
+// address-shaped either: no bastion address, no Warpgate username, no key
+// path, no key. Wiring ssh is the launch path's job (the run's ssh_config,
+// known_hosts, key and PATH wrappers live in its runtime dir); all the
+// render needs — and therefore all the seeder is handed — is the alias names
+// the run can type, so there is no field here that a future render could
+// accidentally print a secret or a routing detail from.
+type BastionRef struct {
+	Targets []string // SSH target aliases (Warpgate target names), caller-ordered
+}
+
 // Opts parametrizes SeedWorkspace — the growth point for later per-spawn
 // seeding knobs (mirrors provider.SeedOpts).
 type Opts struct {
@@ -97,6 +115,18 @@ type Opts struct {
 	// like Secrets and more strictly: a GatewayRef carries granted service
 	// NAMES and nothing else — no proxy URL, no proxy token, no value.
 	Gateway *GatewayRef
+
+	// Bastion is the run's SSH-bastion wiring (issue #39), or nil when this
+	// run is not wired — Warpgate unconfigured (ADR-0068: its settings are
+	// optional and the integration is off while they are unset), or the
+	// repo has no SSH target, or every target was skipped by the alias rule.
+	// Non-nil with at least one target makes renderContextFile append an
+	// "SSH targets" section; nil (or an empty target list, which the launch
+	// path never produces — it wires no run without an alias) leaves the
+	// render exactly as it was, which is how "a spawn without Warpgate is
+	// byte-identical to today" is made structural at this boundary. Alias
+	// NAMES only, like Gateway's service names.
+	Bastion *BastionRef
 }
 
 // SeedWorkspace seeds worktree for a run on repo, driven by the provider's
@@ -119,5 +149,5 @@ func (s *Seeder) SeedWorkspace(worktree string, repo store.Repo, meta provider.S
 	if err := seedSkills(worktree, meta.SkillsDir); err != nil {
 		return err
 	}
-	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Gateway, opts.Imports)
+	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Gateway, opts.Bastion, opts.Imports)
 }

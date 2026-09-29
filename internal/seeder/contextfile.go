@@ -38,18 +38,20 @@ var contextFileTemplate = template.Must(template.New("context-file").Parse(conte
 
 // renderContextFile renders the context-file body for repo, driven by the
 // provider's meta, the repo's secrets metadata, the run's credential-gateway
-// wiring, and the repo's read-only imports. The base template is rendered
-// exactly as always; then ONE Secrets section at most — the GATEWAY one when
-// gateway is non-nil (issue #24), the legacy one when it is nil and secrets
-// is non-empty (issue #104), never both, see appendGatewaySecretsSection;
-// then, ONLY when imports is non-empty, a Read-only imports section is
-// appended (issue #261); then, ONLY for a provider that does not discover
-// seeded skills natively yet does seed them (!meta.NativeSkillDiscovery &&
-// meta.SkillsDir != ""), a generated skills index is appended (issue #79 /
-// ADR-0035). A native-discovery provider with a gateway-less, secret-less,
+// wiring, its SSH-bastion wiring, and the repo's read-only imports. The base
+// template is rendered exactly as always; then ONE Secrets section at most —
+// the GATEWAY one when gateway is non-nil (issue #24), the legacy one when it
+// is nil and secrets is non-empty (issue #104), never both, see
+// appendGatewaySecretsSection; then, ONLY when bastion is non-nil and names
+// at least one target, an SSH targets section (issue #39); then, ONLY when
+// imports is non-empty, a Read-only imports section is appended (issue
+// #261); then, ONLY for a provider that does not discover seeded skills
+// natively yet does seed them (!meta.NativeSkillDiscovery && meta.SkillsDir
+// != ""), a generated skills index is appended (issue #79 / ADR-0035). A
+// native-discovery provider with a gateway-less, bastion-less, secret-less,
 // import-less repo — or one seeding no skills at all — gets byte-for-byte the
 // template render, which is exactly what the testdata goldens pin.
-func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, imports []ImportRef) ([]byte, error) {
+func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef) ([]byte, error) {
 	var b bytes.Buffer
 	data := struct{ Binding, ForgeKind string }{repo.TrackerBinding, repo.ForgeKind}
 	if err := contextFileTemplate.Execute(&b, data); err != nil {
@@ -63,6 +65,9 @@ func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.
 		appendGatewaySecretsSection(&b, gateway.Services)
 	case len(secrets) > 0:
 		appendSecretsSection(&b, secrets)
+	}
+	if bastion != nil && len(bastion.Targets) > 0 {
+		appendSSHTargetsSection(&b, bastion.Targets)
 	}
 	if len(imports) > 0 {
 		appendImportsSection(&b, imports)
@@ -137,7 +142,7 @@ func appendSkillsIndex(buf *bytes.Buffer, skillsDir string, index []skillEntry) 
 // secret-less repo's byte-identity is then guaranteed by renderContextFile's
 // secrets branch simply not firing, never by a template conditional that must
 // stay inert. Section order in renderContextFile is template body → secrets →
-// read-only imports → skills index: repo-driven content (what THIS repo
+// SSH targets → read-only imports → skills index: repo-driven content (what THIS repo
 // holds) precedes the provider-driven tail (what THIS provider needs
 // indexed), the same "what this repo is, then what this agent gets" ordering
 // the rest of the file follows.
@@ -262,6 +267,52 @@ func appendGatewaySecretsSection(buf *bytes.Buffer, services []string) {
 	buf.WriteString("push whose diff carries one is refused, naming the secret and file.\n")
 }
 
+// appendSSHTargetsSection writes the "## SSH targets" section onto buf, one
+// bullet per alias (issue #39 / ADR-0068: a wired run reaches the SSH targets
+// its repo's Warpgate role carries through lab's bastion, by alias, holding no
+// credential for any of them). Brief on purpose — the wiring is complete
+// without the agent knowing anything, so the section only has to stop it from
+// working against the wiring:
+//
+//   - how to connect: `ssh <alias>`, and scp, sftp and `rsync -e ssh` the
+//     same way, with no extra flags — the run's ssh/scp/sftp are lab's
+//     wrappers, which supply the config; an agent that adds its own -F, -i
+//     or host-key options is the one way to break that;
+//   - that no credential for these hosts is in the instance (the bastion
+//     holds it), so hunting for a key is wasted effort — the same inversion
+//     the gateway section teaches for HTTPS;
+//   - that hosts not listed are not reachable through lab, and that an
+//     authentication or host-key failure is an operator's to fix — never a
+//     reason to disable host-key checking.
+//
+// The bullets are the aliases in the caller's order (the launch path hands
+// them sorted), each rendered as the command that uses it. Nothing else of the
+// wiring appears — no bastion address, no Warpgate username, no key path —
+// because BastionRef carries nothing else.
+//
+// Placed after the Secrets section (both are "what this run can reach without
+// holding a credential") and before the Read-only imports, keeping every
+// repo-driven section ahead of the provider-driven skills index. Appended in
+// Go for the same structural reason as its neighbours: an unwired run takes
+// renderContextFile's untouched path, byte-for-byte.
+//
+// Shape mirrors appendImportsSection: a blank line separates the section from
+// whatever precedes it, then the heading, a blank line, the prose paragraph,
+// a blank line, then the bullets, ending in exactly one trailing "\n".
+func appendSSHTargetsSection(buf *bytes.Buffer, targets []string) {
+	buf.WriteString("\n## SSH targets\n\n")
+	buf.WriteString("This run reaches the SSH hosts below through lab's SSH bastion. Connect by\n")
+	buf.WriteString("alias with no extra flags — `ssh <alias>`, and `scp`, `sftp`, and\n")
+	buf.WriteString("`rsync -e ssh` the same way; this run's ssh tools supply the config. No\n")
+	buf.WriteString("credential for these hosts is in this instance: the bastion holds it and\n")
+	buf.WriteString("makes the onward connection, so there is no key to look for. Hosts not\n")
+	buf.WriteString("listed here are not reachable through lab. An authentication or host-key\n")
+	buf.WriteString("failure needs an operator — report it; never disable host-key checking.\n\n")
+	for _, alias := range targets {
+		fmt.Fprintf(buf, "- `ssh %s`\n", alias)
+	}
+}
+
 // appendImportsSection writes the "## Read-only imports" section onto buf,
 // one bullet per import (issue #261: read-only imports — snapshots of other
 // lab repos materialized outside the worktree at spawn, so an instance can
@@ -281,8 +332,8 @@ func appendGatewaySecretsSection(buf *bytes.Buffer, services []string) {
 // import-less repo's byte-identity is guaranteed by the len(imports) == 0
 // check in renderContextFile, never by a template conditional that must stay
 // inert. Section order in renderContextFile is template body → secrets →
-// read-only imports → skills index (see appendSecretsSection's ordering
-// note): both repo-driven sections precede the provider-driven tail.
+// SSH targets → read-only imports → skills index (see appendSecretsSection's
+// ordering note): every repo-driven section precedes the provider-driven tail.
 //
 // Shape mirrors appendSecretsSection: a blank line separates the section from
 // whatever precedes it, then the heading, a blank line, the prose paragraph, a
@@ -306,13 +357,14 @@ func appendImportsSection(buf *bytes.Buffer, imports []ImportRef) {
 // gets none — the write is skipped. meta flows through so the render can append
 // the non-native skills index (issue #79); secrets flows through so it can
 // append the Secrets section (issue #104); gateway flows through so it can
-// append the gateway Secrets section in its place (issue #24); imports flows
+// append the gateway Secrets section in its place (issue #24); bastion flows
+// through so it can append the SSH targets section (issue #39); imports flows
 // through so it can append the Read-only imports section (issue #261).
-func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, imports []ImportRef) error {
+func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef) error {
 	if meta.ContextFileName == "" {
 		return nil
 	}
-	body, err := renderContextFile(repo, meta, secrets, gateway, imports)
+	body, err := renderContextFile(repo, meta, secrets, gateway, bastion, imports)
 	if err != nil {
 		return err
 	}

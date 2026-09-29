@@ -136,7 +136,8 @@ func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 // spawnEnv assembles a session's extra environment (design §3a/§6/M3 contract):
 // the repo credential's git env + LAB_URL + LAB_TOKEN + HOME (the run's private
 // instance home) + the provider credential-injection env + the credential
-// gateway's proxy bundle + the git author/committer identity when configured.
+// gateway's proxy bundle + the SSH bastion's wrapper PATH + the git
+// author/committer identity when configured.
 // The forge token is never included (§3a).
 //
 // HOME is the issue #202 isolation seam: it is the run's private per-run home,
@@ -160,11 +161,23 @@ func (s *Service) EffectiveCap(ctx context.Context, repo store.Repo) int {
 // the outside" layers adjacent, with the author identity staying last exactly
 // as it has been. An empty or nil bundle — every lab with OneCLI unconfigured
 // — makes this a no-op append, so the output is byte-identical to before #24.
-func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken, home string, injEnv, proxyEnv []string) ([]string, error) {
+//
+// bastionEnv is the Warpgate SSH-bastion layer (issue #39 / ADR-0068), right
+// after the gateway's for the same reading-order reason: it is the other
+// "reach the outside" layer. For a wired HOST run it is exactly one entry,
+// PATH=<runtime>/warpgate-bin:<lab's PATH> (bastionHostPATH), which puts the
+// run's ssh/scp/sftp wrappers ahead of the real binaries; no other layer here
+// sets PATH, so nothing is shadowed. It is nil for every unwired run — no
+// PATH entry at all, so the pane keeps inheriting tmux's baseline PATH exactly
+// as before #39 — and nil for a CONTAINER run too, wired or not: a container's
+// PATH is containerEnv's to compose (the host's PATH is never forwarded
+// inward), and Launch hands it the wrapper-dir prefix directly.
+func (s *Service) spawnEnv(ctx context.Context, repo store.Repo, credEnv []string, runToken, home string, injEnv, proxyEnv, bastionEnv []string) ([]string, error) {
 	env := append([]string{}, credEnv...)
 	env = append(env, "LAB_URL="+s.labURL, "LAB_TOKEN="+runToken, "HOME="+home)
 	env = append(env, injEnv...)
 	env = append(env, proxyEnv...)
+	env = append(env, bastionEnv...)
 	author, err := s.authorEnv(ctx, repo)
 	if err != nil {
 		return nil, err

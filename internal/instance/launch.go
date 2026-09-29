@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
+	"git.cloonar.com/Cloonar/coding-lab/internal/warpgate"
 )
 
 // LaunchSpec is the fully-derived identity of one session launch — the shared
@@ -99,10 +101,17 @@ type LaunchSpec struct {
 
 // Launch runs the v0-pinned spawn sequence for a fully-derived spec: the
 // credential-gateway precheck, which refuses the spawn before the claim when
-// the gateway is configured and unreachable (issue #24 / ADR-0067) →
-// startguard.Mark → per-run tree materialization (home + runtime + imports,
-// issues #202/#205/#261) → the run's gateway trust bundle → credential
-// materialization into the per-run runtime
+// the gateway is configured and unreachable (issue #24 / ADR-0067) → the
+// SSH-bastion precheck, which — only for a repo with at least one cached SSH
+// target — heals the repo's Warpgate identity, re-reads its targets fresh and
+// verifies Warpgate's pinned host key, refusing the spawn before the claim
+// when any of that fails (issue #39 / ADR-0068) → startguard.Mark → per-run
+// tree materialization (home + runtime + imports, issues #202/#205/#261) →
+// the run's gateway trust bundle → the run's bastion wiring (a fresh run key
+// registered on the repo's Warpgate user, its revocation marker, the private
+// key, known_hosts, ssh_config, the ssh/scp/sftp PATH wrappers and the
+// ~/.ssh/config link, issue #39) → credential materialization into the
+// per-run runtime
 // dir → read-only import snapshots, in parallel, refusing the spawn before the
 // claim if any target fails (issue #261) →
 // gitx.AddWorktree (fail-loud fetch, no fallback base) → workspace seeding
@@ -113,10 +122,11 @@ type LaunchSpec struct {
 // run.changed. Any failure after worktree creation rolls back to the exact
 // pre-launch state (session kill, RemoveWorktree, force DeleteBranch, run
 // row/token delete, per-run tree wipe — the wipe subsumes the old per-file
-// credential/settings cleanup, issue #205); a failure before worktree
-// creation rolls back nothing but the per-run tree. For an AFK spec the
-// worktree/branch creation IS the claim, so the rollback is what releases a
-// claimed issue back into the selectable queue.
+// credential/settings cleanup, issue #205, and is preceded by the run key's
+// revocation, issue #39); a failure before worktree creation rolls back
+// nothing but the per-run tree (and the run key, once registered). For an
+// AFK spec the worktree/branch creation IS the claim, so the rollback is what
+// releases a claimed issue back into the selectable queue.
 func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error) {
 	repo := spec.Repo
 	name := spec.SessionName
@@ -174,6 +184,24 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, err
 	}
 
+	// The SSH-bastion precheck (issue #39 / ADR-0068), after the gateway's and
+	// in the same pre-claim spot for the same reason: a Warpgate that is down,
+	// a token it rejects, or a host key that no longer matches the pin must
+	// refuse the spawn while nothing exists — never after AddWorktree, where
+	// an AFK spec's issue would be parked behind a sidecar outage. Unlike the
+	// gateway's, this refusal is PER REPO: prepareBastion asks Warpgate
+	// anything at all only when the repo's cached SSH target set is
+	// non-empty, so a repo without targets never waits on, or is refused by,
+	// the bastion (ADR-0068's fail-closed asymmetry). The resolved wiring
+	// (the repo's Warpgate user, the aliases, the pinned known_hosts) carries
+	// down to the key registration and file writes below, the spawn env, and
+	// the seeder; the zero value means this run is unwired and every step
+	// below behaves exactly as it did before #39.
+	bw, err := s.prepareBastion(ctx, repo)
+	if err != nil {
+		return store.Run{}, err
+	}
+
 	// Sweep guard spans worktree-creation → session-live (§4b). Cleared on
 	// every return via defer (success or rollback), matching v0's
 	// markStarting/defer clearStarting.
@@ -193,6 +221,15 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, &StartFailedError{cause: err}
 	}
 	wipeHome := func() {
+		// Revoke the run's Warpgate key first (issue #39), while the marker
+		// naming it still exists. cmd/lab's pre-wipe hook does the same from
+		// inside Wipe, but a launch rollback is the one wipe that can land
+		// seconds after a key was registered, so it does not lean on the hook
+		// being composed: the rollback is self-contained, and the hook's
+		// second look finds the marker already gone (RevokeBastionKey deletes
+		// it on success) and does nothing. A no-op for every unwired run and
+		// every lab without Warpgate — no marker, no call.
+		s.RevokeBastionKey(ctx, runID)
 		if err := s.homes.Wipe(runID); err != nil {
 			s.log.Warn("start rollback: wipe instance home", "component", "instance", "run", runID, "err", err)
 		}
@@ -255,6 +292,37 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 			return store.Run{}, badRequestf("%s", err)
 		}
 		proxyEnv = proxyBundleEnv(gw.proxyURL, bundlePath, noProxyValue(s.labURL, repo.RemoteURL, seedMeta.DirectAPIHosts))
+	}
+
+	// The run's SSH-bastion wiring (issue #39 / ADR-0068), right after the
+	// gateway's and for the same placement reasons: the runtime dir exists
+	// 0700 (Materialize, then vault.NewMaterializer above), the files it
+	// writes live there and ride the container runner's host-identical
+	// runtime bind with no new mount, and the whole step stays on the
+	// pre-claim side of AddWorktree. wireBastion registers a fresh run key on
+	// the repo's Warpgate user and writes the key, known_hosts, ssh_config,
+	// wrappers and ~/.ssh/config link; its refusals are 400s before anything
+	// reached Warpgate, and every failure after the registration is undone by
+	// wipeHome, which revokes the key before the tree goes.
+	//
+	// What the spawn gains is the wrapper dir at the front of PATH — the ONE
+	// change to a wired run's env, and none at all to an unwired one's. A
+	// host run gets it as a spawn-env entry prefixed to lab's own PATH; a
+	// container run gets it as containerEnv's prefix to podmanx.PATH, because
+	// the host's PATH is never forwarded into a container.
+	var bastionEnv []string
+	var bastionPATHPrefix string
+	if bw.active() {
+		binDir, err := s.wireBastion(ctx, repo, runID, home, container, bw)
+		if err != nil {
+			wipeHome()
+			return store.Run{}, err
+		}
+		if container {
+			bastionPATHPrefix = bastionContainerPATHPrefix(binDir)
+		} else {
+			bastionEnv = []string{"PATH=" + bastionHostPATH(binDir, s.hostPATH())}
+		}
 	}
 
 	// Materialize the repo's GIT credential (opID = run id) into the per-run
@@ -392,7 +460,14 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	if gw.active() {
 		gwRef = &seeder.GatewayRef{Services: gw.services}
 	}
-	if err := s.seeder.SeedWorkspace(wtPath, repo, seedMeta, seeder.Opts{Secrets: secrets, Imports: importRefs, Gateway: gwRef}); err != nil {
+	// The bastion ref (issue #39) is the same deal: the aliases this run can
+	// type, nothing credential- or address-shaped, and NIL for every unwired
+	// run so the context file stays byte-identical to before.
+	var bastionRef *seeder.BastionRef
+	if bw.active() {
+		bastionRef = &seeder.BastionRef{Targets: bw.aliases}
+	}
+	if err := s.seeder.SeedWorkspace(wtPath, repo, seedMeta, seeder.Opts{Secrets: secrets, Imports: importRefs, Gateway: gwRef, Bastion: bastionRef}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -455,7 +530,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, err
 	}
 
-	extraEnv, err := s.spawnEnv(ctx, repo, credEnv, token, home, injEnv, proxyEnv)
+	extraEnv, err := s.spawnEnv(ctx, repo, credEnv, token, home, injEnv, proxyEnv, bastionEnv)
 	if err != nil {
 		rollback(true)
 		return store.Run{}, err
@@ -508,7 +583,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// process).
 	var spawnErr error
 	if container {
-		env, forward := containerEnv(extraEnv, home, s.containerSockURL())
+		env, forward := containerEnv(extraEnv, home, s.containerSockURL(), bastionPATHPrefix)
 		paneArgv := podmanx.RunArgv(podmanx.RunSpec{
 			Bin:         s.podmanBin,
 			Name:        podmanx.ContainerName(name),
@@ -704,6 +779,220 @@ func grantServiceNames(grants []onecli.Grant) []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// bastionWiring is a run's RESOLVED SSH-bastion wiring (issue #39 /
+// ADR-0068), everything prepareBastion learned before the claim that the
+// later steps need. The zero value means "this run is not wired" — Warpgate
+// unconfigured, a repo without SSH targets, or targets none of which can
+// become an alias — which every step of Launch checks through active(), so
+// the unwired path has one shape.
+//
+// Nothing in it is a secret: two Warpgate identifiers, alias names, and the
+// known_hosts text rendered from lab's pin (public keys). The one secret of
+// the wiring, the run key's private half, is minted later by wireBastion and
+// never stored here.
+type bastionWiring struct {
+	// userID is the repo's Warpgate user — where the run key is registered.
+	userID string
+	// username is that user's name, the repo slug: the left half of every
+	// `User <username>:<target>` selector in the run's ssh_config.
+	username string
+	// aliases are the SSH target names this run reaches by alias:
+	// bastionAliases' output over the FRESH role read, sorted.
+	aliases []string
+	// knownHosts pins Warpgate's SSH host key(s) under --warpgate-ssh-addr,
+	// rendered from lab's stored pin after this spawn's re-scan matched it.
+	knownHosts string
+}
+
+// active reports whether a run is bastion-wired. Keyed on aliases because a
+// run with none has nothing to reach, and ADR-0068 registers no key for it —
+// a key without an alias would be access nobody can exercise and one more
+// thing to revoke.
+func (w bastionWiring) active() bool { return len(w.aliases) > 0 }
+
+// bastionRefusalf renders every Warpgate-side refusal of a target-bearing
+// spawn in one shape, naming the repo and the failed step: "refusing to spawn
+// for repo R: its SSH targets need the Warpgate bastion, and <step>: <cause>".
+// A *BadRequestError (400), the mapping refuseContainerSpawn and
+// prepareGateway document for operator-fixable refusals: what is wrong is the
+// deployment (a sidecar that is down, a token it rejects, a host key that
+// changed), and the text is the actionable part. Quoting the warpgate error
+// verbatim is safe by that package's construction — its errors carry method,
+// path and status and never the admin token or a targets body.
+func bastionRefusalf(repoName, step string, cause error) *BadRequestError {
+	return badRequestf("refusing to spawn for repo %s: its SSH targets need the Warpgate bastion, and %s: %s", repoName, step, cause)
+}
+
+// prepareBastion resolves a run's SSH-bastion wiring, or refuses the spawn
+// (issue #39 / ADR-0068). Launch calls it right after prepareGateway, BEFORE
+// the start guard and long before AddWorktree — see the call site for why.
+// It lives in this file, next to prepareGateway, for that function's reason:
+// bastion.go is the pure core, and this is the half that dials Warpgate,
+// writes the lab-side cache and logs.
+//
+// The sequence, and why each step is where it is:
+//
+//  1. Gate: !bastionActive() → unwired, no call. A lab with only the REST
+//     pair is "unconfigured for this purpose" (ADR-0068), not a refusal.
+//  2. The lab-side cache (repo_ssh_targets). Empty → unwired, and NO Warpgate
+//     call: this read is what makes the fail-closed rule decidable while
+//     Warpgate is down, and a repo without targets must never wait on or be
+//     refused by the bastion. A store error is a lab fault, a
+//     StartFailedError.
+//  3. EnsureRepoIdentity — the spawn is one of #35's heal touchpoints — then
+//     RoleSSHTargets: the FRESH truth. The aliases a run gets always come
+//     from this read, never from the cache, so a target removed in
+//     Warpgate's UI costs nothing. Either failing, Warpgate unreachable
+//     included, refuses the spawn.
+//  4. The cache is REPLACED with that fresh set, best-effort: it only decides
+//     whether the next spawn asks Warpgate at all, so a failed write is a
+//     warning, never a refusal.
+//  5. Fresh set empty → unwired (the cache is now cleared too). Every target
+//     skipped by the alias rule → unwired, with one warning naming them.
+//  6. KnownHosts: re-scan the listener, compare to the pin, render the run's
+//     known_hosts from the pin. A mismatch, an unpinned or unreachable
+//     listener refuses the spawn — the scan doubles as the SSH listener's
+//     reachability probe, and a changed key must be a legible refusal here
+//     rather than a host-key abort inside the run. Last, so a spawn that
+//     would be unwired anyway never pays for the scan.
+//
+// Nothing here ever logs or wraps a target's credential (the client never
+// decodes one), the admin token, or a targets body.
+func (s *Service) prepareBastion(ctx context.Context, repo store.Repo) (bastionWiring, error) {
+	if !s.bastionActive() {
+		return bastionWiring{}, nil
+	}
+	cached, err := s.store.RepoSSHTargets(ctx, repo.ID)
+	if err != nil {
+		return bastionWiring{}, &StartFailedError{cause: fmt.Errorf("reading repo %s's cached SSH targets: %w", repo.Name, err)}
+	}
+	if len(cached) == 0 {
+		return bastionWiring{}, nil
+	}
+
+	identity, err := s.warpgate.EnsureRepoIdentity(ctx, repo.ID, repo.Name)
+	if err != nil {
+		return bastionWiring{}, bastionRefusalf(repo.Name, "resolving its Warpgate user and role failed (is Warpgate running, and is --warpgate-admin-token-file's token still accepted?)", err)
+	}
+	if identity.User.ID == "" || identity.Role.ID == "" {
+		return bastionWiring{}, bastionRefusalf(repo.Name, "resolving its Warpgate user and role failed", errors.New("the answer carries no user or role id; see internal/warpgate/wire.go"))
+	}
+	targets, err := s.warpgate.RoleSSHTargets(ctx, identity.Role.ID)
+	if err != nil {
+		return bastionWiring{}, bastionRefusalf(repo.Name, "reading its SSH targets from Warpgate failed", err)
+	}
+
+	fresh := make([]store.SSHTarget, 0, len(targets))
+	for _, t := range targets {
+		fresh = append(fresh, store.SSHTarget{ID: t.ID, Name: t.Name})
+	}
+	if err := s.store.ReplaceRepoSSHTargets(ctx, repo.ID, fresh); err != nil {
+		s.log.Warn("refreshing the repo's cached SSH targets from Warpgate", "component", "instance",
+			"repo", repo.ID, "err", err)
+	}
+	if len(targets) == 0 {
+		s.log.Info("the repo's SSH targets no longer carry its Warpgate role; cache cleared, spawning without the bastion",
+			"component", "instance", "repo", repo.ID, "cached", len(cached))
+		return bastionWiring{}, nil
+	}
+
+	aliases, skipped := bastionAliases(targets, forgeHost(repo.RemoteURL))
+	if len(skipped) > 0 {
+		msg := "skipping SSH targets whose names cannot be ssh aliases (they must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and must not be the repo's forge host); rename them in Warpgate"
+		if len(aliases) == 0 {
+			msg = "every SSH target of the repo was skipped: their names cannot be ssh aliases (they must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and must not be the repo's forge host); spawning without the bastion — rename them in Warpgate"
+		}
+		s.log.Warn(msg, "component", "instance", "repo", repo.ID, "skipped", skipped)
+	}
+	if len(aliases) == 0 {
+		return bastionWiring{}, nil
+	}
+
+	knownHosts, err := s.warpgateHostKeys.KnownHosts(ctx)
+	if err != nil {
+		return bastionWiring{}, bastionRefusalf(repo.Name, "Warpgate's SSH host key could not be verified against lab's pin", err)
+	}
+	return bastionWiring{
+		userID:     identity.User.ID,
+		username:   identity.User.Username,
+		aliases:    aliases,
+		knownHosts: knownHosts,
+	}, nil
+}
+
+// wireBastion registers a fresh run key and writes a wired run's files
+// (issue #39 / ADR-0068), returning the wrapper dir the caller prefixes PATH
+// with. Called by Launch after the runtime dir exists and before AddWorktree;
+// on any error the caller runs wipeHome, which revokes the key through the
+// marker before the tree goes.
+//
+// The order is what makes every failure undoable:
+//
+//  1. RENDER first — the ssh_config and the three wrappers, from paths and
+//     names alone. Every refusal a render can produce (an unquotable
+//     --state-dir, a malformed --warpgate-ssh-addr) is operator config, so it
+//     is a 400, and it happens while Warpgate holds nothing of this run's.
+//  2. Generate the key and REGISTER its public half on the repo's Warpgate
+//     user under warpgate.RunKeyLabel(runID) — the label the orphan sweep
+//     keys off, since Warpgate strips the comment. A failure is a 400 like
+//     every Warpgate-side refusal.
+//  3. The MARKER, immediately — before any other file, so that from here on
+//     every path that wipes the tree can find and revoke the key. If the
+//     marker itself cannot be written nothing on disk names the key, so it is
+//     revoked right here from memory.
+//  4. The key, known_hosts, config, wrappers and ~/.ssh/config link. A
+//     failure is genuine I/O (the render already vetted every path), so it is
+//     a StartFailedError (500), not the trust bundle's 400: that step's
+//     common failure is an operator's CA file, this one's is a full disk.
+func (s *Service) wireBastion(ctx context.Context, repo store.Repo, runID, home string, container bool, bw bastionWiring) (string, error) {
+	p := newBastionPaths(s.homes.RuntimePath(runID), home)
+	userConfig := ""
+	if !container {
+		userConfig = bastionUserInclude(s.userSSHConfig(), p)
+	}
+	config, wrappers, err := renderBastionFileSet(bastionConfigSpec{
+		runID:      runID,
+		username:   bw.username,
+		addr:       s.warpgateSSHAddr,
+		aliases:    bw.aliases,
+		paths:      p,
+		userConfig: userConfig,
+	})
+	if err != nil {
+		return "", bastionRefusalf(repo.Name, "this run's ssh configuration cannot be written", err)
+	}
+
+	key, err := generateBastionRunKey(runID)
+	if err != nil {
+		return "", &StartFailedError{cause: err}
+	}
+	registered, err := s.warpgate.AddPublicKey(ctx, bw.userID, warpgate.RunKeyLabel(runID), key.authorizedKey)
+	if err != nil {
+		return "", bastionRefusalf(repo.Name, "registering this run's key on its Warpgate user failed", err)
+	}
+	if err := writeBastionMarker(p.runtimeDir, bastionMarker{UserID: bw.userID, KeyID: registered.ID}); err != nil {
+		s.removeBastionKey(ctx, runID, bw.userID, registered.ID)
+		return "", &StartFailedError{cause: err}
+	}
+	if err := writeBastionFiles(p, bastionFiles{
+		privateKey: key.privatePEM,
+		knownHosts: bw.knownHosts,
+		config:     config,
+		wrappers:   wrappers,
+	}); err != nil {
+		return "", &StartFailedError{cause: err}
+	}
+
+	// One line, and only identifiers: enough to find the run's credential in
+	// Warpgate's UI and to tie a Warpgate session back to this run by the key
+	// fingerprint Warpgate's session log records (#47 will need exactly
+	// that). NEVER the private key, never the known_hosts or config text.
+	s.log.Info("SSH bastion wired for run", "component", "instance",
+		"repo", repo.ID, "run", runID, "warpgate_user", bw.userID, "key", registered.ID,
+		"fingerprint", key.fingerprint, "targets", len(bw.aliases))
+	return p.binDir, nil
 }
 
 // materializeImports materializes every read-only import the repo declares
