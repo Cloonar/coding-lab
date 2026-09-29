@@ -1003,6 +1003,43 @@ func TestParse(t *testing.T) {
 			wantErr: "port must be a decimal integer 1-65535",
 		},
 		{
+			// The run's known_hosts is keyed by the stored string while ssh
+			// looks the bastion up by the port it parsed: a zero-padded port
+			// kept verbatim would fail host-key verification on every wired
+			// connection, so it is stored canonical.
+			name: "warpgate-ssh-addr canonicalizes a zero-padded port",
+			args: []string{"--warpgate-ssh-addr", "10.88.0.1:02222"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "10.88.0.1:2222"
+			}),
+		},
+		{
+			name: "warpgate-ssh-addr canonicalizes a zero-padded port from env",
+			env:  map[string]string{"LAB_WARPGATE_SSH_ADDR": "warpgate.internal:002222"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "warpgate.internal:2222"
+			}),
+		},
+		{
+			name: "warpgate-ssh-addr keeps a canonical IPv6 address bracketed",
+			args: []string{"--warpgate-ssh-addr", "[::1]:02222"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "[::1]:2222"
+			}),
+		},
+		{
+			// strconv.Atoi takes a sign; neither ssh_config nor known_hosts
+			// means one, so it is refused rather than silently dropped.
+			name:    "warpgate-ssh-addr rejects a plus-signed port",
+			args:    []string{"--warpgate-ssh-addr", "host:+2222"},
+			wantErr: "port must be a decimal integer 1-65535",
+		},
+		{
+			name:    "warpgate-ssh-addr rejects a minus-signed port",
+			args:    []string{"--warpgate-ssh-addr", "host:-2222"},
+			wantErr: "port must be a decimal integer 1-65535",
+		},
+		{
 			name: "warpgate-ca-file flag alone is valid, no pairing required",
 			args: []string{"--warpgate-ca-file", "/var/lib/lab/warpgate-ca.pem"},
 			want: with(func(c *Config) {

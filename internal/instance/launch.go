@@ -301,9 +301,12 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// runtime bind with no new mount, and the whole step stays on the
 	// pre-claim side of AddWorktree. wireBastion registers a fresh run key on
 	// the repo's Warpgate user and writes the key, known_hosts, ssh_config,
-	// wrappers and ~/.ssh/config link; its refusals are 400s before anything
-	// reached Warpgate, and every failure after the registration is undone by
-	// wipeHome, which revokes the key before the tree goes.
+	// wrappers and ~/.ssh/config link, and appends the pin to runMat's
+	// known_hosts — seeded just above, and the file git's accept-new reads,
+	// so git through the wrapper cannot trust the bastion on first use; its
+	// refusals are 400s before anything reached Warpgate, and every failure
+	// after the registration is undone by wipeHome, which revokes the key
+	// before the tree goes.
 	//
 	// What the spawn gains is the wrapper dir at the front of PATH — the ONE
 	// change to a wired run's env, and none at all to an unwired one's. A
@@ -313,7 +316,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	var bastionEnv []string
 	var bastionPATHPrefix string
 	if bw.active() {
-		binDir, err := s.wireBastion(ctx, repo, runID, home, container, bw)
+		binDir, err := s.wireBastion(ctx, repo, runID, home, runMat.KnownHostsPath(), container, bw)
 		if err != nil {
 			wipeHome()
 			return store.Run{}, err
@@ -924,9 +927,10 @@ func (s *Service) prepareBastion(ctx context.Context, repo store.Repo) (bastionW
 
 // wireBastion registers a fresh run key and writes a wired run's files
 // (issue #39 / ADR-0068), returning the wrapper dir the caller prefixes PATH
-// with. Called by Launch after the runtime dir exists and before AddWorktree;
-// on any error the caller runs wipeHome, which revokes the key through the
-// marker before the tree goes.
+// with. Called by Launch after the runtime dir exists and its vault
+// known_hosts was seeded, and before AddWorktree; on any error the caller
+// runs wipeHome, which revokes the key through the marker before the tree
+// goes.
 //
 // The order is what makes every failure undoable:
 //
@@ -937,17 +941,25 @@ func (s *Service) prepareBastion(ctx context.Context, repo store.Repo) (bastionW
 //  2. Generate the key and REGISTER its public half on the repo's Warpgate
 //     user under warpgate.RunKeyLabel(runID) — the label the orphan sweep
 //     keys off, since Warpgate strips the comment. A failure is a 400 like
-//     every Warpgate-side refusal.
+//     every Warpgate-side refusal — but not necessarily a key that does not
+//     exist: a POST Warpgate committed before the client gave up (a timeout,
+//     a cancelled request, an unreadable answer) leaves a registered key no
+//     marker will ever name, so the refusal first removes, best-effort, every
+//     key carrying this run's label (removeBastionKeysByLabel).
 //  3. The MARKER, immediately — before any other file, so that from here on
-//     every path that wipes the tree can find and revoke the key. If the
-//     marker itself cannot be written nothing on disk names the key, so it is
-//     revoked right here from memory.
-//  4. The key, known_hosts, config, wrappers and ~/.ssh/config link. A
-//     failure is genuine I/O (the render already vetted every path), so it is
-//     a StartFailedError (500), not the trust bundle's 400: that step's
+//     every path that wipes the tree can find and revoke the key. It goes to
+//     the root of the run's tree, not the runtime dir a container run can
+//     write (see bastionMarkerName). If the marker itself cannot be written
+//     nothing on disk names the key, so it is revoked right here from memory.
+//  4. The key, known_hosts, config, wrappers and ~/.ssh/config link, then the
+//     pin appended to the run's VAULT known_hosts (vaultKnownHosts,
+//     appendBastionKnownHosts: git's GIT_SSH_COMMAND reads that file with
+//     accept-new, and would otherwise trust the bastion on first use). A
+//     failure is genuine I/O (the render already vetted every path), so it
+//     is a StartFailedError (500), not the trust bundle's 400: that step's
 //     common failure is an operator's CA file, this one's is a full disk.
-func (s *Service) wireBastion(ctx context.Context, repo store.Repo, runID, home string, container bool, bw bastionWiring) (string, error) {
-	p := newBastionPaths(s.homes.RuntimePath(runID), home)
+func (s *Service) wireBastion(ctx context.Context, repo store.Repo, runID, home, vaultKnownHosts string, container bool, bw bastionWiring) (string, error) {
+	p := newBastionPaths(s.homes.RunPath(runID), s.homes.RuntimePath(runID), home)
 	userConfig := ""
 	if !container {
 		userConfig = bastionUserInclude(s.userSSHConfig(), p)
@@ -970,9 +982,10 @@ func (s *Service) wireBastion(ctx context.Context, repo store.Repo, runID, home 
 	}
 	registered, err := s.warpgate.AddPublicKey(ctx, bw.userID, warpgate.RunKeyLabel(runID), key.authorizedKey)
 	if err != nil {
+		s.removeBastionKeysByLabel(ctx, runID, bw.userID)
 		return "", bastionRefusalf(repo.Name, "registering this run's key on its Warpgate user failed", err)
 	}
-	if err := writeBastionMarker(p.runtimeDir, bastionMarker{UserID: bw.userID, KeyID: registered.ID}); err != nil {
+	if err := writeBastionMarker(p.runDir, bastionMarker{UserID: bw.userID, KeyID: registered.ID}); err != nil {
 		s.removeBastionKey(ctx, runID, bw.userID, registered.ID)
 		return "", &StartFailedError{cause: err}
 	}
@@ -982,6 +995,9 @@ func (s *Service) wireBastion(ctx context.Context, repo store.Repo, runID, home 
 		config:     config,
 		wrappers:   wrappers,
 	}); err != nil {
+		return "", &StartFailedError{cause: err}
+	}
+	if err := appendBastionKnownHosts(vaultKnownHosts, bw.knownHosts); err != nil {
 		return "", &StartFailedError{cause: err}
 	}
 

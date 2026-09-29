@@ -85,6 +85,16 @@ const (
 	// it is written IMMEDIATELY after the key is registered so that every
 	// path that wipes the run's tree can revoke the key first
 	// (RevokeBastionKey, through instancehome's pre-wipe hook).
+	//
+	// Unlike every other file here it lives at the per-run tree's ROOT
+	// (instancehome.RunPath), not in the runtime dir: the runtime dir is
+	// bind-mounted rw into a container run, and a marker the run can delete
+	// or rewrite is a revocation the run can defeat — the key would outlive
+	// it. The tree root is never mounted, and Wipe/SweepAll remove it whole,
+	// so the marker still goes with the run. A HOST run is no isolation
+	// boundary for this (its agent is the lab user and can reach the whole
+	// state dir), which is why nothing further is attempted there; the
+	// startup sweep (SweepBastionKeys) is the backstop either way.
 	bastionMarkerName = "warpgate-run-key.json"
 )
 
@@ -113,29 +123,32 @@ var bastionWrappedTools = []string{"ssh", "scp", "sftp"}
 var bastionAliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // bastionPaths is every absolute path the wiring touches for one run,
-// derived once from the run's runtime dir and instance HOME so the renderers
-// and the writer can never disagree about where a file lives.
+// derived once from the run's tree root, runtime dir and instance HOME so the
+// renderers and the writer can never disagree about where a file lives.
 type bastionPaths struct {
+	runDir     string
 	runtimeDir string
 	key        string // <runtime>/warpgate-run-key
 	knownHosts string // <runtime>/warpgate-known-hosts
 	config     string // <runtime>/warpgate-ssh-config
 	binDir     string // <runtime>/warpgate-bin
-	marker     string // <runtime>/warpgate-run-key.json
+	marker     string // <run>/warpgate-run-key.json — NOT in the runtime dir (see bastionMarkerName)
 	homeSSHDir string // <home>/.ssh
 	homeConfig string // <home>/.ssh/config → symlink to config
 }
 
-// newBastionPaths derives a run's bastionPaths from its runtime dir
-// (instancehome.RuntimePath) and instance HOME (instancehome.HomePath).
-func newBastionPaths(runtimeDir, home string) bastionPaths {
+// newBastionPaths derives a run's bastionPaths from its per-run tree root
+// (instancehome.RunPath), runtime dir (instancehome.RuntimePath) and instance
+// HOME (instancehome.HomePath).
+func newBastionPaths(runDir, runtimeDir, home string) bastionPaths {
 	return bastionPaths{
+		runDir:     runDir,
 		runtimeDir: runtimeDir,
 		key:        filepath.Join(runtimeDir, bastionKeyName),
 		knownHosts: filepath.Join(runtimeDir, bastionKnownHostsName),
 		config:     filepath.Join(runtimeDir, bastionConfigName),
 		binDir:     filepath.Join(runtimeDir, bastionBinDirName),
-		marker:     filepath.Join(runtimeDir, bastionMarkerName),
+		marker:     filepath.Join(runDir, bastionMarkerName),
 		homeSSHDir: filepath.Join(home, ".ssh"),
 		homeConfig: filepath.Join(home, ".ssh", "config"),
 	}
@@ -153,13 +166,19 @@ func newBastionPaths(runtimeDir, home string) bastionPaths {
 //     run GIT_SSH_COMMAND's bare `ssh` resolves to lab's wrapper and so reads
 //     the run's config, and a block named like the forge would reroute
 //     `git push` through the bastion as a Warpgate user with no such target —
-//     breaking the run's own git. Case-insensitively, because OpenSSH matches
-//     `Host` patterns case-insensitively: a target named "GitHub.com" shadows
-//     github.com exactly as "github.com" would. forge is forgeHost(remote),
-//     and "" (a repo cloned from a local path) excludes nothing;
-//   - its name duplicates, case-insensitively, one already kept: OpenSSH
-//     would apply the FIRST matching block and the second would be dead text
-//     in the file, naming a target the run can never reach.
+//     breaking the run's own git. Case-insensitively although OpenSSH
+//     matches `Host` patterns case-SENSITIVELY, because DNS names are not:
+//     the forge host is whatever spelling the remote URL carries, and every
+//     spelling of it names the same machine, so the exclusion errs wide
+//     rather than leave "GitHub.com" as an alias one re-cased remote away
+//     from shadowing the forge. forge is forgeHost(remote), and "" (a repo
+//     cloned from a local path) excludes nothing;
+//   - its name duplicates one already kept, byte for byte: OpenSSH would
+//     apply the FIRST matching block and the second would be dead text in
+//     the file, naming a target the run can never reach. Exactly, not
+//     case-insensitively, because `Host` matching is case-sensitive (verified
+//     on OpenSSH 10.5p1: `Host Staging` matches `ssh Staging` and not
+//     `ssh staging`), so "Staging" and "staging" are two reachable aliases.
 //
 // Skipping is never an error — the caller logs one warning naming the
 // skipped targets, and a repo whose targets are all skipped spawns unwired.
@@ -169,18 +188,15 @@ func bastionAliases(targets []warpgate.Target, forge string) (aliases, skipped [
 	for _, t := range targets {
 		names = append(names, t.Name)
 	}
-	// Sort first so the case-insensitive dedupe keeps the same one of two
-	// colliding names on every spawn, whatever order Warpgate listed them in.
+	// Sorted, so the aliases come out in the config's deterministic order
+	// whatever order Warpgate listed the targets in.
 	sorted := slices.Clone(names)
 	slices.Sort(sorted)
-	seen := make(map[string]bool, len(sorted))
 	keep := make(map[string]bool, len(sorted))
 	for _, name := range sorted {
-		lower := strings.ToLower(name)
-		if !bastionAliasPattern.MatchString(name) || (forge != "" && strings.EqualFold(name, forge)) || seen[lower] {
+		if !bastionAliasPattern.MatchString(name) || (forge != "" && strings.EqualFold(name, forge)) || keep[name] {
 			continue
 		}
-		seen[lower] = true
 		keep[name] = true
 		aliases = append(aliases, name)
 	}
@@ -295,6 +311,12 @@ func renderBastionSSHConfig(spec bastionConfigSpec) (string, error) {
 // (validateSSHAddr); this re-check exists because the renderer must never
 // write a half-formed block, and a bracketed IPv6 literal comes back bare,
 // which is what `HostName` takes.
+//
+// The port must also be CANONICAL (config stores it so): the run's
+// known_hosts is keyed by the address string verbatim ([host]:port), and a
+// "02222" or "+2222" there would never match the Port 2222 this block makes
+// ssh look the bastion up by — every connection would fail host-key
+// verification, so it is refused here rather than rendered.
 func splitBastionAddr(addr string) (host, port string, err error) {
 	host, port, err = net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
@@ -303,6 +325,9 @@ func splitBastionAddr(addr string) (host, port string, err error) {
 	n, perr := strconv.Atoi(port)
 	if host == "" || perr != nil || n < 1 || n > 65535 {
 		return "", "", fmt.Errorf("warpgate: --warpgate-ssh-addr %q is not host:port with a port in 1-65535", addr)
+	}
+	if port != strconv.Itoa(n) {
+		return "", "", fmt.Errorf("warpgate: --warpgate-ssh-addr %q has a non-canonical port; write it as %s", addr, net.JoinHostPort(host, strconv.Itoa(n)))
 	}
 	if strings.ContainsAny(host, " \t\"'%#") {
 		return "", "", fmt.Errorf("warpgate: --warpgate-ssh-addr %q has a host that cannot be written into an ssh_config HostName line", addr)
@@ -488,24 +513,25 @@ type bastionMarker struct {
 	KeyID  string `json:"key_id"`
 }
 
-// writeBastionMarker writes the marker into the run's runtime dir, 0600. The
-// launch path calls it the moment AddPublicKey succeeds and BEFORE any other
-// file, so that from then on every path that wipes the run's tree can find
-// and revoke the key (RevokeBastionKey).
-func writeBastionMarker(runtimeDir string, m bastionMarker) error {
+// writeBastionMarker writes the marker into the root of the run's tree
+// (runDir, instancehome.RunPath — never the mounted runtime dir, see
+// bastionMarkerName), 0600. The launch path calls it the moment AddPublicKey
+// succeeds and BEFORE any other file, so that from then on every path that
+// wipes the run's tree can find and revoke the key (RevokeBastionKey).
+func writeBastionMarker(runDir string, m bastionMarker) error {
 	body, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("warpgate: encoding the run key marker: %w", err)
 	}
-	return writeNewFile(filepath.Join(runtimeDir, bastionMarkerName), append(body, '\n'), 0o600)
+	return writeNewFile(filepath.Join(runDir, bastionMarkerName), append(body, '\n'), 0o600)
 }
 
-// readBastionMarker reads a run's marker. A missing marker is an error that
-// wraps fs.ErrNotExist — the ordinary answer for every unwired run — and a
-// marker missing either id is an error too: revoking with half an address
-// would 404 at best.
-func readBastionMarker(runtimeDir string) (bastionMarker, error) {
-	body, err := os.ReadFile(filepath.Join(runtimeDir, bastionMarkerName))
+// readBastionMarker reads a run's marker from the root of its tree (runDir).
+// A missing marker is an error that wraps fs.ErrNotExist — the ordinary
+// answer for every unwired run — and a marker missing either id is an error
+// too: revoking with half an address would 404 at best.
+func readBastionMarker(runDir string) (bastionMarker, error) {
+	body, err := os.ReadFile(filepath.Join(runDir, bastionMarkerName))
 	if err != nil {
 		return bastionMarker{}, err
 	}
@@ -597,6 +623,56 @@ func writeNewFile(path string, data []byte, perm os.FileMode) error {
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("warpgate: writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// appendBastionKnownHosts appends the pinned known_hosts lines (the text
+// warpgate-known-hosts holds) to the run's VAULT known_hosts at path — the
+// file git's GIT_SSH_COMMAND names as `-o UserKnownHostsFile=… -o
+// StrictHostKeyChecking=accept-new` (vault.SSHEnv, ADR-0006). Options on
+// ssh's command line beat the run's ssh_config, so `git clone
+// staging:app.git` on a wired run reaches the bastion through the wrapper but
+// checks its host key against THAT file under accept-new: without the pin in
+// it, the first such clone would silently trust whatever answered on the
+// bastion's address — trust-on-first-use inside a run, exactly what ADR-0068
+// rejects. With it, accept-new finds the pinned key and refuses a changed
+// one.
+//
+// Appends, never truncates: the file already holds the host keys
+// SeedKnownHosts copied from the global runtime dir, which the run's own git
+// needs. Created 0600 when absent (a fresh install seeds nothing). A seeded
+// file without a trailing newline gets one first, so the pin never glues onto
+// its last line.
+func appendBastionKnownHosts(path, lines string) error {
+	if lines != "" && !strings.HasSuffix(lines, "\n") {
+		lines += "\n"
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("warpgate: adding the pinned host key to %s: %w", path, err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("warpgate: adding the pinned host key to %s: %w", path, err)
+	}
+	if size := fi.Size(); size > 0 {
+		last := make([]byte, 1)
+		if _, err := f.ReadAt(last, size-1); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("warpgate: adding the pinned host key to %s: %w", path, err)
+		}
+		if last[0] != '\n' {
+			lines = "\n" + lines
+		}
+	}
+	if _, err := f.WriteString(lines); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("warpgate: adding the pinned host key to %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("warpgate: adding the pinned host key to %s: %w", path, err)
 	}
 	return nil
 }

@@ -170,7 +170,9 @@ type Config struct {
 	// WarpgateAdminTokenFile pairing: the REST pair alone gives health and
 	// identity lifecycle with unchanged spawns, and a run is wired for SSH
 	// only once all three (URL, token file, SSH addr) are set, which is
-	// enforced by the run-wiring consumer, not here.
+	// enforced by the run-wiring consumer, not here. Stored canonical — the
+	// port a plain number, an IPv6 host bracketed (validateSSHAddr) — because
+	// a run's known_hosts is keyed by this exact string.
 	WarpgateSSHAddr string
 	// WarpgateCAFile is a host path to a PEM of the certificate or CA lab
 	// must trust for the admin API — Warpgate ships a self-signed
@@ -636,11 +638,18 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 	// reachability rather than the admin REST API, so it stays independently
 	// settable. A run is wired for SSH only once url, adminTokenFile, and
 	// this are all set — enforced by that consumer, not here.
+	//
+	// The value is stored CANONICAL (validateSSHAddr's return): the run's
+	// known_hosts is keyed by this exact string ([host]:port) while ssh looks
+	// the bastion up by the port it parsed, so a "10.88.0.1:02222" kept
+	// verbatim would fail host-key verification on every wired connection.
 	cfg.WarpgateSSHAddr = pick("warpgate-ssh-addr", *warpgateSSHAddr, "LAB_WARPGATE_SSH_ADDR", "")
 	if cfg.WarpgateSSHAddr != "" {
-		if err := validateSSHAddr("--warpgate-ssh-addr", cfg.WarpgateSSHAddr); err != nil {
+		canonical, err := validateSSHAddr("--warpgate-ssh-addr", cfg.WarpgateSSHAddr)
+		if err != nil {
 			return Config{}, err
 		}
+		cfg.WarpgateSSHAddr = canonical
 	}
 
 	// --warpgate-ca-file: a path is a path, exactly like --onecli-ca-file
@@ -748,21 +757,31 @@ func validateHTTPURL(flag, value string) error {
 	return nil
 }
 
-// validateSSHAddr rejects a value that is not a routable host:port pair —
-// used for --warpgate-ssh-addr, which (unlike --warpgate-url) names no
-// scheme, just the address a run's ssh_config dials. net.SplitHostPort
-// supplies the host/port split; SplitHostPort alone would accept a value
-// with an empty host (":2222") or a non-numeric/out-of-range port (it only
-// splits, it does not validate a port number), so both are checked
-// explicitly here.
-func validateSSHAddr(flag, value string) error {
+// validateSSHAddr rejects a value that is not a routable host:port pair and
+// returns it in CANONICAL form — used for --warpgate-ssh-addr, which (unlike
+// --warpgate-url) names no scheme, just the address a run's ssh_config
+// dials. net.SplitHostPort supplies the host/port split; SplitHostPort alone
+// would accept a value with an empty host (":2222") or a non-numeric/
+// out-of-range port (it only splits, it does not validate a port number), so
+// both are checked explicitly here.
+//
+// The port must be plain ASCII digits: strconv.Atoi alone would also take a
+// sign ("+2222"), which no ssh_config or known_hosts reader means. The
+// canonical form is net.JoinHostPort(host, the port as a number) — leading
+// zeros dropped ("02222" → "2222"), an IPv6 literal bracketed ("[::1]:2222"
+// unchanged) — because two consumers render from the one string: the run's
+// ssh_config Port (parsed, so already 2222) and its known_hosts host pattern
+// (the string verbatim, "[10.88.0.1]:02222"), and ssh looks the bastion up
+// by the port it parsed. Stored raw, every wired connection would fail
+// host-key verification.
+func validateSSHAddr(flag, value string) (string, error) {
 	host, port, err := net.SplitHostPort(value)
 	if err != nil || host == "" {
-		return fmt.Errorf("%s %q: want host:port, e.g. 10.88.0.1:2222 (the podman bridge gateway) — not host.containers.internal, not 127.0.0.1 for container runs", flag, value)
+		return "", fmt.Errorf("%s %q: want host:port, e.g. 10.88.0.1:2222 (the podman bridge gateway) — not host.containers.internal, not 127.0.0.1 for container runs", flag, value)
 	}
 	p, err := strconv.Atoi(port)
-	if err != nil || p < 1 || p > 65535 {
-		return fmt.Errorf("%s %q: port must be a decimal integer 1-65535, e.g. 10.88.0.1:2222", flag, value)
+	if err != nil || p < 1 || p > 65535 || strings.TrimLeft(port, "0123456789") != "" {
+		return "", fmt.Errorf("%s %q: port must be a decimal integer 1-65535, e.g. 10.88.0.1:2222", flag, value)
 	}
-	return nil
+	return net.JoinHostPort(host, strconv.Itoa(p)), nil
 }

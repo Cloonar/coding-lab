@@ -42,7 +42,10 @@ const (
 
 // testBastionPaths is a run's path set under a fixed, realistic state layout
 // — the paths are rendered, never touched, by the renderer tests.
-var testBastionPaths = newBastionPaths("/var/lib/lab/instances/"+testBastionRunID+"/runtime", "/var/lib/lab/instances/"+testBastionRunID+"/home")
+var testBastionPaths = newBastionPaths(
+	"/var/lib/lab/instances/"+testBastionRunID,
+	"/var/lib/lab/instances/"+testBastionRunID+"/runtime",
+	"/var/lib/lab/instances/"+testBastionRunID+"/home")
 
 func targets(names ...string) []warpgate.Target {
 	out := make([]warpgate.Target, 0, len(names))
@@ -58,8 +61,10 @@ func targets(names ...string) []warpgate.Target {
 // alias-safe AND is not the repo's forge host, case-insensitively — the
 // forge-host exclusion is what keeps `git push` (GIT_SSH_COMMAND's bare ssh,
 // which resolves to the wrapper on a wired run) off the bastion. Kept aliases
-// come back sorted and deduplicated; skipped names come back in input order
-// so the warning reads like Warpgate's own listing.
+// come back sorted and deduplicated byte for byte (OpenSSH's `Host` matching
+// is case-sensitive, so names differing only in case are two aliases);
+// skipped names come back in input order so the warning reads like Warpgate's
+// own listing.
 func TestBastionAliases(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -76,8 +81,9 @@ func TestBastionAliases(t *testing.T) {
 		},
 		{
 			// The load-bearing case: a target named like the forge host would
-			// reroute the run's own git through the bastion. OpenSSH matches Host
-			// patterns case-insensitively, so the exclusion must too.
+			// reroute the run's own git through the bastion. DNS names are
+			// case-insensitive — any spelling of the forge host names the forge —
+			// so the exclusion is too, although Host matching is not.
 			name:        "the forge host is excluded, case-insensitively",
 			targets:     targets("github.com", "GitHub.com", "staging", "github"),
 			forge:       "github.com",
@@ -104,12 +110,15 @@ func TestBastionAliases(t *testing.T) {
 				"!neg", "a,b", "colon:x", ".dot", "-dash", ""},
 		},
 		{
-			// Two blocks OpenSSH treats as the same host: the second would be
-			// dead text. The byte-smaller name wins, on every spawn.
-			name:        "case-insensitive and exact duplicates are kept once",
-			targets:     targets("staging", "Staging", "staging"),
-			wantAliases: []string{"Staging"},
-			wantSkipped: []string{"staging", "staging"},
+			// An exact duplicate would be a second block for the same host,
+			// dead text after the first. Names differing only in case are NOT
+			// duplicates: OpenSSH's Host matching is case-sensitive (`Host
+			// Staging` matches `ssh Staging`, never `ssh staging`), so each is
+			// its own reachable alias.
+			name:        "exact duplicates are kept once, case variants each kept",
+			targets:     targets("staging", "Staging", "staging", "STAGING"),
+			wantAliases: []string{"STAGING", "Staging", "staging"},
+			wantSkipped: []string{"staging"},
 		},
 		{
 			name:        "every target skipped",
@@ -261,7 +270,7 @@ func TestRenderBastionSSHConfig_refusals(t *testing.T) {
 		runID: testBastionRunID, username: testBastionUser, addr: testBastionAddr,
 		aliases: []string{"staging"}, paths: testBastionPaths, userConfig: "/var/lib/lab/.ssh/config",
 	}
-	withPaths := func(runtime string) bastionPaths { return newBastionPaths(runtime, "/h") }
+	withPaths := func(runtime string) bastionPaths { return newBastionPaths(filepath.Dir(runtime), runtime, "/h") }
 	cases := []struct {
 		name string
 		mut  func(*bastionConfigSpec)
@@ -270,6 +279,10 @@ func TestRenderBastionSSHConfig_refusals(t *testing.T) {
 		{"address without a port", func(s *bastionConfigSpec) { s.addr = "10.88.0.1" }, "not host:port"},
 		{"address with a bad port", func(s *bastionConfigSpec) { s.addr = "10.88.0.1:0" }, "port in 1-65535"},
 		{"address with an empty host", func(s *bastionConfigSpec) { s.addr = ":2222" }, "port in 1-65535"},
+		// known_hosts is keyed by the address verbatim; a port ssh would parse
+		// differently from how the pin's host pattern spells it never matches.
+		{"address with a zero-padded port", func(s *bastionConfigSpec) { s.addr = "10.88.0.1:02222" }, "write it as 10.88.0.1:2222"},
+		{"address with a signed port", func(s *bastionConfigSpec) { s.addr = "10.88.0.1:+2222" }, "non-canonical port"},
 		{"empty username", func(s *bastionConfigSpec) { s.username = "" }, "User line"},
 		{"username with a selector separator", func(s *bastionConfigSpec) { s.username = "repo#x" }, "User line"},
 		{"no aliases", func(s *bastionConfigSpec) { s.aliases = nil }, "no SSH target alias"},
@@ -321,7 +334,7 @@ func TestBastionUserInclude(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p := newBastionPaths(runtimeDir, home)
+	p := newBastionPaths(filepath.Dir(runtimeDir), runtimeDir, home)
 
 	// A service-user .ssh whose config is a dangling symlink to the run's
 	// runtime config (which does not exist yet).
@@ -403,7 +416,7 @@ func TestRenderBastionWrapper(t *testing.T) {
 // A single quote in a baked path cannot be single-quoted: refused, not
 // mis-quoted.
 func TestRenderBastionWrapper_refusesASingleQuote(t *testing.T) {
-	p := newBastionPaths("/srv/lab's state/runtime", "/h")
+	p := newBastionPaths("/srv/lab's state", "/srv/lab's state/runtime", "/h")
 	if got, err := renderBastionWrapper("ssh", testBastionRunID, p); err == nil {
 		t.Fatalf("rendered\n%s\nwant a refusal", got)
 	} else if !strings.Contains(err.Error(), "single quote") {
@@ -542,7 +555,7 @@ func materializedBastionPaths(t *testing.T) bastionPaths {
 			t.Fatal(err)
 		}
 	}
-	return newBastionPaths(runtimeDir, home)
+	return newBastionPaths(root, runtimeDir, home)
 }
 
 // renderedBastionFiles renders a real config and wrapper set for p.
@@ -607,6 +620,95 @@ func TestWriteBastionFiles(t *testing.T) {
 	}
 	if err := writeBastionFiles(p, files); err == nil {
 		t.Error("a second writeBastionFiles into the same tree succeeded; want O_EXCL to refuse")
+	}
+}
+
+// The revocation marker is the one wiring file OUTSIDE the runtime dir: at
+// the root of the run's tree, which no container run mounts, so a run cannot
+// delete or rewrite the record of the key that must be revoked when it ends.
+func TestBastionPaths_markerOutsideTheRuntimeDir(t *testing.T) {
+	p := testBastionPaths
+	if want := "/var/lib/lab/instances/" + testBastionRunID + "/" + bastionMarkerName; p.marker != want {
+		t.Errorf("marker = %q, want %q", p.marker, want)
+	}
+	if rel, err := filepath.Rel(p.runtimeDir, p.marker); err != nil || !strings.HasPrefix(rel, "..") {
+		t.Errorf("marker %q is inside the mounted runtime dir %q", p.marker, p.runtimeDir)
+	}
+	for _, inRuntime := range []string{p.key, p.knownHosts, p.config, p.binDir} {
+		if filepath.Dir(inRuntime) != p.runtimeDir {
+			t.Errorf("%q is not in the runtime dir %q", inRuntime, p.runtimeDir)
+		}
+	}
+}
+
+// The pin is APPENDED to the run's vault known_hosts — the file git's
+// GIT_SSH_COMMAND checks with accept-new — after whatever SeedKnownHosts put
+// there, never replacing it; a seeded file missing its final newline gets
+// one first; an absent file is created 0600.
+func TestAppendBastionKnownHosts(t *testing.T) {
+	const pin = "[10.88.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPinned\n"
+	for _, tc := range []struct {
+		name, seeded, want string
+		absent             bool
+	}{
+		{name: "after the seeded forge keys", seeded: "git.example.com ssh-ed25519 AAAAforge\n", want: "git.example.com ssh-ed25519 AAAAforge\n" + pin},
+		{name: "a seeded file without a final newline", seeded: "git.example.com ssh-ed25519 AAAAforge", want: "git.example.com ssh-ed25519 AAAAforge\n" + pin},
+		{name: "an empty seeded file", seeded: "", want: pin},
+		{name: "nothing seeded: created", absent: true, want: pin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "known_hosts")
+			if !tc.absent {
+				if err := os.WriteFile(path, []byte(tc.seeded), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := appendBastionKnownHosts(path, pin); err != nil {
+				t.Fatalf("appendBastionKnownHosts: %v", err)
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != tc.want {
+				t.Errorf("known_hosts = %q, %v; want %q", got, err, tc.want)
+			}
+			assertMode(t, path, 0o600)
+		})
+	}
+}
+
+// OpenSSH's own known_hosts lookup finds the appended pin under the address
+// a wired run's ssh dials — the lookup git's accept-new makes before it would
+// ever add a key — and still finds the seeded forge key. Real keys, because
+// ssh-keygen skips a line it cannot parse. Skipped without ssh-keygen.
+func TestAppendBastionKnownHosts_sshKeygenFindsThePin(t *testing.T) {
+	keygen, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skip("no ssh-keygen on PATH")
+	}
+	realKey := func() (ssh.PublicKey, string) {
+		t.Helper()
+		k, err := generateBastionRunKey(testBastionRunID) // any real key stands in for a host key
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.authorizedKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pub, strings.Fields(k.authorizedKey)[1]
+	}
+	forgeKey, forgeB64 := realKey()
+	hostKey, hostB64 := realKey()
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(path, []byte(warpgate.KnownHostsLines("git.example.com:22", []ssh.PublicKey{forgeKey})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendBastionKnownHosts(path, warpgate.KnownHostsLines(testBastionAddr, []ssh.PublicKey{hostKey})); err != nil {
+		t.Fatalf("appendBastionKnownHosts: %v", err)
+	}
+	for host, want := range map[string]string{"[10.88.0.1]:2222": hostB64, "git.example.com": forgeB64} {
+		out, err := exec.Command(keygen, "-F", host, "-f", path).CombinedOutput()
+		if err != nil || !strings.Contains(string(out), want) {
+			t.Errorf("ssh-keygen -F %s: %v\n%s\nwant the key %s", host, err, out, want)
+		}
 	}
 }
 
@@ -786,8 +888,9 @@ func sshG(t *testing.T, sshBin, config, host string) map[string][]string {
 // an alias resolves to the bastion with the target selector as the user, the
 // run key, the pinned known_hosts and strict checking; the service user's own
 // config is restored for every other host through the per-user Include under
-// `Match all`; and the forge host resolves to itself, untouched. Skipped when
-// this machine has no ssh (CI images may not).
+// `Match all`; aliases differing only in case resolve to their own blocks;
+// and the forge host resolves to itself, untouched. Skipped when this machine
+// has no ssh (CI images may not).
 func TestBastionSSHConfig_resolvesWithOpenSSH(t *testing.T) {
 	sshBin, err := exec.LookPath("ssh")
 	if err != nil {
@@ -803,11 +906,15 @@ func TestBastionSSHConfig_resolvesWithOpenSSH(t *testing.T) {
 	if err := os.WriteFile(userConfig, []byte("Host forge.example.test\n  Port 2200\n  User forge-user\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeBastionFiles(p, renderedBastionFiles(t, p, bastionUserInclude(userConfig, p), "build-box", "staging")); err != nil {
+	if err := writeBastionFiles(p, renderedBastionFiles(t, p, bastionUserInclude(userConfig, p), "Staging", "build-box", "staging")); err != nil {
 		t.Fatalf("writeBastionFiles: %v", err)
 	}
 
-	for _, alias := range []string{"staging", "build-box"} {
+	// "Staging" and "staging" are two aliases (bastionAliases dedupes
+	// exactly): each resolves to its OWN block, which is the proof that
+	// OpenSSH matches Host case-sensitively — were it not, "staging" would
+	// take the first block, "Staging"'s, and its selector with it.
+	for _, alias := range []string{"staging", "Staging", "build-box"} {
 		got := sshG(t, sshBin, p.config, alias)
 		for key, want := range map[string]string{
 			"hostname":               "10.88.0.1",

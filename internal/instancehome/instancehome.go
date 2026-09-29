@@ -101,6 +101,16 @@ func (m *Manager) SetPreWipeHook(hook func(runID string)) {
 	m.preWipe = hook
 }
 
+// RunPath returns <root>/<runID> — the per-run tree itself, the parent of
+// home, runtime and imports, and exactly what Wipe and SweepAll remove. Pure
+// path derivation like HomePath; the directory need not exist yet. Unlike its
+// three children it is never bind-mounted into a container run, so a file lab
+// keeps at this level (the Warpgate run key's revocation marker, ADR-0068) is
+// out of a containerized agent's reach while still going with the tree.
+func (m *Manager) RunPath(runID string) string {
+	return filepath.Join(m.root, runID)
+}
+
 // HomePath returns <root>/<runID>/home — pure path derivation, no I/O; the
 // directory need not exist yet.
 func (m *Manager) HomePath(runID string) string {

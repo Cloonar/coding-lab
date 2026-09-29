@@ -951,13 +951,22 @@ func run() int {
 	//   - The orphan run-key sweep runs AFTER StartupReconcile, so re-adopted
 	//     runs count as live and orphan trees have already been wiped (and
 	//     their keys revoked) through the pre-wipe hook. It is safe beside
-	//     spawns that start while it runs: a key whose run's marker is still on
-	//     disk is skipped.
+	//     spawns that start while it runs: a key whose run's tree is still on
+	//     disk is skipped. A pass cut short — typically a Warpgate still
+	//     starting beside lab — is retried with backoff (bastionSweepRetry)
+	//     until one completes or lab shuts down; each failed pass already
+	//     logged its one warning, so the retries add none of their own.
 	//   - The host-key check pins Warpgate's SSH host key on first use, here on
 	//     the operator's host rather than at the first target-bearing spawn,
 	//     and logs a mismatch loudly; health shows the same state.
 	if instanceSvc != nil {
-		go instanceSvc.SweepBastionKeys(ctx)
+		go func() {
+			attempts, done := retryUntilComplete(ctx, instanceSvc.SweepBastionKeys,
+				bastionSweepRetryFirst, bastionSweepRetryMax, waitCtx)
+			if done && attempts > 1 {
+				logger.Info("warpgate orphan run-key sweep completed after retries", "component", "main", "attempts", attempts)
+			}
+		}()
 	}
 	if warpgateHostKeys != nil {
 		go func() {
@@ -1224,5 +1233,53 @@ func dbBackend(dsn string) string {
 		return "postgres"
 	default:
 		return "unknown"
+	}
+}
+
+// The backoff between startup Warpgate orphan run-key sweeps that did not
+// complete (issue #39 / ADR-0068): 1m, 2m, 4m, 8m, then every 15m. The first
+// wait is long enough for a Warpgate started beside lab to finish booting,
+// and the cap keeps an outage that lasts all day at a few dozen quiet passes
+// rather than a tight loop.
+const (
+	bastionSweepRetryFirst = time.Minute
+	bastionSweepRetryMax   = 15 * time.Minute
+)
+
+// retryUntilComplete runs pass until it reports a complete pass or ctx is
+// done, waiting firstDelay between the first two attempts and doubling the
+// wait each time after, capped at maxDelay — the startup Warpgate key sweep's
+// retry (SweepBastionKeys reports whether its pass completed). wait sleeps
+// for d unless ctx ends first, reporting whether the full wait elapsed;
+// production passes waitCtx, tests a recorder. Returns how many passes ran
+// and whether the last one completed. Silent by design: each failed pass
+// logs its own one warning, and the caller logs once when a retried pass
+// finally completes.
+func retryUntilComplete(ctx context.Context, pass func(context.Context) bool, firstDelay, maxDelay time.Duration, wait func(context.Context, time.Duration) bool) (attempts int, completed bool) {
+	delay := firstDelay
+	for {
+		if ctx.Err() != nil {
+			return attempts, false
+		}
+		attempts++
+		if pass(ctx) {
+			return attempts, true
+		}
+		if !wait(ctx, delay) {
+			return attempts, false
+		}
+		delay = min(2*delay, maxDelay)
+	}
+}
+
+// waitCtx sleeps for d, or until ctx is done; true when the full d elapsed.
+func waitCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }

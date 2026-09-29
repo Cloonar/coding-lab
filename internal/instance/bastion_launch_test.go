@@ -54,6 +54,9 @@ const (
 // errors, and a record of every call. onAdd runs inside AddPublicKey (after
 // the key is "registered"), which is how a test plants an obstruction in the
 // run's tree at exactly the moment between registration and the file writes.
+// addCommits makes a failing AddPublicKey store the key anyway (listed by
+// ListPublicKeys from then on, and onAdd still runs) — the ambiguous failure:
+// a POST Warpgate committed whose answer the client never got.
 type bastionAPIStub struct {
 	mu sync.Mutex
 
@@ -62,6 +65,7 @@ type bastionAPIStub struct {
 	targets    []warpgate.Target
 	targetsErr error
 	addErr     error
+	addCommits bool
 	onAdd      func(userID, label string)
 	removeErr  error
 
@@ -136,12 +140,16 @@ func (s *bastionAPIStub) AddPublicKey(_ context.Context, userID, label, authoriz
 	s.added = append(s.added, addedKey{userID: userID, label: label, authorizedKey: authorizedKey})
 	n := len(s.added)
 	err, onAdd := s.addErr, s.onAdd
+	committed := err == nil || s.addCommits
+	if err != nil && s.addCommits {
+		s.keys[userID] = append(s.keys[userID], warpgate.PublicKey{ID: fmt.Sprintf("wg-key-%d", n), Label: label})
+	}
 	s.mu.Unlock()
+	if committed && onAdd != nil {
+		onAdd(userID, label)
+	}
 	if err != nil {
 		return warpgate.PublicKey{}, err
-	}
-	if onAdd != nil {
-		onAdd(userID, label)
 	}
 	return warpgate.PublicKey{ID: fmt.Sprintf("wg-key-%d", n), Label: label}, nil
 }
@@ -308,14 +316,18 @@ func assertSameSpawn(t *testing.T, got, want spawnSnapshot) {
 }
 
 // assertNoBastionFiles fails if the run's tree carries anything of the
-// bastion wiring.
+// bastion wiring — its vault known_hosts included, which only a wired run's
+// pin is appended to.
 func assertNoBastionFiles(t *testing.T, f *fixture, run store.Run) {
 	t.Helper()
-	p := newBastionPaths(f.homes.RuntimePath(run.ID), f.homes.HomePath(run.ID))
+	p := newBastionPaths(f.homes.RunPath(run.ID), f.homes.RuntimePath(run.ID), f.homes.HomePath(run.ID))
 	for _, path := range []string{p.key, p.knownHosts, p.config, p.binDir, p.marker, p.homeSSHDir} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("unwired run has %s (lstat err %v)", path, err)
 		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(p.runtimeDir, "known_hosts")); strings.Contains(string(got), testKnownHosts) {
+		t.Errorf("unwired run's vault known_hosts carries the bastion pin:\n%s", got)
 	}
 }
 
@@ -505,6 +517,79 @@ func TestLaunch_BastionKeyRegistrationFailureRefuses(t *testing.T) {
 	if removed := api.removedKeys(); len(removed) != 0 {
 		t.Errorf("RemovePublicKey called %+v for a key that was never registered", removed)
 	}
+	// It did look: a failed registration is not proof of no key.
+	if !slices.Equal(api.listed, []string{testWarpgateUserID}) {
+		t.Errorf("key listings = %q, want one check of the repo user after the failed registration", api.listed)
+	}
+}
+
+// The AMBIGUOUS registration failure: Warpgate committed the POST, the client
+// never saw the answer (a timeout, a cancelled request, an undecodable body).
+// No marker can exist yet, so the refusal itself removes every key labelled
+// for THIS run — and only those: a sibling run's key and an operator's key on
+// the same user are untouched — and still refuses with the original error.
+// The spawn's own context is cancelled at the moment of the failure, as when
+// the client that asked for it hung up: the cleanup detaches from it (the
+// stub's RemovePublicKey refuses a done context).
+func TestLaunch_BastionAmbiguousRegistrationFailureRemovesTheKey(t *testing.T) {
+	f := newFixture(t)
+	logs := f.captureLogs()
+	api := newBastionStub(f.repo.ID, warpgate.Target{ID: "t1", Name: "staging"})
+	api.addErr = errors.New(`warpgate POST /users/wg-user-1/credentials/public-keys: context deadline exceeded (Client.Timeout exceeded while awaiting headers)`)
+	api.addCommits = true
+	sibling := ids.NewID("run")
+	api.keys[testWarpgateUserID] = []warpgate.PublicKey{
+		{ID: "k-sibling", Label: warpgate.RunKeyLabel(sibling)},
+		{ID: "k-operator", Label: "dominik's laptop"},
+	}
+	f.enableBastion(t, api, &hostKeysStub{text: testKnownHosts})
+	f.cacheSSHTargets(t, store.SSHTarget{ID: "t1", Name: "staging"})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	api.onAdd = func(string, string) { cancel() }
+	_, err := f.svc.Start(ctx, StartParams{RepoID: f.repo.ID})
+	var bad *BadRequestError
+	if !errors.As(err, &bad) {
+		t.Fatalf("Start err = %T (%v), want *BadRequestError", err, err)
+	}
+	if !strings.Contains(err.Error(), "registering this run's key on its Warpgate user failed") || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Errorf("refusal = %q, want the registration step and its original cause", err)
+	}
+	assertNothingClaimed(t, f)
+	if want := []removedKey{{userID: testWarpgateUserID, keyID: "wg-key-1"}}; !slices.Equal(api.removedKeys(), want) {
+		t.Errorf("keys removed = %+v, want exactly the run's own committed key %+v", api.removedKeys(), want)
+	}
+	if strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("a successful cleanup warned:\n%s", logs.String())
+	}
+}
+
+// The cleanup is best-effort: a listing that fails too is one warning naming
+// the run, and the spawn still refuses with the REGISTRATION's error — the
+// one the operator needs — not the cleanup's.
+func TestLaunch_BastionAmbiguousRegistrationCleanupFailureWarns(t *testing.T) {
+	f := newFixture(t)
+	logs := f.captureLogs()
+	api := newBastionStub(f.repo.ID, warpgate.Target{ID: "t1", Name: "staging"})
+	api.addErr = errors.New("warpgate POST /users/wg-user-1/credentials/public-keys: connection reset by peer")
+	api.addCommits = true
+	api.listErr[testWarpgateUserID] = errors.New("warpgate GET /users/wg-user-1/credentials/public-keys: connection refused")
+	f.enableBastion(t, api, &hostKeysStub{text: testKnownHosts})
+	f.cacheSSHTargets(t, store.SSHTarget{ID: "t1", Name: "staging"})
+
+	_, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	var bad *BadRequestError
+	if !errors.As(err, &bad) || !strings.Contains(err.Error(), "connection reset by peer") || strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("Start err = %T (%v), want the registration's own 400", err, err)
+	}
+	out := logs.String()
+	if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, "connection refused") || !strings.Contains(out, "run=run_") {
+		t.Errorf("want exactly one warning naming the run and the listing's cause:\n%s", out)
+	}
+	if removed := api.removedKeys(); len(removed) != 0 {
+		t.Errorf("keys removed = %+v with nothing listed", removed)
+	}
 }
 
 // --- 3. reaching Warpgate and finding nothing to wire ------------------------
@@ -620,13 +705,16 @@ func TestLaunch_BastionWiredHostRunner(t *testing.T) {
 	keys := &hostKeysStub{text: testKnownHosts}
 	f.enableBastion(t, api, keys)
 	f.cacheSSHTargets(t, store.SSHTarget{ID: "t2", Name: "staging"}) // stale: one of three
+	// The global known_hosts every run's vault known_hosts is seeded from.
+	const seeded = "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISeededForgeKey\n"
+	writeFile(t, filepath.Join(f.runtime, "known_hosts"), seeded)
 
 	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	runtimeDir := f.homes.RuntimePath(run.ID)
-	p := newBastionPaths(runtimeDir, f.homes.HomePath(run.ID))
+	p := newBastionPaths(f.homes.RunPath(run.ID), runtimeDir, f.homes.HomePath(run.ID))
 
 	// Warpgate: heal, fresh read, one registration under the run label.
 	if !slices.Equal(api.ensured, []string{f.repo.ID}) || !slices.Equal(api.targetReads, []string{testWarpgateRoleID}) {
@@ -680,9 +768,25 @@ func TestLaunch_BastionWiredHostRunner(t *testing.T) {
 	if got, _ := os.ReadFile(p.knownHosts); string(got) != testKnownHosts {
 		t.Errorf("known_hosts = %q, want the pin rendered verbatim %q", got, testKnownHosts)
 	}
-	m, err := readBastionMarker(runtimeDir)
+	// The pin is ALSO in the run's vault known_hosts, after the seeded keys:
+	// git's GIT_SSH_COMMAND reads that file with accept-new (the path the
+	// SSH-credential launch test in instance_test.go pins it to), and those
+	// command-line options beat the run's config, so `git clone
+	// staging:app.git` through the wrapper finds the pinned key instead of
+	// trusting the bastion on first use.
+	vaultKnownHosts := filepath.Join(runtimeDir, "known_hosts")
+	if got, _ := os.ReadFile(vaultKnownHosts); string(got) != seeded+testKnownHosts {
+		t.Errorf("vault known_hosts = %q, want the seeded keys then the pin %q", got, seeded+testKnownHosts)
+	}
+	assertMode(t, vaultKnownHosts, 0o600)
+	// The marker is at the ROOT of the run's tree — never in the runtime dir,
+	// which a container run mounts rw.
+	m, err := readBastionMarker(f.homes.RunPath(run.ID))
 	if err != nil || m != (bastionMarker{UserID: testWarpgateUserID, KeyID: "wg-key-1"}) {
 		t.Errorf("marker = %+v, %v; want the registered key's ids", m, err)
+	}
+	if _, err := os.Lstat(filepath.Join(runtimeDir, bastionMarkerName)); !os.IsNotExist(err) {
+		t.Errorf("a marker exists in the runtime dir (lstat err %v)", err)
 	}
 	config, _ := os.ReadFile(p.config)
 	wantConfig, err := renderBastionSSHConfig(bastionConfigSpec{
@@ -781,7 +885,7 @@ func TestStart_ContainerRunnerBastionPATH(t *testing.T) {
 		t.Fatal("session not live after a wired container Start")
 	}
 	runtimeDir := f.homes.RuntimePath(run.ID)
-	p := newBastionPaths(runtimeDir, f.homes.HomePath(run.ID))
+	p := newBastionPaths(f.homes.RunPath(run.ID), runtimeDir, f.homes.HomePath(run.ID))
 
 	wantArgv := podmanx.RunArgv(podmanx.RunSpec{
 		Bin:         testPodmanBin,
@@ -831,6 +935,31 @@ func TestStart_ContainerRunnerBastionPATH(t *testing.T) {
 	if bind := runtimeDir + ":" + runtimeDir; !slices.Contains(sess.Argv, bind) {
 		t.Errorf("pane argv carries no host-identical runtime bind %q", bind)
 	}
+
+	// The revocation marker is out of the container's reach: at the root of
+	// the run's tree, which no bind covers, so the agent cannot delete it or
+	// point it at another key and so outlive its own revocation. Every
+	// runtime file IS mounted; the marker is not among them.
+	runDir := f.homes.RunPath(run.ID)
+	if m, err := readBastionMarker(runDir); err != nil || m.KeyID != "wg-key-1" {
+		t.Errorf("marker at the tree root = %+v, %v; want the registered key", m, err)
+	}
+	if _, err := os.Lstat(filepath.Join(runtimeDir, bastionMarkerName)); !os.IsNotExist(err) {
+		t.Errorf("a marker exists in the container-mounted runtime dir (lstat err %v)", err)
+	}
+	for i, arg := range sess.Argv {
+		if i == 0 || sess.Argv[i-1] != "-v" {
+			continue
+		}
+		src, _, _ := strings.Cut(arg, ":")
+		if rel, err := filepath.Rel(src, p.marker); err == nil && !strings.HasPrefix(rel, "..") {
+			t.Errorf("bind %q exposes the revocation marker %q to the container", arg, p.marker)
+		}
+	}
+	// Nothing seeded the vault known_hosts here, so the pin creates it.
+	if got, err := os.ReadFile(filepath.Join(runtimeDir, "known_hosts")); err != nil || string(got) != testKnownHosts {
+		t.Errorf("vault known_hosts = %q, %v; want exactly the pin %q", got, err, testKnownHosts)
+	}
 }
 
 // --- 6. every failure after registration revokes the key ---------------------
@@ -863,6 +992,32 @@ func TestLaunch_BastionWriteFailureRevokesTheKey(t *testing.T) {
 	}
 }
 
+// The pin cannot be appended to the run's vault known_hosts (an obstruction
+// at that path): the last step of the wiring is I/O like the file writes — a
+// StartFailedError, the tree wiped, the key revoked through the marker.
+func TestLaunch_BastionVaultKnownHostsFailureRevokesTheKey(t *testing.T) {
+	f := newFixture(t)
+	api := newBastionStub(f.repo.ID, warpgate.Target{ID: "t1", Name: "staging"})
+	api.onAdd = func(_, label string) {
+		runID, _ := warpgate.RunIDFromLabel(label)
+		if err := os.Mkdir(filepath.Join(f.homes.RuntimePath(runID), "known_hosts"), 0o700); err != nil {
+			t.Errorf("planting the obstruction: %v", err)
+		}
+	}
+	f.enableBastion(t, api, &hostKeysStub{text: testKnownHosts})
+	f.cacheSSHTargets(t, store.SSHTarget{ID: "t1", Name: "staging"})
+
+	_, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	var failed *StartFailedError
+	if !errors.As(err, &failed) || !strings.Contains(err.Error(), "adding the pinned host key") {
+		t.Fatalf("Start err = %T (%v), want *StartFailedError naming the known_hosts append", err, err)
+	}
+	assertNothingClaimed(t, f)
+	if want := []removedKey{{userID: testWarpgateUserID, keyID: "wg-key-1"}}; !slices.Equal(api.removedKeys(), want) {
+		t.Errorf("keys removed = %+v, want the registered key revoked once %+v", api.removedKeys(), want)
+	}
+}
+
 // The marker itself cannot be written: no file on disk names the key, so the
 // launch revokes it from memory — once — and the rollback's marker-driven
 // revoke finds nothing to do.
@@ -871,7 +1026,7 @@ func TestLaunch_BastionMarkerWriteFailureRevokesFromMemory(t *testing.T) {
 	api := newBastionStub(f.repo.ID, warpgate.Target{ID: "t1", Name: "staging"})
 	api.onAdd = func(_, label string) {
 		runID, _ := warpgate.RunIDFromLabel(label)
-		if err := os.Mkdir(filepath.Join(f.homes.RuntimePath(runID), bastionMarkerName), 0o700); err != nil {
+		if err := os.Mkdir(filepath.Join(f.homes.RunPath(runID), bastionMarkerName), 0o700); err != nil {
 			t.Errorf("planting the obstruction: %v", err)
 		}
 	}
@@ -957,23 +1112,27 @@ func newTestHomes(t *testing.T) *instancehome.Manager {
 	return instancehome.New(filepath.Join(t.TempDir(), "instances"))
 }
 
-// plantMarker materializes runID's tree and writes its marker.
+// plantMarker materializes runID's tree and writes its marker at the tree's
+// root, where the launch path writes it.
 func plantMarker(t *testing.T, s *Service, runID string, m bastionMarker) string {
 	t.Helper()
 	if _, err := s.homes.Materialize(runID); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeBastionMarker(s.homes.RuntimePath(runID), m); err != nil {
+	if err := writeBastionMarker(s.homes.RunPath(runID), m); err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(s.homes.RuntimePath(runID), bastionMarkerName)
+	return filepath.Join(s.homes.RunPath(runID), bastionMarkerName)
 }
 
 // RevokeBastionKey's whole contract: marker present → that one key removed and
 // the marker deleted, so a second call does nothing; no marker → no call; a
-// failed removal → one warning and the marker KEPT for a later wipe path to
-// retry; a cancelled caller context still revokes; no REST client, a garbage
-// marker, or a path-climbing run id → nothing, and never a panic.
+// failed removal → one warning (the marker is left for the wipe that called
+// it to remove with the tree; the startup sweep is the backstop); a cancelled
+// caller context still revokes; only the marker at the tree ROOT counts — one
+// a run forges or plants in its container-mounted runtime dir is never read;
+// no REST client, a garbage marker, or a path-climbing run id → nothing, and
+// never a panic.
 func TestRevokeBastionKey(t *testing.T) {
 	runID := ids.NewID("run")
 	want := bastionMarker{UserID: "wg-user-9", KeyID: "wg-key-9"}
@@ -1020,15 +1179,43 @@ func TestRevokeBastionKey(t *testing.T) {
 		}
 	})
 
-	t.Run("removal fails: warned, marker kept", func(t *testing.T) {
+	// The tampering shape the root placement closes: a container run can
+	// write its runtime dir, so it could plant a marker there naming some
+	// other key (or delete one it found there). Neither changes what is
+	// revoked: the real marker, out of the run's reach, names the run's key.
+	t.Run("a marker in the runtime dir is never read", func(t *testing.T) {
+		api := newBastionStub("repo_x")
+		s, _ := revokeService(t, api)
+		plantMarker(t, s, runID, want)
+		writeFile(t, filepath.Join(s.homes.RuntimePath(runID), bastionMarkerName), `{"user_id":"wg-user-9","key_id":"some-other-key"}`+"\n")
+		s.RevokeBastionKey(t.Context(), runID)
+		if got := api.removedKeys(); !slices.Equal(got, []removedKey{{userID: "wg-user-9", keyID: "wg-key-9"}}) {
+			t.Errorf("removed = %+v, want the key the root marker names, not the planted one", got)
+		}
+
+		api = newBastionStub("repo_x")
+		s, _ = revokeService(t, api)
+		other := ids.NewID("run")
+		if _, err := s.homes.Materialize(other); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(s.homes.RuntimePath(other), bastionMarkerName), `{"user_id":"wg-user-9","key_id":"wg-key-9"}`+"\n")
+		s.RevokeBastionKey(t.Context(), other)
+		if n := api.calls(); n != 0 {
+			t.Errorf("a runtime-dir marker drove %d Warpgate calls; only the tree-root marker may", n)
+		}
+	})
+
+	t.Run("removal fails: warned, marker left for the wipe", func(t *testing.T) {
 		api := newBastionStub("repo_x")
 		api.removeErr = errors.New("warpgate DELETE /users/wg-user-9/credentials/public-keys/wg-key-9: 503 Service Unavailable")
 		s, logs := revokeService(t, api)
 		marker := plantMarker(t, s, runID, want)
 		s.RevokeBastionKey(t.Context(), runID)
 		out := logs.String()
-		if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, runID) || !strings.Contains(out, "503") {
-			t.Errorf("want one warning naming the run and the cause:\n%s", out)
+		if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, runID) || !strings.Contains(out, "503") ||
+			!strings.Contains(out, "next startup sweep") {
+			t.Errorf("want one warning naming the run, the cause and the startup sweep as the backstop:\n%s", out)
 		}
 		if _, err := os.Stat(marker); err != nil {
 			t.Errorf("marker gone after a FAILED revoke: %v", err)
@@ -1047,7 +1234,7 @@ func TestRevokeBastionKey(t *testing.T) {
 		if _, err := s.homes.Materialize(runID); err != nil {
 			t.Fatal(err)
 		}
-		writeFile(t, filepath.Join(s.homes.RuntimePath(runID), bastionMarkerName), "{not json")
+		writeFile(t, filepath.Join(s.homes.RunPath(runID), bastionMarkerName), "{not json")
 		s.RevokeBastionKey(t.Context(), runID)
 		s.RevokeBastionKey(t.Context(), "../"+runID)
 		s.RevokeBastionKey(t.Context(), "")
@@ -1060,11 +1247,14 @@ func TestRevokeBastionKey(t *testing.T) {
 // --- 8. SweepBastionKeys ------------------------------------------------------
 
 // The startup sweep removes exactly the orphans: keys whose label is a lab run
-// label naming a run that is not active. It keeps an active run's key, an
-// operator's own key, a label that only looks like lab's, and a key whose
-// run's marker is still on disk (a launch in flight, or a tree whose own wipe
-// will revoke it); it sweeps a user whose role is missing, skips a repo with
-// no Warpgate user, and reports what it removed.
+// label naming a run that is neither active nor on disk. It keeps an active
+// run's key, an operator's own key, a label that only looks like lab's, and
+// every key whose run's tree still exists — with a marker naming it, with a
+// marker naming another key, or with NO marker at all: the race shape, a
+// spawn whose AddPublicKey has committed but whose marker is not written yet
+// (and whose run row never is before the key exists). It sweeps a user whose
+// role is missing, skips a repo with no Warpgate user, reports what it
+// removed, and reports the pass complete.
 func TestSweepBastionKeys_removesOnlyOrphanedRunKeys(t *testing.T) {
 	f := newFixture(t)
 	logs := f.captureLogs()
@@ -1079,9 +1269,12 @@ func TestSweepBastionKeys_removesOnlyOrphanedRunKeys(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	orphan, marked, staleMarked := ids.NewID("run"), ids.NewID("run"), ids.NewID("run")
+	orphan, marked, staleMarked, inFlight := ids.NewID("run"), ids.NewID("run"), ids.NewID("run"), ids.NewID("run")
 	plantMarker(t, f.svc, marked, bastionMarker{UserID: "u-proj", KeyID: "k-marked"})
 	plantMarker(t, f.svc, staleMarked, bastionMarker{UserID: "u-proj", KeyID: "k-some-other-key"})
+	if _, err := f.homes.Materialize(inFlight); err != nil { // tree, no marker, no run row
+		t.Fatal(err)
+	}
 
 	alpha := f.addRepo(t, "alpha")
 	zeta := f.addRepo(t, "zeta")
@@ -1095,12 +1288,15 @@ func TestSweepBastionKeys_removesOnlyOrphanedRunKeys(t *testing.T) {
 		{ID: "k-lookalike", Label: "lab-run:not-a-run-id"},
 		{ID: "k-marked", Label: warpgate.RunKeyLabel(marked)},
 		{ID: "k-stale", Label: warpgate.RunKeyLabel(staleMarked)},
+		{ID: "k-inflight", Label: warpgate.RunKeyLabel(inFlight)},
 	}
 	api.keys["u-zeta"] = []warpgate.PublicKey{{ID: "k-zeta", Label: warpgate.RunKeyLabel(zetaOrphan)}}
 
-	f.svc.SweepBastionKeys(t.Context())
+	if !f.svc.SweepBastionKeys(t.Context()) {
+		t.Error("SweepBastionKeys = false for a pass that swept every repo; want true")
+	}
 
-	want := []removedKey{{"u-proj", "k-orphan"}, {"u-proj", "k-stale"}, {"u-zeta", "k-zeta"}}
+	want := []removedKey{{"u-proj", "k-orphan"}, {"u-zeta", "k-zeta"}}
 	if got := api.removedKeys(); !slices.Equal(got, want) {
 		t.Errorf("removed = %+v, want exactly the orphans %+v", got, want)
 	}
@@ -1114,18 +1310,51 @@ func TestSweepBastionKeys_removesOnlyOrphanedRunKeys(t *testing.T) {
 		t.Errorf("the sweep WROTE identities %q; it must be read-only", api.ensured)
 	}
 	out := logs.String()
-	if !strings.Contains(out, "removed orphaned Warpgate run keys") || !strings.Contains(out, "removed=3") {
-		t.Errorf("want one info line reporting 3 removals:\n%s", out)
+	if !strings.Contains(out, "removed orphaned Warpgate run keys") || !strings.Contains(out, "removed=2") {
+		t.Errorf("want one info line reporting 2 removals:\n%s", out)
 	}
 	if strings.Contains(out, "level=WARN") {
 		t.Errorf("a clean sweep warned:\n%s", out)
 	}
 }
 
+// The spawn race end to end: a sweep that runs INSIDE a spawn's
+// AddPublicKey — the key committed, the tree on disk, no marker and no run
+// row yet — leaves the key alone, and the spawn completes wired.
+func TestSweepBastionKeys_sparesAKeyCommittedMidSpawn(t *testing.T) {
+	f := newFixture(t)
+	api := newBastionStub(f.repo.ID, warpgate.Target{ID: "t1", Name: "staging"})
+	api.identities[f.repo.ID] = api.identity
+	var swept bool
+	api.onAdd = func(userID, label string) {
+		api.mu.Lock()
+		api.keys[userID] = append(api.keys[userID], warpgate.PublicKey{ID: "wg-key-1", Label: label})
+		api.mu.Unlock()
+		swept = f.svc.SweepBastionKeys(context.Background())
+	}
+	f.enableBastion(t, api, &hostKeysStub{text: testKnownHosts})
+	f.cacheSSHTargets(t, store.SSHTarget{ID: "t1", Name: "staging"})
+
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !swept {
+		t.Error("the mid-spawn sweep did not complete")
+	}
+	if removed := api.removedKeys(); len(removed) != 0 {
+		t.Errorf("the sweep removed %+v from a spawn in flight", removed)
+	}
+	if m, err := readBastionMarker(f.homes.RunPath(run.ID)); err != nil || m.KeyID != "wg-key-1" {
+		t.Errorf("marker = %+v, %v; want the spawn wired with its key", m, err)
+	}
+}
+
 // The sweep stops at the FIRST Warpgate error with ONE warning naming the repo
 // and how many repos it never reached — the same outage waiting for every
 // remaining repo is not worth a wall of identical warnings. What it removed
-// before the error is still reported.
+// before the error is still reported, and the pass reports itself INCOMPLETE,
+// which is what makes cmd/lab run it again.
 func TestSweepBastionKeys_stopsAtTheFirstError(t *testing.T) {
 	f := newFixture(t)
 	logs := f.captureLogs()
@@ -1137,7 +1366,9 @@ func TestSweepBastionKeys_stopsAtTheFirstError(t *testing.T) {
 	api.keys["u-alpha"] = []warpgate.PublicKey{{ID: "k-alpha", Label: warpgate.RunKeyLabel(ids.NewID("run"))}}
 	api.findErr[f.repo.ID] = errors.New("warpgate GET /users: 401 Unauthorized: check --warpgate-admin-token-file")
 
-	f.svc.SweepBastionKeys(t.Context())
+	if f.svc.SweepBastionKeys(t.Context()) {
+		t.Error("SweepBastionKeys = true for a pass cut short by an error; want false")
+	}
 
 	if got := api.removedKeys(); !slices.Equal(got, []removedKey{{"u-alpha", "k-alpha"}}) {
 		t.Errorf("removed = %+v, want alpha's orphan (swept before the error)", got)
@@ -1157,13 +1388,22 @@ func TestSweepBastionKeys_stopsAtTheFirstError(t *testing.T) {
 	if !strings.Contains(out, "removed=1") {
 		t.Errorf("the removal before the error was not reported:\n%s", out)
 	}
+
+	// The retry after the outage clears completes, and finds nothing left.
+	delete(api.findErr, f.repo.ID)
+	if !f.svc.SweepBastionKeys(t.Context()) {
+		t.Error("the retried pass did not complete")
+	}
 }
 
-// No REST client: the sweep is a no-op (no store read worth logging, no call).
+// No REST client: the sweep is a no-op (no store read worth logging, no call)
+// — and a COMPLETE one, so cmd/lab never retries a lab without Warpgate.
 func TestSweepBastionKeys_noClientIsNoOp(t *testing.T) {
 	f := newFixture(t)
 	logs := f.captureLogs()
-	f.svc.SweepBastionKeys(t.Context())
+	if !f.svc.SweepBastionKeys(t.Context()) {
+		t.Error("SweepBastionKeys = false with no client; want true (nothing to do is done)")
+	}
 	if out := logs.String(); out != "" {
 		t.Errorf("an unconfigured sweep logged:\n%s", out)
 	}

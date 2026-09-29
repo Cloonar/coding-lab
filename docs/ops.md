@@ -791,13 +791,16 @@ Everything lab writes for it lives in the run's runtime dir, `<state>/instances/
 | `warpgate-known-hosts` | Warpgate's SSH host keys, written from lab's [pin](#host-key-pinning) and checked strictly. |
 | `warpgate-ssh-config` | The run's OpenSSH config: one `Host <target>` block per target, then a `Match all` that restores the normal per-user and system config for every other host. |
 | `warpgate-bin/` | `ssh`, `scp`, and `sftp` wrappers, prepended to the run's `PATH`. |
-| `warpgate-run-key.json` | Which Warpgate key to revoke when the run is wiped. Holds no secret. |
+
+The one exception is the revocation marker, `warpgate-run-key.json` — which Warpgate key to revoke when the run is wiped, no secret — kept one level up at `<state>/instances/<runID>/`. That directory is never mounted into a container, so a run cannot delete or rewrite the record of its own key; it is wiped with the rest of the run.
 
 In the run's HOME, `~/.ssh/config` is a symlink to `warpgate-ssh-config`.
 
 **Why wrappers.** OpenSSH finds `~/.ssh/config` through the user's passwd entry, not `$HOME`, so a config in the run's private HOME alone would be invisible to it. Each wrapper runs the real binary — the next one on `PATH`, the host's or the dev image's — with `-F <runtime>/warpgate-ssh-config` in front of your arguments. `scp` and `sftp` need their own because they start `ssh` by absolute path; `rsync -e ssh`, ansible, and anything else that runs `ssh` by name goes through the `ssh` wrapper. A tool that execs ssh by absolute path and doesn't read `~/.ssh/config` itself sees no aliases: run it through `ssh` by name, or pass it `-F`.
 
-**Git is untouched.** `GIT_SSH_COMMAND` still points at the repo's deploy key, no alias lab writes may match the forge host, and every host that is not an alias — the forge included — resolves exactly as it did without the wrappers.
+**Git is untouched.** `GIT_SSH_COMMAND` still points at the repo's deploy key, no alias lab writes may match the forge host, and every host that is not an alias — the forge included — resolves exactly as it did without the wrappers. Lab does append Warpgate's pinned host keys to the run's git `known_hosts` (after its usual contents): git checks host keys with `accept-new`, so without them a `git clone staging:app.git` through the wrapper would trust the bastion on first use.
+
+**The system ssh config must pass OpenSSH's permission check.** The run's config pulls in `/etc/ssh/ssh_config` with `Include`, and OpenSSH refuses an included file that is not owned by root (or the run's user) or is group- or world-writable — a check it skips when it reads that file itself. On a dev image with a loose `/etc/ssh/ssh_config`, every ssh in a wired run fails with `Bad owner or permissions on /etc/ssh/ssh_config`, git included; fix the image (`chown root:root`, `chmod 644`).
 
 **The run's context file** gets an **SSH targets** section: the aliases, how to use them, and that no credential for them is in the instance.
 
@@ -890,13 +893,14 @@ Reading the failures:
 - **`Host key verification failed`** — Warpgate's key no longer matches the pin this run was spawned with. Check health for a mismatch, accept if it's genuine, and start a new run.
 - **The connection drops right after login** — the *target's* host key isn't trusted in Warpgate yet; Warpgate's log (`docker compose logs warpgate`) says `Target host key is not trusted, but there is no active PTY channel`. **Check host key → Trust** on the target's page.
 - **`Connection refused` or a timeout to `10.88.0.1:2222`** — the SSH port isn't reachable from the container's network namespace ([Deploying Warpgate](#deploying-warpgate)).
-- **`git push` failing at the same time** — not the bastion; git never goes through it.
+- **`Bad owner or permissions on /etc/ssh/ssh_config`**, from every ssh in the run — the dev image's system ssh config is group/world-writable or not root-owned, which the run's `Include` of it refuses ([What a bastion-wired run gets](#what-a-bastion-wired-run-gets)). Fix the image and start a new run.
+- **`git push` failing at the same time** — not the bastion; git never goes through it (unless it is the `Bad owner or permissions` error above).
 
 ### Bastion operational notes
 
 - Warpgate is a second process to run, back up, and upgrade. Its `/data` volume holds the target credentials, its SSH host keys, and the recordings — back it up with the same seriousness as `lab.db` / `master.key` ([Backup & restore](#backup-restore)). A recreated or differently restored volume brings new host keys: expect a [mismatch](#host-key-pinning).
 - Keep the image pinned (`0.29.1`) rather than tracking `latest`; lab's client is verified against that version. Check health after an upgrade.
-- **Run keys are revoked, not left behind.** A run's key is removed from Warpgate whenever the run is wiped — Stop, the AFK reaper, a launch rollback, the orphan sweep — and a startup sweep removes any `lab-run:` key whose run is no longer active. A run that survives a lab restart keeps its key. Keys you add by hand to a repo's Warpgate user are never touched.
+- **Run keys are revoked, not left behind.** A run's key is removed from Warpgate whenever the run is wiped — Stop, the AFK reaper, a launch rollback, the orphan sweep — and a startup sweep removes any `lab-run:` key whose run is no longer active and no longer on disk. If Warpgate isn't answering when lab starts, that sweep retries (after 1, 2, 4, 8, then every 15 minutes) until one pass completes. A run that survives a lab restart keeps its key. Keys you add by hand to a repo's Warpgate user are never touched.
 - **Recordings stay in Warpgate** (its **Status** pages). Lab neither reads nor stores them; linking a run to its recordings is issue #47. Warpgate logs each session against the key it used, and that key's label names the run while the run is live.
 - **Don't require MFA.** Warpgate's **Config → Global parameters → MFA enforcement** set to **Require** demands a second factor on every SSH login, which a run's key login can't give: target-bearing runs start and then fail to authenticate inside the session, where lab can't catch it. **Off** and **Enroll** are fine.
 - **The static admin token is full admin over Warpgate and never expires.** Whoever reads it can create a user, give it every target, and log in through the bastion. Keep both copies — `warpgate.env` and lab's token file — at 0600. To rotate, write a new token to both, `docker compose up -d --force-recreate`, and restart lab.
@@ -928,11 +932,16 @@ Reading the failures:
                              dialog spool, --settings file, (gateway-wired
                              runs only) onecli-ca-bundle.pem, 0644, and
                              (bastion-wired runs only) warpgate-run-key,
-                             warpgate-known-hosts, warpgate-ssh-config and
-                             warpgate-run-key.json, all 0600, plus
-                             warpgate-bin/, 0700 (the ssh/scp/sftp wrappers);
-                             same lifecycle as home/, bind-mounted into the
-                             run's container at its host-identical path
+                             warpgate-known-hosts and warpgate-ssh-config,
+                             all 0600, plus warpgate-bin/, 0700 (the
+                             ssh/scp/sftp wrappers); same lifecycle as home/,
+                             bind-mounted into the run's container at its
+                             host-identical path
+  instances/<runID>/warpgate-run-key.json
+                             0600 — (bastion-wired runs only) which Warpgate
+                             key to revoke at wipe; no secret. At the run
+                             dir's root, never mounted into a container, so a
+                             run cannot tamper with its own revocation
   instances/<runID>/imports/ 0700 — per-run read-only import snapshots
                              (issue #261 / ADR-0063): one .git-less copy per
                              imported repo, taken from origin/<default> at
