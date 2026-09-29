@@ -126,6 +126,18 @@ Flags (env overrides in parentheses; flag > env > default):
                            https://onecli.example.com; required for
                            -onecli-dashboard=subdomain, an optional override
                            in port mode (LAB_ONECLI_DASHBOARD_URL)
+  -warpgate-url string     Warpgate admin API base URL, e.g. https://localhost:8888;
+                           set together with -warpgate-admin-token-file; unset leaves
+                           the integration off (LAB_WARPGATE_URL)
+  -warpgate-admin-token-file string
+                           file holding the Warpgate admin API token, 0600 or
+                           stricter; never generated (LAB_WARPGATE_ADMIN_TOKEN_FILE)
+  -warpgate-ssh-addr string  host:port a run uses to reach Warpgate's SSH listener,
+                           e.g. 10.88.0.1:2222; independent of the pair above
+                           (LAB_WARPGATE_SSH_ADDR)
+  -warpgate-ca-file string  path to the PEM file holding the certificate or CA lab
+                           must trust for the admin API; unset uses the system roots
+                           (LAB_WARPGATE_CA_FILE)
   -session-cookie-domain string
                            Domain attribute for lab's session cookie, e.g.
                            example.com; empty (default) keeps the cookie

@@ -241,6 +241,28 @@
                 };
               };
 
+              # Text-level dummy (realized, same no-real-agent-CLIs rule):
+              # the Warpgate SSH bastion sidecar (issue #39, ADR-0067's SSH
+              # counterpart) — pins that all four settings serialize, and —
+              # via the default unit's negative grep below — that an
+              # unconfigured host emits none of them, mirroring exactly how
+              # the OneCLI block above proves "integration entirely off when
+              # unset". sshAddr is a non-loopback address for the same reason
+              # onecli.gatewayUrl is above: a container run cannot reach the
+              # host's loopback (ADR-0052 / #216).
+              warpgateDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  warpgate = {
+                    url = "https://localhost:8888";
+                    adminTokenFile = "/run/secrets/lab-warpgate-admin-token";
+                    sshAddr = "10.88.0.1:2222";
+                    caFile = "/var/lib/lab/warpgate-ca.pem";
+                  };
+                };
+              };
+
               # Third text-level dummy (realized): container mode explicitly
               # OFF. Since #220 flipped container.enable's default to true,
               # the opt-OUT is the non-default path — this dummy's unit text
@@ -501,6 +523,7 @@
                 agentUrlUnit = agentUrlDummy.config.systemd.units."lab.service".text;
                 oneCLIUnit = oneCLIDummy.config.systemd.units."lab.service".text;
                 oneCLIDashboardSubdomainUnit = oneCLIDashboardSubdomainDummy.config.systemd.units."lab.service".text;
+                warpgateUnit = warpgateDummy.config.systemd.units."lab.service".text;
                 containerUnit = containerDummy.config.systemd.units."lab.service".text;
                 containerOffUnit = containerOffDummy.config.systemd.units."lab.service".text;
                 passAsFile = [
@@ -508,6 +531,7 @@
                   "agentUrlUnit"
                   "oneCLIUnit"
                   "oneCLIDashboardSubdomainUnit"
+                  "warpgateUnit"
                   "containerUnit"
                   "containerOffUnit"
                 ];
@@ -607,6 +631,21 @@
                   echo "subdomain-mode unit must not pass --onecli-dashboard-addr (port mode's own listener address)" >&2
                   exit 1
                 fi
+
+                # Warpgate SSH bastion (issue #39 / ADR-0068):
+                # all four settings are optional and default to null, so an
+                # operator who has not opted in must get a unit with no
+                # --warpgate-* flag at all — mirrors the OneCLI negative guard
+                # above exactly.
+                if grep '^ExecStart=' "$unitPath" | grep -qF -- '--warpgate-'; then
+                  echo "default unit must not pass any --warpgate-* flag (integration off when unset, issue #39)" >&2
+                  exit 1
+                fi
+                # ...while each explicitly-set Warpgate option must serialize.
+                grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-url" "https://localhost:8888"'
+                grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-admin-token-file" "/run/secrets/lab-warpgate-admin-token"'
+                grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-ssh-addr" "10.88.0.1:2222"'
+                grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-ca-file" "/var/lib/lab/warpgate-ca.pem"'
 
                 # Text-level PATH serialization (issue #74): prove the path list
                 # actually lands on the unit's Environment=PATH line — the

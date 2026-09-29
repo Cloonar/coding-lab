@@ -18,33 +18,37 @@ func baseEnv() map[string]string {
 
 func TestParse(t *testing.T) {
 	defaults := Config{
-		Addr:                 ":8080",
-		StateDir:             "/home/u/.local/state/lab",
-		DB:                   "sqlite:/home/u/.local/state/lab/lab.db",
-		MasterKeyFile:        "/home/u/.local/state/lab/master.key",
-		VAPIDKeyFile:         "/home/u/.local/state/lab/vapid.key",
-		OneCLIURL:            "",
-		OneCLIAPIKeyFile:     "",
-		OneCLIGatewayURL:     "",
-		OneCLICAFile:         "",
-		OneCLIDashboard:      "off",
-		OneCLIDashboardAddr:  "",
-		OneCLIDashboardURL:   "",
-		SessionCookieDomain:  "",
-		ProviderBin:          map[string]string{},
-		ProviderConfig:       map[string]string{},
-		TmuxBin:              "tmux",
-		GitBin:               "git",
-		PrlimitBin:           "prlimit",
-		PodmanBin:            "podman",
-		ContainerImage:       "",
-		ContainerToolsImages: map[string]string{},
-		MaxInstances:         6,
-		SessionNofile:        16384,
-		ProxyAuth:            false,
-		ProxyAuthHeader:      "Remote-User",
-		BaseURL:              "",
-		AgentURL:             "",
+		Addr:                   ":8080",
+		StateDir:               "/home/u/.local/state/lab",
+		DB:                     "sqlite:/home/u/.local/state/lab/lab.db",
+		MasterKeyFile:          "/home/u/.local/state/lab/master.key",
+		VAPIDKeyFile:           "/home/u/.local/state/lab/vapid.key",
+		OneCLIURL:              "",
+		OneCLIAPIKeyFile:       "",
+		OneCLIGatewayURL:       "",
+		OneCLICAFile:           "",
+		OneCLIDashboard:        "off",
+		OneCLIDashboardAddr:    "",
+		OneCLIDashboardURL:     "",
+		WarpgateURL:            "",
+		WarpgateAdminTokenFile: "",
+		WarpgateSSHAddr:        "",
+		WarpgateCAFile:         "",
+		SessionCookieDomain:    "",
+		ProviderBin:            map[string]string{},
+		ProviderConfig:         map[string]string{},
+		TmuxBin:                "tmux",
+		GitBin:                 "git",
+		PrlimitBin:             "prlimit",
+		PodmanBin:              "podman",
+		ContainerImage:         "",
+		ContainerToolsImages:   map[string]string{},
+		MaxInstances:           6,
+		SessionNofile:          16384,
+		ProxyAuth:              false,
+		ProxyAuthHeader:        "Remote-User",
+		BaseURL:                "",
+		AgentURL:               "",
 	}
 
 	// with copies defaults and applies mut. NOTE: ProviderBin/ProviderConfig/
@@ -868,6 +872,176 @@ func TestParse(t *testing.T) {
 				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
 			},
 			wantErr: "http(s)",
+		},
+		// --- Warpgate SSH bastion config (issue #39) ---
+		{
+			name: "warpgate settings all unset leaves the integration off",
+			want: defaults,
+		},
+		{
+			name: "warpgate-url and warpgate-admin-token-file flags land in Config",
+			args: []string{"--warpgate-url", "https://127.0.0.1:8888", "--warpgate-admin-token-file", "/run/secrets/warpgate-admin-token"},
+			want: with(func(c *Config) {
+				c.WarpgateURL = "https://127.0.0.1:8888"
+				c.WarpgateAdminTokenFile = "/run/secrets/warpgate-admin-token"
+			}),
+		},
+		{
+			name: "warpgate-url and warpgate-admin-token-file env land in Config",
+			env: map[string]string{
+				"LAB_WARPGATE_URL":              "https://127.0.0.1:8888",
+				"LAB_WARPGATE_ADMIN_TOKEN_FILE": "/run/secrets/warpgate-admin-token",
+			},
+			want: with(func(c *Config) {
+				c.WarpgateURL = "https://127.0.0.1:8888"
+				c.WarpgateAdminTokenFile = "/run/secrets/warpgate-admin-token"
+			}),
+		},
+		{
+			name: "warpgate-url flag beats env",
+			args: []string{"--warpgate-url", "https://127.0.0.1:8888", "--warpgate-admin-token-file", "/flag/warpgate-admin-token"},
+			env: map[string]string{
+				"LAB_WARPGATE_URL":              "https://127.0.0.1:19999",
+				"LAB_WARPGATE_ADMIN_TOKEN_FILE": "/env/warpgate-admin-token",
+			},
+			want: with(func(c *Config) {
+				c.WarpgateURL = "https://127.0.0.1:8888"
+				c.WarpgateAdminTokenFile = "/flag/warpgate-admin-token"
+			}),
+		},
+		{
+			name: "warpgate-admin-token-file flag beats env",
+			args: []string{"--warpgate-url", "https://127.0.0.1:8888", "--warpgate-admin-token-file", "/flag/warpgate-admin-token"},
+			env: map[string]string{
+				"LAB_WARPGATE_URL":              "https://127.0.0.1:8888",
+				"LAB_WARPGATE_ADMIN_TOKEN_FILE": "/env/warpgate-admin-token",
+			},
+			want: with(func(c *Config) {
+				c.WarpgateURL = "https://127.0.0.1:8888"
+				c.WarpgateAdminTokenFile = "/flag/warpgate-admin-token"
+			}),
+		},
+		{
+			name:    "warpgate-url without warpgate-admin-token-file errors",
+			args:    []string{"--warpgate-url", "https://127.0.0.1:8888"},
+			wantErr: "--warpgate-url and --warpgate-admin-token-file must be set together or not at all",
+		},
+		{
+			name:    "warpgate-admin-token-file without warpgate-url errors",
+			args:    []string{"--warpgate-admin-token-file", "/run/secrets/warpgate-admin-token"},
+			wantErr: "--warpgate-url and --warpgate-admin-token-file must be set together or not at all",
+		},
+		{
+			name:    "warpgate-url must be http(s)",
+			args:    []string{"--warpgate-url", "ftp://127.0.0.1:8888", "--warpgate-admin-token-file", "/run/secrets/warpgate-admin-token"},
+			wantErr: "http(s)",
+		},
+		{
+			name:    "warpgate-url must be absolute",
+			args:    []string{"--warpgate-url", "localhost:8888", "--warpgate-admin-token-file", "/run/secrets/warpgate-admin-token"},
+			wantErr: "http(s)",
+		},
+		{
+			name: "warpgate-ssh-addr flag alone is valid, no pairing required",
+			args: []string{"--warpgate-ssh-addr", "10.88.0.1:2222"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "10.88.0.1:2222"
+			}),
+		},
+		{
+			name: "warpgate-ssh-addr env alone is valid",
+			env:  map[string]string{"LAB_WARPGATE_SSH_ADDR": "10.88.0.1:2222"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "10.88.0.1:2222"
+			}),
+		},
+		{
+			name: "warpgate-ssh-addr flag beats env",
+			args: []string{"--warpgate-ssh-addr", "10.88.0.1:2222"},
+			env:  map[string]string{"LAB_WARPGATE_SSH_ADDR": "10.88.0.1:19999"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "10.88.0.1:2222"
+			}),
+		},
+		{
+			name: "warpgate-ssh-addr accepts an IPv6 host",
+			args: []string{"--warpgate-ssh-addr", "[::1]:2222"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "[::1]:2222"
+			}),
+		},
+		{
+			name: "warpgate-ssh-addr accepts a hostname",
+			args: []string{"--warpgate-ssh-addr", "warpgate.internal:2222"},
+			want: with(func(c *Config) {
+				c.WarpgateSSHAddr = "warpgate.internal:2222"
+			}),
+		},
+		{
+			name:    "warpgate-ssh-addr rejects a missing port",
+			args:    []string{"--warpgate-ssh-addr", "10.88.0.1"},
+			wantErr: "want host:port",
+		},
+		{
+			name:    "warpgate-ssh-addr rejects a missing host",
+			args:    []string{"--warpgate-ssh-addr", ":2222"},
+			wantErr: "want host:port",
+		},
+		{
+			name:    "warpgate-ssh-addr rejects port 0",
+			args:    []string{"--warpgate-ssh-addr", "host:0"},
+			wantErr: "port must be a decimal integer 1-65535",
+		},
+		{
+			name:    "warpgate-ssh-addr rejects a port above 65535",
+			args:    []string{"--warpgate-ssh-addr", "host:70000"},
+			wantErr: "port must be a decimal integer 1-65535",
+		},
+		{
+			name:    "warpgate-ssh-addr rejects a non-numeric port",
+			args:    []string{"--warpgate-ssh-addr", "host:abc"},
+			wantErr: "port must be a decimal integer 1-65535",
+		},
+		{
+			name: "warpgate-ca-file flag alone is valid, no pairing required",
+			args: []string{"--warpgate-ca-file", "/var/lib/lab/warpgate-ca.pem"},
+			want: with(func(c *Config) {
+				c.WarpgateCAFile = "/var/lib/lab/warpgate-ca.pem"
+			}),
+		},
+		{
+			name: "warpgate-ca-file env alone is valid",
+			env:  map[string]string{"LAB_WARPGATE_CA_FILE": "/var/lib/lab/warpgate-ca.pem"},
+			want: with(func(c *Config) {
+				c.WarpgateCAFile = "/var/lib/lab/warpgate-ca.pem"
+			}),
+		},
+		{
+			name: "warpgate-ca-file flag beats env",
+			args: []string{"--warpgate-ca-file", "/flag/warpgate-ca.pem"},
+			env:  map[string]string{"LAB_WARPGATE_CA_FILE": "/env/warpgate-ca.pem"},
+			want: with(func(c *Config) {
+				c.WarpgateCAFile = "/flag/warpgate-ca.pem"
+			}),
+		},
+		{
+			name: "warpgate settings coexist with an unrelated onecli config",
+			args: []string{
+				"--onecli-url", "http://127.0.0.1:10254",
+				"--onecli-api-key-file", "/run/secrets/onecli-api-key",
+				"--warpgate-url", "https://127.0.0.1:8888",
+				"--warpgate-admin-token-file", "/run/secrets/warpgate-admin-token",
+				"--warpgate-ssh-addr", "10.88.0.1:2222",
+				"--warpgate-ca-file", "/var/lib/lab/warpgate-ca.pem",
+			},
+			want: with(func(c *Config) {
+				c.OneCLIURL = "http://127.0.0.1:10254"
+				c.OneCLIAPIKeyFile = "/run/secrets/onecli-api-key"
+				c.WarpgateURL = "https://127.0.0.1:8888"
+				c.WarpgateAdminTokenFile = "/run/secrets/warpgate-admin-token"
+				c.WarpgateSSHAddr = "10.88.0.1:2222"
+				c.WarpgateCAFile = "/var/lib/lab/warpgate-ca.pem"
+			}),
 		},
 		{
 			name: "session-cookie-domain bare domain is accepted",

@@ -7,10 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -139,6 +141,45 @@ type Config struct {
 	// setting — ADR-0067 pins the OneCLI client/address surface closed, so
 	// there is nothing here for a new setting to pair with.
 	OneCLIDashboardURL string
+
+	// WarpgateURL is the base URL of the Warpgate sidecar's admin API/HTTP
+	// listener that lab itself dials, typically loopback (e.g.
+	// https://localhost:8888). "" means the whole Warpgate integration is
+	// off — the non-HTTP sibling of OneCLIURL (ADR-0068, issue
+	// #39). Must be set together with WarpgateAdminTokenFile — see the
+	// pairing check at the bottom of Parse, which mirrors the
+	// OneCLIURL/OneCLIAPIKeyFile pairing exactly.
+	WarpgateURL string
+	// WarpgateAdminTokenFile is a path to a 0600 file holding Warpgate's
+	// admin API token. "" when unset. Parse stays pure (package doc
+	// comment): this file is read — and its permissions checked — at
+	// startup in cmd/lab, not here, exactly as OneCLIAPIKeyFile is. Never
+	// auto-generated: the token is minted by Warpgate's own setup. Must be
+	// set together with WarpgateURL: a token file with no URL to send it to
+	// is dead config, and a URL with no token cannot authenticate.
+	WarpgateAdminTokenFile string
+	// WarpgateSSHAddr is the host:port a RUN uses to reach Warpgate's SSH
+	// listener. Deliberately separate from WarpgateURL, for the same reason
+	// OneCLIGatewayURL is separate from OneCLIURL: the address lab itself
+	// dials and the address a container run can reach are not the same one —
+	// host.containers.internal is pinned to 127.0.0.1 inside lab's
+	// containers (ADR-0052), so a container run needs a host-reachable
+	// address instead (e.g. the podman bridge gateway 10.88.0.1:2222, never
+	// host.containers.internal, never 127.0.0.1 for a container run).
+	// Independently settable — NOT part of the WarpgateURL/
+	// WarpgateAdminTokenFile pairing: the REST pair alone gives health and
+	// identity lifecycle with unchanged spawns, and a run is wired for SSH
+	// only once all three (URL, token file, SSH addr) are set, which is
+	// enforced by the run-wiring consumer, not here.
+	WarpgateSSHAddr string
+	// WarpgateCAFile is a host path to a PEM of the certificate or CA lab
+	// must trust for the admin API — Warpgate ships a self-signed
+	// certificate on its HTTP listener by default. "" (the default) leaves
+	// lab on the system roots. Mirrors OneCLICAFile: a path is a path, no
+	// filesystem access and no pairing/presence validation here (Parse does
+	// shape validation only) — not part of the WarpgateURL/
+	// WarpgateAdminTokenFile pairing.
+	WarpgateCAFile string
 
 	// ProviderBin maps a provider id to a binary-path override. A missing
 	// entry means the adapter uses its own default (a PATH lookup); config.go
@@ -269,8 +310,9 @@ func (p *providerMapFlag) Set(value string) error {
 // LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE, LAB_ONECLI_URL,
 // LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL, LAB_ONECLI_CA_FILE,
 // LAB_ONECLI_DASHBOARD, LAB_ONECLI_DASHBOARD_ADDR, LAB_ONECLI_DASHBOARD_URL,
-// LAB_SESSION_COOKIE_DOMAIN. providerIDs is the caller's list of registered
-// provider ids: the generic per-provider
+// LAB_WARPGATE_URL, LAB_WARPGATE_ADMIN_TOKEN_FILE, LAB_WARPGATE_SSH_ADDR,
+// LAB_WARPGATE_CA_FILE, LAB_SESSION_COOKIE_DOMAIN. providerIDs is the
+// caller's list of registered provider ids: the generic per-provider
 // flags are validated against it (an unknown id is a parse error), and the
 // LAB_PROVIDER_*_<ID> env forms are read only for ids it contains.
 func Parse(args []string, getenv func(string) string, providerIDs []string) (Config, error) {
@@ -292,6 +334,11 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		oneCLIDashboard     = fs.String("onecli-dashboard", "", "OneCLI dashboard exposure: off (default, nothing exposed), port (lab reverse-proxies it on its own authenticated listener) or subdomain (your reverse proxy fronts it and delegates auth to lab) (env LAB_ONECLI_DASHBOARD)")
 		oneCLIDashboardAddr = fs.String("onecli-dashboard-addr", "", "listen address for --onecli-dashboard=port, e.g. :8443 (env LAB_ONECLI_DASHBOARD_ADDR)")
 		oneCLIDashboardURL  = fs.String("onecli-dashboard-url", "", "browser-facing dashboard origin, e.g. https://onecli.example.com; required for --onecli-dashboard=subdomain, an optional override in port mode (env LAB_ONECLI_DASHBOARD_URL)")
+
+		warpgateURL            = fs.String("warpgate-url", "", "Warpgate sidecar admin API base URL, e.g. https://localhost:8888; empty disables the Warpgate integration; must be set with --warpgate-admin-token-file (env LAB_WARPGATE_URL)")
+		warpgateAdminTokenFile = fs.String("warpgate-admin-token-file", "", "path to a 0600 file holding Warpgate's admin API token; must be set with --warpgate-url (env LAB_WARPGATE_ADMIN_TOKEN_FILE)")
+		warpgateSSHAddr        = fs.String("warpgate-ssh-addr", "", "host:port a run uses to reach Warpgate's SSH listener, e.g. 10.88.0.1:2222 — NOT host.containers.internal, NOT 127.0.0.1 for container runs (env LAB_WARPGATE_SSH_ADDR)")
+		warpgateCAFile         = fs.String("warpgate-ca-file", "", "path to the PEM file holding the certificate or CA lab must trust for the Warpgate admin API; unset uses the system roots (env LAB_WARPGATE_CA_FILE)")
 
 		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
 		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
@@ -562,6 +609,45 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		}
 	}
 
+	// --- Warpgate SSH bastion (issue #39) -----------------------------------
+	// The non-HTTP sibling of the OneCLI block above (ADR-0068, the SSH
+	// counterpart of ADR-0067): url/adminTokenFile mirror OneCLIURL/OneCLIAPIKeyFile
+	// (paired below, same message style), sshAddr mirrors OneCLIGatewayURL
+	// (independently settable, container-routable rather than loopback), and
+	// caFile mirrors OneCLICAFile (a path is a path, no presence check here).
+	cfg.WarpgateURL = pick("warpgate-url", *warpgateURL, "LAB_WARPGATE_URL", "")
+	if cfg.WarpgateURL != "" {
+		if err := validateHTTPURL("--warpgate-url", cfg.WarpgateURL); err != nil {
+			return Config{}, err
+		}
+	}
+	cfg.WarpgateAdminTokenFile = pick("warpgate-admin-token-file", *warpgateAdminTokenFile, "LAB_WARPGATE_ADMIN_TOKEN_FILE", "")
+	// Half a Warpgate REST config = dead config, exactly like the OneCLI
+	// pairing above: a URL with no token file cannot authenticate, and a
+	// token file with no URL has nowhere to send it. Both unset (the
+	// default) leaves the integration off; both set is valid.
+	if (cfg.WarpgateURL != "") != (cfg.WarpgateAdminTokenFile != "") {
+		return Config{}, fmt.Errorf("--warpgate-url and --warpgate-admin-token-file must be set together or not at all")
+	}
+
+	// --warpgate-ssh-addr is deliberately NOT part of the pairing above, for
+	// the same reason --onecli-gateway-url is not part of the OneCLI pairing:
+	// it is consumed by the run-wiring step, which cares about SSH
+	// reachability rather than the admin REST API, so it stays independently
+	// settable. A run is wired for SSH only once url, adminTokenFile, and
+	// this are all set — enforced by that consumer, not here.
+	cfg.WarpgateSSHAddr = pick("warpgate-ssh-addr", *warpgateSSHAddr, "LAB_WARPGATE_SSH_ADDR", "")
+	if cfg.WarpgateSSHAddr != "" {
+		if err := validateSSHAddr("--warpgate-ssh-addr", cfg.WarpgateSSHAddr); err != nil {
+			return Config{}, err
+		}
+	}
+
+	// --warpgate-ca-file: a path is a path, exactly like --onecli-ca-file
+	// (see its field doc). No filesystem access and no pairing/presence
+	// validation here — Parse does shape validation only.
+	cfg.WarpgateCAFile = pick("warpgate-ca-file", *warpgateCAFile, "LAB_WARPGATE_CA_FILE", "")
+
 	cfg.SessionCookieDomain = pick("session-cookie-domain", *sessionCookieDomain, "LAB_SESSION_COOKIE_DOMAIN", "")
 	if cfg.SessionCookieDomain != "" {
 		// A cookie Domain is a bare domain, never an origin: no scheme (it's
@@ -658,6 +744,25 @@ func validateHTTPURL(flag, value string) error {
 	u, err := url.Parse(value)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("%s %q: want an absolute http(s) URL", flag, value)
+	}
+	return nil
+}
+
+// validateSSHAddr rejects a value that is not a routable host:port pair —
+// used for --warpgate-ssh-addr, which (unlike --warpgate-url) names no
+// scheme, just the address a run's ssh_config dials. net.SplitHostPort
+// supplies the host/port split; SplitHostPort alone would accept a value
+// with an empty host (":2222") or a non-numeric/out-of-range port (it only
+// splits, it does not validate a port number), so both are checked
+// explicitly here.
+func validateSSHAddr(flag, value string) error {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || host == "" {
+		return fmt.Errorf("%s %q: want host:port, e.g. 10.88.0.1:2222 (the podman bridge gateway) — not host.containers.internal, not 127.0.0.1 for container runs", flag, value)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("%s %q: port must be a decimal integer 1-65535, e.g. 10.88.0.1:2222", flag, value)
 	}
 	return nil
 }

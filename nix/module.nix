@@ -142,6 +142,22 @@ let
     "--onecli-dashboard-url"
     cfg.onecli.dashboardUrl
   ]
+  ++ lib.optionals (cfg.warpgate.url != null) [
+    "--warpgate-url"
+    cfg.warpgate.url
+  ]
+  ++ lib.optionals (cfg.warpgate.adminTokenFile != null) [
+    "--warpgate-admin-token-file"
+    cfg.warpgate.adminTokenFile
+  ]
+  ++ lib.optionals (cfg.warpgate.sshAddr != null) [
+    "--warpgate-ssh-addr"
+    cfg.warpgate.sshAddr
+  ]
+  ++ lib.optionals (cfg.warpgate.caFile != null) [
+    "--warpgate-ca-file"
+    cfg.warpgate.caFile
+  ]
   ++ lib.optionals (cfg.seedUser != null) [
     "--seed-user"
     cfg.seedUser
@@ -590,6 +606,76 @@ in
           than the one lab listens on internally (e.g. behind a load
           balancer that remaps ports). Rejected by lab at startup when
           {option}`dashboard` is `"off"` — nothing is exposed for it to name.
+        '';
+      };
+    };
+
+    warpgate = {
+      url = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "https://localhost:8888";
+        description = ''
+          Base URL of the Warpgate sidecar's admin API/HTTP listener
+          (--warpgate-url) as lab itself reaches it, typically loopback.
+          `null` (the default) keeps the whole Warpgate integration off — the
+          non-HTTP sibling of {option}`onecli.url` (issue #39, ADR-0068, the SSH
+          counterpart of ADR-0067). Must be set together with {option}`adminTokenFile`;
+          lab refuses to start with only one of the two set.
+
+          This module never deploys Warpgate itself — the operator runs
+          upstream's Warpgate container (or binary) out-of-band, exactly as
+          for the OneCLI sidecar, and points these options at it once it is
+          up; there is no `services.lab.warpgate.enable`.
+        '';
+      };
+
+      adminTokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/run/secrets/lab-warpgate-admin-token";
+        description = ''
+          Path to a file holding Warpgate's admin API token
+          (--warpgate-admin-token-file). Carries {option}`masterKeyFile`'s
+          enforcement contract — 0600 or stricter, lab refuses to start on
+          looser permissions — see the header comment for the sops-nix /
+          LoadCredential patterns. lab never auto-generates this file: the
+          token is minted by Warpgate's own setup. Must be set together with
+          {option}`url`; lab refuses to start with only one of the two set.
+        '';
+      };
+
+      sshAddr = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "10.88.0.1:2222";
+        description = ''
+          `host:port` a RUN uses to reach Warpgate's SSH listener
+          (--warpgate-ssh-addr). Deliberately separate from {option}`url`:
+          lab itself dials the admin API on loopback, but a `container`-runner
+          run cannot reach loopback — lab's container argv pins
+          `host.containers.internal` and `host.docker.internal` to 127.0.0.1
+          (ADR-0052 / issue #216), so a containerized run needs a host
+          address routable from the container's netns instead (e.g. the
+          podman bridge gateway, `10.88.0.1:2222`). Independently settable
+          from {option}`url` / {option}`adminTokenFile` — no pairing
+          requirement; the REST pair alone gives health and identity
+          lifecycle with unchanged spawns, and a run is wired for SSH only
+          once all three (`url`, `adminTokenFile`, this) are set.
+        '';
+      };
+
+      caFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/var/lib/lab/warpgate-ca.pem";
+        description = ''
+          Path to a PEM file holding the certificate or CA lab must trust for
+          the Warpgate admin API (--warpgate-ca-file) — Warpgate ships a
+          self-signed certificate on its HTTP listener by default. `null`
+          (the default) leaves lab on the system roots. Independently
+          settable from {option}`url` / {option}`adminTokenFile` — no
+          pairing requirement with those two.
         '';
       };
     };
