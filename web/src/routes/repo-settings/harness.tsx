@@ -18,6 +18,7 @@ import type {
   Repo,
   RepoImport,
   RepoSecret,
+  RepoSSHTarget,
   Schedule,
 } from '../../api';
 import App from '../../App';
@@ -64,6 +65,21 @@ export function baseOneCLIPool(): OneCLIPool {
     secrets: [{ id: 'sec_pool_1', name: 'ANTHROPIC_API_KEY', provider: 'anthropic' }],
     connections: [{ id: 'conn_pool_1', name: 'GitHub app', provider: 'github' }],
   };
+}
+
+/**
+ * The repo's view of Warpgate's SSH targets (issue #39), as GET
+ * /repos/{id}/warpgate/targets answers it in one body — unlike the OneCLI
+ * pool, there is no separate lab-wide list to join against a grant set.
+ * Configured and non-empty by default, one assigned and one not, so both
+ * toggle states render on the normal path — every other Secrets-section suite
+ * mounts this picker alongside SecretGrants and the legacy Secrets card.
+ */
+export function baseSSHTargets(): RepoSSHTarget[] {
+  return [
+    { id: 'tgt_1', name: 'staging', description: 'Staging box', assigned: true },
+    { id: 'tgt_2', name: 'prod-db', description: 'Prod DB jump host', assigned: false },
+  ];
 }
 
 /** A second provider with its own catalogs (agent-selection tests). */
@@ -287,6 +303,20 @@ export interface RepoSettingsHarnessState {
   /** Forces every grant attach/detach to answer 400 with this message — the
    *  server-side refusal a toggle must surface without flipping the row. */
   grantWriteError: string | null;
+  /** GET /repos/{id}/warpgate/targets's `configured` flag (issue #39): false
+   *  is the "SSH bastion integration is off in this lab" state. */
+  sshTargetsConfigured: boolean;
+  /** This repo's Warpgate SSH targets, each already carrying its own
+   *  `assigned` flag — mutated by the stub's own assign/unassign handlers. */
+  sshTargetsOnServer: RepoSSHTarget[];
+  /** `"<METHOD> <url>"` for every target assign/unassign, in order. */
+  sshTargetRequests: string[];
+  /** Forces GET .../warpgate/targets to answer 502 with this message — the
+   *  one read this picker allows to degrade to an error banner. */
+  sshTargetsReadError: string | null;
+  /** Forces every target PUT/DELETE to answer 400 with this message — the
+   *  server-side refusal a toggle must surface without flipping the row. */
+  sshTargetWriteError: string | null;
 }
 export const h = {} as RepoSettingsHarnessState;
 
@@ -478,6 +508,33 @@ export function stubApi(): void {
         } else {
           h.grantsOnServer = h.grantsOnServer.filter((g) => !(g.kind === kind && g.id === id));
         }
+        return Promise.resolve(jsonResponse(204, undefined));
+      }
+      // SSH-bastion targets (issue #39): the repo's view of Warpgate's SSH
+      // targets, each already flagged with the repo's assignment — one read,
+      // not a pool+grants join. h.sshTargetsReadError turns the read into the
+      // 502 the real server answers when Warpgate is configured but erroring;
+      // "unconfigured" is a 200 with configured:false instead.
+      if (url === `/api/v1/repos/${REPO_ID}/warpgate/targets` && method === 'GET') {
+        if (h.sshTargetsReadError !== null) {
+          return Promise.resolve(jsonResponse(502, { error: h.sshTargetsReadError }));
+        }
+        return Promise.resolve(
+          jsonResponse(200, { configured: h.sshTargetsConfigured, targets: h.sshTargetsOnServer }),
+        );
+      }
+      const sshTargetMatch = new RegExp(`^/api/v1/repos/${REPO_ID}/warpgate/targets/([^/]+)$`).exec(
+        url,
+      );
+      if (sshTargetMatch && (method === 'PUT' || method === 'DELETE')) {
+        h.sshTargetRequests.push(`${method} ${url}`);
+        if (h.sshTargetWriteError !== null) {
+          return Promise.resolve(jsonResponse(400, { error: h.sshTargetWriteError }));
+        }
+        const id = sshTargetMatch[1] ?? '';
+        h.sshTargetsOnServer = h.sshTargetsOnServer.map((t) =>
+          t.id === id ? { ...t, assigned: method === 'PUT' } : t,
+        );
         return Promise.resolve(jsonResponse(204, undefined));
       }
       if (url === '/api/v1/onecli/dashboard' && method === 'GET') {
@@ -729,6 +786,19 @@ export function grantsSection(): HTMLElement {
   return section as HTMLElement;
 }
 
+/** The SSH-targets picker's <section> (issue #39), scoped the same way
+ *  grantsSection() is — it renders directly below the credential-gateway
+ *  grant picker on the same subpage, so the two must never be queried as one. */
+export function sshTargetsSection(): HTMLElement {
+  const header = Array.from(container.querySelectorAll('section h2')).find(
+    (h2) => h2.textContent === 'SSH targets',
+  );
+  if (!header) throw new Error('missing SSH targets section heading');
+  const section = header.closest('section');
+  if (!section) throw new Error('SSH targets heading has no enclosing <section>');
+  return section as HTMLElement;
+}
+
 /** The Schedules section's <section>, scoped the same way secretsSection() is. */
 export function schedulesSection(): HTMLElement {
   const header = Array.from(container.querySelectorAll('section h2')).find(
@@ -864,6 +934,11 @@ export function installRepoSettingsHooks(): void {
     h.dashboardExposure = { mode: 'port', url: 'https://lab.example.com:8443' };
     h.gatewayReadError = null;
     h.grantWriteError = null;
+    h.sshTargetsConfigured = true;
+    h.sshTargetsOnServer = baseSSHTargets();
+    h.sshTargetRequests = [];
+    h.sshTargetsReadError = null;
+    h.sshTargetWriteError = null;
     stubApi();
   });
 
