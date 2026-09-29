@@ -9,7 +9,7 @@ import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
 import type { MemoryHistory } from '@solidjs/router';
-import type { OneCLIHealth, Provider, PushDevice } from '../../api';
+import type { OneCLIHealth, Provider, PushDevice, WarpgateHealth } from '../../api';
 import App from '../../App';
 import SettingsRoute from './index';
 
@@ -94,6 +94,9 @@ export interface SettingsHarnessState {
   // Credential-gateway health (issue #23) — General mounts its status card
   // unconditionally, so every settings suite needs a default response.
   oneCLIHealthOnServer: OneCLIHealth;
+  // SSH-bastion health (issue #39) — General mounts BastionStatus right after
+  // CredentialGatewayStatus, unconditionally, same reason.
+  warpgateHealthOnServer: WarpgateHealth;
 }
 export const h = {} as SettingsHarnessState;
 
@@ -167,6 +170,10 @@ export function stubApi(): void {
       // Credential-gateway health (issue #23) — General's status card.
       if (url === '/api/v1/onecli/health' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, h.oneCLIHealthOnServer));
+      }
+      // SSH-bastion health (issue #39) — General's BastionStatus card.
+      if (url === '/api/v1/warpgate/health' && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, h.warpgateHealthOnServer));
       }
       return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
     }),
@@ -342,6 +349,11 @@ export function installSettingsHooks(): void {
       state: 'off',
       api: { configured: false, reachable: false },
       gateway: { configured: false, reachable: false },
+    };
+    h.warpgateHealthOnServer = {
+      state: 'off',
+      api: { configured: false, reachable: false },
+      ssh: { configured: false, reachable: false },
     };
     stubApi();
   });

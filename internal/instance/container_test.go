@@ -626,7 +626,7 @@ func TestContainerEnv(t *testing.T) {
 		// Author identity: public, passes verbatim.
 		"GIT_AUTHOR_NAME=Dominik",
 	}
-	env, forward := containerEnv(spawnEnv, hostHome, sockURL)
+	env, forward := containerEnv(spawnEnv, hostHome, sockURL, "")
 
 	wantEnv := []string{
 		"GIT_SSH_COMMAND=ssh -i /state/instances/run_1/runtime/cred.run_1.key -o IdentitiesOnly=yes",
@@ -652,7 +652,7 @@ func TestContainerEnv(t *testing.T) {
 	}
 
 	// Empty spawn env still yields the PATH pin and the TERM forward.
-	env, forward = containerEnv(nil, hostHome, sockURL)
+	env, forward = containerEnv(nil, hostHome, sockURL, "")
 	if !slices.Equal(env, []string{"PATH=" + podmanx.PATH}) {
 		t.Errorf("env over empty spawnEnv = %q, want exactly the PATH pin", env)
 	}
@@ -698,7 +698,7 @@ func TestContainerEnv_gatewayBundle(t *testing.T) {
 	}, proxyBundleEnv(proxyURL, bundle, noProxy)...)
 	spawnEnv = append(spawnEnv, "GIT_AUTHOR_NAME=Dominik")
 
-	env, forward := containerEnv(spawnEnv, hostHome, sockURL)
+	env, forward := containerEnv(spawnEnv, hostHome, sockURL, "")
 
 	wantEnv := []string{
 		"GIT_ASKPASS=" + runtimeDir + "/cred.run_1.askpass",

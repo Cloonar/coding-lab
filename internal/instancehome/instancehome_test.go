@@ -23,6 +23,25 @@ func TestNewDoesNoIO(t *testing.T) {
 	}
 }
 
+// RunPath is the per-run tree itself: the parent of home, runtime and imports
+// (never itself a mount source), a pure derivation like its children.
+func TestRunPathShape(t *testing.T) {
+	m := newTestManager(t)
+	const runID = "run_deadbeefdeadbeefdeadbeefdeadbeef"
+	want := filepath.Join(m.Root(), runID)
+	if got := m.RunPath(runID); got != want {
+		t.Errorf("RunPath(%q) = %q, want %q", runID, got, want)
+	}
+	for _, child := range []string{m.HomePath(runID), m.RuntimePath(runID), m.ImportsPath(runID)} {
+		if filepath.Dir(child) != m.RunPath(runID) {
+			t.Errorf("%q is not a direct child of RunPath %q", child, m.RunPath(runID))
+		}
+	}
+	if _, err := os.Stat(m.Root()); !os.IsNotExist(err) {
+		t.Errorf("RunPath created %q; want no I/O until Materialize", m.Root())
+	}
+}
+
 func TestHomePathShape(t *testing.T) {
 	m := newTestManager(t)
 	const runID = "run_deadbeefdeadbeefdeadbeefdeadbeef"
@@ -167,6 +186,12 @@ func TestWipeRemovesWholeTreeIncludingNestedFiles(t *testing.T) {
 	// A materialized credential file in the per-run runtime dir (issue #205):
 	// Wipe is what removes a run's credential surface at stop.
 	if err := os.WriteFile(filepath.Join(m.RuntimePath(runID), "cred_x.run_y.key"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A file at the per-run tree's ROOT, beside home/runtime/imports — where
+	// the Warpgate run key's revocation marker lives (ADR-0068): it must go
+	// with the tree too.
+	if err := os.WriteFile(filepath.Join(m.RunPath(runID), "warpgate-run-key.json"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runDir := filepath.Join(m.Root(), runID)
@@ -387,6 +412,12 @@ func TestSweepAll(t *testing.T) {
 		if _, err := m.Materialize(runID); err != nil {
 			t.Fatalf("Materialize(%s): %v", runID, err)
 		}
+	}
+	// A file at the orphan tree's root (the Warpgate revocation marker's
+	// level, ADR-0068) is reaped with it, and does not change which entries
+	// of <root> the sweep considers.
+	if err := os.WriteFile(filepath.Join(m.RunPath(oldOrphan), "warpgate-run-key.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	// Age the kept run and the orphan past the min-age window; leave
 	// youngStray fresh (just materialized).

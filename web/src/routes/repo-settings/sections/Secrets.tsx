@@ -7,6 +7,10 @@
 // leaves the card itself untouched: the two secret stores coexist on this
 // subpage until #27 retires lab's own `repo_secrets`, and the picker leading
 // is what says which one an operator should reach for first.
+//
+// Issue #39 adds the SSH-targets picker directly below the credential-gateway
+// grant picker (and still above this card): the Warpgate analogue of the same
+// idea, for outbound SSH targets instead of the OneCLI pool.
 
 import { A } from '@solidjs/router';
 import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
@@ -23,6 +27,7 @@ import Banner from '../../../components/Banner';
 import FormCard from '../../../components/FormCard';
 import SectionCard from '../../../components/SectionCard';
 import RepoSecretGrantsSection from './SecretGrants';
+import RepoSSHTargetsSection from './SSHTargets';
 
 function secretUpdatedOn(timestamp: string): string {
   const date = new Date(timestamp);
@@ -43,6 +48,7 @@ export default function RepoSecretsSection(props: { repoId: string }) {
   return (
     <>
       <RepoSecretGrantsSection repoId={props.repoId} />
+      <RepoSSHTargetsSection repoId={props.repoId} />
       <SectionCard
         title="Secrets"
         action={

@@ -8,6 +8,7 @@
 import { createSignal } from 'solid-js';
 import { updateSettings, type Settings, type TextSettingKey } from '../../../api';
 import Banner from '../../../components/Banner';
+import BastionStatus from '../../../components/BastionStatus';
 import CredentialGatewayStatus from '../../../components/CredentialGatewayStatus';
 import SectionCard from '../../../components/SectionCard';
 import { useSettingsForm } from '../../../components/settings/useSettingsForm';
@@ -97,6 +98,10 @@ export default function General(props: { initial: Settings; onSaved: () => void 
           form (issue #23): confirms the OneCLI sidecar is reachable before a
           run depends on it. */}
       <CredentialGatewayStatus />
+      {/* Read-only, same reasons as above (issue #39): confirms the Warpgate
+          SSH bastion sidecar is reachable, and surfaces a host-key mismatch
+          that blocks target-bearing spawns until accepted. */}
+      <BastionStatus />
     </>
   );
 }

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
 )
@@ -120,4 +123,66 @@ func TestLabURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRetryUntilComplete pins the startup Warpgate key sweep's retry (issue
+// #39 / ADR-0068): a pass that does not complete is retried after 1m, 2m,
+// 4m, 8m and then every 15m until one completes; a pass that completes first
+// time is never retried and never waits; and a done context stops the loop
+// at the wait it interrupts, without another pass.
+func TestRetryUntilComplete(t *testing.T) {
+	t.Run("retries with capped backoff until a pass completes", func(t *testing.T) {
+		passes := 0
+		pass := func(context.Context) bool { passes++; return passes == 7 }
+		var waits []time.Duration
+		wait := func(_ context.Context, d time.Duration) bool { waits = append(waits, d); return true }
+
+		attempts, done := retryUntilComplete(t.Context(), pass, bastionSweepRetryFirst, bastionSweepRetryMax, wait)
+		if attempts != 7 || !done {
+			t.Errorf("retryUntilComplete = (%d, %v), want (7, true)", attempts, done)
+		}
+		want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 15 * time.Minute, 15 * time.Minute}
+		if !slices.Equal(waits, want) {
+			t.Errorf("waits = %v, want %v", waits, want)
+		}
+	})
+
+	t.Run("a complete first pass is the only pass", func(t *testing.T) {
+		wait := func(context.Context, time.Duration) bool { t.Error("waited after a complete pass"); return true }
+		attempts, done := retryUntilComplete(t.Context(), func(context.Context) bool { return true }, time.Minute, time.Hour, wait)
+		if attempts != 1 || !done {
+			t.Errorf("retryUntilComplete = (%d, %v), want (1, true)", attempts, done)
+		}
+	})
+
+	t.Run("a done context stops the retries", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		passes := 0
+		pass := func(context.Context) bool { passes++; return false }
+		wait := func(_ context.Context, _ time.Duration) bool {
+			if passes == 2 {
+				cancel() // shutdown during the second wait
+				return false
+			}
+			return true
+		}
+		attempts, done := retryUntilComplete(ctx, pass, time.Minute, time.Hour, wait)
+		if attempts != 2 || done || passes != 2 {
+			t.Errorf("retryUntilComplete = (%d, %v) after %d passes, want (2, false) after 2", attempts, done, passes)
+		}
+		if n, _ := retryUntilComplete(ctx, pass, time.Minute, time.Hour, wait); n != 0 {
+			t.Errorf("a pass ran on an already-done context (%d attempts)", n)
+		}
+	})
+
+	t.Run("waitCtx returns early on a done context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if waitCtx(ctx, time.Hour) {
+			t.Error("waitCtx reported a full wait on a cancelled context")
+		}
+		if !waitCtx(t.Context(), time.Millisecond) {
+			t.Error("waitCtx reported an early return for an elapsed wait")
+		}
+	})
 }

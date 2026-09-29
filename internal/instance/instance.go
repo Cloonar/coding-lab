@@ -24,6 +24,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/user"
 	"path/filepath"
 	"time"
 
@@ -38,6 +40,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
+	"git.cloonar.com/Cloonar/coding-lab/internal/warpgate"
 )
 
 // Event types this service publishes (brief §8.1 SSE contract). Payloads are
@@ -95,6 +98,44 @@ type GatewayAPI interface {
 	EnsureAgent(ctx context.Context, identifier, displayName string) (onecli.Agent, error)
 	ListGrants(ctx context.Context, agentID string) ([]onecli.Grant, error)
 }
+
+// BastionAPI is the Warpgate admin-API seam the launch path wires a run's SSH
+// targets through, and the revocation path removes its key through (issue #39
+// / ADR-0068). Satisfied by *warpgate.Client; nil = no Warpgate REST client
+// configured, the normal state of a lab (bastionActive is the spawn gate,
+// and RevokeBastionKey/SweepBastionKeys gate on this field alone).
+//
+// Narrow on purpose, like GatewayAPI beside it: exactly what a spawn needs
+// (heal the repo's identity, read its role's targets fresh, register the run
+// key), what a wipe needs (remove one key) and what the startup sweep needs
+// (find an identity read-only, list its keys). The picker's assign/unassign
+// and the identity delete stay unreachable from here even by accident.
+type BastionAPI interface {
+	EnsureRepoIdentity(ctx context.Context, repoID, repoName string) (warpgate.Identity, error)
+	FindRepoIdentity(ctx context.Context, repoID string) (warpgate.Identity, bool, error)
+	RoleSSHTargets(ctx context.Context, roleID string) ([]warpgate.Target, error)
+	AddPublicKey(ctx context.Context, userID, label, authorizedKey string) (warpgate.PublicKey, error)
+	ListPublicKeys(ctx context.Context, userID string) ([]warpgate.PublicKey, error)
+	RemovePublicKey(ctx context.Context, userID, keyID string) error
+}
+
+// BastionHostKeys is the host-key pin seam (ADR-0068 decision 4): KnownHosts
+// scans Warpgate's SSH listener and returns the known_hosts text a run gets —
+// rendered from the trusted keys in --warpgate-ssh-host-key when that is set
+// and the listener presents one of them, else from every key the listener
+// presented — or an actionable error on a mismatch or an unreachable
+// listener. Satisfied by *warpgate.HostKeyPin. Every target-bearing spawn
+// calls it; the scan doubles as the SSH listener's reachability probe.
+type BastionHostKeys interface {
+	KnownHosts(ctx context.Context) (string, error)
+}
+
+// Compile-time proof that the two concrete types cmd/lab wires satisfy the
+// seams.
+var (
+	_ BastionAPI      = (*warpgate.Client)(nil)
+	_ BastionHostKeys = (*warpgate.HostKeyPin)(nil)
+)
 
 // Options configures a Service. Everything except Logger, GitEnv, CaptureCtx,
 // Seeder, and Now is required.
@@ -200,6 +241,38 @@ type Options struct {
 	// is about to be pointed at a TLS-terminating proxy it could not verify.
 	OneCLICAFile string
 
+	// --- Warpgate SSH-bastion wiring (issue #39 / ADR-0068). All optional,
+	// the OneCLI block's shape again: a run is wired only when ALL THREE are
+	// set (bastionActive), and even then only when its repo has at least one
+	// SSH target. With any of them unset every spawn is byte-identical to a
+	// lab that never had these fields — no Warpgate call, no key, no file, no
+	// PATH change, no seeder section.
+	//
+	// The two interface fields share the OneCLI fields' nil-interface trap:
+	// a nil *warpgate.Client or nil *warpgate.HostKeyPin assigned straight
+	// into them is a NON-nil interface holding a nil pointer, which would read
+	// as "configured" and panic inside the client on the first target-bearing
+	// spawn. cmd/lab must leave them nil when unconfigured (declare the
+	// interface, assign only a non-nil pointer); New also normalizes the two
+	// concrete typed nils back to nil as the belt to those braces.
+
+	// Warpgate is the admin-API seam (--warpgate-url + the paired
+	// --warpgate-admin-token-file). Production passes *warpgate.Client. Set
+	// on its own — the REST pair without an SSH address — it drives nothing
+	// at spawn (a lab with no address has nothing to hand a run), but it
+	// still arms RevokeBastionKey and SweepBastionKeys: keys registered under
+	// an earlier configuration must stay revocable.
+	Warpgate BastionAPI
+	// WarpgateSSHAddr is the bastion's SSH listener as a RUN dials it
+	// (--warpgate-ssh-addr, host:port) — the HostName/Port of every alias.
+	// Independently settable for --onecli-gateway-url's reason: lab's REST
+	// address is loopback, and a containerized run cannot reach the host's
+	// loopback (ADR-0052's host.containers.internal pin).
+	WarpgateSSHAddr string
+	// WarpgateHostKeys is the host-key pin over WarpgateSSHAddr. Production
+	// passes *warpgate.HostKeyPin built on the same address.
+	WarpgateHostKeys BastionHostKeys
+
 	// GitEnv is prepended to every git subprocess (before the per-credential
 	// env). Production leaves it nil; tests pass testutil.HermeticGitEnv so
 	// service-driven worktree ops never read the developer's git config.
@@ -253,6 +326,27 @@ type Service struct {
 	onecli           GatewayAPI
 	oneCLIGatewayURL string
 	oneCLICAFile     string
+
+	// Warpgate SSH-bastion wiring (issue #39 / ADR-0068; see the Options
+	// fields). warpgate nil = no REST client at all; bastionActive() is the
+	// spawn gate over all three.
+	warpgate         BastionAPI
+	warpgateSSHAddr  string
+	warpgateHostKeys BastionHostKeys
+
+	// hostPATH returns the base PATH a wired HOST run's wrapper dir is
+	// prepended to. New sets it to read os.Getenv("PATH") AT SPAWN, not once
+	// at startup, deliberately: tmuxx computes a pane's baseline PATH from the
+	// lab process environment per call as well, so a wired run's PATH is the
+	// wrapper dir followed by exactly the PATH an unwired pane spawned at the
+	// same instant inherits. Tests replace it with a constant.
+	hostPATH func() string
+	// userSSHConfig returns the lab service user's own per-user OpenSSH
+	// config (<passwd home>/.ssh/config), which a wired host run's config
+	// re-includes, or "" when the home is unknown. New sets it to
+	// serviceUserSSHConfig; it is consulted only for a wired host run. Tests
+	// replace it so they never depend on the machine's passwd entry.
+	userSSHConfig func() string
 
 	// afkStop is the M5 AFK engine's neutral-Stop delegation (design §4c),
 	// wired once at startup via SetAFKStopper; nil refuses AFK stops.
@@ -321,6 +415,7 @@ func New(o Options) (*Service, error) {
 	if podmanRun == nil {
 		podmanRun = podmanx.ExecRunner()
 	}
+	bastion, hostKeys := normalizeBastion(o.Warpgate, o.WarpgateHostKeys)
 	return &Service{
 		store:        o.Store,
 		git:          o.Git,
@@ -350,7 +445,45 @@ func New(o Options) (*Service, error) {
 		onecli:           o.OneCLI,
 		oneCLIGatewayURL: o.OneCLIGatewayURL,
 		oneCLICAFile:     o.OneCLICAFile,
+
+		warpgate:         bastion,
+		warpgateSSHAddr:  o.WarpgateSSHAddr,
+		warpgateHostKeys: hostKeys,
+		hostPATH:         func() string { return os.Getenv("PATH") },
+		userSSHConfig:    serviceUserSSHConfig,
 	}, nil
+}
+
+// normalizeBastion turns a typed nil — a nil *warpgate.Client or nil
+// *warpgate.HostKeyPin stored in the interface-typed Options fields — into
+// the nil interface it was meant to be (httpapi's normalizeWarpgate, the same
+// belt for the same braces). Without it a lab that configured no Warpgate but
+// passed a nil pointer through would read as configured, and its first
+// target-bearing spawn would panic inside the client. Only the two concrete
+// types lab wires are recognized; a test fake is whatever it is.
+func normalizeBastion(api BastionAPI, keys BastionHostKeys) (BastionAPI, BastionHostKeys) {
+	if c, ok := api.(*warpgate.Client); ok && c == nil {
+		api = nil
+	}
+	if p, ok := keys.(*warpgate.HostKeyPin); ok && p == nil {
+		keys = nil
+	}
+	return api, keys
+}
+
+// serviceUserSSHConfig is the per-user OpenSSH config a HOST run's ssh read
+// before it was wired: the passwd home of lab's own uid plus /.ssh/config.
+// The PASSWD home, via os/user, not $HOME — that is where OpenSSH looks
+// (pw->pw_dir), and the reason a config in the instance HOME is invisible to
+// it (ADR-0068). os/user caches its answer, so calling this per spawn costs
+// one lookup per process. "" when the home cannot be determined; the run's
+// config then simply omits the per-user Include.
+func serviceUserSSHConfig() string {
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" {
+		return ""
+	}
+	return filepath.Join(u.HomeDir, ".ssh", "config")
 }
 
 // gatewayActive reports whether this lab has the OneCLI run wiring turned on.
@@ -368,6 +501,22 @@ func New(o Options) (*Service, error) {
 // and is unreachable, never about a gateway nobody asked for.
 func (s *Service) gatewayActive() bool {
 	return s.onecli != nil && s.oneCLIGatewayURL != ""
+}
+
+// bastionActive reports whether this lab wires runs to the Warpgate SSH
+// bastion (issue #39 / ADR-0068): the REST client (--warpgate-url + the
+// paired --warpgate-admin-token-file), the SSH address a run dials
+// (--warpgate-ssh-addr), and the host-key pin over that address — all three.
+//
+// The REST pair alone is a legitimate deployment, not a half-configured one:
+// it gives health and the per-repo identity lifecycle, and its spawns are
+// UNCHANGED — ADR-0068 calls it "unconfigured for this purpose, not a
+// refusal", because a lab with no address has nothing to hand a run, and
+// refusing would turn a deployment choice into a fleet outage. Even with all
+// three set, a spawn is wired only when its repo has at least one SSH target
+// (prepareBastion); this gate only decides whether that question is asked.
+func (s *Service) bastionActive() bool {
+	return s.warpgate != nil && s.warpgateSSHAddr != "" && s.warpgateHostKeys != nil
 }
 
 // bareDir is the repo's bare reference clone (design §7).

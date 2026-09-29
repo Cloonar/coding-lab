@@ -152,7 +152,18 @@ func (s *Service) effectiveContainerLimits(ctx context.Context, repo store.Repo)
 // lab-pinned CLI must win over the dev image's own) into env, and TERM into
 // forward (the provider TUI needs the pane's real TERM; tmux sets it in the
 // pane env, so name-forwarding is exactly right).
-func containerEnv(spawnEnv []string, hostHome, sockURL string) (env, forward []string) {
+//
+// EXACTLY ONE PATH, and it is this function's (issue #39 / ADR-0068). A PATH
+// entry arriving in spawnEnv is DROPPED in the walk rather than passed as
+// K=V: it could only be a host-shaped value — the host's PATH names host
+// directories that mean nothing inside the dev image — and a second PATH in
+// the podman argv would leave which one wins to podman's --env ordering.
+// pathPrefix is what goes in front of podmanx.PATH: "" for every unwired run
+// — so an unwired container's env is byte-identical to before #39 — and a
+// Warpgate-wired run's wrapper dir plus ":" (bastionContainerPATHPrefix),
+// which is a runtime-dir path and therefore valid inside the container
+// unchanged, like the trust bundle above.
+func containerEnv(spawnEnv []string, hostHome, sockURL, pathPrefix string) (env, forward []string) {
 	for _, kv := range spawnEnv {
 		name, _, _ := strings.Cut(kv, "=")
 		switch {
@@ -160,12 +171,14 @@ func containerEnv(spawnEnv []string, hostHome, sockURL string) (env, forward []s
 			forward = append(forward, name)
 		case name == "LAB_URL":
 			env = append(env, "LAB_URL="+sockURL)
+		case name == "PATH":
+			// Never forwarded inward; composed below.
 		default:
 			env = append(env, kv)
 		}
 	}
 	env = podmanx.RewriteHomeEnv(env, hostHome)
-	env = append(env, "PATH="+podmanx.PATH)
+	env = append(env, "PATH="+pathPrefix+podmanx.PATH)
 	forward = append(forward, "TERM")
 	return env, forward
 }

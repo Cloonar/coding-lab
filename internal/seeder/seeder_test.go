@@ -212,7 +212,7 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 }
 
 func TestRenderContextFile_forgeBinding(t *testing.T) {
-	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil, nil, nil)
+	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestRenderContextFile_claudeGoldenByteIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil, nil, nil)
+			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -475,7 +475,7 @@ func TestSeedWorkspace_nonNativeAppendsSkillsIndex(t *testing.T) {
 // native-discovery-WITH-skills absence is asserted in the golden test above.)
 func TestRenderContextFile_noIndexWithoutSkillsDir(t *testing.T) {
 	meta := provider.SeedMeta{ContextFileName: "AGENTS.local.md", NativeSkillDiscovery: false}
-	got, err := renderContextFile(builtinRepo, meta, nil, nil, nil)
+	got, err := renderContextFile(builtinRepo, meta, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 		"empty": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets, nil, nil)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -514,7 +514,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 // and the `labctl secret list` pointer. Byte-pinned against a NEW golden
 // (contextfile-claude-builtin-secrets.golden) captured for this shape.
 func TestRenderContextFile_withSecrets(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, nil, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestRenderContextFile_zeroImportsByteIdentical(t *testing.T) {
 			"empty": {},
 		} {
 			t.Run(tc.name+"/"+name, func(t *testing.T) {
-				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, imports)
+				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil, imports)
 				if err != nil {
 					t.Fatalf("renderContextFile: %v", err)
 				}
@@ -580,7 +580,7 @@ func TestRenderContextFile_zeroImportsByteIdentical(t *testing.T) {
 // (contextfile-claude-builtin-imports.golden) captured for this shape, the
 // same way TestRenderContextFile_withSecrets pins the secrets shape.
 func TestRenderContextFile_withImports(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, testImports)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, testImports)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestRenderContextFile_withImports(t *testing.T) {
 // section comes FIRST — repo-driven content before the provider-driven tail
 // (the append order documented on appendSecretsSection).
 func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil)
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -640,7 +640,7 @@ func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T)
 // extended with the imports section per the ordering documented on
 // appendSecretsSection and appendImportsSection).
 func TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, testImports)
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil, testImports)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestRenderContextFile_nilGatewayByteIdentical(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -736,7 +736,7 @@ func TestRenderContextFile_nilGatewayByteIdentical(t *testing.T) {
 // legacy teaching is gone, which is an explicit issue #24 acceptance
 // criterion, not a nicety.
 func TestRenderContextFile_withGateway(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: testGatewayServices}, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: testGatewayServices}, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -789,7 +789,7 @@ func TestRenderContextFile_gatewayWithoutServices(t *testing.T) {
 		"empty": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: services}, nil)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: services}, nil, nil)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -824,7 +824,7 @@ func TestRenderContextFile_gatewayWithoutServices(t *testing.T) {
 // repo_secrets rows keep existing until #27 — so this is the case that has to
 // be pinned, not assumed.
 func TestRenderContextFile_gatewayReplacesLegacySecrets(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, &GatewayRef{Services: testGatewayServices}, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, &GatewayRef{Services: testGatewayServices}, nil, nil)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -853,7 +853,7 @@ func TestRenderContextFile_gatewayReplacesLegacySecrets(t *testing.T) {
 // CONTENT never reshuffles the file (mirrors
 // TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered).
 func TestRenderContextFile_nonNativeWithGatewayAndImportsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, testImports)
+	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, nil, testImports)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -900,6 +900,134 @@ func TestSeedWorkspace_onDiskWithGatewayMatchesGolden(t *testing.T) {
 	}
 	if want := readGolden(t, "contextfile-claude-builtin-gateway.golden"); !bytes.Equal(got, want) {
 		t.Errorf("on-disk CLAUDE.local.md with a gateway != golden\n%s", byteDiff(got, want))
+	}
+}
+
+// testSSHTargets is the SSH-bastion alias fixture (issue #39 / ADR-0068): the
+// aliases a wired run can type, deliberately NOT alphabetical so the tests pin
+// that the render keeps the caller's order. Names only, because a BastionRef
+// carries nothing else: no bastion address, no Warpgate username, no key path.
+var testSSHTargets = []string{"staging", "build-box"}
+
+// The bastion is opt-in per run: with Opts.Bastion nil — Warpgate
+// unconfigured, or a repo without SSH targets — the render is byte-for-byte
+// what it was before issue #39, for every existing golden shape. A non-nil ref
+// with no targets (which the launch path never produces) renders nothing
+// either: there is no alias to teach.
+func TestRenderContextFile_noBastionByteIdentical(t *testing.T) {
+	cases := []struct {
+		name    string
+		secrets []store.RepoSecret
+		gateway *GatewayRef
+		imports []ImportRef
+		golden  string
+	}{
+		{"plain", nil, nil, nil, "contextfile-claude-builtin.golden"},
+		{"secrets", testSecrets, nil, nil, "contextfile-claude-builtin-secrets.golden"},
+		{"gateway", nil, &GatewayRef{Services: testGatewayServices}, nil, "contextfile-claude-builtin-gateway.golden"},
+		{"imports", nil, nil, testImports, "contextfile-claude-builtin-imports.golden"},
+	}
+	for _, tc := range cases {
+		want := readGolden(t, tc.golden)
+		for name, bastion := range map[string]*BastionRef{
+			"nil":              nil,
+			"no targets (nil)": {},
+			"no targets (empty)": {
+				Targets: []string{},
+			},
+		} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, tc.gateway, bastion, tc.imports)
+				if err != nil {
+					t.Fatalf("renderContextFile: %v", err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("render with a %s bastion ref != %s\n%s", name, tc.golden, byteDiff(got, want))
+				}
+			})
+		}
+	}
+}
+
+// With a bastion, a claude-shaped render carries the SSH targets section: how
+// to connect by alias (ssh, scp, sftp, rsync -e ssh, no extra flags), that no
+// credential for these hosts is in the instance, that unlisted hosts are not
+// reachable through lab, and one `ssh <alias>` bullet per alias IN THE
+// CALLER'S ORDER. Byte-pinned against a NEW golden
+// (contextfile-claude-builtin-ssh.golden), the same way the gateway and
+// imports shapes are.
+func TestRenderContextFile_withBastion(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, &BastionRef{Targets: testSSHTargets}, nil)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-ssh.golden"); !bytes.Equal(got, want) {
+		t.Errorf("render != contextfile-claude-builtin-ssh.golden\n%s", byteDiff(got, want))
+	}
+	gotStr := string(got)
+	for _, want := range []string{
+		"## SSH targets",
+		"`ssh <alias>`",
+		"`scp`, `sftp`, and\n`rsync -e ssh`",
+		"No\ncredential for these hosts is in this instance",
+		"not reachable through lab",
+		"never disable host-key checking",
+		"- `ssh staging`\n- `ssh build-box`\n",
+	} {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("SSH targets section missing %q", want)
+		}
+	}
+	// Nothing routing- or credential-shaped: the ref cannot carry it, and the
+	// prose must not invent it.
+	for _, leak := range []string{"warpgate-", "-F ", "IdentityFile", "known_hosts", "repo-"} {
+		if strings.Contains(gotStr, leak) {
+			t.Errorf("SSH targets section mentions %q", leak)
+		}
+	}
+}
+
+// Every section together, in the documented order: template body → Secrets
+// (the gateway one here) → SSH targets → Read-only imports → Seeded skills —
+// every repo-driven section ahead of the provider-driven tail, so adding the
+// bastion never reshuffles the file.
+func TestRenderContextFile_nonNativeWithEverySectionOrdered(t *testing.T) {
+	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, &BastionRef{Targets: testSSHTargets}, testImports)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+	order := []string{"## Tracker binding", "## Secrets", "## SSH targets", "## Read-only imports", "## Seeded skills"}
+	last := -1
+	for _, heading := range order {
+		idx := strings.Index(gotStr, heading)
+		if idx == -1 {
+			t.Fatalf("missing %s section", heading)
+		}
+		if idx <= last {
+			t.Errorf("%s (offset %d) out of order; want the order %q", heading, idx, order)
+		}
+		last = idx
+	}
+	if n := strings.Count(gotStr, "## SSH targets"); n != 1 {
+		t.Errorf("%d SSH targets headings, want exactly 1", n)
+	}
+}
+
+// The full seed path writes the SSH targets section to disk when Opts.Bastion
+// is set — the field the launch path populates reaches the file, not just
+// renderContextFile's parameter.
+func TestSeedWorkspace_onDiskWithBastionMatchesGolden(t *testing.T) {
+	wt, _ := newWorktree(t)
+	if err := New().SeedWorkspace(wt, builtinRepo, claudeGoldenMeta, Opts{Bastion: &BastionRef{Targets: testSSHTargets}}); err != nil {
+		t.Fatalf("SeedWorkspace: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-ssh.golden"); !bytes.Equal(got, want) {
+		t.Errorf("on-disk CLAUDE.local.md with a bastion != golden\n%s", byteDiff(got, want))
 	}
 }
 

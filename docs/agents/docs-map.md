@@ -24,7 +24,7 @@ paragraphs about internals are not.
 | `internal/httpapi` | `README.md` (surfaces/endpoints), `docs/ops.md` (auth, probes, forward-auth) |
 | `internal/provider*` (incl. adapters, `providertest`) | `docs/agents/provider-authoring.md`, `docs/model-selection.md`, `README.md` features |
 | `internal/tracker`, `internal/afk`, `internal/crmerge` | `README.md` (AFK loop), `docs/agents/triage-labels.md`, `docs/getting-started.md` |
-| `internal/vault`, `internal/secrets`, `internal/onecli`, `internal/credrotate` | `docs/ops.md` (vault, OneCLI credential gateway), `README.md` |
+| `internal/vault`, `internal/secrets`, `internal/onecli`, `internal/warpgate`, `internal/credrotate` | `docs/ops.md` (vault, OneCLI credential gateway, Warpgate SSH bastion), `README.md` |
 | `internal/store`, `migrations/` | `docs/ops.md` (database, backup/restore) |
 | `internal/metrics`, metric label vocabularies (e.g. `internal/tracker/instrument.go`, run kinds/outcomes in `internal/store/runs.go`) | `docs/ops.md` § Metrics — the label enums there must list every value the code can emit |
 | `internal/instance`, `internal/instancehome`, `internal/seeder`, `internal/podmanx`, `containers/` | `docs/ops.md` (runners, state directory tree), `README.md` |

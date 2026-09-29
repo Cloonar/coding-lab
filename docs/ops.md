@@ -8,6 +8,7 @@ What's here, in the order you'll need it:
 - [Configuration reference](#configuration-reference) — every flag, env var, and runtime setting
 - [Seeding the initial operator user](#seeding-the-initial-operator-user) · [Forge credentials](#forge-credentials)
 - [OneCLI credential gateway](#onecli-credential-gateway) — repo secrets for agent runs
+- [Warpgate SSH bastion](#warpgate-ssh-bastion) — SSH targets for agent runs
 - [State directory layout](#state-directory-layout) · [Backup & restore](#backup-restore)
 - [CI runner prerequisites](#ci-runner-prerequisites) · [Agent-tools images](#agent-tools-images) · [Container runner](#container-runner)
 - [Observability](#observability) · [Metrics](#metrics) · [Push notifications](#push-notifications) · [Incogni mode](#incogni-mode)
@@ -38,6 +39,10 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `onecli.dashboardAddr` | `null` | Passed as `--onecli-dashboard-addr`. Listen address for the second listener, e.g. `":8443"`. Required in `port` mode; rejected in any other mode. |
 | `onecli.dashboardUrl` | `null` | Passed as `--onecli-dashboard-url`. The **browser-facing** dashboard origin (e.g. `"https://onecli.example.com"`). Required in `subdomain` mode; optional override in `port` mode. |
 | `sessionCookieDomain` | `null` | Passed as `--session-cookie-domain`. `Domain` attribute on the session cookie; `null` keeps it host-only. Needed **only** for `onecli.dashboard = "subdomain"` — read the warning in [Dashboard exposure](#dashboard-exposure) first. |
+| `warpgate.url` | `null` | Passed as `--warpgate-url`. Warpgate admin API base as lab reaches it (`"https://localhost:8888"`). Set together with `warpgate.adminTokenFile`; `null` leaves the integration off ([Warpgate SSH bastion](#warpgate-ssh-bastion)). The module never deploys Warpgate itself. |
+| `warpgate.adminTokenFile` | `null` | Passed as `--warpgate-admin-token-file`. File holding Warpgate's admin token — 0600 or stricter (startup refuses otherwise); never auto-generated, the token is minted when you deploy Warpgate. |
+| `warpgate.sshAddr` | `null` | Passed as `--warpgate-ssh-addr`. `host:port` runs dial for Warpgate's SSH listener — usually a container-reachable address such as `"10.88.0.1:2222"`, not loopback. Independent of the other `warpgate.*` options. |
+| `warpgate.caFile` | `null` | Passed as `--warpgate-ca-file`. PEM file lab trusts — exclusively — for the admin API: Warpgate's generated self-signed certificate. `null` uses the system roots. |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps the sqlite default **and** lets `LAB_DB` from `environmentFile` take effect (flag > env > default). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (e.g. `LAB_DB` with a password-bearing DSN). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. Auto-generated 0600 when absent; loose permissions or malformed content refuse startup. |
@@ -205,6 +210,10 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--onecli-dashboard-addr` | `LAB_ONECLI_DASHBOARD_ADDR` | (empty) | Second listener address for `port` mode, e.g. `:8443`. Required in `port` mode; rejected otherwise. |
 | `--onecli-dashboard-url` | `LAB_ONECLI_DASHBOARD_URL` | (empty) | Browser-facing dashboard origin. Required in `subdomain` mode; optional port-remap override in `port` mode; refused in `off`. |
 | `--session-cookie-domain` | `LAB_SESSION_COOKIE_DOMAIN` | (empty) | Cookie `Domain` attribute, bare domain only. Empty keeps the cookie host-only — right everywhere except `subdomain` mode ([Dashboard exposure](#dashboard-exposure)). |
+| `--warpgate-url` | `LAB_WARPGATE_URL` | (empty) | Warpgate admin API base as lab reaches it, e.g. `https://localhost:8888`. Set together with `--warpgate-admin-token-file`; unset = integration off ([Warpgate SSH bastion](#warpgate-ssh-bastion)). |
+| `--warpgate-admin-token-file` | `LAB_WARPGATE_ADMIN_TOKEN_FILE` | (empty) | File with Warpgate's admin token, 0600 or stricter, one line. Never auto-generated; read at startup. |
+| `--warpgate-ssh-addr` | `LAB_WARPGATE_SSH_ADDR` | (empty) | `host:port` runs dial for Warpgate's SSH listener, e.g. `10.88.0.1:2222` — a container-reachable address, independent of `--warpgate-url`. |
+| `--warpgate-ca-file` | `LAB_WARPGATE_CA_FILE` | (empty) | PEM file lab trusts — and only it — for the admin API, e.g. Warpgate's generated `tls.certificate.pem`. Unset = the system roots. |
 
 Per-provider host settings resolve per provider entry, highest wins: **generic flag > generic env > alias flag > alias env** (ADR-0034).
 
@@ -633,6 +642,268 @@ Unconfigured is not unhealthy: with no OneCLI set, the GETs answer `200` with `c
 - The dashboard runs in local single-user mode with **no login** — which is exactly why its port stays bound to loopback, never widened the way 10255 sometimes must be.
 - Dashboard exposure through lab's auth is configuration: `--onecli-dashboard` = `off` | `port` | `subdomain` ([Dashboard exposure](#dashboard-exposure)).
 
+## Warpgate SSH bastion
+
+[Warpgate](https://github.com/warp-tech/warpgate) is an open-source SSH bastion: a client logs in to Warpgate, names the host it wants in its SSH username, and Warpgate opens the onward connection with a credential it keeps in its own database. Wired into lab, it lets a run reach operator-defined **SSH targets** — a staging box, a build host, a machine to deploy to — as plain `ssh <target>`, without ever holding the target's key or password. What the run does hold, its **run key**, opens only Warpgate, only its repo's targets, and only until the run is wiped. It is the SSH sibling of the [credential gateway](#onecli-credential-gateway), which fronts outbound HTTPS. Git is untouched: clone, fetch, and push stay on the repo's deploy key from the vault. The integration is entirely off unless `--warpgate-url` and `--warpgate-admin-token-file` are both set. Design rationale: [ADR-0068](adr/0068-warpgate-ssh-bastion.md).
+
+### Deploying Warpgate
+
+Warpgate ships as one container image; lab is verified against **0.29.1**, so pin that tag. It keeps everything — config, database, TLS certificate, recordings — in one `/data` volume, and exposes two ports: **8888** (admin UI and admin API, HTTPS) and **2222** (the SSH listener). As with OneCLI, the two ports want *different* interfaces:
+
+```yaml
+# /srv/warpgate/compose.yaml
+services:
+  warpgate:
+    image: ghcr.io/warp-tech/warpgate:0.29.1
+    # The image's default command is a plain `run`. Lab authenticates with
+    # Warpgate's static admin token, which only `--enable-admin-token` turns on;
+    # the token itself comes from WARPGATE_ADMIN_TOKEN in the env file.
+    command: ["run", "--enable-admin-token"]
+    env_file: warpgate.env          # WARPGATE_ADMIN_TOKEN=…, 0600 (step 1)
+    volumes:
+      - warpgate-data:/data
+    ports:
+      - "127.0.0.1:8888:8888"       # admin UI/API: lab and the operator only
+      - "10.88.0.1:2222:2222"       # SSH: must be reachable from container runs
+    restart: unless-stopped
+
+volumes:
+  warpgate-data:
+```
+
+> **The SSH port cannot be loopback-only when the `container` runner is in use** — for the same reason the OneCLI gateway port cannot ([Deploying the sidecar](#deploying-the-sidecar)): containerized runs deliberately cannot reach loopback-bound host services. Bind 2222 to an address container runs can route to (a bridge address, a second NIC, the host's LAN IP) and pass that address as `--warpgate-ssh-addr`. This is the second deliberate exception to "bind co-located host services to loopback": scope the interface as narrowly as you can, and treat Warpgate's own login — which admits a repo's user only with a key registered on it — not the bind address, as the authorization boundary. Lab itself scans the same address to check Warpgate's host key, so it must be reachable from the lab host too (a bridge address on the host is). The `host` runner has no such constraint; `127.0.0.1:2222` is fine there. The admin port gets no exception in any deployment: it stays on loopback.
+
+1. **Mint the admin token** and write it twice — once for the container, once for lab. Lab refuses a token file looser than 0600 and never generates one:
+
+   ```console
+   $ cd /srv/warpgate
+   $ token=$(openssl rand -hex 32)
+   $ install -m 0600 /dev/stdin warpgate.env <<< "WARPGATE_ADMIN_TOKEN=$token"
+   $ sudo install -m 0600 -o lab -g lab /dev/stdin /var/lib/lab/warpgate-admin-token <<< "$token"
+   $ unset token
+   ```
+
+2. **Run Warpgate's one-time setup.** It writes `/data/warpgate.yaml`, creates the database and the `admin` user, generates the SSH host keys and a self-signed TLS certificate, and refuses to run a second time once the config exists:
+
+   ```console
+   $ read -rsp 'Warpgate admin password: ' WARPGATE_ADMIN_PASSWORD; echo
+   $ export WARPGATE_ADMIN_PASSWORD
+   $ docker compose run --rm -e WARPGATE_ADMIN_PASSWORD warpgate \
+         unattended-setup --data-path /data --http-port 8888 --ssh-port 2222 --record-sessions
+   $ unset WARPGATE_ADMIN_PASSWORD
+   ```
+
+   The password is yours, for logging in to the admin UI as `admin`; lab never uses it. `--ssh-port` is what turns the SSH listener on — without it Warpgate serves HTTPS only. `--record-sessions` keeps a recording of every session in the volume; leave it out if you don't want recordings.
+
+3. **Start it, and copy out its certificate** for lab to trust:
+
+   ```console
+   $ docker compose up -d
+   $ docker compose exec -T warpgate cat /data/tls.certificate.pem \
+       | sudo install -m 0644 -o lab -g lab /dev/stdin /var/lib/lab/warpgate-ca.pem
+   ```
+
+   The generated certificate names only `localhost` and `warpgate.local` — which is why lab dials `https://localhost:8888` below, never `https://127.0.0.1:8888`.
+
+A Warpgate set up earlier without `--ssh-port` has its SSH listener off. Turn it on in `/data/warpgate.yaml` and restart the container:
+
+```yaml
+ssh:
+  enable: true
+  listen: "[::]:2222"
+```
+
+### Wiring lab to Warpgate
+
+```console
+$ lab --warpgate-url https://localhost:8888 \
+      --warpgate-admin-token-file /var/lib/lab/warpgate-admin-token \
+      --warpgate-ca-file /var/lib/lab/warpgate-ca.pem \
+      --warpgate-ssh-addr 10.88.0.1:2222 \
+      --warpgate-ssh-host-key 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…' \
+      ...
+```
+
+NixOS:
+
+```nix
+services.lab.warpgate = {
+  url = "https://localhost:8888";
+  adminTokenFile = "/run/secrets/lab-warpgate-admin-token";   # sops/LoadCredential, 0600
+  caFile = "/var/lib/lab/warpgate-ca.pem";
+  sshAddr = "10.88.0.1:2222";
+  sshHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…";      # optional; see Host key pinning
+};
+```
+
+- `--warpgate-url` and `--warpgate-admin-token-file` must be set together; lab refuses to start with only one. The token file follows the master key's rule — 0600 or stricter, one line — and is read once at startup, so a new token means a lab restart.
+- `--warpgate-ca-file` makes lab trust **only** that certificate for the admin API. Unset, lab uses the system roots — right for a Warpgate you have given a publicly issued certificate. With the generated certificate the URL must say `localhost`: it carries no IP address, so `https://127.0.0.1:8888` fails verification.
+- `--warpgate-ssh-addr` is independent, like `--onecli-gateway-url`: it is the `host:port` runs dial — container-routable, never `host.containers.internal`, and not `127.0.0.1` while any repo uses the container runner.
+- `--warpgate-ssh-host-key` is optional and needs `--warpgate-ssh-addr`: the public host key of Warpgate's SSH listener that runs trust. Unset, runs trust whatever the listener presents — see [Host key pinning](#host-key-pinning) for how to read the key and why to set it.
+- The REST pair alone is a valid deployment: health, and each repo's Warpgate user and role kept in step with lab, with every spawn untouched. A run is **bastion-wired** only when all three of URL, token file, and SSH address are set — and then only if its repo has an SSH target.
+
+**What lab keeps in Warpgate.** Every lab repo gets one Warpgate user and one Warpgate role, both named `repo-<32 hex>` after the repo's ID and described with the repo's name: created with the repo (and at startup for repos that predate the configuration), deleted with the repo. Leave them to lab. A description edited in Warpgate's UI is overwritten at the next check, and a deleted role takes the repo's target assignments with it — lab re-creates the role, empty. Lab's startup pass never deletes anything in Warpgate.
+
+### Defining targets and granting them to a repo
+
+Targets — and the password or key Warpgate uses to reach each one — are created in Warpgate's own admin UI; lab never creates, reads, or edits one. The admin port is loopback-only, so reach it through an SSH tunnel from your workstation:
+
+```console
+$ ssh -N -L 8888:127.0.0.1:8888 operator@lab.example.com
+```
+
+Browse `https://localhost:8888/@warpgate/admin` while that `ssh` lives, accept the self-signed certificate, and log in as `admin`. (Reaching this UI through lab's own auth, the way `--onecli-dashboard` does for OneCLI, is issue #47; until then the tunnel is the way in.)
+
+1. **Config → Targets → Add a target**, kind SSH: the host, the port, the user on the target, and how Warpgate authenticates there — a password, or a key: add one of Warpgate's own client keys (**Config → SSH keys**) to the target's `authorized_keys`.
+2. **Name it the way a run should type it.** The target's name becomes the run's `ssh` alias, so keep to letters, digits, `.`, `_`, and `-`, starting with a letter or digit, and don't reuse the repo's forge host. A target whose name doesn't qualify is skipped at spawn with a warning in lab's log; rename it in Warpgate.
+3. **Trust the target's host key in Warpgate.** On the target's page: **Check host key**, then **Trust**. Warpgate's default policy asks about an unknown target key interactively, and a run's `ssh <target> <command>`, `scp`, or `rsync` has no terminal to answer on — Warpgate drops the connection instead.
+4. **Assign it to repos in lab:** repo settings → Secrets → **SSH targets** card. It lists every SSH target in Warpgate, and each toggle (**Not assigned** / **✓ Assigned**) adds or removes the repo's Warpgate role on that target. Warpgate enforces the change from the next login; a running run's aliases were written at its spawn, so a newly assigned target reaches the *next* run.
+
+Assigning the repo's role on the target's own page in Warpgate (**Allow access for roles**) works too, but lab only learns of it the next time it reads that repo's targets: when the SSH targets card is opened, at a lab restart, or — for a repo that already has a target — at its next spawn. For a repo getting its first target that way, opening its SSH targets card once is enough.
+
+The API behind the card:
+
+```console
+$ curl -s --cookie "lab_session=$TOKEN" \
+       https://lab.example.com/api/v1/repos/repo_4b1f0c7a9d3e42a8b6c5d0e1f2a3b4c5/warpgate/targets
+{"configured":true,"targets":[{"id":"8c0e4f5a-…","name":"staging","description":"Staging web host","assigned":true}]}
+```
+
+- `GET /api/v1/repos/{id}/warpgate/targets` — every SSH target in Warpgate, each flagged with whether this repo's role carries it. Metadata only, never a credential.
+- `PUT`/`DELETE /api/v1/repos/{id}/warpgate/targets/{targetId}` — assign/unassign one target, `204`. The assign creates the repo's Warpgate user and role if they are missing; an id that is not an SSH target answers `404`.
+
+With the REST pair unset, the GET answers `200` with `configured:false` and an empty list, and the mutations answer `409`. A configured-but-unreachable Warpgate answers `502` with the underlying error, which the card shows with a **Retry** — a listing failure blocks nothing else.
+
+### What a bastion-wired run gets
+
+A bastion-wired run of a repo with SSH targets reaches each one by name — no flags, no key handling, nothing to configure:
+
+```console
+$ ssh staging                              # interactive shell on the target
+$ ssh staging 'systemctl status nginx'
+$ scp dist/app.tar.gz staging:/tmp/
+$ sftp staging
+$ rsync -a -e ssh dist/ staging:/srv/app/
+```
+
+Everything lab writes for it lives in the run's runtime dir, `<state>/instances/<runID>/runtime/`, which a container run sees at the same path:
+
+| File | What it is |
+|---|---|
+| `warpgate-run-key` | The **run key**: a fresh ed25519 private key, 0600. Its public half is registered on the repo's Warpgate user, labelled `lab-run:<runID>`, and removed when the run is wiped. |
+| `warpgate-known-hosts` | Warpgate's SSH host key(s), checked strictly: the [trusted key](#host-key-pinning) from `--warpgate-ssh-host-key`, or — with none configured — whatever the listener presented to this spawn's scan. |
+| `warpgate-ssh-config` | The run's OpenSSH config: one `Host <target>` block per target, then a `Match all` that restores the normal per-user and system config for every other host. |
+| `warpgate-bin/` | `ssh`, `scp`, and `sftp` wrappers, prepended to the run's `PATH`. |
+
+The one exception is the revocation marker, `warpgate-run-key.json` — which Warpgate key to revoke when the run is wiped, no secret — kept one level up at `<state>/instances/<runID>/`. That directory is never mounted into a container, so a run cannot delete or rewrite the record of its own key; it is wiped with the rest of the run.
+
+In the run's HOME, `~/.ssh/config` is a symlink to `warpgate-ssh-config`.
+
+**Why wrappers.** OpenSSH finds `~/.ssh/config` through the user's passwd entry, not `$HOME`, so a config in the run's private HOME alone would be invisible to it. Each wrapper runs the real binary — the next one on `PATH`, the host's or the dev image's — with `-F <runtime>/warpgate-ssh-config` in front of your arguments. `scp` and `sftp` need their own because they start `ssh` by absolute path; `rsync -e ssh`, ansible, and anything else that runs `ssh` by name goes through the `ssh` wrapper. A tool that execs ssh by absolute path and doesn't read `~/.ssh/config` itself sees no aliases: run it through `ssh` by name, or pass it `-F`.
+
+**Git is untouched.** `GIT_SSH_COMMAND` still points at the repo's deploy key, no alias lab writes may match the forge host, and every host that is not an alias — the forge included — resolves exactly as it did without the wrappers. Lab does append Warpgate's pinned host keys to the run's git `known_hosts` (after its usual contents): git checks host keys with `accept-new`, so without them a `git clone staging:app.git` through the wrapper would trust the bastion on first use.
+
+**The system ssh config must pass OpenSSH's permission check.** The run's config pulls in `/etc/ssh/ssh_config` with `Include`, and OpenSSH refuses an included file that is not owned by root (or the run's user) or is group- or world-writable — a check it skips when it reads that file itself. On a dev image with a loose `/etc/ssh/ssh_config`, every ssh in a wired run fails with `Bad owner or permissions on /etc/ssh/ssh_config`, git included; fix the image (`chown root:root`, `chmod 644`).
+
+**The run's context file** gets an **SSH targets** section: the aliases, how to use them, and that no credential for them is in the instance.
+
+**Container runs** get the same files through the runtime dir's existing bind mount and the same `PATH` prefix. The dev image must ship an ssh client (`ssh`, `scp`, `sftp`) — already the rule for ssh remotes; `buildpack-deps:stable-scm` qualifies.
+
+**What stays unwired.** A repo with no SSH target spawns exactly as before — no key, no files, no `PATH` change, and no call to Warpgate. So does a run whose targets all turn out to be gone from Warpgate when the spawn re-reads them, or whose target names are all skipped (one warning names them).
+
+### Host key pinning
+
+A run never answers a host-key prompt and never uses `accept-new`: its `warpgate-known-hosts` is written by lab before the run starts, and checked strictly. Which key goes in it is yours to decide with `--warpgate-ssh-host-key`:
+
+- **Set** — runs trust exactly the key(s) you configured. Every target-bearing spawn scans Warpgate's SSH listener first; if it presents none of the configured keys, health turns `degraded` with `hostKey.state: "mismatch"` (the trusted and the observed fingerprints both listed) and the spawn refuses, until the setting names a key the listener presents. Repos without SSH targets are unaffected. Nothing the listener says can widen what a run trusts.
+- **Unset** (the default) — runs trust whatever the listener presents. Each target-bearing spawn scans the listener and writes every key it offered into that run's `warpgate-known-hosts`. Health reports `hostKey.state: "unpinned"` with the observed fingerprints, and lab logs them once at startup. This is trust-on-each-spawn, on the lab host: convenient for a first deployment, but a machine in the middle between lab and the bastion at spawn time would be trusted for that run's lifetime. Pin the key once the sidecar is up.
+
+**Reading the key.** Warpgate generates an ed25519 and an RSA host key at setup and exposes neither through its API, so read them on the Warpgate host itself — never through the network you are about to trust:
+
+```console
+$ docker compose exec -T warpgate ssh-keyscan -p 2222 127.0.0.1 2>/dev/null
+[127.0.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…
+[127.0.0.1]:2222 ssh-rsa AAAAB3NzaC1yc2E…
+```
+
+(Without `ssh-keyscan` in the image: `ssh-keyscan -p 2222 10.88.0.1` from the lab host, and compare its fingerprints — `ssh-keygen -lf -` — against the ones health lists as `observed`.) Either line, or just its `<type> <base64>` part, is the value; the `[host]:port` prefix and any comment are dropped. One key is enough — OpenSSH prefers the host-key algorithms it already has a key for — and several may be given, separated by commas (or newlines in the environment variable). A fingerprint (`SHA256:…`) or a private key is refused at startup.
+
+**Changing it.** A changed key is expected only when Warpgate's database was replaced: a recreated `warpgate-data` volume, a restore from a different backup, a fresh `unattended-setup`, or a different Warpgate behind `--warpgate-ssh-addr`. If none of that happened, treat a mismatch as an incident, not a prompt. If it did, read the new key as above, put it in `--warpgate-ssh-host-key`, and restart lab. The setting is keys, not an address: moving `--warpgate-ssh-addr` to another address of the same Warpgate needs no change. **Settings → General → SSH bastion** shows the current state — the trusted and observed fingerprints on a mismatch, the observed ones when nothing is pinned — but the key itself is configuration, never something the UI or API changes.
+
+### When a target-bearing spawn refuses
+
+Only a **target-bearing** spawn — a bastion-wired lab, a repo with at least one SSH target — ever waits on Warpgate. When any step of its wiring fails, it refuses **before the claim** (no worktree, no run row, no parked AFK issue) with a `400` quoting the cause:
+
+| The message mentions | What it means | Fix |
+|---|---|---|
+| `admin token rejected (401)` | Warpgate did not accept the token. | The file must hold exactly the container's `WARPGATE_ADMIN_TOKEN`, and Warpgate must run with `--enable-admin-token` (the image's default command doesn't pass it). Restart lab after changing the file. |
+| `admin token lacks a permission lab needs (403)` | A per-user API token whose user is missing an admin permission. | Use the static admin token ([Deploying Warpgate](#deploying-warpgate)). |
+| `connection refused`, a timeout, or `no such host` on the admin API | Warpgate is down, or `--warpgate-url` is wrong. | `docker compose ps`; fix the URL. |
+| `x509: certificate signed by unknown authority` | Lab doesn't trust Warpgate's certificate. | Point `--warpgate-ca-file` at the copy of `/data/tls.certificate.pem`. |
+| `x509: … doesn't contain any IP SANs` or `certificate is valid for …, not …` | The URL's host is not a name on the certificate. | Use `https://localhost:8888`. |
+| `cannot verify the SSH host key at <addr>` | Nothing answers SSH at `--warpgate-ssh-addr`. | Check the 2222 bind and that Warpgate's SSH listener is on ([Deploying Warpgate](#deploying-warpgate)). |
+| `are not among the trusted keys configured with --warpgate-ssh-host-key` … `refusing to wire SSH targets` | Warpgate presents none of the configured host keys. | [Host key pinning](#host-key-pinning). |
+
+A repo **without** SSH targets never calls Warpgate at spawn and never refuses on its account: a bastion outage leaves it alone.
+
+### Checking the bastion works
+
+`GET /api/v1/warpgate/health` (authenticated) always answers 200 with `state` — the same four words as the credential gateway's — plus per-component detail:
+
+```console
+$ curl -s --cookie "lab_session=$TOKEN" https://lab.example.com/api/v1/warpgate/health
+{"state":"ok","api":{"configured":true,"reachable":true,"url":"https://localhost:8888","version":"v0.29.1","authenticated":true},"ssh":{"configured":true,"reachable":true,"addr":"10.88.0.1:2222"},"hostKey":{"state":"pinned","pinned":["SHA256:Xq7…"],"observed":["SHA256:Xq7…","SHA256:k2V…"]}}
+```
+
+| `state` | When |
+|---|---|
+| `off` | Nothing configured — not an error. |
+| `ok` | Everything configured answers, the token is accepted as admin, and the listener presents a key from `--warpgate-ssh-host-key` (or none is configured). |
+| `degraded` | One component unreachable, the token not accepted (`api.authenticated: false`), or `hostKey.state` `"mismatch"`. |
+| `unreachable` | Every configured component unreachable. |
+
+`hostKey` is present when `--warpgate-ssh-addr` is set: `pinned` (the listener presents one of the trusted keys; `pinned` lists the trusted fingerprints, `observed` the listener's), `unpinned` (no `--warpgate-ssh-host-key`; runs trust the `observed` keys), `mismatch` (a trusted key is configured and the listener presents none of them), or `unreachable` (the scan failed; `error` says why). The **SSH bastion** card on Settings → General shows the same status, next to the credential gateway's.
+
+That proves the sidecar answers; it does not log in to a target. Prove that once from inside a bastion-wired run — ideally a **container-runner** one, where the files cross a mount and the address crosses a network namespace:
+
+```console
+$ tmux attach -t myrepo~1
+```
+
+```console
+# 1. The wrapper is in front, and the alias resolves to the bastion.
+$ command -v ssh
+/var/lib/lab/instances/run_…/runtime/warpgate-bin/ssh
+$ ssh -G staging | grep -E '^(user|hostname|port) '
+user repo-4b1f0c7a9d3e42a8b6c5d0e1f2a3b4c5:staging
+hostname 10.88.0.1
+port 2222
+
+# 2. The acceptance test: a non-interactive login through Warpgate.
+$ ssh staging true && echo ok
+ok
+```
+
+Reading the failures:
+
+- **`Could not resolve hostname staging`** — the alias isn't in this run's config: the target was assigned after the run started (start a new run), its name was skipped (lab's log names it), or the command bypassed the wrapper (`command -v ssh` doesn't point into `warpgate-bin`).
+- **`Permission denied`** — Warpgate refused the login: the target no longer carries the repo's role, or Warpgate requires MFA ([Bastion operational notes](#bastion-operational-notes)).
+- **`Host key verification failed`** — Warpgate's key no longer matches the pin this run was spawned with. Check health for a mismatch, accept if it's genuine, and start a new run.
+- **The connection drops right after login** — the *target's* host key isn't trusted in Warpgate yet; Warpgate's log (`docker compose logs warpgate`) says `Target host key is not trusted, but there is no active PTY channel`. **Check host key → Trust** on the target's page.
+- **`Connection refused` or a timeout to `10.88.0.1:2222`** — the SSH port isn't reachable from the container's network namespace ([Deploying Warpgate](#deploying-warpgate)).
+- **`Bad owner or permissions on /etc/ssh/ssh_config`**, from every ssh in the run — the dev image's system ssh config is group/world-writable or not root-owned, which the run's `Include` of it refuses ([What a bastion-wired run gets](#what-a-bastion-wired-run-gets)). Fix the image and start a new run.
+- **`git push` failing at the same time** — not the bastion; git never goes through it (unless it is the `Bad owner or permissions` error above).
+
+### Bastion operational notes
+
+- Warpgate is a second process to run, back up, and upgrade. Its `/data` volume holds the target credentials, its SSH host keys, and the recordings — back it up with the same seriousness as `lab.db` / `master.key` ([Backup & restore](#backup-restore)). A recreated or differently restored volume brings new host keys: expect a [mismatch](#host-key-pinning).
+- Keep the image pinned (`0.29.1`) rather than tracking `latest`; lab's client is verified against that version. Check health after an upgrade.
+- **Run keys are revoked, not left behind.** A run's key is removed from Warpgate whenever the run is wiped — Stop, the AFK reaper, a launch rollback, the orphan sweep — and a startup sweep removes any `lab-run:` key whose run is no longer active and no longer on disk. If Warpgate isn't answering when lab starts, that sweep retries (after 1, 2, 4, 8, then every 15 minutes) until one pass completes. A run that survives a lab restart keeps its key. Keys you add by hand to a repo's Warpgate user are never touched.
+- **Recordings stay in Warpgate** (its **Status** pages). Lab neither reads nor stores them; linking a run to its recordings is issue #47. Warpgate logs each session against the key it used, and that key's label names the run while the run is live.
+- **Don't require MFA.** Warpgate's **Config → Global parameters → MFA enforcement** set to **Require** demands a second factor on every SSH login, which a run's key login can't give: target-bearing runs start and then fail to authenticate inside the session, where lab can't catch it. **Off** and **Enroll** are fine.
+- **The static admin token is full admin over Warpgate and never expires.** Whoever reads it can create a user, give it every target, and log in through the bastion. Keep both copies — `warpgate.env` and lab's token file — at 0600. To rotate, write a new token to both, `docker compose up -d --force-recreate`, and restart lab.
+- The admin UI stays on loopback: the SSH tunnel is the way in until issue #47 adds exposure through lab's auth.
+
 ## State directory layout
 
 ```
@@ -650,14 +921,25 @@ Unconfigured is not unhealthy: with no OneCLI set, the GETs answer `200` with `c
                              ops (clone/fetch: <credID>.<opID>.key/.askpass/
                              .sshpass), known_hosts
   instances/<runID>/home/    0700 — per-run private HOME (issue #202): the
-                             provider credential copy, config, and transcripts;
-                             created at launch, wiped at stop/rollback, swept at boot
+                             provider credential copy, config, transcripts, and
+                             (bastion-wired runs only) .ssh/config, a symlink to
+                             runtime/warpgate-ssh-config; created at launch,
+                             wiped at stop/rollback, swept at boot
   instances/<runID>/runtime/ 0700 — per-run runtime dir (issue #205): the run's
                              materialized git credential files, known_hosts,
-                             dialog spool, --settings file, and (gateway-wired
-                             runs only) onecli-ca-bundle.pem, 0644; same
-                             lifecycle as home/, bind-mounted into the run's
-                             container at its host-identical path
+                             dialog spool, --settings file, (gateway-wired
+                             runs only) onecli-ca-bundle.pem, 0644, and
+                             (bastion-wired runs only) warpgate-run-key,
+                             warpgate-known-hosts and warpgate-ssh-config,
+                             all 0600, plus warpgate-bin/, 0700 (the
+                             ssh/scp/sftp wrappers); same lifecycle as home/,
+                             bind-mounted into the run's container at its
+                             host-identical path
+  instances/<runID>/warpgate-run-key.json
+                             0600 — (bastion-wired runs only) which Warpgate
+                             key to revoke at wipe; no secret. At the run
+                             dir's root, never mounted into a container, so a
+                             run cannot tamper with its own revocation
   instances/<runID>/imports/ 0700 — per-run read-only import snapshots
                              (issue #261 / ADR-0063): one .git-less copy per
                              imported repo, taken from origin/<default> at
@@ -676,7 +958,7 @@ Sessions are named `<repo>~<label>`; `~` never appears in paths.
 
 Back up, **consistently together** (one snapshot set):
 
-- `<state>/lab.db` (or the Postgres database) — config, credentials (encrypted), built-in tracker, run history.
+- `<state>/lab.db` (or the Postgres database) — config, credentials (encrypted), built-in tracker, run history; with the [SSH bastion](#warpgate-ssh-bastion) wired, also Warpgate's pinned host key and each repo's SSH-target cache. (Warpgate's own `/data` volume is backed up separately — [Bastion operational notes](#bastion-operational-notes).)
 - `<state>/master.key` (or the sops-managed key file) — without it, credential payloads are unrecoverable.
 - `<state>/repos/` — the bare reference clones (claims and parked branches live here as git refs).
 
@@ -762,7 +1044,7 @@ services.lab.container = {
 
 **What the host must provide** for `repos.runner = container` (what the module provisioning amounts to, and what a non-NixOS host assembles by hand):
 
-- **podman ≥ 4, crun, and passt `2025_04_15`+** on the service PATH. Preflight probes `podman` and `pasta` — the pasta probe actually runs `pasta --map-guest-addr none --version`, because the pane argv pins `--network=pasta:--map-guest-addr,none` and older passt releases (through `2025_03_20`) reject that value while passing version parses and `--help` greps. If the check fires: upgrade the passt package. The argv also pins `host.containers.internal` and `host.docker.internal` to the container's own loopback — deliberate hardening so loopback-bound host services (lab's own listener included) are unreachable from containers. Egress is otherwise untouched: a host service bound to a non-loopback address is reachable by raw IP, so **bind co-located host services to `127.0.0.1`** (the one deliberate exception is the OneCLI gateway port — see [Deploying the sidecar](#deploying-the-sidecar)).
+- **podman ≥ 4, crun, and passt `2025_04_15`+** on the service PATH. Preflight probes `podman` and `pasta` — the pasta probe actually runs `pasta --map-guest-addr none --version`, because the pane argv pins `--network=pasta:--map-guest-addr,none` and older passt releases (through `2025_03_20`) reject that value while passing version parses and `--help` greps. If the check fires: upgrade the passt package. The argv also pins `host.containers.internal` and `host.docker.internal` to the container's own loopback — deliberate hardening so loopback-bound host services (lab's own listener included) are unreachable from containers. Egress is otherwise untouched: a host service bound to a non-loopback address is reachable by raw IP, so **bind co-located host services to `127.0.0.1`** (the two deliberate exceptions are the OneCLI gateway port and the Warpgate SSH port — see [Deploying the sidecar](#deploying-the-sidecar) and [Deploying Warpgate](#deploying-warpgate)).
 - **subuid/subgid ranges for the service user** — required by `--userns=keep-id`. By hand: `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 lab`.
 - **cgroup v2 with a lingering user manager** ([ADR-0060](adr/0060-containers-as-user-manager-scopes.md)). Container panes run `podman --cgroup-manager=systemd`: each container is a transient `libpod-<id>.scope` under the lab user's `user@<uid>.service`, with the memory/pids caps as per-scope `MemoryMax`/`TasksMax`. Lab performs no cgroup placement of its own, so containers survive lab restarts by construction. Preflight's **`user-manager`** check probes that `/run/user/<uid>` is writable and fails with the linger hint (`users.users.lab.linger = true`; by hand `loginctl enable-linger lab`) — lab retries this one on its own, since logind brings `user@` up asynchronously at boot. The **`spawn-probe`** check then proves the pipeline with a real `podman create` + `init` of a probe container (`lab-preflight-probe`, `--memory 64m --pids-limit 16`, nothing in the image ever runs), asserting it lands in a scope with exactly those caps, then removes it.
 - **The user manager's runtime dir** — lingering gives the service user `/run/user/<uid>`, independent of `lab.service`'s lifecycle; rootless podman's runroot/tmpdir live there, so container runtime state survives lab restarts. Lab sets `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` itself at startup; nothing to configure by hand beyond the linger.
@@ -774,7 +1056,7 @@ services.lab.container = {
 
 **Preflight and refusals.** Preflight runs at server startup and collects *every* failure — podman missing/too old, pasta missing or too old, missing subuid/subgid entries, cgroup v1, an unreachable user manager, a failed spawn probe, unset or unresolvable tools refs — into one message, each item paired with the fixing command or config. While any check fails, container spawns are refused with that message (host-runner repos are unaffected); an AFK spawn is refused *before* the issue is claimed, so an unready host never parks an issue. Fix the host and restart — except the `user-manager` check and tools-ref pulls, which lab retries on its own until they clear. The dev-image knob is deliberately *not* preflight-checked: a spawn with no effective image (repo ref blank *and* global unset/`null`) is refused at spawn, where the repo is known, naming both knobs.
 
-**Dev image expectations.** Each container repo picks its dev image in repo settings → Runner (**Dev image**, `repos.image_ref`); blank inherits the global default — on a stock module deployment the pinned `buildpack-deps:stable-scm`. The image needs **no lab-specific contents** (the agent layer is injected via the read-only `/opt/lab` mount); what it must bring is the session's userland: a shell and coreutils, `git`, and an ssh client for ssh remotes. `buildpack-deps:stable-scm` qualifies as-is; `alpine` qualifies once `git` + `openssh-client` are added; plain `debian:stable-slim` does **not** (no git, no ssh).
+**Dev image expectations.** Each container repo picks its dev image in repo settings → Runner (**Dev image**, `repos.image_ref`); blank inherits the global default — on a stock module deployment the pinned `buildpack-deps:stable-scm`. The image needs **no lab-specific contents** (the agent layer is injected via the read-only `/opt/lab` mount); what it must bring is the session's userland: a shell and coreutils, `git`, and an ssh client for ssh remotes and [SSH targets](#warpgate-ssh-bastion). `buildpack-deps:stable-scm` qualifies as-is; `alpine` qualifies once `git` + `openssh-client` are added; plain `debian:stable-slim` does **not** (no git, no ssh).
 
 **Provider login in container mode.** On a container-wired host, login sessions and every non-interactive provider-CLI invocation (auth status, logout, the credential-refresh poke) run in containers: the CLI comes from the agent-tools mount, and the machine's master credential store is bind-mounted rw so a completed login lands where spawns copy from. Such a host needs **no** provider CLI on PATH. The login container runs the global `--container-image` default (login is repo-less); each attempt gets a scratch HOME under `<state>/logins/`, wiped at teardown. While preflight fails, login is refused with the same actionable text. Details: [ADR-0057](adr/0057-containerized-provider-login.md).
 
@@ -795,6 +1077,8 @@ services.lab.container = {
 - `GET /api/v1/onecli/health` — authenticated OneCLI gateway health (`off`/`ok`/`degraded`/`unreachable`); see [Checking it works](#checking-it-works).
 - `GET /api/v1/onecli/dashboard` — authenticated; the resolved dashboard exposure, `{"mode":"off|port|subdomain","url":"…"}` with `url` omitted when off. Static config, never a sidecar probe. See [Dashboard exposure](#dashboard-exposure).
 - `GET /api/v1/onecli/pool`, `GET /api/v1/repos/{id}/onecli/grants`, `PUT`/`DELETE /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}` — the grant picker's API; see [Grant picker](#grant-picker).
+- `GET /api/v1/warpgate/health` — authenticated Warpgate SSH bastion health (`off`/`ok`/`degraded`/`unreachable`, host-key state folded in); see [Checking the bastion works](#checking-the-bastion-works).
+- `GET /api/v1/repos/{id}/warpgate/targets`, `PUT`/`DELETE /api/v1/repos/{id}/warpgate/targets/{targetId}` — the SSH targets picker's API; see [Defining targets and granting them to a repo](#defining-targets-and-granting-them-to-a-repo).
 - `GET /api/v1/auth/check` — authenticated; `204` (empty body) for any valid lab identity, `401` (standard error body) for none. The forward-auth probe `subdomain` mode is built on; see [Dashboard exposure](#dashboard-exposure).
 
 ## Metrics

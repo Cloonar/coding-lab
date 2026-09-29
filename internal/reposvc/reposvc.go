@@ -33,6 +33,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
+	"git.cloonar.com/Cloonar/coding-lab/internal/warpgate"
 )
 
 // Branch-pattern defaults (design §3a): incogni repos are seeded with
@@ -126,6 +127,53 @@ type OneCLIAgents interface {
 	DeleteAgent(ctx context.Context, identifier string) (bool, error)
 }
 
+// WarpgateIdentities is the Warpgate REST seam the repo lifecycle keeps a
+// repo's SSH-bastion identity (one Warpgate user + one Warpgate role,
+// ADR-0068) in step through: the identity is created with the repo,
+// converged at startup, and deleted with it — issue #35's OneCLI lifecycle
+// applied a second time, to a second sidecar. Satisfied by *warpgate.Client;
+// nil = the integration is unconfigured, which is the normal state of a lab
+// and must leave every path here indistinguishable from a lab built before
+// this existed — no behavior change and, just as importantly, no log line
+// (warpgateActive is the one gate).
+//
+// Both the user and the role are addressed by warpgate.RepoSlug(repoID) —
+// derived from the repo's immutable STORE ID, the same derivation
+// onecli.AgentIdentifier uses for the same repo's OneCLI agent, so the two
+// sidecars never disagree about what a repo is called — while the repo's
+// NAME rides along as the description both objects carry, display data lab
+// owns and heals. EnsureRepoIdentity refuses a repo ID that does not derive a
+// well-formed slug, so every call site here passes the repo id straight
+// through rather than deriving the slug itself.
+//
+// Three methods, no more: EnsureRepoIdentity and DeleteRepoIdentity are the
+// same two verbs OneCLIAgents exposes, for the same three lifecycle hooks
+// (create, startup, delete); RoleSSHTargets is the one addition, read-only,
+// letting the startup reconcile refresh the lab-side repo_ssh_targets cache
+// (ADR-0068 decision 1) from Warpgate's truth without reaching into the
+// target-CRUD half of internal/warpgate that the #39 picker owns. Narrow on
+// purpose, exactly like OneCLIAgents: a test drives all three from a struct
+// literal with no HTTP, and nothing else in internal/warpgate is reachable
+// from a repo create, delete or startup heal even by accident.
+//
+// The Identity EnsureRepoIdentity answers with carries no secret — unlike
+// OneCLIAgents' Agent, a Warpgate user/role pair is not itself a credential —
+// but it is still dropped at most call sites here (the startup reconcile is
+// the one caller that keeps it, to read the role's targets next).
+//
+// NOTE for the wiring, not for this seam: cmd/lab must assign the Warpgate
+// client to Options.Warpgate through an explicit nil-pointer guard, never a
+// bare *warpgate.Client that happens to be nil — a nil *warpgate.Client boxed
+// straight into this interface is a NON-NIL interface value, and
+// warpgateActive would then read as configured when it is not. See
+// OneCLIAgents' identical caveat; that wiring is the manager's, not this
+// package's.
+type WarpgateIdentities interface {
+	EnsureRepoIdentity(ctx context.Context, repoID, repoName string) (warpgate.Identity, error)
+	DeleteRepoIdentity(ctx context.Context, repoID string) (bool, error)
+	RoleSSHTargets(ctx context.Context, roleID string) ([]warpgate.Target, error)
+}
+
 // Options configures a Service. Everything except Logger, GitEnv and Now is
 // required.
 type Options struct {
@@ -191,6 +239,16 @@ type Options struct {
 	// nil-pointer guard; a nil *onecli.Client assigned straight in would be a
 	// non-nil interface and this gate would read backwards.
 	OneCLI OneCLIAgents
+	// Warpgate is the SSH-bastion identity seam (ADR-0068, issue #39): repo
+	// create, startup heal and repo delete become the touchpoints that keep a
+	// repo's Warpgate user and role in step with its row, exactly as OneCLI
+	// above does for the credential gateway. Production passes
+	// *warpgate.Client. nil — the lab with no Warpgate configured, which is
+	// most of them — makes all three SILENT no-ops. Injected from cmd/lab as
+	// the interface with an explicit nil-pointer guard; a nil *warpgate.Client
+	// assigned straight in would be a non-nil interface and this gate would
+	// read backwards (see WarpgateIdentities).
+	Warpgate WarpgateIdentities
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -214,6 +272,7 @@ type Service struct {
 	metrics        *metrics.Metrics                                      // nil-safe report methods
 	providers      *provider.Registry                                    // nil in the no-provider degraded boot
 	oneCLI         OneCLIAgents                                          // nil = OneCLI unconfigured (oneCLIActive)
+	warpgate       WarpgateIdentities                                    // nil = Warpgate unconfigured (warpgateActive)
 
 	// mu guards jobs: the single-flight registry of running clone jobs,
 	// keyed by repo id.
@@ -265,6 +324,7 @@ func New(o Options) (*Service, error) {
 		metrics:        o.Metrics,
 		providers:      o.Providers,
 		oneCLI:         o.OneCLI,
+		warpgate:       o.Warpgate,
 		jobs:           make(map[string]*cloneJob),
 	}, nil
 }
@@ -281,6 +341,14 @@ func New(o Options) (*Service, error) {
 // the REST pair alone — issue #23's health-only deployment — still keeps its
 // agents in step even though no spawn there wires a gateway.
 func (s *Service) oneCLIActive() bool { return s.oneCLI != nil }
+
+// warpgateActive reports whether this lab has the Warpgate SSH-bastion
+// integration configured (ADR-0068) — one predicate for all three lifecycle
+// hooks (Add, StartupHeal, Delete), mirroring oneCLIActive() exactly and for
+// the same reason: "off" is the normal state of a lab and the hooks must be
+// invisible in it, so the check belongs in one named place rather than as a
+// nil test per call site that can drift.
+func (s *Service) warpgateActive() bool { return s.warpgate != nil }
 
 // Close cancels every running clone job and waits for them to finish.
 // Interrupted repos stay in clone_status 'cloning'; StartupHeal repairs
@@ -455,6 +523,23 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		// and never logged (see OneCLIAgents).
 		if _, err := s.oneCLI.EnsureAgent(ctx, onecli.AgentIdentifier(created.ID), created.Name); err != nil {
 			s.log.Warn("ensuring onecli agent for new repo", "component", "reposvc", "repo", created.ID, "err", err)
+		}
+	}
+
+	// Eager identity creation (ADR-0068): a repo's Warpgate user and role now
+	// exist from the moment the repo does, mirroring the OneCLI ensure just
+	// above for the same reason — an operator can assign SSH targets to the
+	// repo from the picker before it has ever spawned, instead of the first
+	// spawn doubling as the "make my repo appear over there" step.
+	//
+	// Best-effort with the identical asymmetry: a Warpgate outage must never
+	// block repo creation, because the SPAWN is where ADR-0068 fails closed (and
+	// only for a repo that already has an SSH target — a fresh repo never
+	// does), not the repo row. The startup reconcile and the per-spawn heal stay
+	// as backstops, so all a warn here costs is one later round-trip.
+	if s.warpgateActive() {
+		if _, err := s.warpgate.EnsureRepoIdentity(ctx, created.ID, created.Name); err != nil {
+			s.log.Warn("ensuring warpgate identity for new repo", "component", "reposvc", "repo", created.ID, "err", err)
 		}
 	}
 	return created, nil
@@ -796,6 +881,25 @@ func (s *Service) Delete(ctx context.Context, id string, force bool) error {
 			s.log.Warn("deleting onecli agent for removed repo", "component", "reposvc", "repo", id, "err", err)
 		}
 	}
+
+	// The repo's Warpgate identity goes with the repo too (ADR-0068), for the
+	// identical reason as the OneCLI delete just above: a user and role that
+	// outlive their repo are standing SSH-bastion access nothing in lab can show
+	// or revoke. Deleting the user takes every one of its public-key
+	// credentials — every run's bastion key, live or orphaned — with it
+	// upstream; the store's repo_ssh_targets cache needs no separate cleanup
+	// here, since it cascades away with the repo row already deleted above.
+	//
+	// Detached from ctx and best-effort for the same reasons as the OneCLI
+	// delete: past the point of no return, a client hanging up must not decide
+	// how far the teardown got, and an unreachable sidecar must never hold back
+	// a repo the operator asked to remove — it leaves the identity behind,
+	// exactly the status quo for every repo deleted before this existed.
+	if s.warpgateActive() {
+		if _, err := s.warpgate.DeleteRepoIdentity(context.WithoutCancel(ctx), id); err != nil {
+			s.log.Warn("deleting warpgate identity for removed repo", "component", "reposvc", "repo", id, "err", err)
+		}
+	}
 	return nil
 }
 
@@ -890,6 +994,13 @@ func (s *Service) StartupHeal(ctx context.Context) error {
 	// touched. Nothing downstream depends on it, which is what makes it the
 	// right thing to put at the end of the boot path.
 	s.reconcileOneCLIAgents(ctx)
+
+	// Converge Warpgate identities right after OneCLI's, for the same reason
+	// OneCLI's reconcile sits after the guard reconcile: this pass reads the
+	// repo NAMES the clone healing above may just have touched, and it is a
+	// network call to a sidecar that may still be booting, so it belongs after
+	// the local filesystem work rather than queued ahead of it.
+	s.reconcileWarpgateIdentities(ctx)
 	if err := s.mat.CleanupAll(s.credentialKeep); err != nil {
 		s.log.Warn("sweeping runtime dir", "component", "reposvc", "err", err)
 	}
@@ -946,6 +1057,86 @@ func (s *Service) reconcileOneCLIAgents(ctx context.Context) {
 		if _, err := s.oneCLI.EnsureAgent(ctx, onecli.AgentIdentifier(repo.ID), repo.Name); err != nil {
 			s.log.Warn("reconciling onecli agents", "component", "reposvc", "repo", repo.ID, "err", err, "skipped", len(repos)-i-1)
 			return
+		}
+	}
+}
+
+// warpgateIdentityHealTimeout bounds the WHOLE startup identity sweep, not one
+// call — the same shape and reasoning as oneCLIAgentHealTimeout above: the
+// sidecar coming up in parallel with lab, in the same compose stack, is the
+// expected case, so "not listening yet" is routine and fails instantly with
+// connection refused — a hundred repos then cost microseconds and the bound
+// is never approached. What the bound guards against is the other shape, a
+// Warpgate that ACCEPTS and then hangs, where paying internal/warpgate's own
+// per-request timeout once per repo would otherwise wedge lab's boot behind
+// it.
+const warpgateIdentityHealTimeout = 30 * time.Second
+
+// reconcileWarpgateIdentities converges every repo's Warpgate identity at
+// startup (ADR-0068) — issue #35's OneCLI lifecycle applied a second time, to
+// a second sidecar: a missing user or role is created and a stale description
+// healed in place (EnsureRepoIdentity does both), so a lab that ran before
+// Warpgate was configured, or renamed a repo while the sidecar was down,
+// catches up on the next boot with no stored state and no operator action.
+//
+// For every repo it goes one step further than reconcileOneCLIAgents: once
+// the identity is current, it re-reads the role's SSH targets and REPLACES
+// the lab-side cache (repo_ssh_targets) with Warpgate's answer — decision 1's
+// "every full read of the truth replaces the cache wholesale" — which is also
+// how a target assigned directly in Warpgate's own admin UI, never through
+// lab's picker, is first reflected in lab: the next boot, or the next picker
+// visit, or the next target-bearing spawn.
+//
+// One-way, like reconcileOneCLIAgents: it NEVER deletes an identity in
+// Warpgate, since Warpgate is shared surface an operator or another tool may
+// also hold users and roles on. A repo whose fresh read comes back with no
+// targets gets its cache REPLACED with an empty set (which is exactly what an
+// empty ReplaceRepoSSHTargets call does) — not a delete this pass reaches for
+// on its own, just the ordinary outcome of "replace with the current truth"
+// when the current truth is empty.
+//
+// It stops at the FIRST Warpgate-level failure — EnsureRepoIdentity or
+// RoleSSHTargets, both sidecar round trips — and warns ONCE, naming the repo
+// it stopped on and how many it never reached: the identical rationale as
+// reconcileOneCLIAgents, since every such error reachable here is
+// sidecar-level (unreachable, wedged, wrong token) and so is the same error
+// waiting for every remaining repo. A failure to WRITE the cache afterward is
+// different in kind — Warpgate answered fine, lab's own store write did not —
+// so it is a per-repo warning that does NOT stop the sweep; the next full
+// read of that repo's truth tries again.
+//
+// Never fails boot: StartupHeal's error return is fatal in cmd/lab, and a
+// bastion slow to start is not a reason to refuse to run a lab — every
+// skipped repo is ensured, and its cache refreshed, again at its next
+// target-bearing spawn.
+func (s *Service) reconcileWarpgateIdentities(ctx context.Context) {
+	if !s.warpgateActive() {
+		return
+	}
+	repos, err := s.store.Repos(ctx)
+	if err != nil {
+		s.log.Warn("reconciling warpgate identities: list repos", "component", "reposvc", "err", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, warpgateIdentityHealTimeout)
+	defer cancel()
+	for i, repo := range repos {
+		identity, err := s.warpgate.EnsureRepoIdentity(ctx, repo.ID, repo.Name)
+		if err != nil {
+			s.log.Warn("reconciling warpgate identities", "component", "reposvc", "repo", repo.ID, "err", err, "skipped", len(repos)-i-1)
+			return
+		}
+		targets, err := s.warpgate.RoleSSHTargets(ctx, identity.Role.ID)
+		if err != nil {
+			s.log.Warn("reconciling warpgate identities", "component", "reposvc", "repo", repo.ID, "err", err, "skipped", len(repos)-i-1)
+			return
+		}
+		cached := make([]store.SSHTarget, 0, len(targets))
+		for _, t := range targets {
+			cached = append(cached, store.SSHTarget{ID: t.ID, Name: t.Name})
+		}
+		if err := s.store.ReplaceRepoSSHTargets(ctx, repo.ID, cached); err != nil {
+			s.log.Warn("reconciling warpgate identities: caching ssh targets", "component", "reposvc", "repo", repo.ID, "err", err)
 		}
 	}
 }

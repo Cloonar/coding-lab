@@ -53,7 +53,7 @@ let
   };
 
   # Both Go derivations share src + vendorHash (one goModules fetch).
-  vendorHash = "sha256-hOPrF9pvuxt4r29yoUo/Uy6G7FbCOyxmFPqDDXuEbnA=";
+  vendorHash = "sha256-VI8neXeG1pc500I0vevBMeTxCWD8q/oW7wviQJVgTrg=";
 
   ldflags = [
     "-s"

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   answerRun,
   ApiError,
+  assignRepoSSHTarget,
   attachRepoOneCLIGrant,
   authState,
   closeCR,
@@ -29,6 +30,7 @@ import {
   getRun,
   getSettings,
   getSpawnDefaults,
+  getWarpgateHealth,
   listClaimableIssues,
   listCredentials,
   listCRs,
@@ -39,6 +41,7 @@ import {
   listProviders,
   listReadyIssues,
   listRepoOneCLIGrants,
+  listRepoSSHTargets,
   listRepos,
   listRuns,
   listTokens,
@@ -63,6 +66,7 @@ import {
   startInstance,
   stopAll,
   stopInstance,
+  unassignRepoSSHTarget,
   updateCredential,
   updateIssue,
   updateLabel,
@@ -1236,6 +1240,107 @@ describe('onecli grant picker (issue #25)', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(502);
     expect((err as ApiError).message).toBe('onecli gateway unreachable');
+  });
+});
+
+describe('warpgate SSH bastion health (issue #39)', () => {
+  it('GET /warpgate/health parses the state + api/ssh/hostKey envelope', async () => {
+    const body = {
+      state: 'degraded',
+      api: {
+        configured: true,
+        reachable: true,
+        url: 'https://localhost:8888',
+        version: '0.29.1',
+        authenticated: true,
+      },
+      ssh: {
+        configured: true,
+        reachable: false,
+        addr: '10.88.0.1:2222',
+        error: 'dial tcp 10.88.0.1:2222: connect: connection refused',
+      },
+      hostKey: {
+        state: 'pinned',
+        pinned: ['SHA256:abc'],
+        observed: [],
+      },
+    };
+    const mock = stubFetch(jsonResponse(200, body));
+
+    await expect(getWarpgateHealth()).resolves.toEqual(body);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/warpgate/health');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET /warpgate/health tolerates the off state with hostKey omitted', async () => {
+    const body = {
+      state: 'off',
+      api: { configured: false, reachable: false },
+      ssh: { configured: false, reachable: false },
+    };
+    stubFetch(jsonResponse(200, body));
+
+    const health = await getWarpgateHealth();
+
+    expect(health).toEqual(body);
+    expect(health.hostKey).toBeUndefined();
+  });
+});
+
+describe('warpgate SSH targets picker (issue #39)', () => {
+  it('GET /repos/{id}/warpgate/targets parses the configured list with assigned flags', async () => {
+    const body = {
+      configured: true,
+      targets: [
+        { id: 'tgt_1', name: 'staging', description: 'Staging box', assigned: true },
+        { id: 'tgt_2', name: 'prod-db', description: 'Prod DB jump host', assigned: false },
+      ],
+    };
+    const mock = stubFetch(jsonResponse(200, body));
+
+    await expect(listRepoSSHTargets('repo_1')).resolves.toEqual(body);
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/warpgate/targets');
+    expect(requestInit(mock).method).toBe('GET');
+  });
+
+  it('GET /repos/{id}/warpgate/targets tolerates the unconfigured state with an empty list', async () => {
+    const body = { configured: false, targets: [] };
+    stubFetch(jsonResponse(200, body));
+
+    await expect(listRepoSSHTargets('repo_1')).resolves.toEqual(body);
+  });
+
+  it('PUT /repos/{id}/warpgate/targets/{targetId} carries the CSRF header and URL-encodes ids', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    await expect(assignRepoSSHTarget('repo/1', 'tgt 1')).resolves.toBeUndefined();
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo%2F1/warpgate/targets/tgt%201');
+    const init = requestInit(mock);
+    expect(init.method).toBe('PUT');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+  });
+
+  it('DELETE /repos/{id}/warpgate/targets/{targetId} resolves on 204', async () => {
+    const mock = stubFetch(jsonResponse(204));
+
+    await expect(unassignRepoSSHTarget('repo_1', 'tgt_1')).resolves.toBeUndefined();
+
+    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/warpgate/targets/tgt_1');
+    const init = requestInit(mock);
+    expect(init.method).toBe('DELETE');
+    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
+  });
+
+  it('a non-2xx from the targets endpoint surfaces as ApiError (Warpgate unreachable)', async () => {
+    stubFetch(jsonResponse(502, { error: 'warpgate: list targets: dial tcp: connection refused' }));
+
+    const err = await listRepoSSHTargets('repo_1').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(502);
+    expect((err as ApiError).message).toBe('warpgate: list targets: dial tcp: connection refused');
   });
 });
 
