@@ -49,6 +49,8 @@ Skip this on a first pass — nothing else depends on it. When an agent needs AP
 - **Credential gateway** — with the [OneCLI sidecar](ops.md#onecli-credential-gateway) wired up, this card lists every secret and connection in your OneCLI pool as per-repo toggles. Grant one and the repo's runs get it *at the network layer*: the run's outbound HTTPS goes through the gateway, which injects the real credential on the way out — the agent just calls the service's API, and its environment never holds the value. Creating and rotating values happens in OneCLI's own dashboard; lab's card only picks which repo may use what.
 - **Secrets** — write-only per-repo values stored in lab's vault, for when you're not running the gateway. In a session the agent runs `labctl secret exec NAME -- <cmd>` to execute one command with the value injected as `$NAME` (output redacted), and `labctl secret scan` checks an outgoing diff for leaked values.
 
+The same page's **SSH targets** card is the SSH counterpart: with the [Warpgate SSH bastion](ops.md#warpgate-ssh-bastion) wired up, it lists the SSH hosts defined in Warpgate, and assigning one lets the repo's runs reach it as plain `ssh <name>` without ever holding its key or password. Without the bastion the card just says it's off.
+
 ## 7. Start a manual instance
 
 From the repo, start an **instance**: an interactive agent session in its own fresh git worktree on its own branch, forked from the repo's default branch. Optionally override the model and effort per spawn (defaults are configurable globally and per repo; recommendations in [`model-selection.md`](model-selection.md)).
