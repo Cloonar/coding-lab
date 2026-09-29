@@ -6,9 +6,10 @@
 // .chip.status-error for unreachable, and the "unknown" muted treatment —
 // never a crash — when the request itself fails.
 //
-// The host-key mismatch flow is this card's own addition over the OneCLI
-// precedent: it is the only place in this component that makes a second,
-// mutating call, so it gets its own confirm → POST → refetch coverage.
+// The host-key detail is this card's own addition over the OneCLI precedent:
+// read-only, since which key runs trust is a server setting
+// (--warpgate-ssh-host-key), it names the setting on a mismatch and lists the
+// observed fingerprints when nothing is pinned.
 
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -31,32 +32,16 @@ function jsonResponse(status: number, body?: unknown) {
   };
 }
 
-/**
- * Stubs fetch for both routes this card calls: GET /warpgate/health answers
- * from `opts.health()` (a function, so a test can change what the NEXT call
- * returns — e.g. the refetch after a successful accept), and POST
- * /warpgate/host-key/accept answers from `opts.accept`, recording every body
- * it was called with in `opts.acceptBodies`.
- */
-function stubApi(opts: {
-  health: () => ReturnType<typeof jsonResponse> | Promise<never>;
-  accept?: (fingerprint: string) => ReturnType<typeof jsonResponse> | Promise<never>;
-  acceptBodies?: { fingerprint: string }[];
-}): void {
+/** Stubs fetch for the one route this card calls: GET /warpgate/health
+ *  answers from `health()`. Anything else is a test failure. */
+function stubApi(health: () => ReturnType<typeof jsonResponse> | Promise<never>): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: unknown, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
       if (url === '/api/v1/warpgate/health' && method === 'GET') {
-        const res = opts.health();
-        return res instanceof Promise ? res : Promise.resolve(res);
-      }
-      if (url === '/api/v1/warpgate/host-key/accept' && method === 'POST') {
-        const body = JSON.parse(String(init?.body)) as { fingerprint: string };
-        opts.acceptBodies?.push(body);
-        if (!opts.accept) throw new Error('unexpected accept call');
-        const res = opts.accept(body.fingerprint);
+        const res = health();
         return res instanceof Promise ? res : Promise.resolve(res);
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
@@ -98,14 +83,14 @@ const OFF: WarpgateHealth = {
 
 describe('BastionStatus', () => {
   it('renders the "SSH bastion" title', async () => {
-    stubApi({ health: () => jsonResponse(200, OFF) });
+    stubApi(() => jsonResponse(200, OFF));
     await mount();
 
     expect(container.querySelector('h2')?.textContent).toBe('SSH bastion');
   });
 
   it('off: a muted (bare) chip reading Off, with a "not configured" hint — never an error', async () => {
-    stubApi({ health: () => jsonResponse(200, OFF) });
+    stubApi(() => jsonResponse(200, OFF));
     await mount();
 
     const badge = chip();
@@ -115,52 +100,51 @@ describe('BastionStatus', () => {
     expect(container.querySelector('.chip.status-error')).toBeNull();
   });
 
-  it('ok: chip in-use reading Reachable, with no detail line', async () => {
-    stubApi({
-      health: () =>
-        jsonResponse(200, {
-          state: 'ok',
-          api: {
-            configured: true,
-            reachable: true,
-            url: 'https://localhost:8888',
-            version: '0.29.1',
-            authenticated: true,
-          },
-          ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
-          hostKey: { state: 'pinned', pinned: ['SHA256:abc'], observed: [] },
-        } satisfies WarpgateHealth),
-    });
+  it('ok with a pinned host key: chip in-use reading Reachable, with no detail line', async () => {
+    stubApi(() =>
+      jsonResponse(200, {
+        state: 'ok',
+        api: {
+          configured: true,
+          reachable: true,
+          url: 'https://localhost:8888',
+          version: '0.29.1',
+          authenticated: true,
+        },
+        ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
+        hostKey: { state: 'pinned', pinned: ['SHA256:abc'], observed: ['SHA256:abc'] },
+      } satisfies WarpgateHealth),
+    );
     await mount();
 
     const badge = chip();
     expect(badge.className).toBe('chip in-use');
     expect(badge.textContent).toBe('Reachable');
     expect(container.textContent).not.toContain('unreachable');
-    expect(container.textContent).not.toContain('Host key not pinned');
+    expect(container.textContent).not.toContain('trusted host key');
+    expect(container.textContent).not.toContain('Observed');
   });
 
   it('degraded: a warning chip naming the failing component and its dial error', async () => {
-    stubApi({
-      health: () =>
-        jsonResponse(200, {
-          state: 'degraded',
-          api: {
-            configured: true,
-            reachable: true,
-            url: 'https://localhost:8888',
-            version: '0.29.1',
-            authenticated: true,
-          },
-          ssh: {
-            configured: true,
-            reachable: false,
-            addr: '10.88.0.1:2222',
-            error: 'dial tcp 10.88.0.1:2222: connect: connection refused',
-          },
-          hostKey: { state: 'unreachable', pinned: [], observed: [] },
-        } satisfies WarpgateHealth),
-    });
+    stubApi(() =>
+      jsonResponse(200, {
+        state: 'degraded',
+        api: {
+          configured: true,
+          reachable: true,
+          url: 'https://localhost:8888',
+          version: '0.29.1',
+          authenticated: true,
+        },
+        ssh: {
+          configured: true,
+          reachable: false,
+          addr: '10.88.0.1:2222',
+          error: 'dial tcp 10.88.0.1:2222: connect: connection refused',
+        },
+        hostKey: { state: 'unreachable', pinned: [], observed: [] },
+      } satisfies WarpgateHealth),
+    );
     await mount();
 
     const badge = chip();
@@ -172,14 +156,13 @@ describe('BastionStatus', () => {
   });
 
   it('unreachable: chip status-error reading Unreachable, with both dial errors surfaced', async () => {
-    stubApi({
-      health: () =>
-        jsonResponse(200, {
-          state: 'unreachable',
-          api: { configured: true, reachable: false, error: 'dial tcp 127.0.0.1:8888: refused' },
-          ssh: { configured: true, reachable: false, error: 'dial tcp 10.88.0.1:2222: refused' },
-        } satisfies WarpgateHealth),
-    });
+    stubApi(() =>
+      jsonResponse(200, {
+        state: 'unreachable',
+        api: { configured: true, reachable: false, error: 'dial tcp 127.0.0.1:8888: refused' },
+        ssh: { configured: true, reachable: false, error: 'dial tcp 10.88.0.1:2222: refused' },
+      } satisfies WarpgateHealth),
+    );
     await mount();
 
     const badge = chip();
@@ -194,43 +177,65 @@ describe('BastionStatus', () => {
   });
 
   it('degraded: names a rejected admin token distinctly from a dial error', async () => {
-    stubApi({
-      health: () =>
-        jsonResponse(200, {
-          state: 'degraded',
-          api: {
-            configured: true,
-            reachable: true,
-            url: 'https://localhost:8888',
-            authenticated: false,
-          },
-          ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
-        } satisfies WarpgateHealth),
-    });
+    stubApi(() =>
+      jsonResponse(200, {
+        state: 'degraded',
+        api: {
+          configured: true,
+          reachable: true,
+          url: 'https://localhost:8888',
+          authenticated: false,
+        },
+        ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
+      } satisfies WarpgateHealth),
+    );
     await mount();
 
     expect(container.textContent).toContain('admin token rejected');
     expect(container.textContent).not.toContain('Warpgate API unreachable');
   });
 
-  it('unpinned host key: a muted line, distinct from the mismatch UI', async () => {
-    stubApi({
-      health: () =>
-        jsonResponse(200, {
-          state: 'ok',
-          api: { configured: true, reachable: true, authenticated: true },
-          ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
-          hostKey: { state: 'unpinned', pinned: [], observed: [] },
-        } satisfies WarpgateHealth),
-    });
+  it('unpinned: ok, with the setting to pin and the observed fingerprints listed', async () => {
+    stubApi(() =>
+      jsonResponse(200, {
+        state: 'ok',
+        api: { configured: true, reachable: true, authenticated: true },
+        ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
+        hostKey: { state: 'unpinned', pinned: [], observed: ['SHA256:one', 'SHA256:two'] },
+      } satisfies WarpgateHealth),
+    );
     await mount();
 
-    expect(container.textContent).toContain('Host key not pinned yet.');
-    expect(container.querySelector('button[name^="accept-host-key-"]')).toBeNull();
+    expect(chip().textContent).toBe('Reachable');
+    expect(container.textContent).toContain('No trusted host key is configured');
+    expect(container.textContent).toContain('--warpgate-ssh-host-key');
+    const codes = Array.from(container.querySelectorAll('code')).map((c) => c.textContent);
+    expect(codes).toEqual(['--warpgate-ssh-host-key', 'SHA256:one', 'SHA256:two']);
+    expect(container.textContent).not.toContain('Trusted:');
+  });
+
+  it('mismatch: degraded, showing trusted vs observed fingerprints and naming the setting', async () => {
+    stubApi(() =>
+      jsonResponse(200, {
+        state: 'degraded',
+        api: { configured: true, reachable: true, authenticated: true },
+        ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
+        hostKey: { state: 'mismatch', pinned: ['SHA256:old'], observed: ['SHA256:new'] },
+      } satisfies WarpgateHealth),
+    );
+    await mount();
+
+    expect(chip().textContent).toBe('Degraded');
+    expect(container.textContent).toContain('does not match the trusted key');
+    expect(container.textContent).toContain('Target-bearing spawns are blocked');
+    expect(container.textContent).toContain('--warpgate-ssh-host-key');
+    expect(container.textContent).toContain('Trusted: SHA256:old');
+    expect(container.textContent).toContain('Observed: SHA256:new');
+    expect(container.querySelector('button')).toBeNull();
   });
 
   it('a failed fetch renders the same muted "unknown" treatment, never a crash', async () => {
-    stubApi({ health: () => Promise.reject(new Error('network down')) });
+    stubApi(() => Promise.reject(new Error('network down')));
 
     await expect(mount()).resolves.toBeUndefined();
 
@@ -238,107 +243,5 @@ describe('BastionStatus', () => {
     expect(badge.className).toBe('muted');
     expect(badge.textContent).toBe('unknown');
     expect(container.querySelector('.chip')).toBeNull();
-  });
-
-  describe('host-key mismatch', () => {
-    const MISMATCH: WarpgateHealth = {
-      state: 'degraded',
-      api: { configured: true, reachable: true, authenticated: true },
-      ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
-      hostKey: { state: 'mismatch', pinned: ['SHA256:old'], observed: ['SHA256:new'] },
-    };
-    const PINNED: WarpgateHealth = {
-      state: 'ok',
-      api: { configured: true, reachable: true, authenticated: true },
-      ssh: { configured: true, reachable: true, addr: '10.88.0.1:2222' },
-      hostKey: { state: 'pinned', pinned: ['SHA256:new'], observed: [] },
-    };
-
-    it('shows pinned vs observed fingerprints and explains the block', async () => {
-      stubApi({ health: () => jsonResponse(200, MISMATCH) });
-      await mount();
-
-      expect(container.textContent).toContain('SSH host key changed');
-      expect(container.textContent).toContain('Target-bearing spawns are blocked');
-      expect(container.textContent).toContain('verify');
-      const pinnedCode = container.querySelector('code');
-      expect(pinnedCode?.textContent).toBe('SHA256:old');
-      expect(container.textContent).toContain('SHA256:new');
-    });
-
-    it('confirm → POST the fingerprint → refetch, chip and mismatch UI update', async () => {
-      const acceptBodies: { fingerprint: string }[] = [];
-      let healthCall = 0;
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-      stubApi({
-        health: () => {
-          healthCall += 1;
-          return jsonResponse(200, healthCall === 1 ? MISMATCH : PINNED);
-        },
-        accept: (fp) => jsonResponse(200, { state: 'pinned', pinned: [fp], observed: [] }),
-        acceptBodies,
-      });
-      await mount();
-
-      const acceptButton = container.querySelector<HTMLButtonElement>(
-        'button[name="accept-host-key-SHA256:new"]',
-      );
-      if (!acceptButton) throw new Error('missing accept button');
-      acceptButton.click();
-      await settle();
-
-      expect(confirmSpy).toHaveBeenCalledTimes(1);
-      expect(acceptBodies).toEqual([{ fingerprint: 'SHA256:new' }]);
-      // The refetch landed: the chip now reads the new, healthy state and the
-      // mismatch UI (with its accept button) is gone.
-      expect(chip().textContent).toBe('Reachable');
-      expect(container.querySelector('button[name^="accept-host-key-"]')).toBeNull();
-      expect(container.textContent).not.toContain('SSH host key changed');
-    });
-
-    it('does not call accept when the confirm is cancelled', async () => {
-      const acceptBodies: { fingerprint: string }[] = [];
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
-      stubApi({
-        health: () => jsonResponse(200, MISMATCH),
-        accept: (fp) => jsonResponse(200, { state: 'pinned', pinned: [fp], observed: [] }),
-        acceptBodies,
-      });
-      await mount();
-
-      const acceptButton = container.querySelector<HTMLButtonElement>(
-        'button[name="accept-host-key-SHA256:new"]',
-      );
-      if (!acceptButton) throw new Error('missing accept button');
-      acceptButton.click();
-      await settle();
-
-      expect(acceptBodies).toEqual([]);
-      expect(container.textContent).toContain('SSH host key changed');
-    });
-
-    it('a failed accept shows the error inline and leaves the mismatch UI in place', async () => {
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
-      stubApi({
-        health: () => jsonResponse(200, MISMATCH),
-        accept: () =>
-          jsonResponse(409, { error: 'fingerprint not among the currently observed keys' }),
-      });
-      await mount();
-
-      const acceptButton = container.querySelector<HTMLButtonElement>(
-        'button[name="accept-host-key-SHA256:new"]',
-      );
-      if (!acceptButton) throw new Error('missing accept button');
-      acceptButton.click();
-      await settle();
-
-      expect(container.textContent).toContain('fingerprint not among the currently observed keys');
-      // Still degraded/mismatch — the failed call never refetched.
-      expect(chip().textContent).toBe('Degraded');
-      expect(
-        container.querySelector<HTMLButtonElement>('button[name="accept-host-key-SHA256:new"]'),
-      ).not.toBeNull();
-    });
   });
 });

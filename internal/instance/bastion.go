@@ -71,8 +71,9 @@ const (
 	// bastionKeyName is the run key's PRIVATE half, OpenSSH PEM, 0600 —
 	// OpenSSH refuses an identity file others can read.
 	bastionKeyName = "warpgate-run-key"
-	// bastionKnownHostsName pins Warpgate's SSH host key(s), rendered from
-	// lab's stored pin (never from a fresh scan), 0600.
+	// bastionKnownHostsName pins Warpgate's SSH host key(s) for this run —
+	// the trusted keys of --warpgate-ssh-host-key, or what the spawn's scan
+	// observed when none is configured — 0600.
 	bastionKnownHostsName = "warpgate-known-hosts"
 	// bastionConfigName is THE per-run OpenSSH client config, 0600: the file
 	// the wrappers pass with -F and ~/.ssh/config links to.

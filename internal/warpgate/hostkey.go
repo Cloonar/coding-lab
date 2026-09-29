@@ -1,21 +1,23 @@
 package warpgate
 
-// Warpgate's SSH host key, pinned by lab (ADR-0068 decision 4). A run reaches
-// its targets through the bastion with StrictHostKeyChecking on and a
-// known_hosts file lab writes — never accept-new inside a run — so lab has to
-// know the bastion's host key before the first run needs it. Warpgate exposes
-// no endpoint for it (its host keys live in its database), so lab reads it the
+// Warpgate's SSH host key, as a run trusts it (ADR-0068 decision 4). A run
+// reaches its targets through the bastion with StrictHostKeyChecking on and
+// a known_hosts file lab writes — never accept-new inside a run — so lab has
+// to know the bastion's host key before the run needs it. Warpgate exposes no
+// endpoint for it (its host keys live in its database), so lab reads it the
 // way ssh-keyscan does: one SSH handshake per host-key algorithm, aborted the
 // moment the server has proven possession of its key and before any
 // authentication.
 //
-// The pin is trust-on-first-use exactly ONCE, on the operator's host, by lab
-// itself: the first successful scan with nothing stored becomes the pin.
-// After that a scan that differs is a mismatch — nothing is stored, and
-// target-bearing spawns are refused — until the operator verifies a fingerprint
-// out of band and accepts it. known_hosts for runs is always rendered from the
-// PIN, never from a fresh scan, so a man in the middle between lab and the
-// bastion can at most block spawns, never get a run to trust its key.
+// What a run then trusts is the operator's choice. With
+// --warpgate-ssh-host-key set, that key (or keys) is the pin: every run's
+// known_hosts is rendered from it verbatim, and a listener presenting none of
+// the configured keys refuses target-bearing spawns — a man in the middle
+// between lab and the bastion can at most block spawns, never get a run to
+// trust its key. With the setting unset, lab accepts every key the listener
+// presents: each spawn's scan is what its run trusts. Health reports the
+// observed fingerprints either way, so the setting can be filled in from
+// them.
 
 import (
 	"context"
@@ -24,7 +26,6 @@ import (
 	"net"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -264,197 +265,140 @@ func sameKeySet(a, b []ssh.PublicKey) bool {
 	return true
 }
 
-// SettingsStore is where the pin lives: one settings row holding
-// FormatAuthorizedKeys text. *store.Store satisfies it; GetString returns def
-// for a missing or blank row, which is what "unpinned" is.
-type SettingsStore interface {
-	GetString(ctx context.Context, key, def string) (string, error)
-	SetSetting(ctx context.Context, key, value string) error
-}
-
-// HostKeyState is the outcome of comparing the listener's keys to the pin.
+// HostKeyState is the outcome of comparing the listener's keys to what lab
+// trusts.
 type HostKeyState string
 
 const (
-	// HostKeyUnpinned: nothing is pinned. Check pins on the first successful
-	// scan, so this persists only when storing the pin failed (Error says so).
+	// HostKeyUnpinned: no trusted key is configured (--warpgate-ssh-host-key
+	// unset), so a run trusts whatever the listener presented to the scan
+	// that wired it. Observed lists those keys; Pinned is empty.
 	HostKeyUnpinned HostKeyState = "unpinned"
-	// HostKeyPinned: the listener presents exactly the pinned key set.
+	// HostKeyPinned: a trusted key is configured and the listener presents
+	// at least one of the configured keys.
 	HostKeyPinned HostKeyState = "pinned"
-	// HostKeyMismatch: the listener presents a different key set than the pin
-	// (or the stored pin is unreadable — Error says so). Nothing is stored;
-	// the operator must accept an observed fingerprint.
+	// HostKeyMismatch: a trusted key is configured and the listener presents
+	// none of the configured keys. Target-bearing spawns are refused until
+	// --warpgate-ssh-host-key names a key the listener presents.
 	HostKeyMismatch HostKeyState = "mismatch"
-	// HostKeyUnreachable: the comparison could not be made — the listener
-	// could not be scanned, or the stored pin could not be read from lab's
-	// settings. Error says which.
+	// HostKeyUnreachable: the listener could not be scanned. Error says why.
 	HostKeyUnreachable HostKeyState = "unreachable"
 )
 
 // HostKeyStatus is one check's result, shaped for the health endpoint.
 type HostKeyStatus struct {
 	State    HostKeyState
-	Pinned   []string // fingerprints of the stored pin (empty when unpinned)
+	Pinned   []string // fingerprints of the configured trusted keys (empty when none is configured)
 	Observed []string // fingerprints of the last scan (empty when unreachable)
-	Error    string   // why the state is not simply pinned/mismatch, when there is a reason
+	Error    string   // why the state is not simply pinned/unpinned, when there is a reason
 }
 
-// ErrFingerprintNotObserved is returned (wrapped) by Accept when the
-// fingerprint is not one the listener presents right now — the operator
-// verified a key that is not the one lab sees, or the key changed again since
-// they looked. The HTTP layer maps it to 409; a scan failure is a separate
-// error with State unreachable.
-var ErrFingerprintNotObserved = errors.New("fingerprint is not among the host keys the Warpgate SSH listener presents")
-
-// HostKeyPin holds the pin of Warpgate's SSH host key(s) in one settings row
-// and compares the listener's current keys against it. It is safe for
-// concurrent use: scans run in parallel (every target-bearing spawn scans),
-// while the read-compare-write of the stored pin is serialized, so a TOFU pin
-// and an Accept cannot interleave.
+// HostKeyPin decides which host keys a run trusts for Warpgate's SSH
+// listener at addr:
+//
+//   - With trusted keys configured (--warpgate-ssh-host-key), the run's
+//     known_hosts is rendered from THOSE keys, verbatim, and a scan that
+//     presents none of them refuses to wire a run. Nothing the listener says
+//     can widen what a run trusts.
+//   - With none configured, the run's known_hosts is rendered from the keys
+//     the listener presents to the scan at spawn: every key it offers is
+//     accepted. The operator chose that by leaving the setting unset; health
+//     reports the observed fingerprints so the setting can be filled in.
+//
+// It holds no state and is safe for concurrent use: every call scans.
 type HostKeyPin struct {
-	st         SettingsStore
-	settingKey string
-	addr       string
-	scan       func(ctx context.Context, addr string) ([]ssh.PublicKey, error)
-
-	mu sync.Mutex // guards the stored pin's read-compare-write
+	addr    string
+	trusted []ssh.PublicKey
+	scan    func(ctx context.Context, addr string) ([]ssh.PublicKey, error)
 }
 
-// NewHostKeyPin returns a pin stored under settingKey (store.SettingWarpgateSSHHostKey)
-// for the SSH listener at addr. scan is ScanHostKeys when nil; tests inject
-// their own.
-func NewHostKeyPin(st SettingsStore, settingKey, addr string, scan func(ctx context.Context, addr string) ([]ssh.PublicKey, error)) *HostKeyPin {
+// NewHostKeyPin returns the pin for the SSH listener at addr. trusted is the
+// parsed --warpgate-ssh-host-key (nil or empty when unset). scan is
+// ScanHostKeys when nil; tests inject their own.
+func NewHostKeyPin(addr string, trusted []ssh.PublicKey, scan func(ctx context.Context, addr string) ([]ssh.PublicKey, error)) *HostKeyPin {
 	if scan == nil {
 		scan = ScanHostKeys
 	}
-	return &HostKeyPin{st: st, settingKey: settingKey, addr: addr, scan: scan}
+	return &HostKeyPin{addr: addr, trusted: slices.Clone(trusted), scan: scan}
 }
 
-// Check scans the listener and compares its keys to the pin, pinning them if
-// nothing is pinned yet (trust on first use — the only write Check ever
-// makes). It always scans; there is no cached answer, because the scan is
-// also the SSH listener's reachability probe.
+// Pinned reports whether a trusted key is configured.
+func (p *HostKeyPin) Pinned() bool {
+	return len(p.trusted) > 0
+}
+
+// Check scans the listener and compares its keys to the trusted set. It
+// always scans; there is no cached answer, because the scan is also the SSH
+// listener's reachability probe.
 func (p *HostKeyPin) Check(ctx context.Context) HostKeyStatus {
 	st, _ := p.check(ctx)
 	return st
 }
 
-// check is Check that also returns the pinned keys, which KnownHosts renders.
+// check is Check that also returns the keys a run's known_hosts is rendered
+// from: the trusted keys when configured, else the observed ones.
 func (p *HostKeyPin) check(ctx context.Context) (HostKeyStatus, []ssh.PublicKey) {
 	observed, scanErr := p.scan(ctx, p.addr)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	pinned, stored, readErr := p.readPin(ctx)
-	st := evaluate(pinned, stored, readErr, observed, scanErr)
-	if st.State != HostKeyUnpinned {
-		return st, pinned
-	}
-	// Trust on first use: nothing stored and a successful scan.
-	if err := p.st.SetSetting(ctx, p.settingKey, FormatAuthorizedKeys(observed)); err != nil {
-		st.Error = fmt.Sprintf("pinning the observed host key failed: %v", err)
+	st := evaluate(p.trusted, observed, scanErr)
+	switch st.State {
+	case HostKeyPinned:
+		return st, p.trusted
+	case HostKeyUnpinned:
+		return st, observed
+	default:
 		return st, nil
 	}
-	fps := Fingerprints(observed)
-	return HostKeyStatus{State: HostKeyPinned, Pinned: fps, Observed: fps}, observed
 }
 
-// readPin loads and parses the stored pin. stored reports whether a
-// non-blank row exists, which is what separates "unpinned" from "pinned but
-// unreadable".
-func (p *HostKeyPin) readPin(ctx context.Context) (keys []ssh.PublicKey, stored bool, err error) {
-	text, err := p.st.GetString(ctx, p.settingKey, "")
-	if err != nil {
-		return nil, false, fmt.Errorf("reading the pinned host key from lab's settings: %w", err)
-	}
-	if strings.TrimSpace(text) == "" {
-		return nil, false, nil
-	}
-	keys, err = ParseAuthorizedKeys(text)
-	if err == nil && len(keys) == 0 {
-		err = errors.New("the stored pin holds no key")
-	}
-	return keys, true, err
-}
-
-// evaluate is the pure comparison: no I/O, no writes.
-func evaluate(pinned []ssh.PublicKey, stored bool, readErr error, observed []ssh.PublicKey, scanErr error) HostKeyStatus {
-	st := HostKeyStatus{Pinned: Fingerprints(pinned), Observed: []string{}}
-	switch {
-	case scanErr != nil:
+// evaluate is the pure comparison: no I/O.
+func evaluate(trusted, observed []ssh.PublicKey, scanErr error) HostKeyStatus {
+	st := HostKeyStatus{Pinned: Fingerprints(trusted), Observed: []string{}}
+	if scanErr != nil {
 		st.State, st.Error = HostKeyUnreachable, scanErr.Error()
 		return st
-	case readErr != nil && !stored:
-		// The settings read itself failed: whether a pin exists is unknown,
-		// so neither TOFU nor a comparison is possible. Observed stays empty,
-		// as it does for every unreachable status.
-		st.State, st.Error = HostKeyUnreachable, readErr.Error()
-		return st
-	case readErr != nil:
-		st.State = HostKeyMismatch
-		st.Error = fmt.Sprintf("the stored host key pin is unreadable (%v); accept one of the observed fingerprints to replace it", readErr)
-	case !stored:
+	}
+	st.Observed = Fingerprints(observed)
+	switch {
+	case len(trusted) == 0:
 		st.State = HostKeyUnpinned
-	case sameKeySet(pinned, observed):
+	case anyKeyIn(trusted, observed):
 		st.State = HostKeyPinned
 	default:
 		st.State = HostKeyMismatch
 	}
-	st.Observed = Fingerprints(observed)
 	return st
 }
 
-// KnownHosts checks the listener and, when it presents exactly the pinned
-// keys, returns the known_hosts text a run gets: the PINNED keys under the
-// configured address's host pattern. Every other outcome is an error that
-// tells the operator what to do; a target-bearing spawn is refused on it.
-func (p *HostKeyPin) KnownHosts(ctx context.Context) (string, error) {
-	st, pinned := p.check(ctx)
-	switch st.State {
-	case HostKeyPinned:
-		return KnownHostsLines(p.addr, pinned), nil
-	case HostKeyMismatch:
-		detail := ""
-		if st.Error != "" {
-			detail = " (" + st.Error + ")"
-		}
-		return "", fmt.Errorf("warpgate: the SSH host key(s) presented at %s [%s] do not match lab's pin [%s]%s; refusing to wire SSH targets. If Warpgate's host key was changed on purpose, verify one of the presented fingerprints out of band (e.g. ssh-keyscan -p <port> <addr> | ssh-keygen -lf - run on the Warpgate host itself) and accept it with POST /api/v1/warpgate/host-key/accept {\"fingerprint\":\"SHA256:…\"}",
-			p.addr, strings.Join(st.Observed, ", "), strings.Join(st.Pinned, ", "), detail)
-	case HostKeyUnreachable:
-		return "", fmt.Errorf("warpgate: cannot verify the SSH host key at %s (is --warpgate-ssh-addr right and Warpgate's SSH listener enabled?): %s", p.addr, st.Error)
-	default:
-		return "", fmt.Errorf("warpgate: no SSH host key is pinned for %s: %s", p.addr, st.Error)
+// anyKeyIn reports whether at least one of want is among have, compared by
+// wire encoding.
+func anyKeyIn(want, have []ssh.PublicKey) bool {
+	set := make(map[string]bool, len(have))
+	for _, k := range have {
+		set[string(k.Marshal())] = true
 	}
+	for _, k := range want {
+		if set[string(k.Marshal())] {
+			return true
+		}
+	}
+	return false
 }
 
-// Accept replaces the pin with the listener's CURRENT key set, provided
-// fingerprint (an operator-verified "SHA256:…") is one of the keys it
-// presents right now. The whole observed set is pinned — the fingerprint is
-// the operator's proof that the listener is the real one, and the pin holds
-// every key it offers (see hostKeyAlgorithms).
-//
-// Nothing is stored on any failure: an empty fingerprint, a failed scan
-// (State unreachable), a fingerprint not observed (ErrFingerprintNotObserved,
-// with the current comparison as the status), or a failed write.
-func (p *HostKeyPin) Accept(ctx context.Context, fingerprint string) (HostKeyStatus, error) {
-	fingerprint = strings.TrimSpace(fingerprint)
-	if fingerprint == "" {
-		return HostKeyStatus{}, errors.New("warpgate: a host key fingerprint (SHA256:…) is required")
+// KnownHosts checks the listener and returns the known_hosts text a run gets
+// under the configured address's host pattern: the trusted keys when
+// --warpgate-ssh-host-key is set and the listener presents one of them, else
+// — with no trusted key configured — every key the listener presented. Every
+// other outcome is an error that tells the operator what to do; a
+// target-bearing spawn is refused on it.
+func (p *HostKeyPin) KnownHosts(ctx context.Context) (string, error) {
+	st, keys := p.check(ctx)
+	switch st.State {
+	case HostKeyPinned, HostKeyUnpinned:
+		return KnownHostsLines(p.addr, keys), nil
+	case HostKeyMismatch:
+		return "", fmt.Errorf("warpgate: the SSH host key(s) presented at %s [%s] are not among the trusted keys configured with --warpgate-ssh-host-key [%s]; refusing to wire SSH targets. If Warpgate's host key was changed on purpose, put the new key in --warpgate-ssh-host-key (ssh-keyscan -p <port> <addr> run on the Warpgate host itself prints it) and restart lab",
+			p.addr, strings.Join(st.Observed, ", "), strings.Join(st.Pinned, ", "))
+	default:
+		return "", fmt.Errorf("warpgate: cannot verify the SSH host key at %s (is --warpgate-ssh-addr right and Warpgate's SSH listener enabled?): %s", p.addr, st.Error)
 	}
-	observed, scanErr := p.scan(ctx, p.addr)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	pinned, stored, readErr := p.readPin(ctx)
-	current := evaluate(pinned, stored, readErr, observed, scanErr)
-	if scanErr != nil {
-		return current, fmt.Errorf("warpgate: cannot scan the SSH listener at %s to accept its host key: %w", p.addr, scanErr)
-	}
-	if !slices.Contains(current.Observed, fingerprint) {
-		return current, fmt.Errorf("warpgate: %w: %s is not among [%s] presented at %s right now; re-check the Warpgate health status and verify again", ErrFingerprintNotObserved, fingerprint, strings.Join(current.Observed, ", "), p.addr)
-	}
-	if err := p.st.SetSetting(ctx, p.settingKey, FormatAuthorizedKeys(observed)); err != nil {
-		return current, fmt.Errorf("warpgate: storing the accepted host key pin: %w", err)
-	}
-	return HostKeyStatus{State: HostKeyPinned, Pinned: current.Observed, Observed: current.Observed}, nil
 }

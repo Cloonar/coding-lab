@@ -1,7 +1,7 @@
 package warpgate
 
 // Host-key scanning against an in-process x/crypto/ssh server, and the pin's
-// state machine against a fake settings store with an injected scan.
+// trusted-key comparison with an injected scan.
 
 import (
 	"context"
@@ -272,49 +272,6 @@ func TestFingerprints(t *testing.T) {
 
 // --- HostKeyPin ------------------------------------------------------------
 
-const pinKey = "warpgate_ssh_host_key"
-
-// fakeStore is a SettingsStore with failure injection and a write counter.
-type fakeStore struct {
-	mu       sync.Mutex
-	m        map[string]string
-	getErr   error
-	setErr   error
-	setCalls int
-}
-
-func (s *fakeStore) GetString(_ context.Context, key, def string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.getErr != nil {
-		return "", s.getErr
-	}
-	if v := s.m[key]; v != "" {
-		return v, nil
-	}
-	return def, nil
-}
-
-func (s *fakeStore) SetSetting(_ context.Context, key, value string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.setCalls++
-	if s.setErr != nil {
-		return s.setErr
-	}
-	if s.m == nil {
-		s.m = map[string]string{}
-	}
-	s.m[key] = value
-	return nil
-}
-
-func (s *fakeStore) get() (string, int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.m[pinKey], s.setCalls
-}
-
 // fakeScan is an injectable scan whose answer a test changes between calls.
 type fakeScan struct {
 	mu   sync.Mutex
@@ -338,209 +295,118 @@ func (f *fakeScan) scan(_ context.Context, _ string) ([]ssh.PublicKey, error) {
 
 const pinAddr = "10.88.0.1:2222"
 
-func TestHostKeyPinLifecycle(t *testing.T) {
+// TestHostKeyPinTrusted: with --warpgate-ssh-host-key set, the trusted key is
+// what a run gets — verbatim, never widened by what the listener presents —
+// and a listener presenting none of the trusted keys refuses.
+func TestHostKeyPinTrusted(t *testing.T) {
 	k1, k2, k3 := ed25519Signer(t).PublicKey(), rsaSigner(t).PublicKey(), ed25519Signer(t).PublicKey()
-	store := &fakeStore{}
 	scan := &fakeScan{keys: []ssh.PublicKey{k1, k2}}
-	pin := NewHostKeyPin(store, pinKey, pinAddr, scan.scan)
+	pin := NewHostKeyPin(pinAddr, []ssh.PublicKey{k1}, scan.scan)
 	ctx := context.Background()
-	original := Fingerprints([]ssh.PublicKey{k1, k2})
+	trusted := Fingerprints([]ssh.PublicKey{k1})
+	if !pin.Pinned() {
+		t.Fatal("Pinned() = false with a trusted key configured")
+	}
 
-	// 1. Trust on first use: nothing stored, a clean scan → pinned.
+	// 1. The listener presents the trusted key among others → pinned, and
+	//    the run's known_hosts holds the TRUSTED key only.
 	st := pin.Check(ctx)
-	if st.State != HostKeyPinned || !reflect.DeepEqual(st.Pinned, original) || !reflect.DeepEqual(st.Observed, original) || st.Error != "" {
-		t.Fatalf("TOFU status = %+v", st)
-	}
-	stored, sets := store.get()
-	if stored != FormatAuthorizedKeys([]ssh.PublicKey{k1, k2}) || sets != 1 {
-		t.Fatalf("TOFU stored %q with %d writes", stored, sets)
-	}
-
-	// 2. Stable: the same keys (in another order) → pinned, no write.
-	scan.set([]ssh.PublicKey{k2, k1}, nil)
-	if st := pin.Check(ctx); st.State != HostKeyPinned {
-		t.Errorf("stable status = %+v", st)
+	if st.State != HostKeyPinned || !reflect.DeepEqual(st.Pinned, trusted) || !reflect.DeepEqual(st.Observed, Fingerprints([]ssh.PublicKey{k1, k2})) || st.Error != "" {
+		t.Fatalf("status = %+v", st)
 	}
 	kh, err := pin.KnownHosts(ctx)
 	if err != nil {
 		t.Fatalf("KnownHosts: %v", err)
 	}
-	pinned, _ := ParseAuthorizedKeys(stored)
-	if kh != KnownHostsLines(pinAddr, pinned) || !strings.HasPrefix(kh, "[10.88.0.1]:2222 ") {
-		t.Errorf("KnownHosts = %q, want the pin rendered for %s", kh, pinAddr)
-	}
-	if _, sets := store.get(); sets != 1 {
-		t.Errorf("a stable check wrote the pin (%d writes)", sets)
+	if kh != KnownHostsLines(pinAddr, []ssh.PublicKey{k1}) || !strings.HasPrefix(kh, "[10.88.0.1]:2222 ") || strings.Contains(kh, "ssh-rsa") {
+		t.Errorf("KnownHosts = %q, want the trusted key alone rendered for %s", kh, pinAddr)
 	}
 
-	// 3. Mismatch: a different key → mismatch, nothing stored, KnownHosts refuses
-	//    with both fingerprint sets and the accept endpoint.
+	// 2. Order and repeats are irrelevant.
+	scan.set([]ssh.PublicKey{k2, k1, k1}, nil)
+	if st := pin.Check(ctx); st.State != HostKeyPinned {
+		t.Errorf("reordered status = %+v", st)
+	}
+
+	// 3. Mismatch: the listener presents none of the trusted keys → refused,
+	//    naming both sides, the address, and the setting to change.
 	scan.set([]ssh.PublicKey{k3}, nil)
 	st = pin.Check(ctx)
-	if st.State != HostKeyMismatch || !reflect.DeepEqual(st.Pinned, original) || !reflect.DeepEqual(st.Observed, Fingerprints([]ssh.PublicKey{k3})) {
+	if st.State != HostKeyMismatch || !reflect.DeepEqual(st.Pinned, trusted) || !reflect.DeepEqual(st.Observed, Fingerprints([]ssh.PublicKey{k3})) {
 		t.Errorf("mismatch status = %+v", st)
-	}
-	if got, sets := store.get(); got != stored || sets != 1 {
-		t.Errorf("a mismatch changed the pin (%d writes)", sets)
 	}
 	_, err = pin.KnownHosts(ctx)
 	if err == nil {
 		t.Fatal("KnownHosts succeeded on a mismatch")
 	}
-	for _, want := range append([]string{ssh.FingerprintSHA256(k3), "/api/v1/warpgate/host-key/accept", pinAddr}, original...) {
+	for _, want := range []string{ssh.FingerprintSHA256(k3), ssh.FingerprintSHA256(k1), pinAddr, "--warpgate-ssh-host-key"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("mismatch error %q does not mention %q", err, want)
 		}
 	}
 
-	// 4. A subset is not the pin: set equality, not containment.
-	scan.set([]ssh.PublicKey{k1}, nil)
-	if st := pin.Check(ctx); st.State != HostKeyMismatch {
-		t.Errorf("subset status = %+v, want mismatch", st)
-	}
-
-	// 5. Accept with a fingerprint that is not observed: refused, pin unchanged.
-	scan.set([]ssh.PublicKey{k3}, nil)
-	st, err = pin.Accept(ctx, ssh.FingerprintSHA256(k1))
-	if !errors.Is(err, ErrFingerprintNotObserved) || st.State != HostKeyMismatch {
-		t.Errorf("Accept(unobserved) = %+v, %v; want ErrFingerprintNotObserved with the mismatch status", st, err)
-	}
-	if got, sets := store.get(); got != stored || sets != 1 {
-		t.Errorf("a refused accept changed the pin (%d writes)", sets)
-	}
-	if _, err := pin.Accept(ctx, "  "); err == nil {
-		t.Error("Accept with an empty fingerprint succeeded")
-	}
-
-	// 6. Accept with an observed fingerprint: the pin becomes the observed set.
-	st, err = pin.Accept(ctx, " "+ssh.FingerprintSHA256(k3)+" ")
-	if err != nil {
-		t.Fatalf("Accept(observed): %v", err)
-	}
-	newFps := Fingerprints([]ssh.PublicKey{k3})
-	if st.State != HostKeyPinned || !reflect.DeepEqual(st.Pinned, newFps) || !reflect.DeepEqual(st.Observed, newFps) {
-		t.Errorf("accepted status = %+v", st)
-	}
-	if got, _ := store.get(); got != FormatAuthorizedKeys([]ssh.PublicKey{k3}) {
-		t.Errorf("stored pin after accept = %q", got)
-	}
-	if st := pin.Check(ctx); st.State != HostKeyPinned {
-		t.Errorf("status after accept = %+v", st)
-	}
-
-	// 7. Unreachable: the scan fails → unreachable with the pin still reported;
-	//    KnownHosts and Accept refuse; nothing is written.
-	_, setsBefore := store.get()
+	// 4. Unreachable: the trusted set is still reported; KnownHosts refuses.
 	scan.set(nil, errors.New("dial tcp 10.88.0.1:2222: connect: connection refused"))
 	st = pin.Check(ctx)
-	if st.State != HostKeyUnreachable || !reflect.DeepEqual(st.Pinned, newFps) || len(st.Observed) != 0 || !strings.Contains(st.Error, "connection refused") {
+	if st.State != HostKeyUnreachable || !reflect.DeepEqual(st.Pinned, trusted) || len(st.Observed) != 0 || st.Observed == nil || !strings.Contains(st.Error, "connection refused") {
 		t.Errorf("unreachable status = %+v", st)
 	}
 	if _, err := pin.KnownHosts(ctx); err == nil || !strings.Contains(err.Error(), pinAddr) || !strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("KnownHosts while unreachable = %v", err)
 	}
-	st, err = pin.Accept(ctx, ssh.FingerprintSHA256(k3))
-	if err == nil || st.State != HostKeyUnreachable || errors.Is(err, ErrFingerprintNotObserved) {
-		t.Errorf("Accept while unreachable = %+v, %v", st, err)
-	}
-	if _, sets := store.get(); sets != setsBefore {
-		t.Error("an unreachable check or accept wrote the pin")
-	}
 }
 
-// TestHostKeyPinUnreachableWhileUnpinnedDoesNotPin: TOFU needs a successful
-// scan; a failed first scan pins nothing.
-func TestHostKeyPinUnreachableWhileUnpinnedDoesNotPin(t *testing.T) {
-	store := &fakeStore{}
-	scan := &fakeScan{err: errors.New("no route to host")}
-	pin := NewHostKeyPin(store, pinKey, pinAddr, scan.scan)
+// TestHostKeyPinSeveralTrustedKeys: one presented trusted key is enough, and
+// the run gets every trusted key (ssh picks the one the server negotiates).
+func TestHostKeyPinSeveralTrustedKeys(t *testing.T) {
+	k1, k2 := ed25519Signer(t).PublicKey(), rsaSigner(t).PublicKey()
+	pin := NewHostKeyPin(pinAddr, []ssh.PublicKey{k1, k2}, (&fakeScan{keys: []ssh.PublicKey{k2}}).scan)
 	st := pin.Check(context.Background())
-	if st.State != HostKeyUnreachable || len(st.Pinned) != 0 || st.Pinned == nil {
-		t.Errorf("status = %+v", st)
+	if st.State != HostKeyPinned || !reflect.DeepEqual(st.Pinned, Fingerprints([]ssh.PublicKey{k1, k2})) {
+		t.Fatalf("status = %+v", st)
 	}
-	if _, sets := store.get(); sets != 0 {
-		t.Errorf("a failed first scan wrote %d times", sets)
+	kh, err := pin.KnownHosts(context.Background())
+	if err != nil || strings.Count(kh, "\n") != 2 || !strings.Contains(kh, "ssh-ed25519") || !strings.Contains(kh, "ssh-rsa") {
+		t.Errorf("KnownHosts = %q, %v; want both trusted keys", kh, err)
 	}
 }
 
-func TestHostKeyPinStoreFailures(t *testing.T) {
-	k := ed25519Signer(t).PublicKey()
+// TestHostKeyPinUntrusted: with no trusted key configured, a run trusts
+// whatever the listener presents to the scan that wires it — every key,
+// every time — and only an unreachable listener refuses.
+func TestHostKeyPinUntrusted(t *testing.T) {
+	k1, k2, k3 := ed25519Signer(t).PublicKey(), rsaSigner(t).PublicKey(), ed25519Signer(t).PublicKey()
+	scan := &fakeScan{keys: []ssh.PublicKey{k1, k2}}
+	pin := NewHostKeyPin(pinAddr, nil, scan.scan)
 	ctx := context.Background()
-
-	t.Run("read failure is unreachable, never TOFU", func(t *testing.T) {
-		store := &fakeStore{getErr: errors.New("database is locked")}
-		pin := NewHostKeyPin(store, pinKey, pinAddr, (&fakeScan{keys: []ssh.PublicKey{k}}).scan)
-		st := pin.Check(ctx)
-		if st.State != HostKeyUnreachable || !strings.Contains(st.Error, "database is locked") || len(st.Observed) != 0 {
-			t.Errorf("status = %+v", st)
-		}
-		if _, sets := store.get(); sets != 0 {
-			t.Error("a failed read led to a pin write")
-		}
-		if _, err := pin.KnownHosts(ctx); err == nil {
-			t.Error("KnownHosts succeeded with an unreadable store")
-		}
-	})
-
-	t.Run("TOFU write failure stays unpinned", func(t *testing.T) {
-		store := &fakeStore{setErr: errors.New("disk full")}
-		pin := NewHostKeyPin(store, pinKey, pinAddr, (&fakeScan{keys: []ssh.PublicKey{k}}).scan)
-		st := pin.Check(ctx)
-		if st.State != HostKeyUnpinned || !strings.Contains(st.Error, "disk full") || len(st.Observed) != 1 {
-			t.Errorf("status = %+v", st)
-		}
-		if _, err := pin.KnownHosts(ctx); err == nil || !strings.Contains(err.Error(), "no SSH host key is pinned") {
-			t.Errorf("KnownHosts = %v", err)
-		}
-	})
-
-	t.Run("corrupt pin is a mismatch that accept repairs", func(t *testing.T) {
-		store := &fakeStore{m: map[string]string{pinKey: "ssh-ed25519 not-a-key\n"}}
-		pin := NewHostKeyPin(store, pinKey, pinAddr, (&fakeScan{keys: []ssh.PublicKey{k}}).scan)
-		st := pin.Check(ctx)
-		if st.State != HostKeyMismatch || !strings.Contains(st.Error, "unreadable") {
-			t.Errorf("status = %+v", st)
-		}
-		if _, sets := store.get(); sets != 0 {
-			t.Error("a corrupt pin was overwritten without an accept")
-		}
-		if _, err := pin.Accept(ctx, ssh.FingerprintSHA256(k)); err != nil {
-			t.Fatalf("Accept: %v", err)
-		}
-		if st := pin.Check(ctx); st.State != HostKeyPinned {
-			t.Errorf("status after accept = %+v", st)
-		}
-	})
-
-	t.Run("accept write failure", func(t *testing.T) {
-		store := &fakeStore{m: map[string]string{pinKey: FormatAuthorizedKeys([]ssh.PublicKey{ed25519Signer(t).PublicKey()})}, setErr: errors.New("disk full")}
-		pin := NewHostKeyPin(store, pinKey, pinAddr, (&fakeScan{keys: []ssh.PublicKey{k}}).scan)
-		st, err := pin.Accept(ctx, ssh.FingerprintSHA256(k))
-		if err == nil || errors.Is(err, ErrFingerprintNotObserved) || st.State != HostKeyMismatch {
-			t.Errorf("Accept = %+v, %v; want the write error with the mismatch status", st, err)
-		}
-	})
-}
-
-// TestHostKeyPinConcurrentTOFUPinsOnce: many spawns checking an unpinned
-// listener at once must agree on one pin and write it once.
-func TestHostKeyPinConcurrentTOFUPinsOnce(t *testing.T) {
-	k := ed25519Signer(t).PublicKey()
-	store := &fakeStore{}
-	pin := NewHostKeyPin(store, pinKey, pinAddr, (&fakeScan{keys: []ssh.PublicKey{k}}).scan)
-	var wg sync.WaitGroup
-	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if kh, err := pin.KnownHosts(context.Background()); err != nil || !strings.Contains(kh, "ssh-ed25519") {
-				t.Errorf("KnownHosts = %q, %v", kh, err)
-			}
-		}()
+	if pin.Pinned() {
+		t.Fatal("Pinned() = true with no trusted key configured")
 	}
-	wg.Wait()
-	if _, sets := store.get(); sets != 1 {
-		t.Errorf("concurrent TOFU wrote the pin %d times, want 1", sets)
+
+	st := pin.Check(ctx)
+	if st.State != HostKeyUnpinned || len(st.Pinned) != 0 || st.Pinned == nil || !reflect.DeepEqual(st.Observed, Fingerprints([]ssh.PublicKey{k1, k2})) || st.Error != "" {
+		t.Fatalf("status = %+v", st)
+	}
+	kh, err := pin.KnownHosts(ctx)
+	if err != nil || kh != KnownHostsLines(pinAddr, []ssh.PublicKey{k1, k2}) {
+		t.Errorf("KnownHosts = %q, %v; want every observed key", kh, err)
+	}
+
+	// The listener's key changes: accepted, nothing to compare against.
+	scan.set([]ssh.PublicKey{k3}, nil)
+	if st := pin.Check(ctx); st.State != HostKeyUnpinned || !reflect.DeepEqual(st.Observed, Fingerprints([]ssh.PublicKey{k3})) {
+		t.Errorf("status after a key change = %+v", st)
+	}
+	if kh, err := pin.KnownHosts(ctx); err != nil || kh != KnownHostsLines(pinAddr, []ssh.PublicKey{k3}) {
+		t.Errorf("KnownHosts after a key change = %q, %v", kh, err)
+	}
+
+	scan.set(nil, errors.New("no route to host"))
+	if st := pin.Check(ctx); st.State != HostKeyUnreachable || !strings.Contains(st.Error, "no route to host") {
+		t.Errorf("unreachable status = %+v", st)
+	}
+	if _, err := pin.KnownHosts(ctx); err == nil {
+		t.Error("KnownHosts succeeded with an unreachable listener")
 	}
 }
 
@@ -548,13 +414,25 @@ func TestHostKeyPinConcurrentTOFUPinsOnce(t *testing.T) {
 func TestHostKeyPinAgainstRealListener(t *testing.T) {
 	ed, rs := ed25519Signer(t), rsaSigner(t)
 	addr := startSSHServer(t, ed, rs)
-	store := &fakeStore{}
-	pin := NewHostKeyPin(store, pinKey, addr, nil)
-	kh, err := pin.KnownHosts(context.Background())
+	ctx := context.Background()
+
+	kh, err := NewHostKeyPin(addr, nil, nil).KnownHosts(ctx)
 	if err != nil {
-		t.Fatalf("KnownHosts: %v", err)
+		t.Fatalf("untrusted KnownHosts: %v", err)
 	}
 	if strings.Count(kh, "\n") != 2 || !strings.Contains(kh, "ssh-ed25519") || !strings.Contains(kh, "ssh-rsa") {
-		t.Errorf("KnownHosts = %q", kh)
+		t.Errorf("untrusted KnownHosts = %q", kh)
+	}
+
+	kh, err = NewHostKeyPin(addr, []ssh.PublicKey{ed.PublicKey()}, nil).KnownHosts(ctx)
+	if err != nil {
+		t.Fatalf("trusted KnownHosts: %v", err)
+	}
+	if strings.Count(kh, "\n") != 1 || !strings.Contains(kh, "ssh-ed25519") {
+		t.Errorf("trusted KnownHosts = %q, want the trusted key alone", kh)
+	}
+
+	if _, err := NewHostKeyPin(addr, []ssh.PublicKey{ed25519Signer(t).PublicKey()}, nil).KnownHosts(ctx); err == nil || !strings.Contains(err.Error(), "--warpgate-ssh-host-key") {
+		t.Errorf("KnownHosts with an unpresented trusted key = %v, want a mismatch", err)
 	}
 }

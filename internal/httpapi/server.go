@@ -187,13 +187,11 @@ type Options struct {
 	// non-empty makes health's ssh component configured and echoes it back.
 	WarpgateSSHAddr string
 	// WarpgateHostKeys is the pin of Warpgate's SSH host key(s) — a
-	// *warpgate.HostKeyPin for WarpgateSSHAddr over the store's
-	// store.SettingWarpgateSSHHostKey row — seen through the
-	// WarpgateHostKeyPin seam. Health's ssh probe is its Check (which pins on
-	// the first successful scan), and POST /warpgate/host-key/accept its
-	// Accept. Nil when --warpgate-ssh-addr is unset; cmd/lab should wire it
-	// whenever the address is set (without it, health falls back to a bare
-	// TCP dial for the ssh component, omits hostKey, and the accept 409s).
+	// *warpgate.HostKeyPin for WarpgateSSHAddr over the optional
+	// --warpgate-ssh-host-key — seen through the WarpgateHostKeyPin seam.
+	// Health's ssh probe is its Check. Nil when --warpgate-ssh-addr is unset;
+	// cmd/lab should wire it whenever the address is set (without it, health
+	// falls back to a bare TCP dial for the ssh component and omits hostKey).
 	// Same typed-nil rule as Warpgate above.
 	WarpgateHostKeys WarpgateHostKeyPin
 
@@ -623,16 +621,15 @@ func (s *Server) Handler() http.Handler {
 	// The Warpgate SSH bastion (issue #39 / ADR-0068), the credential
 	// gateway's non-HTTP sibling on the same contract: an always-200 health
 	// folding off/ok/degraded/unreachable over the admin API, the SSH listener
-	// and its pinned host key; the operator's explicit host-key accept; and
-	// the per-repo SSH targets picker, a proxy of Warpgate's admin API (the
-	// admin token must not leave lab). Unconditional for the OneCLI routes'
-	// reason — an unconfigured lab answers health with "off" and the listing
-	// with configured:false, never a 404 the SPA cannot tell from an older
-	// lab — and requireAuth is on every one: health echoes the configured
-	// addresses. The accept is a POST and the toggles PUT/DELETE, so
-	// csrfMiddleware guards them as it guards every mutation on this mux.
+	// and its host key against the configured trust; and the per-repo SSH
+	// targets picker, a proxy of Warpgate's admin API (the admin token must
+	// not leave lab). Unconditional for the OneCLI routes' reason — an
+	// unconfigured lab answers health with "off" and the listing with
+	// configured:false, never a 404 the SPA cannot tell from an older lab —
+	// and requireAuth is on every one: health echoes the configured
+	// addresses. The toggles are PUT/DELETE, so csrfMiddleware guards them as
+	// it guards every mutation on this mux.
 	api.HandleFunc("GET /api/v1/warpgate/health", s.requireAuth(s.handleWarpgateHealth))
-	api.HandleFunc("POST /api/v1/warpgate/host-key/accept", s.requireAuth(s.handleWarpgateHostKeyAccept))
 	api.HandleFunc("GET /api/v1/repos/{id}/warpgate/targets", s.requireAuth(s.handleWarpgateTargetList))
 	api.HandleFunc("PUT /api/v1/repos/{id}/warpgate/targets/{targetId}", s.requireAuth(s.handleWarpgateTargetAssign))
 	api.HandleFunc("DELETE /api/v1/repos/{id}/warpgate/targets/{targetId}", s.requireAuth(s.handleWarpgateTargetUnassign))

@@ -243,7 +243,7 @@
 
               # Text-level dummy (realized, same no-real-agent-CLIs rule):
               # the Warpgate SSH bastion sidecar (issue #39, ADR-0067's SSH
-              # counterpart) — pins that all four settings serialize, and —
+              # counterpart) — pins that all five settings serialize, and —
               # via the default unit's negative grep below — that an
               # unconfigured host emits none of them, mirroring exactly how
               # the OneCLI block above proves "integration entirely off when
@@ -259,6 +259,7 @@
                     adminTokenFile = "/run/secrets/lab-warpgate-admin-token";
                     sshAddr = "10.88.0.1:2222";
                     caFile = "/var/lib/lab/warpgate-ca.pem";
+                    sshHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINhI8LKOopxh0yiaTvHmYEtFqXKyVqyASU7v7RkXh/yl";
                   };
                 };
               };
@@ -633,7 +634,7 @@
                 fi
 
                 # Warpgate SSH bastion (issue #39 / ADR-0068):
-                # all four settings are optional and default to null, so an
+                # all five settings are optional and default to null, so an
                 # operator who has not opted in must get a unit with no
                 # --warpgate-* flag at all — mirrors the OneCLI negative guard
                 # above exactly.
@@ -646,6 +647,7 @@
                 grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-admin-token-file" "/run/secrets/lab-warpgate-admin-token"'
                 grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-ssh-addr" "10.88.0.1:2222"'
                 grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-ca-file" "/var/lib/lab/warpgate-ca.pem"'
+                grep '^ExecStart=' "$warpgateUnitPath" | grep -qF -- '"--warpgate-ssh-host-key" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINhI8LKOopxh0yiaTvHmYEtFqXKyVqyASU7v7RkXh/yl"'
 
                 # Text-level PATH serialization (issue #74): prove the path list
                 # actually lands on the unit's Environment=PATH line — the

@@ -1,12 +1,12 @@
 package httpapi
 
-// Warpgate SSH bastion health and host-key accept (issue #39 / ADR-0068).
+// Warpgate SSH bastion health (issue #39 / ADR-0068).
 // Most of this runs against in-memory fakes of the two seams (WarpgateAPI,
 // WarpgateHostKeyPin), because what these handlers own is the fold and the
 // status mapping, not the wire; the warpgate package's own tests pin the wire
 // against a stubbed admin API. One test drives the REAL *warpgate.HostKeyPin
-// (with an injected scan and lab's real settings row), so the accept's status
-// mapping is proven against the errors the pin actually returns rather than
+// (with an injected scan), so the fold is proven
+// against the statuses the pin actually returns rather than
 // against this file's idea of them.
 
 import (
@@ -15,7 +15,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,7 +22,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/warpgate"
 )
 
@@ -37,14 +35,11 @@ const (
 // --- fakes ------------------------------------------------------------------
 
 // fakeHostKeyPin is an in-memory WarpgateHostKeyPin: Check answers a canned
-// status, Accept a canned status and error, and both record their calls.
+// status and records its calls.
 type fakeHostKeyPin struct {
-	mu           sync.Mutex
-	check        warpgate.HostKeyStatus
-	acceptStatus warpgate.HostKeyStatus
-	acceptErr    error
-	checks       int
-	accepted     []string
+	mu     sync.Mutex
+	check  warpgate.HostKeyStatus
+	checks int
 }
 
 func (p *fakeHostKeyPin) Check(context.Context) warpgate.HostKeyStatus {
@@ -54,23 +49,10 @@ func (p *fakeHostKeyPin) Check(context.Context) warpgate.HostKeyStatus {
 	return p.check
 }
 
-func (p *fakeHostKeyPin) Accept(_ context.Context, fingerprint string) (warpgate.HostKeyStatus, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.accepted = append(p.accepted, fingerprint)
-	return p.acceptStatus, p.acceptErr
-}
-
 func (p *fakeHostKeyPin) checkCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.checks
-}
-
-func (p *fakeHostKeyPin) acceptCalls() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]string(nil), p.accepted...)
 }
 
 func pinnedStatus(fp string) warpgate.HostKeyStatus {
@@ -396,9 +378,6 @@ func TestWarpgateHealthTypedNilIsUnconfigured(t *testing.T) {
 	if raw := rawBody(t, resp); !strings.Contains(raw, `"configured":false`) {
 		t.Fatalf("targets body = %s, want configured:false", raw)
 	}
-	resp = x.do("POST", "/api/v1/warpgate/host-key/accept", map[string]string{"fingerprint": testFingerprintA}, csrfHeaders(x.ts.URL))
-	wantStatus(t, resp, http.StatusConflict)
-	_ = resp.Body.Close()
 }
 
 // TestWarpgateHealthRedactsURLUserinfo pins that a credential in the
@@ -423,18 +402,17 @@ func TestWarpgateHealthRedactsURLUserinfo(t *testing.T) {
 // a pin implementation that hands back nil slices.
 func TestWarpgateHealthNeverNullFingerprints(t *testing.T) {
 	wiring := fullyWired()
-	wiring.pin.check = warpgate.HostKeyStatus{State: warpgate.HostKeyUnpinned, Error: "pinning the observed host key failed: disk full"}
+	wiring.pin.check = warpgate.HostKeyStatus{State: warpgate.HostKeyUnpinned}
 	x := newWarpgateHealthServer(t, wiring)
 
 	body, raw := x.warpgateHealth()
 	if !strings.Contains(raw, `"pinned":[]`) || !strings.Contains(raw, `"observed":[]`) {
 		t.Fatalf("body = %s, want empty arrays, never null", raw)
 	}
-	// Unpinned after a successful scan means the first pin failed to store, so
-	// target-bearing spawns refuse: degraded, with the pin failure riding along.
-	wantWarpgateState(t, body, warpgateStateDegraded)
-	if hk := component(t, body, "hostKey"); hk["error"] == nil {
-		t.Fatalf("hostKey = %#v, want the pin failure's error", hk)
+	// No trusted key configured is the operator's choice, not a fault: ok.
+	wantWarpgateState(t, body, warpgateStateOK)
+	if hk := component(t, body, "hostKey"); hk["state"] != "unpinned" {
+		t.Fatalf("hostKey = %#v, want unpinned", hk)
 	}
 }
 
@@ -486,7 +464,7 @@ func TestWarpgateState(t *testing.T) {
 		{"ssh only, down", apiOff, sshDown, nil, warpgateStateUnreachable},
 		{"ssh only, mismatch", apiOff, sshUp, mismatch, warpgateStateDegraded},
 		{"all up but mismatch", apiUp, sshUp, mismatch, warpgateStateDegraded},
-		{"unpinned is degraded", apiUp, sshUp, unpinned, warpgateStateDegraded},
+		{"unpinned (no trusted key configured) is ok", apiUp, sshUp, unpinned, warpgateStateOK},
 		{"ssh up, no pin wired", apiUp, sshUp, nil, warpgateStateOK},
 		// A reachable API with no verdict at all counts as not authenticated.
 		{"reachable api, no verdict", warpgateAPIHealth{Configured: true, Reachable: true}, sshOff, nil, warpgateStateDegraded},
@@ -527,128 +505,6 @@ func TestWarpgateHealthBodyShape(t *testing.T) {
 	}
 }
 
-// --- accept -----------------------------------------------------------------
-
-func acceptHostKey(x *testServer, body any) *http.Response {
-	x.t.Helper()
-	return x.do("POST", "/api/v1/warpgate/host-key/accept", body, csrfHeaders(x.ts.URL))
-}
-
-// TestWarpgateHostKeyAccept maps every outcome of the pin's Accept onto its
-// status code.
-func TestWarpgateHostKeyAccept(t *testing.T) {
-	t.Run("unconfigured is 409", func(t *testing.T) {
-		x := newWarpgateHealthServer(t, warpgateWiring{})
-		resp := acceptHostKey(x, map[string]string{"fingerprint": testFingerprintA})
-		wantStatus(t, resp, http.StatusConflict)
-		if msg := wantErrorBody(t, resp); !strings.Contains(msg, "--warpgate-ssh-addr") {
-			t.Fatalf("error = %q, want it to name the flag that fixes it", msg)
-		}
-	})
-
-	t.Run("bad bodies are 400 and never reach the pin", func(t *testing.T) {
-		wiring := fullyWired()
-		x := newWarpgateHealthServer(t, wiring)
-		for _, body := range []any{
-			map[string]string{},
-			map[string]string{"fingerprint": ""},
-			map[string]string{"fingerprint": "   "},
-			"not an object",
-		} {
-			resp := acceptHostKey(x, body)
-			wantStatus(t, resp, http.StatusBadRequest)
-			wantErrorBody(t, resp)
-		}
-		if calls := wiring.pin.acceptCalls(); len(calls) != 0 {
-			t.Fatalf("a bad body reached the pin: %v", calls)
-		}
-	})
-
-	t.Run("fingerprint not observed is 409", func(t *testing.T) {
-		wiring := fullyWired()
-		wiring.pin.acceptStatus = warpgate.HostKeyStatus{State: warpgate.HostKeyMismatch, Pinned: []string{testFingerprintA}, Observed: []string{testFingerprintB}}
-		wiring.pin.acceptErr = fmt.Errorf("warpgate: %w: %s is not among [%s]; re-check the Warpgate health status and verify again", warpgate.ErrFingerprintNotObserved, testFingerprintA, testFingerprintB)
-		x := newWarpgateHealthServer(t, wiring)
-
-		resp := acceptHostKey(x, map[string]string{"fingerprint": testFingerprintA})
-		wantStatus(t, resp, http.StatusConflict)
-		if msg := wantErrorBody(t, resp); !strings.Contains(msg, "re-check the Warpgate health") {
-			t.Fatalf("error = %q, want the pin's advice to re-check health", msg)
-		}
-	})
-
-	t.Run("scan failure is 502", func(t *testing.T) {
-		wiring := fullyWired()
-		wiring.pin.acceptStatus = warpgate.HostKeyStatus{State: warpgate.HostKeyUnreachable, Pinned: []string{testFingerprintA}, Observed: []string{}, Error: "connection refused"}
-		wiring.pin.acceptErr = errors.New("warpgate: cannot scan the SSH listener at 10.88.0.1:2222 to accept its host key: connection refused")
-		x := newWarpgateHealthServer(t, wiring)
-
-		resp := acceptHostKey(x, map[string]string{"fingerprint": testFingerprintB})
-		wantStatus(t, resp, http.StatusBadGateway)
-		if msg := wantErrorBody(t, resp); !strings.Contains(msg, "connection refused") {
-			t.Fatalf("error = %q, want the scan failure", msg)
-		}
-	})
-
-	t.Run("store failure is 500", func(t *testing.T) {
-		wiring := fullyWired()
-		wiring.pin.acceptStatus = warpgate.HostKeyStatus{State: warpgate.HostKeyMismatch, Pinned: []string{testFingerprintA}, Observed: []string{testFingerprintB}}
-		wiring.pin.acceptErr = errors.New("warpgate: storing the accepted host key pin: database is locked")
-		x := newWarpgateHealthServer(t, wiring)
-
-		resp := acceptHostKey(x, map[string]string{"fingerprint": testFingerprintB})
-		wantStatus(t, resp, http.StatusInternalServerError)
-		_ = resp.Body.Close()
-	})
-
-	t.Run("success is 200 with the hostKey object", func(t *testing.T) {
-		wiring := fullyWired()
-		wiring.pin.acceptStatus = pinnedStatus(testFingerprintB)
-		x := newWarpgateHealthServer(t, wiring)
-
-		resp := acceptHostKey(x, map[string]string{"fingerprint": "  " + testFingerprintB + "\n"})
-		wantStatus(t, resp, http.StatusOK)
-		raw := rawBody(t, resp)
-		want := `{"state":"pinned","pinned":["` + testFingerprintB + `"],"observed":["` + testFingerprintB + `"]}` + "\n"
-		if raw != want {
-			t.Fatalf("body = %q, want %q", raw, want)
-		}
-		if calls := wiring.pin.acceptCalls(); len(calls) != 1 || calls[0] != testFingerprintB {
-			t.Fatalf("pin.Accept calls = %q, want the trimmed fingerprint once", calls)
-		}
-	})
-}
-
-// TestWarpgateHostKeyAcceptGuards pins requireAuth and CSRF on the one POST:
-// an accept re-points what every future run trusts, so it must never be
-// forgeable cross-site.
-func TestWarpgateHostKeyAcceptGuards(t *testing.T) {
-	wiring := fullyWired()
-	wiring.pin.acceptStatus = pinnedStatus(testFingerprintA)
-	x := newWarpgateHealthServer(t, wiring)
-	body := map[string]string{"fingerprint": testFingerprintA}
-
-	resp := doWith(t, http.DefaultClient, x.ts.URL, "POST", "/api/v1/warpgate/host-key/accept", body, csrfHeaders(x.ts.URL))
-	wantStatus(t, resp, http.StatusUnauthorized)
-	_ = resp.Body.Close()
-
-	resp = x.do("POST", "/api/v1/warpgate/host-key/accept", body, nil)
-	wantStatus(t, resp, http.StatusForbidden)
-	_ = resp.Body.Close()
-
-	resp = x.do("POST", "/api/v1/warpgate/host-key/accept", body, csrfHeaders("https://evil.example"))
-	wantStatus(t, resp, http.StatusForbidden)
-	_ = resp.Body.Close()
-
-	if calls := wiring.pin.acceptCalls(); len(calls) != 0 {
-		t.Fatalf("a refused request reached the pin: %v", calls)
-	}
-
-	resp = acceptHostKey(x, body)
-	wantStatus(t, resp, http.StatusOK)
-	_ = resp.Body.Close()
-}
-
 // --- the real pin -----------------------------------------------------------
 
 func newHostKey(t *testing.T) ssh.PublicKey {
@@ -664,19 +520,20 @@ func newHostKey(t *testing.T) ssh.PublicKey {
 	return key
 }
 
-// TestWarpgateHostKeyLifecycle drives the REAL *warpgate.HostKeyPin, over
-// lab's real settings row, through the endpoints: trust on first use at the
-// first health read, a changed key surfacing as degraded, an accept of a
-// stale fingerprint refused, the accept of the observed one re-pinning, and a
-// failed scan mapping to 502 — each status produced by the errors the pin
-// actually returns.
-func TestWarpgateHostKeyLifecycle(t *testing.T) {
+// TestWarpgateHostKeyThroughHealth drives the REAL *warpgate.HostKeyPin
+// through the health endpoint, so the fold is proven against the statuses the
+// pin actually produces: with --warpgate-ssh-host-key set, a listener
+// presenting the trusted key is ok, a different one degraded (mismatch), and
+// a failed scan unreachable; with nothing configured, whatever the listener
+// presents is unpinned — and ok, with the observed fingerprints listed for
+// the operator to copy into the setting.
+func TestWarpgateHostKeyThroughHealth(t *testing.T) {
 	keyA, keyB := newHostKey(t), newHostKey(t)
 	fpA, fpB := ssh.FingerprintSHA256(keyA), ssh.FingerprintSHA256(keyB)
 
 	var (
 		mu      sync.Mutex
-		current = []ssh.PublicKey{keyA}
+		current []ssh.PublicKey
 		scanErr error
 	)
 	scan := func(context.Context, string) ([]ssh.PublicKey, error) {
@@ -693,74 +550,64 @@ func TestWarpgateHostKeyLifecycle(t *testing.T) {
 		current, scanErr = keys, err
 	}
 
-	x := newTestServer(t, func(o *Options) {
-		o.WarpgateSSHAddr = testWarpgateSSHAddr
-		o.WarpgateHostKeys = warpgate.NewHostKeyPin(o.Store, store.SettingWarpgateSSHHostKey, testWarpgateSSHAddr, scan)
+	t.Run("trusted key configured", func(t *testing.T) {
+		x := newTestServer(t, func(o *Options) {
+			o.WarpgateSSHAddr = testWarpgateSSHAddr
+			o.WarpgateHostKeys = warpgate.NewHostKeyPin(testWarpgateSSHAddr, []ssh.PublicKey{keyA}, scan)
+		})
+		x.setup("op", "password123")
+
+		serve([]ssh.PublicKey{keyA, keyB}, nil)
+		body, raw := x.warpgateHealth()
+		wantWarpgateState(t, body, warpgateStateOK)
+		if hk := component(t, body, "hostKey"); hk["state"] != "pinned" {
+			t.Fatalf("hostKey = %#v, want pinned", hk)
+		}
+		if !strings.Contains(raw, `"pinned":["`+fpA+`"]`) || !strings.Contains(raw, `"observed":[`) || !strings.Contains(raw, fpB) {
+			t.Fatalf("body = %s, want the trusted key pinned and both keys observed", raw)
+		}
+
+		// The listener presents a key that is not the trusted one: degraded,
+		// and the spawn path refuses on the same comparison.
+		serve([]ssh.PublicKey{keyB}, nil)
+		body, raw = x.warpgateHealth()
+		wantWarpgateState(t, body, warpgateStateDegraded)
+		if hk := component(t, body, "hostKey"); hk["state"] != "mismatch" {
+			t.Fatalf("hostKey = %#v, want mismatch", hk)
+		}
+		if !strings.Contains(raw, `"pinned":["`+fpA+`"]`) || !strings.Contains(raw, `"observed":["`+fpB+`"]`) {
+			t.Fatalf("mismatch body = %s, want pinned A and observed B", raw)
+		}
+
+		// The listener goes away: unreachable (it is the only configured
+		// component), the scan error on the ssh component.
+		serve(nil, errors.New("dial tcp 10.88.0.1:2222: connect: connection refused"))
+		body, _ = x.warpgateHealth()
+		wantWarpgateState(t, body, warpgateStateUnreachable)
+		sshComp := wantComponent(t, body, "ssh", true, false)
+		if msg, _ := sshComp["error"].(string); !strings.Contains(msg, "connection refused") {
+			t.Fatalf("ssh.error = %v, want the scan failure", sshComp["error"])
+		}
+		if hk := component(t, body, "hostKey"); hk["state"] != "unreachable" {
+			t.Fatalf("hostKey = %#v, want unreachable", hk)
+		}
 	})
-	x.setup("op", "password123")
 
-	// First health read: nothing pinned, so the scan becomes the pin.
-	body, _ := x.warpgateHealth()
-	wantWarpgateState(t, body, warpgateStateOK)
-	if hk := component(t, body, "hostKey"); hk["state"] != "pinned" {
-		t.Fatalf("hostKey after the first read = %#v, want pinned (TOFU)", hk)
-	}
-	stored, err := x.st.GetString(context.Background(), store.SettingWarpgateSSHHostKey, "")
-	if err != nil || strings.TrimSpace(stored) == "" {
-		t.Fatalf("pin not stored after the first read: %q, %v", stored, err)
-	}
+	t.Run("no trusted key configured", func(t *testing.T) {
+		x := newTestServer(t, func(o *Options) {
+			o.WarpgateSSHAddr = testWarpgateSSHAddr
+			o.WarpgateHostKeys = warpgate.NewHostKeyPin(testWarpgateSSHAddr, nil, scan)
+		})
+		x.setup("op", "password123")
 
-	// The listener's key changes: degraded, nothing re-pinned.
-	serve([]ssh.PublicKey{keyB}, nil)
-	body, raw := x.warpgateHealth()
-	wantWarpgateState(t, body, warpgateStateDegraded)
-	if hk := component(t, body, "hostKey"); hk["state"] != "mismatch" {
-		t.Fatalf("hostKey = %#v, want mismatch", hk)
-	}
-	if !strings.Contains(raw, `"pinned":["`+fpA+`"]`) || !strings.Contains(raw, `"observed":["`+fpB+`"]`) {
-		t.Fatalf("mismatch body = %s, want pinned A and observed B", raw)
-	}
-
-	// Accepting the OLD key (not presented now) is a 409.
-	resp := acceptHostKey(x, map[string]string{"fingerprint": fpA})
-	wantStatus(t, resp, http.StatusConflict)
-	_ = resp.Body.Close()
-
-	// Accepting the observed key re-pins it.
-	resp = acceptHostKey(x, map[string]string{"fingerprint": fpB})
-	wantStatus(t, resp, http.StatusOK)
-	accepted := decodeBody(t, resp)
-	if accepted["state"] != "pinned" {
-		t.Fatalf("accept body = %#v, want pinned", accepted)
-	}
-	body, _ = x.warpgateHealth()
-	wantWarpgateState(t, body, warpgateStateOK)
-
-	// The listener goes away: accept is 502, health unreachable (the SSH
-	// listener is the only configured component).
-	serve(nil, errors.New("dial tcp 10.88.0.1:2222: connect: connection refused"))
-	resp = acceptHostKey(x, map[string]string{"fingerprint": fpB})
-	wantStatus(t, resp, http.StatusBadGateway)
-	_ = resp.Body.Close()
-	body, _ = x.warpgateHealth()
-	wantWarpgateState(t, body, warpgateStateUnreachable)
-	sshComp := wantComponent(t, body, "ssh", true, false)
-	if msg, _ := sshComp["error"].(string); !strings.Contains(msg, "connection refused") {
-		t.Fatalf("ssh.error = %v, want the scan failure", sshComp["error"])
-	}
-}
-
-// TestWarpgateHostKeyNotPatchable pins ADR-0068's "the pin is not reachable
-// through the generic settings PATCH": accepting a key is its own operator
-// action, never a string a PATCH body could overwrite.
-func TestWarpgateHostKeyNotPatchable(t *testing.T) {
-	x := newTestServer(t, nil)
-	x.setup("op", "password123")
-
-	resp := x.do("PATCH", "/api/v1/settings", map[string]string{store.SettingWarpgateSSHHostKey: "ssh-ed25519 AAAA"}, csrfHeaders(x.ts.URL))
-	wantStatus(t, resp, http.StatusBadRequest)
-	_ = resp.Body.Close()
-	if v, err := x.st.GetString(context.Background(), store.SettingWarpgateSSHHostKey, ""); err != nil || v != "" {
-		t.Fatalf("the PATCH wrote the pin: %q, %v", v, err)
-	}
+		serve([]ssh.PublicKey{keyB}, nil)
+		body, raw := x.warpgateHealth()
+		wantWarpgateState(t, body, warpgateStateOK)
+		if hk := component(t, body, "hostKey"); hk["state"] != "unpinned" {
+			t.Fatalf("hostKey = %#v, want unpinned", hk)
+		}
+		if !strings.Contains(raw, `"pinned":[]`) || !strings.Contains(raw, `"observed":["`+fpB+`"]`) {
+			t.Fatalf("unpinned body = %s, want no pinned key and the observed one listed", raw)
+		}
+	})
 }

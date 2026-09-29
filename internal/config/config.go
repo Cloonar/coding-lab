@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // Defaults for the flags that have fixed defaults (path-shaped defaults
@@ -182,6 +184,18 @@ type Config struct {
 	// shape validation only) — not part of the WarpgateURL/
 	// WarpgateAdminTokenFile pairing.
 	WarpgateCAFile string
+	// WarpgateSSHHostKey is the trusted public host key(s) of Warpgate's SSH
+	// listener — what every wired run's known_hosts is rendered from, and
+	// what the spawn-time scan of WarpgateSSHAddr must present at least one
+	// of. Stored CANONICAL: authorized_keys lines ("<type> <base64>"), one
+	// per key, sorted and de-duplicated, newline-terminated — whatever the
+	// flag was given in (authorized_keys lines with or without comments,
+	// ssh-keyscan/known_hosts lines, several keys separated by newlines or
+	// commas). "" (the default) means no key is trusted in advance: lab
+	// accepts every key the listener presents to the scan that wires a run.
+	// Requires WarpgateSSHAddr — a key with no listener to vouch for is dead
+	// config, refused at parse time like the URL/token pairing.
+	WarpgateSSHHostKey string
 
 	// ProviderBin maps a provider id to a binary-path override. A missing
 	// entry means the adapter uses its own default (a PATH lookup); config.go
@@ -341,6 +355,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		warpgateAdminTokenFile = fs.String("warpgate-admin-token-file", "", "path to a 0600 file holding Warpgate's admin API token; must be set with --warpgate-url (env LAB_WARPGATE_ADMIN_TOKEN_FILE)")
 		warpgateSSHAddr        = fs.String("warpgate-ssh-addr", "", "host:port a run uses to reach Warpgate's SSH listener, e.g. 10.88.0.1:2222 — NOT host.containers.internal, NOT 127.0.0.1 for container runs (env LAB_WARPGATE_SSH_ADDR)")
 		warpgateCAFile         = fs.String("warpgate-ca-file", "", "path to the PEM file holding the certificate or CA lab must trust for the Warpgate admin API; unset uses the system roots (env LAB_WARPGATE_CA_FILE)")
+		warpgateSSHHostKey     = fs.String("warpgate-ssh-host-key", "", "trusted public host key of Warpgate's SSH listener, e.g. \"ssh-ed25519 AAAA…\" (ssh-keyscan output works too; several keys separated by newlines or commas); unset accepts every key the listener presents; requires --warpgate-ssh-addr (env LAB_WARPGATE_SSH_HOST_KEY)")
 
 		tmuxBin    = fs.String("tmux", "tmux", "tmux binary (PATH lookup by default)")
 		gitBin     = fs.String("git", "git", "git binary (PATH lookup by default)")
@@ -657,6 +672,24 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 	// validation here — Parse does shape validation only.
 	cfg.WarpgateCAFile = pick("warpgate-ca-file", *warpgateCAFile, "LAB_WARPGATE_CA_FILE", "")
 
+	// --warpgate-ssh-host-key: the trusted host key(s) a wired run's
+	// known_hosts is rendered from. Shape-validated and stored canonical
+	// (see the field doc) so the one consumer, cmd/lab, parses a known-good
+	// authorized_keys text. Unset means "trust whatever the listener
+	// presents" — the operator's call, not an error. Set without the
+	// listener's address it is dead config, refused like the URL/token pair.
+	rawHostKey := pick("warpgate-ssh-host-key", *warpgateSSHHostKey, "LAB_WARPGATE_SSH_HOST_KEY", "")
+	if strings.TrimSpace(rawHostKey) != "" {
+		if cfg.WarpgateSSHAddr == "" {
+			return Config{}, fmt.Errorf("--warpgate-ssh-host-key is set but --warpgate-ssh-addr is not: there is no SSH listener for the key to vouch for")
+		}
+		canonical, err := canonicalSSHHostKeys("--warpgate-ssh-host-key", rawHostKey)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.WarpgateSSHHostKey = canonical
+	}
+
 	cfg.SessionCookieDomain = pick("session-cookie-domain", *sessionCookieDomain, "LAB_SESSION_COOKIE_DOMAIN", "")
 	if cfg.SessionCookieDomain != "" {
 		// A cookie Domain is a bare domain, never an origin: no scheme (it's
@@ -784,4 +817,38 @@ func validateSSHAddr(flag, value string) (string, error) {
 		return "", fmt.Errorf("%s %q: port must be a decimal integer 1-65535, e.g. 10.88.0.1:2222", flag, value)
 	}
 	return net.JoinHostPort(host, strconv.Itoa(p)), nil
+}
+
+// canonicalSSHHostKeys parses one or more SSH public host keys and returns
+// them as canonical authorized_keys text — "<type> <base64>" per line,
+// sorted, de-duplicated, newline-terminated — the stored form of
+// --warpgate-ssh-host-key. Keys may be separated by newlines or commas, and
+// each may be an authorized_keys line (a trailing comment is dropped) or a
+// known_hosts line as ssh-keyscan prints it (the leading host field is
+// dropped). A private key, a fingerprint, or anything else that is not a
+// public key is an error naming the flag and the offending entry.
+func canonicalSSHHostKeys(flag, value string) (string, error) {
+	var lines []string
+	for i, entry := range strings.FieldsFunc(value, func(r rune) bool { return r == '\n' || r == ',' }) {
+		entry = strings.TrimSpace(entry)
+		if entry == "" || strings.HasPrefix(entry, "#") {
+			continue
+		}
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(entry))
+		if err != nil {
+			// A known_hosts line ("<host> <type> <base64>") that the
+			// authorized_keys parser did not take as options + key.
+			_, _, key, _, _, err = ssh.ParseKnownHosts([]byte(entry))
+		}
+		if err != nil {
+			return "", fmt.Errorf("%s: entry %d is not an SSH public key (want \"<type> <base64>\" as in an authorized_keys line, or an ssh-keyscan line): %v", flag, i+1, err)
+		}
+		lines = append(lines, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+	}
+	if len(lines) == 0 {
+		return "", fmt.Errorf("%s: no SSH public key found", flag)
+	}
+	slices.Sort(lines)
+	lines = slices.Compact(lines)
+	return strings.Join(lines, "\n") + "\n", nil
 }

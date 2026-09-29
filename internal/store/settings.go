@@ -88,22 +88,6 @@ const (
 	SettingContainerMemory = "container_memory"
 	SettingContainerPids   = "container_pids"
 	SettingContainerNofile = "container_nofile"
-
-	// SettingWarpgateSSHHostKey is lab's persisted pin of Warpgate's SSH host
-	// key(s), in authorized_keys format (one key per line) — issue #39. It is
-	// written exactly once by lab's first successful scan of
-	// --warpgate-ssh-addr (trust-on-first-use, performed once by lab itself on
-	// the operator's host, never inside a run and never as accept-new there)
-	// and thereafter overwritten only by the operator's explicit accept
-	// action when Warpgate's host key legitimately rotates. Deliberately NOT
-	// seeded by SeedDefaultSettings — absent means "not yet pinned", a
-	// meaningful state distinct from any stored value, the same reasoning as
-	// the AFK-override keys above — and NOT reachable through the generic
-	// settings PATCH (internal/httpapi/settings.go's key switch has no case
-	// for it, so it 400s as an unknown key): TOFU pinning and rotation
-	// acceptance are their own operator-facing action, not a plain string
-	// setting a PATCH body could silently overwrite.
-	SettingWarpgateSSHHostKey = "warpgate_ssh_host_key"
 )
 
 // Container resource-limit defaults — the ONE source of the grilled #205

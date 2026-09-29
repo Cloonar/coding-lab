@@ -671,7 +671,7 @@ volumes:
   warpgate-data:
 ```
 
-> **The SSH port cannot be loopback-only when the `container` runner is in use** — for the same reason the OneCLI gateway port cannot ([Deploying the sidecar](#deploying-the-sidecar)): containerized runs deliberately cannot reach loopback-bound host services. Bind 2222 to an address container runs can route to (a bridge address, a second NIC, the host's LAN IP) and pass that address as `--warpgate-ssh-addr`. This is the second deliberate exception to "bind co-located host services to loopback": scope the interface as narrowly as you can, and treat Warpgate's own login — which admits a repo's user only with a key registered on it — not the bind address, as the authorization boundary. Lab itself scans the same address to pin Warpgate's host key, so it must be reachable from the lab host too (a bridge address on the host is). The `host` runner has no such constraint; `127.0.0.1:2222` is fine there. The admin port gets no exception in any deployment: it stays on loopback.
+> **The SSH port cannot be loopback-only when the `container` runner is in use** — for the same reason the OneCLI gateway port cannot ([Deploying the sidecar](#deploying-the-sidecar)): containerized runs deliberately cannot reach loopback-bound host services. Bind 2222 to an address container runs can route to (a bridge address, a second NIC, the host's LAN IP) and pass that address as `--warpgate-ssh-addr`. This is the second deliberate exception to "bind co-located host services to loopback": scope the interface as narrowly as you can, and treat Warpgate's own login — which admits a repo's user only with a key registered on it — not the bind address, as the authorization boundary. Lab itself scans the same address to check Warpgate's host key, so it must be reachable from the lab host too (a bridge address on the host is). The `host` runner has no such constraint; `127.0.0.1:2222` is fine there. The admin port gets no exception in any deployment: it stays on loopback.
 
 1. **Mint the admin token** and write it twice — once for the container, once for lab. Lab refuses a token file looser than 0600 and never generates one:
 
@@ -720,6 +720,7 @@ $ lab --warpgate-url https://localhost:8888 \
       --warpgate-admin-token-file /var/lib/lab/warpgate-admin-token \
       --warpgate-ca-file /var/lib/lab/warpgate-ca.pem \
       --warpgate-ssh-addr 10.88.0.1:2222 \
+      --warpgate-ssh-host-key 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…' \
       ...
 ```
 
@@ -731,12 +732,14 @@ services.lab.warpgate = {
   adminTokenFile = "/run/secrets/lab-warpgate-admin-token";   # sops/LoadCredential, 0600
   caFile = "/var/lib/lab/warpgate-ca.pem";
   sshAddr = "10.88.0.1:2222";
+  sshHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…";      # optional; see Host key pinning
 };
 ```
 
 - `--warpgate-url` and `--warpgate-admin-token-file` must be set together; lab refuses to start with only one. The token file follows the master key's rule — 0600 or stricter, one line — and is read once at startup, so a new token means a lab restart.
 - `--warpgate-ca-file` makes lab trust **only** that certificate for the admin API. Unset, lab uses the system roots — right for a Warpgate you have given a publicly issued certificate. With the generated certificate the URL must say `localhost`: it carries no IP address, so `https://127.0.0.1:8888` fails verification.
 - `--warpgate-ssh-addr` is independent, like `--onecli-gateway-url`: it is the `host:port` runs dial — container-routable, never `host.containers.internal`, and not `127.0.0.1` while any repo uses the container runner.
+- `--warpgate-ssh-host-key` is optional and needs `--warpgate-ssh-addr`: the public host key of Warpgate's SSH listener that runs trust. Unset, runs trust whatever the listener presents — see [Host key pinning](#host-key-pinning) for how to read the key and why to set it.
 - The REST pair alone is a valid deployment: health, and each repo's Warpgate user and role kept in step with lab, with every spawn untouched. A run is **bastion-wired** only when all three of URL, token file, and SSH address are set — and then only if its repo has an SSH target.
 
 **What lab keeps in Warpgate.** Every lab repo gets one Warpgate user and one Warpgate role, both named `repo-<32 hex>` after the repo's ID and described with the repo's name: created with the repo (and at startup for repos that predate the configuration), deleted with the repo. Leave them to lab. A description edited in Warpgate's UI is overwritten at the next check, and a deleted role takes the repo's target assignments with it — lab re-creates the role, empty. Lab's startup pass never deletes anything in Warpgate.
@@ -788,7 +791,7 @@ Everything lab writes for it lives in the run's runtime dir, `<state>/instances/
 | File | What it is |
 |---|---|
 | `warpgate-run-key` | The **run key**: a fresh ed25519 private key, 0600. Its public half is registered on the repo's Warpgate user, labelled `lab-run:<runID>`, and removed when the run is wiped. |
-| `warpgate-known-hosts` | Warpgate's SSH host keys, written from lab's [pin](#host-key-pinning) and checked strictly. |
+| `warpgate-known-hosts` | Warpgate's SSH host key(s), checked strictly: the [trusted key](#host-key-pinning) from `--warpgate-ssh-host-key`, or — with none configured — whatever the listener presented to this spawn's scan. |
 | `warpgate-ssh-config` | The run's OpenSSH config: one `Host <target>` block per target, then a `Match all` that restores the normal per-user and system config for every other host. |
 | `warpgate-bin/` | `ssh`, `scp`, and `sftp` wrappers, prepended to the run's `PATH`. |
 
@@ -810,27 +813,22 @@ In the run's HOME, `~/.ssh/config` is a symlink to `warpgate-ssh-config`.
 
 ### Host key pinning
 
-A run never trusts the bastion on first use. The first time lab scans Warpgate's SSH listener — at startup or on the first health check — it **pins** every host key Warpgate offers (an ed25519 and an RSA key) in its own database, and every run's `warpgate-known-hosts` is written from that pin. Every target-bearing spawn rescans and compares.
+A run never answers a host-key prompt and never uses `accept-new`: its `warpgate-known-hosts` is written by lab before the run starts, and checked strictly. Which key goes in it is yours to decide with `--warpgate-ssh-host-key`:
 
-If Warpgate presents different keys, health turns `degraded` with `hostKey.state: "mismatch"` and both key sets listed, and target-bearing spawns refuse until you accept the new keys. Repos without SSH targets are unaffected.
+- **Set** — runs trust exactly the key(s) you configured. Every target-bearing spawn scans Warpgate's SSH listener first; if it presents none of the configured keys, health turns `degraded` with `hostKey.state: "mismatch"` (the trusted and the observed fingerprints both listed) and the spawn refuses, until the setting names a key the listener presents. Repos without SSH targets are unaffected. Nothing the listener says can widen what a run trusts.
+- **Unset** (the default) — runs trust whatever the listener presents. Each target-bearing spawn scans the listener and writes every key it offered into that run's `warpgate-known-hosts`. Health reports `hostKey.state: "unpinned"` with the observed fingerprints, and lab logs them once at startup. This is trust-on-each-spawn, on the lab host: convenient for a first deployment, but a machine in the middle between lab and the bastion at spawn time would be trusted for that run's lifetime. Pin the key once the sidecar is up.
 
-A changed key is expected only when Warpgate's database was replaced: a recreated `warpgate-data` volume, a restore from a different backup, a fresh `unattended-setup`, or a different Warpgate behind `--warpgate-ssh-addr`. If none of that happened, treat the mismatch as an incident, not a prompt. If it did, read the fingerprints on the Warpgate host itself and check that they are the ones health lists as `observed`:
-
-```console
-$ ssh-keyscan -p 2222 10.88.0.1 2>/dev/null | ssh-keygen -lf -
-```
-
-Then accept one of them — on **Settings → General → SSH bastion**, which lists the pinned and observed fingerprints with an **Accept new host key** button beside each observed one, or through the API with a lab personal access token (`lab_pat_…`, minted on the Tokens page):
+**Reading the key.** Warpgate generates an ed25519 and an RSA host key at setup and exposes neither through its API, so read them on the Warpgate host itself — never through the network you are about to trust:
 
 ```console
-$ curl -s -X POST -H "Authorization: Bearer $LAB_PAT" \
-       -H 'Content-Type: application/json' \
-       -d '{"fingerprint":"SHA256:Xq7…"}' \
-       https://lab.example.com/api/v1/warpgate/host-key/accept
-{"state":"pinned","pinned":["SHA256:Xq7…","SHA256:k2V…"],"observed":["SHA256:Xq7…","SHA256:k2V…"]}
+$ docker compose exec -T warpgate ssh-keyscan -p 2222 127.0.0.1 2>/dev/null
+[127.0.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…
+[127.0.0.1]:2222 ssh-rsa AAAAB3NzaC1yc2E…
 ```
 
-Lab rescans and pins Warpgate's *whole current* key set — but only if the fingerprint you accepted is among the keys it presents right now, so what gets pinned is the key you inspected, not whatever answers at click time. A fingerprint not presented now answers `409` (re-check health and verify again), a failed scan `502`, a lab without `--warpgate-ssh-addr` `409`. The pin is keys, not an address: moving `--warpgate-ssh-addr` to another address of the same Warpgate needs no accept.
+(Without `ssh-keyscan` in the image: `ssh-keyscan -p 2222 10.88.0.1` from the lab host, and compare its fingerprints — `ssh-keygen -lf -` — against the ones health lists as `observed`.) Either line, or just its `<type> <base64>` part, is the value; the `[host]:port` prefix and any comment are dropped. One key is enough — OpenSSH prefers the host-key algorithms it already has a key for — and several may be given, separated by commas (or newlines in the environment variable). A fingerprint (`SHA256:…`) or a private key is refused at startup.
+
+**Changing it.** A changed key is expected only when Warpgate's database was replaced: a recreated `warpgate-data` volume, a restore from a different backup, a fresh `unattended-setup`, or a different Warpgate behind `--warpgate-ssh-addr`. If none of that happened, treat a mismatch as an incident, not a prompt. If it did, read the new key as above, put it in `--warpgate-ssh-host-key`, and restart lab. The setting is keys, not an address: moving `--warpgate-ssh-addr` to another address of the same Warpgate needs no change. **Settings → General → SSH bastion** shows the current state — the trusted and observed fingerprints on a mismatch, the observed ones when nothing is pinned — but the key itself is configuration, never something the UI or API changes.
 
 ### When a target-bearing spawn refuses
 
@@ -844,7 +842,7 @@ Only a **target-bearing** spawn — a bastion-wired lab, a repo with at least on
 | `x509: certificate signed by unknown authority` | Lab doesn't trust Warpgate's certificate. | Point `--warpgate-ca-file` at the copy of `/data/tls.certificate.pem`. |
 | `x509: … doesn't contain any IP SANs` or `certificate is valid for …, not …` | The URL's host is not a name on the certificate. | Use `https://localhost:8888`. |
 | `cannot verify the SSH host key at <addr>` | Nothing answers SSH at `--warpgate-ssh-addr`. | Check the 2222 bind and that Warpgate's SSH listener is on ([Deploying Warpgate](#deploying-warpgate)). |
-| `do not match lab's pin` … `refusing to wire SSH targets` | Warpgate's host key changed. | [Host key pinning](#host-key-pinning). |
+| `are not among the trusted keys configured with --warpgate-ssh-host-key` … `refusing to wire SSH targets` | Warpgate presents none of the configured host keys. | [Host key pinning](#host-key-pinning). |
 
 A repo **without** SSH targets never calls Warpgate at spawn and never refuses on its account: a bastion outage leaves it alone.
 
@@ -854,17 +852,17 @@ A repo **without** SSH targets never calls Warpgate at spawn and never refuses o
 
 ```console
 $ curl -s --cookie "lab_session=$TOKEN" https://lab.example.com/api/v1/warpgate/health
-{"state":"ok","api":{"configured":true,"reachable":true,"url":"https://localhost:8888","version":"v0.29.1","authenticated":true},"ssh":{"configured":true,"reachable":true,"addr":"10.88.0.1:2222"},"hostKey":{"state":"pinned","pinned":["SHA256:Xq7…","SHA256:k2V…"],"observed":["SHA256:Xq7…","SHA256:k2V…"]}}
+{"state":"ok","api":{"configured":true,"reachable":true,"url":"https://localhost:8888","version":"v0.29.1","authenticated":true},"ssh":{"configured":true,"reachable":true,"addr":"10.88.0.1:2222"},"hostKey":{"state":"pinned","pinned":["SHA256:Xq7…"],"observed":["SHA256:Xq7…","SHA256:k2V…"]}}
 ```
 
 | `state` | When |
 |---|---|
 | `off` | Nothing configured — not an error. |
-| `ok` | Everything configured answers, the token is accepted as admin, and the host key matches the pin. |
-| `degraded` | One component unreachable, the token not accepted (`api.authenticated: false`), or `hostKey.state` `"mismatch"` or `"unpinned"`. |
+| `ok` | Everything configured answers, the token is accepted as admin, and the listener presents a key from `--warpgate-ssh-host-key` (or none is configured). |
+| `degraded` | One component unreachable, the token not accepted (`api.authenticated: false`), or `hostKey.state` `"mismatch"`. |
 | `unreachable` | Every configured component unreachable. |
 
-`hostKey` is present when `--warpgate-ssh-addr` is set: `pinned`, `unpinned` (the scan succeeded but storing the first pin failed — `error` says why), `mismatch`, or `unreachable` (the scan failed; `error` says why). The **SSH bastion** card on Settings → General shows the same status, next to the credential gateway's.
+`hostKey` is present when `--warpgate-ssh-addr` is set: `pinned` (the listener presents one of the trusted keys; `pinned` lists the trusted fingerprints, `observed` the listener's), `unpinned` (no `--warpgate-ssh-host-key`; runs trust the `observed` keys), `mismatch` (a trusted key is configured and the listener presents none of them), or `unreachable` (the scan failed; `error` says why). The **SSH bastion** card on Settings → General shows the same status, next to the credential gateway's.
 
 That proves the sidecar answers; it does not log in to a target. Prove that once from inside a bastion-wired run — ideally a **container-runner** one, where the files cross a mount and the address crosses a network namespace:
 
@@ -1080,7 +1078,6 @@ services.lab.container = {
 - `GET /api/v1/onecli/dashboard` — authenticated; the resolved dashboard exposure, `{"mode":"off|port|subdomain","url":"…"}` with `url` omitted when off. Static config, never a sidecar probe. See [Dashboard exposure](#dashboard-exposure).
 - `GET /api/v1/onecli/pool`, `GET /api/v1/repos/{id}/onecli/grants`, `PUT`/`DELETE /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}` — the grant picker's API; see [Grant picker](#grant-picker).
 - `GET /api/v1/warpgate/health` — authenticated Warpgate SSH bastion health (`off`/`ok`/`degraded`/`unreachable`, host-key state folded in); see [Checking the bastion works](#checking-the-bastion-works).
-- `POST /api/v1/warpgate/host-key/accept` — authenticated; re-pins Warpgate's SSH host key after a verified change; see [Host key pinning](#host-key-pinning).
 - `GET /api/v1/repos/{id}/warpgate/targets`, `PUT`/`DELETE /api/v1/repos/{id}/warpgate/targets/{targetId}` — the SSH targets picker's API; see [Defining targets and granting them to a repo](#defining-targets-and-granting-them-to-a-repo).
 - `GET /api/v1/auth/check` — authenticated; `204` (empty body) for any valid lab identity, `401` (standard error body) for none. The forward-auth probe `subdomain` mode is built on; see [Dashboard exposure](#dashboard-exposure).
 

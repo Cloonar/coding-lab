@@ -139,6 +139,12 @@ Flags (env overrides in parentheses; flag > env > default):
   -warpgate-ca-file string  path to the PEM file holding the certificate or CA lab
                            must trust for the admin API; unset uses the system roots
                            (LAB_WARPGATE_CA_FILE)
+  -warpgate-ssh-host-key string
+                           trusted public host key of Warpgate's SSH listener,
+                           e.g. "ssh-ed25519 AAAA…" (ssh-keyscan output works too;
+                           several keys separated by newlines or commas); unset
+                           accepts every key the listener presents; requires
+                           -warpgate-ssh-addr (LAB_WARPGATE_SSH_HOST_KEY)
   -session-cookie-domain string
                            Domain attribute for lab's session cookie, e.g.
                            example.com; empty (default) keeps the cookie
@@ -310,9 +316,11 @@ func run() int {
 	// is: degrading to "Warpgate off" would silently drop every repo's SSH
 	// targets.
 	//
-	// The pin exists whenever --warpgate-ssh-addr is set, REST pair or not: it
-	// only needs the address and lab's settings row, and health reports its
-	// state either way. Runs are wired only when all three are set, which the
+	// The host-key pin exists whenever --warpgate-ssh-addr is set, REST pair
+	// or not: it needs only the address and the optional
+	// --warpgate-ssh-host-key (config stores it canonical, so a parse failure
+	// here is a bug, not operator input), and health reports its state
+	// either way. Runs are wired only when all three are set, which the
 	// instance service decides (bastionActive).
 	var warpgateClient *warpgate.Client
 	if cfg.WarpgateURL != "" {
@@ -329,7 +337,12 @@ func run() int {
 	}
 	var warpgateHostKeys *warpgate.HostKeyPin
 	if cfg.WarpgateSSHAddr != "" {
-		warpgateHostKeys = warpgate.NewHostKeyPin(st, store.SettingWarpgateSSHHostKey, cfg.WarpgateSSHAddr, nil)
+		trusted, keyErr := warpgate.ParseAuthorizedKeys(cfg.WarpgateSSHHostKey)
+		if keyErr != nil {
+			logger.Error("warpgate ssh host key", "component", "main", "err", keyErr)
+			return 1
+		}
+		warpgateHostKeys = warpgate.NewHostKeyPin(cfg.WarpgateSSHAddr, trusted, nil)
 	}
 	// The same nil-pointer guard as the OneCLI seams above, once per consumer
 	// interface: a nil *warpgate.Client or *warpgate.HostKeyPin assigned
@@ -956,9 +969,11 @@ func run() int {
 	//     starting beside lab — is retried with backoff (bastionSweepRetry)
 	//     until one completes or lab shuts down; each failed pass already
 	//     logged its one warning, so the retries add none of their own.
-	//   - The host-key check pins Warpgate's SSH host key on first use, here on
-	//     the operator's host rather than at the first target-bearing spawn,
-	//     and logs a mismatch loudly; health shows the same state.
+	//   - The host-key check compares the listener's keys to
+	//     --warpgate-ssh-host-key, here at startup rather than at the first
+	//     target-bearing spawn, and logs a mismatch loudly; with no trusted
+	//     key configured it logs the observed fingerprints once, so the
+	//     setting can be filled in from them. Health shows the same state.
 	if instanceSvc != nil {
 		go func() {
 			attempts, done := retryUntilComplete(ctx, instanceSvc.SweepBastionKeys,
@@ -973,10 +988,13 @@ func run() int {
 			hk := warpgateHostKeys.Check(ctx)
 			switch hk.State {
 			case warpgate.HostKeyPinned:
-				logger.Info("warpgate ssh host key pinned", "component", "main", "addr", cfg.WarpgateSSHAddr, "fingerprints", hk.Pinned)
+				logger.Info("warpgate ssh host key matches --warpgate-ssh-host-key", "component", "main", "addr", cfg.WarpgateSSHAddr, "trusted", hk.Pinned, "observed", hk.Observed)
+			case warpgate.HostKeyUnpinned:
+				logger.Info("no trusted warpgate ssh host key configured; runs trust whatever the listener presents — set --warpgate-ssh-host-key to pin one of the observed keys",
+					"component", "main", "addr", cfg.WarpgateSSHAddr, "observed", hk.Observed)
 			case warpgate.HostKeyMismatch:
-				logger.Warn("warpgate ssh host key does not match lab's pin; target-bearing spawns are refused until an operator accepts the new key",
-					"component", "main", "addr", cfg.WarpgateSSHAddr, "pinned", hk.Pinned, "observed", hk.Observed, "detail", hk.Error)
+				logger.Warn("warpgate ssh host key does not match --warpgate-ssh-host-key; target-bearing spawns are refused until the setting names a key the listener presents",
+					"component", "main", "addr", cfg.WarpgateSSHAddr, "trusted", hk.Pinned, "observed", hk.Observed)
 			default:
 				logger.Warn("warpgate ssh host key could not be checked at startup", "component", "main",
 					"addr", cfg.WarpgateSSHAddr, "state", hk.State, "err", hk.Error)
@@ -1027,8 +1045,8 @@ func run() int {
 		OneCLIDashboardMode: cfg.OneCLIDashboard,
 		OneCLIDashboardAddr: cfg.OneCLIDashboardAddr,
 		OneCLIDashboardURL:  cfg.OneCLIDashboardURL,
-		// Warpgate SSH-bastion health, host-key accept, and the per-repo SSH
-		// target picker (issue #39 / ADR-0068). All zero when unconfigured;
+		// Warpgate SSH-bastion health and the per-repo SSH target picker
+		// (issue #39 / ADR-0068). All zero when unconfigured;
 		// the routes mount anyway and say so.
 		Warpgate:         warpgateHTTP,
 		WarpgateAPIURL:   cfg.WarpgateURL,

@@ -422,7 +422,7 @@ func TestLaunch_BastionUnwiredParity(t *testing.T) {
 // session, no per-run tree, no start-guard mark, and no key registered. Each
 // row breaks a different pre-claim step: Warpgate unreachable at the identity
 // heal, the fresh target read failing, and the host key no longer matching
-// lab's pin.
+// the trusted host key.
 func TestLaunch_BastionRefusesBeforeTheClaim(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -453,11 +453,11 @@ func TestLaunch_BastionRefusesBeforeTheClaim(t *testing.T) {
 		{
 			name: "the host key no longer matches the pin",
 			wire: func(_ *bastionAPIStub, keys *hostKeysStub) {
-				keys.err = errors.New("warpgate: the SSH host key(s) presented at 10.88.0.1:2222 [SHA256:new] do not match lab's pin [SHA256:old]; refusing to wire SSH targets")
+				keys.err = errors.New("warpgate: the SSH host key(s) presented at 10.88.0.1:2222 [SHA256:new] are not among the trusted keys configured with --warpgate-ssh-host-key [SHA256:old]; refusing to wire SSH targets")
 			},
 			wantMsg: []string{
-				"refusing to spawn for repo proj: its SSH targets need the Warpgate bastion, and Warpgate's SSH host key could not be verified against lab's pin",
-				"do not match lab's pin",
+				"refusing to spawn for repo proj: its SSH targets need the Warpgate bastion, and Warpgate's SSH host key could not be verified",
+				"are not among the trusted keys configured with --warpgate-ssh-host-key",
 			},
 			scanned: 1,
 		},

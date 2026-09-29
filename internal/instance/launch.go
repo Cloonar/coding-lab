@@ -104,7 +104,7 @@ type LaunchSpec struct {
 // the gateway is configured and unreachable (issue #24 / ADR-0067) → the
 // SSH-bastion precheck, which — only for a repo with at least one cached SSH
 // target — heals the repo's Warpgate identity, re-reads its targets fresh and
-// verifies Warpgate's pinned host key, refusing the spawn before the claim
+// verifies Warpgate's host key, refusing the spawn before the claim
 // when any of that fails (issue #39 / ADR-0068) → startguard.Mark → per-run
 // tree materialization (home + runtime + imports, issues #202/#205/#261) →
 // the run's gateway trust bundle → the run's bastion wiring (a fresh run key
@@ -186,14 +186,14 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 
 	// The SSH-bastion precheck (issue #39 / ADR-0068), after the gateway's and
 	// in the same pre-claim spot for the same reason: a Warpgate that is down,
-	// a token it rejects, or a host key that no longer matches the pin must
+	// a token it rejects, or a host key that does not match the trusted one must
 	// refuse the spawn while nothing exists — never after AddWorktree, where
 	// an AFK spec's issue would be parked behind a sidecar outage. Unlike the
 	// gateway's, this refusal is PER REPO: prepareBastion asks Warpgate
 	// anything at all only when the repo's cached SSH target set is
 	// non-empty, so a repo without targets never waits on, or is refused by,
 	// the bastion (ADR-0068's fail-closed asymmetry). The resolved wiring
-	// (the repo's Warpgate user, the aliases, the pinned known_hosts) carries
+	// (the repo's Warpgate user, the aliases, the known_hosts) carries
 	// down to the key registration and file writes below, the spawn env, and
 	// the seeder; the zero value means this run is unwired and every step
 	// below behaves exactly as it did before #39.
@@ -792,7 +792,7 @@ func grantServiceNames(grants []onecli.Grant) []string {
 // the unwired path has one shape.
 //
 // Nothing in it is a secret: two Warpgate identifiers, alias names, and the
-// known_hosts text rendered from lab's pin (public keys). The one secret of
+// known_hosts text (public keys). The one secret of
 // the wiring, the run key's private half, is minted later by wireBastion and
 // never stored here.
 type bastionWiring struct {
@@ -804,8 +804,9 @@ type bastionWiring struct {
 	// aliases are the SSH target names this run reaches by alias:
 	// bastionAliases' output over the FRESH role read, sorted.
 	aliases []string
-	// knownHosts pins Warpgate's SSH host key(s) under --warpgate-ssh-addr,
-	// rendered from lab's stored pin after this spawn's re-scan matched it.
+	// knownHosts pins Warpgate's SSH host key(s) under --warpgate-ssh-addr:
+	// the trusted keys of --warpgate-ssh-host-key when set (after this
+	// spawn's scan presented one of them), else the keys the scan observed.
 	knownHosts string
 }
 
@@ -854,8 +855,9 @@ func bastionRefusalf(repoName, step string, cause error) *BadRequestError {
 //     warning, never a refusal.
 //  5. Fresh set empty → unwired (the cache is now cleared too). Every target
 //     skipped by the alias rule → unwired, with one warning naming them.
-//  6. KnownHosts: re-scan the listener, compare to the pin, render the run's
-//     known_hosts from the pin. A mismatch, an unpinned or unreachable
+//  6. KnownHosts: scan the listener and render the run's known_hosts — from
+//     the trusted keys when --warpgate-ssh-host-key is set, else from what
+//     the scan observed. A mismatch with the trusted keys or an unreachable
 //     listener refuses the spawn — the scan doubles as the SSH listener's
 //     reachability probe, and a changed key must be a legible refusal here
 //     rather than a host-key abort inside the run. Last, so a spawn that
@@ -915,7 +917,7 @@ func (s *Service) prepareBastion(ctx context.Context, repo store.Repo) (bastionW
 
 	knownHosts, err := s.warpgateHostKeys.KnownHosts(ctx)
 	if err != nil {
-		return bastionWiring{}, bastionRefusalf(repo.Name, "Warpgate's SSH host key could not be verified against lab's pin", err)
+		return bastionWiring{}, bastionRefusalf(repo.Name, "Warpgate's SSH host key could not be verified", err)
 	}
 	return bastionWiring{
 		userID:     identity.User.ID,

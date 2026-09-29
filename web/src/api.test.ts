@@ -1,7 +1,6 @@
 import { createResource, createRoot } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  acceptWarpgateHostKey,
   answerRun,
   ApiError,
   assignRepoSSHTarget,
@@ -1286,28 +1285,6 @@ describe('warpgate SSH bastion health (issue #39)', () => {
 
     expect(health).toEqual(body);
     expect(health.hostKey).toBeUndefined();
-  });
-
-  it('POST /warpgate/host-key/accept sends {fingerprint} and parses the resulting hostKey', async () => {
-    const hostKey = { state: 'pinned', pinned: ['SHA256:new'], observed: [] };
-    const mock = stubFetch(jsonResponse(200, hostKey));
-
-    await expect(acceptWarpgateHostKey('SHA256:new')).resolves.toEqual(hostKey);
-    expect(fetchCall(mock)[0]).toBe('/api/v1/warpgate/host-key/accept');
-    const init = requestInit(mock);
-    expect(init.method).toBe('POST');
-    expect(init.headers).toMatchObject({ 'X-Lab-Csrf': '1' });
-    expect(JSON.parse(init.body as string)).toEqual({ fingerprint: 'SHA256:new' });
-  });
-
-  it('POST /warpgate/host-key/accept surfaces the not-observed 409 verbatim', async () => {
-    stubFetch(jsonResponse(409, { error: 'fingerprint not among the currently observed keys' }));
-
-    const err = await acceptWarpgateHostKey('SHA256:bogus').catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(ApiError);
-    expect((err as ApiError).status).toBe(409);
-    expect((err as ApiError).message).toBe('fingerprint not among the currently observed keys');
   });
 });
 

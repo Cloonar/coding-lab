@@ -158,6 +158,10 @@ let
     "--warpgate-ca-file"
     cfg.warpgate.caFile
   ]
+  ++ lib.optionals (cfg.warpgate.sshHostKey != null) [
+    "--warpgate-ssh-host-key"
+    cfg.warpgate.sshHostKey
+  ]
   ++ lib.optionals (cfg.seedUser != null) [
     "--seed-user"
     cfg.seedUser
@@ -676,6 +680,24 @@ in
           (the default) leaves lab on the system roots. Independently
           settable from {option}`url` / {option}`adminTokenFile` — no
           pairing requirement with those two.
+        '';
+      };
+
+      sshHostKey = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…";
+        description = ''
+          The trusted public host key of Warpgate's SSH listener
+          (--warpgate-ssh-host-key): what every bastion-wired run's
+          known_hosts is written from, and what the listener must present
+          for a target-bearing spawn to proceed. An authorized_keys-style
+          line (`<type> <base64>`, as `ssh-keygen -y` or Warpgate's health
+          fingerprints lead you to) or an `ssh-keyscan` line; several keys
+          may be given separated by commas. `null` (the default) pins
+          nothing: lab accepts whatever key the listener presents to the
+          scan that wires each run. Requires {option}`sshAddr`; lab refuses
+          to start with a key and no listener address.
         '';
       };
     };

@@ -14,22 +14,14 @@
 // Two things this card adds that the credential gateway's does not, because
 // Warpgate's health carries them and OneCLI's does not: an "admin token
 // rejected" line when the API dials fine but the token itself was refused
-// (`api.reachable && !api.authenticated`), and the host-key pin state —
-// including, on a `mismatch`, an explicit accept action. Accepting is the
-// only mutating call this card makes, gated by the app's existing
-// confirm-then-call pattern (Danger.tsx, SecretGrants.tsx's delete): the
-// operator must confirm having verified the new fingerprint out of band
-// before lab starts trusting it, since accepting the wrong key would let a
-// spoofed bastion intercept every target-bearing run's SSH traffic.
+// (`api.reachable && !api.authenticated`), and the host-key state. That state
+// is read-only here: which key runs trust is `--warpgate-ssh-host-key`, a
+// server setting, so on a `mismatch` the card shows both sides and says what
+// to change, and with no trusted key configured (`unpinned`) it lists the
+// fingerprints the bastion presents so the operator can pin one.
 
-import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
-import {
-  acceptWarpgateHostKey,
-  errorMessage,
-  getWarpgateHealth,
-  type WarpgateHealth,
-} from '../api';
-import Banner from './Banner';
+import { For, Match, Show, Switch, createResource } from 'solid-js';
+import { errorMessage, getWarpgateHealth, type WarpgateHealth } from '../api';
 import SectionCard from './SectionCard';
 
 /** Configured-but-unreachable components, each with its raw dial/request
@@ -46,7 +38,7 @@ function unreachableComponents(health: WarpgateHealth): { label: string; error?:
 }
 
 export default function BastionStatus() {
-  const [health, { refetch }] = createResource(() => getWarpgateHealth());
+  const [health] = createResource(() => getWarpgateHealth());
 
   /** The failing components plus a possible admin-token line, joined as one
    *  detail line — empty when nothing's wrong (ok, or no data yet). */
@@ -105,7 +97,7 @@ export default function BastionStatus() {
                 {detail()}
               </p>
             </Show>
-            <HostKeyDetail health={health() as WarpgateHealth} onAccepted={() => void refetch()} />
+            <HostKeyDetail health={health() as WarpgateHealth} />
           </>
         </Match>
       </Switch>
@@ -113,81 +105,61 @@ export default function BastionStatus() {
   );
 }
 
+/** A comma-joined run of fingerprints, each in monospace. */
+function Fingerprints(props: { list: string[] }) {
+  return (
+    <For each={props.list}>
+      {(fp, i) => (
+        <>
+          {i() > 0 ? ', ' : ''}
+          <code class="mono">{fp}</code>
+        </>
+      )}
+    </For>
+  );
+}
+
 /**
- * The pinned host-key state, rendered under the reachability detail line.
+ * The host-key state, rendered under the reachability detail line.
  * `unpinned` and `mismatch` are the two states an operator must act on or
- * understand; `pinned` (the normal, healthy state) and `unreachable` (the
- * scan itself failed — already named in the reachability detail above, since
- * a failed scan means the SSH listener probe failed too) render nothing extra.
+ * understand; `pinned` (the normal, healthy state with a trusted key) and
+ * `unreachable` (the scan itself failed — already named in the reachability
+ * detail above, since a failed scan means the SSH listener probe failed too)
+ * render nothing extra.
  */
-function HostKeyDetail(props: { health: WarpgateHealth; onAccepted: () => void }) {
-  const [busyFingerprint, setBusyFingerprint] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
-
+function HostKeyDetail(props: { health: WarpgateHealth }) {
   const hostKey = () => props.health.hostKey;
-
-  const accept = async (fingerprint: string) => {
-    if (
-      !window.confirm(
-        `Accept new Warpgate host key ${fingerprint}?\n\n` +
-          'Only accept after verifying this fingerprint out of band — accepting the wrong ' +
-          'key lets a spoofed bastion intercept every affected run’s SSH traffic.',
-      )
-    ) {
-      return;
-    }
-    setBusyFingerprint(fingerprint);
-    setError(null);
-    try {
-      await acceptWarpgateHostKey(fingerprint);
-      props.onAccepted();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusyFingerprint(null);
-    }
-  };
 
   return (
     <Switch>
       <Match when={hostKey()?.state === 'unpinned'}>
-        <p class="muted card-sub">Host key not pinned yet.</p>
+        <div class="card-sub">
+          <p class="muted">
+            No trusted host key is configured — runs trust whatever the bastion presents. To pin it,
+            set <code class="mono">--warpgate-ssh-host-key</code> to one of the keys it presents
+            now.
+          </p>
+          <Show when={(hostKey()?.observed ?? []).length > 0}>
+            <p>
+              Observed: <Fingerprints list={hostKey()?.observed ?? []} />
+            </p>
+          </Show>
+        </div>
       </Match>
       <Match when={hostKey()?.state === 'mismatch'}>
         <div class="card-sub">
           <p>
-            Warpgate's SSH host key changed. Target-bearing spawns are blocked until the new key is
-            accepted — verify the observed fingerprint out of band (e.g. with ssh-keyscan run on the
-            Warpgate host itself) before accepting it.
+            Warpgate's SSH host key does not match the trusted key configured with{' '}
+            <code class="mono">--warpgate-ssh-host-key</code>. Target-bearing spawns are blocked
+            until that setting names a key the bastion presents — verify the observed fingerprint
+            out of band (e.g. with ssh-keyscan run on the Warpgate host itself) before changing it.
           </p>
           <p>
-            Pinned:{' '}
-            <For each={hostKey()?.pinned ?? []}>
-              {(fp, i) => (
-                <>
-                  {i() > 0 ? ', ' : ''}
-                  <code class="mono">{fp}</code>
-                </>
-              )}
-            </For>
+            Trusted: <Fingerprints list={hostKey()?.pinned ?? []} />
           </p>
-          <For each={hostKey()?.observed ?? []}>
-            {(fp) => (
-              <p>
-                Observed: <code class="mono">{fp}</code>{' '}
-                <button
-                  type="button"
-                  class="small"
-                  name={`accept-host-key-${fp}`}
-                  disabled={busyFingerprint() !== null}
-                  onClick={() => void accept(fp)}
-                >
-                  {busyFingerprint() === fp ? 'Accepting…' : 'Accept new host key'}
-                </button>
-              </p>
-            )}
-          </For>
-          <Banner message={error()} onDismiss={() => setError(null)} />
+          <p>
+            Observed: <Fingerprints list={hostKey()?.observed ?? []} />
+          </p>
         </div>
       </Match>
     </Switch>

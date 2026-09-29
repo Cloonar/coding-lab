@@ -38,22 +38,25 @@ export interface WarpgateSSHHealth {
 }
 
 /**
- * `unpinned` means lab has never successfully scanned a host key (SSH not yet
- * reachable, or reachable but not yet scanned); `pinned` is the normal,
- * healthy state; `mismatch` means a rescan disagrees with the stored pin —
- * target-bearing spawns are blocked until an operator calls the accept
- * endpoint with one of the currently observed fingerprints; `unreachable`
- * means the scan itself failed (`error` carries why).
+ * `pinned` means a trusted host key is configured (`--warpgate-ssh-host-key`)
+ * and the listener presents one of the trusted keys — the normal, healthy
+ * state with a pin; `mismatch` means the listener presents none of them —
+ * target-bearing spawns are blocked until the setting names a key the
+ * listener presents; `unpinned` means no trusted key is configured — runs
+ * trust whatever the listener presents, and `observed` lists what that is
+ * right now so the operator can pin it; `unreachable` means the scan itself
+ * failed (`error` carries why).
  */
 export type WarpgateHostKeyState = 'unpinned' | 'pinned' | 'mismatch' | 'unreachable';
 
-/** SHA256 host-key fingerprints, e.g. `SHA256:abcd…`. `pinned` is empty when
- *  unpinned; `observed` is empty when the last scan was unreachable. */
+/** SHA256 host-key fingerprints, e.g. `SHA256:abcd…`. `pinned` is the
+ *  configured trusted keys (empty when unpinned); `observed` is what the
+ *  listener presented to the last scan (empty when unreachable). */
 export interface WarpgateHostKey {
   state: WarpgateHostKeyState;
   pinned: string[];
   observed: string[];
-  /** The scan error text, only present when `state === 'unreachable'`. */
+  /** The scan error text, present when `state === 'unreachable'`. */
   error?: string;
 }
 
@@ -77,18 +80,6 @@ export interface WarpgateHealth {
 /** GET /warpgate/health: always answers 200, even when unreachable or off. */
 export function getWarpgateHealth(): Promise<WarpgateHealth> {
   return request<WarpgateHealth>('GET', '/warpgate/health');
-}
-
-/**
- * POST /warpgate/host-key/accept: accepts a NEW host key observed during the
- * last scan, replacing the stored pin — the operator's explicit action after
- * verifying the fingerprint out of band. Returns the resulting `hostKey`
- * object so the caller can render the outcome without a second round trip.
- * 409 when SSH isn't configured or the fingerprint isn't among the currently
- * observed keys; 400 when the fingerprint is missing; 502 on a failed scan.
- */
-export function acceptWarpgateHostKey(fingerprint: string): Promise<WarpgateHostKey> {
-  return request<WarpgateHostKey>('POST', '/warpgate/host-key/accept', { fingerprint });
 }
 
 /**

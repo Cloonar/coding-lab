@@ -119,13 +119,13 @@ type BastionAPI interface {
 	RemovePublicKey(ctx context.Context, userID, keyID string) error
 }
 
-// BastionHostKeys is the host-key pin seam (ADR-0068 "keyscan once, pin"):
-// KnownHosts re-scans Warpgate's SSH listener, compares the keys to lab's
-// stored pin, and returns the known_hosts text a run gets — rendered from the
-// PIN, never from the scan — or an actionable error on a mismatch, an
-// unreachable listener, or no pin. Satisfied by *warpgate.HostKeyPin. Every
-// target-bearing spawn calls it; the scan doubles as the SSH listener's
-// reachability probe.
+// BastionHostKeys is the host-key pin seam (ADR-0068 decision 4): KnownHosts
+// scans Warpgate's SSH listener and returns the known_hosts text a run gets —
+// rendered from the trusted keys in --warpgate-ssh-host-key when that is set
+// and the listener presents one of them, else from every key the listener
+// presented — or an actionable error on a mismatch or an unreachable
+// listener. Satisfied by *warpgate.HostKeyPin. Every target-bearing spawn
+// calls it; the scan doubles as the SSH listener's reachability probe.
 type BastionHostKeys interface {
 	KnownHosts(ctx context.Context) (string, error)
 }
