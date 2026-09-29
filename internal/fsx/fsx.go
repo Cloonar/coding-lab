@@ -4,6 +4,10 @@
 // share one audited implementation of the same-directory temp file + fsync
 // + rename/link + directory fsync sequence rather than each re-deriving the
 // same durability contract.
+//
+// Its read-side counterpart, ReadSecretFile, is the one permission-checked
+// loader for the sidecar credential files (OneCLI's API key, Warpgate's admin
+// token), for the same reason: one audited rule instead of a copy per flag.
 package fsx
 
 import (
