@@ -284,7 +284,7 @@ func warpgateTargetID(w http.ResponseWriter, r *http.Request) (string, bool) {
 		writeError(w, http.StatusBadRequest, "the SSH target id must not be empty")
 		return "", false
 	}
-	if strings.ContainsRune(id, '/') || strings.ContainsFunc(id, unicode.IsControl) {
+	if id == "." || id == ".." || strings.ContainsRune(id, '/') || strings.ContainsFunc(id, unicode.IsControl) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid SSH target id %q", id))
 		return "", false
 	}

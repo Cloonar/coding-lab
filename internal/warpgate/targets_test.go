@@ -231,3 +231,21 @@ func TestTargetFixtureIsUpstreamShaped(t *testing.T) {
 		}
 	}
 }
+
+// TestDotSegmentIDsStayOneElement pins escID: url.PathEscape leaves "." and
+// ".." alone and JoinPath would clean them as dot-segments, so an id of ".."
+// must reach Warpgate percent-encoded inside its own endpoint rather than
+// collapsing …/targets/../roles/<id> into …/roles/<id>.
+func TestDotSegmentIDsStayOneElement(t *testing.T) {
+	for _, id := range []string{".", ".."} {
+		s := newStub(t, answer(http.StatusNoContent, ""))
+		c := newTestClient(t, s.URL)
+		if err := c.UnassignTargetRole(context.Background(), id, "role-1"); err != nil {
+			t.Fatalf("UnassignTargetRole(%q): %v", id, err)
+		}
+		want := "/@warpgate/admin/api/targets/" + strings.ReplaceAll(id, ".", "%2E") + "/roles/role-1"
+		if got := s.only(t).Path; got != want {
+			t.Fatalf("id %q: path = %s, want %s", id, got, want)
+		}
+	}
+}

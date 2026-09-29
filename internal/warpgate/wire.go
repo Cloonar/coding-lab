@@ -165,7 +165,7 @@ func stripAPIPath(path string) string {
 // --- URL builders ----------------------------------------------------------
 //
 // All of them build on roots normalizeBase already cleaned, so joining can
-// neither double nor drop a separator. Caller-supplied ids are PathEscape'd:
+// neither double nor drop a separator. Caller-supplied ids go through escID:
 // an id containing a slash must address one (escaped) path element, never
 // traverse into a different endpoint.
 
@@ -187,15 +187,15 @@ func (c *Client) usersURL(search string) *url.URL {
 func (c *Client) usersCreateURL() *url.URL { return c.adminRoot.JoinPath(segUsers) }
 
 func (c *Client) userURL(userID string) *url.URL {
-	return c.adminRoot.JoinPath(segUsers, url.PathEscape(userID))
+	return c.adminRoot.JoinPath(segUsers, escID(userID))
 }
 
 func (c *Client) userRolesURL(userID string) *url.URL {
-	return c.adminRoot.JoinPath(segUsers, url.PathEscape(userID), segRoles)
+	return c.adminRoot.JoinPath(segUsers, escID(userID), segRoles)
 }
 
 func (c *Client) userRoleURL(userID, roleID string) *url.URL {
-	return c.adminRoot.JoinPath(segUsers, url.PathEscape(userID), segRoles, url.PathEscape(roleID))
+	return c.adminRoot.JoinPath(segUsers, escID(userID), segRoles, escID(roleID))
 }
 
 func (c *Client) rolesURL(search string) *url.URL {
@@ -206,25 +206,25 @@ func (c *Client) rolesCreateURL() *url.URL { return c.adminRoot.JoinPath(segRole
 
 // roleURL is SINGULAR /role/{id} (point 1) — the plural spelling is a 404.
 func (c *Client) roleURL(roleID string) *url.URL {
-	return c.adminRoot.JoinPath(segRole, url.PathEscape(roleID))
+	return c.adminRoot.JoinPath(segRole, escID(roleID))
 }
 
 func (c *Client) roleTargetsURL(roleID string) *url.URL {
-	return c.adminRoot.JoinPath(segRole, url.PathEscape(roleID), segTargets)
+	return c.adminRoot.JoinPath(segRole, escID(roleID), segTargets)
 }
 
 func (c *Client) targetsURL() *url.URL { return c.adminRoot.JoinPath(segTargets) }
 
 func (c *Client) targetRoleURL(targetID, roleID string) *url.URL {
-	return c.adminRoot.JoinPath(segTargets, url.PathEscape(targetID), segRoles, url.PathEscape(roleID))
+	return c.adminRoot.JoinPath(segTargets, escID(targetID), segRoles, escID(roleID))
 }
 
 func (c *Client) publicKeysURL(userID string) *url.URL {
-	return c.adminRoot.JoinPath(segUsers, url.PathEscape(userID), segCredentials, segPublicKeys)
+	return c.adminRoot.JoinPath(segUsers, escID(userID), segCredentials, segPublicKeys)
 }
 
 func (c *Client) publicKeyURL(userID, keyID string) *url.URL {
-	return c.adminRoot.JoinPath(segUsers, url.PathEscape(userID), segCredentials, segPublicKeys, url.PathEscape(keyID))
+	return c.adminRoot.JoinPath(segUsers, escID(userID), segCredentials, segPublicKeys, escID(keyID))
 }
 
 // --- request shapes --------------------------------------------------------
@@ -436,4 +436,17 @@ func sanitizeDecodeErr(err error, secrecy bodySecrecy) error {
 		return fmt.Errorf("field %q has an unexpected JSON type, want %s (value withheld: the body may carry target credentials)", typeErr.Field, typeErr.Type)
 	}
 	return errors.New("undecodable JSON (details withheld: the body may carry target credentials)")
+}
+
+// escID renders a caller-supplied id as exactly ONE escaped path element.
+// url.PathEscape alone is not enough: it leaves "." and ".." untouched, and
+// JoinPath cleans those as dot-segments, so an id of ".." would step out of
+// its endpoint (…/targets/../roles/<id> is …/roles/<id>). Percent-encoding the
+// dots keeps such an id a literal element, which Warpgate's uuid path
+// parameter then rejects.
+func escID(id string) string {
+	if id == "." || id == ".." {
+		return strings.ReplaceAll(id, ".", "%2E")
+	}
+	return url.PathEscape(id)
 }

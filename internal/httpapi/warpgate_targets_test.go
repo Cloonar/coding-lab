@@ -595,7 +595,7 @@ func TestWarpgateTargetInvalidID(t *testing.T) {
 	api := newFakeWarpgateAPI(targetAlpha)
 	x, repo := newWarpgateTargetServer(t, api)
 
-	for _, id := range []string{"a%2Fb", "..%2F..%2Froles", "tgt%01x", "%20"} {
+	for _, id := range []string{"a%2Fb", "..%2F..%2Froles", "tgt%01x", "%20", "%2E", "%2E%2E"} {
 		for _, method := range []string{"PUT", "DELETE"} {
 			resp := x.do(method, sshTargetPath(repo, id), nil, csrfHeaders(x.ts.URL))
 			wantStatus(t, resp, http.StatusBadRequest)

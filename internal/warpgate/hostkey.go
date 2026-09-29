@@ -12,7 +12,7 @@ package warpgate
 // The pin is trust-on-first-use exactly ONCE, on the operator's host, by lab
 // itself: the first successful scan with nothing stored becomes the pin.
 // After that a scan that differs is a mismatch — nothing is stored, and
-// grant-bearing spawns are refused — until the operator verifies a fingerprint
+// target-bearing spawns are refused — until the operator verifies a fingerprint
 // out of band and accepts it. known_hosts for runs is always rendered from the
 // PIN, never from a fresh scan, so a man in the middle between lab and the
 // bastion can at most block spawns, never get a run to trust its key.
@@ -308,7 +308,7 @@ var ErrFingerprintNotObserved = errors.New("fingerprint is not among the host ke
 
 // HostKeyPin holds the pin of Warpgate's SSH host key(s) in one settings row
 // and compares the listener's current keys against it. It is safe for
-// concurrent use: scans run in parallel (every grant-bearing spawn scans),
+// concurrent use: scans run in parallel (every target-bearing spawn scans),
 // while the read-compare-write of the stored pin is serialized, so a TOFU pin
 // and an Accept cannot interleave.
 type HostKeyPin struct {
@@ -407,7 +407,7 @@ func evaluate(pinned []ssh.PublicKey, stored bool, readErr error, observed []ssh
 // KnownHosts checks the listener and, when it presents exactly the pinned
 // keys, returns the known_hosts text a run gets: the PINNED keys under the
 // configured address's host pattern. Every other outcome is an error that
-// tells the operator what to do; a grant-bearing spawn is refused on it.
+// tells the operator what to do; a target-bearing spawn is refused on it.
 func (p *HostKeyPin) KnownHosts(ctx context.Context) (string, error) {
 	st, pinned := p.check(ctx)
 	switch st.State {
@@ -418,7 +418,7 @@ func (p *HostKeyPin) KnownHosts(ctx context.Context) (string, error) {
 		if st.Error != "" {
 			detail = " (" + st.Error + ")"
 		}
-		return "", fmt.Errorf("warpgate: the SSH host key(s) presented at %s [%s] do not match lab's pin [%s]%s; refusing to wire SSH targets. If Warpgate's host key was changed on purpose, verify one of the presented fingerprints out of band (e.g. ssh-keygen -lf on Warpgate's key) and accept it with POST /api/v1/warpgate/host-key/accept {\"fingerprint\":\"SHA256:…\"}",
+		return "", fmt.Errorf("warpgate: the SSH host key(s) presented at %s [%s] do not match lab's pin [%s]%s; refusing to wire SSH targets. If Warpgate's host key was changed on purpose, verify one of the presented fingerprints out of band (e.g. ssh-keyscan -p <port> <addr> | ssh-keygen -lf - run on the Warpgate host itself) and accept it with POST /api/v1/warpgate/host-key/accept {\"fingerprint\":\"SHA256:…\"}",
 			p.addr, strings.Join(st.Observed, ", "), strings.Join(st.Pinned, ", "), detail)
 	case HostKeyUnreachable:
 		return "", fmt.Errorf("warpgate: cannot verify the SSH host key at %s (is --warpgate-ssh-addr right and Warpgate's SSH listener enabled?): %s", p.addr, st.Error)
