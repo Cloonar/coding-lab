@@ -165,6 +165,38 @@ type Options struct {
 	// the dashboard is off.
 	OneCLIDashboardURL string
 
+	// Warpgate is the Warpgate SSH bastion's admin REST client (issue #39 /
+	// ADR-0068), seen through the WarpgateAPI seam; *warpgate.Client
+	// satisfies it. Nil means the REST pair (--warpgate-url +
+	// --warpgate-admin-token-file) is unconfigured: health reports the api
+	// component unconfigured, the SSH targets picker answers
+	// configured:false, and its toggles 409. As with OneCLI, the routes mount
+	// regardless — an unconfigured lab is not an unhealthy one.
+	//
+	// cmd/lab MUST leave this nil when unconfigured, assigning the client only
+	// behind a non-nil check on the concrete pointer: a nil *warpgate.Client
+	// stored here is a NON-nil interface. New also folds that exact typed nil
+	// back to nil (normalizeWarpgate), but the rule stands on its own.
+	Warpgate WarpgateAPI
+	// WarpgateAPIURL is --warpgate-url verbatim, echoed (redacted, like
+	// OneCLIAPIURL) by the health endpoint. Reporting only — a nil Warpgate
+	// with a non-empty URL still reports the api component unconfigured.
+	WarpgateAPIURL string
+	// WarpgateSSHAddr is --warpgate-ssh-addr, the host:port runs dial.
+	// Independent of the REST pair (ADR-0068's pairing rule stops there);
+	// non-empty makes health's ssh component configured and echoes it back.
+	WarpgateSSHAddr string
+	// WarpgateHostKeys is the pin of Warpgate's SSH host key(s) — a
+	// *warpgate.HostKeyPin for WarpgateSSHAddr over the store's
+	// store.SettingWarpgateSSHHostKey row — seen through the
+	// WarpgateHostKeyPin seam. Health's ssh probe is its Check (which pins on
+	// the first successful scan), and POST /warpgate/host-key/accept its
+	// Accept. Nil when --warpgate-ssh-addr is unset; cmd/lab should wire it
+	// whenever the address is set (without it, health falls back to a bare
+	// TCP dial for the ssh component, omits hostKey, and the accept 409s).
+	// Same typed-nil rule as Warpgate above.
+	WarpgateHostKeys WarpgateHostKeyPin
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -232,6 +264,13 @@ type Server struct {
 	// with nothing left to parse and nothing left to fail.
 	oneCLIDashboardMode string
 	oneCLIDashboardURL  string
+
+	// The Warpgate SSH bastion (issue #39 / ADR-0068). A nil warpgate or
+	// warpgateHostKeys is the unconfigured state (normalized in New).
+	warpgate         WarpgateAPI
+	warpgateAPIURL   string
+	warpgateSSHAddr  string
+	warpgateHostKeys WarpgateHostKeyPin
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -330,6 +369,9 @@ func New(o Options) (*Server, error) {
 		oneCLIAPIURL:     o.OneCLIAPIURL,
 		oneCLIGatewayURL: o.OneCLIGatewayURL,
 
+		warpgateAPIURL:  o.WarpgateAPIURL,
+		warpgateSSHAddr: o.WarpgateSSHAddr,
+
 		sessionCookieDomain: o.SessionCookieDomain,
 
 		proxyAuth:     o.ProxyAuth,
@@ -346,6 +388,7 @@ func New(o Options) (*Server, error) {
 		commandsCache: make(map[string]commandsCacheEntry),
 	}
 	s.shutdownCtx, s.shutdownCancel = context.WithCancel(context.Background())
+	s.warpgate, s.warpgateHostKeys = normalizeWarpgate(o.Warpgate, o.WarpgateHostKeys)
 
 	if o.BaseURL != "" {
 		u, err := url.Parse(o.BaseURL)
@@ -576,6 +619,23 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/repos/{id}/onecli/grants", s.requireAuth(s.handleOneCLIGrantList))
 	api.HandleFunc("PUT /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}", s.requireAuth(s.handleOneCLIGrantAttach))
 	api.HandleFunc("DELETE /api/v1/repos/{id}/onecli/grants/{kind}/{resourceId}", s.requireAuth(s.handleOneCLIGrantDetach))
+
+	// The Warpgate SSH bastion (issue #39 / ADR-0068), the credential
+	// gateway's non-HTTP sibling on the same contract: an always-200 health
+	// folding off/ok/degraded/unreachable over the admin API, the SSH listener
+	// and its pinned host key; the operator's explicit host-key accept; and
+	// the per-repo SSH targets picker, a proxy of Warpgate's admin API (the
+	// admin token must not leave lab). Unconditional for the OneCLI routes'
+	// reason — an unconfigured lab answers health with "off" and the listing
+	// with configured:false, never a 404 the SPA cannot tell from an older
+	// lab — and requireAuth is on every one: health echoes the configured
+	// addresses. The accept is a POST and the toggles PUT/DELETE, so
+	// csrfMiddleware guards them as it guards every mutation on this mux.
+	api.HandleFunc("GET /api/v1/warpgate/health", s.requireAuth(s.handleWarpgateHealth))
+	api.HandleFunc("POST /api/v1/warpgate/host-key/accept", s.requireAuth(s.handleWarpgateHostKeyAccept))
+	api.HandleFunc("GET /api/v1/repos/{id}/warpgate/targets", s.requireAuth(s.handleWarpgateTargetList))
+	api.HandleFunc("PUT /api/v1/repos/{id}/warpgate/targets/{targetId}", s.requireAuth(s.handleWarpgateTargetAssign))
+	api.HandleFunc("DELETE /api/v1/repos/{id}/warpgate/targets/{targetId}", s.requireAuth(s.handleWarpgateTargetUnassign))
 
 	// Web Push (issue #98): the VAPID public key plus subscription CRUD/test
 	// (operator auth; CSRF guards the mutations). Mounted only when the
