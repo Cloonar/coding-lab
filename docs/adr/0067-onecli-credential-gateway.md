@@ -26,7 +26,7 @@ The decisions, pinned:
 
 ## Status
 
-Accepted. Settled via issue #23 (2026-08-13), the foundation epic of the OneCLI series — #24 (run wiring and fail-closed enforcement), #25 (the per-repo grant picker), #26 (dashboard exposure modes) and #35 (the agent identity's naming and lifecycle) have all since landed, each recorded in an amendment below except #25, which built exactly what was pinned above and had nothing to overturn; still ahead is #27 (`repo_secrets` retirement).
+Accepted. Settled via issue #23 (2026-08-13), the foundation epic of the OneCLI series — #24 (run wiring and fail-closed enforcement), #25 (the per-repo grant picker), #26 (dashboard exposure modes) and #35 (the agent identity's naming and lifecycle) have all since landed, each recorded in an amendment below except #25, which built exactly what was pinned above and had nothing to overturn; still ahead is #27 (`repo_secrets` retirement). Its SSH counterpart is [ADR-0068](0068-warpgate-ssh-bastion.md), the non-HTTP sibling that fronts outbound SSH from runs through the Warpgate bastion on this same house pattern.
 
 Amended by issue #24 (2026-08-13): the run-wiring epic, the first consumer of everything above and the one that had to price it. Nothing pinned above is overturned. What changes is that the three-setting pin becomes **four**, the fail-closed pin acquires a site, and the four questions #23 left genuinely open — how a run *trusts* a proxy that terminates TLS, what it must still reach *directly*, where the refusal *lands*, and what its context file then *says* — are settled:
 
