@@ -55,6 +55,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/github"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker/secretscan"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
+	"git.cloonar.com/Cloonar/coding-lab/internal/warpgate"
 )
 
 // version is stamped via -ldflags "-X main.version=…".
@@ -297,6 +298,60 @@ func run() int {
 	var oneCLIAgents reposvc.OneCLIAgents
 	if oneCLIClient != nil {
 		oneCLIAgents = oneCLIClient
+	}
+
+	// Warpgate SSH bastion (issue #39 / ADR-0068): the admin REST client and
+	// the host-key pin, on the OneCLI pattern above. Off when unconfigured:
+	// --warpgate-url and --warpgate-admin-token-file are a pair config.Parse
+	// enforces, so an empty URL means no token file is ever opened. A token
+	// file that is unreadable, loose (0600 rule, shared with the OneCLI key and
+	// the master key via fsx.ReadSecretFile) or empty, and a --warpgate-ca-file
+	// that holds no certificate, are fatal for the same reason the OneCLI key
+	// is: degrading to "Warpgate off" would silently drop every repo's SSH
+	// targets.
+	//
+	// The pin exists whenever --warpgate-ssh-addr is set, REST pair or not: it
+	// only needs the address and lab's settings row, and health reports its
+	// state either way. Runs are wired only when all three are set, which the
+	// instance service decides (bastionActive).
+	var warpgateClient *warpgate.Client
+	if cfg.WarpgateURL != "" {
+		token, tokenErr := warpgate.LoadAdminToken(cfg.WarpgateAdminTokenFile)
+		if tokenErr != nil {
+			logger.Error("warpgate admin token", "component", "main", "err", tokenErr)
+			return 1
+		}
+		warpgateClient, err = warpgate.New(warpgate.Options{BaseURL: cfg.WarpgateURL, Token: token, CAFile: cfg.WarpgateCAFile})
+		if err != nil {
+			logger.Error("building warpgate client", "component", "main", "err", err)
+			return 1
+		}
+	}
+	var warpgateHostKeys *warpgate.HostKeyPin
+	if cfg.WarpgateSSHAddr != "" {
+		warpgateHostKeys = warpgate.NewHostKeyPin(st, store.SettingWarpgateSSHHostKey, cfg.WarpgateSSHAddr, nil)
+	}
+	// The same nil-pointer guard as the OneCLI seams above, once per consumer
+	// interface: a nil *warpgate.Client or *warpgate.HostKeyPin assigned
+	// straight into an interface field is a NON-nil interface, which would
+	// read "configured" everywhere on a lab that configured nothing.
+	var (
+		warpgateBastion    instance.BastionAPI
+		warpgateIdentities reposvc.WarpgateIdentities
+		warpgateHTTP       httpapi.WarpgateAPI
+	)
+	if warpgateClient != nil {
+		warpgateBastion = warpgateClient
+		warpgateIdentities = warpgateClient
+		warpgateHTTP = warpgateClient
+	}
+	var (
+		warpgateSpawnHostKeys instance.BastionHostKeys
+		warpgateHTTPHostKeys  httpapi.WarpgateHostKeyPin
+	)
+	if warpgateHostKeys != nil {
+		warpgateSpawnHostKeys = warpgateHostKeys
+		warpgateHTTPHostKeys = warpgateHostKeys
 	}
 	// Per-run private HOME lifecycle (issue #202): <state>/instances holds one
 	// private HOME per run — the isolation seam a run's provider credential copy,
@@ -636,6 +691,15 @@ func run() int {
 			OneCLI:           oneCLIGateway,
 			OneCLIGatewayURL: cfg.OneCLIGatewayURL,
 			OneCLICAFile:     cfg.OneCLICAFile,
+			// Warpgate SSH-bastion run wiring (issue #39 / ADR-0068): a
+			// target-bearing spawn registers a per-run key, writes the run's
+			// ssh config, known_hosts and ssh/scp/sftp wrappers, and refuses
+			// before the claim when Warpgate or its host key cannot be
+			// verified. All three must be set for a run to be wired; with any
+			// of them zero every spawn is unchanged.
+			Warpgate:         warpgateBastion,
+			WarpgateSSHAddr:  cfg.WarpgateSSHAddr,
+			WarpgateHostKeys: warpgateSpawnHostKeys,
 		})
 		if err != nil {
 			logger.Error("building instance service", "component", "main", "err", err)
@@ -767,7 +831,18 @@ func run() int {
 		// issue #222 exists to fix. ctx is the process signal context: during
 		// shutdown AdoptCheck degrades to a fast no-op (its store lookup fails
 		// and it returns immediately, best-effort by design).
-		homes.SetPreWipeHook(func(runID string) { credrotateSvc.AdoptCheck(ctx, runID) })
+		//
+		// The same single hook revokes the run's Warpgate key (issue #39 /
+		// ADR-0068): every wipe path is exactly where a run's SSH access must
+		// end, so the run key rides the adopt-check's totality instead of a
+		// second list of call sites. RevokeBastionKey reads the run's marker
+		// from the runtime dir the wipe is about to remove, is a no-op on a lab
+		// without Warpgate or a run that was never wired, and detaches from ctx
+		// so shutdown cannot strand a key.
+		homes.SetPreWipeHook(func(runID string) {
+			credrotateSvc.AdoptCheck(ctx, runID)
+			instanceSvc.RevokeBastionKey(ctx, runID)
+		})
 
 		// lab_instances_active (M8): a scrape-time gauge over the live
 		// tmux+active-runs view — registered only with the instance stack up
@@ -838,6 +913,11 @@ func run() int {
 		// repo's credential-gateway agent in step with its row (issue #35). Nil
 		// on a lab with no --onecli-url, where all three are silent no-ops.
 		OneCLI: oneCLIAgents,
+		// Warpgate gives each repo its SSH-bastion user and role on the same
+		// three touchpoints, and startup also refreshes the repo_ssh_targets
+		// cache the spawn path reads (issue #39 / ADR-0068). Nil without
+		// --warpgate-url.
+		Warpgate: warpgateIdentities,
 	}
 	if instanceSvc != nil {
 		// Preserve live-session credential files across the restart heal — the
@@ -865,6 +945,34 @@ func run() int {
 			logger.Error("startup reconcile", "component", "main", "err", err)
 			return 1
 		}
+	}
+	// Warpgate startup passes (issue #39 / ADR-0068), both off the boot path:
+	// a bastion that is slow to come up must not delay serving.
+	//   - The orphan run-key sweep runs AFTER StartupReconcile, so re-adopted
+	//     runs count as live and orphan trees have already been wiped (and
+	//     their keys revoked) through the pre-wipe hook. It is safe beside
+	//     spawns that start while it runs: a key whose run's marker is still on
+	//     disk is skipped.
+	//   - The host-key check pins Warpgate's SSH host key on first use, here on
+	//     the operator's host rather than at the first target-bearing spawn,
+	//     and logs a mismatch loudly; health shows the same state.
+	if instanceSvc != nil {
+		go instanceSvc.SweepBastionKeys(ctx)
+	}
+	if warpgateHostKeys != nil {
+		go func() {
+			hk := warpgateHostKeys.Check(ctx)
+			switch hk.State {
+			case warpgate.HostKeyPinned:
+				logger.Info("warpgate ssh host key pinned", "component", "main", "addr", cfg.WarpgateSSHAddr, "fingerprints", hk.Pinned)
+			case warpgate.HostKeyMismatch:
+				logger.Warn("warpgate ssh host key does not match lab's pin; target-bearing spawns are refused until an operator accepts the new key",
+					"component", "main", "addr", cfg.WarpgateSSHAddr, "pinned", hk.Pinned, "observed", hk.Observed, "detail", hk.Error)
+			default:
+				logger.Warn("warpgate ssh host key could not be checked at startup", "component", "main",
+					"addr", cfg.WarpgateSSHAddr, "state", hk.State, "err", hk.Error)
+			}
+		}()
 	}
 
 	api, err := httpapi.New(httpapi.Options{
@@ -910,6 +1018,13 @@ func run() int {
 		OneCLIDashboardMode: cfg.OneCLIDashboard,
 		OneCLIDashboardAddr: cfg.OneCLIDashboardAddr,
 		OneCLIDashboardURL:  cfg.OneCLIDashboardURL,
+		// Warpgate SSH-bastion health, host-key accept, and the per-repo SSH
+		// target picker (issue #39 / ADR-0068). All zero when unconfigured;
+		// the routes mount anyway and say so.
+		Warpgate:         warpgateHTTP,
+		WarpgateAPIURL:   cfg.WarpgateURL,
+		WarpgateSSHAddr:  cfg.WarpgateSSHAddr,
+		WarpgateHostKeys: warpgateHTTPHostKeys,
 	})
 	if err != nil {
 		logger.Error("building http api", "component", "main", "err", err)
