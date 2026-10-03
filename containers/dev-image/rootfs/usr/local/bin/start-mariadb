@@ -1,0 +1,37 @@
+#!/bin/sh
+# start-mariadb — start a throwaway MariaDB for this session.
+#
+# Listens on 127.0.0.1:${MYSQL_TCP_PORT:-3306}; user `root`, empty password.
+# Data lives under ${DEVDB_DIR:-/tmp/devdb}/mariadb and is gone with the
+# container. Safe to run again: a running server is left alone.
+set -eu
+
+dir="${DEVDB_DIR:-/tmp/devdb}/mariadb"
+port="${MYSQL_TCP_PORT:-3306}"
+sock="${dir}/mariadb.sock"
+
+# --no-defaults throughout: the packaged /etc/mysql config points at
+# /var/lib/mysql and /run/mysqld, neither writable by the session user.
+if [ ! -d "${dir}/data/mysql" ]; then
+  mkdir -p "${dir}"
+  mariadb-install-db --no-defaults --datadir="${dir}/data" \
+    --auth-root-authentication-method=normal --skip-test-db >/dev/null
+fi
+
+if ! mariadb-admin --no-defaults --socket="${sock}" ping >/dev/null 2>&1; then
+  mariadbd --no-defaults --datadir="${dir}/data" --socket="${sock}" \
+    --pid-file="${dir}/mariadb.pid" --log-error="${dir}/server.log" \
+    --bind-address=127.0.0.1 --port="${port}" >/dev/null 2>&1 &
+  tries=0
+  until mariadb-admin --no-defaults --socket="${sock}" ping >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "${tries}" -gt 60 ]; then
+      echo "start-mariadb: server did not come up — see ${dir}/server.log" >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
+fi
+
+echo "mariadb ready: mysql://root@127.0.0.1:${port}/  (socket ${sock})"
+echo "  log: ${dir}/server.log   stop: mariadb-admin --no-defaults --socket=${sock} -uroot shutdown"

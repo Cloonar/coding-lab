@@ -1,0 +1,13 @@
+# Passwordless sudo for the package manager only (ADR-0069), so a session can
+# install a package this image lacks: `sudo apt-get update && sudo apt-get
+# install -y <pkg>`.
+#
+# A guard rail, not a security boundary. A lab session runs as an unprivileged
+# user whose uid is the lab service user's (podman --userns=keep-id); root
+# inside the container is a subordinate uid on the host and gains nothing lab
+# protects. What sudo must NOT be used for is writing into the worktree or
+# HOME: files created there as root belong to that subordinate uid host-side,
+# and lab can then neither diff nor remove them. Limiting the rule to apt/dpkg
+# keeps a stray `sudo npm install` from doing exactly that.
+Defaults env_keep += "DEBIAN_FRONTEND"
+ALL ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg

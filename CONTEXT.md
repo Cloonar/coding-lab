@@ -174,6 +174,10 @@ _Avoid_: tools container, sidecar image, base image
 The per-repo OCI image a `container`-**Runner** instance runs in — `repos.image_ref` (nullable; repo settings → **Runner**, the "Dev image" field), NULL inheriting the global `--container-image` **default**. The operator owns its userland (a shell, coreutils, `git`, an ssh client for ssh-remoted repos) and nothing lab-specific: lab injects only the **agent-tools image** read-only at `/opt/lab` and the repo's **read-only imports** at their host-identical paths, reserving every mount point it uses. A fully-qualified ref, resolved tag→digest against the registry (anonymous, HTTPS-only) and stored pinned as `host/path:tag@sha256:…` on save — so what runs is exactly what was reviewed — and pulled if missing at spawn, before the run claims anything (ADR-0053).
 _Avoid_: base image, container image, sandbox image
 
+**Full dev image**:
+The one **dev image** lab itself publishes (`ghcr.io/cloonar/dev-image:full`, built from `containers/dev-image/`) — an opt-in, batteries-included userland for repos that want toolchains without maintaining an image: Go, Node, Python and several PHP versions side by side, Chromium and Playwright for screenshots, PostgreSQL/MariaDB/Redis servers started per session by `start-*` helpers, common shell tools, and passwordless `sudo` limited to the package manager. It is an ordinary dev image in every other respect — selected per repo through the Dev image field or host-wide through the global default, digest-pinned on save, carrying nothing lab-specific — and it is never a default: the module's default dev image stays the stock scm image. Rebuilt on change and monthly; a rebuild reaches a repo only when its ref is re-saved (ADR-0069).
+_Avoid_: default image, base image, developer image, fat image
+
 ### Security
 
 **Master key**:

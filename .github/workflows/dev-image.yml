@@ -1,0 +1,183 @@
+# dev-image = build, smoke-test, and (on release) publish lab's opt-in full
+# dev image (ADR-0069): a batteries-included userland for container-runner
+# sessions — Go, Node, Python and PHP toolchains, a browser, database servers
+# and common shell tools — published next to the agent-tools images. Nothing
+# consumes it by default: the NixOS module's default dev image stays the
+# stock `buildpack-deps:stable-scm`, a repo opts in through its Dev image
+# field, and so no deploy gate depends on this workflow.
+#
+# Two legs on disjoint events, with the same secrets asymmetry as
+# agent-tools.yml:
+#
+#   * PR leg (job `smoke`, `pull_request`): builds the image and runs the
+#     smoke test under the container runner's conditions (unprivileged user,
+#     empty HOME, lab's fixed PATH). No push, `contents: read`, and no
+#     `secrets.*` reference — fork PRs run it safely.
+#
+#   * Release leg (job `publish`): builds, re-runs the smoke test, pushes to
+#     ghcr.io, and verifies the tags resolve anonymously. Three triggers:
+#     `push` to main (path-gated, so only a change to the image re-releases
+#     it), a monthly `schedule`, and `workflow_dispatch`. The schedule is the
+#     point of difference from agent-tools: most of this image is Debian
+#     packages that float with the release's security updates (only the pins
+#     in versions.env are fixed), so a rebuild with no diff still produces a
+#     fresher image — a browser one month staler is the cost of skipping it.
+#
+# Tags. `full-<YYYYMMDD>` is the dated build; `full` moves to the newest one.
+# Neither is what a session runs: lab resolves a Dev image ref to its digest
+# when the operator saves it (ADR-0053), so a rebuild reaches a repo only
+# when its ref is re-saved, and reaches a host-wide
+# `container.defaultImage` only when its hand-pinned digest is changed.
+#
+# Registry and auth are agent-tools.yml's: REGISTRY hardcoded `ghcr.io`,
+# OWNER derived from the repository owner (lowercased), auth by the built-in
+# GITHUB_TOKEN under `packages: write`. That token cannot set package
+# visibility, and lab resolves and pulls dev images anonymously — the verify
+# step at the end exists to catch a still-private package.
+#
+# Runner assumptions: `ubuntu-latest` with podman and skopeo preinstalled.
+# The image is several gigabytes, so both legs first reclaim disk from
+# preinstalled toolchains this job never uses.
+name: dev-image
+
+on:
+  pull_request:
+    paths:
+      - "containers/dev-image/**"
+      - ".github/workflows/dev-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "containers/dev-image/**"
+      - ".github/workflows/dev-image.yml"
+  schedule:
+    # 04:17 UTC on the 1st of each month. Off the hour on purpose: GitHub
+    # delays or drops scheduled runs queued at the busiest minutes.
+    - cron: "17 4 1 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR-only cancellation, as in agent-tools.yml: a publish run killed between
+  # its two tag pushes, or before the anonymous verify, leaves the registry
+  # half-released and unchecked.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # PR leg — local build + smoke test only. No push, no secrets.
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reclaim disk and record the podman config
+        run: |
+          # The image and its build layers need more room than the runner's
+          # default headroom reliably leaves; these preinstalled toolchains
+          # are the cheapest tens of gigabytes to give back.
+          set -eux
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+          podman version
+          podman info
+
+      - name: Build + smoke test
+        run: |
+          set -euo pipefail
+          containers/dev-image/build.sh
+          containers/dev-image/smoke-test.sh
+
+  # Release leg — build, re-smoke, push, verify anonymous resolution.
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # The only write scope this workflow holds, on the leg `pull_request`
+    # cannot reach.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reclaim disk and record the podman config
+        run: |
+          # Same step as the PR leg — see there for the rationale.
+          set -eux
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+          podman version
+          podman info
+
+      - name: Build + smoke test
+        run: |
+          set -euo pipefail
+          containers/dev-image/build.sh
+          containers/dev-image/smoke-test.sh
+
+      - name: Publish to ghcr.io
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # No `set -x` in this step — it handles the registry token. Login is
+          # --password-stdin; the token is never echoed or put on argv.
+          set -euo pipefail
+
+          REGISTRY="ghcr.io"
+          OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          repo="${REGISTRY}/${OWNER}/dev-image"
+          dated="${repo}:full-$(date -u +%Y%m%d)"
+          moving="${repo}:full"
+
+          podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin <<<"$GITHUB_TOKEN"
+
+          # Push once, under the dated tag, then point the moving tag at the
+          # SAME manifest registry-side. Two separate pushes of one local
+          # image are not guaranteed to produce one digest, and the two tags
+          # naming different digests would make "full" and "full-<date>" two
+          # different images.
+          podman tag localhost/dev-image:full "$dated"
+          podman push --digestfile /tmp/digest.full "$dated"
+          skopeo copy "docker://${dated}" "docker://${moving}"
+
+          digest="$(cat /tmp/digest.full)"
+          echo "$dated" > /tmp/ref.dated
+          echo "published ${repo}@${digest}  (tags: full, ${dated##*:})"
+          {
+            echo "### dev-image: full"
+            echo "- pinned ref: \`${moving}@${digest}\`"
+            echo "- dated tag: \`${dated}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the published tags resolve anonymously
+        run: |
+          # The consumer contract check: lab resolves a Dev image ref to its
+          # digest anonymously when it is saved, and pulls it anonymously at
+          # spawn (ADR-0053). A ghcr package is PRIVATE until a human makes it
+          # public, and a private package passes the authenticated push above
+          # and then fails for every consumer — so prove the anonymous path
+          # here. Resolving the manifest is enough to prove it, and avoids
+          # pulling several gigabytes back.
+          set -euo pipefail
+
+          REGISTRY="ghcr.io"
+          OWNER="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          repo="${REGISTRY}/${OWNER}/dev-image"
+
+          podman logout "$REGISTRY"
+
+          want="$(cat /tmp/digest.full)"
+          for ref in "${repo}:full" "$(cat /tmp/ref.dated)"; do
+            if ! got="$(skopeo inspect --no-creds --format '{{.Digest}}' "docker://${ref}")"; then
+              echo "::error::anonymous resolution of ${ref} failed — the dev-image package is not publicly readable (or the push did not land)."
+              echo "Fix (one-time, manual — the GITHUB_TOKEN cannot set package visibility): on the ${OWNER} organization, go to Packages → dev-image → Package settings → Change visibility → Public. lab resolves and pulls dev images without credentials."
+              exit 1
+            fi
+            if [ "$got" != "$want" ]; then
+              echo "::error::${ref} resolved to ${got}, but this run pushed ${want} — the tag moved between push and verify."
+              exit 1
+            fi
+            echo "verified ${ref} resolves anonymously (${got})"
+          done

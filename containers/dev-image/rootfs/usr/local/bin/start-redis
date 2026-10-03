@@ -1,0 +1,28 @@
+#!/bin/sh
+# start-redis — start a throwaway Redis for this session.
+#
+# Listens on 127.0.0.1:${REDIS_PORT:-6379}, no password, no persistence.
+# Safe to run again: a running server is left alone.
+set -eu
+
+dir="${DEVDB_DIR:-/tmp/devdb}/redis"
+port="${REDIS_PORT:-6379}"
+
+if ! redis-cli -h 127.0.0.1 -p "${port}" ping >/dev/null 2>&1; then
+  mkdir -p "${dir}"
+  redis-server --bind 127.0.0.1 --port "${port}" --dir "${dir}" \
+    --daemonize yes --pidfile "${dir}/redis.pid" --logfile "${dir}/server.log" \
+    --save "" >/dev/null
+  tries=0
+  until redis-cli -h 127.0.0.1 -p "${port}" ping >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "${tries}" -gt 60 ]; then
+      echo "start-redis: server did not come up — see ${dir}/server.log" >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
+fi
+
+echo "redis ready: redis://127.0.0.1:${port}"
+echo "  log: ${dir}/server.log   stop: redis-cli -p ${port} shutdown nosave"
