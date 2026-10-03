@@ -22,16 +22,18 @@
 #     injection), then pushes digest-pinned tags to ghcr.io and verifies they
 #     pull back anonymously. `pull_request` never reaches this job, so the
 #     `packages: write` token it holds is out of reach of a fork PR. Both legs
-#     are path-gated (containers/** or this file) so unrelated merges to main
+#     are path-gated (containers/agent-tools/** or this file — not all of
+#     containers/, which also holds the full dev image with a workflow of its
+#     own, dev-image.yml) so unrelated merges to main
 #     don't re-release (issue #220 settled this deliberately: images rebuild
 #     only when their inputs change, and the consuming pin — versions.env,
 #     which the NixOS module's toolsImages default reads — moves only together
 #     with a build). `workflow_dispatch` is the manual re-release knob:
 #     `labctl` is built from the repo *inside* the image build, so a labctl
 #     change that should be baked into fresh images is shipped by dispatching
-#     this workflow — even with no containers/** diff; the lab server re-pulls
-#     the tags at every preflight, so the refresh reaches hosts on their next
-#     restart.
+#     this workflow — even with no containers/agent-tools/** diff; the lab
+#     server re-pulls the tags at every preflight, so the refresh reaches
+#     hosts on their next restart.
 #
 # Tags and the pinning contract. Tags are `<provider>-<cli-version>`
 # (`claude-<CLAUDE_CODE_VERSION>`, `codex-<CODEX_VERSION>`), the versions read
@@ -74,12 +76,12 @@ name: agent-tools
 on:
   pull_request:
     paths:
-      - "containers/**"
+      - "containers/agent-tools/**"
       - ".github/workflows/agent-tools.yml"
   push:
     branches: [main]
     paths:
-      - "containers/**"
+      - "containers/agent-tools/**"
       - ".github/workflows/agent-tools.yml"
   workflow_dispatch:
 

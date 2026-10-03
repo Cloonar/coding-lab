@@ -984,7 +984,8 @@ Pull requests are gated by **GitHub Actions** on hosted `ubuntu-latest` runners 
 - **Native gate** ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml), job `native`) — every PR, the **required** check. Go + Node directly on the runner, no nix: SPA eslint/prettier/vitest/`vite build`, the `ui`-tagged Go build + `go test`, untagged golangci-lint. Needs: the `actions/*` actions and GitHub's hosted cache reachable; egress to `proxy.golang.org`, `registry.npmjs.org`, `github.com`/`raw.githubusercontent.com`; `git`/`prlimit` ship on the image and `tmux` is apt-installed in-job.
 - **Hermetic gate** ([`.github/workflows/ci-nix.yml`](../.github/workflows/ci-nix.yml), job `flake-check`) — full `nix flake check`, path-gated to nix and Go-dependency changes (`**/*.nix`, `flake.lock`, `go.mod`, `go.sum` — the last two matter because a dep bump stales `vendorHash`, which the native gate can't catch). Needs: root/`sudo` for the Determinate nix installer, egress to `install.determinate.systems` and `cache.nixos.org`, and disk for the store. [`ci-nix-noop.yml`](../.github/workflows/ci-nix-noop.yml) is its always-green twin on the inverse paths, so the required `flake-check` context always reports (a required check that never runs would pin the PR at "Expected" forever).
 - **Branch protection**: the required status checks are the job ids **`native`** and **`flake-check`** — kept stable deliberately; branch protection matches them as strings.
-- **Agent-tools gate** ([`.github/workflows/agent-tools.yml`](../.github/workflows/agent-tools.yml), see [Agent-tools images](#agent-tools-images)) — path-gated to `containers/**`. Needs podman (preinstalled on the image), egress to `downloads.claude.ai`, `github.com`, `docker.io`, and — release leg only — `ghcr.io`. CLI artifacts are sha256-verified and cached keyed on `versions.env`.
+- **Agent-tools gate** ([`.github/workflows/agent-tools.yml`](../.github/workflows/agent-tools.yml), see [Agent-tools images](#agent-tools-images)) — path-gated to `containers/agent-tools/**`. Needs podman (preinstalled on the image), egress to `downloads.claude.ai`, `github.com`, `docker.io`, and — release leg only — `ghcr.io`. CLI artifacts are sha256-verified and cached keyed on `versions.env`.
+- **Dev-image gate** ([`.github/workflows/dev-image.yml`](../.github/workflows/dev-image.yml), see [The full dev image](#the-full-dev-image)) — path-gated to `containers/dev-image/**`, plus a monthly scheduled rebuild. Needs podman and skopeo (both preinstalled on the image), several gigabytes of free disk (the job reclaims it from unused preinstalled toolchains), egress to `docker.io`, `ghcr.io`, `deb.debian.org`, `packages.sury.org`, `registry.npmjs.org`, `proxy.golang.org`, `raw.githubusercontent.com` and Playwright's browser CDN.
 - **Docs gate** ([`.github/workflows/docs.yml`](../.github/workflows/docs.yml), [ADR-0066](adr/0066-docs-site-github-pages.md)) — builds the mkdocs site with `mkdocs build --strict` in `nix develop .#docs`, path-gated to everything that changes the render; on a `v*` tag it publishes to GitHub Pages via OIDC (no operator secret). One-time admin step: enable Pages with source "GitHub Actions" (Settings → Pages) — until then the deploy fails loudly.
 - **Forgejo deploy poll** ([`.forgejo/workflows/deploy.yml`](../.forgejo/workflows/deploy.yml)) — the only workflow left on Forgejo (its `NIXOS_PIN_TOKEN` credential must never become a GitHub secret): a 5-minute schedule that bumps the coding-lab pin in the private `Cloonar/nixos` repo. Every fact it acts on is fetched from GitHub's `main`, never the mirror checkout; a no-op poll needs only `github.com` + `git.cloonar.com`, a real bump additionally needs the hermetic gate's prerequisites, KVM for `test-configuration`, and anonymous pulls from `ghcr.io`/`docker.io` for the skopeo probes.
 
@@ -1056,7 +1057,7 @@ services.lab.container = {
 
 **Preflight and refusals.** Preflight runs at server startup and collects *every* failure — podman missing/too old, pasta missing or too old, missing subuid/subgid entries, cgroup v1, an unreachable user manager, a failed spawn probe, unset or unresolvable tools refs — into one message, each item paired with the fixing command or config. While any check fails, container spawns are refused with that message (host-runner repos are unaffected); an AFK spawn is refused *before* the issue is claimed, so an unready host never parks an issue. Fix the host and restart — except the `user-manager` check and tools-ref pulls, which lab retries on its own until they clear. The dev-image knob is deliberately *not* preflight-checked: a spawn with no effective image (repo ref blank *and* global unset/`null`) is refused at spawn, where the repo is known, naming both knobs.
 
-**Dev image expectations.** Each container repo picks its dev image in repo settings → Runner (**Dev image**, `repos.image_ref`); blank inherits the global default — on a stock module deployment the pinned `buildpack-deps:stable-scm`. The image needs **no lab-specific contents** (the agent layer is injected via the read-only `/opt/lab` mount); what it must bring is the session's userland: a shell and coreutils, `git`, and an ssh client for ssh remotes and [SSH targets](#warpgate-ssh-bastion). `buildpack-deps:stable-scm` qualifies as-is; `alpine` qualifies once `git` + `openssh-client` are added; plain `debian:stable-slim` does **not** (no git, no ssh).
+**Dev image expectations.** Each container repo picks its dev image in repo settings → Runner (**Dev image**, `repos.image_ref`); blank inherits the global default — on a stock module deployment the pinned `buildpack-deps:stable-scm`. The image needs **no lab-specific contents** (the agent layer is injected via the read-only `/opt/lab` mount); what it must bring is the session's userland: a shell and coreutils, `git`, and an ssh client for ssh remotes and [SSH targets](#warpgate-ssh-bastion). `buildpack-deps:stable-scm` qualifies as-is; `alpine` qualifies once `git` + `openssh-client` are added; plain `debian:stable-slim` does **not** (no git, no ssh). For sessions that need language toolchains, a browser or a database without a per-repo image of your own, lab publishes an opt-in one — see [The full dev image](#the-full-dev-image).
 
 **Provider login in container mode.** On a container-wired host, login sessions and every non-interactive provider-CLI invocation (auth status, logout, the credential-refresh poke) run in containers: the CLI comes from the agent-tools mount, and the machine's master credential store is bind-mounted rw so a completed login lands where spawns copy from. Such a host needs **no** provider CLI on PATH. The login container runs the global `--container-image` default (login is repo-less); each attempt gets a scratch HOME under `<state>/logins/`, wiped at teardown. While preflight fails, login is refused with the same actionable text. Details: [ADR-0057](adr/0057-containerized-provider-login.md).
 
@@ -1067,6 +1068,49 @@ services.lab.container = {
 **Image storage counts toward `stateDir`** — see the [sizing note](#state-directory-layout).
 
 **Everything lab injects is read-only.** The `/opt/lab` mount (and any future lab-injected content) arrives read-only; an image must treat lab's mount points as reserved — never bake content at them, never write to them.
+
+### The full dev image
+
+The default dev image is deliberately bare: git, an ssh client, curl. A session in it has no Go, Node, Python or PHP, no browser and no database, and — running as an unprivileged user — cannot install them. For repos where that is the wrong trade, lab publishes an opt-in image that already carries them: **`ghcr.io/cloonar/dev-image:full`** ([ADR-0069](adr/0069-opt-in-full-dev-image.md)). Nothing uses it until you select it; the module default stays the stock image.
+
+**Selecting it.** Per repo: repo settings → Runner → **Dev image**, enter `ghcr.io/cloonar/dev-image:full` and save — lab pins it to the digest it resolves to. For every container repo on a host that has no Dev image of its own, set the global default instead, digest-pinned by hand like any other value of that option:
+
+```nix
+services.lab.container.defaultImage = "ghcr.io/cloonar/dev-image:full@sha256:…";
+```
+
+The digest is printed in the publish job's summary; `skopeo inspect --format '{{.Digest}}' docker://ghcr.io/cloonar/dev-image:full` prints the current one.
+
+**What is inside.**
+
+| Area | Contents |
+|---|---|
+| Base | Debian stable (`buildpack-deps`): git, git-lfs, ssh client, curl, wget, gcc/g++, make, common `-dev` headers |
+| Go | Go, `gopls`, `golangci-lint` |
+| Node | Node.js LTS, `npm`, `pnpm`, `yarn`, `corepack` |
+| Python | Python 3, `pip`, `venv`, `pipx`, `uv` |
+| PHP | 8.2, 8.3 and 8.4 side by side as `php8.2` / `php8.3` / `php8.4` (bare `php` is 8.2), each with curl, mbstring, xml, zip, intl, gd, mysql, pgsql, sqlite3, bcmath, soap, opcache, redis, apcu and imagick; Composer 2 |
+| Browser | Chromium, Playwright with its own Chromium build, Liberation/DejaVu/Noto fonts with emoji |
+| Databases | PostgreSQL, MariaDB and Redis — servers and clients; SQLite |
+| Shell tools | `rg`, `fd`, `jq`, `yq`, `shellcheck`, `rsync`, `zip`/`unzip`, `tree`, `less`, `lsof`, `ip`, `nc`, `dig` |
+| Media | ImageMagick, GraphicsMagick, Ghostscript, poppler tools |
+
+The exact pins (Go, Node major, PHP versions, golangci-lint) are in [`containers/dev-image/versions.env`](../containers/dev-image/versions.env); everything else is whatever the Debian release currently ships.
+
+**Working in it.** A session has no way to know which dev image it landed in, so tell your agents once — a few lines in the repo's `CLAUDE.md` / `AGENTS.md` naming what applies:
+
+- **A PHP version other than the default**: call it by name — `php8.3 bin/console …`, `php8.3 /usr/local/bin/composer install`.
+- **A screenshot**: `chromium --headless --screenshot=out.png --window-size=1280,800 <url>`, or `playwright screenshot <url> out.png`. Chromium starts with the flags a container needs (no sandbox, no `/dev/shm`) already applied; Puppeteer and Karma are pointed at it through `PUPPETEER_EXECUTABLE_PATH` / `CHROME_BIN`. A project that pins its own Playwright version adds that version's browser with `npx playwright install chromium`.
+- **A database for tests**: `start-postgres`, `start-mariadb`, `start-redis`. Each starts a throwaway server on `127.0.0.1` at the standard port (override with `PGPORT` / `MYSQL_TCP_PORT` / `REDIS_PORT`), prints its connection URL, and is safe to run twice. PostgreSQL's superuser is `postgres`, MariaDB's is `root`; neither has a password. Data lives under `/tmp/devdb` and ends with the session.
+- **A missing package**: `sudo apt-get update && sudo apt-get install -y <pkg>`. `sudo` is passwordless for `apt-get`, `apt` and `dpkg` and refused for everything else. Root inside the container is an unprivileged subordinate uid on the host, so this grants nothing lab protects — but a file written into the worktree or HOME as root would belong to that uid host-side, where lab could neither diff nor remove it. That is the reason the rule stops at the package manager. Installed packages last until the session ends.
+
+**Limits.** x86_64 only. No nested containers: `docker` and `ddev` cannot run inside a session, which is why the database servers are baked in. No Nix — a repo whose checks need `nix` stays on the host runner or brings its own image. Binaries installed with `go install` land in `~/go/bin`, which is not on the session PATH (lab sets PATH itself); run them by path or with `go run`.
+
+**Updates.** The image is rebuilt on every change to `containers/dev-image/` and on the first of each month, so its Debian packages and browser stay current. Each build is also tagged `full-<YYYYMMDD>`. Because a Dev image is pinned on save, a rebuild reaches a repo only when you **re-save its ref** (and reaches a hand-pinned `defaultImage` only when you change the digest). It is several gigabytes: the first spawn after selecting or updating it waits for the pull, and it counts toward `stateDir` like any image.
+
+**One manual step**, as for the agent-tools package: make the ghcr package public once (org **Packages → `dev-image` → Package settings → Change visibility → Public**). lab resolves and pulls dev images without credentials, so a private package fails every save; the publish job's last step checks anonymous resolution and prints this click path when it fails.
+
+**Building it yourself.** `containers/dev-image/build.sh` builds `localhost/dev-image:full` with podman, and `containers/dev-image/smoke-test.sh` runs it the way lab does — unprivileged user, empty HOME, lab's PATH — checking every toolchain, taking real screenshots and starting each database. To add or drop a PHP version, edit `PHP_VERSIONS` in `versions.env`.
 
 ## Observability
 

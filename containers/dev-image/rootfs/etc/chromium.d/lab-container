@@ -1,0 +1,10 @@
+# Flags every `chromium` launch needs inside a lab container (ADR-0069).
+# Sourced by Debian's /usr/bin/chromium launcher.
+#
+# --no-sandbox: Chromium's own sandbox needs to create user namespaces, which
+#   the container's seccomp profile denies to an unprivileged process. The
+#   container is the sandbox here.
+# --disable-dev-shm-usage: the container's /dev/shm is podman's 64 MB default;
+#   Chromium crashes on larger pages unless it keeps shared memory in /tmp.
+# --disable-gpu: there is no GPU, and probing for one only adds log noise.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-dev-shm-usage --disable-gpu"

@@ -1,0 +1,176 @@
+# dev-image: full — lab's opt-in, batteries-included dev image (ADR-0069).
+#
+# A dev image is the userland a container-runner session runs in (ADR-0052,
+# ADR-0053). The module's default dev image is a stock Debian scm image with
+# no language toolchains; this one is the opposite trade: large, and already
+# carrying what sessions keep reaching for — Go, Node, Python and PHP
+# toolchains, a browser for screenshots, database servers for tests, and the
+# usual shell tools. Nothing selects it by default: a repo opts in through
+# its Dev image field, a host through `services.lab.container.defaultImage`.
+#
+# What the container runner forces on this file (docs/ops.md § "The full dev
+# image" is the user-facing version):
+#
+#   * PATH is lab's, not the image's. The runner passes one fixed PATH
+#     (podmanx.PATH: /opt/lab/bin, then /usr/local/{sbin,bin}, /usr/{sbin,bin},
+#     /{sbin,bin}) and an image `ENV PATH` never reaches a session. Every tool
+#     must therefore resolve through one of those directories — which is why
+#     Go, npm and the PostgreSQL server binaries are symlinked into
+#     /usr/local/bin below rather than added to PATH.
+#   * HOME is mounted over. Each run gets a fresh, empty /home/agent, so
+#     nothing a session needs may live under a home directory: tools install
+#     system-wide and the Playwright browser goes to /opt/playwright.
+#   * Sessions run as an unprivileged user (podman --userns=keep-id maps the
+#     lab service user's uid in). Everything here must be usable by an
+#     arbitrary non-root uid; the database servers are started per session
+#     by the start-* helpers instead of from their packaged, root-owned
+#     data directories.
+#   * /opt/lab is lab's mount point (the agent-tools image) — never bake
+#     content there.
+#
+# No ARG defaults: build.sh passes every pin from versions.env, and a missing
+# one must fail the build (an empty image tag) rather than silently build
+# something else.
+
+ARG DEBIAN_RELEASE
+ARG GO_VERSION
+ARG NODE_MAJOR
+
+# ---- Stage: go — the toolchain plus the two Go tools worth pre-building -----
+FROM docker.io/library/golang:${GO_VERSION}-${DEBIAN_RELEASE} AS go
+ARG GOLANGCI_LINT_VERSION
+RUN set -eux; \
+    GOTOOLCHAIN=auto GOBIN=/out go install golang.org/x/tools/gopls@latest; \
+    curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/v${GOLANGCI_LINT_VERSION}/install.sh" \
+      | sh -s -- -b /out "v${GOLANGCI_LINT_VERSION}"; \
+    /out/gopls version; \
+    /out/golangci-lint --version
+
+# ---- Stages: upstream images that ship a single relocatable payload ---------
+FROM docker.io/library/node:${NODE_MAJOR}-${DEBIAN_RELEASE}-slim AS node
+FROM docker.io/library/composer:2 AS composer
+FROM ghcr.io/astral-sh/uv:latest AS uv
+FROM docker.io/mikefarah/yq:4 AS yq
+
+# ---- Final ------------------------------------------------------------------
+# buildpack-deps (full variant): Debian plus git, an ssh client, curl, wget,
+# the C/C++ toolchain, make, and the -dev headers most language packages want
+# when they compile a native extension. It is the same family as the module's
+# default dev image (buildpack-deps:stable-scm), so the dev-image contract —
+# shell, coreutils, git, ssh client — holds here by construction.
+FROM docker.io/library/buildpack-deps:${DEBIAN_RELEASE}
+
+# Redeclared: an ARG declared before the first FROM is only visible to FROM
+# lines until a stage asks for it again.
+ARG DEBIAN_RELEASE
+ARG PHP_VERSIONS
+ARG PHP_DEFAULT
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Debian packages: shell tools, Python, database servers and clients, the
+# browser with fonts, and media tools.
+#
+# postgresql-common goes in first so its createcluster.conf can be switched
+# off before the server package installs: by default the server's postinst
+# creates a root-owned "main" cluster no session user could ever start.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-common; \
+    sed -ri 's/^#?\s*create_main_cluster\s*=.*$/create_main_cluster = false/' \
+      /etc/postgresql-common/createcluster.conf; \
+    grep -qx 'create_main_cluster = false' /etc/postgresql-common/createcluster.conf; \
+    apt-get install -y --no-install-recommends \
+      sudo \
+      ripgrep fd-find jq zip unzip rsync tree less file patch gawk bc zstd \
+      gettext-base shellcheck sqlite3 git-lfs vim-tiny \
+      procps psmisc lsof iproute2 netcat-openbsd bind9-dnsutils \
+      python3 python3-pip python3-venv python3-dev python-is-python3 pipx \
+      postgresql postgresql-client \
+      mariadb-server mariadb-client \
+      redis-server redis-tools \
+      chromium \
+      fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji \
+      imagemagick graphicsmagick ghostscript poppler-utils; \
+    rm -rf /var/lib/apt/lists/*
+
+# PHP, several versions side by side, from the packages.sury.org archive —
+# maintained by Debian's own PHP maintainer and the standard source for PHP
+# versions other than the one a Debian release ships. Setup follows that
+# archive's README. Each version installs as php<ver>; PHP_DEFAULT is what
+# the bare `php` command means.
+RUN set -eux; \
+    curl -fsSLo /tmp/debsuryorg-archive-keyring.deb \
+      https://packages.sury.org/debsuryorg-archive-keyring.deb; \
+    dpkg -i /tmp/debsuryorg-archive-keyring.deb; \
+    rm /tmp/debsuryorg-archive-keyring.deb; \
+    echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ ${DEBIAN_RELEASE} main" \
+      > /etc/apt/sources.list.d/sury-php.list; \
+    apt-get update; \
+    pkgs=""; \
+    for v in $(echo "${PHP_VERSIONS}" | tr ',' ' '); do \
+      for ext in cli common curl mbstring xml zip intl gd mysql pgsql sqlite3 \
+                 bcmath soap opcache readline redis apcu imagick; do \
+        pkgs="${pkgs} php${v}-${ext}"; \
+      done; \
+    done; \
+    apt-get install -y --no-install-recommends ${pkgs}; \
+    update-alternatives --set php "/usr/bin/php${PHP_DEFAULT}"; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=go /usr/local/go /usr/local/go
+COPY --from=go /out/ /usr/local/bin/
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=node /usr/local/include/node /usr/local/include/node
+COPY --from=composer /usr/bin/composer /usr/local/bin/composer
+COPY --from=uv /uv /uvx /usr/local/bin/
+COPY --from=yq /usr/bin/yq /usr/local/bin/yq
+
+# Session environment. Deliberately no PATH (lab replaces it — see the header).
+#
+#   * PLAYWRIGHT_BROWSERS_PATH: the default is a cache under HOME, which is
+#     empty in every run. The directory is made world-writable below so a
+#     project pinning a different Playwright version can add its own browser
+#     build beside the baked one.
+#   * PUPPETEER_* / CHROME_BIN: point Puppeteer and Karma at the system
+#     Chromium instead of letting them download a Chrome into HOME on every
+#     run — one that would then start without the container flags from
+#     /etc/chromium.d/lab-container and fail.
+ENV LANG=C.UTF-8 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
+    PUPPETEER_SKIP_DOWNLOAD=1 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+    CHROME_BIN=/usr/bin/chromium
+
+# Wire the copied toolchains into lab's PATH, add the Node package managers,
+# and install Playwright with its own Chromium build (--with-deps pulls the
+# shared libraries that build needs through apt).
+RUN set -eux; \
+    ln -s /usr/local/go/bin/go /usr/local/go/bin/gofmt /usr/local/bin/; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+    ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack; \
+    ln -s /usr/bin/fdfind /usr/local/bin/fd; \
+    pgbin="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -n 1)"; \
+    for b in initdb pg_ctl postgres; do ln -s "${pgbin}/${b}" "/usr/local/bin/${b}"; done; \
+    npm install -g pnpm yarn playwright; \
+    apt-get update; \
+    playwright install --with-deps chromium; \
+    chmod -R a+rwX /opt/playwright; \
+    npm cache clean --force; \
+    rm -rf /root/.npm /root/.cache /var/lib/apt/lists/* /tmp/*
+
+# The image's own files: the per-session database starters, the Chromium
+# container flags, and the apt-only sudo rule (each file explains itself).
+# visudo proves the rule parses — a sudoers syntax error would otherwise only
+# surface as sudo refusing to run at all, inside a session.
+COPY --chmod=0755 rootfs/usr/local/bin/ /usr/local/bin/
+COPY --chmod=0644 rootfs/etc/chromium.d/lab-container /etc/chromium.d/lab-container
+COPY --chmod=0440 rootfs/etc/sudoers.d/lab-apt /etc/sudoers.d/lab-apt
+RUN visudo -cf /etc/sudoers.d/lab-apt
+
+LABEL org.opencontainers.image.title="dev-image: full" \
+      org.opencontainers.image.description="Opt-in full dev image for lab container sessions: Go, Node, Python and PHP toolchains, Chromium and Playwright, database servers, and common shell tools." \
+      org.opencontainers.image.source="https://github.com/Cloonar/coding-lab"
+
+CMD ["bash"]
