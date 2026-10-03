@@ -7,15 +7,19 @@
 # field, and so no deploy gate depends on this workflow.
 #
 # Two legs on disjoint events, with the same secrets asymmetry as
-# agent-tools.yml:
+# agent-tools.yml. The job ids carry a `dev-image-` prefix because a job id
+# is the check-run name, and agent-tools.yml already has `smoke` and
+# `publish`: a PR touching both workflows would report two checks under one
+# name, which `labctl pr logs --check` refuses as ambiguous.
 #
-#   * PR leg (job `smoke`, `pull_request`): builds the image and runs the
-#     smoke test under the container runner's conditions (unprivileged user,
-#     empty HOME, lab's fixed PATH). No push, `contents: read`, and no
-#     `secrets.*` reference — fork PRs run it safely.
+#   * PR leg (job `dev-image-smoke`, `pull_request`): builds the image and
+#     runs the smoke test under the container runner's conditions
+#     (unprivileged user, empty HOME, lab's fixed PATH). No push,
+#     `contents: read`, and no `secrets.*` reference — fork PRs run it safely.
 #
-#   * Release leg (job `publish`): builds, re-runs the smoke test, pushes to
-#     ghcr.io, and verifies the tags resolve anonymously. Three triggers:
+#   * Release leg (job `dev-image-publish`): builds, re-runs the smoke test,
+#     pushes to ghcr.io, and verifies the tags resolve anonymously. Three
+#     triggers:
 #     `push` to main (path-gated, so only a change to the image re-releases
 #     it), a monthly `schedule`, and `workflow_dispatch`. The schedule is the
 #     point of difference from agent-tools: most of this image is Debian
@@ -65,7 +69,7 @@ concurrency:
 
 jobs:
   # PR leg — local build + smoke test only. No push, no secrets.
-  smoke:
+  dev-image-smoke:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -91,7 +95,7 @@ jobs:
           containers/dev-image/smoke-test.sh
 
   # Release leg — build, re-smoke, push, verify anonymous resolution.
-  publish:
+  dev-image-publish:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # The only write scope this workflow holds, on the leg `pull_request`
