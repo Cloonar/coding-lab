@@ -55,8 +55,10 @@ when it matters.
   commands, the gate model, commit conventions. If a rule already ran as a gate,
   it vouches — read it, don't re-run it.
 - **Diff-scope sanity** — the diff matches the linked issue's stated intent and
-  nothing else. Flag drive-by changes unrelated to the issue; if it's ambiguous
-  whether a divergence is intentional, escalate to the human rather than guess.
+  nothing else. The issue's contract is its body — or, when the issue carries a
+  comment headed `## Agent Brief`, the latest such comment. Flag drive-by
+  changes unrelated to the issue; if it's ambiguous whether a divergence is
+  intentional, escalate to the human rather than guess.
 
 ## Conflict policy
 

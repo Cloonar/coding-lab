@@ -10,6 +10,8 @@ Ask the questions one at a time, waiting for feedback on each question before co
 
 If a question can be answered by exploring the codebase, explore the codebase instead.
 
+When the plan is headed for the issue tracker, treat how it is cut into issues as one of the decisions to resolve: recommend the fewest issues that can each land on their own — often a single issue — and get my answer before the session ends.
+
 ## Domain awareness
 
 During codebase exploration, also look for existing documentation:
