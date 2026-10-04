@@ -258,10 +258,11 @@ func TestAddCloneLifecycle(t *testing.T) {
 	if repo.AFKBranchPattern != "afk/<N>" || repo.ManualBranchPrefix != "lab/" {
 		t.Errorf("patterns = %q/%q, want afk/<N> and lab/", repo.AFKBranchPattern, repo.ManualBranchPrefix)
 	}
-	// Runner (issue #205) is NOT NULL: Add must stamp the host default itself
-	// rather than let CreateRepo insert the Go zero string.
-	if repo.Runner != store.RunnerHost {
-		t.Errorf("runner = %q, want %q", repo.Runner, store.RunnerHost)
+	// Runner (issue #205) starts nil since issue #55: a new repo INHERITS the
+	// global runner_default rather than being stamped host — the spawn resolves
+	// it live, so a later change of the default reaches this repo too.
+	if repo.Runner != nil {
+		t.Errorf("runner = %q, want nil (inherit the global runner default)", *repo.Runner)
 	}
 	if repo.ContainerMemory != nil || repo.ContainerPids != nil || repo.ContainerNofile != nil {
 		t.Errorf("container overrides = %v/%v/%v, want nil/nil/nil at create", repo.ContainerMemory, repo.ContainerPids, repo.ContainerNofile)
@@ -940,8 +941,10 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 		{Name: store.Set("   ")}, // whitespace-only sanitizes to ""
 		// Runner/container overrides (issue #205): the enum and the
 		// podman-flavored grammars all reject bad input as a BadRequestError.
-		{Runner: store.Set("bogus")},
-		{Runner: store.Set("")}, // NOT NULL: a PATCH must send a concrete value
+		{Runner: store.Set(ptr("bogus"))},
+		// Blank is NOT a spelling of inherit (issue #55): only nil un-pins.
+		{Runner: store.Set(ptr(""))},
+		{Runner: store.Set(ptr("  "))},
 		{ContainerMemory: store.Set(ptr("9x"))},
 		{ContainerPids: store.Set(ptr(0))},
 		{ContainerNofile: store.Set(ptr(0))},
@@ -991,11 +994,10 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 		t.Errorf("budget_minutes = %v, want nil", updated.BudgetMinutes)
 	}
 
-	// Runner (issue #205): flip to container and set all three limit
-	// overrides, then clear them back to nil (inherit) without touching
-	// runner.
+	// Runner (issue #205): pin container and set all three limit overrides,
+	// then clear them back to nil (inherit) without touching runner.
 	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
-		Runner:          store.Set(store.RunnerContainer),
+		Runner:          store.Set(ptr(store.RunnerContainer)),
 		ContainerMemory: store.Set(ptr("512m")),
 		ContainerPids:   store.Set(ptr(2048)),
 		ContainerNofile: store.Set(ptr(8192)),
@@ -1003,7 +1005,7 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateSettings runner+limits: %v", err)
 	}
-	if updated.Runner != store.RunnerContainer ||
+	if updated.Runner == nil || *updated.Runner != store.RunnerContainer ||
 		updated.ContainerMemory == nil || *updated.ContainerMemory != "512m" ||
 		updated.ContainerPids == nil || *updated.ContainerPids != 2048 ||
 		updated.ContainerNofile == nil || *updated.ContainerNofile != 8192 {
@@ -1020,8 +1022,29 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 	if updated.ContainerMemory != nil || updated.ContainerPids != nil || updated.ContainerNofile != nil {
 		t.Errorf("cleared limits = %v/%v/%v, want nil/nil/nil", updated.ContainerMemory, updated.ContainerPids, updated.ContainerNofile)
 	}
-	if updated.Runner != store.RunnerContainer {
+	if updated.Runner == nil || *updated.Runner != store.RunnerContainer {
 		t.Error("clearing limit overrides silently reset runner")
+	}
+
+	// Runner tri-state round trip (issue #55): nil clears the pin back to
+	// inherit, and host re-pins — each read back exactly as written.
+	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		Runner: store.Set[*string](nil),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings runner=nil: %v", err)
+	}
+	if updated.Runner != nil {
+		t.Errorf("runner after nil = %q, want nil (inherit)", *updated.Runner)
+	}
+	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		Runner: store.Set(ptr(store.RunnerHost)),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings runner=host: %v", err)
+	}
+	if updated.Runner == nil || *updated.Runner != store.RunnerHost {
+		t.Errorf("runner after host = %v, want the host pin", updated.Runner)
 	}
 
 	waitFor(t, "repo.changed after PATCH", func() bool {
@@ -1186,6 +1209,72 @@ func TestUpdateSettingsImageRefPinnerUnavailable(t *testing.T) {
 	if row.ImageRef != nil {
 		t.Errorf("image_ref = %v after a no-pinner failure, want nil", row.ImageRef)
 	}
+}
+
+// TestPinImageRef pins the one pin-on-save path (issue #207 / ADR-0053) that
+// both a repo's image_ref and the global dev_image_default setting (issue #55
+// / ADR-0071) save through: blank-after-trim is a clear that returns "" and
+// never calls the pinner (with or without one); otherwise the pinner gets the
+// TRIMMED ref and its output is returned verbatim; a pinner rejection is a
+// *BadRequestError carrying the pinner's message unchanged (a 400); and the
+// no-pinner boot is a plain error (500-family), never an unpinned ref.
+func TestPinImageRef(t *testing.T) {
+	e := newTestEnv(t)
+	pinned := "docker.io/library/debian:bookworm@sha256:" + strings.Repeat("c", 64)
+
+	t.Run("blank clears without pinning", func(t *testing.T) {
+		for _, in := range []string{"", "   ", "\t\n"} {
+			got, err := e.svc.PinImageRef(t.Context(), in)
+			if err != nil || got != "" {
+				t.Errorf("PinImageRef(%q) = %q, %v; want \"\", nil", in, got, err)
+			}
+		}
+		if n := e.pin.callCount(); n != 0 {
+			t.Errorf("blank refs called the pinner %d times, want 0", n)
+		}
+	})
+
+	t.Run("a ref is pinned trimmed and the pinner's output returned", func(t *testing.T) {
+		e.pin.pinned, e.pin.err = pinned, nil
+		got, err := e.svc.PinImageRef(t.Context(), "  docker.io/library/debian:bookworm \n")
+		if err != nil || got != pinned {
+			t.Fatalf("PinImageRef = %q, %v; want %q, nil", got, err, pinned)
+		}
+		if last := e.pin.lastCall(); last != "docker.io/library/debian:bookworm" {
+			t.Errorf("pinner called with %q, want the trimmed ref", last)
+		}
+	})
+
+	t.Run("a pinner rejection is a verbatim BadRequestError", func(t *testing.T) {
+		e.pin.pinned = ""
+		e.pin.err = errors.New(`image ref "debian" must be fully qualified, e.g. docker.io/library/debian:bookworm`)
+		defer func() { e.pin.err = nil }()
+		got, err := e.svc.PinImageRef(t.Context(), "debian")
+		var bad *BadRequestError
+		if !asBadRequest(err, &bad) {
+			t.Fatalf("PinImageRef error = %v (%T), want *BadRequestError", err, err)
+		}
+		if bad.Error() != e.pin.err.Error() {
+			t.Errorf("BadRequestError = %q, want the pinner's verbatim %q", bad.Error(), e.pin.err.Error())
+		}
+		if got != "" {
+			t.Errorf("PinImageRef returned %q alongside its error, want \"\"", got)
+		}
+	})
+
+	t.Run("no pinner is a plain error, but a clear still works", func(t *testing.T) {
+		pin := e.svc.pinImageRef
+		e.svc.pinImageRef = nil // simulate the no-pinner boot (in-package access)
+		defer func() { e.svc.pinImageRef = pin }()
+		_, err := e.svc.PinImageRef(t.Context(), "docker.io/library/debian:bookworm")
+		var bad *BadRequestError
+		if err == nil || asBadRequest(err, &bad) || !strings.Contains(err.Error(), "image ref pinning unavailable") {
+			t.Errorf("no-pinner PinImageRef error = %v, want the plain \"image ref pinning unavailable\"", err)
+		}
+		if got, err := e.svc.PinImageRef(t.Context(), "  "); err != nil || got != "" {
+			t.Errorf("no-pinner blank PinImageRef = %q, %v; want \"\", nil", got, err)
+		}
+	})
 }
 
 func ptr[T any](v T) *T { return &v }

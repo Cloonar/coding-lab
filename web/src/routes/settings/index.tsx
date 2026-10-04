@@ -1,9 +1,10 @@
 // Global settings (/settings/:section?) — the area root (issue #198). It owns
 // the page chrome and the two area-level resources (settings + provider
 // catalog), fetched ONCE here and threaded into the sections by props; the
-// category subpages (General, Agents, Notifications) live under ./sections and
-// are switched on the active slug. GLOBAL_SETTINGS_CATEGORIES is the single
-// source driving the routes, the mobile index rows and the desktop nav.
+// category subpages (General, Agents, Notifications, Runner) live under
+// ./sections and are switched on the active slug. GLOBAL_SETTINGS_CATEGORIES is
+// the single source driving the routes, the mobile index rows and the desktop
+// nav.
 // Global settings is deliberately breadcrumb-free (no Crumbs) — spec.
 
 import { Match, Show, Switch, createResource } from 'solid-js';
@@ -18,6 +19,7 @@ import { GLOBAL_SETTINGS_CATEGORIES } from './categories';
 import General from './sections/General';
 import Agents from './sections/Agents';
 import Notifications from './sections/Notifications';
+import Runner from './sections/Runner';
 
 export default function SettingsRoute() {
   return (
@@ -34,7 +36,7 @@ function SettingsView() {
   const [settings, { refetch }] = createResource(() => getSettings());
   const [providers] = createResource(() => listProviders());
 
-  // The form sections (general, agents) render inside a KEYED Show on the
+  // The form sections (general, agents, runner) render inside a KEYED Show on the
   // settings object: a successful save → refetch → NEW settings object →
   // the section REMOUNTS with a fresh seed and reads clean. The monolith never
   // remounted, so after a save its drafts stayed nominally "dirty" against the
@@ -85,6 +87,11 @@ function SettingsView() {
                 providers={providers() ?? []}
                 onSaved={() => void refetch()}
               />
+            ))}
+          </Match>
+          <Match when={params.section === 'runner'}>
+            {formGate((current) => (
+              <Runner initial={current} onSaved={() => void refetch()} />
             ))}
           </Match>
         </Switch>

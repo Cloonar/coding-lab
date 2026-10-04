@@ -94,9 +94,11 @@ Flags (env overrides in parentheses; flag > env > default):
   -agent-url string        session-facing base URL handed to labctl as LAB_URL,
                            http(s) or unix:///abs/path; defaults to
                            unix://<state-dir>/agent/agent.sock (LAB_AGENT_URL)
-  -container-image string  global default dev image for containerized sessions;
-                           per-repo Dev image overrides it, neither set refuses
-                           the spawn (LAB_CONTAINER_IMAGE)
+  -container-image string  deployed fallback dev image for containerized sessions:
+                           the last layer, after the repo's Dev image and the
+                           global default dev image (Settings → Runner); none of
+                           the three set refuses the spawn. Also the provider
+                           login image (LAB_CONTAINER_IMAGE)
   -container-tools-image provider=ref[,provider=ref…]
                            agent-tools injection image per provider id,
                            @sha256-pinned per ADR-0051 (LAB_CONTAINER_TOOLS_IMAGE)
@@ -573,67 +575,20 @@ func run() int {
 		// Containerized provider login + CLI surface (issue #206 / ADR-0057):
 		// with container config present, each adapter's login pane and
 		// non-interactive CLI invocations run in containers against its master
-		// store — never a host-CLI fallback. Per-provider Config: the
-		// master-store declaration is the package-level resolver (the same one
-		// the adapter's own method uses), the tools image is that provider's
-		// ref (missing → actionable refusal at use, mirroring run spawns), the
-		// dev image is the global default only (login is repo-less), and
-		// limits read the global container_* rows with the seeded fallbacks
-		// (the effectiveContainerLimits posture, minus the repo override that
-		// cannot apply). Without container config the adapters keep the raw
-		// runner and a nil CLI (→ provider.HostCLI inside New): host-mode
-		// login stays byte-for-byte unchanged. The instance/reconcile/afk
-		// services below always get the raw runner — the run-spawn seam is
-		// their own podman handling, untouched here.
+		// store — never a host-CLI fallback (providerCLIConfigs documents the
+		// per-provider Config, and why its dev image is the flag image alone).
+		// Without container config the adapters keep the raw runner and a nil
+		// CLI (→ provider.HostCLI inside New): host-mode login stays
+		// byte-for-byte unchanged. The instance/reconcile/afk services below
+		// always get the raw runner — the run-spawn seam is their own podman
+		// handling, untouched here.
 		claudeRunner := tmuxx.SessionRunner(runner)
 		codexRunner := tmuxx.SessionRunner(runner)
 		var claudeCLI, codexCLI provider.CLIRunner
 		if containerPreflight != nil {
-			loginHomes := filepath.Join(cfg.StateDir, "logins")
-			// One limits closure shared by both providers. The fallbacks are
-			// store's single-source defaults (what SeedDefaultSettings writes)
-			// — the same last-resort posture as instance's fallbacks.
-			limits := func(ctx context.Context) (string, int, int, error) {
-				memory, err := st.GetString(ctx, store.SettingContainerMemory, store.DefaultContainerMemory)
-				if err != nil {
-					return "", 0, 0, err
-				}
-				pids, err := st.GetInt(ctx, store.SettingContainerPids, store.DefaultContainerPids)
-				if err != nil {
-					return "", 0, 0, err
-				}
-				nofile, err := st.GetInt(ctx, store.SettingContainerNofile, store.DefaultContainerNofile)
-				if err != nil {
-					return "", 0, 0, err
-				}
-				return memory, pids, nofile, nil
-			}
-			claudeCfg := providercli.Config{
-				ProviderID:    claudecode.ID,
-				PodmanBin:     cfg.PodmanBin,
-				Preflight:     containerPreflight,
-				Image:         cfg.ContainerImage,
-				ToolsImage:    cfg.ContainerToolsImages[claudecode.ID],
-				Spec:          claudecode.MasterStore,
-				LoginHomeRoot: loginHomes,
-				Limits:        limits,
-				Logger:        logger,
-			}
+			claudeCfg, codexCfg := providerCLIConfigs(cfg, st, containerPreflight, home, logger)
 			claudeRunner = providercli.NewLoginRunner(runner, claudeCfg)
 			claudeCLI = providercli.NewContainerCLI(claudeCfg)
-			codexCfg := providercli.Config{
-				ProviderID: codex.ID,
-				PodmanBin:  cfg.PodmanBin,
-				Preflight:  containerPreflight,
-				Image:      cfg.ContainerImage,
-				ToolsImage: cfg.ContainerToolsImages[codex.ID],
-				// The same loginDir codex.New is handed below, so closure and
-				// adapter resolve one store.
-				Spec:          func() provider.MasterStoreSpec { return codex.MasterStore(home) },
-				LoginHomeRoot: loginHomes,
-				Limits:        limits,
-				Logger:        logger,
-			}
 			codexRunner = providercli.NewLoginRunner(runner, codexCfg)
 			codexCLI = providercli.NewContainerCLI(codexCfg)
 		}
@@ -1028,6 +983,9 @@ func run() int {
 		ProxyAuthHeader: cfg.ProxyAuthHeader,
 		TrustedProxies:  cfg.TrustedProxies,
 		AgentHandler:    agent.Handler(),
+		// The deployed fallback dev image (issue #55 / ADR-0071), reported
+		// read-only in the settings response as dev_image_fallback.
+		DevImageFallback: cfg.ContainerImage,
 		// The session cookie's Domain (issue #26): "" in every deployment but
 		// --onecli-dashboard=subdomain, which needs the parent domain so lab's
 		// session reaches onecli.<domain> and forward-auth can see it.
@@ -1226,6 +1184,69 @@ func loadOrGenerateVAPIDKey(path string, logger *slog.Logger) (push.Key, error) 
 		return key, nil
 	}
 	return push.LoadKey(path)
+}
+
+// providerCLIConfigs builds the per-provider container login/CLI configs
+// (issue #206 / ADR-0057) the claude-code and codex adapters' LoginRunner and
+// ContainerCLI read: the master-store declaration is the package-level
+// resolver (the same one the adapter's own method uses), the tools image is
+// that provider's ref (missing → actionable refusal at use, mirroring run
+// spawns), and limits read the global container_* rows with the seeded
+// fallbacks (the effectiveContainerLimits posture, minus the repo override
+// that cannot apply to a repo-less login).
+//
+// The dev image is cfg.ContainerImage — the --container-image flag — and
+// nothing else, deliberately (ADR-0057, ADR-0071): login and the CLI pokes are
+// repo-less, machine-level state, so neither a repo's image_ref nor the global
+// default dev image (the dev_image_default setting) ever applies, and st is
+// handed in for the limits alone — the setting is never read here. A
+// deployment that relies on the setting with the flag unset therefore has no
+// login image, which providercli refuses naming --container-image.
+func providerCLIConfigs(cfg config.Config, st *store.Store, preflight func() (podmanx.Result, bool), home string, logger *slog.Logger) (claudeCfg, codexCfg providercli.Config) {
+	loginHomes := filepath.Join(cfg.StateDir, "logins")
+	// One limits closure shared by both providers. The fallbacks are
+	// store's single-source defaults (what SeedDefaultSettings writes)
+	// — the same last-resort posture as instance's fallbacks.
+	limits := func(ctx context.Context) (string, int, int, error) {
+		memory, err := st.GetString(ctx, store.SettingContainerMemory, store.DefaultContainerMemory)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		pids, err := st.GetInt(ctx, store.SettingContainerPids, store.DefaultContainerPids)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		nofile, err := st.GetInt(ctx, store.SettingContainerNofile, store.DefaultContainerNofile)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		return memory, pids, nofile, nil
+	}
+	claudeCfg = providercli.Config{
+		ProviderID:    claudecode.ID,
+		PodmanBin:     cfg.PodmanBin,
+		Preflight:     preflight,
+		Image:         cfg.ContainerImage,
+		ToolsImage:    cfg.ContainerToolsImages[claudecode.ID],
+		Spec:          claudecode.MasterStore,
+		LoginHomeRoot: loginHomes,
+		Limits:        limits,
+		Logger:        logger,
+	}
+	codexCfg = providercli.Config{
+		ProviderID: codex.ID,
+		PodmanBin:  cfg.PodmanBin,
+		Preflight:  preflight,
+		Image:      cfg.ContainerImage,
+		ToolsImage: cfg.ContainerToolsImages[codex.ID],
+		// The same loginDir codex.New is handed in run(), so closure and
+		// adapter resolve one store.
+		Spec:          func() provider.MasterStoreSpec { return codex.MasterStore(home) },
+		LoginHomeRoot: loginHomes,
+		Limits:        limits,
+		Logger:        logger,
+	}
+	return claudeCfg, codexCfg
 }
 
 // labURL is the LAB_URL handed to spawned sessions. An explicit --agent-url

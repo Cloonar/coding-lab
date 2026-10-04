@@ -16,7 +16,7 @@ You add repositories and credentials in the UI, then start **manual instances** 
 - **AFK runs** — unattended sessions that claim one `ready-for-agent` issue from the repo's tracker, resolve it, and open a PR. Budget clock, three-strikes pause, guarded teardown, restart-safe re-adoption.
 - **Multiple agent providers** — Claude Code and Codex ship today, behind an `AgentProvider` seam designed so a new provider is one adapter, zero refactor (see [`docs/agents/provider-authoring.md`](docs/agents/provider-authoring.md)).
 - **Tracker integration** — Forgejo and GitHub forges, or lab's built-in tracker (issues, labels, comments, change requests with diff view and merge from the UI). Agents talk to whichever tracker the repo binds through one CLI: `labctl`.
-- **Container or host runner** — per repo, sessions run either in a rootless podman container (your dev image + lab's injected agent tools) or directly on the host. An opt-in full dev image with Go, Node, Python, PHP, a browser and database servers is published for repos that want one.
+- **Container or host runner** — sessions run either in a rootless podman container (your dev image + lab's injected agent tools) or directly on the host, picked per repo or inherited from a global runner default in Settings → Runner, where the global default dev image and container limits live too. An opt-in full dev image with Go, Node, Python, PHP, a browser and database servers is published for repos that want one.
 - **Credentials vault** — SSH keys, HTTPS tokens, and forge API tokens encrypted at rest (AES-256-GCM, operator-owned master key file); secrets are never displayed back and never land in URLs or repo config.
 - **Repo secrets for agents** — two ways to hand a run API keys, neither of which puts a readable value in the session: per-repo grants against a [OneCLI](https://onecli.sh) credential gateway (the real credential is injected at the network layer, on the way out) or write-only vault-stored secrets used via `labctl secret exec` with redacted output and a pre-push leak scan.
 - **SSH targets without SSH keys** — with an optional [Warpgate](https://github.com/warp-tech/warpgate) SSH bastion wired up, runs reach operator-defined SSH hosts as plain `ssh <target>` (and `scp`, `sftp`, `rsync`) without ever holding the target's credential: a per-repo target picker, a fresh run-scoped key revoked when the run stops, and Warpgate's host key pinned by lab.
@@ -60,7 +60,7 @@ The unattended loop end to end: you label an issue `ready-for-agent` → the AFK
 
 ### Requirements
 
-Any Linux host. On PATH: `git`, `tmux`, `ssh` (openssh), `prlimit` (util-linux). Provider CLIs (`claude`, `codex`) are only needed for host-runner repos — with the container runner (the default on the NixOS module) they come from lab's published agent-tools images instead.
+Any Linux host. On PATH: `git`, `tmux`, `ssh` (openssh), `prlimit` (util-linux). Provider CLIs (`claude`, `codex`) are only needed for host-runner repos — with the container runner (which the NixOS module provisions by default) they come from lab's published agent-tools images instead.
 
 ### NixOS (recommended)
 

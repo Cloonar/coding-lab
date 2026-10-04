@@ -195,6 +195,16 @@ type Options struct {
 	// Same typed-nil rule as Warpgate above.
 	WarpgateHostKeys WarpgateHostKeyPin
 
+	// DevImageFallback is --container-image verbatim, "" when the flag is
+	// unset: the deployed fallback dev image, the LAST layer of a container
+	// run's dev image chain (repo image_ref → the dev_image_default setting →
+	// this; issue #55 / ADR-0071). The settings surface reports it read-only
+	// as dev_image_fallback, so the UI can say what a blank global default dev
+	// image falls through to; a settings PATCH can never write it. Reporting
+	// only — the spawn path resolves the image itself
+	// (instance.EffectiveDevImage, from its own copy of the flag).
+	DevImageFallback string
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -269,6 +279,8 @@ type Server struct {
 	warpgateAPIURL   string
 	warpgateSSHAddr  string
 	warpgateHostKeys WarpgateHostKeyPin
+
+	devImageFallback string // --container-image, reported as dev_image_fallback
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -369,6 +381,8 @@ func New(o Options) (*Server, error) {
 
 		warpgateAPIURL:  o.WarpgateAPIURL,
 		warpgateSSHAddr: o.WarpgateSSHAddr,
+
+		devImageFallback: o.DevImageFallback,
 
 		sessionCookieDomain: o.SessionCookieDomain,
 

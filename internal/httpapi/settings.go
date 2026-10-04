@@ -2,15 +2,23 @@ package httpapi
 
 // Settings surface (pinned M5 contract): GET returns every settings row with
 // typed values (the integer knobs as JSON numbers, the boolean knobs as JSON
-// bools); PATCH validates the whole body first — unknown keys, non-integers,
-// non-booleans, out-of-range intervals, and spawn defaults outside the provider
-// catalogs are 400s that write NOTHING — then
-// upserts and returns the updated map. No event is published and no restart
-// is needed: the runtime loops re-read settings every tick (D12c), and spawn
-// paths read them per call.
+// bools), plus the computed read-only fields (afk_prompt_default,
+// dev_image_fallback — see injectReadonlySettings); PATCH validates the whole
+// body first — unknown keys (the read-only fields included), non-integers,
+// non-booleans, out-of-range intervals, spawn defaults outside the provider
+// catalogs, and a runner_default outside host/container are 400s that write
+// NOTHING — then upserts and returns the updated map. The one validation that
+// touches the network, pinning a non-blank dev_image_default (issue #55 /
+// ADR-0071, through the same pinner a repo's image_ref uses), runs LAST,
+// after every cheap check of the body has passed, and a failed pin writes
+// nothing either. No event is published and no restart is needed: the
+// runtime loops re-read settings every tick (D12c), and spawn paths read them
+// per call.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -35,6 +43,14 @@ const afkPromptMaxBytes = 16 << 10
 // It is injected into every settings response so the UI can show the factory
 // prompt as the placeholder an operator's afk_prompt override would replace.
 const afkPromptDefaultKey = "afk_prompt_default"
+
+// devImageFallbackKey is the read-only settings field carrying the deployed
+// fallback dev image — the --container-image value, "" when the flag is unset
+// (issue #55 / ADR-0071). Like afk_prompt_default it is NOT a stored settings
+// row and PATCH rejects it as an unknown key; it is injected into every
+// settings response so the UI can say what a blank dev_image_default falls
+// through to.
+const devImageFallbackKey = "dev_image_fallback"
 
 // settingsIntMin is the closed set of integer settings keys with each key's
 // minimum: a zero cap or budget would deadlock every spawn, and sub-5s ticks
@@ -103,14 +119,18 @@ func typedSettings(all map[string]string) map[string]any {
 	return out
 }
 
-// injectReadonlySettings adds the computed read-only settings fields (issue #52
-// / ADR-0027) to a typed settings map before it is returned, so GET and PATCH
-// carry an identical surface (both handlers route through here). afk_prompt_default
-// is the BASE seed-prompt template — non-incogni, tokens un-interpolated — the
-// exact text the built-in SeedPrompt renders from and that an afk_prompt override
-// replaces.
-func injectReadonlySettings(m map[string]any) map[string]any {
+// injectReadonlySettings adds the computed read-only settings fields to a typed
+// settings map before it is returned, so GET and PATCH carry an identical
+// surface (both handlers route through here). Neither is a stored row, and
+// PATCH rejects both as unknown keys. afk_prompt_default (issue #52 /
+// ADR-0027) is the BASE seed-prompt template — non-incogni, tokens
+// un-interpolated — the exact text the built-in SeedPrompt renders from and
+// that an afk_prompt override replaces. dev_image_fallback (issue #55 /
+// ADR-0071) is the --container-image value (Options.DevImageFallback, "" when
+// unset), the last layer a blank dev_image_default falls through to.
+func (s *Server) injectReadonlySettings(m map[string]any) map[string]any {
 	m[afkPromptDefaultKey] = afk.SeedPromptTemplate(false)
+	m[devImageFallbackKey] = s.devImageFallback
 	return m
 }
 
@@ -121,7 +141,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "loading settings", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": injectReadonlySettings(typedSettings(all))})
+	writeJSON(w, http.StatusOK, map[string]any{"settings": s.injectReadonlySettings(typedSettings(all))})
 }
 
 // handleSettingsPatch is PATCH /api/v1/settings {key: value, …}: validate
@@ -135,6 +155,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	updates := make(map[string]string, len(body))
+	var devImageRef *string // a non-blank dev_image_default awaiting its pin
 	for key, raw := range body {
 		if floor, isInt := settingsIntMin[key]; isInt {
 			n, err := parseSettingInt(raw)
@@ -279,10 +300,57 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates[key] = v
+		case store.SettingRunnerDefault:
+			// The global runner default (issue #55 / ADR-0071): exactly host or
+			// container, the value every inheriting repo's next spawn resolves
+			// to. Strict like the boolean keys — null, "", a case variant, a
+			// number are all 400s — because the spawn path refuses anything
+			// else, and a value it would refuse must never be stored.
+			v, err := parseSettingString(raw)
+			if err != nil || (v != store.RunnerHost && v != store.RunnerContainer) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be %q or %q", key, store.RunnerHost, store.RunnerContainer))
+				return
+			}
+			updates[key] = v
+		case store.SettingDevImageDefault:
+			// The global default dev image (issue #55 / ADR-0071). Blank or
+			// whitespace clears it (stored "", which falls through to
+			// --container-image); a non-blank ref is only recorded here and
+			// pinned after the loop, once every cheap check has passed.
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			if strings.TrimSpace(v) == "" {
+				updates[key] = ""
+			} else {
+				devImageRef = &v
+			}
 		default:
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown setting %q", key))
 			return
 		}
+	}
+
+	// dev_image_default is pinned LAST (issue #55 / ADR-0071), mirroring
+	// reposvc's image_ref rule: it is the only key that touches the network, so
+	// every cheap check above gates the registry round-trip (a request invalid
+	// for another reason never pays for a pin), and running it after the loop
+	// keeps that true whatever order the map yields the keys in. It pins
+	// through reposvc.Service.PinImageRef — the very path a repo's image_ref
+	// takes, not a second implementation — and its errors map exactly as the
+	// repo field's do (writeRepoError): the pinner's rejection is a 400
+	// carrying its message verbatim, an unavailable pinner a 500. Either way
+	// the PATCH writes nothing, the body's other keys included. The RETURNED
+	// pinned string is stored, never the operator's tag.
+	if devImageRef != nil {
+		pinned, err := s.pinDevImageDefault(r.Context(), *devImageRef)
+		if err != nil {
+			s.writeRepoError(w, "pinning "+store.SettingDevImageDefault, err)
+			return
+		}
+		updates[store.SettingDevImageDefault] = pinned
 	}
 
 	// All valid — write. (Individual upserts: a store failure mid-way is a
@@ -299,7 +367,19 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "loading settings", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": injectReadonlySettings(typedSettings(all))})
+	writeJSON(w, http.StatusOK, map[string]any{"settings": s.injectReadonlySettings(typedSettings(all))})
+}
+
+// pinDevImageDefault digest-pins a non-blank dev_image_default through the
+// repo service's PinImageRef (issue #55 / ADR-0071) and returns the pinned
+// ref to store. A server built without the repo service has no pinner at all,
+// so it fails exactly like reposvc's nil-pinner boot does — a plain error,
+// never an unpinned ref stored as if it were pinned.
+func (s *Server) pinDevImageDefault(ctx context.Context, ref string) (string, error) {
+	if s.repos == nil {
+		return "", errors.New("image ref pinning unavailable")
+	}
+	return s.repos.PinImageRef(ctx, ref)
 }
 
 // parseSettingInt accepts a JSON integer or a string holding one (the SPA

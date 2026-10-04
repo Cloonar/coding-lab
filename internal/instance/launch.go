@@ -100,6 +100,11 @@ type LaunchSpec struct {
 }
 
 // Launch runs the v0-pinned spawn sequence for a fully-derived spec: the
+// effective-Runner resolution (EffectiveRunner, issue #55), which refuses the
+// spawn before the claim when an inheriting repo's runner_default is absent
+// or invalid → the container gate (issues #205/#207), which resolves the
+// effective dev image (EffectiveDevImage, issue #55: repo image_ref →
+// dev_image_default → --container-image) and pulls it if missing → the
 // credential-gateway precheck, which refuses the spawn before the claim when
 // the gateway is configured and unreachable (issue #24 / ADR-0067) → the
 // SSH-bastion precheck, which — only for a repo with at least one cached SSH
@@ -135,22 +140,46 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	bareDir := s.bareDir(repo.ID)
 	runID := ids.NewID("run")
 
-	// Container-mode gate + image/limit resolution (issues #205, #207), FIRST
-	// — before the guard, the per-run tree, and above all before AddWorktree:
+	// The effective Runner (issue #55), resolved FIRST and exactly once per
+	// spawn: the repo's pin, else the global runner_default read live right
+	// now. Everything below that depends on the Runner — the container gate
+	// and spawn branch, the bastion wiring's PATH shape, the read-only import
+	// snapshots' advisory write protection — consumes THIS answer, so one
+	// spawn can never act on two different Runners if the setting changes
+	// mid-launch. An unresolvable Runner (the setting absent or holding
+	// neither host nor container) refuses the spawn here, before anything
+	// exists — for an AFK spec AddWorktree IS the claim, so the issue stays
+	// selectable — and never falls back to host: guessing host would hand an
+	// unsandboxed pane to a repo whose operator chose container. The refusal
+	// is a *BadRequestError (the container gate's #205 posture: an
+	// operator-fixable config problem is a 400 whose text — naming the
+	// setting and where to fix it — surfaces verbatim).
+	effRunner, err := EffectiveRunner(ctx, s.store, repo)
+	if err != nil {
+		return store.Run{}, badRequestf("%s", err)
+	}
+
+	// Container-mode gate + image/limit resolution (issues #205, #207, #55),
+	// FIRST after the Runner — before the guard, the per-run tree, and above
+	// all before AddWorktree:
 	// for an AFK spec the worktree IS the claim, so a container refusal (host
-	// not ready, missing tools image, no dev image for the repo, an
-	// unresolvable dev-image ref) landing any later would park the issue behind
-	// a host/config problem. The gate and limit reads are pure; the one side
-	// effect is EnsureImage's pull-if-missing (#207), placed here on purpose so
-	// a failed pull refuses PRE-claim rather than stranding one. A refusal here
-	// rolls back nothing because nothing exists yet. The resolved image and
-	// limits carry to the spawn branch below.
-	container := repo.Runner == store.RunnerContainer
+	// not ready, missing tools image, no dev image at any of the three layers,
+	// an unreadable dev_image_default, an unresolvable dev-image ref) landing
+	// any later would park the issue behind a host/config problem. The image
+	// comes from EffectiveDevImage (through the gate): the repo's image_ref,
+	// else the dev_image_default setting read live right now, else the
+	// --container-image flag — and an unreadable setting refuses here rather
+	// than dropping to the flag image. The gate and limit reads are pure; the
+	// one side effect is EnsureImage's pull-if-missing (#207) of whichever
+	// image that chain resolved, placed here on purpose so a failed pull
+	// refuses PRE-claim rather than stranding one. A refusal here rolls back
+	// nothing because nothing exists yet. The resolved image and limits carry
+	// to the spawn branch below.
+	container := effRunner == store.RunnerContainer
 	var ctrImage, ctrMemory string
 	var ctrPids, ctrNofile int
 	if container {
-		var err error
-		if ctrImage, err = s.refuseContainerSpawn(spec.Provider.ID(), repo); err != nil {
+		if ctrImage, err = s.refuseContainerSpawn(ctx, spec.Provider.ID(), repo); err != nil {
 			return store.Run{}, err
 		}
 		if ctrMemory, ctrPids, ctrNofile, err = s.effectiveContainerLimits(ctx, repo); err != nil {
@@ -351,7 +380,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// scheduled runs is by construction, not by keeping call sites in step. The
 	// refusal names the failing target; the cleanup is wipeHome alone, since
 	// the snapshots live INSIDE the per-run tree.
-	importRefs, importDirs, err := s.materializeImports(ctx, repo, runID, runMat)
+	importRefs, importDirs, err := s.materializeImports(ctx, repo, runID, runMat, container)
 	if err != nil {
 		wipeHome()
 		return store.Run{}, &StartFailedError{cause: err}
@@ -1032,7 +1061,11 @@ func (s *Service) wireBastion(ctx context.Context, repo store.Repo, runID, home,
 // an indexed result slice is the whole concurrency story (no shared writes, no
 // errgroup dependency); the first error IN TARGET ORDER wins, so a two-target
 // failure names the same target on every run.
-func (s *Service) materializeImports(ctx context.Context, repo store.Repo, runID string, runMat *vault.Materializer) ([]seeder.ImportRef, []string, error) {
+//
+// container is the spawn's effective Runner as Launch already resolved it
+// (issue #55) — passed in rather than re-resolved, so the snapshots' write
+// protection follows the same answer as the pane they are mounted into.
+func (s *Service) materializeImports(ctx context.Context, repo store.Repo, runID string, runMat *vault.Materializer, container bool) ([]seeder.ImportRef, []string, error) {
 	targets, err := s.store.RepoImports(ctx, repo.ID)
 	if err != nil {
 		return nil, nil, err
@@ -1074,7 +1107,7 @@ func (s *Service) materializeImports(ctx context.Context, repo store.Repo, runID
 	// knows about an import is runner-specific. Under the container runner the
 	// snapshots stay writable HOST-side on purpose: the `:ro` bind is the
 	// enforcement, and /pull-base must be able to re-materialize in place.
-	if repo.Runner != store.RunnerContainer {
+	if !container {
 		for _, ref := range refs {
 			if err := protectSnapshot(ref.Path); err != nil {
 				s.log.Warn("write-protecting import snapshot", "component", "instance",

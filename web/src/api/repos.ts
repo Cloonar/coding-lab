@@ -5,7 +5,11 @@ import { request } from './core';
 export type TrackerBinding = 'forge' | 'builtin';
 export type ForgeKind = 'forgejo' | 'github' | 'none';
 export type CloneStatus = 'cloning' | 'ready' | 'error';
-/** The repo's host/container pane pick (issue #205). NOT NULL — no inherit state. */
+/**
+ * Where an instance's pane command executes (issue #205). A repo's own pick is
+ * nullable — null means "inherit the global runner default" (the `runner_default`
+ * setting) — but a concrete Runner is always one of these two.
+ */
 export type Runner = 'container' | 'host';
 
 export interface Repo {
@@ -71,9 +75,11 @@ export interface Repo {
    *  then this repo's base chain (resolved at lander launch). */
   lander_effort: string | null;
   /** Host (unsandboxed — full host access, break-glass) or container (rootless
-   *  podman). NOT NULL; default host until the container preflight is proven
-   *  (issue #205). */
-  runner: Runner;
+   *  podman) (issue #205). null = inherit the global `runner_default` setting
+   *  (live: a change there moves every inheriting repo's next spawn); newly
+   *  created repos start null, an existing repo keeps its explicit pin.
+   *  The effective runner is `runner ?? settings.runner_default`. */
+  runner: Runner | null;
   /** Container-mode resource-limit overrides (issue #205); null = inherit the
    *  matching global container_memory/container_pids/container_nofile setting.
    *  Meaningless while runner is "host". */
@@ -81,9 +87,9 @@ export interface Repo {
   container_pids: number | null;
   container_nofile: number | null;
   /** OCI image ref this repo's container sessions run in (issue #207); null =
-   *  inherit the server's globally configured default dev image
-   *  (--container-image). The server resolves and digest-pins the ref
-   *  (https registries only) on save. */
+   *  inherit the global default dev image (the `dev_image_default` setting,
+   *  else the server's --container-image). The server resolves and digest-pins
+   *  the ref (https registries only) on save. */
   image_ref: string | null;
 }
 
@@ -143,16 +149,17 @@ export interface RepoPatch {
   /** null/"" clears back to inherit; any non-empty string is accepted (no
    *  write-time catalog check — strictness is at lander launch, issue #189). */
   lander_effort?: string | null;
-  /** NOT NULL (issue #205) — a PATCH must send a concrete value, never null. */
-  runner?: Runner;
+  /** null clears back to inherit the global `runner_default` setting; the
+   *  server rejects any other non-enum value. */
+  runner?: Runner | null;
   /** Container-mode limit overrides (issue #205); null clears back to inherit
    *  the global default. */
   container_memory?: string | null;
   container_pids?: number | null;
   container_nofile?: number | null;
-  /** null clears back to inherit the server's global default dev image
-   *  (issue #207). A non-null value is resolved and digest-pinned server-side
-   *  on save — that can 400 with a resolution error. */
+  /** null clears back to inherit the global default dev image (issue #207).
+   *  A non-null value is resolved and digest-pinned server-side on save — that
+   *  can 400 with a resolution error. */
   image_ref?: string | null;
 }
 

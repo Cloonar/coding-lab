@@ -32,12 +32,15 @@ const (
 )
 
 // Runner values (issue #205 / the 2026-07-22 container-isolation design): the
-// repo-level pick between today's host pane (prlimit-wrapped, unsandboxed —
-// full host access) and a rootless-podman container pane. Host is the
-// zero-friction default (repos.runner is NOT NULL DEFAULT 'host' — migration
-// 0017) until the container preflight is proven; there is no DB CHECK on the
-// value, matching TrackerBinding's precedent — reposvc.UpdateSettings enforces
-// the two-value enum app-side.
+// pick between today's host pane (prlimit-wrapped, unsandboxed — full host
+// access) and a rootless-podman container pane. They are the two legal values
+// of BOTH layers of the Runner (issue #55): a repo's repos.runner pin and the
+// global runner_default setting (SettingRunnerDefault) that a repo with a NULL
+// runner inherits — resolved per spawn by instance.EffectiveRunner, the one
+// place that turns the two layers into an answer. There is no DB CHECK on
+// either, matching TrackerBinding's precedent — reposvc.UpdateSettings
+// enforces the enum on the repo pin app-side, and the resolver refuses a
+// setting that holds anything else.
 const (
 	RunnerHost      = "host"
 	RunnerContainer = "container"
@@ -123,21 +126,27 @@ type Repo struct {
 	// rather than silently falling back.
 	LanderModel  *string
 	LanderEffort *string
-	// Runner is the repo's host/container pick (issue #205), NOT NULL: "host"
-	// (today's prlimit-wrapped pane, unsandboxed — full host access) or
-	// "container" (rootless podman). ContainerMemory/ContainerPids/
-	// ContainerNofile are that mode's per-repo resource-limit overrides — nil
-	// means inherit the matching global settings.SettingContainerMemory &c.
-	// default; all three are meaningless while Runner is "host".
-	Runner          string
+	// Runner is the repo's host/container pick (issue #205): "host" (today's
+	// prlimit-wrapped pane, unsandboxed — full host access) or "container"
+	// (rootless podman). Nil / NULL means inherit the global runner_default
+	// setting (issue #55 — the state every new repo starts in); a non-nil
+	// value pins the repo regardless of that setting. Never compare it
+	// directly: instance.EffectiveRunner is the one resolver every consumer
+	// branches on. ContainerMemory/ContainerPids/ContainerNofile are container
+	// mode's per-repo resource-limit overrides — nil means inherit the
+	// matching global settings.SettingContainerMemory &c. default; all three
+	// are meaningless while the effective Runner is "host".
+	Runner          *string
 	ContainerMemory *string
 	ContainerPids   *int
 	ContainerNofile *int
 	// ImageRef is the repo's dev container image reference (issue #207). Nil /
-	// NULL means inherit the globally configured default dev image
-	// (--container-image); a non-NULL value is always digest-pinned, pinned by
-	// reposvc on save — the store persists whatever it is given, unchanged. It
-	// only matters while Runner is "container".
+	// NULL means inherit: the global default dev image (the dev_image_default
+	// setting, issue #55), else the deployed fallback (--container-image) —
+	// resolved per spawn by instance.EffectiveDevImage, the one resolver; a
+	// non-NULL value is always digest-pinned, pinned by reposvc on save — the
+	// store persists whatever it is given, unchanged. It only matters while
+	// the effective Runner is "container".
 	ImageRef *string
 }
 
@@ -327,7 +336,7 @@ type RepoSettingsUpdate struct {
 	LanderProvider       Opt[*string] // lander run's provider override (issue #181); nil clears (NULL = inherit repo's Provider)
 	LanderModel          Opt[*string] // lander run's model override; issue #189; nil clears (NULL = inherit)
 	LanderEffort         Opt[*string] // lander run's effort override; issue #189; nil clears (NULL = inherit)
-	Runner               Opt[string]  // host|container (issue #205); NOT NULL, no inherit state
+	Runner               Opt[*string] // host|container pin (issue #205); nil clears (NULL = inherit the global runner_default, issue #55)
 	ContainerMemory      Opt[*string] // podman --memory override; nil clears (NULL = inherit the global default)
 	ContainerPids        Opt[*int]    // podman --pids-limit override; nil clears (NULL = inherit)
 	ContainerNofile      Opt[*int]    // podman --ulimit nofile override; nil clears (NULL = inherit)
@@ -646,7 +655,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		remoteDef, afkRemoteDef           sql.NullBool
 		landerProvider                    sql.NullString
 		landerModel, landerEffort         sql.NullString
-		containerMemory                   sql.NullString
+		runner, containerMemory           sql.NullString
 		containerPids, containerNofile    sql.NullInt64
 		imageRef                          sql.NullString
 	)
@@ -661,7 +670,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		&afkProviderDef, &remoteDef, &afkRemoteDef,
 		&r.AutolandEnabled, &r.MaxFixAttempts, &r.AutoMerge, &landerProvider,
 		&landerModel, &landerEffort,
-		&r.Runner, &containerMemory, &containerPids, &containerNofile, &imageRef); err != nil {
+		&runner, &containerMemory, &containerPids, &containerNofile, &imageRef); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
@@ -683,6 +692,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.LanderProvider = nullStr(landerProvider)
 	r.LanderModel = nullStr(landerModel)
 	r.LanderEffort = nullStr(landerEffort)
+	r.Runner = nullStr(runner)
 	r.ContainerMemory = nullStr(containerMemory)
 	r.ContainerPids = nullInt(containerPids)
 	r.ContainerNofile = nullInt(containerNofile)

@@ -19,6 +19,7 @@ export const INT_SETTING_KEYS = [
    * The global container resource-limit defaults (issue #205), seeded
    * 4096/16384 — the floor under a repo's container_pids/container_nofile
    * override (the repo-settings Runner section's inherit hint reads these).
+   * Edited in global Settings › Runner › Container limits.
    */
   'container_pids',
   'container_nofile',
@@ -47,9 +48,36 @@ export const TEXT_SETTING_KEYS = [
   'afk_prompt',
   /**
    * The global container --memory default (issue #205), seeded "8g" — the
-   * floor under a repo's container_memory override.
+   * floor under a repo's container_memory override. Podman's memory grammar
+   * (e.g. "512m", "8g"); the server validates it.
    */
   'container_memory',
+  /**
+   * The global runner default (issue #55): "host" or "container", always
+   * present on GET (seeded "host"), writable. The effective runner of every
+   * repo whose own `runner` is null — live, so a change moves each inheriting
+   * repo's next spawn. Typed string here like every text key; the Runner
+   * section's Select keeps an unexpected stored value selectable as-is.
+   */
+  'runner_default',
+  /**
+   * The global default dev image (issue #55): sits between a repo's image_ref
+   * and the server's --container-image flag. Not seeded — "" or absent means
+   * "fall through to the flag". Writable: the server resolves and digest-pins a
+   * non-blank ref on save (host/path:tag@sha256:…, a bad ref → 400 {"error"})
+   * and sending "" clears it.
+   */
+  'dev_image_default',
+  /**
+   * Read-only, server-injected (issue #55): the server's --container-image flag
+   * value ("" when unset) — what a blank dev_image_default falls through to.
+   * Like afk_prompt_default below it is listed here only so normalizeSettings
+   * keeps it for the sections to read; callers MUST NOT include it in an
+   * updateSettings patch (the server 400s). The global Runner section's
+   * buildPatch builds from its own explicit key list, which keeps it out of
+   * PATCHes.
+   */
+  'dev_image_fallback',
   /**
    * Read-only, server-injected (issue #52): the built-in seed-prompt template
    * with literal <N>/<BRANCH> tokens un-interpolated. Listed here only so
@@ -85,8 +113,9 @@ export type BoolSettingKey = (typeof BOOL_SETTING_KEYS)[number];
  * stores it as a JSON string and returns it as one on GET; normalizeSettings
  * parses it to an object here, and PATCH sends it back as an object.
  *
- * `afk_prompt_default` is read-only (see TEXT_SETTING_KEYS above) — present on
- * every GET, must never be sent back in a PATCH.
+ * `afk_prompt_default` and `dev_image_fallback` are read-only (see
+ * TEXT_SETTING_KEYS above) — present on every GET, must never be sent back in
+ * a PATCH.
  *
  * The bool keys carry `null` as a first-class value (an AFK override cleared
  * back to inherit), so their type is `boolean | null`, not just `boolean`.

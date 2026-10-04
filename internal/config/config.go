@@ -215,16 +215,19 @@ type Config struct {
 	PrlimitBin string
 	PodmanBin  string
 
-	// ContainerImage is the global DEFAULT dev image containerized sessions
-	// run in (issue #205), overridable per repo via repos.image_ref (issue
-	// #207): a repo with its own image_ref ignores this, one without inherits
-	// it. lab deliberately ships no dev image of its own — the operator owns
-	// the container userland, lab injects only the agent tools (ADR-0051). ""
-	// means no global default, which is NO LONGER a preflight failure (#207):
-	// a deployment where every container repo pins its own image_ref is valid.
-	// The refusal moved to the spawn instead — a container launch whose repo
-	// has neither an image_ref override nor this global default is refused
-	// there (only the spawn knows the repo), never at startup.
+	// ContainerImage is the deployed FALLBACK dev image containerized sessions
+	// run in (issue #205): the last of three layers (issue #55 / ADR-0071) —
+	// a repo's own repos.image_ref (issue #207) wins, else the global default
+	// dev image (the dev_image_default setting, editable at runtime), else
+	// this. It is also, alone, the image provider login and the provider CLI
+	// containers run (ADR-0057): those never follow the setting. lab
+	// deliberately ships no dev image of its own — the operator owns the
+	// container userland, lab injects only the agent tools (ADR-0051). ""
+	// means no fallback, which is NO LONGER a preflight failure (#207): a
+	// deployment where every container repo pins its own image_ref, or where
+	// dev_image_default is set, is valid for runs. The refusal moved to the
+	// spawn instead — a container launch with none of the three layers set is
+	// refused there (only the spawn knows the repo), never at startup.
 	ContainerImage string
 
 	// ContainerToolsImages maps a provider id to its agent-tools OCI image
@@ -362,7 +365,7 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		prlimitBin = fs.String("prlimit", "prlimit", "prlimit binary (PATH lookup by default)")
 		podmanBin  = fs.String("podman", "podman", "podman binary (PATH lookup by default)")
 
-		containerImage      = fs.String("container-image", "", "dev image containerized sessions run in; empty refuses container spawns (env LAB_CONTAINER_IMAGE)")
+		containerImage      = fs.String("container-image", "", "deployed fallback dev image for containerized sessions — the last layer, after the repo's Dev image and the global default dev image (Settings → Runner); also the provider login image; empty with neither layer set refuses container spawns (env LAB_CONTAINER_IMAGE)")
 		containerToolsImage = fs.String("container-tools-image", "", "agent-tools image refs, provider=ref[,provider=ref…], @sha256-pinned per ADR-0051 (env LAB_CONTAINER_TOOLS_IMAGE)")
 
 		maxInstances  = fs.Int("max-instances", DefaultMaxInstances, "global live-instance cap; seeds the settings row on first start")

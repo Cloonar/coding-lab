@@ -896,6 +896,50 @@ func TestStartManualAFK_spawnFailureReleasesClaim(t *testing.T) {
 	}
 }
 
+// An inheriting repo whose global runner_default cannot be resolved is refused
+// BEFORE the claim (issue #55): instance.Launch resolves the effective Runner
+// ahead of AddWorktree — which IS the claim for an AFK run — so the refusal
+// (a *BadRequestError naming the setting) leaves no afk/<N> branch, no
+// worktree, no run row and no session, and the issue stays selectable: once
+// the operator fixes the setting, the very next start claims that same issue.
+func TestStartManualAFK_unresolvableRunnerLeavesIssueUnclaimed(t *testing.T) {
+	f := newFixture(t) // the fixture repo is created with Runner nil: inherit
+	f.trk.setReady(7)
+	if err := f.st.SetSetting(t.Context(), store.SettingRunnerDefault, "podman"); err != nil {
+		t.Fatalf("SetSetting(runner_default): %v", err)
+	}
+
+	_, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	var bad *instance.BadRequestError
+	if !errors.As(err, &bad) {
+		t.Fatalf("err = %v (%T), want *instance.BadRequestError", err, err)
+	}
+	if !strings.Contains(err.Error(), "runner_default") || !strings.Contains(err.Error(), `"podman"`) {
+		t.Errorf("refusal = %q, want it to name runner_default and the bad value", err)
+	}
+	if f.branchExists(f.repo, "afk/7") || dirExists(filepath.Join(f.worktreeRoot, "proj-7")) {
+		t.Error("refused launch claimed the issue (worktree or afk/7 branch exists)")
+	}
+	if active, _ := f.st.ActiveRuns(t.Context()); len(active) != 0 {
+		t.Errorf("refused launch left %d active runs", len(active))
+	}
+	if _, live := f.runner.Session("proj~afk-7"); live {
+		t.Error("refused launch started a session")
+	}
+
+	// Fixed setting: the same issue is still the one claimed.
+	if err := f.st.SetSetting(t.Context(), store.SettingRunnerDefault, store.RunnerHost); err != nil {
+		t.Fatalf("SetSetting(runner_default=host): %v", err)
+	}
+	run, err := f.svc.StartManualAFK(t.Context(), f.repo.ID)
+	if err != nil {
+		t.Fatalf("StartManualAFK after fixing runner_default: %v", err)
+	}
+	if run.IssueNumber == nil || *run.IssueNumber != 7 {
+		t.Errorf("claimed issue = %v, want 7 — the refusal must not have parked it", run.IssueNumber)
+	}
+}
+
 func TestClaimRace_concurrentStartsPickDifferentIssues(t *testing.T) {
 	f := newFixture(t)
 	f.trk.setReady(7, 8)

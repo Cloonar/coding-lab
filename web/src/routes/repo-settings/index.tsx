@@ -133,7 +133,13 @@ function RepoSettingsView() {
                     />
                   </Match>
                   <Match when={params.section === 'runner'}>
-                    <RunnerSection repo={r} settings={settings() ?? {}} onSaved={refetch} />
+                    {/* Gated on the settings fetch (issue #55): the inherit row's
+                        "currently …" and the dev image hint read the global
+                        defaults, and an empty stand-in would briefly claim "no
+                        dev image is configured". */}
+                    <Show when={settings()}>
+                      {(s) => <RunnerSection repo={r} settings={s()} onSaved={refetch} />}
+                    </Show>
                   </Match>
                   <Match when={params.section === 'autoland'}>
                     <AutolandSection

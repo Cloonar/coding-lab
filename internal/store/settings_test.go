@@ -169,6 +169,7 @@ func TestSeedDefaultSettings(t *testing.T) {
 			SettingContainerMemory:      "8g",
 			SettingContainerPids:        "4096",
 			SettingContainerNofile:      "16384",
+			SettingRunnerDefault:        "host",
 		}
 		if len(all) != len(want) {
 			t.Errorf("seeded %d keys, want %d: %v", len(all), len(want), all)
@@ -254,6 +255,35 @@ func TestSeedDefaultSettingsIdempotent(t *testing.T) {
 		}
 		if v, _ := s.GetString(ctx, SettingProviderDefault, ""); v != "claude-code" {
 			t.Errorf("provider_default after reseed = %q, want the first seed's claude-code", v)
+		}
+	})
+}
+
+// TestSeedDefaultSettings_runnerDefault pins the global runner default's seed
+// contract (issue #55): a fresh database ends up with runner_default = host
+// without operator action — so an upgrade spawns exactly as before — and an
+// operator's existing value is never overwritten by a later seed (every boot
+// re-runs SeedDefaultSettings, so an overwrite would silently flip every
+// inheriting repo back to host on the next restart).
+func TestSeedDefaultSettings_runnerDefault(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		if v, err := s.GetSetting(ctx, SettingRunnerDefault); err != nil || v != RunnerHost {
+			t.Fatalf("fresh runner_default = %q, %v; want the seeded %q", v, err, RunnerHost)
+		}
+
+		if err := s.SetSetting(ctx, SettingRunnerDefault, RunnerContainer); err != nil {
+			t.Fatalf("set runner_default: %v", err)
+		}
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+			t.Fatalf("re-seed: %v", err)
+		}
+		if v, err := s.GetSetting(ctx, SettingRunnerDefault); err != nil || v != RunnerContainer {
+			t.Errorf("runner_default after re-seed = %q, %v; want the operator's %q to survive", v, err, RunnerContainer)
 		}
 	})
 }

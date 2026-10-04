@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -66,16 +67,24 @@ const (
 	testToolsImage = "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef"
 )
 
-// enableContainer flips the fixture repo to Runner=container and wires the
-// service's container seam: an OK preflight, the recording exec seam, and
-// the canonical images. Returns the recorder for backstop assertions.
+// enableContainer pins the fixture repo to Runner=container and wires the
+// service's container seam (wireContainer). Returns the recorder for backstop
+// assertions.
 func (f *fixture) enableContainer(t *testing.T) *recordingCmdRunner {
 	t.Helper()
 	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
-		Runner: store.Set(store.RunnerContainer),
+		Runner: store.Set(new(store.RunnerContainer)),
 	}); err != nil {
 		t.Fatalf("UpdateRepoSettings(runner=container): %v", err)
 	}
+	return f.wireContainer()
+}
+
+// wireContainer wires the service's container seam WITHOUT touching the
+// repo's Runner: an OK preflight, the recording exec seam, and the canonical
+// images — so a test can let the Runner come from the global runner_default
+// (issue #55) and still see a green container spawn.
+func (f *fixture) wireContainer() *recordingCmdRunner {
 	rec := newRecordingCmdRunner()
 	f.svc.podmanBin = testPodmanBin
 	f.svc.containerImage = testDevImage
@@ -291,19 +300,21 @@ func TestStart_containerRefusals(t *testing.T) {
 	cases := []struct {
 		name    string
 		wire    func(f *fixture)
-		wantMsg string
+		wantMsg []string // substrings the refusal must carry
 	}{
 		{
-			name:    "unconfigured server",
-			wire:    func(f *fixture) { f.svc.containerPreflight = nil },
-			wantMsg: "container runner not configured on this server",
+			name: "unconfigured server",
+			wire: func(f *fixture) { f.svc.containerPreflight = nil },
+			// The dev-image half of the hint names all three layers (#55).
+			wantMsg: []string{"container runner not configured on this server", "--container-tools-image",
+				"the repo's Dev image", "the global default dev image in Settings → Runner", "--container-image"},
 		},
 		{
 			name: "preflight pending",
 			wire: func(f *fixture) {
 				f.svc.containerPreflight = func() (podmanx.Result, bool) { return podmanx.Result{}, false }
 			},
-			wantMsg: "container preflight has not finished",
+			wantMsg: []string{"container preflight has not finished"},
 		},
 		{
 			name: "preflight failed",
@@ -315,14 +326,23 @@ func TestStart_containerRefusals(t *testing.T) {
 				}
 			},
 			// The full actionable multi-failure message surfaces verbatim.
-			wantMsg: "pasta not found on PATH (install passt (provides pasta))",
+			wantMsg: []string{"pasta not found on PATH (install passt (provides pasta))"},
 		},
 		{
 			name: "missing tools image for provider",
 			wire: func(f *fixture) {
 				f.svc.containerToolsImages = map[string]string{}
 			},
-			wantMsg: "no agent-tools image configured for provider claude-code — set --container-tools-image claude-code=<ref>",
+			wantMsg: []string{"no agent-tools image configured for provider claude-code — set --container-tools-image claude-code=<ref>"},
+		},
+		{
+			// No dev image at any of the three layers (issue #55): the repo has
+			// no image_ref, dev_image_default is unseeded, and the flag is
+			// unset — the refusal names every knob, since any one fixes it.
+			name: "no dev image at any layer",
+			wire: func(f *fixture) { f.svc.containerImage = "" },
+			wantMsg: []string{"no dev image for this repo", "the repo's Dev image (repo settings → Runner)",
+				"the global default dev image (Settings → Runner → Dev image, dev_image_default)", "--container-image"},
 		},
 	}
 	for _, tc := range cases {
@@ -339,8 +359,10 @@ func TestStart_containerRefusals(t *testing.T) {
 			if !errors.As(err, &bad) {
 				t.Errorf("refusal error type = %T (%v), want *BadRequestError (the 400 mapping)", err, err)
 			}
-			if !strings.Contains(err.Error(), tc.wantMsg) {
-				t.Errorf("refusal = %q, want it to contain %q", err, tc.wantMsg)
+			for _, want := range tc.wantMsg {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal = %q, want it to contain %q", err, want)
+				}
 			}
 
 			// Refused BEFORE the claim: nothing was created anywhere.
@@ -374,34 +396,44 @@ func hasCall(calls [][]string, want []string) bool {
 	return false
 }
 
-// refuseContainerSpawn doubles as the effective dev-image resolver (issue
-// #207): the repo's image_ref override wins when set and non-empty, else the
-// server's global default; neither set is a *BadRequestError naming BOTH knobs
-// (either one fixes it). Driven directly on the helper — the pure selection
-// needs no launch machinery — with the gate otherwise green (preflight OK,
-// tools image present) so only the image branch decides.
+// refuseContainerSpawn hands the effective dev image back from the one
+// resolver (EffectiveDevImage, issues #207/#55) over the service's real store
+// and its --container-image fallback, and maps the resolver's refusal to a
+// *BadRequestError (the 400 mapping). Driven directly on the helper — the
+// selection needs no launch machinery — with the gate otherwise green
+// (preflight OK, tools image present) so only the image branch decides. The
+// resolver's own table (TestEffectiveDevImage) covers every layer
+// combination; this pins the wiring of each layer into the gate.
 func TestRefuseContainerSpawn_effectiveImage(t *testing.T) {
 	override := "registry.example.com/dev@sha256:override"
+	setting := "registry.example.com/global@sha256:setting"
 	empty := ""
 	cases := []struct {
 		name      string
-		global    string
+		global    string  // the --container-image fallback
+		setting   *string // dev_image_default; nil = absent (it is unseeded)
 		imageRef  *string
 		wantImage string
 		wantErr   []string // substrings the refusal must carry; nil = success
 	}{
-		{name: "repo override wins", global: testDevImage, imageRef: &override, wantImage: override},
-		{name: "nil override falls back to global", global: testDevImage, imageRef: nil, wantImage: testDevImage},
-		{name: "empty override falls back to global", global: testDevImage, imageRef: &empty, wantImage: testDevImage},
-		{name: "neither set refuses naming both knobs", global: "", imageRef: nil,
-			wantErr: []string{"no dev image for this repo", "Runner settings", "--container-image"}},
+		{name: "repo override wins", global: testDevImage, setting: &setting, imageRef: &override, wantImage: override},
+		{name: "setting beats the flag", global: testDevImage, setting: &setting, imageRef: nil, wantImage: setting},
+		{name: "absent setting falls back to the flag", global: testDevImage, imageRef: nil, wantImage: testDevImage},
+		{name: "blank setting falls back to the flag", global: testDevImage, setting: &empty, imageRef: &empty, wantImage: testDevImage},
+		{name: "none set refuses naming all three knobs", global: "", imageRef: nil,
+			wantErr: []string{"no dev image for this repo", "repo settings → Runner", "dev_image_default", "--container-image"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			f.enableContainer(t)
 			f.svc.containerImage = tc.global
-			image, err := f.svc.refuseContainerSpawn("claude-code", store.Repo{ImageRef: tc.imageRef})
+			if tc.setting != nil {
+				if err := f.st.SetSetting(t.Context(), store.SettingDevImageDefault, *tc.setting); err != nil {
+					t.Fatalf("SetSetting(dev_image_default): %v", err)
+				}
+			}
+			image, err := f.svc.refuseContainerSpawn(t.Context(), "claude-code", store.Repo{ImageRef: tc.imageRef})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("refuseContainerSpawn: %v", err)
@@ -492,6 +524,167 @@ func TestStart_containerImageResolution(t *testing.T) {
 			t.Errorf("RunBySession after pull failure: %v, want ErrNotFound (no run row)", err)
 		}
 	})
+}
+
+// The dev image chain at spawn (issue #55 / ADR-0071), one case per layer
+// winning: the repo's image_ref beats the dev_image_default setting and the
+// flag; with the repo blank the setting beats the flag; with the setting
+// blank or absent the flag is used. Driven through Start, so the image is
+// read from the persisted row and the live setting, and asserted where it
+// matters — the podman pane's argv and EnsureImage's pre-claim probe — with
+// the losing layers absent from both.
+func TestStart_devImageChain(t *testing.T) {
+	const (
+		repoRef = "registry.example.com/repo/dev:v1@sha256:feed"
+		setting = "registry.example.com/global/dev:v2@sha256:beef"
+	)
+	cases := []struct {
+		name    string
+		repoRef string  // "" = no image_ref
+		setting *string // nil = the row is absent (dev_image_default is unseeded)
+		want    string
+	}{
+		{name: "repo image_ref beats the setting and the flag", repoRef: repoRef, setting: new(setting), want: repoRef},
+		{name: "setting beats the flag", setting: new(setting), want: setting},
+		{name: "blank setting falls through to the flag", setting: new("  "), want: testDevImage},
+		{name: "absent setting falls through to the flag", want: testDevImage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			rec := f.enableContainer(t) // the flag is testDevImage
+			if tc.repoRef != "" {
+				if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+					ImageRef: store.Set(new(tc.repoRef)),
+				}); err != nil {
+					t.Fatalf("UpdateRepoSettings(image_ref): %v", err)
+				}
+			}
+			if tc.setting != nil {
+				if err := f.st.SetSetting(t.Context(), store.SettingDevImageDefault, *tc.setting); err != nil {
+					t.Fatalf("SetSetting(dev_image_default): %v", err)
+				}
+			}
+
+			if _, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			sess, live := f.runner.Session("proj~20260608-1530")
+			if !live {
+				t.Fatal("session not live")
+			}
+			if !slices.Contains(sess.Argv, tc.want) {
+				t.Errorf("pane argv does not carry the winning image %q:\n  %q", tc.want, sess.Argv)
+			}
+			if !hasCall(rec.recorded(), []string{testPodmanBin, "image", "exists", tc.want}) {
+				t.Errorf("EnsureImage did not probe the winning image %q; calls = %q", tc.want, rec.recorded())
+			}
+			for _, loser := range []string{repoRef, setting, testDevImage} {
+				if loser == tc.want {
+					continue
+				}
+				if slices.Contains(sess.Argv, loser) {
+					t.Errorf("pane argv carries the losing image %q:\n  %q", loser, sess.Argv)
+				}
+				if hasCall(rec.recorded(), []string{testPodmanBin, "image", "exists", loser}) {
+					t.Errorf("EnsureImage probed the losing image %q", loser)
+				}
+			}
+		})
+	}
+}
+
+// breakSettingRead makes every store read of the settings row key fail with a
+// genuine SQLite error, while every other key keeps reading normally: behind
+// the store's back, it swaps the settings table for a view whose value column
+// evaluates abs(-9223372036854775808) — documented to raise "integer
+// overflow" — for that one key. The row must exist (otherwise the read is an
+// ordinary not-found), and the table becomes read-only, so a test calls this
+// after its last settings write. It is how a Launch-level test reaches a
+// store read error a real database never produces on demand.
+func (f *fixture) breakSettingRead(t *testing.T, key string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+f.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s: %v", f.dbPath, err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, stmt := range []string{
+		`ALTER TABLE settings RENAME TO settings_rows`,
+		`CREATE VIEW settings AS SELECT key, CASE WHEN key = '` + key + `' THEN abs(-9223372036854775808) ELSE value END AS value FROM settings_rows`,
+	} {
+		if _, err := db.ExecContext(t.Context(), stmt); err != nil {
+			t.Fatalf("breaking the %s read (%s): %v", key, stmt, err)
+		}
+	}
+	if _, err := f.st.GetSetting(t.Context(), key); err == nil || errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetSetting(%s) after breakSettingRead = %v, want a non-not-found read error", key, err)
+	}
+}
+
+// A dev_image_default that cannot be read refuses the spawn BEFORE the claim
+// (issue #55 / ADR-0071) — it never silently drops to the flag image, which
+// is set here on purpose. The refusal is a *BadRequestError naming the
+// setting, the flag image is neither probed nor pulled (no podman call at
+// all), and nothing exists afterwards: no worktree, no branch, no run row,
+// no session, no per-run tree. A repo with its own image_ref never reads the
+// setting, so the same broken row leaves its spawn alone.
+func TestStart_unreadableDevImageDefaultRefusedBeforeClaim(t *testing.T) {
+	f := newFixture(t)
+	rec := f.enableContainer(t) // the flag is testDevImage
+	if err := f.st.SetSetting(t.Context(), store.SettingDevImageDefault, "registry.example.com/global/dev@sha256:beef"); err != nil {
+		t.Fatalf("SetSetting(dev_image_default): %v", err)
+	}
+	f.breakSettingRead(t, store.SettingDevImageDefault)
+
+	_, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err == nil {
+		t.Fatal("Start succeeded, want the unreadable-dev_image_default refusal")
+	}
+	var bad *BadRequestError
+	if !errors.As(err, &bad) {
+		t.Errorf("refusal error type = %T (%v), want *BadRequestError (the 400 mapping)", err, err)
+	}
+	for _, want := range []string{"dev_image_default", "could not be read", "integer overflow", "rather than falling back to --container-image"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want it to contain %q", err, want)
+		}
+	}
+	if calls := rec.recorded(); len(calls) != 0 {
+		t.Errorf("refused spawn issued podman calls %q, want none (the flag image must not be probed or pulled)", calls)
+	}
+
+	// Refused BEFORE the claim: nothing was created anywhere.
+	if dirExists(filepath.Join(f.worktreeRoot, "proj-20260608-1530")) {
+		t.Error("refused spawn created a worktree")
+	}
+	if f.branchExists("lab/20260608-1530") {
+		t.Error("refused spawn created a branch")
+	}
+	if _, err := f.st.RunBySession(t.Context(), "proj~20260608-1530"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("RunBySession after refusal: %v, want ErrNotFound (no run row)", err)
+	}
+	if _, live := f.runner.Session("proj~20260608-1530"); live {
+		t.Error("refused spawn left a session")
+	}
+	if dirExists(f.instancesDir) {
+		t.Error("refused spawn materialized a per-run tree")
+	}
+
+	// The same broken row is invisible to a repo with its own Dev image.
+	const repoRef = "registry.example.com/repo/dev@sha256:feed"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		ImageRef: store.Set(new(repoRef)),
+	}); err != nil {
+		t.Fatalf("UpdateRepoSettings(image_ref): %v", err)
+	}
+	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
+	if err != nil {
+		t.Fatalf("Start with a repo image_ref under a broken dev_image_default: %v", err)
+	}
+	if sess, live := f.runner.Session(run.SessionName); !live || !slices.Contains(sess.Argv, repoRef) {
+		t.Errorf("repo-ref spawn: live=%v argv=%q, want a live pane running %q", live, sess.Argv, repoRef)
+	}
 }
 
 // A host-runner repo never resolves an image and never calls EnsureImage: the

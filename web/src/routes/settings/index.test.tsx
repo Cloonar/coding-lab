@@ -28,6 +28,7 @@ const SECTION_CARD: Record<string, string> = {
   general: 'Git author',
   agents: 'Spawn defaults',
   notifications: 'Notifications',
+  runner: 'Runner',
 };
 
 describe('Settings route wiring (issue #198)', () => {
@@ -53,6 +54,15 @@ describe('Settings route wiring (issue #198)', () => {
     expect(rows.map((r) => r.querySelector('.settings-index-title')?.textContent)).toEqual(
       GLOBAL_SETTINGS_CATEGORIES.map((c) => c.title),
     );
+  });
+
+  it('Runner is the fourth category, after General, Agents and Notifications (issue #55)', () => {
+    expect(GLOBAL_SETTINGS_CATEGORIES.map((c) => c.slug)).toEqual([
+      'general',
+      'agents',
+      'notifications',
+      'runner',
+    ]);
   });
 
   it('desktop bare /settings redirects to the first slug (general)', async () => {
