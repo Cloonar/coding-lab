@@ -408,3 +408,90 @@ func TestRunScheduleNow_deathStrikesTheScheduleOnly(t *testing.T) {
 		t.Errorf("repo failures = %d, want %d (a scheduled death never strikes the repo)", n, PauseThreshold-1)
 	}
 }
+
+// Run now's labels are minute-granular (ADR-0062), so a second Run now in the
+// same minute after the first ended would reuse its session, branch, and
+// worktree. It must be refused with ErrScheduleStartedThisMinute BEFORE the
+// launch — never a mid-launch git "branch already exists" — and launch
+// normally once the minute turns.
+func TestRunScheduleNow_sameMinuteIdentityRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(f *fixture, run store.Run)
+	}{
+		{
+			// A neutral Stop keeps the worktree and the branch — the commit
+			// makes the branch unmergeable too, so nothing could ever reclaim it.
+			name: "stopped run keeps its branch",
+			end: func(f *fixture, run store.Run) {
+				f.commitInWorktree(run.WorktreePath)
+				if err := f.svc.StopAFK(f.t.Context(), run.SessionName); err != nil {
+					f.t.Fatalf("StopAFK: %v", err)
+				}
+				if !f.branchExists(f.repo, run.Branch) {
+					f.t.Fatal("fixture: the stopped run's branch did not survive")
+				}
+			},
+		},
+		{
+			// A clean death reaps its worktree and merged branch: only the
+			// ended run's row is left to collide with.
+			name: "dead run leaves only its row",
+			end: func(f *fixture, run store.Run) {
+				f.runner.Kill(run.SessionName)
+				f.svc.ReapOnce(f.t.Context(), f.clock.Now()) // same minute
+				if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeDeath {
+					f.t.Fatalf("fixture: outcome = %q, want death", got.Outcome)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			sched := f.addSchedule("deps", nil)
+			first, err := f.svc.RunScheduleNow(t.Context(), sched.ID)
+			if err != nil {
+				t.Fatalf("first Run now: %v", err)
+			}
+			tc.end(f, first)
+			f.clock.Advance(30 * time.Second) // 12:00:30 — still the same minute
+
+			if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrScheduleStartedThisMinute) {
+				t.Fatalf("same-minute Run now err = %v, want ErrScheduleStartedThisMinute", err)
+			}
+			// The locked launch is the authority on its own, too (a minute
+			// boundary or a racing launch between pre-check and lock).
+			if res := f.svc.launchScheduledRun(t.Context(), sched.ID, true); !errors.Is(res.err, ErrScheduleStartedThisMinute) || res.outcome != spawnSkipped {
+				t.Fatalf("locked on-demand launch = %v/%v, want spawnSkipped/ErrScheduleStartedThisMinute", res.outcome, res.err)
+			}
+			if runs := f.scheduledRuns(); len(runs) != 1 {
+				t.Fatalf("scheduled runs = %d, want 1 (the refusal created nothing)", len(runs))
+			}
+
+			f.clock.Advance(time.Minute) // 12:01:30 — a fresh label
+			second, err := f.svc.RunScheduleNow(t.Context(), sched.ID)
+			if err != nil {
+				t.Fatalf("next-minute Run now: %v", err)
+			}
+			if second.SessionName == first.SessionName || second.Branch == first.Branch {
+				t.Errorf("next-minute identity %s/%s reuses the first run's", second.SessionName, second.Branch)
+			}
+		})
+	}
+}
+
+// The branch in the bare clone is checked on its own: a same-minute branch no
+// row of this Schedule accounts for still refuses rather than failing the
+// launch in git.
+func TestRunScheduleNow_sameMinuteBranchWithoutRowRefused(t *testing.T) {
+	f := newFixture(t)
+	sched := f.addSchedule("deps", nil)
+	f.createClaimBranch(f.repo, f.repo.ManualBranchPrefix+ScheduleLabel(sched.ID, f.clock.Now()))
+
+	if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrScheduleStartedThisMinute) {
+		t.Fatalf("err = %v, want ErrScheduleStartedThisMinute", err)
+	}
+	if runs := f.scheduledRuns(); len(runs) != 0 {
+		t.Errorf("scheduled runs = %d, want 0", len(runs))
+	}
+}

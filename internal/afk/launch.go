@@ -44,6 +44,13 @@ var (
 	// whose every flow key this binary no longer knows (the API refuses an
 	// empty brief at write). Launching would burn a whole budget on nothing.
 	ErrScheduleEmptyPrompt = errors.New("schedule composes an empty prompt — check its prompt and flows")
+	// ErrScheduleStartedThisMinute: the Schedule already started a run in
+	// the current minute whose identity — the minute-granular label, and so
+	// the session, branch, and worktree (ADR-0062) — a new run would reuse:
+	// a stopped or dead run whose branch survived, or its row. Refused before
+	// anything is created, never a mid-launch git failure; the next minute's
+	// label is fresh.
+	ErrScheduleStartedThisMinute = errors.New("schedule already started a run this minute — try again in a minute")
 )
 
 // TrackerError wraps a tracker round-trip failure inside the engine so the

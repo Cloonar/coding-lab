@@ -170,10 +170,27 @@ func TestAPI_ScheduleRunNowConflictMatrix(t *testing.T) {
 			},
 			want: "provider is logged out",
 		},
+		{
+			// Run now, then the operator's Stop (neutral: worktree and branch
+			// survive), then Run now again inside the same minute — the
+			// engine clock is fixed, so the label would collide.
+			name: "already started a run this minute",
+			setup: func(t *testing.T, x *afkTestServer, sc store.Schedule) {
+				h := csrfHeaders(x.ts.URL)
+				resp := x.do("POST", runNowPath(x.repo.ID, sc.ID), nil, h)
+				wantStatus(t, resp, http.StatusAccepted)
+				run := decodeBody(t, resp)["run"].(map[string]any)
+				resp = x.do("DELETE", "/api/v1/instances/"+url.PathEscape(run["session_name"].(string)), nil, h)
+				wantStatus(t, resp, http.StatusOK)
+				_ = resp.Body.Close()
+			},
+			want: "schedule already started a run this minute — try again in a minute",
+		},
 	}
 	// The pinned strings ARE the sentinels' messages.
 	if cases[0].want != afk.ErrSchedulePaused.Error() || cases[1].want != afk.ErrScheduleRunLive.Error() ||
-		cases[2].want != instance.ErrOverCap.Error() || cases[3].want != instance.ErrLoggedOut.Error() {
+		cases[2].want != instance.ErrOverCap.Error() || cases[3].want != instance.ErrLoggedOut.Error() ||
+		cases[4].want != afk.ErrScheduleStartedThisMinute.Error() {
 		t.Fatal("a pinned refusal string drifted from its sentinel")
 	}
 	for _, tc := range cases {

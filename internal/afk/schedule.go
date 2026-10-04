@@ -35,6 +35,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -350,9 +351,10 @@ func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outco
 // firing verdict (meaningless for a Run now, which has no pending firing);
 // run is the spawned run when outcome is spawnSpawned; err is why nothing
 // spawned — typed where the API maps it (ErrSchedulePaused,
-// ErrScheduleRunLive, ErrScheduleEmptyPrompt, instance.ErrRepoNotReady,
-// instance.ErrOverCap, store.ErrNotFound), raw otherwise. The cadence path
-// only logs it; a Run now hands it back to the operator.
+// ErrScheduleRunLive, ErrScheduleEmptyPrompt, ErrScheduleStartedThisMinute,
+// instance.ErrRepoNotReady, instance.ErrOverCap, store.ErrNotFound), raw
+// otherwise. The cadence path only logs it; a Run now hands it back to the
+// operator.
 type scheduledLaunch struct {
 	outcome  spawnOutcome
 	consumed bool
@@ -526,6 +528,17 @@ func (s *Service) launchScheduledRun(ctx context.Context, scheduleID string, onD
 	deadline := s.now().Add(budget)
 	tokenExpiry := deadline.Add(runTokenSlack)
 
+	// A Run now's same-minute identity collision, refused before anything
+	// is created — authoritatively here, with the exact label the launch
+	// below uses (RunScheduleNow's pre-check is the cheap first line). The
+	// cadence never needs it: cron is per-minute and a Schedule has one
+	// live run.
+	if onDemand {
+		if err := s.runNowIdentityFree(ctx, sched, repo, label); err != nil {
+			return scheduledLaunch{outcome: spawnSkipped, err: err}
+		}
+	}
+
 	run, err := s.instances.Launch(ctx, instance.LaunchSpec{
 		Repo:           repo,
 		Provider:       prov,
@@ -596,11 +609,12 @@ func (s *Service) launchScheduledRun(ctx context.Context, scheduleID string, onD
 // A refusal is final and never queued: the candidate exists for this one
 // synchronous pass only, so nothing fires later because of it. Typed
 // refusals (API → 409): ErrSchedulePaused, ErrScheduleRunLive,
-// instance.ErrOverCap, instance.ErrRepoNotReady, instance.ErrLoggedOut,
-// ErrScheduleEmptyPrompt; store.ErrNotFound → 404; anything else is the raw
-// cause. It works on a switched-off Schedule (testing a prompt before
-// enabling it) and never touches the cadence's state: not the in-memory
-// pending/high-water memo, not last_fired_at.
+// ErrScheduleStartedThisMinute, instance.ErrOverCap,
+// instance.ErrRepoNotReady, instance.ErrLoggedOut, ErrScheduleEmptyPrompt;
+// store.ErrNotFound → 404; anything else is the raw cause. It works on a
+// switched-off Schedule (testing a prompt before enabling it) and never
+// touches the cadence's state: not the in-memory pending/high-water memo,
+// not last_fired_at.
 //
 // The specific reason wins when several apply. Paused and run-live are
 // checked BEFORE the pass (and re-checked under the engine lock), so paused-
@@ -624,6 +638,12 @@ func (s *Service) RunScheduleNow(ctx context.Context, scheduleID string) (store.
 	}
 	if repo.CloneStatus != store.CloneStatusReady {
 		return store.Run{}, instance.ErrRepoNotReady
+	}
+	// A same-minute identity collision refuses before the pass (so it also
+	// wins over at-cap); the locked launch re-checks with the label it
+	// actually stamps.
+	if err := s.runNowIdentityFree(ctx, sched, repo, ScheduleLabel(sched.ID, s.now())); err != nil {
+		return store.Run{}, err
 	}
 	// FORCE the auth refresh — never a cached status: a spawn while logged
 	// out strands a session that dies at the login wall and reaps as a
@@ -684,6 +704,52 @@ func (s *Service) runNowRefusal(ctx context.Context, sched store.Schedule) error
 		return ErrScheduleRunLive
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
+	}
+	return nil
+}
+
+// runNowIdentityFree refuses a Run now whose scheduled identity is already
+// taken (ErrScheduleStartedThisMinute). The label is minute-granular —
+// sched-<id-suffix>-<yyyymmdd-hhmm>, pinned by ADR-0062 — which a cadence can
+// never collide with (cron is per-minute and a Schedule has one live run),
+// but a Run now can, in an ordinary operator flow: Run now, then a neutral
+// Stop (which keeps the worktree and the branch) or a death that leaves an
+// unmerged branch, then Run now again inside the same minute would reuse the
+// session, branch, and worktree names, and git would refuse the branch
+// mid-launch — a 500 instead of a refusal. The next minute's label is fresh,
+// hence the "try again in a minute" reason.
+//
+// Two reads, both before anything is created. The Schedule's newest run row
+// — the durable record of what this Schedule started, and the newest is
+// enough because a run started this minute is necessarily the newest —
+// carrying the same session, branch, or worktree. And the branch itself in
+// the bare reference clone, which is what actually collides, so an identity
+// no row of this Schedule accounts for is caught too. The row check refuses
+// even when that earlier run's branch is already gone: one minute of "try
+// again" is the price of never depending on teardown having run. A failed
+// read returns raw (500), never a refusal on missing data.
+func (s *Service) runNowIdentityFree(ctx context.Context, sched store.Schedule, repo store.Repo, label string) error {
+	session := gitx.ComposeSessionName(repo.Name, label)
+	branch := repo.ManualBranchPrefix + label
+	worktree := filepath.Join(s.worktreeRoot, gitx.WorktreeDir(repo.Name, label))
+
+	latest, err := s.store.LatestRunForSchedule(ctx, sched.ID)
+	switch {
+	case err == nil:
+		if latest.SessionName == session || latest.Branch == branch || latest.WorktreePath == worktree {
+			return ErrScheduleStartedThisMinute
+		}
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+
+	// Branches globs on a prefix; only an exact name collides.
+	existing, err := s.git.Branches(ctx, s.bareDir(repo.ID), s.gitEnv, branch)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(existing, branch) {
+		return ErrScheduleStartedThisMinute
 	}
 	return nil
 }

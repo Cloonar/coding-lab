@@ -59,6 +59,8 @@ func (s *Server) writeAFKError(w http.ResponseWriter, doing string, err error) {
 		writeError(w, http.StatusConflict, afk.ErrScheduleRunLive.Error())
 	case errors.Is(err, afk.ErrScheduleEmptyPrompt):
 		writeError(w, http.StatusConflict, afk.ErrScheduleEmptyPrompt.Error())
+	case errors.Is(err, afk.ErrScheduleStartedThisMinute):
+		writeError(w, http.StatusConflict, afk.ErrScheduleStartedThisMinute.Error())
 	case isTrackerConfigError(err):
 		// The repo's tracker binding can't be driven (unsupported forge kind,
 		// bad/missing forge credential, unparseable remote/host, unknown
