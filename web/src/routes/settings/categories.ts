@@ -26,4 +26,10 @@ export const GLOBAL_SETTINGS_CATEGORIES: SettingsCategory[] = [
     description: 'Push notifications and app install — for this device.',
     icon: 'bell',
   },
+  {
+    slug: 'runner',
+    title: 'Runner',
+    description: 'Where sessions run, the default dev image and container limits.',
+    icon: 'container',
+  },
 ];

@@ -56,6 +56,12 @@
   margin: 0 0 0.9rem;
 }
 
+/* A digest-pinned dev image ref quoted in a hint (issue #55) is one unbreakable
+   ~100-character token — let it wrap instead of widening the page on a phone. */
+.hint code {
+  overflow-wrap: anywhere;
+}
+
 select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--accent);

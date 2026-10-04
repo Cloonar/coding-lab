@@ -9,9 +9,16 @@ import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
 import type { MemoryHistory } from '@solidjs/router';
-import type { OneCLIHealth, Provider, PushDevice, WarpgateHealth } from '../../api';
+import type { OneCLIHealth, Provider, PushDevice, Repo, Runner, WarpgateHealth } from '../../api';
 import App from '../../App';
+import { baseRepo } from '../repo-settings/harness';
 import SettingsRoute from './index';
+
+/** A repo whose runner is `runner` (null = inherits the global default) — the
+ *  rows the Runner section's inheriting-repo count is computed from. */
+export function repoWithRunner(id: string, runner: Runner | null): Repo {
+  return { ...baseRepo(), id, name: id, runner };
+}
 
 /** claude-code catalog with the ultracode bool option. */
 export function baseProviders(): Provider[] {
@@ -85,6 +92,15 @@ export interface SettingsHarnessState {
   settingsOnServer: Record<string, unknown>;
   providersOnServer: Provider[];
   patchBodies: Record<string, unknown>[];
+  /** Forces every settings PATCH to answer 400 with this message (recorded in
+   *  patchBodies first, applied to nothing) — the server-side refusal a
+   *  section must surface in its banner. */
+  patchError: string | null;
+  /** GET /repos (issue #55): the registered repos the global Runner section
+   *  counts inheriting repos over. */
+  reposOnServer: Repo[];
+  /** Makes GET /repos answer 500 — the count must degrade, not block. */
+  reposError: boolean;
   // Web Push (issue #98) server state, exercised by the notifications suite.
   pushKeyValue: string;
   subsOnServer: PushDevice[];
@@ -125,8 +141,24 @@ export function stubApi(): void {
       if (url === '/api/v1/settings' && method === 'PATCH') {
         const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
         h.patchBodies.push(patch);
+        if (h.patchError !== null) {
+          return Promise.resolve(jsonResponse(400, { error: h.patchError }));
+        }
+        // The real server 400s a PATCH carrying a read-only key (issue #55's
+        // dev_image_fallback, issue #52's afk_prompt_default).
+        for (const readOnly of ['dev_image_fallback', 'afk_prompt_default']) {
+          if (readOnly in patch) {
+            return Promise.resolve(jsonResponse(400, { error: `${readOnly} is read-only` }));
+          }
+        }
         h.settingsOnServer = { ...h.settingsOnServer, ...patch };
         return Promise.resolve(jsonResponse(200, { ...h.settingsOnServer }));
+      }
+      // Registered repos (issue #55): the global Runner section counts the ones
+      // that inherit the runner default (runner null).
+      if (url === '/api/v1/repos' && method === 'GET') {
+        if (h.reposError) return Promise.resolve(jsonResponse(500, { error: 'repos unavailable' }));
+        return Promise.resolve(jsonResponse(200, { repos: h.reposOnServer }));
       }
       // AppShell mounts the side rail once authenticated; it fetches the
       // instance list for the ACTIVE rail + attention badge.
@@ -334,6 +366,9 @@ export function installSettingsHooks(): void {
     h.settingsOnServer = {};
     h.providersOnServer = baseProviders();
     h.patchBodies = [];
+    h.patchError = null;
+    h.reposOnServer = [];
+    h.reposError = false;
     // A valid base64url VAPID key (65 zero-ish bytes) so urlBase64ToUint8Array
     // round-trips without throwing.
     const keyBytes = new Uint8Array(65);

@@ -912,6 +912,13 @@ export function installRepoSettingsHooks(): void {
       container_memory: '8g',
       container_pids: 4096,
       container_nofile: 16384,
+      // The global runner default (issue #55), seeded host server-side, and the
+      // dev image chain's two settings-level rungs: no global default image, and
+      // no --container-image flag. The Runner section's inherit row and dev
+      // image hint read these.
+      runner_default: 'host',
+      dev_image_default: '',
+      dev_image_fallback: '',
     };
     h.credentialsOnServer = [];
     h.patchBodies = [];
