@@ -50,9 +50,13 @@ type Config struct {
 	// nil: the wiring layer only builds this package when container config
 	// exists, and a container-wired server always runs the boot preflight.
 	Preflight func() (podmanx.Result, bool)
-	// Image is the global default dev image (--container-image). Login and
-	// the CLI pokes are repo-less, machine-level state, so the per-repo
-	// dev-image resolution (ADR-0053) never applies; "" refuses.
+	// Image is the --container-image flag's image (the deployed fallback dev
+	// image) — deliberately the flag image and nothing else (ADR-0057,
+	// ADR-0071). Login and the CLI pokes are repo-less, machine-level state,
+	// so the run dev-image chain (instance.EffectiveDevImage) never applies:
+	// neither a repo's image_ref nor the global default dev image (the
+	// dev_image_default setting) is ever consulted, even when the setting
+	// names a different image from the flag. "" refuses.
 	Image string
 	// ToolsImage is this provider's agent-tools ref (ADR-0051) — the only
 	// CLI distribution a container-mode host has; "" refuses.
@@ -99,12 +103,13 @@ const preflightPendingText = "container preflight has not finished — retry in 
 // ordered most-structural first, mirroring instance.refuseContainerSpawn's
 // discipline: a red preflight verdict (its Error() already names every fix),
 // then the per-provider tools image, then the dev image. The dev-image text
-// deliberately names ONE knob, unlike the run refusal that names two: login
-// and the CLI pokes are repo-less, so no repo Runner setting can ever
-// provide the image — only --container-image can. The preflight-PENDING case
-// is not here because the two consumers treat it differently: LoginRunner
-// refuses instantly (an operator can simply retry), ContainerCLI waits out
-// the boot race first.
+// deliberately names ONE knob, unlike the run refusal that names three: login
+// and the CLI pokes are repo-less and never follow dev_image_default
+// (ADR-0071), so neither a repo's Dev image nor the global default dev image
+// can ever provide the image — only --container-image can. The
+// preflight-PENDING case is not here because the two consumers treat it
+// differently: LoginRunner refuses instantly (an operator can simply retry),
+// ContainerCLI waits out the boot race first.
 func (c Config) structuralRefusal(r podmanx.Result) string {
 	if !r.OK() {
 		return r.Error()

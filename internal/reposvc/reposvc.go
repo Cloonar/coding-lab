@@ -226,9 +226,10 @@ type Options struct {
 	// digest recorded on save is exactly what the spawn-time pull runs, and a
 	// same-tag re-push between save and spawn changes nothing; the store persists
 	// this returned pinned string verbatim). Production injects imageref's
-	// Resolver.Pin. Nil is the no-pinner degraded state — an image_ref update then
-	// FAILS rather than persisting an unpinned ref: storing what spawn cannot
-	// trust is never the safe fallback.
+	// Resolver.Pin. Nil is the no-pinner degraded state — an image_ref update
+	// (and a dev_image_default save, which pins through the same
+	// Service.PinImageRef, issue #55) then FAILS rather than persisting an
+	// unpinned ref: storing what spawn cannot trust is never the safe fallback.
 	PinImageRef func(ctx context.Context, ref string) (string, error)
 	// OneCLI is the credential-gateway agent seam (issue #35): repo create,
 	// startup heal and repo delete become the touchpoints that keep a repo's
@@ -548,6 +549,35 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 	return created, nil
 }
 
+// PinImageRef is the ONE pin-on-save path for a dev image ref (issue #207 /
+// ADR-0053), shared by a repo's image_ref (UpdateSettings) and the global
+// default dev image, the dev_image_default setting (the httpapi settings
+// PATCH, issue #55 / ADR-0071), so the two fields can never pin by different
+// rules. ref is TrimSpace'd, and blank-after-trim returns "" with no pinner
+// call — the caller's clear. Otherwise the ref is pinned (a tag moves, the
+// digest does not) and the pinner's canonical host/path:tag@sha256:… form is
+// returned for the caller to store, never the input tag. A nil pinner is the
+// degraded no-pinner boot and fails plainly (a config gap — 500-family, not
+// the operator's fault, and never a silently-stored unpinned ref); a pinner
+// error IS the operator's, and imageref's messages already name the ref and
+// the offending part, so it surfaces verbatim as a *BadRequestError (400)
+// with no double-wrap. It touches the network for an unpinned ref, so callers
+// run it after every cheap validation of the same request.
+func (s *Service) PinImageRef(ctx context.Context, ref string) (string, error) {
+	trimmed := strings.TrimSpace(ref)
+	if trimmed == "" {
+		return "", nil
+	}
+	if s.pinImageRef == nil {
+		return "", errors.New("image ref pinning unavailable")
+	}
+	pinned, err := s.pinImageRef(ctx, trimmed)
+	if err != nil {
+		return "", badRequestf("%s", err)
+	}
+	return pinned, nil
+}
+
 // UpdateSettings validates and applies a repo-settings PATCH (pinned M2
 // contract), publishes repo.changed, and returns the updated row. The
 // caller assembles u from the request body; only fields with Set=true are
@@ -716,28 +746,22 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 	// touches the network: every cheap enum/grammar check above gates the
 	// registry round-trip, so a request invalid for another reason never pays for
 	// a pin. Set-to-nil clears the per-repo override back to inherit the global
-	// default dev image, with no pinner call. A non-nil value is TrimSpace'd, and
-	// blank-after-trim is treated as a clear too (defensive — httpapi's
-	// patchNullableString already folds blank → nil). Otherwise the ref is pinned
-	// on save (ADR-0053 — a tag moves, the digest does not), so the column only
-	// ever holds a canonical host/path:tag@sha256:… form: a nil pinner is the
-	// degraded no-pinner boot and fails plainly (a config gap — 500-family, not
-	// the operator's fault, and never a silently-stored unpinned ref); a pinner
-	// error IS the operator's, and imageref's messages already name the ref and
-	// the offending part, so it surfaces verbatim as a 400 with no double-wrap. On
-	// success the RETURNED pinned string is stored, never the input tag.
+	// default dev image, with no pinner call. A non-nil value goes through
+	// PinImageRef, the one pin-on-save path (shared with the global
+	// dev_image_default setting): blank-after-trim comes back "" and is treated
+	// as a clear too (defensive — httpapi's patchNullableString already folds
+	// blank → nil); otherwise the RETURNED pinned string is stored, never the
+	// input tag, and PinImageRef's errors pass through unchanged (a
+	// *BadRequestError for the operator's bad ref, a plain error for the
+	// no-pinner boot).
 	if u.ImageRef.Set && u.ImageRef.Value != nil {
-		trimmed := strings.TrimSpace(*u.ImageRef.Value)
-		switch {
-		case trimmed == "":
+		pinned, err := s.PinImageRef(ctx, *u.ImageRef.Value)
+		if err != nil {
+			return store.Repo{}, err
+		}
+		if pinned == "" {
 			u.ImageRef.Value = nil
-		case s.pinImageRef == nil:
-			return store.Repo{}, errors.New("image ref pinning unavailable")
-		default:
-			pinned, err := s.pinImageRef(ctx, trimmed)
-			if err != nil {
-				return store.Repo{}, badRequestf("%s", err)
-			}
+		} else {
 			u.ImageRef.Value = &pinned
 		}
 	}

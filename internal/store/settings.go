@@ -116,6 +116,23 @@ const (
 	// this key — never a silent fall back to host. There is no server flag
 	// and no NixOS option for it: the settings row is the only source.
 	SettingRunnerDefault = "runner_default"
+
+	// Global default dev image (issue #55 / ADR-0071): the middle layer of a
+	// container run's dev image chain — the repo's own image_ref, else this
+	// row, else the --container-image flag (the deployed fallback, the last
+	// layer). Unlike runner_default above it is deliberately NOT seeded by
+	// SeedDefaultSettings: absent or blank means "fall through to the flag",
+	// so clearing it returns every inheriting repo to the deployed default,
+	// and an upgrade changes no image by itself. A non-blank value is always
+	// a digest-pinned host/path:tag@sha256:… ref, pinned on save by the
+	// settings PATCH through the same pinner a repo's image_ref uses
+	// (reposvc.Service.PinImageRef) — like ImageRef, the store persists
+	// whatever it is given, unchanged. The effective-dev-image resolver
+	// (instance.EffectiveDevImage) reads this row per spawn; a read failure
+	// other than an absent row refuses the spawn naming this key — never a
+	// silent drop to the flag image. Provider login and the provider CLI
+	// containers never read it: they run the flag image alone (ADR-0057).
+	SettingDevImageDefault = "dev_image_default"
 )
 
 // Container resource-limit defaults — the ONE source of the grilled #205

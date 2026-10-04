@@ -40,20 +40,44 @@ type repoTestServer struct {
 
 // fakePinner is a test double for reposvc.Options.PinImageRef: it returns a
 // canned pinned string (or a canned error), so the pin-on-save contract
-// (ADR-0053) is exercised over HTTP without a live registry.
+// (ADR-0053) is exercised over HTTP without a live registry. delegate, when
+// set, answers instead of the canned pair — the dev_image_default suite
+// (issue #55) routes it to a real imageref.Resolver over a stub registry.
+// calls records every ref handed to Pin, in order.
 type fakePinner struct {
-	mu     sync.Mutex
-	pinned string // returned on success — the canonical digest-pinned form
-	err    error  // when non-nil, returned verbatim (imageref errors are user-facing)
+	mu       sync.Mutex
+	pinned   string // returned on success — the canonical digest-pinned form
+	err      error  // when non-nil, returned verbatim (imageref errors are user-facing)
+	delegate func(ctx context.Context, ref string) (string, error)
+	calls    []string
 }
 
-func (p *fakePinner) Pin(_ context.Context, _ string) (string, error) {
+func (p *fakePinner) Pin(ctx context.Context, ref string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls = append(p.calls, ref)
+	if p.delegate != nil {
+		return p.delegate(ctx, ref)
+	}
 	if p.err != nil {
 		return "", p.err
 	}
 	return p.pinned, nil
+}
+
+func (p *fakePinner) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.calls)
+}
+
+func (p *fakePinner) lastCall() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.calls) == 0 {
+		return ""
+	}
+	return p.calls[len(p.calls)-1]
 }
 
 // newRepoTestServer builds a logged-in test server with the full M2 stack:
@@ -61,6 +85,14 @@ func (p *fakePinner) Pin(_ context.Context, _ string) (string, error) {
 // two-provider registry (claude-code + fake-b) backs the repo provider
 // validation (issue #66).
 func newRepoTestServer(t *testing.T) *repoTestServer {
+	t.Helper()
+	return newRepoTestServerWith(t, nil)
+}
+
+// newRepoTestServerWith is newRepoTestServer with a hook over the server
+// Options, run after the M2 stack is wired in (so it may seed the store or
+// set plain-value options such as DevImageFallback).
+func newRepoTestServerWith(t *testing.T, mod func(*Options)) *repoTestServer {
 	t.Helper()
 	testutil.RequireTool(t, "git")
 
@@ -104,6 +136,9 @@ func newRepoTestServer(t *testing.T) *repoTestServer {
 		o.Vault = v
 		o.Repos = svc
 		o.Providers = reg
+		if mod != nil {
+			mod(o)
+		}
 	})
 	t.Cleanup(svc.Close)
 	x.setup("op", "password123")

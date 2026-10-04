@@ -185,10 +185,12 @@ type Options struct {
 	// PodmanBin is the podman binary (--podman) the container pane argv and
 	// the rm backstop shell out to.
 	PodmanBin string
-	// ContainerImage is the operator's dev image (--container-image) every
-	// containerized session runs in. Deliberately no default: ADR-0051 makes
-	// the container userland the operator's, so absence means "refuse", not
-	// "pick one" (the preflight owns that refusal).
+	// ContainerImage is the deployed fallback dev image (--container-image):
+	// the LAST layer of a container run's dev image chain, used only when
+	// neither the repo's image_ref nor the dev_image_default setting is set
+	// (EffectiveDevImage, issue #55 / ADR-0071). Deliberately no default:
+	// ADR-0051 makes the container userland the operator's, so with all three
+	// layers empty the spawn is refused, never handed an image lab picked.
 	ContainerImage string
 	// ContainerToolsImages maps provider id → agent-tools image ref
 	// (--container-tools-image, digest-pinned per ADR-0051), the read-only

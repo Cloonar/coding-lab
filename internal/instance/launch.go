@@ -102,7 +102,9 @@ type LaunchSpec struct {
 // Launch runs the v0-pinned spawn sequence for a fully-derived spec: the
 // effective-Runner resolution (EffectiveRunner, issue #55), which refuses the
 // spawn before the claim when an inheriting repo's runner_default is absent
-// or invalid → the container gate (issues #205/#207) → the
+// or invalid → the container gate (issues #205/#207), which resolves the
+// effective dev image (EffectiveDevImage, issue #55: repo image_ref →
+// dev_image_default → --container-image) and pulls it if missing → the
 // credential-gateway precheck, which refuses the spawn before the claim when
 // the gateway is configured and unreachable (issue #24 / ADR-0067) → the
 // SSH-bastion precheck, which — only for a repo with at least one cached SSH
@@ -157,22 +159,27 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		return store.Run{}, badRequestf("%s", err)
 	}
 
-	// Container-mode gate + image/limit resolution (issues #205, #207), FIRST
-	// after the Runner — before the guard, the per-run tree, and above all
-	// before AddWorktree:
+	// Container-mode gate + image/limit resolution (issues #205, #207, #55),
+	// FIRST after the Runner — before the guard, the per-run tree, and above
+	// all before AddWorktree:
 	// for an AFK spec the worktree IS the claim, so a container refusal (host
-	// not ready, missing tools image, no dev image for the repo, an
-	// unresolvable dev-image ref) landing any later would park the issue behind
-	// a host/config problem. The gate and limit reads are pure; the one side
-	// effect is EnsureImage's pull-if-missing (#207), placed here on purpose so
-	// a failed pull refuses PRE-claim rather than stranding one. A refusal here
-	// rolls back nothing because nothing exists yet. The resolved image and
-	// limits carry to the spawn branch below.
+	// not ready, missing tools image, no dev image at any of the three layers,
+	// an unreadable dev_image_default, an unresolvable dev-image ref) landing
+	// any later would park the issue behind a host/config problem. The image
+	// comes from EffectiveDevImage (through the gate): the repo's image_ref,
+	// else the dev_image_default setting read live right now, else the
+	// --container-image flag — and an unreadable setting refuses here rather
+	// than dropping to the flag image. The gate and limit reads are pure; the
+	// one side effect is EnsureImage's pull-if-missing (#207) of whichever
+	// image that chain resolved, placed here on purpose so a failed pull
+	// refuses PRE-claim rather than stranding one. A refusal here rolls back
+	// nothing because nothing exists yet. The resolved image and limits carry
+	// to the spawn branch below.
 	container := effRunner == store.RunnerContainer
 	var ctrImage, ctrMemory string
 	var ctrPids, ctrNofile int
 	if container {
-		if ctrImage, err = s.refuseContainerSpawn(spec.Provider.ID(), repo); err != nil {
+		if ctrImage, err = s.refuseContainerSpawn(ctx, spec.Provider.ID(), repo); err != nil {
 			return store.Run{}, err
 		}
 		if ctrMemory, ctrPids, ctrNofile, err = s.effectiveContainerLimits(ctx, repo); err != nil {

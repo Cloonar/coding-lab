@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
+	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
@@ -47,6 +49,9 @@ type fixture struct {
 	runtime                string
 	instancesDir           string
 	repo                   store.Repo
+	// dbPath is the sqlite file behind st, for the rare test that must make
+	// the database misbehave behind the store's back (breakSettingRead).
+	dbPath string
 }
 
 // fixtureOpts parametrizes the provider under test. The zero value gives the
@@ -85,7 +90,17 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	runtime := filepath.Join(stateDir, "runtime")
 
 	git := gitx.New("git")
-	st := testutil.TempStore(t)
+	// testutil.TempStore's recipe, with the file's path kept (fixture.dbPath).
+	dbPath := filepath.Join(t.TempDir(), "lab.db")
+	st, err := store.Open(context.Background(), "sqlite:"+dbPath, logx.New(io.Discard))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	if !o.noSeed {
 		if err := st.SeedDefaultSettings(t.Context(), 6, "claude-code"); err != nil {
 			t.Fatalf("SeedDefaultSettings: %v", err)
@@ -154,7 +169,7 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	return &fixture{
 		t: t, svc: svc, st: st, runner: runner, prov: prov, guard: guard, bus: bus, clock: clock,
 		homes: homes, home: home, env: env, reposDir: reposDir, worktreeRoot: worktreeRoot,
-		runtime: runtime, instancesDir: instancesDir, repo: repo,
+		runtime: runtime, instancesDir: instancesDir, repo: repo, dbPath: dbPath,
 	}
 }
 

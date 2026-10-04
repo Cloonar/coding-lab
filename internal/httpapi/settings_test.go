@@ -6,10 +6,16 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/imageref"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -543,5 +549,281 @@ func TestAPI_SettingsContainerLimitsRoundtrip(t *testing.T) {
 	// Persisted where the container-runner config would read them.
 	if v, err := x.st.GetString(context.Background(), store.SettingContainerMemory, ""); err != nil || v != "16g" {
 		t.Errorf("stored container_memory = %q (%v), want 16g", v, err)
+	}
+}
+
+// The global runner default (issue #55 / ADR-0071): seeded host, and exactly
+// "host" or "container" round-trip through a PATCH. Anything else — another
+// word, blank, a case variant, null, a number — is a 400 naming the key and
+// both values, and writes nothing, neither the bad value nor a valid sibling
+// in the same body.
+func TestAPI_SettingsRunnerDefault(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if got := settingsOf(t, decodeBody(t, resp)); got[store.SettingRunnerDefault] != store.RunnerHost {
+		t.Errorf("runner_default = %v, want the seeded %q", got[store.SettingRunnerDefault], store.RunnerHost)
+	}
+
+	for _, v := range []string{store.RunnerContainer, store.RunnerHost, store.RunnerContainer} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingRunnerDefault: v}, h)
+		wantStatus(t, resp, http.StatusOK)
+		if got := settingsOf(t, decodeBody(t, resp)); got[store.SettingRunnerDefault] != v {
+			t.Errorf("runner_default after PATCH %q = %v", v, got[store.SettingRunnerDefault])
+		}
+		if stored, err := x.st.GetSetting(context.Background(), store.SettingRunnerDefault); err != nil || stored != v {
+			t.Errorf("stored runner_default = %q (%v), want %q", stored, err, v)
+		}
+	}
+
+	for _, bad := range []any{"podman", "", "HOST", " host", nil, 5} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+			store.SettingRunnerDefault: bad,
+			store.SettingGitAuthorName: "Half Applied",
+		}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		msg := fmt.Sprint(decodeBody(t, resp)["error"])
+		for _, want := range []string{"runner_default", `"host"`, `"container"`} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("runner_default %#v: 400 error %q does not name %s", bad, msg, want)
+			}
+		}
+	}
+	// Every rejected PATCH wrote nothing: the last good value stands, and the
+	// valid sibling never landed.
+	if stored, err := x.st.GetSetting(context.Background(), store.SettingRunnerDefault); err != nil || stored != store.RunnerContainer {
+		t.Errorf("runner_default = %q (%v) after rejected PATCHes, want %q", stored, err, store.RunnerContainer)
+	}
+	if v, err := x.st.GetString(context.Background(), store.SettingGitAuthorName, ""); err != nil || v != "" {
+		t.Errorf("git_author_name = %q (%v) after rejected PATCHes, want empty", v, err)
+	}
+}
+
+// devImageRegistryDigest is the digest the stub registry hands back for its
+// one resolvable tag — grammatically valid, otherwise arbitrary.
+const devImageRegistryDigest = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// newDevImageSettingsServer is the dev_image_default suite's server (issue
+// #55): the repo test server (so Options.Repos is a real reposvc) with the
+// settings seeded and fallback as Options.DevImageFallback, and its injected
+// pinner delegating to a REAL imageref.Resolver whose only network is an
+// in-process TLS stub registry. The registry resolves exactly one tag,
+// <host>/team/dev:v1 → devImageRegistryDigest, and 404s everything else, so
+// the save path runs the production pinner end to end with no live registry.
+// It returns the server, the registry's host:port, and a count of the
+// requests the registry has served.
+func newDevImageSettingsServer(t *testing.T, fallback string) (*repoTestServer, string, *atomic.Int32) {
+	t.Helper()
+	hits := &atomic.Int32{}
+	reg := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Method == http.MethodHead && r.URL.Path == "/v2/team/dev/manifests/v1" {
+			w.Header().Set("Docker-Content-Digest", devImageRegistryDigest)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(reg.Close)
+	u, err := url.Parse(reg.URL)
+	if err != nil {
+		t.Fatalf("parse registry url: %v", err)
+	}
+	x := newRepoTestServerWith(t, func(o *Options) {
+		if err := o.Store.SeedDefaultSettings(context.Background(), 6, "claude-code"); err != nil {
+			t.Fatal(err)
+		}
+		o.DevImageFallback = fallback
+	})
+	x.pin.delegate = (&imageref.Resolver{Client: reg.Client()}).Pin
+	return x, u.Host, hits
+}
+
+// The global default dev image (issue #55 / ADR-0071) saves exactly as a
+// repo's Dev image does (ADR-0053), through the same reposvc pinner: unseeded
+// at first; a tag ref is stored digest-pinned with the tag kept; an already
+// pinned ref is stored as-is without touching the registry; an unqualified or
+// unresolvable ref is a 400 carrying the pinner's reason that writes nothing,
+// not even a valid sibling key; and blank clears it to "" (fall through to
+// the flag) without a pin.
+func TestAPI_SettingsDevImageDefault(t *testing.T) {
+	x, host, hits := newDevImageSettingsServer(t, "")
+	h := csrfHeaders(x.ts.URL)
+	stored := func() string {
+		t.Helper()
+		v, err := x.st.GetSetting(context.Background(), store.SettingDevImageDefault)
+		if err != nil {
+			t.Fatalf("GetSetting(dev_image_default): %v", err)
+		}
+		return v
+	}
+
+	// Not seeded: absent from GET until first saved.
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if v, ok := settingsOf(t, decodeBody(t, resp))[store.SettingDevImageDefault]; ok {
+		t.Errorf("dev_image_default = %v on a fresh install, want absent (unseeded)", v)
+	}
+
+	// A tag ref is resolved and stored pinned, tag kept; the pinner saw the
+	// trimmed operator input.
+	pinned := host + "/team/dev:v1@" + devImageRegistryDigest
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingDevImageDefault: "  " + host + "/team/dev:v1 "}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got := settingsOf(t, decodeBody(t, resp)); got[store.SettingDevImageDefault] != pinned {
+		t.Errorf("dev_image_default = %v after PATCH, want the pinned %q", got[store.SettingDevImageDefault], pinned)
+	}
+	if v := stored(); v != pinned {
+		t.Errorf("stored dev_image_default = %q, want %q", v, pinned)
+	}
+	if last := x.pin.lastCall(); last != host+"/team/dev:v1" {
+		t.Errorf("pinner called with %q, want the trimmed ref", last)
+	}
+
+	// An already pinned ref is stored as-is, with no registry round-trip.
+	already := host + "/team/other:v9@" + devImageRegistryDigest
+	before := hits.Load()
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingDevImageDefault: already}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got := settingsOf(t, decodeBody(t, resp)); got[store.SettingDevImageDefault] != already {
+		t.Errorf("dev_image_default = %v, want the already pinned ref as-is", got[store.SettingDevImageDefault])
+	}
+	if hits.Load() != before {
+		t.Errorf("saving an already pinned ref hit the registry %d times, want 0", hits.Load()-before)
+	}
+
+	// Unqualified and unresolvable refs: a 400 carrying the pinner's reason,
+	// and nothing written — not the ref, not the valid sibling beside it.
+	for _, tc := range []struct{ ref, reason string }{
+		{"debian", "must be fully qualified"},
+		{host + "/team/missing:v1", "registry returned 404 (check the image path and tag)"},
+	} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+			store.SettingDevImageDefault: tc.ref,
+			store.SettingGitAuthorName:   "Half Applied",
+		}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if msg := fmt.Sprint(decodeBody(t, resp)["error"]); !strings.Contains(msg, tc.reason) {
+			t.Errorf("PATCH %q: 400 error %q, want the pinner's reason %q", tc.ref, msg, tc.reason)
+		}
+		if v := stored(); v != already {
+			t.Errorf("dev_image_default = %q after the rejected %q, want the previous %q", v, tc.ref, already)
+		}
+		if v, err := x.st.GetString(context.Background(), store.SettingGitAuthorName, ""); err != nil || v != "" {
+			t.Errorf("git_author_name = %q (%v) after the rejected %q, want empty", v, err, tc.ref)
+		}
+	}
+
+	// Blank clears to "" — the fall-through to the flag — without a pin.
+	calls := x.pin.callCount()
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingDevImageDefault: " \t "}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got := settingsOf(t, decodeBody(t, resp)); got[store.SettingDevImageDefault] != "" {
+		t.Errorf("dev_image_default = %v after a blank PATCH, want \"\"", got[store.SettingDevImageDefault])
+	}
+	if v := stored(); v != "" {
+		t.Errorf("stored dev_image_default = %q after a blank PATCH, want \"\"", v)
+	}
+	if n := x.pin.callCount(); n != calls {
+		t.Errorf("a blank PATCH called the pinner (%d → %d)", calls, n)
+	}
+}
+
+// The pin runs only after every cheap check of the same body has passed
+// (issue #55, mirroring reposvc's image_ref-validated-last rule): a PATCH
+// whose other key is invalid is a 400 for THAT key, and neither the pinner
+// nor the registry is ever reached. Repeated, because map iteration order is
+// random — a pin inside the validation loop would slip through some runs.
+func TestAPI_SettingsDevImageDefaultPinnedLast(t *testing.T) {
+	x, host, hits := newDevImageSettingsServer(t, "")
+	h := csrfHeaders(x.ts.URL)
+	for range 20 {
+		resp := x.do("PATCH", "/api/v1/settings", map[string]any{
+			store.SettingDevImageDefault: host + "/team/dev:v1",
+			store.SettingAFKTickSeconds:  1,
+		}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if msg := fmt.Sprint(decodeBody(t, resp)["error"]); !strings.Contains(msg, "afk_tick_seconds") {
+			t.Fatalf("400 error = %q, want the afk_tick_seconds floor", msg)
+		}
+	}
+	if n := x.pin.callCount(); n != 0 {
+		t.Errorf("pinner called %d times for PATCHes failing a cheap check, want 0", n)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("registry hit %d times for PATCHes failing a cheap check, want 0", n)
+	}
+	if v, err := x.st.GetSetting(context.Background(), store.SettingDevImageDefault); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("dev_image_default = %q (%v), want still unset", v, err)
+	}
+}
+
+// With no pinner at all — a server built without the repo service — a
+// non-blank dev_image_default fails the way the repo field's no-pinner boot
+// does (a 500, never an unpinned ref stored as pinned) and writes nothing,
+// while a blank value, which needs no pin, still clears.
+func TestAPI_SettingsDevImageDefaultPinnerUnavailable(t *testing.T) {
+	x := newSettingsServer(t) // Options.Repos is nil
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingDevImageDefault: "docker.io/library/debian:bookworm",
+		store.SettingGitAuthorName:   "Half Applied",
+	}, h)
+	wantStatus(t, resp, http.StatusInternalServerError)
+	_ = resp.Body.Close()
+	if v, err := x.st.GetSetting(context.Background(), store.SettingDevImageDefault); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("dev_image_default = %q (%v) after the no-pinner failure, want unset", v, err)
+	}
+	if v, err := x.st.GetString(context.Background(), store.SettingGitAuthorName, ""); err != nil || v != "" {
+		t.Errorf("git_author_name = %q (%v) after the no-pinner failure, want empty", v, err)
+	}
+
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingDevImageDefault: ""}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if got := settingsOf(t, decodeBody(t, resp)); got[store.SettingDevImageDefault] != "" {
+		t.Errorf("dev_image_default = %v after a blank PATCH, want \"\"", got[store.SettingDevImageDefault])
+	}
+}
+
+// dev_image_fallback (issue #55 / ADR-0071) is the --container-image value,
+// injected read-only into both the GET and the PATCH response ("" when the
+// flag is unset); a PATCH carrying it is an unknown-setting 400 that stores
+// nothing.
+func TestAPI_SettingsDevImageFallback(t *testing.T) {
+	const flag = "docker.io/library/debian:stable-slim@sha256:" + "abababababababababababababababababababababababababababababababab"
+	for _, tc := range []struct {
+		name     string
+		fallback string
+	}{
+		{"flag set", flag},
+		{"flag unset", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x, _, _ := newDevImageSettingsServer(t, tc.fallback)
+			h := csrfHeaders(x.ts.URL)
+
+			resp := x.do("GET", "/api/v1/settings", nil, nil)
+			wantStatus(t, resp, http.StatusOK)
+			if v, ok := settingsOf(t, decodeBody(t, resp))["dev_image_fallback"]; !ok || v != tc.fallback {
+				t.Errorf("GET dev_image_fallback = %v (present %v), want %q", v, ok, tc.fallback)
+			}
+			resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingGitAuthorName: "Lab Bot"}, h)
+			wantStatus(t, resp, http.StatusOK)
+			if v, ok := settingsOf(t, decodeBody(t, resp))["dev_image_fallback"]; !ok || v != tc.fallback {
+				t.Errorf("PATCH dev_image_fallback = %v (present %v), want %q", v, ok, tc.fallback)
+			}
+
+			resp = x.do("PATCH", "/api/v1/settings", map[string]any{"dev_image_fallback": "x"}, h)
+			wantStatus(t, resp, http.StatusBadRequest)
+			if msg := fmt.Sprint(decodeBody(t, resp)["error"]); !strings.Contains(msg, `unknown setting "dev_image_fallback"`) {
+				t.Errorf("400 error = %q, want unknown setting", msg)
+			}
+			if _, err := x.st.GetSetting(context.Background(), "dev_image_fallback"); !errors.Is(err, store.ErrNotFound) {
+				t.Errorf("GetSetting(dev_image_fallback) = %v, want ErrNotFound (never a stored row)", err)
+			}
+		})
 	}
 }

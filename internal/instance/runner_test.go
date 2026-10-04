@@ -12,18 +12,21 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
-// fakeRunnerSettings is EffectiveRunner's settings seam scripted per case: a
-// row value (present=true), an absent row, or a store read error — the last
-// being the one case a real database cannot produce on demand.
+// fakeRunnerSettings is the settings seam of EffectiveRunner and
+// EffectiveDevImage, scripted per case: a row value (present=true), an absent
+// row, or a store read error — the last being the one case a real database
+// cannot produce on demand. keys records every key read, in order.
 type fakeRunnerSettings struct {
 	value   string
 	present bool
 	err     error
 	reads   int
+	keys    []string
 }
 
 func (f *fakeRunnerSettings) GetSetting(_ context.Context, key string) (string, error) {
 	f.reads++
+	f.keys = append(f.keys, key)
 	if f.err != nil {
 		return "", f.err
 	}
@@ -87,6 +90,92 @@ func TestEffectiveRunner(t *testing.T) {
 			}
 			if got != "" {
 				t.Errorf("EffectiveRunner returned %q alongside its error, want \"\"", got)
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err, want)
+				}
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("error %q does not wrap %v", err, tc.wantIs)
+			}
+		})
+	}
+}
+
+// TestEffectiveDevImage pins the one effective-dev-image resolver (issue #55 /
+// ADR-0071): repo image_ref → dev_image_default → the --container-image
+// fallback, the first one set winning. A repo ref wins without even reading
+// the setting; an absent, blank or whitespace setting falls through to the
+// flag; a setting that cannot be read is an error naming dev_image_default —
+// and returns "" rather than the flag image, which is set in that case on
+// purpose; with nothing set anywhere the error names all three knobs.
+func TestEffectiveDevImage(t *testing.T) {
+	const (
+		repoRef = "registry.example.com/repo/dev:v1@sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
+		setting = "registry.example.com/global/dev:v2@sha256:" + "2222222222222222222222222222222222222222222222222222222222222222"
+		flag    = "docker.io/library/debian:stable-slim"
+	)
+	repo := func(ref *string) store.Repo { return store.Repo{Name: "proj", ImageRef: ref} }
+	threeKnobs := []string{"no dev image for this repo", "repo settings → Runner", "Settings → Runner → Dev image", "dev_image_default", "--container-image"}
+	dbErr := errors.New("database is locked")
+	cases := []struct {
+		name      string
+		repo      store.Repo
+		settings  *fakeRunnerSettings
+		fallback  string
+		want      string
+		wantReads int      // a repo ref must not even read the setting
+		wantErr   []string // substrings the error must carry; nil = success
+		wantIs    error    // a wrapped cause the error must still match
+	}{
+		{name: "repo ref beats the setting and the flag", repo: repo(new(repoRef)),
+			settings: &fakeRunnerSettings{value: setting, present: true}, fallback: flag, want: repoRef},
+		{name: "setting beats the flag", repo: repo(nil),
+			settings: &fakeRunnerSettings{value: setting, present: true}, fallback: flag, want: setting, wantReads: 1},
+		{name: "empty repo ref is no ref", repo: repo(new("")),
+			settings: &fakeRunnerSettings{value: setting, present: true}, fallback: flag, want: setting, wantReads: 1},
+		{name: "setting is trimmed", repo: repo(nil),
+			settings: &fakeRunnerSettings{value: "  " + setting + "\n", present: true}, fallback: flag, want: setting, wantReads: 1},
+		{name: "absent setting falls through to the flag", repo: repo(nil),
+			settings: &fakeRunnerSettings{}, fallback: flag, want: flag, wantReads: 1},
+		{name: "blank setting falls through to the flag", repo: repo(nil),
+			settings: &fakeRunnerSettings{value: "", present: true}, fallback: flag, want: flag, wantReads: 1},
+		{name: "whitespace setting falls through to the flag", repo: repo(nil),
+			settings: &fakeRunnerSettings{value: " \t ", present: true}, fallback: flag, want: flag, wantReads: 1},
+		{name: "unreadable setting refuses instead of using the flag", repo: repo(nil),
+			settings: &fakeRunnerSettings{err: dbErr}, fallback: flag, wantReads: 1,
+			wantErr: []string{"repo proj", "dev_image_default", "could not be read", "database is locked", "rather than falling back to --container-image"},
+			wantIs:  dbErr},
+		{name: "unreadable setting is irrelevant under a repo ref", repo: repo(new(repoRef)),
+			settings: &fakeRunnerSettings{err: dbErr}, fallback: flag, want: repoRef},
+		{name: "nothing set names all three knobs", repo: repo(nil),
+			settings: &fakeRunnerSettings{}, wantReads: 1, wantErr: threeKnobs},
+		{name: "blank setting and no flag names all three knobs", repo: repo(new("")),
+			settings: &fakeRunnerSettings{value: "  ", present: true}, wantReads: 1, wantErr: threeKnobs},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := EffectiveDevImage(t.Context(), tc.settings, tc.repo, tc.fallback)
+			if tc.settings.reads != tc.wantReads {
+				t.Errorf("setting reads = %d, want %d", tc.settings.reads, tc.wantReads)
+			}
+			for _, k := range tc.settings.keys {
+				if k != store.SettingDevImageDefault {
+					t.Errorf("read setting %q, want only %q", k, store.SettingDevImageDefault)
+				}
+			}
+			if tc.wantErr == nil {
+				if err != nil || got != tc.want {
+					t.Fatalf("EffectiveDevImage = %q, %v; want %q, nil", got, err, tc.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("EffectiveDevImage = %q, nil; want an error (never a silent fall back to the flag)", got)
+			}
+			if got != "" {
+				t.Errorf("EffectiveDevImage returned %q alongside its error, want \"\"", got)
 			}
 			for _, want := range tc.wantErr {
 				if !strings.Contains(err.Error(), want) {

@@ -1211,6 +1211,72 @@ func TestUpdateSettingsImageRefPinnerUnavailable(t *testing.T) {
 	}
 }
 
+// TestPinImageRef pins the one pin-on-save path (issue #207 / ADR-0053) that
+// both a repo's image_ref and the global dev_image_default setting (issue #55
+// / ADR-0071) save through: blank-after-trim is a clear that returns "" and
+// never calls the pinner (with or without one); otherwise the pinner gets the
+// TRIMMED ref and its output is returned verbatim; a pinner rejection is a
+// *BadRequestError carrying the pinner's message unchanged (a 400); and the
+// no-pinner boot is a plain error (500-family), never an unpinned ref.
+func TestPinImageRef(t *testing.T) {
+	e := newTestEnv(t)
+	pinned := "docker.io/library/debian:bookworm@sha256:" + strings.Repeat("c", 64)
+
+	t.Run("blank clears without pinning", func(t *testing.T) {
+		for _, in := range []string{"", "   ", "\t\n"} {
+			got, err := e.svc.PinImageRef(t.Context(), in)
+			if err != nil || got != "" {
+				t.Errorf("PinImageRef(%q) = %q, %v; want \"\", nil", in, got, err)
+			}
+		}
+		if n := e.pin.callCount(); n != 0 {
+			t.Errorf("blank refs called the pinner %d times, want 0", n)
+		}
+	})
+
+	t.Run("a ref is pinned trimmed and the pinner's output returned", func(t *testing.T) {
+		e.pin.pinned, e.pin.err = pinned, nil
+		got, err := e.svc.PinImageRef(t.Context(), "  docker.io/library/debian:bookworm \n")
+		if err != nil || got != pinned {
+			t.Fatalf("PinImageRef = %q, %v; want %q, nil", got, err, pinned)
+		}
+		if last := e.pin.lastCall(); last != "docker.io/library/debian:bookworm" {
+			t.Errorf("pinner called with %q, want the trimmed ref", last)
+		}
+	})
+
+	t.Run("a pinner rejection is a verbatim BadRequestError", func(t *testing.T) {
+		e.pin.pinned = ""
+		e.pin.err = errors.New(`image ref "debian" must be fully qualified, e.g. docker.io/library/debian:bookworm`)
+		defer func() { e.pin.err = nil }()
+		got, err := e.svc.PinImageRef(t.Context(), "debian")
+		var bad *BadRequestError
+		if !asBadRequest(err, &bad) {
+			t.Fatalf("PinImageRef error = %v (%T), want *BadRequestError", err, err)
+		}
+		if bad.Error() != e.pin.err.Error() {
+			t.Errorf("BadRequestError = %q, want the pinner's verbatim %q", bad.Error(), e.pin.err.Error())
+		}
+		if got != "" {
+			t.Errorf("PinImageRef returned %q alongside its error, want \"\"", got)
+		}
+	})
+
+	t.Run("no pinner is a plain error, but a clear still works", func(t *testing.T) {
+		pin := e.svc.pinImageRef
+		e.svc.pinImageRef = nil // simulate the no-pinner boot (in-package access)
+		defer func() { e.svc.pinImageRef = pin }()
+		_, err := e.svc.PinImageRef(t.Context(), "docker.io/library/debian:bookworm")
+		var bad *BadRequestError
+		if err == nil || asBadRequest(err, &bad) || !strings.Contains(err.Error(), "image ref pinning unavailable") {
+			t.Errorf("no-pinner PinImageRef error = %v, want the plain \"image ref pinning unavailable\"", err)
+		}
+		if got, err := e.svc.PinImageRef(t.Context(), "  "); err != nil || got != "" {
+			t.Errorf("no-pinner blank PinImageRef = %q, %v; want \"\", nil", got, err)
+		}
+	})
+}
+
 func ptr[T any](v T) *T { return &v }
 
 func asBadRequest(err error, target **BadRequestError) bool { return errors.As(err, target) }

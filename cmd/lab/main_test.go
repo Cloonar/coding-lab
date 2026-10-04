@@ -2,12 +2,21 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
+	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
+	"git.cloonar.com/Cloonar/coding-lab/internal/providercli"
+	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
 // TestUsageDocumentsGenericProviderFlags pins the issue #78 / ADR-0034
@@ -185,4 +194,113 @@ func TestRetryUntilComplete(t *testing.T) {
 			t.Error("waitCtx reported an early return for an elapsed wait")
 		}
 	})
+}
+
+// TestProviderCLIConfigsKeepTheFlagImage pins ADR-0071's acceptance criterion
+// that provider login and the provider CLI containers do NOT follow the
+// global default dev image (ADR-0057): with dev_image_default set in a real
+// store to an image different from --container-image, both providers' login
+// pane and their non-interactive CLI container still run the flag image.
+// It drives the production wiring end to end — providerCLIConfigs over that
+// store, then the real LoginRunner (over a fake tmux) and ContainerCLI —
+// against a stand-in podman binary that records every invocation, so the
+// proof is the podman argv itself (the pre-claim `image exists` probe and the
+// `podman run`), not just a Config field.
+func TestProviderCLIConfigsKeepTheFlagImage(t *testing.T) {
+	const (
+		flagImage    = "registry.example.com/flag/dev@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		settingImage = "registry.example.com/setting/dev:v1@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+		toolsImage   = "registry.example.com/agent-tools@sha256:7777777777777777777777777777777777777777777777777777777777777777"
+	)
+	ctx := t.Context()
+	st := openTestStore(t)
+	if err := st.SeedDefaultSettings(ctx, 6, claudecode.ID); err != nil {
+		t.Fatalf("SeedDefaultSettings: %v", err)
+	}
+	if err := st.SetSetting(ctx, store.SettingDevImageDefault, settingImage); err != nil {
+		t.Fatalf("SetSetting(dev_image_default): %v", err)
+	}
+
+	// The stand-in podman: logs each invocation's argv as one line, exits 0
+	// (so `image exists` reports present and `run` succeeds with no output).
+	binDir := t.TempDir()
+	podmanLog := filepath.Join(binDir, "podman.log")
+	podman := filepath.Join(binDir, "podman")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + podmanLog + "'\n"
+	if err := os.WriteFile(podman, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stand-in podman: %v", err)
+	}
+	// Master stores in temp dirs: login creates the mount source.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+
+	cfg := config.Config{
+		StateDir:             t.TempDir(),
+		PodmanBin:            podman,
+		ContainerImage:       flagImage,
+		ContainerToolsImages: map[string]string{claudecode.ID: toolsImage, codex.ID: toolsImage},
+	}
+	preflight := func() (podmanx.Result, bool) { return podmanx.Result{Version: "5.0.0"}, true }
+	claudeCfg, codexCfg := providerCLIConfigs(cfg, st, preflight, t.TempDir(), discardLogger())
+
+	for _, pc := range []struct {
+		cfg  providercli.Config
+		argv []string
+	}{
+		{claudeCfg, []string{"claude", "auth", "status"}},
+		{codexCfg, []string{"codex", "login", "status"}},
+	} {
+		t.Run(pc.cfg.ProviderID, func(t *testing.T) {
+			if pc.cfg.Image != flagImage {
+				t.Errorf("Config.Image = %q, want the --container-image flag %q", pc.cfg.Image, flagImage)
+			}
+			if err := os.Truncate(podmanLog, 0); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("truncate podman log: %v", err)
+			}
+
+			// The login pane: LoginRunner turns the login session's command
+			// into `podman run … <image> …`.
+			panes := tmuxx.NewFake()
+			name := tmuxx.LoginSessionName(pc.cfg.ProviderID)
+			if err := providercli.NewLoginRunner(panes, pc.cfg).Start(ctx, name, t.TempDir(), pc.argv, nil); err != nil {
+				t.Fatalf("login Start: %v", err)
+			}
+			sess, live := panes.Session(name)
+			if !live {
+				t.Fatal("login session not started")
+			}
+			if !slices.Contains(sess.Argv, flagImage) || slices.Contains(sess.Argv, settingImage) {
+				t.Errorf("login pane argv = %q, want the flag image %q and never dev_image_default's", sess.Argv, flagImage)
+			}
+
+			// The non-interactive CLI container (auth status, logout, the
+			// refresh poke, the catalog probe all run through it).
+			if _, _, err := providercli.NewContainerCLI(pc.cfg).Run(ctx, provider.CLIInvocation{Argv: pc.argv}); err != nil {
+				t.Fatalf("ContainerCLI.Run: %v", err)
+			}
+
+			raw, err := os.ReadFile(podmanLog)
+			if err != nil {
+				t.Fatalf("read podman log: %v", err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+			var probes, runs int
+			for _, l := range lines {
+				if strings.Contains(l, settingImage) {
+					t.Errorf("podman ran with dev_image_default's image: %q", l)
+				}
+				if l == "image exists "+flagImage {
+					probes++
+				}
+				if f := strings.Fields(l); slices.Contains(f, "run") && slices.Contains(f, flagImage) {
+					runs++
+				}
+			}
+			// Login: one probe (its pane's `podman run` goes to the fake tmux,
+			// not the binary). CLI: one probe and one `podman run`.
+			if probes != 2 || runs != 1 {
+				t.Errorf("podman invocations = %q, want 2 flag-image probes and 1 flag-image run", lines)
+			}
+		})
+	}
 }

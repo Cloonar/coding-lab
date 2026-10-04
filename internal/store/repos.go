@@ -141,10 +141,12 @@ type Repo struct {
 	ContainerPids   *int
 	ContainerNofile *int
 	// ImageRef is the repo's dev container image reference (issue #207). Nil /
-	// NULL means inherit the globally configured default dev image
-	// (--container-image); a non-NULL value is always digest-pinned, pinned by
-	// reposvc on save — the store persists whatever it is given, unchanged. It
-	// only matters while the effective Runner is "container".
+	// NULL means inherit: the global default dev image (the dev_image_default
+	// setting, issue #55), else the deployed fallback (--container-image) —
+	// resolved per spawn by instance.EffectiveDevImage, the one resolver; a
+	// non-NULL value is always digest-pinned, pinned by reposvc on save — the
+	// store persists whatever it is given, unchanged. It only matters while
+	// the effective Runner is "container".
 	ImageRef *string
 }
 
