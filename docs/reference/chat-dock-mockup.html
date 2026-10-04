@@ -1,0 +1,854 @@
+<!doctype html>
+<!--
+  Reference mockup for the chat dock redesign (design direction "Dock", revision 2).
+  A static design reference, not shipped code: the spec is the issue's agent brief, and this
+  file shows the intended layout, hierarchy and interaction. Open it in a browser.
+  - The switch at the top selects the run state. The URL hash does the same:
+    #working, #question (one question), #questions (three questions), #idle.
+  - At viewport widths up to 760px the phone layout fills the screen; wider shows a
+    desktop frame and a phone frame side by side with design notes.
+  Sample content is invented. Markup and CSS here are throwaway; follow the app's own
+  components, tokens and conventions when implementing.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>lab chat dock mockup</title>
+</head>
+<body>
+<style>
+/* The app's own vendored serif, loaded by relative path so the file needs no network. */
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations'); font-weight: 200 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations'); font-weight: 200 900; font-style: italic; font-display: swap; }
+[hidden] { display: none !important; }
+img { max-width: 100%; }
+/* Layout: a quiet spec sheet. One desktop frame, one phone frame, notes beside the phone.
+   Below 760px the phone frame becomes the whole screen so the mockup is used at real size. */
+:root {
+  /* lab's own tokens (web/src/styles/tokens.css), light */
+  --bg: #faf9f5; --card: #ffffff; --text: #1f1e1d; --muted: #6b675c;
+  --border: #e8e4da; --hover: #f1efe8;
+  --accent: #d97757; --accent-text: #2a1a12; --link: #b0532f;
+  --danger: #c0362c; --ok: #1a9c5b;
+  --bubble: #ece7db; --chip-bg: #eeeae0; --chip-text: #524c3f;
+  --attn-bg: #fbeae2; --attn-border: #efc3b1;
+  --warn-text: #8a5a00;
+  --add: #1f6b3d; --add-bg: #e7f2e1; --del: #9c3324; --del-bg: #fbeae5;
+  --stage: #efece3; --bezel: #2b2a27; --scrim: rgba(31, 30, 29, 0.42);
+  --shadow: 0 1px 2px rgba(40, 32, 22, 0.06), 0 8px 24px rgba(40, 32, 22, 0.08);
+  --serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --r-card: 14px; --r-ctl: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #262624; --card: #30302e; --text: #ecebe6; --muted: #a5a196;
+    --border: #3e3c37; --hover: #373631;
+    --accent: #d97757; --accent-text: #2a1a12; --link: #e08d70;
+    --danger: #f28577; --ok: #3ecf8e;
+    --bubble: #3a3833; --chip-bg: #3a3833; --chip-text: #d6d2c7;
+    --attn-bg: #3b2a22; --attn-border: #6b4433;
+    --warn-text: #e6c56a;
+    --add: #6cd99a; --add-bg: #17301d; --del: #f3aca2; --del-bg: #2e1613;
+    --stage: #1c1c1a; --bezel: #0e0e0d; --scrim: rgba(0, 0, 0, 0.55);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.3);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #262624; --card: #30302e; --text: #ecebe6; --muted: #a5a196;
+  --border: #3e3c37; --hover: #373631;
+  --accent: #d97757; --accent-text: #2a1a12; --link: #e08d70;
+  --danger: #f28577; --ok: #3ecf8e;
+  --bubble: #3a3833; --chip-bg: #3a3833; --chip-text: #d6d2c7;
+  --attn-bg: #3b2a22; --attn-border: #6b4433;
+  --warn-text: #e6c56a;
+  --add: #6cd99a; --add-bg: #17301d; --del: #f3aca2; --del-bg: #2e1613;
+  --stage: #1c1c1a; --bezel: #0e0e0d; --scrim: rgba(0, 0, 0, 0.55);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.3);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--stage); color: var(--text); font: 15px/1.5 var(--sans); -webkit-text-size-adjust: 100%; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+svg.i.s { width: 14px; height: 14px; }
+p { margin: 0; }
+code, .mono { font-family: var(--mono); }
+
+/* ---------- the spec sheet around the frames ---------- */
+.sheet { max-width: 1320px; margin: 0 auto; padding-inline: 24px; padding-block: 28px 56px; display: flex; flex-direction: column; gap: 20px; }
+.sheet-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 32px; }
+.sheet-id { flex: 1 1 420px; min-width: 0; }
+.eyebrow { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.sheet h1 { font: 600 34px/1.1 var(--serif); letter-spacing: -0.015em; margin: 4px 0 6px; text-wrap: balance; }
+.lede { font: 400 17px/1.5 var(--serif); color: var(--muted); max-width: 62ch; }
+.sheet-nav { display: flex; gap: 6px; }
+.sheet-nav > a, .sheet-nav > span { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; color: var(--muted); text-decoration: none; background: var(--bg); }
+.sheet-nav a:hover { color: var(--text); border-color: var(--muted); }
+.sheet-nav [aria-current] { color: var(--text); border-color: var(--text); font-weight: 600; }
+.sheet-nav b { font: 600 12px var(--mono); }
+.statebar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 13px; color: var(--muted); }
+.seg { display: inline-flex; padding: 3px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); }
+.seg button { min-height: 32px; padding: 0 14px; border-radius: 999px; font-size: 13px; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); font-weight: 600; }
+.notes-btn { display: none; }
+.stage-label { font: 500 11px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.fit { width: 100%; overflow: hidden; border-radius: 12px; box-shadow: var(--shadow); }
+.frame { position: relative; overflow: hidden; background: var(--bg); }
+.frame--desktop { width: 1240px; height: 760px; border: 1px solid var(--border); border-radius: 12px; transform-origin: 0 0; }
+.frame--phone { width: 390px; height: 800px; border-radius: 40px; border: 9px solid var(--bezel); box-shadow: var(--shadow); max-width: 100%; }
+.stage-row { display: flex; flex-wrap: wrap; gap: 28px 44px; align-items: flex-start; }
+.stage--phone { flex: none; max-width: 100%; }
+.notes { flex: 1 1 380px; min-width: 0; display: grid; gap: 22px; align-content: start; padding-top: 24px; }
+.notes h2 { font: 600 12px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+.notes ul { margin: 0; padding-left: 18px; display: grid; gap: 7px; max-width: 64ch; }
+.notes li { line-height: 1.5; }
+.notes li b { font-weight: 600; }
+.notes .try { font: 400 16px/1.55 var(--serif); max-width: 60ch; }
+.notes-close { display: none; }
+
+@media (max-width: 760px) {
+  body { background: var(--bg); }
+  .sheet { height: 100%; padding: 0; gap: 0; max-width: none; }
+  .sheet-head { padding: 8px 12px 6px; align-items: center; gap: 8px; flex-wrap: nowrap; border-bottom: 1px solid var(--border); background: var(--stage); }
+  .sheet-id { flex: 1 1 auto; display: flex; align-items: baseline; gap: 8px; }
+  .eyebrow, .lede, .stage-label, .stage--desktop { display: none; }
+  .sheet h1 { font-size: 18px; margin: 0; }
+  .sheet-nav > a, .sheet-nav > span { min-height: 32px; padding: 0 10px; }
+  .sheet-nav .nm { display: none; }
+  .statebar { padding: 6px 12px; background: var(--stage); border-bottom: 1px solid var(--border); flex-wrap: nowrap; }
+  .statebar > .lbl { display: none; }
+  .seg { flex: 1; }
+  .seg button { flex: 1; text-align: center; padding: 0 6px; }
+  .notes-btn { display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; background: var(--bg); }
+  .stage-row { flex: 1; min-height: 0; display: block; }
+  .stage--phone { height: 100%; }
+  .frame--phone { width: 100%; height: 100%; border: 0; border-radius: 0; box-shadow: none; }
+  .notes { display: none; position: fixed; inset: 0; z-index: 50; background: var(--bg); padding: calc(16px + env(safe-area-inset-top, 0px)) 16px 32px; overflow-y: auto; }
+  .notes-open .notes { display: grid; }
+  .notes-close { display: inline-flex; justify-self: end; align-items: center; min-height: 40px; padding: 0 14px; border: 1px solid var(--border); border-radius: 999px; }
+}
+
+/* ---------- shared app pieces (lab chrome) ---------- */
+.app { position: relative; height: 100%; display: flex; overflow: hidden; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); }
+.frame--phone .only-desktop, .frame--desktop .only-phone { display: none !important; }
+.app[data-state="working"] [data-when]:not([data-when~="working"]),
+.app[data-state="question"] [data-when]:not([data-when~="question"]),
+.app[data-state="idle"] [data-when]:not([data-when~="idle"]) { display: none !important; }
+
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: var(--r-ctl); color: var(--muted); position: relative; flex: none; }
+.icon-btn:hover { background: var(--hover); color: var(--text); }
+.chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border-radius: 999px; background: var(--chip-bg); color: var(--chip-text); font-size: 12px; white-space: nowrap; }
+.chip.mono { font-size: 11.5px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot--working { background: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+.dot--question { background: var(--accent); }
+.dot--idle { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--ok); animation: spin 0.9s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .dot--working, .spin { animation: none; } .rail, .sheet-b { transition: none !important; } }
+kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; color: var(--muted); background: var(--card); }
+
+/* runs rail */
+.rail { width: 260px; flex: none; display: flex; flex-direction: column; gap: 4px; padding: 14px 12px; background: var(--card); border-right: 1px solid var(--border); }
+.frame--phone .rail { position: absolute; inset: 0 auto 0 0; z-index: 30; transform: translateX(-102%); transition: transform 0.22s ease; box-shadow: var(--shadow); }
+.frame--phone .rail-open .rail, .frame--phone .app.rail-open .rail { transform: none; }
+.scrim { position: absolute; inset: 0; z-index: 25; background: var(--scrim); display: none; }
+.frame--phone .app.rail-open .scrim, .app.sheet-open .scrim, .app.turns-open .scrim { display: block; }
+.rail-top { display: flex; align-items: center; justify-content: space-between; min-height: 40px; padding: 0 4px; }
+.brand { font: 600 22px var(--serif); }
+.brand i { color: var(--accent); font-style: normal; }
+.rail-new { display: flex; align-items: center; justify-content: center; min-height: 44px; border-radius: var(--r-ctl); background: var(--accent); color: var(--accent-text); font-weight: 600; margin: 6px 0 10px; }
+.rail-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 4px 6px; }
+.run { display: grid; grid-template-columns: 8px 1fr; column-gap: 10px; align-items: center; padding: 8px 8px; border-radius: var(--r-ctl); min-height: 48px; width: 100%; }
+.run:hover { background: var(--hover); }
+.run.is-current { background: var(--hover); }
+.run-t { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-s { grid-column: 2; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-s em { font-style: normal; color: var(--link); font-weight: 600; }
+.rail-nav { margin-top: auto; border-top: 1px solid var(--border); padding-top: 8px; display: grid; }
+.rail-nav button { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 8px; border-radius: var(--r-ctl); font-weight: 500; font-size: 14px; }
+.rail-nav button:hover { background: var(--hover); }
+.rail-nav svg { color: var(--muted); }
+
+/* chat column basics */
+.chat { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.hd { display: flex; align-items: center; gap: 4px; min-height: 52px; padding: 4px 6px; border-bottom: 1px solid var(--border); flex: none; }
+.frame--desktop .hd { padding: 4px 20px; gap: 8px; min-height: 56px; }
+.hd-title { flex: 1; min-width: 0; padding: 0 6px; }
+.hd-title strong { display: block; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.25; }
+.hd-sub { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.hd-sub .mono { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+.attn { position: absolute; top: 9px; right: 9px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); }
+.stream { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.col { max-width: 760px; margin: 0 auto; padding: 16px 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+.frame--desktop .col { padding: 24px 24px 28px; gap: 16px; }
+.bubble { align-self: flex-end; max-width: 85%; padding: 9px 13px; border-radius: 16px; background: var(--bubble); }
+.prose { font: 400 16.5px/1.65 var(--serif); display: grid; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+.prose b { font-weight: 600; }
+.prose code { font: 0.82em var(--mono); background: var(--chip-bg); color: var(--chip-text); padding: 1px 5px; border-radius: 5px; }
+.prose a, .lnk { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+.prose ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.msg-actions { display: flex; gap: 2px; margin-top: -4px; }
+.msg-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 8px; border-radius: 8px; font-size: 12.5px; color: var(--muted); }
+.msg-actions button:hover { background: var(--hover); color: var(--text); }
+.life { align-self: center; font-size: 13px; color: var(--muted); text-align: center; }
+
+/* composer */
+.composer { display: flex; align-items: flex-end; gap: 6px; padding: 6px 6px 6px 6px; border: 1px solid var(--border); border-radius: 18px; background: var(--card); }
+.composer textarea, .composer input { flex: 1; min-width: 0; border: 0; background: transparent; resize: none; font: 16px/1.4 var(--sans); color: var(--text); padding: 10px 8px; height: 44px; }
+.composer textarea:focus, .composer input:focus { outline: none; }
+.composer:focus-within { border-color: var(--muted); }
+.composer ::placeholder { color: var(--muted); opacity: 0.85; }
+.send { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 14px; background: var(--accent); color: var(--accent-text); flex: none; }
+.send.wide { width: auto; padding: 0 16px; font-weight: 600; gap: 6px; }
+.slash { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 44px; border-radius: 12px; color: var(--muted); font: 600 17px var(--mono); flex: none; }
+.slash:hover { background: var(--hover); color: var(--text); }
+.btn { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); font-size: 13.5px; font-weight: 500; background: var(--card); white-space: nowrap; }
+.btn:hover { border-color: var(--muted); }
+.btn.danger { color: var(--danger); }
+
+/* answer options (shared look) */
+.opts { display: grid; gap: 6px; }
+.opt { display: grid; grid-template-columns: auto 1fr auto; column-gap: 10px; align-items: start; width: 100%; padding: 10px 12px; min-height: 48px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+.opt:hover { border-color: var(--muted); }
+.opt .radio { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--muted); margin-top: 2px; }
+.opt.is-picked { border-color: var(--accent); background: var(--attn-bg); }
+.opt.is-picked .radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 4px, transparent 5px); }
+.opt-l { font-weight: 600; font-size: 14.5px; }
+.opt-l small { font-weight: 500; font-size: 11.5px; color: var(--link); margin-left: 6px; }
+.opt-d { grid-column: 2 / -1; font-size: 13px; color: var(--muted); line-height: 1.4; }
+
+/* bottom sheet (phone) */
+.sheet-b { position: absolute; left: 0; right: 0; bottom: 0; z-index: 40; background: var(--card); border-radius: 18px 18px 0 0; border-top: 1px solid var(--border); padding: 8px 12px 16px; transform: translateY(105%); transition: transform 0.22s ease; max-height: 80%; overflow-y: auto; box-shadow: var(--shadow); }
+.app.sheet-open .sheet-b--menu, .app.turns-open .sheet-b--turns { transform: none; }
+.frame--desktop .sheet-b { left: auto; right: 16px; top: 60px; bottom: auto; width: 320px; border: 1px solid var(--border); border-radius: 14px; transform: none; display: none; padding: 8px; }
+.frame--desktop .app.sheet-open .sheet-b--menu { display: block; }
+.frame--desktop .app.sheet-open .scrim { background: transparent; }
+.grab { width: 36px; height: 4px; border-radius: 2px; background: var(--border); margin: 2px auto 8px; }
+.menu-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 10px; border-radius: var(--r-ctl); font-size: 15px; }
+.menu-row:hover { background: var(--hover); }
+.menu-row svg { color: var(--muted); }
+.menu-row.danger, .menu-row.danger svg { color: var(--danger); }
+.menu-row .end { margin-left: auto; font-size: 12.5px; color: var(--muted); }
+.menu-sep { height: 1px; background: var(--border); margin: 6px 0; }
+.fit { max-width: 1240px; }
+.add { color: var(--add); } .del { color: var(--del); }
+.ctx { display: inline-flex; align-items: center; gap: 5px; font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.ctx i { width: 16px; height: 16px; border-radius: 50%; background: conic-gradient(var(--muted) 62%, var(--border) 0); -webkit-mask: radial-gradient(circle, transparent 4.5px, #000 5px); mask: radial-gradient(circle, transparent 4.5px, #000 5px); }
+
+/* shared dock, jump button, state pill */
+.dock { flex: none; position: relative; border-top: 1px solid var(--border); background: var(--bg); padding: 6px 10px 10px; }
+.frame--desktop .dock { border-top: 0; padding: 0 24px 12px; }
+.dock-in { max-width: 760px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.jump { position: absolute; right: 14px; top: -50px; display: inline-flex; align-items: center; gap: 6px; height: 38px; padding: 0 14px 0 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); box-shadow: var(--shadow); font-size: 13px; font-weight: 500; opacity: 0; pointer-events: none; transition: opacity 0.15s; z-index: 6; }
+.scrolled-up .jump { opacity: 1; pointer-events: auto; }
+.app[data-state="question"].scrolled-up .jump { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+.hint { font-size: 12px; color: var(--muted); display: flex; gap: 14px; justify-content: center; padding-top: 2px; }
+.qa { border-left: 2px solid var(--border); padding: 2px 0 2px 12px; font-size: 14px; display: grid; gap: 2px; }
+.qa .q { color: var(--muted); }
+.qa .a { font-weight: 600; }
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px 0 9px; border-radius: 999px; font-size: 12.5px; font-weight: 600; border: 1px solid var(--border); white-space: nowrap; flex: none; }
+.pill--question { background: var(--attn-bg); border-color: var(--attn-border); }
+.chev { color: var(--muted); transition: transform 0.15s; }
+.step { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 6px; font: 12.5px var(--mono); color: var(--muted); }
+.step .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.step .r { white-space: nowrap; }
+.step.is-live .t { font-weight: 600; }
+/* in-stream question card */
+.ask-card { border: 1px solid var(--attn-border); background: var(--attn-bg); border-radius: 16px; padding: 12px 10px 10px; display: grid; gap: 10px; }
+.ask-hd { display: flex; align-items: center; gap: 8px; font-size: 13px; padding-left: 4px; }
+.ask-q { font: 600 15.5px/1.4 var(--sans); padding: 0 4px; text-wrap: pretty; }
+.ask-card .opt { grid-template-columns: 1fr auto; }
+.ask-card .opt .opt-d { grid-column: 1 / -1; }
+.ask-card .opt > .i { color: var(--muted); align-self: center; grid-row: 1 / span 2; grid-column: 2; }
+.ask-foot { font-size: 12.5px; color: var(--muted); padding: 0 4px; }
+.app[data-q="one"] .only-many, .app[data-q="many"] .only-one { display: none !important; }
+.send:disabled { opacity: 0.45; cursor: default; }
+/* A · Dock */
+.steps-card { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.steps-sum { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 44px; padding: 7px 10px 7px 12px; font-size: 13.5px; }
+.steps-sum:hover { background: var(--hover); }
+.steps-sum > .i:first-child { color: var(--ok); }
+.sum-b { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; column-gap: 10px; align-items: baseline; }
+.sum-t { font-weight: 500; }
+.sum-m { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.is-open > .steps-sum .chev { transform: rotate(180deg); }
+.step-list { display: none; list-style: none; margin: 0; padding: 4px 6px 6px; border-top: 1px solid var(--border); background: var(--hover); }
+.is-open > .step-list { display: grid; grid-template-columns: minmax(0, 1fr); }
+
+.strip { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 2px 0 6px; font-size: 13.5px; }
+.strip b { font-weight: 600; white-space: nowrap; }
+.strip .now { flex: 1; min-width: 0; font: 12.5px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strip .btn { min-height: 34px; }
+.frame--phone .strip .ctx.tight span { display: none; }
+.answer { border: 1px solid var(--attn-border); background: var(--attn-bg); border-radius: 16px; padding: 4px 8px 8px; }
+.answer-hd { display: flex; align-items: center; gap: 8px; font-size: 13px; padding-left: 6px; }
+.answer-hd b { font-weight: 600; }
+.answer-hd .n { color: var(--muted); margin-left: auto; }
+.answer-hd .icon-btn { width: 40px; height: 40px; }
+.answer-q { font: 600 15.5px/1.4 var(--sans); margin: 0 6px 10px; text-wrap: pretty; }
+.answer.is-min .answer-body { display: none; }
+.answer.is-min .icon-btn .i { transform: rotate(180deg); }
+
+/* --- revision 2: meter, run details, several questions, chat about this, slash list --- */
+.meter { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 10px; border-radius: 999px; background: var(--chip-bg); color: var(--chip-text); font-size: 11.5px; flex: none; }
+.meter:hover { box-shadow: inset 0 0 0 1px var(--muted); }
+.meter .ctx { color: inherit; font-weight: 600; }
+.frame--desktop .meter { min-height: 30px; }
+.app.info-open .sheet-b--info { transform: none; }
+.frame--desktop .app.info-open .sheet-b--info { display: block; right: 150px; }
+.app.info-open .scrim { display: block; }
+.frame--desktop .app.info-open .scrim { background: transparent; }
+.facts { margin: 0; display: grid; }
+.fact { display: grid; grid-template-columns: 76px 1fr; gap: 4px 12px; align-items: center; padding: 10px 8px; border-bottom: 1px solid var(--border); min-height: 48px; }
+.fact dt { font-size: 12.5px; color: var(--muted); }
+.fact dd { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 14px; min-width: 0; }
+.fact dd .mono { font-size: 12.5px; overflow-wrap: anywhere; }
+.fact dd .btn { min-height: 34px; margin-left: auto; }
+.fact small { font-size: 12.5px; color: var(--muted); }
+.bar { display: inline-block; width: 72px; height: 6px; border-radius: 3px; background: var(--border); position: relative; overflow: hidden; }
+.bar::after { content: ""; position: absolute; inset: 0 38% 0 0; background: var(--muted); border-radius: 3px; }
+.sheet-note { font-size: 12.5px; color: var(--muted); padding: 10px 8px 2px; }
+
+.answer-q small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); margin-top: 2px; }
+.radio { display: grid; place-items: center; }
+.radio .i { display: none; width: 12px; height: 12px; stroke-width: 3; }
+.opts[data-multi] .radio { border-radius: 5px; }
+.opts[data-multi] .is-picked .radio { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.opts[data-multi] .is-picked .radio .i { display: block; }
+.mq-steps { display: flex; gap: 6px; overflow-x: auto; padding: 0 4px 10px; scrollbar-width: none; }
+.mq-steps::-webkit-scrollbar { display: none; }
+.mq-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 11px 0 7px; border-radius: 999px; border: 1px solid var(--attn-border); font-size: 13px; white-space: nowrap; color: var(--muted); flex: none; }
+.mq-chip:last-child { padding-left: 11px; }
+.mq-chip i { font: 600 11px var(--mono); font-style: normal; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--card); border: 1px solid var(--attn-border); }
+.mq-chip.is-cur { background: var(--card); color: var(--text); font-weight: 600; border-color: var(--accent); }
+.mq-chip.is-done i { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+.frame--phone .mq-pages { max-height: 300px; overflow-y: auto; }
+.mq-list { display: grid; gap: 6px; }
+.mq-row { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; align-items: center; width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); min-height: 52px; }
+.mq-row:hover { border-color: var(--muted); }
+.mq-row .h { font-size: 12px; color: var(--muted); }
+.mq-row .a { grid-column: 1; font-weight: 600; font-size: 14.5px; overflow-wrap: anywhere; }
+.mq-row .a.none { color: var(--link); }
+.mq-row .i { grid-row: 1 / span 2; grid-column: 2; color: var(--muted); }
+.mq-send { justify-content: center; min-height: 48px; width: 100%; }
+
+.chat-about { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 10px; margin: 6px 0 -2px; border-radius: 10px; font-size: 13.5px; font-weight: 500; color: var(--link); }
+.chat-about:hover { background: var(--card); }
+.dock-in:not(.is-chatting) .when-chat, .dock-in:not(.is-chatting) .composer--chat, .dock-in:not(.is-chatting) .chat-note { display: none; }
+.dock-in.is-chatting .not-chat, .dock-in.is-chatting .answer-body, .dock-in.is-chatting .composer--answer, .dock-in.is-chatting .mq-send { display: none; }
+.dock-in.is-chatting .answer { padding: 4px 6px 4px 8px; }
+.answer-hd .btn { margin-left: auto; min-height: 34px; }
+.composer--chat { flex-wrap: wrap; }
+.about { flex: 1 0 100%; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 2px 0 2px 8px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 2px; }
+.about-q { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.about .icon-btn { width: 36px; height: 36px; }
+.chat-note { font-size: 12.5px; color: var(--muted); text-align: center; }
+
+.composer { position: relative; }
+.cmd-pop { display: none; position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); z-index: 8; padding: 6px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); box-shadow: var(--shadow); }
+.composer.cmds-open .cmd-pop { display: grid; }
+.cmd { display: grid; grid-template-columns: 1fr auto; gap: 0 10px; align-items: baseline; padding: 8px 10px; border-radius: 9px; min-height: 48px; }
+.cmd:hover { background: var(--hover); }
+.cmd .mono { font-size: 13.5px; font-weight: 600; }
+.cmd .src { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.cmd .ds { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); }
+@media (max-width: 760px) { .seg button { font-size: 12px; padding: 0 4px; white-space: nowrap; } }
+.frame--desktop .sheet-b--info { width: 380px; }
+</style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+<symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+<symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></symbol>
+<symbol id="i-square" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></symbol>
+<symbol id="i-chev-d" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+<symbol id="i-chev-u" viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></symbol>
+<symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+<symbol id="i-pr" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol>
+<symbol id="i-term" viewBox="0 0 24 24"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="M15 5l4 4"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+<symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/></symbol>
+<symbol id="i-ext" viewBox="0 0 24 24"><path d="M15 3h6v6"/><path d="M10 14L21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M3 12h.01M3 18h.01M3 6h.01M8 12h13M8 18h13M8 6h13"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-pull" viewBox="0 0 24 24"><path d="M12 17V3"/><path d="M6 11l6 6 6-6"/><path d="M19 21H5"/></symbol>
+<symbol id="i-issue" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/></symbol>
+<symbol id="i-msg" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+<symbol id="i-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+</defs></svg>
+<div class="sheet">
+<header class="sheet-head"><div class="sheet-id">
+<span class="eyebrow">lab chat overhaul · reference mockup</span><h1>Dock</h1><p class="lede">Everything you act on sits at the bottom edge, in thumb reach. Revision 2 adds model and context on the phone, several questions per ask, and Chat about this.</p></div>
+</header>
+<div class="statebar"><span class="lbl">Show the run while it is</span><div class="seg" role="group" aria-label="Run state shown in the mockup"><button type="button" data-state="working" aria-pressed="false">Working</button><button type="button" data-state="question" data-q="one" aria-pressed="false">1 question</button><button type="button" data-state="question" data-q="many" aria-pressed="true">3 questions</button><button type="button" data-state="idle" aria-pressed="false">Idle</button></div><button type="button" class="notes-btn" data-notes>Notes</button></div>
+<section class="stage stage--desktop"><div class="stage-label">Desktop · 1240 px</div><div class="fit"><div class="frame frame--desktop"></div></div></section>
+<section class="stage-row"><div class="stage stage--phone"><div class="stage-label">Phone · 390 px</div><div class="frame frame--phone"></div></div>
+<div class="notes"><button type="button" class="notes-close" data-notes>Close notes</button>
+<div><h2>Try it</h2><p class="try">Pick “3 questions” above. Step through with Next, type your own answer to any question, then check them on Review. Tap “Chat about this”, the context ring in the header, and the <code>/</code> button.</p></div>
+<div><h2>New in this revision</h2><ul>
+<li><b>Model and context on the phone.</b> The model sits under the run title and the context ring with its percentage sits beside it, in every state. Tapping it opens run details with token counts, branch and Pull base.</li>
+<li><b>Several questions in one ask.</b> One question shows at a time. Chips name each question and tick off as you go. Review lists every answer, and one button sends them together.</li>
+<li><b>Your own answer to any question.</b> The text box always belongs to the question on screen. On a pick-any question it adds to the ticked options.</li>
+<li><b>Chat about this.</b> The questions fold to one line and the composer turns into a normal reply that quotes the question. Nothing is dismissed until you send, and Back returns to the options.</li>
+<li><b>The <code>/</code> button opens the command list.</b></li>
+</ul></div>
+<div><h2>Kept from the first pass</h2><ul>
+<li>A status line with words above the composer, with one-tap Interrupt in thumb reach.</li>
+<li>Questions dock above the composer, with the recommended option preselected.</li>
+<li>Tool runs summarised by what happened.</li>
+</ul></div>
+<div><h2>Trade-offs</h2><ul>
+<li>A three-question ask takes four taps when you accept every recommendation. The Review step is the price of sending all answers at once.</li>
+<li>The docked panel covers about half a phone screen. The chevron folds it away to read the stream.</li>
+<li>Sending a chat message sets the questions aside, as Claude Code does. The agent has to ask again afterwards.</li>
+</ul></div>
+<div><h2>What it touches</h2><ul>
+<li>Composer, Dialogs and ChatHeader. The multi-question form already submits atomically, so the stepper is a front-end change.</li>
+<li>Chat about this needs a dismiss-and-reply path in the answer endpoint.</li>
+<li>Revisits ADR-0029 on where Interrupt lives, and ADR-0061 on where the context meter shows.</li>
+</ul></div>
+</div></section>
+</div>
+<template id="app-tpl"><div class="app" data-state="question" data-q="many" data-tab="chat" data-itab="activity">
+<aside class="rail" aria-label="Runs">
+  <div class="rail-top"><span class="brand">lab<i>.</i></span><button type="button" class="icon-btn only-phone" data-act="toggle" data-cls="rail-open" aria-label="Close runs"><svg class="i"><use href="#i-x"/></svg></button></div>
+  <button type="button" class="rail-new">+ New run</button>
+  <div class="rail-label">Active</div>
+  <button type="button" class="run is-current">
+    <span class="dot dot--working" data-when="working"></span><span class="dot dot--question" data-when="question"></span><span class="dot dot--idle" data-when="idle"></span>
+    <span class="run-t">Fix README clone URLs</span>
+    <span class="run-s"><span data-when="working">coding-lab · working</span><span data-when="question">coding-lab · <em>asking you</em></span><span data-when="idle">coding-lab · idle</span></span>
+  </button>
+  <button type="button" class="run"><span class="dot dot--working"></span><span class="run-t">afk/212 · lander model default</span><span class="run-s">coding-lab · 1h 12m left</span></button>
+  <button type="button" class="run"><span class="dot dot--working"></span><span class="run-t">Nightly dependency audit</span><span class="run-s">cloonar-nixos · scheduled</span></button>
+  <button type="button" class="run"><span class="dot dot--idle"></span><span class="run-t">Triage inbox</span><span class="run-s">coding-lab · idle</span></button>
+  <nav class="rail-nav" aria-label="Sections">
+    <button type="button"><svg class="i"><use href="#i-folder"/></svg>Repos</button>
+    <button type="button"><svg class="i"><use href="#i-history"/></svg>History</button>
+    <button type="button"><svg class="i"><use href="#i-key"/></svg>Credentials</button>
+    <button type="button"><svg class="i"><use href="#i-sliders"/></svg>Settings</button>
+  </nav>
+</aside>
+<div class="scrim" data-act="close"></div>
+<main class="chat">
+  <header class="hd">
+    <button type="button" class="icon-btn only-phone" data-act="toggle" data-cls="rail-open" aria-label="Runs. Two other runs are working"><svg class="i"><use href="#i-menu"/></svg></button>
+    <div class="hd-title"><strong>Fix README clone URLs</strong><span class="hd-sub"><span>coding-lab</span><span class="only-phone">· Fable 5.1 · high</span><svg class="i s only-desktop"><use href="#i-branch"/></svg><span class="mono only-desktop">lab/20261004-1407</span></span></div>
+    <button type="button" class="meter" data-act="toggle" data-cls="info-open" aria-label="Fable 5.1, high effort. Context 62% used. Open run details" title="Run details"><span class="mono only-desktop">Fable 5.1 · high</span><span class="ctx"><i></i><span>62%</span></span></button>
+    <button type="button" class="btn only-desktop"><svg class="i s"><use href="#i-ext"/></svg>Open in Claude</button>
+    <button type="button" class="icon-btn" data-act="toggle" data-cls="sheet-open" aria-label="Run actions"><svg class="i"><use href="#i-more"/></svg></button>
+  </header>
+
+  <div class="stream" role="log"><div class="col">
+    <p class="life">Started 13:04 from <span class="mono">main</span></p>
+    <div class="bubble">The README quickstart still points at the old Forgejo URL. Fix it everywhere it's wrong, and file issues for anything you can't fix yourself.</div>
+    <div class="prose"><p>I'll find every reference to the old host first, then fix the ones that are plainly stale.</p></div>
+    <div class="steps-card">
+      <button type="button" class="steps-sum" data-act="toggle" data-host=".steps-card" data-cls="is-open" aria-expanded="false">
+        <svg class="i s"><use href="#i-check"/></svg>
+        <span class="sum-b"><span class="sum-t">Edited 4 files, opened PR #7, filed 3 issues</span><span class="sum-m">14 steps · 6m 12s</span></span>
+        <svg class="i s chev"><use href="#i-chev-d"/></svg>
+      </button>
+      <ol class="step-list">
+        <li class="step"><svg class="i s"><use href="#i-search"/></svg><span class="t">grep git.cloonar.com/Cloonar/coding-lab</span><span class="r">12 in 7 files</span></li>
+        <li class="step"><svg class="i s"><use href="#i-file"/></svg><span class="t">Read README.md, docs/ops.md, 2 more</span><span class="r">4 files</span></li>
+        <li class="step"><svg class="i s"><use href="#i-pencil"/></svg><span class="t">README.md</span><span class="r"><span class="add">+2</span> <span class="del">−2</span></span></li>
+        <li class="step"><svg class="i s"><use href="#i-pencil"/></svg><span class="t">docs/ops.md</span><span class="r"><span class="add">+1</span> <span class="del">−1</span></span></li>
+        <li class="step"><svg class="i s"><use href="#i-pencil"/></svg><span class="t">CONTRIBUTING.md</span><span class="r"><span class="add">+1</span> <span class="del">−1</span></span></li>
+        <li class="step"><svg class="i s"><use href="#i-pencil"/></svg><span class="t">nix/package.nix</span><span class="r"><span class="add">+2</span> <span class="del">−2</span></span></li>
+        <li class="step"><svg class="i s"><use href="#i-term"/></svg><span class="t">make test</span><span class="r">passed · 41s</span></li>
+        <li class="step"><svg class="i s"><use href="#i-term"/></svg><span class="t">labctl pr create</span><span class="r">PR #7</span></li>
+        <li class="step"><svg class="i s"><use href="#i-term"/></svg><span class="t">labctl issue create ×3</span><span class="r">#8 #9 #10</span></li>
+      </ol>
+    </div>
+    <div class="prose">
+      <p>Done on both fronts.</p>
+      <p><b>URL fix: PR <a href="#">#7</a></b> (closes #5). The README quickstart's flake input is now <code>github:Cloonar/coding-lab</code> and the clone URL points at GitHub. The same fix landed in <code>docs/ops.md</code>, <code>CONTRIBUTING.md</code> and both <code>meta.homepage</code> values in <code>nix/package.nix</code>.</p>
+      <p><b>Issues filed</b> for the rest, all labeled <code>needs-triage</code>:</p>
+      <ul><li><b>#8</b> README screenshots still show the old host</li><li><b>#9</b> repo description and topics need GitHub admin access</li><li><b>#10</b> Go module path rename, which has import-rewrite fallout</li></ul>
+    </div>
+    <div class="msg-actions"><button type="button"><svg class="i s"><use href="#i-copy"/></svg>Copy</button></div>
+
+    <div class="bubble">Good. Take #10 too and rename the Go module path.</div>
+    <div class="prose"><p>Renaming the module path touches every import, so I'm checking the blast radius before I edit anything.</p></div>
+
+    <div class="steps-card is-open" data-when="working">
+      <button type="button" class="steps-sum" data-act="toggle" data-host=".steps-card" data-cls="is-open" aria-expanded="true">
+        <span class="spin"></span>
+        <span class="sum-b"><span class="sum-t">Checking imports</span><span class="sum-m">3 steps · 0:48</span></span>
+        <svg class="i s chev"><use href="#i-chev-d"/></svg>
+      </button>
+      <ol class="step-list">
+        <li class="step"><svg class="i s"><use href="#i-search"/></svg><span class="t">grep git.cloonar.com/Cloonar/coding-lab *.go</span><span class="r">214 in 96 files</span></li>
+        <li class="step"><svg class="i s"><use href="#i-file"/></svg><span class="t">Read go.mod</span><span class="r">1 file</span></li>
+        <li class="step is-live"><svg class="i s"><use href="#i-term"/></svg><span class="t">go build ./...</span><span class="r">running · 0:23</span></li>
+      </ol>
+    </div>
+
+    <div class="steps-card" data-when="question idle">
+      <button type="button" class="steps-sum" data-act="toggle" data-host=".steps-card" data-cls="is-open" aria-expanded="false">
+        <svg class="i s"><use href="#i-check"/></svg>
+        <span class="sum-b"><span class="sum-t">Searched imports, build passes</span><span class="sum-m">3 steps · 1m 02s</span></span>
+        <svg class="i s chev"><use href="#i-chev-d"/></svg>
+      </button>
+      <ol class="step-list">
+        <li class="step"><svg class="i s"><use href="#i-search"/></svg><span class="t">grep git.cloonar.com/Cloonar/coding-lab *.go</span><span class="r">214 in 96 files</span></li>
+        <li class="step"><svg class="i s"><use href="#i-file"/></svg><span class="t">Read go.mod</span><span class="r">1 file</span></li>
+        <li class="step"><svg class="i s"><use href="#i-term"/></svg><span class="t">go build ./...</span><span class="r">passed · 37s</span></li>
+      </ol>
+    </div>
+    <div class="prose" data-when="question idle"><p>The rename is mechanical but large: 214 imports across 96 files. <span class="only-one">One decision</span><span class="only-many">Three decisions</span> before I start.</p></div>
+    <p class="life" data-when="question">Claude Code is asking <span class="only-one">a question</span><span class="only-many">3 questions</span>. Answer below.</p>
+
+    <div class="qa only-one" data-when="idle"><span class="q">Where should the rename land?</span><span class="a">Separate PR</span></div>
+    <div class="qa only-many" data-when="idle"><span class="q">Where should the rename land?</span><span class="a">Separate PR</span><span class="q">Keep the old import path working?</span><span class="a">No, clean break</span><span class="q">What else should change in the same PR?</span><span class="a">Docs and ADR samples, “also bump the README badge”</span></div>
+    <div class="steps-card" data-when="idle">
+      <button type="button" class="steps-sum" data-act="toggle" data-host=".steps-card" data-cls="is-open" aria-expanded="false">
+        <svg class="i s"><use href="#i-check"/></svg>
+        <span class="sum-b"><span class="sum-t">Edited 96 files, opened PR #11</span><span class="sum-m">9 steps · 3m 40s</span></span>
+        <svg class="i s chev"><use href="#i-chev-d"/></svg>
+      </button>
+      <ol class="step-list">
+        <li class="step"><svg class="i s"><use href="#i-term"/></svg><span class="t">git switch -c lab/module-path origin/main</span><span class="r">ok</span></li>
+        <li class="step"><svg class="i s"><use href="#i-pencil"/></svg><span class="t">go.mod and 95 more</span><span class="r"><span class="add">+215</span> <span class="del">−215</span></span></li>
+        <li class="step"><svg class="i s"><use href="#i-term"/></svg><span class="t">go build ./... &amp;&amp; make test</span><span class="r">passed · 1m 58s</span></li>
+        <li class="step"><svg class="i s"><use href="#i-term"/></svg><span class="t">labctl pr create</span><span class="r">PR #11</span></li>
+      </ol>
+    </div>
+    <div class="prose" data-when="idle">
+      <p>Opened <b>PR <a href="#">#11</a></b> (closes #10). The module path is now <code>github.com/Cloonar/coding-lab</code> in <code>go.mod</code> and all 214 imports. <code>go build</code> and <code>make test</code> pass.</p>
+      <p>PR #7 is untouched and ready to merge on its own.</p>
+    </div>
+    <div class="msg-actions" data-when="idle"><button type="button"><svg class="i s"><use href="#i-copy"/></svg>Copy</button></div>
+  </div></div>
+
+  <div class="dock">
+    <button type="button" class="jump" data-act="jump"><svg class="i s"><use href="#i-down"/></svg><span data-when="working idle">Latest</span><span data-when="question">Answer</span></button>
+    <div class="dock-in">
+      <div class="strip" data-when="working">
+        <span class="dot dot--working"></span><b>Working</b><span class="now">go build ./... · 0:23</span>
+        <button type="button" class="btn" data-act="state" data-to="idle"><svg class="i s"><use href="#i-pause"/></svg>Interrupt<kbd class="only-desktop">Esc</kbd></button>
+      </div>
+      <div class="strip" data-when="idle">
+        <span class="dot dot--idle"></span><b>Idle</b><span class="now">2 min ago</span>
+        <button type="button" class="btn"><svg class="i s"><use href="#i-pull"/></svg>Pull base · 3 behind</button>
+      </div>
+
+      <section class="answer only-one" data-when="question" aria-label="Claude Code is asking">
+        <div class="answer-hd"><span class="dot dot--question"></span><b class="not-chat">Claude Code is asking</b><b class="when-chat">Question on hold</b><span class="n not-chat">1 question</span>
+          <button type="button" class="btn when-chat" data-act="toggle" data-host=".dock-in" data-cls="is-chatting">Back to question</button>
+          <button type="button" class="icon-btn not-chat" data-act="toggle" data-host=".answer" data-cls="is-min" aria-label="Minimise"><svg class="i"><use href="#i-chev-d"/></svg></button></div>
+        <div class="answer-body">
+          <p class="answer-q">The rename rewrites 214 imports across 96 files. Where should it land?</p>
+          <div class="opts" role="radiogroup">
+              <button type="button" class="opt is-picked" role="radio" aria-checked="true" data-act="pick" data-name="Separate PR"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Separate PR<small>Recommended</small></span><kbd class="only-desktop">1</kbd><span class="opt-d">PR #7 stays a docs-only change that can merge today.</span></button>
+              <button type="button" class="opt" role="radio" aria-checked="false" data-act="pick" data-name="Add to PR #7"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Add to PR #7</span><kbd class="only-desktop">2</kbd><span class="opt-d">One PR, but the docs fix waits on a 96-file review.</span></button>
+              <button type="button" class="opt" role="radio" aria-checked="false" data-act="pick" data-name="Only write the plan"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Only write the plan</span><kbd class="only-desktop">3</kbd><span class="opt-d">Put the steps on issue #10 and stop.</span></button>
+          </div>
+          <button type="button" class="chat-about" data-chat><svg class="i s"><use href="#i-msg"/></svg>Chat about this</button>
+        </div>
+      </section>
+
+      <section class="answer mq only-many" data-when="question" aria-label="Claude Code is asking 3 questions">
+        <div class="answer-hd"><span class="dot dot--question"></span><b class="not-chat">Claude Code is asking</b><b class="when-chat">3 questions on hold</b><span class="n not-chat">3 questions</span>
+          <button type="button" class="btn when-chat" data-act="toggle" data-host=".dock-in" data-cls="is-chatting">Back to questions</button>
+          <button type="button" class="icon-btn not-chat" data-act="toggle" data-host=".answer" data-cls="is-min" aria-label="Minimise"><svg class="i"><use href="#i-chev-d"/></svg></button></div>
+        <div class="answer-body">
+          <div class="mq-steps" role="tablist" aria-label="Questions">
+            <button type="button" role="tab" class="mq-chip" data-go="0"><i>1</i>Landing</button>
+            <button type="button" role="tab" class="mq-chip" data-go="1"><i>2</i>Old path</button>
+            <button type="button" role="tab" class="mq-chip" data-go="2"><i>3</i>Also update</button>
+            <button type="button" role="tab" class="mq-chip" data-go="3">Review</button>
+          </div>
+          <div class="mq-pages">
+            <div class="mq-page" data-head="Landing">
+              <p class="answer-q">Where should the rename land?</p>
+              <div class="opts" role="radiogroup">
+              <button type="button" class="opt is-picked" role="radio" aria-checked="true" data-act="pick" data-name="Separate PR"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Separate PR<small>Recommended</small></span><kbd class="only-desktop">1</kbd><span class="opt-d">PR #7 stays a docs-only change that can merge today.</span></button>
+              <button type="button" class="opt" role="radio" aria-checked="false" data-act="pick" data-name="Add to PR #7"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Add to PR #7</span><kbd class="only-desktop">2</kbd><span class="opt-d">One PR, but the docs fix waits on a 96-file review.</span></button>
+              <button type="button" class="opt" role="radio" aria-checked="false" data-act="pick" data-name="Only write the plan"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Only write the plan</span><kbd class="only-desktop">3</kbd><span class="opt-d">Put the steps on issue #10 and stop.</span></button>
+              </div>
+            </div>
+            <div class="mq-page" data-head="Old path" hidden>
+              <p class="answer-q">Keep the old import path working?</p>
+              <div class="opts" role="radiogroup">
+              <button type="button" class="opt is-picked" role="radio" aria-checked="true" data-act="pick" data-name="No, clean break"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">No, clean break<small>Recommended</small></span><kbd class="only-desktop">1</kbd><span class="opt-d">Nothing outside this repo imports it.</span></button>
+              <button type="button" class="opt" role="radio" aria-checked="false" data-act="pick" data-name="Add a redirect"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Add a redirect</span><kbd class="only-desktop">2</kbd><span class="opt-d">git.cloonar.com keeps answering go get for the old path.</span></button>
+              </div>
+            </div>
+            <div class="mq-page" data-head="Also update" hidden>
+              <p class="answer-q">What else should change in the same PR? <small>Pick any that apply.</small></p>
+              <div class="opts" data-multi role="group">
+              <button type="button" class="opt" role="checkbox" aria-checked="false" data-act="pick" data-name="Docs and ADR samples"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Docs and ADR samples</span><kbd class="only-desktop">1</kbd><span class="opt-d">23 code samples quote the old path.</span></button>
+              <button type="button" class="opt" role="checkbox" aria-checked="false" data-act="pick" data-name="CI workflow paths"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">CI workflow paths</span><kbd class="only-desktop">2</kbd><span class="opt-d">Two workflows build by module path.</span></button>
+              <button type="button" class="opt" role="checkbox" aria-checked="false" data-act="pick" data-name="Nix vendorHash"><span class="radio"><svg class="i"><use href="#i-check"/></svg></span><span class="opt-l">Nix vendorHash</span><kbd class="only-desktop">3</kbd><span class="opt-d">Needs a rebuild to compute the new hash.</span></button>
+              </div>
+            </div>
+            <div class="mq-page mq-review" hidden>
+              <p class="answer-q">Check your answers</p>
+              <div class="mq-list"></div>
+            </div>
+          </div>
+          <button type="button" class="chat-about" data-chat><svg class="i s"><use href="#i-msg"/></svg>Chat about this</button>
+        </div>
+      </section>
+
+      <div class="composer" data-when="working idle">
+        <div class="cmd-pop" role="listbox" aria-label="Slash commands">
+          <button type="button" class="cmd" data-act="toggle" data-host=".composer" data-cls="cmds-open"><span class="mono">/pull-base</span><span class="src">lab</span><span class="ds">Merge origin/main into this run</span></button>
+          <button type="button" class="cmd" data-act="toggle" data-host=".composer" data-cls="cmds-open"><span class="mono">/clear</span><span class="src">claude</span><span class="ds">Start a new conversation</span></button>
+          <button type="button" class="cmd" data-act="toggle" data-host=".composer" data-cls="cmds-open"><span class="mono">/compact</span><span class="src">claude</span><span class="ds">Summarise the conversation to free context</span></button>
+          <button type="button" class="cmd" data-act="toggle" data-host=".composer" data-cls="cmds-open"><span class="mono">/code-review</span><span class="src">skill</span><span class="ds">Review the current diff for bugs</span></button>
+        </div>
+        <button type="button" class="slash" data-act="toggle" data-host=".composer" data-cls="cmds-open" aria-label="Slash commands" title="Slash commands">/</button>
+        <textarea rows="1" placeholder="Reply to Claude Code…" aria-label="Reply"></textarea>
+        <button type="button" class="send" aria-label="Send"><svg class="i"><use href="#i-up"/></svg></button>
+      </div>
+
+      <div class="composer composer--answer only-one" data-when="question">
+        <textarea rows="1" placeholder="Or type your own answer…" aria-label="Type your own answer"></textarea>
+        <button type="button" class="send wide" data-act="state" data-to="idle">Answer<svg class="i s"><use href="#i-up"/></svg></button>
+      </div>
+      <div class="composer composer--answer mq-composer only-many" data-when="question">
+        <textarea rows="1" class="mq-input" placeholder="Or type your own answer…" aria-label="Type your own answer to this question"></textarea>
+        <button type="button" class="send wide mq-next"><span>Next</span><svg class="i s"><use href="#i-right"/></svg></button>
+      </div>
+      <button type="button" class="send wide mq-send only-many" data-when="question" hidden data-act="state" data-to="idle"><span>Send 3 answers</span><svg class="i s"><use href="#i-up"/></svg></button>
+
+      <div class="composer composer--chat" data-when="question">
+        <div class="about"><svg class="i s"><use href="#i-msg"/></svg><span class="about-q">Where should the rename land?</span><button type="button" class="icon-btn" data-act="toggle" data-host=".dock-in" data-cls="is-chatting" aria-label="Back to the question"><svg class="i s"><use href="#i-x"/></svg></button></div>
+        <textarea rows="1" placeholder="Ask about this question…" aria-label="Chat about this question"></textarea>
+        <button type="button" class="send" data-act="state" data-to="working" aria-label="Send"><svg class="i"><use href="#i-up"/></svg></button>
+      </div>
+      <p class="chat-note" data-when="question">Sending sets the questions aside. Claude Code asks again after it has replied.</p>
+
+      <p class="hint only-desktop" data-when="working idle"><span><kbd>Enter</kbd> send</span><span><kbd>Shift</kbd> <kbd>Enter</kbd> new line</span><span><kbd>/</kbd> commands</span></p>
+      <p class="hint only-desktop not-chat" data-when="question"><span><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> pick</span><span><kbd>Enter</kbd> confirm</span><span class="only-many"><kbd>Tab</kbd> next question</span></p>
+    </div>
+  </div>
+
+  <div class="sheet-b sheet-b--info" aria-label="Run details">
+    <div class="grab only-phone"></div>
+    <dl class="facts">
+      <div class="fact"><dt>Model</dt><dd>Fable 5.1<small>high effort · set at start</small></dd></div>
+      <div class="fact"><dt>Context</dt><dd><span class="bar"></span><b>62%</b><small>124k of 200k tokens</small></dd></div>
+      <div class="fact"><dt>Branch</dt><dd><span class="mono">lab/20261004-1407</span></dd></div>
+      <div class="fact"><dt>Base</dt><dd><span class="mono">main</span><small>3 behind</small><button type="button" class="btn"><svg class="i s"><use href="#i-pull"/></svg>Pull base</button></dd></div>
+    </dl>
+    <p class="sheet-note">The ring turns amber at 80% and red at 95%.</p>
+  </div>
+  <div class="sheet-b sheet-b--menu" role="menu" aria-label="Run actions">
+    <div class="grab only-phone"></div>
+    <button type="button" class="menu-row" role="menuitem"><svg class="i"><use href="#i-pencil"/></svg>Rename run</button>
+    <button type="button" class="menu-row only-phone" role="menuitem"><svg class="i"><use href="#i-ext"/></svg>Open in Claude</button>
+    <button type="button" class="menu-row" role="menuitem"><svg class="i"><use href="#i-pr"/></svg>PR #7 on GitHub<span class="end">open</span></button>
+    <button type="button" class="menu-row" role="menuitem"><svg class="i"><use href="#i-plus"/></svg>New conversation<span class="end mono">/clear</span></button>
+    <div class="menu-sep"></div>
+    <button type="button" class="menu-row danger" role="menuitem"><svg class="i"><use href="#i-square"/></svg>Stop run…</button>
+  </div>
+</main>
+</div></template>
+<script>
+(function () {
+  var tpl = document.getElementById('app-tpl');
+  document.querySelectorAll('.frame').forEach(function (f) { f.appendChild(tpl.content.cloneNode(true)); });
+  var apps = Array.prototype.slice.call(document.querySelectorAll('.app'));
+  var sheet = document.querySelector('.sheet');
+
+  function toBottom() {
+    document.querySelectorAll('.stream, .autoscroll').forEach(function (s) { s.scrollTop = s.scrollHeight; });
+  }
+  function setState(s, q) {
+    apps.forEach(function (a) { a.dataset.state = s; if (q) a.dataset.q = q; a.classList.remove('sheet-open', 'rail-open', 'turns-open', 'info-open'); });
+    ['is-chatting', 'cmds-open', 'is-min'].forEach(function (c) { document.querySelectorAll('.' + c).forEach(function (e) { e.classList.remove(c); }); });
+    var curQ = apps[0] ? apps[0].dataset.q : '';
+    document.querySelectorAll('.seg [data-state]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.state === s && (!b.dataset.q || b.dataset.q === curQ))); });
+    document.dispatchEvent(new CustomEvent('labstate'));
+    try { localStorage.setItem('labchat-state', s); } catch (e) {}
+    requestAnimationFrame(toBottom);
+  }
+  var saved = null;
+  try { saved = localStorage.getItem('labchat-state'); } catch (e) {}
+  var hash = (location.hash || '').slice(1);
+  var initial = ['working', 'question', 'questions', 'idle'].indexOf(hash) >= 0 ? hash : (saved || 'question');
+  if (hash === 'question') setState('question', 'one');
+  else if (initial === 'questions') setState('question', 'many');
+  else setState(['working', 'question', 'idle'].indexOf(initial) >= 0 ? initial : 'question');
+  window.labSetState = setState;
+
+  document.addEventListener('click', function (e) {
+    var sb = e.target.closest('.seg [data-state]');
+    if (sb) { setState(sb.dataset.state, sb.dataset.q); return; }
+    if (e.target.closest('[data-notes]')) { sheet.classList.toggle('notes-open'); return; }
+    var t = e.target.closest('[data-act]');
+    if (!t) return;
+    var app = t.closest('.app');
+    var act = t.dataset.act;
+    if (act === 'toggle') {
+      var host = t.dataset.host ? t.closest(t.dataset.host) : app;
+      var on = host.classList.toggle(t.dataset.cls);
+      if (t.hasAttribute('aria-expanded')) t.setAttribute('aria-expanded', String(on));
+    } else if (act === 'close') {
+      app.classList.remove('rail-open', 'sheet-open', 'turns-open', 'info-open');
+    } else if (act === 'set') {
+      t.dataset.set.split(' ').forEach(function (kv) { var p = kv.split('='); app.setAttribute('data-' + p[0], p[1]); });
+      app.classList.remove('sheet-open');
+    } else if (act === 'pick') {
+      if (t.closest('.opts').hasAttribute('data-multi')) {
+        t.setAttribute('aria-checked', String(t.classList.toggle('is-picked')));
+      } else {
+        t.closest('.opts').querySelectorAll('.opt').forEach(function (o) { o.classList.remove('is-picked'); o.setAttribute('aria-checked', 'false'); });
+        t.classList.add('is-picked'); t.setAttribute('aria-checked', 'true');
+      }
+    } else if (act === 'state') {
+      setState(t.dataset.to);
+    } else if (act === 'jump') {
+      var st = app.querySelector('.stream'); st.scrollTo({ top: st.scrollHeight, behavior: 'smooth' });
+    } else if (act === 'goto') {
+      var el = app.querySelector(t.dataset.target);
+      if (el) app.querySelector('.stream').scrollTo({ top: el.offsetTop, behavior: 'smooth' });
+      app.classList.remove('sheet-open', 'turns-open');
+    }
+  });
+
+  // jump-to-latest shows only when the stream is scrolled away from the end
+  document.querySelectorAll('.stream').forEach(function (s) {
+    s.addEventListener('scroll', function () {
+      var away = s.scrollHeight - s.scrollTop - s.clientHeight > 120;
+      s.closest('.app').classList.toggle('scrolled-up', away);
+    }, { passive: true });
+  });
+
+  // scale the desktop frame down to the available width
+  var fit = document.querySelector('.fit'), desk = document.querySelector('.frame--desktop');
+  function refit() {
+    if (!fit || !desk) return;
+    var w = fit.clientWidth; if (!w) return;
+    var k = Math.min(1, w / 1240);
+    desk.style.transform = k < 1 ? 'scale(' + k + ')' : '';
+    fit.style.height = Math.round(760 * k) + 'px';
+  }
+  if (fit && 'ResizeObserver' in window) new ResizeObserver(refit).observe(fit);
+  window.addEventListener('resize', refit); refit();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(toBottom);
+  window.addEventListener('load', toBottom);
+})();
+// A · Dock — stepper for several questions, "chat about this", composer auto-grow
+(function () {
+  document.querySelectorAll('.dock-in').forEach(function (root) {
+    var panel = root.querySelector('.mq');
+    if (!panel) return;
+    var pages = [].slice.call(panel.querySelectorAll('.mq-page'));
+    var chips = [].slice.call(panel.querySelectorAll('.mq-chip'));
+    var input = root.querySelector('.mq-input'), next = root.querySelector('.mq-next');
+    var comp = root.querySelector('.mq-composer'), send = root.querySelector('.mq-send');
+    var list = panel.querySelector('.mq-list'), chat = panel.querySelector('.chat-about');
+    var n = pages.length - 1, cur = 0, done = [], custom = [];
+    var initial = pages.map(function (p) { return [].map.call(p.querySelectorAll('.opt'), function (o) { return o.classList.contains('is-picked'); }); });
+
+    function answer(i) {
+      var names = [].map.call(pages[i].querySelectorAll('.opt.is-picked'), function (o) { return o.dataset.name; });
+      if (custom[i]) names.push('“' + custom[i] + '”');
+      return names.join(', ');
+    }
+    function save() { if (cur < n) custom[cur] = input.value.trim(); }
+    function ready() { return cur < n && (pages[cur].querySelector('.opt.is-picked') || input.value.trim()); }
+    function render() {
+      pages.forEach(function (p, i) { p.hidden = i !== cur; });
+      chips.forEach(function (c, i) {
+        c.classList.toggle('is-cur', i === cur); c.classList.toggle('is-done', !!done[i]);
+        c.setAttribute('aria-selected', String(i === cur));
+        var b = c.querySelector('i'); if (b) b.textContent = done[i] ? '✓' : String(i + 1);
+      });
+      var steps = panel.querySelector('.mq-steps');
+      steps.scrollLeft = Math.max(0, chips[cur].offsetLeft - steps.offsetLeft - 40);
+      var review = cur === n;
+      comp.hidden = review; send.hidden = !review; chat.hidden = review;
+      if (!review) {
+        input.value = custom[cur] || ''; input.style.height = '';
+        next.querySelector('span').textContent = cur === n - 1 ? 'Review' : 'Next';
+        next.disabled = !ready();
+        return;
+      }
+      list.textContent = ''; var missing = 0;
+      for (var i = 0; i < n; i++) {
+        var a = answer(i); if (!a) missing++;
+        var row = document.createElement('button'); row.type = 'button'; row.className = 'mq-row'; row.dataset.go = String(i);
+        var h = document.createElement('span'); h.className = 'h'; h.textContent = pages[i].dataset.head;
+        var v = document.createElement('span'); v.className = 'a' + (a ? '' : ' none'); v.textContent = a || 'Not answered yet';
+        row.appendChild(h); row.appendChild(v);
+        row.insertAdjacentHTML('beforeend', '<svg class="i s"><use href="#i-pencil"/></svg>');
+        list.appendChild(row);
+      }
+      send.disabled = missing > 0;
+      send.querySelector('span').textContent = missing ? 'Answer every question first' : 'Send ' + n + ' answers';
+    }
+    function go(i) { save(); if (cur < n && answer(cur)) done[cur] = true; cur = i; render(); }
+
+    root.addEventListener('click', function (e) {
+      var g = e.target.closest('[data-go]');
+      if (g) { go(Number(g.dataset.go)); return; }
+      if (e.target.closest('.mq-next')) { if (ready()) go(cur + 1); return; }
+      var o = e.target.closest('.mq .opt');
+      if (o && cur < n) {
+        // a picked option replaces a typed answer on single-choice questions
+        setTimeout(function () {
+          if (!pages[cur].querySelector('.opts[data-multi]')) { input.value = ''; custom[cur] = ''; }
+          next.disabled = !ready();
+        }, 0);
+      }
+    });
+    input.addEventListener('input', function () {
+      if (input.value.trim() && !pages[cur].querySelector('.opts[data-multi]')) {
+        pages[cur].querySelectorAll('.opt').forEach(function (x) { x.classList.remove('is-picked'); x.setAttribute('aria-checked', 'false'); });
+      }
+      next.disabled = !ready();
+    });
+    document.addEventListener('labstate', function () {
+      cur = 0; done = []; custom = [];
+      pages.forEach(function (p, i) { [].forEach.call(p.querySelectorAll('.opt'), function (o, k) { o.classList.toggle('is-picked', !!initial[i][k]); o.setAttribute('aria-checked', String(!!initial[i][k])); }); });
+      render();
+    });
+    render();
+  });
+
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-chat]');
+    if (!t) return;
+    var root = t.closest('.dock-in'), a = t.closest('.answer');
+    var q = a.querySelector('.mq-page:not([hidden]) .answer-q') || a.querySelector('.answer-q');
+    root.querySelector('.about-q').textContent = q.firstChild.textContent.trim();
+    root.classList.add('is-chatting');
+    var ta = root.querySelector('.composer--chat textarea'); if (ta) ta.focus({ preventScroll: true });
+  });
+  document.addEventListener('input', function (e) {
+    var ta = e.target.closest('.composer textarea');
+    if (!ta) return;
+    ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 132) + 'px';
+  });
+})();
+</script>
+</body>
+</html>
