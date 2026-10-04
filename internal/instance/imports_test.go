@@ -29,7 +29,7 @@ func (f *fixture) addImportTarget(t *testing.T, name, cloneStatus string) (store
 	target, err := f.st.CreateRepo(t.Context(), store.Repo{
 		ID: repoID, Name: name, RemoteURL: "file://" + origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: store.RunnerHost,
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: new(store.RunnerHost),
 		CloneStatus: cloneStatus, CreatedAt: clockTime,
 	})
 	if err != nil {

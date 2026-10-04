@@ -10,9 +10,11 @@ package pull
 // into.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -224,7 +226,7 @@ func newFixture(t *testing.T, mod func(*store.Repo)) *fixture {
 		ID: repoID, Name: "proj", RemoteURL: origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
 		GitAuthorName: &name, GitAuthorEmail: &email,
-		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: store.RunnerHost,
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: new(store.RunnerHost),
 		CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
 	}
 	if mod != nil {
@@ -296,7 +298,7 @@ func (f *fixture) addImportTarget(name string) (store.Repo, string) {
 	target, err := f.st.CreateRepo(f.t.Context(), store.Repo{
 		ID: repoID, Name: name, RemoteURL: origin,
 		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
-		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: store.RunnerHost,
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: new(store.RunnerHost),
 		CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
 	})
 	if err != nil {
@@ -326,7 +328,7 @@ func (f *fixture) spawnSnapshot(target store.Repo) (dest, commit string) {
 	if err := os.WriteFile(dest+".commit", []byte(commit+"\n"), 0o600); err != nil {
 		f.t.Fatalf("write commit sidecar: %v", err)
 	}
-	if f.repo.Runner != store.RunnerContainer {
+	if f.repo.Runner == nil || *f.repo.Runner != store.RunnerContainer {
 		if err := protectSnapshot(dest); err != nil {
 			f.t.Fatalf("protectSnapshot: %v", err)
 		}
@@ -800,16 +802,28 @@ func TestPullBase_importRefreshFailureReportedNotFatal(t *testing.T) {
 // same path would hold the same content under weaker modes than the spawn gave
 // it. Under the container runner the tree stays writable host-side — the `:ro`
 // bind is the enforcement there, and /pull-base has to be able to rewrite it.
+// The Runner deciding it is the EFFECTIVE one (issue #55, through
+// instance.EffectiveRunner): a pin wins, and an inheriting repo follows the
+// global runner_default as it stands at refresh time.
 func TestPullBase_importWriteProtectionFollowsRunner(t *testing.T) {
 	for _, tc := range []struct {
-		runner      string
-		wantWritten bool // may the refreshed tree still be written host-side?
+		name        string
+		pin         *string // the repo's runner column; nil = inherit
+		def         string  // the runner_default row; "" = no row
+		wantWritten bool    // may the refreshed tree still be written host-side?
 	}{
-		{store.RunnerHost, false},
-		{store.RunnerContainer, true},
+		{"pinned host", new(store.RunnerHost), store.RunnerContainer, false},
+		{"pinned container", new(store.RunnerContainer), store.RunnerHost, true},
+		{"inherit host", nil, store.RunnerHost, false},
+		{"inherit container", nil, store.RunnerContainer, true},
 	} {
-		t.Run(tc.runner, func(t *testing.T) {
-			f := newFixture(t, func(r *store.Repo) { r.Runner = tc.runner })
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, func(r *store.Repo) { r.Runner = tc.pin })
+			if tc.def != "" {
+				if err := f.st.SetSetting(t.Context(), store.SettingRunnerDefault, tc.def); err != nil {
+					t.Fatalf("SetSetting(runner_default): %v", err)
+				}
+			}
 			target, targetOrigin := f.addImportTarget("libcore")
 			dest, _ := f.spawnSnapshot(target)
 			f.advanceImport(targetOrigin, "api.go", "package api // v2\n")
@@ -827,8 +841,63 @@ func TestPullBase_importWriteProtectionFollowsRunner(t *testing.T) {
 					t.Fatalf("stat %s: %v", p, err)
 				}
 				if writable := fi.Mode().Perm()&0o222 != 0; writable != tc.wantWritten {
-					t.Errorf("%s is mode %04o after a %s-runner refresh, want writable=%v",
-						p, fi.Mode().Perm(), tc.runner, tc.wantWritten)
+					t.Errorf("%s is mode %04o after a %s refresh, want writable=%v",
+						p, fi.Mode().Perm(), tc.name, tc.wantWritten)
+				}
+			}
+		})
+	}
+}
+
+// An UNRESOLVABLE Runner never fails a refresh (issue #55): an inheriting repo
+// whose runner_default row is absent or holds neither host nor container
+// cannot say whether its snapshots get the advisory write protection, so the
+// refresh skips it and logs a warning naming the setting — the import still
+// refreshes and the digest still reports it. The spawn-time snapshot is
+// write-protected (the run spawned while the default was still host), so a
+// writable tree afterwards proves the protection was skipped, not guessed.
+func TestPullBase_unresolvableRunnerSkipsProtectionAndLogs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		def  string // the runner_default row; "" = no row at all
+		want []string
+	}{
+		{"absent runner_default", "", []string{"runner_default", "not found"}},
+		{"invalid runner_default", "podman", []string{"runner_default", `\"podman\"`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, func(r *store.Repo) { r.Runner = nil })
+			target, targetOrigin := f.addImportTarget("libcore")
+			dest, _ := f.spawnSnapshot(target) // inherit → protected, as a host spawn would be
+			if tc.def != "" {
+				if err := f.st.SetSetting(t.Context(), store.SettingRunnerDefault, tc.def); err != nil {
+					t.Fatalf("SetSetting(runner_default): %v", err)
+				}
+			}
+			var logs bytes.Buffer
+			f.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+			newImportCommit := f.advanceImport(targetOrigin, "api.go", "package api // v2\n")
+
+			res, err := f.svc.PullBase(t.Context(), f.run)
+			if err != nil {
+				t.Fatalf("PullBase: %v — an unresolvable Runner must not fail the refresh", err)
+			}
+			if len(res.Imports) != 1 || res.Imports[0].Failed || res.Imports[0].New != newImportCommit {
+				t.Fatalf("Imports = %+v, want one successful refresh to %s", res.Imports, newImportCommit)
+			}
+			for _, p := range []string{dest, filepath.Join(dest, "api.go")} {
+				fi, err := os.Stat(p)
+				if err != nil {
+					t.Fatalf("stat %s: %v", p, err)
+				}
+				if fi.Mode().Perm()&0o200 == 0 {
+					t.Errorf("%s is mode %04o — the protection was applied despite an unresolvable Runner", p, fi.Mode().Perm())
+				}
+			}
+			out := logs.String()
+			for _, want := range append([]string{"level=WARN", "component=pull", "run=" + f.run.ID, "import=libcore"}, tc.want...) {
+				if !strings.Contains(out, want) {
+					t.Errorf("log does not contain %q:\n%s", want, out)
 				}
 			}
 		})

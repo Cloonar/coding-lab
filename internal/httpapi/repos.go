@@ -90,20 +90,22 @@ type repoResponse struct {
 	LanderModel  *string `json:"lander_model"`
 	LanderEffort *string `json:"lander_effort"`
 	// Runner (issue #205): host (today's prlimit-wrapped pane, unsandboxed —
-	// full host access) or container (rootless podman). NOT NULL — no inherit
-	// state, unlike the nullable overrides below.
-	Runner string `json:"runner"`
+	// full host access) or container (rootless podman) when the repo pins one,
+	// null when it inherits the global runner_default setting (issue #55 —
+	// every new repo starts null). It is the repo's own LAYER, not the
+	// effective Runner: the spawn resolves null live, at each spawn.
+	Runner *string `json:"runner"`
 	// ContainerMemory/ContainerPids/ContainerNofile are the container-mode
 	// resource-limit overrides (issue #205): null means inherit the matching
 	// global container_memory/container_pids/container_nofile setting. All
-	// three stay meaningless while Runner is "host".
+	// three stay meaningless while the effective Runner is "host".
 	ContainerMemory *string `json:"container_memory"`
 	ContainerPids   *int    `json:"container_pids"`
 	ContainerNofile *int    `json:"container_nofile"`
 	// ImageRef is the repo's dev container image override (issue #207): null
 	// means inherit the globally configured default dev image. A non-null value
-	// is always digest-pinned (reposvc pins it on save). Meaningless while Runner
-	// is "host", same as the container limits above.
+	// is always digest-pinned (reposvc pins it on save). Meaningless while the
+	// effective Runner is "host", same as the container limits above.
 	ImageRef *string `json:"image_ref"`
 }
 
@@ -406,9 +408,13 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			// No write-time catalog validation (issue #189): see lander_model.
 			u.LanderEffort, err = patchNullableString(raw, key)
 		case "runner":
-			// NOT NULL (issue #205): null rejected, same as tracker_binding; the
-			// host|container enum itself is checked in reposvc.UpdateSettings.
-			u.Runner, err = patchString(raw, key)
+			// Tri-state (issue #55): null clears the pin (inherit the global
+			// runner_default); a string pins. Decoded STRICTLY — unlike
+			// patchNullableString, "" and whitespace are NOT folded into null,
+			// so a blank value reaches reposvc.UpdateSettings verbatim and is
+			// refused there (400) with the host|container enum, instead of
+			// silently un-pinning the repo.
+			u.Runner, err = patchStrictNullableString(raw, key)
 		case "container_memory":
 			// Nullable (issue #205): null clears back to the global default; a
 			// non-null value's podman --memory grammar is checked in
@@ -484,6 +490,19 @@ func patchNullableString(raw json.RawMessage, field string) (store.Opt[*string],
 	}
 	if v != nil && strings.TrimSpace(*v) == "" {
 		v = nil
+	}
+	return store.Set(v), nil
+}
+
+// patchStrictNullableString reads a nullable-string PATCH field WITHOUT
+// patchNullableString's blank folding (issue #55): null → Set(nil), any string
+// — "" and whitespace included — → Set(&v) verbatim, for an enum column where
+// null is the one spelling of "inherit" and a blank value must reach the
+// service's validation as the invalid value it is.
+func patchStrictNullableString(raw json.RawMessage, field string) (store.Opt[*string], error) {
+	var v *string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return store.Opt[*string]{}, fmt.Errorf("field %s must be a string or null", field)
 	}
 	return store.Set(v), nil
 }

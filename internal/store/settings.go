@@ -101,6 +101,21 @@ const (
 	SettingContainerMemory = "container_memory"
 	SettingContainerPids   = "container_pids"
 	SettingContainerNofile = "container_nofile"
+
+	// Global runner default (issue #55): the Runner a repo with a NULL
+	// repos.runner inherits — RunnerHost or RunnerContainer, nothing else.
+	// Like the container limits above it IS seeded (to host), and for the
+	// same reason: a spawn always needs a concrete Runner and there is no
+	// lower layer to inherit from — and seeding host means an upgrade changes
+	// nothing by itself, since every pre-existing repo was migrated as a pin
+	// (migration 0024) and only new repos inherit. Inheritance is live: the
+	// effective-Runner resolver (instance.EffectiveRunner) reads this row
+	// per spawn and never caches it, so a change reaches every inheriting
+	// repo's NEXT spawn while runs already alive are untouched. A missing row
+	// or a value outside the enum refuses an inheriting repo's spawn naming
+	// this key — never a silent fall back to host. There is no server flag
+	// and no NixOS option for it: the settings row is the only source.
+	SettingRunnerDefault = "runner_default"
 )
 
 // Container resource-limit defaults — the ONE source of the grilled #205
@@ -243,7 +258,10 @@ func (s *Store) GetBool(ctx context.Context, key string, def bool) (bool, error)
 // unseeded, like the other _afk keys. The container limit trio (issue #205)
 // is seeded the same way and for the same reason: a container-mode spawn
 // always needs a concrete --memory/--pids-limit/--ulimit nofile, so there is
-// no lower layer for "absent" to fall back to.
+// no lower layer for "absent" to fall back to. runner_default (issue #55)
+// joins them on the same footing, seeded host so an upgrade spawns exactly
+// as before; like every row here an existing value — an operator's
+// container — survives re-seeding untouched.
 func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defaultProvider string) error {
 	defaults := map[string]string{
 		SettingSpawnModelDefault:    "opus[1m]",
@@ -260,6 +278,7 @@ func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defau
 		SettingContainerMemory:      DefaultContainerMemory,
 		SettingContainerPids:        strconv.Itoa(DefaultContainerPids),
 		SettingContainerNofile:      strconv.Itoa(DefaultContainerNofile),
+		SettingRunnerDefault:        RunnerHost,
 	}
 	for key, value := range defaults {
 		_, err := s.db.ExecContext(ctx, s.rebind(

@@ -232,9 +232,11 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 			repo["autoland_enabled"], repo["max_fix_attempts"], repo["auto_merge"],
 			repo["lander_provider"], repo["lander_model"], repo["lander_effort"])
 	}
-	// Runner (issue #205) defaults to host with every limit override nil.
-	if repo["runner"] != "host" {
-		t.Errorf("runner = %v, want host", repo["runner"])
+	// Runner (issue #205) is null at create since issue #55 — the repo
+	// inherits the global runner_default — with every limit override nil. The
+	// key is still present (the pinned-keys loop below), just null.
+	if repo["runner"] != nil {
+		t.Errorf("runner = %v, want null (inherit the global runner default)", repo["runner"])
 	}
 	if repo["container_memory"] != nil || repo["container_pids"] != nil || repo["container_nofile"] != nil {
 		t.Errorf("container overrides = %v/%v/%v, want null/null/null at create",
@@ -460,6 +462,9 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 		"wrong type":            {"incogni": "yes"},
 		// Runner + container limits (issue #205).
 		"unknown runner":       {"runner": "bogus"},
+		"empty runner":         {"runner": ""},   // issue #55: blank is not a spelling of inherit
+		"blank runner":         {"runner": "  "}, // nor is whitespace
+		"non-string runner":    {"runner": 1},
 		"bad container memory": {"container_memory": "9x"},
 		"container pids zero":  {"container_pids": 0},
 	} {
@@ -535,6 +540,60 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 	resp = x.do("PATCH", "/api/v1/repos/repo_missing", map[string]any{"name": "x"}, h)
 	wantStatus(t, resp, http.StatusNotFound)
 	_ = decodeBody(t, resp)
+}
+
+// TestRepoPatchRunnerTriState pins the repo Runner's wire contract (issue
+// #55): a created repo's runner is null (inherit the global runner_default);
+// PATCH round-trips "host" and "container" as pins and null back to inherit,
+// each echoed by the PATCH response and by a fresh GET; and every other value
+// — "bogus", "", whitespace — is a 400 that leaves the stored pin untouched.
+// "" is the one that matters most: folded into null like other nullable
+// strings, a blanked field would silently un-pin a repo the operator pinned.
+func TestRepoPatchRunnerTriState(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+
+	resp := x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	created := decodeBody(t, resp)
+	if v, ok := created["runner"]; !ok || v != nil {
+		t.Fatalf("created runner = %v (present %v), want a present null", v, ok)
+	}
+	id := created["id"].(string)
+	x.waitCloneStatus(t, id, "ready")
+
+	for _, step := range []struct {
+		send any // the PATCH runner value
+		want any // the echoed runner: a string pin, or nil for inherit
+	}{
+		{"host", "host"},
+		{"container", "container"},
+		{nil, nil},
+		{"container", "container"},
+	} {
+		resp := x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"runner": step.send}, h)
+		wantStatus(t, resp, http.StatusOK)
+		if got := decodeBody(t, resp)["runner"]; got != step.want {
+			t.Errorf("PATCH runner=%v echoed %v, want %v", step.send, got, step.want)
+		}
+		if got := x.getRepo(t, id)["runner"]; got != step.want {
+			t.Errorf("GET after PATCH runner=%v = %v, want %v", step.send, got, step.want)
+		}
+	}
+
+	// Invalid values are 400s and leave the container pin from the last step
+	// exactly where it was.
+	for _, bad := range []any{"bogus", "", "   ", "HOST"} {
+		resp := x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"runner": bad}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if msg, _ := decodeBody(t, resp)["error"].(string); !strings.Contains(msg, "runner") {
+			t.Errorf("PATCH runner=%q error = %q, want it to name the runner field", bad, msg)
+		}
+		if got := x.getRepo(t, id)["runner"]; got != "container" {
+			t.Errorf("runner after rejected PATCH %q = %v, want the container pin untouched", bad, got)
+		}
+	}
 }
 
 // TestRepoAFKPromptOverride pins the #52/ADR-0027 repo surface: afk_prompt is

@@ -60,6 +60,12 @@ type fixtureOpts struct {
 	modelDef   *string
 	effortDef  *string
 	extraProvs []provider.AgentProvider
+	// noSeed skips SeedDefaultSettings, leaving the settings table empty — the
+	// only way to reach an ABSENT runner_default row (issue #55) through the
+	// public store API, which has no delete. Every other setting the spawn
+	// path reads has a code default, so a spawn still gets as far as the
+	// Runner resolution.
+	noSeed bool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -80,8 +86,10 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 
 	git := gitx.New("git")
 	st := testutil.TempStore(t)
-	if err := st.SeedDefaultSettings(t.Context(), 6, "claude-code"); err != nil {
-		t.Fatalf("SeedDefaultSettings: %v", err)
+	if !o.noSeed {
+		if err := st.SeedDefaultSettings(t.Context(), 6, "claude-code"); err != nil {
+			t.Fatalf("SeedDefaultSettings: %v", err)
+		}
 	}
 	repoID := ids.NewID("repo")
 	bare := filepath.Join(reposDir, repoID+".git")

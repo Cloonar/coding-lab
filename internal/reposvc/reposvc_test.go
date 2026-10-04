@@ -258,10 +258,11 @@ func TestAddCloneLifecycle(t *testing.T) {
 	if repo.AFKBranchPattern != "afk/<N>" || repo.ManualBranchPrefix != "lab/" {
 		t.Errorf("patterns = %q/%q, want afk/<N> and lab/", repo.AFKBranchPattern, repo.ManualBranchPrefix)
 	}
-	// Runner (issue #205) is NOT NULL: Add must stamp the host default itself
-	// rather than let CreateRepo insert the Go zero string.
-	if repo.Runner != store.RunnerHost {
-		t.Errorf("runner = %q, want %q", repo.Runner, store.RunnerHost)
+	// Runner (issue #205) starts nil since issue #55: a new repo INHERITS the
+	// global runner_default rather than being stamped host — the spawn resolves
+	// it live, so a later change of the default reaches this repo too.
+	if repo.Runner != nil {
+		t.Errorf("runner = %q, want nil (inherit the global runner default)", *repo.Runner)
 	}
 	if repo.ContainerMemory != nil || repo.ContainerPids != nil || repo.ContainerNofile != nil {
 		t.Errorf("container overrides = %v/%v/%v, want nil/nil/nil at create", repo.ContainerMemory, repo.ContainerPids, repo.ContainerNofile)
@@ -940,8 +941,10 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 		{Name: store.Set("   ")}, // whitespace-only sanitizes to ""
 		// Runner/container overrides (issue #205): the enum and the
 		// podman-flavored grammars all reject bad input as a BadRequestError.
-		{Runner: store.Set("bogus")},
-		{Runner: store.Set("")}, // NOT NULL: a PATCH must send a concrete value
+		{Runner: store.Set(ptr("bogus"))},
+		// Blank is NOT a spelling of inherit (issue #55): only nil un-pins.
+		{Runner: store.Set(ptr(""))},
+		{Runner: store.Set(ptr("  "))},
 		{ContainerMemory: store.Set(ptr("9x"))},
 		{ContainerPids: store.Set(ptr(0))},
 		{ContainerNofile: store.Set(ptr(0))},
@@ -991,11 +994,10 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 		t.Errorf("budget_minutes = %v, want nil", updated.BudgetMinutes)
 	}
 
-	// Runner (issue #205): flip to container and set all three limit
-	// overrides, then clear them back to nil (inherit) without touching
-	// runner.
+	// Runner (issue #205): pin container and set all three limit overrides,
+	// then clear them back to nil (inherit) without touching runner.
 	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
-		Runner:          store.Set(store.RunnerContainer),
+		Runner:          store.Set(ptr(store.RunnerContainer)),
 		ContainerMemory: store.Set(ptr("512m")),
 		ContainerPids:   store.Set(ptr(2048)),
 		ContainerNofile: store.Set(ptr(8192)),
@@ -1003,7 +1005,7 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateSettings runner+limits: %v", err)
 	}
-	if updated.Runner != store.RunnerContainer ||
+	if updated.Runner == nil || *updated.Runner != store.RunnerContainer ||
 		updated.ContainerMemory == nil || *updated.ContainerMemory != "512m" ||
 		updated.ContainerPids == nil || *updated.ContainerPids != 2048 ||
 		updated.ContainerNofile == nil || *updated.ContainerNofile != 8192 {
@@ -1020,8 +1022,29 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 	if updated.ContainerMemory != nil || updated.ContainerPids != nil || updated.ContainerNofile != nil {
 		t.Errorf("cleared limits = %v/%v/%v, want nil/nil/nil", updated.ContainerMemory, updated.ContainerPids, updated.ContainerNofile)
 	}
-	if updated.Runner != store.RunnerContainer {
+	if updated.Runner == nil || *updated.Runner != store.RunnerContainer {
 		t.Error("clearing limit overrides silently reset runner")
+	}
+
+	// Runner tri-state round trip (issue #55): nil clears the pin back to
+	// inherit, and host re-pins — each read back exactly as written.
+	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		Runner: store.Set[*string](nil),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings runner=nil: %v", err)
+	}
+	if updated.Runner != nil {
+		t.Errorf("runner after nil = %q, want nil (inherit)", *updated.Runner)
+	}
+	updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		Runner: store.Set(ptr(store.RunnerHost)),
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings runner=host: %v", err)
+	}
+	if updated.Runner == nil || *updated.Runner != store.RunnerHost {
+		t.Errorf("runner after host = %v, want the host pin", updated.Runner)
 	}
 
 	waitFor(t, "repo.changed after PATCH", func() bool {

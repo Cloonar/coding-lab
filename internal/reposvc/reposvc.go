@@ -487,9 +487,12 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		CreatedAt:          s.now(),
 		MaxFixAttempts:     defaultMaxFixAttempts,
 		AutoMerge:          defaultAutoMerge,
-		// Runner (issue #205) is NOT NULL: stamp the host default explicitly
-		// so CreateRepo never inserts the Go zero string "" into it.
-		Runner: store.RunnerHost,
+		// Runner (issue #205) starts nil: a new repo INHERITS the global
+		// runner_default setting (issue #55), resolved live at each spawn by
+		// instance.EffectiveRunner, until the operator pins it. Existing repos
+		// were migrated as pins (migration 0024), so this stamp is the only
+		// way a repo ever starts out inheriting.
+		Runner: nil,
 	}
 	created, err := s.store.CreateRepo(ctx, repo)
 	if err != nil {
@@ -633,14 +636,17 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		u.DefaultBranch.Value = branch
 	}
 
-	// Runner (issue #205): a plain two-value enum, exactly like tracker_binding
-	// above — no inherit state, since repos.runner is NOT NULL. An empty string
-	// is not valid either: a PATCH must send a concrete "host" or "container".
-	if u.Runner.Set {
-		switch u.Runner.Value {
+	// Runner (issue #205): nil clears the pin back to NULL — inherit the
+	// global runner_default (issue #55) — and a non-nil value must be one of
+	// the two-value enum, exactly like tracker_binding above. An empty or
+	// blank string is NOT a spelling of inherit: the API layer passes it
+	// through verbatim so it lands here as the 400 it is, rather than being
+	// folded into nil and silently un-pinning the repo.
+	if u.Runner.Set && u.Runner.Value != nil {
+		switch *u.Runner.Value {
 		case store.RunnerHost, store.RunnerContainer:
 		default:
-			return store.Repo{}, badRequestf("runner: must be %q or %q", store.RunnerHost, store.RunnerContainer)
+			return store.Repo{}, badRequestf("runner: must be %q, %q, or null (inherit the global runner default)", store.RunnerHost, store.RunnerContainer)
 		}
 	}
 	// container_memory (issue #205): nullable — null clears the per-repo

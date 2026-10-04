@@ -66,16 +66,24 @@ const (
 	testToolsImage = "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef"
 )
 
-// enableContainer flips the fixture repo to Runner=container and wires the
-// service's container seam: an OK preflight, the recording exec seam, and
-// the canonical images. Returns the recorder for backstop assertions.
+// enableContainer pins the fixture repo to Runner=container and wires the
+// service's container seam (wireContainer). Returns the recorder for backstop
+// assertions.
 func (f *fixture) enableContainer(t *testing.T) *recordingCmdRunner {
 	t.Helper()
 	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
-		Runner: store.Set(store.RunnerContainer),
+		Runner: store.Set(new(store.RunnerContainer)),
 	}); err != nil {
 		t.Fatalf("UpdateRepoSettings(runner=container): %v", err)
 	}
+	return f.wireContainer()
+}
+
+// wireContainer wires the service's container seam WITHOUT touching the
+// repo's Runner: an OK preflight, the recording exec seam, and the canonical
+// images — so a test can let the Runner come from the global runner_default
+// (issue #55) and still see a green container spawn.
+func (f *fixture) wireContainer() *recordingCmdRunner {
 	rec := newRecordingCmdRunner()
 	f.svc.podmanBin = testPodmanBin
 	f.svc.containerImage = testDevImage

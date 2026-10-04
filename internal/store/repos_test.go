@@ -2,12 +2,22 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
+
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
+	"git.cloonar.com/Cloonar/coding-lab/migrations"
 )
 
 // testRepo builds a minimal valid Repo the way the API layer would: every
@@ -32,13 +42,12 @@ func testRepo(name string, createdAt time.Time) Repo {
 		// ManualBranchPrefix above already are. LanderModel/LanderEffort (issue
 		// #189) are nullable with no default, so nil is already the Go zero
 		// value — nothing to set here.
+		// Runner (issue #205) is nullable since issue #55 and reposvc.Add
+		// stamps nil (inherit the global runner_default), as do
+		// ContainerMemory/ContainerPids/ContainerNofile — so the Go zero value
+		// already mirrors the caller's defaults and nothing is set here.
 		MaxFixAttempts: 2,
 		AutoMerge:      true,
-		// Runner (issue #205) is NOT NULL; the caller (reposvc.Add) always
-		// stamps the host default, mirrored here. ContainerMemory/
-		// ContainerPids/ContainerNofile are nullable with no default, so nil
-		// is already the Go zero value.
-		Runner: RunnerHost,
 	}
 }
 
@@ -655,10 +664,11 @@ func TestRepoAutolandColumnsRoundTrip(t *testing.T) {
 }
 
 // TestRepoContainerRunnerColumnsRoundTrip pins the repos.runner tracer-bullet
-// slice (issue #205): a full container-mode repo with all three limit
-// overrides set round-trips; a minimal repo defaults to runner="host" with
-// every override nil; and UpdateRepoSettings both sets and clears the
-// overrides back to nil (inherit the global settings).
+// slice (issue #205) and its inherit state (issue #55): a full container-mode
+// repo with all three limit overrides set round-trips; a minimal repo
+// defaults to runner nil (inherit the global runner_default) with every
+// override nil; and UpdateRepoSettings both sets and clears the runner pin
+// and the overrides back to nil (inherit).
 func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
@@ -666,7 +676,7 @@ func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
 
 		// Create with every knob set away from its default.
 		full := testRepo("runnerfull", now)
-		full.Runner = RunnerContainer
+		full.Runner = strPtr(RunnerContainer)
 		full.ContainerMemory = strPtr("4g")
 		full.ContainerPids = intPtr(2048)
 		full.ContainerNofile = intPtr(8192)
@@ -682,8 +692,9 @@ func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
 			t.Errorf("container runner columns round trip mismatch:\n got %+v\nwant %+v", got, created)
 		}
 
-		// A minimal repo carries the caller-applied default: host, every
-		// override nil (inherit the global settings).
+		// A minimal repo carries the caller-applied default: runner nil
+		// (inherit runner_default, issue #55), every override nil (inherit the
+		// global settings).
 		min := testRepo("runnermin", now)
 		if _, err := s.CreateRepo(ctx, min); err != nil {
 			t.Fatalf("create minimal: %v", err)
@@ -692,15 +703,15 @@ func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("by id minimal: %v", err)
 		}
-		if gotMin.Runner != RunnerHost || gotMin.ContainerMemory != nil ||
+		if gotMin.Runner != nil || gotMin.ContainerMemory != nil ||
 			gotMin.ContainerPids != nil || gotMin.ContainerNofile != nil {
-			t.Errorf("minimal repo runner columns = runner=%v memory=%v pids=%v nofile=%v, want host/nil/nil/nil",
+			t.Errorf("minimal repo runner columns = runner=%v memory=%v pids=%v nofile=%v, want nil/nil/nil/nil",
 				gotMin.Runner, gotMin.ContainerMemory, gotMin.ContainerPids, gotMin.ContainerNofile)
 		}
 
-		// Patch: flip to container and set all three overrides.
+		// Patch: pin container and set all three overrides.
 		updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
-			Runner:          Set(RunnerContainer),
+			Runner:          Set(strPtr(RunnerContainer)),
 			ContainerMemory: Set(strPtr("8g")),
 			ContainerPids:   Set(intPtr(4096)),
 			ContainerNofile: Set(intPtr(16384)),
@@ -708,15 +719,15 @@ func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("update: %v", err)
 		}
-		if updated.Runner != RunnerContainer ||
+		if updated.Runner == nil || *updated.Runner != RunnerContainer ||
 			updated.ContainerMemory == nil || *updated.ContainerMemory != "8g" ||
 			updated.ContainerPids == nil || *updated.ContainerPids != 4096 ||
 			updated.ContainerNofile == nil || *updated.ContainerNofile != 16384 {
 			t.Errorf("patched runner columns = %+v, want container/8g/4096/16384", updated)
 		}
 
-		// Patch: clear the three overrides back to NULL (inherit); runner
-		// (NOT NULL, untouched by this patch) stays container.
+		// Patch: clear the three overrides back to NULL (inherit); the runner
+		// pin (untouched by this patch) stays container.
 		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
 			ContainerMemory: Set[*string](nil),
 			ContainerPids:   Set[*int](nil),
@@ -729,8 +740,20 @@ func TestRepoContainerRunnerColumnsRoundTrip(t *testing.T) {
 			t.Errorf("cleared container overrides = %v/%v/%v, want nil/nil/nil",
 				updated.ContainerMemory, updated.ContainerPids, updated.ContainerNofile)
 		}
-		if updated.Runner != RunnerContainer {
+		if updated.Runner == nil || *updated.Runner != RunnerContainer {
 			t.Errorf("unrelated runner column changed by clear patch: %v", updated.Runner)
+		}
+
+		// Patch: clear the runner pin back to NULL (inherit the global
+		// runner_default, issue #55); the limit columns are untouched.
+		updated, err = s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			Runner: Set[*string](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear runner pin: %v", err)
+		}
+		if updated.Runner != nil {
+			t.Errorf("cleared runner = %q, want nil (inherit)", *updated.Runner)
 		}
 	})
 }
@@ -785,7 +808,7 @@ func TestRepoImageRefColumnRoundTrip(t *testing.T) {
 		if updated.ImageRef == nil || *updated.ImageRef != "registry.example.com/dev@sha256:bbbb" {
 			t.Errorf("patched image_ref = %v, want set", updated.ImageRef)
 		}
-		if updated.Runner != gotMin.Runner {
+		if !reflect.DeepEqual(updated.Runner, gotMin.Runner) {
 			t.Errorf("unrelated runner column changed by set patch: %v", updated.Runner)
 		}
 
@@ -799,7 +822,7 @@ func TestRepoImageRefColumnRoundTrip(t *testing.T) {
 		if updated.ImageRef != nil {
 			t.Errorf("cleared image_ref = %v, want nil", updated.ImageRef)
 		}
-		if updated.Runner != gotMin.Runner {
+		if !reflect.DeepEqual(updated.Runner, gotMin.Runner) {
 			t.Errorf("unrelated runner column changed by clear patch: %v", updated.Runner)
 		}
 	})
@@ -1012,4 +1035,191 @@ func TestHealInterruptedClones(t *testing.T) {
 			t.Errorf("second heal = %v/%v, want empty", ready, failed)
 		}
 	})
+}
+
+// openUnmigrated opens one backend's database WITHOUT applying any migration
+// and returns a store over it plus the goose provider that drives its schema
+// version by version — the shape a migration proof needs, since Open always
+// migrates to head. sqlite gets the store's pinned open recipe (foreign keys
+// enforced, single connection); postgres gets a throwaway schema exactly like
+// openTestPostgres, skipped without LAB_TEST_POSTGRES_DSN.
+func openUnmigrated(t *testing.T, backend string) (*Store, *goose.Provider) {
+	t.Helper()
+	var (
+		db    *sql.DB
+		dia   dialect
+		gd    goose.Dialect
+		trees fs.FS
+		err   error
+	)
+	switch backend {
+	case "sqlite":
+		db, err = sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "lab.db")+
+			"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		db.SetMaxOpenConns(1)
+		dia, gd, trees = dialectSQLite, goose.DialectSQLite3, migrations.SQLite
+	case "postgres":
+		dsn := os.Getenv("LAB_TEST_POSTGRES_DSN")
+		if dsn == "" {
+			t.Skip("LAB_TEST_POSTGRES_DSN not set")
+		}
+		var b [6]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+		schema := "labtest_" + hex.EncodeToString(b[:])
+		admin, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Fatalf("open postgres admin conn: %v", err)
+		}
+		if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
+			_ = admin.Close()
+			t.Fatalf("create test schema: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = admin.Exec("DROP SCHEMA " + schema + " CASCADE")
+			_ = admin.Close()
+		})
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		db, err = sql.Open("pgx", dsn+sep+"search_path="+schema)
+		if err != nil {
+			t.Fatalf("open postgres: %v", err)
+		}
+		dia, gd, trees = dialectPostgres, goose.DialectPostgres, migrations.Postgres
+	default:
+		t.Fatalf("unknown backend %q", backend)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	p, err := goose.NewProvider(gd, db, trees)
+	if err != nil {
+		t.Fatalf("goose provider: %v", err)
+	}
+	return &Store{db: db, dia: dia, log: discardLogger(), Now: time.Now}, p
+}
+
+// TestRunnerInheritMigration is the 0024 proof (issue #55), against both
+// dialects: rows written under the 0023 schema — when repos.runner was NOT
+// NULL DEFAULT 'host' — keep their exact value through the migration (an
+// existing host or container repo becomes a PIN, so an upgrade changes nothing
+// by itself), a NULL runner (inherit) is accepted afterwards and reads back
+// as nil through the normal accessors, and the down-migration maps every
+// inheriting row to host and enforces NOT NULL again. The sqlite dialect
+// swaps the column rather than rebuilding the table, so a child row
+// referencing the repo (a label) must ride through both directions untouched.
+func TestRunnerInheritMigration(t *testing.T) {
+	for _, backend := range []string{"sqlite", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			ctx := context.Background()
+			st, p := openUnmigrated(t, backend)
+
+			if _, err := p.UpTo(ctx, 23); err != nil {
+				t.Fatalf("migrate to 0023: %v", err)
+			}
+			insertRepo := func(id, name string, runner any) error {
+				_, err := st.db.ExecContext(ctx, st.rebind(
+					`INSERT INTO repos (id, name, remote_url, tracker_binding, forge_kind,
+					     afk_branch_pattern, manual_branch_prefix, clone_status, created_at, runner)
+					 VALUES (?, ?, ?, 'builtin', 'none', 'afk/<N>', 'lab/', 'ready', ?, ?)`),
+					id, name, "/tmp/"+name, fmtTime(time.Now()), runner)
+				return err
+			}
+			runnerOf := func(id string) sql.NullString {
+				t.Helper()
+				var v sql.NullString
+				if err := st.db.QueryRowContext(ctx, st.rebind(
+					`SELECT runner FROM repos WHERE id = ?`), id).Scan(&v); err != nil {
+					t.Fatalf("read runner of %s: %v", id, err)
+				}
+				return v
+			}
+
+			hostID, ctrID, inheritID := ids.NewID("repo"), ids.NewID("repo"), ids.NewID("repo")
+			if err := insertRepo(hostID, "legacyhost", RunnerHost); err != nil {
+				t.Fatalf("insert pre-migration host repo: %v", err)
+			}
+			if err := insertRepo(ctrID, "legacyctr", RunnerContainer); err != nil {
+				t.Fatalf("insert pre-migration container repo: %v", err)
+			}
+			// The fixture really is pre-migration: 0023 refuses a NULL runner.
+			if err := insertRepo(ids.NewID("repo"), "prenull", nil); err == nil {
+				t.Fatal("0023 accepted a NULL runner — the fixture is not pre-migration")
+			}
+			if _, err := st.db.ExecContext(ctx, st.rebind(
+				`INSERT INTO labels (id, repo_id, name, color) VALUES (?, ?, 'keep', '#000000')`),
+				ids.NewID("lbl"), hostID); err != nil {
+				t.Fatalf("insert child label: %v", err)
+			}
+
+			// Up: values unchanged, NULL now accepted.
+			if _, err := p.UpTo(ctx, 24); err != nil {
+				t.Fatalf("migrate to 0024: %v", err)
+			}
+			if v := runnerOf(hostID); !v.Valid || v.String != RunnerHost {
+				t.Errorf("host repo runner after 0024 = %v, want the pinned %q", v, RunnerHost)
+			}
+			if v := runnerOf(ctrID); !v.Valid || v.String != RunnerContainer {
+				t.Errorf("container repo runner after 0024 = %v, want the pinned %q", v, RunnerContainer)
+			}
+			if err := insertRepo(inheritID, "fresh", nil); err != nil {
+				t.Fatalf("insert NULL runner after 0024: %v", err)
+			}
+			// A runner-less insert gets NULL, not a lingering 'host' default.
+			defaultID := ids.NewID("repo")
+			if _, err := st.db.ExecContext(ctx, st.rebind(
+				`INSERT INTO repos (id, name, remote_url, tracker_binding, forge_kind,
+				     afk_branch_pattern, manual_branch_prefix, clone_status, created_at)
+				 VALUES (?, 'nodefault', '/tmp/nodefault', 'builtin', 'none', 'afk/<N>', 'lab/', 'ready', ?)`),
+				defaultID, fmtTime(time.Now())); err != nil {
+				t.Fatalf("insert runner-less repo after 0024: %v", err)
+			}
+			if v := runnerOf(defaultID); v.Valid {
+				t.Errorf("runner-less insert after 0024 = %q, want NULL (no default)", v.String)
+			}
+			// The normal accessors read the reshaped column: nil is inherit.
+			if got, err := st.RepoByID(ctx, inheritID); err != nil || got.Runner != nil {
+				t.Errorf("RepoByID(inherit) runner = %v, %v; want nil, nil", got.Runner, err)
+			}
+			if got, err := st.RepoByID(ctx, ctrID); err != nil || got.Runner == nil || *got.Runner != RunnerContainer {
+				t.Errorf("RepoByID(container) runner = %v, %v; want the container pin", got.Runner, err)
+			}
+			if n := count(t, st, "labels"); n != 1 {
+				t.Errorf("labels after 0024 = %d, want the child row untouched", n)
+			}
+
+			// Down: NULL → host, pins kept, NOT NULL enforced again.
+			if _, err := p.DownTo(ctx, 23); err != nil {
+				t.Fatalf("migrate down to 0023: %v", err)
+			}
+			for id, want := range map[string]string{
+				hostID: RunnerHost, ctrID: RunnerContainer, inheritID: RunnerHost, defaultID: RunnerHost,
+			} {
+				if v := runnerOf(id); !v.Valid || v.String != want {
+					t.Errorf("runner of %s after down = %v, want %q", id, v, want)
+				}
+			}
+			if err := insertRepo(ids.NewID("repo"), "postnull", nil); err == nil {
+				t.Error("down-migrated schema accepted a NULL runner — NOT NULL not restored")
+			}
+			restoredID := ids.NewID("repo")
+			if _, err := st.db.ExecContext(ctx, st.rebind(
+				`INSERT INTO repos (id, name, remote_url, tracker_binding, forge_kind,
+				     afk_branch_pattern, manual_branch_prefix, clone_status, created_at)
+				 VALUES (?, 'restored', '/tmp/restored', 'builtin', 'none', 'afk/<N>', 'lab/', 'ready', ?)`),
+				restoredID, fmtTime(time.Now())); err != nil {
+				t.Fatalf("insert runner-less repo after down: %v", err)
+			}
+			if v := runnerOf(restoredID); !v.Valid || v.String != RunnerHost {
+				t.Errorf("runner-less insert after down = %v, want the restored DEFAULT 'host'", v)
+			}
+			if n := count(t, st, "labels"); n != 1 {
+				t.Errorf("labels after down = %d, want the child row untouched", n)
+			}
+		})
+	}
 }

@@ -27,6 +27,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
@@ -359,6 +360,19 @@ func (s *Service) refreshImports(ctx context.Context, repo store.Repo, run store
 		return nil
 	}
 
+	// The repo's effective Runner (issue #55) decides whether each refreshed
+	// tree gets its advisory write protection back — resolved ONCE per pull,
+	// through the same instance.EffectiveRunner the spawn used, so every
+	// import of one pull follows one answer. It is resolved NOW, not read off
+	// the run: a run does not record the Runner it spawned under, so a Runner
+	// change mid-run (a re-pinned repo, or a changed runner_default for an
+	// inheriting one) can make this refresh apply or skip the protection the
+	// spawn did the opposite of. That is accepted — the protection is
+	// advisory, and it predates #55 for per-repo flips. An UNRESOLVABLE
+	// Runner is no reason to fail a refresh either: refreshImport skips the
+	// protection and logs, and the snapshots still move.
+	runner, runnerErr := instance.EffectiveRunner(ctx, s.store, repo)
+
 	importsDir := s.homes.ImportsPath(run.ID)
 	changes := make([]ImportChange, 0, len(targets))
 	for _, t := range targets {
@@ -366,7 +380,7 @@ func (s *Service) refreshImports(ctx context.Context, repo store.Repo, run store
 		if fi, err := os.Stat(dest); err != nil || !fi.IsDir() {
 			continue // declared after this run spawned: no mount to fill
 		}
-		changes = append(changes, s.refreshImport(ctx, repo, run, t, dest))
+		changes = append(changes, s.refreshImport(ctx, repo, run, t, dest, runner, runnerErr))
 	}
 	return changes
 }
@@ -378,10 +392,12 @@ func (s *Service) refreshImports(ctx context.Context, repo store.Repo, run store
 // sibling rather than an empty directory; and the sidecar is only rewritten
 // once the new tree is actually on disk.
 //
-// repo is the run's OWN repo — the consumer, whose runner decides whether the
-// refreshed tree gets write-protected again — while target is the imported
-// repo, whose reference clone, default branch and credential drive the fetch.
-func (s *Service) refreshImport(ctx context.Context, repo store.Repo, run store.Run, target store.Repo, dest string) ImportChange {
+// repo is the run's OWN repo — the consumer, whose effective Runner (runner,
+// or runnerErr when it could not be resolved — refreshImports resolves it
+// once per pull, issue #55) decides whether the refreshed tree gets
+// write-protected again — while target is the imported repo, whose reference
+// clone, default branch and credential drive the fetch.
+func (s *Service) refreshImport(ctx context.Context, repo store.Repo, run store.Run, target store.Repo, dest, runner string, runnerErr error) ImportChange {
 	c := ImportChange{Name: target.Name, Old: snapshotCommit(dest)}
 
 	// The TARGET's own credential — that is what makes the feature
@@ -436,8 +452,16 @@ func (s *Service) refreshImport(ctx context.Context, repo store.Repo, run store.
 	// reported as a failed refresh, because the snapshot itself is correct and
 	// that runner is full-host-access break-glass anyway. Under the container
 	// runner the tree stays writable host-side on purpose: the `:ro` bind is
-	// the enforcement, and this very code has to be able to rewrite it.
-	if repo.Runner != store.RunnerContainer {
+	// the enforcement, and this very code has to be able to rewrite it. With
+	// no resolvable Runner (issue #55: an inheriting repo whose runner_default
+	// is absent or invalid) the protection is skipped and logged rather than
+	// guessed — the refresh itself already succeeded and is reported as such,
+	// and the warning names the setting to fix.
+	switch {
+	case runnerErr != nil:
+		s.log.Warn("skipping write protection of refreshed import snapshot: the repo's Runner is unresolvable", "component", "pull",
+			"run", run.ID, "import", target.Name, "err", runnerErr)
+	case runner != store.RunnerContainer:
 		if err := protectSnapshot(dest); err != nil {
 			s.log.Warn("re-protecting refreshed import snapshot", "component", "pull",
 				"run", run.ID, "import", target.Name, "err", err)
