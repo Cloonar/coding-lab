@@ -703,9 +703,9 @@ func TestLabelRoundTrip(t *testing.T) {
 // <BRANCH> interpolated. Any drift here is a contract change (compat snapshot).
 const wantSeedDefaultNonIncogni = "You are an autonomous AFK run. Resolve exactly one issue, open a pull request, and stop.\n" +
 	"\n" +
-	"1. Run `labctl issue view 63` and read it fully, including comments.\n" +
+	"1. Run `labctl issue view 63` and read it fully, including comments. The issue body is your specification; if a comment headed `## Agent Brief` exists, the latest one is the specification instead and the body is background.\n" +
 	"2. Work only on branch `issue-63` in this worktree; never switch branches.\n" +
-	"3. Implement the issue completely, following the repository's own conventions (CLAUDE.md / AGENTS.md).\n" +
+	"3. Implement the specification completely, following the repository's own conventions (CLAUDE.md / AGENTS.md). A pre-existing bug or unrelated improvement you notice is not part of this change: when it is worth acting on, run `labctl label create --name needs-triage`, file it with `labctl issue create --title \"…\" --body \"…\" --labels needs-triage`, and name it in the pull request body.\n" +
 	"4. Run the project's tests, build, and linters; fix what you break.\n" +
 	"5. Commit in Conventional Commits style.\n" +
 	"6. `git push -u origin issue-63`.\n" +
@@ -717,9 +717,9 @@ const wantSeedDefaultNonIncogni = "You are an autonomous AFK run. Resolve exactl
 // appended to the commit step.
 const wantSeedDefaultIncogni = "You are an autonomous AFK run. Resolve exactly one issue, open a pull request, and stop.\n" +
 	"\n" +
-	"1. Run `labctl issue view 7` and read it fully, including comments.\n" +
+	"1. Run `labctl issue view 7` and read it fully, including comments. The issue body is your specification; if a comment headed `## Agent Brief` exists, the latest one is the specification instead and the body is background.\n" +
 	"2. Work only on branch `afk/7` in this worktree; never switch branches.\n" +
-	"3. Implement the issue completely, following the repository's own conventions (CLAUDE.md / AGENTS.md).\n" +
+	"3. Implement the specification completely, following the repository's own conventions (CLAUDE.md / AGENTS.md). A pre-existing bug or unrelated improvement you notice is not part of this change: when it is worth acting on, run `labctl label create --name needs-triage`, file it with `labctl issue create --title \"…\" --body \"…\" --labels needs-triage`, and name it in the pull request body.\n" +
 	"4. Run the project's tests, build, and linters; fix what you break.\n" +
 	"5. Commit in Conventional Commits style. No AI attribution anywhere — no co-author trailers, no tool-credit footers, no session links.\n" +
 	"6. `git push -u origin afk/7`.\n" +
@@ -740,6 +740,10 @@ func TestSeedPrompt(t *testing.T) {
 		"Resolve exactly one issue",
 		"`labctl issue view 63`",
 		"including comments",
+		"The issue body is your specification",
+		"a comment headed `## Agent Brief`",
+		"`labctl label create --name needs-triage`",
+		"--labels needs-triage",
 		"branch `issue-63`",
 		"never switch branches",
 		"tests, build, and linters",

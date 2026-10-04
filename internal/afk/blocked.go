@@ -30,7 +30,7 @@ import (
 // counts), the words "blocked by" case-insensitively, an optional trailing
 // colon, and only whitespace to end of line. A heading carrying trailing text
 // ("## Blocked by #5") is deliberately NOT matched — the marker must stand
-// alone, exactly as the to-issues template renders it.
+// alone, exactly as the agent-brief body template renders it.
 var blockedByHeadingRe = regexp.MustCompile(`(?i)^#{1,6}[ \t]*blocked[ \t]+by[ \t]*:?[ \t]*$`)
 
 // atxHeadingRe matches any ATX heading line — 1–6 hashes followed by
@@ -89,7 +89,7 @@ func blockedBySection(body string) string {
 // never a blocker. Non-positive numbers and tokens too large for an int are
 // dropped, mirroring tracker.ParseCloses. The result is never nil; an empty
 // slice means "no local blockers" — which is also what a body with no such
-// section, or the to-issues template's "None - can start immediately"
+// section, or the agent-brief template's "None - can start immediately"
 // placeholder, yields (neither carries a bounded local #<n>).
 func ParseBlockedBy(body string) []int {
 	section := blockedBySection(body)

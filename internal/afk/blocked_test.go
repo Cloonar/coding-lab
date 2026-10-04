@@ -7,7 +7,7 @@ import (
 )
 
 // blockedByBody wraps section text under a canonical "## Blocked by" heading —
-// the shape the to-issues template renders.
+// the shape the agent-brief body template renders.
 func blockedByBody(section string) string { return "## Blocked by\n" + section }
 
 // readyIssue is a ready-queue issue with a number and body; the gate reads only
