@@ -452,6 +452,7 @@ func (f *agentFixture) env() map[string]string {
 const wantIssueView = `#1 Fix the frobnicator
 state: open
 labels: ready-for-agent
+author: operator
 
 It wobbles.
 
@@ -467,6 +468,41 @@ func TestIssueViewClaimed(t *testing.T) {
 	}
 	if stdout != wantIssueView {
 		t.Errorf("stdout =\n%q\nwant\n%q", stdout, wantIssueView)
+	}
+}
+
+// TestPrintIssueAuthorLine pins the author line of the issue view (ADR-0070):
+// a forge login renders verbatim under the labels line, and an issue with no
+// reported author — a deleted forge account, or the list-shaped answer of
+// create/edit, which carries none — renders exactly the pre-author view, with
+// no empty "author:" line for an agent to misread as an identity.
+func TestPrintIssueAuthorLine(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		author string
+		want   string
+	}{
+		{
+			name:   "forge login",
+			author: "alice",
+			want:   "#7 Crash on save\nstate: open\nlabels: bug, needs-triage\nauthor: alice\n\nIt crashes.\n",
+		},
+		{
+			name:   "no author reported",
+			author: "",
+			want:   "#7 Crash on save\nstate: open\nlabels: bug, needs-triage\n\nIt crashes.\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			printIssue(&b, Issue{
+				Number: 7, Title: "Crash on save", Body: "It crashes.", Author: tc.author,
+				State: "open", Labels: []string{"bug", "needs-triage"},
+			})
+			if b.String() != tc.want {
+				t.Errorf("printIssue =\n%q\nwant\n%q", b.String(), tc.want)
+			}
+		})
 	}
 }
 
@@ -663,10 +699,10 @@ func TestIssueEditCommand(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("view after clear: exit = %d, stderr %q", code, stderr)
 	}
-	// Empty body renders as the blank region between the labels line and the
+	// Empty body renders as the blank region between the header lines and the
 	// seeded operator comment (printIssue's "\n%s\n" over ""); the old body text
 	// is gone.
-	if !strings.HasPrefix(stdout, "#1 Renamed\nstate: open\nlabels: ready-for-agent\n\n\n") {
+	if !strings.HasPrefix(stdout, "#1 Renamed\nstate: open\nlabels: ready-for-agent\nauthor: operator\n\n\n") {
 		t.Errorf("view after clear = %q, want the renamed issue with an empty body", stdout)
 	}
 	if strings.Contains(stdout, "It wobbles.") || strings.Contains(stdout, "Now settled.") {

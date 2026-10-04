@@ -306,6 +306,10 @@ func TestClaimedIssue(t *testing.T) {
 	if got.Number != 7 || got.Title != "Fix the frobnicator" || got.State != "open" {
 		t.Fatalf("issue = %+v", got)
 	}
+	// The detail view names who filed the issue (ADR-0070).
+	if got.Author != store.CommentAuthorOperator {
+		t.Fatalf("issue author = %q, want %q", got.Author, store.CommentAuthorOperator)
+	}
 	if len(got.Comments) != 1 || got.Comments[0].Author != store.CommentAuthorOperator {
 		t.Fatalf("comments = %+v, want the seeded operator comment", got.Comments)
 	}

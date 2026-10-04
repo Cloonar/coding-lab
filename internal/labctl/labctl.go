@@ -602,12 +602,19 @@ func runPR(args []string, env Env) int {
 }
 
 // printIssue renders the pinned plain-text issue view: number, title, state,
-// labels, body, then each comment under a "--- comment by <author> (<time>)"
-// separator.
+// labels, author, body, then each comment under a "--- comment by <author>
+// (<time>)" separator. The author line (ADR-0070: who filed the issue, so a
+// triage agent can tell a maintainer's issue from a third party's report) is
+// omitted when the server reports none — an issue whose forge account is gone,
+// or a response that carries no author at all (the list-shaped answers of
+// create and edit).
 func printIssue(w io.Writer, is Issue) {
 	_, _ = fmt.Fprintf(w, "#%d %s\n", is.Number, is.Title)
 	_, _ = fmt.Fprintf(w, "state: %s\n", is.State)
 	_, _ = fmt.Fprintf(w, "labels: %s\n", strings.Join(is.Labels, ", "))
+	if is.Author != "" {
+		_, _ = fmt.Fprintf(w, "author: %s\n", is.Author)
+	}
 	_, _ = fmt.Fprintf(w, "\n%s\n", is.Body)
 	for _, c := range is.Comments {
 		_, _ = fmt.Fprintf(w, "\n--- comment by %s (%s)\n%s\n", c.Author, c.CreatedAt, c.Body)

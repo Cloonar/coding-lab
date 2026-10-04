@@ -140,6 +140,7 @@ type ghIssue struct {
 	Number      int           `json:"number"`
 	Title       string        `json:"title"`
 	Body        string        `json:"body"`
+	User        ghUser        `json:"user"` // the reporter; null for a deleted account, which decodes to the zero value
 	State       string        `json:"state"`
 	Labels      []ghLabel     `json:"labels"`
 	Comments    int           `json:"comments"` // GitHub's comment count — the list views' CommentsCount
@@ -1134,6 +1135,7 @@ func toIssue(gh ghIssue, comments []tracker.Comment) tracker.Issue {
 		Number:        gh.Number,
 		Title:         gh.Title,
 		Body:          gh.Body,
+		Author:        gh.User.Login,
 		State:         gh.State,
 		Labels:        labels,
 		Comments:      comments,

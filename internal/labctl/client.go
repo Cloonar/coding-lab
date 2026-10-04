@@ -39,6 +39,7 @@ type Issue struct {
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
+	Author    string    `json:"author"`
 	State     string    `json:"state"`
 	Labels    []string  `json:"labels"`
 	Comments  []Comment `json:"comments"`

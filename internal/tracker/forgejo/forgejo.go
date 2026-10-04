@@ -102,6 +102,7 @@ type fjIssue struct {
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
+	User      fjUser    `json:"user"` // the reporter; null for a deleted account, which decodes to the zero value
 	State     string    `json:"state"`
 	Labels    []fjLabel `json:"labels"`
 	Comments  int       `json:"comments"` // Forgejo's comment count — the list views' CommentsCount
@@ -1014,6 +1015,7 @@ func toIssue(fj fjIssue, comments []tracker.Comment) tracker.Issue {
 		Number:        fj.Number,
 		Title:         fj.Title,
 		Body:          fj.Body,
+		Author:        fjLogin(fj.User),
 		State:         fj.State,
 		Labels:        labels,
 		Comments:      comments,

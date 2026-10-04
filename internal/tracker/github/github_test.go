@@ -300,6 +300,7 @@ func TestIssue_withComments(t *testing.T) {
 		switch {
 		case r.URL.Path == apiPrefix+"/issues/62" && r.Method == http.MethodGet:
 			_, _ = io.WriteString(w, `{"number":62,"title":"deep","body":"the body","state":"open",
+			  "user":{"login":"carol"},
 			  "labels":[{"name":"bug"}],
 			  "created_at":"2026-03-01T10:00:00Z","updated_at":"2026-03-02T11:00:00Z"}`)
 		case r.URL.Path == apiPrefix+"/issues/62/comments" && r.Method == http.MethodGet:
@@ -320,12 +321,42 @@ func TestIssue_withComments(t *testing.T) {
 	if issue.Number != 62 || issue.Title != "deep" || issue.Body != "the body" {
 		t.Errorf("issue scalars: %+v", issue)
 	}
+	// The reporter is the issue's own user, never a commenter (ADR-0070).
+	if issue.Author != "carol" {
+		t.Errorf("issue.Author = %q; want carol (the issue's user.login)", issue.Author)
+	}
 	if len(issue.Comments) != 2 || issue.Comments[0].Author != "alice" || issue.Comments[1].Author != "bob" {
 		t.Errorf("comments = %+v", issue.Comments)
 	}
 	if issue.Comments[0].Body != "first comment" ||
 		!issue.Comments[0].CreatedAt.Equal(mustTime(t, "2026-03-01T12:00:00Z")) {
 		t.Errorf("comment[0] mismatch: %+v", issue.Comments[0])
+	}
+}
+
+// TestIssue_authorAbsent: GitHub reports a deleted account's issue with
+// "user": null. That decodes to an empty Author — never an error, and never a
+// commenter's login standing in for the reporter.
+func TestIssue_authorAbsent(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == apiPrefix+"/issues/62" && r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"number":62,"title":"orphan","body":"","state":"open","user":null,
+			  "labels":[],"created_at":"2026-03-01T10:00:00Z","updated_at":"2026-03-02T11:00:00Z"}`)
+		case r.URL.Path == apiPrefix+"/issues/62/comments" && r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `[{"body":"a comment","user":{"login":"alice"},"created_at":"2026-03-01T12:00:00Z"}]`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	})
+
+	issue, err := c.Issue(context.Background(), 62)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if issue.Author != "" {
+		t.Errorf("issue.Author = %q; want empty for a null user", issue.Author)
 	}
 }
 
