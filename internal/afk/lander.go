@@ -191,8 +191,10 @@ func (s *Service) landerChainProvider(ctx context.Context, repo store.Repo, kind
 // landerChainProvider's nil→"" extraction, and shared by both launch paths for
 // the same reason: lander and escalate are one validation class, and a
 // separate escalate knob is explicitly out of scope. NULL (nil) stays "" —
-// ResolveModelEffort's ordinary layered resolution (repo base → global base →
-// provider default), i.e. today's behavior, unchanged. Non-NULL is a STRICT
+// ResolveModelEffort's ordinary layered resolution for a lander kind: the
+// global lander default (spawn_model_default_lander /
+// spawn_effort_default_lander, skip-layer like every default) → repo base →
+// global base → provider default. Non-NULL is a STRICT
 // per-spawn request: ResolveModelEffort fails the launch loudly on an unknown
 // value (*instance.BadRequestError) — including the issue-#156 per-model rule,
 // where an effort outside the RESOLVED model's own list 400s even if the
@@ -221,7 +223,8 @@ func landerRequestModelEffort(repo store.Repo) (model, effort string) {
 // AFK kind (isAFKKind), so the AFK override layers never apply. Model/effort
 // additionally take the lander_model/lander_effort row as a STRICT per-spawn
 // request when set (landerRequestModelEffort, issue #189): NULL inherits the
-// lander's normal layered resolution exactly as before; non-NULL fails the
+// lander's normal layered resolution (the global lander default, then the
+// base chain); non-NULL fails the
 // launch loudly on an unknown value, the same fatal-to-the-launch contract
 // the #181 provider precedent established. approveOnly
 // forces the approve-and-stop seed variant regardless of repo.AutoMerge — the

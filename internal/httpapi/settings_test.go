@@ -242,6 +242,10 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		// against the provider catalogs; the options bag validates keys + values.
 		{"afk unknown model", map[string]any{"spawn_model_default_afk": "gpt-9"}},
 		{"afk unknown effort", map[string]any{"spawn_effort_default_afk": "ultra"}},
+		// The lander-override defaults follow the AFK pair's rule exactly.
+		{"lander unknown model", map[string]any{"spawn_model_default_lander": "gpt-9"}},
+		{"lander unknown effort", map[string]any{"spawn_effort_default_lander": "ultra"}},
+		{"lander model not a string", map[string]any{"spawn_model_default_lander": 7}},
 		// The provider defaults (issue #66): the base key must always name a
 		// registered provider (no lower operator layer to inherit from); the
 		// AFK override allows "" (inherit) but rejects an unknown id.
@@ -393,6 +397,43 @@ func TestAPI_SettingsRemoteDefaultsRoundtrip(t *testing.T) {
 	wantStatus(t, resp, http.StatusOK)
 	if got = settingsOf(t, decodeBody(t, resp)); got[store.SettingSpawnRemoteDefaultAFK] != true {
 		t.Errorf("spawn_remote_default_afk = %v, want true", got[store.SettingSpawnRemoteDefaultAFK])
+	}
+}
+
+// The lander-override defaults: a catalog value lands, an EMPTY value is
+// allowed and means inherit — the AFK pair's rule — and the two layers are
+// independent rows, so the lander can hold a different model than AFK.
+func TestAPI_SettingsLanderDefaultsRoundtrip(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+
+	resp := x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingSpawnModelDefaultAFK:     "sonnet",
+		store.SettingSpawnModelDefaultLander:  "fable",
+		store.SettingSpawnEffortDefaultLander: "high",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingSpawnModelDefaultLander] != "fable" {
+		t.Errorf("spawn_model_default_lander = %v, want fable", got[store.SettingSpawnModelDefaultLander])
+	}
+	if got[store.SettingSpawnEffortDefaultLander] != "high" {
+		t.Errorf("spawn_effort_default_lander = %v, want high", got[store.SettingSpawnEffortDefaultLander])
+	}
+	if got[store.SettingSpawnModelDefaultAFK] != "sonnet" {
+		t.Errorf("spawn_model_default_afk = %v, want sonnet (untouched by the lander key)", got[store.SettingSpawnModelDefaultAFK])
+	}
+
+	// Clearing back to inherit: "" is a legal value for the override.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+		store.SettingSpawnModelDefaultLander:  "",
+		store.SettingSpawnEffortDefaultLander: "",
+	}, h)
+	wantStatus(t, resp, http.StatusOK)
+	got = settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingSpawnModelDefaultLander] != "" || got[store.SettingSpawnEffortDefaultLander] != "" {
+		t.Errorf("lander overrides = %v/%v, want both empty (inherit)",
+			got[store.SettingSpawnModelDefaultLander], got[store.SettingSpawnEffortDefaultLander])
 	}
 }
 

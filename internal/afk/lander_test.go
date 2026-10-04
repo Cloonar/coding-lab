@@ -597,6 +597,71 @@ func TestLaunchLander_unsupportedEffortForResolvedModelFails(t *testing.T) {
 	}
 }
 
+// The global lander default (spawn_model_default_lander /
+// spawn_effort_default_lander) is what a repo with NULL
+// lander_model/lander_effort inherits first — ahead of the base defaults, and
+// independent of the AFK override, so the lander runs a different model than
+// the AFK runs it validates. Values chosen to differ from the seeded base
+// (opus[1m]/max) AND from the AFK override set alongside.
+func TestLaunchLander_globalLanderDefault(t *testing.T) {
+	f := newFixture(t)
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+	for k, v := range map[string]string{
+		store.SettingSpawnModelDefaultAFK:     "fable",
+		store.SettingSpawnEffortDefaultAFK:    "high",
+		store.SettingSpawnModelDefaultLander:  "sonnet",
+		store.SettingSpawnEffortDefaultLander: "low",
+	} {
+		if err := f.st.SetSetting(t.Context(), k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false); err != nil {
+		t.Fatalf("LaunchLander: %v", err)
+	}
+	active, err := f.st.ActiveRuns(t.Context())
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active runs = %v (err %v), want exactly one", active, err)
+	}
+	if active[0].Model != "sonnet" || active[0].Effort != "low" {
+		t.Errorf("run model/effort = %q/%q, want the global lander default sonnet/low", active[0].Model, active[0].Effort)
+	}
+}
+
+// The repo's own lander_model/lander_effort still beat the global lander
+// default: they are the strict per-spawn request, the layer above it.
+func TestLaunchLander_repoLanderModelBeatsGlobalLanderDefault(t *testing.T) {
+	f := newFixture(t)
+	origin := strings.TrimPrefix(f.repo.RemoteURL, "file://")
+	gitCmd(t, f.home, origin, "branch", "afk/7", "main")
+	if err := f.st.SetSetting(t.Context(), store.SettingSpawnModelDefaultLander, "sonnet"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetSetting(t.Context(), store.SettingSpawnEffortDefaultLander, "low"); err != nil {
+		t.Fatal(err)
+	}
+	model, effort := "fable", "high"
+	if _, err := f.st.UpdateRepoSettings(t.Context(), f.repo.ID, store.RepoSettingsUpdate{
+		LanderModel:  store.Set(&model),
+		LanderEffort: store.Set(&effort),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.svc.LaunchLander(t.Context(), f.repo.ID, 9, "afk/7", 7, false); err != nil {
+		t.Fatalf("LaunchLander: %v", err)
+	}
+	active, err := f.st.ActiveRuns(t.Context())
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active runs = %v (err %v), want exactly one", active, err)
+	}
+	if active[0].Model != model || active[0].Effort != effort {
+		t.Errorf("run model/effort = %q/%q, want the repo's %q/%q", active[0].Model, active[0].Effort, model, effort)
+	}
+}
+
 // NULL lander_model/lander_effort (the zero value — never set on this repo)
 // inherits the lander's ordinary layered resolution exactly as it did before
 // issue #189 added the knobs: the seeded global base defaults (opus[1m]/max —

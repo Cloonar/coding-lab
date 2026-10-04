@@ -107,6 +107,70 @@ describe('Settings AFK defaults', () => {
   });
 });
 
+// Lander defaults: the global model/effort override for the Autoland lander —
+// its own card and its own keys, independent of the AFK override so the two
+// can hold different models.
+describe('Settings lander defaults', () => {
+  const landerModel = () =>
+    waitFor(
+      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_lander"]'),
+      'lander defaults section',
+    );
+
+  it('renders in its own card, seeded to the inherit entry', async () => {
+    await mountAgents();
+    await landerModel();
+
+    expect(selectedLabel('spawn_model_default_lander')).toBe('Same as default');
+    expect(selectedLabel('spawn_effort_default_lander')).toBe('Same as default');
+    const card = cardByHeading('Lander defaults');
+    expect(card.querySelector('button[name="spawn_model_default_lander"]')).not.toBeNull();
+    expect(card.querySelector('button[name="spawn_effort_default_lander"]')).not.toBeNull();
+  });
+
+  it('seeds from the stored payload independently of the AFK model', async () => {
+    h.settingsOnServer = {
+      spawn_model_default_afk: 'opus[1m]',
+      spawn_model_default_lander: 'sonnet',
+      spawn_effort_default_lander: 'high',
+    };
+    await mountAgents();
+    await landerModel();
+
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Opus (1M)');
+    expect(selectedLabel('spawn_model_default_lander')).toBe('Sonnet');
+    expect(selectedLabel('spawn_effort_default_lander')).toBe('high');
+  });
+
+  it('PATCHes only the lander keys, leaving the AFK model untouched', async () => {
+    h.settingsOnServer = { spawn_model_default_afk: 'opus[1m]' };
+    await mountAgents();
+    await landerModel();
+
+    await chooseFromSelect('spawn_model_default_lander', 'Sonnet');
+    await chooseFromSelect('spawn_effort_default_lander', 'high');
+    submitForm();
+    await settle();
+
+    expect(h.patchBodies).toEqual([
+      { spawn_model_default_lander: 'sonnet', spawn_effort_default_lander: 'high' },
+    ]);
+  });
+
+  it('selecting inherit clears a stored lander model back to an empty string', async () => {
+    h.settingsOnServer = { spawn_model_default_lander: 'sonnet' };
+    await mountAgents();
+    await landerModel();
+    expect(selectedLabel('spawn_model_default_lander')).toBe('Sonnet');
+
+    await chooseFromSelect('spawn_model_default_lander', 'Same as default');
+    submitForm();
+    await settle();
+
+    expect(h.patchBodies).toEqual([{ spawn_model_default_lander: '' }]);
+  });
+});
+
 // Remote control (issue #163): a plain on/off checkbox at the BASE scope (there
 // is nothing above it to inherit from) and a 3-state override in the AFK card,
 // both PATCHed as JSON bools — with null for "same as default".

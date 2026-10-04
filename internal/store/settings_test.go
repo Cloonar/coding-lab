@@ -192,6 +192,8 @@ func TestSeedDefaultSettings(t *testing.T) {
 			SettingSpawnRemoteDefaultAFK,
 			SettingSpawnModelDefaultAFK,
 			SettingSpawnEffortDefaultAFK,
+			SettingSpawnModelDefaultLander,
+			SettingSpawnEffortDefaultLander,
 			SettingSpawnProviderDefaultAFK,
 			SettingSpawnOptionsAFK,
 			SettingAFKPrompt,

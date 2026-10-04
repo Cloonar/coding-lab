@@ -64,9 +64,11 @@ export interface Repo {
   auto_merge: boolean;
   /** Lander run's provider override; null = inherit this repo's own provider. */
   lander_provider: string | null;
-  /** Lander run's model override; null = inherit (resolved at lander launch). */
+  /** Lander run's model override; null = inherit the global lander default,
+   *  then this repo's base chain (resolved at lander launch). */
   lander_model: string | null;
-  /** Lander run's effort override; null = inherit (resolved at lander launch). */
+  /** Lander run's effort override; null = inherit the global lander default,
+   *  then this repo's base chain (resolved at lander launch). */
   lander_effort: string | null;
   /** Host (unsandboxed — full host access, break-glass) or container (rootless
    *  podman). NOT NULL; default host until the container preflight is proven

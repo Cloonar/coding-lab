@@ -45,6 +45,19 @@ const (
 	SettingSpawnEffortDefaultAFK = "spawn_effort_default_afk"
 	SettingSpawnOptionsAFK       = "spawn_options_afk"
 
+	// Lander-override spawn defaults: the validation-class twin of the AFK
+	// pair above — the layer a lander run (and the escalate-mode lander, which
+	// shares every lander knob) resolves BEFORE the base
+	// spawn_model_default/spawn_effort_default, so the lander can run on a
+	// different model than both the AFK runs it validates and the manual
+	// default. Above it sits the per-repo repos.lander_model/lander_effort
+	// (a strict per-spawn request, issue #189); below it the base chain. Empty
+	// or absent = inherit the base, so like the AFK overrides these are
+	// intentionally NOT seeded by SeedDefaultSettings — an existing install's
+	// landers keep resolving exactly as before until an override is set.
+	SettingSpawnModelDefaultLander  = "spawn_model_default_lander"
+	SettingSpawnEffortDefaultLander = "spawn_effort_default_lander"
+
 	// AFK-override provider default (issue #66): the AFK-only layer that
 	// resolves BEFORE the base provider_default above (mirroring the
 	// spawn_*_default_afk pair). Empty or absent = inherit the base chain, so

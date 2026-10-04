@@ -156,14 +156,18 @@ export default function AutolandSection(props: {
         />
         {/* Model/effort for the lander (issue #189): same component + catalog
             source as the base/AFK pickers, resolved against the lander's
-            effective provider (lander agent above, else this repo's chain). */}
+            effective provider (lander agent above, else this repo's chain).
+            Inherit names the NEXT layer down — the global lander default
+            (Settings › Agents), which itself falls through to this repo's and
+            then the global spawn default — the same wording the Agents
+            section's AFK overrides use for their global AFK default. */}
         <Select
           skin="field"
           label="Model"
           name="lander_model"
           value={landerModel()}
           options={landerEffectiveProvider()?.models ?? []}
-          inheritLabel="Inherit repo default"
+          inheritLabel="Inherit global lander default"
           onChange={setLanderModel}
         />
         <Select
@@ -172,7 +176,7 @@ export default function AutolandSection(props: {
           name="lander_effort"
           value={landerEffort()}
           options={landerEffectiveProvider()?.efforts ?? []}
-          inheritLabel="Inherit repo default"
+          inheritLabel="Inherit global lander default"
           onChange={setLanderEffort}
         />
       </SectionCard>

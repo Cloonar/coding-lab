@@ -27,6 +27,11 @@ func setGlobal(t *testing.T, f *fixture, key, val string) {
 // request is strict (unknown → 400). All layers unset/foreign → the catalog's
 // first entry. The seeded global base is opus[1m]/max; the fake catalog's
 // first entries are opus[1m]/low.
+//
+// A LANDER run (and the escalate-mode lander) has its own override layer —
+// the global spawn_*_default_lander keys — resolved before the same base and
+// disjoint from the AFK layer in both directions, so the lander can run a
+// different model than the AFK runs it validates.
 func TestResolveModelEffort_kindAwareLayering(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -36,6 +41,8 @@ func TestResolveModelEffort_kindAwareLayering(t *testing.T) {
 		kind                              string
 		repo                              store.Repo
 		globalAFKModel, globalAFKEffort   string
+		globalLanderModel                 string
+		globalLanderEffort                string
 		globalBaseModel, globalBaseEffort string // "" keeps the seeded opus[1m]/max
 		reqModel, reqEffort               string
 		wantModel, wantEffort             string
@@ -98,6 +105,70 @@ func TestResolveModelEffort_kindAwareLayering(t *testing.T) {
 			wantModel: "opus[1m]", wantEffort: "low",
 		},
 		{
+			name: "lander with no override falls back to the base", kind: store.RunKindLander,
+			wantModel: "opus[1m]", wantEffort: "max",
+		},
+		{
+			name: "lander global override wins over the base", kind: store.RunKindLander,
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			wantModel: "sonnet", wantEffort: "low",
+		},
+		{
+			// The override layer sits ABOVE the whole base chain, exactly as the
+			// global AFK override does for an AFK run.
+			name: "lander global override wins over the repo base", kind: store.RunKindLander,
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			repo:      store.Repo{ModelDefault: strptr("haiku"), EffortDefault: strptr("high")},
+			wantModel: "sonnet", wantEffort: "low",
+		},
+		{
+			name: "escalate shares the lander override", kind: store.RunKindEscalate,
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			wantModel: "sonnet", wantEffort: "low",
+		},
+		{
+			// The point of the knob: with both overrides set, the lander and
+			// the AFK run resolve DIFFERENT models from the same settings.
+			name: "lander ignores the AFK overrides", kind: store.RunKindLander,
+			globalAFKModel: "fable", globalAFKEffort: "high",
+			repo:              store.Repo{AFKModelDefault: strptr("haiku"), AFKEffortDefault: strptr("high")},
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			wantModel: "sonnet", wantEffort: "low",
+		},
+		{
+			name: "afk ignores the lander override", kind: store.RunKindAFKAuto,
+			globalAFKModel: "fable", globalAFKEffort: "high",
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			wantModel: "fable", wantEffort: "high",
+		},
+		{
+			name: "fix ignores the lander override", kind: store.RunKindFix,
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			wantModel: "opus[1m]", wantEffort: "max",
+		},
+		{
+			name: "manual ignores the lander override", kind: store.RunKindManual,
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			wantModel: "opus[1m]", wantEffort: "max",
+		},
+		{
+			// repos.lander_model/lander_effort reach the resolver as the strict
+			// per-spawn request (landerRequestModelEffort), so they beat the
+			// global lander override.
+			name: "lander per-spawn request wins over the lander override", kind: store.RunKindLander,
+			globalLanderModel: "sonnet", globalLanderEffort: "low",
+			reqModel: "fable", reqEffort: "high",
+			wantModel: "fable", wantEffort: "high",
+		},
+		{
+			// Skip-layer like every default: a lander override the effective
+			// provider's catalog does not carry falls through, never a 400.
+			name: "lander override outside the catalog falls through to the base", kind: store.RunKindLander,
+			globalLanderModel: "gpt-9", globalLanderEffort: "turbo",
+			repo:      store.Repo{ModelDefault: strptr("haiku"), EffortDefault: strptr("high")},
+			wantModel: "haiku", wantEffort: "high",
+		},
+		{
 			// The explicit per-spawn request stays STRICT: unknown → 400, even
 			// though a default layer with the same value would fall through.
 			name: "explicit request outside the catalog is a bad request", kind: store.RunKindManual,
@@ -114,6 +185,8 @@ func TestResolveModelEffort_kindAwareLayering(t *testing.T) {
 			// pin the base globals (empty keeps the seeded opus[1m]/max).
 			setGlobal(t, f, store.SettingSpawnModelDefaultAFK, tc.globalAFKModel)
 			setGlobal(t, f, store.SettingSpawnEffortDefaultAFK, tc.globalAFKEffort)
+			setGlobal(t, f, store.SettingSpawnModelDefaultLander, tc.globalLanderModel)
+			setGlobal(t, f, store.SettingSpawnEffortDefaultLander, tc.globalLanderEffort)
 			baseModel, baseEffort := tc.globalBaseModel, tc.globalBaseEffort
 			if baseModel == "" {
 				baseModel = "opus[1m]"

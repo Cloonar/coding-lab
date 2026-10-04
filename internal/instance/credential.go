@@ -82,6 +82,48 @@ func isAFKKind(kind string) bool {
 		kind == store.RunKindFix || kind == store.RunKindScheduled
 }
 
+// isLanderKind reports whether a run kind is validation-class — the lander
+// and #182's escalate-mode lander, which share every lander knob (issue
+// #189). These kinds consult the global LANDER override layer for model and
+// effort (spawn_model_default_lander / spawn_effort_default_lander) before
+// the base chain, the way an AFK kind consults the AFK override layer. The
+// two layers are disjoint by construction — no kind is both — which is what
+// lets the operator run the lander on a different model than the AFK runs it
+// validates.
+func isLanderKind(kind string) bool {
+	return kind == store.RunKindLander || kind == store.RunKindEscalate
+}
+
+// spawnOverride is the kind-specific override layer of the model/effort
+// resolution: the pair of rungs consulted BEFORE the base chain (repo base →
+// global base). An AFK kind gets the repo AFK columns over the global
+// spawn_*_default_afk keys; a lander kind gets the global
+// spawn_*_default_lander keys alone — its repo-level knob
+// (repos.lander_model / lander_effort) is a STRICT per-spawn request the
+// launch passes as reqModel/reqEffort, never a skip-layer default, so it has
+// no rung here. A manual run has no override layer at all (the zero value:
+// empty keys are never read).
+type spawnOverride struct {
+	repoModel, repoEffort *string
+	modelKey, effortKey   string
+}
+
+// spawnOverrideFor picks the override layer for a run kind.
+func spawnOverrideFor(kind string, repo store.Repo) spawnOverride {
+	switch {
+	case isAFKKind(kind):
+		return spawnOverride{
+			repoModel: repo.AFKModelDefault, repoEffort: repo.AFKEffortDefault,
+			modelKey: store.SettingSpawnModelDefaultAFK, effortKey: store.SettingSpawnEffortDefaultAFK,
+		}
+	case isLanderKind(kind):
+		return spawnOverride{
+			modelKey: store.SettingSpawnModelDefaultLander, effortKey: store.SettingSpawnEffortDefaultLander,
+		}
+	}
+	return spawnOverride{}
+}
+
 // ResolveProvider resolves the EFFECTIVE agent provider for a spawn of the
 // given kind (issue #66) — the same three-level, skip-layer layering
 // model/effort use. A MANUAL run: explicit per-spawn request → repo.provider →
@@ -165,7 +207,7 @@ func (s *Service) ResolveScheduleModelEffort(ctx context.Context, prov provider.
 	modelCatalog := modelOptions(models)
 	if v := strOrEmpty(modelOverride); v != "" && provider.HasOption(modelCatalog, v) {
 		model = v
-	} else if model, err = s.layerSpawnDefault(ctx, modelCatalog, "", true, "", repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault, "model"); err != nil {
+	} else if model, err = s.layerSpawnDefault(ctx, modelCatalog, "", "", repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault, "model"); err != nil {
 		return "", "", err
 	}
 	// The effort catalog is the resolved model's OWN list (issue #156), exactly
@@ -176,7 +218,7 @@ func (s *Service) ResolveScheduleModelEffort(ctx context.Context, prov provider.
 	}
 	if v := strOrEmpty(effortOverride); v != "" && provider.HasOption(effortCatalog, v) {
 		effort = v
-	} else if effort, err = s.layerSpawnDefault(ctx, effortCatalog, reportedDefault, true, "", repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault, "effort"); err != nil {
+	} else if effort, err = s.layerSpawnDefault(ctx, effortCatalog, reportedDefault, "", repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault, "effort"); err != nil {
 		return "", "", err
 	}
 	return model, effort, nil
@@ -187,7 +229,11 @@ func (s *Service) ResolveScheduleModelEffort(ctx context.Context, prov provider.
 // catalogs (issue #66). A MANUAL run: explicit per-spawn value → repo base
 // default → global base default. An AFK run has no per-spawn request; it
 // consults the AFK-override layer FIRST — repo.afk_* → global spawn_*_default_afk
-// — then falls back to the same base (repo base → global base). A DEFAULT-layer
+// — then falls back to the same base (repo base → global base). A LANDER or
+// escalate run consults its own override layer instead — the global
+// spawn_*_default_lander keys — before that same base; its repo-level
+// lander_model/lander_effort arrive here as the strict reqModel/reqEffort
+// (landerRequestModelEffort in internal/afk). A DEFAULT-layer
 // value the provider's catalog does not carry is treated as unset and falls
 // through (a claude-shaped global default must not 400 a spawn on another
 // provider); only the explicit request stays strict (unknown → 400).
@@ -203,9 +249,9 @@ func (s *Service) ResolveScheduleModelEffort(ctx context.Context, prov provider.
 // resolves to "" — the CLI flag is omitted. Exported for the M5 AFK engine,
 // whose spawns resolve through the same rule.
 func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentProvider, repo store.Repo, kind, reqModel, reqEffort string) (model, effort string, err error) {
-	afk := isAFKKind(kind)
+	ov := spawnOverrideFor(kind, repo)
 	models := prov.Models()
-	if model, err = s.layerSpawnDefault(ctx, modelOptions(models), "", afk, reqModel, repo.AFKModelDefault, repo.ModelDefault, store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefault, "model"); err != nil {
+	if model, err = s.layerSpawnDefault(ctx, modelOptions(models), "", reqModel, ov.repoModel, repo.ModelDefault, ov.modelKey, store.SettingSpawnModelDefault, "model"); err != nil {
 		return "", "", err
 	}
 	// The effort catalog is the resolved model's OWN list (issue #156). A ""
@@ -217,7 +263,7 @@ func (s *Service) ResolveModelEffort(ctx context.Context, prov provider.AgentPro
 	if m, ok := provider.FindModelOption(models, model); ok {
 		effortCatalog, reportedDefault = m.Efforts, m.DefaultEffort
 	}
-	if effort, err = s.layerSpawnDefault(ctx, effortCatalog, reportedDefault, afk, reqEffort, repo.AFKEffortDefault, repo.EffortDefault, store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefault, "effort"); err != nil {
+	if effort, err = s.layerSpawnDefault(ctx, effortCatalog, reportedDefault, reqEffort, ov.repoEffort, repo.EffortDefault, ov.effortKey, store.SettingSpawnEffortDefault, "effort"); err != nil {
 		return "", "", err
 	}
 	return model, effort, nil
@@ -241,17 +287,19 @@ func modelOptions(models []provider.ModelOption) []provider.Option {
 // catalog is the resolved model's own list, so this is the issue-#156
 // unsupported-combo rejection); every default layer counts only when its
 // value is non-empty AND present in the catalog, else it is treated as unset
-// and falls through. For an AFK run the AFK-override layer (repo override
-// column, then the global AFK-override setting) is consulted first; then
-// every run type falls back to the base layer (repo base column, then the
-// global base setting), and finally reportedDefault — the provider's reported
+// and falls through. The kind's override layer (spawnOverrideFor: the repo
+// override column, then the global override setting — the AFK pair for an
+// AFK run, the global lander key alone for a lander run) is consulted first;
+// an empty overrideKey means the kind has no such layer (a manual run) and
+// nothing is read. Then every run type falls back to the base layer (repo
+// base column, then the global base setting), and finally reportedDefault — the provider's reported
 // per-model default effort (issue #156), honored when non-empty AND a catalog
 // member (defensive; conformance pins membership), "" for the model pass and
 // for models reporting none — else the catalog's first entry, or "" for a
 // provider whose catalog is empty (the flag is omitted at spawn). req is
 // always "" for AFK (the start is bodyless). knob names the field in the 400
 // message ("model"/"effort").
-func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Option, reportedDefault string, afk bool, req string, repoAFK, repoBase *string, afkKey, baseKey, knob string) (string, error) {
+func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Option, reportedDefault string, req string, repoOverride, repoBase *string, overrideKey, baseKey, knob string) (string, error) {
 	if req != "" {
 		if !provider.HasOption(catalog, req) {
 			return "", badRequestf("unknown %s %q", knob, req)
@@ -259,11 +307,11 @@ func (s *Service) layerSpawnDefault(ctx context.Context, catalog []provider.Opti
 		return req, nil
 	}
 	inCatalog := func(v string) bool { return v != "" && provider.HasOption(catalog, v) }
-	if afk {
-		if repoAFK != nil && inCatalog(*repoAFK) {
-			return *repoAFK, nil
+	if overrideKey != "" {
+		if repoOverride != nil && inCatalog(*repoOverride) {
+			return *repoOverride, nil
 		}
-		v, err := s.store.GetString(ctx, afkKey, "")
+		v, err := s.store.GetString(ctx, overrideKey, "")
 		if err != nil {
 			return "", err
 		}

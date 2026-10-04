@@ -33,6 +33,15 @@ export const TEXT_SETTING_KEYS = [
   'spawn_provider_default_afk',
   'spawn_model_default_afk',
   'spawn_effort_default_afk',
+  /**
+   * Lander model/effort override ("" = inherit the spawn default): the layer
+   * an Autoland lander (and its escalate-mode twin) resolves before the base
+   * default, below a repo's own lander_model/lander_effort. Separate from the
+   * AFK pair above so the lander can run a different model than the AFK runs
+   * it validates.
+   */
+  'spawn_model_default_lander',
+  'spawn_effort_default_lander',
   'git_author_name',
   'git_author_email',
   'afk_prompt',
