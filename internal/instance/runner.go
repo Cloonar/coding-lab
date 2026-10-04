@@ -113,6 +113,23 @@ func EffectiveDevImage(ctx context.Context, settings RunnerSettings, repo store.
 	if fallback != "" {
 		return fallback, nil
 	}
-	return "", fmt.Errorf("no dev image for this repo — set the repo's Dev image (repo settings → Runner), the global default dev image (Settings → Runner → Dev image, %s), or the deployed fallback with --container-image",
+	return "", noDevImageError{}
+}
+
+// ErrNoDevImage matches EffectiveDevImage's refusal when NO layer names a dev
+// image — the repo's image_ref, the dev_image_default setting and the
+// --container-image fallback are all unset. It tells "nothing is configured"
+// (the repo settings page shows the inherited image as "", issue #61) apart
+// from an unreadable setting, which stays an error.
+var ErrNoDevImage = errors.New("no dev image configured")
+
+// noDevImageError is the actionable no-layer refusal; errors.Is matches it
+// against ErrNoDevImage.
+type noDevImageError struct{}
+
+func (noDevImageError) Error() string {
+	return fmt.Sprintf("no dev image for this repo — set the repo's Dev image (repo settings → Runner), the global default dev image (Settings → Runner → Dev image, %s), or the deployed fallback with --container-image",
 		store.SettingDevImageDefault)
 }
+
+func (noDevImageError) Is(target error) bool { return target == ErrNoDevImage }

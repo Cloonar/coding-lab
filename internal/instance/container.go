@@ -77,20 +77,31 @@ func (s *Service) refuseContainerSpawn(ctx context.Context, providerID string, r
 	// dev_image_default setting → the --container-image flag, resolved by the
 	// one resolver. Its errors (none of the three set, or the setting
 	// unreadable) already carry the actionable text.
-	if image, err = EffectiveDevImage(ctx, s.store, repo, s.containerImage); err != nil {
+	if image, err = s.DevImage(ctx, repo); err != nil {
 		return "", badRequestf("%s", err)
 	}
 	return image, nil
 }
 
-// effectiveContainerLimits resolves a container run's resource caps: the
+// DevImage is EffectiveDevImage over this service's own store and its copy of
+// the --container-image flag — the exact dev image chain the container gate
+// above resolves for a spawn of repo. Exported so the repo settings page's
+// inherited values (issue #61) ask the same chain with the same fallback
+// rather than a second copy of the flag. Pure: a store read, no pull.
+func (s *Service) DevImage(ctx context.Context, repo store.Repo) (string, error) {
+	return EffectiveDevImage(ctx, s.store, repo, s.containerImage)
+}
+
+// EffectiveContainerLimits resolves a container run's resource caps: the
 // repo's override column when set, else the global settings row, else the
 // seeded default — the same repo-??-settings shape as EffectiveCap, except a
 // settings READ error refuses the launch instead of warning: limits are the
 // blast-radius contract of #205, and silently spawning uncapped (or
 // default-capped against the operator's stored intent) on a flaky read
-// would defeat it. Runs before the claim, so the refusal is free.
-func (s *Service) effectiveContainerLimits(ctx context.Context, repo store.Repo) (memory string, pids, nofile int, err error) {
+// would defeat it. Runs before the claim, so the refusal is free. Exported
+// for the repo settings page's inherited values (issue #61), which read the
+// limits a repo without its own overrides would run with from here.
+func (s *Service) EffectiveContainerLimits(ctx context.Context, repo store.Repo) (memory string, pids, nofile int, err error) {
 	if repo.ContainerMemory != nil {
 		memory = *repo.ContainerMemory
 	} else if memory, err = s.store.GetString(ctx, store.SettingContainerMemory, defaultContainerMemory); err != nil {

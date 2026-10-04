@@ -21,6 +21,18 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+// writeFieldError writes the refusal shape that names the offending request
+// field (issue #61): {"error":"<message>","field":"<json key>"}, so a form
+// can show the message under that field instead of in a banner. The key is
+// optional — an empty field writes writeError's plain shape.
+func writeFieldError(w http.ResponseWriter, code int, field, msg string) {
+	if field == "" {
+		writeError(w, code, msg)
+		return
+	}
+	writeJSON(w, code, map[string]string{"error": msg, "field": field})
+}
+
 // decodeJSON reads the request body into dst. On failure it writes a 400 and
 // returns the error (the caller just returns).
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {

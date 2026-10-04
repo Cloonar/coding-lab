@@ -171,19 +171,38 @@ func (s *Service) landerWorktreePath(repoName string, n int) string {
 }
 
 // landerChainProvider resolves the lander-chain effective provider for a
+// validation-class run (LanderChainProvider over this engine's instance
+// service). Shared by the producer's auth gates and both launch paths so the
+// gate and the launch can never disagree.
+func (s *Service) landerChainProvider(ctx context.Context, repo store.Repo, kind string) (provider.AgentProvider, error) {
+	return LanderChainProvider(ctx, s.instances, repo, kind)
+}
+
+// LanderChainProvider resolves the lander-chain effective provider for a
 // validation-class run — the lander, and #182's escalate-mode lander: the
 // lander_provider setting as a STRICT per-spawn request when set (an unknown
 // id fails the launch — the operator asked for it by name), else the repo's
 // base chain. kind rides through so the resolver treats both as NON-AFK
 // (isAFKKind): the AFK override layers never apply to a validation-class run.
-// Shared by the producer's auth gates and both launch paths so the gate and
-// the launch can never disagree.
-func (s *Service) landerChainProvider(ctx context.Context, repo store.Repo, kind string) (provider.AgentProvider, error) {
+// Exported so the repo settings page's inherited lander provider (issue #61)
+// is this same resolution for the repo with lander_provider nulled.
+func LanderChainProvider(ctx context.Context, instances *instance.Service, repo store.Repo, kind string) (provider.AgentProvider, error) {
 	req := ""
 	if repo.LanderProvider != nil {
 		req = *repo.LanderProvider
 	}
-	return s.instances.ResolveProvider(ctx, repo, kind, req)
+	return instances.ResolveProvider(ctx, repo, kind, req)
+}
+
+// LanderModelEffort resolves a validation-class run's model/effort against
+// its lander-chain provider prov: ResolveModelEffort for kind with the repo's
+// lander_model/lander_effort as the STRICT per-spawn request
+// (landerRequestModelEffort). Both launch paths resolve through it, and so
+// does the repo settings page's inherited lander model/effort (issue #61),
+// for the repo with those columns nulled.
+func LanderModelEffort(ctx context.Context, instances *instance.Service, prov provider.AgentProvider, repo store.Repo, kind string) (model, effort string, err error) {
+	reqModel, reqEffort := landerRequestModelEffort(repo)
+	return instances.ResolveModelEffort(ctx, prov, repo, kind, reqModel, reqEffort)
 }
 
 // landerRequestModelEffort extracts the lander-chain's per-spawn model/effort
@@ -262,8 +281,7 @@ func (s *Service) LaunchLander(ctx context.Context, repoID string, prNumber int,
 		return instance.ErrOverCap
 	}
 
-	reqModel, reqEffort := landerRequestModelEffort(repo)
-	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindLander, reqModel, reqEffort)
+	model, effort, err := LanderModelEffort(ctx, s.instances, prov, repo, store.RunKindLander)
 	if err != nil {
 		return err
 	}
@@ -351,8 +369,7 @@ func (s *Service) LaunchEscalate(ctx context.Context, repoID string, prNumber in
 		return instance.ErrOverCap
 	}
 
-	reqModel, reqEffort := landerRequestModelEffort(repo)
-	model, effort, err := s.instances.ResolveModelEffort(ctx, prov, repo, store.RunKindEscalate, reqModel, reqEffort)
+	model, effort, err := LanderModelEffort(ctx, s.instances, prov, repo, store.RunKindEscalate)
 	if err != nil {
 		return err
 	}

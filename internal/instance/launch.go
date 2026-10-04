@@ -182,7 +182,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		if ctrImage, err = s.refuseContainerSpawn(ctx, spec.Provider.ID(), repo); err != nil {
 			return store.Run{}, err
 		}
-		if ctrMemory, ctrPids, ctrNofile, err = s.effectiveContainerLimits(ctx, repo); err != nil {
+		if ctrMemory, ctrPids, ctrNofile, err = s.EffectiveContainerLimits(ctx, repo); err != nil {
 			return store.Run{}, &StartFailedError{cause: err}
 		}
 		// Pull-if-missing the effective dev image before the claim (issue #207):

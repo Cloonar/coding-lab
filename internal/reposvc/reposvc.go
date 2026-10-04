@@ -87,12 +87,26 @@ var ErrHasLiveInstances = errors.New("repository has live instances")
 
 // BadRequestError marks invalid operator input; the API answers 400 with
 // the message. Messages name fields and credential ids, never secrets.
-type BadRequestError struct{ msg string }
+//
+// Field is the request's JSON key the refusal is about, when there is one
+// (issue #61): the API echoes it beside the message ({"error", "field"}) so
+// the repo settings page and the Add repository form can show the refusal
+// under that field instead of in a banner. "" = the refusal names no single
+// field, and the API omits the key.
+type BadRequestError struct {
+	msg   string
+	Field string
+}
 
 func (e *BadRequestError) Error() string { return e.msg }
 
 func badRequestf(format string, args ...any) *BadRequestError {
 	return &BadRequestError{msg: fmt.Sprintf(format, args...)}
+}
+
+// fieldBadRequestf is badRequestf naming the offending request field.
+func fieldBadRequestf(field, format string, args ...any) *BadRequestError {
+	return &BadRequestError{msg: fmt.Sprintf(format, args...), Field: field}
 }
 
 // OneCLIAgents is the OneCLI REST seam the repo lifecycle keeps a repo's
@@ -404,17 +418,19 @@ type AddParams struct {
 func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 	remote := strings.TrimSpace(p.RemoteURL)
 	if remote == "" {
-		return store.Repo{}, badRequestf("remote_url is required")
+		return store.Repo{}, fieldBadRequestf("remote_url", "remote_url is required")
 	}
 
 	var name string
+	nameField := "name" // the field an empty name is the fault of (issue #61)
 	if strings.TrimSpace(p.Name) != "" {
 		name = gitx.SanitizeRepoName(p.Name)
 	} else {
 		name = gitx.NameFromURL(remote)
+		nameField = "remote_url" // derived: an unusable URL is what failed
 	}
 	if name == "" {
-		return store.Repo{}, badRequestf("cannot derive a repository name from remote_url; provide name")
+		return store.Repo{}, fieldBadRequestf(nameField, "cannot derive a repository name from remote_url; provide name")
 	}
 
 	if p.CredentialID != nil {
@@ -449,13 +465,13 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		// binds explicitly. The cross-field invariant — a forge binding needs a
 		// forge credential — stays.
 		if p.ForgeCredentialID == nil {
-			return store.Repo{}, badRequestf("tracker_binding: %q requires a forge_token credential (set forge_credential_id or use %q)", store.TrackerBindingForge, store.TrackerBindingBuiltin)
+			return store.Repo{}, fieldBadRequestf("tracker_binding", "tracker_binding: %q requires a forge_token credential (set forge_credential_id or use %q)", store.TrackerBindingForge, store.TrackerBindingBuiltin)
 		}
 		binding = store.TrackerBindingForge
 	case store.TrackerBindingBuiltin:
 		binding = store.TrackerBindingBuiltin
 	default:
-		return store.Repo{}, badRequestf("tracker_binding: must be \"auto\", %q or %q", store.TrackerBindingForge, store.TrackerBindingBuiltin)
+		return store.Repo{}, fieldBadRequestf("tracker_binding", "tracker_binding: must be \"auto\", %q or %q", store.TrackerBindingForge, store.TrackerBindingBuiltin)
 	}
 
 	// Provider is stored only when the operator explicitly chose one (issue
@@ -591,7 +607,7 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 	if u.Name.Set {
 		name := gitx.SanitizeRepoName(u.Name.Value)
 		if name == "" {
-			return store.Repo{}, badRequestf("name: must not be empty after sanitization")
+			return store.Repo{}, fieldBadRequestf("name", "name: must not be empty after sanitization")
 		}
 		u.Name.Value = name
 	}
@@ -634,7 +650,7 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 			// requirement is dropped. The cross-field invariant below still
 			// requires the forge credential.
 		default:
-			return store.Repo{}, badRequestf("tracker_binding: must be %q or %q", store.TrackerBindingForge, store.TrackerBindingBuiltin)
+			return store.Repo{}, fieldBadRequestf("tracker_binding", "tracker_binding: must be %q or %q", store.TrackerBindingForge, store.TrackerBindingBuiltin)
 		}
 	}
 	// Cross-field invariant (design §3a): a forge-bound repo must hold a
@@ -652,16 +668,22 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 			forgeCred = u.ForgeCredentialID.Value
 		}
 		if binding == store.TrackerBindingForge && forgeCred == nil {
-			return store.Repo{}, badRequestf("tracker_binding: %q requires a forge_token credential (set forge_credential_id or use %q)", store.TrackerBindingForge, store.TrackerBindingBuiltin)
+			// The refusal belongs to the key the request changed: the binding
+			// when it was sent, else the cleared credential (issue #61).
+			field := "tracker_binding"
+			if !u.TrackerBinding.Set {
+				field = "forge_credential_id"
+			}
+			return store.Repo{}, fieldBadRequestf(field, "tracker_binding: %q requires a forge_token credential (set forge_credential_id or use %q)", store.TrackerBindingForge, store.TrackerBindingBuiltin)
 		}
 	}
 	if u.DefaultBranch.Set {
 		branch := strings.TrimSpace(u.DefaultBranch.Value)
 		if branch == "" {
-			return store.Repo{}, badRequestf("default_branch: must not be empty")
+			return store.Repo{}, fieldBadRequestf("default_branch", "default_branch: must not be empty")
 		}
 		if strings.HasPrefix(branch, "-") {
-			return store.Repo{}, badRequestf("default_branch: must not start with '-'")
+			return store.Repo{}, fieldBadRequestf("default_branch", "default_branch: must not start with '-'")
 		}
 		u.DefaultBranch.Value = branch
 	}
@@ -676,7 +698,7 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		switch *u.Runner.Value {
 		case store.RunnerHost, store.RunnerContainer:
 		default:
-			return store.Repo{}, badRequestf("runner: must be %q, %q, or null (inherit the global runner default)", store.RunnerHost, store.RunnerContainer)
+			return store.Repo{}, fieldBadRequestf("runner", "runner: must be %q, %q, or null (inherit the global runner default)", store.RunnerHost, store.RunnerContainer)
 		}
 	}
 	// container_memory (issue #205): nullable — null clears the per-repo
@@ -685,7 +707,7 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 	// shared with the global setting's own validation in httpapi/settings.go),
 	// e.g. "8g".
 	if u.ContainerMemory.Set && u.ContainerMemory.Value != nil && !store.ValidContainerMemory(*u.ContainerMemory.Value) {
-		return store.Repo{}, badRequestf("container_memory: must look like a podman --memory value, e.g. %q", "8g")
+		return store.Repo{}, fieldBadRequestf("container_memory", "container_memory: must look like a podman --memory value, e.g. %q", "8g")
 	}
 
 	// Pattern grammar (design §4a): validate the pair that would result,
@@ -698,29 +720,29 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 		if u.ManualBranchPrefix.Set {
 			prefix = u.ManualBranchPrefix.Value
 		}
-		if err := gitx.ValidatePatternPair(pattern, prefix); err != nil {
-			return store.Repo{}, badRequestf("%s", err)
+		if err := validatePatternPair(pattern, prefix, u.AFKBranchPattern.Set); err != nil {
+			return store.Repo{}, err
 		}
 	}
 
 	if u.BudgetMinutes.Set && u.BudgetMinutes.Value != nil && *u.BudgetMinutes.Value < 1 {
-		return store.Repo{}, badRequestf("budget_minutes: must be at least 1 (null clears the override)")
+		return store.Repo{}, fieldBadRequestf("budget_minutes", "budget_minutes: must be at least 1 (null clears the override)")
 	}
 	if u.MaxInstancesOverride.Set && u.MaxInstancesOverride.Value != nil && *u.MaxInstancesOverride.Value < 1 {
-		return store.Repo{}, badRequestf("max_instances_override: must be at least 1 (null clears the override)")
+		return store.Repo{}, fieldBadRequestf("max_instances_override", "max_instances_override: must be at least 1 (null clears the override)")
 	}
 	// container_pids/container_nofile (issue #205): nullable per-repo overrides
 	// of the podman --pids-limit / --ulimit nofile floors; null clears back to
 	// the global default, same "null clears the override" wording as the pair
 	// above.
 	if u.ContainerPids.Set && u.ContainerPids.Value != nil && *u.ContainerPids.Value < 1 {
-		return store.Repo{}, badRequestf("container_pids: must be at least 1 (null clears the override)")
+		return store.Repo{}, fieldBadRequestf("container_pids", "container_pids: must be at least 1 (null clears the override)")
 	}
 	if u.ContainerNofile.Set && u.ContainerNofile.Value != nil && *u.ContainerNofile.Value < 1 {
-		return store.Repo{}, badRequestf("container_nofile: must be at least 1 (null clears the override)")
+		return store.Repo{}, fieldBadRequestf("container_nofile", "container_nofile: must be at least 1 (null clears the override)")
 	}
 	if u.MaxFixAttempts.Set && u.MaxFixAttempts.Value < 0 {
-		return store.Repo{}, badRequestf("max_fix_attempts: must be at least 0")
+		return store.Repo{}, fieldBadRequestf("max_fix_attempts", "max_fix_attempts: must be at least 0")
 	}
 	// Autoland (issue #181 / ADR-0048) is forge-only: the engine polls PR
 	// comments for lander verdicts, and the builtin tracker binding has no
@@ -738,7 +760,13 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 			enabled = u.AutolandEnabled.Value
 		}
 		if enabled && binding != store.TrackerBindingForge {
-			return store.Repo{}, badRequestf("autoland_enabled: requires a forge tracker binding")
+			// Named at the key the request changed (issue #61): autoland_enabled
+			// when it was sent, else the binding flip that broke the pair.
+			field := "autoland_enabled"
+			if !u.AutolandEnabled.Set {
+				field = "tracker_binding"
+			}
+			return store.Repo{}, fieldBadRequestf(field, "autoland_enabled: requires a forge tracker binding")
 		}
 	}
 
@@ -757,6 +785,13 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 	if u.ImageRef.Set && u.ImageRef.Value != nil {
 		pinned, err := s.PinImageRef(ctx, *u.ImageRef.Value)
 		if err != nil {
+			// PinImageRef is shared with the global dev_image_default setting,
+			// so it names no field; on this path the refusal is image_ref's
+			// (issue #61). The no-pinner plain error passes through untouched.
+			var bad *BadRequestError
+			if errors.As(err, &bad) {
+				return store.Repo{}, fieldBadRequestf("image_ref", "%s", bad.msg)
+			}
 			return store.Repo{}, err
 		}
 		if pinned == "" {
@@ -829,9 +864,28 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 // bare clone. While the clone job is running it refuses with
 // ErrCloneInProgress unless force is set, in which case the job is
 // cancelled and awaited so no git process survives the directory removal.
+//
+// A repo other repos import is refused FIRST, forced or not, with the same
+// *store.ImportersError the store-level guard returns (issue #61): force
+// never bypasses that guard (ADR-0063), so checking it only inside
+// store.DeleteRepo — after a forced delete had already abandoned the clone
+// and stopped every live instance — tore the repo's work down and then
+// refused anyway. store.DeleteRepo keeps its own check as the backstop for
+// an import declared between this read and the row delete.
 func (s *Service) Delete(ctx context.Context, id string, force bool) error {
 	if _, err := s.store.RepoByID(ctx, id); err != nil {
 		return err
+	}
+	importers, err := s.store.RepoImporters(ctx, id)
+	if err != nil {
+		return fmt.Errorf("checking importers: %w", err)
+	}
+	if len(importers) > 0 {
+		names := make([]string, len(importers))
+		for i, r := range importers {
+			names[i] = r.Name
+		}
+		return &store.ImportersError{Importers: names}
 	}
 
 	s.mu.Lock()
@@ -1266,7 +1320,7 @@ func (s *Service) validateProvider(field string, v *string) (*string, error) {
 	}
 	if s.providers != nil {
 		if _, ok := s.providers.Get(id); !ok {
-			return nil, badRequestf("%s: unknown provider %q", field, id)
+			return nil, fieldBadRequestf(field, "%s: unknown provider %q", field, id)
 		}
 	}
 	return &id, nil
@@ -1278,13 +1332,36 @@ func (s *Service) validateProvider(field string, v *string) (*string, error) {
 func (s *Service) checkCredentialKind(ctx context.Context, field, credID string, kindOK func(string) bool, want string) error {
 	cred, err := s.store.CredentialByID(ctx, credID)
 	if errors.Is(err, store.ErrNotFound) {
-		return badRequestf("%s: credential %s not found", field, credID)
+		return fieldBadRequestf(field, "%s: credential %s not found", field, credID)
 	}
 	if err != nil {
 		return err
 	}
 	if !kindOK(cred.Kind) {
-		return badRequestf("%s: credential %s has kind %s, want %s", field, credID, cred.Kind, want)
+		return fieldBadRequestf(field, "%s: credential %s has kind %s, want %s", field, credID, cred.Kind, want)
+	}
+	return nil
+}
+
+// validatePatternPair is gitx.ValidatePatternPair with the refusal pinned to
+// the field at fault (issue #61), the message unchanged: a grammar error in
+// the AFK branch pattern is afk_branch_pattern's, one in the manual branch
+// prefix is manual_branch_prefix's, and an overlap of two individually valid
+// halves belongs to whichever key the request sent — the pattern when it was
+// sent (alone or with the prefix), else the prefix.
+func validatePatternPair(pattern, prefix string, patternSent bool) error {
+	if err := gitx.ValidatePattern(pattern); err != nil {
+		return fieldBadRequestf("afk_branch_pattern", "%s", err)
+	}
+	if err := gitx.ValidateManualPrefix(prefix); err != nil {
+		return fieldBadRequestf("manual_branch_prefix", "%s", err)
+	}
+	if err := gitx.ValidatePatternPair(pattern, prefix); err != nil {
+		field := "afk_branch_pattern"
+		if !patternSent {
+			field = "manual_branch_prefix"
+		}
+		return fieldBadRequestf(field, "%s", err)
 	}
 	return nil
 }

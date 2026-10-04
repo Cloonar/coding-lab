@@ -109,3 +109,59 @@ func TestDelete_noGuardWhenNoLiveInstances(t *testing.T) {
 		t.Errorf("StopInstances called with no live instances")
 	}
 }
+
+// TestDelete_importersRefuseBeforeForcedTeardown pins the guard order of
+// issue #61: a repo another repo imports is refused — forced or not — BEFORE
+// a forced delete abandons the running clone or stops a live instance. The
+// importers guard used to run only inside store.DeleteRepo, after that
+// teardown, so a forced delete stopped the repo's instances and then answered
+// 409 anyway.
+func TestDelete_importersRefuseBeforeForcedTeardown(t *testing.T) {
+	g := newGuardEnv(t)
+	repo := g.readyRepo(t)
+	consumer, err := g.st.CreateRepo(context.Background(), store.Repo{
+		ID: ids.NewID("repo"), Name: "consumer", RemoteURL: "/tmp/consumer",
+		TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
+		AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/",
+		CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.st.AddRepoImport(context.Background(), consumer.ID, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	g.live = 1
+
+	// A registered clone job stands in for a running clone: a forced delete
+	// would cancel it and wait on done.
+	cancelled := false
+	done := make(chan struct{})
+	close(done)
+	g.svc.mu.Lock()
+	g.svc.jobs[repo.ID] = &cloneJob{cancel: func() { cancelled = true }, done: done}
+	g.svc.mu.Unlock()
+	t.Cleanup(func() {
+		g.svc.mu.Lock()
+		delete(g.svc.jobs, repo.ID)
+		g.svc.mu.Unlock()
+	})
+
+	for _, force := range []bool{true, false} {
+		err := g.svc.Delete(context.Background(), repo.ID, force)
+		var imp *store.ImportersError
+		if !errors.Is(err, store.ErrHasImporters) || !errors.As(err, &imp) ||
+			len(imp.Importers) != 1 || imp.Importers[0] != "consumer" {
+			t.Fatalf("Delete(force=%v) err = %v, want an ImportersError naming consumer", force, err)
+		}
+	}
+	if g.stopCalls != 0 || g.live != 1 {
+		t.Errorf("refused delete stopped instances (StopInstances calls = %d, live = %d), want the instance left running", g.stopCalls, g.live)
+	}
+	if cancelled {
+		t.Error("refused delete cancelled the running clone")
+	}
+	if _, err := g.st.RepoByID(context.Background(), repo.ID); err != nil {
+		t.Errorf("repo was deleted despite an importer: %v", err)
+	}
+}

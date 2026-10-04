@@ -348,9 +348,15 @@ func (s *Service) settingMinutes(ctx context.Context, key string, def int) time.
 }
 
 func (s *Service) settingDuration(ctx context.Context, key string, def int, unit time.Duration) time.Duration {
-	n, err := s.store.GetInt(ctx, key, def)
+	return settingDuration(ctx, s.store, s.log, key, def, unit)
+}
+
+// settingDuration is the engine-free read behind Service.settingDuration, so
+// EffectiveBudget can be asked without an engine.
+func settingDuration(ctx context.Context, st *store.Store, log *slog.Logger, key string, def int, unit time.Duration) time.Duration {
+	n, err := st.GetInt(ctx, key, def)
 	if err != nil {
-		s.log.Warn("reading interval setting; using default", "component", "afk", "setting", key, "err", err)
+		log.Warn("reading interval setting; using default", "component", "afk", "setting", key, "err", err)
 		n = def
 	}
 	if n <= 0 {
@@ -359,13 +365,23 @@ func (s *Service) settingDuration(ctx context.Context, key string, def int, unit
 	return time.Duration(n) * unit
 }
 
-// effectiveBudget is a repo's AFK run budget: repos.budget_minutes when set,
-// else the afk_budget_minutes setting (default 120 — D12c).
+// effectiveBudget is a repo's AFK run budget — EffectiveBudget over this
+// engine's store and logger.
 func (s *Service) effectiveBudget(ctx context.Context, repo store.Repo) time.Duration {
+	return EffectiveBudget(ctx, s.store, s.log, repo)
+}
+
+// EffectiveBudget is a repo's AFK run budget, the budget clock every AFK,
+// fix, lander and escalate launch arms: repos.budget_minutes when set, else
+// the afk_budget_minutes setting (default 120 — D12c; a missing, garbled or
+// non-positive row falls back to it with a warning on log). Exported so the
+// repo settings page's inherited budget (issue #61) is this same answer for
+// the repo with its override nulled, never a second copy of the chain.
+func EffectiveBudget(ctx context.Context, st *store.Store, log *slog.Logger, repo store.Repo) time.Duration {
 	if repo.BudgetMinutes != nil && *repo.BudgetMinutes > 0 {
 		return time.Duration(*repo.BudgetMinutes) * time.Minute
 	}
-	return s.settingMinutes(ctx, store.SettingAFKBudgetMinutes, defaultBudgetMinutes)
+	return settingDuration(ctx, st, log, store.SettingAFKBudgetMinutes, defaultBudgetMinutes, time.Minute)
 }
 
 // removeRunContainer is the `podman rm` backstop behind this engine's

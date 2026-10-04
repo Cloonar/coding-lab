@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
@@ -197,11 +199,13 @@ func (s *Server) writeRepoError(w http.ResponseWriter, doing string, err error) 
 	var bad *reposvc.BadRequestError
 	switch {
 	case errors.As(err, &bad):
-		writeError(w, http.StatusBadRequest, bad.Error())
+		// The refusal names its field when reposvc pinned one (issue #61).
+		writeFieldError(w, http.StatusBadRequest, bad.Field, bad.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, store.ErrNameTaken):
-		writeError(w, http.StatusConflict, store.ErrNameTaken.Error())
+		// Only a create or a rename can collide, and both carry the name.
+		writeFieldError(w, http.StatusConflict, "name", store.ErrNameTaken.Error())
 	case errors.Is(err, store.ErrCredentialGone):
 		// FK race: the referenced credential was deleted after the kind
 		// check but before the row write landed.
@@ -317,14 +321,17 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 
 // handleRepoUpdate is PATCH /api/v1/repos/{id}. The body is read as raw
 // JSON per field so absent, null, and zero values stay distinguishable
-// (null clears nullable columns; absent leaves them untouched).
+// (null clears nullable columns; absent leaves them untouched). Keys are
+// decoded in sorted order, so with several bad fields the refusal — which
+// names its field (issue #61) — is the same one every time.
 func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	var body map[string]json.RawMessage
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
 	var u store.RepoSettingsUpdate
-	for key, raw := range body {
+	for _, key := range slices.Sorted(maps.Keys(body)) {
+		raw := body[key]
 		var err error
 		switch key {
 		case "name":
@@ -434,7 +441,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			err = fmt.Errorf("unknown field %q", key)
 		}
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeFieldError(w, http.StatusBadRequest, key, err.Error())
 			return
 		}
 	}

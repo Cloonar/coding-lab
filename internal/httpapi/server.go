@@ -489,6 +489,9 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/v1/repos/{id}/imports", s.requireAuth(s.handleRepoImportsList))
 		api.HandleFunc("POST /api/v1/repos/{id}/imports", s.requireAuth(s.handleRepoImportsAdd))
 		api.HandleFunc("DELETE /api/v1/repos/{id}/imports/{target}", s.requireAuth(s.handleRepoImportsRemove))
+		// The reverse direction (issue #61): who imports this repo — the
+		// importers that block its deletion, read before any attempt.
+		api.HandleFunc("GET /api/v1/repos/{id}/importers", s.requireAuth(s.handleRepoImportersList))
 	}
 
 	// M3 instance lifecycle (operator auth; CSRF guards the mutations).
@@ -497,6 +500,10 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/v1/instances", s.requireAuth(s.handleInstanceList))
 		api.HandleFunc("DELETE /api/v1/instances/{session}", s.requireAuth(s.handleInstanceDelete))
 		api.HandleFunc("POST /api/v1/repos/{id}/stop-all", s.requireAuth(s.handleStopAll))
+		// Inherited values (issue #61): what each overridable repo field
+		// resolves to without the repo's own value, from the spawn's own
+		// resolvers — which is why it mounts with the instance service.
+		api.HandleFunc("POST /api/v1/repos/{id}/inherited", s.requireAuth(s.handleRepoInherited))
 		api.HandleFunc("GET /api/v1/runs", s.requireAuth(s.handleRunsList))
 		api.HandleFunc("GET /api/v1/runs/{id}", s.requireAuth(s.handleRunGet))
 		api.HandleFunc("PATCH /api/v1/runs/{id}", s.requireAuth(s.handleRunUpdate))

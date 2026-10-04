@@ -31,6 +31,17 @@ func (s *Service) Imports(ctx context.Context, repoID string) ([]store.Repo, err
 	return s.store.RepoImports(ctx, repoID)
 }
 
+// Importers returns the repos that have declared repoID a read-only import
+// (store.RepoImporters — the reverse direction of Imports, ordered by name):
+// the repos whose imports block deleting repoID, forced or not (ADR-0063).
+// ErrNotFound if repoID itself is unknown.
+func (s *Service) Importers(ctx context.Context, repoID string) ([]store.Repo, error) {
+	if _, err := s.store.RepoByID(ctx, repoID); err != nil {
+		return nil, err
+	}
+	return s.store.RepoImporters(ctx, repoID)
+}
+
 // AddImport declares that repoID's instances may read targetID's
 // origin/<default> (ADR-0063). Validated, in order, before the store write:
 // repoID must exist (ErrNotFound); targetID must not equal repoID (400 —

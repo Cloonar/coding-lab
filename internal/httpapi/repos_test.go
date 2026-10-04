@@ -356,17 +356,47 @@ func TestRepoNameDerivationAndCollision(t *testing.T) {
 		t.Errorf("sanitized name = %v, want My_Repo_", repo["name"])
 	}
 
-	// A second repo sanitizing to the same name → 409.
+	// A second repo sanitizing to the same name → 409, placed at the name
+	// field of the Add repository form (issue #61).
 	resp = x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin, "name": "My?Repo?"}, h)
 	wantStatus(t, resp, http.StatusConflict)
-	if got := decodeBody(t, resp); got["error"] == "" {
-		t.Fatal("409 without error message")
+	if got := decodeBody(t, resp); got["error"] == "" || got["field"] != "name" {
+		t.Fatalf("409 body = %v, want an error naming field name", got)
 	}
 
-	// Underivable name → 400.
-	resp = x.do("POST", "/api/v1/repos", map[string]any{"remote_url": "///"}, h)
-	wantStatus(t, resp, http.StatusBadRequest)
-	_ = decodeBody(t, resp)
+	// Renaming another repo onto the taken name is the same 409 on name.
+	resp = x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin, "name": "other"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	otherID := decodeBody(t, resp)["id"].(string)
+	resp = x.do("PATCH", "/api/v1/repos/"+otherID, map[string]any{"name": "My_Repo_"}, h)
+	wantStatus(t, resp, http.StatusConflict)
+	if got := decodeBody(t, resp); got["field"] != "name" {
+		t.Errorf("rename collision body = %v, want field name", got)
+	}
+
+	// Create refusals name their field (issue #61): an underivable name is
+	// the URL's fault; a missing URL is too.
+	for _, tc := range []struct {
+		name  string
+		body  map[string]any
+		field string
+	}{
+		{"underivable name", map[string]any{"remote_url": "///"}, "remote_url"},
+		{"missing remote", map[string]any{"name": "x"}, "remote_url"},
+		{"bad binding", map[string]any{"remote_url": "/tmp/y", "tracker_binding": "jira"}, "tracker_binding"},
+		{"forge without credential", map[string]any{"remote_url": "/tmp/y", "tracker_binding": "forge"}, "tracker_binding"},
+		{"missing credential", map[string]any{"remote_url": "/tmp/y", "credential_id": "cred_00000000000000000000000000000000"}, "credential_id"},
+		{"missing forge credential", map[string]any{"remote_url": "/tmp/y", "forge_credential_id": "cred_00000000000000000000000000000000"}, "forge_credential_id"},
+		{"unknown provider", map[string]any{"remote_url": "/tmp/y", "provider": "nope"}, "provider"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := x.do("POST", "/api/v1/repos", tc.body, h)
+			wantStatus(t, resp, http.StatusBadRequest)
+			if got := decodeBody(t, resp); got["error"] == "" || got["field"] != tc.field {
+				t.Errorf("400 body = %v, want an error naming field %q", got, tc.field)
+			}
+		})
+	}
 }
 
 func TestRepoAutoBindingAndKindMismatch(t *testing.T) {
@@ -482,34 +512,70 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 	id := decodeBody(t, resp)["id"].(string)
 	x.waitCloneStatus(t, id, "ready")
 
-	// Grammar and value 400s (design §4a).
-	for name, patch := range map[string]map[string]any{
-		"pattern without <N>":   {"afk_branch_pattern": "plain"},
-		"overlapping pair":      {"afk_branch_pattern": "lab/<N>"},
-		"empty manual prefix":   {"manual_branch_prefix": ""},
-		"bad pattern chars":     {"afk_branch_pattern": "afk ~<N>"},
-		"budget zero":           {"budget_minutes": 0},
-		"max instances zero":    {"max_instances_override": 0},
-		"binding auto stored":   {"tracker_binding": "auto"},
-		"binding forge on none": {"tracker_binding": "forge"},
-		"empty default branch":  {"default_branch": ""},
-		"unknown field":         {"nonsense": 1},
-		"wrong type":            {"incogni": "yes"},
+	// Grammar and value 400s (design §4a). Every refusal names the JSON key
+	// it is about in "field" (issue #61), so the settings page can show it
+	// under that field — the decode refusals here in the handler and the
+	// validation refusals in reposvc alike.
+	for _, tc := range []struct {
+		name  string
+		patch map[string]any
+		field string
+		want  string // substring of the error message
+	}{
+		{"pattern without <N>", map[string]any{"afk_branch_pattern": "plain"}, "afk_branch_pattern", "<N>"},
+		{"overlapping pair", map[string]any{"afk_branch_pattern": "lab/<N>"}, "afk_branch_pattern", "overlap"},
+		{"overlap sent as the prefix", map[string]any{"manual_branch_prefix": "afk/"}, "manual_branch_prefix", "overlap"},
+		{"empty manual prefix", map[string]any{"manual_branch_prefix": ""}, "manual_branch_prefix", "must not be empty"},
+		{"bad pattern chars", map[string]any{"afk_branch_pattern": "afk ~<N>"}, "afk_branch_pattern", "invalid character"},
+		{"budget zero", map[string]any{"budget_minutes": 0}, "budget_minutes", "at least 1"},
+		{"max instances zero", map[string]any{"max_instances_override": 0}, "max_instances_override", "at least 1"},
+		{"binding auto stored", map[string]any{"tracker_binding": "auto"}, "tracker_binding", "tracker_binding"},
+		{"binding forge on none", map[string]any{"tracker_binding": "forge"}, "tracker_binding", "forge_token credential"},
+		{"empty default branch", map[string]any{"default_branch": ""}, "default_branch", "must not be empty"},
+		{"empty name", map[string]any{"name": "  "}, "name", "must not be empty"},
+		{"unknown provider", map[string]any{"provider": "nope"}, "provider", "unknown provider"},
+		{"unknown afk provider", map[string]any{"afk_provider_default": "nope"}, "afk_provider_default", "unknown provider"},
+		{"unknown lander provider", map[string]any{"lander_provider": "nope"}, "lander_provider", "unknown provider"},
+		{"missing credential", map[string]any{"credential_id": "cred_00000000000000000000000000000000"}, "credential_id", "not found"},
+		{"missing forge credential", map[string]any{"forge_credential_id": "cred_00000000000000000000000000000000"}, "forge_credential_id", "not found"},
+		{"negative fix attempts", map[string]any{"max_fix_attempts": -1}, "max_fix_attempts", "at least 0"},
+		{"autoland on builtin", map[string]any{"autoland_enabled": true}, "autoland_enabled", "forge tracker binding"},
+		{"unknown field", map[string]any{"nonsense": 1}, "nonsense", "unknown field"},
+		{"wrong type", map[string]any{"incogni": "yes"}, "incogni", "must be a boolean"},
+		{"afk prompt too long", map[string]any{"afk_prompt": strings.Repeat("x", afkPromptMaxBytes+1)}, "afk_prompt", "at most"},
 		// Runner + container limits (issue #205).
-		"unknown runner":       {"runner": "bogus"},
-		"empty runner":         {"runner": ""},   // issue #55: blank is not a spelling of inherit
-		"blank runner":         {"runner": "  "}, // nor is whitespace
-		"non-string runner":    {"runner": 1},
-		"bad container memory": {"container_memory": "9x"},
-		"container pids zero":  {"container_pids": 0},
+		{"unknown runner", map[string]any{"runner": "bogus"}, "runner", "runner"},
+		{"empty runner", map[string]any{"runner": ""}, "runner", "runner"},   // issue #55: blank is not a spelling of inherit
+		{"blank runner", map[string]any{"runner": "  "}, "runner", "runner"}, // nor is whitespace
+		{"non-string runner", map[string]any{"runner": 1}, "runner", "must be a string or null"},
+		{"bad container memory", map[string]any{"container_memory": "9x"}, "container_memory", "podman --memory"},
+		{"container pids zero", map[string]any{"container_pids": 0}, "container_pids", "at least 1"},
+		{"container nofile zero", map[string]any{"container_nofile": 0}, "container_nofile", "at least 1"},
+		// Several bad keys: the handler decodes in sorted key order, so the
+		// refusal is deterministic — never whichever key a map yielded first.
+		{"several bad keys", map[string]any{"zzz": 1, "incogni": "yes", "budget_minutes": "x"}, "budget_minutes", "must be an integer"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			resp := x.do("PATCH", "/api/v1/repos/"+id, patch, h)
-			wantStatus(t, resp, http.StatusBadRequest)
-			if got := decodeBody(t, resp); got["error"] == "" {
-				t.Fatal("400 without error message")
+		t.Run(tc.name, func(t *testing.T) {
+			for range 5 { // repeat: a random map order would flake the "several" case
+				resp := x.do("PATCH", "/api/v1/repos/"+id, tc.patch, h)
+				wantStatus(t, resp, http.StatusBadRequest)
+				got := decodeBody(t, resp)
+				if msg, _ := got["error"].(string); !strings.Contains(msg, tc.want) {
+					t.Fatalf("error = %q, want it to contain %q", msg, tc.want)
+				}
+				if got["field"] != tc.field {
+					t.Fatalf("field = %v, want %q (body %v)", got["field"], tc.field, got)
+				}
 			}
 		})
+	}
+
+	// A refusal that names no single field (here: the body is not JSON)
+	// carries no "field" key at all — the key is optional.
+	resp = x.do("PATCH", "/api/v1/repos/"+id, "not an object", h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decodeBody(t, resp); hasKey(got, "field") {
+		t.Errorf("fieldless refusal carries field = %v", got["field"])
 	}
 
 	// A full valid PATCH.
