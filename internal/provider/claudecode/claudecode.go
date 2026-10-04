@@ -75,14 +75,13 @@ const (
 	// keyDelay still paces every op AFTER the first.
 	defaultDialogSettleDelay = 500 * time.Millisecond
 
-	// defaultDialogChatSettleDelay is the "Chat about this" fallback's gap
-	// (issue #58, compat §7) between the Escape that declines the pending
-	// picker and the bracketed paste of the operator's message: the declined
-	// picker has to close and the composer regain focus before the paste
-	// lands, or the text reaches a picker that is still tearing down instead
-	// of the composer. PINNED UNVERIFIED-LIVE: the implementing environment
-	// had no tmux and no logged-in claude, so unlike keyDelay and settleDelay
-	// above this value was never measured against a real picker. 1s is a
+	// defaultDialogChatSettleDelay is the "Chat about this" gap (issue #58,
+	// compat §7) between the Enter that selects the picker's own "Chat about
+	// this" row and the bracketed paste of the operator's message: the picker
+	// has to close and the composer regain focus before the paste lands, or
+	// the text reaches a picker that is still tearing down instead of the
+	// composer. PINNED UNVERIFIED-LIVE: unlike keyDelay and settleDelay above,
+	// this value was never measured against a real picker. 1s is a
 	// deliberately generous guess — twice the measured pre-first-key settle,
 	// the nearest cousin (a picker MOUNT needed 300ms+; an unmount is assumed
 	// no slower). Re-verify it on the next live sweep (compat "Live
@@ -208,7 +207,7 @@ type Provider struct {
 	logoutTimeout   time.Duration // defensive cap on the non-interactive `claude auth logout`
 	keyDelay        time.Duration // inter-op gap in the dialog-answer recipe (compat §7)
 	settleDelay     time.Duration // gap before the recipe's FIRST key (compat §7, 2.1.280)
-	chatSettleDelay time.Duration // "Chat about this": gap after the declining Escape, before the paste (compat §7, issue #58)
+	chatSettleDelay time.Duration // "Chat about this": gap after the Enter that selects the row, before the paste (compat §7, issue #58)
 
 	// authMu guards the lazy login-status cache. The ~0.75s status command
 	// runs while holding it; that brief serialisation is accepted for a

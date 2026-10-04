@@ -582,39 +582,54 @@ func TestCompat_DialogKeystrokes_plan(t *testing.T) {
 	}
 }
 
-// "Chat about this" (compat.md §7 "Chat about this", issue #58): the shipped
-// FALLBACK — the §8 interrupt key declining the picker, then the §6 reply
-// recipe (bracketed paste, separate Enter) — one named key per op. No row is
-// navigated, so the sequence is identical for a flat single-select, a flat
-// multi-select and a multi-question form; the pasted text is the validated
-// reply (multi-line kept — a composer reply, not a picker row). The picker's
-// own trailing "Chat about this" row stays unmodeled until captured live; a
-// plan review cannot be set aside this way.
+// "Chat about this" (compat.md §7 "Chat about this", issue #58): the recipe
+// selects the picker's OWN trailing "Chat about this" row — a downward walk
+// onto it, one Down per op, then Enter — and then plays the §6 reply recipe
+// (bracketed paste, separate Enter). No Escape. The walk length is the row's
+// navigation index per the §7 row models: len(modeled rows) on a
+// single-select picker, one more on a multi-select picker (past the Submit
+// row), and the FIRST question's geometry on a multi-question form. The
+// pasted text is the validated reply (multi-line kept — a composer reply, not
+// a picker row). A plan review has no such row and is refused.
 func TestCompat_ChatAboutThisKeystrokes(t *testing.T) {
 	other := provider.DialogOption{Label: "Other", IsOther: true}
-	shapes := map[string]provider.Dialog{
-		"single-select": {Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
-			Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, other}},
-		"multi-select": {Kind: provider.DialogKindQuestion, Prompt: "Which toppings?", Answerable: true, Multi: true,
-			Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, other}},
-		"multi-question": {Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
-			Questions: []provider.Question{
-				{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
-				{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Apple"}, {Label: "Cherry"}, other}},
-			}},
+	down := claudecode.KeyOp{Named: []string{"Down"}}
+	enter := claudecode.KeyOp{Named: []string{"Enter"}}
+	paste := claudecode.KeyOp{Text: "Why these two?\nWhat about fish?"}
+	shapes := map[string]struct {
+		dialog provider.Dialog
+		want   []claudecode.KeyOp
+	}{
+		// Dog, Cat, Type something. | Chat about this → index 3.
+		"single-select": {
+			provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
+				Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, other}},
+			[]claudecode.KeyOp{down, down, down, enter, paste, enter},
+		},
+		// Olives, Onions, Type something, Submit | Chat about this → index 4.
+		"multi-select": {
+			provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Which toppings?", Answerable: true, Multi: true,
+				Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, other}},
+			[]claudecode.KeyOp{down, down, down, down, enter, paste, enter},
+		},
+		// The form opens on its first question (single-select Color): Red,
+		// Blue, Type something. | Chat about this → index 3.
+		"multi-question": {
+			provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+				Questions: []provider.Question{
+					{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
+					{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Apple"}, {Label: "Cherry"}, other}},
+				}},
+			[]claudecode.KeyOp{down, down, down, enter, paste, enter},
+		},
 	}
-	want := []claudecode.KeyOp{
-		{Named: []string{"Escape"}},                // decline the picker (§8)
-		{Text: "Why these two?\nWhat about fish?"}, // §6 reply: bracketed paste…
-		{Named: []string{"Enter"}},                 // …then the paced submit
-	}
-	for name, d := range shapes {
-		got, err := claudecode.ChatAboutThisKeystrokes(d, provider.DialogAnswer{ChatText: "Why these two?\nWhat about fish?"})
+	for name, c := range shapes {
+		got, err := claudecode.ChatAboutThisKeystrokes(c.dialog, provider.DialogAnswer{ChatText: "Why these two?\nWhat about fish?"})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s: chat-about-this sequence = %v; want %v", name, got, want)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: chat-about-this sequence = %v; want %v", name, got, c.want)
 		}
 	}
 

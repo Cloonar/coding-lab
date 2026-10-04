@@ -485,85 +485,124 @@ func TestCompat_Live_exitPlanModeRows(t *testing.T) {
 	}
 }
 
-// TestCompat_Live_chatAboutThisFallback drives issue #58's SHIPPED "Chat about
-// this" mechanism — the fallback (compat §7 "Chat about this"): the §8 Escape
-// declines the pending picker, the pinned chat settle lets it close, then the
-// §6 reply delivers the operator's message — against a real single-select
-// AskUserQuestion picker, through the production AnswerDialog path.
+// TestCompat_Live_chatAboutThisRow drives issue #58's "Chat about this"
+// mechanism (compat §7 "Chat about this"): a downward walk onto the picker's
+// own trailing "Chat about this" row, Enter, then the §6 reply — through the
+// production AnswerDialog path with production pacing. The recipe was written
+// from the §7 row models and has NOT been driven live yet, so this test's
+// first green run IS the live verification the compat entry is waiting on.
+// It asserts what the recipe promises and logs what it has to learn:
 //
-// WRITTEN BUT NEVER RUN: the implementing environment had no tmux and no
-// logged-in claude, so this test's first green run IS the live verification
-// the compat entry is waiting on (the Escape-declined resolution shape and
-// the unmeasured 1s chatSettleDelay). It asserts the three things the
-// fallback promises: (1) the picker resolves as a DECLINE — a string
-// toolUseResult (compat §5), never an answers object, so no row was picked;
-// (2) the message lands verbatim as an ordinary user turn — submitted, not
-// stranded in the composer or swallowed by a picker that had not closed yet;
-// (3) the production read renders the dialog through the dismissed summary
-// with no backstop warning.
-func TestCompat_Live_chatAboutThisFallback(t *testing.T) {
-	rig := newLiveRecipeRig(t, "lab-compat-live-chat")
-
-	prompt := `Call the AskUserQuestion tool right now, before any other reply or action, with exactly one question: ` +
-		`header "Pet", question "Favorite pet?", multiSelect false, options: {label "Dog", description "loyal"}, {label "Cat", description "aloof"}. ` +
-		`Use exactly these strings.`
-	if err := rig.prov.Reply(context.Background(), rig.session, prompt); err != nil {
-		t.Fatalf("Reply: %v", err)
+//	(1) the picker resolves WITHOUT an option being picked — a recorded
+//	    answers object means the walk landed on an option row (the index is
+//	    off) and the Enter answered the question;
+//	(2) the message lands verbatim as an ordinary user turn — submitted, not
+//	    stranded in the composer or swallowed by a picker that had not closed;
+//	(3) the production read renders the dialog through the dismissed summary
+//	    with no backstop warning.
+//
+// It logs the tool_result line the row leaves behind — the transcript shape
+// §7 still has to pin. Run it for each picker shape before trusting the
+// recipe: the subtests cover single-select, multi-select and a two-question
+// form.
+func TestCompat_Live_chatAboutThisRow(t *testing.T) {
+	other := provider.DialogOption{Label: "Other", IsOther: true}
+	shapes := []struct {
+		name   string
+		prompt string
+		needle string // the first picker's question text, to know WHEN it is up
+		dialog provider.Dialog
+	}{
+		{
+			name: "single-select",
+			prompt: `Call the AskUserQuestion tool right now, before any other reply or action, with exactly one question: ` +
+				`header "Pet", question "Favorite pet?", multiSelect false, options: {label "Dog", description "loyal"}, {label "Cat", description "aloof"}. ` +
+				`Use exactly these strings.`,
+			needle: "Favorite pet?",
+			dialog: provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
+				Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, other}},
+		},
+		{
+			name: "multi-select",
+			prompt: `Call the AskUserQuestion tool right now, before any other reply or action, with exactly one question: ` +
+				`header "Toppings", question "Which toppings?", multiSelect true, options: {label "Olives", description "salty"}, {label "Onions", description "sharp"}. ` +
+				`Use exactly these strings.`,
+			needle: "Which toppings?",
+			dialog: provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Which toppings?", Answerable: true, Multi: true,
+				Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, other}},
+		},
+		{
+			name: "multi-question",
+			prompt: `Call the AskUserQuestion tool right now, before any other reply or action, with exactly two questions. ` +
+				`Question 1: header "Color", question "Which color do you prefer?", multiSelect false, options: {label "Red", description "warm"}, {label "Blue", description "cool"}. ` +
+				`Question 2: header "Fruits", question "Which fruits do you like?", multiSelect true, options: {label "Apple", description "crisp"}, {label "Banana", description "soft"}, {label "Cherry", description "tart"}. ` +
+				`Use exactly these strings.`,
+			needle: "Which color do you prefer?",
+			dialog: provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+				Questions: []provider.Question{
+					{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
+					{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{
+						{Label: "Apple"}, {Label: "Banana"}, {Label: "Cherry"}, other}},
+				}},
+		},
 	}
-	rig.waitPane(t, 120*time.Second, "Favorite pet?")
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			rig := newLiveRecipeRig(t, "lab-compat-live-chat-"+shape.name)
+			if err := rig.prov.Reply(context.Background(), rig.session, shape.prompt); err != nil {
+				t.Fatalf("Reply: %v", err)
+			}
+			rig.waitPane(t, 120*time.Second, shape.needle)
 
-	dialog := provider.Dialog{
-		Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
-		Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, {Label: "Other", IsOther: true}},
-	}
-	const chatText = "Before I pick: reply with only the word PINEAPPLE."
-	if err := rig.prov.AnswerDialog(context.Background(), rig.session, dialog, provider.DialogAnswer{ChatText: chatText}); err != nil {
-		t.Fatalf("AnswerDialog(chat_text): %v", err)
-	}
+			const chatText = "Before I pick: reply with only the word PINEAPPLE."
+			if err := rig.prov.AnswerDialog(context.Background(), rig.session, shape.dialog, provider.DialogAnswer{ChatText: chatText}); err != nil {
+				t.Fatalf("AnswerDialog(chat_text): %v", err)
+			}
 
-	// (1) The first recorded resolution must be the §5 decline STRING. Any
-	// toolUseResult is accepted by the wait so a wrong shape fails loudly here
-	// instead of timing out: an answers OBJECT means the Escape never closed
-	// the picker and the pasted text answered it.
-	raw := rig.waitRecordedResult(t, 90*time.Second, func(json.RawMessage) bool { return true })
-	if raw[0] != '"' {
-		t.Fatalf("the picker resolved with %s; want a decline string — the Escape did not decline it", raw)
-	}
-	// The Escape-declined shape is the pin this run verifies (compat §7):
-	// record it for the sweep's notes.
-	t.Logf("Escape-declined toolUseResult: %s", raw)
-
-	// (2) + (3) Poll the production read until the message shows up as a user
-	// turn, then check how the dialog renders.
-	deadline := time.Now().Add(90 * time.Second)
-	for {
-		chat, err := rig.prov.ReadChat(provider.ReadSpec{TranscriptPath: rig.transcriptPath(t)})
-		if err != nil {
-			t.Fatalf("ReadChat: %v", err)
-		}
-		replied := false
-		var outcome *provider.DialogOutcome
-		for _, m := range chat.Messages {
-			if m.Kind == provider.MessageText && m.Role == "user" && strings.Contains(m.Text, chatText) {
-				replied = true
+			// Poll the production read until the message shows up as a user
+			// turn, then check how the dialog resolved and renders.
+			deadline := time.Now().Add(120 * time.Second)
+			for {
+				path := rig.transcriptPath(t)
+				chat, err := rig.prov.ReadChat(provider.ReadSpec{TranscriptPath: path})
+				if err != nil {
+					t.Fatalf("ReadChat: %v", err)
+				}
+				replied := false
+				var outcome *provider.DialogOutcome
+				for _, m := range chat.Messages {
+					if m.Kind == provider.MessageText && m.Role == "user" && strings.Contains(m.Text, chatText) {
+						replied = true
+					}
+					if m.Kind == provider.MessageDialog && m.Dialog != nil && m.Dialog.Kind == provider.DialogKindQuestion && m.Dialog.Outcome != nil {
+						outcome = m.Dialog.Outcome
+					}
+					if m.Kind == provider.MessageLifecycle && m.Error && strings.HasPrefix(m.Text, "Dialog answer may not have landed") {
+						t.Errorf("the row selection emitted a backstop warning: %q", m.Text)
+					}
+				}
+				if replied {
+					// (1) + (3): resolved, no option picked, dismissed summary.
+					if outcome == nil || !outcome.Dismissed {
+						t.Errorf("dialog outcome = %+v; want the dismissed summary — a Results outcome means the walk picked an option", outcome)
+					}
+					// The shape the row records is the pin this run captures
+					// (compat §7): log every tool_result line for the notes.
+					if b, err := os.ReadFile(path); err == nil {
+						for _, line := range strings.Split(string(b), "\n") {
+							if strings.Contains(line, `"tool_result"`) {
+								t.Logf("recorded tool_result line: %s", line)
+							}
+						}
+					}
+					return
+				}
+				if time.Now().After(deadline) {
+					pane, _ := rig.tm.CapturePane(context.Background(), rig.session)
+					t.Fatalf("the chat message never landed as a user turn within 120s (dialog outcome so far: %+v); pane:\n%s", outcome, pane)
+				}
+				time.Sleep(time.Second)
 			}
-			if m.Kind == provider.MessageDialog && m.Dialog != nil && m.Dialog.Kind == provider.DialogKindQuestion && m.Dialog.Outcome != nil {
-				outcome = m.Dialog.Outcome
-			}
-			if m.Kind == provider.MessageLifecycle && m.Error && strings.HasPrefix(m.Text, "Dialog answer may not have landed") {
-				t.Errorf("the deliberate decline emitted a backstop warning: %q", m.Text)
-			}
-		}
-		if replied {
-			if outcome == nil || !outcome.Dismissed {
-				t.Errorf("dialog outcome = %+v; want the dismissed summary", outcome)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			pane, _ := rig.tm.CapturePane(context.Background(), rig.session)
-			t.Fatalf("the chat message never landed as a user turn within 90s; pane:\n%s", pane)
-		}
-		time.Sleep(time.Second)
+		})
 	}
 }

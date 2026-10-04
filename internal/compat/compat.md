@@ -1221,7 +1221,7 @@ Favorite pet?
   2. Cat
   3. Type something.       ← free-text row, ALWAYS present (modeled as "Other", IsOther)
 ──────────────
-  4. Chat about this       ← trailing synth row, NOT modeled (see "Chat about this" below)
+  4. Chat about this       ← trailing synth row, not an Option; driven by index (see "Chat about this" below)
 ```
 
 - lab models the listed options **plus** the free-text row in `Options`; its
@@ -1368,74 +1368,82 @@ Claude has written up a plan and is ready to execute. Would you like to proceed?
 
 **Chat about this** (issue #58) — the dock's "set the question aside and
 chat" action: `POST /runs/{id}/answer` with `chat_text` (`DialogAnswer.ChatText`)
-dismisses the pending **question** dialog, then delivers the text verbatim as
-an ordinary reply. **The mechanism that SHIPPED is the FALLBACK**, built only
-from already-verified primitives — `ChatAboutThisKeystrokes`, snapshot
-`TestCompat_ChatAboutThisKeystrokes`:
+selects the picker's **own trailing "Chat about this" row**, then delivers the
+text verbatim as an ordinary reply. No `Escape` is sent — the action is the
+picker's row, not an interrupt (maintainer decision on PR #60). Recipe —
+`ChatAboutThisKeystrokes`, snapshot `TestCompat_ChatAboutThisKeystrokes`:
 
 ```
-settleDelay → [Escape] → chatSettleDelay → [PasteText] → keyDelay → [Enter]
+settleDelay → [Down × row] (keyDelay between keys) → [Enter] → chatSettleDelay → [PasteText] → keyDelay → [Enter]
 ```
 
-the §8 interrupt key (one `Escape`; the picker footer itself advertises
-`Esc to cancel` — §11, live) declines the picker, then the §6 reply recipe
-(bracketed paste, separately paced `Enter`) sends the message from the
-composer. One named key per op, as everywhere in this section. The op
-sequence is identical for flat single-select, flat multi-select and
-multi-question forms — no row is navigated; the Escape declines the whole
-form, whatever question is on screen. The pre-first-key `settleDelay` guards
-the Escape like any first key (a dropped Escape would leave the picker
-focused for the paste); `chatSettleDelay` (`defaultDialogChatSettleDelay` =
-**1s**) is the gap for the declined picker to close and the composer to
-regain focus before the paste. Validation is at the door, before any key:
-the dialog must be answerable and of kind question (a plan review is
-`ErrDialogNotAnswerable` — declining a plan is a rejection, a different
-semantic, and the UI never offers it there); the text follows `validateReply`
-(multi-line allowed — a composer reply, not a single-line picker row); and
-`selected`/`other_text`/`answers` alongside it are `ErrInvalidReply`. The
-whole sequence runs inside one `AnswerDialog` call under the chat service's
-per-session lock, behind the same live tool_id re-read as any answer — a
-stale id is refused before a key plays, and nothing can interleave between
-the decline and the reply.
+A downward-only walk from the top row (universal rules above: no climb, one
+named key per op), `Enter` on the row, then the §6 reply recipe (bracketed
+paste, separately paced `Enter`). `row` is the row's 0-based navigation index
+on the picker a fresh dialog presents (`chatRowIndex`):
 
-- **Why the fallback, not the picker's own row.** The preferred mechanism —
-  select the TUI's trailing "Chat about this" row, then send the message once
-  the picker has closed — needs that row's navigation index per picker shape
-  and the transcript it leaves behind, captured against a live picker. The
-  implementing environment had **no tmux and no logged-in claude**, so neither
-  was captured, and issue #58 forbids shipping an unverified recipe. The row
-  therefore stays **NOT modeled** (the row models above are unchanged).
-- **What the row models imply for a future live capture — NOT driven.**
-  Single-select: the row sits after the free-text row, past the `──` divider
-  — if the divider is not a stop, navigation index = len(modeled rows), i.e.
-  `[Down × len(Options)][Enter]`. Multi-select: after the Submit row —
-  index len(modeled rows) + 1. Multi-question: per the current question's
-  picker (single- or multi-select geometry), with it unknown whether choosing
-  it mid-form abandons the whole form; the review screen has no such row.
-  Every one of these is an inference from the rows captured above, never
-  driven — capture before switching mechanisms.
-- **Expected resolution shape.** A declined `AskUserQuestion`: the §5 denial
-  — `toolUseResult:"User rejected tool use"`, `toolDenialKind:"user-rejected"`,
-  `is_error:true` — followed by the `[Request interrupted by user for tool
-  use]` user line, then the message as an ordinary user turn. That decline
-  shape is live-captured (2026-07-08, the decline in
-  `transcript-askuserquestion-live-2.1.198.jsonl`; the Enter-on-the-empty-
-  free-text-row bug above recorded the same pair); the **Escape**-declined
-  shape specifically was not captured. Rendering does not depend on the
-  difference: `questionOutcome` collapses any denial AND any
-  absent/unreadable result to `Dismissed`, so history shows the existing
-  dismissed summary. The chat path records **no** pick intent and drops a
-  stale one left by an earlier attempt on the same pending picker, so the
-  deliberate decline never trips the backstop
-  (`TestBackstop_chatAboutThis_dismissedWithoutWarning`).
+| Picker | Navigation order | `row` |
+| --- | --- | --- |
+| single-select | modeled rows (options + free-text row), Chat about this | `len(Options)` |
+| multi-select | modeled rows, Submit, Chat about this | `len(Options) + 1` |
+| multi-question form | the **first** question's picker, by its own shape | as above, from `Questions[0]` |
+
+`chatSettleDelay` (`defaultDialogChatSettleDelay` = **1s**) is the gap for the
+picker to close and the composer to regain focus before the paste. Validation
+is at the door, before any key: the dialog must be answerable and of kind
+question (a plan review is `ErrDialogNotAnswerable` — its picker has no such
+row, and the UI never offers the action there); `selected`/`other_text`/
+`answers` alongside `chat_text` are `ErrInvalidReply`; and the text follows
+`validateReply` (multi-line allowed — a composer reply, not a single-line
+picker row). The whole sequence runs inside one `AnswerDialog` call under the
+chat service's per-session lock, behind the same live tool_id re-read as any
+answer — a stale id is refused before a key plays, and nothing can interleave
+between the row selection and the reply.
+
+- **NOT YET DRIVEN LIVE — the recipe is built from the row models above.**
+  The multi-select navigation order (options, Submit, Chat about this) was
+  observed live on 2026-07-09 and the single-select row sits last in the
+  captured picker, but the walk **onto** the row and the `Enter` on it were
+  never played against a real picker. Three things are therefore inferred:
+  (1) the `──` divider above the row is not a navigation stop; (2) on a
+  multi-question form, choosing the row from the first question sets the
+  whole form aside; (3) the picker closes within `chatSettleDelay`. Neither
+  the implementing environment nor PR #60's landing session could drive a
+  live picker (the latter had a logged-in claude but was not permitted to
+  spawn a nested one). `TestCompat_Live_chatAboutThisRow` is the owed live
+  run (§Live re-verification).
+- **What a wrong index does.** One row short on a single-select picker lands
+  on the empty free-text row, where `Enter` declines the whole dialog (live,
+  2026-07-08) — the message is still delivered, so that miss degrades
+  harmlessly. One row long **wraps to row 0** (Up/Down wrap) and the `Enter`
+  **picks the first option** (single-select) or toggles it (multi-select).
+  On a multi-select picker one row short lands on Submit. These are the
+  desyncs the §5 backstop exists for, so this path records its own intent:
+  "no option picked". A recorded answers object after a Chat about this emits
+  `Dialog answer may not have landed: lab chose "Chat about this", but the
+  transcript recorded an answer (…)` in the chat
+  (`TestBackstop_chatAboutThis_recordedAnswer_warns`).
+- **Resolution shape — not captured.** What the transcript records after the
+  row is chosen is unknown. Rendering and verification do not depend on it:
+  `questionOutcome` collapses any denial, any absent or unreadable result and
+  an empty answers map to `Dismissed`, and the chat intent verifies silently
+  on all of those (`TestBackstop_chatAboutThis_dismissedWithoutWarning`,
+  which covers the §5 decline pair and a result with no `toolUseResult`). The
+  chat intent replaces a stale pick intent left by an earlier attempt on the
+  same pending picker, so the deliberate non-answer never trips the backstop.
+  Whether claude keeps working after the row is chosen (answering the
+  "wants to chat" result) or stops and waits is also uncaptured; the reply
+  recipe is valid in both states (Send is never gated on state, ADR-0029).
 - **Hazard (accepted).** If the picker resolves on its own between the
-  tool_id re-read and the Escape (an AFK run's 60s timeout landing in that
-  window), the Escape reaches a working turn instead and interrupts it (§8 —
-  non-destructive), and the message then lands as an ordinary reply.
-- **Pinned unverified-live.** `chatSettleDelay` was never measured (1s is
-  twice the measured pre-first-key settle, its nearest cousin) and the
-  Escape-on-picker transcript shape was never captured — both are on the
-  next live sweep (§Live re-verification, `TestCompat_Live_chatAboutThisFallback`).
+  tool_id re-read and the first key (an AFK run's 60s timeout landing in that
+  window), the walk's `Down` keys and the `Enter` reach the composer of a
+  working turn, where they are expected to be inert on an empty box, and the
+  message then lands as an ordinary reply. Unlike the earlier Escape-based
+  fallback, nothing interrupts the turn.
+- **Pinned unverified-live.** The row indices, the multi-question behaviour,
+  `chatSettleDelay` (1s is twice the measured pre-first-key settle, its
+  nearest cousin) and the resolution shape — all four are on the next live
+  sweep.
 
 **Timeout**: any of these pickers left unanswered resolves ITSELF after 60s
 (§5 afkTimeout) — an answer sent after that 409s on the tool_id re-read, and
@@ -1468,9 +1476,9 @@ confirm; the two controls do not share a glyph (ADR-0029 decision 6). The
 interrupt is distinct from a run Stop: it never touches the session
 lifecycle, the budget clock, the claim, or the three-strikes counter
 (issue #7 decision 12) — intervention neutrality is structural (nothing
-in the chat path writes a run outcome). The same single `Escape` is also
-the first key of the §7 "Chat about this" fallback (issue #58), which
-declines a pending picker with it. fixture — the send is tmux-hermetic;
+in the chat path writes a run outcome). The §7 "Chat about this" action
+(issue #58) does **not** use this key: it selects the picker's own row.
+fixture — the send is tmux-hermetic;
 the claude-side Escape-interrupts-the-turn behavior is re-verified live
 on upgrades.
 
@@ -2265,24 +2273,23 @@ skipped run is not a pass**. (They watch the pane via `capture-pane` to know WHE
 up — that is the verification harness observing its own probe, not a
 production scrape; the recipes themselves stay blind.)
 
-**"Chat about this" fallback — owed, never yet run live (issue #58).**
-`TestCompat_Live_chatAboutThisFallback` (same gate, same file) drives the §7
-"Chat about this" fallback against a real single-select picker: Escape,
-the pinned `chatSettleDelay` (1s), then the §6 reply. It was **written but
-never run** — the implementing environment had no tmux and no logged-in
-claude — so its first run on the next sweep IS the live verification of two
-pins: (1) the **Escape-declined resolution shape** (it asserts a §5 decline
-string, never an answers object, and records what the Escape actually wrote
-— compare against the §5 decline pair and update §7 if it differs), and
-(2) the **chat settle**: the message must land verbatim as an ordinary user
-turn, not stranded in the composer or swallowed by a closing picker. If it
-passes, also try it with `chatSettleDelay` cut to 500ms and 250ms and record
-the smallest reliable value in `defaultDialogChatSettleDelay`'s comment. The
-same session is the chance to **capture the picker's own trailing "Chat about
-this" row** by hand (single-select, multi-select, a multi-question form):
-its navigation index per shape (§7 lists the inferred, undriven indices) and
-the transcript it leaves — the evidence needed before the preferred
-mechanism can replace the fallback.
+**"Chat about this" row — owed, never yet run live (issue #58).**
+`TestCompat_Live_chatAboutThisRow` (same gate, same file) drives the §7
+"Chat about this" recipe against real pickers, one subtest per shape —
+single-select, multi-select, and a two-question form: the Down walk onto the
+picker's own trailing row, `Enter`, the pinned `chatSettleDelay` (1s), then
+the §6 reply. It was **written but never run**, so its first run IS the live
+verification of the recipe. Per subtest it asserts that (1) the dialog
+resolved **without an option being picked** (a `Results` outcome means the
+row index is off — fix `chatRowIndex` and the §7 table), (2) the message
+landed verbatim as an ordinary user turn, not stranded in the composer or
+swallowed by a closing picker, and (3) no backstop warning was emitted. It
+logs the `tool_result` line the row leaves behind — **record that shape in
+§7** (and whether claude kept working or stopped). If it passes, also try
+`chatSettleDelay` cut to 500ms and 250ms and record the smallest reliable
+value in `defaultDialogChatSettleDelay`'s comment. A lab instance may refuse
+to spawn a nested claude (PR #60's landing session did); run the sweep on a
+host where that is allowed.
 
 **Running the suite from inside a lab instance (how the 2.1.284 bump did it).**
 The rig resolves everything off `$HOME`: it seeds trust into

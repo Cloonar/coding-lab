@@ -198,36 +198,46 @@ func TestBackstop_userRejectedAfterAnswer_warns(t *testing.T) {
 	}
 }
 
-// "Chat about this" (issue #58) declines the picker ON PURPOSE, so its
-// resolution must render through the plain dismissed summary with NO backstop
-// warning: the chat path records no pick intent, and it drops a stale one an
-// earlier answer attempt left on the same still-pending picker (otherwise the
-// deliberate decline would read as "lab sent an answer, but the transcript
-// recorded a decline"). The resolution modeled here is the live-captured
-// 2.1.198 decline (declinedLine: toolUseResult "User rejected tool use" +
-// toolDenialKind user-rejected — compat §5), followed by the
-// "[Request interrupted by user for tool use]" marker the same fixture
-// records and then the operator's message as an ordinary user turn; the
-// Escape-specific shape is pinned unverified-live (compat §7).
+// "Chat about this" (issue #58) sets the dialog aside ON PURPOSE by selecting
+// the picker's own trailing row, so a resolution that picked no option must
+// render through the plain dismissed summary with NO backstop warning. The
+// chat path records a "no option picked" intent, and that intent REPLACES a
+// stale pick intent an earlier answer attempt left on the same still-pending
+// picker (otherwise the deliberate non-answer would read as "lab sent an
+// answer, but the transcript recorded a decline").
+//
+// What the row records has not been captured live (compat §7), so the test
+// covers both shapes lab can meet without reading the row's own text: the
+// live-captured 2.1.198 decline (declinedLine: toolUseResult "User rejected
+// tool use" + toolDenialKind user-rejected — compat §5) and a tool_result
+// carrying no toolUseResult at all. Either way the operator's message follows
+// as an ordinary user turn.
 func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
-	const interruptedLine = `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"2026-07-08T15:38:32.214Z"}`
+	const bareResultLine = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user wants to talk about these questions first.","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-08T15:38:32.213Z"}`
 	const chatLine = `{"type":"user","message":{"role":"user","content":"Before I pick: which of these is cheaper to run?"},"timestamp":"2026-07-08T15:38:35.000Z"}`
 	d := provider.Dialog{
 		ToolID: "toolu_chat", Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
 		Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, {Label: "Other", IsOther: true}},
 	}
-	transcript := resolvedTranscript(toolAskUserQuestion, "toolu_chat", declinedLine) + interruptedLine + "\n" + chatLine + "\n"
-
-	for name, staleIntent := range map[string]bool{"fresh picker": false, "after a failed answer attempt": true} {
+	cases := map[string]struct {
+		resolution  string
+		staleIntent bool
+	}{
+		"decline shape, fresh picker":                  {declinedLine, false},
+		"decline shape, after a failed answer attempt": {declinedLine, true},
+		"no toolUseResult, fresh picker":               {bareResultLine, false},
+	}
+	for name, c := range cases {
+		transcript := resolvedTranscript(toolAskUserQuestion, "toolu_chat", c.resolution) + chatLine + "\n"
 		p, f := armedRunner(t)
-		if staleIntent {
+		if c.staleIntent {
 			// An earlier answer whose keys played but never landed: its intent
 			// is still recorded for this tool_id.
 			if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Index: 0}); err != nil {
 				t.Fatalf("%s: AnswerDialog(pick): %v", name, err)
 			}
-			if _, ok := p.intents.byID["toolu_chat"]; !ok {
-				t.Fatalf("%s: the pick recorded no intent; the stale-intent case is not exercised", name)
+			if in, ok := p.intents.byID["toolu_chat"]; !ok || in.chat {
+				t.Fatalf("%s: the pick recorded no pick intent (%+v); the stale-intent case is not exercised", name, in)
 			}
 		}
 		if err := p.AnswerDialog(context.Background(), chatSession, d,
@@ -237,8 +247,11 @@ func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
 		if len(f.KeyLog(chatSession)) == 0 {
 			t.Fatalf("%s: the chat path sent no keystrokes", name)
 		}
-		if _, ok := p.intents.byID["toolu_chat"]; ok {
-			t.Errorf("%s: an intent is still recorded after the chat path; want none", name)
+		if in, ok := p.intents.byID["toolu_chat"]; !ok || !in.chat || len(in.answers) != 0 {
+			t.Errorf("%s: intent after the chat path = %+v (recorded %v); want the chat intent alone", name, in, ok)
+		}
+		if n := len(p.intents.order); n != 1 {
+			t.Errorf("%s: %d eviction-order slots for one tool_id; want 1", name, n)
 		}
 		path := filepath.Join(t.TempDir(), "t.jsonl")
 		if err := os.WriteFile(path, []byte(transcript), 0o644); err != nil {
@@ -249,7 +262,10 @@ func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
 			t.Fatalf("%s: ReadChat: %v", name, err)
 		}
 		if w := backstopWarnings(chat); len(w) != 0 {
-			t.Errorf("%s: the deliberate decline emitted backstop warnings: %+v", name, w)
+			t.Errorf("%s: the deliberate non-answer emitted backstop warnings: %+v", name, w)
+		}
+		if _, ok := p.intents.byID["toolu_chat"]; ok {
+			t.Errorf("%s: the verified chat intent is still recorded; want it cleared", name)
 		}
 		var outcome *provider.DialogOutcome
 		var replied bool
@@ -267,6 +283,37 @@ func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
 		if !replied {
 			t.Errorf("%s: the chat message is not an ordinary user turn in %+v", name, chat.Messages)
 		}
+	}
+}
+
+// The walk onto the "Chat about this" row is blind. If it lands on an OPTION
+// row instead, the Enter answers the question — an answer the operator never
+// gave. The chat intent turns exactly that into a visible warning naming what
+// was recorded; it stays recorded, so every re-parse repeats it.
+func TestBackstop_chatAboutThis_recordedAnswer_warns(t *testing.T) {
+	chat := answerThenRead(t, twoQuestionDialog("toolu_2q"), provider.DialogAnswer{ChatText: "why these colors?"},
+		resolvedTranscript(toolAskUserQuestion, "toolu_2q", answeredLine))
+	w := backstopWarnings(chat)
+	if len(w) != 1 {
+		t.Fatalf("a recorded answer after Chat about this: %d warnings; want 1 (%+v)", len(w), chat.Messages)
+	}
+	for _, want := range []string{"Dialog answer may not have landed", "Chat about this", `"Red"`, `"Apple, Cherry"`} {
+		if !strings.Contains(w[0].Text, want) {
+			t.Errorf("warning %q lacks %q", w[0].Text, want)
+		}
+	}
+}
+
+// The 60s unattended timeout can win the race against lab's keys: it records
+// answers:{} with an afkTimeoutMs stamp. No option was picked, so the chat
+// intent verifies silently (the keys then reach the composer and the message
+// is sent as an ordinary reply).
+func TestBackstop_chatAboutThis_timeout_silent(t *testing.T) {
+	const timeoutLine = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"No response after 60s.","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-08T15:39:32.213Z","toolUseResult":{"questions":[],"answers":{},"annotations":{},"afkTimeoutMs":60000}}`
+	chat := answerThenRead(t, twoQuestionDialog("toolu_2q"), provider.DialogAnswer{ChatText: "why these colors?"},
+		resolvedTranscript(toolAskUserQuestion, "toolu_2q", timeoutLine))
+	if w := backstopWarnings(chat); len(w) != 0 {
+		t.Errorf("a timed-out picker after Chat about this emitted warnings: %+v", w)
 	}
 }
 

@@ -63,6 +63,12 @@ type dialogIntent struct {
 	// "Favorite pet?":"Ferret"}`).
 	answers map[string]string
 
+	// chat (question kind) marks a "Chat about this" intent (issue #58): lab
+	// walked onto the picker's own trailing row to set the dialog aside, so
+	// the expected resolution is anything that picked NO option. answers
+	// stays empty.
+	chat bool
+
 	// approve/feedback (plan kind): rows 0–1 of the pinned picker approve,
 	// rows 2–3 reject; feedback carries row 3's typed text (recorded inside
 	// the denial string after "the user said:\n" — live 2026-07-08).
@@ -113,15 +119,36 @@ func (r *intentRegistry) record(sessionName string, d provider.Dialog, a provide
 	}
 	in.session = sessionName
 	in.ops = ops
+	r.store(d.ToolID, in)
+}
+
+// recordChat stores the intent behind a "Chat about this" answer (issue #58,
+// chatAboutThis): lab walked onto the picker's own trailing row, so the
+// dialog must resolve WITHOUT an option being picked. It replaces any intent
+// an earlier answer attempt left on the same still-pending picker — that
+// answer never landed (the chat service re-read the dialog as pending under
+// the session lock), and the operator's latest word on it is "set it aside",
+// so the stale pick must not turn the deliberate non-answer into a false
+// warning.
+func (r *intentRegistry) recordChat(sessionName, toolID string, ops []KeyOp) {
+	if toolID == "" {
+		return
+	}
+	r.store(toolID, dialogIntent{kind: provider.DialogKindQuestion, chat: true, session: sessionName, ops: ops})
+}
+
+// store puts in under toolID, replacing any previous intent, and evicts
+// oldest-first past maxDialogIntents.
+func (r *intentRegistry) store(toolID string, in dialogIntent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.byID == nil {
 		r.byID = map[string]dialogIntent{}
 	}
-	if _, exists := r.byID[d.ToolID]; !exists {
-		r.order = append(r.order, d.ToolID)
+	if _, exists := r.byID[toolID]; !exists {
+		r.order = append(r.order, toolID)
 	}
-	r.byID[d.ToolID] = in
+	r.byID[toolID] = in
 	for len(r.order) > maxDialogIntents {
 		oldest := r.order[0]
 		r.order = r.order[1:]
@@ -168,21 +195,6 @@ func (r *intentRegistry) verify(toolID string, res resolvedTool) (warn string, o
 		logMismatch(log, capture, toolID, in, warn)
 	}
 	return warn, true
-}
-
-// forget drops any intent recorded for toolID — a no-op when there is none.
-// The "Chat about this" path (issue #58, chatAboutThis) calls it: that path
-// DECLINES the picker on purpose, so an intent left by an earlier answer
-// attempt on the same still-pending picker would turn the deliberate decline
-// into a false "may not have landed" warning instead of the plain dismissed
-// summary.
-func (r *intentRegistry) forget(toolID string) {
-	if toolID == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.dropLocked(toolID)
 }
 
 // dropLocked removes toolID's intent and its eviction-order slot. r.mu must
@@ -358,6 +370,9 @@ func mismatch(in dialogIntent, res resolvedTool) string {
 	}
 
 	// Question kind.
+	if in.chat {
+		return chatMismatch(prefix, isDenial, res)
+	}
 	if isDenial {
 		return prefix + "lab sent an answer, but the transcript recorded a decline (user-rejected)"
 	}
@@ -390,6 +405,32 @@ func mismatch(in dialogIntent, res resolvedTool) string {
 		return prefix + fmt.Sprintf("%d answers recorded, %d intended", len(rec.Answers), len(in.answers))
 	}
 	return ""
+}
+
+// chatMismatch verifies a "Chat about this" intent (issue #58): the picker's
+// own trailing row was meant to be selected, so the only wrong outcome is a
+// recorded ANSWER — the blind walk landed on an option row and the Enter
+// picked it. Everything that picked nothing is a match: a denial (string
+// result or the user-rejected stamp), an absent or unreadable result
+// (whatever shape the row records, lab cannot and need not judge it), and the
+// answers:{} the 60s timeout leaves when it wins the race against lab's keys.
+func chatMismatch(prefix string, isDenial bool, res resolvedTool) string {
+	if isDenial {
+		return ""
+	}
+	var rec struct {
+		Answers map[string]string `json:"answers"`
+	}
+	if len(res.toolUseResult) == 0 || json.Unmarshal(res.toolUseResult, &rec) != nil || len(rec.Answers) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(rec.Answers))
+	for q, a := range rec.Answers {
+		parts = append(parts, fmt.Sprintf("%q for %q", truncate(a, 80), truncate(q, 80)))
+	}
+	slices.Sort(parts) // map order is not deterministic; the warning must be (seq stability)
+	return prefix + `lab chose "Chat about this", but the transcript recorded an answer (` +
+		strings.Join(parts, "; ") + ")"
 }
 
 // Forensic log (issue #165 item 1). logMismatch renders and emits the
@@ -444,6 +485,9 @@ func renderIntent(in dialogIntent) string {
 		default:
 			return "plan reject"
 		}
+	}
+	if in.chat {
+		return "question chat-about-this (no option picked)"
 	}
 	parts := make([]string, 0, len(in.answers))
 	for q, a := range in.answers {

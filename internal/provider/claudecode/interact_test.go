@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -267,10 +268,9 @@ func TestAnswerDialog_multiSelectValidation(t *testing.T) {
 
 // --- "Chat about this" (issue #58) ------------------------------------------
 //
-// The shipped mechanism is the FALLBACK built from verified primitives — the
-// §8 Escape that declines the picker, then the §6 reply (paste, Enter) — not
-// the picker's own trailing "Chat about this" row, which was never captured
-// live (compat §7 "Chat about this").
+// The mechanism selects the picker's OWN trailing "Chat about this" row — a
+// downward walk onto it, Enter — then sends the message with the §6 reply
+// (paste, Enter). No Escape is involved (compat §7 "Chat about this").
 
 // chatQuestionDialogs are the three answerable question shapes the dock
 // offers "Chat about this" on: flat single-select, flat multi-select, and a
@@ -285,10 +285,36 @@ func chatQuestionDialogs() map[string]provider.Dialog {
 	}
 }
 
-// The builder's op sequence is shape-independent: no row is navigated, so
-// single-select, multi-select and a multi-question form all get the same
-// [Escape][paste][Enter], one named key per op. The pasted text is the
-// validated reply — trimmed, CRLF normalized, newlines kept (it is a composer
+// chatRowWalk is how many Down presses reach the "Chat about this" row of
+// each chatQuestionDialogs shape (compat §7 row models): past the three
+// modeled rows of a single-select picker; past the three modeled rows AND
+// the Submit row of a multi-select picker; and, for the form, past the three
+// modeled rows of its FIRST question (single-select "Color").
+var chatRowWalk = map[string]int{"single-select": 3, "multi-select": 4, "multi-question": 3}
+
+// chatOps is the expected recipe: n single-key Down ops, the Enter that
+// selects the row, the paste, the submitting Enter.
+func chatOps(n int, text string) []KeyOp {
+	ops := downOps(n)
+	return append(ops, KeyOp{Named: []string{"Enter"}}, KeyOp{Text: text}, KeyOp{Named: []string{"Enter"}})
+}
+
+// chatKeyLog is chatOps as the fake runner logs it.
+func chatKeyLog(n int, text string) []tmuxx.KeyEvent {
+	var log []tmuxx.KeyEvent
+	for range n {
+		log = append(log, tmuxx.KeyEvent{Kind: "keys", Keys: "Down"})
+	}
+	return append(log,
+		tmuxx.KeyEvent{Kind: "keys", Keys: "Enter"},
+		tmuxx.KeyEvent{Kind: "paste", Text: text},
+		tmuxx.KeyEvent{Kind: "keys", Keys: "Enter"})
+}
+
+// The builder walks DOWN onto the picker's trailing "Chat about this" row —
+// one Down per op, never an Escape — selects it with Enter, then appends the
+// reply. The walk length follows the picker shape. The pasted text is the
+// validated reply: trimmed, CRLF normalized, newlines kept (it is a composer
 // reply, not a single-line picker row).
 func TestChatAboutThisKeystrokes_shapes(t *testing.T) {
 	for name, d := range chatQuestionDialogs() {
@@ -296,12 +322,45 @@ func TestChatAboutThisKeystrokes_shapes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		want := []KeyOp{
-			{Named: []string{"Escape"}},
-			{Text: "wait — why those options?\nAlso: cost?"},
-			{Named: []string{"Enter"}},
-		}
+		want := chatOps(chatRowWalk[name], "wait — why those options?\nAlso: cost?")
 		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: ops = %+v; want %+v", name, got, want)
+		}
+		for _, op := range got {
+			if len(op.Named) > 1 {
+				t.Errorf("%s: op %+v batches keys; want one named key per op", name, op)
+			}
+			if slices.Contains(op.Named, "Escape") {
+				t.Errorf("%s: the recipe sends Escape; want the picker's own row selected instead", name)
+			}
+		}
+	}
+}
+
+// The walk length is the picker's row count, not a constant: it grows with the
+// option list, and a multi-question form uses its FIRST question's geometry —
+// here a multi-select one, so the walk also passes the Submit row.
+func TestChatAboutThisKeystrokes_walkFollowsTheRowModel(t *testing.T) {
+	other := provider.DialogOption{Label: "Other", IsOther: true}
+	five := provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Pick one", Answerable: true,
+		Options: []provider.DialogOption{{Label: "A"}, {Label: "B"}, {Label: "C"}, {Label: "D"}, other}}
+	multiFirst := provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+		Questions: []provider.Question{
+			{Header: "Fruits", Text: "Which fruits?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Apple"}, {Label: "Cherry"}, other}},
+			{Header: "Color", Text: "Which color?", Options: []provider.DialogOption{{Label: "Red"}, other}},
+		}}
+	for name, c := range map[string]struct {
+		d    provider.Dialog
+		walk int
+	}{
+		"five modeled rows":            {five, 5},
+		"form opening on multi-select": {multiFirst, 4},
+	} {
+		got, err := ChatAboutThisKeystrokes(c.d, provider.DialogAnswer{ChatText: "hi"})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if want := chatOps(c.walk, "hi"); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: ops = %+v; want %+v", name, got, want)
 		}
 	}
@@ -315,6 +374,8 @@ func TestChatAboutThisKeystrokes_rejects(t *testing.T) {
 	plan := planTestDialog("toolu_plan")
 	unanswerable := single
 	unanswerable.Answerable = false
+	rowless := single
+	rowless.Options = nil
 	cases := map[string]struct {
 		d    provider.Dialog
 		a    provider.DialogAnswer
@@ -329,6 +390,7 @@ func TestChatAboutThisKeystrokes_rejects(t *testing.T) {
 		"with answers":            {form, provider.DialogAnswer{ChatText: "hi", Answers: []provider.QuestionAnswer{{Index: 0}, {Selected: []int{0}}}}, ErrInvalidReply},
 		"plan dialog":             {plan, provider.DialogAnswer{ChatText: "hi"}, ErrDialogNotAnswerable},
 		"non-answerable dialog":   {unanswerable, provider.DialogAnswer{ChatText: "hi"}, ErrDialogNotAnswerable},
+		"no modeled rows":         {rowless, provider.DialogAnswer{ChatText: "hi"}, ErrDialogNotAnswerable},
 		"unknown kind (approval)": {provider.Dialog{Kind: provider.DialogKindApproval, Answerable: true, Options: []provider.DialogOption{{Label: "yes"}}}, provider.DialogAnswer{ChatText: "hi"}, ErrDialogNotAnswerable},
 	}
 	for name, c := range cases {
@@ -339,29 +401,27 @@ func TestChatAboutThisKeystrokes_rejects(t *testing.T) {
 }
 
 // AnswerDialog with chat_text plays the sequence through the runner, in
-// order: Escape, the paste, Enter — and records no pick intent.
-func TestAnswerDialog_chatAboutThis_playsEscapePasteEnter(t *testing.T) {
+// order: the Down walk onto the row, Enter, the paste, Enter — and records a
+// "no option picked" backstop intent, never a pick.
+func TestAnswerDialog_chatAboutThis_playsRowWalkPasteEnter(t *testing.T) {
 	for name, d := range chatQuestionDialogs() {
 		p, f := armedRunner(t)
 		if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{ChatText: "let's discuss first"}); err != nil {
 			t.Fatalf("%s: AnswerDialog: %v", name, err)
 		}
-		want := []tmuxx.KeyEvent{
-			{Kind: "keys", Keys: "Escape"},
-			{Kind: "paste", Text: "let's discuss first"},
-			{Kind: "keys", Keys: "Enter"},
-		}
+		want := chatKeyLog(chatRowWalk[name], "let's discuss first")
 		if got := f.KeyLog(chatSession); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: key log = %+v; want %+v", name, got, want)
 		}
-		if n := len(p.intents.byID); n != 0 {
-			t.Errorf("%s: %d intents recorded; want none (a decline is the intended outcome)", name, n)
+		in, ok := p.intents.byID[d.ToolID]
+		if !ok || !in.chat || len(in.answers) != 0 {
+			t.Errorf("%s: intent = %+v (recorded %v); want a chat intent with no expected answers", name, in, ok)
 		}
 	}
 }
 
-// A refused chat answer plays nothing at all — not even the Escape (which on
-// its own would decline the picker and lose the operator's dialog).
+// A refused chat answer plays nothing at all — not one key of the walk
+// (which on its own would leave the picker's cursor off the top row).
 func TestAnswerDialog_chatAboutThis_rejectedPlaysNothing(t *testing.T) {
 	p, f := armedRunner(t)
 	single := chatQuestionDialogs()["single-select"]
@@ -382,11 +442,15 @@ func TestAnswerDialog_chatAboutThis_rejectedPlaysNothing(t *testing.T) {
 	if log := f.KeyLog(chatSession); len(log) != 0 {
 		t.Errorf("refused chat answers still played %+v; want nothing", log)
 	}
+	if n := len(p.intents.byID); n != 0 {
+		t.Errorf("refused chat answers recorded %d intents; want none", n)
+	}
 }
 
-// The post-Escape chat settle honours context cancellation: a request
-// cancelled there stops after the Escape and before the paste, so no text
-// ever reaches a picker that may not have closed yet.
+// The chat settle sits between the Enter that selects the row and the paste,
+// and honours context cancellation: a request cancelled there has selected the
+// row but pasted nothing, so no text ever reaches a picker that may not have
+// closed yet.
 func TestAnswerDialog_chatAboutThis_settleRespectsCancel(t *testing.T) {
 	p, f := armedRunner(t)
 	p.chatSettleDelay = time.Hour // make the chat settle effectively block
@@ -396,15 +460,36 @@ func TestAnswerDialog_chatAboutThis_settleRespectsCancel(t *testing.T) {
 	if err := p.AnswerDialog(ctx, chatSession, d, provider.DialogAnswer{ChatText: "hold on"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("AnswerDialog with a cancelled context = %v; want context.Canceled", err)
 	}
-	want := []tmuxx.KeyEvent{{Kind: "keys", Keys: "Escape"}}
+	want := []tmuxx.KeyEvent{
+		{Kind: "keys", Keys: "Down"}, {Kind: "keys", Keys: "Down"}, {Kind: "keys", Keys: "Down"},
+		{Kind: "keys", Keys: "Enter"},
+	}
 	if got := f.KeyLog(chatSession); !reflect.DeepEqual(got, want) {
-		t.Errorf("key log = %+v; want only the Escape (stopped at the chat settle, before the paste)", got)
+		t.Errorf("key log = %+v; want the walk and the selecting Enter only (stopped at the chat settle, before the paste)", got)
+	}
+}
+
+// The walk is paced like every picker walk: keyDelay sits before each key
+// after the first, so a request cancelled there stops after ONE Down — the
+// picker never sees a burst.
+func TestAnswerDialog_chatAboutThis_walkIsPaced(t *testing.T) {
+	p, f := armedRunner(t)
+	p.keyDelay = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d := chatQuestionDialogs()["multi-select"]
+	if err := p.AnswerDialog(ctx, chatSession, d, provider.DialogAnswer{ChatText: "hold on"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AnswerDialog with a cancelled context = %v; want context.Canceled", err)
+	}
+	want := []tmuxx.KeyEvent{{Kind: "keys", Keys: "Down"}}
+	if got := f.KeyLog(chatSession); !reflect.DeepEqual(got, want) {
+		t.Errorf("key log = %+v; want exactly one Down (stopped at the first keyDelay)", got)
 	}
 }
 
 // The chat path keeps the pre-first-key settle every dialog recipe gets: a
-// request cancelled there plays nothing, not even the Escape.
-func TestAnswerDialog_chatAboutThis_preEscapeSettleRespectsCancel(t *testing.T) {
+// request cancelled there plays nothing, not even the first Down.
+func TestAnswerDialog_chatAboutThis_preFirstKeySettleRespectsCancel(t *testing.T) {
 	p, f := armedRunner(t)
 	p.settleDelay = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
