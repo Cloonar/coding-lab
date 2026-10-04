@@ -117,7 +117,8 @@ type Repo struct {
 	LanderProvider  *string
 	// LanderModel and LanderEffort are the lander run's model/effort overrides
 	// (issue #189). NULL = inherit the lander's normal model/effort resolution
-	// (repo base → global base → provider default); non-NULL is a strict
+	// (global lander default → repo base → global base → provider default);
+	// non-NULL is a strict
 	// per-spawn request that fails the launch if the model/effort is unknown,
 	// rather than silently falling back.
 	LanderModel  *string

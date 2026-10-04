@@ -181,20 +181,21 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates[key] = v
-		case store.SettingSpawnModelDefaultAFK:
+		case store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefaultLander:
 			v, err := parseSettingString(raw)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			// Empty = inherit the base default (issue #19), so unlike the base
-			// key an empty AFK override is explicitly allowed.
+			// key an empty AFK override is explicitly allowed. The lander
+			// override follows the identical rule.
 			if v != "" && !s.spawnDefaultAllowed(v, true) {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q", v))
 				return
 			}
 			updates[key] = v
-		case store.SettingSpawnEffortDefaultAFK:
+		case store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefaultLander:
 			v, err := parseSettingString(raw)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))

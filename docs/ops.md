@@ -223,6 +223,7 @@ Runtime-mutable knobs live in the `settings` table (Settings UI / `PATCH /api/v1
 |---|---|---|
 | `spawn_model_default` | `opus[1m]` | Default model for spawns (per-repo and per-spawn overrides exist). |
 | `spawn_effort_default` | `max` | Default effort. |
+| `spawn_model_default_lander` / `spawn_effort_default_lander` | (unset) | Model and effort for Autoland lander and escalate runs. Unset inherits the spawn default; a repo's `lander_model` / `lander_effort` wins over it. Independent of the AFK defaults. |
 | `max_instances` | seeded from `--max-instances` | Global live-instance cap (login session excluded). |
 | `afk_budget_minutes` | `120` | AFK budget clock; per-repo override on the repo row. |
 | `afk_tick_seconds` | `30` | Reaper loop interval. |

@@ -1,6 +1,6 @@
 // Global settings › Agents (issue #198): spawn defaults (model/effort from the
-// provider catalog), the AFK defaults override, the AFK seed prompt, and the
-// global capacity/AFK loop tuning. Saved as a dirty-fields-only PATCH; int
+// provider catalog), the AFK defaults override, the AFK seed prompt, the
+// lander defaults override, and the global capacity/AFK loop tuning. Saved as a dirty-fields-only PATCH; int
 // fields validate per field client-side and the server's 400 {"error"} lands
 // in the banner. Runtime loops re-read settings each tick, so saves apply
 // without a restart. Ported verbatim from the old Settings monolith's
@@ -126,6 +126,8 @@ export default function Agents(props: {
     spawn_model_default_afk: seedDraft(initial, 'spawn_model_default_afk'),
     spawn_effort_default_afk: seedDraft(initial, 'spawn_effort_default_afk'),
     spawn_remote_default_afk: seedDraft(initial, 'spawn_remote_default_afk'),
+    spawn_model_default_lander: seedDraft(initial, 'spawn_model_default_lander'),
+    spawn_effort_default_lander: seedDraft(initial, 'spawn_effort_default_lander'),
     afk_prompt: seedDraft(initial, 'afk_prompt'),
     ...Object.fromEntries(INT_FIELDS.map((f) => [f.key, seedDraft(initial, f.key)])),
   });
@@ -189,6 +191,8 @@ export default function Agents(props: {
       'spawn_provider_default_afk',
       'spawn_model_default_afk',
       'spawn_effort_default_afk',
+      'spawn_model_default_lander',
+      'spawn_effort_default_lander',
       'afk_prompt',
     ] as TextSettingKey[]) {
       // afk_prompt_default is deliberately absent from this list: it is a
@@ -416,6 +420,43 @@ export default function Agents(props: {
           The run is detected as done only by an open PR on its branch — a prompt that never opens a
           PR burns its budget, counts as a failure, and three failures auto-pause the repo's AFK.
         </small>
+      </SectionCard>
+
+      {/* Lander defaults: the model/effort an Autoland lander (and its
+          escalate-mode twin) runs with — its own override layer, separate from
+          the AFK one above, so the run that validates a PR can use a different
+          model than the run that wrote it. There is no global lander AGENT, so
+          the catalogs follow the base agent (a lander is not an AFK run and
+          never sees the AFK agent override); a repo that picks its own lander
+          agent picks its model there too. */}
+      <SectionCard
+        title="Lander defaults"
+        hint={
+          <>
+            Used for the Autoland lander that validates and merges AFK pull requests. Leave a field
+            on “Same as default” to inherit the spawn default above. A repo's own lander model in
+            its Autoland settings wins over this.
+          </>
+        }
+      >
+        <Select
+          skin="field"
+          label="Model"
+          name="spawn_model_default_lander"
+          value={draft('spawn_model_default_lander')}
+          options={baseProvider()?.models ?? []}
+          inheritLabel="Same as default"
+          onChange={(value) => setDraft('spawn_model_default_lander', value)}
+        />
+        <Select
+          skin="field"
+          label="Effort"
+          name="spawn_effort_default_lander"
+          value={draft('spawn_effort_default_lander')}
+          options={baseProvider()?.efforts ?? []}
+          inheritLabel="Same as default"
+          onChange={(value) => setDraft('spawn_effort_default_lander', value)}
+        />
       </SectionCard>
 
       <SectionCard title="Capacity & AFK">

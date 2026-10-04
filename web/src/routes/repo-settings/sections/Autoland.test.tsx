@@ -43,8 +43,8 @@ describe('RepoSettings Autoland', () => {
     expect(input('max_fix_attempts').value).toBe('2');
     expect(selectedLabel('lander_provider')).toBe('Inherit repo agent');
     // Lander model/effort (issue #189) default to the inherit row too.
-    expect(selectedLabel('lander_model')).toBe('Inherit repo default');
-    expect(selectedLabel('lander_effort')).toBe('Inherit repo default');
+    expect(selectedLabel('lander_model')).toBe('Inherit global lander default');
+    expect(selectedLabel('lander_effort')).toBe('Inherit global lander default');
   });
 
   it('disables autoland_enabled with a hint on a non-forge (builtin) SAVED binding', async () => {
@@ -108,7 +108,7 @@ describe('RepoSettings Autoland', () => {
     );
     // The catalog resolves against the lander's effective provider — here the
     // repo's chain falls back to provider_default (claude-code).
-    expect(selectedLabel('lander_model')).toBe('Inherit repo default');
+    expect(selectedLabel('lander_model')).toBe('Inherit global lander default');
 
     await chooseFromSelect('lander_model', 'Sonnet');
     await chooseFromSelect('lander_effort', 'high');
@@ -129,7 +129,7 @@ describe('RepoSettings Autoland', () => {
     );
     expect(selectedLabel('lander_model')).toBe('Sonnet');
 
-    await chooseFromSelect('lander_model', 'Inherit repo default');
+    await chooseFromSelect('lander_model', 'Inherit global lander default');
     submitForm();
     await settle();
 
