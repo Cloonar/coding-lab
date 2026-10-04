@@ -7,16 +7,15 @@ package claudecode
 // are built as pure []KeyOp sequences so the compat test can snapshot them;
 // AnswerDialog just plays the sequence through the runner (and records the
 // intended answer for the post-resolve verification backstop, dialogintent.go).
-// "Chat about this" (issue #58, §7) is the one AnswerDialog shape that joins
-// two recipes: a picker walk onto the picker's own trailing "Chat about this"
-// row, then the §6 reply (ChatAboutThisKeystrokes).
+// "Chat about this" (issue #58, §7) is one more answer shape of the same
+// recipes: the operator's earlier answers, then a walk onto the picker's own
+// trailing "Chat about this" row on the question they chose it on (chatRowOps).
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 	"unicode"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -101,14 +100,11 @@ func (p *Provider) Interrupt(ctx context.Context, sessionName string) error {
 // play, deliberately: a send that dies mid-recipe leaves the picker in an
 // unknown state, which is exactly when the backstop warning earns its keep.
 //
-// A non-empty answer.ChatText takes the "Chat about this" path instead
-// (issue #58, chatAboutThis below) — branched BEFORE the answer recipe is
-// built, since that answer picks no OPTION row: it selects the picker's own
-// "Chat about this" row.
+// "Chat about this" (issue #58) is not a separate path: DialogKeystrokes
+// builds it like any answer, it is paced like any answer, and its intent is
+// recorded like any answer (intentFor: the dialog must resolve with no answer
+// recorded for the question the operator chose to chat about).
 func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog provider.Dialog, answer provider.DialogAnswer) error {
-	if answer.ChatText != "" {
-		return p.chatAboutThis(ctx, sessionName, dialog, answer)
-	}
 	ops, err := DialogKeystrokes(dialog, answer)
 	if err != nil {
 		return err
@@ -118,168 +114,26 @@ func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog 
 	// as the picker mounts (compat §7, live 2026-09-23 — see
 	// defaultDialogSettleDelay). Navigation keys were not observed dropped, but
 	// the guard is applied uniformly: the recipe is blind to which key is first.
-	// keyDelay paces every op after it.
-	return p.play(ctx, sessionName, ops, "answer dialog", func(i int) time.Duration {
-		if i == 0 {
-			return p.settleDelay
-		}
-		return p.keyDelay
-	})
-}
-
-// chatAboutThis is AnswerDialog's "Chat about this" path (issue #58, compat
-// §7): select the picker's own trailing "Chat about this" row, then deliver
-// answer.ChatText verbatim as an ordinary reply. It plays
-// ChatAboutThisKeystrokes' ops with three kinds of gap in front of them:
-//
-//		settleDelay → [Down] → keyDelay → … → [Enter] → chatSettleDelay → [PasteText] → keyDelay → [Enter]
-//
-//	  - settleDelay before the first key: the same pre-first-key guard every
-//	    dialog recipe gets (the recipe is blind to which key is first).
-//	  - keyDelay between the walk's keys and before the Enter that selects the
-//	    row: the ordinary picker pacing, one named key per op.
-//	  - chatSettleDelay before the paste: the picker has to close and the
-//	    composer regain focus before the message arrives
-//	    (defaultDialogChatSettleDelay — pinned, but NOT yet measured live).
-//	  - keyDelay before the final Enter: exactly Reply's paste→Enter pacing
-//	    (compat §6 — an Enter in the same instant as a multi-line paste is
-//	    dropped).
-//
-// Every gap honours ctx cancellation, so a cancelled request stops before the
-// next key — cancelled in the chat settle, nothing has been pasted.
-//
-// The backstop intent recorded here is "no option picked" (recordChat,
-// dialogintent.go), replacing any stale pick intent an earlier answer attempt
-// left on the same still-pending picker. The walk is blind like every recipe:
-// if it lands on an option row instead of "Chat about this", the transcript
-// records an ANSWER the operator never gave, and the backstop says so in the
-// chat. Every resolution that picked nothing — whatever the row records —
-// verifies silently and renders through the existing dismissed summary
-// (questionOutcome → Outcome.Dismissed). Recorded only after validation
-// passes, like record, so a refused request leaves the registry untouched.
-func (p *Provider) chatAboutThis(ctx context.Context, sessionName string, dialog provider.Dialog, answer provider.DialogAnswer) error {
-	ops, err := ChatAboutThisKeystrokes(dialog, answer)
-	if err != nil {
-		return err
+	if p.settleDelay > 0 && !sleepOrDone(ctx, p.settleDelay) {
+		return ctx.Err()
 	}
-	p.intents.recordChat(sessionName, dialog.ToolID, ops)
-	paste := len(ops) - 2 // [walk…][Enter][PasteText][Enter]
-	return p.play(ctx, sessionName, ops, "chat about this", func(i int) time.Duration {
-		switch i {
-		case 0:
-			return p.settleDelay
-		case paste:
-			return p.chatSettleDelay
-		default:
-			return p.keyDelay
-		}
-	})
-}
-
-// play sends ops to the session in order, sleeping gap(i) (when positive)
-// before op i and honouring ctx cancellation in every gap. A Text op is a
-// bracketed paste, a Named op one send-keys call (one key per op is the
-// recipes' rule — see AnswerDialog); what labels the wrapped send errors.
-func (p *Provider) play(ctx context.Context, sessionName string, ops []KeyOp, what string, gap func(i int) time.Duration) error {
 	for i, op := range ops {
-		if d := gap(i); d > 0 && !sleepOrDone(ctx, d) {
-			return ctx.Err()
+		if i > 0 && p.keyDelay > 0 {
+			if !sleepOrDone(ctx, p.keyDelay) {
+				return ctx.Err()
+			}
 		}
 		if op.Text != "" {
 			if err := p.runner.PasteText(ctx, sessionName, op.Text); err != nil {
-				return fmt.Errorf("%s (paste): %w", what, err)
+				return fmt.Errorf("answer dialog (paste): %w", err)
 			}
 			continue
 		}
 		if err := p.runner.SendNamedKeys(ctx, sessionName, op.Named...); err != nil {
-			return fmt.Errorf("%s (keys): %w", what, err)
+			return fmt.Errorf("answer dialog (keys): %w", err)
 		}
 	}
 	return nil
-}
-
-// ChatAboutThisKeystrokes builds the "Chat about this" sequence (issue #58,
-// compat §7 "Chat about this"): walk onto the picker's own trailing "Chat
-// about this" row, select it, then deliver a.ChatText verbatim through the
-// ordinary reply recipe. Exported for the compat snapshot test; AnswerDialog
-// plays it with the gaps documented on chatAboutThis.
-//
-//	[Down × row] [Enter] [PasteText] [Enter]
-//
-// Claude Code's question pickers end in a "Chat about this" row of their own;
-// selecting it closes the picker without answering and hands the conversation
-// back, which is exactly what the dock's action means. No Escape is sent: the
-// action is the picker's own row, not an interrupt. The walk is the same
-// downward-only walk as every recipe (one Down per op, from the top row a
-// fresh picker opens on — see the no-climb note below); row comes from
-// chatRowIndex. The trailing [PasteText][Enter] is the §6 reply.
-//
-// NOT YET DRIVEN LIVE: the row's navigation index is taken from the row models
-// compat §7 records (the divider above the row is assumed not to be a stop),
-// and what the transcript records after the row is chosen has not been
-// captured. The backstop (chatAboutThis) flags the one harmful failure — a
-// walk that lands on an option and answers the question.
-//
-// Validation is strict at the door, before any key could play:
-//   - the dialog must be Answerable and of kind question — a plan review is
-//     ErrDialogNotAnswerable (its picker has no such row, and the UI never
-//     offers the action there);
-//   - the answer fields must be empty alongside ChatText (Selected,
-//     OtherText, Answers; Index is ignored — 0 is its zero value, see
-//     DialogAnswer): a mixed payload is ErrInvalidReply, never half-played;
-//   - ChatText follows Reply's text rules (validateReply: trimmed, non-empty,
-//     bounded, no control characters except newline/tab) — multi-line is fine,
-//     it is a composer reply, not a single-line picker row.
-func ChatAboutThisKeystrokes(d provider.Dialog, a provider.DialogAnswer) ([]KeyOp, error) {
-	if !d.Answerable {
-		return nil, ErrDialogNotAnswerable
-	}
-	if d.Kind != provider.DialogKindQuestion {
-		return nil, fmt.Errorf("%w: only a question dialog can be set aside to chat (dialog kind %q)", ErrDialogNotAnswerable, d.Kind)
-	}
-	if len(a.Selected) > 0 || a.OtherText != "" || len(a.Answers) > 0 {
-		return nil, fmt.Errorf("%w: chat_text cannot be combined with an answer (selected, other_text, answers)", ErrInvalidReply)
-	}
-	clean, err := validateReply(a.ChatText)
-	if err != nil {
-		return nil, fmt.Errorf("%w: chat text: %w", ErrInvalidReply, err)
-	}
-	row, err := chatRowIndex(d)
-	if err != nil {
-		return nil, err
-	}
-	ops := downOps(row)
-	return append(ops,
-		KeyOp{Named: []string{"Enter"}}, // select the picker's "Chat about this" row
-		KeyOp{Text: clean},              // the §6 reply: bracketed paste…
-		KeyOp{Named: []string{"Enter"}}, // …then a separate, paced submit
-	), nil
-}
-
-// chatRowIndex is the 0-based navigation index of the trailing "Chat about
-// this" row on the picker a fresh question dialog presents (compat §7 row
-// models). The row is the LAST navigation stop of every question picker:
-//
-//   - single-select: the modeled rows (options + the free-text row), then
-//     "Chat about this" — index len(modeled rows);
-//   - multi-select: the modeled rows, the unnumbered Submit row, then "Chat
-//     about this" — index len(modeled rows) + 1.
-//
-// A multi-question form presents its FIRST question's picker, and lab always
-// drives a fresh picker in one AnswerDialog shot, so the first question's
-// geometry applies; choosing the row there sets the whole form aside.
-func chatRowIndex(d provider.Dialog) (int, error) {
-	opts, multi := d.Options, d.Multi
-	if len(d.Questions) >= 2 {
-		opts, multi = d.Questions[0].Options, d.Questions[0].MultiSelect
-	}
-	if len(opts) == 0 {
-		return 0, ErrDialogNotAnswerable
-	}
-	if multi {
-		return len(opts) + 1, nil // past the Submit row
-	}
-	return len(opts), nil
 }
 
 // No normalize-to-top climb (LIVE-VERIFIED 2026-07-08, 2.1.198 — compat §7).
@@ -318,6 +172,10 @@ func chatRowIndex(d provider.Dialog) (int, error) {
 //     then the review screen [Enter].
 //   - plan approval: [Down×idx][Enter] over the four pinned rows; row 3
 //     (IsOther) takes the type-first feedback path like Other.
+//   - "Chat about this" (issue #58): [Down × chat row][Enter] on the question
+//     the operator chose it on — after the recipes of the questions answered
+//     before it, and with NO review step and no text: choosing the row ends
+//     the form (chatRowOps; NOT yet driven live — compat §7).
 //
 // Answer encoding (issue #51 decision 3, per-question strictness): a
 // multi-question dialog requires exactly len(Questions) positional Answers —
@@ -328,6 +186,11 @@ func chatRowIndex(d provider.Dialog) (int, error) {
 // index never appears in Selected — free text IS its toggle, and OtherText
 // alone with an empty Selected is a valid answer). A flat dialog accepts the
 // flat fields as today, or a single Answers element with answers[0] semantics.
+// "Chat about this" is DialogAnswer.Chat on a flat dialog (or its single
+// Answers element with Chat set); on a multi-question dialog it is the LAST
+// Answers element, preceded by exactly the answers to the questions before it
+// — so there Answers may be shorter than Questions. A Chat entry carries no
+// other field, and only a question dialog accepts one.
 // Violations return the provider sentinels so the API's 400/409 mapping stays
 // meaningful — a misencoded answer must fail at the door, never play misplaced
 // keystrokes.
@@ -341,12 +204,24 @@ func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp,
 	if len(answer.Answers) > 1 {
 		return nil, fmt.Errorf("%w: %d answers for a single-question dialog", ErrInvalidReply, len(answer.Answers))
 	}
+	qa := provider.QuestionAnswer{Index: answer.Index, Selected: answer.Selected, OtherText: answer.OtherText, Chat: answer.Chat}
 	if len(answer.Answers) == 1 {
-		qa := answer.Answers[0]
-		answer = provider.DialogAnswer{Index: qa.Index, Selected: qa.Selected, OtherText: qa.OtherText}
+		if answer.Chat {
+			return nil, fmt.Errorf("%w: chat cannot be combined with answers", ErrInvalidReply)
+		}
+		qa = answer.Answers[0]
+		answer = provider.DialogAnswer{Index: qa.Index, Selected: qa.Selected, OtherText: qa.OtherText, Chat: qa.Chat}
 	}
 	if len(d.Options) == 0 {
 		return nil, ErrDialogNotAnswerable
+	}
+	if answer.Chat {
+		if d.Kind != provider.DialogKindQuestion {
+			// The plan picker has no "Chat about this" row, and the UI never
+			// offers the action there.
+			return nil, fmt.Errorf("%w: only a question dialog offers \"Chat about this\" (dialog kind %q)", ErrDialogNotAnswerable, d.Kind)
+		}
+		return chatRowOps(d.Options, d.Multi, qa)
 	}
 	if d.Kind == provider.DialogKindPlan {
 		// The plan picker has no ✔ Submit tab and no review screen: Enter on the
@@ -371,17 +246,45 @@ func DialogKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp,
 // needed (live 2026-07-08; keyDelay pacing still applies between every op) —
 // then the review screen. Validation per the positional answer encoding (see
 // DialogKeystrokes); the whole form is validated before any key plays.
+//
+// "Chat about this" (issue #58): the operator answered questions 0..k−1 and
+// chose the row on question k. The recipe is then exactly that path — the
+// first k per-question recipes, each auto-advancing, then the walk onto
+// question k's "Chat about this" row — and it STOPS there: no later question,
+// no review screen. Entering the earlier answers is the point, not an
+// optimisation: it is how the picker is on question k when the row is chosen,
+// so the agent learns which question the operator wants to talk about and
+// what they already decided.
 func multiQuestionKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([]KeyOp, error) {
-	if len(answer.Answers) != len(d.Questions) {
-		return nil, fmt.Errorf("%w: %d answers for %d questions", ErrInvalidReply, len(answer.Answers), len(d.Questions))
+	if answer.Chat {
+		return nil, fmt.Errorf("%w: on a multi-question dialog chat is set on the answers entry of the question it was chosen on", ErrInvalidReply)
+	}
+	n := len(answer.Answers)
+	chatAt := -1
+	for i, qa := range answer.Answers {
+		if qa.Chat {
+			chatAt = i
+			break
+		}
+	}
+	switch {
+	case chatAt < 0 && n != len(d.Questions):
+		return nil, fmt.Errorf("%w: %d answers for %d questions", ErrInvalidReply, n, len(d.Questions))
+	case chatAt >= 0 && chatAt != n-1:
+		return nil, fmt.Errorf("%w: chat on question %d ends the form, but %d more answers follow it", ErrInvalidReply, chatAt, n-1-chatAt)
+	case n > len(d.Questions):
+		return nil, fmt.Errorf("%w: %d answers for %d questions", ErrInvalidReply, n, len(d.Questions))
 	}
 	var ops []KeyOp
-	for i, q := range d.Questions {
-		qops, err := questionOps(q, answer.Answers[i])
+	for i := range n {
+		qops, err := questionOps(d.Questions[i], answer.Answers[i])
 		if err != nil {
 			return nil, fmt.Errorf("question %d: %w", i, err)
 		}
 		ops = append(ops, qops...)
+	}
+	if chatAt >= 0 {
+		return ops, nil // choosing the row ends the form: no review screen
 	}
 	return append(ops, reviewOps()...), nil
 }
@@ -393,6 +296,9 @@ func multiQuestionKeystrokes(d provider.Dialog, answer provider.DialogAnswer) ([
 // misread answer is exactly the desync the verification backstop exists for,
 // and 4xx at the door beats a warning after the fact.
 func questionOps(q provider.Question, a provider.QuestionAnswer) ([]KeyOp, error) {
+	if a.Chat {
+		return chatRowOps(q.Options, q.MultiSelect, a)
+	}
 	if q.MultiSelect {
 		return multiSelectOps(q.Options, a.Selected, a.OtherText)
 	}
@@ -400,6 +306,45 @@ func questionOps(q provider.Question, a provider.QuestionAnswer) ([]KeyOp, error
 		return nil, fmt.Errorf("%w: selected indices have no meaning for a single-select question (use index)", ErrInvalidReply)
 	}
 	return singleSelectOps(q.Options, a.Index, a.OtherText)
+}
+
+// chatRowOps is the "Chat about this" recipe for ONE question picker (issue
+// #58, compat §7 "Chat about this"): from the top-of-picker start, walk down
+// onto the picker's own trailing "Chat about this" row and select it.
+//
+//	[Down × row] [Enter]
+//
+// That is all of it. No Escape, no settle, no text: selecting the row is the
+// whole action — claude then asks the operator what they want to know, and
+// the operator answers with an ordinary reply once the dialog is gone.
+//
+// Every question picker ends in the row — each question of a form has its
+// own — and it is the LAST navigation stop (compat §7 row models):
+//
+//   - single-select: the modeled rows (options + the free-text row), then
+//     "Chat about this" — row = len(modeled rows);
+//   - multi-select: the modeled rows, the unnumbered Submit row, then "Chat
+//     about this" — row = len(modeled rows) + 1.
+//
+// NOT YET DRIVEN LIVE: the index is taken from those row models (the divider
+// above the row is assumed not to be a stop). The backstop (intentFor) flags
+// the harmful miss — a walk that lands on an option and answers the question.
+//
+// A Chat answer carries nothing else: an option choice alongside it is
+// ErrInvalidReply, never half-played.
+func chatRowOps(opts []provider.DialogOption, multi bool, a provider.QuestionAnswer) ([]KeyOp, error) {
+	if a.Index != 0 || len(a.Selected) > 0 || a.OtherText != "" {
+		return nil, fmt.Errorf("%w: chat cannot be combined with an answer (index, selected, other_text)", ErrInvalidReply)
+	}
+	rows := len(opts)
+	if rows == 0 {
+		return nil, ErrDialogNotAnswerable
+	}
+	row := rows
+	if multi {
+		row = rows + 1 // past the Submit row
+	}
+	return append(downOps(row), KeyOp{Named: []string{"Enter"}}), nil
 }
 
 // singleSelectOps is the one single-select picker recipe, shared by flat

@@ -29,7 +29,7 @@ The captured `https://claude.ai/code/<id>` URL of an instance — read from clau
 _Avoid_: attach URL, share link, session URL
 
 **Chat**:
-The rendered conversation of an instance inside lab's UI (the `/runs/:id` view) — user and assistant messages, tool chips, and pending dialogs — where the operator can reply, answer a dialog, or interrupt. The header's context meter opens **Run details** (model, effort, context, branch, commits behind the base, **Pull base**); a status line above the composer names the instance's state while it is live; a pending question is answered in a panel docked above the composer, with **Chat about this** to set it aside for an ordinary reply. It complements the deep link (the escape hatch), never replaces it, and applies to every instance (manual and AFK).
+The rendered conversation of an instance inside lab's UI (the `/runs/:id` view) — user and assistant messages, tool chips, and pending dialogs — where the operator can reply, answer a dialog, or interrupt. The header's context meter opens **Run details** (model, effort, context, branch, commits behind the base, **Pull base**); a status line above the composer names the instance's state while it is live; a pending question is answered in a panel docked above the composer, with **Chat about this** to talk about a question first: one tap, no text, and the agent asks what the operator wants to know. It complements the deep link (the escape hatch), never replaces it, and applies to every instance (manual and AFK).
 _Avoid_: terminal, console, session view, thread
 
 **Transcript**:

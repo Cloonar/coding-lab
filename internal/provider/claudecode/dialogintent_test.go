@@ -199,22 +199,20 @@ func TestBackstop_userRejectedAfterAnswer_warns(t *testing.T) {
 }
 
 // "Chat about this" (issue #58) sets the dialog aside ON PURPOSE by selecting
-// the picker's own trailing row, so a resolution that picked no option must
-// render through the plain dismissed summary with NO backstop warning. The
-// chat path records a "no option picked" intent, and that intent REPLACES a
-// stale pick intent an earlier answer attempt left on the same still-pending
-// picker (otherwise the deliberate non-answer would read as "lab sent an
-// answer, but the transcript recorded a decline").
+// the picker's own trailing row, so a resolution that recorded no answer for
+// the chat question must render through the plain dismissed summary with NO
+// backstop warning. The chat answer's intent REPLACES a stale pick intent an
+// earlier answer attempt left on the same still-pending picker (otherwise the
+// deliberate non-answer would read as "lab sent an answer, but the transcript
+// recorded a decline").
 //
 // What the row records has not been captured live (compat §7), so the test
-// covers both shapes lab can meet without reading the row's own text: the
+// covers the shapes lab can meet without reading the row's own text: the
 // live-captured 2.1.198 decline (declinedLine: toolUseResult "User rejected
 // tool use" + toolDenialKind user-rejected — compat §5) and a tool_result
-// carrying no toolUseResult at all. Either way the operator's message follows
-// as an ordinary user turn.
+// carrying no toolUseResult at all.
 func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
 	const bareResultLine = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user wants to talk about these questions first.","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-08T15:38:32.213Z"}`
-	const chatLine = `{"type":"user","message":{"role":"user","content":"Before I pick: which of these is cheaper to run?"},"timestamp":"2026-07-08T15:38:35.000Z"}`
 	d := provider.Dialog{
 		ToolID: "toolu_chat", Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
 		Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, {Label: "Other", IsOther: true}},
@@ -228,7 +226,6 @@ func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
 		"no toolUseResult, fresh picker":               {bareResultLine, false},
 	}
 	for name, c := range cases {
-		transcript := resolvedTranscript(toolAskUserQuestion, "toolu_chat", c.resolution) + chatLine + "\n"
 		p, f := armedRunner(t)
 		if c.staleIntent {
 			// An earlier answer whose keys played but never landed: its intent
@@ -240,21 +237,20 @@ func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
 				t.Fatalf("%s: the pick recorded no pick intent (%+v); the stale-intent case is not exercised", name, in)
 			}
 		}
-		if err := p.AnswerDialog(context.Background(), chatSession, d,
-			provider.DialogAnswer{ChatText: "Before I pick: which of these is cheaper to run?"}); err != nil {
+		if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Chat: true}); err != nil {
 			t.Fatalf("%s: AnswerDialog(chat): %v", name, err)
 		}
 		if len(f.KeyLog(chatSession)) == 0 {
-			t.Fatalf("%s: the chat path sent no keystrokes", name)
+			t.Fatalf("%s: the chat answer sent no keystrokes", name)
 		}
 		if in, ok := p.intents.byID["toolu_chat"]; !ok || !in.chat || len(in.answers) != 0 {
-			t.Errorf("%s: intent after the chat path = %+v (recorded %v); want the chat intent alone", name, in, ok)
+			t.Errorf("%s: intent after the chat answer = %+v (recorded %v); want the chat intent alone", name, in, ok)
 		}
 		if n := len(p.intents.order); n != 1 {
 			t.Errorf("%s: %d eviction-order slots for one tool_id; want 1", name, n)
 		}
 		path := filepath.Join(t.TempDir(), "t.jsonl")
-		if err := os.WriteFile(path, []byte(transcript), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(resolvedTranscript(toolAskUserQuestion, "toolu_chat", c.resolution)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
@@ -268,49 +264,74 @@ func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
 			t.Errorf("%s: the verified chat intent is still recorded; want it cleared", name)
 		}
 		var outcome *provider.DialogOutcome
-		var replied bool
 		for _, m := range chat.Messages {
 			if m.Kind == provider.MessageDialog && m.Dialog != nil && m.Dialog.ToolID == "toolu_chat" {
 				outcome = m.Dialog.Outcome
 			}
-			if m.Kind == provider.MessageText && m.Role == "user" && m.Text == "Before I pick: which of these is cheaper to run?" {
-				replied = true
-			}
 		}
 		if outcome == nil || !reflect.DeepEqual(*outcome, provider.DialogOutcome{Dismissed: true}) {
 			t.Errorf("%s: dialog outcome = %+v; want the dismissed summary {Dismissed:true}", name, outcome)
-		}
-		if !replied {
-			t.Errorf("%s: the chat message is not an ordinary user turn in %+v", name, chat.Messages)
 		}
 	}
 }
 
 // The walk onto the "Chat about this" row is blind. If it lands on an OPTION
 // row instead, the Enter answers the question — an answer the operator never
-// gave. The chat intent turns exactly that into a visible warning naming what
-// was recorded; it stays recorded, so every re-parse repeats it.
+// gave. The chat intent turns exactly that into a visible warning naming the
+// question and what was recorded for it.
 func TestBackstop_chatAboutThis_recordedAnswer_warns(t *testing.T) {
-	chat := answerThenRead(t, twoQuestionDialog("toolu_2q"), provider.DialogAnswer{ChatText: "why these colors?"},
-		resolvedTranscript(toolAskUserQuestion, "toolu_2q", answeredLine))
-	w := backstopWarnings(chat)
-	if len(w) != 1 {
-		t.Fatalf("a recorded answer after Chat about this: %d warnings; want 1 (%+v)", len(w), chat.Messages)
+	// answeredLine records Red for Color and "Apple, Cherry" for Fruits.
+	cases := map[string]struct {
+		answer provider.DialogAnswer
+		want   []string // substrings of the single warning
+	}{
+		// Chat on the first question, but Color was answered.
+		"chat on the first question": {
+			provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true}}},
+			[]string{"Dialog answer may not have landed", "Chat about this", "Which color do you prefer?", `"Red"`},
+		},
+		// Color answered as intended (not verified), chat on Fruits — but
+		// Fruits was answered.
+		"an answer, then chat on the second question": {
+			provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 0}, {Chat: true}}},
+			[]string{"Dialog answer may not have landed", "Chat about this", "Which fruits do you like?", `"Apple, Cherry"`},
+		},
 	}
-	for _, want := range []string{"Dialog answer may not have landed", "Chat about this", `"Red"`, `"Apple, Cherry"`} {
-		if !strings.Contains(w[0].Text, want) {
-			t.Errorf("warning %q lacks %q", w[0].Text, want)
+	for name, c := range cases {
+		chat := answerThenRead(t, twoQuestionDialog("toolu_2q"), c.answer,
+			resolvedTranscript(toolAskUserQuestion, "toolu_2q", answeredLine))
+		w := backstopWarnings(chat)
+		if len(w) != 1 {
+			t.Fatalf("%s: %d warnings; want 1 (%+v)", name, len(w), chat.Messages)
+		}
+		for _, want := range c.want {
+			if !strings.Contains(w[0].Text, want) {
+				t.Errorf("%s: warning %q lacks %q", name, w[0].Text, want)
+			}
 		}
 	}
 }
 
+// Answers recorded only for the questions BEFORE the chat are the operator's
+// own answers, not a miss: if the row's resolution carries them, the chat
+// intent still verifies silently.
+func TestBackstop_chatAboutThis_earlierAnswersRecorded_silent(t *testing.T) {
+	const partialLine = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user wants to talk about these questions first.","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-08T15:38:32.213Z","toolUseResult":{"questions":[],"answers":{"Which color do you prefer?":"Blue"},"annotations":{}}}`
+	chat := answerThenRead(t, twoQuestionDialog("toolu_2q"),
+		provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 1}, {Chat: true}}},
+		resolvedTranscript(toolAskUserQuestion, "toolu_2q", partialLine))
+	if w := backstopWarnings(chat); len(w) != 0 {
+		t.Errorf("earlier answers recorded beside a chat emitted warnings: %+v", w)
+	}
+}
+
 // The 60s unattended timeout can win the race against lab's keys: it records
-// answers:{} with an afkTimeoutMs stamp. No option was picked, so the chat
-// intent verifies silently (the keys then reach the composer and the message
-// is sent as an ordinary reply).
+// answers:{} with an afkTimeoutMs stamp. No answer was recorded for the chat
+// question, so the chat intent verifies silently.
 func TestBackstop_chatAboutThis_timeout_silent(t *testing.T) {
 	const timeoutLine = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"No response after 60s.","tool_use_id":"TOOLID"}]},"timestamp":"2026-07-08T15:39:32.213Z","toolUseResult":{"questions":[],"answers":{},"annotations":{},"afkTimeoutMs":60000}}`
-	chat := answerThenRead(t, twoQuestionDialog("toolu_2q"), provider.DialogAnswer{ChatText: "why these colors?"},
+	chat := answerThenRead(t, twoQuestionDialog("toolu_2q"),
+		provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true}}},
 		resolvedTranscript(toolAskUserQuestion, "toolu_2q", timeoutLine))
 	if w := backstopWarnings(chat); len(w) != 0 {
 		t.Errorf("a timed-out picker after Chat about this emitted warnings: %+v", w)

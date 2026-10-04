@@ -2,14 +2,14 @@
 // is always available and fires immediately, with the slash-command
 // autocomplete (issue #51 decision 5, tiered ranking per issue #122) and its
 // `/` button (issue #58 §6), the §4 jump-to-latest pill, the worded status
-// line (issue #58 §2), the docked question panel with its answer and "Chat
-// about this" modes (issue #58 §3/§4), and the shared one-tap interrupt
-// action (ADR-0029) behind every Interrupt.
+// line (issue #58 §2), the docked question panel with its answer box and its
+// one-tap "Chat about this" (issue #58 §3/§4), and the shared one-tap
+// interrupt action (ADR-0029) behind every Interrupt.
 //
 // Modes, first match wins:
 //   ended run                         read-only note
 //   transcript gone                   read-only note
-//   answerable question dialog        QuestionDock (panel + answer/chat box)
+//   answerable question dialog        QuestionDock (panel + answer box)
 //   plan review / non-answerable      waiting note (the card is in the stream)
 //   state question, no dialog         degraded note + Interrupt escape hatch
 //   otherwise                         status line (live + transcript
@@ -303,11 +303,11 @@ export function Composer(props: {
           <p class="chat-composer-note">Transcript no longer available — the chat is read-only.</p>
         </Match>
         {/* An answerable question dialog docks HERE (issue #58 §3): the panel
-            above, the answer box (its free-text row) or the "Chat about this"
-            reply box below. Non-keyed Match: the dock stays mounted across
-            refetches that hand in fresh dialog objects, so its drafts — keyed
-            to the tool_id inside — survive every SSE tick. No slash
-            autocomplete or `/` button in any of its modes. */}
+            above, the answer box (its free-text row) below. Non-keyed Match:
+            the dock stays mounted across refetches that hand in fresh dialog
+            objects, so its drafts — keyed to the tool_id inside — survive
+            every SSE tick. No slash autocomplete or `/` button while it is
+            up. */}
         <Match when={dockedQuestion()}>
           {(d) => (
             <QuestionDock

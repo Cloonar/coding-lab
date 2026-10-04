@@ -16,8 +16,10 @@
 //   answers[] POST, disabled until complete;
 // - drafts survive refetches of the same dialog and reset on a new tool_id;
 //   the panel folds; slash autocomplete is off;
-// - "Chat about this" holds the question (sends nothing; Back restores every
-//   draft) and its Send posts exactly {tool_id, chat_text}.
+// - "Chat about this" is one tap with no text: {tool_id, chat:true} for a
+//   single question; for a multi-question dialog the answers to the EARLIER
+//   questions exactly as picked, then {chat:true} — and it stays off until
+//   those earlier questions are answered.
 
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, Dialog } from '../../api';
@@ -604,93 +606,138 @@ describe('QuestionDock', () => {
     expect(h.answerPosts).toHaveLength(0);
   });
 
-  it('Chat about this holds the question, and Back restores the panel with every draft, sending nothing', async () => {
+  const chatBtn = () => buttonByText('Chat about this') as HTMLButtonElement | null;
+  const chatHint = () => container.querySelector('.chat-qpanel-chat-hint')?.textContent ?? null;
+
+  it('Chat about this on a single question is one tap: it posts exactly {tool_id, chat:true} — no text, no draft pick', async () => {
+    withPending(flatSingle('toolu_chat'));
+    await mountChat();
+
+    // A drafted pick and typed text are NOT an answer: the operator chose to
+    // talk about the question instead.
+    option('Revert').click();
+    await settle();
+    expect(chatBtn()!.disabled).toBe(false);
+    expect(chatHint()).toBeNull();
+
+    chatBtn()!.click();
+    await settle();
+
+    expect(h.answerPosts).toEqual([{ tool_id: 'toolu_chat', chat: true }]);
+    expect(h.replyPosts).toHaveLength(0);
+    // No hold mode, no second text box: the panel is simply as it was until
+    // the refetch resolves the dialog.
+    expect(container.querySelector('.chat-hold')).toBeNull();
+    expect(container.querySelectorAll('.chat-composer textarea')).toHaveLength(0);
+  });
+
+  it('Chat about this on a flat multi-select question posts {tool_id, chat:true} too', async () => {
+    withPending(flatMulti('toolu_chat_multi'));
+    await mountChat();
+    option('Frontend').click();
+    await settle();
+
+    chatBtn()!.click();
+    await settle();
+    expect(h.answerPosts).toEqual([{ tool_id: 'toolu_chat_multi', chat: true }]);
+  });
+
+  it('Chat about this on the first of several questions posts answers:[{chat:true}]', async () => {
     withPending(threeQuestions());
     await mountChat();
 
+    expect(chatBtn()!.disabled).toBe(false);
+    chatBtn()!.click();
+    await settle();
+    expect(h.answerPosts).toEqual([{ tool_id: 'toolu_mq', answers: [{ chat: true }] }]);
+  });
+
+  it('Chat about this on a later question sends the earlier answers exactly as given, then the chat', async () => {
+    withPending(threeQuestions());
+    await mountChat();
+
+    // Second option on the first question…
     option('Patch forward').click();
     await settle();
     confirmBtn()!.click(); // Next → question 2
     await settle();
-    typeAnswer('maybe both');
-    await settle();
-
-    buttonByText('Chat about this')!.click();
-    await settle();
-
-    // The panel folds to one "on hold" line with a Back button.
-    expect(panel()!.querySelector('.chat-qpanel-title')?.textContent).toBe('3 questions on hold');
-    expect(container.querySelector<HTMLElement>('.chat-qpanel-body')!.hidden).toBe(true);
-    expect(container.querySelector('.chat-qpanel-back')?.textContent).toBe('Back to questions');
-    // The composer is a normal multi-line reply box quoting the question that
-    // was on screen, with the hold note beneath.
-    const box = container.querySelector<HTMLTextAreaElement>('.chat-hold textarea');
-    expect(box).not.toBeNull();
-    expect(document.activeElement).toBe(box);
-    expect(container.querySelector('.chat-hold-quote-text')?.textContent).toBe('Which areas?');
-    expect(container.querySelector('.chat-hold-note')?.textContent).toBe(
-      'Sending sets the questions aside. Claude Code asks again after it has replied.',
-    );
-    expect(answerInput()).toBeNull();
-    // Slash autocomplete stays off in this mode too.
-    box!.value = '/';
-    box!.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
-
-    // The quote's dismiss control is the same Back.
-    const dismiss = container.querySelector<HTMLButtonElement>('.chat-hold-dismiss')!;
-    expect(dismiss.getAttribute('aria-label')).toBe('Back to questions');
-    dismiss.click();
-    await settle();
-
-    // Everything as it was: question 2 on screen, its text, question 1's pick.
-    expect(container.querySelector('.chat-hold')).toBeNull();
     expect(questionText()).toContain('Which areas?');
-    expect(answerInput()!.value).toBe('maybe both');
-    expect(chip('Approach').classList.contains('done')).toBe(true);
-    chip('Approach').click();
+    // …a half-made draft on the second, which is NOT sent…
+    option('Backend').click();
     await settle();
-    expect(option('Patch forward').getAttribute('aria-checked')).toBe('true');
-    expect(h.answerPosts).toHaveLength(0);
+    // …and chat about the second.
+    chatBtn()!.click();
+    await settle();
+
+    expect(h.answerPosts).toEqual([
+      { tool_id: 'toolu_mq', answers: [{ index: 1 }, { chat: true }] },
+    ]);
     expect(h.replyPosts).toHaveLength(0);
   });
 
-  it('Chat about this then Send posts exactly {tool_id, chat_text} and leaves chat mode', async () => {
-    withPending(flatSingle('toolu_chat'));
+  it('Chat about this on the last question carries every earlier answer in its own encoding', async () => {
+    withPending(threeQuestions());
     await mountChat();
 
-    option('Revert').click();
+    typeAnswer('rewrite it'); // question 1: the free-text row
     await settle();
-    buttonByText('Chat about this')!.click();
+    confirmBtn()!.click();
     await settle();
+    option('Frontend').click(); // question 2: multi-select ticks + typed text
+    option('Backend').click();
+    typeAnswer('docs');
+    await settle();
+    confirmBtn()!.click();
+    await settle();
+    expect(questionText()).toContain('Anything else?');
 
-    expect(panel()!.querySelector('.chat-qpanel-title')?.textContent).toBe('Question on hold');
-    expect(container.querySelector('.chat-qpanel-back')?.textContent).toBe('Back to question');
-    expect(container.querySelector('.chat-hold-quote-text')?.textContent).toBe('Which fix?');
-    expect(container.querySelector('.chat-hold-note')?.textContent).toBe(
-      'Sending sets the question aside. Claude Code asks again after it has replied.',
-    );
-
-    const send = () => container.querySelector<HTMLButtonElement>('.chat-hold .chat-send')!;
-    expect(send().getAttribute('aria-label')).toBe('Send');
-    expect(send().disabled).toBe(true);
-    const box = container.querySelector<HTMLTextAreaElement>('.chat-hold textarea')!;
-    box.value = '  why not both?  ';
-    box.dispatchEvent(new Event('input', { bubbles: true }));
+    chatBtn()!.click();
     await settle();
-    expect(send().disabled).toBe(false);
-
-    send().click();
-    await settle();
-    // Only the typed words, trimmed — never the quote, never the draft pick.
-    expect(h.answerPosts).toEqual([{ tool_id: 'toolu_chat', chat_text: 'why not both?' }]);
-    expect(h.replyPosts).toHaveLength(0);
-    // Chat mode left (the next refetch resolves the dialog server-side).
-    expect(container.querySelector('.chat-hold')).toBeNull();
+    expect(h.answerPosts).toEqual([
+      {
+        tool_id: 'toolu_mq',
+        answers: [
+          { index: 2, other_text: 'rewrite it' },
+          { selected: [0, 1], other_text: 'docs' },
+          { chat: true },
+        ],
+      },
+    ]);
   });
 
-  it('Chat about this: a refused Send keeps the text and the hold, surfacing the banner', async () => {
+  it('Chat about this stays off, with the reason in words, until every earlier question is answered', async () => {
+    withPending(threeQuestions());
+    await mountChat();
+
+    // Jump straight to question 3: questions 1 and 2 are unanswered.
+    chips()[2]!.click();
+    await settle();
+    expect(questionText()).toContain('Anything else?');
+    expect(chatBtn()!.disabled).toBe(true);
+    expect(chatHint()).toBe('Answer the earlier questions first.');
+    expect(chatBtn()!.getAttribute('aria-describedby')).toBe(
+      container.querySelector('.chat-qpanel-chat-hint')!.id,
+    );
+    chatBtn()!.click();
+    await settle();
+    expect(h.answerPosts).toHaveLength(0);
+
+    // Answer question 1 only: still off on question 3 (question 2 is open)…
+    chip('Approach').click();
+    await settle();
+    option('Revert').click();
+    await settle();
+    chips()[2]!.click();
+    await settle();
+    expect(chatBtn()!.disabled).toBe(true);
+    // …but on for question 2, whose only earlier question is answered.
+    chip('Scope').click();
+    await settle();
+    expect(chatBtn()!.disabled).toBe(false);
+    expect(chatHint()).toBeNull();
+  });
+
+  it('Chat about this: a refused request surfaces the banner and keeps the panel and its drafts', async () => {
     withPending(flatSingle('toolu_stale'));
     await mountChat();
     const base = globalThis.fetch;
@@ -705,22 +752,17 @@ describe('QuestionDock', () => {
       }),
     );
 
-    buttonByText('Chat about this')!.click();
+    option('Revert').click();
     await settle();
-    const box = container.querySelector<HTMLTextAreaElement>('.chat-hold textarea')!;
-    box.value = 'explain the options';
-    box.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-    container.querySelector<HTMLButtonElement>('.chat-hold .chat-send')!.click();
+    chatBtn()!.click();
     await settle();
 
-    expect(h.answerPosts).toEqual([{ tool_id: 'toolu_stale', chat_text: 'explain the options' }]);
+    expect(h.answerPosts).toEqual([{ tool_id: 'toolu_stale', chat: true }]);
     expect(container.querySelector('.banner.error')?.textContent).toContain(
       'dialog is no longer pending',
     );
-    expect(container.querySelector<HTMLTextAreaElement>('.chat-hold textarea')?.value).toBe(
-      'explain the options',
-    );
+    expect(option('Revert').getAttribute('aria-checked')).toBe('true');
+    expect(chatBtn()!.disabled).toBe(false);
   });
 
   it('renders a transcript-flushed question once: the marker at its position, the dock fed by the field', async () => {
@@ -840,10 +882,8 @@ describe('QuestionDock', () => {
       'Agent Zed is asking a question. Answer below.',
     );
     expect(panel()!.getAttribute('aria-label')).toBe('Agent Zed is asking');
-    buttonByText('Chat about this')!.click();
-    await settle();
-    expect(container.querySelector('.chat-hold-note')?.textContent).toContain(
-      'Agent Zed asks again after it has replied.',
+    expect(buttonByText('Chat about this')!.getAttribute('title')).toContain(
+      'Agent Zed asks what you want to know',
     );
     expect(container.textContent).not.toContain('Claude');
   });

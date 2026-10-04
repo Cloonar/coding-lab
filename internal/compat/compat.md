@@ -1366,84 +1366,93 @@ Claude has written up a plan and is ready to execute. Would you like to proceed?
   with the feedback after "the user said:\n" (Enter on the empty row records a
   bare "User rejected tool use", so the recipe requires feedback text on it).
 
-**Chat about this** (issue #58) — the dock's "set the question aside and
-chat" action: `POST /runs/{id}/answer` with `chat_text` (`DialogAnswer.ChatText`)
-selects the picker's **own trailing "Chat about this" row**, then delivers the
-text verbatim as an ordinary reply. No `Escape` is sent — the action is the
-picker's row, not an interrupt (maintainer decision on PR #60). Recipe —
-`ChatAboutThisKeystrokes`, snapshot `TestCompat_ChatAboutThisKeystrokes`:
+**Chat about this** (issue #58) — the dock's "talk about this question
+first" action. It is the picker's **own trailing "Chat about this" row**,
+selected exactly where the operator chose it, and nothing more: no `Escape`,
+no text, no extra wait. claude then asks the operator what they want to know,
+and the operator answers with an ordinary reply (maintainer decisions on
+PR #60). It is one more answer shape of `POST /runs/{id}/answer`
+(`DialogAnswer.Chat` / `QuestionAnswer.Chat`), built by `DialogKeystrokes`
+and played and paced like any answer (snapshot
+`TestCompat_ChatAboutThisKeystrokes`):
 
 ```
-settleDelay → [Down × row] (keyDelay between keys) → [Enter] → chatSettleDelay → [PasteText] → keyDelay → [Enter]
+single question:      [Down × row] [Enter]
+multi-question form:  [recipe of question 0] … [recipe of question k−1] [Down × row_k] [Enter]
 ```
 
-A downward-only walk from the top row (universal rules above: no climb, one
-named key per op), `Enter` on the row, then the §6 reply recipe (bracketed
-paste, separately paced `Enter`). `row` is the row's 0-based navigation index
-on the picker a fresh dialog presents (`chatRowIndex`):
+- **Every question picker has the row** — each question of a form carries
+  its own — so on a form the recipe must be on question *k* when it chooses
+  it. The operator's answers to questions 0..k−1 are therefore **entered
+  first, exactly as given** (their ordinary per-question recipes; committing
+  one auto-advances), then the row is chosen on question *k*. That is the
+  only way claude can tell which question the operator wants to talk about
+  and what they had already decided: *"second option on the first question,
+  chat about the second"* plays `[Down][Enter]` and then walks onto the
+  second picker's row. Nothing follows the row's `Enter` — no later
+  question, no review step.
+- **`row`** is the row's 0-based navigation index on that question's picker
+  (`chatRowOps`), a downward-only walk from the top row (universal rules
+  above: no climb, one named key per op):
 
-| Picker | Navigation order | `row` |
-| --- | --- | --- |
-| single-select | modeled rows (options + free-text row), Chat about this | `len(Options)` |
-| multi-select | modeled rows, Submit, Chat about this | `len(Options) + 1` |
-| multi-question form | the **first** question's picker, by its own shape | as above, from `Questions[0]` |
+  | Picker | Navigation order | `row` |
+  | --- | --- | --- |
+  | single-select | modeled rows (options + free-text row), Chat about this | `len(Options)` |
+  | multi-select | modeled rows, Submit, Chat about this | `len(Options) + 1` |
 
-`chatSettleDelay` (`defaultDialogChatSettleDelay` = **1s**) is the gap for the
-picker to close and the composer to regain focus before the paste. Validation
-is at the door, before any key: the dialog must be answerable and of kind
-question (a plan review is `ErrDialogNotAnswerable` — its picker has no such
-row, and the UI never offers the action there); `selected`/`other_text`/
-`answers` alongside `chat_text` are `ErrInvalidReply`; and the text follows
-`validateReply` (multi-line allowed — a composer reply, not a single-line
-picker row). The whole sequence runs inside one `AnswerDialog` call under the
-chat service's per-session lock, behind the same live tool_id re-read as any
-answer — a stale id is refused before a key plays, and nothing can interleave
-between the row selection and the reply.
-
+- **Wire shape.** Single-question dialog: `{tool_id, chat: true}` with no
+  answer field. Multi-question dialog: `answers` holds the answers to the
+  questions before the chat, in order, and ends with one `{chat: true}`
+  entry — so it is shorter than the question list unless the chat is on the
+  last question. Validation is at the door, before any key: a chat entry
+  carries no `index`/`selected`/`other_text`; nothing may follow it; the
+  top-level `chat` is not accepted on a form; every earlier entry must be a
+  valid answer to its question (all `ErrInvalidReply`); and only an
+  answerable dialog of kind question accepts it (a plan review is
+  `ErrDialogNotAnswerable` — its picker has no such row). The dock keeps the
+  action off until every earlier question has an answer. The whole recipe
+  runs inside one `AnswerDialog` call under the chat service's per-session
+  lock, behind the same live tool_id re-read as any answer.
 - **NOT YET DRIVEN LIVE — the recipe is built from the row models above.**
   The multi-select navigation order (options, Submit, Chat about this) was
   observed live on 2026-07-09 and the single-select row sits last in the
   captured picker, but the walk **onto** the row and the `Enter` on it were
-  never played against a real picker. Three things are therefore inferred:
-  (1) the `──` divider above the row is not a navigation stop; (2) on a
-  multi-question form, choosing the row from the first question sets the
-  whole form aside; (3) the picker closes within `chatSettleDelay`. Neither
-  the implementing environment nor PR #60's landing session could drive a
-  live picker (the latter had a logged-in claude but was not permitted to
-  spawn a nested one). `TestCompat_Live_chatAboutThisRow` is the owed live
-  run (§Live re-verification).
+  never played against a real picker. Inferred: (1) the `──` divider above
+  the row is not a navigation stop; (2) choosing the row on question *k* of a
+  form ends the whole form. Neither the implementing environment nor PR #60's
+  landing session could drive a live picker (the latter had a logged-in
+  claude but was not permitted to spawn a nested one).
+  `TestCompat_Live_chatAboutThisRow` is the owed live run (§Live
+  re-verification).
 - **What a wrong index does.** One row short on a single-select picker lands
   on the empty free-text row, where `Enter` declines the whole dialog (live,
-  2026-07-08) — the message is still delivered, so that miss degrades
-  harmlessly. One row long **wraps to row 0** (Up/Down wrap) and the `Enter`
-  **picks the first option** (single-select) or toggles it (multi-select).
-  On a multi-select picker one row short lands on Submit. These are the
-  desyncs the §5 backstop exists for, so this path records its own intent:
-  "no option picked". A recorded answers object after a Chat about this emits
-  `Dialog answer may not have landed: lab chose "Chat about this", but the
-  transcript recorded an answer (…)` in the chat
+  2026-07-08). One row long **wraps to row 0** (Up/Down wrap) and the `Enter`
+  **picks the first option** (single-select) or toggles it (multi-select);
+  on a form that also advances to the next question and leaves the dialog
+  pending off its first picker. On a multi-select picker one row short lands
+  on Submit. These are the desyncs the §5 backstop exists for, so a chat
+  answer records its own intent: no answer may be recorded for the chat
+  question or any later one. If one is, the chat shows `Dialog answer may
+  not have landed: lab chose "Chat about this" for "<question>", but the
+  transcript recorded the answer "<answer>"`
   (`TestBackstop_chatAboutThis_recordedAnswer_warns`).
 - **Resolution shape — not captured.** What the transcript records after the
-  row is chosen is unknown. Rendering and verification do not depend on it:
+  row is chosen is unknown, including what it says about the earlier answers
+  of a form. Rendering and verification do not depend on it:
   `questionOutcome` collapses any denial, any absent or unreadable result and
   an empty answers map to `Dismissed`, and the chat intent verifies silently
-  on all of those (`TestBackstop_chatAboutThis_dismissedWithoutWarning`,
-  which covers the §5 decline pair and a result with no `toolUseResult`). The
-  chat intent replaces a stale pick intent left by an earlier attempt on the
-  same pending picker, so the deliberate non-answer never trips the backstop.
-  Whether claude keeps working after the row is chosen (answering the
-  "wants to chat" result) or stops and waits is also uncaptured; the reply
-  recipe is valid in both states (Send is never gated on state, ADR-0029).
+  on all of those and on a result that records answers for the EARLIER
+  questions only (`TestBackstop_chatAboutThis_dismissedWithoutWarning`,
+  `…_earlierAnswersRecorded_silent`). The earlier answers themselves are not
+  verified. A chat intent replaces a stale pick intent left by an earlier
+  attempt on the same pending picker.
 - **Hazard (accepted).** If the picker resolves on its own between the
   tool_id re-read and the first key (an AFK run's 60s timeout landing in that
-  window), the walk's `Down` keys and the `Enter` reach the composer of a
-  working turn, where they are expected to be inert on an empty box, and the
-  message then lands as an ordinary reply. Unlike the earlier Escape-based
-  fallback, nothing interrupts the turn.
-- **Pinned unverified-live.** The row indices, the multi-question behaviour,
-  `chatSettleDelay` (1s is twice the measured pre-first-key settle, its
-  nearest cousin) and the resolution shape — all four are on the next live
-  sweep.
+  window), the recipe's keys reach the composer of a working turn, where
+  `Down` and `Enter` on an empty box are expected to be inert. Nothing is
+  interrupted and nothing is sent.
+- **Pinned unverified-live.** The row indices, the form behaviour and the
+  resolution shape — all on the next live sweep.
 
 **Timeout**: any of these pickers left unanswered resolves ITSELF after 60s
 (§5 afkTimeout) — an answer sent after that 409s on the tool_id re-read, and
@@ -2275,21 +2284,21 @@ production scrape; the recipes themselves stay blind.)
 
 **"Chat about this" row — owed, never yet run live (issue #58).**
 `TestCompat_Live_chatAboutThisRow` (same gate, same file) drives the §7
-"Chat about this" recipe against real pickers, one subtest per shape —
-single-select, multi-select, and a two-question form: the Down walk onto the
-picker's own trailing row, `Enter`, the pinned `chatSettleDelay` (1s), then
-the §6 reply. It was **written but never run**, so its first run IS the live
-verification of the recipe. Per subtest it asserts that (1) the dialog
-resolved **without an option being picked** (a `Results` outcome means the
-row index is off — fix `chatRowIndex` and the §7 table), (2) the message
-landed verbatim as an ordinary user turn, not stranded in the composer or
-swallowed by a closing picker, and (3) no backstop warning was emitted. It
-logs the `tool_result` line the row leaves behind — **record that shape in
-§7** (and whether claude kept working or stopped). If it passes, also try
-`chatSettleDelay` cut to 500ms and 250ms and record the smallest reliable
-value in `defaultDialogChatSettleDelay`'s comment. A lab instance may refuse
-to spawn a nested claude (PR #60's landing session did); run the sweep on a
-host where that is allowed.
+"Chat about this" recipe against real pickers, one subtest per shape: a
+single-select question, a multi-select question, a two-question form with
+the chat on its first question, and the same form with the second option
+picked on the first question and the chat on the second. It was **written
+but never run**, so its first run IS the live verification of the recipe.
+Per subtest it asserts that (1) the dialog **resolved** — a picker still
+pending means the walk landed on an option of a form, or on nothing; (2) it
+resolved through the dismissed summary — a `Results` outcome means the row
+index is off (fix `chatRowOps` and the §7 table); and (3) no backstop warning
+was emitted. It logs the `tool_result` line the row leaves behind and the
+pane ten seconds later — **record both in §7**: the transcript shape
+(including what it says about a form's earlier answers) and whether claude
+went on to ask what the operator wants to know. A lab instance may refuse to
+spawn a nested claude (PR #60's landing session did); run the sweep on a host
+where that is allowed.
 
 **Running the suite from inside a lab instance (how the 2.1.284 bump did it).**
 The rig resolves everything off `$HOME`: it seeds trust into

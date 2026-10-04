@@ -456,14 +456,15 @@ func (s *Service) Reply(ctx context.Context, run store.Run, text string) error {
 // the keystroke recipe is always built from the live dialog, not the client's
 // copy.
 //
-// "Chat about this" (answer.ChatText, issue #58) rides this same method, so
-// it inherits both guards unchanged: a stale tool_id is refused here before
-// the provider is called (no key plays), and the adapter's two steps — set
-// the dialog aside, then deliver the message as an ordinary reply — run inside
-// the one provider call while this session lock is held, so no racing
-// reply/answer/interrupt can interleave and the message never lands in a
-// focused picker. It is the only route by which reply text reaches a session
-// whose dialog is pending: Reply itself stays refused with ErrDialogPending.
+// "Chat about this" (issue #58 — provider.DialogAnswer.Chat, or a trailing
+// Answers entry with Chat set) is one more answer shape and rides this same
+// method, so it inherits both guards unchanged: a stale tool_id is refused
+// here before the provider is called (no key plays), and the adapter's whole
+// recipe — the operator's earlier answers, then the "Chat about this" choice
+// — runs inside the one provider call while this session lock is held, so no
+// racing reply/answer/interrupt can interleave. No reply text is involved:
+// the agent asks what the operator wants to know, and the operator answers
+// through Reply once the dialog is gone.
 func (s *Service) AnswerDialog(ctx context.Context, run store.Run, toolID string, answer provider.DialogAnswer) error {
 	prov, err := s.liveProvider(run)
 	if err != nil {

@@ -554,21 +554,26 @@ type answerRequest struct {
 	// non-empty it wins, but the seam (not this layer) decides that, so the
 	// flat shape keeps working for single-question dialogs with zero churn.
 	Answers []answerQuestion `json:"answers"`
-	// ChatText is "Chat about this" (issue #58): non-empty sets the pending
-	// question dialog aside and delivers the text verbatim as an ordinary
-	// reply, behind the same tool_id guard as any answer. Threaded through
-	// unchanged like the fields above — its exclusivity with them and its
-	// text rules are the provider's validation (ErrInvalidReply → 400).
-	ChatText string `json:"chat_text"`
+	// Chat is "Chat about this" on a single-question dialog (issue #58): the
+	// operator chose to talk about the question instead of answering it. No
+	// text rides it. On a multi-question dialog the choice rides the LAST
+	// answers[] entry instead (answerQuestion.Chat), after the answers the
+	// operator gave to the earlier questions. Threaded through unchanged like
+	// the fields above — the shape rules are the provider's validation
+	// (ErrInvalidReply → 400).
+	Chat bool `json:"chat"`
 }
 
 // answerQuestion is one question's answer within a multi-question submit: the
 // single-select Index into that question's options, the multi-select Selected
-// toggles, and OtherText when the chosen row is the free-text "Other".
+// toggles, and OtherText when the chosen row is the free-text "Other" — or
+// Chat, "Chat about this" chosen on that question (issue #58), which ends the
+// list.
 type answerQuestion struct {
 	Index     int    `json:"index"`
 	Selected  []int  `json:"selected"`
 	OtherText string `json:"other_text"`
+	Chat      bool   `json:"chat"`
 }
 
 // handleRunAnswer is POST /api/v1/runs/{id}/answer — answer the pending dialog.
@@ -576,12 +581,13 @@ type answerQuestion struct {
 // lock and refuses a mismatch, so a stale client never answers a dialog that
 // already moved on. The flat fields answer a single-question dialog; answers[]
 // answers a multi-question form (issue #51 decision 3) — both are passed to the
-// provider, which resolves precedence. chat_text is "Chat about this" (issue
-// #58): one server action that dismisses the pending dialog and then delivers
-// the message as an ordinary reply, under the same tool_id guard and session
-// lock — so the same mapping applies: a stale or vanished dialog is 409, a
-// provider with no answerable dialogs refuses it with 409, and bad text or a
-// chat_text mixed with answer fields is 400.
+// provider, which resolves precedence. chat is "Chat about this" (issue #58):
+// the operator chose to talk about a question instead of answering it — flat
+// `chat:true`, or a trailing answers[] entry with `chat:true` after the
+// answers to the earlier questions. It is one more answer shape under the
+// same tool_id guard and session lock, so the same mapping applies: a stale
+// or vanished dialog is 409, a provider with no answerable dialogs refuses it
+// with 409, and a mixed or misordered shape is 400.
 func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -596,11 +602,11 @@ func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "tool_id is required")
 		return
 	}
-	answer := provider.DialogAnswer{Index: req.Index, Selected: req.Selected, OtherText: req.OtherText, ChatText: req.ChatText}
+	answer := provider.DialogAnswer{Index: req.Index, Selected: req.Selected, OtherText: req.OtherText, Chat: req.Chat}
 	if len(req.Answers) > 0 {
 		answer.Answers = make([]provider.QuestionAnswer, len(req.Answers))
 		for i, a := range req.Answers {
-			answer.Answers[i] = provider.QuestionAnswer{Index: a.Index, Selected: a.Selected, OtherText: a.OtherText}
+			answer.Answers[i] = provider.QuestionAnswer{Index: a.Index, Selected: a.Selected, OtherText: a.OtherText, Chat: a.Chat}
 		}
 	}
 	if err := s.chat.AnswerDialog(r.Context(), run, req.ToolID, answer); err != nil {

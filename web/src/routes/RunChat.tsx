@@ -8,7 +8,7 @@
 // composer (issue #58 §3) — lifecycle/errors; thinking permanently hidden at
 // paint — issue #68), and a fixed bottom dock whose state follows the run:
 // the worded status line over the composer (issue #58 §2), the question panel
-// with its answer and "Chat about this" modes, a waiting note while an
+// with its answer box and one-tap "Chat about this", a waiting note while an
 // in-stream card is pending, read-only for ended instances. Tool
 // chips and group summaries are buttons whose click branches on the breakpoint
 // (issue #154): on desktop (>=1024px) they toggle a RICH inline expansion in

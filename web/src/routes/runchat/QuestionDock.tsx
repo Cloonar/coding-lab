@@ -19,24 +19,29 @@
 // - Multi-question: one question at a time behind a chip stepper ("Next" /
 //   "Review"), a per-question text box, and a Review step whose single "Send
 //   N answers" posts the positional answers[] exactly like issue #51's form.
-// - Chat about this (§4): folds the panel to "Question on hold", turns the
-//   composer into a normal multi-line reply box quoting the question, and its
-//   Send asks the server to set the dialog aside and deliver the text as an
-//   ordinary reply ({tool_id, chat_text} — one action under the answer
-//   endpoint's stale-dialog guard). Back restores every draft.
+// - Chat about this (§4): one tap, no text. It is the provider picker's own
+//   "Chat about this" choice on the question on screen: the server enters the
+//   answers given to the EARLIER questions exactly as picked here, then
+//   chooses "Chat about this" on this one ({tool_id, chat:true}, or
+//   {tool_id, answers:[…earlier answers, {chat:true}]} — one action under the
+//   answer endpoint's stale-dialog guard). The agent then asks what the
+//   operator wants to know, and they reply in the ordinary composer. On a
+//   multi-question dialog it needs every earlier question answered — that is
+//   the path the provider's own form walks.
 //
 // Drafts are keyed to the dialog's IDENTITY (tool_id), memoized exactly like
 // the old DialogPanel's dialogIdentity: a refetch hands in a fresh dialog
 // object for the same pending dialog on every SSE tick, and only a genuinely
-// new tool_id may drop the operator's picks, typed text, current question,
-// fold or hold.
+// new tool_id may drop the operator's picks, typed text, current question or
+// fold.
 //
 // Answer encoding is the wire contract provider.go's DialogAnswer /
 // QuestionAnswer define (compat §7): a single-select answer is `index` (the
 // is_other row's index + `other_text` for typed text); a multi-select answer
 // is `selected` — the REAL ticked indices ascending, never the is_other index
 // (its text IS its toggle) — plus `other_text` when typed. A multi-question
-// dialog sends one entry per question, positionally.
+// dialog sends one entry per question, positionally — or, for Chat about
+// this, the entries of the questions before it and a closing `{chat: true}`.
 
 import {
   Index,
@@ -58,7 +63,6 @@ import {
   type QuestionAnswer,
 } from '../../api';
 import Icon from '../../components/Icon';
-import { isComposerSend } from '../../lib/composerKeys';
 import { capitalize } from './shared';
 
 /**
@@ -156,8 +160,6 @@ export function QuestionDock(props: {
   const [texts, setTexts] = createSignal<ReadonlyMap<number, string>>(new Map());
   const [left, setLeft] = createSignal<ReadonlySet<number>>(new Set()); // questions navigated away from
   const [folded, setFolded] = createSignal(false);
-  const [chatting, setChatting] = createSignal(false);
-  const [chatText, setChatText] = createSignal('');
   const [busy, setBusy] = createSignal(false);
 
   const identity = createMemo(() => props.dialog.tool_id);
@@ -170,8 +172,6 @@ export function QuestionDock(props: {
         setTexts(new Map());
         setLeft(new Set<number>());
         setFolded(false);
-        setChatting(false);
-        setChatText('');
       },
       { defer: true },
     ),
@@ -292,41 +292,31 @@ export function QuestionDock(props: {
   };
 
   // --- Chat about this (§4) ------------------------------------------------
-  let chatInputEl: HTMLTextAreaElement | undefined;
-  let chatAboutEl: HTMLButtonElement | undefined;
-  const holdTitle = () => (plural() ? `${total()} questions on hold` : 'Question on hold');
-  const backLabel = () => (plural() ? 'Back to questions' : 'Back to question');
-  const startChat = () => {
-    setChatting(true);
-    queueMicrotask(() => chatInputEl?.focus());
-  };
-  const backToQuestion = () => {
-    setChatting(false);
-    queueMicrotask(() => chatAboutEl?.focus());
-  };
-  const autoGrow = () => {
-    const el = chatInputEl;
-    if (el === undefined) return;
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
-  };
-  createEffect(() => {
-    chatText();
-    autoGrow();
-  });
-  const canChatSend = () => !busy() && chatText().trim() !== '';
-  const sendChat = async () => {
-    if (!canChatSend()) return;
-    // The quote above the box is display only — only the typed words go out.
-    const ok = await post({ chat_text: chatText().trim() });
-    if (ok) {
-      setChatText('');
-      setChatting(false);
+  // One tap, no text: the provider picker's own "Chat about this" choice on
+  // the question on screen. The request is the operator's path through the
+  // form EXACTLY as they walked it here — the answers to the questions before
+  // this one, then the chat choice — because that is what the server replays
+  // on the provider's picker, and how the agent learns which question the
+  // chat is about ("second option on the first question, chat about the
+  // second"). Answers drafted for LATER questions are not sent: choosing the
+  // row ends the form. It therefore needs every earlier question answered.
+  const earlierAnswered = () => questions().every((_, i) => i >= cur() || answered(i));
+  const canChat = () => !busy() && earlierAnswered();
+  const chatAbout = () => {
+    if (!canChat()) return;
+    if (!multiQ()) {
+      void post({ chat: true });
+      return;
     }
+    const earlier = questions()
+      .slice(0, cur())
+      .map((_, i) => answerFor(i));
+    void post({ answers: [...earlier, { chat: true }] });
   };
 
   const bodyId = `chat-qpanel-${uid}`;
   const qTextId = `chat-qtext-${uid}`;
+  const chatHintId = `chat-qchat-hint-${uid}`;
   const current = () => question(cur());
   // The current question's selectable rows with their ORIGINAL indices (the
   // adapter drives picker rows by index); the is_other row is the text box.
@@ -349,42 +339,30 @@ export function QuestionDock(props: {
     <div class="chat-qdock">
       <section
         class="chat-qpanel"
-        classList={{ folded: folded() || chatting() }}
+        classList={{ folded: folded() }}
         aria-label={`${agent()} is asking`}
       >
         <div class="chat-qpanel-head">
           <span class="chat-qpanel-dot" aria-hidden="true" />
-          <Show
-            when={!chatting()}
-            fallback={
-              <>
-                <b class="chat-qpanel-title">{holdTitle()}</b>
-                <button type="button" class="chat-qpanel-back" onClick={backToQuestion}>
-                  {backLabel()}
-                </button>
-              </>
-            }
+          <b class="chat-qpanel-title">{agent()} is asking</b>
+          <span class="chat-qpanel-count">
+            {total()} {plural() ? 'questions' : 'question'}
+          </span>
+          {/* The fold: the panel collapses to this header line so the
+              stream can be read; it reopens on tap and resets with the
+              dialog. */}
+          <button
+            type="button"
+            class="icon-btn chat-qpanel-fold"
+            aria-label={plural() ? 'Questions' : 'Question'}
+            aria-expanded={!folded()}
+            aria-controls={bodyId}
+            onClick={() => setFolded((f) => !f)}
           >
-            <b class="chat-qpanel-title">{agent()} is asking</b>
-            <span class="chat-qpanel-count">
-              {total()} {plural() ? 'questions' : 'question'}
-            </span>
-            {/* The fold: the panel collapses to this header line so the
-                stream can be read; it reopens on tap and resets with the
-                dialog. */}
-            <button
-              type="button"
-              class="icon-btn chat-qpanel-fold"
-              aria-label={plural() ? 'Questions' : 'Question'}
-              aria-expanded={!folded()}
-              aria-controls={bodyId}
-              onClick={() => setFolded((f) => !f)}
-            >
-              <Icon name="chevron-down" size={18} />
-            </button>
-          </Show>
+            <Icon name="chevron-down" size={18} />
+          </button>
         </div>
-        <div class="chat-qpanel-body" id={bodyId} hidden={folded() || chatting()}>
+        <div class="chat-qpanel-body" id={bodyId} hidden={folded()}>
           {/* Multi-question stepper: one chip per question (its header, else
               "Question N"), then Review. Any chip is tappable in any order;
               the row scrolls sideways when it overflows. */}
@@ -471,72 +449,34 @@ export function QuestionDock(props: {
                   )}
                 </Index>
               </div>
-              <button type="button" class="chat-qpanel-chat" ref={chatAboutEl} onClick={startChat}>
+              {/* Chat about this: one tap chooses the provider picker's own
+                  row on THIS question — no text; the agent asks what the
+                  operator wants to know. Off until every earlier question of
+                  a multi-question dialog has an answer (the server enters
+                  those first), with the reason spelled out beneath. */}
+              <button
+                type="button"
+                class="chat-qpanel-chat"
+                classList={{ busy: busy() }}
+                title={`Talk about this question first — ${agent()} asks what you want to know`}
+                aria-describedby={earlierAnswered() ? undefined : chatHintId}
+                disabled={!canChat()}
+                onClick={chatAbout}
+              >
                 <Icon name="message-square" size={16} />
                 <span>Chat about this</span>
               </button>
+              <Show when={!earlierAnswered()}>
+                <p class="chat-qpanel-chat-hint" id={chatHintId}>
+                  Answer the earlier questions first.
+                </p>
+              </Show>
             </Show>
           </div>
         </div>
       </section>
 
       <Switch>
-        {/* Chat about this: a normal multi-line reply box (no slash
-            autocomplete — the dialog still holds the agent's picker), headed
-            by a one-line quote of the question that was on screen. */}
-        <Match when={chatting()}>
-          <div class="chat-hold">
-            <div class="chat-hold-field">
-              <div class="chat-hold-quote">
-                <Icon name="message-square" size={14} class="chat-hold-quote-icon" />
-                <span class="chat-hold-quote-text">{current()?.text}</span>
-                <button
-                  type="button"
-                  class="icon-btn chat-hold-dismiss"
-                  aria-label={backLabel()}
-                  onClick={backToQuestion}
-                >
-                  <Icon name="x" size={16} />
-                </button>
-              </div>
-              <div class="chat-composer-row">
-                <textarea
-                  ref={(el) => {
-                    chatInputEl = el;
-                    queueMicrotask(autoGrow);
-                  }}
-                  class="chat-input"
-                  rows={1}
-                  placeholder={plural() ? 'Ask about these questions…' : 'Ask about this question…'}
-                  aria-label={plural() ? 'Chat about these questions' : 'Chat about this question'}
-                  value={chatText()}
-                  onInput={(e) => setChatText(e.currentTarget.value)}
-                  onKeyDown={(e) => {
-                    if (isComposerSend(e)) {
-                      e.preventDefault();
-                      void sendChat();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  class="icon-btn chat-send"
-                  classList={{ busy: busy() }}
-                  aria-label="Send"
-                  title="Send"
-                  disabled={!canChatSend()}
-                  onClick={() => void sendChat()}
-                >
-                  <Icon name="send" />
-                </button>
-              </div>
-            </div>
-            <p class="chat-hold-note">
-              Sending sets the {plural() ? 'questions' : 'question'} aside. {agent()} asks again
-              after it has replied.
-            </p>
-          </div>
-        </Match>
         {/* Review: the text box gives way to the one atomic send. */}
         <Match when={onReview()}>
           <button

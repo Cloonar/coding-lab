@@ -147,9 +147,8 @@
 .chat-qpanel.folded {
   padding-bottom: 0;
 }
-/* Header line: dot, "{agent} is asking" (or "Question on hold"), the count,
-   and the fold chevron (or "Back to question"). The only part left when the
-   panel folds or holds. */
+/* Header line: dot, "{agent} is asking", the count, and the fold chevron.
+   The only part left when the panel folds. */
 .chat-qpanel-head {
   display: flex;
   align-items: center;
@@ -187,14 +186,6 @@
 }
 .chat-qpanel-fold[aria-expanded='false'] svg {
   transform: rotate(180deg);
-}
-.chat-qpanel-back {
-  flex: none;
-  margin-left: auto;
-  padding: 0 0.8rem;
-  font-size: 0.85rem;
-  font-weight: 500;
-  white-space: nowrap;
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-qpanel-fold svg {
@@ -382,8 +373,20 @@
   background: transparent;
   border: none;
 }
-.chat-qpanel-chat:hover {
+.chat-qpanel-chat:hover:not(:disabled) {
   background: var(--card);
+}
+.chat-qpanel-chat:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+/* Why the action is off, in words (a multi-question dialog needs the earlier
+   questions answered first — the server enters them before the chat choice). */
+.chat-qpanel-chat-hint {
+  margin: -0.15rem 0 0;
+  padding: 0 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 /* Review: one row per question — its header over the answer (picked labels,
@@ -503,62 +506,6 @@
   min-height: 48px;
 }
 
-/* §4 — the hold: a normal multi-line reply box headed by a one-line quote of
-   the question (display only), with a note beneath. The field carries the
-   frame and focus ring; the inner composer row drops its own. */
-.chat-hold {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-}
-.chat-hold-field {
-  min-width: 0;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-}
-.chat-hold-field:focus-within {
-  border-color: var(--accent);
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-}
-.chat-hold-field .chat-composer-row,
-.chat-hold-field .chat-composer-row:focus-within {
-  background: transparent;
-  border: none;
-  outline: none;
-}
-.chat-hold-quote {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
-  padding-left: 0.65rem;
-  font-size: 0.82rem;
-  color: var(--muted);
-  border-bottom: 1px solid var(--border);
-}
-.chat-hold-quote-icon {
-  flex: none;
-}
-.chat-hold-quote-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chat-hold-dismiss {
-  flex: none;
-  color: var(--muted);
-}
-.chat-hold-note {
-  margin: 0;
-  text-align: center;
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-
 /* The stream's marker for a docked question: a .chat-lifecycle line that
    wraps centered on narrow screens. */
 .chat-dialog-asking {
@@ -572,7 +519,6 @@
     min-height: 40px;
   }
   .chat-status-action,
-  .chat-qpanel-back,
   .chat-qstep,
   .chat-qpanel-chat {
     min-height: 36px;

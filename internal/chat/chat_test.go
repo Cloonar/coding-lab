@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -355,21 +356,26 @@ func TestAnswerDialog_toolIDGuard(t *testing.T) {
 	}
 }
 
-// "Chat about this" (issue #58) rides AnswerDialog, so it inherits the same
-// tool_id guard: a stale id is refused BEFORE the provider is called — no
-// key plays — and a vanished dialog is ErrNoDialog. The matching request is
-// ONE provider call carrying the message (the adapter dismisses the dialog
-// and replies inside it, under this session lock); the service never routes
-// it through Reply (which a pending dialog locks) or Interrupt.
+// "Chat about this" (issue #58) is one more answer shape, so it inherits the
+// same tool_id guard: a stale id is refused BEFORE the provider is called —
+// no key plays — and a vanished dialog is ErrNoDialog. The matching request
+// is ONE provider call carrying the shape unchanged — the operator's earlier
+// answers and the trailing chat entry; the service never routes it through
+// Reply (no text is sent at all) or Interrupt.
 func TestAnswerDialog_chatAboutThis_toolIDGuard(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
 	fake.SetTranscriptPath("/transcript.jsonl")
+	other := provider.DialogOption{Label: "Other", IsOther: true}
 	fake.SetChat(provider.Chat{State: provider.StateQuestion, Messages: []provider.Message{
 		{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{ToolID: "t1", Kind: provider.DialogKindQuestion, Answerable: true,
-			Options: []provider.DialogOption{{Label: "A"}, {Label: "Other", IsOther: true}}}},
+			Prompt: "2 questions", Questions: []provider.Question{
+				{Header: "One", Text: "First?", Options: []provider.DialogOption{{Label: "A"}, {Label: "B"}, other}},
+				{Header: "Two", Text: "Second?", Options: []provider.DialogOption{{Label: "C"}, other}},
+			}}},
 	}})
-	chatAnswer := provider.DialogAnswer{ChatText: "Before I answer — what does option A cost?"}
+	// Second option on the first question, chat about the second.
+	chatAnswer := provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 1}, {Chat: true}}}
 
 	if err := svc.AnswerDialog(context.Background(), run, "t_stale", chatAnswer); !errors.Is(err, ErrDialogChanged) {
 		t.Errorf("stale tool_id = %v; want ErrDialogChanged", err)
@@ -382,11 +388,11 @@ func TestAnswerDialog_chatAboutThis_toolIDGuard(t *testing.T) {
 		t.Fatalf("matching tool_id = %v; want nil", err)
 	}
 	got := fake.Answers()
-	if len(got) != 1 || got[0].ChatText != chatAnswer.ChatText {
-		t.Errorf("answers recorded = %+v; want exactly one carrying the chat text", got)
+	if len(got) != 1 || !reflect.DeepEqual(got[0], chatAnswer) {
+		t.Errorf("answers recorded = %+v; want exactly one, the chat shape unchanged", got)
 	}
 	if r, i := fake.Replies(), fake.Interrupts(); len(r) != 0 || i != 0 {
-		t.Errorf("replies = %v, interrupts = %d; want neither — the chat path is one AnswerDialog call", r, i)
+		t.Errorf("replies = %v, interrupts = %d; want neither — the chat choice is one AnswerDialog call and sends no text", r, i)
 	}
 
 	fake.SetChat(provider.Chat{State: provider.StateWorking})

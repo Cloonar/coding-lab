@@ -521,10 +521,15 @@ type DialogOption struct {
 // Dialog. Index is the single-select choice into that question's Options;
 // Selected the multi-select toggles; OtherText the free text when the chosen
 // row IsOther.
+//
+// Chat is "Chat about this" chosen ON THIS QUESTION (issue #58): no option is
+// picked, and the other fields must be zero/empty. It ends the form — see
+// DialogAnswer.
 type QuestionAnswer struct {
 	Index     int    `json:"index"`
 	Selected  []int  `json:"selected,omitempty"`
 	OtherText string `json:"other_text,omitempty"`
+	Chat      bool   `json:"chat,omitempty"`
 }
 
 // DialogAnswer is the operator's response to a pending Dialog. For the flat
@@ -535,21 +540,31 @@ type QuestionAnswer struct {
 // collected in one submit; when Answers is non-empty the flat fields are
 // ignored (issue #51 decision 3).
 //
-// ChatText is a third, exclusive shape: "Chat about this" (issue #58).
+// "Chat about this" (issue #58) is the operator choosing to talk about a
+// QUESTION dialog instead of answering it. It carries NO text: the adapter
+// only makes that choice on the provider's own dialog, and the agent then asks
+// what the operator wants to know; the operator answers through an ordinary
+// reply afterwards. It is expressed exactly as the operator did it:
+//
+//   - flat single-question dialog: Chat is true and every answer field is
+//     zero/empty (or one Answers entry with Chat set);
+//   - multi-question dialog: Answers holds the operator's answers to the
+//     questions BEFORE the one they chose to chat about, in order, and ends
+//     with one entry whose Chat is true. It is therefore shorter than
+//     Dialog.Questions unless the chat is on the last question. Nothing may
+//     follow the Chat entry, and the top-level Chat stays false.
+//
+// The earlier answers are part of the request on purpose: the adapter must
+// reproduce the operator's path through the form — "second option on the
+// first question, chat about the second" — or the agent cannot tell which
+// question the operator wants to talk about. An adapter rejects any other
+// mix with ErrInvalidReply.
 type DialogAnswer struct {
 	Index     int              `json:"index"`
 	Selected  []int            `json:"selected,omitempty"`
 	OtherText string           `json:"other_text,omitempty"`
 	Answers   []QuestionAnswer `json:"answers,omitempty"` // per-question; wins over the flat fields
-	// ChatText, when non-empty, is "Chat about this" (issue #58): set the
-	// pending QUESTION dialog aside — no option is picked — and deliver
-	// ChatText verbatim as an ordinary reply (Reply's text rules: trimmed,
-	// multi-line allowed, control characters refused). When set, the answer
-	// fields must be zero/empty — Selected, OtherText and Answers — and an
-	// adapter rejects a mixed answer with ErrInvalidReply. Index cannot be
-	// checked: 0 is its zero value, indistinguishable from "unset", so it is
-	// simply ignored on this path.
-	ChatText string `json:"chat_text,omitempty"`
+	Chat      bool             `json:"chat,omitempty"`    // flat dialog: "Chat about this" instead of an answer
 }
 
 // CommandRoleClear marks a provider's native clear-context command in its
@@ -905,17 +920,16 @@ type AgentProvider interface {
 	// operator's selection (per-question Answers for a multi-question
 	// dialog). Returns ErrDialogNotAnswerable if dialog is not Answerable.
 	//
-	// A non-empty answer.ChatText is "Chat about this" (issue #58): the
-	// adapter sets the pending question dialog aside, then delivers ChatText
-	// verbatim as an ordinary reply — both steps inside this ONE call, which
-	// the caller makes under its per-session lock, so no racing reply, answer,
-	// or interrupt can land between them and the message can never reach a
-	// focused picker. The answer shape is validated before any key plays (a
-	// non-question dialog → ErrDialogNotAnswerable; bad text or a mixed
-	// answer → ErrInvalidReply). An adapter with no answerable dialogs keeps
-	// returning ErrDialogNotAnswerable for it as for any answer; the UI only
-	// offers the action on an answerable question dialog, so in practice it
-	// never reaches one.
+	// "Chat about this" (issue #58 — answer.Chat, or a trailing Answers
+	// entry with Chat set; see DialogAnswer) is played the same way: the
+	// adapter enters the operator's earlier answers exactly as given, then
+	// chooses the dialog's own "Chat about this" on the question the operator
+	// chose it on. No text is sent. The shape is validated before any key
+	// plays (a non-question dialog → ErrDialogNotAnswerable; a mixed or
+	// misordered answer → ErrInvalidReply). An adapter with no answerable
+	// dialogs keeps returning ErrDialogNotAnswerable for it as for any
+	// answer; the UI only offers the action on an answerable question
+	// dialog, so in practice it never reaches one.
 	AnswerDialog(ctx context.Context, sessionName string, dialog Dialog, answer DialogAnswer) error
 	// Interrupt sends the session's interrupt keystroke (claude: Escape) —
 	// the chat Stop-generating affordance, distinct from a run Stop.

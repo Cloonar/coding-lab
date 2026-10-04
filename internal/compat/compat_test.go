@@ -584,47 +584,63 @@ func TestCompat_DialogKeystrokes_plan(t *testing.T) {
 
 // "Chat about this" (compat.md §7 "Chat about this", issue #58): the recipe
 // selects the picker's OWN trailing "Chat about this" row — a downward walk
-// onto it, one Down per op, then Enter — and then plays the §6 reply recipe
-// (bracketed paste, separate Enter). No Escape. The walk length is the row's
-// navigation index per the §7 row models: len(modeled rows) on a
-// single-select picker, one more on a multi-select picker (past the Submit
-// row), and the FIRST question's geometry on a multi-question form. The
-// pasted text is the validated reply (multi-line kept — a composer reply, not
-// a picker row). A plan review has no such row and is refused.
+// onto it, one Down per op, then Enter — and that is all of it: no Escape, no
+// text, no review step. The walk length is the row's navigation index per the
+// §7 row models: len(modeled rows) on a single-select picker, one more on a
+// multi-select picker (past the Submit row). On a multi-question form the
+// operator's answers to the EARLIER questions are played first, exactly as
+// given, so the row is chosen on the question the operator chose it on. A
+// plan review has no such row and is refused.
 func TestCompat_ChatAboutThisKeystrokes(t *testing.T) {
 	other := provider.DialogOption{Label: "Other", IsOther: true}
-	down := claudecode.KeyOp{Named: []string{"Down"}}
-	enter := claudecode.KeyOp{Named: []string{"Enter"}}
-	paste := claudecode.KeyOp{Text: "Why these two?\nWhat about fish?"}
+	keys := func(names ...string) []claudecode.KeyOp {
+		out := make([]claudecode.KeyOp, 0, len(names))
+		for _, n := range names {
+			out = append(out, claudecode.KeyOp{Named: []string{n}})
+		}
+		return out
+	}
+	form := provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+		Questions: []provider.Question{
+			{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
+			{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Apple"}, {Label: "Cherry"}, other}},
+		}}
 	shapes := map[string]struct {
 		dialog provider.Dialog
+		answer provider.DialogAnswer
 		want   []claudecode.KeyOp
 	}{
-		// Dog, Cat, Type something. | Chat about this → index 3.
+		// Dog, Cat, Type something. | Chat about this → row 3.
 		"single-select": {
 			provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
 				Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, other}},
-			[]claudecode.KeyOp{down, down, down, enter, paste, enter},
+			provider.DialogAnswer{Chat: true},
+			keys("Down", "Down", "Down", "Enter"),
 		},
-		// Olives, Onions, Type something, Submit | Chat about this → index 4.
+		// Olives, Onions, Type something, Submit | Chat about this → row 4.
 		"multi-select": {
 			provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Which toppings?", Answerable: true, Multi: true,
 				Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, other}},
-			[]claudecode.KeyOp{down, down, down, down, enter, paste, enter},
+			provider.DialogAnswer{Chat: true},
+			keys("Down", "Down", "Down", "Down", "Enter"),
 		},
-		// The form opens on its first question (single-select Color): Red,
-		// Blue, Type something. | Chat about this → index 3.
-		"multi-question": {
-			provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
-				Questions: []provider.Question{
-					{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
-					{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Apple"}, {Label: "Cherry"}, other}},
-				}},
-			[]claudecode.KeyOp{down, down, down, enter, paste, enter},
+		// The form opens on Color: chat about it straight away → row 3.
+		"form, chat on the first question": {
+			form,
+			provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true}}},
+			keys("Down", "Down", "Down", "Enter"),
+		},
+		// "Second option on the first question, chat about the second":
+		// [Down][Enter] picks Blue and auto-advances to Fruits (Apple, Cherry,
+		// Type something, Submit | Chat about this → row 4).
+		"form, second option then chat on the second question": {
+			form,
+			provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 1}, {Chat: true}}},
+			keys("Down", "Enter", "Down", "Down", "Down", "Down", "Enter"),
 		},
 	}
 	for name, c := range shapes {
-		got, err := claudecode.ChatAboutThisKeystrokes(c.dialog, provider.DialogAnswer{ChatText: "Why these two?\nWhat about fish?"})
+		got, err := claudecode.DialogKeystrokes(c.dialog, c.answer)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -635,7 +651,7 @@ func TestCompat_ChatAboutThisKeystrokes(t *testing.T) {
 
 	plan := provider.Dialog{Kind: provider.DialogKindPlan, Answerable: true, Prompt: "# Plan",
 		Options: []provider.DialogOption{{Label: "Approve — auto-accept edits"}, {Label: "Approve — review each edit"}, {Label: "Reject with feedback", IsOther: true}}}
-	if _, err := claudecode.ChatAboutThisKeystrokes(plan, provider.DialogAnswer{ChatText: "hi"}); err == nil {
+	if _, err := claudecode.DialogKeystrokes(plan, provider.DialogAnswer{Chat: true}); err == nil {
 		t.Error("plan review accepted a chat-about-this sequence; want it refused")
 	}
 }

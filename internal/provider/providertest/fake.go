@@ -584,8 +584,9 @@ func (f *Fake) Reply(_ context.Context, _, text string) error {
 	return nil
 }
 
-// AnswerDialog records the answer — the whole DialogAnswer, ChatText
-// included (issue #58) — or returns the scripted error without recording it.
+// AnswerDialog records the answer — the whole DialogAnswer, the "Chat about
+// this" flags included (issue #58) — or returns the scripted error without
+// recording it.
 func (f *Fake) AnswerDialog(_ context.Context, _ string, _ provider.Dialog, answer provider.DialogAnswer) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

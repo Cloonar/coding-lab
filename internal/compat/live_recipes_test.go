@@ -486,32 +486,43 @@ func TestCompat_Live_exitPlanModeRows(t *testing.T) {
 }
 
 // TestCompat_Live_chatAboutThisRow drives issue #58's "Chat about this"
-// mechanism (compat §7 "Chat about this"): a downward walk onto the picker's
-// own trailing "Chat about this" row, Enter, then the §6 reply — through the
-// production AnswerDialog path with production pacing. The recipe was written
-// from the §7 row models and has NOT been driven live yet, so this test's
-// first green run IS the live verification the compat entry is waiting on.
-// It asserts what the recipe promises and logs what it has to learn:
+// recipe (compat §7 "Chat about this") through the production AnswerDialog
+// path with production pacing: a downward walk onto the picker's own trailing
+// "Chat about this" row and Enter — after the operator's earlier answers on a
+// multi-question form — and nothing else. The recipe was written from the §7
+// row models and has NOT been driven live yet, so this test's first green run
+// IS the live verification the compat entry is waiting on. Per shape it
+// asserts:
 //
-//	(1) the picker resolves WITHOUT an option being picked — a recorded
-//	    answers object means the walk landed on an option row (the index is
-//	    off) and the Enter answered the question;
-//	(2) the message lands verbatim as an ordinary user turn — submitted, not
-//	    stranded in the composer or swallowed by a picker that had not closed;
-//	(3) the production read renders the dialog through the dismissed summary
-//	    with no backstop warning.
+//	(1) the dialog RESOLVES — a picker still pending means the walk landed on
+//	    an option row of a form (the Enter answered that question and the
+//	    form moved on) or on nothing at all;
+//	(2) it resolves through the dismissed summary — a Results outcome means
+//	    the walk landed on an option and answered the question;
+//	(3) no backstop warning is emitted.
 //
 // It logs the tool_result line the row leaves behind — the transcript shape
-// §7 still has to pin. Run it for each picker shape before trusting the
-// recipe: the subtests cover single-select, multi-select and a two-question
-// form.
+// §7 still has to pin, including what it says about the EARLIER answers of a
+// form — and the pane afterwards, which shows whether claude went on to ask
+// what the operator wants to know.
 func TestCompat_Live_chatAboutThisRow(t *testing.T) {
 	other := provider.DialogOption{Label: "Other", IsOther: true}
+	const formPrompt = `Call the AskUserQuestion tool right now, before any other reply or action, with exactly two questions. ` +
+		`Question 1: header "Color", question "Which color do you prefer?", multiSelect false, options: {label "Red", description "warm"}, {label "Blue", description "cool"}. ` +
+		`Question 2: header "Fruits", question "Which fruits do you like?", multiSelect true, options: {label "Apple", description "crisp"}, {label "Banana", description "soft"}, {label "Cherry", description "tart"}. ` +
+		`Use exactly these strings.`
+	form := provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+		Questions: []provider.Question{
+			{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
+			{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{
+				{Label: "Apple"}, {Label: "Banana"}, {Label: "Cherry"}, other}},
+		}}
 	shapes := []struct {
 		name   string
 		prompt string
 		needle string // the first picker's question text, to know WHEN it is up
 		dialog provider.Dialog
+		answer provider.DialogAnswer
 	}{
 		{
 			name: "single-select",
@@ -521,6 +532,7 @@ func TestCompat_Live_chatAboutThisRow(t *testing.T) {
 			needle: "Favorite pet?",
 			dialog: provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
 				Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, other}},
+			answer: provider.DialogAnswer{Chat: true},
 		},
 		{
 			name: "multi-select",
@@ -530,20 +542,19 @@ func TestCompat_Live_chatAboutThisRow(t *testing.T) {
 			needle: "Which toppings?",
 			dialog: provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "Which toppings?", Answerable: true, Multi: true,
 				Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, other}},
+			answer: provider.DialogAnswer{Chat: true},
 		},
 		{
-			name: "multi-question",
-			prompt: `Call the AskUserQuestion tool right now, before any other reply or action, with exactly two questions. ` +
-				`Question 1: header "Color", question "Which color do you prefer?", multiSelect false, options: {label "Red", description "warm"}, {label "Blue", description "cool"}. ` +
-				`Question 2: header "Fruits", question "Which fruits do you like?", multiSelect true, options: {label "Apple", description "crisp"}, {label "Banana", description "soft"}, {label "Cherry", description "tart"}. ` +
-				`Use exactly these strings.`,
-			needle: "Which color do you prefer?",
-			dialog: provider.Dialog{Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
-				Questions: []provider.Question{
-					{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
-					{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{
-						{Label: "Apple"}, {Label: "Banana"}, {Label: "Cherry"}, other}},
-				}},
+			name:   "form-chat-on-first-question",
+			prompt: formPrompt, needle: "Which color do you prefer?", dialog: form,
+			answer: provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true}}},
+		},
+		{
+			// The maintainer's example: second option on the first question,
+			// chat about the second.
+			name:   "form-answer-then-chat-on-second-question",
+			prompt: formPrompt, needle: "Which color do you prefer?", dialog: form,
+			answer: provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 1}, {Chat: true}}},
 		},
 	}
 	for _, shape := range shapes {
@@ -554,26 +565,21 @@ func TestCompat_Live_chatAboutThisRow(t *testing.T) {
 			}
 			rig.waitPane(t, 120*time.Second, shape.needle)
 
-			const chatText = "Before I pick: reply with only the word PINEAPPLE."
-			if err := rig.prov.AnswerDialog(context.Background(), rig.session, shape.dialog, provider.DialogAnswer{ChatText: chatText}); err != nil {
-				t.Fatalf("AnswerDialog(chat_text): %v", err)
+			if err := rig.prov.AnswerDialog(context.Background(), rig.session, shape.dialog, shape.answer); err != nil {
+				t.Fatalf("AnswerDialog(chat): %v", err)
 			}
 
-			// Poll the production read until the message shows up as a user
-			// turn, then check how the dialog resolved and renders.
-			deadline := time.Now().Add(120 * time.Second)
+			// Poll the production read until the dialog shows up RESOLVED,
+			// then check how it resolved and renders.
+			deadline := time.Now().Add(90 * time.Second)
 			for {
 				path := rig.transcriptPath(t)
 				chat, err := rig.prov.ReadChat(provider.ReadSpec{TranscriptPath: path})
 				if err != nil {
 					t.Fatalf("ReadChat: %v", err)
 				}
-				replied := false
 				var outcome *provider.DialogOutcome
 				for _, m := range chat.Messages {
-					if m.Kind == provider.MessageText && m.Role == "user" && strings.Contains(m.Text, chatText) {
-						replied = true
-					}
 					if m.Kind == provider.MessageDialog && m.Dialog != nil && m.Dialog.Kind == provider.DialogKindQuestion && m.Dialog.Outcome != nil {
 						outcome = m.Dialog.Outcome
 					}
@@ -581,9 +587,8 @@ func TestCompat_Live_chatAboutThisRow(t *testing.T) {
 						t.Errorf("the row selection emitted a backstop warning: %q", m.Text)
 					}
 				}
-				if replied {
-					// (1) + (3): resolved, no option picked, dismissed summary.
-					if outcome == nil || !outcome.Dismissed {
+				if outcome != nil {
+					if !outcome.Dismissed {
 						t.Errorf("dialog outcome = %+v; want the dismissed summary — a Results outcome means the walk picked an option", outcome)
 					}
 					// The shape the row records is the pin this run captures
@@ -595,11 +600,16 @@ func TestCompat_Live_chatAboutThisRow(t *testing.T) {
 							}
 						}
 					}
+					// Give claude a moment, then record what it did next —
+					// the expectation is that it asks what to clarify.
+					time.Sleep(10 * time.Second)
+					pane, _ := rig.tm.CapturePane(context.Background(), rig.session)
+					t.Logf("pane after the row was chosen:\n%s", pane)
 					return
 				}
 				if time.Now().After(deadline) {
 					pane, _ := rig.tm.CapturePane(context.Background(), rig.session)
-					t.Fatalf("the chat message never landed as a user turn within 120s (dialog outcome so far: %+v); pane:\n%s", outcome, pane)
+					t.Fatalf("the dialog never resolved within 90s — the walk did not land on \"Chat about this\"; pane:\n%s", pane)
 				}
 				time.Sleep(time.Second)
 			}
