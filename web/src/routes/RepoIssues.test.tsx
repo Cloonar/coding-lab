@@ -4,14 +4,16 @@
 //   forge note while the read view keeps working;
 // - the label chips narrow the ALREADY-FETCHED page client-side (no refetch),
 //   while the state filter refetches server-side with ?state=…;
-// - a scoped issue.changed refetches, foreign repoIDs do not.
+// - a scoped issue.changed refetches, foreign repoIDs do not;
+// - it renders as the Issues tab of the repo home frame (issue #61): the
+//   frame names the repo, so this tab root carries no crumb trail.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ForgeKind, IssueSummary, Label, TrackerBinding } from '../api';
 import App from '../App';
-import RepoIssues from './RepoIssues';
+import RepoRoutes from './repo-home/routes';
 
 const REPO_ID = 'repo_1';
 
@@ -156,7 +158,7 @@ async function mountIssues(): Promise<void> {
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>
-        <Route path="/repos/:id/issues" component={RepoIssues} />
+        <RepoRoutes />
         <Route path="*" component={() => null} />
       </MemoryRouter>
     ),
@@ -204,13 +206,20 @@ afterEach(() => {
 });
 
 describe('RepoIssues (builtin repo)', () => {
-  it('renders the breadcrumb trail (Repos / <repo> / Issues), leaf inert', async () => {
+  it('renders inside the repo home frame: no crumb, the Issues tab current', async () => {
     await mountIssues();
 
-    const crumb = container.querySelector('p.crumb');
-    expect(crumb?.textContent).toBe('Repos / coding-lab / Issues');
-    expect(crumb?.querySelector('a[href="/repos"]')).not.toBeNull();
-    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/issues"]`)).not.toBeNull();
+    // The old "Repos / <repo> / Issues" trail moved into the frame (issue #61):
+    // the back link returns to the list and the header names the repo.
+    expect(container.querySelector('p.crumb')).toBeNull();
+    expect(container.querySelector('a.back-link')?.getAttribute('href')).toBe('/repos');
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(
+      container
+        .querySelector(`nav.repo-tabs a[href="/repos/${REPO_ID}/issues"]`)
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
+    expect(container.querySelector('.section-head h2')?.textContent).toBe('Issues');
   });
 
   it('shows the ready queue, the issue cards and the mutation entry points', async () => {
@@ -281,7 +290,7 @@ describe('RepoIssues (fetch failures)', () => {
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain('tracker unavailable');
     // The rest of the page stays up instead of going silently blank.
-    expect(container.textContent).toContain('coding-lab · Issues');
+    expect(container.querySelector('.section-head h2')?.textContent).toBe('Issues');
     expect(container.querySelectorAll('button.seg')).toHaveLength(3);
     expect(container.querySelectorAll('.issue-card')).toHaveLength(0);
     expect(container.querySelector('.empty')).toBeNull();

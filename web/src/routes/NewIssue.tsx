@@ -1,42 +1,32 @@
 // New issue form (/repos/:id/issues/new, builtin repos only): title, optional
 // body and an optional label set picked from the repo's labels. A forge-bound
 // repo gets the managed-on-the-forge note instead of the form — the server
-// would 409 the create anyway. Success navigates to the fresh issue.
+// would 409 the create anyway. Success navigates to the fresh issue. It renders
+// inside the repo home frame's Issues tab (issue #61): the frame owns the page,
+// the repo heading and the repo fetch; this page keeps an "Issues / New issue"
+// trail within the tab.
 
 import { useNavigate, useParams } from '@solidjs/router';
 import { Match, Show, Switch, createResource, createSignal } from 'solid-js';
-import { createIssue, errorMessage, getRepo, listLabels, type CreateIssueRequest } from '../api';
-import Banner from '../components/Banner';
+import { createIssue, errorMessage, listLabels, type CreateIssueRequest } from '../api';
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import FormCard from '../components/FormCard';
 import LabelPicker from '../components/LabelPicker';
-import RequireAuth from '../components/RequireAuth';
 import SectionHead from '../components/SectionHead';
 import { canMutateTracker } from '../lib/issues';
 import { toggleLabel } from '../lib/labels';
 import { resourceValue } from '../lib/resource';
+import { useRepoHome } from './repo-home/context';
 
 export default function NewIssue() {
-  return (
-    <RequireAuth>
-      <NewIssueView />
-    </RequireAuth>
-  );
-}
-
-function NewIssueView() {
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const home = useRepoHome();
 
-  const [repo] = createResource(
-    () => params.id,
-    (id) => getRepo(id),
-  );
-  // Reads outside the guarded <Match> branches (the h2, builtin(), the label
-  // picker) go through the non-throwing accessors so a failed getRepo renders
-  // the error banner — and a failed listLabels keeps the form usable —
-  // instead of blanking the page.
-  const repoData = () => resourceValue(repo);
+  // The frame's repo (undefined while loading or after a failed getRepo — the
+  // frame shows that banner). A failed listLabels keeps the form usable: the
+  // label list goes through the non-throwing accessor.
+  const repoData = () => home.repo();
   const builtin = () => {
     const r = repoData();
     return r !== undefined && canMutateTracker(r.tracker_binding);
@@ -48,8 +38,6 @@ function NewIssueView() {
   const labelList = () => resourceValue(labels);
 
   const crumbs = (): Crumb[] => [
-    { label: 'Repos', href: '/repos' },
-    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
     { label: 'Issues', href: `/repos/${params.id}/issues` },
     { label: 'New issue' },
   ];
@@ -82,17 +70,14 @@ function NewIssueView() {
   };
 
   return (
-    <main class="page">
+    <>
       <Crumbs segments={crumbs()} />
-      <SectionHead title={<>{repoData()?.name ?? 'Repository'} · New issue</>} />
+      <SectionHead title="New issue" />
       <Switch>
-        <Match when={repo.error !== undefined}>
-          <Banner message={errorMessage(repo.error)} />
-        </Match>
-        <Match when={repo() !== undefined && !builtin()}>
+        <Match when={repoData() !== undefined && !builtin()}>
           <p class="muted forge-note">Managed on the forge — create issues there.</p>
         </Match>
-        <Match when={repo()}>
+        <Match when={repoData()}>
           <FormCard
             error={error()}
             onDismissError={() => setError(null)}
@@ -136,6 +121,6 @@ function NewIssueView() {
           </FormCard>
         </Match>
       </Switch>
-    </main>
+    </>
   );
 }

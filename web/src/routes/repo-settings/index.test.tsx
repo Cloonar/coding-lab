@@ -1,8 +1,9 @@
 // Repo-settings area wiring (issue #198): every category slug deep-links to
 // its section; the mobile bare index lists the rows in order (danger last,
-// tinted) under the repo section-head; desktop redirects the bare index to
-// the first category; the crumbs follow the index/section split (Settings
-// inert on the index, a link back to it on a section); the per-section
+// tinted) under the repo home header; desktop redirects the bare index to
+// the first category; the area renders as the Settings tab of the repo home
+// frame (issue #61) — the frame names the repo, so the area carries no crumb
+// trail of its own; the schedule editor URLs reach the area; the per-section
 // unsaved-changes guard intercepts in-app navigation and tab close.
 
 import { describe, expect, it, vi } from 'vitest';
@@ -15,6 +16,7 @@ import {
   setDesktop,
   settle,
   typeInto,
+  unmount,
   waitFor,
 } from './harness';
 import { REPO_SETTINGS_CATEGORIES } from './categories';
@@ -61,13 +63,13 @@ describe('repo-settings mobile index', () => {
     await mountSettings(BASE);
     await waitFor(() => container.querySelector('a.settings-index-row'), 'index rows');
 
-    // The monolith's section-head survives as the index title: repo name h2,
-    // clone-status chip (baseRepo is mid-clone) and the remote host line.
-    expect(
-      Array.from(container.querySelectorAll('h2')).some((el) => el.textContent === 'coding-lab'),
-    ).toBe(true);
-    expect(container.querySelector('.section-head .chip')?.textContent).toBe('cloning');
-    expect(container.textContent).toContain('git.cloonar.com');
+    // The repo home frame's header heads the index (issue #61): repo name h1,
+    // clone-status chip (baseRepo is mid-clone) and the remote line.
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(container.querySelector('.repo-head .chip.status-cloning')?.textContent).toBe('cloning');
+    expect(container.querySelector('.repo-head-remote')?.textContent).toBe(
+      'git.cloonar.com/Cloonar/coding-lab',
+    );
 
     const rows = Array.from(container.querySelectorAll<HTMLAnchorElement>('a.settings-index-row'));
     expect(rows.map((row) => row.getAttribute('href'))).toEqual(
@@ -105,32 +107,43 @@ describe('repo-settings desktop redirect', () => {
   });
 });
 
-describe('repo-settings crumbs', () => {
-  it('the index shows Repos / <name> / Settings with an inert Settings leaf', async () => {
+describe('repo-settings in the repo home frame', () => {
+  const settingsTab = () =>
+    container.querySelector<HTMLAnchorElement>(
+      `nav.repo-tabs a[href="/repos/${REPO_ID}/settings"]`,
+    );
+
+  it('the index carries no crumb trail: the frame names the repo, Settings is the current tab', async () => {
     await mountSettings(BASE);
     await waitFor(() => container.querySelector('a.settings-index-row'), 'index rows');
 
-    const crumb = container.querySelector('p.crumb');
-    expect(crumb?.textContent).toBe('Repos / coding-lab / Settings');
-    const links = Array.from(crumb?.querySelectorAll('a') ?? []);
-    expect(links.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
-      ['Repos', '/repos'],
-      ['coding-lab', `/repos/${REPO_ID}/issues`],
-    ]);
+    // The old "Repos / <name> / Settings" trail moved into the frame: the back
+    // link returns to the list, the header names the repo.
+    expect(container.querySelector('p.crumb')).toBeNull();
+    expect(container.querySelector('a.back-link')?.getAttribute('href')).toBe('/repos');
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(settingsTab()?.getAttribute('aria-current')).toBe('page');
   });
 
-  it('a section appends its title and turns Settings into a link to the index', async () => {
+  it('a section keeps the Settings tab current and links back to the index', async () => {
     await mountSettings(`${BASE}/agents`);
     await waitFor(() => container.querySelector('button[name="provider"]'), 'agents section');
 
-    const crumb = container.querySelector('p.crumb');
-    expect(crumb?.textContent).toBe('Repos / coding-lab / Settings / Agents');
-    const links = Array.from(crumb?.querySelectorAll('a') ?? []);
-    expect(links.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
-      ['Repos', '/repos'],
-      ['coding-lab', `/repos/${REPO_ID}/issues`],
-      ['Settings', BASE],
-    ]);
+    expect(container.querySelector('p.crumb')).toBeNull();
+    expect(settingsTab()?.getAttribute('aria-current')).toBe('page');
+    // The mobile back head still returns to the category index.
+    expect(container.querySelector('a.settings-back-link')?.getAttribute('href')).toBe(BASE);
+    expect(container.querySelector('.settings-back-head h2')?.textContent).toBe('Agents');
+  });
+
+  it('the schedule editor URLs reach the area and open the Schedules section', async () => {
+    for (const path of [`${BASE}/schedules/new`, `${BASE}/schedules/sched_1`]) {
+      await mountSettings(path);
+      await waitFor(() => buttonByText('+ Add schedule'), `schedules section at ${path}`);
+      expect(routerHistory.get()).toBe(path); // no redirect away from the editor URL
+      expect(settingsTab()?.getAttribute('aria-current')).toBe('page');
+      unmount();
+    }
   });
 });
 

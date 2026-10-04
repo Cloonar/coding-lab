@@ -34,3 +34,8 @@
 @import './styles/settings-ia.css';
 @import './styles/chatheader.css';
 @import './styles/chatdock.css';
+@import './styles/repo-home.css';
+@import './styles/controls.css';
+@import './styles/repos.css';
+@import './styles/repo-overview.css';
+@import './styles/repo-settings.css';

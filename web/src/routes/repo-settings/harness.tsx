@@ -1,6 +1,8 @@
 // Shared test harness for the repo-settings area suites (issue #198), the
 // runchat/harness.tsx precedent applied to the RepoSettings.test.tsx stub
-// server and DOM helpers. Section suites mount the real route at
+// server and DOM helpers. Section suites mount the real repositories route
+// table (routes/repo-home/routes.tsx — the settings area renders as the
+// Settings tab of the /repos/:id repo home frame, issue #61) at
 // /repos/:id/settings/:section? (App root, MemoryRouter) and poke the mutable
 // `h` state object to shape server responses.
 
@@ -22,7 +24,7 @@ import type {
   Schedule,
 } from '../../api';
 import App from '../../App';
-import RepoSettingsRoute from './index';
+import RepoRoutes from '../repo-home/routes';
 
 export const REPO_ID = 'repo_1';
 
@@ -667,7 +669,7 @@ export async function mountSettings(path: string = `/repos/${REPO_ID}/settings`)
   dispose = render(
     () => (
       <MemoryRouter history={routerHistory} root={App}>
-        <Route path="/repos/:id/settings/:section?" component={RepoSettingsRoute} />
+        <RepoRoutes />
         <Route path="*" component={() => null} />
       </MemoryRouter>
     ),

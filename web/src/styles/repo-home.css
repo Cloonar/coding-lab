@@ -1,0 +1,121 @@
+/* Repo home frame (issue #61) ------------------------------------------------ */
+/* The /repos/:id frame (routes/repo-home/index.tsx): back link, header (name,
+   tracker binding / incogni / clone chips, remote), and the tab row. The tabs
+   are links; the active one carries aria-current="page" and is marked by an
+   underline plus text colour, never by colour alone. The tab row scrolls
+   inside itself if it ever outgrows the column, so the page never scrolls
+   sideways at 390px. */
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  min-height: 44px;
+  margin-left: -0.45rem;
+  padding: 0 0.5rem 0 0.2rem;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-weight: 550;
+  text-decoration: none;
+}
+
+.back-link:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.back-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.repo-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: var(--space-1);
+  min-width: 0;
+}
+
+.repo-head .banner {
+  margin: 0;
+}
+
+.repo-head-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.6rem;
+  min-width: 0;
+}
+
+.repo-head-title h1 {
+  margin: 0;
+  min-width: 0;
+  font-size: 1.6rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.repo-head-remote {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.repo-tabs {
+  display: flex;
+  gap: var(--space-5);
+  margin-top: var(--space-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* The baseline under the row, drawn inside the box so the active tab's
+     own underline sits on top of it. */
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+.repo-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.repo-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0 0.1rem;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-weight: 550;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.repo-tab:hover {
+  color: var(--text);
+}
+
+.repo-tab[aria-current='page'] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* Inset: the row clips overflow, so an outset ring would be cut off. */
+.repo-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-control) var(--radius-control) 0 0;
+}
+
+.repo-home-body {
+  margin-top: var(--space-4);
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .repo-home-body {
+    margin-top: var(--space-5);
+  }
+}

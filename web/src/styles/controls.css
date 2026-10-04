@@ -1,0 +1,425 @@
+/* Shared controls (issue #61) ------------------------------------------------ */
+/* The primitives the repositories redesign builds on: ToggleSwitch, Segmented,
+   InlineConfirm, Dialog, the Toast action, plus two small utilities (the
+   visually-hidden text and the count pill). Tokens only, so both colour
+   schemes follow. Selectors carry two classes where a control may sit inside a
+   `.field`, whose `.field span` rule would otherwise restyle inner spans. */
+
+/* Text for assistive tech only (e.g. "(12 open)" after a count pill). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A small number pill beside a label (tab counts, section counts). */
+.count {
+  display: inline-block;
+  padding: 0 0.42rem;
+  border-radius: var(--radius-pill);
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The named action of an in-place confirmation: solid, unlike the outlined
+   `button.danger` trigger it replaces. */
+button.solid-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--card);
+  font-weight: 600;
+}
+
+button.solid-danger:hover {
+  background: color-mix(in srgb, var(--danger) 88%, var(--text));
+}
+
+/* Switch ----------------------------------------------------------------------- */
+/* A 44px-tall hit area around a compact track; the thumb's position (left =
+   off, right = on) carries the state alongside the track colour. */
+
+button.switch {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  min-height: 44px;
+  padding: 0 0.15rem;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  line-height: 0;
+}
+
+button.switch:hover {
+  background: transparent;
+}
+
+button.switch:focus-visible {
+  outline: none;
+}
+
+.switch .switch-track {
+  position: relative;
+  display: block;
+  width: 46px;
+  height: 28px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--idle-bg);
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.switch .switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  display: block;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  box-shadow:
+    0 0 0 1px var(--border),
+    var(--shadow);
+  transition: transform 0.15s ease;
+}
+
+.switch[aria-checked='true'] .switch-track {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.switch[aria-checked='true'] .switch-thumb {
+  transform: translateX(18px);
+}
+
+button.switch:focus-visible .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.switch:disabled {
+  opacity: 0.5;
+}
+
+/* Dark: --card is charcoal, so the thumb takes the light text tone to stay
+   visible on both the idle and the on track. */
+@media (prefers-color-scheme: dark) {
+  .switch .switch-thumb {
+    background: var(--text);
+  }
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+}
+
+.switch-row .switch-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.switch-row .switch-label {
+  font-weight: 600;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.switch-row .switch-desc {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.switch-row.disabled .switch-label {
+  cursor: default;
+}
+
+/* Segmented -------------------------------------------------------------------- */
+/* A radio group drawn as one bar; the checked segment is raised as a bordered
+   pill in a heavier weight, so it reads without colour. Segments shrink and
+   wrap their text instead of overflowing a narrow container. */
+
+.segmented-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.segmented-field.fill {
+  align-items: stretch;
+}
+
+.segmented-field .segmented-label {
+  display: block;
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.segmented {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px;
+  gap: 2px;
+  border-radius: var(--radius-control);
+  background: var(--chip-bg);
+}
+
+.segmented.fill {
+  display: flex;
+  width: 100%;
+}
+
+/* min-width stays auto (the longest word): a segment shrinks by wrapping its
+   label at spaces ("Global ·" / "container"), never mid-word. */
+.segmented .segment {
+  flex: 0 1 auto;
+  min-height: 44px;
+  padding: 0.25rem 0.85rem;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-control) - 2px);
+  background: transparent;
+  color: var(--muted);
+  font-weight: 550;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+.segmented.fill .segment {
+  flex: 1 1 0;
+  padding-inline: 0.2rem;
+}
+
+.segmented .segment:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.segmented .segment[aria-checked='true'] {
+  background: var(--card);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 650;
+  box-shadow: var(--shadow);
+}
+
+.segmented .segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.segmented .segment:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (min-width: 1024px) {
+  .segmented .segment {
+    min-height: 38px;
+  }
+}
+
+/* InlineConfirm ---------------------------------------------------------------- */
+
+.inline-confirm {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  max-width: 100%;
+}
+
+.inline-confirm-prompt {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Dialog ----------------------------------------------------------------------- */
+/* A bottom sheet below 1024px, a centered dialog from 1024px (centered over
+   the content column while the side rail shows). Above the drawer (25/30), the
+   install sheet (40/41) and the toast (20). */
+
+.dialog-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.dialog {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: 92vh;
+  max-height: 92dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-4) var(--space-4) calc(var(--space-5) + env(safe-area-inset-bottom));
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  animation: dialog-sheet-up 0.2s ease-out;
+}
+
+@keyframes dialog-sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.dialog .dialog-title {
+  margin: 0;
+  font-size: 1.25rem;
+  overflow-wrap: anywhere;
+}
+
+.dialog .dialog-title:focus {
+  outline: none;
+}
+
+.dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.dialog-body p,
+.dialog-body ul {
+  margin: 0;
+}
+
+.dialog-body ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-left: 1.15rem;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Two buttons share a row; a third wraps to its own full-width row. */
+.dialog-actions > * {
+  flex: 1 1 40%;
+}
+
+@media (min-width: 1024px) {
+  .dialog {
+    left: 50%;
+    right: auto;
+    bottom: auto;
+    top: 11vh;
+    width: min(480px, calc(100vw - 2 * var(--space-4)));
+    max-height: 78vh;
+    padding: var(--space-5);
+    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    transform: translateX(-50%);
+    animation: none;
+  }
+
+  /* The 260px side rail (shell.css): center over the content beside it. */
+  .shell:not(.rail-collapsed) .dialog {
+    left: calc(50% + 130px);
+  }
+
+  .dialog-actions {
+    justify-content: flex-end;
+  }
+
+  .dialog-actions > * {
+    flex: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog {
+    animation: none;
+  }
+}
+
+/* Toast action ------------------------------------------------------------------ */
+/* The Undo button beside a toast's text: underlined text in the toast's own
+   colours, with a 44px-tall hit area that does not grow the pill. */
+
+/* Size to the text (up to toast.css's max-width) instead of the half-viewport
+   a left: 50% fixed box would otherwise wrap at. */
+.toast {
+  width: max-content;
+}
+
+.toast.toast-with-action {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.toast .toast-action {
+  flex: none;
+  min-height: 44px;
+  margin: -0.55rem -0.25rem;
+  padding: 0 0.25rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.toast .toast-action:hover {
+  background: none;
+  opacity: 0.85;
+}
+
+.toast .toast-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}

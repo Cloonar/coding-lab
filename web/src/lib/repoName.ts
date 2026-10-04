@@ -49,6 +49,37 @@ export function remoteHost(remoteUrl: string): string {
 }
 
 /**
+ * The remote as one short display line, host plus path ("github.com/Cloonar/
+ * coding-lab"): the repo home header and the repo list show it in mono. Drops
+ * the scheme, any user or password, the port and a trailing ".git"; a remote
+ * that parses as neither a scheme URL nor scp-like shows verbatim (trimmed).
+ * Never throws.
+ */
+export function remoteLabel(remoteUrl: string): string {
+  const url = remoteUrl.trim();
+  const tidy = (path: string): string => {
+    let p = path.replace(/\/+$/, '');
+    if (p.toLowerCase().endsWith('.git')) p = p.slice(0, -4);
+    return p.replace(/^\/+|\/+$/g, '');
+  };
+  // scheme://[user[:pass]@]host[:port][/path]
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/@]*@)?([^/:]*)(?::\d+)?(\/.*)?$/i.exec(url);
+  if (scheme !== null) {
+    const host = scheme[1] ?? '';
+    const path = tidy(scheme[2] ?? '');
+    if (host === '') return path === '' ? url : path;
+    return path === '' ? host : `${host}/${path}`;
+  }
+  // scp-like: [user@]host:path
+  const scp = /^(?:[^@/]+@)?([^:/]+):(.+)$/.exec(url);
+  if (scp !== null) {
+    const path = tidy(scp[2] ?? '');
+    return path === '' ? (scp[1] ?? url) : `${scp[1] ?? ''}/${path}`;
+  }
+  return url;
+}
+
+/**
  * Builds the forge's web URL from a repo's clone remote ("open on forge"
  * links). Forgejo and GitHub both serve `https://host/owner/repo` for a
  * repo's web page, so there's no per-kind branching beyond the `'none'`

@@ -3,20 +3,18 @@
 // PATCHable field per the M2 contract stays grouped, saved as a per-section
 // dirty-fields-only PATCH; 400 {"error"} surfaces in the section's banner.
 // Danger zone deletes the repo (confirm; force checkbox appears after a 409).
-// The area root owns the data (live repo + catalogs), Crumbs and RequireAuth;
-// SettingsLayout owns the mobile-index / desktop-master-detail chrome.
+// It is the repo home's Settings tab (issue #61): the frame at /repos/:id owns
+// the page, RequireAuth, the repo header and the ONE live repo resource, read
+// here through useRepoHome(); this area owns the catalogs it needs and
+// SettingsLayout owns the mobile-index / desktop-master-detail chrome. The
+// schedule editor URLs (settings/schedules/new, settings/schedules/:scheduleId)
+// render the Schedules section for now.
 
-import { useParams } from '@solidjs/router';
+import { useMatch, useParams } from '@solidjs/router';
 import { Match, Show, Switch, createResource } from 'solid-js';
-import { errorMessage, getRepo, getSettings, listCredentials, listProviders } from '../../api';
-import Banner from '../../components/Banner';
-import Crumbs, { type Crumb } from '../../components/Crumbs';
-import RequireAuth from '../../components/RequireAuth';
-import SectionHead from '../../components/SectionHead';
+import { getSettings, listCredentials, listProviders } from '../../api';
 import SettingsLayout from '../../components/settings/SettingsLayout';
-import { createLiveResource } from '../../lib/liveResource';
-import { remoteHost } from '../../lib/repoName';
-import { resourceValue } from '../../lib/resource';
+import { useRepoHome } from '../repo-home/context';
 import { REPO_SETTINGS_CATEGORIES } from './categories';
 import AgentsSection from './sections/Agents';
 import AutolandSection from './sections/Autoland';
@@ -30,148 +28,84 @@ import RepoSecretsSection from './sections/Secrets';
 import RunnerSection from './sections/Runner';
 
 export default function RepoSettings() {
-  return (
-    <RequireAuth>
-      <RepoSettingsView />
-    </RequireAuth>
-  );
-}
-
-function RepoSettingsView() {
-  const params = useParams<{ id: string; section?: string }>();
-  const [repo, { refetch }] = createLiveResource(
-    () => getRepo(params.id),
-    [{ type: 'repo.changed', match: (event) => event.repoID === params.id }],
-  );
+  const params = useParams<{ id: string; section?: string; scheduleId?: string }>();
+  const home = useRepoHome();
+  const refetch = () => void home.refetch();
   const [credentials] = createResource(() => listCredentials());
   const [providers] = createResource(() => listProviders());
   // Global settings feed the effective-provider chains (provider_default /
   // spawn_provider_default_afk) the Agents/Autoland catalogs resolve against.
   const [settings] = createResource(() => getSettings());
 
-  const active = () => REPO_SETTINGS_CATEGORIES.find((c) => c.slug === params.section);
-
-  // Non-throwing read: the crumb renders above the error <Match>, so a failed
-  // getRepo must degrade to the placeholder name, not re-throw and blank it.
-  const crumbs = (): Crumb[] => {
-    const trail: Crumb[] = [
-      { label: 'Repos', href: '/repos' },
-      { label: resourceValue(repo)?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
-    ];
-    const category = active();
-    // Bare index (or an unknown slug mid-redirect): Settings is the inert
-    // leaf. On a section: Settings links back to the index and the section
-    // title is the inert leaf (issue #198 acceptance).
-    if (category === undefined) return [...trail, { label: 'Settings' }];
-    return [
-      ...trail,
-      { label: 'Settings', href: `/repos/${params.id}/settings` },
-      { label: category.title },
-    ];
-  };
+  // The schedule editor's URLs carry no :section; they belong to Schedules.
+  const scheduleNew = useMatch(() => `/repos/${params.id}/settings/schedules/new`);
+  const section = (): string | undefined =>
+    params.section ??
+    (params.scheduleId !== undefined || scheduleNew() !== undefined ? 'schedules' : undefined);
 
   return (
-    <main class="page">
-      <Crumbs segments={crumbs()} />
-      <Switch>
-        <Match when={repo.error !== undefined}>
-          <Banner message={errorMessage(repo.error)} />
-        </Match>
-        <Match when={repo.error === undefined}>
-          <SettingsLayout
-            base={`/repos/${params.id}/settings`}
-            categories={REPO_SETTINGS_CATEGORIES}
-            section={params.section}
-            indexTitle={
-              <Show when={resourceValue(repo)}>
-                {(r) => (
-                  <>
-                    <SectionHead
-                      title={r().name}
-                      action={
-                        <Show when={r().clone_status !== 'ready'}>
-                          <span
-                            classList={{
-                              chip: true,
-                              'status-cloning': r().clone_status === 'cloning',
-                              'status-error': r().clone_status === 'error',
-                            }}
-                          >
-                            {r().clone_status === 'cloning' ? 'cloning' : 'clone failed'}
-                          </span>
-                        </Show>
-                      }
-                    />
-                    <p class="muted card-sub mono">{remoteHost(r().remote_url)}</p>
-                  </>
-                )}
+    <SettingsLayout
+      base={`/repos/${params.id}/settings`}
+      categories={REPO_SETTINGS_CATEGORIES}
+      section={section()}
+    >
+      <Show when={home.repo()}>
+        {(r) => (
+          <Switch>
+            <Match when={section() === 'general'}>
+              <GeneralSection repo={r} onSaved={refetch} />
+            </Match>
+            <Match when={section() === 'integrations'}>
+              <IntegrationsSection repo={r} credentials={credentials() ?? []} onSaved={refetch} />
+            </Match>
+            <Match when={section() === 'branches'}>
+              <BranchesSection repo={r} onSaved={refetch} />
+            </Match>
+            <Match when={section() === 'agents'}>
+              <AgentsSection
+                repo={r}
+                providers={providers() ?? []}
+                settings={settings() ?? {}}
+                onSaved={refetch}
+              />
+            </Match>
+            <Match when={section() === 'runner'}>
+              {/* Gated on the settings fetch (issue #55): the inherit row's
+                  "currently …" and the dev image hint read the global
+                  defaults, and an empty stand-in would briefly claim "no dev
+                  image is configured". */}
+              <Show when={settings()}>
+                {(s) => <RunnerSection repo={r} settings={s()} onSaved={refetch} />}
               </Show>
-            }
-          >
-            <Show when={repo()}>
-              {(r) => (
-                <Switch>
-                  <Match when={params.section === 'general'}>
-                    <GeneralSection repo={r} onSaved={refetch} />
-                  </Match>
-                  <Match when={params.section === 'integrations'}>
-                    <IntegrationsSection
-                      repo={r}
-                      credentials={credentials() ?? []}
-                      onSaved={refetch}
-                    />
-                  </Match>
-                  <Match when={params.section === 'branches'}>
-                    <BranchesSection repo={r} onSaved={refetch} />
-                  </Match>
-                  <Match when={params.section === 'agents'}>
-                    <AgentsSection
-                      repo={r}
-                      providers={providers() ?? []}
-                      settings={settings() ?? {}}
-                      onSaved={refetch}
-                    />
-                  </Match>
-                  <Match when={params.section === 'runner'}>
-                    {/* Gated on the settings fetch (issue #55): the inherit row's
-                        "currently …" and the dev image hint read the global
-                        defaults, and an empty stand-in would briefly claim "no
-                        dev image is configured". */}
-                    <Show when={settings()}>
-                      {(s) => <RunnerSection repo={r} settings={s()} onSaved={refetch} />}
-                    </Show>
-                  </Match>
-                  <Match when={params.section === 'autoland'}>
-                    <AutolandSection
-                      repo={r}
-                      providers={providers() ?? []}
-                      settings={settings() ?? {}}
-                      onSaved={refetch}
-                    />
-                  </Match>
-                  <Match when={params.section === 'secrets'}>
-                    <RepoSecretsSection repoId={r().id} />
-                  </Match>
-                  <Match when={params.section === 'schedules'}>
-                    <SchedulesSection
-                      repo={r}
-                      providers={providers() ?? []}
-                      settings={settings() ?? {}}
-                      onSaved={refetch}
-                    />
-                  </Match>
-                  <Match when={params.section === 'imports'}>
-                    <ImportsSection repoId={r().id} />
-                  </Match>
-                  <Match when={params.section === 'danger'}>
-                    <DangerZone repo={r} />
-                  </Match>
-                </Switch>
-              )}
-            </Show>
-          </SettingsLayout>
-        </Match>
-      </Switch>
-    </main>
+            </Match>
+            <Match when={section() === 'autoland'}>
+              <AutolandSection
+                repo={r}
+                providers={providers() ?? []}
+                settings={settings() ?? {}}
+                onSaved={refetch}
+              />
+            </Match>
+            <Match when={section() === 'secrets'}>
+              <RepoSecretsSection repoId={r().id} />
+            </Match>
+            <Match when={section() === 'schedules'}>
+              <SchedulesSection
+                repo={r}
+                providers={providers() ?? []}
+                settings={settings() ?? {}}
+                onSaved={refetch}
+              />
+            </Match>
+            <Match when={section() === 'imports'}>
+              <ImportsSection repoId={r().id} />
+            </Match>
+            <Match when={section() === 'danger'}>
+              <DangerZone repo={r} />
+            </Match>
+          </Switch>
+        )}
+      </Show>
+    </SettingsLayout>
   );
 }

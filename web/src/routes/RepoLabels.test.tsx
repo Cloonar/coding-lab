@@ -1,16 +1,19 @@
-// RepoLabels behavioral contract:
-// - a failed getRepo renders the error banner (the h2 falls back to
-//   'Repository') instead of blanking the page below the heading;
+// RepoLabels behavioral contract (it renders inside the repo home frame's
+// Issues tab, issue #61, with an "Issues / Labels" trail):
+// - a failed getRepo renders the frame's error banner instead of blanking the
+//   page below the heading;
 // - an SSE-triggered refetch (issue.changed for this repo) reconciles the
 //   label rows by id, so an in-progress edit — the open LabelForm and its
-//   typed draft — survives the refetch instead of being remounted and wiped.
+//   typed draft — survives the refetch instead of being remounted and wiped;
+// - Delete asks in place (Cancel / "Delete from every issue"), never through a
+//   browser confirm, and only the confirm button sends the DELETE.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Label, TrackerBinding } from '../api';
 import App from '../App';
-import RepoLabels from './RepoLabels';
+import RepoRoutes from './repo-home/routes';
 
 const REPO_ID = 'repo_1';
 
@@ -43,6 +46,7 @@ let binding: TrackerBinding;
 let repoFails: boolean;
 let labelsOnServer: Label[];
 let labelsFetches: number;
+let labelDeletes: string[];
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
 
@@ -73,7 +77,12 @@ function stubApi(): void {
           return Promise.resolve(jsonResponse(500, { error: 'repo lookup failed' }));
         }
         return Promise.resolve(
-          jsonResponse(200, { id: REPO_ID, name: 'coding-lab', tracker_binding: binding }),
+          jsonResponse(200, {
+            id: REPO_ID,
+            name: 'coding-lab',
+            tracker_binding: binding,
+            remote_url: 'git@git.cloonar.com:Cloonar/coding-lab.git',
+          }),
         );
       }
       if (url === `/api/v1/repos/${REPO_ID}/labels` && method === 'GET') {
@@ -81,6 +90,12 @@ function stubApi(): void {
         // JSON round-trip: every fetch returns fresh object identities, like
         // the real API — exactly what used to tear the <For> rows down.
         return Promise.resolve(jsonResponse(200, { labels: labelsOnServer }));
+      }
+      const labelMatch = new RegExp(`^/api/v1/repos/${REPO_ID}/labels/([^/]+)$`).exec(url);
+      if (labelMatch && method === 'DELETE') {
+        labelDeletes.push(labelMatch[1] ?? '');
+        labelsOnServer = labelsOnServer.filter((label) => label.id !== labelMatch[1]);
+        return Promise.resolve(jsonResponse(204, undefined));
       }
       // AppShell mounts the side rail once authenticated; it fetches the
       // instance list for the ACTIVE rail + attention badge.
@@ -106,7 +121,7 @@ async function mountLabels(): Promise<void> {
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>
-        <Route path="/repos/:id/labels" component={RepoLabels} />
+        <RepoRoutes />
         <Route path="*" component={() => null} />
       </MemoryRouter>
     ),
@@ -139,6 +154,7 @@ beforeEach(() => {
   binding = 'builtin';
   repoFails = false;
   labelsFetches = 0;
+  labelDeletes = [];
   labelsOnServer = [
     { id: 'lbl_1', name: 'bug', color: '#d73a4a', description: 'defects' },
     { id: 'lbl_2', name: 'ui', color: '#1d76db', description: '' },
@@ -159,9 +175,10 @@ describe('RepoLabels (repo fetch fails)', () => {
     repoFails = true;
     await mountLabels();
 
-    // Header falls back and the failure is visible — not a silent blank.
-    expect(container.textContent).toContain('Repository · Labels');
-    const banner = container.querySelector('.banner.error');
+    // The heading stays and the frame shows the failure — not a silent blank.
+    expect(container.querySelector('.section-head h2')?.textContent).toBe('Labels');
+    expect(container.querySelector('p.crumb')?.textContent).toBe('Issues / Labels');
+    const banner = container.querySelector('.repo-head .banner.error');
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain('repo lookup failed');
   });
@@ -176,6 +193,43 @@ describe('RepoLabels (builtin repo)', () => {
     expect(container.textContent).toContain('ui');
     expect(rowButton(rowFor('bug'), 'Edit')).not.toBeNull();
     expect(rowButton(rowFor('bug'), 'Delete')).not.toBeNull();
+  });
+
+  it('renders the trail within the Issues tab, the Issues tab current', async () => {
+    await mountLabels();
+
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    const crumb = container.querySelector('p.crumb');
+    expect(crumb?.textContent).toBe('Issues / Labels');
+    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/issues"]`)).not.toBeNull();
+    expect(
+      container
+        .querySelector(`nav.repo-tabs a[href="/repos/${REPO_ID}/issues"]`)
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
+  });
+
+  it('asks in place before deleting, and only the confirm button deletes', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    await mountLabels();
+
+    rowButton(rowFor('bug'), 'Delete').click();
+    await settle();
+    // The trigger turned into Cancel plus the named action; nothing sent yet.
+    expect(labelDeletes).toEqual([]);
+    rowButton(rowFor('bug'), 'Cancel').click();
+    await settle();
+    expect(labelDeletes).toEqual([]);
+
+    rowButton(rowFor('bug'), 'Delete').click();
+    await settle();
+    rowButton(rowFor('bug'), 'Delete from every issue').click();
+    await settle();
+
+    expect(labelDeletes).toEqual(['lbl_1']);
+    expect(container.textContent).not.toContain('defects');
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 
   it('keeps an in-progress edit across an issue.changed refetch', async () => {
