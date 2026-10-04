@@ -153,13 +153,7 @@ func (r *intentRegistry) verify(toolID string, res resolvedTool) (warn string, o
 	}
 	warn = mismatch(in, res)
 	if warn == "" {
-		delete(r.byID, toolID)
-		for i, id := range r.order {
-			if id == toolID {
-				r.order = append(r.order[:i], r.order[i+1:]...)
-				break
-			}
-		}
+		r.dropLocked(toolID)
 		r.mu.Unlock()
 		return warn, true
 	}
@@ -174,6 +168,36 @@ func (r *intentRegistry) verify(toolID string, res resolvedTool) (warn string, o
 		logMismatch(log, capture, toolID, in, warn)
 	}
 	return warn, true
+}
+
+// forget drops any intent recorded for toolID — a no-op when there is none.
+// The "Chat about this" path (issue #58, chatAboutThis) calls it: that path
+// DECLINES the picker on purpose, so an intent left by an earlier answer
+// attempt on the same still-pending picker would turn the deliberate decline
+// into a false "may not have landed" warning instead of the plain dismissed
+// summary.
+func (r *intentRegistry) forget(toolID string) {
+	if toolID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dropLocked(toolID)
+}
+
+// dropLocked removes toolID's intent and its eviction-order slot. r.mu must
+// be held.
+func (r *intentRegistry) dropLocked(toolID string) {
+	if _, ok := r.byID[toolID]; !ok {
+		return
+	}
+	delete(r.byID, toolID)
+	for i, id := range r.order {
+		if id == toolID {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
 }
 
 // intentFor derives the expected recorded outcome from a dialog + the answer

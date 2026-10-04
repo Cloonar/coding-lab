@@ -355,6 +355,49 @@ func TestAnswerDialog_toolIDGuard(t *testing.T) {
 	}
 }
 
+// "Chat about this" (issue #58) rides AnswerDialog, so it inherits the same
+// tool_id guard: a stale id is refused BEFORE the provider is called — no
+// key plays — and a vanished dialog is ErrNoDialog. The matching request is
+// ONE provider call carrying the message (the adapter dismisses the dialog
+// and replies inside it, under this session lock); the service never routes
+// it through Reply (which a pending dialog locks) or Interrupt.
+func TestAnswerDialog_chatAboutThis_toolIDGuard(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateQuestion, Messages: []provider.Message{
+		{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{ToolID: "t1", Kind: provider.DialogKindQuestion, Answerable: true,
+			Options: []provider.DialogOption{{Label: "A"}, {Label: "Other", IsOther: true}}}},
+	}})
+	chatAnswer := provider.DialogAnswer{ChatText: "Before I answer — what does option A cost?"}
+
+	if err := svc.AnswerDialog(context.Background(), run, "t_stale", chatAnswer); !errors.Is(err, ErrDialogChanged) {
+		t.Errorf("stale tool_id = %v; want ErrDialogChanged", err)
+	}
+	if n := len(fake.Answers()); n != 0 {
+		t.Fatalf("a stale chat request reached the provider (%d answers); want it refused before any key plays", n)
+	}
+
+	if err := svc.AnswerDialog(context.Background(), run, "t1", chatAnswer); err != nil {
+		t.Fatalf("matching tool_id = %v; want nil", err)
+	}
+	got := fake.Answers()
+	if len(got) != 1 || got[0].ChatText != chatAnswer.ChatText {
+		t.Errorf("answers recorded = %+v; want exactly one carrying the chat text", got)
+	}
+	if r, i := fake.Replies(), fake.Interrupts(); len(r) != 0 || i != 0 {
+		t.Errorf("replies = %v, interrupts = %d; want neither — the chat path is one AnswerDialog call", r, i)
+	}
+
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+	if err := svc.AnswerDialog(context.Background(), run, "t1", chatAnswer); !errors.Is(err, ErrNoDialog) {
+		t.Errorf("no pending dialog = %v; want ErrNoDialog", err)
+	}
+	if n := len(fake.Answers()); n != 1 {
+		t.Errorf("answers recorded = %d after the no-dialog refusal; want still 1", n)
+	}
+}
+
 func TestReply_guards(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	fake.SetTranscriptPath("/transcript.jsonl")

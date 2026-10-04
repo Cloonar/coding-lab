@@ -382,11 +382,20 @@ type ToolInfo struct {
 
 // Rich tool-view kinds (ToolView.Kind, issue #146). Provider-neutral: each
 // kind names a rendering the web client already knows how to draw — no more.
+//
+// ToolViewSearch is the one exception (issue #58): it is a CLASSIFICATION
+// tag, not a new rendering. The client's tool-run summary counts reads by
+// kind ("read N files" spans read AND search tools) and never by tool name,
+// so a search tool needs a kind to be counted at all — but the client draws
+// it through the raw Input/Output fallback, exactly as if View were nil. Path
+// is the search root when the tool named one, otherwise empty; Text and
+// Command stay empty.
 const (
 	ToolViewDiff    = "diff"    // Path + Text: a unified-diff body for an edit
 	ToolViewCommand = "command" // Command: a shell command line
 	ToolViewWrite   = "write"   // Path + Text: a file's written content
 	ToolViewRead    = "read"    // Path + Text: a file excerpt that was read
+	ToolViewSearch  = "search"  // Path (optional): a content/file-name search; drawn via the raw fallback
 )
 
 // ToolView is the optional provider-neutral rich view of a tool call (issue
@@ -400,8 +409,8 @@ const (
 // here carries no ---/+++ file header — see internal/unidiff), and the fields a
 // given Kind does not use stay empty (see the kind constants above).
 type ToolView struct {
-	Kind    string `json:"kind"`              // ToolView* (diff|command|write|read)
-	Path    string `json:"path,omitempty"`    // diff, write, read: the file path
+	Kind    string `json:"kind"`              // ToolView* (diff|command|write|read|search)
+	Path    string `json:"path,omitempty"`    // diff, write, read: the file path; search: the search root, if named
 	Text    string `json:"text,omitempty"`    // diff: unified-diff text; write/read: file content/excerpt
 	Command string `json:"command,omitempty"` // command: the shell command line
 }
@@ -525,11 +534,22 @@ type QuestionAnswer struct {
 // Answers carries one QuestionAnswer per Dialog.Questions entry, all
 // collected in one submit; when Answers is non-empty the flat fields are
 // ignored (issue #51 decision 3).
+//
+// ChatText is a third, exclusive shape: "Chat about this" (issue #58).
 type DialogAnswer struct {
 	Index     int              `json:"index"`
 	Selected  []int            `json:"selected,omitempty"`
 	OtherText string           `json:"other_text,omitempty"`
 	Answers   []QuestionAnswer `json:"answers,omitempty"` // per-question; wins over the flat fields
+	// ChatText, when non-empty, is "Chat about this" (issue #58): set the
+	// pending QUESTION dialog aside — no option is picked — and deliver
+	// ChatText verbatim as an ordinary reply (Reply's text rules: trimmed,
+	// multi-line allowed, control characters refused). When set, the answer
+	// fields must be zero/empty — Selected, OtherText and Answers — and an
+	// adapter rejects a mixed answer with ErrInvalidReply. Index cannot be
+	// checked: 0 is its zero value, indistinguishable from "unset", so it is
+	// simply ignored on this path.
+	ChatText string `json:"chat_text,omitempty"`
 }
 
 // CommandRoleClear marks a provider's native clear-context command in its
@@ -884,6 +904,18 @@ type AgentProvider interface {
 	// keystroke recipe. dialog is the Dialog the caller read; answer is the
 	// operator's selection (per-question Answers for a multi-question
 	// dialog). Returns ErrDialogNotAnswerable if dialog is not Answerable.
+	//
+	// A non-empty answer.ChatText is "Chat about this" (issue #58): the
+	// adapter sets the pending question dialog aside, then delivers ChatText
+	// verbatim as an ordinary reply — both steps inside this ONE call, which
+	// the caller makes under its per-session lock, so no racing reply, answer,
+	// or interrupt can land between them and the message can never reach a
+	// focused picker. The answer shape is validated before any key plays (a
+	// non-question dialog → ErrDialogNotAnswerable; bad text or a mixed
+	// answer → ErrInvalidReply). An adapter with no answerable dialogs keeps
+	// returning ErrDialogNotAnswerable for it as for any answer; the UI only
+	// offers the action on an answerable question dialog, so in practice it
+	// never reaches one.
 	AnswerDialog(ctx context.Context, sessionName string, dialog Dialog, answer DialogAnswer) error
 	// Interrupt sends the session's interrupt keystroke (claude: Escape) —
 	// the chat Stop-generating affordance, distinct from a run Stop.

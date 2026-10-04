@@ -7,12 +7,16 @@ package claudecode
 // are built as pure []KeyOp sequences so the compat test can snapshot them;
 // AnswerDialog just plays the sequence through the runner (and records the
 // intended answer for the post-resolve verification backstop, dialogintent.go).
+// "Chat about this" (issue #58, §7) is the one AnswerDialog shape built from
+// the OTHER two recipes — the §8 Escape, then the §6 reply — rather than a
+// picker walk (ChatAboutThisKeystrokes).
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -96,7 +100,14 @@ func (p *Provider) Interrupt(ctx context.Context, sessionName string) error {
 // verify the retro-flushed tool_result against it — recorded BEFORE the keys
 // play, deliberately: a send that dies mid-recipe leaves the picker in an
 // unknown state, which is exactly when the backstop warning earns its keep.
+//
+// A non-empty answer.ChatText takes the "Chat about this" path instead
+// (issue #58, chatAboutThis below) — branched BEFORE the picker recipe is
+// built, since that answer picks no row at all.
 func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog provider.Dialog, answer provider.DialogAnswer) error {
+	if answer.ChatText != "" {
+		return p.chatAboutThis(ctx, sessionName, dialog, answer)
+	}
 	ops, err := DialogKeystrokes(dialog, answer)
 	if err != nil {
 		return err
@@ -106,26 +117,136 @@ func (p *Provider) AnswerDialog(ctx context.Context, sessionName string, dialog 
 	// as the picker mounts (compat §7, live 2026-09-23 — see
 	// defaultDialogSettleDelay). Navigation keys were not observed dropped, but
 	// the guard is applied uniformly: the recipe is blind to which key is first.
-	if p.settleDelay > 0 && !sleepOrDone(ctx, p.settleDelay) {
-		return ctx.Err()
+	// keyDelay paces every op after it.
+	return p.play(ctx, sessionName, ops, "answer dialog", func(i int) time.Duration {
+		if i == 0 {
+			return p.settleDelay
+		}
+		return p.keyDelay
+	})
+}
+
+// chatAboutThis is AnswerDialog's "Chat about this" path (issue #58, compat
+// §7): set the pending question dialog aside, then deliver answer.ChatText
+// verbatim as an ordinary reply. It plays ChatAboutThisKeystrokes' three ops
+// with three different gaps in front of them:
+//
+//		settleDelay → [Escape] → chatSettleDelay → [PasteText] → keyDelay → [Enter]
+//
+//	  - settleDelay before the Escape: the same pre-first-key guard every
+//	    dialog recipe gets (the recipe is blind to which key is first). Here it
+//	    matters doubly — an Escape dropped as the picker mounts would leave the
+//	    picker FOCUSED for the paste that follows.
+//	  - chatSettleDelay after it: the declined picker must close and the
+//	    composer regain focus before the paste (defaultDialogChatSettleDelay —
+//	    pinned, but NOT yet measured live).
+//	  - keyDelay before the Enter: exactly Reply's paste→Enter pacing (compat
+//	    §6 — an Enter in the same instant as a multi-line paste is dropped).
+//
+// Every gap honours ctx cancellation, so a cancelled request stops before the
+// next key — after the Escape, nothing has been pasted.
+//
+// No pick intent is recorded in the backstop registry (dialogintent.go): the
+// resolution this plays IS a decline, which renders through the existing
+// dismissed summary (questionOutcome → Outcome.Dismissed), and an intent would
+// only turn that expected decline into a false "may not have landed" warning.
+// For the same reason a STALE intent on this tool_id — left by an earlier
+// answer attempt on the same picker — is dropped: the picker is still pending
+// (the chat service re-read it under the session lock), so that answer never
+// landed, and the operator's latest word on the dialog is "set it aside".
+// Dropped only after validation passes, like record, so a refused request
+// leaves the registry untouched.
+func (p *Provider) chatAboutThis(ctx context.Context, sessionName string, dialog provider.Dialog, answer provider.DialogAnswer) error {
+	ops, err := ChatAboutThisKeystrokes(dialog, answer)
+	if err != nil {
+		return err
 	}
+	p.intents.forget(dialog.ToolID)
+	return p.play(ctx, sessionName, ops, "chat about this", func(i int) time.Duration {
+		switch i {
+		case 0:
+			return p.settleDelay
+		case 1:
+			return p.chatSettleDelay
+		default:
+			return p.keyDelay
+		}
+	})
+}
+
+// play sends ops to the session in order, sleeping gap(i) (when positive)
+// before op i and honouring ctx cancellation in every gap. A Text op is a
+// bracketed paste, a Named op one send-keys call (one key per op is the
+// recipes' rule — see AnswerDialog); what labels the wrapped send errors.
+func (p *Provider) play(ctx context.Context, sessionName string, ops []KeyOp, what string, gap func(i int) time.Duration) error {
 	for i, op := range ops {
-		if i > 0 && p.keyDelay > 0 {
-			if !sleepOrDone(ctx, p.keyDelay) {
-				return ctx.Err()
-			}
+		if d := gap(i); d > 0 && !sleepOrDone(ctx, d) {
+			return ctx.Err()
 		}
 		if op.Text != "" {
 			if err := p.runner.PasteText(ctx, sessionName, op.Text); err != nil {
-				return fmt.Errorf("answer dialog (paste): %w", err)
+				return fmt.Errorf("%s (paste): %w", what, err)
 			}
 			continue
 		}
 		if err := p.runner.SendNamedKeys(ctx, sessionName, op.Named...); err != nil {
-			return fmt.Errorf("answer dialog (keys): %w", err)
+			return fmt.Errorf("%s (keys): %w", what, err)
 		}
 	}
 	return nil
+}
+
+// ChatAboutThisKeystrokes builds the "Chat about this" sequence (issue #58,
+// compat §7 "Chat about this"): decline the pending question picker, then
+// deliver a.ChatText verbatim through the ordinary reply recipe. Exported for
+// the compat snapshot test; AnswerDialog plays it with the gaps documented on
+// chatAboutThis.
+//
+//	[Escape] [PasteText] [Enter]
+//
+// THE FALLBACK MECHANISM, and deliberately so. Claude Code's pickers carry
+// their own trailing "Chat about this" row (compat §7 row models: "trailing
+// synth row, NOT modeled"), and selecting it is the preferred mechanism — but
+// its navigation index per picker shape and the transcript it leaves behind
+// were never captured against a live picker (the implementing environment had
+// no tmux and no logged-in claude), and issue #58 forbids shipping an
+// unverified recipe. So this is composed purely of already-verified
+// primitives: the §8 interrupt keystroke (one Escape — the picker's own
+// footer reads "Esc to cancel", §11), which declines the picker, then the §6
+// reply (bracketed paste, Enter). The shape is identical for every question
+// form — flat single-select, flat multi-select, multi-question — because no
+// row is navigated: the Escape declines the whole form, whatever question is
+// on screen.
+//
+// Validation is strict at the door, before any key could play:
+//   - the dialog must be Answerable and of kind question — a plan review is
+//     ErrDialogNotAnswerable (the UI never offers the action there; declining
+//     a plan picker is a rejection, a different semantic);
+//   - ChatText follows Reply's text rules (validateReply: trimmed, non-empty,
+//     bounded, no control characters except newline/tab) — multi-line is fine,
+//     it is a composer reply, not a single-line picker row;
+//   - the answer fields must be empty alongside it (Selected, OtherText,
+//     Answers; Index is ignored — 0 is its zero value, see DialogAnswer):
+//     a mixed payload is ErrInvalidReply, never half-played.
+func ChatAboutThisKeystrokes(d provider.Dialog, a provider.DialogAnswer) ([]KeyOp, error) {
+	if !d.Answerable {
+		return nil, ErrDialogNotAnswerable
+	}
+	if d.Kind != provider.DialogKindQuestion {
+		return nil, fmt.Errorf("%w: only a question dialog can be set aside to chat (dialog kind %q)", ErrDialogNotAnswerable, d.Kind)
+	}
+	if len(a.Selected) > 0 || a.OtherText != "" || len(a.Answers) > 0 {
+		return nil, fmt.Errorf("%w: chat_text cannot be combined with an answer (selected, other_text, answers)", ErrInvalidReply)
+	}
+	clean, err := validateReply(a.ChatText)
+	if err != nil {
+		return nil, fmt.Errorf("%w: chat text: %w", ErrInvalidReply, err)
+	}
+	return []KeyOp{
+		{Named: []string{"Escape"}}, // decline the picker (the §8 interrupt key)
+		{Text: clean},               // the §6 reply: bracketed paste…
+		{Named: []string{"Enter"}},  // …then a separate, paced submit
+	}, nil
 }
 
 // No normalize-to-top climb (LIVE-VERIFIED 2026-07-08, 2.1.198 — compat §7).

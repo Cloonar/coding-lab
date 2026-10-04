@@ -75,6 +75,20 @@ const (
 	// keyDelay still paces every op AFTER the first.
 	defaultDialogSettleDelay = 500 * time.Millisecond
 
+	// defaultDialogChatSettleDelay is the "Chat about this" fallback's gap
+	// (issue #58, compat §7) between the Escape that declines the pending
+	// picker and the bracketed paste of the operator's message: the declined
+	// picker has to close and the composer regain focus before the paste
+	// lands, or the text reaches a picker that is still tearing down instead
+	// of the composer. PINNED UNVERIFIED-LIVE: the implementing environment
+	// had no tmux and no logged-in claude, so unlike keyDelay and settleDelay
+	// above this value was never measured against a real picker. 1s is a
+	// deliberately generous guess — twice the measured pre-first-key settle,
+	// the nearest cousin (a picker MOUNT needed 300ms+; an unmount is assumed
+	// no slower). Re-verify it on the next live sweep (compat "Live
+	// re-verification") and tighten or widen it from evidence.
+	defaultDialogChatSettleDelay = 1 * time.Second
+
 	// pollInterval is the cadence of both the registry poll and the pane
 	// scrape (v0-pinned 200ms).
 	pollInterval = 200 * time.Millisecond
@@ -186,14 +200,15 @@ type Provider struct {
 	log        *slog.Logger
 	now        func() time.Time
 
-	captureTimeout time.Duration
-	bridgeTimeout  time.Duration
-	loginTimeout   time.Duration
-	loginPoll      time.Duration
-	authTTL        time.Duration
-	logoutTimeout  time.Duration // defensive cap on the non-interactive `claude auth logout`
-	keyDelay       time.Duration // inter-op gap in the dialog-answer recipe (compat §7)
-	settleDelay    time.Duration // gap before the recipe's FIRST key (compat §7, 2.1.280)
+	captureTimeout  time.Duration
+	bridgeTimeout   time.Duration
+	loginTimeout    time.Duration
+	loginPoll       time.Duration
+	authTTL         time.Duration
+	logoutTimeout   time.Duration // defensive cap on the non-interactive `claude auth logout`
+	keyDelay        time.Duration // inter-op gap in the dialog-answer recipe (compat §7)
+	settleDelay     time.Duration // gap before the recipe's FIRST key (compat §7, 2.1.280)
+	chatSettleDelay time.Duration // "Chat about this": gap after the declining Escape, before the paste (compat §7, issue #58)
 
 	// authMu guards the lazy login-status cache. The ~0.75s status command
 	// runs while holding it; that brief serialisation is accepted for a
@@ -269,23 +284,24 @@ func New(o Options) (*Provider, error) {
 		cli = &provider.HostCLI{}
 	}
 	p := &Provider{
-		claudeBin:      claudeBin,
-		configPath:     configPath,
-		loginDir:       o.LoginDir,
-		runner:         o.Runner,
-		cli:            cli,
-		bus:            o.Bus,
-		log:            logger,
-		now:            now,
-		captureTimeout: defaultCaptureTimeout,
-		bridgeTimeout:  defaultBridgeTimeout,
-		loginTimeout:   defaultLoginTimeout,
-		loginPoll:      defaultLoginPoll,
-		authTTL:        defaultAuthTTL,
-		logoutTimeout:  defaultLogoutTimeout,
-		keyDelay:       defaultDialogKeyDelay,
-		settleDelay:    defaultDialogSettleDelay,
-		capturing:      map[string]bool{},
+		claudeBin:       claudeBin,
+		configPath:      configPath,
+		loginDir:        o.LoginDir,
+		runner:          o.Runner,
+		cli:             cli,
+		bus:             o.Bus,
+		log:             logger,
+		now:             now,
+		captureTimeout:  defaultCaptureTimeout,
+		bridgeTimeout:   defaultBridgeTimeout,
+		loginTimeout:    defaultLoginTimeout,
+		loginPoll:       defaultLoginPoll,
+		authTTL:         defaultAuthTTL,
+		logoutTimeout:   defaultLogoutTimeout,
+		keyDelay:        defaultDialogKeyDelay,
+		settleDelay:     defaultDialogSettleDelay,
+		chatSettleDelay: defaultDialogChatSettleDelay,
+		capturing:       map[string]bool{},
 	}
 	// Wire the mismatch backstop's forensic instrumentation (issue #165 item
 	// 1) onto the intent registry: p.intents is a plain zero-value struct

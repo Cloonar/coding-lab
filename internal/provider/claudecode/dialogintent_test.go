@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -194,6 +195,78 @@ func TestBackstop_userRejectedAfterAnswer_warns(t *testing.T) {
 	w := backstopWarnings(chat)
 	if len(w) != 1 || !strings.Contains(w[0].Text, "decline") {
 		t.Fatalf("user-rejected after an answer: warnings = %+v; want one decline warning", w)
+	}
+}
+
+// "Chat about this" (issue #58) declines the picker ON PURPOSE, so its
+// resolution must render through the plain dismissed summary with NO backstop
+// warning: the chat path records no pick intent, and it drops a stale one an
+// earlier answer attempt left on the same still-pending picker (otherwise the
+// deliberate decline would read as "lab sent an answer, but the transcript
+// recorded a decline"). The resolution modeled here is the live-captured
+// 2.1.198 decline (declinedLine: toolUseResult "User rejected tool use" +
+// toolDenialKind user-rejected — compat §5), followed by the
+// "[Request interrupted by user for tool use]" marker the same fixture
+// records and then the operator's message as an ordinary user turn; the
+// Escape-specific shape is pinned unverified-live (compat §7).
+func TestBackstop_chatAboutThis_dismissedWithoutWarning(t *testing.T) {
+	const interruptedLine = `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"2026-07-08T15:38:32.214Z"}`
+	const chatLine = `{"type":"user","message":{"role":"user","content":"Before I pick: which of these is cheaper to run?"},"timestamp":"2026-07-08T15:38:35.000Z"}`
+	d := provider.Dialog{
+		ToolID: "toolu_chat", Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
+		Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, {Label: "Other", IsOther: true}},
+	}
+	transcript := resolvedTranscript(toolAskUserQuestion, "toolu_chat", declinedLine) + interruptedLine + "\n" + chatLine + "\n"
+
+	for name, staleIntent := range map[string]bool{"fresh picker": false, "after a failed answer attempt": true} {
+		p, f := armedRunner(t)
+		if staleIntent {
+			// An earlier answer whose keys played but never landed: its intent
+			// is still recorded for this tool_id.
+			if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Index: 0}); err != nil {
+				t.Fatalf("%s: AnswerDialog(pick): %v", name, err)
+			}
+			if _, ok := p.intents.byID["toolu_chat"]; !ok {
+				t.Fatalf("%s: the pick recorded no intent; the stale-intent case is not exercised", name)
+			}
+		}
+		if err := p.AnswerDialog(context.Background(), chatSession, d,
+			provider.DialogAnswer{ChatText: "Before I pick: which of these is cheaper to run?"}); err != nil {
+			t.Fatalf("%s: AnswerDialog(chat): %v", name, err)
+		}
+		if len(f.KeyLog(chatSession)) == 0 {
+			t.Fatalf("%s: the chat path sent no keystrokes", name)
+		}
+		if _, ok := p.intents.byID["toolu_chat"]; ok {
+			t.Errorf("%s: an intent is still recorded after the chat path; want none", name)
+		}
+		path := filepath.Join(t.TempDir(), "t.jsonl")
+		if err := os.WriteFile(path, []byte(transcript), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		chat, err := p.ReadChat(provider.ReadSpec{TranscriptPath: path})
+		if err != nil {
+			t.Fatalf("%s: ReadChat: %v", name, err)
+		}
+		if w := backstopWarnings(chat); len(w) != 0 {
+			t.Errorf("%s: the deliberate decline emitted backstop warnings: %+v", name, w)
+		}
+		var outcome *provider.DialogOutcome
+		var replied bool
+		for _, m := range chat.Messages {
+			if m.Kind == provider.MessageDialog && m.Dialog != nil && m.Dialog.ToolID == "toolu_chat" {
+				outcome = m.Dialog.Outcome
+			}
+			if m.Kind == provider.MessageText && m.Role == "user" && m.Text == "Before I pick: which of these is cheaper to run?" {
+				replied = true
+			}
+		}
+		if outcome == nil || !reflect.DeepEqual(*outcome, provider.DialogOutcome{Dismissed: true}) {
+			t.Errorf("%s: dialog outcome = %+v; want the dismissed summary {Dismissed:true}", name, outcome)
+		}
+		if !replied {
+			t.Errorf("%s: the chat message is not an ordinary user turn in %+v", name, chat.Messages)
+		}
 	}
 }
 

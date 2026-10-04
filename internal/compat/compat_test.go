@@ -582,6 +582,49 @@ func TestCompat_DialogKeystrokes_plan(t *testing.T) {
 	}
 }
 
+// "Chat about this" (compat.md §7 "Chat about this", issue #58): the shipped
+// FALLBACK — the §8 interrupt key declining the picker, then the §6 reply
+// recipe (bracketed paste, separate Enter) — one named key per op. No row is
+// navigated, so the sequence is identical for a flat single-select, a flat
+// multi-select and a multi-question form; the pasted text is the validated
+// reply (multi-line kept — a composer reply, not a picker row). The picker's
+// own trailing "Chat about this" row stays unmodeled until captured live; a
+// plan review cannot be set aside this way.
+func TestCompat_ChatAboutThisKeystrokes(t *testing.T) {
+	other := provider.DialogOption{Label: "Other", IsOther: true}
+	shapes := map[string]provider.Dialog{
+		"single-select": {Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
+			Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, other}},
+		"multi-select": {Kind: provider.DialogKindQuestion, Prompt: "Which toppings?", Answerable: true, Multi: true,
+			Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, other}},
+		"multi-question": {Kind: provider.DialogKindQuestion, Prompt: "2 questions", Answerable: true,
+			Questions: []provider.Question{
+				{Header: "Color", Text: "Which color do you prefer?", Options: []provider.DialogOption{{Label: "Red"}, {Label: "Blue"}, other}},
+				{Header: "Fruits", Text: "Which fruits do you like?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Apple"}, {Label: "Cherry"}, other}},
+			}},
+	}
+	want := []claudecode.KeyOp{
+		{Named: []string{"Escape"}},                // decline the picker (§8)
+		{Text: "Why these two?\nWhat about fish?"}, // §6 reply: bracketed paste…
+		{Named: []string{"Enter"}},                 // …then the paced submit
+	}
+	for name, d := range shapes {
+		got, err := claudecode.ChatAboutThisKeystrokes(d, provider.DialogAnswer{ChatText: "Why these two?\nWhat about fish?"})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: chat-about-this sequence = %v; want %v", name, got, want)
+		}
+	}
+
+	plan := provider.Dialog{Kind: provider.DialogKindPlan, Answerable: true, Prompt: "# Plan",
+		Options: []provider.DialogOption{{Label: "Approve — auto-accept edits"}, {Label: "Approve — review each edit"}, {Label: "Reject with feedback", IsOther: true}}}
+	if _, err := claudecode.ChatAboutThisKeystrokes(plan, provider.DialogAnswer{ChatText: "hi"}); err == nil {
+		t.Error("plan review accepted a chat-about-this sequence; want it refused")
+	}
+}
+
 // Multi-question hook payload → Dialog (compat.md §7/§9): the 2-question form
 // captured live 2026-07-08 (the tool_input is byte-identical between the
 // PreToolUse payload and the transcript tool_use — one mapper, two sources;

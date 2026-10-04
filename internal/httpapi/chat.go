@@ -554,6 +554,12 @@ type answerRequest struct {
 	// non-empty it wins, but the seam (not this layer) decides that, so the
 	// flat shape keeps working for single-question dialogs with zero churn.
 	Answers []answerQuestion `json:"answers"`
+	// ChatText is "Chat about this" (issue #58): non-empty sets the pending
+	// question dialog aside and delivers the text verbatim as an ordinary
+	// reply, behind the same tool_id guard as any answer. Threaded through
+	// unchanged like the fields above — its exclusivity with them and its
+	// text rules are the provider's validation (ErrInvalidReply → 400).
+	ChatText string `json:"chat_text"`
 }
 
 // answerQuestion is one question's answer within a multi-question submit: the
@@ -570,7 +576,12 @@ type answerQuestion struct {
 // lock and refuses a mismatch, so a stale client never answers a dialog that
 // already moved on. The flat fields answer a single-question dialog; answers[]
 // answers a multi-question form (issue #51 decision 3) — both are passed to the
-// provider, which resolves precedence.
+// provider, which resolves precedence. chat_text is "Chat about this" (issue
+// #58): one server action that dismisses the pending dialog and then delivers
+// the message as an ordinary reply, under the same tool_id guard and session
+// lock — so the same mapping applies: a stale or vanished dialog is 409, a
+// provider with no answerable dialogs refuses it with 409, and bad text or a
+// chat_text mixed with answer fields is 400.
 func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.RunByID(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -585,7 +596,7 @@ func (s *Server) handleRunAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "tool_id is required")
 		return
 	}
-	answer := provider.DialogAnswer{Index: req.Index, Selected: req.Selected, OtherText: req.OtherText}
+	answer := provider.DialogAnswer{Index: req.Index, Selected: req.Selected, OtherText: req.OtherText, ChatText: req.ChatText}
 	if len(req.Answers) > 0 {
 		answer.Answers = make([]provider.QuestionAnswer, len(req.Answers))
 		for i, a := range req.Answers {

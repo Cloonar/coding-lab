@@ -200,7 +200,9 @@ func toolInfo(b tBlock) *provider.ToolInfo {
 // in is nil for a partial mid-stream input (the tool_use line arrived before
 // its JSON input finished streaming) — every branch below is a plain map
 // lookup that reads "" from a nil map, so a partial input yields no view
-// exactly like an unmapped tool, never a panic.
+// exactly like an unmapped tool, never a panic. (The search tag is the one
+// exception: it needs no input to classify the call, so a partial Grep/Glob
+// still gets its path-less search view.)
 func toolView(name string, in map[string]any) *provider.ToolView {
 	switch name {
 	case "Edit":
@@ -240,6 +242,17 @@ func toolView(name string, in map[string]any) *provider.ToolView {
 			return nil
 		}
 		return &provider.ToolView{Kind: provider.ToolViewRead, Path: path}
+	case "Grep", "Glob":
+		// A classification tag, not a rendering (issue #58): the client's
+		// tool-run summary counts search tools under "read N files" by
+		// ToolView.Kind alone, and draws the call itself through the raw
+		// Input/Output fallback. Both tools take an optional "path" (the
+		// search root; absent means the cwd) beside their required "pattern"
+		// — Path stays "" when the call named none. Unlike the cases above
+		// this one never returns nil: a nil or partial input still IS a
+		// search, and str() reads "" from a nil map, so it cannot panic.
+		// patchToolResult leaves the view alone (no Text is ever attached).
+		return &provider.ToolView{Kind: provider.ToolViewSearch, Path: str(in["path"])}
 	default:
 		return nil
 	}

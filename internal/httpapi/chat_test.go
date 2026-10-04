@@ -349,6 +349,55 @@ func TestAPI_ChatAnswer(t *testing.T) {
 	wantStatus(t, resp, http.StatusBadRequest)
 }
 
+// "Chat about this" (issue #58): chat_text threads into the provider's
+// DialogAnswer.ChatText unchanged, behind the same tool_id guard (a stale id
+// is 409 and never reaches the provider), and the existing mapping covers the
+// provider's refusals — no answerable dialogs is 409, bad or mixed text 400.
+func TestAPI_ChatAnswer_chatAboutThis(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, _ := startRun(t, x)
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(provider.Chat{
+		State: provider.StateQuestion,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageDialog, Dialog: &provider.Dialog{
+			ToolID: "toolu_1", Kind: provider.DialogKindQuestion, Answerable: true,
+			Options: []provider.DialogOption{{Label: "a"}, {Label: "Other", IsOther: true}},
+		}}},
+	})
+	h := csrfHeaders(x.ts.URL)
+	const text = "Hold on — what does option a change?\nAsk me again after."
+
+	// Stale tool_id: refused before the provider is called.
+	resp := x.do("POST", "/api/v1/runs/"+runID+"/answer", map[string]any{"tool_id": "toolu_old", "chat_text": text}, h)
+	wantStatus(t, resp, http.StatusConflict)
+	_ = resp.Body.Close()
+	if got := x.prov.Answers(); len(got) != 0 {
+		t.Fatalf("stale chat request reached the provider: %+v", got)
+	}
+
+	resp = x.do("POST", "/api/v1/runs/"+runID+"/answer", map[string]any{"tool_id": "toolu_1", "chat_text": text}, h)
+	wantStatus(t, resp, http.StatusNoContent)
+	_ = resp.Body.Close()
+	got := x.prov.Answers()
+	if len(got) != 1 || got[0].ChatText != text {
+		t.Fatalf("answers = %+v; want one carrying chat_text verbatim", got)
+	}
+	if got[0].Index != 0 || got[0].Selected != nil || got[0].OtherText != "" || got[0].Answers != nil {
+		t.Errorf("answer = %+v; want only ChatText set", got[0])
+	}
+
+	// A provider with no answerable dialogs refuses it → 409; a provider's
+	// text validation failure → 400.
+	x.prov.SetAnswerError(provider.ErrDialogNotAnswerable)
+	resp = x.do("POST", "/api/v1/runs/"+runID+"/answer", map[string]any{"tool_id": "toolu_1", "chat_text": text}, h)
+	wantStatus(t, resp, http.StatusConflict)
+	_ = resp.Body.Close()
+	x.prov.SetAnswerError(fmt.Errorf("%w: chat_text cannot be combined with an answer", provider.ErrInvalidReply))
+	resp = x.do("POST", "/api/v1/runs/"+runID+"/answer", map[string]any{"tool_id": "toolu_1", "chat_text": text, "other_text": "x"}, h)
+	wantStatus(t, resp, http.StatusBadRequest)
+	_ = resp.Body.Close()
+}
+
 // commandsOf extracts the {"commands":[…]} array as decoded maps.
 func commandsOf(t *testing.T, body map[string]any) []map[string]any {
 	t.Helper()
