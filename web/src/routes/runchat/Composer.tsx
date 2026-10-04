@@ -1,14 +1,26 @@
-// The fixed bottom composer (ADR-0029, issue #61): Send is always available
-// and fires immediately, with the slash-command autocomplete (issue #51
-// decision 5, tiered ranking per issue #122), the §4 jump-to-latest pill, and
-// the shared one-tap interrupt action (ADR-0029) that backs the header's turn
-// Interrupt and the degraded question-state escape hatch.
+// The Chat's bottom dock (ADR-0029, issue #61; redesigned by issue #58): Send
+// is always available and fires immediately, with the slash-command
+// autocomplete (issue #51 decision 5, tiered ranking per issue #122) and its
+// `/` button (issue #58 §6), the §4 jump-to-latest pill, the worded status
+// line (issue #58 §2), the docked question panel with its answer box and its
+// one-tap "Chat about this" (issue #58 §3/§4), and the shared one-tap
+// interrupt action (ADR-0029) behind every Interrupt.
+//
+// Modes, first match wins:
+//   ended run                         read-only note
+//   transcript gone                   read-only note
+//   answerable question dialog        QuestionDock (panel + answer box)
+//   plan review / non-answerable      waiting note (the card is in the stream)
+//   state question, no dialog         degraded note + Interrupt escape hatch
+//   otherwise                         status line (live + transcript
+//                                     available) above the normal composer
 
 import { For, Match, Show, Switch, createEffect, createSignal, on } from 'solid-js';
 import {
   errorMessage,
   interruptRun,
   replyRun,
+  type ChatMessage,
   type ConversationState,
   type Dialog,
   type RunCommand,
@@ -16,12 +28,15 @@ import {
 } from '../../api';
 import Icon from '../../components/Icon';
 import { isComposerSend } from '../../lib/composerKeys';
+import { QuestionDock, docksQuestion } from './QuestionDock';
+import { StatusLine } from './StatusLine';
 import { capitalize } from './shared';
 
 // Shared one-tap interrupt action (ADR-0029): POST /interrupt (the tmux Escape),
-// no confirm, re-entrancy-guarded. Backs the header's turn Interrupt (and its
-// mobile menu twin) plus the two question/dialog escape-hatch buttons, so the
-// "one tap, no confirm" contract lives in exactly one place.
+// no confirm, re-entrancy-guarded. Backs the status line's working Interrupt
+// (issue #58 §2), the header's ••• menu Interrupt and the degraded
+// question-state escape hatch, so the "one tap, no confirm" contract lives in
+// exactly one place.
 export function createInterrupt(
   runID: () => string,
   onError: (m: string) => void,
@@ -49,6 +64,10 @@ export function Composer(props: {
   ended: boolean;
   transcript: TranscriptStatus;
   dialog: Dialog | null;
+  /** The loaded stream — the status line's running tool and timestamps. */
+  messages: readonly ChatMessage[];
+  /** Run.commits_behind (0 when absent) — the idle line's Pull base. */
+  commitsBehind: number;
   /** The run's chat-safe slash-command catalog (issue #51 decision 5). */
   commands: RunCommand[];
   /** The provider's display name ('the agent' while metadata loads). */
@@ -61,15 +80,33 @@ export function Composer(props: {
   onError: (message: string) => void;
   /** A reply's informational notice (issue #149) — never an error. */
   onNotice: (message: string) => void;
+  /** After any reply / answer / interrupt POST: refetch the stream. */
   onSent: () => void;
+  /** After a Pull base: refetch the run (commits_behind) and the stream. */
+  onPulled: () => void;
 }) {
   const [text, setText] = createSignal('');
   const [sending, setSending] = createSignal(false);
+  // The `/` button's browse mode (issue #58 §6): the popover lists the FULL
+  // catalog whatever the box holds, until the next keystroke, a pick, a send,
+  // Escape or blur.
+  const [browseAll, setBrowseAll] = createSignal(false);
 
   // Send is gated only on a non-empty box and no in-flight POST — never on the
-  // run's derived state (ADR-0029, issue #61): the composer no longer morphs and
-  // has no Interrupt of its own (that moved to the header).
+  // run's derived state (ADR-0029, issue #61): the composer never morphs. The
+  // status line above it carries the working Interrupt (issue #58 §2), and it
+  // gates nothing.
   const canSend = () => !sending() && text().trim() !== '';
+
+  // The one interrupt controller this composer hands its Interrupt buttons
+  // (the status line's and the degraded escape hatch's share one busy guard).
+  const interrupt = createInterrupt(
+    () => props.runID,
+    (m) => props.onError(m),
+    () => props.onSent(),
+  );
+  // The pending dialog the dock answers (issue #58 §3), else null.
+  const dockedQuestion = (): Dialog | null => (docksQuestion(props.dialog) ? props.dialog : null);
 
   // Auto-grow (decision 9b): reset to one row then grow to the content height,
   // capped by CSS max-height with internal scroll. Driven from two places: the
@@ -99,6 +136,7 @@ export function Composer(props: {
     try {
       const result = await replyRun(props.runID, body);
       setText('');
+      setBrowseAll(false);
       // 200 with a `notice` body is informational (issue #149), not an error
       // — 204 (the common case) carries none.
       if (result?.notice) props.onNotice(result.notice);
@@ -125,6 +163,7 @@ export function Composer(props: {
   const [acDismissed, setAcDismissed] = createSignal(false); // Escape until the next keystroke
   const [acIndex, setAcIndex] = createSignal(0);
   const acMatches = (): RunCommand[] => {
+    if (browseAll()) return props.commands; // the `/` button: the whole catalog
     const value = text();
     if (!value.startsWith('/')) return [];
     const q = value.slice(1).toLowerCase();
@@ -156,6 +195,7 @@ export function Composer(props: {
     document.getElementById(`chat-cmd-opt-${acIndex()}`)?.scrollIntoView?.({ block: 'nearest' });
   });
   const completeCommand = (cmd: RunCommand) => {
+    setBrowseAll(false);
     setText(`/${cmd.name} `);
     // Dismiss until the next keystroke: with the completion landed the picker
     // has done its job — left open it would keep swallowing Tab and the
@@ -197,6 +237,7 @@ export function Composer(props: {
         // #145, defaultPrevented-guarded) from firing on a popover dismissal.
         e.preventDefault();
         setAcDismissed(true);
+        setBrowseAll(false);
         return;
       }
       if (e.key === 'Tab') {
@@ -210,6 +251,27 @@ export function Composer(props: {
       e.preventDefault();
       void send();
     }
+  };
+
+  // --- The `/` button (issue #58 §6) ---------------------------------------
+  // Slash commands were discoverable only by typing `/`; the button shows the
+  // same popover with the FULL catalog and focuses the box, so a pick behaves
+  // exactly like a click in the typed-slash popover (send outright, or
+  // complete "/name " when the command takes an argument). It sits left of
+  // the box while there is a catalog and the box is empty or already a slash
+  // command — once the operator types prose it gives the box its width back.
+  const slashVisible = () =>
+    props.commands.length > 0 && (text().trim() === '' || text().startsWith('/'));
+  const toggleCatalog = () => {
+    if (browseAll() && acOpen()) {
+      setBrowseAll(false);
+      setAcDismissed(true);
+    } else {
+      setAcDismissed(false);
+      setAcIndex(0);
+      setBrowseAll(true);
+    }
+    inputEl?.focus();
   };
 
   return (
@@ -240,16 +302,33 @@ export function Composer(props: {
         <Match when={props.transcript === 'gone'}>
           <p class="chat-composer-note">Transcript no longer available — the chat is read-only.</p>
         </Match>
-        {/* A dialog is pending: the interactive card lives in the STREAM
-            (issue #56 decision 1), so the composer collapses to a slim
+        {/* An answerable question dialog docks HERE (issue #58 §3): the panel
+            above, the answer box (its free-text row) below. Non-keyed Match:
+            the dock stays mounted across refetches that hand in fresh dialog
+            objects, so its drafts — keyed to the tool_id inside — survive
+            every SSE tick. No slash autocomplete or `/` button while it is
+            up. */}
+        <Match when={dockedQuestion()}>
+          {(d) => (
+            <QuestionDock
+              runID={props.runID}
+              dialog={d()}
+              agentName={props.agentName}
+              onError={props.onError}
+              onAnswered={props.onSent}
+            />
+          )}
+        </Match>
+        {/* A plan review or a non-answerable dialog is pending: its card
+            lives in the STREAM (issue #56 decision 1 — docking these is out
+            of issue #58's scope), so the composer collapses to a slim
             waiting note pointing up at it — no textarea, free text can't
             answer a focused picker (decision 2). No Interrupt here (issue
             #165 item 3): an accent square in Send's slot, right next to a
             live interactive card, drew muscle-memory "send" taps that
             declined the focused picker instead. The escape hatch stays
-            reachable via the sticky header's turn Interrupt (desktop) and
-            the ••• ChatMenu (mobile) — both gated on `live()`, which holds
-            while a dialog pends. */}
+            reachable via the header's ••• menu Interrupt, gated on the live
+            outcome, which holds while a dialog pends. */}
         <Match when={props.dialog}>
           <p class="chat-composer-note">
             {capitalize(props.agentName)} is waiting on your answer — see the question above.
@@ -264,15 +343,30 @@ export function Composer(props: {
             <p class="chat-composer-note">
               {capitalize(props.agentName)} needs input — {props.openHint} to respond.
             </p>
-            <InterruptButton runID={props.runID} onError={props.onError} onDone={props.onSent} />
+            <InterruptButton interrupt={interrupt} />
           </div>
         </Match>
         <Match when={true}>
           {/* Residual blocked state with no structured dialog — e.g. a plain
               tool-permission prompt or the post-decline "stuck" case (decision
-              7). The composer stays usable. The needs-input note now lives in
-              the stream as a status line (§3), so needs_input collapses to just
-              the input row here. */}
+              7). The composer stays usable. The needs-input note lives in the
+              stream (§3); the worded status line (issue #58 §2) sits above
+              the input row whenever the run is live with an available
+              transcript — `ended`, `gone` and every dialog branch above
+              already took the other cases, and while the transcript is still
+              locating there is nothing to describe yet. */}
+          <Show when={props.transcript === 'available'}>
+            <StatusLine
+              runID={props.runID}
+              state={props.state}
+              messages={props.messages}
+              commitsBehind={props.commitsBehind}
+              interrupt={interrupt}
+              onError={props.onError}
+              onNotice={props.onNotice}
+              onPulled={props.onPulled}
+            />
+          </Show>
           {/* Slash-command autocomplete popover (issue #51 decision 5): floats
               above the input like the jump pill; rows carry /name, the arg
               hint (dim), the description and a source badge. Keyboard runs
@@ -311,7 +405,24 @@ export function Composer(props: {
               </For>
             </div>
           </Show>
-          <div class="chat-composer-row">
+          <div class="chat-composer-row" classList={{ 'has-slash': slashVisible() }}>
+            <Show when={slashVisible()}>
+              {/* mousedown is swallowed like the popover rows' so a tap
+                  never steals the textarea's focus (or blurs it shut). */}
+              <button
+                type="button"
+                class="chat-slash mono"
+                aria-label="Slash commands"
+                title="Slash commands"
+                aria-haspopup="listbox"
+                aria-expanded={acOpen()}
+                aria-controls={acOpen() ? 'chat-cmd-pop' : undefined}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={toggleCatalog}
+              >
+                /
+              </button>
+            </Show>
             <textarea
               ref={(el) => {
                 inputEl = el;
@@ -329,11 +440,14 @@ export function Composer(props: {
               aria-controls={acOpen() ? 'chat-cmd-pop' : undefined}
               aria-activedescendant={acOpen() ? `chat-cmd-opt-${acIndex()}` : undefined}
               onInput={(e) => {
-                // A fresh keystroke revives an Escape-dismissed popover.
+                // A fresh keystroke revives an Escape-dismissed popover and
+                // ends the `/` button's browse mode (back to prefix filtering).
                 setAcDismissed(false);
+                setBrowseAll(false);
                 setText(e.currentTarget.value);
               }}
               onKeyDown={onKeyDown}
+              onBlur={() => setBrowseAll(false)}
             />
             {/* Always-Send (ADR-0029, issue #61): Send never reads the derived
                 `working` state, because that state can be false — a stale
@@ -368,31 +482,22 @@ export function Composer(props: {
 // primary action, with no interactive card above to draw a miss-tap. The
 // dialog-pending branch dropped it (issue #165 item 3): an accent square in
 // Send's slot, next to a live interactive card, drew muscle-memory "send" taps
-// that declined the focused picker instead; the header's turn Interrupt and the
-// ••• ChatMenu keep the hatch reachable there. It shares the `pause` glyph with
-// the header's turn Interrupt (the composer Send no longer morphs — ADR-0029),
-// and stays distinct from the danger `square` Stop, which is two-step (destructive
-// teardown, ADR-0019).
-function InterruptButton(props: {
-  runID: string;
-  onError: (message: string) => void;
-  onDone: () => void;
-}) {
-  const interrupt = createInterrupt(
-    () => props.runID,
-    (m) => props.onError(m),
-    () => props.onDone(),
-  );
+// that declined the focused picker instead; the header's ••• menu Interrupt
+// keeps the hatch reachable there. It shares the `pause` glyph with the status
+// line's Interrupt (issue #58 §2; the composer Send no longer morphs —
+// ADR-0029), and stays distinct from the danger `square` Stop, which is
+// two-step (destructive teardown, ADR-0019).
+function InterruptButton(props: { interrupt: { busy: () => boolean; run: () => Promise<void> } }) {
   return (
     <button
       type="button"
       class="chat-interrupt icon-btn"
-      classList={{ busy: interrupt.busy() }}
+      classList={{ busy: props.interrupt.busy() }}
       aria-label="Interrupt"
       title="Interrupt the agent (Escape)"
-      onClick={() => void interrupt.run()}
+      onClick={() => void props.interrupt.run()}
     >
-      <Show when={interrupt.busy()} fallback={<Icon name="pause" />}>
+      <Show when={props.interrupt.busy()} fallback={<Icon name="pause" />}>
         <span class="chat-interrupt-busy" aria-hidden="true">
           …
         </span>

@@ -162,8 +162,9 @@ function ToolChip(props: {
   );
 }
 
-// A run of 2+ tool calls behind one summary line (decisions 8–11): the count
-// plus rolled-up failure/liveness. The click branches on the breakpoint (issue
+// A run of 2+ tool calls behind one summary line (decisions 8–11): the run
+// described by kind (issue #58, "Edited 4 files, ran 3 commands, read 5
+// files") plus rolled-up failure/liveness. The click branches on the breakpoint (issue
 // #154) — desktop toggles the run open in place (member chips stack in the
 // body, each independently expandable), mobile opens the panel at the group's
 // LIST page (issue #145). Folded-in thinking is dropped at paint (issue #68).

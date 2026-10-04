@@ -29,7 +29,7 @@ The captured `https://claude.ai/code/<id>` URL of an instance — read from clau
 _Avoid_: attach URL, share link, session URL
 
 **Chat**:
-The rendered conversation of an instance inside lab's UI (the `/runs/:id` view) — user and assistant messages, tool chips, and pending dialogs — where the operator can reply, answer a dialog, or interrupt. It complements the deep link (the escape hatch), never replaces it, and applies to every instance (manual and AFK).
+The rendered conversation of an instance inside lab's UI (the `/runs/:id` view) — user and assistant messages, tool chips, and pending dialogs — where the operator can reply, answer a dialog, or interrupt. The header's context meter opens **Run details** (model, effort, context, branch, commits behind the base, **Pull base**); a status line above the composer names the instance's state while it is live; a pending question is answered in a panel docked above the composer, with **Chat about this** to talk about a question first: one tap, no text, and the agent asks what the operator wants to know. It complements the deep link (the escape hatch), never replaces it, and applies to every instance (manual and AFK).
 _Avoid_: terminal, console, session view, thread
 
 **Transcript**:
@@ -37,11 +37,11 @@ The provider-native session file the Chat reads through (Claude Code: the live J
 _Avoid_: log, history, raw output, session file (in UI copy)
 
 **Conversational state**:
-The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live state dot on the runs rail and a badge in the chat header. Distinct from `live` (tmux liveness) and the run's terminal outcome.
+The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live state dot on the runs rail and as the chat's status line above the composer (*Working*, *Waiting for you*, *Idle*). Distinct from `live` (tmux liveness) and the run's terminal outcome.
 _Avoid_: status, activity, progress
 
 **Slash-command catalog**:
-The provider's slash commands plus lab's own **lab commands**, surfaced in the Chat composer as autocomplete the moment the input starts with `/` (filtered as you type by name, description, and argument hint). Served per instance — project- and user-level commands are discovered relative to the worktree — and curated to **chat-safe** commands only: one that would strand the agent's TUI in a picker lab cannot see is withheld. The entry tagged `role=clear` (Claude Code's `/clear`) also backs a **New conversation** action that clears the instance's context in place; a provider command executes down the ordinary reply path as pasted text, never a dedicated endpoint, while a **lab command** is intercepted by the server and never reaches the provider.
+The provider's slash commands plus lab's own **lab commands**, surfaced in the Chat composer as autocomplete the moment the input starts with `/` (filtered as you type by name, description, and argument hint) or from the composer's `/` button, which opens the full list. Served per instance — project- and user-level commands are discovered relative to the worktree — and curated to **chat-safe** commands only: one that would strand the agent's TUI in a picker lab cannot see is withheld. The entry tagged `role=clear` (Claude Code's `/clear`) also backs a **New conversation** action that clears the instance's context in place; a provider command executes down the ordinary reply path as pasted text, never a dedicated endpoint, while a **lab command** is intercepted by the server and never reaches the provider.
 _Avoid_: command palette, quick switcher, command menu
 
 **Lab command**:
@@ -248,7 +248,7 @@ _Avoid_: failure alert, error notification, per-firing push
 - The scheduler counts the **claimable** set (**ready queue** minus existing claims, minus issues whose `## Blocked by` section references a still-open issue); an AFK run that outlives its **budget clock** without a done-signal is a timeout, and timeouts (like deaths) feed the **three-strikes pause**.
 - **Autoland** (per-repo, default-off, forge-only) reads the PR's verdict state — lander verdicts plus human native reviews — to feed the fleet **spawn pass** a **lander run** candidate that validates a **claim**'s PR and a **fix run** candidate that re-engages a rejected one on the existing claim branch; the fix run's **done-signal** is an explicit `labctl pr rerequest`, not a fresh PR, because the claim's PR already exists.
 - A manual **instance**'s **deep link** is the operator's handle to it; the deep link is captured best-effort (only for a provider with the `DeepLinker` capability) and survives restarts on the run row — a link-less provider's rows offer a copyable `tmux attach` instead.
-- The **chat** reads an instance's **transcript** through the provider seam and lets the operator reply/answer/interrupt; it complements the deep link and applies to every instance. Replying to or interrupting an **AFK run** is a **neutral** intervention — it never touches the **budget clock**, **claim**, or **three-strikes pause**. The tailer's **conversational state** feeds the instance list's live badges.
+- The **chat** reads an instance's **transcript** through the provider seam and lets the operator reply/answer/interrupt; it complements the deep link and applies to every instance. Replying to or interrupting an **AFK run** is a **neutral** intervention — it never touches the **budget clock**, **claim**, or **three-strikes pause**. The tailer's **conversational state** feeds the instance list's live state dots and the chat's status line.
 - **Guarded teardown** runs at all four teardown sites (manual Stop, AFK reaper, startup reconciliation, merged-sweep) and produces **parked work**; the **unguarded Discard** is the only way to destroy it and the only requeue.
 - A **neutral Stop** parks the claim and never feeds the **three-strikes pause** counter.
 - Each repo has exactly one **tracker binding** and an *effective provider* resolved by layering (the repo override is optional), and may enable **incogni mode**.

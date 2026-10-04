@@ -1,0 +1,526 @@
+/* Chat bottom dock (issue #58): the status line, the docked question panel
+   (single, multi-select, multi-question stepper + Review), the "Chat about
+   this" hold, and the composer's / button. Imported last, so equal-specificity
+   ties with the base composer rules (chat.css / chatui.css) resolve here.
+   Existing tokens only — the attention tints are color-mix()es of --accent,
+   the same recipe as the selected dialog option (issue #56). Every control is
+   44px tall by default (the base `button` rule); only fine-pointer layouts
+   step the secondary ones down. */
+
+/* --- §2 status line ------------------------------------------------------ */
+/* One row above the composer: dot, the state in words, a clipped mono detail
+   (running tool · elapsed, or "4m ago"), and at most one action on the right.
+   The dot is a redundant cue — filled + pulsing, filled, or hollow — never
+   the only carrier of the state. */
+.chat-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  margin-bottom: var(--space-1);
+  padding: 0 0.15rem 0 0.4rem;
+  font-size: 0.875rem;
+}
+.chat-status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.chat-status-dot.working {
+  background: var(--ok);
+  animation: chat-status-pulse 1.6s ease-in-out infinite;
+}
+.chat-status-dot.waiting {
+  background: var(--accent);
+}
+.chat-status-dot.idle {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--muted);
+}
+@keyframes chat-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-status-dot.working {
+    animation: none;
+  }
+}
+/* Label, tool title, time: only the title shrinks (with an ellipsis), so a
+   long command gives way before "Working" or the elapsed time does. The
+   detail parts keep their leading " · " (white-space: pre — a flex item would
+   otherwise drop the leading space). */
+.chat-status-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.chat-status-label {
+  flex: none;
+  font-weight: 600;
+}
+.chat-status-detail {
+  flex: none;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.chat-status-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-status-action {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.8rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.chat-status-action.busy {
+  opacity: 0.6;
+}
+
+/* --- §6 the / button ----------------------------------------------------- */
+/* Pinned bottom-left inside the merged composer field, mirroring the pinned
+   Send on the right; the textarea pads its left edge only while the button
+   shows, so typed prose gets the full width back. */
+.chat-composer-row.has-slash .chat-input {
+  padding-left: 2.75rem;
+}
+.chat-slash {
+  position: absolute;
+  left: 4px;
+  bottom: 0;
+  width: 40px;
+  min-width: 40px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-control);
+}
+.chat-slash:hover,
+.chat-slash[aria-expanded='true'] {
+  color: var(--text);
+  background: var(--hover);
+}
+
+/* --- §3 question panel --------------------------------------------------- */
+.chat-qdock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.chat-qpanel {
+  min-width: 0;
+  padding: 0 0.5rem 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+.chat-qpanel.folded {
+  padding-bottom: 0;
+}
+/* Header line: dot, "{agent} is asking", the count, and the fold chevron.
+   The only part left when the panel folds. */
+.chat-qpanel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding-left: 0.35rem;
+  font-size: 0.85rem;
+}
+.chat-qpanel-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.chat-qpanel-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.chat-qpanel-count {
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.chat-qpanel-fold {
+  flex: none;
+  margin-right: -0.25rem;
+  color: var(--muted);
+}
+.chat-qpanel-fold svg {
+  transition: transform 0.15s ease;
+}
+.chat-qpanel-fold[aria-expanded='false'] svg {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-qpanel-fold svg {
+    transition: none;
+  }
+}
+.chat-qpanel-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.chat-qpanel-body[hidden] {
+  display: none; /* the flex display above would otherwise beat [hidden] */
+}
+
+/* Multi-question chips: a horizontal strip that scrolls inside the panel
+   (never the page) when the headers overflow. The current chip is bold with
+   an accent border; a ticked one swaps its number for a check. */
+.chat-qsteps {
+  display: flex;
+  gap: 0.4rem;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.chat-qsteps::-webkit-scrollbar {
+  display: none;
+}
+.chat-qstep {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.75rem 0 0.45rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: var(--radius-pill);
+}
+.chat-qstep.review {
+  padding-left: 0.75rem;
+}
+.chat-qstep.current {
+  color: var(--text);
+  font-weight: 600;
+  background: var(--card);
+  border-color: var(--accent);
+}
+.chat-qstep-mark {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font:
+    600 0.7rem ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.chat-qstep.done .chat-qstep-mark {
+  color: var(--accent-text);
+  background: var(--accent);
+  border-color: transparent;
+}
+
+/* The question + its options (+ Chat about this, or the Review list): the
+   part that scrolls. Below 640px it is capped so the whole panel stays near
+   half the viewport — the header above and the composer below never leave
+   the screen; on wider layouts a looser cap keeps the stream readable. */
+.chat-qpanel-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+@media (max-width: 639.98px) {
+  .chat-qpanel-scroll {
+    max-height: calc(50vh - 3.5rem);
+    max-height: calc(50dvh - 3.5rem);
+  }
+  .chat-qsteps + .chat-qpanel-scroll {
+    max-height: calc(50vh - 6.5rem);
+    max-height: calc(50dvh - 6.5rem);
+  }
+}
+.chat-qpanel-q {
+  margin: 0.15rem 0.35rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.chat-qpanel-hint {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* Option rows: radios (single-select) or checkboxes (multi-select). The
+   mark changes SHAPE when picked — a centre dot, a ticked box — on top of
+   the accent border and tint. */
+.chat-qopts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.chat-qopt {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  min-height: 48px;
+  padding: 0.6rem 0.75rem;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.chat-qopt:hover {
+  background: var(--card);
+  border-color: var(--muted);
+}
+.chat-qopt.picked {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+.chat-qopt-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 0.15rem;
+  color: var(--accent-text);
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+}
+.chat-qopt.multi .chat-qopt-mark {
+  border-radius: 5px;
+}
+.chat-qopt.picked .chat-qopt-mark {
+  border-color: var(--accent);
+  background: radial-gradient(circle, var(--accent) 0 4px, transparent 4.5px);
+}
+.chat-qopt.multi.picked .chat-qopt-mark {
+  background: var(--accent);
+}
+.chat-qopt-body {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* The provider's recommendation, in words, where the "(Recommended)" suffix
+   was. */
+.chat-qopt-tag {
+  font-size: 0.72rem;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--link);
+}
+
+/* §4 — the "Chat about this" action under the options: a quiet link-tinted
+   text button, not another option row. */
+.chat-qpanel-chat {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0 0.6rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--link);
+  background: transparent;
+  border: none;
+}
+.chat-qpanel-chat:hover:not(:disabled) {
+  background: var(--card);
+}
+.chat-qpanel-chat:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+/* Why the action is off, in words (a multi-question dialog needs the earlier
+   questions answered first — the server enters them before the chat choice). */
+.chat-qpanel-chat-hint {
+  margin: -0.15rem 0 0;
+  padding: 0 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* Review: one row per question — its header over the answer (picked labels,
+   typed text in quotes) — tapping returns to it. "Not answered yet" is said
+   in words, italic, not just tinted. */
+.chat-qreview {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.chat-qreview-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 0.6rem;
+  align-items: center;
+  min-height: 52px;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.chat-qreview-row:hover {
+  background: var(--card);
+  border-color: var(--muted);
+}
+.chat-qreview-head {
+  grid-column: 1;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.chat-qreview-answer {
+  grid-column: 1;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.chat-qreview-answer.missing {
+  font-weight: 500;
+  font-style: italic;
+  color: var(--link);
+}
+.chat-qreview-edit {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  color: var(--muted);
+}
+
+/* Answer mode: the single-line free-text box (the question's is_other row)
+   and Send turned into a labeled confirm — Answer / Next / Review. With no
+   free-text row the confirm stands alone at full width, like Review's
+   "Send N answers". */
+.chat-answer-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.2rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.chat-answer-row:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.chat-answer-row.no-text {
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+.chat-answer-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 0.6rem;
+  font: inherit;
+  font-size: 16px; /* no iOS zoom */
+  color: var(--text);
+  background: transparent;
+  border: none;
+}
+.chat-answer-input:focus-visible {
+  outline: none; /* the focus ring lives on the row */
+}
+.chat-answer-confirm {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0 1rem;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-control);
+}
+/* Both hover rules beat the base `button:hover` (--hover) so a disabled
+   confirm under the pointer keeps its accent face. */
+.chat-answer-confirm:hover {
+  background: var(--accent);
+}
+.chat-answer-confirm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+.chat-answer-confirm.busy {
+  opacity: 0.6;
+}
+.chat-answer-row.no-text .chat-answer-confirm,
+.chat-answer-all {
+  width: 100%;
+  min-height: 48px;
+}
+
+/* The stream's marker for a docked question: a .chat-lifecycle line that
+   wraps centered on narrow screens. */
+.chat-dialog-asking {
+  text-align: center;
+}
+
+/* Fine-pointer layouts (mouse / trackpad) step the secondary controls down
+   from the 44px touch floor, as the mockup's desktop frame does. */
+@media (hover: hover) and (pointer: fine) {
+  .chat-status {
+    min-height: 40px;
+  }
+  .chat-status-action,
+  .chat-qstep,
+  .chat-qpanel-chat {
+    min-height: 36px;
+  }
+}

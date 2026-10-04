@@ -184,13 +184,69 @@ func TestToolView_notebookEditDeleteNoView(t *testing.T) {
 	}
 }
 
-// TestToolView_unmappedTool: a tool this mapper does not know about — Glob
-// included, since it is the paradigm case the client's raw Input/Output
-// fallback exists for — gets no view.
+// TestToolView_unmappedTool: a tool this mapper does not know about gets no
+// view — the client's raw Input/Output fallback draws it. (Grep and Glob left
+// this list with issue #58: they now carry the search classification tag,
+// pinned by TestToolView_search — still drawn through that same fallback.)
 func TestToolView_unmappedTool(t *testing.T) {
-	for _, name := range []string{"Grep", "Glob", "Task", "Skill", "AskUserQuestion", "SomeFutureTool"} {
+	for _, name := range []string{"Task", "Skill", "AskUserQuestion", "SomeFutureTool"} {
 		if v := toolView(name, map[string]any{"file_path": "x", "command": "y"}); v != nil {
 			t.Errorf("%s: View = %+v; want nil", name, v)
+		}
+	}
+}
+
+// TestToolView_search pins the search classification tag (issue #58): Grep
+// and Glob carry Kind=search so the client's tool-run summary can count them
+// under "read N files" without knowing tool names. Path is the optional
+// "path" input (the search root) and stays empty when the call named none;
+// Text and Command are never set. A nil (partial mid-stream) input still
+// classifies — it cannot panic, and it is still a search.
+func TestToolView_search(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		in   map[string]any
+		path string
+	}{
+		{"grep with root", "Grep", map[string]any{"pattern": "func main", "path": "internal/chat", "output_mode": "content"}, "internal/chat"},
+		{"grep without root", "Grep", map[string]any{"pattern": "TODO"}, ""},
+		{"glob with root", "Glob", map[string]any{"pattern": "**/*.go", "path": "web/src"}, "web/src"},
+		{"glob without root", "Glob", map[string]any{"pattern": "*.md"}, ""},
+		{"grep non-string path", "Grep", map[string]any{"pattern": "x", "path": 7}, ""},
+		{"grep partial input", "Grep", nil, ""},
+		{"glob partial input", "Glob", nil, ""},
+	}
+	for _, c := range cases {
+		v := toolView(c.tool, c.in)
+		if v == nil {
+			t.Errorf("%s: View = nil; want a search view", c.name)
+			continue
+		}
+		want := provider.ToolView{Kind: provider.ToolViewSearch, Path: c.path}
+		if *v != want {
+			t.Errorf("%s: View = %+v; want %+v", c.name, *v, want)
+		}
+	}
+}
+
+// TestPatchToolResult_searchViewUntouched: a search view is a classification
+// tag, not a rendering — the tool_result lands in Output as for any tool, and
+// the view keeps no Text (only the read view grows an excerpt), on success
+// and on error alike.
+func TestPatchToolResult_searchViewUntouched(t *testing.T) {
+	for _, isErr := range []bool{false, true} {
+		raw, _ := json.Marshal("internal/chat/chat.go:12:func main() {}")
+		tool := &provider.ToolInfo{View: &provider.ToolView{Kind: provider.ToolViewSearch, Path: "internal"}}
+		patchToolResult(tool, tBlock{Result: json.RawMessage(raw), IsError: isErr})
+		if tool.View == nil {
+			t.Fatalf("is_error=%v: View = nil; want the search view kept", isErr)
+		}
+		if want := (provider.ToolView{Kind: provider.ToolViewSearch, Path: "internal"}); *tool.View != want {
+			t.Errorf("is_error=%v: View = %+v; want %+v (no Text attached)", isErr, *tool.View, want)
+		}
+		if tool.Output == "" {
+			t.Errorf("is_error=%v: Output empty; want the raw result for the fallback", isErr)
 		}
 	}
 }

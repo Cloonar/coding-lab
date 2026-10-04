@@ -1,17 +1,26 @@
 // ChatHeader behavioral contract (issue #7), header-area slice of the
-// RunChat contract split (issue #194):
-// - one-tap interrupt (POST /interrupt, no confirm) lives in the live-gated
-//   header — inline on desktop and a `•••` menu item above Stop, a `pause`
-//   glyph distinct from the two-step danger `square` Stop — plus the two
-//   locked-state escape hatches;
-// - the run's spawn-time model · effort rides a read-only chip beside the
-//   state chip on desktop, and a non-interactive info row (role=none, not a
-//   menuitem) pinned atop the `•••` panel on mobile — catalog pretty labels
-//   with the raw id as fallback, hidden entirely for a legacy row with no
-//   model (issue #68);
+// RunChat contract split (issue #194), reshaped by issue #58 §1:
+// - a two-line title block: the click-to-edit title over a secondary line of
+//   project link · forge link · the run's spawn-time model · effort — at every
+//   width, catalog pretty labels with the raw id as fallback, hidden for a
+//   legacy row with no model (issue #68);
+// - the context meter (issue #243 / ADR-0061) is a ring + percentage button at
+//   every width, in every conversational state, whenever usable usage exists
+//   — no longer nested in the model text — tinting amber at >=80% and red at
+//   >=95%; it opens Run details (a bottom sheet <1024px, an anchored popover
+//   >=1024px: model, effort, tokens, branch, base, commits behind, and a Pull
+//   base that sends `/pull-base` only while a live run is behind);
+// - no conversational state badge and no "N behind" chip at any width;
+// - the `•••` menu at every width (a bottom sheet <640px, an anchored dropdown
+//   >=640px) always offers "Run details" and, whenever the run is live, the
+//   one-tap turn Interrupt (POST /interrupt, no confirm, a `pause` glyph
+//   distinct from the two-step danger `square` Stop); below 640px it also
+//   carries the open affordance and the two-step Stop.
 
 import { describe, expect, it } from 'vitest';
+import type { ConversationState } from '../../api';
 import {
+  DESKTOP_QUERY,
   baseRepo,
   baseRun,
   container,
@@ -21,8 +30,24 @@ import {
   mountChat,
   moreButton,
   settle,
+  stubMatchMedia,
   buttonByLabel,
 } from './harness';
+
+// The header's own breakpoint: the `•••` menu is a dropdown from here up.
+const MENU_DROPDOWN_QUERY = '(min-width: 640px)';
+
+const header = () => container.querySelector('header.chat-header') as HTMLElement;
+const meterButton = () => container.querySelector<HTMLButtonElement>('button.chat-context-meter');
+const details = () => container.querySelector<HTMLElement>('section.chat-details');
+/** A Run details fact row's <dd> text, by its <dt> label. */
+const fact = (label: string): string | null | undefined =>
+  Array.from(details()?.querySelectorAll('.chat-details-fact') ?? [])
+    .find((row) => row.querySelector('dt')?.textContent === label)
+    ?.querySelector('dd')?.textContent;
+const withUsage = (used: number, limit: number) => {
+  h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used, limit } };
+};
 
 installChatHooks();
 
@@ -218,8 +243,8 @@ describe('ChatHeader', () => {
     expect(container.querySelector('.chat-menu-panel')).toBeNull();
   });
 
-  it('opens an anchored dropdown with the model info row, open affordance, Interrupt and Stop run for a live run', async () => {
-    await mountChat(); // default fixture: live, needs_input
+  it('opens the ••• menu as a bottom sheet below 640px with Run details, the open affordance, Interrupt and Stop run', async () => {
+    await mountChat(); // default fixture: live, needs_input; jsdom matches no media query
 
     expect(container.querySelector('.chat-menu-panel')).toBeNull();
     moreButton()!.click();
@@ -227,28 +252,59 @@ describe('ChatHeader', () => {
 
     const panel = container.querySelector('.chat-menu-panel');
     expect(panel).not.toBeNull();
+    // A sheet over a dimming scrim, rendered OUTSIDE the header (its stacking
+    // context and <640px overlay transform would trap a fixed sheet).
+    expect(panel!.classList.contains('chat-sheet')).toBe(true);
+    expect(panel!.closest('header')).toBeNull();
+    expect(container.querySelector('.chat-sheet-scrim')).not.toBeNull();
+    expect(panel!.getAttribute('role')).toBe('menu');
+    expect(moreButton()!.getAttribute('aria-expanded')).toBe('true');
+
+    expect(menuItem('Run details')).toBeDefined();
     expect(container.querySelector('.chat-menu-open')).not.toBeNull(); // the open affordance
     expect(menuItem('Interrupt')).toBeDefined(); // live turn Interrupt (ADR-0029)
     expect(menuItem('Stop run…')).toBeDefined();
     expect(menuItem('Show thinking')).toBeUndefined();
     expect(menuItem('New conversation')).toBeUndefined();
 
-    // The spawn-time model info row (issue #68): a plain, non-focusable div —
-    // NOT a menuitem — pinned as the panel's FIRST child, above every item.
-    const info = panel!.firstElementChild as HTMLElement;
-    expect(info.classList.contains('chat-menu-info')).toBe(true);
-    expect(info.tagName).toBe('DIV');
-    expect(info.getAttribute('role')).toBe('none');
-    expect(info.textContent).toBe('opus[1m] · max');
-
-    // The model string never leaks into an actual menu item.
-    const menuItemTexts = Array.from(document.querySelectorAll('[role=menuitem]')).map(
+    // The model info row left the menu: model · effort rides the header's
+    // secondary line at every width now (issue #58 §1).
+    expect(container.querySelector('.chat-menu-info')).toBeNull();
+    const menuItemTexts = Array.from(panel!.querySelectorAll('[role=menuitem]')).map(
       (el) => el.textContent,
     );
     expect(menuItemTexts.some((t) => t?.includes('opus[1m]'))).toBe(false);
   });
 
-  it('omits Stop run from the dropdown when the run has ended', async () => {
+  it('opens an anchored dropdown at >=640px with Run details and Interrupt, the open affordance and Stop staying inline', async () => {
+    stubMatchMedia().set(MENU_DROPDOWN_QUERY, true);
+    await mountChat();
+
+    // Inline at this width: the open affordance and the two-step Stop.
+    expect(container.querySelector('.chat-desktop-actions a.card-link')).not.toBeNull();
+    expect(container.querySelector('.chat-desktop-actions .chat-stop')).not.toBeNull();
+
+    moreButton()!.click();
+    await settle();
+    const panel = container.querySelector('.chat-menu-panel');
+    expect(panel?.classList.contains('chat-menu-dropdown')).toBe(true);
+    expect(panel!.closest('header')).not.toBeNull(); // anchored inside the header
+    expect(container.querySelector('.chat-sheet-scrim')).toBeNull();
+    expect(container.querySelector('.chat-menu-scrim')).not.toBeNull(); // outside-tap catcher
+
+    expect(menuItem('Run details')).toBeDefined();
+    expect(menuItem('Interrupt')).toBeDefined();
+    // What fits the row stays out of the dropdown.
+    expect(menuItem('Stop run…')).toBeUndefined();
+    expect(container.querySelector('.chat-menu-open')).toBeNull();
+
+    // Outside tap closes it.
+    (container.querySelector('.chat-menu-scrim') as HTMLElement).click();
+    await settle();
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
+  });
+
+  it('omits Interrupt and Stop run from the menu when the run has ended, keeping Run details', async () => {
     h.runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
     h.messagesOnServer = { ...h.messagesOnServer, state: 'ended' };
     await mountChat();
@@ -256,43 +312,73 @@ describe('ChatHeader', () => {
     moreButton()!.click();
     await settle();
     expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
-    // The model info row shows regardless of liveness (it's spawn-time, not run state).
-    expect(container.querySelector('.chat-menu-info')?.textContent).toBe('opus[1m] · max');
+    // Run details is always reachable — it isn't run state.
+    expect(menuItem('Run details')).toBeDefined();
     // Both the turn Interrupt and Stop are live-gated — gone on an ended run.
     expect(menuItem('Interrupt')).toBeUndefined();
     expect(menuItem('Stop run…')).toBeUndefined();
   });
 
-  it('closes the dropdown on Escape', async () => {
+  it('closes the menu on Escape, consuming the event', async () => {
     await mountChat();
     moreButton()!.click();
     await settle();
     expect(container.querySelector('.chat-menu-panel')).not.toBeNull();
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    window.dispatchEvent(esc);
     await settle();
     expect(container.querySelector('.chat-menu-panel')).toBeNull();
+    // Consumed, so the tool panel's window Esc-close skips it (issue #145).
+    expect(esc.defaultPrevented).toBe(true);
   });
 
-  it('renders a state dot carrying the convo class token for the live state', async () => {
-    await mountChat(); // needs_input fixture
-    // The mobile dot and the full chip both live in the DOM (CSS gates which
-    // shows); the dot carries stateBadge('needs_input').cls, which the CSS maps
-    // to the convo color (jsdom applies no stylesheet, so only the class is
-    // assertable here — the color mapping is exercised by conversation.test.ts).
-    expect(container.querySelector('.chat-state-dot.needs-input')).not.toBeNull();
+  it('closes the sheet on a scrim tap and abandons a half-armed Stop', async () => {
+    await mountChat();
+    moreButton()!.click();
+    await settle();
+    menuItem('Stop run…')!.click();
+    await settle();
+    expect(menuItem('Confirm stop')).toBeDefined();
+
+    (container.querySelector('.chat-sheet-scrim') as HTMLElement).click();
+    await settle();
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
+
+    // Reopened: the confirm did not linger.
+    moreButton()!.click();
+    await settle();
+    expect(menuItem('Confirm stop')).toBeUndefined();
+    expect(menuItem('Stop run…')).toBeDefined();
   });
+
+  it.each<ConversationState>(['working', 'needs_input', 'question', 'idle'])(
+    'renders no conversational state badge in the header (state %s)',
+    async (state) => {
+      h.messagesOnServer = { ...h.messagesOnServer, state };
+      await mountChat();
+
+      // The dock's status line (issue #58 §2) names the state in words now;
+      // neither the <640px dot nor the >=640px chip renders at any width.
+      expect(header().querySelector('.chat-state-dot')).toBeNull();
+      expect(header().querySelector('.chat-state-chip')).toBeNull();
+      expect(header().querySelector('.chip.convo')).toBeNull();
+    },
+  );
 
   it('omits the exposure badge for a run that has exposed nothing', async () => {
     await mountChat(); // baseRun() carries no exposed_secrets
-    expect(container.querySelector('.chat-state-dot.exposed')).toBeNull();
+    expect(container.querySelector('.chat-exposed-dot')).toBeNull();
     expect(container.querySelector('.chip.exposed')).toBeNull();
   });
 
   it('renders a singular exposure badge naming the one exposed secret', async () => {
     h.runOnServer = { ...baseRun(), exposed_secrets: ['API_KEY'] };
     await mountChat();
-    expect(container.querySelector('.chat-state-dot.exposed')).not.toBeNull();
+    // The <640px dot is a labeled graphic; the >=640px chip carries the text.
+    const dot = container.querySelector('.chat-exposed-dot');
+    expect(dot?.getAttribute('role')).toBe('img');
+    expect(dot?.getAttribute('aria-label')).toContain('API_KEY');
     const chip = container.querySelector('.chip.exposed');
     expect(chip?.textContent).toBe('API_KEY exposed');
     expect(chip?.getAttribute('title')).toContain('API_KEY');
@@ -307,37 +393,61 @@ describe('ChatHeader', () => {
     expect(chip?.getAttribute('title')).toContain('ZEBRA_KEY');
   });
 
-  it('renders a one-tap desktop header Interrupt that posts /interrupt, live-gated', async () => {
-    await mountChat(); // default fixture: live (outcome active)
+  it.each<ConversationState>(['working', 'idle', 'question'])(
+    'puts Interrupt in the ••• menu, firing /interrupt on one tap whenever live (state %s)',
+    async (state) => {
+      // The derived state can be stale (issue #38), so the menu Interrupt is
+      // gated on the live outcome alone — offered in every state.
+      h.messagesOnServer = { ...h.messagesOnServer, state };
+      await mountChat();
 
-    const interrupt = container.querySelector<HTMLButtonElement>(
-      '.chat-desktop-actions button[aria-label="Interrupt"]',
-    );
-    expect(interrupt).not.toBeNull();
-    expect(interrupt!.classList.contains('chat-turn-interrupt')).toBe(true);
-    expect(interrupt!.title).toBe('Interrupt the current turn (keeps the session)');
-    // The `pause` glyph (two rects) reads distinct from the danger two-step
-    // `square` Stop (one rect) that renders immediately after it.
-    expect(interrupt!.querySelectorAll('svg rect')).toHaveLength(2);
-    const stop = container.querySelector<HTMLButtonElement>('.chat-desktop-actions .chat-stop');
-    expect(stop!.querySelectorAll('svg rect')).toHaveLength(1);
+      // The inline header Interrupt is gone at every width.
+      expect(header().querySelector('.chat-turn-interrupt')).toBeNull();
+      expect(header().querySelector('button[aria-label="Interrupt"]')).toBeNull();
 
-    // One click fires interrupt with no confirm step.
-    interrupt!.click();
+      moreButton()!.click();
+      await settle();
+      const interrupt = menuItem('Interrupt');
+      expect(interrupt).toBeDefined();
+      expect(interrupt!.title).toBe('Interrupt the current turn (keeps the session)');
+      // The `pause` glyph (two rects) reads distinct from the danger two-step
+      // `square` Stop (one rect) listed below it.
+      expect(interrupt!.querySelectorAll('svg rect')).toHaveLength(2);
+      expect(menuItem('Stop run…')!.querySelectorAll('svg rect')).toHaveLength(1);
+
+      // One click fires interrupt with no confirm step.
+      interrupt!.click();
+      await settle();
+      expect(h.interruptPosts).toBe(1);
+    },
+  );
+
+  it('offers Interrupt in the >=640px dropdown too', async () => {
+    stubMatchMedia().set(MENU_DROPDOWN_QUERY, true);
+    h.messagesOnServer = { ...h.messagesOnServer, state: 'working' };
+    await mountChat();
+
+    expect(
+      header().querySelector('.chat-desktop-actions button[aria-label="Interrupt"]'),
+    ).toBeNull();
+    moreButton()!.click();
+    await settle();
+    menuItem('Interrupt')!.click();
     await settle();
     expect(h.interruptPosts).toBe(1);
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
   });
 
-  it('omits the header Interrupt for an ended run (live-gated)', async () => {
+  it('offers no Interrupt anywhere for an ended run (live-gated)', async () => {
     h.runOnServer = { ...baseRun(), outcome: 'stopped', ended_at: '2026-07-06T16:00:00.000Z' };
     h.messagesOnServer = { ...h.messagesOnServer, state: 'ended' };
     await mountChat();
 
-    expect(
-      container.querySelector('.chat-desktop-actions button[aria-label="Interrupt"]'),
-    ).toBeNull();
-    // None anywhere: not live (no header/menu turn Interrupt) and the ended
-    // composer is read-only (no escape hatch).
+    moreButton()!.click();
+    await settle();
+    expect(menuItem('Interrupt')).toBeUndefined();
+    // None anywhere: not live (no menu turn Interrupt) and the ended composer
+    // is read-only (no escape hatch).
     expect(buttonByLabel('Interrupt')).toBeNull();
   });
 
@@ -351,7 +461,6 @@ describe('ChatHeader', () => {
     const stop = menuItem('Stop run…');
     expect(interrupt).toBeDefined();
     expect(stop).toBeDefined();
-    expect(interrupt!.title).toBe('Interrupt the current turn (keeps the session)');
     // Listed ABOVE the danger Stop item among the panel's buttons.
     const buttons = Array.from(panel.querySelectorAll('button'));
     expect(buttons.indexOf(interrupt!)).toBeLessThan(buttons.indexOf(stop!));
@@ -370,63 +479,104 @@ describe('ChatHeader', () => {
     expect(header.classList.contains('chat-header--hidden')).toBe(false); // headerVisible starts true
   });
 
-  it('renders the desktop model chip with raw ids when the catalog has no match', async () => {
+  it('renders model · effort on the secondary line with raw ids when the catalog has no match', async () => {
     await mountChat(); // default mocks: h.providersOnServer[0].models/efforts are both []
 
-    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m] · max');
+    // The secondary line under the title, at every width (no CSS gate): the
+    // project, the forge link, then the model · effort text.
+    const sub = container.querySelector('.chat-titlebar .chat-title-sub')!;
+    expect(sub.querySelector('.chat-title-model')?.textContent).toBe('opus[1m] · max');
+    // First class only: the router's <A> appends its own active/inactive class.
+    const order = Array.from(sub.children).map((el) => el.classList[0]);
+    expect(order).toEqual([
+      'chat-title-project',
+      'chat-title-forge',
+      'chat-title-sep',
+      'chat-title-model',
+    ]);
+    expect(sub.textContent).toBe('proj·opus[1m] · max');
+    // No model chip anymore.
+    expect(container.querySelector('.chat-model-chip')).toBeNull();
   });
 
-  it('renders the desktop model chip with catalog pretty labels when they match', async () => {
+  it('renders model · effort with catalog pretty labels when they match', async () => {
     h.providersOnServer[0]!.models = [{ value: 'opus[1m]', label: 'Opus 4.6 [1m]', efforts: [] }];
     h.providersOnServer[0]!.efforts = [{ value: 'max', label: 'Max' }];
     await mountChat();
 
-    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('Opus 4.6 [1m] · Max');
+    expect(container.querySelector('.chat-title-model')?.textContent).toBe('Opus 4.6 [1m] · Max');
   });
 
-  it('hides the model chip and the menu info row entirely for a legacy run with no model', async () => {
+  it('hides the model text for a legacy run with no model', async () => {
     h.runOnServer = { ...baseRun(), model: '' };
     await mountChat();
 
-    expect(container.querySelector('.chat-model-chip')).toBeNull();
-    moreButton()!.click();
-    await settle();
-    expect(container.querySelector('.chat-menu-info')).toBeNull();
+    expect(container.querySelector('.chat-title-model')).toBeNull();
+    expect(container.querySelector('.chat-title-sep')).toBeNull();
+    // The project still rides the secondary line.
+    expect(container.querySelector('.chat-title-sub .chat-title-project')?.textContent).toBe(
+      'proj',
+    );
   });
 
   it('renders the model alone, with no separator, when effort is empty', async () => {
     h.runOnServer = { ...baseRun(), effort: '' };
     await mountChat();
 
-    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m]');
+    expect(container.querySelector('.chat-title-model')?.textContent).toBe('opus[1m]');
   });
 
-  // The context-pressure meter (issue #243 / ADR-0061): a nested `· N%` span
-  // inside the model chip, tinting amber at >=80% occupancy and red at >=95%,
-  // with an `N of M tokens` title — hidden with the chip when usage is absent.
-  it('renders the context-pressure meter as a `· N%` suffix nested in the model chip', async () => {
-    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 127432, limit: 200000 } };
+  it('shows the model text with no leading separator for a legacy no-~ session', async () => {
+    h.runOnServer = { ...baseRun(), session_name: 'legacy-session' };
     await mountChat();
 
-    const chip = container.querySelector('.chat-model-chip');
-    // The chip text carries model · effort · pct; the meter is a NESTED span so
-    // it inherits the chip's sub-640px hiding.
-    expect(chip?.textContent).toBe('opus[1m] · max · 64%');
-    const meter = chip?.querySelector('.chat-context-meter');
-    expect(meter?.textContent).toBe(' · 64%');
-    // The title humanizes the token counts (127432 → 127k), never raw numbers.
-    expect(meter?.getAttribute('title')).toBe('127k of 200k tokens');
-    // Occupancy 0.64 is below the amber threshold → no tint band.
-    expect(meter?.classList.contains('warn')).toBe(false);
-    expect(meter?.classList.contains('danger')).toBe(false);
+    expect(container.querySelector('.chat-title-sub')?.textContent).toBe('opus[1m] · max');
+    expect(container.querySelector('.chat-title-sep')).toBeNull();
   });
+
+  // The context meter (issue #243 / ADR-0061, issue #58 §1): a ring + rounded
+  // percentage button of its own — not nested in the model text — tinting
+  // amber at >=80% occupancy and red at >=95%.
+  it('renders the context meter as a ring + percentage button, outside the model text', async () => {
+    withUsage(127432, 200000);
+    await mountChat();
+
+    const meter = meterButton();
+    expect(meter).not.toBeNull();
+    expect(meter!.closest('header')).not.toBeNull();
+    // Its own control, not nested in (or gated by) the model text.
+    expect(meter!.closest('.chat-title-model')).toBeNull();
+    expect(container.querySelector('.chat-title-model')?.textContent).toBe('opus[1m] · max');
+    // Percentage text always present (never colour-only), plus the ring glyph
+    // filled to the percentage.
+    expect(meter!.textContent).toBe('64%');
+    const fill = meter!.querySelector('svg.chat-context-ring .chat-context-ring-fill');
+    expect(fill?.getAttribute('stroke-dasharray')).toBe('64 100');
+    expect(meter!.getAttribute('aria-label')).toBe('Context 64% used — run details');
+    // The tooltip humanizes the token counts (127432 → 127k).
+    expect(meter!.getAttribute('title')).toBe('127k of 200k tokens');
+    // Occupancy 0.64 is below the amber threshold → no tint band.
+    expect(meter!.classList.contains('warn')).toBe(false);
+    expect(meter!.classList.contains('danger')).toBe(false);
+  });
+
+  it.each<ConversationState>(['working', 'needs_input', 'question', 'idle'])(
+    'shows the meter in every conversational state (state %s)',
+    async (state) => {
+      withUsage(100000, 200000);
+      h.messagesOnServer = { ...h.messagesOnServer, state };
+      await mountChat();
+
+      expect(meterButton()?.textContent).toBe('50%');
+    },
+  );
 
   it('tints the meter amber at exactly 80% occupancy (the warn threshold)', async () => {
-    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 160000, limit: 200000 } };
+    withUsage(160000, 200000);
     await mountChat();
 
-    const meter = container.querySelector('.chat-context-meter');
-    expect(meter?.textContent).toBe(' · 80%');
+    const meter = meterButton();
+    expect(meter?.textContent).toBe('80%');
     expect(meter?.classList.contains('warn')).toBe(true);
     expect(meter?.classList.contains('danger')).toBe(false);
   });
@@ -434,70 +584,218 @@ describe('ChatHeader', () => {
   it('keeps the meter untinted just below the amber threshold (0.80)', async () => {
     // Occupancy 0.799995 rounds to 80% but is below the 0.80 tint boundary, so
     // the band stays off — the tint keys on the ratio, not the shown percent.
-    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 159999, limit: 200000 } };
+    withUsage(159999, 200000);
     await mountChat();
 
-    const meter = container.querySelector('.chat-context-meter');
+    const meter = meterButton();
     expect(meter?.classList.contains('warn')).toBe(false);
     expect(meter?.classList.contains('danger')).toBe(false);
   });
 
   it('tints the meter red at exactly 95% occupancy (red wins over amber)', async () => {
-    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 190000, limit: 200000 } };
+    withUsage(190000, 200000);
     await mountChat();
 
-    const meter = container.querySelector('.chat-context-meter');
-    expect(meter?.textContent).toBe(' · 95%');
+    const meter = meterButton();
+    expect(meter?.textContent).toBe('95%');
     expect(meter?.classList.contains('danger')).toBe(true);
     // Red wins: past 95% the amber band is not also applied.
     expect(meter?.classList.contains('warn')).toBe(false);
   });
 
-  it('hides the meter when the response carries no context usage', async () => {
+  it('hides the meter without usage, keeping Run details reachable from the menu', async () => {
     await mountChat(); // default fixture: no context_usage
 
-    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m] · max');
+    expect(container.querySelector('.chat-title-model')?.textContent).toBe('opus[1m] · max');
     expect(container.querySelector('.chat-context-meter')).toBeNull();
+
+    moreButton()!.click();
+    await settle();
+    menuItem('Run details')!.click();
+    await settle();
+    // Opening Run details closes the menu.
+    expect(container.querySelector('.chat-menu-panel')).toBeNull();
+    expect(details()).not.toBeNull();
+    expect(fact('Context')).toBe('Not reported yet');
+    expect(fact('Branch')).toBe('lab/x');
   });
 
-  it('hides the meter with the chip for a legacy model-less run even when usage is present', async () => {
-    // A codex run with an empty stored model could carry usage without a chip;
-    // the meter nests in the model chip's Show, so it hides with the chip.
+  it('keeps the meter for a legacy model-less run when usage is present', async () => {
+    // No longer nested in the model chip: a codex run with an empty stored
+    // model that carries usage still shows its meter.
     h.runOnServer = { ...baseRun(), model: '' };
-    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 100000, limit: 200000 } };
+    withUsage(100000, 200000);
     await mountChat();
 
-    expect(container.querySelector('.chat-model-chip')).toBeNull();
-    expect(container.querySelector('.chat-context-meter')).toBeNull();
+    expect(container.querySelector('.chat-title-model')).toBeNull();
+    expect(meterButton()?.textContent).toBe('50%');
   });
 
   it('hides the meter when the limit is 0 (no denominator to divide by)', async () => {
-    h.messagesOnServer = { ...h.messagesOnServer, context_usage: { used: 5000, limit: 0 } };
+    withUsage(5000, 0);
     await mountChat();
 
-    expect(container.querySelector('.chat-model-chip')?.textContent).toBe('opus[1m] · max');
+    expect(container.querySelector('.chat-title-model')?.textContent).toBe('opus[1m] · max');
     expect(container.querySelector('.chat-context-meter')).toBeNull();
+    moreButton()!.click();
+    await settle();
+    expect(menuItem('Run details')).toBeDefined();
   });
 
-  it('renders the "N behind" chip when commits_behind is positive', async () => {
+  it('renders no "N behind" chip at any count — Run details carries it', async () => {
     h.runOnServer = { ...baseRun(), commits_behind: 3 };
     await mountChat();
 
-    const chip = container.querySelector('.chat-behind-chip');
-    expect(chip?.textContent).toBe('3 behind');
-    expect(chip?.getAttribute('title')).toBe('3 commits behind the base branch');
+    expect(container.querySelector('.chat-behind-chip')).toBeNull();
+    expect(header().textContent).not.toContain('behind');
   });
 
-  it('hides the "N behind" chip when commits_behind is 0', async () => {
-    h.runOnServer = { ...baseRun(), commits_behind: 0 };
+  // Run details (issue #58 §1): what the meter opens.
+  it('opens Run details from the meter as a bottom sheet below 1024px with model, effort, tokens, branch, base and behind count', async () => {
+    h.providersOnServer[0]!.models = [{ value: 'opus[1m]', label: 'Opus 4.6 [1m]', efforts: [] }];
+    h.providersOnServer[0]!.efforts = [{ value: 'max', label: 'Max' }];
+    h.runOnServer = { ...baseRun(), commits_behind: 3 };
+    withUsage(127432, 200000);
     await mountChat();
 
-    expect(container.querySelector('.chat-behind-chip')).toBeNull();
+    expect(details()).toBeNull();
+    meterButton()!.click();
+    await settle();
+
+    const sheet = details();
+    expect(sheet).not.toBeNull();
+    // A modal sheet over a scrim, outside the header.
+    expect(sheet!.classList.contains('chat-sheet')).toBe(true);
+    expect(sheet!.closest('header')).toBeNull();
+    expect(sheet!.getAttribute('role')).toBe('dialog');
+    expect(sheet!.getAttribute('aria-modal')).toBe('true');
+    expect(container.querySelector('.chat-sheet-scrim')).not.toBeNull();
+    const headingId = sheet!.getAttribute('aria-labelledby')!;
+    expect(document.getElementById(headingId)?.textContent).toBe('Run details');
+    expect(meterButton()!.getAttribute('aria-expanded')).toBe('true');
+
+    expect(fact('Model')).toBe('Opus 4.6 [1m]Max effort · set at spawn');
+    expect(fact('Context')).toBe('64%127k of 200k tokens');
+    expect(sheet!.querySelector('.chat-details-bar > span')?.getAttribute('style')).toContain(
+      'width: 64%',
+    );
+    expect(fact('Branch')).toBe('lab/x');
+    expect(fact('Base')).toBe('main3 behindPull base');
+    expect(sheet!.querySelector('.chat-details-behind')?.getAttribute('title')).toBe(
+      '3 commits behind the base branch',
+    );
+    // Focus moves into the surface.
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Close run details');
   });
 
-  it('hides the "N behind" chip when commits_behind is absent', async () => {
-    await mountChat(); // baseRun() carries no commits_behind
+  it('opens Run details as a popover anchored under the meter at >=1024px', async () => {
+    stubMatchMedia().set(MENU_DROPDOWN_QUERY, true);
+    stubMatchMedia().set(DESKTOP_QUERY, true);
+    withUsage(50000, 200000);
+    await mountChat();
 
-    expect(container.querySelector('.chat-behind-chip')).toBeNull();
+    meterButton()!.click();
+    await settle();
+    const popover = details();
+    expect(popover?.classList.contains('chat-popover')).toBe(true);
+    expect(popover!.closest('.chat-meter-anchor')).not.toBeNull();
+    // Non-modal: no aria-modal, no dimming scrim — a transparent outside-tap
+    // catcher instead.
+    expect(popover!.getAttribute('aria-modal')).toBeNull();
+    expect(container.querySelector('.chat-sheet-scrim')).toBeNull();
+    (container.querySelector('.chat-menu-scrim') as HTMLElement).click();
+    await settle();
+    expect(details()).toBeNull();
+
+    // Opened from the menu, it anchors under the ••• trigger instead.
+    moreButton()!.click();
+    await settle();
+    menuItem('Run details')!.click();
+    await settle();
+    expect(details()?.closest('.chat-menu')).not.toBeNull();
+  });
+
+  it('offers Pull base only while a live run is behind', async () => {
+    withUsage(50000, 200000);
+    await mountChat(); // baseRun() carries no commits_behind → up to date
+
+    meterButton()!.click();
+    await settle();
+    expect(fact('Base')).toBe('mainUp to date');
+    expect(details()!.querySelector('.chat-details-pull')).toBeNull();
+  });
+
+  it('offers no Pull base on an ended run', async () => {
+    h.runOnServer = {
+      ...baseRun(),
+      outcome: 'stopped',
+      ended_at: '2026-07-06T16:00:00.000Z',
+      commits_behind: 3,
+    };
+    h.messagesOnServer = { ...h.messagesOnServer, state: 'ended' };
+    await mountChat();
+
+    moreButton()!.click();
+    await settle();
+    menuItem('Run details')!.click();
+    await settle();
+    expect(fact('Base')).toBe('main');
+    expect(details()!.querySelector('.chat-details-pull')).toBeNull();
+  });
+
+  it('Pull base sends /pull-base down the reply path and surfaces the returned notice', async () => {
+    h.runOnServer = { ...baseRun(), commits_behind: 2 };
+    h.replyStatus = 200;
+    h.replyNotice = 'already up to date with origin/main';
+    withUsage(50000, 200000);
+    await mountChat();
+
+    meterButton()!.click();
+    await settle();
+    const pull = details()!.querySelector<HTMLButtonElement>('.chat-details-pull')!;
+    expect(pull.textContent).toBe('Pull base');
+    pull.click();
+    await settle();
+
+    expect(h.replyPosts).toEqual([{ text: '/pull-base' }]);
+    // The surface closes so the reply's notice banner is in view.
+    expect(details()).toBeNull();
+    const notice = container.querySelector('.banner.notice');
+    expect(notice?.textContent).toContain('already up to date with origin/main');
+    expect(container.querySelector('.banner.error')).toBeNull();
+  });
+
+  it('closes Run details on Escape (consumed), returning focus to the meter', async () => {
+    withUsage(50000, 200000);
+    await mountChat();
+    meterButton()!.click();
+    await settle();
+    expect(details()).not.toBeNull();
+
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    window.dispatchEvent(esc);
+    await settle();
+    expect(details()).toBeNull();
+    // Consumed, so the tool panel's window Esc-close skips it (issue #145).
+    expect(esc.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(meterButton());
+  });
+
+  it('closes Run details on the close button and on a scrim tap', async () => {
+    withUsage(50000, 200000);
+    await mountChat();
+
+    meterButton()!.click();
+    await settle();
+    buttonByLabel('Close run details')!.click();
+    await settle();
+    expect(details()).toBeNull();
+
+    meterButton()!.click();
+    await settle();
+    (container.querySelector('.chat-sheet-scrim') as HTMLElement).click();
+    await settle();
+    expect(details()).toBeNull();
+    expect(container.querySelector('.chat-sheet-scrim')).toBeNull();
   });
 });

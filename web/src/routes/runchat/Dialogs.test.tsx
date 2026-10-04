@@ -1,18 +1,21 @@
 // Dialog behavioral contract (issue #7), dialog-area slice of the
 // RunChat contract split (issue #194):
-// - a pending dialog renders as an interactive card INSIDE the chat stream
-//   (issue #56) — deduped by tool_id against a transcript dialog message, never
-//   twice — with native option buttons that POST /answer with the option index;
-//   the composer collapses to a waiting note + Interrupt (no textarea) until it
-//   resolves; the messages-scan fallback is gated on state==='question' and
-//   selections reset when the dialog identity (tool_id) changes; a newly
-//   arriving card scrolls its top into view only while following the tail;
+// - a pending PLAN REVIEW, APPROVAL or NON-ANSWERABLE dialog renders as an
+//   interactive card INSIDE the chat stream (issue #56) — deduped by tool_id
+//   against a transcript dialog message, never twice — with native option
+//   buttons that POST /answer with the option index; the composer collapses
+//   to a waiting note (no textarea, no status line) until it resolves; the
+//   messages-scan fallback is gated on state==='question'; the card's typed
+//   Other text resets when the dialog identity (tool_id) changes and survives
+//   a refetch of the same one; a newly arriving card scrolls its top into view
+//   only while following the tail. Answerable QUESTION dialogs dock above the
+//   composer instead (issue #58 §3) — their contract lives in
+//   QuestionDock.test.tsx;
 // - an ANSWERED dialog message (outcome present — issue #56 decision 3)
 //   renders as a compact inert Q→A summary: no buttons, no interactive card,
 //   no raw tool chip; outcome PRESENCE alone is the answered signal;
 // - dialog options are house-style cards (issue #56 decision 7): full-width,
-//   descriptions always visible — the flat multi-select path is toggle-card
-//   buttons (aria-pressed) instead of checkboxes, same Submit payload;
+//   descriptions always visible.
 
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, Dialog } from '../../api';
@@ -31,25 +34,44 @@ import {
 installChatHooks();
 
 describe('Dialogs', () => {
-  it('locks the composer and answers a pending dialog by option index', async () => {
+  // An approval dialog (the generic yes/no kind) — like a plan review, it
+  // stays an in-stream card after issue #58.
+  const approvalDialog = (toolID = 'toolu_card'): Dialog => ({
+    tool_id: toolID,
+    dialog_kind: 'approval',
+    prompt: 'Allow the tool call?',
+    answerable: true,
+    options: [{ label: 'Allow' }, { label: 'Deny' }],
+  });
+
+  // A plan review with the provider's free-text feedback row (is_other — the
+  // picker's "reject with feedback" row), which takes typed text in the card.
+  const planDialog = (toolID = 'toolu_plan'): Dialog => ({
+    tool_id: toolID,
+    dialog_kind: 'plan',
+    prompt: '# The plan\n\nSteps',
+    answerable: true,
+    options: [
+      { label: 'Approve' },
+      { label: 'Keep planning' },
+      { label: 'Reject with feedback', is_other: true },
+    ],
+  });
+
+  function withPending(dialog: Dialog): void {
     h.messagesOnServer = {
-      messages: [
-        {
-          seq: 1,
-          kind: 'dialog',
-          dialog: {
-            tool_id: 'toolu_1',
-            dialog_kind: 'question',
-            prompt: 'Which fix?',
-            answerable: true,
-            options: [
-              { label: 'Revert' },
-              { label: 'Patch forward' },
-              { label: 'Other', is_other: true },
-            ],
-          },
-        },
-      ],
+      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+      pending_dialog: dialog,
+    };
+  }
+
+  it('locks the composer and answers a transcript-flushed card dialog by option index', async () => {
+    h.messagesOnServer = {
+      messages: [{ seq: 1, kind: 'dialog', dialog: approvalDialog('toolu_1') }],
       state: 'question',
       cursor: 1,
       has_more: false,
@@ -63,71 +85,45 @@ describe('Dialogs', () => {
     // position (issue #56) — the message does not double as an inert prompt.
     const card = container.querySelector('.chat-stream .chat-dialog-card');
     expect(card).not.toBeNull();
-    expect(card?.textContent).toContain('Which fix?');
+    expect(card?.textContent).toContain('Allow the tool call?');
     expect(container.querySelector('.chat-dialog-inline')).toBeNull();
+    // Not a question: nothing docks above the composer (issue #58 §3).
+    expect(container.querySelector('.chat-qpanel')).toBeNull();
 
-    buttonByText('Patch forward')!.click();
+    buttonByText('Deny')!.click();
     await settle();
     expect(h.answerPosts).toHaveLength(1);
     expect(h.answerPosts[0]).toMatchObject({ tool_id: 'toolu_1', index: 1 });
   });
 
-  it('renders and answers a pending dialog from the pending_dialog field (spool)', async () => {
-    // The transcript carries no dialog message (Claude Code never flushes a
+  it('renders and answers a pending plan from the pending_dialog field (spool)', async () => {
+    // The transcript carries no dialog message (the provider never flushes a
     // pending tool_use); the dialog arrives only via the top-level field.
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'thinking…' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: {
-        tool_id: 'toolu_field',
-        dialog_kind: 'question',
-        prompt: 'Pick a flavor?',
-        answerable: true,
-        options: [{ label: 'Option A' }, { label: 'Option B' }, { label: 'Other', is_other: true }],
-      },
-    };
+    withPending(planDialog('toolu_field'));
     await mountChat();
 
-    // Composer is locked; the card renders the field's prompt + options,
+    // Composer is locked; the card renders the field's plan + options,
     // APPENDED as the last stream item (nothing in the transcript anchors it).
     expect(container.querySelector('.chat-composer-row')).toBeNull();
     const card = container.querySelector('.chat-stream .chat-dialog-card');
     expect(card).not.toBeNull();
-    expect(card?.textContent).toContain('Pick a flavor?');
+    expect(card?.querySelector('.chat-dialog-plan')).not.toBeNull();
     expect(container.querySelector('.chat-stream')!.lastElementChild).toBe(card);
 
-    buttonByText('Option B')!.click();
+    buttonByText('Keep planning')!.click();
     await settle();
     expect(h.answerPosts).toHaveLength(1);
-    expect(h.answerPosts[0]).toMatchObject({ tool_id: 'toolu_field', index: 1 });
+    expect(h.answerPosts[0]).toEqual({ tool_id: 'toolu_field', index: 1 });
   });
 
-  const singleSelectDialog = (toolID = 'toolu_card') => ({
-    tool_id: toolID,
-    dialog_kind: 'question' as const,
-    prompt: 'Pick a flavor?',
-    answerable: true,
-    options: [{ label: 'Option A' }, { label: 'Option B' }],
-  });
-
-  it('collapses the composer to a bare waiting note, with no composer Interrupt, while the card is pending', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: singleSelectDialog(),
-    };
+  it('collapses the composer to a bare waiting note, with no Interrupt, status line or dock, while the card is pending', async () => {
+    withPending(approvalDialog());
     await mountChat();
 
     // The interactive single-select renders inside the scrollable stream.
     const card = container.querySelector('.chat-stream .chat-dialog-card');
     expect(card).not.toBeNull();
-    expect(card?.querySelector('.chat-dialog-prompt')?.textContent).toBe('Pick a flavor?');
+    expect(card?.querySelector('.chat-dialog-prompt')?.textContent).toBe('Allow the tool call?');
 
     // The composer: one-line waiting note pointing up at the card — no
     // textarea, no Send (decision 2).
@@ -137,15 +133,15 @@ describe('Dialogs', () => {
     expect(container.querySelector('.chat-composer .chat-composer-note')?.textContent).toBe(
       'Claude Code is waiting on your answer — see the question above.',
     );
-    // No composer Interrupt in this branch anymore (issue #165 item 3): an
-    // accent square in Send's slot, right next to the live interactive card
-    // above, drew muscle-memory "send" taps that declined the focused picker.
-    // Neither the composer nor the card carries a `.chat-interrupt`.
+    // No composer Interrupt in this branch (issue #165 item 3): an accent
+    // square in Send's slot, right next to the live interactive card above,
+    // drew muscle-memory "send" taps that declined the focused picker. The
+    // escape hatch is the header's ••• menu Interrupt (ChatHeader's tests).
     expect(container.querySelectorAll('.chat-interrupt')).toHaveLength(0);
-    // The escape hatch survives elsewhere: the sticky header's turn Interrupt
-    // (class `chat-turn-interrupt`) is gated on `live()`, which is true while
-    // a dialog pends on this live run.
-    expect(container.querySelector('.chat-turn-interrupt')).not.toBeNull();
+    // No status line (issue #58 §2: only without a pending dialog) and no
+    // docked panel (a non-question dialog keeps the card).
+    expect(container.querySelector('.chat-status')).toBeNull();
+    expect(container.querySelector('.chat-qpanel')).toBeNull();
   });
 
   it('renders the dialog exactly once when a stream message and pending_dialog share a tool_id', async () => {
@@ -154,17 +150,7 @@ describe('Dialogs', () => {
     // the richer field data.
     h.messagesOnServer = {
       messages: [
-        {
-          seq: 1,
-          kind: 'dialog',
-          dialog: {
-            tool_id: 'toolu_dup',
-            dialog_kind: 'question',
-            prompt: 'Which fix?',
-            answerable: true,
-            options: [{ label: 'Revert' }, { label: 'Patch forward' }],
-          },
-        },
+        { seq: 1, kind: 'dialog', dialog: approvalDialog('toolu_dup') },
         { seq: 2, kind: 'text', role: 'assistant', text: 'context after' },
       ],
       state: 'question',
@@ -172,14 +158,8 @@ describe('Dialogs', () => {
       has_more: false,
       transcript: 'available',
       pending_dialog: {
-        tool_id: 'toolu_dup',
-        dialog_kind: 'question',
-        prompt: 'Which fix?',
-        answerable: true,
-        options: [
-          { label: 'Revert', description: 'Roll back the change' },
-          { label: 'Patch forward' },
-        ],
+        ...approvalDialog('toolu_dup'),
+        options: [{ label: 'Allow', description: 'Run it once' }, { label: 'Deny' }],
       },
     };
     await mountChat();
@@ -189,7 +169,7 @@ describe('Dialogs', () => {
     expect(container.querySelectorAll('.chat-dialog-card')).toHaveLength(1);
     expect(
       Array.from(container.querySelectorAll('button.dialog-option')).filter(
-        (b) => b.querySelector('.dialog-option-label')?.textContent === 'Revert',
+        (b) => b.querySelector('.dialog-option-label')?.textContent === 'Allow',
       ),
     ).toHaveLength(1);
     expect(container.querySelector('.chat-dialog-inline')).toBeNull();
@@ -199,26 +179,20 @@ describe('Dialogs', () => {
     // description).
     const card = container.querySelector('.chat-stream .chat-dialog-card')!;
     expect(card.nextElementSibling?.textContent).toContain('context after');
-    expect(card.querySelector('.dialog-option-desc')?.textContent).toBe('Roll back the change');
+    expect(card.querySelector('.dialog-option-desc')?.textContent).toBe('Run it once');
 
-    buttonByText('Patch forward')!.click();
+    buttonByText('Deny')!.click();
     await settle();
     expect(h.answerPosts).toHaveLength(1);
     expect(h.answerPosts[0]).toMatchObject({ tool_id: 'toolu_dup', index: 1 });
   });
 
   it('removes the card and returns the textarea once the dialog resolves', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: singleSelectDialog(),
-    };
+    withPending(planDialog());
     await mountChat();
     expect(container.querySelector('.chat-dialog-card')).not.toBeNull();
-    expect(container.querySelector('.chat-input')).toBeNull();
+    // Scoped: the plan card's own feedback input wears .chat-input too.
+    expect(container.querySelector('.chat-composer .chat-input')).toBeNull();
 
     // The dialog resolves (answered on another surface) and the agent works on.
     h.messagesOnServer = {
@@ -236,23 +210,8 @@ describe('Dialogs', () => {
     expect(container.querySelector('.chat-input')).not.toBeNull();
   });
 
-  const singleSelectOtherDialog = (toolID = 'toolu_solo_other') => ({
-    tool_id: toolID,
-    dialog_kind: 'question' as const,
-    prompt: 'Which fix?',
-    answerable: true,
-    options: [{ label: 'Revert' }, { label: 'Other', is_other: true }],
-  });
-
-  it('single-select Other: Enter submits exactly like clicking Send', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: singleSelectOtherDialog(),
-    };
+  it('plan feedback (Other) row: Enter submits exactly like clicking Send', async () => {
+    withPending(planDialog('toolu_solo_other'));
     await mountChat();
 
     const other = container.querySelector('.dialog-other input') as HTMLInputElement;
@@ -266,20 +225,13 @@ describe('Dialogs', () => {
     expect(h.answerPosts).toHaveLength(1);
     expect(h.answerPosts[0]).toEqual({
       tool_id: 'toolu_solo_other',
-      index: 1,
+      index: 2,
       other_text: 'roll it back manually',
     });
   });
 
-  it('single-select Other: Enter no-ops on empty or whitespace-only text, matching disabled Send', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: singleSelectOtherDialog(),
-    };
+  it('plan feedback (Other) row: Enter no-ops on empty or whitespace-only text, matching disabled Send', async () => {
+    withPending(planDialog());
     await mountChat();
 
     const other = container.querySelector('.dialog-other input') as HTMLInputElement;
@@ -297,15 +249,8 @@ describe('Dialogs', () => {
     expect(h.answerPosts).toHaveLength(0);
   });
 
-  it('single-select Other: ignores Enter fired mid-IME-composition even with valid text', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'hmm' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: singleSelectOtherDialog(),
-    };
+  it('plan feedback (Other) row: ignores Enter fired mid-IME-composition even with valid text', async () => {
+    withPending(planDialog());
     await mountChat();
 
     const other = container.querySelector('.dialog-other input') as HTMLInputElement;
@@ -324,6 +269,64 @@ describe('Dialogs', () => {
     );
     await settle();
     expect(h.answerPosts).toHaveLength(0);
+  });
+
+  it('keeps the card’s typed Other text and input element across a refetch of the SAME dialog', async () => {
+    // Every response is a fresh JSON parse — the same pending dialog arrives
+    // as a new object each refetch. Neither the half-typed text nor the input
+    // ELEMENT (focus!) may churn on an SSE tick that changed nothing.
+    withPending(planDialog('toolu_same'));
+    await mountChat();
+
+    const other = container.querySelector('.dialog-other input') as HTMLInputElement;
+    other.value = 'half-typed feedback';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    await emitMessagesChangedSettled();
+
+    const after = container.querySelector('.dialog-other input') as HTMLInputElement;
+    expect(after).toBe(other); // same element — focus survives
+    expect(after.value).toBe('half-typed feedback');
+    expect(buttonByText('Send')!.disabled).toBe(false);
+  });
+
+  it('resets the card’s typed Other text when the pending dialog identity changes', async () => {
+    const dialogMessage = (seq: number, toolID: string): ChatMessage => ({
+      seq,
+      kind: 'dialog',
+      dialog: planDialog(toolID),
+    });
+    h.messagesOnServer = {
+      messages: [dialogMessage(1, 'toolu_a')],
+      state: 'question',
+      cursor: 1,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    const other = container.querySelector('.dialog-other input') as HTMLInputElement;
+    other.value = 'for the first plan';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(buttonByText('Send')!.disabled).toBe(false);
+
+    // A NEW pending dialog (the messages-scan picks the latest unanswered
+    // one) while the card stays mounted: stale text must not answer it.
+    h.messagesOnServer = {
+      ...h.messagesOnServer,
+      messages: [dialogMessage(1, 'toolu_a'), dialogMessage(2, 'toolu_b')],
+      cursor: 2,
+    };
+    await emitMessagesChangedSettled();
+
+    const inputs = Array.from(
+      container.querySelectorAll<HTMLInputElement>('.chat-dialog-card .dialog-other input'),
+    );
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.value).toBe('');
+    expect(buttonByText('Send')!.disabled).toBe(true);
   });
 
   function stubScrollIntoView(): {
@@ -349,12 +352,12 @@ describe('Dialogs', () => {
       await mountChat(); // no dialog yet; jsdom geometry reads as at-bottom
       expect(scrolls.calls).toHaveLength(0);
 
-      // A refetch brings a NEW pending dialog: follow is on, so the CARD's
-      // top comes into view — not the stream bottom.
+      // A refetch brings a NEW pending card dialog: follow is on, so the
+      // CARD's top comes into view — not the stream bottom.
       h.messagesOnServer = {
         ...h.messagesOnServer,
         state: 'question',
-        pending_dialog: singleSelectDialog('toolu_scroll'),
+        pending_dialog: planDialog('toolu_scroll'),
       };
       await emitMessagesChangedSettled();
 
@@ -386,7 +389,7 @@ describe('Dialogs', () => {
       h.messagesOnServer = {
         ...h.messagesOnServer,
         state: 'question',
-        pending_dialog: singleSelectDialog('toolu_up'),
+        pending_dialog: planDialog('toolu_up'),
       };
       await emitMessagesChangedSettled();
 
@@ -468,134 +471,8 @@ describe('Dialogs', () => {
     await mountChat();
 
     expect(container.querySelector('.chat-dialog')).toBeNull();
+    expect(container.querySelector('.chat-qpanel')).toBeNull(); // nothing docks either
     expect(container.querySelector('.chat-composer-row')).not.toBeNull();
-  });
-
-  it('resets dialog selections when the pending dialog identity changes', async () => {
-    const dialogMessage = (seq: number, toolID: string, prompt: string): ChatMessage => ({
-      seq,
-      kind: 'dialog',
-      dialog: {
-        tool_id: toolID,
-        dialog_kind: 'question',
-        prompt,
-        answerable: true,
-        multi: true,
-        options: [{ label: 'One' }, { label: 'Two' }],
-      },
-    });
-    h.messagesOnServer = {
-      messages: [dialogMessage(1, 'toolu_a', 'First question?')],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-    };
-    await mountChat();
-
-    // Flat multi-select options are toggle cards (issue #56 decision 7).
-    buttonByText('One')!.click();
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-
-    // The pending dialog changes identity while the panel stays mounted.
-    h.messagesOnServer = {
-      ...h.messagesOnServer,
-      messages: [
-        dialogMessage(1, 'toolu_a', 'First question?'),
-        dialogMessage(2, 'toolu_b', 'Second question?'),
-      ],
-      cursor: 2,
-    };
-    await emitMessagesChangedSettled();
-
-    expect(container.textContent).toContain('Second question?');
-    expect(buttonByText('Submit')!.disabled).toBe(true); // stale picks dropped
-  });
-
-  it('keeps in-progress picks, Other text and the input element across a refetch of the SAME dialog', async () => {
-    // Every response is a fresh JSON parse — the same pending dialog arrives
-    // as a new object each refetch. Neither the operator's picks, nor the
-    // half-typed Other text, nor the input ELEMENT (focus!) may churn on an
-    // SSE tick that changed nothing.
-    h.messagesOnServer = {
-      messages: [],
-      state: 'question',
-      cursor: 0,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: {
-        tool_id: 'toolu_same',
-        dialog_kind: 'question',
-        prompt: 'Pick or type?',
-        answerable: true,
-        multi: true,
-        options: [{ label: 'One' }, { label: 'Two' }, { label: 'Other', is_other: true }],
-      },
-    };
-    await mountChat();
-
-    buttonByText('One')!.click();
-    buttonByText('Other')!.click();
-    await settle();
-    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
-    other.value = 'half-typed answer';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-
-    await emitMessagesChangedSettled();
-
-    const after = container.querySelector('.dialog-other-input') as HTMLInputElement;
-    expect(after).toBe(other); // same element — focus survives
-    expect(after.value).toBe('half-typed answer');
-    expect(buttonByText('One')!.getAttribute('aria-pressed')).toBe('true');
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-  });
-
-  it('keeps multi-question form answers across a refetch of the SAME dialog', async () => {
-    h.messagesOnServer = {
-      messages: [],
-      state: 'question',
-      cursor: 0,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: {
-        tool_id: 'toolu_form',
-        dialog_kind: 'question',
-        prompt: '2 questions',
-        answerable: true,
-        questions: [
-          {
-            text: 'Pick a flavor?',
-            header: 'Flavor',
-            options: [{ label: 'Sweet' }, { label: 'Sour' }, { label: 'Other', is_other: true }],
-          },
-          {
-            text: 'Pick a size?',
-            header: 'Size',
-            options: [{ label: 'Small' }, { label: 'Large' }],
-          },
-        ],
-      },
-    };
-    await mountChat();
-
-    buttonByText('Other')!.click();
-    await settle();
-    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
-    other.value = 'umami';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    buttonByText('Large')!.click();
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-
-    await emitMessagesChangedSettled();
-
-    const after = container.querySelector('.dialog-other-input') as HTMLInputElement;
-    expect(after).toBe(other);
-    expect(after.value).toBe('umami');
-    expect(buttonByText('Large')!.getAttribute('aria-pressed')).toBe('true');
-    expect(buttonByText('Submit')!.disabled).toBe(false);
   });
 
   it('derives the answer-elsewhere hint from fallback_open in the locked question state', async () => {
@@ -636,236 +513,6 @@ describe('Dialogs', () => {
     expect(note).not.toContain('claude.ai');
   });
 
-  const multiQuestionDialog = () => ({
-    tool_id: 'toolu_mq',
-    dialog_kind: 'question' as const,
-    prompt: '2 questions',
-    answerable: true,
-    questions: [
-      {
-        header: 'Approach',
-        text: 'Which approach?',
-        options: [
-          { label: 'Revert', description: 'Roll back the change' },
-          { label: 'Patch forward' },
-          { label: 'Other', is_other: true },
-        ],
-      },
-      {
-        header: 'Scope',
-        text: 'Which areas?',
-        multi_select: true,
-        options: [{ label: 'Frontend' }, { label: 'Backend' }, { label: 'Other', is_other: true }],
-      },
-    ],
-  });
-
-  function questionEl(i: number): Element {
-    const el = container.querySelectorAll('.dialog-question')[i];
-    if (!el) throw new Error(`missing .dialog-question[${i}]`);
-    return el;
-  }
-
-  function questionOption(qi: number, label: string): HTMLButtonElement {
-    const btn = Array.from(
-      questionEl(qi).querySelectorAll<HTMLButtonElement>('button.dialog-option'),
-    ).find((b) => b.querySelector('.dialog-option-label')?.textContent === label);
-    if (!btn) throw new Error(`missing option "${label}" in question ${qi}`);
-    return btn;
-  }
-
-  it('renders a multi-question form and submits all answers atomically via answers[]', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: multiQuestionDialog(),
-    };
-    await mountChat();
-
-    // Composer locked; the form lives in the stream card with NO inner
-    // scrollbox — nothing in the card carries an inline max-height (the CSS
-    // caps are gone; jsdom applies no stylesheet, so inline style is the
-    // assertable surface). The chat pane stays the only scrollbar.
-    expect(container.querySelector('.chat-composer-row')).toBeNull();
-    const mqCard = container.querySelector('.chat-stream .chat-dialog-card');
-    expect(mqCard).not.toBeNull();
-    expect(mqCard?.querySelector('.dialog-questions')).not.toBeNull();
-    expect(
-      Array.from(mqCard!.querySelectorAll<HTMLElement>('*')).filter(
-        (el) => el.style.maxHeight !== '',
-      ),
-    ).toEqual([]);
-
-    // The two questions render stacked, in order, each with its header chip +
-    // question text; options show label + description.
-    const headers = Array.from(container.querySelectorAll('.dialog-question-header')).map(
-      (el) => el.textContent,
-    );
-    expect(headers).toEqual(['Approach', 'Scope']);
-    expect(questionEl(0).textContent).toContain('Which approach?');
-    expect(questionEl(1).textContent).toContain('Which areas?');
-    expect(questionOption(0, 'Revert').querySelector('.dialog-option-desc')?.textContent).toBe(
-      'Roll back the change',
-    );
-
-    // BOTH questions keep the synthesized Other row — the multi-select one
-    // included (the adapter fills the TUI's free-text row from other_text;
-    // compat §7, captured live 2026-07-09).
-    const optionLabels = (qi: number) =>
-      Array.from(questionEl(qi).querySelectorAll('.dialog-option-label')).map(
-        (el) => el.textContent,
-      );
-    expect(optionLabels(0)).toEqual(['Revert', 'Patch forward', 'Other']);
-    expect(optionLabels(1)).toEqual(['Frontend', 'Backend', 'Other']);
-
-    // ONE submit for the whole form, disabled until every question is answered.
-    const submit = () => buttonByText('Submit')!;
-    expect(submit().disabled).toBe(true);
-
-    // Answer question 0 (single select) — still incomplete.
-    questionOption(0, 'Patch forward').click();
-    await settle();
-    expect(questionOption(0, 'Patch forward').getAttribute('aria-pressed')).toBe('true');
-    expect(submit().disabled).toBe(true);
-
-    // Question 1 is multi-select: toggle two options.
-    questionOption(1, 'Frontend').click();
-    questionOption(1, 'Backend').click();
-    await settle();
-    expect(submit().disabled).toBe(false);
-
-    // Multi-select toggles OFF again too.
-    questionOption(1, 'Backend').click();
-    await settle();
-    expect(questionOption(1, 'Backend').getAttribute('aria-pressed')).toBe('false');
-    questionOption(1, 'Backend').click();
-    await settle();
-
-    submit().click();
-    await settle();
-
-    // One atomic POST, positionally aligned with the questions (no question
-    // index on the wire): a single-select answer is `index` = the chosen
-    // OPTION index (never `selected`); a multi-select answer is `selected` =
-    // the toggled option indices ascending (no `index`). No flat fields.
-    expect(h.answerPosts).toHaveLength(1);
-    expect(h.answerPosts[0]).toEqual({
-      tool_id: 'toolu_mq',
-      answers: [{ index: 1 }, { selected: [0, 1] }],
-    });
-  });
-
-  it('requires non-empty Other text for a single-select Other pick too', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: multiQuestionDialog(),
-    };
-    await mountChat();
-
-    // Pick Other in question 0 and answer question 1 fully.
-    questionOption(0, 'Other').click();
-    questionOption(1, 'Frontend').click();
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(true); // Other text missing
-
-    const other = questionEl(0).querySelector('.dialog-other-input') as HTMLInputElement;
-    other.value = 'ship a hotfix';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-
-    buttonByText('Submit')!.click();
-    await settle();
-    // Single-select Other = index of the is_other row + the free text; the
-    // multi-select answer stays selected-only.
-    expect(h.answerPosts[0]).toEqual({
-      tool_id: 'toolu_mq',
-      answers: [{ index: 2, other_text: 'ship a hotfix' }, { selected: [0] }],
-    });
-  });
-
-  it('multi-select Other in a form: toggling it gates on text and rides other_text, never selected', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: multiQuestionDialog(),
-    };
-    await mountChat();
-
-    questionOption(0, 'Revert').click();
-    questionOption(1, 'Backend').click();
-    questionOption(1, 'Other').click();
-    await settle();
-    // Other toggled but empty → the form is incomplete.
-    expect(questionOption(1, 'Other').getAttribute('aria-pressed')).toBe('true');
-    expect(buttonByText('Submit')!.disabled).toBe(true);
-
-    const other = questionEl(1).querySelector('.dialog-other-input') as HTMLInputElement;
-    other.value = 'the build scripts';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-
-    buttonByText('Submit')!.click();
-    await settle();
-    // The Other row's INDEX (2) stays out of selected — its text IS its
-    // toggle (the adapter pastes it onto the TUI's free-text row, compat §7).
-    expect(h.answerPosts[0]).toEqual({
-      tool_id: 'toolu_mq',
-      answers: [{ index: 0 }, { selected: [1], other_text: 'the build scripts' }],
-    });
-  });
-
-  it('multi-question form Other: Enter no-ops while incomplete, then fires the atomic submit once complete (issue #165)', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'need input' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: multiQuestionDialog(),
-    };
-    await mountChat();
-
-    questionOption(0, 'Other').click();
-    await settle();
-    const other = questionEl(0).querySelector('.dialog-other-input') as HTMLInputElement;
-    other.value = 'ship a hotfix';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-
-    // Question 1 (Scope) is still unanswered — the form is incomplete, so
-    // Enter in question 0's Other input must no-op exactly like the disabled
-    // Submit button.
-    expect(buttonByText('Submit')!.disabled).toBe(true);
-    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    await settle();
-    expect(h.answerPosts).toHaveLength(0);
-
-    questionOption(1, 'Frontend').click();
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-
-    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    await settle();
-    // Same atomic payload clicking Submit would send.
-    expect(h.answerPosts).toHaveLength(1);
-    expect(h.answerPosts[0]).toEqual({
-      tool_id: 'toolu_mq',
-      answers: [{ index: 2, other_text: 'ship a hotfix' }, { selected: [0] }],
-    });
-  });
-
   it('renders a plan dialog as markdown with real approve/reject buttons answering flat', async () => {
     h.messagesOnServer = {
       messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'planned' }],
@@ -902,6 +549,10 @@ describe('Dialogs', () => {
       container.querySelectorAll<HTMLButtonElement>('button.dialog-option'),
     ).find((b) => b.querySelector('.dialog-option-label')?.textContent === 'Approve');
     expect(approve?.querySelector('.dialog-option-desc')?.textContent).toBe('Start implementing');
+    // A plan review keeps the in-stream card (issue #58 §3): no docked panel,
+    // no "Chat about this".
+    expect(container.querySelector('.chat-qpanel')).toBeNull();
+    expect(buttonByText('Chat about this')).toBeNull();
     approve!.click();
     await settle();
     expect(h.answerPosts).toHaveLength(1);
@@ -953,6 +604,11 @@ describe('Dialogs', () => {
       "This dialog can't be answered here — open it at claude.ai to respond.",
     );
     expect(container.querySelector('button.dialog-option')).toBeNull();
+    // A non-answerable QUESTION never docks (issue #58 §3): no panel, and no
+    // "Chat about this" — the server could not drive it either.
+    expect(container.querySelector('.chat-qpanel')).toBeNull();
+    expect(container.querySelector('.chat-dialog-asking')).toBeNull();
+    expect(buttonByText('Chat about this')).toBeNull();
   });
 
   it('does not name the web host in the unanswerable-dialog note for a remote-off run', async () => {
@@ -1168,179 +824,5 @@ describe('Dialogs', () => {
     expect(container.querySelector('.chat-dialog-answered .chat-dialog-outcome')?.textContent).toBe(
       'Plan dismissed',
     );
-  });
-
-  function optionCard(label: string): HTMLButtonElement {
-    const btn = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button.dialog-option'),
-    ).find((b) => b.querySelector('.dialog-option-label')?.textContent === label);
-    if (!btn) throw new Error(`missing option card "${label}"`);
-    return btn;
-  }
-
-  const flatMultiDialog = () => ({
-    tool_id: 'toolu_flat_multi',
-    dialog_kind: 'question' as const,
-    prompt: 'Which areas?',
-    answerable: true,
-    multi: true,
-    options: [
-      { label: 'Frontend', description: 'The SPA under web/' },
-      { label: 'Backend', description: 'The Go API' },
-      { label: 'Other', is_other: true },
-    ],
-  });
-
-  it('renders flat multi-select options as toggle cards with visible descriptions', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: flatMultiDialog(),
-    };
-    await mountChat();
-
-    // Toggle-card buttons, not checkboxes — and the descriptions show now.
-    expect(container.querySelector('.dialog-check')).toBeNull();
-    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
-    expect(optionCard('Frontend').querySelector('.dialog-option-desc')?.textContent).toBe(
-      'The SPA under web/',
-    );
-    // Card, not pill: the seg class is gone from dialog options.
-    expect(optionCard('Frontend').classList.contains('seg')).toBe(false);
-    // Completeness gating: nothing selected yet → Submit disabled.
-    expect(buttonByText('Submit')!.disabled).toBe(true);
-
-    // Toggling carries the selected state on the card itself.
-    expect(optionCard('Frontend').getAttribute('aria-pressed')).toBe('false');
-    optionCard('Frontend').click();
-    await settle();
-    expect(optionCard('Frontend').getAttribute('aria-pressed')).toBe('true');
-    expect(optionCard('Frontend').classList.contains('selected')).toBe(true);
-    expect(optionCard('Frontend').querySelector('.dialog-option-check')).not.toBeNull();
-
-    // Toggling OFF works too, then re-select both for the submit.
-    optionCard('Frontend').click();
-    await settle();
-    expect(optionCard('Frontend').getAttribute('aria-pressed')).toBe('false');
-    expect(optionCard('Frontend').querySelector('.dialog-option-check')).toBeNull();
-    optionCard('Frontend').click();
-    optionCard('Backend').click();
-    await settle();
-
-    // The Submit flow and payload are byte-for-byte the pre-card contract
-    // (an untouched Other row adds nothing to the wire).
-    buttonByText('Submit')!.click();
-    await settle();
-    expect(h.answerPosts).toHaveLength(1);
-    expect(h.answerPosts[0]).toEqual({ tool_id: 'toolu_flat_multi', selected: [0, 1] });
-  });
-
-  it('flat multi-select Other: toggling opens the input, gates Submit on text, rides other_text', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: flatMultiDialog(),
-    };
-    await mountChat();
-
-    // No stray input while Other is untoggled.
-    expect(container.querySelector('.dialog-other-input')).toBeNull();
-
-    optionCard('Backend').click();
-    optionCard('Other').click();
-    await settle();
-    // Other toggled but empty → Submit stays disabled even with a real pick.
-    expect(optionCard('Other').getAttribute('aria-pressed')).toBe('true');
-    expect(buttonByText('Submit')!.disabled).toBe(true);
-
-    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
-    expect(other).not.toBeNull();
-    other.value = 'the CI pipeline';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-
-    buttonByText('Submit')!.click();
-    await settle();
-    // The Other row's INDEX (2) never enters selected — its text IS its
-    // toggle (the adapter pastes it onto the TUI's "Type something" row,
-    // which fills AND checks it — compat §7, live 2026-07-09).
-    expect(h.answerPosts).toHaveLength(1);
-    expect(h.answerPosts[0]).toEqual({
-      tool_id: 'toolu_flat_multi',
-      selected: [1],
-      other_text: 'the CI pipeline',
-    });
-  });
-
-  it('flat multi-select accepts an Other-only answer (nothing else toggled)', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: flatMultiDialog(),
-    };
-    await mountChat();
-
-    optionCard('Other').click();
-    await settle();
-    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
-    other.value = 'docs only';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-
-    buttonByText('Submit')!.click();
-    await settle();
-    expect(h.answerPosts[0]).toEqual({
-      tool_id: 'toolu_flat_multi',
-      selected: [],
-      other_text: 'docs only',
-    });
-  });
-
-  it('flat multi-select Other: Enter no-ops until ready, then submits exactly like clicking Submit (issue #165)', async () => {
-    h.messagesOnServer = {
-      messages: [{ seq: 1, kind: 'text', role: 'assistant', text: 'pick some' }],
-      state: 'question',
-      cursor: 1,
-      has_more: false,
-      transcript: 'available',
-      pending_dialog: flatMultiDialog(),
-    };
-    await mountChat();
-
-    optionCard('Backend').click();
-    optionCard('Other').click();
-    await settle();
-    const other = container.querySelector('.dialog-other-input') as HTMLInputElement;
-
-    // Other toggled but still empty → not ready, Enter no-ops like the
-    // disabled Submit.
-    expect(buttonByText('Submit')!.disabled).toBe(true);
-    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    await settle();
-    expect(h.answerPosts).toHaveLength(0);
-
-    other.value = 'the CI pipeline';
-    other.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-    expect(buttonByText('Submit')!.disabled).toBe(false);
-
-    other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    await settle();
-    expect(h.answerPosts).toHaveLength(1);
-    expect(h.answerPosts[0]).toEqual({
-      tool_id: 'toolu_flat_multi',
-      selected: [1],
-      other_text: 'the CI pipeline',
-    });
   });
 });

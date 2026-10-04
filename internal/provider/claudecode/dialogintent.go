@@ -63,6 +63,17 @@ type dialogIntent struct {
 	// "Favorite pet?":"Ferret"}`).
 	answers map[string]string
 
+	// chat (question kind) marks a "Chat about this" intent (issue #58): lab
+	// walked onto the picker's own trailing row on one question, so the
+	// dialog must resolve with NO answer recorded for that question or any
+	// after it. unanswered holds those question texts (the keys
+	// toolUseResult.answers would record them under); answers stays empty —
+	// the answers lab entered for the EARLIER questions are not verified,
+	// because what the row records about them has not been captured
+	// (compat §7).
+	chat       bool
+	unanswered []string
+
 	// approve/feedback (plan kind): rows 0–1 of the pinned picker approve,
 	// rows 2–3 reject; feedback carries row 3's typed text (recorded inside
 	// the denial string after "the user said:\n" — live 2026-07-08).
@@ -197,6 +208,9 @@ func intentFor(d provider.Dialog, a provider.DialogAnswer) (dialogIntent, bool) 
 		}
 		return in, true
 	case provider.DialogKindQuestion:
+		if in, ok := chatIntentFor(d, a); ok {
+			return in, true
+		}
 		answers := map[string]string{}
 		if len(d.Questions) >= 2 {
 			if len(a.Answers) != len(d.Questions) {
@@ -227,6 +241,32 @@ func intentFor(d provider.Dialog, a provider.DialogAnswer) (dialogIntent, bool) 
 	default:
 		return dialogIntent{}, false
 	}
+}
+
+// chatIntentFor derives the intent of a "Chat about this" answer (issue #58;
+// see provider.DialogAnswer for the encoding DialogKeystrokes validated):
+// ok=false when a is an ordinary answer. The operator chose the row on
+// question k — the only question of a flat dialog, or the one the trailing
+// Answers entry stands for — so no answer may be recorded for question k or
+// any later one.
+func chatIntentFor(d provider.Dialog, a provider.DialogAnswer) (dialogIntent, bool) {
+	in := dialogIntent{kind: provider.DialogKindQuestion, chat: true}
+	if len(d.Questions) >= 2 {
+		k := len(a.Answers) - 1
+		if k < 0 || k >= len(d.Questions) || !a.Answers[k].Chat {
+			return dialogIntent{}, false
+		}
+		for _, q := range d.Questions[k:] {
+			in.unanswered = append(in.unanswered, q.Text)
+		}
+		return in, true
+	}
+	if !a.Chat && (len(a.Answers) != 1 || !a.Answers[0].Chat) {
+		return dialogIntent{}, false
+	}
+	// The flat Prompt IS the question text (see intentFor).
+	in.unanswered = []string{d.Prompt}
+	return in, true
 }
 
 // sameAnswer compares a recorded answer string against the intended one,
@@ -334,6 +374,9 @@ func mismatch(in dialogIntent, res resolvedTool) string {
 	}
 
 	// Question kind.
+	if in.chat {
+		return chatMismatch(prefix, in, isDenial, res)
+	}
 	if isDenial {
 		return prefix + "lab sent an answer, but the transcript recorded a decline (user-rejected)"
 	}
@@ -364,6 +407,34 @@ func mismatch(in dialogIntent, res resolvedTool) string {
 	}
 	if len(rec.Answers) != len(in.answers) {
 		return prefix + fmt.Sprintf("%d answers recorded, %d intended", len(rec.Answers), len(in.answers))
+	}
+	return ""
+}
+
+// chatMismatch verifies a "Chat about this" intent (issue #58): the picker's
+// own trailing row was meant to be selected on one question, so the only
+// wrong outcome is a recorded ANSWER to that question or a later one — the
+// blind walk landed on an option row and the Enter picked it. Everything else
+// is a match: a denial (string result or the user-rejected stamp), an absent
+// or unreadable result (whatever shape the row records, lab cannot and need
+// not judge it), answers recorded only for the EARLIER questions (the
+// operator did answer those), and the answers:{} the 60s timeout leaves when
+// it wins the race against lab's keys.
+func chatMismatch(prefix string, in dialogIntent, isDenial bool, res resolvedTool) string {
+	if isDenial {
+		return ""
+	}
+	var rec struct {
+		Answers map[string]string `json:"answers"`
+	}
+	if len(res.toolUseResult) == 0 || json.Unmarshal(res.toolUseResult, &rec) != nil {
+		return ""
+	}
+	for _, q := range in.unanswered { // question order: the first hit is deterministic
+		if got, ok := rec.Answers[q]; ok {
+			return prefix + fmt.Sprintf("lab chose \"Chat about this\" for %q, but the transcript recorded the answer %q",
+				truncate(q, 80), truncate(got, 80))
+		}
 	}
 	return ""
 }
@@ -420,6 +491,13 @@ func renderIntent(in dialogIntent) string {
 		default:
 			return "plan reject"
 		}
+	}
+	if in.chat {
+		q := ""
+		if len(in.unanswered) > 0 {
+			q = in.unanswered[0]
+		}
+		return fmt.Sprintf("question chat-about-this on %q", q)
 	}
 	parts := make([]string, 0, len(in.answers))
 	for q, a := range in.answers {

@@ -94,6 +94,7 @@ type Fake struct {
 	answers        []provider.DialogAnswer
 	interrupts     int
 	replyErr       error
+	answerErr      error
 	interruptErr   error
 
 	// LiveSignals lifecycle capability (issue #17 / ADR-0020, narrowed in
@@ -583,10 +584,15 @@ func (f *Fake) Reply(_ context.Context, _, text string) error {
 	return nil
 }
 
-// AnswerDialog records the answer.
+// AnswerDialog records the answer — the whole DialogAnswer, the "Chat about
+// this" flags included (issue #58) — or returns the scripted error without
+// recording it.
 func (f *Fake) AnswerDialog(_ context.Context, _ string, _ provider.Dialog, answer provider.DialogAnswer) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.answerErr != nil {
+		return f.answerErr
+	}
 	f.answers = append(f.answers, answer)
 	return nil
 }
@@ -781,8 +787,11 @@ func (f *Fake) SetReadError(err error) {
 	f.readErr = err
 }
 
-// SetReplyError / SetInterruptError script the send-keys failures.
+// SetReplyError / SetAnswerError / SetInterruptError script the send-keys
+// failures (SetAnswerError also stands in for an adapter's refusal, e.g.
+// provider.ErrDialogNotAnswerable from one with no answerable dialogs).
 func (f *Fake) SetReplyError(err error)     { f.mu.Lock(); f.replyErr = err; f.mu.Unlock() }
+func (f *Fake) SetAnswerError(err error)    { f.mu.Lock(); f.answerErr = err; f.mu.Unlock() }
 func (f *Fake) SetInterruptError(err error) { f.mu.Lock(); f.interruptErr = err; f.mu.Unlock() }
 
 // Replies returns the reply texts delivered, in order.

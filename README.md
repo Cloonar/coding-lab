@@ -12,7 +12,7 @@ You add repositories and credentials in the UI, then start **manual instances** 
 
 ## Features
 
-- **Manual instances** — interactive agent sessions, each in its own git worktree on its own branch. Drive them through lab's embedded chat (messages, tool activity, answerable dialogs, interrupt), or hop into the provider's own web surface via a captured deep link (claude.ai for Claude Code).
+- **Manual instances** — interactive agent sessions, each in its own git worktree on its own branch. Drive them through lab's embedded chat (messages, tool activity, a status line with one-tap interrupt, questions answered in a panel above the composer, model and context at a glance), or hop into the provider's own web surface via a captured deep link (claude.ai for Claude Code).
 - **AFK runs** — unattended sessions that claim one `ready-for-agent` issue from the repo's tracker, resolve it, and open a PR. Budget clock, three-strikes pause, guarded teardown, restart-safe re-adoption.
 - **Multiple agent providers** — Claude Code and Codex ship today, behind an `AgentProvider` seam designed so a new provider is one adapter, zero refactor (see [`docs/agents/provider-authoring.md`](docs/agents/provider-authoring.md)).
 - **Tracker integration** — Forgejo and GitHub forges, or lab's built-in tracker (issues, labels, comments, change requests with diff view and merge from the UI). Agents talk to whichever tracker the repo binds through one CLI: `labctl`.

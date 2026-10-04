@@ -1,0 +1,228 @@
+/* Chat header surfaces (issue #58): the always-visible context meter, the
+   Run details bottom sheet / anchored popover, and the ••• actions sheet. */
+
+/* The context meter (issue #58 §1, after issue #243 / ADR-0061): a ring plus
+   the rounded percentage at every width, in every conversational state. The
+   button is a transparent 44px-tall hit area around a compact pill, so the
+   touch target clears 44px while the pill stays chip-sized. Untinted it reads
+   as chip metadata; it warms to amber at >=80% occupancy and red at >=95% (red
+   wins) with the shared banner (amber) and danger tokens — and the percentage
+   text is always present, so the band is never colour-only. */
+.chat-meter-anchor {
+  position: relative; /* the >=1024px Run details popover anchors here */
+  flex: none;
+  display: flex;
+}
+button.chat-context-meter {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--chip-text);
+}
+button.chat-context-meter:hover {
+  background: none;
+}
+.chat-context-meter.warn {
+  color: var(--banner-text);
+}
+.chat-context-meter.danger {
+  color: var(--danger);
+}
+.chat-context-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 30px;
+  padding: 0 0.6rem 0 0.45rem;
+  border-radius: var(--radius-pill);
+  background: var(--chip-bg);
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+button.chat-context-meter:hover .chat-context-pill,
+button.chat-context-meter[aria-expanded='true'] .chat-context-pill {
+  box-shadow: inset 0 0 0 1px var(--muted);
+}
+/* The ring: a faint track in the current tint plus an arc filled to the
+   percentage (pathLength=100 in the markup), both currentColor-driven. */
+.chat-context-ring {
+  flex: none;
+  display: block;
+}
+.chat-context-ring-track {
+  stroke: currentColor;
+  opacity: 0.25;
+}
+.chat-context-ring-fill {
+  stroke: currentColor;
+}
+
+/* Bottom sheets (Run details below 1024px, the ••• menu below 640px). They
+   render outside the header — after it, in .chat-body — so position:fixed
+   places them against the viewport and they stack over the whole page,
+   header included. Same layering ladder as the install sheet and the tool
+   panel sheet (scrim 40, card 41), which never show at the same time. */
+.chat-sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.4);
+}
+.chat-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  max-width: 560px;
+  max-height: 82dvh;
+  margin: 0 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--card);
+  color: var(--text);
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  box-shadow: var(--shadow);
+  padding: var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+  animation: chat-sheet-up 0.2s ease-out;
+}
+@keyframes chat-sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-sheet {
+    animation: none;
+  }
+}
+/* The ••• sheet's rows: roomier than the dropdown's, thumb-sized. */
+.chat-menu-panel.chat-sheet {
+  gap: 0.15rem;
+}
+.chat-menu-panel.chat-sheet .chat-menu-item,
+.chat-menu-panel.chat-sheet .chat-menu-open .card-link,
+.chat-menu-panel.chat-sheet .chat-menu-open .attach-copy {
+  min-height: 48px;
+  font-size: 1rem;
+}
+.chat-menu-panel.chat-sheet .chat-menu-open {
+  padding: 0;
+}
+
+/* Run details at and above 1024px: a non-modal popover anchored under the
+   control that opened it (the meter, or the ••• trigger) — inside the header's
+   stacking context, above the stream. */
+.chat-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 2;
+  width: min(22rem, calc(100vw - 2rem));
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  font-size: 0.9rem;
+}
+
+/* Run details content (both containers). */
+.chat-details-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.chat-details-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.chat-details-close {
+  flex: none;
+  color: var(--muted);
+}
+.chat-details-facts {
+  margin: 0;
+  display: grid;
+}
+.chat-details-fact {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  column-gap: var(--space-3);
+  align-items: center;
+  min-height: 48px;
+  padding: var(--space-2) var(--space-1);
+  border-bottom: 1px solid var(--border);
+}
+.chat-details-fact:last-child {
+  border-bottom: 0;
+}
+.chat-details-fact dt {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.chat-details-fact dd {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) 0.6rem;
+}
+.chat-details-fact .mono {
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+.chat-details-fact small {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.chat-details-model > span {
+  font-weight: 600;
+}
+.chat-details-context b {
+  font-variant-numeric: tabular-nums;
+}
+/* The context bar: same tint band as the meter. */
+.chat-details-bar {
+  display: inline-block;
+  width: 72px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+  color: var(--muted);
+}
+.chat-details-bar.warn {
+  color: var(--banner-text);
+}
+.chat-details-bar.danger {
+  color: var(--danger);
+}
+.chat-details-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: currentColor;
+}
+.chat-details-pull {
+  margin-left: auto;
+  font-weight: 600;
+}
+.chat-details-note {
+  margin: var(--space-2) var(--space-1) 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}

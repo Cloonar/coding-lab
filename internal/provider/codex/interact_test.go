@@ -83,13 +83,19 @@ func TestInterrupt_singleEscape(t *testing.T) {
 }
 
 // No answerable dialogs exist in v1 (never-ask posture, no structured
-// question tool): AnswerDialog always refuses, and no keys ever play.
+// question tool): AnswerDialog always refuses, and no keys ever play — the
+// "Chat about this" shape (Chat, issue #58) included.
 func TestAnswerDialog_neverAnswerable(t *testing.T) {
 	p, f := armedRunner(t)
 	d := provider.Dialog{Answerable: true, Options: []provider.DialogOption{{Label: "yes"}}}
 	err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Index: 0})
 	if !errors.Is(err, provider.ErrDialogNotAnswerable) {
 		t.Errorf("AnswerDialog err = %v; want ErrDialogNotAnswerable", err)
+	}
+	d.Kind = provider.DialogKindQuestion
+	err = p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{Chat: true})
+	if !errors.Is(err, provider.ErrDialogNotAnswerable) {
+		t.Errorf("AnswerDialog(chat) err = %v; want ErrDialogNotAnswerable", err)
 	}
 	if n := len(f.KeyLog(chatSession)); n != 0 {
 		t.Errorf("AnswerDialog sent %d keystrokes; want 0", n)

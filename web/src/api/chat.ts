@@ -12,7 +12,11 @@ export type ToolView =
   | { kind: 'diff'; path: string; text: string }
   | { kind: 'command'; command: string }
   | { kind: 'write'; path: string; text: string }
-  | { kind: 'read'; path: string; text: string };
+  | { kind: 'read'; path: string; text: string }
+  /** A content or file search (issue #58): a classification tag for the tool-run
+   *  summary's "read N files" count — the detail views draw it through the raw
+   *  input/output fallback. `path` is the search root when the tool named one. */
+  | { kind: 'search'; path?: string };
 
 export interface ToolInfo {
   name: string;
@@ -219,11 +223,15 @@ export function replyRun(id: string, text: string): Promise<ReplyResult | undefi
  * `selected` (its free text IS its toggle; the adapter pastes it onto the
  * TUI's "Type something" row). `other_text` alone with an empty `selected`
  * is a valid multi-select answer.
+ *
+ * `chat: true` is "Chat about this" chosen ON THIS QUESTION (issue #58): it
+ * carries no other field and is always the LAST entry — see AnswerRequest.
  */
 export interface QuestionAnswer {
   index?: number;
   selected?: number[];
   other_text?: string;
+  chat?: boolean;
 }
 
 export interface AnswerRequest {
@@ -236,6 +244,18 @@ export interface AnswerRequest {
    * non-empty the flat fields are ignored.
    */
   answers?: QuestionAnswer[];
+  /**
+   * "Chat about this" (issue #58) on a SINGLE-question dialog: the operator
+   * chose to talk about the question instead of answering it. No text is
+   * sent — the agent asks what they want to know — and every other answer
+   * field must be absent.
+   *
+   * On a multi-question dialog the choice rides `answers` instead: the
+   * operator's answers to the questions BEFORE the one they chose to chat
+   * about, in order, then one `{ chat: true }` entry. The server enters
+   * exactly that path, so the agent knows which question the chat is about.
+   */
+  chat?: boolean;
 }
 
 export function answerRun(id: string, req: AnswerRequest): Promise<void> {

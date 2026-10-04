@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +263,246 @@ func TestAnswerDialog_multiSelectValidation(t *testing.T) {
 	// Free text alone (nothing toggled) is a valid multi-select answer.
 	if err := p.AnswerDialog(context.Background(), chatSession, d, provider.DialogAnswer{OtherText: "kale"}); err != nil {
 		t.Errorf("other-only multi-select answer rejected: %v", err)
+	}
+}
+
+// --- "Chat about this" (issue #58) ------------------------------------------
+//
+// The action selects the picker's OWN trailing "Chat about this" row — a
+// downward walk onto it, Enter — and nothing else: no Escape, no text, no
+// extra wait. On a multi-question form the operator's earlier answers are
+// played first, exactly as given, so the row is chosen on the question the
+// operator chose it on (compat §7 "Chat about this").
+
+var chatOther = provider.DialogOption{Label: "Other", IsOther: true}
+
+// chatSingle / chatMulti are the two flat question shapes: three modeled rows
+// each (two options + the free-text row).
+func chatSingle() provider.Dialog {
+	return provider.Dialog{ToolID: "toolu_single", Kind: provider.DialogKindQuestion, Prompt: "Favorite pet?", Answerable: true,
+		Options: []provider.DialogOption{{Label: "Dog"}, {Label: "Cat"}, chatOther}}
+}
+
+func chatMulti() provider.Dialog {
+	return provider.Dialog{ToolID: "toolu_multi", Kind: provider.DialogKindQuestion, Prompt: "Which toppings?", Answerable: true, Multi: true,
+		Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, chatOther}}
+}
+
+// keys renders named keys as single-key ops ("Down" → one op each).
+func keys(names ...string) []KeyOp {
+	out := make([]KeyOp, 0, len(names))
+	for _, n := range names {
+		out = append(out, KeyOp{Named: []string{n}})
+	}
+	return out
+}
+
+// Flat dialogs: the walk passes every modeled row (and, on a multi-select
+// picker, the Submit row), then Enter. That is the entire recipe — it ends on
+// the selecting Enter, with no paste and no review step.
+func TestDialogKeystrokes_chatAboutThis_flat(t *testing.T) {
+	cases := map[string]struct {
+		d    provider.Dialog
+		a    provider.DialogAnswer
+		want []KeyOp
+	}{
+		"single-select":                {chatSingle(), provider.DialogAnswer{Chat: true}, keys("Down", "Down", "Down", "Enter")},
+		"multi-select":                 {chatMulti(), provider.DialogAnswer{Chat: true}, keys("Down", "Down", "Down", "Down", "Enter")},
+		"single-select via answers[0]": {chatSingle(), provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true}}}, keys("Down", "Down", "Down", "Enter")},
+	}
+	for name, c := range cases {
+		got, err := DialogKeystrokes(c.d, c.a)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: ops = %+v; want %+v", name, got, c.want)
+		}
+		for _, op := range got {
+			if op.Text != "" {
+				t.Errorf("%s: the recipe pastes %q; want no text at all", name, op.Text)
+			}
+			if slices.Contains(op.Named, "Escape") {
+				t.Errorf("%s: the recipe sends Escape; want the picker's own row selected", name)
+			}
+		}
+	}
+}
+
+// A multi-question form is entered EXACTLY as the operator did it: the
+// answers to the questions before the chat, each with its ordinary recipe
+// (committing auto-advances), then the walk onto "Chat about this" on the
+// question they chose it on — by that question's own geometry — and nothing
+// after: no later question, no review screen.
+func TestDialogKeystrokes_chatAboutThis_multiQuestion(t *testing.T) {
+	// Color (single-select: Red, Blue, Other) then Fruits (multi-select:
+	// Apple, Banana, Cherry, Other).
+	form := twoQuestionDialog("toolu_form")
+	three := provider.Dialog{ToolID: "toolu_3q", Kind: provider.DialogKindQuestion, Prompt: "3 questions", Answerable: true,
+		Questions: []provider.Question{
+			{Header: "Toppings", Text: "Which toppings?", MultiSelect: true, Options: []provider.DialogOption{{Label: "Olives"}, {Label: "Onions"}, chatOther}},
+			{Header: "Size", Text: "Which size?", Options: []provider.DialogOption{{Label: "S"}, {Label: "M"}, {Label: "L"}, chatOther}},
+			{Header: "Crust", Text: "Which crust?", Options: []provider.DialogOption{{Label: "Thin"}, chatOther}},
+		}}
+	cases := map[string]struct {
+		d    provider.Dialog
+		a    provider.DialogAnswer
+		want []KeyOp
+	}{
+		// Chat on the first question: no earlier answers, Color's row 3.
+		"chat on the first question": {form,
+			provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true}}},
+			keys("Down", "Down", "Down", "Enter")},
+		// The maintainer's example: second option on the first question
+		// ([Down][Enter] → auto-advance), chat about the second — Fruits is
+		// multi-select with four modeled rows, so the row sits past Submit: 5.
+		"second option, then chat about the second question": {form,
+			provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 1}, {Chat: true}}},
+			keys("Down", "Enter" /* Blue */, "Down", "Down", "Down", "Down", "Down", "Enter" /* Chat about this */)},
+		// A multi-select answer first (Space on Olives, 3 Downs onto Submit,
+		// Enter), a single-select pick ([Down][Down][Enter] → L), then chat on
+		// the third question: Thin, Other | Chat about this → row 2.
+		"two answers, then chat about the third question": {three,
+			provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Selected: []int{0}}, {Index: 2}, {Chat: true}}},
+			keys("Space", "Down", "Down", "Down", "Enter", "Down", "Down", "Enter", "Down", "Down", "Enter")},
+	}
+	for name, c := range cases {
+		got, err := DialogKeystrokes(c.d, c.a)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: ops = %+v; want %+v", name, got, c.want)
+		}
+	}
+
+	// A free-text answer before the chat is entered too (type-first row).
+	got, err := DialogKeystrokes(form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 2, OtherText: "Teal"}, {Chat: true}}})
+	if err != nil {
+		t.Fatalf("free text then chat: %v", err)
+	}
+	want := append(keys("Down", "Down"), KeyOp{Text: "Teal"})
+	want = append(want, keys("Enter", "Down", "Down", "Down", "Down", "Down", "Enter")...)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("free text then chat: ops = %+v; want %+v", got, want)
+	}
+}
+
+// Every refusal happens at the door with the provider sentinel the API maps
+// (ErrInvalidReply → 400, ErrDialogNotAnswerable → 409).
+func TestDialogKeystrokes_chatAboutThis_rejects(t *testing.T) {
+	single := chatSingle()
+	form := twoQuestionDialog("toolu_form")
+	unanswerable := single
+	unanswerable.Answerable = false
+	rowless := single
+	rowless.Options = nil
+	chat := provider.QuestionAnswer{Chat: true}
+	cases := map[string]struct {
+		d    provider.Dialog
+		a    provider.DialogAnswer
+		want error
+	}{
+		"flat: with other_text":             {single, provider.DialogAnswer{Chat: true, OtherText: "Ferret"}, ErrInvalidReply},
+		"flat: with selected":               {single, provider.DialogAnswer{Chat: true, Selected: []int{0}}, ErrInvalidReply},
+		"flat: with index":                  {single, provider.DialogAnswer{Chat: true, Index: 1}, ErrInvalidReply},
+		"flat: chat beside answers":         {single, provider.DialogAnswer{Chat: true, Answers: []provider.QuestionAnswer{{Index: 0}}}, ErrInvalidReply},
+		"flat: plan dialog":                 {planTestDialog("toolu_plan"), provider.DialogAnswer{Chat: true}, ErrDialogNotAnswerable},
+		"flat: approval kind":               {provider.Dialog{Kind: provider.DialogKindApproval, Answerable: true, Options: []provider.DialogOption{{Label: "yes"}}}, provider.DialogAnswer{Chat: true}, ErrDialogNotAnswerable},
+		"flat: non-answerable dialog":       {unanswerable, provider.DialogAnswer{Chat: true}, ErrDialogNotAnswerable},
+		"flat: no modeled rows":             {rowless, provider.DialogAnswer{Chat: true}, ErrDialogNotAnswerable},
+		"form: top-level chat":              {form, provider.DialogAnswer{Chat: true}, ErrInvalidReply},
+		"form: top-level chat and answers":  {form, provider.DialogAnswer{Chat: true, Answers: []provider.QuestionAnswer{{Index: 0}, chat}}, ErrInvalidReply},
+		"form: an answer after the chat":    {form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{chat, {Selected: []int{0}}}}, ErrInvalidReply},
+		"form: more entries than questions": {form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 0}, {Selected: []int{0}}, chat}}, ErrInvalidReply},
+		"form: chat entry with an option":   {form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true, Index: 1}}}, ErrInvalidReply},
+		"form: chat entry with text":        {form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true, OtherText: "x"}}}, ErrInvalidReply},
+		"form: bad earlier answer":          {form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Selected: []int{0}}, chat}}, ErrInvalidReply},
+		"form: short answers without chat":  {form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 0}}}, ErrInvalidReply},
+	}
+	for name, c := range cases {
+		if ops, err := DialogKeystrokes(c.d, c.a); !errors.Is(err, c.want) {
+			t.Errorf("%s: ops = %+v, err = %v; want %v", name, ops, err, c.want)
+		}
+	}
+}
+
+// AnswerDialog plays the chat recipe through the runner like any answer —
+// keys only, never a paste — and records a chat intent naming the questions
+// that must stay unanswered.
+func TestAnswerDialog_chatAboutThis_playsTheOperatorsPath(t *testing.T) {
+	p, f := armedRunner(t)
+	form := twoQuestionDialog("toolu_form")
+	answer := provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Index: 1}, {Chat: true}}}
+	if err := p.AnswerDialog(context.Background(), chatSession, form, answer); err != nil {
+		t.Fatalf("AnswerDialog: %v", err)
+	}
+	var want []tmuxx.KeyEvent
+	for _, k := range []string{"Down", "Enter", "Down", "Down", "Down", "Down", "Down", "Enter"} {
+		want = append(want, tmuxx.KeyEvent{Kind: "keys", Keys: k})
+	}
+	if got := f.KeyLog(chatSession); !reflect.DeepEqual(got, want) {
+		t.Errorf("key log = %+v; want %+v", got, want)
+	}
+	in, ok := p.intents.byID["toolu_form"]
+	if !ok || !in.chat || !reflect.DeepEqual(in.unanswered, []string{"Which fruits do you like?"}) || len(in.answers) != 0 {
+		t.Errorf("intent = %+v (recorded %v); want a chat intent for the Fruits question", in, ok)
+	}
+
+	// Flat: the single question itself must stay unanswered.
+	p, f = armedRunner(t)
+	if err := p.AnswerDialog(context.Background(), chatSession, chatSingle(), provider.DialogAnswer{Chat: true}); err != nil {
+		t.Fatalf("AnswerDialog(flat): %v", err)
+	}
+	if got := len(f.KeyLog(chatSession)); got != 4 {
+		t.Errorf("flat chat played %d key events; want 4 (three Downs and the Enter)", got)
+	}
+	if in := p.intents.byID["toolu_single"]; !in.chat || !reflect.DeepEqual(in.unanswered, []string{"Favorite pet?"}) {
+		t.Errorf("flat intent = %+v; want a chat intent for the question itself", in)
+	}
+}
+
+// A refused chat answer plays nothing at all — not one key of the walk
+// (which on its own would leave the picker's cursor off the top row) — and
+// records no intent.
+func TestAnswerDialog_chatAboutThis_rejectedPlaysNothing(t *testing.T) {
+	p, f := armedRunner(t)
+	form := twoQuestionDialog("toolu_form")
+	for _, c := range []struct {
+		d provider.Dialog
+		a provider.DialogAnswer
+	}{
+		{chatSingle(), provider.DialogAnswer{Chat: true, OtherText: "Ferret"}},
+		{chatSingle(), provider.DialogAnswer{Chat: true, Selected: []int{1}}},
+		{form, provider.DialogAnswer{Chat: true}},
+		{form, provider.DialogAnswer{Answers: []provider.QuestionAnswer{{Chat: true}, {Selected: []int{0}}}}},
+		{planTestDialog("toolu_plan"), provider.DialogAnswer{Chat: true}},
+	} {
+		if err := p.AnswerDialog(context.Background(), chatSession, c.d, c.a); err == nil {
+			t.Errorf("AnswerDialog(%+v) = nil; want a refusal", c.a)
+		}
+	}
+	if log := f.KeyLog(chatSession); len(log) != 0 {
+		t.Errorf("refused chat answers still played %+v; want nothing", log)
+	}
+	if n := len(p.intents.byID); n != 0 {
+		t.Errorf("refused chat answers recorded %d intents; want none", n)
+	}
+}
+
+// The chat recipe is paced like every recipe: keyDelay sits before each key
+// after the first, so a request cancelled there stops after ONE key — the
+// picker never sees a burst.
+func TestAnswerDialog_chatAboutThis_isPaced(t *testing.T) {
+	p, f := armedRunner(t)
+	p.keyDelay = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.AnswerDialog(ctx, chatSession, chatMulti(), provider.DialogAnswer{Chat: true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AnswerDialog with a cancelled context = %v; want context.Canceled", err)
+	}
+	want := []tmuxx.KeyEvent{{Kind: "keys", Keys: "Down"}}
+	if got := f.KeyLog(chatSession); !reflect.DeepEqual(got, want) {
+		t.Errorf("key log = %+v; want exactly one Down (stopped at the first keyDelay)", got)
 	}
 }

@@ -4,89 +4,61 @@
    rules above are the <640px view; the min-width:640px block at the end
    restores the desktop header verbatim. */
 
-/* §1 — the convo chip reduced to a saturated dot beside the title (<640px).
-   Reuses the convo palette tokens so light/dark track the full chip. */
-.chat-state-dot {
+/* The secret-exposure warning (issue #108): a saturated dot beside the title
+   block below 640px, a destructive text chip at >=640px (the gate is in the
+   >=640px block at the end). Not a conversational state, so it uses the err
+   palette (same destructive tokens as `.chip.status-error`). The header no
+   longer carries a conversational-state badge (issue #58 §1). */
+.chat-exposed-dot {
   flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--muted);
-}
-.chat-state-dot.working {
-  background: var(--banner-text);
-}
-.chat-state-dot.needs-input,
-.chat-state-dot.question {
-  background: var(--run-text);
-}
-/* The secret-exposure warning dot/chip (issue #108) — not a conversational
-   state, so it skips the `.convo` namespace and uses the err palette (same
-   destructive tokens as `.chip.status-error`) rather than the convo one. */
-.chat-state-dot.exposed {
   background: var(--err-text);
 }
 .chip.exposed {
   background: var(--err-bg);
   color: var(--err-text);
 }
-
-/* The full text chip and the inline desktop cluster are the >=640px view. */
-.chat-state-chip {
+.chat-exposed-chip {
   display: none;
 }
+/* The inline open affordance + two-step Stop are the >=640px view; below it
+   they live in the ••• sheet. */
 .chat-desktop-actions {
   display: none;
 }
-/* The spawn-time model chip (issue #68) — same >=640px-only display gate as
-   the state chip beside it; its string rides the ••• menu's info row on
-   mobile instead. Muted so it reads as metadata, not an interactive control. */
-.chat-model-chip {
-  display: none;
-  color: var(--muted);
-  font-weight: 500;
-}
-/* The context-pressure meter (issue #243 / ADR-0061): a nested `· 62%` span
-   inside the model chip, so it inherits the chip's >=640px-only display gate —
-   the meter hides with the chip below 640px, no gate of its own. Untinted it
-   stays the chip's muted metadata; it warms to amber at >=80% occupancy and red
-   at >=95% (red wins), reusing the shared banner (amber) and danger palette
-   tokens so both themes track. */
-.chat-context-meter.warn {
-  color: var(--banner-text);
-}
-.chat-context-meter.danger {
-  color: var(--danger);
-}
-/* The "N behind" chip (issue #149) — unlike the model chip above, this rides
-   at ALL widths (a countless dot would be useless), so it skips the
-   >=640px-only display gate entirely; `.chip` already keeps it
-   display:inline-block. Same muted metadata look as the model chip. */
-.chat-behind-chip {
-  color: var(--muted);
-  font-weight: 500;
-}
 
-/* §1 — the `•••` overflow menu: an anchored dropdown mirroring TopBar's
-   nav-menu/nav-scrim pattern (outside-tap + Escape + tap-to-close). */
+/* §1 — the `•••` menu (issue #58 §1: every width). The trigger rides the
+   header row; its items render in an anchored dropdown at >=640px
+   (.chat-menu-dropdown) or a bottom sheet below (.chat-menu-panel.chat-sheet,
+   chatheader.css). Outside-tap + Escape + tap-to-close, like TopBar. */
 .chat-menu {
   position: relative;
   flex: none;
+}
+/* The sheet variant renders after the header (outside its stacking context);
+   its .chat-menu wrapper is only a scope, never a box. */
+.chat-menu--sheet {
+  display: contents;
 }
 .chat-menu-toggle {
   color: var(--text); /* size/hit-area from .icon-btn */
 }
 .chat-menu-panel {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 2; /* above the scrim, within the header's stacking context */
-  min-width: 12rem;
-  max-width: min(16rem, calc(100vw - 1rem));
   display: flex;
   flex-direction: column;
   padding: 0.4rem;
   background: var(--card);
+  color: var(--text);
+}
+.chat-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 2; /* within the header's stacking context, above the stream */
+  min-width: 12rem;
+  max-width: min(16rem, calc(100vw - 1rem));
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   box-shadow: var(--shadow);
@@ -125,16 +97,13 @@
 .chat-menu-item.accent .chat-menu-icon {
   color: var(--accent);
 }
-/* Non-interactive model info row (issue #68), pinned above the menu items: a
-   plain div (no hover affordance — it's not clickable), muted and set off by
-   its own bottom border/margin so it reads as metadata, not an action. */
-.chat-menu-info {
-  padding: 0.4rem 0.6rem 0.55rem;
-  margin-bottom: 0.25rem;
-  border-bottom: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 0.78rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+/* The Run details entry's ring glyph, boxed to the 20px icon column. */
+.chat-menu-ring {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
 }
 /* The OpenAffordance in a menu row reveals BOTH icon and label (the header
    context keeps it icon-only). This must appear after
@@ -165,13 +134,15 @@
 .chat-menu-open .action-label {
   display: inline;
 }
-/* Scrim behind the dropdown — a dedicated class (not .nav-scrim, which sits at
-   z:5 and would paint over the z:2 header and its own panel). */
+/* The dropdown's (and Run details popover's) outside-tap catcher: transparent,
+   BELOW the header (z-index 1 vs 2), so the header's own controls stay live. A
+   dedicated class (not .nav-scrim, which sits at z:5 and would paint over the
+   z:2 header and its own panel). */
 .chat-menu-scrim {
   position: fixed;
   inset: 0;
   z-index: 1;
-  background: rgba(0, 0, 0, 0.4);
+  background: transparent;
 }
 
 /* The error banner outranks the header so that when the mobile overlay header
@@ -388,35 +359,27 @@
   inset: -4px; /* 36 + 2*4 = 44px touch target */
 }
 
-/* >=640px: restore the original wrapped inline header; hide all mobile bits.
-   The <640px §2 overlay query is inert here, so the header stays sticky and the
-   headerVisible toggle is a harmless no-op (one JS path, CSS gates the view). */
+/* >=640px: the inline header — the exposure chip and the inline open/Stop
+   controls replace their phone forms. The <640px §2 overlay query is inert
+   here, so the header stays sticky and the headerVisible toggle is a harmless
+   no-op (one JS path, CSS gates the view). */
 @media (min-width: 640px) {
-  .chat-header {
-    flex-wrap: wrap;
-  }
+  /* The title block hugs its content and shrinks (both lines ellipsize) before
+     anything wraps: one row at every width now that the state, model and
+     behind chips have left it (issue #58 §1). */
   .chat-titlebar {
     flex: 0 1 auto;
-    max-width: 40%;
   }
   .chat-header .spacer {
     flex: 1; /* the sole grower again — pushes the inline controls right */
   }
-  .chat-state-dot {
+  .chat-exposed-dot {
     display: none;
   }
-  .chat-state-chip {
-    display: inline-block;
-  }
-  /* issue #68 — flips on beside the state chip at desktop width. */
-  .chat-model-chip {
+  .chat-exposed-chip {
     display: inline-block;
   }
   .chat-desktop-actions {
     display: contents; /* transparent wrapper → identical flex layout to before */
-  }
-  .chat-menu,
-  .chat-menu-scrim {
-    display: none;
   }
 }
