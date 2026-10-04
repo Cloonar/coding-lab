@@ -1,0 +1,1197 @@
+<!doctype html>
+<!--
+  Reference mockup for the repositories and repository settings redesign
+  (design direction A, "Single scroll", round 2).
+  A static design reference, not shipped code: the spec is the issue's agent brief, and this
+  file shows the intended layout, hierarchy, copy tone and interaction. Open it in a browser.
+  - At viewport widths below 840px the phone layout fills the screen. Wider viewports show a
+    phone frame with design notes; the switch in the top bar changes it to a desktop frame.
+  - Everything is clickable. The URL hash opens a state directly, which is how to screenshot
+    it with a headless browser. Tokens are joined by dots, for example #desktop.settings.
+      frame:      desktop, nonotes
+      list:       (no token), add, added
+      repo home:  overview, not-ready
+      settings:   settings, changed, error, leave, runner, builtin, schedules, secrets,
+                  imports, setup
+      schedules:  schedule, schedule-new
+      delete:     delete, delete-blocked
+    Reload after changing the hash.
+  Sample content is invented. Markup, CSS and script here are throwaway; follow the app's own
+  components, tokens and conventions when implementing.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>lab repositories and settings mockup</title>
+</head>
+<body>
+<style>
+/* The app's own vendored serif, loaded by relative path so the file needs no network. */
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations'); font-weight: 200 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations'); font-weight: 200 900; font-style: italic; font-display: swap; }
+[hidden] { display: none !important; }
+img { max-width: 100%; }
+/* Layout: a slim prototype bar over a device stage. The device is a size container, so the app inside
+   answers to the frame (phone or desktop), not to the window. Colors and type are lab's own tokens. */
+:root{
+  --bg:#faf9f5; --card:#ffffff; --text:#1f1e1d; --muted:#6b675c; --border:#e8e4da; --hover:#f1efe8;
+  --accent:#d97757; --accent-text:#2a1a12; --accent-bg:#fbe9e1; --link:#b0532f;
+  --danger:#c0362c; --danger-border:#e6b8b3; --ok:#1a9c5b; --warn:#b98a1f;
+  --run-bg:#e7f2e1; --run-text:#1f6b3d; --idle-bg:#ece7db; --chip-bg:#eeeae0; --chip-text:#524c3f;
+  --banner-bg:#faf1d8; --banner-border:#e9cd8e; --banner-text:#5b4b16;
+  --err-bg:#fbeae5; --err-border:#eec2b8; --err-text:#9c3324;
+  --stage:#ebe7dc; --scrim:rgba(31,30,29,.42); --knob:#ffffff;
+  --shadow:0 1px 2px rgba(40,32,22,.06),0 1px 3px rgba(40,32,22,.04);
+  --shadow-lift:0 12px 34px rgba(40,32,22,.16);
+  --font-serif:'Source Serif 4',Georgia,'Times New Roman',serif;
+  --font-sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  --r-card:14px; --r-ctl:10px; --r-pill:999px;
+  --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2rem;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#262624; --card:#30302e; --text:#ecebe6; --muted:#a5a196; --border:#3e3c37; --hover:#373631;
+  --accent:#d97757; --accent-bg:#40291f; --link:#e08d70;
+  --danger:#f28577; --danger-border:#5c2b27; --ok:#3ecf8e; --warn:#d9b24c;
+  --run-bg:#17301d; --run-text:#6cd99a; --idle-bg:#35332e; --chip-bg:#3a3833; --chip-text:#d6d2c7;
+  --banner-bg:#2e2712; --banner-border:#5c4f20; --banner-text:#e6d9a6;
+  --err-bg:#2e1613; --err-border:#5c2b27; --err-text:#f3aca2;
+  --stage:#1a1a18; --scrim:rgba(0,0,0,.58); --knob:#f4f2ec;
+  --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-lift:0 12px 34px rgba(0,0,0,.5);
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#262624; --card:#30302e; --text:#ecebe6; --muted:#a5a196; --border:#3e3c37; --hover:#373631;
+  --accent:#d97757; --accent-bg:#40291f; --link:#e08d70;
+  --danger:#f28577; --danger-border:#5c2b27; --ok:#3ecf8e; --warn:#d9b24c;
+  --run-bg:#17301d; --run-text:#6cd99a; --idle-bg:#35332e; --chip-bg:#3a3833; --chip-text:#d6d2c7;
+  --banner-bg:#2e2712; --banner-border:#5c4f20; --banner-text:#e6d9a6;
+  --err-bg:#2e1613; --err-border:#5c2b27; --err-text:#f3aca2;
+  --stage:#1a1a18; --scrim:rgba(0,0,0,.58); --knob:#f4f2ec;
+  --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-lift:0 12px 34px rgba(0,0,0,.5);
+  color-scheme:dark;
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--stage);color:var(--text);font:15px/1.5 var(--font-sans);-webkit-text-size-adjust:100%}
+h1,h2,h3{font-family:var(--font-serif);font-weight:600;margin:0;text-wrap:balance;overflow-wrap:anywhere}
+h4{margin:0}
+p{margin:0}
+button,input,select,textarea{font:inherit;color:inherit}
+button{-webkit-tap-highlight-color:transparent}
+.mono,code{font-family:var(--font-mono);font-size:.84em}
+.muted{color:var(--muted)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg.i{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+svg.i.sm{width:16px;height:16px}
+.spacer{flex:1}
+
+/* ---- prototype chrome ---- */
+.proto{height:100%;display:flex;flex-direction:column}
+.pbar{display:flex;align-items:center;gap:var(--s3);padding:6px 16px;background:var(--card);border-bottom:1px solid var(--border)}
+.pbar-badge{width:30px;height:30px;flex:none;border-radius:9px;background:var(--accent);color:var(--accent-text);display:grid;place-items:center;font-weight:700}
+.pbar-t{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+.pbar-name{font-family:var(--font-serif);font-weight:600;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pbar-sub{color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stage{flex:1;min-height:0;position:relative;display:flex;justify-content:center;gap:var(--s5)}
+.device{container:device / inline-size;position:relative;overflow:hidden;background:var(--bg);width:100%;height:100%}
+.notes{background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);padding:var(--s4) var(--s4) var(--s5);overflow-y:auto;position:absolute;inset:8px;z-index:60;box-shadow:var(--shadow-lift)}
+.proto:not(.notes-open) .notes{display:none}
+.notes-h{display:flex;align-items:flex-start;gap:var(--s2)}
+.notes-h > div{flex:1;min-width:0}
+.notes h2{font-size:1.35rem}
+.notes h3{font-family:var(--font-sans);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:var(--s4) 0 var(--s1)}
+.notes ul{margin:0;padding-left:1.1rem;display:flex;flex-direction:column;gap:.35rem}
+.notes .lead{margin-top:var(--s2);font-family:var(--font-serif);font-size:1.02rem;line-height:1.45}
+.notes .fine{margin-top:var(--s4);font-size:.82rem;color:var(--muted)}
+.seg.viewseg{display:none}
+@media (min-width:840px){
+  .seg.viewseg{display:inline-flex}
+  .stage{padding:var(--s4)}
+  .device{border:1px solid var(--border);box-shadow:var(--shadow-lift)}
+  .mode-phone .device{width:390px;flex:none;border-radius:30px;max-height:820px}
+  .mode-desktop .device{flex:1;min-width:0;border-radius:12px}
+  .mode-phone .notes{position:static;inset:auto;z-index:auto;width:360px;flex:none;max-height:820px;box-shadow:var(--shadow)}
+  .mode-desktop .notes{inset:16px 16px 16px auto;width:360px}
+}
+@media (max-width:839.98px){.pbar-sub{display:none}}
+
+/* ---- app shell ---- */
+.app{height:100%;display:flex;position:relative}
+.rail{display:none;width:236px;flex:none;flex-direction:column;gap:var(--s2);padding:var(--s3);background:var(--card);border-right:1px solid var(--border);overflow-y:auto}
+.app.drawer-open .rail{display:flex;position:absolute;inset:0 auto 0 0;z-index:46;width:260px;max-width:85%;box-shadow:var(--shadow-lift)}
+.drawer-scrim{display:none;position:absolute;inset:0;z-index:45;background:var(--scrim)}
+.app.drawer-open .drawer-scrim{display:block}
+.rail-brand{font-family:var(--font-serif);font-weight:650;font-size:1.3rem;padding:.1rem .3rem}
+.rail-new{display:flex;align-items:center;justify-content:center;gap:.4rem;min-height:44px;border-radius:var(--r-ctl);background:var(--accent);color:var(--accent-text);font-weight:600}
+.eyebrow{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+.rail .eyebrow{margin-top:var(--s2);padding:0 .3rem}
+.rail-run{display:flex;align-items:center;gap:.55rem;min-height:44px;padding:.3rem .5rem;border-radius:var(--r-ctl)}
+.rail-run span{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+.rail-run b{font-weight:550;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail-run small{color:var(--muted);font-size:.78rem}
+.rail-link{display:flex;align-items:center;gap:.6rem;min-height:40px;padding:0 .5rem;border-radius:var(--r-ctl);font-weight:500}
+.rail-link .i{color:var(--muted)}
+.rail-link.active{background:var(--hover);color:var(--link);font-weight:600}
+.rail-link.active .i{color:var(--link)}
+.rail-foot{display:flex;align-items:center;gap:.5rem;padding:.6rem .5rem 0;border-top:1px solid var(--border);font-size:.85rem;color:var(--muted)}
+.main{flex:1;min-width:0;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.topstrip{display:flex;align-items:center;gap:.25rem;padding:2px var(--s1);border-bottom:1px solid var(--border);background:var(--bg)}
+.topstrip .brand{font-family:var(--font-serif);font-weight:650;font-size:1.15rem}
+.scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.page{max-width:760px;margin-inline:auto;padding:var(--s3) var(--s4) var(--s6)}
+.page.wide{max-width:1100px}
+@container device (min-width:900px){
+  .app .rail{display:flex;position:static;width:236px;box-shadow:none}
+  .app .drawer-scrim{display:none}
+  .topstrip{display:none}
+  .page{padding:var(--s5) var(--s5) var(--s6)}
+}
+
+/* ---- components ---- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:.4rem;min-height:44px;padding:.4rem .95rem;border:1px solid var(--border);border-radius:var(--r-ctl);background:var(--card);font-weight:550;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--hover)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text);font-weight:600}
+.btn.primary:hover{background:var(--accent);filter:brightness(.96)}
+.btn.danger{color:var(--danger);border-color:var(--danger-border)}
+.btn.small{min-height:36px;padding:.2rem .7rem;font-size:.9rem}
+.iconbtn{width:44px;height:44px;flex:none;display:inline-grid;place-items:center;border:0;background:none;border-radius:var(--r-ctl);cursor:pointer;color:var(--muted)}
+.iconbtn:hover{background:var(--hover)}
+.chip{display:inline-flex;align-items:center;gap:.3rem;padding:.08rem .55rem;border-radius:var(--r-pill);background:var(--chip-bg);color:var(--chip-text);font-size:.78rem;font-weight:550;white-space:nowrap;font-family:var(--font-sans)}
+.chip.run{background:var(--run-bg);color:var(--run-text)}
+.chip.warn{background:var(--banner-bg);color:var(--banner-text);box-shadow:inset 0 0 0 1px var(--banner-border)}
+.chip.err{background:var(--err-bg);color:var(--err-text);box-shadow:inset 0 0 0 1px var(--err-border)}
+.chip.attn{background:var(--accent-bg);color:var(--link)}
+.count{font-size:.75rem;font-weight:600;background:var(--chip-bg);color:var(--chip-text);border-radius:var(--r-pill);padding:0 .42rem;font-variant-numeric:tabular-nums}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.dot.ok{background:var(--ok)} .dot.attn{background:var(--accent)} .dot.err{background:var(--danger)} .dot.warn{background:var(--warn)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow)}
+.pad{padding:var(--s4)}
+.phead{display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s3)}
+.phead h1{font-size:1.55rem;flex:1;min-width:0}
+.search{display:flex;align-items:center;gap:.5rem;min-height:44px;padding:0 .75rem;border:1px solid var(--border);border-radius:var(--r-ctl);background:var(--card);color:var(--muted)}
+.search input{flex:1;min-width:0;min-height:42px;border:0;background:none;outline:none;font-size:16px;color:var(--text)}
+.search:focus-within{outline:2px solid var(--accent);outline-offset:1px}
+.banner{display:flex;align-items:center;gap:var(--s3);padding:.5rem .7rem;border:1px solid var(--banner-border);background:var(--banner-bg);color:var(--banner-text);border-radius:var(--r-ctl);font-size:.9rem}
+.banner.err{border-color:var(--err-border);background:var(--err-bg);color:var(--err-text)}
+.banner .btn{background:var(--card);color:var(--text)}
+.grow{flex:1;min-width:0}
+.txt2{flex:1;min-width:0;display:flex;flex-direction:column}
+.txt2 b{font-weight:550;overflow-wrap:anywhere}
+.txt2 small{color:var(--muted);font-size:.86rem;overflow-wrap:anywhere}
+.banner .txt2 small{color:inherit;opacity:.9}
+.prog{height:6px;border-radius:var(--r-pill);background:var(--chip-bg);overflow:hidden}
+.prog i{display:block;height:100%;background:var(--accent);border-radius:var(--r-pill)}
+.empty{padding:var(--s5) var(--s4);text-align:center;color:var(--muted);border:1px dashed var(--border);border-radius:var(--r-card)}
+.back{display:inline-flex;align-items:center;gap:.15rem;min-height:44px;margin-left:-.45rem;padding:0 .5rem 0 .2rem;border:0;background:none;border-radius:var(--r-ctl);color:var(--muted);font-weight:550;cursor:pointer}
+.back:hover{background:var(--hover)}
+.tabs{display:flex;gap:var(--s5);border-bottom:1px solid var(--border);margin-top:var(--s2)}
+.tabs button{display:inline-flex;align-items:center;gap:.4rem;min-height:44px;padding:0 .1rem;margin-bottom:-1px;border:0;border-bottom:2px solid transparent;background:none;font-weight:550;color:var(--muted);cursor:pointer}
+.tabs button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
+.toast{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:70;max-width:calc(100% - 32px);padding:.5rem .95rem;border-radius:var(--r-pill);background:var(--text);color:var(--bg);font-size:.9rem;font-weight:550;box-shadow:var(--shadow-lift);text-align:center}
+
+/* ---- form vocabulary (shared by all three directions) ---- */
+.fields{display:flex;flex-direction:column;gap:var(--s4)}
+.field{display:flex;flex-direction:column;gap:.3rem;min-width:0}
+.lbl{display:flex;align-items:center;flex-wrap:wrap;gap:.2rem .5rem;font-weight:600;font-size:.9rem}
+.inh{font-style:normal;font-weight:500;font-size:.74rem;color:var(--muted);border:1px dashed var(--muted);border-radius:var(--r-pill);padding:0 .45rem;line-height:1.5}
+.field input,.field select,.field textarea{width:100%;min-height:44px;padding:.45rem .7rem;font-size:16px;border:1px solid var(--border);border-radius:var(--r-ctl);background:var(--bg)}
+.field input.mono{font-family:var(--font-mono);font-size:15px}
+.field textarea{font-family:var(--font-mono);font-size:13px;line-height:1.45;resize:vertical}
+.field ::placeholder{color:var(--muted);opacity:.85}
+.hint{color:var(--muted);font-size:.82rem}
+.sub{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;padding-top:var(--s3);border-top:1px solid var(--border)}
+.grid3{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s3)}
+.grid3 > :first-child{grid-column:1 / -1}
+.grid3.even > :first-child{grid-column:auto}
+.grid3.even{grid-template-columns:repeat(3,minmax(0,1fr))}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s3)}
+@container device (min-width:900px){
+  .grid3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .grid3 > :first-child{grid-column:auto}
+}
+.srow{display:flex;align-items:center;gap:var(--s3);min-height:44px;cursor:pointer}
+.srow .txt2 b{font-weight:600;font-size:.95rem}
+.srow .txt2 small{font-size:.82rem}
+input.switch{appearance:none;-webkit-appearance:none;flex:none;width:46px;height:28px;min-height:0;margin:0;padding:0;border-radius:var(--r-pill);background:var(--idle-bg);border:1px solid var(--border);position:relative;cursor:pointer;transition:background .15s}
+input.switch::before{content:"";position:absolute;top:2px;left:2px;width:22px;height:22px;border-radius:50%;background:var(--knob);box-shadow:0 1px 2px rgba(0,0,0,.28);transition:transform .15s}
+input.switch:checked{background:var(--ok);border-color:var(--ok)}
+input.switch:checked::before{transform:translateX(18px)}
+.seg{display:inline-flex;align-self:flex-start;max-width:100%;padding:3px;gap:2px;background:var(--chip-bg);border-radius:var(--r-ctl)}
+.seg button{min-height:38px;padding:0 .85rem;border:0;border-radius:8px;background:none;font-weight:550;color:var(--muted);cursor:pointer;white-space:nowrap}
+.seg button[aria-pressed="true"]{background:var(--card);color:var(--text);box-shadow:var(--shadow)}
+.pbar .seg button{min-height:32px}
+.rows{display:flex;flex-direction:column}
+.rows > .r{display:flex;align-items:center;gap:var(--s3);min-height:56px;padding:.5rem 0}
+.rows > .r:first-child{padding-top:0}
+.rows > .r + .r{border-top:1px solid var(--border)}
+.rows-foot{display:flex;padding-top:var(--s3);border-top:1px solid var(--border)}
+details.more > summary{display:flex;align-items:center;gap:.4rem;min-height:44px;cursor:pointer;font-weight:600;font-size:.9rem;list-style:none}
+details.more > summary::-webkit-details-marker{display:none}
+details.more > summary .i{color:var(--muted);transition:transform .15s}
+details.more[open] > summary .i{transform:rotate(90deg)}
+.danger-box{display:flex;flex-direction:column;gap:var(--s3);align-items:flex-start}
+.confirm{display:flex;gap:var(--s2);flex-wrap:wrap}
+.btn.solid-danger{background:var(--danger);border-color:var(--danger);color:var(--card)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+
+/* ---- round 2 additions ---- */
+.btn:disabled{opacity:.5;cursor:default}
+.list{display:flex;flex-direction:column}
+.list > * + *{border-top:1px solid var(--border)}
+.list > .r{display:flex;align-items:center;gap:var(--s3);min-height:56px;padding:.5rem 0}
+.list-foot{padding-top:var(--s3)}
+.linkbtn{border:0;background:none;padding:.3rem .15rem;margin:-.3rem -.15rem;color:var(--link);font-weight:600;font-size:.86rem;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.inh.set{border:1px solid transparent;background:var(--accent-bg);color:var(--link);font-weight:600}
+.inh-line{display:flex;align-items:center;flex-wrap:wrap;gap:.1rem .6rem}
+.inh-line small{color:var(--muted);font-size:.82rem}
+.changed > .lbl::before{content:"";width:7px;height:7px;flex:none;border-radius:50%;background:var(--accent)}
+.srow.changed .txt2 b::before{content:"";display:inline-block;width:7px;height:7px;margin-right:.4rem;vertical-align:middle;border-radius:50%;background:var(--accent)}
+.invalid input,.invalid select,.invalid textarea{border-color:var(--danger)}
+.err-t{color:var(--danger);font-size:.84rem;font-weight:550}
+.flash{outline:2px solid var(--accent);outline-offset:6px;border-radius:6px}
+.na{padding:.6rem .75rem;border:1px dashed var(--border);border-radius:var(--r-ctl);background:var(--bg);color:var(--muted);font-size:.88rem}
+.sub.first{border-top:0;padding-top:0}
+.cfm{display:inline-flex;gap:var(--s2);flex-wrap:wrap}
+.toast{display:flex;align-items:center;gap:.8rem}
+.toast button{border:0;background:none;padding:.15rem .1rem;color:inherit;font-weight:700;text-decoration:underline;text-underline-offset:2px;cursor:pointer;white-space:nowrap}
+.pick{display:flex;flex-wrap:wrap;gap:.4rem}
+.pick button{min-height:40px;padding:0 .85rem;border:1px solid var(--border);border-radius:var(--r-pill);background:var(--card);font-weight:550;color:var(--muted);cursor:pointer}
+.pick button[aria-pressed="true"]{background:var(--text);border-color:var(--text);color:var(--bg)}
+.pick.week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}
+.pick.week button{padding:0;border-radius:var(--r-ctl)}
+.seg.fill{display:flex;align-self:stretch}
+.seg.fill button{flex:1;padding:0 .2rem}
+.scrim{position:absolute;inset:0;z-index:50;background:var(--scrim)}
+.dlg{position:absolute;left:0;right:0;bottom:0;z-index:51;max-height:92%;overflow-y:auto;display:flex;flex-direction:column;gap:var(--s3);padding:var(--s4) var(--s4) var(--s5);background:var(--card);border:1px solid var(--border);border-bottom:0;border-radius:20px 20px 0 0;box-shadow:var(--shadow-lift)}
+.dlg h2{font-size:1.25rem}
+.dlg h2:focus{outline:none}
+.dlg ul{margin:0;padding-left:1.15rem;display:flex;flex-direction:column;gap:.25rem}
+.dlg-actions{display:flex;flex-wrap:wrap;gap:var(--s2)}
+.dlg-actions .btn{flex:1}
+@container device (min-width:900px){
+  .dlg{left:50%;right:auto;bottom:auto;top:11%;width:480px;transform:translateX(-50%);border-bottom:1px solid var(--border);border-radius:var(--r-card);padding:var(--s5)}
+  .dlg-actions{justify-content:flex-end}
+  .dlg-actions .btn{flex:none}
+}
+/* ---- Direction A, round 2 ---- */
+.a-need{display:flex;flex-direction:column;gap:var(--s2)}
+.a-lh{display:flex;align-items:center;gap:.5rem;margin:var(--s4) 0 var(--s2)}
+.a-sortnote{font-size:.8rem;color:var(--muted)}
+.a-table{overflow:hidden}
+.a-thead{display:none}
+.a-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:var(--s3);width:100%;padding:.65rem .9rem;border:0;background:none;text-align:left;cursor:pointer}
+.a-row + .a-row{border-top:1px solid var(--border)}
+.a-row:hover{background:var(--hover)}
+.a-name{min-width:0;display:flex;flex-direction:column;gap:1px}
+.a-name b{display:flex;align-items:center;flex-wrap:wrap;gap:.2rem .5rem;font-weight:650;font-size:1.03rem}
+.a-name .mono{overflow-wrap:anywhere}
+.a-line{display:flex;flex-wrap:wrap;align-items:center;gap:.15rem .8rem;margin-top:.25rem;color:var(--muted);font-size:.87rem}
+.a-line > span{display:inline-flex;align-items:center;gap:.35rem}
+.a-cell{display:none}
+.a-row > .i{color:var(--muted)}
+.a-rhead{max-width:1100px;margin-inline:auto;padding:var(--s1) var(--s4) 0}
+.a-title{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .6rem}
+.a-title h1{font-size:1.6rem}
+.a-ov{max-width:1100px;margin-inline:auto;padding:var(--s4) var(--s4) var(--s6);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3);align-items:start}
+.a-ov > div.card{display:flex;flex-direction:column;gap:var(--s2)}
+.a-ch{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2)}
+.a-ch h3{flex:1;font-size:1.08rem}
+.ready{grid-column:1 / -1}
+.ready > summary{display:flex;align-items:center;gap:.7rem;min-height:62px;padding:.6rem var(--s4);cursor:pointer;list-style:none}
+.ready > summary::-webkit-details-marker{display:none}
+.ready .chev{color:var(--muted);transition:transform .15s}
+.ready[open] .chev{transform:rotate(90deg)}
+.ready.bad{border-color:var(--err-border)}
+.chk{display:flex;flex-direction:column;padding:0 var(--s4) var(--s2);border-top:1px solid var(--border)}
+.chk-i{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .65rem;padding:.55rem 0}
+.chk-i + .chk-i{border-top:1px solid var(--border)}
+.chk-i .txt2{flex:1 1 170px}
+.chk-ic{width:24px;height:24px;flex:none;display:grid;place-items:center;border-radius:50%;background:var(--chip-bg);color:var(--chip-text)}
+.chk-ic.ok{background:var(--run-bg);color:var(--run-text)}
+.chk-ic.bad{background:var(--err-bg);color:var(--err-text)}
+.chk-ic.big{width:30px;height:30px}
+.chk .prog{margin-top:.35rem}
+.a-chips{position:sticky;top:0;z-index:5;display:flex;gap:.35rem;overflow-x:auto;padding:0 var(--s4);background:var(--bg);border-bottom:1px solid var(--border);scrollbar-width:none;scroll-behavior:smooth}
+.a-chips::-webkit-scrollbar{display:none}
+.a-chips button{flex:none;display:inline-flex;align-items:center;min-height:48px;padding:0;border:0;background:none;cursor:pointer}
+.a-chips button span{display:inline-flex;align-items:center;height:32px;padding:0 .8rem;border-radius:var(--r-pill);border:1px solid var(--border);background:var(--card);font-weight:550;font-size:.88rem;color:var(--muted)}
+.a-chips button[aria-current="true"] span{background:var(--text);border-color:var(--text);color:var(--bg)}
+.a-chips button.danger span{color:var(--danger)}
+.a-chips button.danger[aria-current="true"] span{background:var(--danger);border-color:var(--danger);color:var(--card)}
+.a-chips button.dirty span::after,.a-toc button.dirty::after{content:"";width:7px;height:7px;flex:none;margin-left:.4rem;border-radius:50%;background:var(--accent)}
+.a-body{max-width:1100px;margin-inline:auto;padding:var(--s4) var(--s4) var(--s6);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s5)}
+.a-toc{display:none}
+.a-secs{display:flex;flex-direction:column;gap:var(--s5);min-width:0;max-width:720px;padding-bottom:9rem}
+.a-sec-head{margin:0 0 var(--s2) .1rem}
+.a-sec-head .hrow{display:flex;align-items:center;flex-wrap:wrap;gap:.2rem .6rem}
+.a-sec-head h2{font-size:1.22rem}
+.a-sec-head p{color:var(--muted);font-size:.88rem}
+.tag-live{font-size:.72rem;font-weight:600;color:var(--muted);border:1px solid var(--border);border-radius:var(--r-pill);padding:.05rem .5rem;background:var(--card)}
+.a-sec.danger h2{color:var(--danger)}
+.a-sec.danger .card{border-color:var(--danger-border)}
+.dim{opacity:.55}
+.s-row{display:flex;align-items:center;gap:var(--s2)}
+.s-main{flex:1;min-width:0;display:flex;align-items:center;gap:.5rem;min-height:60px;padding:.6rem 0;border:0;background:none;text-align:left;cursor:pointer}
+.s-main:hover b{color:var(--link)}
+.s-main .txt2 b{display:flex;align-items:center;flex-wrap:wrap;gap:.1rem .3rem}
+.s-main .txt2 b .i{color:var(--muted)}
+.x-row > summary{display:flex;align-items:center;gap:.5rem;min-height:56px;padding:.5rem 0;cursor:pointer;list-style:none}
+.x-row > summary::-webkit-details-marker{display:none}
+.x-row > summary .chev{color:var(--muted);transition:transform .15s}
+.x-row[open] > summary .chev{transform:rotate(90deg)}
+.x-body{display:flex;flex-direction:column;gap:var(--s3);padding:0 0 var(--s4)}
+.x-actions{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2)}
+.add-line{display:flex;gap:var(--s2);padding-top:var(--s3)}
+.add-line select{flex:1;min-width:0;min-height:44px;padding:0 .6rem;font-size:16px;border:1px solid var(--border);border-radius:var(--r-ctl);background:var(--bg)}
+.savebar{display:flex;align-items:center;gap:var(--s2);padding:.5rem var(--s4);background:var(--card);border-top:1px solid var(--border);box-shadow:0 -8px 22px rgba(40,32,22,.09)}
+.savebar .msg{flex:1;min-width:0;display:flex;align-items:center;gap:.55rem}
+.savebar .txt2 b{font-weight:650;font-size:.93rem}
+.savebar.bad .dot{background:var(--danger)}
+.savebar.bad .txt2 b{color:var(--danger)}
+/* schedule editor: its own screen on the phone, a side panel on desktop */
+.ed-scrim{display:none}
+.ed{position:absolute;inset:0;z-index:48;display:flex;flex-direction:column;background:var(--bg)}
+.ed-h{display:flex;align-items:center;gap:.25rem;padding:2px var(--s3) 2px 2px;border-bottom:1px solid var(--border);background:var(--bg)}
+.ed-h h2{font-size:1.15rem;flex:1;min-width:0}
+.ed-b{flex:1;min-height:0;overflow-y:auto;padding:var(--s4);display:flex;flex-direction:column;gap:var(--s4)}
+.ed-b > *{flex:none}
+.ed-f{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2);padding:var(--s3) var(--s4);border-top:1px solid var(--border);background:var(--card)}
+.ed-f .grow{font-size:.84rem}
+.preview{padding:.5rem .7rem;border:1px solid var(--border);border-radius:var(--r-ctl);background:var(--bg);font-size:.88rem}
+.preview.bad{border-color:var(--err-border);background:var(--err-bg);color:var(--err-text)}
+@container device (min-width:900px){
+  .a-thead,.a-row{grid-template-columns:minmax(0,2.3fr) minmax(0,1.5fr) repeat(4,minmax(0,1fr)) 20px}
+  .a-thead{display:grid;column-gap:var(--s3);padding:.55rem .9rem;border-bottom:1px solid var(--border);background:var(--bg)}
+  .a-line{display:none}
+  .a-cell{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .4rem;min-width:0;font-size:.9rem;font-variant-numeric:tabular-nums}
+  .a-rhead{padding:var(--s3) var(--s5) 0}
+  .a-ov{grid-template-columns:repeat(2,minmax(0,1fr));padding:var(--s5)}
+  .a-chips{display:none}
+  .a-body{grid-template-columns:180px minmax(0,1fr);padding:var(--s5)}
+  .a-toc{display:flex;flex-direction:column;gap:2px;position:sticky;top:var(--s5);align-self:start}
+  .a-toc .eyebrow{margin:var(--s3) 0 .15rem .6rem}
+  .a-toc .eyebrow:first-child{margin-top:0}
+  .a-toc button{display:flex;align-items:center;min-height:34px;padding:0 .6rem;border:0;border-radius:8px;background:none;text-align:left;font-weight:500;color:var(--muted);cursor:pointer}
+  .a-toc button:hover{color:var(--text)}
+  .a-toc button[aria-current="true"]{background:var(--hover);color:var(--link);font-weight:650}
+  .a-toc button.danger{color:var(--danger);margin-top:var(--s3)}
+  .savebar{padding-inline:var(--s5)}
+  .ed-scrim{display:block;position:absolute;inset:0;z-index:47;background:var(--scrim)}
+  .ed{inset:0 0 0 auto;width:520px;border-left:1px solid var(--border);box-shadow:var(--shadow-lift)}
+  .ed-h{padding-left:var(--s2)}
+  .ed-b{padding:var(--s5)}
+  .ed-f{padding-inline:var(--s5)}
+}
+</style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+<symbol id="i-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+<symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></symbol>
+<symbol id="i-ticket" viewBox="0 0 24 24"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2M13 17v2M13 11v2"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+<symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+<symbol id="i-box" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
+<symbol id="i-merge" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></symbol>
+<symbol id="i-import" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M6 3 20 12 6 21Z"/></symbol>
+<symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-bang" viewBox="0 0 24 24"><path d="M12 6v7M12 17.5h.01"/></symbol>
+</defs></svg>
+<div class="proto mode-phone">
+<header class="pbar"><span class="pbar-badge">A</span><div class="pbar-t"><span class="pbar-name">Single scroll</span><span class="pbar-sub">lab repositories and settings · direction A, round 2</span></div><span class="spacer"></span><div class="seg viewseg" role="group" aria-label="Preview size"><button type="button" data-mode="phone" aria-pressed="true">Phone</button><button type="button" data-mode="desktop" aria-pressed="false">Desktop</button></div><button type="button" class="btn small" id="notes-btn" aria-expanded="false">Notes</button></header>
+<div class="stage"><div class="device"><div class="app">
+<div class="drawer-scrim"></div>
+<nav class="rail" aria-label="App navigation (static in this mockup)">
+  <div class="rail-brand">lab</div>
+  <div class="rail-new"><svg class="i sm" aria-hidden="true"><use href="#i-plus"/></svg>New run</div>
+  <div class="eyebrow">Active</div>
+  <div class="rail-run"><i class="dot attn"></i><span><b>Fix chat dock overlap</b><small>coding-lab</small></span></div>
+  <div class="rail-run"><i class="dot ok"></i><span><b>afk/61 Autoland re-arm</b><small>coding-lab · 1h 12m left</small></span></div>
+  <div class="rail-run"><i class="dot ok"></i><span><b>afk/118 Backfill events</b><small>data-pipeline · 48m left</small></span></div>
+  <div class="rail-run"><i class="dot"></i><span><b>Bump flake inputs</b><small>cloonar-nixos</small></span></div>
+  <span class="spacer"></span>
+  <div class="rail-link active"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>Repos</div>
+  <div class="rail-link"><svg class="i" aria-hidden="true"><use href="#i-history"/></svg>History</div>
+  <div class="rail-link"><svg class="i" aria-hidden="true"><use href="#i-key"/></svg>Credentials</div>
+  <div class="rail-link"><svg class="i" aria-hidden="true"><use href="#i-ticket"/></svg>Tokens</div>
+  <div class="rail-link"><svg class="i" aria-hidden="true"><use href="#i-gear"/></svg>Settings</div>
+  <div class="rail-foot"><span>operator</span><span class="spacer"></span><span>Log out</span><i class="dot ok"></i></div>
+</nav>
+<div class="main">
+<div class="topstrip"><button class="iconbtn" data-drawer aria-label="Open navigation"><svg class="i" aria-hidden="true"><use href="#i-menu"/></svg></button><span class="brand">lab</span></div>
+<div class="scroll" id="scroll">
+  <section data-screen="repos" class="page wide">
+    <div class="phead"><h1>Repositories</h1><button class="btn primary small" data-add><svg class="i sm" aria-hidden="true"><use href="#i-plus"/></svg>Add</button></div>
+    <label class="search"><svg class="i" aria-hidden="true"><use href="#i-search"/></svg><input id="a-search" type="search" placeholder="Filter by name or host" aria-label="Filter repositories" autocomplete="off"></label>
+    <div id="a-need-wrap"><div class="a-lh"><span class="eyebrow">Needs you</span><span class="count" id="a-need-n"></span></div><div class="a-need" id="a-need"></div></div>
+    <div class="a-lh"><span class="eyebrow" id="a-list-t">All repositories</span><span class="count" id="a-count"></span><span class="spacer"></span><span class="a-sortnote">Latest run first</span></div>
+    <div class="card a-table">
+      <div class="a-thead eyebrow"><span>Repository</span><span>Runs</span><span>Ready</span><span>AFK</span><span>Autoland</span><span>Last run</span><span></span></div>
+      <div id="a-rows"></div>
+    </div>
+  </section>
+
+  <section data-screen="add" class="page" hidden>
+    <button class="back" data-add-cancel><svg class="i" aria-hidden="true"><use href="#i-left"/></svg>Repositories</button>
+    <div class="phead"><h1>Add repository</h1></div>
+    <div class="card pad fields">
+      <div class="field"><label class="lbl" for="n-url">Remote URL</label><input id="n-url" type="text" inputmode="url" class="mono" placeholder="git@github.com:owner/repo.git" autocomplete="off" autocapitalize="off" spellcheck="false"><small class="hint" id="n-detect">Paste an SSH or HTTPS remote. Name and tracker are filled in from it.</small></div>
+      <div class="field"><label class="lbl" for="n-name">Name</label><input id="n-name" type="text" placeholder="Taken from the URL" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div class="field"><label class="lbl" for="n-cred">Git credential</label><select id="n-cred"><option>gh-cloonar · HTTPS token</option><option>deploy-key · SSH key</option><option>None, public remote</option></select></div>
+      <div class="field"><span class="lbl">Tracker binding</span><div class="seg" id="n-tracker" role="group" aria-label="Tracker binding"><button type="button" aria-pressed="true">Auto</button><button type="button" aria-pressed="false">Forge</button><button type="button" aria-pressed="false">Built-in</button></div><small class="hint">Auto binds to the forge when the forge credential fits the remote.</small></div>
+      <div class="field" id="n-forge-f"><label class="lbl" for="n-forge">Forge credential</label><select id="n-forge"><option>gh-cloonar · GitHub</option><option>forgejo-bot · Forgejo</option></select></div>
+      <label class="srow"><span class="txt2"><b>Incogni</b><small>Strips AI attribution from this repo's output.</small></span><input id="n-incogni" type="checkbox" class="switch" role="switch"></label>
+      <button type="button" class="btn primary" id="n-submit">Add and start cloning</button>
+      <small class="hint">Agent, runner and everything else start from your global settings. You land on the repository, where the clone and the readiness checks are shown.</small>
+    </div>
+  </section>
+
+  <section data-screen="repo" hidden>
+    <div class="a-rhead">
+      <button class="back" data-back><svg class="i" aria-hidden="true"><use href="#i-left"/></svg>Repositories</button>
+      <div class="a-title"><h1 data-rn></h1><span class="chip" data-rt></span><span id="a-state"></span></div>
+      <p class="mono muted" data-rh></p>
+      <div class="tabs" role="tablist">
+        <button role="tab" data-t="overview" aria-selected="true">Overview</button>
+        <button role="tab" data-t="issues" aria-selected="false">Issues <span class="count" data-ri></span></button>
+        <button role="tab" data-t="settings" aria-selected="false">Settings</button>
+      </div>
+    </div>
+    <div data-tab="overview" class="a-ov" id="a-ov"></div>
+    <div data-tab="issues" class="a-ov" hidden><p class="empty" style="grid-column:1 / -1">The issue list stays as it is today. It becomes a tab of the repository.</p></div>
+    <div data-tab="settings" hidden>
+      <nav class="a-chips" id="a-chips" aria-label="Settings sections"></nav>
+      <div class="a-body"><nav class="a-toc" id="a-toc" aria-label="Settings sections"></nav><div class="a-secs" id="a-secs"></div></div>
+    </div>
+  </section>
+</div>
+
+<div class="savebar" id="savebar" hidden>
+  <div class="msg"><i class="dot attn"></i><div class="txt2"><b id="save-n"></b><small id="save-secs"></small></div></div>
+  <button class="btn small" id="a-discard">Discard</button>
+  <button class="btn primary small" id="a-save">Save</button>
+</div>
+
+<div class="ed-scrim" id="ed-scrim" hidden></div>
+<section class="ed" id="ed" aria-labelledby="ed-t" hidden>
+  <div class="ed-h"><button class="iconbtn" data-ed-close aria-label="Close the schedule editor"><svg class="i" aria-hidden="true"><use href="#i-left"/></svg></button><h2 id="ed-t">Edit schedule</h2><button class="btn small" id="ed-run"><svg class="i sm" aria-hidden="true"><use href="#i-play"/></svg>Run now</button></div>
+  <div class="ed-b" id="ed-b">
+    <div class="card pad fields">
+      <div class="field"><label class="lbl" for="e-name">Name</label><input id="e-name" type="text" autocomplete="off"></div>
+      <div class="field"><label class="lbl" for="e-prompt">Prompt</label><textarea id="e-prompt" rows="5"></textarea><small class="hint">What the run should look into. Flows add where the findings go.</small></div>
+      <div class="field"><span class="lbl">Flows</span><div class="pick" id="e-flows" role="group" aria-label="Flows"><button type="button" data-flow="autolander" aria-pressed="false">Autolander</button><button type="button" data-flow="triage" aria-pressed="false">Human triage</button></div><small class="hint" id="e-flow-h"></small></div>
+    </div>
+    <div class="card pad fields">
+      <h4 class="sub first">Cadence</h4>
+      <div class="seg fill" id="e-mode" role="group" aria-label="Cadence"><button type="button" aria-pressed="true">Daily</button><button type="button" aria-pressed="false">Weekly</button><button type="button" aria-pressed="false">Monthly</button><button type="button" aria-pressed="false">Cron</button></div>
+      <div class="field" id="e-days-f"><span class="lbl">Weekdays</span><div class="pick week" id="e-days" role="group" aria-label="Weekdays"><button type="button" data-day="1" aria-pressed="false">Mo</button><button type="button" data-day="2" aria-pressed="false">Tu</button><button type="button" data-day="3" aria-pressed="false">We</button><button type="button" data-day="4" aria-pressed="false">Th</button><button type="button" data-day="5" aria-pressed="false">Fr</button><button type="button" data-day="6" aria-pressed="false">Sa</button><button type="button" data-day="0" aria-pressed="false">Su</button></div></div>
+      <div class="field" id="e-dom-f"><label class="lbl" for="e-dom">Day of month</label><input id="e-dom" type="number" inputmode="numeric" min="1" max="28"><small class="hint">1 to 28, so every month has it.</small></div>
+      <div class="field" id="e-time-f"><label class="lbl" for="e-time">Time, server-local</label><input id="e-time" type="time"></div>
+      <div class="field" id="e-cron-f"><label class="lbl" for="e-cron">Cron expression</label><input id="e-cron" type="text" class="mono" autocomplete="off" spellcheck="false"></div>
+      <div class="preview" id="e-prev" role="status"></div>
+    </div>
+    <div class="card pad fields">
+      <h4 class="sub first">Run settings</h4>
+      <div class="field" data-inh="30 minutes"><label class="lbl" for="e-budget">Budget, minutes</label><input id="e-budget" type="number" inputmode="numeric" placeholder="30" min="1"></div>
+      <div class="grid3">
+        <div class="field" data-inh="the repo's AFK agent"><label class="lbl" for="e-agent">Agent</label><select id="e-agent"><option value="">Repo · Claude Code</option><option>Claude Code</option></select></div>
+        <div class="field" data-inh="the repo's AFK model"><label class="lbl" for="e-model">Model</label><select id="e-model"><option value="">Repo · sonnet</option><option>opus</option><option>sonnet</option><option>haiku</option></select></div>
+        <div class="field" data-inh="the repo's AFK effort"><label class="lbl" for="e-effort">Effort</label><select id="e-effort"><option value="">Repo · high</option><option>low</option><option>medium</option><option>high</option></select></div>
+      </div>
+      <label class="srow"><span class="txt2"><b>Enabled</b><small>Off keeps the schedule but skips its runs.</small></span><input id="e-enabled" type="checkbox" class="switch" role="switch"></label>
+    </div>
+    <div><button type="button" class="btn danger" id="ed-delete">Delete schedule</button></div>
+  </div>
+  <div class="ed-f" id="ed-f"><span class="grow muted" id="ed-note"></span><button class="btn" data-ed-close>Cancel</button><button class="btn primary" id="ed-save">Save schedule</button></div>
+  <div class="ed-f" id="ed-f2" hidden><span class="grow"><b>Discard your changes?</b></span><button class="btn" id="ed-keep">Keep editing</button><button class="btn solid-danger" id="ed-discard">Discard</button></div>
+</section>
+
+<div class="scrim" id="dlg-scrim" hidden></div>
+<section class="dlg" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-t" hidden></section>
+</div>
+<div class="toast" role="status" hidden></div>
+</div></div>
+<aside class="notes" aria-label="About this round">
+<div class="notes-h"><div><span class="eyebrow">Direction A · round 2</span><h2>Single scroll</h2></div><button class="iconbtn" data-notes-close aria-label="Close notes"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button></div>
+<p class="lead">The agreed direction with all nine ideas, editable schedules and the delete flow worked in.</p>
+<h3>New in this round</h3>
+<ul>
+  <li><b>Schedules.</b> Tap one to edit it on its own screen, a side panel on desktop. Run now, Delete and the next runs live there.</li>
+  <li><b>Delete.</b> Stays in Danger zone. The dialog lists what is lost, and it explains a blocked delete before you try. See cloonar-nixos.</li>
+  <li><b>One save rule.</b> Fields wait for the save bar, which names the changed sections. Sections tagged "applies immediately" act at once.</li>
+  <li><b>Errors at the field.</b> Break the AFK branch pattern and press Save.</li>
+  <li><b>Inheritance.</b> Every overridable field says inherited or set here, with a reset. Remote control now has its three states.</li>
+  <li><b>Only what applies.</b> Pick the Host runner, the built-in tracker, or turn Autoland off.</li>
+  <li><b>New order.</b> Agents and automation first, set-once sections last.</li>
+  <li><b>Readiness.</b> Overview checks whether runs can start. See auth-service.</li>
+  <li><b>List.</b> Fifteen repositories, what needs you on top, then recently opened.</li>
+  <li><b>Undo.</b> Removing an import or discarding edits can be undone. Irreversible actions ask first.</li>
+  <li><b>Add.</b> Adding a repository lands on its home with clone progress.</li>
+</ul>
+<h3>Needs server work</h3>
+<ul>
+  <li>Run now for schedules.</li>
+  <li>The readiness checks as one endpoint.</li>
+</ul>
+<p class="fine">Example data. Colors and type are lab's current tokens.</p>
+</aside>
+</div></div>
+<template id="t-agents"><div class="fields">
+  <h4 class="sub first">Runs you start</h4>
+  <div class="grid3">
+    <div class="field" data-inh="Claude Code"><label class="lbl" for="f-agent">Agent</label><select id="f-agent"><option value="">Global · Claude Code</option><option>Claude Code</option></select></div>
+    <div class="field" data-inh="opus"><label class="lbl" for="f-model">Model</label><select id="f-model"><option value="">Global · opus</option><option>opus</option><option>sonnet</option><option>haiku</option></select></div>
+    <div class="field" data-inh="high"><label class="lbl" for="f-effort">Effort</label><select id="f-effort"><option value="">Global · high</option><option>low</option><option>medium</option><option>high</option></select></div>
+  </div>
+  <div class="field" data-inh="on"><span class="lbl">Remote control</span><div class="seg" id="f-remote" role="group" aria-label="Remote control for runs you start"><button type="button" aria-pressed="true">Global · on</button><button type="button" aria-pressed="false">On</button><button type="button" aria-pressed="false">Off</button></div><small class="hint">Also opens the session on claude.ai.</small></div>
+  <h4 class="sub">AFK runs</h4>
+  <div class="grid3">
+    <div class="field" data-inh="Claude Code"><label class="lbl" for="f-afk-agent">Agent</label><select id="f-afk-agent"><option value="">Global · Claude Code</option><option>Claude Code</option></select></div>
+    <div class="field" data-inh="opus"><label class="lbl" for="f-afk-model">Model</label><select id="f-afk-model"><option value="">Global · opus</option><option>opus</option><option selected>sonnet</option><option>haiku</option></select></div>
+    <div class="field" data-inh="high"><label class="lbl" for="f-afk-effort">Effort</label><select id="f-afk-effort"><option value="">Global · high</option><option>low</option><option>medium</option><option>high</option></select></div>
+  </div>
+  <div class="field" data-inh="off"><span class="lbl">Remote control</span><div class="seg" id="f-afk-remote" role="group" aria-label="Remote control for AFK runs"><button type="button" aria-pressed="true">Global · off</button><button type="button" aria-pressed="false">On</button><button type="button" aria-pressed="false">Off</button></div></div>
+  <div class="field" data-inh="lab's built-in prompt"><label class="lbl" for="f-seed">Seed prompt</label><textarea id="f-seed" rows="3" placeholder="Using lab's built-in seed prompt."></textarea></div>
+  <h4 class="sub">AFK capacity</h4>
+  <label class="srow"><span class="txt2"><b>Auto-spawn</b><small>Claim ready-for-agent issues as they appear.</small></span><input id="f-auto" type="checkbox" class="switch" role="switch"></label>
+  <div class="grid2">
+    <div class="field" data-inh="120 minutes"><label class="lbl" for="f-budget">Budget, minutes</label><input id="f-budget" type="number" inputmode="numeric" placeholder="120" min="1"></div>
+    <div class="field" data-inh="2 instances"><label class="lbl" for="f-max">Max instances</label><input id="f-max" type="number" inputmode="numeric" placeholder="2" min="1"></div>
+  </div>
+</div></template>
+
+<template id="t-runner"><div class="fields">
+  <div class="field" data-inh="container"><span class="lbl">Runner</span><div class="seg" id="f-runner" role="group" aria-label="Runner"><button type="button" aria-pressed="true">Global · container</button><button type="button" aria-pressed="false">Container</button><button type="button" aria-pressed="false">Host</button></div></div>
+  <div class="banner" id="host-warn" hidden>Host runs are unsandboxed and have full host access.</div>
+  <div class="fields" id="cont-opts">
+    <div class="field" data-inh="ghcr.io/cloonar/lab-dev:latest"><label class="lbl" for="f-image">Dev image</label><input id="f-image" type="text" class="mono" placeholder="ghcr.io/cloonar/lab-dev:latest" autocomplete="off" spellcheck="false"><small class="hint">Pinned to a digest on save.</small></div>
+    <h4 class="sub">Container limits</h4>
+    <div class="grid3 even">
+      <div class="field" data-inh="8g"><label class="lbl" for="f-mem">Memory</label><input id="f-mem" type="text" placeholder="8g" autocomplete="off"></div>
+      <div class="field" data-inh="4096"><label class="lbl" for="f-pids">Processes</label><input id="f-pids" type="number" inputmode="numeric" placeholder="4096"></div>
+      <div class="field" data-inh="16384"><label class="lbl" for="f-nofile">Open files</label><input id="f-nofile" type="number" inputmode="numeric" placeholder="16384"></div>
+    </div>
+  </div>
+  <div class="na" id="cont-na" hidden>Dev image and container limits only apply to container runs. <button type="button" class="linkbtn" id="cont-show">Show anyway</button></div>
+</div></template>
+
+<template id="t-autoland"><div class="fields">
+  <div class="na" id="al-blocked" hidden>Autoland needs a forge tracker, and this repository uses the built-in one. <button type="button" class="linkbtn" data-goto="integrations" data-field="f-tracker">Change in Integrations</button></div>
+  <label class="srow" id="al-main"><span class="txt2"><b>Autoland claim PRs</b><small>A lander run validates each PR an AFK run opens.</small></span><input id="f-autoland" type="checkbox" class="switch" role="switch"></label>
+  <div class="fields" id="al-opts">
+    <label class="srow"><span class="txt2"><b>Merge on clean PASS</b><small>Off means approve only, and a human merges.</small></span><input id="f-merge" type="checkbox" class="switch" role="switch" checked></label>
+    <div class="field"><label class="lbl" for="f-fix">Max fix attempts</label><input id="f-fix" type="number" inputmode="numeric" value="2" min="0"><small class="hint">After that the PR is handed to a human.</small></div>
+    <h4 class="sub">Lander</h4>
+    <div class="grid3">
+      <div class="field" data-inh="this repo's agent"><label class="lbl" for="f-l-agent">Agent</label><select id="f-l-agent"><option value="">Repo · Claude Code</option><option>Claude Code</option></select></div>
+      <div class="field" data-inh="opus"><label class="lbl" for="f-l-model">Model</label><select id="f-l-model"><option value="">Global · opus</option><option>opus</option><option>sonnet</option></select></div>
+      <div class="field" data-inh="high"><label class="lbl" for="f-l-effort">Effort</label><select id="f-l-effort"><option value="">Global · high</option><option>medium</option><option>high</option></select></div>
+    </div>
+  </div>
+  <div class="na" id="al-off" hidden>Merge policy and lander options appear when Autoland is on.</div>
+</div></template>
+
+<template id="t-general"><div class="fields">
+  <div class="field"><label class="lbl" for="f-name">Name</label><input id="f-name" type="text" autocomplete="off" spellcheck="false"></div>
+  <div class="field" data-inh="lab-bot"><label class="lbl" for="f-author">Git author name</label><input id="f-author" type="text" placeholder="lab-bot" autocomplete="off"></div>
+  <div class="field" data-inh="lab-bot@example.com"><label class="lbl" for="f-email">Git author email</label><input id="f-email" type="text" placeholder="lab-bot@example.com" autocomplete="off" spellcheck="false"></div>
+  <label class="srow"><span class="txt2"><b>Incogni</b><small>Strips AI attribution from this repo's output. Branch naming stays as it is.</small></span><input id="f-incogni" type="checkbox" class="switch" role="switch"></label>
+</div></template>
+
+<template id="t-integrations"><div class="fields">
+  <div class="field"><label class="lbl" for="f-gitcred">Git credential</label><select id="f-gitcred"><option>gh-cloonar · HTTPS token</option><option>deploy-key · SSH key</option><option>None, public remote</option></select></div>
+  <div class="field"><span class="lbl">Tracker binding</span><div class="seg" id="f-tracker" role="group" aria-label="Tracker binding"><button type="button" aria-pressed="true">Forge</button><button type="button" aria-pressed="false">Built-in</button></div><small class="hint">Forge keeps issues and pull requests on the forge. Built-in keeps them inside lab.</small></div>
+  <div class="field" id="forge-cred"><label class="lbl" for="f-forgecred">Forge credential</label><select id="f-forgecred"><option>gh-cloonar · GitHub</option><option>forgejo-bot · Forgejo</option></select><small class="hint">The credential's flavor picks the forge client.</small></div>
+  <div class="na" id="forge-na" hidden>The built-in tracker needs no forge credential.</div>
+</div></template>
+
+<template id="t-branches"><div class="fields">
+  <div class="field"><label class="lbl" for="f-default">Default branch</label><input id="f-default" type="text" value="main" autocomplete="off" spellcheck="false"></div>
+  <div class="field"><label class="lbl" for="f-afkpat">AFK branch pattern</label><input id="f-afkpat" type="text" class="mono" value="afk/&lt;N&gt;" autocomplete="off" spellcheck="false"><small class="hint">&lt;N&gt; stands for the issue number. For example afk/&lt;N&gt; or issue-&lt;N&gt;.</small></div>
+  <div class="field"><label class="lbl" for="f-prefix">Manual branch prefix</label><input id="f-prefix" type="text" class="mono" value="lab/" autocomplete="off" spellcheck="false"><small class="hint">Prefix for branches of runs you start yourself.</small></div>
+</div></template>
+
+<template id="t-schedules"><div id="sched-list"></div></template>
+<template id="t-secrets"><div id="secret-list"></div></template>
+<template id="t-imports"><div id="import-list"></div></template>
+<template id="t-danger"><div class="danger-box">
+  <p>Removes <b data-rn></b> from lab, with its clone, settings, schedules and secrets. The remote repository is not touched.</p>
+  <button type="button" class="btn danger" id="del-open">Delete repository</button>
+</div></template>
+<script>
+const $=(s,r=document)=>r.querySelector(s);
+const $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const ic=(n,c='')=>`<svg class="i ${c}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const tpl=slug=>document.getElementById('t-'+slug).content.cloneNode(true);
+const plural=(n,w)=>`${n} ${w}${n===1?'':'s'}`;
+const proto=$('.proto'),app=$('.app'),device=$('.device'),scroll=$('#scroll'),savebar=$('#savebar');
+const isWide=()=>window.matchMedia('(min-width:840px)').matches;
+const isDesktop=()=>device.clientWidth>=900;
+const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ===== example data: coding-lab and cloonar-nixos are real names, every figure is invented ===== */
+const HR=60,DAY_MIN=1440;
+const R=(name,host,o)=>({id:name,name,host,tracker:'forge · github',status:'ready',opened:0,ready:0,parked:0,auto:false,autoland:false,runner:'container',issues:0,runs:[],...o});
+const REPOS=[
+  R('coding-lab','github.com/Cloonar/coding-lab',{opened:4,ready:3,parked:1,auto:true,autoland:true,issues:12,imports:['cloonar-nixos'],
+    runs:[{t:'Fix chat dock overlap',s:'Waiting for you',dot:'attn'},{t:'afk/61 Autoland re-arm',s:'Working · 1h 12m of budget left',dot:'ok'}],
+    secrets:[{name:'NPM_TOKEN',desc:'Registry publish token',when:'12 Sep'},{name:'SENTRY_AUTH_TOKEN',desc:'Release uploads',when:'3 Aug'},{name:'STAGING_DB_URL',desc:'Read-only staging database',when:'21 Jul'}],
+    schedules:[
+      {id:'s1',name:'Nightly dependency check',prompt:'Check for outdated or vulnerable dependencies in go.mod and web/package.json. Group related bumps.',flows:['autolander'],mode:'daily',time:'03:00',days:[1],dom:1,cron:'0 3 * * *',budget:'',agent:'',model:'',effort:'',enabled:true,last:'last run ok'},
+      {id:'s2',name:'Weekly triage sweep',prompt:'Read the open needs-triage issues and look for duplicates and missing reproduction steps.',flows:['triage'],mode:'weekly',time:'08:00',days:[1],dom:1,cron:'0 8 * * 1',budget:'45',agent:'',model:'opus',effort:'',enabled:true,last:'last run ok'},
+      {id:'s3',name:'Docs drift check',prompt:'Compare docs/ with the code changed since the last docs sync.',flows:['autolander'],mode:'weekly',time:'17:00',days:[5],dom:1,cron:'0 17 * * 5',budget:'',agent:'',model:'',effort:'',enabled:true,paused:true,last:'last 3 runs failed'},
+    ]}),
+  R('mobile-app','github.com/example/mobile-app',{opened:12,status:'cloning',percent:62}),
+  R('cloonar-nixos','git.example.com/cloonar/nixos',{opened:95,tracker:'forge · forgejo',runner:'host',issues:4,runs:[{t:'Bump flake inputs',s:'Idle',dot:''}]}),
+  R('data-pipeline','github.com/example/data-pipeline',{opened:3*HR,ready:4,auto:true,issues:17,runs:[{t:'afk/118 Backfill events',s:'Working · 48m of budget left',dot:'ok'}]}),
+  R('billing-api','git.example.com/acme/billing-api',{opened:5*HR,tracker:'builtin tracker',incogni:true,ready:1,issues:6}),
+  R('website','github.com/example/website',{opened:26*HR,ready:5,parked:2,auto:true,paused:true,autoland:true,issues:9}),
+  R('auth-service','git.example.com/acme/auth-service',{opened:30*HR,tracker:'forge · forgejo',ready:2,auto:true,badForge:true,issues:8}),
+  R('docs-site','github.com/example/docs-site',{opened:2*DAY_MIN,auto:true,autoland:true,issues:3}),
+  R('infra-docs','git.example.com/acme/infra-docs',{opened:3*DAY_MIN,tracker:'forge · forgejo',status:'error',error:'Clone failed: the remote rejected the git credential.'}),
+  R('design-tokens','github.com/example/design-tokens',{opened:6*DAY_MIN,issues:2}),
+  R('cli-tools','github.com/example/cli-tools',{opened:9*DAY_MIN,ready:2,issues:5}),
+  R('status-page','github.com/example/status-page',{opened:14*DAY_MIN,autoland:true,issues:1}),
+  R('terraform-modules','git.example.com/acme/terraform-modules',{opened:20*DAY_MIN,tracker:'forge · forgejo',runner:'host',issues:7}),
+  R('mail-templates','github.com/example/mail-templates',{opened:31*DAY_MIN}),
+  R('analytics-dash','git.example.com/acme/analytics-dash',{opened:45*DAY_MIN,tracker:'builtin tracker',incogni:true,issues:4}),
+];
+REPOS.forEach(r=>{r.imports??=[];r.secrets??=[];r.schedules??=[]});
+const TITLES={agents:'Agents',runner:'Runner',autoland:'Autoland',schedules:'Schedules',secrets:'Secrets',imports:'Imports',general:'General',integrations:'Integrations',branches:'Branches',danger:'Danger zone'};
+/* Ordered by how often a section is touched; set-once sections come last. */
+const SECS=[
+  {slug:'agents',group:'Runs',desc:'Defaults for runs you start and for AFK runs.'},
+  {slug:'runner',group:'Runs',desc:'Where sessions run, and with which image and limits.'},
+  {slug:'autoland',group:'Automation',desc:'Validation and merge policy for the PRs AFK runs open.'},
+  {slug:'schedules',group:'Automation',desc:'Runs that start on a cadence, with your prompt.',live:true},
+  {slug:'secrets',group:'Access',desc:'What agents may use. Values are write-only.',live:true},
+  {slug:'imports',group:'Access',desc:'Other lab repositories this one may read.',live:true},
+  {slug:'general',group:'Setup',desc:'Name, git author identity, Incogni.'},
+  {slug:'integrations',group:'Setup',desc:'Git credential and tracker.'},
+  {slug:'branches',group:'Setup',desc:'Default branch and branch naming.'},
+  {slug:'danger',group:'',desc:'Delete this repository.',danger:true,quiet:true},
+];
+const liveN=r=>r.runs.length,waitN=r=>r.runs.filter(x=>x.dot==='attn').length;
+const ago=m=>m<1?'just now':m<HR?`${m} min ago`:m<DAY_MIN?`${Math.floor(m/HR)} h ago`:m<2*DAY_MIN?'yesterday':`${Math.floor(m/DAY_MIN)} days ago`;
+let cur=REPOS[0],snap=[],showContainerAnyway=false,instant=false;const errors=new Map();
+
+/* ===== prototype chrome ===== */
+let toastTimer;
+function toast(msg,action){
+  const t=$('.toast');t.textContent='';const s=document.createElement('span');s.textContent=msg;t.append(s);
+  if(action){const b=document.createElement('button');b.type='button';b.textContent=action.label;b.addEventListener('click',()=>{t.hidden=true;action.run()});t.append(b)}
+  t.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{t.hidden=true},action?6500:2300);
+}
+function setNotes(open){proto.classList.toggle('notes-open',open);$('#notes-btn').setAttribute('aria-expanded',String(open))}
+function setMode(m){
+  proto.classList.toggle('mode-phone',m==='phone');proto.classList.toggle('mode-desktop',m==='desktop');
+  $$('.viewseg button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===m)));
+  app.classList.remove('drawer-open');setNotes(m==='phone'&&isWide());
+}
+const setSeg=(seg,i)=>$$('button',seg).forEach((b,k)=>b.setAttribute('aria-pressed',String(k===i)));
+const valueOf=el=>el.classList.contains('seg')?$$('button',el).findIndex(b=>b.getAttribute('aria-pressed')==='true'):el.type==='checkbox'?el.checked:el.value;
+function restore(el,v){if(el.classList.contains('seg'))setSeg(el,v);else if(el.type==='checkbox')el.checked=v;else el.value=v}
+/* An irreversible action asks in place: the button turns into Cancel plus the named action. */
+function confirmInline(btn,label,run){
+  const box=document.createElement('span');box.className='cfm';
+  box.innerHTML=`<button type="button" class="btn small">Cancel</button><button type="button" class="btn small solid-danger">${esc(label)}</button>`;
+  btn.hidden=true;btn.after(box);
+  box.firstElementChild.addEventListener('click',()=>{box.remove();btn.hidden=false;btn.focus()});
+  box.lastElementChild.addEventListener('click',()=>{box.remove();btn.hidden=false;run()});
+  box.lastElementChild.focus();
+}
+function dialog(html){$('#dlg').innerHTML=html;$('#dlg').hidden=false;$('#dlg-scrim').hidden=false;const f=$('#dlg h2');if(f){f.tabIndex=-1;f.focus()}}
+function closeDialog(){$('#dlg').hidden=true;$('#dlg-scrim').hidden=true}
+
+/* ===== repository list ===== */
+function need(r){
+  if(r.status==='error')return {cls:' err',msg:r.error,btn:'Retry',act:'retry'};
+  if(r.badForge)return {cls:' err',msg:'The forge token was rejected. AFK runs cannot read issues.',btn:'Fix',act:'fix'};
+  if(r.paused)return {cls:'',msg:`AFK paused after 3 failed runs. ${plural(r.ready,'issue')} waiting.`,btn:'Reset',act:'reset'};
+  return null;
+}
+function aLine(r){
+  if(r.status==='cloning')return `<span class="chip warn">Cloning ${r.percent}%</span>`;
+  if(r.status==='error')return '<span class="chip err">Clone failed</span>';
+  const p=[liveN(r)?`<span><i class="dot ok"></i>${liveN(r)} live</span>`:'<span>No live runs</span>'];
+  if(waitN(r))p.push(`<span class="chip attn">${waitN(r)} waiting</span>`);
+  p.push(`<span>${r.ready} ready</span>`);
+  p.push(r.badForge?'<span class="chip err">Not ready</span>':r.paused?'<span class="chip warn">AFK paused</span>':`<span>Auto ${r.auto?'on':'off'}</span>`);
+  return p.join('');
+}
+function aCells(r){
+  const no='<span class="muted">–</span>',opened=`<span class="muted">${ago(r.opened)}</span>`;
+  if(r.status==='cloning')return [`<span class="chip warn">Cloning ${r.percent}%</span>`,no,no,no,opened];
+  if(r.status==='error')return ['<span class="chip err">Clone failed</span>',no,no,no,opened];
+  return [
+    liveN(r)?`<i class="dot ok"></i>${liveN(r)} live${waitN(r)?` <span class="chip attn">${waitN(r)} waiting</span>`:''}`:'<span class="muted">None</span>',
+    r.ready?String(r.ready):'<span class="muted">0</span>',
+    r.badForge?'<span class="chip err">Not ready</span>':r.paused?'<span class="chip warn">Paused</span>':r.auto?'Auto on':'<span class="muted">Off</span>',
+    r.autoland?'On':'<span class="muted">Off</span>',opened,
+  ];
+}
+function renderRepos(){
+  const q=$('#a-search').value.trim().toLowerCase();
+  const list=REPOS.filter(r=>r.name.includes(q)||r.host.toLowerCase().includes(q)).sort((a,b)=>a.opened-b.opened);
+  $('#a-rows').innerHTML=list.map(r=>`<button class="a-row" data-repo="${r.id}">
+    <span class="a-name"><b>${esc(r.name)}${r.incogni?' <span class="chip">incogni</span>':''}</b><span class="mono muted">${esc(r.host)}</span><span class="a-line">${aLine(r)}</span></span>
+    ${aCells(r).map(c=>`<span class="a-cell">${c}</span>`).join('')}${ic('right')}</button>`).join('')||'<p class="empty" style="margin:var(--s3)">No repository matches that filter.</p>';
+  $('#a-count').textContent=list.length;$('#a-list-t').textContent=q?'Matches':'All repositories';
+  const needy=q?[]:REPOS.filter(need);
+  $('#a-need-wrap').hidden=needy.length===0;$('#a-need-n').textContent=needy.length;
+  $('#a-need').innerHTML=needy.map(r=>{const n=need(r);return `<div class="banner${n.cls}"><span class="txt2"><b>${esc(r.name)}</b><small>${esc(n.msg)}</small></span><button class="btn small" data-need="${n.act}" data-id="${r.id}">${n.btn}</button></div>`}).join('');
+}
+function startClone(r){
+  r.status='cloning';r.percent=r.percent||3;delete r.error;
+  const t=setInterval(()=>{
+    r.percent=Math.min(100,r.percent+11);
+    if(r.percent>=100){clearInterval(t);r.status='ready';toast(`${r.name} is cloned and ready`)}
+    if(!REPOS.includes(r)){clearInterval(t);return}
+    if(cur===r&&!$('[data-screen="repo"]').hidden){bindRepo();if(!$('[data-tab="overview"]').hidden)renderOverview()}
+    if(!$('[data-screen="repos"]').hidden)renderRepos();
+  },800);
+}
+
+/* ===== repository home ===== */
+function bindRepo(){
+  $$('[data-rn]').forEach(e=>{e.textContent=cur.name});$$('[data-rh]').forEach(e=>{e.textContent=cur.host});
+  $$('[data-rt]').forEach(e=>{e.textContent=cur.tracker});$$('[data-ri]').forEach(e=>{e.textContent=cur.issues});
+  $('#a-state').innerHTML=cur.status==='cloning'?'<span class="chip warn">cloning</span>':cur.status==='error'?'<span class="chip err">clone failed</span>':'';
+}
+function checks(r){
+  const c=[];
+  if(r.status==='cloning')c.push({s:'wait',t:'Clone',d:`Cloning, ${r.percent}% done.`,prog:r.percent});
+  else if(r.status==='error')c.push({s:'bad',t:'Clone',d:'The last attempt failed.',btn:`<button class="btn small" data-retry="${r.id}">Retry clone</button>`});
+  else c.push({s:'ok',t:'Clone',d:'The reference repo is up to date.'});
+  c.push(r.status==='error'
+    ?{s:'bad',t:'Git credential',d:'gh-cloonar was rejected by the remote.',btn:'<button class="btn small" data-goto="integrations" data-field="f-gitcred">Change credential</button>'}
+    :{s:'ok',t:'Git credential',d:'gh-cloonar can fetch and push.'});
+  c.push(r.badForge
+    ?{s:'bad',t:'Tracker',d:'The forge token was rejected, so issues cannot be read.',btn:'<button class="btn small" data-goto="integrations" data-field="f-forgecred">Change credential</button>'}
+    :{s:'ok',t:'Tracker',d:r.tracker.startsWith('builtin')?'Built-in tracker.':`${r.tracker}, issues are readable.`});
+  c.push({s:'ok',t:'Agent',d:'Claude Code is logged in.'});
+  c.push({s:'ok',t:'Dev image',d:r.runner==='host'?'Not needed on the host runner.':'Inherited from the global setting.'});
+  c.push({s:'ok',t:'Imports',d:r.imports.length?`${r.imports.join(', ')} can be fetched.`:'None declared.'});
+  return c;
+}
+function readiness(r){
+  const c=checks(r),bad=c.filter(x=>x.s==='bad').length,wait=c.filter(x=>x.s==='wait').length;
+  const state=bad?'bad':wait?'wait':'ok',order={bad:0,wait:1,ok:2};
+  const head=bad?`Not ready, ${plural(bad,'problem')}`:wait?'Getting ready':'Ready to run';
+  const sub=bad?'New runs are refused until this is fixed.':wait?'Runs can start when the clone has finished.':`All ${c.length} checks pass.`;
+  const icon={ok:'check',bad:'bang',wait:'clock'};
+  return `<details class="card ready ${state}"${state==='ok'?'':' open'}><summary><span class="chk-ic big ${state}">${ic(icon[state],'sm')}</span><span class="txt2"><b>${head}</b><small>${sub}</small></span>${ic('right','chev')}</summary>
+    <div class="chk">${c.sort((a,b)=>order[a.s]-order[b.s]).map(x=>`<div class="chk-i"><span class="chk-ic ${x.s}">${ic(icon[x.s],'sm')}</span><span class="txt2"><b>${x.t}</b><small>${esc(x.d)}</small>${x.prog!==undefined?`<div class="prog"><i style="width:${x.prog}%"></i></div>`:''}</span>${x.btn||''}</div>`).join('')}</div></details>`;
+}
+function renderOverview(){
+  const r=cur,out=[readiness(r)];
+  if(r.status==='ready'){
+    out.push(`<div class="card pad"><div class="a-ch"><h3>Live runs</h3>${liveN(r)?`<button class="btn small danger" data-stop>Stop all (${liveN(r)})</button>`:''}</div>${liveN(r)?`<div class="list">${r.runs.map(x=>`<div class="r"><i class="dot ${x.dot}"></i><span class="txt2"><b>${esc(x.t)}</b><small>${esc(x.s)}</small></span></div>`).join('')}</div>`:'<p class="muted">No live runs.</p>'}</div>`);
+    out.push(`<div class="card pad"><div class="a-ch"><h3>AFK</h3></div>${r.paused?'<div class="banner"><span class="grow">Paused after 3 failed runs.</span><button class="btn small" data-afk-reset>Reset</button></div>':''}
+      <p class="muted">${plural(r.ready,'issue')} ready for an agent.</p>
+      <div class="a-ch"><button class="btn small" data-runone${r.ready&&!r.paused&&!r.badForge?'':' disabled'}>${ic('play','sm')}Run one</button><span class="spacer"></span><label class="srow"><b style="font-weight:600">Auto</b><input id="ov-auto" type="checkbox" class="switch" role="switch" ${r.auto?'checked':''}></label></div></div>`);
+    out.push(`<div class="card pad"><div class="a-ch"><h3>Parked work</h3><span class="count">${r.parked}</span></div>${r.parked?`<div class="list">${Array.from({length:r.parked},(_,i)=>`<div class="r"><span class="txt2"><b class="mono">${['lab/try-sse-backoff','afk/57'][i]||'lab/wip-'+i}</b><small>${i?'Branch is not merged':'Worktree has uncommitted changes'}</small></span><button class="btn small danger" data-discard-parked>Discard</button></div>`).join('')}</div>`:'<p class="muted">Nothing parked.</p>'}</div>`);
+  }
+  $('#a-ov').innerHTML=out.join('');
+}
+
+/* ===== settings: fields wait for the save bar ===== */
+const controls=()=>$$('#a-secs .a-sec:not([data-live]) :is(input,select,textarea,.seg)');
+const inSettings=()=>!$('[data-screen="repo"]').hidden&&!$('[data-tab="settings"]').hidden;
+function decorateInh(root){
+  $$('.field[data-inh]',root).forEach(f=>{
+    $('.lbl',f).insertAdjacentHTML('beforeend','<em class="inh"></em>');
+    $('select,input,textarea,.seg',f).insertAdjacentHTML('afterend',`<div class="inh-line" hidden><small>Default: ${esc(f.dataset.inh)}</small><button type="button" class="linkbtn" data-reset>Reset</button></div>`);
+  });
+}
+function syncInh(root){
+  $$('.field[data-inh]',root).forEach(f=>{
+    const ctl=$('select,input,textarea,.seg',f),v=valueOf(ctl),inherited=ctl.classList.contains('seg')?v===0:v==='';
+    const pill=$('.inh',f);pill.textContent=inherited?'inherited':'set here';pill.classList.toggle('set',!inherited);$('.inh-line',f).hidden=inherited;
+  });
+}
+function applyRules(){
+  syncInh($('#a-secs'));
+  const host=valueOf($('#f-runner'))===2;
+  $('#host-warn').hidden=!host;$('#cont-opts').hidden=host&&!showContainerAnyway;$('#cont-na').hidden=!(host&&!showContainerAnyway);
+  const builtin=valueOf($('#f-tracker'))===1;
+  $('#forge-cred').hidden=builtin;$('#forge-na').hidden=!builtin;
+  const al=$('#f-autoland');al.disabled=builtin;$('#al-main').classList.toggle('dim',builtin);$('#al-blocked').hidden=!builtin;
+  const on=al.checked&&!builtin;$('#al-opts').hidden=!on;$('#al-off').hidden=on||builtin;
+}
+const RULES={
+  'f-name':v=>v.trim()?'':'Enter a name.',
+  'f-default':v=>v.trim()?'':'Enter the default branch.',
+  'f-afkpat':v=>(v.match(/<N>/g)||[]).length===1?'':'The pattern needs <N> exactly once. It stands for the issue number.',
+  'f-prefix':v=>v.trim()?'':'Enter a prefix, for example lab/.',
+  'f-fix':v=>/^\d+$/.test(v)?'':'Use a whole number, 0 or more.',
+};
+function setError(el,msg){
+  const f=el.closest('.field');let e=$('.err-t',f);
+  if(msg){if(!e){e=document.createElement('small');e.className='err-t';e.setAttribute('role','alert');el.after(e)}e.textContent=msg;f.classList.add('invalid');el.setAttribute('aria-invalid','true')}
+  else{if(e)e.remove();f.classList.remove('invalid');el.removeAttribute('aria-invalid')}
+}
+function validate(el){const rule=RULES[el.id];if(!rule)return true;const msg=rule(el.value);if(msg)errors.set(el.id,msg);else errors.delete(el.id);setError(el,msg);return !msg}
+function refreshSave(){
+  const changed=new Map();
+  controls().forEach((el,i)=>{
+    const d=valueOf(el)!==snap[i],wrap=el.closest('.field,.srow');if(wrap)wrap.classList.toggle('changed',d);
+    if(d){const slug=el.closest('.a-sec').dataset.slug;changed.set(slug,(changed.get(slug)||0)+1)}
+  });
+  const n=[...changed.values()].reduce((a,b)=>a+b,0);
+  $$('[data-sec]').forEach(b=>b.classList.toggle('dirty',changed.has(b.dataset.sec)));
+  savebar.hidden=$('[data-screen="repo"]').hidden||n===0;savebar.classList.toggle('bad',errors.size>0);
+  const errSecs=[...new Set([...errors.keys()].map(id=>$('#'+id).closest('.a-sec').dataset.slug))];
+  const link=slug=>`<button type="button" class="linkbtn" data-goto="${slug}">${TITLES[slug]}</button>`;
+  if(errors.size){$('#save-n').textContent=`${plural(errors.size,'problem')} to fix`;$('#save-secs').innerHTML='in '+errSecs.map(link).join(', ')}
+  else{$('#save-n').textContent=plural(n,'unsaved change');$('#save-secs').innerHTML='in '+[...changed.keys()].map(link).join(', ')}
+  return n;
+}
+function onEdit(e){
+  const el=e.target;if(el.closest('[data-live]'))return;
+  if(RULES[el.id]&&(e.type==='change'||errors.has(el.id)))validate(el);
+  applyRules();refreshSave();
+}
+function buildSettings(){
+  const host=$('#a-secs');host.innerHTML='';errors.clear();showContainerAnyway=false;
+  SECS.forEach(s=>{
+    const el=document.createElement('section');el.className='a-sec'+(s.danger?' danger':'');el.id='sec-'+s.slug;el.dataset.slug=s.slug;if(s.live||s.quiet)el.dataset.live='';
+    el.innerHTML=`<div class="a-sec-head"><div class="hrow"><h2>${TITLES[s.slug]}</h2>${s.live?'<span class="tag-live">applies immediately</span>':''}</div><p>${s.desc}</p></div><div class="card pad"></div>`;
+    el.lastElementChild.append(tpl(s.slug));host.append(el);
+  });
+  decorateInh(host);
+  $('#f-name').value=cur.name;$('#f-incogni').checked=!!cur.incogni;$('#f-auto').checked=!!cur.auto;$('#f-autoland').checked=!!cur.autoland;
+  setSeg($('#f-tracker'),cur.tracker.startsWith('builtin')?1:0);setSeg($('#f-runner'),cur.runner==='host'?2:0);
+  if(cur.id!=='coding-lab')$('#f-afk-model').value='';
+  renderSchedules();renderSecrets();renderImports();bindRepo();
+  snap=controls().map(valueOf);applyRules();refreshSave();
+}
+function save(){
+  const bad=Object.keys(RULES).map(id=>$('#'+id)).filter(el=>!validate(el));
+  if(bad.length){refreshSave();goto(bad[0].closest('.a-sec').dataset.slug,bad[0].id);return false}
+  const n=refreshSave(),builtin=valueOf($('#f-tracker'))===1,forgeChanged=$('#f-forgecred').closest('.field').classList.contains('changed');
+  cur.name=$('#f-name').value.trim();cur.incogni=$('#f-incogni').checked;cur.auto=$('#f-auto').checked;cur.autoland=$('#f-autoland').checked&&!builtin;
+  cur.runner=valueOf($('#f-runner'))===2?'host':'container';
+  if(builtin)cur.tracker='builtin tracker';else if(cur.tracker.startsWith('builtin'))cur.tracker='forge · github';
+  if(forgeChanged||builtin)cur.badForge=false;
+  snap=controls().map(valueOf);bindRepo();refreshSave();renderOverview();
+  toast(`Saved ${plural(n,'change')} to ${cur.name}`);return true;
+}
+function discard(){
+  const drafts=controls().map(valueOf);
+  const put=vals=>{controls().forEach((el,i)=>restore(el,vals[i]));Object.keys(RULES).forEach(id=>{if(errors.has(id))validate($('#'+id))});applyRules();refreshSave()};
+  put(snap);toast('Changes discarded',{label:'Undo',run:()=>put(drafts)});
+}
+
+/* ===== schedules: listed in the page, edited on their own screen ===== */
+const DAY=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],DAYS_FULL=['Sundays','Mondays','Tuesdays','Wednesdays','Thursdays','Fridays','Saturdays'];
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],MODES=['daily','weekly','monthly','cron'];
+const FLOWS={autolander:'Autolander flow',triage:'Human-triage flow'};
+const pad=n=>String(n).padStart(2,'0');
+function cadence(s){
+  if(s.mode==='cron')return `Cron ${s.cron}`;
+  if(s.mode==='daily')return `Daily at ${s.time}`;
+  if(s.mode==='monthly')return `Monthly on day ${s.dom} at ${s.time}`;
+  const d=[1,2,3,4,5,6,0].filter(x=>s.days.includes(x));
+  return `${d.length===1?DAYS_FULL[d[0]]:d.map(x=>DAY[x]).join(', ')} at ${s.time}`;
+}
+function nextRuns(s,n=3){
+  if(s.mode==='cron'||!/^\d\d:\d\d$/.test(s.time))return [];
+  const [h,m]=s.time.split(':').map(Number),now=new Date(),out=[];
+  for(let i=0;i<70&&out.length<n;i++){
+    const c=new Date(now.getFullYear(),now.getMonth(),now.getDate()+i,h,m);
+    if(c<=now||(s.mode==='weekly'&&!s.days.includes(c.getDay()))||(s.mode==='monthly'&&c.getDate()!==s.dom))continue;
+    out.push(c);
+  }
+  return out;
+}
+function fmt(d){
+  const now=new Date(),t=`${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const diff=Math.round((new Date(d.getFullYear(),d.getMonth(),d.getDate())-new Date(now.getFullYear(),now.getMonth(),now.getDate()))/864e5);
+  return diff===0?`today ${t}`:diff===1?`tomorrow ${t}`:`${DAY[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]} ${t}`;
+}
+const toCron=d=>{const [h,m]=(d.time||'0:0').split(':').map(Number);return d.mode==='daily'?`${m} ${h} * * *`:d.mode==='weekly'?`${m} ${h} * * ${[...d.days].sort().join(',')||'*'}`:`${m} ${h} ${d.dom} * *`};
+function renderSchedules(){
+  const rows=cur.schedules.map(s=>{
+    const nx=nextRuns(s,1)[0],when=s.paused?'Paused after 3 failed runs':!s.enabled?'Off':nx?`Next ${fmt(nx)}`:'Next run set by cron';
+    return `<div class="s-row"><button class="s-main" data-sched="${s.id}"><span class="txt2"><b>${esc(s.name)}${ic('right','sm')}${s.paused?'<span class="chip warn">paused</span>':''}</b><small>${esc(cadence(s))} · ${s.flows.map(f=>FLOWS[f]).join(', ')||'prompt only'}</small><small>${when} · ${s.last}</small></span></button>${s.paused?`<button class="btn small" data-sched-reenable="${s.id}">Re-enable</button>`:`<input type="checkbox" class="switch" role="switch" data-sched-toggle="${s.id}" id="st-${s.id}" aria-label="${esc(s.name)} enabled" ${s.enabled?'checked':''}>`}</div>`;
+  }).join('');
+  $('#sched-list').innerHTML=`<div class="list">${rows||'<p class="muted" style="padding-bottom:var(--s3)">No schedules yet. A schedule starts a run on a cadence, with your prompt.</p>'}<div class="list-foot"><button type="button" class="btn small" data-sched-new>${ic('plus','sm')}New schedule</button></div></div>`;
+}
+let ed=null;
+function readEditor(){
+  return {name:$('#e-name').value,prompt:$('#e-prompt').value,flows:$$('#e-flows [aria-pressed="true"]').map(b=>b.dataset.flow),mode:MODES[valueOf($('#e-mode'))],
+    time:$('#e-time').value,days:$$('#e-days [aria-pressed="true"]').map(b=>+b.dataset.day),dom:Math.min(28,Math.max(1,+$('#e-dom').value||1)),cron:$('#e-cron').value,
+    budget:$('#e-budget').value,agent:$('#e-agent').value,model:$('#e-model').value,effort:$('#e-effort').value,enabled:$('#e-enabled').checked};
+}
+function edSync(){
+  const d=readEditor();
+  $('#e-time-f').hidden=d.mode==='cron';$('#e-days-f').hidden=d.mode!=='weekly';$('#e-dom-f').hidden=d.mode!=='monthly';$('#e-cron-f').hidden=d.mode!=='cron';
+  if(d.mode!=='cron')$('#e-cron').value=toCron(d);
+  const p=$('#e-prev'),noDay=d.mode==='weekly'&&!d.days.length;
+  p.textContent=d.mode==='cron'?'The server previews the next runs as you type.':noDay?'Pick at least one weekday.':'Next runs: '+nextRuns(d).map(fmt).join(', ');
+  p.classList.toggle('bad',noDay);
+  $('#e-flow-h').textContent=!d.flows.length?'No flow. The run only follows your prompt.':d.flows.map(f=>f==='autolander'?'Autolander files ready-for-agent issues that AFK runs pick up.':'Human triage files needs-triage issues for you to review.').join(' ');
+  if($('#e-name').value.trim())setError($('#e-name'),'');
+  syncInh($('#ed'));
+  ed.bad=noDay;ed.dirty=ed.orig!==null&&JSON.stringify(readEditor())!==ed.orig;
+  $('#ed-run').disabled=!ed.id||ed.dirty;$('#ed-note').textContent=ed.id&&ed.dirty?'Run now uses the saved version.':'';
+}
+function openEditor(id){
+  const s=id?cur.schedules.find(x=>x.id===id):{name:'',prompt:'',flows:['autolander'],mode:'daily',time:'03:00',days:[1],dom:1,cron:'0 3 * * *',budget:'',agent:'',model:'',effort:'',enabled:true};
+  ed={id:id||null,orig:null,dirty:false,bad:false};
+  $('#ed-t').textContent=id?'Edit schedule':'New schedule';$('#ed-run').hidden=!id;$('#ed-delete').hidden=!id;
+  $('#e-name').value=s.name;$('#e-prompt').value=s.prompt;$('#e-time').value=s.time;$('#e-dom').value=s.dom;$('#e-cron').value=s.cron;
+  $('#e-budget').value=s.budget;$('#e-agent').value=s.agent;$('#e-model').value=s.model;$('#e-effort').value=s.effort;$('#e-enabled').checked=s.enabled;
+  $$('#e-flows button').forEach(b=>b.setAttribute('aria-pressed',String(s.flows.includes(b.dataset.flow))));
+  $$('#e-days button').forEach(b=>b.setAttribute('aria-pressed',String(s.days.includes(+b.dataset.day))));
+  setSeg($('#e-mode'),MODES.indexOf(s.mode));setError($('#e-name'),'');
+  $('#ed-f').hidden=false;$('#ed-f2').hidden=true;$$('#ed .cfm').forEach(c=>c.remove());
+  $('#ed').hidden=false;$('#ed-scrim').hidden=false;$('#ed-b').scrollTop=0;
+  edSync();ed.orig=JSON.stringify(readEditor());edSync();
+  if(!id)$('#e-name').focus();
+}
+function hideEditor(){$('#ed').hidden=true;$('#ed-scrim').hidden=true;ed=null}
+function closeEditor(){if(!ed)return;if(ed.dirty){$('#ed-f').hidden=true;$('#ed-f2').hidden=false;$('#ed-keep').focus()}else hideEditor()}
+function runNow(s){cur.opened=0;cur.runs.push({t:`Scheduled: ${s.name}`,s:`Working · ${s.budget||30}m of budget left`,dot:'ok'});s.last='running now';renderSchedules();renderOverview();toast(`Started a run from "${s.name}"`)}
+function saveSchedule(){
+  const d=readEditor();d.name=d.name.trim();
+  if(!d.name){setError($('#e-name'),'Give the schedule a name.');$('#e-name').focus();return}
+  if(ed.bad){$('#e-prev').scrollIntoView({block:'center'});return}
+  let s;
+  if(ed.id){s=cur.schedules.find(x=>x.id===ed.id);Object.assign(s,d)}else{s={...d,id:'s'+Date.now(),last:'never ran'};cur.schedules.push(s)}
+  hideEditor();renderSchedules();toast(`Saved "${s.name}"`,{label:'Run now',run:()=>runNow(s)});
+}
+
+/* ===== secrets and imports: every action applies at once ===== */
+function renderSecrets(){
+  const rows=cur.secrets.map(s=>`<details class="x-row"><summary><span class="txt2"><b class="mono">${esc(s.name)}</b><small>${esc(s.desc)} · updated ${esc(s.when)}</small></span>${ic('right','chev')}</summary>
+    <div class="x-body"><div class="field"><label class="lbl" for="sv-${esc(s.name)}">New value</label><input id="sv-${esc(s.name)}" type="password" autocomplete="new-password" placeholder="Paste the new value"><small class="hint">The current value is never shown.</small></div>
+    <div class="x-actions"><button type="button" class="btn small danger" data-secret-del="${esc(s.name)}">Delete</button><span class="spacer"></span><button type="button" class="btn small primary" data-secret-rot="${esc(s.name)}">Save new value</button></div></div></details>`).join('');
+  $('#secret-list').innerHTML=`<div class="list">
+    <div class="r"><span class="txt2"><b>Credential gateway</b><small>No services granted yet.</small></span><button type="button" class="btn small" data-toast="Pick services from the gateway's pool">Grant</button></div>
+    <div class="r"><span class="txt2"><b>SSH targets</b><small>staging-diag, through the bastion</small></span><button type="button" class="btn small" data-toast="Pick SSH targets from the bastion's list">Edit</button></div>
+    ${rows}
+    <details class="x-row" id="sec-new"><summary><span class="txt2"><b>${ic('plus','sm')} New secret</b></span>${ic('right','chev')}</summary>
+      <div class="x-body"><div class="field"><label class="lbl" for="ns-name">Name</label><input id="ns-name" type="text" class="mono" placeholder="API_TOKEN" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>
+      <div class="field"><label class="lbl" for="ns-desc">Description</label><input id="ns-desc" type="text" autocomplete="off"></div>
+      <div class="field"><label class="lbl" for="ns-val">Value</label><input id="ns-val" type="password" autocomplete="new-password"></div>
+      <div class="x-actions"><span class="spacer"></span><button type="button" class="btn small primary" id="sec-add">Add secret</button></div></div></details></div>`;
+}
+function renderImports(){
+  const rest=REPOS.filter(r=>r!==cur&&!cur.imports.includes(r.id)&&r.status==='ready');
+  $('#import-list').innerHTML=`<div class="list">${cur.imports.map(id=>`<div class="r"><span class="txt2"><b>${esc(id)}</b><small>Read-only snapshot of its default branch, refreshed at every spawn</small></span><button type="button" class="btn small" data-import-rm="${esc(id)}">Remove</button></div>`).join('')||'<p class="muted" style="padding-bottom:var(--s2)">No imports. Runs only see this repository.</p>'}</div>
+    <div class="add-line"><select id="imp-pick" aria-label="Repository to import"><option value="">Choose a repository to import</option>${rest.map(r=>`<option>${esc(r.name)}</option>`).join('')}</select><button type="button" class="btn small" id="imp-add">Add</button></div>`;
+}
+
+/* ===== delete: consequences first, and a blocked delete is explained before you try ===== */
+function deleteDialog(){
+  const r=cur,by=REPOS.filter(x=>x.imports.includes(r.id));
+  if(by.length){dialog(`<h2 id="dlg-t">${esc(r.name)} cannot be deleted yet</h2>
+    <div class="banner err"><span class="grow">${by.map(x=>`<b>${esc(x.name)}</b>`).join(', ')} imports this repository. Remove that import first.</span></div>
+    <div class="dlg-actions"><button class="btn" data-dlg-close>Close</button><button class="btn primary" data-open-imports="${by[0].id}">Open ${esc(by[0].name)} imports</button></div>`);return}
+  const items=[];
+  if(r.status==='cloning')items.push('Abandons the running clone.');
+  if(liveN(r))items.push(`Stops ${plural(liveN(r),'live run')}.`);
+  if(r.parked)items.push(`Discards ${plural(r.parked,'parked worktree')} with ${r.parked===1?'its branch':'their branches'}.`);
+  if(r.schedules.length||r.secrets.length)items.push(`Deletes ${plural(r.schedules.length,'schedule')} and ${plural(r.secrets.length,'secret')}.`);
+  items.push("Removes lab's clone and this repository's settings.");
+  dialog(`<h2 id="dlg-t">Delete ${esc(r.name)}?</h2><ul>${items.map(i=>`<li>${i}</li>`).join('')}</ul>
+    <p class="muted">The remote on ${esc(r.host.split('/')[0])} is not touched. This cannot be undone.</p>
+    <div class="field"><label class="lbl" for="del-name">Type ${esc(r.name)} to confirm</label><input id="del-name" type="text" class="mono" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+    <div class="dlg-actions"><button class="btn" data-dlg-close>Cancel</button><button class="btn solid-danger" id="del-go" disabled>Delete repository</button></div>`);
+}
+const delReady=()=>$('#del-name').value.trim()===cur.name;
+function leaveDialog(n,next){
+  dialog(`<h2 id="dlg-t">Leave with ${plural(n,'unsaved change')}?</h2><p class="muted">Your changes to ${esc(cur.name)} are not saved yet.</p>
+    <div class="dlg-actions"><button class="btn" data-dlg-close>Keep editing</button><button class="btn" id="lv-discard">Discard</button><button class="btn primary" id="lv-save">Save and leave</button></div>`);
+  $('#lv-discard').addEventListener('click',()=>{closeDialog();errors.clear();next()});
+  $('#lv-save').addEventListener('click',()=>{closeDialog();if(save())next()});
+}
+
+/* ===== navigation ===== */
+function screen(name){$$('[data-screen]').forEach(s=>{s.hidden=s.dataset.screen!==name});scroll.scrollTop=0;if(name==='repos')renderRepos();refreshSaveSafe()}
+function refreshSaveSafe(){if($('#a-secs').children.length)refreshSave();else savebar.hidden=true}
+function tab(name){
+  $$('.tabs button').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.t===name)));
+  $$('[data-tab]').forEach(t=>{t.hidden=t.dataset.tab!==name});scroll.scrollTop=0;if(name==='overview')renderOverview();spy();
+}
+function openRepo(id,t){cur=REPOS.find(r=>r.id===id);bindRepo();renderOverview();buildSettings();screen('repo');tab(t||'overview')}
+function leaveRepo(next){const n=refreshSave();if(n>0)leaveDialog(n,next);else next()}
+const spyOffset=()=>isDesktop()?24:$('#a-chips').offsetHeight+12;
+function goto(slug,fieldId){
+  closeDialog();if($('[data-tab="settings"]').hidden)tab('settings');
+  const target=fieldId?$('#'+fieldId):null;
+  if(target&&target.closest('#cont-opts')&&$('#cont-opts').hidden){showContainerAnyway=true;applyRules()}
+  const el=target?target.closest('.field,.srow'):$('#sec-'+slug);
+  const top=el.getBoundingClientRect().top-scroll.getBoundingClientRect().top+scroll.scrollTop-spyOffset()-(target?36:-4);
+  scroll.scrollTo({top,behavior:reduced||instant?'auto':'smooth'});
+  if(target){const f=target.matches('.seg')?$('button',target):target;f.focus({preventScroll:true});el.classList.add('flash');setTimeout(()=>el.classList.remove('flash'),1800)}
+}
+function spy(){
+  if(!inSettings())return;
+  const base=scroll.getBoundingClientRect().top,off=spyOffset()+8;let active=SECS[0].slug;
+  for(const s of SECS){if($('#sec-'+s.slug).getBoundingClientRect().top-base<=off)active=s.slug}
+  if(scroll.scrollTop>0&&scroll.scrollTop+scroll.clientHeight>=scroll.scrollHeight-2)active=SECS[SECS.length-1].slug;
+  $$('[data-sec]').forEach(b=>b.setAttribute('aria-current',String(b.dataset.sec===active)));
+  const bar=$('#a-chips'),chip=$(`[data-sec="${active}"]`,bar);
+  if(bar.clientWidth)bar.scrollLeft=chip.offsetLeft-bar.clientWidth/2+chip.clientWidth/2;
+}
+$('#a-chips').innerHTML=SECS.map(s=>`<button data-sec="${s.slug}"${s.danger?' class="danger"':''}><span>${TITLES[s.slug]}</span></button>`).join('');
+{let g=null;$('#a-toc').innerHTML=SECS.map(s=>{const h=s.group&&s.group!==g?`<span class="eyebrow">${s.group}</span>`:'';g=s.group;return h+`<button data-sec="${s.slug}"${s.danger?' class="danger"':''}>${TITLES[s.slug]}</button>`}).join('')}
+
+/* ===== add repository ===== */
+const deriveName=u=>{const m=u.trim().replace(/\/+$/,'').replace(/\.git$/,'').match(/([^/:]+)$/);return m&&/[/:]/.test(u)?m[1]:''};
+const deriveHost=u=>{const m=u.trim().replace(/\.git$/,'').match(/^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)[:/](.+)$/i);return m?`${m[1]}/${m[2].replace(/^\/+|\/+$/g,'')}`:''};
+let nameTouched=false;
+function addSync(){
+  const u=$('#n-url').value,name=deriveName(u),host=deriveHost(u).split('/')[0]||'';
+  if(!nameTouched)$('#n-name').value=name;
+  $('#n-detect').textContent=!name?'Paste an SSH or HTTPS remote. Name and tracker are filled in from it.':/github/.test(host)?`Detected GitHub on ${host}.`:`Remote on ${host}.`;
+  $('#n-forge-f').hidden=valueOf($('#n-tracker'))===2;
+  if(name)setError($('#n-url'),'');
+}
+function openAdd(){nameTouched=false;['n-url','n-name'].forEach(id=>{$('#'+id).value='';setError($('#'+id),'')});setSeg($('#n-tracker'),0);$('#n-incogni').checked=false;addSync();screen('add')}
+function submitAdd(){
+  const u=$('#n-url').value,name=($('#n-name').value.trim()||deriveName(u));
+  if(!deriveName(u)){setError($('#n-url'),'Paste the remote URL, for example git@github.com:owner/repo.git');$('#n-url').focus();return}
+  if(REPOS.some(r=>r.name===name)){setError($('#n-name'),'A repository with this name already exists.');$('#n-name').focus();return}
+  const builtin=valueOf($('#n-tracker'))===2,host=deriveHost(u);
+  const r=R(name,host,{tracker:builtin?'builtin tracker':/github/.test(host)?'forge · github':'forge · forgejo',incogni:$('#n-incogni').checked,status:'cloning',percent:3});
+  r.imports=[];r.secrets=[];r.schedules=[];REPOS.unshift(r);startClone(r);openRepo(r.id,'overview');toast(`Added ${name}. Cloning has started.`);
+}
+
+/* ===== events ===== */
+scroll.addEventListener('scroll',spy,{passive:true});
+document.addEventListener('layout',spy);
+$('#a-search').addEventListener('input',renderRepos);
+$('#a-secs').addEventListener('input',onEdit);
+$('#a-secs').addEventListener('change',e=>{
+  const t=e.target;
+  if(t.dataset.schedToggle){const s=cur.schedules.find(x=>x.id===t.dataset.schedToggle);s.enabled=t.checked;renderSchedules();toast(`"${s.name}" turned ${s.enabled?'on':'off'}`);return}
+  onEdit(e);
+});
+$('#a-ov').addEventListener('change',e=>{
+  if(e.target.id!=='ov-auto')return;
+  cur.auto=e.target.checked;const f=$('#f-auto'),i=controls().indexOf(f);
+  if(valueOf(f)===snap[i]){f.checked=cur.auto}snap[i]=cur.auto;refreshSave();
+  toast(`Auto-spawn ${cur.auto?'on':'off'} for ${cur.name}`);
+});
+$('#ed').addEventListener('input',()=>ed&&edSync());
+$('#ed').addEventListener('change',()=>ed&&edSync());
+$('#dlg').addEventListener('input',()=>{const b=$('#del-go');if(b)b.disabled=!delReady()});
+$('#dlg').addEventListener('change',()=>{const b=$('#del-go');if(b)b.disabled=!delReady()});
+$('#n-url').addEventListener('input',addSync);
+$('#n-name').addEventListener('input',e=>{nameTouched=e.target.value!=='';setError(e.target,'')});
+$('[data-screen="add"]').addEventListener('change',addSync);
+document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('#dlg').hidden)closeDialog();else if(ed)closeEditor()});
+document.addEventListener('click',e=>{
+  const t=e.target.closest('button,.drawer-scrim,#dlg-scrim,#ed-scrim');if(!t)return;
+  if(t.classList.contains('drawer-scrim')){app.classList.remove('drawer-open');return}
+  if(t.id==='dlg-scrim'){closeDialog();return}
+  if(t.id==='ed-scrim'){closeEditor();return}
+  if(t.closest('.viewseg')){setMode(t.dataset.mode);return}
+  if(t.id==='notes-btn'){setNotes(!proto.classList.contains('notes-open'));return}
+  const d=t.dataset;
+  if('notesClose' in d){setNotes(false);return}
+  if('drawer' in d){app.classList.toggle('drawer-open');return}
+  const seg=t.closest('.seg');
+  if(seg){setSeg(seg,$$('button',seg).indexOf(t));seg.dispatchEvent(new Event('change',{bubbles:true}));return}
+  const pick=t.closest('.pick');
+  if(pick){t.setAttribute('aria-pressed',String(t.getAttribute('aria-pressed')!=='true'));pick.dispatchEvent(new Event('change',{bubbles:true}));return}
+  if(d.toast){toast(d.toast);return}
+  if(d.repo){openRepo(d.repo);return}
+  if('add' in d){openAdd();return}
+  if('addCancel' in d){screen('repos');return}
+  if(t.id==='n-submit'){submitAdd();return}
+  if('back' in d){leaveRepo(()=>screen('repos'));return}
+  if(d.t){tab(d.t);return}
+  if(d.sec){goto(d.sec);return}
+  if(d.goto){goto(d.goto,d.field);return}
+  if('dlgClose' in d){closeDialog();return}
+  if(d.need){
+    const r=REPOS.find(x=>x.id===d.id);
+    if(d.need==='reset'){r.paused=false;toast(`AFK runs resumed for ${r.name}`);renderRepos()}
+    else if(d.need==='retry'){startClone(r);toast(`Retrying the clone of ${r.name}`);renderRepos()}
+    else{openRepo(r.id,'settings');goto('integrations','f-forgecred')}
+    return;
+  }
+  if(d.retry){const r=REPOS.find(x=>x.id===d.retry);startClone(r);bindRepo();renderOverview();toast(`Retrying the clone of ${r.name}`);return}
+  if(t.id==='a-discard'){discard();return}
+  if(t.id==='a-save'){save();return}
+  if('reset' in d){const f=t.closest('.field'),ctl=$('select,input,textarea,.seg',f);restore(ctl,ctl.classList.contains('seg')?0:'');ctl.dispatchEvent(new Event('change',{bubbles:true}));return}
+  if(t.id==='cont-show'){showContainerAnyway=true;applyRules();return}
+  if('stop' in d){confirmInline(t,`Stop ${plural(liveN(cur),'run')}`,()=>{const n=liveN(cur);cur.runs=[];renderOverview();toast(`Stopped ${plural(n,'run')}. Worktrees are kept.`)});return}
+  if('runone' in d){cur.ready--;cur.opened=0;cur.runs.push({t:`afk/${60+cur.runs.length+2}`,s:'Working · 2h 0m of budget left',dot:'ok'});renderOverview();toast(`Started an AFK run in ${cur.name}`);return}
+  if('afkReset' in d){cur.paused=false;renderOverview();toast('AFK runs resumed');return}
+  if('discardParked' in d){confirmInline(t,'Discard for good',()=>{cur.parked--;renderOverview();toast('Discarded the parked worktree and branch')});return}
+  if(d.sched){openEditor(d.sched);return}
+  if('schedNew' in d){openEditor(null);return}
+  if(d.schedReenable){const s=cur.schedules.find(x=>x.id===d.schedReenable);s.paused=false;s.last='re-enabled just now';renderSchedules();toast(`"${s.name}" re-enabled`);return}
+  if('edClose' in d){closeEditor();return}
+  if(t.id==='ed-keep'){$('#ed-f').hidden=false;$('#ed-f2').hidden=true;return}
+  if(t.id==='ed-discard'){hideEditor();return}
+  if(t.id==='ed-save'){saveSchedule();return}
+  if(t.id==='ed-run'){const s=cur.schedules.find(x=>x.id===ed.id);hideEditor();runNow(s);return}
+  if(t.id==='ed-delete'){confirmInline(t,'Delete schedule',()=>{const i=cur.schedules.findIndex(x=>x.id===ed.id),s=cur.schedules.splice(i,1)[0];hideEditor();renderSchedules();toast(`Deleted "${s.name}"`)});return}
+  if(d.secretRot){const inp=$('#sv-'+d.secretRot);if(!inp.value){setError(inp,'Paste the new value first.');inp.focus();return}cur.secrets.find(s=>s.name===d.secretRot).when='just now';renderSecrets();toast(`${d.secretRot} has a new value`);return}
+  if(d.secretDel){confirmInline(t,'Delete for good',()=>{cur.secrets=cur.secrets.filter(s=>s.name!==d.secretDel);renderSecrets();toast(`Deleted ${d.secretDel}`)});return}
+  if(t.id==='sec-add'){const n=$('#ns-name'),v=$('#ns-val');if(!n.value.trim()){setError(n,'Give the secret a name.');n.focus();return}if(!v.value){setError(v,'Enter the value.');v.focus();return}cur.secrets.push({name:n.value.trim().toUpperCase().replace(/[^A-Z0-9_]/g,'_'),desc:$('#ns-desc').value.trim()||'No description',when:'just now'});renderSecrets();toast('Secret added');return}
+  if(d.importRm){const i=cur.imports.indexOf(d.importRm);cur.imports.splice(i,1);renderImports();toast(`Removed the import of ${d.importRm}`,{label:'Undo',run:()=>{cur.imports.splice(i,0,d.importRm);renderImports()}});return}
+  if(t.id==='imp-add'){const v=$('#imp-pick').value;if(!v){toast('Choose a repository first');return}cur.imports.push(v);renderImports();toast(`${cur.name} can now read ${v}`);return}
+  if(t.id==='del-open'){const n=refreshSave();deleteDialog();return}
+  if(d.openImports){closeDialog();errors.clear();openRepo(d.openImports,'settings');goto('imports');return}
+  if(t.id==='del-go'){const r=cur;closeDialog();REPOS.splice(REPOS.indexOf(r),1);errors.clear();$('#a-secs').innerHTML='';screen('repos');toast(`Deleted ${r.name} from lab`);return}
+});
+let lastDesk=null;
+new ResizeObserver(()=>{const dk=isDesktop();if(dk!==lastDesk){lastDesk=dk;document.dispatchEvent(new CustomEvent('layout',{detail:dk}))}}).observe(device);
+decorateInh($('#ed'));renderRepos();setMode('phone');
+
+/* ===== deep links: tokens joined by dots, for example #settings or #desktop.schedule ===== */
+function applyHash(){
+  const h=location.hash.slice(1).split('.').filter(Boolean),has=k=>h.includes(k);if(!h.length)return;
+  const fire=(el,t='change')=>el.dispatchEvent(new Event(t,{bubbles:true})),lab=t=>openRepo('coding-lab',t);
+  instant=true;
+  if(has('desktop'))setMode('desktop');
+  if(has('nonotes'))setNotes(false);
+  if(has('add')||has('added')){openAdd();$('#n-url').value='git@github.com:example/search-indexer.git';addSync();if(has('added'))submitAdd()}
+  if(has('overview'))lab('overview');
+  if(has('not-ready'))openRepo('auth-service','overview');
+  if(has('settings'))lab('settings');
+  if(has('changed')||has('leave')){lab('settings');$('#f-model').value='sonnet';fire($('#f-model'));setSeg($('#f-remote'),2);fire($('#f-remote'));$('#f-budget').value='90';fire($('#f-budget'),'input');if(has('leave'))leaveRepo(()=>screen('repos'))}
+  if(has('error')){lab('settings');$('#f-afkpat').value='afk/';fire($('#f-afkpat'),'input');save()}
+  if(has('runner')){openRepo('cloonar-nixos','settings');goto('runner')}
+  if(has('builtin')){openRepo('billing-api','settings');goto('autoland')}
+  if(has('schedules')){lab('settings');goto('schedules')}
+  if(has('schedule')){lab('settings');goto('schedules');openEditor('s2')}
+  if(has('schedule-new')){lab('settings');goto('schedules');openEditor(null)}
+  if(has('secrets')){lab('settings');goto('secrets');$('#secret-list .x-row').open=true}
+  if(has('imports')){lab('settings');goto('imports')}
+  if(has('setup')){lab('settings');goto('general')}
+  if(has('delete')){lab('settings');goto('danger');deleteDialog()}
+  if(has('delete-blocked')){openRepo('cloonar-nixos','settings');goto('danger');deleteDialog()}
+  instant=false;
+}
+applyHash();
+</script>
+</body>
+</html>
