@@ -40,7 +40,13 @@ type runResponse struct {
 	// struct pins is "every key, always", so a key that appears only on three
 	// of seven kinds would make the SPA's Run type optional-vs-nullable for
 	// no reason the wire format justifies.
-	PullNumber   *int    `json:"pull_number"`
+	PullNumber *int `json:"pull_number"`
+	// ScheduleID is the Schedule a scheduled run belongs to (issue #61) —
+	// cadence firing and Run now alike — and null for every other kind, or
+	// for a scheduled run whose Schedule was deleted (ON DELETE SET NULL).
+	// Bare null like PullNumber, so the SPA can attribute a runs-rail or
+	// history row to its Schedule without parsing the session label.
+	ScheduleID   *string `json:"schedule_id"`
 	Branch       string  `json:"branch"`
 	WorktreePath string  `json:"worktree_path"`
 	SessionName  string  `json:"session_name"`
@@ -91,6 +97,7 @@ func runJSON(r store.Run) runResponse {
 		Provider:      r.Provider,
 		IssueNumber:   r.IssueNumber,
 		PullNumber:    r.PullNumber,
+		ScheduleID:    r.ScheduleID,
 		Branch:        r.Branch,
 		WorktreePath:  r.WorktreePath,
 		SessionName:   r.SessionName,

@@ -52,6 +52,21 @@ type spawnCandidate struct {
 // literal) and the scheduler tick as an additional fill heartbeat — plus the
 // HTTP toggle-on/reset kicks.
 func (s *Service) SpawnOnce(ctx context.Context) {
+	// The abort cause is already logged; a tick or kick has nobody to tell.
+	_ = s.spawnOnce(ctx)
+}
+
+// spawnOnce is SpawnOnce with on-demand candidates riding along: extra is
+// appended AFTER every producer's gather, so within its stage it sorts behind
+// them (the sort is stable). That is how a Schedule's Run now joins the ONE
+// pass instead of becoming a second launch path (RunScheduleNow) — and the
+// placement is load-bearing: when the same Schedule's cadence slot is due in
+// this very pass, the cadence firing launches first and the Run now then
+// meets it as a live previous run, whereas the reverse order would overlap-
+// skip the cadence firing and so consume it. The returned error is the cause
+// of an aborted pass (repo or session listing failed — no candidate ran);
+// nil means the pass ran to completion.
+func (s *Service) spawnOnce(ctx context.Context, extra ...spawnCandidate) error {
 	// Serialized under its own lock so there is ONE cap consumer by
 	// construction: issue #185 — two loops racing one bounded resource was a
 	// race by construction, and merging the decision only helps if concurrent
@@ -63,12 +78,12 @@ func (s *Service) SpawnOnce(ctx context.Context) {
 	repos, err := s.store.Repos(ctx)
 	if err != nil {
 		s.log.Warn("spawn: list repos", "component", "afk", "err", err)
-		return
+		return err
 	}
 	live, err := s.runner.List(ctx)
 	if err != nil {
 		s.log.Warn("spawn: list sessions", "component", "afk", "err", err)
-		return
+		return err
 	}
 	liveCount := instance.LiveInstanceCount(live)
 
@@ -91,8 +106,12 @@ func (s *Service) SpawnOnce(ctx context.Context) {
 	// candidates for due firings — a fourth gather, appended like the rest:
 	// production order among producers is irrelevant, the sort owns priority.
 	candidates = append(candidates, s.scheduleCandidates(ctx, repos, liveCount, loggedIn)...)
+	// On-demand candidates last — see the doc comment: within their stage the
+	// producers' candidates must launch first.
+	candidates = append(candidates, extra...)
 
 	s.spawnPass(ctx, liveCount, candidates)
+	return nil
 }
 
 // spawnPass is the pass core, deliberately separated from the gathering so

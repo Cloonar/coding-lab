@@ -1,0 +1,410 @@
+package afk
+
+// Run now (issue #61): a Schedule's on-demand scheduled run, driven through
+// the same fixture as the cadence suite. The bar is the issue's: an ORDINARY
+// scheduled run (kind, ScheduleID, budget clock, failure accounting) that
+// goes through the ONE spawn pass, refuses with a typed reason instead of
+// queueing, works on a switched-off Schedule, and leaves the cadence's own
+// state — the in-memory pending/high-water memo and last_fired_at — exactly
+// where it was.
+
+import (
+	"errors"
+	"maps"
+	"testing"
+	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+)
+
+// cadenceMemo snapshots the Schedule due-ness memo so a test can prove a Run
+// now left it untouched.
+func (f *fixture) cadenceMemo() (pending, checked map[string]time.Time) {
+	return maps.Clone(f.svc.schedulePending), maps.Clone(f.svc.scheduleChecked)
+}
+
+func (f *fixture) atCap() {
+	f.t.Helper()
+	if err := f.st.SetSetting(f.t.Context(), store.SettingMaxInstances, "1"); err != nil {
+		f.t.Fatal(err)
+	}
+	f.runner.AddLive("other~existing")
+}
+
+// The success path: an ordinary scheduled run with the pinned identity, the
+// Schedule link, and the ordinary 30-minute budget clock — for an enabled
+// Schedule, for a switched-off one (testing a prompt before arming the
+// cadence), and for a repo whose own AFK three-strikes pause is tripped
+// (that pause never stops Schedules).
+func TestRunScheduleNow_launchesOrdinaryScheduledRun(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		enabled     bool
+		repoStrikes int
+	}{
+		{name: "enabled", enabled: true},
+		{name: "switched off", enabled: false},
+		{name: "repo AFK-paused", enabled: true, repoStrikes: PauseThreshold},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.setFailures(f.repo, tc.repoStrikes)
+			sched := f.addSchedule("deps", func(sc *store.Schedule) { sc.Enabled = tc.enabled })
+
+			run, err := f.svc.RunScheduleNow(t.Context(), sched.ID)
+			if err != nil {
+				t.Fatalf("RunScheduleNow: %v", err)
+			}
+			if run.Kind != store.RunKindScheduled {
+				t.Errorf("kind = %q, want scheduled", run.Kind)
+			}
+			if run.ScheduleID == nil || *run.ScheduleID != sched.ID {
+				t.Errorf("ScheduleID = %v, want %q", run.ScheduleID, sched.ID)
+			}
+			if run.IssueNumber != nil {
+				t.Errorf("IssueNumber = %v, want nil", *run.IssueNumber)
+			}
+			wantLabel := ScheduleLabel(sched.ID, f.clock.Now())
+			if run.SessionName != "proj~"+wantLabel || run.Branch != f.repo.ManualBranchPrefix+wantLabel {
+				t.Errorf("session/branch = %q/%q, want the scheduled identity for label %q", run.SessionName, run.Branch, wantLabel)
+			}
+			if want := f.clock.Now().Add(30 * time.Minute); run.BudgetDeadline == nil || !run.BudgetDeadline.Equal(want) {
+				t.Errorf("budget deadline = %v, want %v (the ordinary scheduled-run budget)", run.BudgetDeadline, want)
+			}
+			sess, live := f.runner.Session(run.SessionName)
+			if !live {
+				t.Fatalf("session %q not live", run.SessionName)
+			}
+			if want := ComposeSchedulePrompt(sched.Prompt, sched.Flows, sched.Name); sess.Argv[len(sess.Argv)-1] != want {
+				t.Errorf("seed = %q, want the composed schedule prompt %q", sess.Argv[len(sess.Argv)-1], want)
+			}
+			// The returned run is the stored row.
+			if runs := f.scheduledRuns(); len(runs) != 1 || runs[0].ID != run.ID || runs[0].Outcome != store.RunOutcomeActive {
+				t.Fatalf("scheduled runs = %+v, want exactly the returned active run", runs)
+			}
+			// last_fired_at is cadence bookkeeping: a Run now never stamps it.
+			if row := f.scheduleRow(sched.ID); row.LastFiredAt != nil {
+				t.Errorf("last_fired_at = %v, want nil (a Run now is not a cadence firing)", row.LastFiredAt)
+			}
+		})
+	}
+}
+
+// The per-Schedule budget override applies to a Run now like to any firing.
+func TestRunScheduleNow_budgetOverride(t *testing.T) {
+	f := newFixture(t)
+	mins := 45
+	sched := f.addSchedule("deps", func(sc *store.Schedule) { sc.BudgetMinutes = &mins })
+	run, err := f.svc.RunScheduleNow(t.Context(), sched.ID)
+	if err != nil {
+		t.Fatalf("RunScheduleNow: %v", err)
+	}
+	if want := f.clock.Now().Add(45 * time.Minute); run.BudgetDeadline == nil || !run.BudgetDeadline.Equal(want) {
+		t.Errorf("budget deadline = %v, want %v", run.BudgetDeadline, want)
+	}
+}
+
+// Every refusal is typed, and the SPECIFIC reason wins over at-cap when
+// several apply.
+func TestRunScheduleNow_refusals(t *testing.T) {
+	t.Run("paused", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		if _, err := f.st.SetSchedulePaused(t.Context(), sched.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrSchedulePaused) {
+			t.Fatalf("err = %v, want ErrSchedulePaused", err)
+		}
+		if runs := f.scheduledRuns(); len(runs) != 0 {
+			t.Errorf("paused Run now launched %d runs", len(runs))
+		}
+	})
+	t.Run("paused and at cap answers paused", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		if _, err := f.st.SetSchedulePaused(t.Context(), sched.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		f.atCap()
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrSchedulePaused) {
+			t.Fatalf("err = %v, want ErrSchedulePaused (the specific reason wins over at-cap)", err)
+		}
+	})
+	t.Run("previous Run now still live", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); err != nil {
+			t.Fatalf("first Run now: %v", err)
+		}
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrScheduleRunLive) {
+			t.Fatalf("second Run now err = %v, want ErrScheduleRunLive", err)
+		}
+		if runs := f.scheduledRuns(); len(runs) != 1 {
+			t.Errorf("scheduled runs = %d, want 1", len(runs))
+		}
+	})
+	t.Run("cadence run still live", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		f.sightSchedules()                // 12:00
+		f.clock.Advance(16 * time.Minute) // 12:16 — the 12:15 slot fires
+		f.svc.SpawnOnce(t.Context())
+		if runs := f.scheduledRuns(); len(runs) != 1 {
+			t.Fatalf("cadence runs = %d, want 1", len(runs))
+		}
+		// One live run fills a cap of 1 too: run-live must still win.
+		if err := f.st.SetSetting(t.Context(), store.SettingMaxInstances, "1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrScheduleRunLive) {
+			t.Fatalf("err = %v, want ErrScheduleRunLive", err)
+		}
+		if runs := f.scheduledRuns(); len(runs) != 1 {
+			t.Errorf("scheduled runs = %d, want still 1", len(runs))
+		}
+	})
+	t.Run("logged out", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		f.prov.SetLoggedIn(false)
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, instance.ErrLoggedOut) {
+			t.Fatalf("err = %v, want instance.ErrLoggedOut", err)
+		}
+		if runs := f.scheduledRuns(); len(runs) != 0 {
+			t.Errorf("logged-out Run now launched %d runs", len(runs))
+		}
+	})
+	t.Run("repo not ready", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		if err := f.st.UpdateRepoCloneStatus(t.Context(), f.repo.ID, store.CloneStatusCloning, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, instance.ErrRepoNotReady) {
+			t.Fatalf("err = %v, want instance.ErrRepoNotReady", err)
+		}
+	})
+	t.Run("unknown schedule", func(t *testing.T) {
+		f := newFixture(t)
+		if _, err := f.svc.RunScheduleNow(t.Context(), "sched_missing"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("err = %v, want store.ErrNotFound", err)
+		}
+	})
+	t.Run("empty composed prompt", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("ghostly", func(sc *store.Schedule) {
+			sc.Prompt = ""
+			sc.Flows = []string{"retired-flow"}
+		})
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrScheduleEmptyPrompt) {
+			t.Fatalf("err = %v, want ErrScheduleEmptyPrompt", err)
+		}
+	})
+}
+
+// At cap a Run now is refused with ErrOverCap — and NOT queued: once the cap
+// frees, later passes launch nothing for it (enabled or switched off alike).
+func TestRunScheduleNow_atCapRefusedNeverQueued(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		f := newFixture(t)
+		sched := f.addSchedule("daily", func(sc *store.Schedule) {
+			sc.Cadence = "0 6 * * *" // no slot inside this test's window
+			sc.Enabled = enabled
+		})
+		f.sightSchedules()
+		f.atCap()
+
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, instance.ErrOverCap) {
+			t.Fatalf("enabled=%v: err = %v, want instance.ErrOverCap", enabled, err)
+		}
+
+		f.runner.Kill("other~existing") // the cap frees
+		for range 3 {
+			f.clock.Advance(time.Minute)
+			f.svc.SpawnOnce(t.Context())
+		}
+		if runs := f.scheduledRuns(); len(runs) != 0 {
+			t.Fatalf("enabled=%v: a refused Run now fired later: %d scheduled runs, want 0", enabled, len(runs))
+		}
+	}
+}
+
+// The Run now candidate rides the pass AFTER the producers: when the same
+// Schedule's cadence slot is due in that very pass, the cadence firing
+// launches first (stamping last_fired_at, consuming its pending) and the Run
+// now is refused as run-live — never the reverse, which would overlap-skip
+// and so consume the cadence firing. With exactly one free slot the Run now
+// is snapshot-vetoed instead of called, and the specific reason must still
+// win over at-cap.
+func TestRunScheduleNow_cadenceDueInSamePassLaunchesFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cap  string // "" = the seeded default (plenty of headroom)
+	}{
+		{name: "headroom"},
+		{name: "one free slot", cap: "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			sched := f.addSchedule("deps", nil)
+			f.sightSchedules() // 12:00
+			if tc.cap != "" {
+				if err := f.st.SetSetting(t.Context(), store.SettingMaxInstances, tc.cap); err != nil {
+					t.Fatal(err)
+				}
+				f.runner.AddLive("other~existing")
+			}
+			f.clock.Advance(16 * time.Minute) // 12:16 — the 12:15 slot is due in the Run now's pass
+
+			if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrScheduleRunLive) {
+				t.Fatalf("err = %v, want ErrScheduleRunLive (the cadence firing launched first)", err)
+			}
+			runs := f.scheduledRuns()
+			if len(runs) != 1 {
+				t.Fatalf("scheduled runs = %d, want 1 (the cadence firing)", len(runs))
+			}
+			if row := f.scheduleRow(sched.ID); row.LastFiredAt == nil || !row.LastFiredAt.Equal(f.clock.Now()) {
+				t.Errorf("last_fired_at = %v, want %v (the run is the cadence firing)", row.LastFiredAt, f.clock.Now())
+			}
+			if _, held := f.svc.schedulePending[sched.ID]; held {
+				t.Error("cadence firing still pending after it launched")
+			}
+		})
+	}
+}
+
+// A Run now never reads or writes the cadence memo: the pending at-cap
+// firing and the high-water marks are identical before and after a refused
+// Run now and a launched one, and the held firing still launches on its own
+// once the cap frees.
+func TestRunScheduleNow_leavesCadenceMemoUntouched(t *testing.T) {
+	t.Run("refused at cap with a held firing", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		f.sightSchedules() // 12:00
+		f.atCap()
+		f.clock.Advance(16 * time.Minute) // 12:16 — the 12:15 firing is owed but at cap
+		f.svc.SpawnOnce(t.Context())
+		if due, held := f.svc.schedulePending[sched.ID]; !held || !due.Equal(clockTime.Add(15*time.Minute)) {
+			t.Fatalf("pending = %v/%v, want the 12:15 firing held at cap", due, held)
+		}
+		pending, checked := f.cadenceMemo()
+
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, instance.ErrOverCap) {
+			t.Fatalf("err = %v, want instance.ErrOverCap", err)
+		}
+		if p, c := f.cadenceMemo(); !maps.Equal(p, pending) || !maps.Equal(c, checked) {
+			t.Fatalf("memo moved: pending %v → %v, checked %v → %v", pending, p, checked, c)
+		}
+
+		// The held cadence firing launches on its own once the cap frees —
+		// one run, the cadence's.
+		f.runner.Kill("other~existing")
+		f.clock.Advance(time.Minute) // 12:17
+		f.svc.SpawnOnce(t.Context())
+		if runs := f.scheduledRuns(); len(runs) != 1 {
+			t.Fatalf("scheduled runs after the cap freed = %d, want 1 (the held cadence firing)", len(runs))
+		}
+		if row := f.scheduleRow(sched.ID); row.LastFiredAt == nil {
+			t.Error("the held cadence firing did not stamp last_fired_at")
+		}
+	})
+	t.Run("launched", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", nil)
+		f.sightSchedules()               // 12:00
+		f.clock.Advance(5 * time.Minute) // 12:05
+		f.svc.SpawnOnce(t.Context())     // the tick a live engine would run here
+		pending, checked := f.cadenceMemo()
+
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); err != nil {
+			t.Fatalf("RunScheduleNow: %v", err)
+		}
+		if p, c := f.cadenceMemo(); !maps.Equal(p, pending) || !maps.Equal(c, checked) {
+			t.Fatalf("memo moved: pending %v → %v, checked %v → %v", pending, p, checked, c)
+		}
+	})
+	t.Run("switched off", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("deps", func(sc *store.Schedule) { sc.Enabled = false })
+		f.sightSchedules()
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); err != nil {
+			t.Fatalf("RunScheduleNow: %v", err)
+		}
+		if _, ok := f.svc.scheduleChecked[sched.ID]; ok {
+			t.Error("a Run now armed a switched-off Schedule's cadence")
+		}
+		if _, ok := f.svc.schedulePending[sched.ID]; ok {
+			t.Error("a Run now left a pending firing for a switched-off Schedule")
+		}
+	})
+}
+
+// The next cadence firing is neither moved nor consumed: sight at 12:00, Run
+// now at 12:05, the run dies and is reaped, and the 12:15 slot fires on its
+// own — with last_fired_at untouched until then.
+func TestRunScheduleNow_nextCadenceFiringUnchanged(t *testing.T) {
+	f := newFixture(t)
+	sched := f.addSchedule("deps", nil)
+	f.sightSchedules() // 12:00
+
+	f.clock.Advance(5 * time.Minute) // 12:05
+	now, err := f.svc.RunScheduleNow(t.Context(), sched.ID)
+	if err != nil {
+		t.Fatalf("RunScheduleNow: %v", err)
+	}
+	if row := f.scheduleRow(sched.ID); row.LastFiredAt != nil {
+		t.Fatalf("last_fired_at = %v after a Run now, want nil", row.LastFiredAt)
+	}
+
+	f.runner.Kill(now.SessionName)
+	f.clock.Advance(time.Minute) // 12:06
+	f.svc.ReapOnce(t.Context(), f.clock.Now())
+	if got := f.runRow(now.ID); got.Outcome != store.RunOutcomeDeath {
+		t.Fatalf("Run now outcome = %q, want death", got.Outcome)
+	}
+
+	f.clock.Advance(10 * time.Minute) // 12:16 — past the 12:15 slot
+	f.svc.SpawnOnce(t.Context())
+	runs := f.scheduledRuns()
+	if len(runs) != 2 {
+		t.Fatalf("scheduled runs = %d, want 2 (the Run now and the 12:15 cadence firing)", len(runs))
+	}
+	if cadence := runs[1]; cadence.Outcome != store.RunOutcomeActive ||
+		cadence.SessionName != "proj~"+ScheduleLabel(sched.ID, f.clock.Now()) {
+		t.Errorf("cadence run = %s (%s), want the live 12:16 firing", cadence.SessionName, cadence.Outcome)
+	}
+	if row := f.scheduleRow(sched.ID); row.LastFiredAt == nil || !row.LastFiredAt.Equal(f.clock.Now()) {
+		t.Errorf("last_fired_at = %v, want %v (stamped by the cadence firing alone)", row.LastFiredAt, f.clock.Now())
+	}
+}
+
+// Failure accounting is the ordinary scheduled run's: a Run now run that
+// dies before its deadline strikes its Schedule, never the repo's AFK
+// three-strikes counter — here one strike short of the repo pause, which it
+// must not trip.
+func TestRunScheduleNow_deathStrikesTheScheduleOnly(t *testing.T) {
+	f := newFixture(t)
+	f.setFailures(f.repo, PauseThreshold-1)
+	sched := f.addSchedule("deps", nil)
+
+	run, err := f.svc.RunScheduleNow(t.Context(), sched.ID)
+	if err != nil {
+		t.Fatalf("RunScheduleNow: %v", err)
+	}
+	f.runner.Kill(run.SessionName)
+	f.clock.Advance(time.Minute)
+	f.svc.ReapOnce(t.Context(), f.clock.Now())
+
+	if got := f.runRow(run.ID); got.Outcome != store.RunOutcomeDeath {
+		t.Fatalf("outcome = %q, want death (died before its budget deadline)", got.Outcome)
+	}
+	if row := f.scheduleRow(sched.ID); row.ConsecutiveFailures != 1 || row.Paused {
+		t.Errorf("schedule failures/paused = %d/%v, want 1/false", row.ConsecutiveFailures, row.Paused)
+	}
+	if n := f.failures(f.repo); n != PauseThreshold-1 {
+		t.Errorf("repo failures = %d, want %d (a scheduled death never strikes the repo)", n, PauseThreshold-1)
+	}
+}

@@ -570,6 +570,10 @@ func (s *Server) Handler() http.Handler {
 		// surface (internal/agentapi) below. See autoland.go's header comment
 		// for why that placement is load-bearing.
 		api.HandleFunc("POST /api/v1/repos/{id}/autoland/pulls/{pull}/rearm", s.requireAuth(s.handleAutolandRearm))
+		// A Schedule's Run now (issue #61). Here rather than with the
+		// store-backed Schedule CRUD below: it launches a run through the
+		// engine's spawn pass, so it exists only where the engine does.
+		api.HandleFunc("POST /api/v1/repos/{id}/schedules/{sid}/run", s.requireAuth(s.handleScheduleRun))
 	}
 
 	// Schedules (issue #247 / ADR-0062): per-repo cadence CRUD, the human
@@ -578,6 +582,8 @@ func (s *Server) Handler() http.Handler {
 	// cron. Store-backed and always mounted, like the settings routes below —
 	// a Schedule is a row, and the one engine touch (the re-enable's
 	// spawn-pass kick) is nil-guarded rather than gating the whole surface.
+	// Run now is not here: it IS an engine launch, so it mounts with the AFK
+	// routes above.
 	api.HandleFunc("GET /api/v1/repos/{id}/schedules", s.requireAuth(s.handleScheduleList))
 	api.HandleFunc("POST /api/v1/repos/{id}/schedules", s.requireAuth(s.handleScheduleCreate))
 	api.HandleFunc("PATCH /api/v1/repos/{id}/schedules/{sid}", s.requireAuth(s.handleScheduleUpdate))

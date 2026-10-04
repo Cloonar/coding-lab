@@ -876,3 +876,63 @@ func names(list []Schedule) []string {
 	}
 	return out
 }
+
+// TestLatestRunForSchedule pins the Schedules list's last-outcome source: the
+// newest run of the named Schedule whatever its outcome, never a sibling
+// Schedule's, never an unattributed run, and ErrNotFound for a Schedule that
+// has launched nothing (or whose only run was orphaned by a delete).
+func TestLatestRunForSchedule(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		ctx := context.Background()
+		repo := afkFixtureRepo(t, st, "proj")
+		weekly := fixtureSchedule(t, st, repo.ID, "weekly", "0 6 * * 1")
+		daily := fixtureSchedule(t, st, repo.ID, "daily", "0 6 * * *")
+
+		if _, err := st.LatestRunForSchedule(ctx, weekly.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("never-launched Schedule = %v, want ErrNotFound", err)
+		}
+
+		mk := func(label string, sched *string, started time.Time) Run {
+			t.Helper()
+			r, err := st.CreateRun(ctx, Run{
+				ID: ids.NewID("run"), RepoID: repo.ID, Kind: RunKindScheduled,
+				Provider: "claude-code", ScheduleID: sched, Branch: "lab/" + label,
+				WorktreePath: "/wt/" + label, SessionName: "proj~" + label,
+				Model: "opus[1m]", Effort: "max", StartedAt: started,
+				Outcome: RunOutcomeActive,
+			})
+			if err != nil {
+				t.Fatalf("CreateRun %s: %v", label, err)
+			}
+			return r
+		}
+		first := mk("sched-1", &weekly.ID, schedClock)
+		if err := st.EndRun(ctx, first.ID, RunOutcomeDeath, schedClock.Add(5*time.Minute), "session died"); err != nil {
+			t.Fatalf("EndRun: %v", err)
+		}
+		got, err := st.LatestRunForSchedule(ctx, weekly.ID)
+		if err != nil {
+			t.Fatalf("LatestRunForSchedule: %v", err)
+		}
+		if got.ID != first.ID || got.Outcome != RunOutcomeDeath || got.EndedAt == nil {
+			t.Fatalf("latest = %q %q ended=%v, want the ended run %q", got.ID, got.Outcome, got.EndedAt, first.ID)
+		}
+
+		// A newer run wins while still live; a sibling Schedule's and an
+		// unattributed run, newer still, change nothing.
+		second := mk("sched-2", &weekly.ID, schedClock.Add(time.Hour))
+		mk("sched-3", &daily.ID, schedClock.Add(2*time.Hour))
+		mk("manual", nil, schedClock.Add(3*time.Hour))
+		if got, err = st.LatestRunForSchedule(ctx, weekly.ID); err != nil || got.ID != second.ID || got.Outcome != RunOutcomeActive {
+			t.Fatalf("latest = %q %q err=%v, want the live run %q", got.ID, got.Outcome, err, second.ID)
+		}
+
+		// Deleting the Schedule orphans its runs: they are no longer its.
+		if err := st.DeleteSchedule(ctx, daily.ID); err != nil {
+			t.Fatalf("DeleteSchedule: %v", err)
+		}
+		if _, err := st.LatestRunForSchedule(ctx, daily.ID); !errors.Is(err, ErrNotFound) {
+			t.Errorf("deleted Schedule = %v, want ErrNotFound", err)
+		}
+	})
+}

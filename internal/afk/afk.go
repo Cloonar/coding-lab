@@ -213,7 +213,9 @@ type Service struct {
 	// INVARIANT: every field in this block is touched ONLY from
 	// scheduleCandidates and the launch closures it emits, all of which run
 	// inside the spawn pass under spawnMu — that serialization is these
-	// fields' only guard, so no other code path may read or write them.
+	// fields' only guard, so no other code path may read or write them —
+	// including a Schedule's Run now (RunScheduleNow), whose on-demand
+	// candidate rides the same pass but is cadence-blind by design.
 	//
 	// schedulePending maps a schedule ID to the due time of the one owed
 	// firing (at-cap firings retry from here each pass; overlap-skips and

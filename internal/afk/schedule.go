@@ -33,6 +33,7 @@ package afk
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -340,8 +341,56 @@ func (s *Service) logMissedSlots(schedules []store.Schedule, byRepoID map[string
 // loses real work. On success the firing is stamped durable via
 // MarkScheduleFired.
 func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outcome spawnOutcome, consumed bool) {
+	res := s.launchScheduledRun(ctx, scheduleID, false)
+	return res.outcome, res.consumed
+}
+
+// scheduledLaunch is one locked scheduled-run launch's full answer. outcome
+// is what the spawn pass acts on; consumed is the cadence path's pending-
+// firing verdict (meaningless for a Run now, which has no pending firing);
+// run is the spawned run when outcome is spawnSpawned; err is why nothing
+// spawned — typed where the API maps it (ErrSchedulePaused,
+// ErrScheduleRunLive, ErrScheduleEmptyPrompt, instance.ErrRepoNotReady,
+// instance.ErrOverCap, store.ErrNotFound), raw otherwise. The cadence path
+// only logs it; a Run now hands it back to the operator.
+type scheduledLaunch struct {
+	outcome  spawnOutcome
+	consumed bool
+	run      store.Run
+	err      error
+}
+
+// launchScheduledRun is the ONE locked scheduled-run launch core, shared by a
+// cadence firing (onDemand=false, via launchScheduled) and a Schedule's Run
+// now (onDemand=true, via RunScheduleNow's candidate). A Run now is an
+// ordinary scheduled run — same identity grammar, prompt composition, knob
+// resolution, budget clock, and failure accounting (Kind scheduled +
+// ScheduleID is what the reaper keys on) — so the two differ in exactly
+// three places, each marked below:
+//
+//   - The enabled flag gates only the cadence: a Run now launches a
+//     switched-off Schedule, so a prompt can be tested before the cadence is
+//     armed. Paused refuses both — a struck-out Schedule waits for its human
+//     re-enable either way.
+//   - Cadence refusals are logged here (nobody else will see them); a Run
+//     now's refusals travel back to the operator as scheduledLaunch.err
+//     instead.
+//   - Only a cadence firing stamps last_fired_at. That column is cadence
+//     bookkeeping (the startup missed-slot log's baseline), and a Run now
+//     neither moves nor consumes the next cadence firing. The in-memory
+//     schedulePending/scheduleChecked memo is likewise never touched here —
+//     only scheduleCandidates' closures write it.
+func (s *Service) launchScheduledRun(ctx context.Context, scheduleID string, onDemand bool) scheduledLaunch {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// note logs a cadence-path cause. A Run now's causes are its returned
+	// error — the HTTP layer surfaces refusals and logs the internal ones.
+	note := func(level slog.Level, msg string, args ...any) {
+		if !onDemand {
+			s.log.Log(ctx, level, msg, args...)
+		}
+	}
 
 	// Re-read the Schedule under the lock: deleted, disabled, or paused
 	// since the gather → the firing dissolves; an unreadable row is a
@@ -349,49 +398,54 @@ func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outco
 	sched, err := s.store.ScheduleByID(ctx, scheduleID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			s.log.Warn("schedule launch: schedule vanished", "component", "afk", "schedule", scheduleID, "err", err)
-			return spawnSkipped, true
+			note(slog.LevelWarn, "schedule launch: schedule vanished", "component", "afk", "schedule", scheduleID, "err", err)
+			return scheduledLaunch{outcome: spawnSkipped, consumed: true, err: err}
 		}
-		s.log.Warn("schedule launch: read schedule; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: read schedule; firing kept for retry",
 			"component", "afk", "schedule", scheduleID, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
-	if !sched.Enabled || sched.Paused {
-		s.log.Info("schedule launch: schedule disabled or paused meanwhile; firing dropped",
+	// On demand, ONLY paused refuses here (a Run now of a switched-off
+	// Schedule is the point); the cadence drops a disabled one too. err is
+	// read only on demand, where reaching this branch means paused.
+	if sched.Paused || (!onDemand && !sched.Enabled) {
+		note(slog.LevelInfo, "schedule launch: schedule disabled or paused meanwhile; firing dropped",
 			"component", "afk", "schedule", sched.Name)
-		return spawnSkipped, true
+		return scheduledLaunch{outcome: spawnSkipped, consumed: true, err: ErrSchedulePaused}
 	}
 	// Re-read the repo under the lock: branch prefix, budgets, caps, and the
 	// clone state must be current, not a gather snapshot.
 	repo, err := s.store.RepoByID(ctx, sched.RepoID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			s.log.Warn("schedule launch: repo vanished", "component", "afk", "schedule", sched.Name, "err", err)
-			return spawnSkipped, true
+			note(slog.LevelWarn, "schedule launch: repo vanished", "component", "afk", "schedule", sched.Name, "err", err)
+			return scheduledLaunch{outcome: spawnSkipped, consumed: true, err: err}
 		}
-		s.log.Warn("schedule launch: read repo; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: read repo; firing kept for retry",
 			"component", "afk", "schedule", sched.Name, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
 	if repo.CloneStatus != store.CloneStatusReady {
-		s.log.Warn("schedule launch: repo not ready; firing dropped",
+		note(slog.LevelWarn, "schedule launch: repo not ready; firing dropped",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name)
-		return spawnSkipped, true
+		return scheduledLaunch{outcome: spawnSkipped, consumed: true, err: instance.ErrRepoNotReady}
 	}
 
 	// Overlap re-check under the lock — the authority (the producer checked,
 	// but a manual pass or a racing tick may have fired meanwhile). Skip-on-
 	// overlap consumes the firing, loudly, never queues it (ADR-0062); an
-	// ambiguous read keeps it — never consume a firing on missing data.
+	// ambiguous read keeps it — never consume a firing on missing data. A
+	// Run now meets the same gate: one live run per Schedule, whichever path
+	// launched it.
 	if prev, err := s.store.ActiveRunForSchedule(ctx, sched.ID); err == nil {
-		s.log.Warn("schedule firing skipped: previous run still live",
+		note(slog.LevelWarn, "schedule firing skipped: previous run still live",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name,
 			"run", prev.ID, "session", prev.SessionName)
-		return spawnSkipped, true
+		return scheduledLaunch{outcome: spawnSkipped, consumed: true, err: ErrScheduleRunLive}
 	} else if !errors.Is(err, store.ErrNotFound) {
-		s.log.Warn("schedule launch: active run for schedule; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: active run for schedule; firing kept for retry",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
 
 	// A firing with nothing to say must not launch: it would burn its whole
@@ -399,12 +453,14 @@ func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outco
 	// prompt goes empty when the Schedule's prompt cleared under concurrent
 	// edits, or when every selected flow key is unknown to this binary (a
 	// retired catalog entry surviving in the row). TrimSpace is the API's own
-	// emptiness test — deliberately no deeper unicode chase here.
+	// emptiness test — deliberately no deeper unicode chase here. Logged at
+	// error level on the cadence path only: a Run now's operator reads the
+	// refusal itself.
 	seed := ComposeSchedulePrompt(sched.Prompt, sched.Flows, sched.Name)
 	if strings.TrimSpace(seed) == "" {
-		s.log.Error("schedule composed an empty prompt; firing skipped — check the schedule's prompt and flows",
+		note(slog.LevelError, "schedule composed an empty prompt; firing skipped — check the schedule's prompt and flows",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name)
-		return spawnSkipped, true
+		return scheduledLaunch{outcome: spawnSkipped, consumed: true, err: ErrScheduleEmptyPrompt}
 	}
 
 	// Knob resolution (ADR-0062 rides ADR-0021/0030 unchanged): the
@@ -416,27 +472,27 @@ func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outco
 	// correct and pinned. All opaque here, exactly like launch().
 	prov, err := s.instances.ResolveScheduleProvider(ctx, repo, sched.Provider)
 	if err != nil {
-		s.log.Warn("schedule launch: resolve provider; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: resolve provider; firing kept for retry",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
 	model, effort, err := s.instances.ResolveScheduleModelEffort(ctx, prov, repo, sched.Model, sched.Effort)
 	if err != nil {
-		s.log.Warn("schedule launch: resolve model/effort; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: resolve model/effort; firing kept for retry",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
 	options, err := s.instances.ResolveSpawnOptions(ctx, prov, repo, store.RunKindScheduled)
 	if err != nil {
-		s.log.Warn("schedule launch: resolve options; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: resolve options; firing kept for retry",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
 	remote, err := s.instances.ResolveRemote(ctx, prov, repo, store.RunKindScheduled, nil)
 	if err != nil {
-		s.log.Warn("schedule launch: resolve remote; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: resolve remote; firing kept for retry",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
 
 	// Cap guard on fresh liveness, exactly like launch(): nothing is created
@@ -445,12 +501,12 @@ func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outco
 	// stance — retry, never consume.
 	live, err := s.runner.List(ctx)
 	if err != nil {
-		s.log.Warn("schedule launch: list sessions; firing kept for retry",
+		note(slog.LevelWarn, "schedule launch: list sessions; firing kept for retry",
 			"component", "afk", "repo", repo.Name, "schedule", sched.Name, "err", err)
-		return spawnSkipped, false
+		return scheduledLaunch{outcome: spawnSkipped, err: err}
 	}
 	if instance.LiveInstanceCount(live) >= s.instances.EffectiveCap(ctx, repo) {
-		return spawnAtCap, false
+		return scheduledLaunch{outcome: spawnAtCap, err: instance.ErrOverCap}
 	}
 
 	// The scheduled identity: label sched-<id-suffix>-<stamp>; branch is
@@ -502,11 +558,18 @@ func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outco
 		// every tick is auto-retry-shaped runaway — the next cron match
 		// tries again.
 		if errors.Is(err, instance.ErrOverCap) {
-			return spawnAtCap, false
+			return scheduledLaunch{outcome: spawnAtCap, err: err}
 		}
-		s.log.Warn("schedule launch failed; firing consumed", "component", "afk",
+		note(slog.LevelWarn, "schedule launch failed; firing consumed", "component", "afk",
 			"repo", repo.Name, "schedule", sched.Name, "err", err)
-		return spawnSkipped, true
+		return scheduledLaunch{outcome: spawnSkipped, consumed: true, err: err}
+	}
+	if onDemand {
+		// No MarkScheduleFired: last_fired_at stays "the last CADENCE
+		// firing" — a Run now is not a slot of the cron expression.
+		s.log.Info("schedule run now launched", "component", "afk",
+			"repo", repo.Name, "schedule", sched.Name, "session", run.SessionName)
+		return scheduledLaunch{outcome: spawnSpawned, run: run}
 	}
 	// The firing is durable: last_fired_at is the startup missed-slot log's
 	// baseline. A write failure only degrades that log — never the run.
@@ -516,5 +579,111 @@ func (s *Service) launchScheduled(ctx context.Context, scheduleID string) (outco
 	}
 	s.log.Info("schedule fired", "component", "afk",
 		"repo", repo.Name, "schedule", sched.Name, "session", run.SessionName)
-	return spawnSpawned, true
+	return scheduledLaunch{outcome: spawnSpawned, consumed: true, run: run}
+}
+
+// RunScheduleNow starts one scheduled run for a Schedule on demand — the
+// operator's "Run now", POST /repos/{id}/schedules/{sid}/run — and returns
+// the run or the reason it was refused. It is an ORDINARY scheduled run
+// (launchScheduledRun's on-demand mode: same prompt and flows, overrides,
+// budget clock, and failure accounting) and it goes through the ONE spawn
+// pass as a StageScheduled candidate, never a second launch path: the pass
+// stays the sole consumer of the instance cap (ADR-0049), so a Run now
+// competes for a slot in pipeline order like any firing — after the drain
+// stages, after a cadence firing due in the same pass, ahead of new AFK
+// work.
+//
+// A refusal is final and never queued: the candidate exists for this one
+// synchronous pass only, so nothing fires later because of it. Typed
+// refusals (API → 409): ErrSchedulePaused, ErrScheduleRunLive,
+// instance.ErrOverCap, instance.ErrRepoNotReady, instance.ErrLoggedOut,
+// ErrScheduleEmptyPrompt; store.ErrNotFound → 404; anything else is the raw
+// cause. It works on a switched-off Schedule (testing a prompt before
+// enabling it) and never touches the cadence's state: not the in-memory
+// pending/high-water memo, not last_fired_at.
+//
+// The specific reason wins when several apply. Paused and run-live are
+// checked BEFORE the pass (and re-checked under the engine lock), so paused-
+// and-at-cap answers paused; the forced provider login check runs here too,
+// per click, exactly as StartManualAFK's does — the pass's shared auth memo
+// belongs to the producers' candidates. A candidate the pass's snapshot
+// vetoed is never called, so that path answers at-cap — after one more look
+// for a more specific reason, because the slot may have gone to this same
+// Schedule's cadence firing in this very pass.
+func (s *Service) RunScheduleNow(ctx context.Context, scheduleID string) (store.Run, error) {
+	sched, err := s.store.ScheduleByID(ctx, scheduleID)
+	if err != nil {
+		return store.Run{}, err // ErrNotFound → 404
+	}
+	if err := s.runNowRefusal(ctx, sched); err != nil {
+		return store.Run{}, err
+	}
+	repo, err := s.store.RepoByID(ctx, sched.RepoID)
+	if err != nil {
+		return store.Run{}, err
+	}
+	if repo.CloneStatus != store.CloneStatusReady {
+		return store.Run{}, instance.ErrRepoNotReady
+	}
+	// FORCE the auth refresh — never a cached status: a spawn while logged
+	// out strands a session that dies at the login wall and reaps as a
+	// death, striking the Schedule for nothing. The locked launch re-resolves
+	// the provider authoritatively.
+	prov, err := s.instances.ResolveScheduleProvider(ctx, repo, sched.Provider)
+	if err != nil {
+		return store.Run{}, err
+	}
+	if st, _ := prov.AuthStatus(ctx, true); !st.LoggedIn {
+		return store.Run{}, instance.ErrLoggedOut
+	}
+
+	var (
+		called bool
+		res    scheduledLaunch
+	)
+	candidate := spawnCandidate{
+		stage: StageScheduled,
+		repo:  repo,
+		label: "sched-now " + repo.Name + "/" + sched.Name,
+		launch: func(ctx context.Context) spawnOutcome {
+			called = true
+			res = s.launchScheduledRun(ctx, scheduleID, true)
+			return res.outcome
+		},
+	}
+	if err := s.spawnOnce(ctx, candidate); err != nil {
+		return store.Run{}, err
+	}
+	if called {
+		if res.outcome != spawnSpawned {
+			return store.Run{}, res.err
+		}
+		return res.run, nil
+	}
+	// The pass's snapshot vetoed the candidate (the only way a gathered
+	// candidate goes uncalled): at cap — unless a more specific reason now
+	// applies.
+	sched, err = s.store.ScheduleByID(ctx, scheduleID)
+	if err != nil {
+		return store.Run{}, err
+	}
+	if err := s.runNowRefusal(ctx, sched); err != nil {
+		return store.Run{}, err
+	}
+	return store.Run{}, instance.ErrOverCap
+}
+
+// runNowRefusal is a Run now's Schedule-specific gate, read outside the
+// engine lock (launchScheduledRun re-checks both under it): paused first,
+// then a live previous run. nil means neither applies.
+func (s *Service) runNowRefusal(ctx context.Context, sched store.Schedule) error {
+	if sched.Paused {
+		return ErrSchedulePaused
+	}
+	if _, err := s.store.ActiveRunForSchedule(ctx, sched.ID); err == nil {
+		return ErrScheduleRunLive
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	return nil
 }

@@ -50,6 +50,15 @@ func (s *Server) writeAFKError(w http.ResponseWriter, doing string, err error) {
 		writeError(w, http.StatusConflict, afk.ErrRepoPaused.Error())
 	case errors.Is(err, afk.ErrNoReady):
 		writeError(w, http.StatusConflict, afk.ErrNoReady.Error())
+	case errors.Is(err, afk.ErrSchedulePaused):
+		// The Schedule Run now refusals (issue #61), each a 409 the UI shows
+		// verbatim; the cap and logged-out refusals are the shared instance
+		// mapping below.
+		writeError(w, http.StatusConflict, afk.ErrSchedulePaused.Error())
+	case errors.Is(err, afk.ErrScheduleRunLive):
+		writeError(w, http.StatusConflict, afk.ErrScheduleRunLive.Error())
+	case errors.Is(err, afk.ErrScheduleEmptyPrompt):
+		writeError(w, http.StatusConflict, afk.ErrScheduleEmptyPrompt.Error())
 	case isTrackerConfigError(err):
 		// The repo's tracker binding can't be driven (unsupported forge kind,
 		// bad/missing forge credential, unparseable remote/host, unknown

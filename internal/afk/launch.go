@@ -24,6 +24,26 @@ var (
 	// API → 409. (D12 delta from v0, where a manual start bypassed the
 	// pause — the M5 contract pins the 409.)
 	ErrRepoPaused = errors.New("repository is paused after consecutive AFK failures — reset to re-arm")
+
+	// The Schedule "Run now" refusals (RunScheduleNow), each answered 409
+	// with exactly this message — the UI shows it verbatim. The cap refusal
+	// is instance.ErrOverCap, shared with every other launch.
+	//
+	// ErrSchedulePaused: the Schedule's own three-strikes paused it; a Run
+	// now waits for the human re-enable exactly as its cadence does. (The
+	// enabled flag is NOT a refusal: a Run now of a switched-off Schedule is
+	// how a prompt is tested before the cadence is armed.)
+	ErrSchedulePaused = errors.New("schedule is paused after consecutive failures — re-enable to re-arm")
+	// ErrScheduleRunLive: the Schedule's previous run — cadence firing or
+	// Run now alike — is still live. One live run per Schedule, the same
+	// gate skip-on-overlap applies to a firing (ADR-0062); a refused Run now
+	// is never queued behind it.
+	ErrScheduleRunLive = errors.New("schedule's previous run is still live")
+	// ErrScheduleEmptyPrompt: the Schedule's prompt plus flow blocks compose
+	// to nothing — only reachable through a row whose prompt is empty and
+	// whose every flow key this binary no longer knows (the API refuses an
+	// empty brief at write). Launching would burn a whole budget on nothing.
+	ErrScheduleEmptyPrompt = errors.New("schedule composes an empty prompt — check its prompt and flows")
 )
 
 // TrackerError wraps a tracker round-trip failure inside the engine so the

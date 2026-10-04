@@ -94,6 +94,29 @@ func (s *Store) ActiveRunForSchedule(ctx context.Context, scheduleID string) (Ru
 	return r, nil
 }
 
+// LatestRunForSchedule returns the most recently started run scheduleID
+// launched — ANY outcome, live or ended, cadence firing or Run now alike
+// (both carry runs.schedule_id) — or ErrNotFound when the Schedule has never
+// launched one. It is the Schedules list's "last outcome" source, which is
+// why it reads the same durable link the skip-on-overlap gate does rather
+// than parsing session labels. Runs orphaned by a deleted Schedule (ON
+// DELETE SET NULL) are invisible here, as they should be.
+func (s *Store) LatestRunForSchedule(ctx context.Context, scheduleID string) (Run, error) {
+	row := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT `+runColumns+` FROM runs
+		 WHERE schedule_id = ?
+		 ORDER BY started_at DESC LIMIT 1`),
+		scheduleID)
+	r, err := scanRun(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, fmt.Errorf("latest run for schedule %q: %w", scheduleID, ErrNotFound)
+		}
+		return Run{}, fmt.Errorf("latest run for schedule %q: %w", scheduleID, err)
+	}
+	return r, nil
+}
+
 // ActiveRunOnBranch reports whether any outcome='active' run — ANY kind —
 // works branch in the repo: the autoland poller's runs-store gate (issue
 // #181). The authoring AFK run still idling on its claim and a lander already

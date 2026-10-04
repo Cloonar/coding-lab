@@ -1,8 +1,9 @@
 package httpapi
 
 // Schedule surface (issue #247 / ADR-0062): per-repo cadence CRUD, the human
-// re-enable of a struck-out Schedule, the built-in flow catalog the form's
-// multiselect renders, and the server-rendered cron preview.
+// re-enable of a struck-out Schedule, the operator's Run now (issue #61), the
+// built-in flow catalog the form's multiselect renders, and the
+// server-rendered cron preview.
 //
 // Shape follows labels.go — s.loadRepo plus a cross-repo guard that 404s a
 // Schedule belonging to another repo rather than leaking its existence — and
@@ -19,10 +20,12 @@ package httpapi
 // provider is not knowable here (the repos.go lander_model rationale).
 //
 // The preview endpoint exists so the SPA never re-implements cron and can
-// never disagree with the engine about the next firing: one parser, three
-// readers (write validation, this preview, the spawn pass).
+// never disagree with the engine about the next firing: one parser, four
+// readers (write validation, this preview, every Schedule row's next_run_at,
+// the spawn pass).
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,13 +97,41 @@ type scheduleResponse struct {
 	ConsecutiveFailures int  `json:"consecutive_failures"`
 	Paused              bool `json:"paused"`
 	// LastFiredAt is null until the first firing; it is engine bookkeeping and
-	// deliberately does not move UpdatedAt.
+	// deliberately does not move UpdatedAt. It is the last CADENCE firing — a
+	// Run now never stamps it (issue #61); LastRun below covers both.
 	LastFiredAt *string `json:"last_fired_at"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
+
+	// NextRunAt is the next cadence firing — the next cron match after the
+	// server's now, from the same parser /cron/preview uses, in RFC3339 — and
+	// NextRunDisplay the same instant in the preview's next_display rendering,
+	// so the Schedules list never computes cron in the browser (issue #61).
+	// Both null when no cadence firing is coming: the Schedule is switched
+	// off or paused, or its cadence does not parse or never matches. It is
+	// the cron slot, not a promise: skip-on-overlap still drops that slot if
+	// the Schedule's previous run is live when it comes due.
+	NextRunAt      *string `json:"next_run_at"`
+	NextRunDisplay *string `json:"next_run_display"`
+	// LastRun is the Schedule's most recently started run — cadence firing or
+	// Run now — or null when it has never launched one.
+	LastRun *scheduleLastRunResponse `json:"last_run"`
 }
 
-// scheduleJSON renders a Schedule row as its pinned JSON shape.
+// scheduleLastRunResponse is a Schedule row's "last outcome": just enough of
+// its newest run to render the list, in the run JSON's own vocabulary
+// (outcome active while live, then success/death/timeout/stopped; ended_at
+// null while live). The full run is GET /runs/{id}.
+type scheduleLastRunResponse struct {
+	ID        string  `json:"id"`
+	StartedAt string  `json:"started_at"`
+	EndedAt   *string `json:"ended_at"`
+	Outcome   string  `json:"outcome"`
+}
+
+// scheduleJSON renders a Schedule row as its pinned JSON shape, minus the
+// derived next_run_*/last_run fields scheduleView adds (they render null
+// here).
 func scheduleJSON(sc store.Schedule) scheduleResponse {
 	flows := sc.Flows
 	if flows == nil {
@@ -132,6 +163,58 @@ func scheduleJSON(sc store.Schedule) scheduleResponse {
 	return resp
 }
 
+// scheduleView is the Schedule JSON every handler answers with: the stored
+// row plus the two derived facts the Schedules list shows per row — the next
+// cadence firing and the last run's outcome (issue #61).
+func (s *Server) scheduleView(ctx context.Context, sc store.Schedule) (scheduleResponse, error) {
+	resp := scheduleJSON(sc)
+	resp.NextRunAt, resp.NextRunDisplay = scheduleNextRun(sc, s.now())
+	last, err := s.store.LatestRunForSchedule(ctx, sc.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		return scheduleResponse{}, err
+	default:
+		lr := &scheduleLastRunResponse{
+			ID:        last.ID,
+			StartedAt: store.FormatTime(last.StartedAt),
+			Outcome:   last.Outcome,
+		}
+		if last.EndedAt != nil {
+			ended := store.FormatTime(*last.EndedAt)
+			lr.EndedAt = &ended
+		}
+		resp.LastRun = lr
+	}
+	return resp, nil
+}
+
+// scheduleNextRun is a Schedule's next cadence firing after now, rendered
+// exactly as a /cron/preview entry, or (nil, nil) when no cadence firing is
+// coming. Only enabled, unpaused Schedules have one: the spawn pass's
+// producer lists exactly those (store.EnabledSchedules).
+func scheduleNextRun(sc store.Schedule, now time.Time) (at, display *string) {
+	if !sc.Enabled || sc.Paused {
+		return nil, nil
+	}
+	expr, err := cronx.Parse(sc.Cadence)
+	if err != nil {
+		return nil, nil
+	}
+	next, ok := expr.Next(now)
+	if !ok {
+		return nil, nil
+	}
+	a, d := cronFiring(next)
+	return &a, &d
+}
+
+// cronFiring renders one cron match the way the preview and the Schedule
+// rows both show it: RFC3339 for machines, cronPreviewLayout for the form.
+func cronFiring(t time.Time) (rfc3339, display string) {
+	return t.Format(time.RFC3339), t.Format(cronPreviewLayout)
+}
+
 // handleScheduleList is GET /api/v1/repos/{id}/schedules, ordered by name.
 func (s *Server) handleScheduleList(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
@@ -145,7 +228,12 @@ func (s *Server) handleScheduleList(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]scheduleResponse, 0, len(schedules))
 	for _, sc := range schedules {
-		items = append(items, scheduleJSON(sc))
+		item, err := s.scheduleView(r.Context(), sc)
+		if err != nil {
+			s.internalError(w, "listing schedules", err)
+			return
+		}
+		items = append(items, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"schedules": items})
 }
@@ -236,7 +324,7 @@ func (s *Server) handleScheduleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publishRepoChanged(repo.ID)
-	writeJSON(w, http.StatusCreated, scheduleJSON(sc))
+	s.writeScheduleView(w, r, http.StatusCreated, "creating schedule", sc)
 }
 
 // handleScheduleUpdate is PATCH /api/v1/repos/{id}/schedules/{sid}. The body
@@ -345,7 +433,7 @@ func (s *Server) handleScheduleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publishRepoChanged(repo.ID)
-	writeJSON(w, http.StatusOK, scheduleJSON(updated))
+	s.writeScheduleView(w, r, http.StatusOK, "updating schedule", updated)
 }
 
 // handleScheduleDelete is DELETE /api/v1/repos/{id}/schedules/{sid}: 204. A
@@ -389,7 +477,7 @@ func (s *Server) handleScheduleReenable(w http.ResponseWriter, r *http.Request) 
 	}
 	if !sc.Paused && sc.ConsecutiveFailures == 0 {
 		// Already armed: nothing to write, nothing to announce.
-		writeJSON(w, http.StatusOK, scheduleJSON(sc))
+		s.writeScheduleView(w, r, http.StatusOK, "re-enabling schedule", sc)
 		return
 	}
 	updated, err := s.store.ReenableSchedule(r.Context(), sc.ID)
@@ -403,7 +491,49 @@ func (s *Server) handleScheduleReenable(w http.ResponseWriter, r *http.Request) 
 		// handler and stops with the server (handleAFKReset's contract).
 		go s.afk.SpawnOnce(s.shutdownCtx)
 	}
-	writeJSON(w, http.StatusOK, scheduleJSON(updated))
+	s.writeScheduleView(w, r, http.StatusOK, "re-enabling schedule", updated)
+}
+
+// writeScheduleView answers status with sc's full Schedule JSON
+// (scheduleView); a failed derived read is a 500 like any store error.
+func (s *Server) writeScheduleView(w http.ResponseWriter, r *http.Request, status int, doing string, sc store.Schedule) {
+	resp, err := s.scheduleView(r.Context(), sc)
+	if err != nil {
+		s.internalError(w, doing, err)
+		return
+	}
+	writeJSON(w, status, resp)
+}
+
+// handleScheduleRun is POST /api/v1/repos/{id}/schedules/{sid}/run — the
+// operator's Run now (issue #61): start one ordinary scheduled run for the
+// Schedule NOW, through the engine's one spawn pass, and answer 202 {run}
+// (handleAFKStart's envelope). A refusal is a 409 whose error is the reason,
+// shown verbatim by the UI — paused, previous run still live, instance cap
+// reached, provider logged out, repository not ready — and is never queued:
+// nothing fires later because of it. A Schedule of another repo is a 404
+// (loadRepoSchedule). The launch publishes run.changed through the shared
+// instance core like every launch, so the runs rail updates.
+//
+// The engine runs the pass on the server-scoped context rather than the
+// request's: the pass may launch other candidates on its way (landers, a due
+// firing), and a client hanging up must not abort those mid-launch. The
+// handler still waits for it — the answer IS the pass's verdict.
+func (s *Server) handleScheduleRun(w http.ResponseWriter, r *http.Request) {
+	repo, ok := s.loadRepo(w, r)
+	if !ok {
+		return
+	}
+	sc, ok := s.loadRepoSchedule(w, r, repo)
+	if !ok {
+		return
+	}
+	run, err := s.afk.RunScheduleNow(s.shutdownCtx, sc.ID)
+	if err != nil {
+		s.writeAFKError(w, "running schedule now", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"run": runJSON(run)})
 }
 
 // scheduleFlowResponse is one flow-catalog entry as the form sees it. The
@@ -484,8 +614,9 @@ func (s *Server) handleCronPreview(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			break
 		}
-		next = append(next, fired.Format(time.RFC3339))
-		display = append(display, fired.Format(cronPreviewLayout))
+		at3339, shown := cronFiring(fired)
+		next = append(next, at3339)
+		display = append(display, shown)
 		at = fired
 	}
 	if len(next) == 0 {
