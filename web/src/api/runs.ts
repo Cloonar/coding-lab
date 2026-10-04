@@ -47,6 +47,12 @@ export interface Run {
   outcome: RunOutcome;
   failure_reason: string | null;
   /**
+   * The Schedule a scheduled run belongs to (issue #61) — a cadence firing or
+   * a Run now alike; null on every other kind. Optional only so a row from a
+   * server that predates the key still types: treat absent as null.
+   */
+  schedule_id?: string | null;
+  /**
    * Names of repo secrets this run's transcript has exposed (issue #108),
    * sorted. Only GET /runs/{id} (the chat header's source) populates this —
    * the runs list never does, to avoid an exposure lookup per row — so it is

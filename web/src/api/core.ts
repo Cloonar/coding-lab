@@ -3,7 +3,10 @@
 // Every mutating request carries the `X-Lab-Csrf: 1` header the server's CSRF
 // middleware requires for ambient-credential (cookie) auth. Error responses
 // are always JSON envelopes `{"error": "<message>"}`; they surface as
-// ApiError(status, message) so the real message reaches the operator.
+// ApiError(status, message) so the real message reaches the operator. A
+// refusal that names the offending request field carries it as an optional
+// `"field": "<json key>"` beside the message (issue #61) — ApiError.field —
+// so a form can show the message under that field instead of in a banner.
 
 const BASE = '/api/v1';
 
@@ -11,11 +14,14 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export class ApiError extends Error {
   readonly status: number;
+  /** The request's JSON field the refusal names, when the server said so. */
+  readonly field?: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, field?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    if (field !== undefined) this.field = field;
   }
 }
 
@@ -46,6 +52,14 @@ function errorFromBody(body: unknown): string | null {
   return null;
 }
 
+function fieldFromBody(body: unknown): string | undefined {
+  if (typeof body === 'object' && body !== null) {
+    const field = (body as { field?: unknown }).field;
+    if (typeof field === 'string' && field !== '') return field;
+  }
+  return undefined;
+}
+
 export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
   if (MUTATING_METHODS.has(method)) headers['X-Lab-Csrf'] = '1';
@@ -68,13 +82,16 @@ export async function request<T>(method: string, path: string, body?: unknown): 
       unauthorizedHandler();
     }
     let message = `Request failed (${res.status})`;
+    let field: string | undefined;
     try {
-      const parsed = errorFromBody(await res.json());
+      const body: unknown = await res.json();
+      const parsed = errorFromBody(body);
       if (parsed !== null) message = parsed;
+      field = fieldFromBody(body);
     } catch {
       // Non-JSON error body — keep the generic message.
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, field);
   }
 
   if (res.status === 204) return undefined as T;

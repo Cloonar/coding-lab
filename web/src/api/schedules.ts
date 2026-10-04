@@ -1,4 +1,5 @@
 import { request } from './core';
+import type { Run, RunOutcome } from './runs';
 
 // --- Schedules (issue #247 / ADR-0062) ---
 
@@ -32,10 +33,29 @@ export interface Schedule {
    */
   consecutive_failures: number;
   paused: boolean;
-  /** null until the first firing. */
+  /** null until the first cadence firing. A Run now never moves it. */
   last_fired_at: string | null;
+  /**
+   * The next cron match after now, from the server's own parser (issue #61):
+   * RFC3339, or null when the Schedule cannot fire on its cadence — switched
+   * off, paused, or an unparseable cadence. Never computed in the browser.
+   */
+  next_run_at: string | null;
+  /** next_run_at rendered server-local, like the cron preview's lines. */
+  next_run_display: string | null;
+  /** The most recent run of this Schedule — a cadence firing or a Run now. */
+  last_run: ScheduleLastRun | null;
   created_at: string;
   updated_at: string;
+}
+
+/** The last run a Schedule produced, for the list row's "last outcome". */
+export interface ScheduleLastRun {
+  id: string;
+  started_at: string;
+  /** null while the run is still live. */
+  ended_at: string | null;
+  outcome: RunOutcome;
 }
 
 /** POST body: name + cadence are required, everything else optional. */
@@ -138,6 +158,22 @@ export function reenableRepoSchedule(repoID: string, scheduleID: string): Promis
     'POST',
     `/repos/${encodeURIComponent(repoID)}/schedules/${encodeURIComponent(scheduleID)}/reenable`,
   );
+}
+
+/**
+ * POST /repos/{id}/schedules/{sid}/run -> 202 {run} — Run now (issue #61):
+ * starts an ordinary scheduled run from the SAVED Schedule through the spawn
+ * pass. Works for a switched-off Schedule; never moves the next cadence
+ * firing. Refused with a 409 whose message is the reason, shown verbatim —
+ * the Schedule is paused, its previous run is still live, or the repo is at
+ * its instance cap. A refused Run now is not queued.
+ */
+export async function runScheduleNow(repoID: string, scheduleID: string): Promise<Run> {
+  const res = await request<{ run: Run }>(
+    'POST',
+    `/repos/${encodeURIComponent(repoID)}/schedules/${encodeURIComponent(scheduleID)}/run`,
+  );
+  return res.run;
 }
 
 /** GET /schedule-flows — the built-in catalog, in catalog order. */

@@ -41,3 +41,17 @@ export function removeRepoImport(repoID: string, targetRepoID: string): Promise<
     `/repos/${encodeURIComponent(repoID)}/imports/${encodeURIComponent(targetRepoID)}`,
   );
 }
+
+/**
+ * GET /repos/{id}/importers — the reverse direction (issue #61): the repos
+ * that declare an import OF this one, sorted by name. Deleting a repo others
+ * import is refused server-side (force does not bypass it), so the delete
+ * dialog reads this first and names the importers instead of attempting.
+ */
+export async function listRepoImporters(repoID: string): Promise<RepoImport[]> {
+  const res = await request<{ importers: RepoImport[] }>(
+    'GET',
+    `/repos/${encodeURIComponent(repoID)}/importers`,
+  );
+  return res.importers;
+}
