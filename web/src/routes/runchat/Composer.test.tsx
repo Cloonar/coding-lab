@@ -2,9 +2,15 @@
 // RunChat contract split (issue #194):
 // - the composer replies (POST /reply) and clears; Cmd/Ctrl+Enter sends, bare
 //   Enter does not; Send is ALWAYS present in the unlocked states and enabled
-//   with text even while working (ADR-0029, issue #61), POSTing /reply
+//   with text in every state without a pending dialog — working, idle,
+//   needs_input, '' — (ADR-0029, issue #61, issue #58 §2), POSTing /reply
 //   immediately — no morph, no queue copy, no working hint; Cmd/Ctrl+Enter
 //   sends while working too;
+// - the slash-command popover opens on a leading `/` (issue #51 decision 5,
+//   tiered per issue #122) and from the `/` button left of the box (issue #58
+//   §6), which shows only with a non-empty catalog while the box is empty or
+//   already a slash command, lists the FULL catalog, focuses the box, and
+//   whose picks behave exactly like the typed popover's;
 
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -205,9 +211,11 @@ describe('Composer', () => {
     expect(send).not.toBeNull();
     // Disabled while the box is empty, even though the agent is working.
     expect(send!.disabled).toBe(true);
-    // The composer carries no Interrupt of its own now (the header holds the
-    // one-tap turn Interrupt); scope so the live header button isn't counted.
-    expect(container.querySelector('.chat-composer button[aria-label="Interrupt"]')).toBeNull();
+    // The composer's input row carries no Interrupt of its own: the one-tap
+    // turn Interrupt rides the status line ABOVE it (issue #58 §2), and Send
+    // keeps its slot and its job.
+    expect(row!.querySelector('.chat-interrupt, .chat-status-interrupt')).toBeNull();
+    expect(container.querySelector('.chat-composer .chat-status-interrupt')).not.toBeNull();
     // The deleted working hint / "tap to interrupt" / queue copy are all gone.
     expect(container.querySelector('.chat-composer-hint')).toBeNull();
     expect(container.textContent).not.toContain('tap to interrupt');
@@ -604,5 +612,132 @@ describe('Composer', () => {
     expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toContain(
       '/clear',
     );
+  });
+
+  it.each(['working', 'idle', 'needs_input', ''] as const)(
+    'enables Send whenever the box is non-empty without a pending dialog (state %j)',
+    async (state) => {
+      h.messagesOnServer = { ...h.messagesOnServer, state };
+      await mountChat();
+      const send = () =>
+        container.querySelector<HTMLButtonElement>('.chat-composer-row button[aria-label="Send"]')!;
+      expect(send().disabled).toBe(true);
+      setComposerText('a reply');
+      await settle();
+      expect(send().disabled).toBe(false);
+      send().click();
+      await settle();
+      expect(h.replyPosts).toEqual([{ text: 'a reply' }]);
+    },
+  );
+
+  const slashButton = () => container.querySelector<HTMLButtonElement>('.chat-slash');
+
+  it('shows the / button left of an empty box, and hides it once prose is typed', async () => {
+    await mountChat();
+    const btn = slashButton();
+    expect(btn).not.toBeNull();
+    expect(btn!.getAttribute('aria-label')).toBe('Slash commands');
+    expect(btn!.getAttribute('aria-expanded')).toBe('false');
+    // Left of the text box, inside the merged field.
+    expect(btn!.nextElementSibling?.classList.contains('chat-input')).toBe(true);
+    expect(container.querySelector('.chat-composer-row')!.classList.contains('has-slash')).toBe(
+      true,
+    );
+
+    setComposerText('hello');
+    await settle();
+    expect(slashButton()).toBeNull();
+    expect(container.querySelector('.chat-composer-row')!.classList.contains('has-slash')).toBe(
+      false,
+    );
+
+    // A box that already starts with "/" keeps it.
+    setComposerText('/cle');
+    await settle();
+    expect(slashButton()).not.toBeNull();
+  });
+
+  it('hides the / button when the catalog is empty', async () => {
+    h.commandsOnServer = [];
+    await mountChat();
+    expect(slashButton()).toBeNull();
+  });
+
+  it('opens the FULL catalog from the / button, focuses the box, and a pick sends a no-argument command', async () => {
+    await mountChat();
+    const input = container.querySelector('.chat-input') as HTMLTextAreaElement;
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+
+    slashButton()!.click();
+    await settle();
+    expect(document.activeElement).toBe(input);
+    expect(slashButton()!.getAttribute('aria-expanded')).toBe('true');
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toEqual([
+      '/clear',
+      '/compact',
+      '/deploy',
+    ]);
+    expect(input.value).toBe(''); // the box is untouched
+
+    // Exactly a click in the typed popover: /clear has no argument → sent.
+    popRows()[0]!.click();
+    await settle();
+    expect(h.replyPosts).toEqual([{ text: '/clear' }]);
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+  });
+
+  it('a / button pick with an argument hint completes "/name " instead of sending', async () => {
+    await mountChat();
+    slashButton()!.click();
+    await settle();
+
+    popRows()[2]!.click(); // /deploy — arg hint "env"
+    await settle();
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/deploy ');
+    expect(h.replyPosts).toHaveLength(0);
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+  });
+
+  it('the / button lists the full catalog even over a typed filter, and toggles it closed', async () => {
+    await mountChat();
+    setComposerText('/cle');
+    await settle();
+    expect(popRows()).toHaveLength(1); // the typed filter
+
+    slashButton()!.click();
+    await settle();
+    expect(popRows()).toHaveLength(3); // the whole catalog
+
+    slashButton()!.click();
+    await settle();
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+
+    // The next keystroke goes back to the typed filter.
+    setComposerText('/dep');
+    await settle();
+    expect(popRows().map((r) => r.querySelector('.chat-cmd-name')?.textContent)).toEqual([
+      '/deploy',
+    ]);
+  });
+
+  it('closes the / button list on Escape, keeping keyboard cycling over the full catalog', async () => {
+    await mountChat();
+    slashButton()!.click();
+    await settle();
+    composerKey('ArrowDown');
+    await settle();
+    expect(popRows()[1]?.getAttribute('aria-selected')).toBe('true');
+    composerKey('Tab');
+    await settle();
+    expect((container.querySelector('.chat-input') as HTMLTextAreaElement).value).toBe('/compact ');
+
+    setComposerText('');
+    await settle();
+    slashButton()!.click();
+    await settle();
+    composerKey('Escape');
+    await settle();
+    expect(container.querySelector('.chat-cmd-pop')).toBeNull();
   });
 });

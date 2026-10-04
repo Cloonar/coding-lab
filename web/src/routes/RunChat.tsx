@@ -1,19 +1,25 @@
 // Embedded chat (/runs/:id, issue #7 / ADR-0016): the body IS the chat. A
-// compact header (title · conversational state · spawn-time model chip (issue
-// #68) · deep link · Interrupt · Stop), the conversation stream (user/assistant
-// text, tool chips, the pending dialog as an interactive inline card (issue
-// #56), lifecycle/errors; thinking permanently hidden at paint — issue #68),
-// and a fixed bottom composer whose state follows the run — collapsed to a
-// waiting note while a dialog is pending, disabled for ended instances. Tool
+// compact header (title over project · spawn-time model and effort (issues
+// #68/#58) · context meter opening Run details · deep link · Stop · the •••
+// menu with Interrupt — issue #58 §1), the conversation stream (user/assistant
+// text, tool chips, a pending plan-review / non-answerable dialog as an
+// interactive inline card (issue #56) — an answerable question dialog only as
+// a one-line "…is asking… Answer below." marker, since it docks above the
+// composer (issue #58 §3) — lifecycle/errors; thinking permanently hidden at
+// paint — issue #68), and a fixed bottom dock whose state follows the run:
+// the worded status line over the composer (issue #58 §2), the question panel
+// with its answer and "Chat about this" modes, a waiting note while an
+// in-stream card is pending, read-only for ended instances. Tool
 // chips and group summaries are buttons whose click branches on the breakpoint
 // (issue #154): on desktop (>=1024px) they toggle a RICH inline expansion in
 // place (a lone chip reveals its ToolViewBody, a group reveals its member
 // chips); on phones they open the tool detail bottom sheet exactly as before
 // (issue #145) — while the pending-dialog card stays inline. Send is
 // ALWAYS available and fires immediately (ADR-0029, issue #61);
-// the one-tap turn Interrupt lives in the header next to Stop, gated on the live
-// outcome — not the derived `working` state, which can be a stale-transcript-tail
-// false positive (issue #38). Reads through GET /runs/:id/messages; the tailer's
+// the one-tap turn Interrupt rides the working status line (issue #58 §2), and
+// the header's ••• menu keeps one gated on the live outcome — not the derived
+// `working` state, which can be a stale-transcript-tail false positive (issue
+// #38). Reads through GET /runs/:id/messages; the tailer's
 // ~1/s run.messages.changed ticks coalesce on a trailing debounce into a LIGHT
 // tail-only refetch (after=min(cursor, backpatchSeq-1) — issue #175, no
 // per-second latest-window re-merge), while route changes, transcript rotation,
@@ -66,6 +72,7 @@ import { ChatHeader } from './runchat/ChatHeader';
 import { Composer } from './runchat/Composer';
 import { DialogCard } from './runchat/Dialogs';
 import { MessageView, ToolGroupView } from './runchat/Messages';
+import { askingLine, docksQuestion } from './runchat/QuestionDock';
 import { createMessageFeed } from './runchat/messageFeed';
 import { capitalize } from './runchat/shared';
 
@@ -237,8 +244,15 @@ function RunChatView() {
   // a microtask (like the composer's autoGrow) so the card rendered by this
   // refetch's signal writes has attached; guarded like every scripted scroll
   // (§2). jsdom has no scrollIntoView — optional call, like the autocomplete's.
+  // A DOCKED question (issue #58 §3) has no card: the thing to read is the
+  // panel above the composer, so the follow lands on the stream's bottom —
+  // its "…is asking… Answer below." marker sitting right above the dock.
   const scrollToPendingCard = () => {
     queueMicrotask(() => {
+      if (docksQuestion(activeDialog())) {
+        scrollToBottom();
+        return;
+      }
       const el = dialogCardEl;
       if (el === undefined || !el.isConnected) {
         // The card didn't render (e.g. the run ended under the dialog) — keep
@@ -303,6 +317,22 @@ function RunChatView() {
       const ro = new ResizeObserver(() => measureHeader());
       ro.observe(headerEl);
       onCleanup(() => ro.disconnect());
+    }
+    // Keep a reader who sits at the stream's end there when the stream's box
+    // SHRINKS (issue #58): the bottom dock grows — a question panel docks, a
+    // stepper page is taller, the reply box auto-grows — or the phone keyboard
+    // opens, and scrollTop does not move on its own, so the newest lines (the
+    // "…Answer below." marker) would slide under the dock. nearBottom() is the
+    // last scroll-time reading, i.e. where the reader was before the shrink.
+    if (typeof ResizeObserver !== 'undefined') {
+      let lastHeight = el.clientHeight;
+      const sro = new ResizeObserver(() => {
+        const height = el.clientHeight;
+        if (height < lastHeight && nearBottom()) scrollToBottom();
+        lastHeight = height;
+      });
+      sro.observe(el);
+      onCleanup(() => sro.disconnect());
     }
   });
 
@@ -440,6 +470,28 @@ function RunChatView() {
     const matched = messages().some((m) => m.kind === 'dialog' && m.dialog?.tool_id === d.tool_id);
     return matched ? null : d;
   };
+  // What the stream shows at either render position (issue #58 §3): an
+  // answerable QUESTION dialog is answered in the composer dock, so the stream
+  // only marks its place with one lifecycle-style line; a plan review or a
+  // non-answerable dialog keeps the interactive card (issue #56) exactly as
+  // before.
+  const PendingDialogView = (p: { dialog: Dialog }) => (
+    <Show
+      when={docksQuestion(p.dialog)}
+      fallback={
+        <DialogCard
+          runID={params.id}
+          dialog={p.dialog}
+          openHint={openHint()}
+          onError={setError}
+          onAnswered={() => void refetchMessages()}
+          cardRef={(el) => (dialogCardEl = el)}
+        />
+      }
+    >
+      <p class="chat-lifecycle chat-dialog-asking">{askingLine(agentName(), p.dialog)}</p>
+    </Show>
+  );
   // Group consecutive tool runs at render time (decision 7). Thinking is
   // permanently dropped at paint (issue #68) — never shown, transcripts on
   // disk keep everything — while grouping still runs on the FULL list
@@ -534,11 +586,15 @@ function RunChatView() {
             run={runData()}
             repo={resourceValue(repo)}
             providers={providers()}
-            state={state()}
             contextUsage={contextUsage()}
             onError={setError}
+            onNotice={setNotice}
             onChanged={() => void refetchRun()}
             onInterrupted={() => void refetchMessages()}
+            onPullBase={() => {
+              void refetchMessages();
+              void refetchRun();
+            }}
             hidden={!headerVisible()}
             headerRef={(el) => (headerEl = el)}
           />
@@ -597,9 +653,10 @@ function RunChatView() {
                       <Match when={item.kind === 'message' && item}>
                         {(msg) => (
                           // A dialog message matching the pending dialog renders
-                          // as the interactive card AT ITS TRANSCRIPT POSITION
-                          // (issue #56 decision 1) — never also as the inert
-                          // prompt line, and never a second time below.
+                          // as the interactive card — or, for a docked question,
+                          // its "Answer below." marker (issue #58 §3) — AT ITS
+                          // TRANSCRIPT POSITION (issue #56 decision 1): never
+                          // also as the inert prompt line, never twice.
                           <Show
                             when={pendingCardFor(msg().message)}
                             fallback={
@@ -617,16 +674,7 @@ function RunChatView() {
                               </Show>
                             }
                           >
-                            {(d) => (
-                              <DialogCard
-                                runID={params.id}
-                                dialog={d()}
-                                openHint={openHint()}
-                                onError={setError}
-                                onAnswered={() => void refetchMessages()}
-                                cardRef={(el) => (dialogCardEl = el)}
-                              />
-                            )}
+                            {(d) => <PendingDialogView dialog={d()} />}
                           </Show>
                         )}
                       </Match>
@@ -636,22 +684,12 @@ function RunChatView() {
               </Match>
             </Switch>
             {/* The pending dialog as an interactive stream card (issue #56
-              decision 1), appended after the last item when no transcript
-              message carries its tool_id — the usual case: the spool-served
-              dialog never reaches the transcript. When one does, the card
-              renders at that message's position above instead. */}
-            <Show when={appendedDialog()}>
-              {(d) => (
-                <DialogCard
-                  runID={params.id}
-                  dialog={d()}
-                  openHint={openHint()}
-                  onError={setError}
-                  onAnswered={() => void refetchMessages()}
-                  cardRef={(el) => (dialogCardEl = el)}
-                />
-              )}
-            </Show>
+              decision 1) — or a docked question's marker line (issue #58
+              §3) — appended after the last item when no transcript message
+              carries its tool_id — the usual case: the spool-served dialog
+              never reaches the transcript. When one does, it renders at that
+              message's position above instead. */}
+            <Show when={appendedDialog()}>{(d) => <PendingDialogView dialog={d()} />}</Show>
             {/* §3 — the needs-input note lives in the stream, not the composer: a
             subtle centered status line (styled like .chat-lifecycle, not a
             bubble), the last stream child so it only shows at the bottom.
@@ -670,6 +708,8 @@ function RunChatView() {
           ended={ended()}
           transcript={transcript()}
           dialog={pendingDialog()}
+          messages={messages()}
+          commitsBehind={runData()?.commits_behind ?? 0}
           commands={commands() ?? []}
           agentName={agentName()}
           openHint={openHint()}
@@ -679,6 +719,10 @@ function RunChatView() {
           onError={setError}
           onNotice={setNotice}
           onSent={() => void refetchMessages()}
+          onPulled={() => {
+            void refetchMessages();
+            void refetchRun();
+          }}
         />
       </div>
       {/* The tool detail panel (issue #145): a pure view over panelTarget —

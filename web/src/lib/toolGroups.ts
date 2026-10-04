@@ -1,8 +1,10 @@
 // Render-time coalescing of tool-call runs for the embedded chat (issue #13,
 // decisions 7–12). The server emits a flat message list; collapsing consecutive
-// tool activity into one "N tool calls" disclosure is a pure display concern —
-// no backend/schema change. This helper turns the flat list into render items:
-// either a passthrough message, or a tool group.
+// tool activity into one disclosure is a pure display concern — no
+// backend/schema change. This helper turns the flat list into render items:
+// either a passthrough message, or a tool group. The group's collapsed line
+// describes the run by kind ("Edited 4 files, ran 3 commands, read 5 files",
+// issue #58) — see toolGroupSummary.
 //
 // Run rule: scan maximal runs of {tool | thinking} messages (a run breaks on
 // text/dialog/lifecycle). thinking FOLDS IN — it never breaks a run and is not
@@ -107,14 +109,62 @@ export function reconcileRenderItems(prev: RenderItem[], next: RenderItem[]): Re
   return out.length === prev.length && out.every((item, i) => item === prev[i]) ? prev : out;
 }
 
-/** The collapsed summary line: "N tool calls[ · M failed][ · running…]". */
+/** Pluralize a count: "1 file", "3 files". */
+function counted(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * The collapsed summary line (issue #58): the run described by kind, in a fixed
+ * order, zero counts omitted — "Edited N files, ran N commands, read N files".
+ * The first segment is capitalized whichever kind leads ("Ran 2 commands, read
+ * 1 file"). Classification is PROVIDER-BLIND — by `tool.view.kind` only, never
+ * by tool name: edited = distinct paths of diff/write views; ran = command
+ * views (one per call); read = distinct paths of read views plus one per search
+ * view. Tools with no view or any other kind are simply not named; a run with
+ * NO recognized tool keeps "N tool calls". Thinking never counts (it is not a
+ * tool), and the failed count / running marker are independent of the label.
+ */
 export function toolGroupSummary(group: ToolGroup): {
   label: string;
   failed: string | null;
   running: boolean;
 } {
+  const edited = new Set<string>();
+  const readPaths = new Set<string>();
+  let commands = 0;
+  let searches = 0;
+  for (const m of group.items) {
+    if (m.kind !== 'tool') continue;
+    const view = m.tool?.view;
+    if (view === undefined) continue;
+    switch (view.kind) {
+      case 'diff':
+      case 'write':
+        edited.add(view.path);
+        break;
+      case 'command':
+        commands += 1;
+        break;
+      case 'read':
+        readPaths.add(view.path);
+        break;
+      case 'search':
+        searches += 1;
+        break;
+    }
+  }
+  const segments: string[] = [];
+  if (edited.size > 0) segments.push(`edited ${counted(edited.size, 'file')}`);
+  if (commands > 0) segments.push(`ran ${counted(commands, 'command')}`);
+  const reads = readPaths.size + searches;
+  if (reads > 0) segments.push(`read ${counted(reads, 'file')}`);
+  const described = segments.join(', ');
   return {
-    label: `${group.toolCount} tool calls`,
+    label:
+      segments.length > 0
+        ? described.charAt(0).toUpperCase() + described.slice(1)
+        : `${group.toolCount} tool calls`,
     failed: group.errorCount > 0 ? `${group.errorCount} failed` : null,
     running: group.running,
   };

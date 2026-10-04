@@ -116,6 +116,73 @@ describe('Messages', () => {
     );
   });
 
+  it('describes a classified run by kind instead of "N tool calls" (issue #58)', async () => {
+    h.messagesOnServer = {
+      messages: [
+        {
+          seq: 1,
+          kind: 'tool',
+          tool: {
+            name: 'Edit',
+            title: 'edit a.ts',
+            status: 'ok',
+            view: { kind: 'diff', path: 'a.ts', text: '@@ -1 +1 @@\n+a' },
+          },
+        },
+        {
+          seq: 2,
+          kind: 'tool',
+          tool: {
+            name: 'Write',
+            title: 'write a.ts',
+            status: 'ok',
+            view: { kind: 'write', path: 'a.ts', text: 'a' },
+          },
+        },
+        {
+          seq: 3,
+          kind: 'tool',
+          tool: {
+            name: 'Bash',
+            title: 'run tests',
+            status: 'error',
+            view: { kind: 'command', command: 'npm test' },
+          },
+        },
+        { seq: 4, kind: 'text', role: 'assistant', thinking: true, text: 'hmm' },
+        {
+          seq: 5,
+          kind: 'tool',
+          tool: {
+            name: 'Read',
+            title: 'read b.ts',
+            status: 'ok',
+            view: { kind: 'read', path: 'b.ts', text: 'b' },
+          },
+        },
+        {
+          seq: 6,
+          kind: 'tool',
+          tool: { name: 'Grep', title: 'grep foo', status: 'running', view: { kind: 'search' } },
+        },
+        { seq: 7, kind: 'tool', tool: { name: 'Mystery', title: 'mystery', status: 'ok' } },
+      ],
+      state: 'working',
+      cursor: 7,
+      has_more: false,
+      transcript: 'available',
+    };
+    await mountChat();
+
+    // Edits dedupe by path, the search counts toward "read", the view-less tool
+    // is simply not named, and the failed count / running marker are unchanged.
+    expect(container.querySelector('.tool-group-count')?.textContent).toBe(
+      'Edited 1 file, ran 1 command, read 2 files',
+    );
+    expect(container.querySelector('.tool-group-failed')?.textContent).toContain('1 failed');
+    expect(container.querySelector('.tool-group-running')?.textContent).toContain('running');
+  });
+
   it('leaves a lone tool call as a plain chip (threshold is 2+)', async () => {
     // The default fixture has a single tool at seq 3.
     await mountChat();
@@ -627,6 +694,7 @@ describe('Messages', () => {
 
     const groupFrame = container.querySelector('.chat-tool-group') as HTMLElement;
     const groupSummary = groupFrame.querySelector('button.tool-group-summary') as HTMLButtonElement;
+    expect(groupSummary.querySelector('.tool-group-count')?.textContent).toBe('Edited 2 files');
     // Collapsed group: no affordance anywhere in the frame (the summary row is
     // not a file chip).
     expect(groupFrame.querySelector('button[aria-label="Open in sidebar"]')).toBeNull();

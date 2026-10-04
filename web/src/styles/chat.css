@@ -1,16 +1,5 @@
 /* --- Embedded chat (issue #7): phone-first conversation view ------------- */
 
-/* Conversational-state badges on instance rows and the chat header. */
-.chip.convo.working {
-  background: var(--banner-bg);
-  color: var(--banner-text);
-}
-.chip.convo.needs-input,
-.chip.convo.question {
-  background: var(--run-bg);
-  color: var(--run-text);
-}
-
 /* The chat page is a BOUNDED flex row (height, not min-height): the document
    never scrolls, .chat-stream is the scroll container, and the composer stays
    pinned at the bottom of .chat-column — the column wrapper that carries the
@@ -44,7 +33,7 @@
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  flex-wrap: nowrap; /* <640px: a single non-wrapping row (§1) */
+  flex-wrap: nowrap; /* one non-wrapping row at every width (§1, issue #58) */
   padding: 0.5rem 0;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
@@ -53,25 +42,28 @@
   /* sizing/centering come from .icon-btn; only neutralise .crumb's margin. */
   margin: 0;
 }
-/* The title area (issue #132): the title button/form plus the project name and
-   forge icon as siblings — a link inside a button is invalid nested-interactive
-   HTML. This wrapper is the header's flex item (mobile grower / desktop cap the
-   button used to carry); inside it the title shrinks last and the project first
-   (below). Baseline-aligned like the old in-button row. */
+/* The two-line title block (issue #58 §1, after issue #132): line 1 the title
+   button/form, line 2 the secondary line (.chat-title-sub) — project link,
+   forge icon and model · effort as siblings of the button, since a link inside
+   a button is invalid nested-interactive HTML. This wrapper is the header's
+   flex item: it grows below 640px and lets both lines truncate, so the row
+   never wraps (§1). */
 .chat-titlebar {
   display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
+  flex-direction: column;
+  justify-content: center;
   min-width: 0;
-  flex: 1; /* <640px: grow + let children truncate so the row never wraps (§1) */
+  flex: 1;
 }
 .chat-title {
   font-weight: 600;
-  flex: 0 1 auto; /* within .chat-titlebar: shrink, never grow past the project */
+  align-self: flex-start; /* hug the text — the button is the rename target */
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.3;
 }
 /* Inline rename (issue #111): the title is a click-to-edit <button> in view
    mode and a compact <form> in edit mode — both wear .chat-title so the
@@ -92,24 +84,44 @@ button.chat-title {
 button.chat-title:hover {
   background: none;
 }
-/* Flex children ellipsize themselves (the container's clip can't reach them);
-   the title's flex-shrink stays default (1) while the project span's is huge
-   (100000, below) so the project hits zero width before the title loses a
-   pixel. */
+/* Flex children ellipsize themselves (the container's clip can't reach them). */
 .chat-title-text,
-.chat-title-project {
+.chat-title-project,
+.chat-title-model {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 0 1 auto;
 }
-/* The project name beside the display title (titled or not, issue #120) —
-   muted, secondary, shrinks-to-zero-first per the rule above. */
+/* The secondary line under the title (issue #58 §1): muted metadata in one
+   non-wrapping row at every width. The model · effort text must survive a
+   390px phone row, so the project gives way first — a huge flex-shrink with a
+   small floor, so a sliver of it ("pr…") stays — and the model ellipsizes
+   only after that. */
+.chat-title-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* The project name under the display title (titled or not, issue #120). */
 .chat-title-project {
   flex: 0 100000 auto;
+  min-width: 1.75rem;
   font-weight: 400;
   font-size: 0.8rem;
+  color: var(--muted);
+}
+.chat-title-sep {
+  flex: none;
+}
+/* The run's spawn-time model · effort (issue #68) — read-only metadata. */
+.chat-title-model {
   color: var(--muted);
 }
 /* As a link to the repo's issues page (issue #132) it keeps the muted look, with
@@ -123,12 +135,10 @@ a.chat-title-project:focus-visible {
   text-decoration: underline;
 }
 /* The forge git-icon link (issue #132) — a compact inline affordance beside the
-   project name, NOT a 44px .icon-btn: it rides the title row, so it centers
-   against the baseline-aligned text and only tints on hover. Hidden entirely
-   (never greyed) when there's no forge URL. */
+   project name, NOT a 44px .icon-btn: it rides the secondary line and only
+   tints on hover. Hidden entirely (never greyed) when there's no forge URL. */
 .chat-title-forge {
   flex: none;
-  align-self: center;
   display: inline-flex;
   align-items: center;
   padding: 0.1rem;
@@ -152,14 +162,14 @@ button.chat-title:hover .chat-title-pencil,
 button.chat-title:focus-visible .chat-title-pencil {
   opacity: 1;
 }
-/* Edit mode: input + save/cancel in the title's slot. 36px controls — the
-   header's 44px back button still sets the row height, so both modes measure
-   the same. */
+/* Edit mode: input + save/cancel in the title block (the secondary line is
+   hidden). 36px controls — the header's 44px back button still sets the row
+   height, so both modes measure the same. */
 .chat-title-form {
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  flex: 1; /* fill .chat-titlebar in edit mode (the project/icon are hidden) */
+  align-self: stretch; /* fill .chat-titlebar's width in edit mode */
   overflow: visible; /* don't clip the input's focus outline */
 }
 .chat-title-input {
@@ -188,8 +198,9 @@ button.chat-title:focus-visible .chat-title-pencil {
     display: inline-flex;
   }
 }
-/* <640px the title is the sole grower (fills the row, dot + ••• hug the right);
-   the spacer only grows at >=640px, where the title stops growing (§1). */
+/* <640px the title block is the sole grower (fills the row; the exposure dot,
+   meter and ••• hug the right); the spacer only grows at >=640px, where the
+   title block hugs its content (§1). */
 .chat-header .spacer {
   flex: none;
 }
@@ -407,6 +418,9 @@ button.chat-title:focus-visible .chat-title-pencil {
 }
 .chat-input {
   flex: 1;
+  /* The UI sans, not the browser's monospace textarea default (issue #58's
+     dock reads as one surface with the status line and the answer box). */
+  font-family: inherit;
   font-size: 16px;
   min-height: 44px;
   /* Auto-grows one row → content height, capped here with internal scroll
@@ -447,8 +461,7 @@ button.chat-title:focus-visible .chat-title-pencil {
   border: none;
 }
 .chat-send.icon-btn.busy,
-.chat-interrupt.icon-btn.busy,
-.chat-turn-interrupt.icon-btn.busy {
+.chat-interrupt.icon-btn.busy {
   opacity: 0.6;
 }
 .chat-interrupt-busy {
@@ -476,12 +489,11 @@ button.chat-title:focus-visible .chat-title-pencil {
   flex-direction: column;
   gap: 0.4rem;
 }
-/* House-style option cards (issue #56 decision 7): every dialog option — the
-   single-select rows, the flat multi-select toggles (formerly bare checkbox
-   rows that dropped descriptions), and the multi-question form's buttons —
-   is a full-width rectangular card on the control radius, never the seg
-   pill: left-aligned, bold label with the muted description always visible
-   beneath, and a check indicator riding the trailing edge when toggled on. */
+/* House-style option cards (issue #56 decision 7): every in-stream dialog
+   option — plan approve/reject rows and approval options — is a full-width
+   rectangular card on the control radius, never the seg pill: left-aligned,
+   bold label with the muted description always visible beneath. (Question
+   dialogs answer in the dock since issue #58 — chatdock.css's .chat-qopt.) */
 .dialog-option {
   width: 100%;
   display: flex;
@@ -505,7 +517,7 @@ button.chat-title:focus-visible .chat-title-pencil {
 }
 
 /* Option faces (issue #51): bold label over a secondary description, shared by
-   single-question options, plan approve/reject rows and the question form. */
+   the in-stream card's rows and the docked question rows (issue #58). */
 .dialog-option-label {
   display: block;
   font-weight: 600;
@@ -514,17 +526,6 @@ button.chat-title:focus-visible .chat-title-pencil {
   display: block;
   font-size: 0.85rem;
   color: var(--muted);
-}
-/* A picked (not yet submitted) toggle: accent border + subtle tint + the
-   check indicator (issue #56 decision 7); aria-pressed carries the state. */
-.dialog-option.selected {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, var(--card));
-}
-.dialog-option-check {
-  display: inline-flex;
-  flex: none;
-  color: var(--accent);
 }
 
 /* Plan review (issue #51): the prompt IS the plan body — markdown at natural
@@ -535,27 +536,6 @@ button.chat-title:focus-visible .chat-title-pencil {
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--card);
-}
-
-/* Multi-question form (issue #51): stacked questions, each a small header chip
-   + the question text + its option buttons; ONE submit for all answers. Natural
-   height — the chat pane is the only scrollbar (issue #56). */
-.dialog-questions {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-.dialog-question {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-.dialog-question-header {
-  align-self: flex-start;
-}
-.dialog-other-input {
-  width: 100%;
-  margin-top: 0.3rem;
 }
 
 /* Inline dialog cards (issue #56) ------------------------------------------ */

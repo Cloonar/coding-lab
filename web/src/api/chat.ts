@@ -12,7 +12,11 @@ export type ToolView =
   | { kind: 'diff'; path: string; text: string }
   | { kind: 'command'; command: string }
   | { kind: 'write'; path: string; text: string }
-  | { kind: 'read'; path: string; text: string };
+  | { kind: 'read'; path: string; text: string }
+  /** A content or file search (issue #58): a classification tag for the tool-run
+   *  summary's "read N files" count — the detail views draw it through the raw
+   *  input/output fallback. `path` is the search root when the tool named one. */
+  | { kind: 'search'; path?: string };
 
 export interface ToolInfo {
   name: string;
@@ -236,6 +240,13 @@ export interface AnswerRequest {
    * non-empty the flat fields are ignored.
    */
   answers?: QuestionAnswer[];
+  /**
+   * "Chat about this" (issue #58): set aside the pending question dialog
+   * `tool_id` names and deliver this text verbatim as an ordinary reply, in
+   * one server action under the same stale-dialog guard as an answer. When
+   * non-empty, every other answer field must be absent.
+   */
+  chat_text?: string;
 }
 
 export function answerRun(id: string, req: AnswerRequest): Promise<void> {
