@@ -30,11 +30,13 @@ via `.git/info/exclude`). See `docs/agent-brief.md`, decision D13.
   derives the code-area → doc mapping by searching the doc tree for the changed
   identifiers. Written for this project (2026-08-16).
 
-## Local prompt tuning (2026-08, Claude 5 family)
+## Local prompt tuning
 
-On top of the vendored rev, these files carry local edits tuning the prompts for the
-Claude 5 models (more literal instruction-following, longer default deliverables). An
-upstream bump replaces upstream skill directories wholesale — re-apply these afterwards:
+On top of the vendored rev, the files below carry local edits. An upstream bump replaces
+upstream skill directories wholesale — re-apply these afterwards.
+
+**2026-08, Claude 5 family** — more literal instruction-following, longer default
+deliverables:
 
 - `grill-me/SKILL.md` — questions explicitly wait for feedback before continuing (matches
   `grill-with-docs`).
@@ -44,6 +46,32 @@ upstream bump replaces upstream skill directories wholesale — re-apply these a
 - `triage/AGENT-BRIEF.md` — tracker-neutral wording (was GitHub/`gh`-specific).
 - `land-pr/validation-core.md` (cloonar-local, survives bumps anyway) — explicit bar for
   `CONCERNS`, so higher-recall reviewers don't stall autoland's auto-merge on nitpicks.
+
+**2026-10, Fable 5.1 / Opus 5.5** — the workflow changes of
+[ADR-0070](../../docs/adr/0070-agent-brief-in-the-issue-body.md). The agents had outgrown
+thin slices and a human pass over every issue; these edits move the human to the
+decisions:
+
+- `to-issues/SKILL.md` — rewritten around the fewest issues that can each land on their
+  own (was "prefer many thin slices"), in the description too, since that line rides in
+  every session. Issues of an approved plan are labeled for their destination
+  (`ready-for-agent` / `ready-for-human`) instead of `needs-triage`, and each body is
+  written as an agent brief. Links across skills to `../triage/AGENT-BRIEF.md`.
+- `triage/AGENT-BRIEF.md` — the brief lives in the issue body (an `## Agent Brief`
+  comment only on an issue someone else reported); file paths allowed as starting hints;
+  new sections for decisions with reasons, how to verify, and assumptions to check; a
+  body-form template and reworked examples.
+- `triage/SKILL.md` — reproduce before recommending; recommendation and draft brief in
+  one turn; the grilling skill referenced by file (`../grill-with-docs/SKILL.md` — it is
+  `disable-model-invocation`, so `/grill-with-docs` cannot be invoked by the model);
+  glossary/ADR decisions recorded in the brief instead of edited from the triage
+  worktree; brief placement; an **unattended mode** for scheduled runs.
+- `grill-me/SKILL.md`, `grill-with-docs/SKILL.md` — one added sentence: how the plan is
+  cut into issues is one of the decisions to resolve. The interview itself (relentless,
+  one question at a time) is deliberately untouched — the maintainer wants it that way.
+- `land-pr/validation-core.md` — one sentence naming the issue's contract (the body, or
+  the latest `## Agent Brief` comment), so the lander's diff-scope check reads the same
+  text the AFK run implemented.
 
 The recommended model/effort per workflow stage lives in
 [`docs/model-selection.md`](../../docs/model-selection.md).

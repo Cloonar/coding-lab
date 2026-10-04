@@ -73,7 +73,15 @@ const PREVIEW_DEBOUNCE_MS = 400;
  * The prompt starters the example picker offers. UI-only (ADR-0062): they are
  * editable starting text about the INVESTIGATION, never about routing — what
  * happens to the findings is the flows' business, so no example here names a
- * label, an issue or a CLI verb.
+ * label or a CLI verb.
+ *
+ * The triage starter is the one that is not an investigation (ADR-0070): its
+ * whole job is tracker work, and the seeded triage skill's unattended mode
+ * already says where every output goes. It therefore runs WITHOUT a flow — a
+ * flow's "file what you found" block would contradict it — and its label says
+ * so, since the picker has no other place to tell the operator. The maintainer
+ * placeholder is deliberate: left unfilled, the run can establish no
+ * maintainer and so promotes nothing, which is the safe way to be wrong.
  */
 const PROMPT_EXAMPLES: readonly { key: string; label: string; text: string }[] = [
   {
@@ -102,6 +110,20 @@ const PROMPT_EXAMPLES: readonly { key: string; label: string; text: string }[] =
       '',
       'Write up the findings that deserve action, worst first — each with the file',
       'it lives in and why it matters.',
+    ].join('\n'),
+  },
+  {
+    key: 'triage-inbox',
+    label: 'Prepare the triage inbox (no flow)',
+    text: [
+      "Work through this repository's triage inbox with the triage skill, in its",
+      'unattended mode. Nobody is in this session.',
+      '',
+      'Maintainer accounts — the only ones whose comments count as decisions:',
+      '<fill in the logins>',
+      '',
+      'Prepare every waiting issue for a decision and leave promotion to the',
+      'maintainers, as the skill describes.',
     ].join('\n'),
   },
 ];

@@ -215,6 +215,20 @@ describe('RepoSettings schedules example picker', () => {
     await chooseFromSelect('schedule-example', 'Security audit');
     expect(textarea('schedule-prompt').value).toContain('security-review skill');
   });
+
+  it('offers the triage starter with its maintainer placeholder', async () => {
+    await mountSchedules();
+    await waitFor(() => button('+ Add schedule'), 'add button');
+    await openEditor();
+
+    await chooseFromSelect('schedule-example', 'Prepare the triage inbox (no flow)');
+
+    const prompt = textarea('schedule-prompt');
+    expect(prompt.value).toContain('unattended mode');
+    // The placeholder is the safe default (ADR-0070): left unfilled, the run
+    // can establish no maintainer and so promotes nothing.
+    expect(prompt.value).toContain('<fill in the logins>');
+  });
 });
 
 describe('RepoSettings schedules validation', () => {

@@ -546,6 +546,7 @@ func toTrackerIssue(is store.Issue) tracker.Issue {
 		Number:        is.Number,
 		Title:         is.Title,
 		Body:          is.Body,
+		Author:        is.AuthorKind,
 		State:         is.State,
 		Labels:        labels,
 		CommentsCount: is.CommentCount,

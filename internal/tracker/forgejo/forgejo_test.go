@@ -340,7 +340,10 @@ func TestIssue_withComments(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == apiPrefix+"/issues/62" && r.Method == http.MethodGet:
+			// The reporter rides the issue's own user, with the same login →
+			// username fallback the comments get.
 			_, _ = io.WriteString(w, `{"number":62,"title":"deep","body":"the body","state":"open",
+			  "user":{"login":"","username":"carol"},
 			  "labels":[{"name":"bug"}],
 			  "created_at":"2026-03-01T10:00:00Z","updated_at":"2026-03-02T11:00:00Z"}`)
 		case r.URL.Path == apiPrefix+"/issues/62/comments" && r.Method == http.MethodGet:
@@ -365,6 +368,10 @@ func TestIssue_withComments(t *testing.T) {
 	}
 	if len(issue.Labels) != 1 || issue.Labels[0] != "bug" {
 		t.Errorf("labels = %v; want [bug]", issue.Labels)
+	}
+	// The reporter is the issue's own user, never a commenter (ADR-0070).
+	if issue.Author != "carol" {
+		t.Errorf("issue.Author = %q; want carol (the issue's user, username fallback)", issue.Author)
 	}
 	if len(issue.Comments) != 2 {
 		t.Fatalf("got %d comments; want 2", len(issue.Comments))

@@ -14,6 +14,8 @@ When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the 
 
 `ready-for-agent` alongside a live `## Blocked by` reference is a valid combination: don't withhold the label until blockers merge. The AFK scheduler reads the `## Blocked by` section and orders the work itself, holding a blocked issue back until its referenced issues close. Blockers must be `#N` refs in the **issue body** — prose and comments are invisible to the scheduler, so promote a dependency discovered later into the body's `## Blocked by` section by editing the issue.
 
+The contract a `ready-for-agent` (or `ready-for-human`) issue points at is its **agent brief**: the issue body, or — on an issue someone other than a maintainer reported — the latest comment headed `## Agent Brief` (ADR-0070; the triage skill's brief guide has the format). Put the brief in place before applying the label; when an issue is created already agent-ready, the brief is its body and the label rides the create call. `to-issues` labels the issues of an approved plan this way directly, so `needs-triage` is for issues that still need a decision.
+
 All five labels exist on the GitHub repo. The tracker rejects applying a label that doesn't exist — if you change a string here, create the label first: `labctl label create --name "..." [--color "#..." --description "..."]` (idempotent, create-if-missing).
 
 Edit the right-hand column to match whatever vocabulary you actually use.

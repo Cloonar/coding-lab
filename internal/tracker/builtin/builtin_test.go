@@ -175,6 +175,10 @@ func TestBuiltin_IssueWithComments(t *testing.T) {
 	if got.Title != "threaded" || got.Body != "the body" {
 		t.Errorf("issue = %+v", got)
 	}
+	// The reporter is the issue row's author_kind, like a comment's (ADR-0070).
+	if got.Author != store.CommentAuthorOperator {
+		t.Errorf("issue.Author = %q, want %q", got.Author, store.CommentAuthorOperator)
+	}
 	if len(got.Comments) != 2 {
 		t.Fatalf("comments = %d, want 2", len(got.Comments))
 	}

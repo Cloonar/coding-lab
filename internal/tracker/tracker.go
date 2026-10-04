@@ -218,11 +218,16 @@ type Comment struct {
 // to stay cheap and report the thread size via CommentsCount instead (the
 // forge client maps Forgejo's `comments` field, the builtin tracker the
 // store's count); Issue(n) loads the full comment thread. State is StateOpen
-// or StateClosed.
+// or StateClosed. Author is who filed the issue, filled exactly like
+// Comment.Author (the forge client from the issue's user, the built-in tracker
+// from author_kind); it is "" when the backend reports none (a deleted forge
+// account). Agents read it to tell a maintainer's issue from a third party's
+// report (ADR-0070) — it is display identity, never an authorization input.
 type Issue struct {
 	Number        int
 	Title         string
 	Body          string
+	Author        string
 	State         string
 	Labels        []string
 	Comments      []Comment

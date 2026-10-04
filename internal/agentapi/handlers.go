@@ -70,6 +70,7 @@ type issueDetailResponse struct {
 	Number    int               `json:"number"`
 	Title     string            `json:"title"`
 	Body      string            `json:"body"`
+	Author    string            `json:"author"`
 	State     string            `json:"state"`
 	Labels    []string          `json:"labels"`
 	Comments  []commentResponse `json:"comments"`
@@ -117,6 +118,7 @@ func issueDetailJSON(is tracker.Issue) issueDetailResponse {
 		Number:    is.Number,
 		Title:     is.Title,
 		Body:      is.Body,
+		Author:    is.Author,
 		State:     is.State,
 		Labels:    labels,
 		Comments:  comments,

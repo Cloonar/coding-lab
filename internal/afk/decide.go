@@ -759,7 +759,14 @@ const BranchToken = "<BRANCH>"
 // from v0 afkSeedPrompt: read #N, stay on the run branch, implement, verify,
 // commit, push, open a PR with `Closes #N`, then stop). The tracker surface is
 // labctl ONLY (D10 — tea/gh are gone); the branch is the repo's rendered claim
-// branch, never a literal prefix. The incogni variant appends the attribution
+// branch, never a literal prefix. Two sentences carry the agent-brief contract
+// (ADR-0070): step 1 names WHERE the specification is — the issue body, or the
+// latest `## Agent Brief` comment when one exists — because an issue may carry
+// both and nothing else tells the run which wins; step 3 holds the scope —
+// an unrelated finding becomes a `needs-triage` issue (`labctl label create`
+// first: applying an undefined label is an error and create is idempotent, the
+// EscalateSeedPromptTemplate precedent) instead of a drive-by change the lander
+// would have to flag. The incogni variant appends the attribution
 // sentence to the commit step (D15 §9 measure 2; reworded from the M7-final
 // text by ADR-0033 so the sentence itself spells no attribution-marker token —
 // the core-neutrality arch test scans every core literal, prompts included). This
@@ -774,9 +781,9 @@ func SeedPromptTemplate(incogni bool) string {
 	return strings.Join([]string{
 		"You are an autonomous AFK run. Resolve exactly one issue, open a pull request, and stop.",
 		"",
-		"1. Run `labctl issue view " + gitx.NToken + "` and read it fully, including comments.",
+		"1. Run `labctl issue view " + gitx.NToken + "` and read it fully, including comments. The issue body is your specification; if a comment headed `## Agent Brief` exists, the latest one is the specification instead and the body is background.",
 		"2. Work only on branch `" + BranchToken + "` in this worktree; never switch branches.",
-		"3. Implement the issue completely, following the repository's own conventions (CLAUDE.md / AGENTS.md).",
+		"3. Implement the specification completely, following the repository's own conventions (CLAUDE.md / AGENTS.md). A pre-existing bug or unrelated improvement you notice is not part of this change: when it is worth acting on, run `labctl label create --name needs-triage`, file it with `labctl issue create --title \"…\" --body \"…\" --labels needs-triage`, and name it in the pull request body.",
 		"4. Run the project's tests, build, and linters; fix what you break.",
 		commit,
 		"6. `git push -u origin " + BranchToken + "`.",
