@@ -14,6 +14,10 @@
 //   # ln -sfn "$B/chromium_headless_shell-1223" /tmp/pw/chromium_headless_shell-1228
 //   PLAYWRIGHT_BROWSERS_PATH=/tmp/pw PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true npm run test:e2e
 //
+// Or point at any installed Chromium directly (unset = Playwright's own):
+//
+//   PLAYWRIGHT_CHROMIUM_PATH=/usr/bin/chromium npm run test:e2e
+//
 // The webServer command is self-contained (e2e/serve.sh): it builds the SPA,
 // embeds it into a fresh `lab` binary (-tags ui) and starts that binary on a
 // throwaway state dir, so the smoke exercises the real serving path — webui
@@ -23,6 +27,12 @@ import { defineConfig } from '@playwright/test';
 
 const port = 8378;
 const baseURL = `http://127.0.0.1:${port}`;
+// An explicit browser binary, for hosts where Playwright's downloaded revision
+// is missing or will not exec. Unset = Playwright's default resolution. Read
+// through globalThis: web/ has no @types/node (tsc checks this file with the
+// SPA's DOM-only types), so `process` is not a declared global here.
+const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+const chromiumPath = env?.PLAYWRIGHT_CHROMIUM_PATH;
 
 export default defineConfig({
   testDir: './e2e',
@@ -30,6 +40,7 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: 'chromium',
+    launchOptions: chromiumPath ? { executablePath: chromiumPath } : {},
   },
   webServer: {
     command: './e2e/serve.sh',
