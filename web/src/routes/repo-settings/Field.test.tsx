@@ -23,6 +23,7 @@ import {
   mountSettings,
   save,
   resetButton,
+  segment,
   selectTrigger,
   setSwitch,
   settle,
@@ -83,11 +84,12 @@ describe('repo settings fields', () => {
     expect(input('git_author_name').hasAttribute('aria-required')).toBe(false);
   });
 
-  it('names a select by its label, and a switch by its own', async () => {
+  it('names a select by its label and the value it shows, and a switch by its own', async () => {
     await mount();
 
+    // The pick is part of the name: "Inherited · <value>" is heard, not only seen.
     expect(textOf(selectTrigger('afk_model_default').getAttribute('aria-labelledby'))).toBe(
-      'Model',
+      'Model Inherited · Opus (1M)',
     );
     expect(selectTrigger('afk_model_default').id).toBe('rs-afk_model_default');
 
@@ -121,10 +123,19 @@ describe('repo settings fields', () => {
       'Git author name (unsaved change)',
     );
     expect(textOf(selectTrigger('afk_model_default').getAttribute('aria-labelledby'))).toBe(
-      'Model (unsaved change)',
+      'Model (unsaved change) Sonnet',
     );
-    // A switch brings its own label; the words sit beside it in the field.
+    // A switch draws its own label: the words are inside it, so they are part
+    // of the switch's name too — and nowhere else in the field.
     expect(fieldChanged('afk_auto_enabled')).toBe(true);
+    const auto = switchButton('afk_auto_enabled');
+    const autoLabel = container.querySelector(`label[for="${auto.id}"]`);
+    expect(autoLabel?.textContent).toBe('Auto-spawn (unsaved change)');
+    expect(
+      Array.from(fieldWrapper('afk_auto_enabled').querySelectorAll('.visually-hidden')).every(
+        (el) => autoLabel?.contains(el),
+      ),
+    ).toBe(true);
     // The words are for assistive tech: visually the mark is the dot.
     expect(
       fieldWrapper('git_author_name')
@@ -137,6 +148,74 @@ describe('repo settings fields', () => {
     expect(container.querySelector('label[for="rs-git_author_name"]')?.textContent).toBe(
       'Git author name',
     );
+  });
+
+  it('a switch is described by its own line, then its problem and hint, and marked invalid', async () => {
+    await mount(); // Autoland on, forge binding
+    const autoland = switchButton('autoland_enabled');
+    expect(textOf(autoland.getAttribute('aria-describedby'))).toBe(
+      'A lander run validates each PR an AFK run opens.',
+    );
+    expect(autoland.hasAttribute('aria-invalid')).toBe(false);
+
+    // Autoland on under the builtin binding is a problem Save finds, shown at
+    // the switch.
+    segment('tracker_binding', 'builtin').click();
+    await settle();
+    await save();
+
+    const error = fieldWrapper('autoland_enabled').querySelector('.sfield-error');
+    expect(error?.textContent).toBe('Turn Autoland off before switching to the built-in tracker.');
+    expect(autoland.getAttribute('aria-invalid')).toBe('true');
+    const described = autoland.getAttribute('aria-describedby')?.split(' ') ?? [];
+    expect(described).toContain(error?.id);
+    // Its own description still comes first.
+    expect(document.getElementById(described[0] ?? '')?.textContent).toBe(
+      'Autoland needs a forge tracker binding. Turn it off to use the built-in one.',
+    );
+  });
+
+  it('a number field is a text input with the numeric keypad, so a typo reaches the check', async () => {
+    h.repoOnServer = { ...h.repoOnServer, budget_minutes: 45 };
+    await mount();
+
+    for (const name of [
+      'budget_minutes',
+      'max_instances_override',
+      'container_pids',
+      'container_nofile',
+      'max_fix_attempts',
+    ]) {
+      expect([name, input(name).type]).toEqual([name, 'text']);
+      expect([name, input(name).getAttribute('inputmode')]).toEqual([name, 'numeric']);
+      expect([name, input(name).getAttribute('pattern')]).toEqual([name, '[0-9]*']);
+    }
+    // A text field carries neither.
+    expect(input('git_author_name').hasAttribute('inputmode')).toBe(false);
+
+    // Letters stay in the field as typed — a number input would hand "" to
+    // the form, which means "inherit" — and Save refuses them at the field.
+    typeInto(input('budget_minutes'), 'abc');
+    await settle();
+    expect(input('budget_minutes').value).toBe('abc');
+    await save();
+    expect(h.patchBodies).toEqual([]);
+    expect(fieldWrapper('budget_minutes').querySelector('.sfield-error')?.textContent).toBe(
+      'Use a whole number, 1 or more, or leave it empty.',
+    );
+
+    // Spaces around a number are no problem.
+    typeInto(input('budget_minutes'), '30 ');
+    await settle();
+    await save();
+    expect(h.patchBodies).toEqual([{ budget_minutes: 30 }]);
+
+    // And empty is what it always was: back to inherited.
+    typeInto(input('budget_minutes'), '');
+    await settle();
+    expect(fieldState('budget_minutes')).toBe('inherited');
+    await save();
+    expect(h.patchBodies.at(-1)).toEqual({ budget_minutes: null });
   });
 
   it('puts a problem under the control as an alert that describes it, before the hint', async () => {

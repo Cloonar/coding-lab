@@ -18,8 +18,15 @@
 // foreign to the new catalog stays selectable, marked "(not in catalog)".
 // Remote control is a three-way pick over a tri-state field: inherited, on,
 // off — and off is a value, saved as false.
+//
+// Nothing is guessed. While the repo has no option bag of its own and the one
+// it inherits is not known (still loading, never answered), the boxes show no
+// state and cannot be toggled — a first toggle would pin the whole bag from
+// values nobody knows. And the seed prompt's inherited template is the one
+// the server computed for the SAVED repo: it depends on Incogni, so with an
+// unsaved Incogni change the page says the template will follow once saved.
 
-import { For, Show } from 'solid-js';
+import { For, Show, createEffect, createUniqueId } from 'solid-js';
 import type { SelectOption } from '../../../components/Select';
 import { Field, FieldGroup, SegmentedField, SelectField, SwitchField, TextField } from '../Field';
 import { useRepoSettingsForm } from '../form';
@@ -42,6 +49,11 @@ export default function AgentsSection() {
   const baseBlocker = () => remoteBlocker(catalog.baseProvider());
   const afkBlocker = () => remoteBlocker(catalog.afkProvider());
 
+  // The inherited seed prompt is incogni-aware, and only the server composes
+  // it — for the saved repo. An unsaved Incogni change is said, not guessed.
+  const incogniPending = (): boolean => form.field('incogni').changed();
+  const templateNoteId = `rs-afk_prompt-template-${createUniqueId()}`;
+
   // The option bag (issue #19). While the repo has no bag of its own the
   // boxes show the bag it inherits; the first toggle gives it one — the full
   // declared bag — and Reset returns it to inherited.
@@ -49,7 +61,10 @@ export default function AgentsSection() {
   const inheritedBag = (): Record<string, boolean> =>
     toBoolMap(form.inherited()?.afk_options ?? null);
   const shownBag = (): Record<string, boolean> => bag.value() ?? inheritedBag();
+  // Known: the repo's own bag, or the server's answer about the inherited one.
+  const bagKnown = (): boolean => bag.value() !== null || form.inherited() !== undefined;
   const toggleOption = (key: string, checked: boolean): void => {
+    if (!bagKnown()) return;
     const declared = catalog.afkBoolOptions();
     const next = Object.fromEntries(
       declared.map((option) => [
@@ -101,7 +116,15 @@ export default function AgentsSection() {
           hint={<Show when={afkBlocker()}>{(name) => <>{name()} ignores this.</>}</Show>}
         />
         <Show when={catalog.afkBoolOptions().length > 0}>
-          <Field name="afk_options" labelMode="id">
+          <Field
+            name="afk_options"
+            labelMode="id"
+            hint={
+              bagKnown()
+                ? undefined
+                : 'The inherited options are not known yet, so they cannot be changed here.'
+            }
+          >
             {(control) => (
               <div
                 class="settings-checks"
@@ -115,7 +138,14 @@ export default function AgentsSection() {
                       <input
                         type="checkbox"
                         name={`afk_options.${option.key}`}
-                        checked={shownBag()[option.key] ?? false}
+                        checked={bagKnown() && (shownBag()[option.key] ?? false)}
+                        // Neither on nor off while it is not known.
+                        ref={(el) =>
+                          createEffect(() => {
+                            el.indeterminate = !bagKnown();
+                          })
+                        }
+                        disabled={!bagKnown()}
                         onChange={(event) => toggleOption(option.key, event.currentTarget.checked)}
                       />
                       <span>{option.label}</span>
@@ -136,7 +166,11 @@ export default function AgentsSection() {
                 id={control.id}
                 name="afk_prompt"
                 rows="6"
-                aria-describedby={control.describedBy()}
+                aria-describedby={
+                  incogniPending()
+                    ? `${control.describedBy() ?? ''} ${templateNoteId}`.trim()
+                    : control.describedBy()
+                }
                 aria-invalid={control.invalid() ? 'true' : undefined}
                 value={control.binding.value()}
                 // Blank inherits: the placeholder is the prompt that then runs.
@@ -153,6 +187,12 @@ export default function AgentsSection() {
                   Customize
                 </button>
               </Show>
+              <Show when={incogniPending()}>
+                <p class="settings-note" id={templateNoteId}>
+                  The inherited template follows Incogni once saved. The one shown is for the saved
+                  setting.
+                </p>
+              </Show>
             </>
           )}
         </Field>
@@ -164,8 +204,8 @@ export default function AgentsSection() {
           description="Claim ready-for-agent issues as they appear."
         />
         <div class="settings-grid2">
-          <TextField name="budget_minutes" type="number" min={1} />
-          <TextField name="max_instances_override" type="number" min={1} />
+          <TextField name="budget_minutes" type="number" />
+          <TextField name="max_instances_override" type="number" />
         </div>
       </FieldGroup>
     </div>

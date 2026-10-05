@@ -23,6 +23,7 @@ import {
   REPO_ID,
   baseProviders,
   baseRepo,
+  baseSchedule,
   chooseFromSelect,
   container,
   emitRepoChanged,
@@ -38,6 +39,7 @@ import {
   save,
   saveBar,
   saveBarTitle,
+  scheduleEditor,
   segment,
   segmentLabels,
   segmentValue,
@@ -59,6 +61,11 @@ beforeEach(() => {
 });
 
 const BASE = `/repos/${REPO_ID}/settings`;
+/** The page's notice about the inherited values (not an error banner). */
+const notice = (): HTMLElement | null =>
+  container.querySelector<HTMLElement>('.settings-page .banner.notice');
+const tryAgain = (root: HTMLElement | null): HTMLButtonElement | undefined =>
+  Array.from(root?.querySelectorAll('button') ?? []).find((b) => b.textContent === 'Try again');
 const mount = async (): Promise<void> => {
   await mountSettings(BASE);
   await waitFor(() => container.querySelector('input[name="afk_options.ultracode"]'), 'the page');
@@ -366,18 +373,58 @@ describe('the inherited values come from the server', () => {
     expect(h.inheritedBodies).toEqual([{}]);
   });
 
-  it('asks again when the saved repo changes', async () => {
-    h.settingsOnServer = { ...h.settingsOnServer, afk_budget_minutes: 60 };
+  it('asks again when a saved value that chains read changes', async () => {
     await mount();
-    expect(input('budget_minutes').placeholder).toBe('60');
+    expect(selectedLabel('afk_model_default')).toBe('Inherited · Opus (1M)');
 
-    // The global budget changed, and something touched the repo.
-    h.settingsOnServer = { ...h.settingsOnServer, afk_budget_minutes: 90 };
+    // The repo's model was changed elsewhere: the AFK model inherits it.
+    h.repoOnServer = { ...h.repoOnServer, model_default: 'sonnet' };
     emitRepoChanged();
     await settle();
 
     expect(h.inheritedBodies).toEqual([{}, {}]);
-    expect(input('budget_minutes').placeholder).toBe('90');
+    expect(selectedLabel('afk_model_default')).toBe('Inherited · Sonnet');
+  });
+
+  it('asks nothing for a refresh that changes no value a chain reads', async () => {
+    await mount();
+
+    // The frame refetches the repo for every run and issue event; a counter
+    // moved, the Auto switch was flipped on Overview — no answer depends on it.
+    emitRepoChanged();
+    await settle();
+    h.repoOnServer = { ...h.repoOnServer, afk_auto_enabled: true, budget_minutes: 45 };
+    emitRepoChanged();
+    await settle();
+
+    expect(input('budget_minutes').value).toBe('45'); // the refresh did land
+    expect(h.inheritedBodies).toEqual([{}]);
+  });
+
+  it('a drafted lander model is sent along, and the inherited lander effort follows it', async () => {
+    // Sonnet has an effort list of its own; the provider-level one is the union.
+    h.providersOnServer = [
+      {
+        ...baseProviders()[0]!,
+        models: [
+          { value: 'opus[1m]', label: 'Opus (1M)', efforts: [] },
+          { value: 'sonnet', label: 'Sonnet', efforts: [{ value: 'low', label: 'low' }] },
+        ],
+        efforts: [
+          { value: 'high', label: 'high' },
+          { value: 'low', label: 'low' },
+        ],
+      },
+    ];
+    await mount();
+    expect(selectedLabel('lander_effort')).toBe('Inherited · high');
+
+    await chooseFromSelect('lander_model', 'Sonnet');
+    await settleInherited();
+
+    expect(h.inheritedBodies.at(-1)).toEqual({ lander_model: 'sonnet' });
+    expect(selectedLabel('lander_effort')).toBe('Inherited · low');
+    expect(h.patchBodies).toEqual([]);
   });
 
   it('a drafted Agent is sent along; the Model pick and its catalog follow the answer', async () => {
@@ -546,7 +593,12 @@ describe('while the inherited values are not there', () => {
       expect([key, shownInherited(key)]).toEqual([key, shown]);
       expect([key, fieldState(key)]).toEqual([key, 'inherited']);
     }
-    // No error takes over the page, and nothing is pending because of it.
+    // The page says so, with a way to try again — as a notice: no error takes
+    // over the page, and nothing is pending because of it.
+    expect(notice()?.textContent).toContain(
+      'The inherited values could not be loaded. inherited: store unavailable',
+    );
+    expect(notice()?.getAttribute('role')).toBe('status');
     expect(container.querySelector('.settings-page .banner.error')).toBeNull();
     expect(saveBar()).toBeNull();
 
@@ -583,42 +635,230 @@ describe('while the inherited values are not there', () => {
     expect(h.inheritedBodies).toHaveLength(asked + 1);
     expect(selectedLabel('model_default')).toBe('Inherited · Opus (1M)');
     expect(input('budget_minutes').placeholder).toBe('120');
+    expect(notice()).toBeNull();
   });
 
-  it('a pending option bag stays pending — and is saved as it was — when the values go away', async () => {
+  it('Try again in the notice asks at once', async () => {
+    h.inheritedError = 'inherited: store unavailable';
+    await mountSettings(BASE);
+    await waitFor(notice, 'the notice');
+    const asked = h.inheritedBodies.length;
+
+    h.inheritedError = null;
+    tryAgain(notice())?.click();
+    await settle();
+
+    expect(h.inheritedBodies).toHaveLength(asked + 1);
+    expect(notice()).toBeNull();
+    expect(selectedLabel('model_default')).toBe('Inherited · Opus (1M)');
+  });
+
+  it('a later request that fails keeps what was there: the bag, the catalogs, the folds', async () => {
     await mount();
     input('afk_options.ultracode').click();
     await settle();
     expect(saveBarTitle()).toBe('1 unsaved change');
+    expect(container.querySelector('[data-field="image_ref"]')).not.toBeNull();
 
-    // The next refresh fails: the AFK provider is not known any more, so the
-    // bag's boxes are gone from the page. The change is not.
+    // A saved value some chain reads changed, and the question about it fails.
     h.inheritedError = 'inherited: store unavailable';
+    h.repoOnServer = { ...h.repoOnServer, model_default: 'sonnet' };
     emitRepoChanged();
     await settle();
-    expect(container.querySelector('input[name="afk_options.ultracode"]')).toBeNull();
+
+    // Nothing was withdrawn: the AFK agent is still known, so the bag's boxes
+    // are still there with the pending change; the Runner did not unfold; the
+    // model catalog is still offered.
+    expect(input('afk_options.ultracode').checked).toBe(true);
+    expect(input('afk_options.ultracode').disabled).toBe(false);
     expect(saveBarTitle()).toBe('1 unsaved change');
+    expect(selectedLabel('afk_provider_default')).toBe('Inherited · Claude Code');
+    expect(container.querySelector('[data-field="image_ref"]')).not.toBeNull();
+    selectTrigger('afk_model_default').click();
+    await settle();
+    expect(optionRows().map((row) => row.textContent)).toContain('Sonnet');
+    selectTrigger('afk_model_default').click();
+    // The page says the values may be out of date, and offers to ask again.
+    expect(notice()?.textContent).toContain(
+      'The inherited values could not be refreshed, so the ones shown may be out of date. inherited: store unavailable',
+    );
 
     await save();
     expect(h.patchBodies).toEqual([{ afk_options: { ultracode: 'true' } }]);
+
+    h.inheritedError = null;
+    tryAgain(notice())?.click();
+    await settle();
+    expect(notice()).toBeNull();
+    expect(selectedLabel('afk_model_default')).toBe('Inherited · Sonnet');
   });
 
-  it('values that were shown are withdrawn when a later request fails', async () => {
+  it('the drafted agent still is the effective one while its question fails', async () => {
     h.providersOnServer = [...baseProviders(), CODEX];
     await mount();
-    expect(selectedLabel('model_default')).toBe('Inherited · Opus (1M)');
+    expect(selectedLabel('afk_provider_default')).toBe('Inherited · Claude Code');
 
-    // They were for the saved agent; the question about the drafted one fails.
+    // The values were for the saved agent; the question about the drafted one fails.
     h.inheritedError = 'inherited: store unavailable';
     await chooseFromSelect('provider', 'Codex');
     await settleInherited();
 
-    expect(selectedLabel('model_default')).toBe('Inherited');
-    expect(selectedLabel('afk_model_default')).toBe('Inherited');
-    // The drafted agent still is the effective one: its catalog is offered.
+    // The last good answer stands, marked as possibly out of date…
+    expect(selectedLabel('afk_provider_default')).toBe('Inherited · Claude Code');
+    expect(notice()?.textContent).toContain('may be out of date');
+    // …and the pick the operator made here decides its own catalog.
     selectTrigger('model_default').click();
     await settle();
     expect(optionRows().map((row) => row.textContent)).toContain('GPT-5 Codex');
+  });
+});
+
+describe('the option bag never starts from a guess', () => {
+  const HINT = 'The inherited options are not known yet, so they cannot be changed here.';
+  const bagHint = (): string | null =>
+    container.querySelector('[data-field="afk_options"] .sfield-hint')?.textContent ?? null;
+  // The AFK agent is set HERE, so its options are known from the catalog even
+  // while nothing is known about what the repo inherits.
+  const setHere = (): void => {
+    h.repoOnServer = { ...h.repoOnServer, afk_provider_default: 'claude-code' };
+    h.settingsOnServer = { ...h.settingsOnServer, spawn_options_afk: { ultracode: 'true' } };
+  };
+
+  it('while the inherited bag is not known the boxes show no state and cannot be toggled', async () => {
+    setHere();
+    h.inheritedError = 'inherited: store unavailable';
+    await mountSettings(BASE);
+    const box = await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="afk_options.ultracode"]'),
+      'the bag',
+    );
+    await settle();
+
+    // Neither on nor off — it inherits ON, and "unchecked" would be a guess.
+    expect(box.disabled).toBe(true);
+    expect(box.indeterminate).toBe(true);
+    expect(box.checked).toBe(false);
+    expect(bagHint()).toBe(HINT);
+    box.click();
+    await settle();
+    expect(saveBar()).toBeNull();
+    expect(h.patchBodies).toEqual([]);
+
+    // Once the answer is there the boxes show it, and a toggle starts from it.
+    h.inheritedError = null;
+    tryAgain(notice())?.click();
+    await settle();
+    expect(box.disabled).toBe(false);
+    expect(box.indeterminate).toBe(false);
+    expect(box.checked).toBe(true);
+    expect(bagHint()).toBeNull();
+  });
+
+  it('the same while the first answer is still on its way', async () => {
+    setHere();
+    let release = (): void => {};
+    h.inheritedGate = () => new Promise<void>((resolve) => (release = resolve));
+    await mountSettings(BASE);
+    const box = await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="afk_options.ultracode"]'),
+      'the bag',
+    );
+
+    expect(box.disabled).toBe(true);
+    expect(box.indeterminate).toBe(true);
+    expect(bagHint()).toBe(HINT);
+
+    release();
+    await settle();
+    expect(box.disabled).toBe(false);
+    expect(box.checked).toBe(true);
+  });
+
+  it('a bag of its own is known whatever the server says about the inherited one', async () => {
+    setHere();
+    h.repoOnServer = { ...h.repoOnServer, afk_options: { ultracode: 'false' } };
+    h.inheritedError = 'inherited: store unavailable';
+    await mountSettings(BASE);
+    const box = await waitFor(
+      () => container.querySelector<HTMLInputElement>('input[name="afk_options.ultracode"]'),
+      'the bag',
+    );
+    await settle();
+
+    expect(box.disabled).toBe(false);
+    expect(box.indeterminate).toBe(false);
+    expect(box.checked).toBe(false);
+    box.click();
+    await settle();
+    await save();
+    expect(h.patchBodies).toEqual([{ afk_options: { ultracode: 'true' } }]);
+  });
+});
+
+describe('what acts at once reads the saved repo, never the drafts', () => {
+  const editorAgent = (): string =>
+    container.querySelector('button[name="schedule_provider"] .select-field-label')?.textContent ??
+    '';
+  const openSchedule = async (): Promise<void> => {
+    container.querySelector<HTMLAnchorElement>('.schedules-list a.schedule-row-main')?.click();
+    await settle();
+    await waitFor(scheduleEditor, 'the schedule editor');
+  };
+
+  it('a drafted Agent does not change what a Schedule inherits', async () => {
+    h.providersOnServer = [...baseProviders(), CODEX];
+    h.schedules = [baseSchedule()];
+    await mount();
+    await chooseFromSelect('provider', 'Codex');
+    await settleInherited();
+    // The page's own fields follow the draft…
+    expect(selectedLabel('afk_provider_default')).toBe('Inherited · Codex');
+
+    await openSchedule();
+
+    // …a Schedule, which applies at once, does not: the saved repo's AFK
+    // runs still resolve to the saved agent, with that agent's models.
+    expect(editorAgent()).toBe('Inherited · Claude Code');
+    selectTrigger('schedule_model').click();
+    await settle();
+    const models = optionRows().map((row) => row.textContent);
+    expect(models).toContain('Sonnet');
+    expect(models).not.toContain('GPT-5 Codex');
+    // The saved repo's answer was already known: nothing more was asked.
+    expect(h.inheritedBodies).toEqual([{}, { provider: 'codex' }]);
+  });
+
+  it('once the Agent is saved the Schedule follows it', async () => {
+    h.providersOnServer = [...baseProviders(), CODEX];
+    h.schedules = [baseSchedule()];
+    await mount();
+    await chooseFromSelect('provider', 'Codex');
+    await settleInherited();
+    await save();
+    await settleInherited();
+
+    await openSchedule();
+
+    expect(editorAgent()).toBe('Inherited · Codex');
+  });
+
+  it('asks about the saved repo on its own when it changes under pending drafts', async () => {
+    h.providersOnServer = [...baseProviders(), CODEX];
+    h.schedules = [baseSchedule()];
+    await mount();
+    await chooseFromSelect('model_default', 'Sonnet'); // a chain draft, pending
+    await settleInherited();
+    const asked = h.inheritedBodies.length;
+
+    // The saved agent changes elsewhere while that draft is pending.
+    h.repoOnServer = { ...h.repoOnServer, provider: 'codex' };
+    emitRepoChanged();
+    await settle();
+
+    // One question for the page's drafts, one for the saved repo alone.
+    expect(h.inheritedBodies.slice(asked)).toEqual([{ model_default: 'sonnet' }, {}]);
+    await openSchedule();
+    expect(editorAgent()).toBe('Inherited · Codex');
   });
 });
 

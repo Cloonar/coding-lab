@@ -154,4 +154,62 @@ describe('RepoSettings imports section', () => {
       container.querySelector('button[name="target_repo_id"] .select-field-label')?.textContent,
     ).toBe('other-repo');
   });
+
+  it('Add with nothing chosen puts the focus on the pick it asks for', async () => {
+    await mountImports();
+    await waitForList();
+    const add = button('Add');
+    add.focus();
+
+    add.click();
+    await settle();
+
+    expect(document.activeElement).toBe(selectTrigger('target_repo_id'));
+    expect(selectTrigger('target_repo_id').getAttribute('aria-describedby')).toBe(
+      importsSection().querySelector('.sfield-error')?.id,
+    );
+  });
+
+  it('after a removal the focus goes to the row that takes its place, else to the pick', async () => {
+    h.importsOnServer = [
+      { id: 'repo_2', name: 'other-repo' },
+      { id: 'repo_3', name: 'third-repo' },
+    ];
+    await mountImports();
+    await waitForList();
+    const third = button('Remove the import of third-repo');
+
+    const first = button('Remove the import of other-repo');
+    first.focus();
+    first.click();
+    await settle();
+
+    // The other row was not rebuilt, and has the focus now.
+    expect(first.isConnected).toBe(false);
+    expect(button('Remove the import of third-repo')).toBe(third);
+    expect(document.activeElement).toBe(third);
+    // Never disabled meanwhile.
+    expect(third.hasAttribute('disabled')).toBe(false);
+
+    third.click();
+    await settle();
+    expect(importsSection().textContent).toContain('No imports.');
+    expect(document.activeElement).toBe(selectTrigger('target_repo_id'));
+  });
+
+  it('Undo hands the focus to the row it brought back', async () => {
+    h.importsOnServer = [{ id: 'repo_2', name: 'other-repo' }];
+    await mountImports();
+    await waitForList();
+    button('Remove the import of other-repo').click();
+    await settle();
+
+    const undo = container.querySelector<HTMLButtonElement>('.toast button');
+    undo?.focus();
+    undo?.click();
+    await settle();
+
+    expect(undo?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(button('Remove the import of other-repo'));
+  });
 });

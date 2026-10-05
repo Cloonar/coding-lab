@@ -202,6 +202,118 @@ describe('the save bar across sections', () => {
     expect(saveButton().disabled).toBe(false);
   });
 
+  it('an edit back to the old value while the Save is in flight stays pending', async () => {
+    let release = (): void => {};
+    h.patchHold = new Promise<void>((resolve) => (release = resolve));
+    h.repoOnServer = { ...h.repoOnServer, git_author_name: 'Old' };
+    await mount();
+    typeInto(input('git_author_name'), 'New');
+    await settle();
+    saveButton().click();
+    await settle();
+    expect(saveButton().textContent).toBe('Saving…');
+
+    // Second thoughts while "New" is on its way: back to what the repo holds
+    // right now. That is an edit against what was submitted, not "no edit".
+    typeInto(input('git_author_name'), 'Old');
+    await settle();
+    expect(input('git_author_name').value).toBe('Old');
+
+    release();
+    await settle();
+
+    // "New" was saved; "Old" is the pending change now — not silently lost.
+    expect(h.patchBodies).toEqual([{ git_author_name: 'New' }]);
+    expect(h.repoOnServer.git_author_name).toBe('New');
+    expect(input('git_author_name').value).toBe('Old');
+    expect(fieldChanged('git_author_name')).toBe(true);
+    expect(saveBarTitle()).toBe('1 unsaved change');
+
+    h.patchHold = null;
+    await save();
+    expect(h.patchBodies[1]).toEqual({ git_author_name: 'Old' });
+    expect(saveBar()).toBeNull();
+  });
+
+  it('the same edit survives the repo.changed that the Save itself causes', async () => {
+    let release = (): void => {};
+    h.patchHold = new Promise<void>((resolve) => (release = resolve));
+    h.repoOnServer = { ...h.repoOnServer, git_author_name: 'Old' };
+    await mount();
+    typeInto(input('git_author_name'), 'New');
+    await settle();
+    saveButton().click();
+    await settle();
+    typeInto(input('git_author_name'), 'Old');
+    await settle();
+
+    // The server has applied the PATCH and says so before the response lands.
+    h.repoOnServer = { ...h.repoOnServer, git_author_name: 'New' };
+    emitRepoChanged();
+    await settle();
+    expect(input('git_author_name').value).toBe('Old');
+
+    release();
+    await settle();
+    expect(input('git_author_name').value).toBe('Old');
+    expect(saveBarTitle()).toBe('1 unsaved change');
+  });
+
+  it('typing the submitted value again while it is in flight is no pending change afterwards', async () => {
+    let release = (): void => {};
+    h.patchHold = new Promise<void>((resolve) => (release = resolve));
+    await mount();
+    typeInto(input('git_author_name'), 'New');
+    await settle();
+    saveButton().click();
+    await settle();
+    typeInto(input('git_author_name'), 'Newer');
+    typeInto(input('git_author_name'), 'New');
+    await settle();
+
+    release();
+    await settle();
+
+    expect(h.patchBodies).toEqual([{ git_author_name: 'New' }]);
+    expect(saveBar()).toBeNull();
+    expect(input('git_author_name').value).toBe('New');
+  });
+
+  it('after Save the focus goes to the repo heading, not to the top of the document', async () => {
+    await mount();
+    typeInto(input('git_author_name'), 'Dominik');
+    await settle();
+
+    saveButton().focus();
+    saveButton().click();
+    await settle();
+
+    expect(saveBar()).toBeNull();
+    const heading = container.querySelector<HTMLElement>('.repo-head h1');
+    expect(heading).not.toBeNull();
+    expect(document.activeElement).toBe(heading);
+    // Focusable by script only: it is not a tab stop.
+    expect(heading?.getAttribute('tabindex')).toBe('-1');
+  });
+
+  it('a Save that leaves the bar on the page leaves the focus where it is', async () => {
+    let release = (): void => {};
+    h.patchHold = new Promise<void>((resolve) => (release = resolve));
+    await mount();
+    typeInto(input('git_author_name'), 'Dominik');
+    await settle();
+    saveButton().focus();
+    saveButton().click();
+    await settle();
+    // A newer edit: the bar stays after the save.
+    typeInto(input('git_author_email'), 'dominik@example.com');
+    release();
+    await settle();
+
+    expect(saveBarTitle()).toBe('1 unsaved change');
+    expect(document.activeElement).toBe(saveButton());
+  });
+
   it('shows the saved value as the server normalised it', async () => {
     await mount();
     // The server digest-pins an image ref on save: the answer differs from
@@ -367,6 +479,90 @@ describe('a refusal from the server', () => {
     expect(saveBar()).toBeNull();
   });
 
+  it('a pair refused at one half is answered by fixing the other half', async () => {
+    await mount(); // pattern afk/<N>, prefix lab/
+    // The operator changes only the prefix, into the pattern's own space: the
+    // server pins the overlap to the prefix — the half this request sent.
+    typeInto(input('manual_branch_prefix'), 'afk/');
+    await settle();
+    await save();
+    const overlap =
+      'afk branch pattern "afk/<N>" and manual branch prefix "afk/" overlap: a branch could match both';
+    expect(h.patchBodies).toEqual([{ manual_branch_prefix: 'afk/' }]);
+    expect(fieldError('manual_branch_prefix')).toBe(overlap);
+    expect(saveBarTitle()).toBe('1 problem to fix');
+
+    // The fix is made at the OTHER half: the pattern moves out of the way.
+    typeInto(input('afk_branch_pattern'), 'bot/<N>');
+    await settle();
+
+    expect(fieldError('manual_branch_prefix')).toBeNull();
+    expect(saveBarTitle()).toBe('2 unsaved changes');
+    await save();
+    expect(h.patchBodies[1]).toEqual({
+      afk_branch_pattern: 'bot/<N>',
+      manual_branch_prefix: 'afk/',
+    });
+    expect(saveBar()).toBeNull();
+  });
+
+  it('a field outside the pair leaves the refusal where it is', async () => {
+    await mount();
+    typeInto(input('manual_branch_prefix'), 'afk/');
+    await settle();
+    await save();
+    expect(fieldError('manual_branch_prefix')).not.toBeNull();
+
+    typeInto(input('git_author_name'), 'Dominik');
+    await settle();
+
+    expect(fieldError('manual_branch_prefix')).not.toBeNull();
+    expect(saveBarTitle()).toBe('1 problem to fix');
+  });
+
+  it('a problem never stays on the page once nothing is pending', async () => {
+    h.patchRefusal = { error: "default_branch: must not start with '-'", field: 'default_branch' };
+    await mount();
+    typeInto(input('manual_branch_prefix'), 'afk/');
+    typeInto(input('default_branch'), '-main');
+    await settle();
+    await save();
+    expect(fieldError('default_branch')).not.toBeNull();
+    expect(saveBarTitle()).toBe('1 problem to fix');
+
+    // The operator takes the OTHER edit back, then the refused one: with the
+    // last pending change gone the bar is gone — and no problem outlives it.
+    typeInto(input('manual_branch_prefix'), 'lab/');
+    await settle();
+    expect(fieldError('default_branch')).not.toBeNull();
+    typeInto(input('default_branch'), 'main');
+    await settle();
+
+    expect(saveBar()).toBeNull();
+    expect(container.querySelector('.sfield-error')).toBeNull();
+    expect(container.querySelector('.sfield.invalid')).toBeNull();
+  });
+
+  it('a stored oddity that Save reported is forgotten when its field goes back to it', async () => {
+    h.repoOnServer = { ...h.repoOnServer, afk_branch_pattern: 'legacy-pattern' };
+    await mount();
+    typeInto(input('afk_branch_pattern'), 'still-wrong');
+    typeInto(input('git_author_name'), 'Dominik');
+    await settle();
+    await save();
+    expect(fieldError('afk_branch_pattern')).not.toBeNull();
+
+    // Back to what is stored: the field is untouched, is not sent, and so has
+    // no problem — though another change is still pending.
+    typeInto(input('afk_branch_pattern'), 'legacy-pattern');
+    await settle();
+
+    expect(fieldError('afk_branch_pattern')).toBeNull();
+    expect(saveBarTitle()).toBe('1 unsaved change');
+    await save();
+    expect(h.patchBodies).toEqual([{ git_author_name: 'Dominik' }]);
+  });
+
   it('on a control that is not a text field lands there too', async () => {
     h.patchRefusal = {
       error: 'tracker_binding: "forge" requires a forge_token credential',
@@ -447,7 +643,7 @@ describe('Discard and Undo', () => {
     await chooseFromSelect('model_default', 'Sonnet');
     typeInto(input('budget_minutes'), '90');
     setSwitch('incogni', true);
-    segment('tracker_binding', 'builtin').click();
+    segment('runner', 'host').click();
     typeInto(textarea('afk_prompt'), 'Open a PR when done.');
     input('afk_options.ultracode').click();
     await settle();
@@ -460,7 +656,7 @@ describe('Discard and Undo', () => {
     expect(selectedLabel('model_default')).toBe('Inherited · Opus (1M)');
     expect(input('budget_minutes').value).toBe('');
     expect(switchOn('incogni')).toBe(false);
-    expect(segment('tracker_binding', 'forge').getAttribute('aria-checked')).toBe('true');
+    expect(segment('runner', 'container').getAttribute('aria-checked')).toBe('true');
     expect(textarea('afk_prompt').value).toBe('');
     expect(input('afk_options.ultracode').checked).toBe(false);
     expect(h.patchBodies).toEqual([]);
@@ -474,7 +670,7 @@ describe('Discard and Undo', () => {
     expect(selectedLabel('model_default')).toBe('Sonnet');
     expect(input('budget_minutes').value).toBe('90');
     expect(switchOn('incogni')).toBe(true);
-    expect(segment('tracker_binding', 'builtin').getAttribute('aria-checked')).toBe('true');
+    expect(segment('runner', 'host').getAttribute('aria-checked')).toBe('true');
     expect(textarea('afk_prompt').value).toBe('Open a PR when done.');
     expect(input('afk_options.ultracode').checked).toBe(true);
 
@@ -486,9 +682,34 @@ describe('Discard and Undo', () => {
         afk_prompt: 'Open a PR when done.',
         budget_minutes: 90,
         incogni: true,
-        tracker_binding: 'builtin',
+        runner: 'host',
       },
     ]);
+  });
+
+  it('focus never drops to the document: Undo after Discard, back to Discard after Undo', async () => {
+    await mount();
+    typeInto(input('git_author_name'), 'Dominik');
+    await settle();
+
+    const discardButton = Array.from(saveBar()?.querySelectorAll('button') ?? []).find(
+      (b) => b.textContent === 'Discard',
+    );
+    discardButton?.focus();
+    discardButton?.click();
+    await settle();
+
+    // The bar is gone, and with it the button that had the focus.
+    expect(saveBar()).toBeNull();
+    expect(document.activeElement).toBe(undoButton());
+
+    undoButton()?.click();
+    await settle();
+
+    // The toast is gone in turn; the bar is back, and so is the focus.
+    expect(saveBarTitle()).toBe('1 unsaved change');
+    expect(document.activeElement?.textContent).toBe('Discard');
+    expect(saveBar()?.contains(document.activeElement)).toBe(true);
   });
 
   it('Discard drops the problems too, and Undo brings them back with their fields', async () => {

@@ -303,6 +303,58 @@ describe('repo settings ?field= (the readiness Fix links)', () => {
   });
 });
 
+describe('repo settings: what could not be loaded, and what a scroll costs', () => {
+  const catalogError = () =>
+    Array.from(container.querySelectorAll('.settings-page .banner.error')).find((el) =>
+      el.textContent?.includes('The agent catalog could not be loaded'),
+    ) ?? null;
+
+  it('a provider catalog that cannot be loaded is said, with a retry that fills the picks', async () => {
+    h.providersError = 'providers: registry unavailable';
+    await mountSettings(BASE);
+    await waitForPage();
+    await waitFor(catalogError, 'the catalog error');
+
+    expect(catalogError()?.textContent).toContain(
+      'The agent catalog could not be loaded, so the agent, model and effort picks are incomplete. providers: registry unavailable',
+    );
+    expect(catalogError()?.getAttribute('role')).toBe('alert');
+    // Every section is still there; the agent pick just has nothing to offer.
+    expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
+    expect(container.querySelector('input[name="afk_options.ultracode"]')).toBeNull();
+
+    h.providersError = null;
+    Array.from(catalogError()?.querySelectorAll('button') ?? [])
+      .find((b) => b.textContent === 'Try again')
+      ?.click();
+    await waitFor(() => (catalogError() === null ? true : null), 'the retry');
+
+    expect(h.providersGets).toBe(2);
+    await waitFor(
+      () => container.querySelector('input[name="afk_options.ultracode"]'),
+      'the catalog-driven option bag',
+    );
+    expect(
+      container.querySelector('button[name="provider"] .select-field-label')?.textContent,
+    ).toBe('Inherited · Claude Code');
+  });
+
+  it('reads the layout once per frame, however many scroll events that frame holds', async () => {
+    await mountSettings(BASE);
+    await waitForPage();
+    await settle();
+    const before = h.layoutReads;
+
+    for (let i = 0; i < 8; i += 1) window.dispatchEvent(new Event('scroll'));
+    // Nothing is measured inside the scroll handler itself…
+    expect(h.layoutReads).toBe(before);
+    await settle();
+
+    // …and the frame after it makes ONE pass over the ten sections.
+    expect(h.layoutReads - before).toBe(10);
+  });
+});
+
 describe('repo settings in the repo home frame', () => {
   const settingsTab = () =>
     container.querySelector<HTMLAnchorElement>(

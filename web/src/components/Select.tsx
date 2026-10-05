@@ -15,6 +15,10 @@
 // (no `.field` block, no label) and takes its name from that element. `id`,
 // `describedBy` and `invalid` let such a host wire a hint and an error to the
 // trigger.
+//
+// The field trigger's accessible name is its label AND the value it shows
+// ("Model Inherited · Opus"): a button named by its label alone never says
+// what is picked. The chip skin keeps its aria-label.
 
 import {
   For,
@@ -96,6 +100,7 @@ export default function Select(props: {
 }) {
   const id = createUniqueId();
   const labelId = `select-${id}-label`;
+  const valueId = `select-${id}-value`;
   const listboxId = `select-${id}-listbox`;
   const optionId = (index: number): string => `select-${id}-option-${index}`;
 
@@ -290,7 +295,7 @@ export default function Select(props: {
       id={props.id}
       name={props.name}
       aria-label={chip() ? props.label : undefined}
-      aria-labelledby={chip() ? undefined : (props.labelledBy ?? labelId)}
+      aria-labelledby={chip() ? undefined : `${props.labelledBy ?? labelId} ${valueId}`}
       aria-describedby={props.describedBy}
       aria-invalid={props.invalid === true ? 'true' : undefined}
       aria-haspopup="listbox"
@@ -300,7 +305,12 @@ export default function Select(props: {
       onKeyDown={onTriggerKeyDown}
     >
       <Show when={chip()}>{props.icon}</Show>
-      <span class={chip() ? 'composer-chip-label' : 'select-field-label'}>{triggerLabel()}</span>
+      <span
+        class={chip() ? 'composer-chip-label' : 'select-field-label'}
+        id={chip() ? undefined : valueId}
+      >
+        {triggerLabel()}
+      </span>
       <Icon
         name="chevron-down"
         size={chip() ? 14 : 16}

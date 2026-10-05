@@ -8,6 +8,11 @@
 // toast offers Undo (which declares it again); Add is a pick and a button,
 // and says what happened in the toast. Nothing opens over the page and no
 // browser confirm is involved.
+//
+// Rows keep their identity across a reload (lib/rowStore.ts), and focus never
+// falls off the page: a removed row hands it to the row that takes its place
+// (else to the pick), Undo to the row it brought back, and an Add with
+// nothing picked to the pick it is asking for.
 
 import { For, Show, createMemo, createResource, createSignal, createUniqueId } from 'solid-js';
 import {
@@ -21,6 +26,9 @@ import {
 import Banner from '../../../components/Banner';
 import EmptyState from '../../../components/EmptyState';
 import Select, { type SelectOption } from '../../../components/Select';
+import { rescueFocus } from '../../../lib/focus';
+import { resourceValue } from '../../../lib/resource';
+import { createRowStore, rescueRowFocus, type OwnedRows } from '../../../lib/rowStore';
 import { useRepoHome } from '../../repo-home/context';
 
 /**
@@ -40,19 +48,44 @@ export default function ImportsSection(props: { repoId: string }) {
   const uid = createUniqueId();
   const pickLabelId = `imports-${uid}-pick`;
   const pickErrorId = `imports-${uid}-pick-error`;
-  const [imports, { refetch }] = createResource(() => listRepoImports(props.repoId));
+  const [fetched, { refetch }] = createResource(
+    () => props.repoId,
+    async (repoId): Promise<OwnedRows<RepoImport>> => ({
+      owner: repoId,
+      rows: await listRepoImports(repoId),
+    }),
+  );
+  // One stable object per import, and only ever this repo's.
+  const imports = createRowStore(
+    () => resourceValue(fetched),
+    () => props.repoId,
+  );
   const [repos] = createResource(() => listRepos());
   const [error, setError] = createSignal<string | null>(null);
   const [targetId, setTargetId] = createSignal('');
   const [pickProblem, setPickProblem] = createSignal<string | null>(null);
-  const [busy, setBusy] = createSignal<string | null>(null);
+  // What has a request in flight ('add', or an import's id): checked before
+  // sending, so the buttons can stay enabled — a disabled one drops the focus.
+  const [busy, setBusy] = createSignal<ReadonlySet<string>>(new Set());
+  const setKeyBusy = (key: string, on: boolean): void => {
+    const next = new Set(busy());
+    if (on) next.add(key);
+    else next.delete(key);
+    setBusy(next);
+  };
+
+  let section: HTMLElement | undefined;
+  const removeButtons = (): HTMLElement[] =>
+    Array.from(section?.querySelectorAll<HTMLElement>('.import-row button') ?? []);
+  const pick = (): HTMLElement | null =>
+    section?.querySelector<HTMLElement>('button[name="target_repo_id"]') ?? null;
 
   // Candidates for the picker: every registered repo minus this one
   // (self-import is rejected server-side) and minus whatever is already
   // declared (adding again would just be a no-op 201) — the picker only ever
   // offers a target that would actually change something.
   const candidates = createMemo<SelectOption[]>(() => {
-    const declared = new Set((imports() ?? []).map((imp) => imp.id));
+    const declared = new Set(imports.rows.map((imp) => imp.id));
     return (repos() ?? [])
       .filter((repo) => repo.id !== props.repoId && !declared.has(repo.id))
       .map((repo) => ({
@@ -64,13 +97,15 @@ export default function ImportsSection(props: { repoId: string }) {
 
   const add = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
-    if (busy() !== null) return;
+    if (busy().has('add')) return;
     if (targetId() === '') {
       setPickProblem('Choose a repository first.');
+      // To the control the problem is about.
+      pick()?.focus();
       return;
     }
     const target = targetId();
-    setBusy('add');
+    setKeyBusy('add', true);
     setError(null);
     try {
       const added = await addRepoImport(props.repoId, target);
@@ -80,26 +115,43 @@ export default function ImportsSection(props: { repoId: string }) {
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setBusy(null);
+      setKeyBusy('add', false);
     }
   };
 
   // Removed at once; the toast's Undo declares the import again. A re-add
   // that fails says so where the list is.
   const remove = async (imp: RepoImport): Promise<void> => {
-    setBusy(imp.id);
+    // Captured before the await: the row is a live object.
+    const { id, name } = imp;
+    if (busy().has(id)) return;
+    setKeyBusy(id, true);
     setError(null);
     try {
-      await removeRepoImport(props.repoId, imp.id);
-      await refetch();
-      home.notify(`Removed the import of ${imp.name}`, {
+      await removeRepoImport(props.repoId, id);
+      const at = imports.rows.findIndex((row) => row.id === id);
+      imports.remove(id);
+      void refetch();
+      // The row took its Remove button — and the focus — with it.
+      rescueRowFocus(removeButtons(), at, pick());
+      home.notify(`Removed the import of ${name}`, {
         action: {
           label: 'Undo',
           run: () => {
-            void addRepoImport(props.repoId, imp.id)
+            void addRepoImport(props.repoId, id)
               .then(() => refetch())
+              .then(() => {
+                // The toast is gone with the click that ran this.
+                rescueFocus(
+                  removeButtons().find(
+                    (button) => button.getAttribute('aria-label') === removeLabel(name),
+                  ),
+                  pick(),
+                );
+              })
               .catch((err: unknown) => {
-                setError(`Could not import ${imp.name} again: ${errorMessage(err)}`);
+                setError(`Could not import ${name} again: ${errorMessage(err)}`);
+                rescueFocus(pick());
               });
           },
         },
@@ -107,45 +159,44 @@ export default function ImportsSection(props: { repoId: string }) {
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setBusy(null);
+      setKeyBusy(id, false);
     }
   };
+  const removeLabel = (name: string): string => `Remove the import of ${name}`;
 
   return (
-    <section class="card imports-list" aria-label="Imports">
+    <section class="card imports-list" aria-label="Imports" ref={section}>
       <Banner message={error()} onDismiss={() => setError(null)} />
-      <Show when={imports.error}>{(err) => <Banner message={errorMessage(err())} />}</Show>
-      <Show when={imports()}>
-        {(list) => (
-          <Show
-            when={list().length > 0}
-            fallback={<EmptyState>No imports. Runs only see this repository.</EmptyState>}
-          >
-            <ul class="import-rows">
-              <For each={list()}>
-                {(imp) => (
-                  <li class="import-row">
-                    <span class="import-row-text">
-                      <strong>{imp.name}</strong>
-                      <span class="import-row-meta">
-                        Read-only snapshot of its default branch, refreshed at every spawn.
-                      </span>
+      <Show when={fetched.error}>{(err) => <Banner message={errorMessage(err())} />}</Show>
+      <Show when={imports.loaded()}>
+        <Show
+          when={imports.rows.length > 0}
+          fallback={<EmptyState>No imports. Runs only see this repository.</EmptyState>}
+        >
+          <ul class="import-rows">
+            <For each={imports.rows}>
+              {(imp) => (
+                <li class="import-row">
+                  <span class="import-row-text">
+                    <strong>{imp.name}</strong>
+                    <span class="import-row-meta">
+                      Read-only snapshot of its default branch, refreshed at every spawn.
                     </span>
-                    <button
-                      type="button"
-                      class="small"
-                      aria-label={`Remove the import of ${imp.name}`}
-                      disabled={busy() === imp.id}
-                      onClick={() => void remove(imp)}
-                    >
-                      {busy() === imp.id ? 'Removing…' : 'Remove'}
-                    </button>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </Show>
-        )}
+                  </span>
+                  <button
+                    type="button"
+                    class="small"
+                    aria-label={removeLabel(imp.name)}
+                    aria-busy={busy().has(imp.id) ? 'true' : undefined}
+                    onClick={() => void remove(imp)}
+                  >
+                    {busy().has(imp.id) ? 'Removing…' : 'Remove'}
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
       </Show>
       <form class="imports-add" novalidate onSubmit={(e) => void add(e)}>
         <span id={pickLabelId} class="visually-hidden">
@@ -167,8 +218,8 @@ export default function ImportsSection(props: { repoId: string }) {
               setPickProblem(null);
             }}
           />
-          <button type="submit" disabled={busy() === 'add'}>
-            {busy() === 'add' ? 'Adding…' : 'Add'}
+          <button type="submit" aria-busy={busy().has('add') ? 'true' : undefined}>
+            {busy().has('add') ? 'Adding…' : 'Add'}
           </button>
         </div>
         <Show when={pickProblem()}>

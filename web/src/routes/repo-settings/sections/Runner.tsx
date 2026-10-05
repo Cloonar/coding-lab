@@ -113,8 +113,8 @@ export default function RunnerSection() {
         <FieldGroup title="Container limits">
           <div class="settings-grid3 even">
             <TextField name="container_memory" />
-            <TextField name="container_pids" type="number" min={1} />
-            <TextField name="container_nofile" type="number" min={1} />
+            <TextField name="container_pids" type="number" />
+            <TextField name="container_nofile" type="number" />
           </div>
         </FieldGroup>
       </Show>

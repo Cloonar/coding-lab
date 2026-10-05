@@ -20,11 +20,13 @@ import {
   chooseFromSelect,
   chooseNative,
   container,
+  followLink,
   h,
   input,
   installRepoSettingsHooks,
   mountSettings,
   openDialog,
+  repoTab,
   routerHistory,
   scheduleEditor,
   schedulesSection,
@@ -97,6 +99,22 @@ const openFromRow = async (): Promise<HTMLAnchorElement> => {
   link.click();
   await settle();
   await waitFor(scheduleEditor, 'the editor');
+  return link;
+};
+/** Holds every schedule write until the returned function is called. */
+const hold = (): (() => void) => {
+  let release = (): void => {};
+  h.scheduleHold = new Promise<void>((resolve) => (release = resolve));
+  return () => {
+    release();
+    h.scheduleHold = null;
+  };
+};
+const rowLinkOf = (id: string): HTMLAnchorElement => {
+  const link = schedulesSection().querySelector<HTMLAnchorElement>(
+    `a.schedule-row-main[href="${BASE}/schedules/${id}"]`,
+  );
+  if (!link) throw new Error(`no row link for ${id}`);
   return link;
 };
 const openNew = async (): Promise<void> => {
@@ -720,5 +738,524 @@ describe('schedule editor: overrides', () => {
     submitEditor();
     await settle();
     expect(h.scheduleBodies).toEqual([{ budget_minutes: null }]);
+  });
+});
+
+describe('schedule editor under the leave dialog', () => {
+  // A pending repo setting, the editor open (and clean), and a navigation
+  // that leaves the repo: the repo form's leave dialog opens OVER the editor.
+  const openBoth = async (): Promise<void> => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await mountSettings(`${BASE}/schedules`);
+    const link = await waitFor(
+      () => schedulesSection().querySelector<HTMLAnchorElement>('a.schedule-row-main'),
+      'the row',
+    );
+    typeInto(input('git_author_name'), 'Dominik');
+    await settle();
+    link.focus();
+    link.click();
+    await settle();
+    await waitFor(scheduleEditor, 'the editor');
+    linkTo('/elsewhere').click();
+    await settle();
+  };
+
+  it('the dialog opens over the editor, and the two do not fight over the focus', async () => {
+    // Two focus traps that both insist bounce the focus between them until
+    // the stack overflows. Opening the dialog must simply work.
+    await openBoth();
+
+    expect(openDialog()).not.toBeNull();
+    expect(scheduleEditor()).not.toBeNull();
+    expect(routerHistory.get()).toBe(`${BASE}/schedules/sched_1`);
+    expect(document.activeElement?.textContent).toBe('Keep editing');
+    expect(openDialog()?.contains(document.activeElement)).toBe(true);
+
+    // Focus sent into the editor underneath comes back to the dialog — once.
+    expect(() => input('schedule-name').focus()).not.toThrow();
+    expect(openDialog()?.contains(document.activeElement)).toBe(true);
+  });
+
+  it('Escape closes the dialog only; the editor underneath stays', async () => {
+    await openBoth();
+
+    keydown('Escape');
+    await settle();
+
+    expect(openDialog()).toBeNull();
+    expect(scheduleEditor()).not.toBeNull();
+    expect(routerHistory.get()).toBe(`${BASE}/schedules/sched_1`);
+    // The editor is the modal again: focus is in it, and the page is locked.
+    expect(editor().contains(document.activeElement)).toBe(true);
+    expect(document.body.style.overflow).toBe('hidden');
+  });
+
+  it('Keep editing returns to the editor, which then has the Escape key again', async () => {
+    await openBoth();
+
+    Array.from(openDialog()?.querySelectorAll('button') ?? [])
+      .find((b) => b.textContent === 'Keep editing')
+      ?.click();
+    await settle();
+
+    expect(openDialog()).toBeNull();
+    expect(editor().contains(document.activeElement)).toBe(true);
+    // Focus sent to the page behind is pulled back into the editor.
+    linkTo('/elsewhere').focus();
+    expect(editor().contains(document.activeElement)).toBe(true);
+
+    keydown('Escape');
+    await settle();
+    expect(scheduleEditor()).toBeNull();
+    expect(document.body.style.overflow).toBe('');
+  });
+});
+
+describe('schedule editor: the stand-in while a Schedule loads', () => {
+  it('is as modal as the editor, and can be left while the list has not answered', async () => {
+    let release = (): void => {};
+    h.schedulesHold = new Promise<void>((resolve) => (release = resolve));
+    h.schedules = [baseSchedule()];
+    await mountSettings(`${BASE}/schedules/sched_1`);
+    const frame = await waitFor(scheduleEditor, 'the frame');
+
+    expect(frame.textContent).toContain('Loading schedule…');
+    expect(frame.getAttribute('role')).toBe('dialog');
+    expect(frame.getAttribute('aria-modal')).toBe('true');
+    expect(document.activeElement).toBe(frame.querySelector('h2'));
+    expect(document.body.style.overflow).toBe('hidden');
+    // A way out, also now.
+    expect(frame.querySelector('button[aria-label="Back to schedules"]')).not.toBeNull();
+    linkTo('/elsewhere').focus();
+    expect(frame.contains(document.activeElement)).toBe(true);
+
+    keydown('Escape');
+    await settle();
+    expect(scheduleEditor()).toBeNull();
+    expect(routerHistory.get()).toBe(`${BASE}/schedules`);
+    expect(document.body.style.overflow).toBe('');
+    release();
+  });
+
+  it('gives way to the editor once the Schedule is there', async () => {
+    let release = (): void => {};
+    h.schedulesHold = new Promise<void>((resolve) => (release = resolve));
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await mountSettings(`${BASE}/schedules/sched_1`);
+    await waitFor(scheduleEditor, 'the frame');
+
+    release();
+    await waitFor(
+      () => (scheduleEditor()?.querySelector('h2')?.textContent === 'Edit schedule' ? true : null),
+      'the editor',
+    );
+
+    expect(input('schedule-name').value).toBe('Weekly deps');
+    expect(document.activeElement).toBe(editor().querySelector('h2'));
+    expect(document.body.style.overflow).toBe('hidden');
+  });
+});
+
+describe('schedule editor: an answer that arrives late', () => {
+  // Run now holds its answer for a whole spawn pass. (The memory router's
+  // history move is not held by a leave guard, which is how these tests get
+  // the editor off the page while a request is in flight.)
+  it('a Run now that lands after the editor is gone only reports — it navigates nowhere', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    const release = hold();
+    await openFromRow();
+    runNowButton()?.click();
+    await settle();
+    expect(runNowButton()?.textContent).toContain('Starting…');
+
+    routerHistory.go(-1);
+    await settle();
+    expect(scheduleEditor()).toBeNull();
+    await followLink(repoTab('Issues'));
+    expect(routerHistory.get()).toBe(`${REPO}/issues`);
+
+    release();
+    await settle();
+
+    // The run did start, and that is said — on the tab the operator is on.
+    expect(routerHistory.get()).toBe(`${REPO}/issues`);
+    expect(toastText()).toBe('Started a run from "Weekly deps"');
+  });
+
+  it('…and never closes another editor the operator opened meanwhile', async () => {
+    h.schedules = [
+      baseSchedule({ name: 'Weekly deps' }),
+      baseSchedule({ id: 'sched_2', name: 'Nightly audit' }),
+    ];
+    const release = hold();
+    await mountSettings(`${BASE}/schedules`);
+    await waitFor(() => schedulesSection().querySelector('a.schedule-row-main'), 'the rows');
+    rowLinkOf('sched_1').click();
+    await settle();
+    await waitFor(scheduleEditor, 'the first editor');
+    runNowButton()?.click();
+    await settle();
+
+    routerHistory.go(-1);
+    await settle();
+    rowLinkOf('sched_2').click();
+    await settle();
+    await waitFor(scheduleEditor, 'the second editor');
+    expect(input('schedule-name').value).toBe('Nightly audit');
+
+    release();
+    await settle();
+
+    expect(routerHistory.get()).toBe(`${BASE}/schedules/sched_2`);
+    expect(input('schedule-name').value).toBe('Nightly audit');
+    expect(toastText()).toBe('Started a run from "Weekly deps"');
+  });
+
+  it('a Save that lands after the editor is gone is said to have landed, without navigating', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await openFromRow();
+    typeInto(input('schedule-name'), 'Weekly deps v2');
+    const release = hold();
+    submitEditor();
+    await settle();
+
+    routerHistory.go(-1);
+    await settle();
+    expect(scheduleEditor()).toBeNull();
+    await followLink(repoTab('Issues'));
+
+    release();
+    await settle();
+
+    expect(h.schedules[0]?.name).toBe('Weekly deps v2');
+    expect(routerHistory.get()).toBe(`${REPO}/issues`);
+    expect(toastText()).toContain('Saved "Weekly deps v2"');
+  });
+
+  it('a refusal that lands after the editor is gone is said through the frame, verbatim', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    h.runNowRefusal = "schedule's previous run is still live";
+    const release = hold();
+    await openFromRow();
+    runNowButton()?.click();
+    await settle();
+    routerHistory.go(-1);
+    await settle();
+
+    release();
+    await settle();
+
+    expect(toastText()).toBe(
+      'No run started from "Weekly deps": schedule\'s previous run is still live',
+    );
+    expect(routerHistory.get()).toBe(`${BASE}/schedules`);
+  });
+});
+
+describe('schedule editor: leaving while a request is in flight', () => {
+  it('a navigation during Run now waits for the answer, then goes ahead', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    const release = hold();
+    await openFromRow();
+    runNowButton()?.click();
+    await settle();
+
+    linkTo(`${REPO}/issues`).click();
+    await settle();
+
+    // Not gone, and nothing asked: the run is being started.
+    expect(routerHistory.get()).toBe(`${BASE}/schedules/sched_1`);
+    expect(scheduleEditor()).not.toBeNull();
+    expect(footer()).not.toContain('Discard your changes?');
+
+    release();
+    await settle();
+
+    expect(routerHistory.get()).toBe(`${REPO}/issues`);
+    expect(scheduleEditor()).toBeNull();
+    expect(toastText()).toBe('Started a run from "Weekly deps"');
+  });
+
+  it('a navigation during a Save is not asked about: nothing can be discarded any more', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await openFromRow();
+    typeInto(input('schedule-name'), 'Weekly deps v2');
+    const release = hold();
+    submitEditor();
+    await settle();
+
+    linkTo(`${REPO}/issues`).click();
+    await settle();
+
+    // No "Discard your changes?" for edits that are on their way to the server.
+    expect(footer()).not.toContain('Discard your changes?');
+    expect(routerHistory.get()).toBe(`${BASE}/schedules/sched_1`);
+
+    release();
+    await settle();
+
+    expect(h.scheduleBodies).toEqual([{ name: 'Weekly deps v2' }]);
+    expect(routerHistory.get()).toBe(`${REPO}/issues`);
+    expect(toastText()).toContain('Saved "Weekly deps v2"');
+  });
+
+  it('…and stays, with the reason, when the request is refused', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    h.scheduleRefusal = { error: 'name already taken', field: 'name' };
+    await openFromRow();
+    typeInto(input('schedule-name'), 'Taken');
+    const release = hold();
+    submitEditor();
+    await settle();
+    linkTo(`${REPO}/issues`).click();
+    await settle();
+
+    release();
+    await settle();
+
+    // The navigation that waited is dropped: the operator has a name to fix.
+    expect(routerHistory.get()).toBe(`${BASE}/schedules/sched_1`);
+    expect(fieldError('schedule-name')).toBe('name already taken');
+    // Leaving now asks, as it always does with pending edits.
+    linkTo(`${REPO}/issues`).click();
+    await settle();
+    expect(footer()).toContain('Discard your changes?');
+  });
+
+  it('a second click on Run now while the first is on its way sends nothing', async () => {
+    h.schedules = [baseSchedule()];
+    const release = hold();
+    await openFromRow();
+
+    runNowButton()?.click();
+    runNowButton()?.click();
+    await settle();
+    runNowButton()?.click();
+    release();
+    await settle();
+
+    expect(h.runNowRequests).toEqual(['sched_1']);
+  });
+});
+
+describe('schedule editor: what a request says is always in view', () => {
+  it('a refusal that names no field shows in the strip under the header, and takes the focus', async () => {
+    h.schedules = [baseSchedule()];
+    h.scheduleRefusal = { error: 'schedules are read-only right now' };
+    await openFromRow();
+    typeInto(input('schedule-name'), 'Other');
+    submitEditor();
+    await settle();
+
+    const strip = editor().querySelector<HTMLElement>('.schedule-editor-alerts');
+    expect(strip?.querySelector('.banner.error')?.textContent).toContain(
+      'schedules are read-only right now',
+    );
+    expect(strip?.querySelector('.banner.error')?.getAttribute('role')).toBe('alert');
+    // Not inside the scrolling body: a tap on Save at the bottom of a long
+    // form must not be answered somewhere off screen.
+    expect(
+      editor()
+        .querySelector('.schedule-editor-body')
+        ?.contains(strip ?? null),
+    ).toBe(false);
+    expect(document.activeElement).toBe(strip);
+  });
+
+  it('a failed Delete is said there too', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await openFromRow();
+    h.scheduleRefusal = { error: 'schedule has a live run' };
+    button('Delete schedule').click();
+    await settle();
+    button('Delete for good').click();
+    await settle();
+
+    expect(scheduleEditor()).not.toBeNull();
+    expect(editor().querySelector('.schedule-editor-alerts .banner.error')?.textContent).toContain(
+      'schedule has a live run',
+    );
+    expect(h.schedules).toHaveLength(1);
+  });
+
+  it('a Run now that fails for another reason than a refusal shows by the button as well', async () => {
+    h.schedules = [baseSchedule()];
+    h.runNowError = { status: 500, error: 'spawn pass: store unavailable' };
+    await openFromRow();
+
+    runNowButton()?.click();
+    await settle();
+
+    expect(scheduleEditor()).not.toBeNull();
+    expect(refusalText()).toBe('spawn pass: store unavailable');
+    expect(editor().querySelector('.schedule-editor-refusal')?.getAttribute('role')).toBe('alert');
+    expect(editor().querySelector('.banner.error')).toBeNull();
+    expect(runNowButton()?.disabled).toBe(false);
+    expect(toastText()).toBe('');
+  });
+});
+
+describe('schedule editor: the Saved toast, away from the Settings tab', () => {
+  it('a refused Run now is said through the frame, with the reason verbatim', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await openFromRow();
+    typeInto(input('schedule-name'), 'Weekly deps v2');
+    submitEditor();
+    await settle();
+    expect(toastText()).toContain('Saved "Weekly deps v2"');
+
+    // The toast outlives the tab; the page that would show a notice does not.
+    await followLink(repoTab('Issues'));
+    h.runNowRefusal = 'schedule is paused after consecutive failures — re-enable to re-arm';
+    container.querySelector<HTMLButtonElement>('.toast button')?.click();
+    await settle();
+
+    expect(h.runNowRequests).toEqual(['sched_1']);
+    expect(toastText()).toBe(
+      'No run started from "Weekly deps v2": schedule is paused after consecutive failures — re-enable to re-arm',
+    );
+  });
+
+  it('and a run that did start is said there just the same', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await openFromRow();
+    typeInto(input('schedule-name'), 'Weekly deps v2');
+    submitEditor();
+    await settle();
+    await followLink(repoTab('Issues'));
+
+    container.querySelector<HTMLButtonElement>('.toast button')?.click();
+    await settle();
+
+    expect(toastText()).toBe('Started a run from "Weekly deps v2"');
+  });
+});
+
+describe('schedule editor: focus after it closes', () => {
+  it('after Save the focus is back on the row, and stays there through the reload', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    const link = await openFromRow();
+    typeInto(input('schedule-name'), 'Weekly deps v2');
+    submitEditor();
+    await settle();
+
+    // The SAME row: patched in place, not rebuilt under the focus.
+    expect(link.isConnected).toBe(true);
+    expect(link.textContent).toContain('Weekly deps v2');
+    expect(document.activeElement).toBe(link);
+  });
+
+  it('after Run now the focus is back on the row as well', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    const link = await openFromRow();
+    runNowButton()?.click();
+    await settle();
+
+    expect(link.isConnected).toBe(true);
+    expect(document.activeElement).toBe(link);
+  });
+
+  it('after Delete the focus goes to the row that takes its place', async () => {
+    h.schedules = [
+      baseSchedule({ name: 'Weekly deps' }),
+      baseSchedule({ id: 'sched_2', name: 'Nightly audit' }),
+    ];
+    await mountSettings(`${BASE}/schedules`);
+    await waitFor(() => schedulesSection().querySelector('a.schedule-row-main'), 'the rows');
+    const first = rowLinkOf('sched_1');
+    first.focus();
+    first.click();
+    await settle();
+    await waitFor(scheduleEditor, 'the editor');
+
+    button('Delete schedule').click();
+    await settle();
+    button('Delete for good').click();
+    await settle();
+
+    expect(scheduleEditor()).toBeNull();
+    expect(first.isConnected).toBe(false);
+    expect(document.activeElement).toBe(rowLinkOf('sched_2'));
+  });
+
+  it('…and to New schedule when it was the last one', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await openFromRow();
+
+    button('Delete schedule').click();
+    await settle();
+    button('Delete for good').click();
+    await settle();
+
+    expect(document.activeElement).toBe(schedulesSection().querySelector('a.schedule-new'));
+  });
+});
+
+describe("schedule editor: Examples keep the operator's own words one Undo away", () => {
+  it('trying a second example over the first still undoes to what the operator wrote', async () => {
+    await openNew();
+    typeInto(textarea('schedule-prompt'), 'my own words');
+
+    await chooseFromSelect('schedule-example', 'Security audit');
+    await chooseFromSelect('schedule-example', 'Check for dependency updates');
+    expect(textarea('schedule-prompt').value).toContain("Investigate this repository's");
+
+    button('Undo').click();
+    await settle();
+
+    expect(textarea('schedule-prompt').value).toBe('my own words');
+  });
+
+  it('an example over an empty prompt, then another: there was nothing to undo', async () => {
+    await openNew();
+
+    await chooseFromSelect('schedule-example', 'Security audit');
+    await chooseFromSelect('schedule-example', 'Check for dependency updates');
+
+    expect(editor().textContent).not.toContain('Replaced your prompt');
+  });
+
+  it('an example the operator then edited is their text: the next example offers it back', async () => {
+    await openNew();
+    await chooseFromSelect('schedule-example', 'Security audit');
+    typeInto(textarea('schedule-prompt'), 'Security audit, but only the API.');
+
+    await chooseFromSelect('schedule-example', 'Check for dependency updates');
+    button('Undo').click();
+    await settle();
+
+    expect(textarea('schedule-prompt').value).toBe('Security audit, but only the API.');
+  });
+});
+
+describe('schedule editor: a tab close or reload', () => {
+  const unloadHeld = (): boolean => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+
+  it('keeps the browser prompt armed only while the editor has pending edits', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await openFromRow();
+    expect(unloadHeld()).toBe(false);
+
+    typeInto(input('schedule-name'), 'Renamed');
+    await settle();
+    expect(unloadHeld()).toBe(true);
+
+    typeInto(input('schedule-name'), 'Weekly deps');
+    await settle();
+    expect(unloadHeld()).toBe(false);
+
+    // Gone with the editor.
+    typeInto(input('schedule-name'), 'Renamed');
+    button('Cancel').click();
+    await settle();
+    button('Discard').click();
+    await settle();
+    expect(scheduleEditor()).toBeNull();
+    expect(unloadHeld()).toBe(false);
   });
 });

@@ -18,7 +18,8 @@
 //     that is not known the state shows without a value;
 //   - a changed field is marked AT ITS LABEL by a dot plus the words
 //     "unsaved change" inside the label (so it is part of the control's
-//     accessible name) — never by colour alone;
+//     accessible name) — never by colour alone. A switch draws its own
+//     label, and gets the words through `control.changedText`;
 //   - a problem (a browser check or a server refusal) renders under the
 //     control as an alert, and the control is aria-invalid and described by it;
 //   - the hint describes the control too (aria-describedby);
@@ -69,7 +70,9 @@ export function focusFieldControl(wrapper: HTMLElement, key: RepoFieldKey): bool
     wrapper.querySelector<HTMLElement>(
       'input, select, textarea, button[role="radio"][tabindex="0"], button:not([tabindex="-1"])',
     );
-  if (control === null) return false;
+  // A disabled control cannot take focus: report it, so a deep link that is
+  // still being held tries again once the control is usable.
+  if (control === null || control.matches(':disabled')) return false;
   control.focus({ preventScroll: true });
   return true;
 }
@@ -93,6 +96,12 @@ export interface FieldControl<K extends RepoFieldKey> {
   describedBy: Accessor<string | undefined>;
   /** True while a problem is shown under the control. */
   invalid: Accessor<boolean>;
+  /**
+   * The words behind the changed mark, for a control that draws its own
+   * label (a switch row): render it INSIDE that label, so it joins the
+   * control's accessible name.
+   */
+  changedText: () => JSX.Element;
 }
 
 export function Field<K extends RepoFieldKey>(props: {
@@ -165,7 +174,7 @@ export function Field<K extends RepoFieldKey>(props: {
       data-field={key}
       ref={wrapper}
     >
-      <Show when={props.labelMode !== 'none'} fallback={<ChangedText />}>
+      <Show when={props.labelMode !== 'none'}>
         <div class="sfield-label">
           <Show
             when={props.labelMode === 'id'}
@@ -190,7 +199,14 @@ export function Field<K extends RepoFieldKey>(props: {
           </Show>
         </div>
       </Show>
-      {props.children({ binding, id, labelId, describedBy, invalid })}
+      {props.children({
+        binding,
+        id,
+        labelId,
+        describedBy,
+        invalid,
+        changedText: () => <ChangedText />,
+      })}
       <Show when={binding.error()}>
         {(message) => (
           <p class="sfield-error" id={errorId} role="alert">
@@ -220,7 +236,12 @@ export function Field<K extends RepoFieldKey>(props: {
   );
 }
 
-/** A one-line text or number field. */
+/**
+ * A one-line text or number field. A number field is a TEXT input with the
+ * numeric keypad: a browser's number input reports anything it cannot parse
+ * as "" — which here means "inherit" — so a typo would be saved as a reset
+ * and the field table's whole-number rule would never see it.
+ */
 export function TextField(props: {
   name: TextFieldKey;
   label?: string;
@@ -230,8 +251,6 @@ export function TextField(props: {
   mono?: boolean;
   /** Default: what an overridable field inherits (nothing for any other field). */
   placeholder?: string;
-  /** Lowest value a number field's stepper offers; the field table validates. */
-  min?: number;
   /** The field may not be left empty (announced; the field table enforces it). */
   required?: boolean;
   spellcheck?: boolean;
@@ -243,11 +262,10 @@ export function TextField(props: {
         <input
           id={control.id}
           name={control.binding.key}
-          type={props.type ?? 'text'}
+          type="text"
           classList={{ mono: props.mono === true }}
           inputmode={props.type === 'number' ? 'numeric' : undefined}
-          min={props.min}
-          step={props.type === 'number' ? 1 : undefined}
+          pattern={props.type === 'number' ? '[0-9]*' : undefined}
           autocomplete="off"
           spellcheck={props.spellcheck ?? false}
           placeholder={props.placeholder ?? control.binding.inheritedText() ?? undefined}
@@ -314,6 +332,7 @@ export function NativeSelectField(props: {
   label?: string;
   hint?: JSX.Element;
   options: { value: string; label: string }[];
+  disabled?: boolean;
   class?: string;
 }) {
   return (
@@ -322,6 +341,7 @@ export function NativeSelectField(props: {
         <select
           id={control.id}
           name={control.binding.key}
+          disabled={props.disabled}
           aria-invalid={control.invalid() ? 'true' : undefined}
           aria-describedby={control.describedBy()}
           value={control.binding.value()}
@@ -404,6 +424,9 @@ export function SwitchField(props: {
           name={control.binding.key}
           label={props.label ?? control.binding.spec.label}
           description={props.description}
+          labelExtra={control.changedText()}
+          describedBy={control.describedBy()}
+          invalid={control.invalid()}
           checked={control.binding.value()}
           disabled={props.disabled}
           onChange={(next) => control.binding.set(next)}

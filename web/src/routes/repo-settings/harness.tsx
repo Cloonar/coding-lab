@@ -13,6 +13,13 @@
 // shapes any other answer. (The app itself never walks a chain; this is the
 // fake SERVER.)
 //
+// PATCH /repos/:id applies the server's own PAIR checks (pairRefusal() below,
+// after reposvc.UpdateSettings): a forge binding needs a forge credential,
+// the AFK branch pattern and the manual branch prefix must not overlap, and
+// Autoland needs the forge binding — each refused with the server's message
+// at the field the server pins it to. So a fixture that sends a pair the real
+// server would refuse is refused here too.
+//
 // The page's layout seam (scrolling.ts `viewport`) is replaced by a fake for
 // every test: jsdom has no layout, so `h.tops` says where each section sits
 // and `h.scrolls` records where the page scrolled to.
@@ -300,6 +307,15 @@ export interface RepoSettingsHarnessState {
   tops: Record<string, number>;
   /** The fake layout's "the page is scrolled to its end". */
   pageAtEnd: boolean;
+  /** How often the page read an element's position from the fake layout. */
+  layoutReads: number;
+  /** Makes GET /providers answer 500 with this message. */
+  providersError: string | null;
+  /** Makes GET /credentials answer 500 with this message. */
+  credentialsError: string | null;
+  /** Number of GET /providers and GET /credentials requests so far. */
+  providersGets: number;
+  credentialsGets: number;
   /** Every scroll the page asked for, in order: the target element's id (a
    *  section) or its data-field (a field), the offset, and whether animated. */
   scrolls: { target: string; offset: number; smooth: boolean }[];
@@ -329,6 +345,19 @@ export interface RepoSettingsHarnessState {
   runNowRequests: string[];
   /** Makes Run now answer 409 with this reason (verbatim) instead of 202. */
   runNowRefusal: string | null;
+  /** Makes Run now fail with another status (a 500, say) and this message. */
+  runNowError: { status: number; error: string } | null;
+  /** While set, every schedule write (POST, PATCH, DELETE, re-enable, Run
+   *  now) is answered only once this resolves — how a test acts while a
+   *  request is in flight. The request is recorded at once. */
+  scheduleHold: Promise<void> | null;
+  /** While set, GET …/schedules is answered only once this resolves. */
+  schedulesHold: Promise<void> | null;
+  /** Makes GET …/schedules answer 500 with this message. */
+  schedulesGetError: string | null;
+  /** Makes every secret write (POST, PATCH, DELETE) answer 400 with this
+   *  refusal — with `field`, the key the row shows it under. */
+  secretRefusal: { error: string; field?: string } | null;
   /** This repo's declared imports (issue #261), sorted by name like the real API. */
   importsOnServer: RepoImport[];
   /** Every imports POST body, for exact target_repo_id assertions. */
@@ -401,9 +430,17 @@ export function stubApi(): void {
         );
       }
       if (url === '/api/v1/credentials' && method === 'GET') {
+        h.credentialsGets += 1;
+        if (h.credentialsError !== null) {
+          return Promise.resolve(jsonResponse(500, { error: h.credentialsError }));
+        }
         return Promise.resolve(jsonResponse(200, { credentials: h.credentialsOnServer }));
       }
       if (url === '/api/v1/providers' && method === 'GET') {
+        h.providersGets += 1;
+        if (h.providersError !== null) {
+          return Promise.resolve(jsonResponse(500, { error: h.providersError }));
+        }
         return Promise.resolve(jsonResponse(200, { providers: h.providersOnServer }));
       }
       // Global settings feed the effective-provider chains the catalogs
@@ -430,6 +467,9 @@ export function stubApi(): void {
             const { status, ...body } = refusal;
             return jsonResponse(status ?? 400, body);
           }
+          // The pairs the server checks as a whole, refused as it refuses them.
+          const pair = pairRefusal(h.repoOnServer, patch);
+          if (pair !== null) return jsonResponse(400, pair);
           h.repoOnServer = { ...h.repoOnServer, ...patch };
           return jsonResponse(200, { ...h.repoOnServer });
         };
@@ -491,6 +531,16 @@ export function stubApi(): void {
       // value — same write-only discipline the real API enforces.
       if (url === `/api/v1/repos/${REPO_ID}/secrets` && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { secrets: h.secretsOnServer }));
+      }
+      if (
+        h.secretRefusal !== null &&
+        method !== 'GET' &&
+        url.startsWith(`/api/v1/repos/${REPO_ID}/secrets`)
+      ) {
+        if (init?.body !== undefined && init.body !== null) {
+          h.secretRequestBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        }
+        return Promise.resolve(jsonResponse(400, { ...h.secretRefusal }));
       }
       if (url === `/api/v1/repos/${REPO_ID}/secrets` && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -658,28 +708,36 @@ export function stubApi(): void {
       // needs — the built-in flow catalog and the server-rendered cron
       // preview, which is the ONLY thing that ever says when a cadence fires.
       if (url === `/api/v1/repos/${REPO_ID}/schedules` && method === 'GET') {
-        return Promise.resolve(jsonResponse(200, { schedules: h.schedules }));
+        const list = () =>
+          h.schedulesGetError !== null
+            ? jsonResponse(500, { error: h.schedulesGetError })
+            : jsonResponse(200, { schedules: h.schedules });
+        return h.schedulesHold !== null ? h.schedulesHold.then(list) : Promise.resolve(list());
       }
+      // A schedule write is recorded at once and answered — applied, too —
+      // only after h.scheduleHold, when a test holds one.
+      const held = (answer: () => ReturnType<typeof jsonResponse>) =>
+        h.scheduleHold !== null ? h.scheduleHold.then(answer) : Promise.resolve(answer());
       if (url === `/api/v1/repos/${REPO_ID}/schedules` && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         h.scheduleBodies.push(body);
-        if (h.scheduleRefusal !== null) {
-          return Promise.resolve(jsonResponse(400, { ...h.scheduleRefusal }));
-        }
-        // A name is unique per repo — the real 409 the section must surface.
-        if (h.schedules.some((s) => s.name === body.name)) {
-          return Promise.resolve(jsonResponse(409, { error: 'name already taken' }));
-        }
-        const created = baseSchedule({
-          id: `sched_${h.schedules.length + 1}`,
-          name: String(body.name ?? ''),
-          cadence: String(body.cadence ?? ''),
-          prompt: String(body.prompt ?? ''),
-          flows: (body.flows as string[] | undefined) ?? [],
-          enabled: (body.enabled as boolean | undefined) ?? true,
+        return held(() => {
+          if (h.scheduleRefusal !== null) return jsonResponse(400, { ...h.scheduleRefusal });
+          // A name is unique per repo — the real 409 the section must surface.
+          if (h.schedules.some((s) => s.name === body.name)) {
+            return jsonResponse(409, { error: 'name already taken', field: 'name' });
+          }
+          const created = baseSchedule({
+            id: `sched_${h.schedules.length + 1}`,
+            name: String(body.name ?? ''),
+            cadence: String(body.cadence ?? ''),
+            prompt: String(body.prompt ?? ''),
+            flows: (body.flows as string[] | undefined) ?? [],
+            enabled: (body.enabled as boolean | undefined) ?? true,
+          });
+          h.schedules = [...h.schedules, created];
+          return jsonResponse(201, created);
         });
-        h.schedules = [...h.schedules, created];
-        return Promise.resolve(jsonResponse(201, created));
       }
       // Run now (issue #61): 202 with the run, or the server's refusal as a
       // 409 whose message is the reason. Never moves the cadence.
@@ -687,11 +745,12 @@ export function stubApi(): void {
       if (runNowMatch && method === 'POST') {
         const id = runNowMatch[1] ?? '';
         h.runNowRequests.push(id);
-        if (h.runNowRefusal !== null) {
-          return Promise.resolve(jsonResponse(409, { error: h.runNowRefusal }));
-        }
-        return Promise.resolve(
-          jsonResponse(202, {
+        return held(() => {
+          if (h.runNowError !== null) {
+            return jsonResponse(h.runNowError.status, { error: h.runNowError.error });
+          }
+          if (h.runNowRefusal !== null) return jsonResponse(409, { error: h.runNowRefusal });
+          return jsonResponse(202, {
             run: {
               id: `run_now_${h.runNowRequests.length}`,
               repo_id: REPO_ID,
@@ -703,36 +762,41 @@ export function stubApi(): void {
               failure_reason: null,
               schedule_id: id,
             },
-          }),
-        );
+          });
+        });
       }
       const reenableMatch = /^\/api\/v1\/repos\/repo_1\/schedules\/([^/]+)\/reenable$/.exec(url);
       if (reenableMatch && method === 'POST') {
         const id = reenableMatch[1];
-        const fresh = {
-          ...(h.schedules.find((s) => s.id === id) as Schedule),
-          paused: false,
-          consecutive_failures: 0,
-        };
-        h.schedules = h.schedules.map((s) => (s.id === id ? fresh : s));
-        return Promise.resolve(jsonResponse(200, fresh));
+        return held(() => {
+          const fresh = {
+            ...(h.schedules.find((s) => s.id === id) as Schedule),
+            paused: false,
+            consecutive_failures: 0,
+          };
+          h.schedules = h.schedules.map((s) => (s.id === id ? fresh : s));
+          return jsonResponse(200, fresh);
+        });
       }
       const scheduleMatch = /^\/api\/v1\/repos\/repo_1\/schedules\/([^/]+)$/.exec(url);
       if (scheduleMatch && method === 'PATCH') {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         h.scheduleBodies.push(body);
-        if (h.scheduleRefusal !== null) {
-          return Promise.resolve(jsonResponse(400, { ...h.scheduleRefusal }));
-        }
         const id = scheduleMatch[1];
-        const updated = { ...(h.schedules.find((s) => s.id === id) as Schedule), ...body };
-        h.schedules = h.schedules.map((s) => (s.id === id ? updated : s));
-        return Promise.resolve(jsonResponse(200, updated));
+        return held(() => {
+          if (h.scheduleRefusal !== null) return jsonResponse(400, { ...h.scheduleRefusal });
+          const updated = { ...(h.schedules.find((s) => s.id === id) as Schedule), ...body };
+          h.schedules = h.schedules.map((s) => (s.id === id ? updated : s));
+          return jsonResponse(200, updated);
+        });
       }
       if (scheduleMatch && method === 'DELETE') {
         const id = scheduleMatch[1];
-        h.schedules = h.schedules.filter((s) => s.id !== id);
-        return Promise.resolve(jsonResponse(204, undefined));
+        return held(() => {
+          if (h.scheduleRefusal !== null) return jsonResponse(400, { ...h.scheduleRefusal });
+          h.schedules = h.schedules.filter((s) => s.id !== id);
+          return jsonResponse(204, undefined);
+        });
       }
       if (url === '/api/v1/schedule-flows' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { flows: SCHEDULE_FLOWS }));
@@ -771,6 +835,70 @@ export function stubApi(): void {
       return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
     }),
   );
+}
+
+/** gitx.patternsOverlap: some rendered AFK branch starts with the manual prefix. */
+function patternsOverlap(pattern: string, manualPrefix: string): boolean {
+  const at = pattern.indexOf('<N>');
+  const prefix = pattern.slice(0, at);
+  const suffix = pattern.slice(at + '<N>'.length);
+  if (prefix.startsWith(manualPrefix)) return true;
+  if (!manualPrefix.startsWith(prefix)) return false;
+  const rest = manualPrefix.slice(prefix.length);
+  const digits = /^[0-9]*/.exec(rest)?.[0] ?? '';
+  const tail = rest.slice(digits.length);
+  if (digits === '' || digits.startsWith('0')) return false;
+  if (tail === '') return true;
+  for (let j = 1; j <= digits.length; j += 1) {
+    if (suffix.startsWith(rest.slice(j))) return true;
+  }
+  return false;
+}
+
+/**
+ * The fake server's pair checks on PATCH /repos/:id, in reposvc's order and
+ * with its messages and field pins: each pair is checked on the values that
+ * WOULD result, only when the request touches one of its halves, and the
+ * refusal names the key the request sent (see reposvc.UpdateSettings).
+ */
+export function pairRefusal(
+  current: Repo,
+  patch: Record<string, unknown>,
+): { error: string; field: string } | null {
+  const sent = (key: string): boolean => Object.hasOwn(patch, key);
+  const next = { ...current, ...patch } as Repo;
+  if (
+    (sent('tracker_binding') || sent('forge_credential_id')) &&
+    next.tracker_binding === 'forge' &&
+    next.forge_credential_id === null
+  ) {
+    return {
+      field: sent('tracker_binding') ? 'tracker_binding' : 'forge_credential_id',
+      error:
+        'tracker_binding: "forge" requires a forge_token credential (set forge_credential_id or use "builtin")',
+    };
+  }
+  if (
+    (sent('afk_branch_pattern') || sent('manual_branch_prefix')) &&
+    next.afk_branch_pattern.split('<N>').length === 2 &&
+    patternsOverlap(next.afk_branch_pattern, next.manual_branch_prefix)
+  ) {
+    return {
+      field: sent('afk_branch_pattern') ? 'afk_branch_pattern' : 'manual_branch_prefix',
+      error: `afk branch pattern "${next.afk_branch_pattern}" and manual branch prefix "${next.manual_branch_prefix}" overlap: a branch could match both`,
+    };
+  }
+  if (
+    (sent('autoland_enabled') || sent('tracker_binding')) &&
+    next.autoland_enabled &&
+    next.tracker_binding !== 'forge'
+  ) {
+    return {
+      field: sent('autoland_enabled') ? 'autoland_enabled' : 'tracker_binding',
+      error: 'autoland_enabled: requires a forge tracker binding',
+    };
+  }
+  return null;
 }
 
 /**
@@ -818,6 +946,19 @@ export function fakeInherited(drafts: Record<string, unknown> = {}): RepoInherit
   );
   const runner = settings['runner_default'];
   const bag = (settings['spawn_options_afk'] ?? {}) as Record<string, string>;
+  const landerModel =
+    lander === null
+      ? null
+      : resolveSpawnOption(
+          lander.models,
+          text('spawn_model_default_lander'),
+          repo.model_default,
+          text('spawn_model_default'),
+        );
+  const landerEfforts = (provider: Provider, model: string | null): Provider['efforts'] => {
+    const own = provider.models.find((candidate) => candidate.value === model)?.efforts ?? [];
+    return own.length > 0 ? own : provider.efforts;
+  };
 
   return {
     provider: manualBelow?.id ?? null,
@@ -845,20 +986,14 @@ export function fakeInherited(drafts: Record<string, unknown> = {}): RepoInherit
             repo.effort_default,
             text('spawn_effort_default'),
           ),
-    lander_model:
-      lander === null
-        ? null
-        : resolveSpawnOption(
-            lander.models,
-            text('spawn_model_default_lander'),
-            repo.model_default,
-            text('spawn_model_default'),
-          ),
+    lander_model: landerModel,
+    // Resolved against the model the launch requests (afk.LanderModelEffort):
+    // a model with an effort list of its own answers from that list.
     lander_effort:
       lander === null
         ? null
         : resolveSpawnOption(
-            lander.efforts,
+            landerEfforts(lander, repo.lander_model ?? landerModel),
             text('spawn_effort_default_lander'),
             repo.effort_default,
             text('spawn_effort_default'),
@@ -1377,6 +1512,11 @@ export function installRepoSettingsHooks(): void {
     h.inheritedGate = null;
     h.tops = {};
     h.pageAtEnd = false;
+    h.layoutReads = 0;
+    h.providersError = null;
+    h.credentialsError = null;
+    h.providersGets = 0;
+    h.credentialsGets = 0;
     h.scrolls = [];
     h.secretsOnServer = [];
     h.secretRequestBodies = [];
@@ -1388,6 +1528,11 @@ export function installRepoSettingsHooks(): void {
     h.scheduleRefusal = null;
     h.runNowRequests = [];
     h.runNowRefusal = null;
+    h.runNowError = null;
+    h.scheduleHold = null;
+    h.schedulesHold = null;
+    h.schedulesGetError = null;
+    h.secretRefusal = null;
     h.importsOnServer = [];
     h.importPostBodies = [];
     h.importPostError = null;
@@ -1409,7 +1554,10 @@ export function installRepoSettingsHooks(): void {
     // jsdom has no layout: the page's seam answers from `h` instead. A
     // section without an entry in h.tops is far below the fold.
     Object.assign(viewport, {
-      topOf: (element) => h.tops[element.id] ?? 100_000,
+      topOf: (element) => {
+        h.layoutReads += 1;
+        return h.tops[element.id] ?? 100_000;
+      },
       heightOf: () => 0,
       scrollTo: (element, offset, smooth) => {
         const target = element.getAttribute('data-field') ?? element.id;
@@ -1420,6 +1568,12 @@ export function installRepoSettingsHooks(): void {
     // The router scrolls to the top after a navigation; jsdom only logs
     // "not implemented" for it.
     vi.stubGlobal('scrollTo', vi.fn());
+    // A frame is the next macrotask here, so settle() is enough to let the
+    // page's once-per-frame work run (jsdom's own frames tick every 16ms).
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+      setTimeout(() => callback(performance.now()), 0),
+    );
+    vi.stubGlobal('cancelAnimationFrame', (handle: number) => clearTimeout(handle));
   });
 
   afterEach(() => {

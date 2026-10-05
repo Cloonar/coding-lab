@@ -6,8 +6,14 @@
 // the page) to take a new value — "Save new value" — or to be deleted behind
 // an inline confirmation; the last row is "+ New secret", which opens the
 // same way into the name, description and value of a new one. Problems show
-// under the field they are about; the server's refusals too, when it names
-// the field, else under the form.
+// where they belong: under the field they are about — the server's refusals
+// too, when it names the field, else under the form — and a failed delete in
+// the row it was asked for.
+//
+// Rows keep their identity across a reload (lib/rowStore.ts), and focus never
+// falls off the page: a row that closes after a new value hands it to its
+// own head, a deleted row to the row that takes its place (else to "New
+// secret"), and an added secret to "New secret".
 //
 // Issue #25 puts the credential-gateway grant picker ABOVE this list and
 // issue #39 the SSH-targets picker below it (and still above this list): the
@@ -16,7 +22,7 @@
 // should reach for first.
 
 import { A } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, createSignal, createUniqueId } from 'solid-js';
+import { For, Show, createResource, createSignal, createUniqueId, type JSX } from 'solid-js';
 import {
   ApiError,
   createRepoSecret,
@@ -30,6 +36,9 @@ import Banner from '../../../components/Banner';
 import EmptyState from '../../../components/EmptyState';
 import Icon from '../../../components/Icon';
 import InlineConfirm from '../../../components/InlineConfirm';
+import { rescueFocus } from '../../../lib/focus';
+import { resourceValue } from '../../../lib/resource';
+import { createRowStore, rescueRowFocus, type OwnedRows } from '../../../lib/rowStore';
 import { useRepoHome } from '../../repo-home/context';
 import RepoSecretGrantsSection from './SecretGrants';
 import RepoSSHTargetsSection from './SSHTargets';
@@ -40,13 +49,31 @@ function secretUpdatedOn(timestamp: string): string {
 }
 
 export default function RepoSecretsSection(props: { repoId: string }) {
-  const [secrets, { refetch }] = createResource(() => listRepoSecrets(props.repoId));
-  const [error, setError] = createSignal<string | null>(null);
+  const [fetched, { refetch }] = createResource(
+    () => props.repoId,
+    async (repoId): Promise<OwnedRows<RepoSecret>> => ({
+      owner: repoId,
+      rows: await listRepoSecrets(repoId),
+    }),
+  );
+  // One stable object per secret, and only ever this repo's.
+  const secrets = createRowStore(
+    () => resourceValue(fetched),
+    () => props.repoId,
+  );
   // One row open at a time: a secret's id, 'new', or nothing.
   const [open, setOpen] = createSignal<string | null>(null);
   const toggle = (id: string): void => {
     setOpen(open() === id ? null : id);
   };
+  let list: HTMLUListElement | undefined;
+  const rowHeads = (): HTMLElement[] =>
+    Array.from(
+      list?.querySelectorAll<HTMLElement>('.secret-row:not(.secret-row-new) .secret-row-head') ??
+        [],
+    );
+  const newHead = (): HTMLElement | null =>
+    list?.querySelector<HTMLElement>('.secret-row-new .secret-row-head') ?? null;
 
   return (
     <>
@@ -57,47 +84,51 @@ export default function RepoSecretsSection(props: { repoId: string }) {
           Values are write-only: lab never reads or shows them again after saving. Agents use them
           via <code>labctl secret exec</code>.
         </p>
-        <Banner message={error()} onDismiss={() => setError(null)} />
-        <Switch>
-          <Match when={secrets.error !== undefined}>
-            <Banner message={errorMessage(secrets.error)} />
-          </Match>
-          <Match when={secrets()}>
-            {(list) => (
-              <ul class="secret-rows">
-                <Show when={list().length === 0}>
-                  <li>
-                    <EmptyState>No secrets yet. Add one for agents to use.</EmptyState>
-                  </li>
-                </Show>
-                <For each={list()}>
-                  {(secret) => (
-                    <SecretRow
-                      repoId={props.repoId}
-                      secret={secret}
-                      open={open() === secret.id}
-                      onToggle={() => toggle(secret.id)}
-                      onChanged={() => {
-                        setOpen(null);
-                        void refetch();
-                      }}
-                      onError={setError}
-                    />
-                  )}
-                </For>
-                <NewSecretRow
+        <Show when={fetched.error}>{(err) => <Banner message={errorMessage(err())} />}</Show>
+        <Show when={secrets.loaded()}>
+          <ul class="secret-rows" ref={list}>
+            <Show when={secrets.rows.length === 0}>
+              <li>
+                <EmptyState>No secrets yet. Add one for agents to use.</EmptyState>
+              </li>
+            </Show>
+            <For each={secrets.rows}>
+              {(secret) => (
+                <SecretRow
                   repoId={props.repoId}
-                  open={open() === 'new'}
-                  onToggle={() => toggle('new')}
-                  onCreated={() => {
+                  secret={secret}
+                  open={open() === secret.id}
+                  onToggle={() => toggle(secret.id)}
+                  onRotated={(rotated) => {
+                    // The answer first (the exposure note goes at once), then
+                    // the list.
+                    secrets.patch(rotated);
                     setOpen(null);
                     void refetch();
                   }}
+                  onDeleted={() => {
+                    const at = secrets.rows.findIndex((row) => row.id === secret.id);
+                    secrets.remove(secret.id);
+                    setOpen(null);
+                    void refetch();
+                    // The row took the focus with it.
+                    rescueRowFocus(rowHeads(), at, newHead());
+                  }}
                 />
-              </ul>
-            )}
-          </Match>
-        </Switch>
+              )}
+            </For>
+            <NewSecretRow
+              repoId={props.repoId}
+              open={open() === 'new'}
+              onToggle={() => toggle('new')}
+              onCreated={() => {
+                setOpen(null);
+                void refetch();
+                rescueFocus(newHead());
+              }}
+            />
+          </ul>
+        </Show>
       </section>
     </>
   );
@@ -108,11 +139,13 @@ function RowHead(props: {
   open: boolean;
   controls: string;
   onToggle: () => void;
-  children: import('solid-js').JSX.Element;
+  ref?: (el: HTMLButtonElement) => void;
+  children: JSX.Element;
 }) {
   return (
     <button
       type="button"
+      ref={props.ref}
       class="secret-row-head"
       aria-expanded={props.open}
       aria-controls={props.controls}
@@ -129,8 +162,10 @@ function SecretRow(props: {
   secret: RepoSecret;
   open: boolean;
   onToggle: () => void;
-  onChanged: () => void;
-  onError: (message: string | null) => void;
+  /** A new value was saved: the server's row (the page closes this one). */
+  onRotated: (secret: RepoSecret) => void;
+  /** The secret is gone (the page takes the row out and moves the focus). */
+  onDeleted: () => void;
 }) {
   const home = useRepoHome();
   const uid = createUniqueId();
@@ -140,7 +175,10 @@ function SecretRow(props: {
   const hintId = `secret-${uid}-hint`;
   const [newValue, setNewValue] = createSignal('');
   const [problem, setProblem] = createSignal<string | null>(null);
+  // A failed delete, said in this row — not somewhere above the list.
+  const [deleteError, setDeleteError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
+  let head: HTMLButtonElement | undefined;
 
   const rotate = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
@@ -150,30 +188,37 @@ function SecretRow(props: {
       document.getElementById(valueId)?.focus();
       return;
     }
+    // Captured before the await: the row is a live object.
+    const name = props.secret.name;
     setBusy(true);
     setProblem(null);
-    props.onError(null);
+    setDeleteError(null);
     try {
-      await rotateRepoSecret(props.repoId, props.secret.id, newValue());
+      const rotated = await rotateRepoSecret(props.repoId, props.secret.id, newValue());
       setNewValue('');
-      props.onChanged();
-      home.notify(`${props.secret.name} has a new value`);
+      props.onRotated(rotated);
+      home.notify(`${name} has a new value`);
+      // The row closed, and took the button that had the focus with it.
+      rescueFocus(head);
     } catch (err) {
       setProblem(errorMessage(err));
+      document.getElementById(valueId)?.focus();
     } finally {
       setBusy(false);
     }
   };
 
   const remove = async (): Promise<void> => {
+    if (busy()) return;
+    const name = props.secret.name;
     setBusy(true);
-    props.onError(null);
+    setDeleteError(null);
     try {
       await deleteRepoSecret(props.repoId, props.secret.id);
-      props.onChanged();
-      home.notify(`Deleted ${props.secret.name}`);
+      props.onDeleted();
+      home.notify(`Deleted ${name}`);
     } catch (err) {
-      props.onError(errorMessage(err));
+      setDeleteError(`${name} was not deleted. ${errorMessage(err)}`);
     } finally {
       setBusy(false);
     }
@@ -181,7 +226,12 @@ function SecretRow(props: {
 
   return (
     <li class="secret-row" classList={{ open: props.open }}>
-      <RowHead open={props.open} controls={bodyId} onToggle={props.onToggle}>
+      <RowHead
+        open={props.open}
+        controls={bodyId}
+        onToggle={props.onToggle}
+        ref={(el) => (head = el)}
+      >
         <span class="secret-row-name mono">{props.secret.name}</span>
         <span class="secret-row-meta">
           <Show when={props.secret.description}>{props.secret.description} · </Show>
@@ -239,6 +289,13 @@ function SecretRow(props: {
               The current value is never shown.
             </small>
           </div>
+          <Show when={deleteError()}>
+            {(message) => (
+              <p class="sfield-error" role="alert">
+                {message()}
+              </p>
+            )}
+          </Show>
           <div class="secret-row-actions">
             <InlineConfirm
               label="Delete"
@@ -304,8 +361,12 @@ function NewSecretRow(props: {
     } catch (err) {
       // A refusal that names the field (the name's shape) shows under it.
       const field = err instanceof ApiError ? err.field : undefined;
-      if (field === 'name' || field === 'value') setProblems({ [field]: errorMessage(err) });
-      else setProblems({ form: errorMessage(err) });
+      if (field === 'name' || field === 'value') {
+        setProblems({ [field]: errorMessage(err) });
+        document.getElementById(id(field))?.focus();
+      } else {
+        setProblems({ form: errorMessage(err) });
+      }
     } finally {
       setBusy(false);
     }
@@ -314,7 +375,7 @@ function NewSecretRow(props: {
   const textField = (
     key: 'name' | 'description' | 'value',
     label: string,
-    input: import('solid-js').JSX.Element,
+    input: JSX.Element,
     hint?: string,
   ) => {
     const problem = (): string | undefined => (key === 'description' ? undefined : problems()[key]);

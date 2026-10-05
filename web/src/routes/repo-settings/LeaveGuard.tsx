@@ -92,7 +92,9 @@ export default function LeaveGuard() {
           <button type="button" ref={keepButton} onClick={stay}>
             Keep editing
           </button>
-          <button type="button" onClick={discardAndLeave}>
+          {/* Not while a save is in flight: the edits would be dropped here
+              and saved there all the same. */}
+          <button type="button" onClick={discardAndLeave} disabled={form.busy()}>
             Discard
           </button>
           <button

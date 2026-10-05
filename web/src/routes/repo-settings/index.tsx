@@ -62,7 +62,9 @@ import Banner from '../../components/Banner';
 import Icon from '../../components/Icon';
 import { createLiveResource } from '../../lib/liveResource';
 import { createMediaQuery } from '../../lib/media';
+import { createModal } from '../../lib/modalStack';
 import { resourceValue } from '../../lib/resource';
+import { createRowStore, rescueRowFocus, type OwnedRows } from '../../lib/rowStore';
 import { sectionInView } from '../../lib/sectionSpy';
 import { useRepoHome } from '../repo-home/context';
 import {
@@ -119,7 +121,7 @@ export default function RepoSettings() {
   // and the inherited values follow the repo only while it shows.
   form.catalog.load();
   onCleanup(() => form.catalog.idle());
-  const [credentials] = createResource(() => listCredentials());
+  const [credentials, { refetch: refetchCredentials }] = createResource(() => listCredentials());
 
   const base = (): string => `/repos/${params.id}/settings`;
   const section = (): string | undefined => params.section;
@@ -317,7 +319,17 @@ export default function RepoSettings() {
     for (const type of SCROLL_INPUTS) {
       window.addEventListener(type, onOwnScroll, { passive: true });
     }
-    window.addEventListener('scroll', updateCurrent, { passive: true });
+    // A scroll fires many events per frame, and one pass reads the position
+    // of every section: one pass per frame is all the page can show anyway.
+    let frame: number | undefined;
+    const onScroll = (): void => {
+      if (frame !== undefined) return;
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        updateCurrent();
+      });
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onResize);
     // Late content moves every section below it.
     const observer =
@@ -327,7 +339,8 @@ export default function RepoSettings() {
     if (page !== undefined) observer?.observe(page);
     onCleanup(() => {
       for (const type of SCROLL_INPUTS) window.removeEventListener(type, onOwnScroll);
-      window.removeEventListener('scroll', updateCurrent);
+      window.removeEventListener('scroll', onScroll);
+      if (frame !== undefined) cancelAnimationFrame(frame);
       window.removeEventListener('resize', onResize);
       observer?.disconnect();
     });
@@ -339,21 +352,38 @@ export default function RepoSettings() {
 
   // --- schedules and their editor -----------------------------------------------
   // The list is live: repo.changed (a pause, a re-enable, a count moved) and
-  // run.changed (a run of a Schedule started or ended) both refetch it.
+  // run.changed (a run of a Schedule started or ended) both refetch it. Its
+  // rows live in a store reconciled by id (lib/rowStore.ts): a refetch patches
+  // a row in place, so the switch or link a keyboard user is on survives it —
+  // and the store only ever answers for THIS repo, never with the list the
+  // resource still holds for the one the operator just came from.
   const ofThisRepo = (event: { repoID?: string }): boolean =>
     event.repoID === undefined || event.repoID === home.id();
-  const [schedules, { refetch: refetchSchedules }] = createLiveResource(
+  const [schedulesFetched, { refetch: refetchSchedules }] = createLiveResource(
     () => home.id(),
-    (repoID) => listRepoSchedules(repoID),
+    async (repoID): Promise<OwnedRows<Schedule>> => ({
+      owner: repoID,
+      rows: await listRepoSchedules(repoID),
+    }),
     [
       { type: 'repo.changed', match: ofThisRepo },
       { type: 'run.changed', match: ofThisRepo },
     ],
   );
+  const schedules = createRowStore(() => resourceValue(schedulesFetched), home.id);
+  const schedulesError = (): string | null =>
+    schedulesFetched.error !== undefined ? errorMessage(schedulesFetched.error) : null;
   const [flows] = createResource(() => listScheduleFlows());
   // A problem to report in the Schedules section once the editor is gone (a
-  // Run now from the Saved toast that the server refused).
+  // Run now from the Saved toast that did not start).
   const [scheduleNotice, setScheduleNotice] = createSignal<string | null>(null);
+  // The page can be gone while something it started is still answering (the
+  // toast's Run now outlives the Settings tab): what it has to say then goes
+  // through the frame.
+  let showing = true;
+  onCleanup(() => {
+    showing = false;
+  });
 
   // Opened from this page: a history entry was pushed, so closing goes back.
   // Arrived at directly (a deep link, a reload): closing replaces the URL
@@ -363,7 +393,11 @@ export default function RepoSettings() {
     openedHere = true;
     navigate(editorHref(id), { scroll: false });
   };
-  const closeEditor = (): void => {
+  // Closes the editor of ONE Schedule — and only while that is the editor
+  // showing, so nothing that belongs to an editor long gone can close
+  // another one, or move a page the operator has opened since.
+  const closeEditor = (id: string): void => {
+    if (!showing || editorId() !== id) return;
     if (openedHere) {
       openedHere = false;
       navigate(-1);
@@ -371,18 +405,38 @@ export default function RepoSettings() {
       navigate(`${base()}/schedules`, { replace: true, scroll: false });
     }
   };
+  // What to do about the focus once the editor is off the page (its row was
+  // deleted, so the link it would return focus to is gone).
+  let afterClose: (() => void) | undefined;
   createEffect(
     on(editorId, (id) => {
-      if (id === undefined) openedHere = false;
+      if (id !== undefined) return;
+      openedHere = false;
+      const act = afterClose;
+      afterClose = undefined;
+      if (act !== undefined) queueMicrotask(act);
     }),
   );
-  const runNow = async (schedule: Schedule): Promise<void> => {
+  const scheduleLinks = (): HTMLElement[] =>
+    Array.from(page?.querySelectorAll<HTMLElement>('.schedules-list a.schedule-row-main') ?? []);
+  const newScheduleLink = (): HTMLElement | null =>
+    page?.querySelector<HTMLElement>('.schedules-list a.schedule-new') ?? null;
+
+  const notStarted = (name: string, reason: string): string =>
+    `No run started from "${name}": ${reason}`;
+  // Run now from the "Saved" toast. The toast outlives the Settings tab, so
+  // the repo is the one the toast was shown for, and a refusal is reported
+  // where the operator is: in the Schedules section while this page shows,
+  // through the frame's toast otherwise — never into a page that is gone.
+  const runNow = async (repoID: string, schedule: Schedule): Promise<void> => {
     try {
-      await runScheduleNow(home.id(), schedule.id);
+      await runScheduleNow(repoID, schedule.id);
       home.notify(`Started a run from "${schedule.name}"`);
-      void refetchSchedules();
+      if (showing) void refetchSchedules();
     } catch (err) {
-      setScheduleNotice(errorMessage(err));
+      const said = notStarted(schedule.name, errorMessage(err));
+      if (showing && home.id() === repoID) setScheduleNotice(said);
+      else home.notify(said);
     }
   };
 
@@ -398,11 +452,18 @@ export default function RepoSettings() {
         return (
           <SchedulesSection
             repoId={repo().id}
-            schedules={schedules}
+            rows={schedules.rows}
+            loaded={schedules.loaded()}
+            error={schedulesError()}
             flows={resourceValue(flows) ?? []}
             editorHref={editorHref}
             onOpen={openEditor}
-            onChanged={() => void refetchSchedules()}
+            // The server's answer first — the row shows it at once, and keeps
+            // it should the refetch fail — then the list.
+            onChanged={(row) => {
+              schedules.patch(row);
+              void refetchSchedules();
+            }}
             notice={scheduleNotice()}
             onDismissNotice={() => setScheduleNotice(null)}
           />
@@ -414,7 +475,15 @@ export default function RepoSettings() {
       case 'general':
         return <GeneralSection />;
       case 'integrations':
-        return <IntegrationsSection credentials={resourceValue(credentials) ?? []} />;
+        return (
+          <IntegrationsSection
+            credentials={resourceValue(credentials)}
+            credentialsError={
+              credentials.error !== undefined ? errorMessage(credentials.error) : null
+            }
+            onRetryCredentials={() => void refetchCredentials()}
+          />
+        );
       case 'branches':
         return <BranchesSection />;
       case 'danger':
@@ -440,6 +509,37 @@ export default function RepoSettings() {
               chipsRef={(element) => (chips = element)}
             />
             <div class="settings-sections">
+              {/* What could not be loaded is said, with a way to try again —
+                  never papered over with an empty pick or a guessed value. */}
+              <Show when={form.catalog.error()}>
+                {(message) => (
+                  <Banner
+                    message={`The agent catalog could not be loaded, so the agent, model and effort picks are incomplete. ${message()}`}
+                    action={
+                      <button type="button" onClick={() => form.catalog.retry()}>
+                        Try again
+                      </button>
+                    }
+                  />
+                )}
+              </Show>
+              <Show when={form.inheritedError()}>
+                {(message) => (
+                  <Banner
+                    variant="notice"
+                    message={
+                      form.inherited() === undefined
+                        ? `The inherited values could not be loaded. ${message()}`
+                        : `The inherited values could not be refreshed, so the ones shown may be out of date. ${message()}`
+                    }
+                    action={
+                      <button type="button" onClick={() => form.retryInherited()}>
+                        Try again
+                      </button>
+                    }
+                  />
+                )}
+              </Show>
               <For each={REPO_SETTINGS_CATEGORIES}>
                 {(category) => (
                   <SettingsSection category={category}>{body(category.slug, repo)}</SettingsSection>
@@ -453,65 +553,97 @@ export default function RepoSettings() {
                 // The Schedule the editor opens on — latched once found, so a
                 // refetch while it is open (a run of it ended) neither
                 // remounts it nor, should the row have gone, takes it away.
+                // A COPY of the row: the editor diffs its drafts against what
+                // it opened on, and the row itself keeps changing under it.
                 const seed = createMemo<Schedule | null | 'missing' | 'failed' | undefined>(
                   (previous) => {
                     if (previous !== undefined && previous !== 'missing' && previous !== 'failed') {
                       return previous;
                     }
                     if (id === 'new') return null;
-                    if (schedules.error !== undefined) return 'failed';
-                    const list = resourceValue(schedules);
-                    if (list === undefined) return undefined;
-                    return list.find((candidate) => candidate.id === id) ?? 'missing';
+                    if (!schedules.loaded()) {
+                      return schedulesFetched.error !== undefined ? 'failed' : undefined;
+                    }
+                    const row = schedules.rows.find((candidate) => candidate.id === id);
+                    return row === undefined
+                      ? 'missing'
+                      : (JSON.parse(JSON.stringify(row)) as Schedule);
                   },
                 );
+                const close = (): void => closeEditor(id);
+                // The repo these answers are about: the toast they show can
+                // outlive a move to another one.
+                const repoID = repo().id;
                 return (
                   <Switch>
                     <Match when={seed() === undefined}>
-                      <EditorNotice title="Loading schedule…" />
+                      <EditorNotice title="Loading schedule…" onClose={close} />
                     </Match>
                     <Match when={seed() === 'missing'}>
-                      <EditorNotice title="Schedule not found" onClose={closeEditor}>
+                      <EditorNotice title="Schedule not found" onClose={close}>
                         This schedule no longer exists.
                       </EditorNotice>
                     </Match>
                     <Match when={seed() === 'failed'}>
-                      <EditorNotice title="Schedule not loaded" onClose={closeEditor}>
-                        The schedules could not be loaded. {errorMessage(schedules.error)}
+                      <EditorNotice title="Schedule not loaded" onClose={close}>
+                        The schedules could not be loaded. {schedulesError()}
                       </EditorNotice>
                     </Match>
                     <Match when={typeof seed() === 'object'}>
                       <ScheduleEditor
-                        repoId={repo().id}
+                        repoId={repoID}
                         schedule={seed() as Schedule | null}
                         providers={form.catalog.providers()}
                         // The layer under a Schedule's own agent pick: the
                         // SAVED repo's AFK agent, else the one the server
-                        // says it inherits.
+                        // says the saved repo inherits. Never the answer for
+                        // the drafts — a Schedule applies at once, and an
+                        // unsaved Agent pick is not the repo's agent yet.
                         afkProviderId={
                           repo().afk_provider_default ??
-                          form.inherited()?.afk_provider_default ??
+                          form.inheritedSaved()?.afk_provider_default ??
                           null
                         }
                         flows={resourceValue(flows) ?? []}
                         url={editorHref(id)}
-                        onClose={closeEditor}
-                        onSaved={(saved) => {
-                          closeEditor();
-                          void refetchSchedules();
+                        onClose={close}
+                        // What a request did: reported and applied, never
+                        // navigated on — the editor closed itself, or was
+                        // gone before the answer came.
+                        onSaved={(saved, created) => {
+                          if (showing && home.id() === repoID) {
+                            if (!created) schedules.patch(saved);
+                            void refetchSchedules();
+                          }
                           home.notify(`Saved "${saved.name}"`, {
-                            action: { label: 'Run now', run: () => void runNow(saved) },
+                            action: { label: 'Run now', run: () => void runNow(repoID, saved) },
                           });
                         }}
                         onDeleted={(deleted) => {
-                          closeEditor();
-                          void refetchSchedules();
+                          if (showing && home.id() === repoID) {
+                            const at = schedules.rows.findIndex((row) => row.id === deleted.id);
+                            // The row goes, and with it the link the editor
+                            // hands the focus back to: the row that takes its
+                            // place gets it, else the way to add one.
+                            const rescue = (): void => {
+                              schedules.remove(deleted.id);
+                              rescueRowFocus(scheduleLinks(), at, newScheduleLink());
+                            };
+                            if (editorId() === id) afterClose = rescue;
+                            else rescue();
+                            void refetchSchedules();
+                          }
                           home.notify(`Deleted "${deleted.name}"`);
                         }}
                         onRan={(ran) => {
-                          closeEditor();
-                          void refetchSchedules();
+                          if (showing && home.id() === repoID) void refetchSchedules();
                           home.notify(`Started a run from "${ran.name}"`);
+                        }}
+                        onLateFailure={(what, name, reason) => {
+                          if (what === 'run') home.notify(notStarted(name, reason));
+                          else if (what === 'save')
+                            home.notify(`"${name}" was not saved: ${reason}`);
+                          else home.notify(`"${name}" was not deleted: ${reason}`);
                         }}
                       />
                     </Match>
@@ -528,28 +660,47 @@ export default function RepoSettings() {
 
 /**
  * The editor's frame with a message instead of a form: while the Schedule a
- * deep link names is still loading, or when it is gone.
+ * deep link names is still loading, or when it is gone. As modal as the
+ * editor it stands in for — focus moves in and stays in, Escape and the back
+ * control close it (also while loading: a list that never answers must not
+ * leave the operator behind a scrim), and the page behind does not scroll.
  */
-function EditorNotice(props: { title: string; onClose?: () => void; children?: JSX.Element }) {
+function EditorNotice(props: { title: string; onClose: () => void; children?: JSX.Element }) {
   const desktop = createMediaQuery(DESKTOP_QUERY);
+  let panel: HTMLElement | undefined;
+  let heading: HTMLHeadingElement | undefined;
+  createModal({
+    panel: () => panel,
+    fallback: () => heading,
+    onEscape: (event) => {
+      event.preventDefault();
+      props.onClose();
+    },
+  });
   return (
     <>
       <Show when={desktop()}>
-        <div class="schedule-editor-scrim" aria-hidden="true" onClick={() => props.onClose?.()} />
+        <div class="schedule-editor-scrim" aria-hidden="true" onClick={() => props.onClose()} />
       </Show>
-      <section class="schedule-editor" role="dialog" aria-modal="true" aria-label={props.title}>
+      <section
+        ref={panel}
+        class="schedule-editor"
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.title}
+      >
         <header class="schedule-editor-head">
-          <Show when={props.onClose}>
-            <button
-              type="button"
-              class="icon-btn"
-              aria-label="Back to schedules"
-              onClick={() => props.onClose?.()}
-            >
-              <Icon name="chevron-left" />
-            </button>
-          </Show>
-          <h2>{props.title}</h2>
+          <button
+            type="button"
+            class="icon-btn"
+            aria-label="Back to schedules"
+            onClick={() => props.onClose()}
+          >
+            <Icon name="chevron-left" />
+          </button>
+          <h2 ref={heading} tabIndex={-1}>
+            {props.title}
+          </h2>
         </header>
         <Show when={props.children}>
           <div class="schedule-editor-body">

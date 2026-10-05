@@ -156,6 +156,8 @@ describe('chain fields', () => {
         'afk_model_default',
         'afk_effort_default',
         'lander_provider',
+        // The inherited lander effort is resolved against the lander's model.
+        'lander_model',
       ].sort(),
     );
     for (const key of CHAIN_FIELD_KEYS) expect(isOverridable(key)).toBe(true);

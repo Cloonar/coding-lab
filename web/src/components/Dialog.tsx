@@ -11,10 +11,16 @@
 // scrim click and Escape call onClose unless `dismissable` is false. While any
 // dialog is open the page behind it does not scroll.
 //
+// All of that is lib/modalStack.ts's createModal(): the dialog shares one
+// stack with every other modal on the page (the schedule editor), so a
+// dialog that opens OVER another modal is the one that traps focus and hears
+// Escape, and the one below waits — two traps never fight over the focus.
+//
 // Scrim and panel are siblings (the InstallSheet precedent): the close handler
 // lives on the scrim alone, so a click inside the panel never reaches it.
 
-import { Show, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js';
+import { Show, createUniqueId, type JSX } from 'solid-js';
+import { createModal } from '../lib/modalStack';
 
 export interface DialogProps {
   open: boolean;
@@ -36,29 +42,6 @@ export interface DialogProps {
   class?: string;
 }
 
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-// Nested dialogs share one scroll lock; the first to open saves the page's own
-// overflow value and the last to close restores it.
-let scrollLocks = 0;
-let savedOverflow = '';
-
-function lockScroll(): () => void {
-  if (scrollLocks === 0) {
-    savedOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-  }
-  scrollLocks += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    scrollLocks -= 1;
-    if (scrollLocks === 0) document.body.style.overflow = savedOverflow;
-  };
-}
-
 export default function Dialog(props: DialogProps) {
   const uid = createUniqueId();
   const titleId = `dialog-${uid}-title`;
@@ -77,64 +60,19 @@ function DialogPanel(
 ) {
   let panel: HTMLDivElement | undefined;
   let heading: HTMLHeadingElement | undefined;
-  // Captured when the panel mounts — before focus moves in — so closing can
-  // hand focus back to the control that opened it.
-  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
-  const focusables = (): HTMLElement[] =>
-    panel === undefined ? [] : Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
-
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape') {
+  // A control inside the panel that handles Escape itself (an open
+  // InlineConfirm, an open pick) keeps it from reaching here.
+  createModal({
+    panel: () => panel,
+    fallback: () => heading,
+    initialFocus: () => props.initialFocus?.(),
+    onEscape: (event) => {
       if (!props.dismissable) return;
       event.preventDefault();
       event.stopPropagation();
       props.onClose();
-      return;
-    }
-    if (event.key !== 'Tab' || panel === undefined) return;
-    const items = focusables();
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (first === undefined || last === undefined) {
-      event.preventDefault();
-      heading?.focus();
-      return;
-    }
-    if (event.shiftKey && (active === first || active === heading || !panel.contains(active))) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
-  // Focus that lands outside the panel (a click on the page behind is blocked
-  // by the scrim, but programmatic focus or assistive tech can still move it)
-  // is pulled back in.
-  const onFocusIn = (event: FocusEvent): void => {
-    if (panel === undefined || !(event.target instanceof Node)) return;
-    if (!panel.contains(event.target)) (focusables()[0] ?? heading)?.focus();
-  };
-
-  // Bubble phase: a control inside the panel that handles Escape itself (an
-  // open InlineConfirm) stops it before it reaches here.
-  document.addEventListener('keydown', onKeyDown);
-  document.addEventListener('focusin', onFocusIn);
-  const unlock = lockScroll();
-  onCleanup(() => {
-    document.removeEventListener('keydown', onKeyDown);
-    document.removeEventListener('focusin', onFocusIn);
-    unlock();
-    if (opener?.isConnected === true) opener.focus();
-  });
-
-  // Focus moves in once the panel is in the document.
-  onMount(() => {
-    const target = props.initialFocus?.() ?? heading;
-    target?.focus();
+    },
   });
 
   return (

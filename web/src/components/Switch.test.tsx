@@ -95,6 +95,43 @@ describe('ToggleSwitch', () => {
     expect(onChange).toHaveBeenCalledWith(true);
   });
 
+  it("adds the host's hint and problem to its description, after its own", () => {
+    const { control } = mount({
+      label: 'Autoland',
+      description: 'A lander run validates each PR.',
+      describedBy: 'host-error host-hint',
+      invalid: true,
+    });
+    const ids = control().getAttribute('aria-describedby')?.split(' ') ?? [];
+    expect(ids).toHaveLength(3);
+    expect(document.getElementById(ids[0] ?? '')?.textContent).toBe(
+      'A lander run validates each PR.',
+    );
+    expect(ids.slice(1)).toEqual(['host-error', 'host-hint']);
+    expect(control().getAttribute('aria-invalid')).toBe('true');
+  });
+
+  it('takes a host description without one of its own, and is not invalid by default', () => {
+    const plain = mount({ label: 'Autoland' });
+    expect(plain.control().hasAttribute('aria-describedby')).toBe(false);
+    expect(plain.control().hasAttribute('aria-invalid')).toBe(false);
+    dispose?.();
+    container.remove();
+
+    const { control } = mount({ label: 'Autoland', describedBy: 'host-hint' });
+    expect(control().getAttribute('aria-describedby')).toBe('host-hint');
+  });
+
+  it('renders extra label content inside the label, so it joins the name', () => {
+    mount({
+      label: 'Incogni',
+      labelExtra: <span class="visually-hidden"> (unsaved change)</span>,
+    });
+    const label = container.querySelector('label');
+    expect(label?.textContent).toBe('Incogni (unsaved change)');
+    expect(label?.querySelector('.visually-hidden')).not.toBeNull();
+  });
+
   it('can be named by an element elsewhere', () => {
     const { control } = mount({ labelledBy: 'auto-label' });
     expect(control().getAttribute('aria-labelledby')).toBe('auto-label');

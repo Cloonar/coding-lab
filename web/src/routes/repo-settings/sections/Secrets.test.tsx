@@ -209,4 +209,139 @@ describe('RepoSettings secrets section', () => {
     expect(rowHead('OTHER').getAttribute('aria-expanded')).toBe('true');
     expect(secretsSection().querySelectorAll('input[name="secret-rotate-value"]')).toHaveLength(1);
   });
+
+  it('keeps a row across a reload, and hands the focus to its head after a new value', async () => {
+    h.secretsOnServer = [apiKey(), { ...apiKey(), id: 'sec_2', name: 'OTHER' }];
+    await mountSecrets();
+    await waitFor(() => secretsSection().querySelector('.secret-row-name.mono'), 'secret rows');
+    const head = rowHead('API_KEY');
+    const other = rowHead('OTHER');
+
+    head.click();
+    await settle();
+    typeInto(input('secret-rotate-value'), 'rotated-secret-value');
+    const saveButton = button('Save new value');
+    saveButton.focus();
+    saveButton.click();
+    await settle();
+
+    // The row closed with the button that had the focus; its head takes it.
+    expect(saveButton.isConnected).toBe(false);
+    expect(rowHead('API_KEY')).toBe(head);
+    expect(rowHead('OTHER')).toBe(other);
+    expect(document.activeElement).toBe(head);
+    expect(head.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('after a delete the focus goes to the row that takes its place, else to New secret', async () => {
+    h.secretsOnServer = [apiKey(), { ...apiKey(), id: 'sec_2', name: 'OTHER' }];
+    await mountSecrets();
+    await waitFor(() => secretsSection().querySelector('.secret-row-name.mono'), 'secret rows');
+
+    rowHead('API_KEY').click();
+    await settle();
+    button('Delete').click();
+    await settle();
+    button('Delete for good').click();
+    await settle();
+
+    expect(h.secretsOnServer.map((secret) => secret.name)).toEqual(['OTHER']);
+    expect(document.activeElement).toBe(rowHead('OTHER'));
+
+    // The last one: focus goes to the way to add one.
+    rowHead('OTHER').click();
+    await settle();
+    button('Delete').click();
+    await settle();
+    button('Delete for good').click();
+    await settle();
+
+    expect(h.secretsOnServer).toHaveLength(0);
+    expect(document.activeElement).toBe(rowHead('New secret'));
+  });
+
+  it('a failed delete is said in the row it was asked for, and the row stays', async () => {
+    h.secretsOnServer = [apiKey(), { ...apiKey(), id: 'sec_2', name: 'OTHER' }];
+    await mountSecrets();
+    await waitFor(() => secretsSection().querySelector('.secret-row-name.mono'), 'secret rows');
+    rowHead('OTHER').click();
+    await settle();
+    h.secretRefusal = { error: 'secrets: store unavailable' };
+    button('Delete').click();
+    await settle();
+    button('Delete for good').click();
+    await settle();
+
+    const row = rowHead('OTHER').closest('li');
+    const alert = row?.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe('OTHER was not deleted. secrets: store unavailable');
+    expect(rowHead('API_KEY').closest('li')?.querySelector('[role="alert"]')).toBeNull();
+    // Nothing above the list speaks for a single row.
+    expect(secretsSection().querySelector('.banner.error')).toBeNull();
+    expect(h.secretsOnServer).toHaveLength(2);
+    expect(toastText()).toBe('');
+  });
+
+  it('a refused new value is said under its field, which keeps the focus', async () => {
+    h.secretsOnServer = [apiKey()];
+    await mountSecrets();
+    await waitFor(() => secretsSection().querySelector('.secret-row-name.mono'), 'secret row');
+    rowHead('API_KEY').click();
+    await settle();
+    h.secretRefusal = { error: 'value: must not be empty', field: 'value' };
+    typeInto(input('secret-rotate-value'), ' ');
+    button('Save new value').click();
+    await settle();
+
+    expect(errorUnder('secret-rotate-value')).toBe('value: must not be empty');
+    expect(input('secret-rotate-value').getAttribute('aria-invalid')).toBe('true');
+    expect(document.activeElement).toBe(input('secret-rotate-value'));
+    expect(rowHead('API_KEY').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('a refused name of a new secret is said under the name, a refusal without a field under the form', async () => {
+    await mountSecrets();
+    await waitFor(() => rowHeads().at(-1) ?? null, 'the add row');
+    rowHead('New secret').click();
+    await settle();
+    typeInto(input('secret-name'), 'lower_case');
+    typeInto(input('secret-value'), 'v');
+
+    h.secretRefusal = {
+      error: 'name: must be uppercase letters, digits and underscores',
+      field: 'name',
+    };
+    submitRowForm();
+    await settle();
+    expect(errorUnder('secret-name')).toBe(
+      'name: must be uppercase letters, digits and underscores',
+    );
+    expect(document.activeElement).toBe(input('secret-name'));
+    expect(secretsSection().querySelector('.banner.error')).toBeNull();
+
+    h.secretRefusal = { error: 'secrets: store unavailable' };
+    submitRowForm();
+    await settle();
+    expect(errorUnder('secret-name')).toBeNull();
+    expect(secretsSection().querySelector('form .banner.error')?.textContent).toContain(
+      'secrets: store unavailable',
+    );
+  });
+
+  it('after adding one the focus rests on New secret', async () => {
+    await mountSecrets();
+    await waitFor(() => rowHeads().at(-1) ?? null, 'the add row');
+    rowHead('New secret').click();
+    await settle();
+    typeInto(input('secret-name'), 'DEPLOY_TOKEN');
+    typeInto(input('secret-value'), 'v');
+    const add = button('Add secret');
+    add.focus();
+    add.click();
+    await settle();
+
+    expect(add.isConnected).toBe(false);
+    expect(document.activeElement).toBe(rowHead('New secret'));
+    expect(secretsSection().textContent).toContain('DEPLOY_TOKEN');
+  });
 });

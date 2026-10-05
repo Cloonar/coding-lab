@@ -10,7 +10,10 @@
 //     verdicts, and the builtin tracker binding has none to read. With that
 //     binding the section says why it is unavailable, links to the tracker
 //     binding field, and disables the switch (the reason is the switch's
-//     description, so assistive tech hears it too).
+//     description, so assistive tech hears it too) — but only a switch that
+//     is OFF: an Autoland that is on can always be turned off, which is the
+//     one way out when the binding is being changed to builtin. Save checks
+//     that pair in the browser (fields.ts) and sends nothing while it holds.
 //   - With Autoland off, the merge policy, the fix-attempt bound and the
 //     lander's agent, model and effort are replaced by a note.
 //
@@ -46,7 +49,14 @@ export default function AutolandSection() {
     catalog.providers().map((p) => ({ value: p.id, label: p.display_name }));
 
   const builtin = (): boolean => form.field('tracker_binding').value() !== 'forge';
-  const on = (): boolean => form.field('autoland_enabled').value() && !builtin();
+  const enabled = (): boolean => form.field('autoland_enabled').value();
+  const on = (): boolean => enabled() && !builtin();
+  const switchNote = (): string => {
+    if (!builtin()) return 'A lander run validates each PR an AFK run opens.';
+    return enabled()
+      ? 'Autoland needs a forge tracker binding. Turn it off to use the built-in one.'
+      : 'Not available: Autoland needs a forge tracker binding.';
+  };
   // An option something pointed at stays shown from then on.
   const [pointed, setPointed] = createSignal(false);
   createComputed(() => {
@@ -83,12 +93,9 @@ export default function AutolandSection() {
       </Show>
       <SwitchField
         name="autoland_enabled"
-        description={
-          builtin()
-            ? 'Not available: Autoland needs a forge tracker binding.'
-            : 'A lander run validates each PR an AFK run opens.'
-        }
-        disabled={builtin()}
+        description={switchNote()}
+        // Never while it is on: turning it off must stay possible.
+        disabled={builtin() && !enabled()}
       />
       <Show
         when={optionsShown()}
@@ -102,7 +109,6 @@ export default function AutolandSection() {
         <TextField
           name="max_fix_attempts"
           type="number"
-          min={0}
           required
           hint="After that the PR is handed to a human."
         />

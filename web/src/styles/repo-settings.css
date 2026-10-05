@@ -31,6 +31,12 @@
   }
 }
 
+/* What could not be loaded, said above the sections: the column's gap is
+   all the room a notice needs. */
+.settings-sections > .banner {
+  margin: 0;
+}
+
 /* Section chips (below 1024px) --------------------------------------------------- */
 /* Flush under the tab row and full-bleed across the 16px page gutters. The row
    scrolls sideways inside itself; `top` is set inline to the height of the
@@ -824,8 +830,25 @@
   font-weight: 600;
 }
 
-.schedule-editor-refusal {
+/* The strip under the header: always in view, whatever the body is scrolled
+   to. It takes focus (by script) when it has something new to say. */
+.schedule-editor-alerts {
   flex: none;
+}
+
+.schedule-editor-alerts:focus {
+  outline: none;
+}
+
+.schedule-editor-alerts:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.schedule-editor-alerts .banner {
+  margin: 0;
+  border-width: 0 0 1px;
+  border-radius: 0;
 }
 
 .schedule-editor-refusal p {
@@ -887,6 +910,8 @@
   margin-top: 0.2rem;
 }
 
+/* Touch targets: 44px below 1024px, for flows as for weekdays. */
+.schedule-editor-flows .chip-toggle,
 .schedule-editor-weekdays .chip-toggle {
   min-height: 44px;
   min-width: 44px;
@@ -978,6 +1003,7 @@
     flex: 1 1 auto;
   }
 
+  .schedule-editor-flows .chip-toggle,
   .schedule-editor-weekdays .chip-toggle {
     min-height: 36px;
   }

@@ -112,6 +112,42 @@ describe('the save bar outside the Settings tab', () => {
     expect(count(INHERITED)).toBe(2);
   });
 
+  it('announces the count from a status region that is in the page before the bar is', async () => {
+    await mountSettings(BASE);
+    await waitFor(() => container.querySelector('input[name="afk_branch_pattern"]'), 'the page');
+
+    // There while nothing is pending — empty, and not inside the bar: a live
+    // region that arrives together with its text is never read out.
+    const live = container.querySelector('.settings-savebar-live');
+    expect(live).not.toBeNull();
+    expect(live?.getAttribute('role')).toBe('status');
+    expect(live?.textContent).toBe('');
+    expect(saveBar()).toBeNull();
+
+    typeInto(input('budget_minutes'), '90');
+    await settle();
+    // The SAME node now says it.
+    expect(container.querySelector('.settings-savebar-live')).toBe(live);
+    expect(live?.textContent).toBe('1 unsaved change in Agents');
+    expect(saveBar()?.contains(live ?? null)).toBe(false);
+    // One live region for it: the visible text is not a second one.
+    expect(saveBar()?.querySelector('[role="status"]')).toBeNull();
+
+    typeInto(input('afk_branch_pattern'), 'issue-<N>');
+    await settle();
+    expect(live?.textContent).toBe('2 unsaved changes in Agents, Branches');
+
+    // A Save that finds a problem is announced the same way.
+    typeInto(input('budget_minutes'), '0');
+    await settle();
+    await save();
+    expect(live?.textContent).toBe('1 problem to fix in Agents');
+
+    await discard();
+    expect(live?.isConnected).toBe(true);
+    expect(live?.textContent).toBe('');
+  });
+
   it('reserves its own height in the page, so nothing hides behind it', async () => {
     await mountWithChanges();
     const space = container.querySelector('.settings-savebar-space');

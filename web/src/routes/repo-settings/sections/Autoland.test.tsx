@@ -16,6 +16,7 @@ import {
   baseRepo,
   chooseFromSelect,
   container,
+  emitRepoChanged,
   fieldChanged,
   fieldDefault,
   fieldError,
@@ -298,7 +299,7 @@ describe('RepoSettings Autoland: the builtin tracker binding', () => {
   });
 
   it('says why it is unavailable, links to the tracker binding and disables the switch', async () => {
-    h.repoOnServer = { ...builtinRepo(), autoland_enabled: true };
+    h.repoOnServer = builtinRepo(); // Autoland off
     await mountAutoland();
 
     expect(autolandText()).toContain(BUILTIN_NOTE);
@@ -311,6 +312,28 @@ describe('RepoSettings Autoland: the builtin tracker binding', () => {
     // Its options are not offered either, and no "appear when on" note.
     for (const key of OPTIONS) expect(shows(key)).toBe(false);
     expect(autolandText()).not.toContain(OFF_NOTE);
+  });
+
+  it('an Autoland that is ON can always be turned off — only then is the switch disabled', async () => {
+    h.repoOnServer = { ...builtinRepo(), autoland_enabled: true };
+    await mountAutoland();
+
+    const toggle = switchButton('autoland_enabled');
+    expect(toggle.disabled).toBe(false);
+    expect(switchOn('autoland_enabled')).toBe(true);
+    expect(textOf(toggle.getAttribute('aria-describedby'))).toBe(
+      'Autoland needs a forge tracker binding. Turn it off to use the built-in one.',
+    );
+    // Still no options to set: it cannot run on this binding.
+    for (const key of OPTIONS) expect(shows(key)).toBe(false);
+
+    setSwitch('autoland_enabled', false);
+    await settle();
+    expect(switchButton('autoland_enabled').disabled).toBe(true);
+    await save();
+
+    expect(h.patchBodies).toEqual([{ autoland_enabled: false }]);
+    expect(h.repoOnServer.autoland_enabled).toBe(false);
   });
 
   it('the link reveals the tracker binding field', async () => {
@@ -348,7 +371,7 @@ describe('RepoSettings Autoland: the builtin tracker binding', () => {
     expect(h.patchBodies).toHaveLength(0);
   });
 
-  it('flipping a repo to builtin never changes its Autoland fields in the PATCH', async () => {
+  it('switching a repo with Autoland on to builtin: Save asks to turn Autoland off first, and sends nothing', async () => {
     h.repoOnServer = { ...onRepo(), max_fix_attempts: 5 };
     await mountAutoland();
 
@@ -356,10 +379,78 @@ describe('RepoSettings Autoland: the builtin tracker binding', () => {
     await settle();
     expect(segmentValue('tracker_binding')).toBe('builtin');
     expect(shows('max_fix_attempts')).toBe(false);
+    // The switch stays usable: it is the way out.
+    expect(switchButton('autoland_enabled').disabled).toBe(false);
     await save();
 
-    expect(h.patchBodies).toEqual([{ tracker_binding: 'builtin' }]);
-    expect(h.repoOnServer.autoland_enabled).toBe(true);
+    // The server would refuse this pair; the browser finds it first.
+    expect(h.patchBodies).toEqual([]);
+    expect(fieldError('autoland_enabled')).toBe(
+      'Turn Autoland off before switching to the built-in tracker.',
+    );
+    expect(saveBarTitle()).toBe('1 problem to fix');
+    expect(saveBarSections()).toEqual(['Autoland']);
+    expect(document.activeElement).toBe(switchButton('autoland_enabled'));
+
+    // Turning it off answers the problem, and both changes go in one PATCH.
+    setSwitch('autoland_enabled', false);
+    await settle();
+    expect(fieldError('autoland_enabled')).toBeNull();
+    expect(saveBarTitle()).toBe('2 unsaved changes');
+    await save();
+
+    expect(h.patchBodies).toEqual([{ autoland_enabled: false, tracker_binding: 'builtin' }]);
+    // Folding and the switch changed nothing else.
     expect(h.repoOnServer.max_fix_attempts).toBe(5);
+  });
+
+  it('going back to the forge binding answers the same problem from the other half', async () => {
+    h.repoOnServer = onRepo();
+    await mountAutoland();
+    segment('tracker_binding', 'builtin').click();
+    await settle();
+    await save();
+    expect(fieldError('autoland_enabled')).not.toBeNull();
+
+    segment('tracker_binding', 'forge').click();
+    await settle();
+
+    // Nothing is pending any more: no problem, and no bar to count one in.
+    expect(fieldError('autoland_enabled')).toBeNull();
+    expect(saveBarTitle()).toBe('');
+    expect(h.patchBodies).toEqual([]);
+  });
+
+  it('a refusal of the pair from the server never leaves the operator stuck', async () => {
+    await mountAutoland(); // forge-bound, Autoland off as far as this page knows
+    // Autoland was switched on elsewhere, and this page has not heard yet.
+    h.repoOnServer = { ...h.repoOnServer, autoland_enabled: true };
+
+    segment('tracker_binding', 'builtin').click();
+    await settle();
+    await save();
+
+    // The server refuses the pair, at the half this request changed.
+    expect(h.patchBodies).toEqual([{ tracker_binding: 'builtin' }]);
+    expect(fieldError('tracker_binding')).toBe(
+      'autoland_enabled: requires a forge tracker binding',
+    );
+    expect(h.repoOnServer.tracker_binding).toBe('forge');
+
+    // The page catches up: Autoland is on, under a drafted builtin binding —
+    // and the switch can be turned off.
+    emitRepoChanged();
+    await waitFor(() => (switchOn('autoland_enabled') ? true : null), 'the refreshed switch');
+    expect(switchButton('autoland_enabled').disabled).toBe(false);
+
+    setSwitch('autoland_enabled', false);
+    await settle();
+    // Fixing the other half of the pair clears the refusal at this one.
+    expect(fieldError('tracker_binding')).toBeNull();
+    await save();
+
+    expect(h.patchBodies.at(-1)).toEqual({ autoland_enabled: false, tracker_binding: 'builtin' });
+    expect(h.repoOnServer.tracker_binding).toBe('builtin');
+    expect(h.repoOnServer.autoland_enabled).toBe(false);
   });
 });

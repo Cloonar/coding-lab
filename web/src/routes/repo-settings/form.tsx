@@ -20,12 +20,15 @@
 //
 // Inheritance (issue #61 §6): what an overridable field resolves to while the
 // repo's own value is null is the SERVER's answer (getRepoInherited — the
-// spawn path's own resolvers), asked again whenever the saved repo changes
-// and, debounced, whenever a draft that other fields' chains read changes.
-// The browser never walks a chain. Its one composition: a field's EFFECTIVE
-// value is its own draft when set, else the inherited one — that picks the
-// provider whose catalogs a select lists, the Runner the page folds by, and
-// the options the AFK option bag declares.
+// spawn path's own resolvers), asked again whenever a saved value other
+// fields' chains read changes and, debounced, whenever a draft of one does.
+// A request that fails keeps the last good answer (the page says it may be
+// out of date) and the next trigger asks again. The browser never walks a
+// chain. Its one composition: a field's EFFECTIVE value is its own draft when
+// set, else the inherited one — that picks the provider whose catalogs a
+// select lists, the Runner the page folds by, and the options the AFK option
+// bag declares. What acts at once on the SAVED repo (Schedules) reads the
+// answer for the saved repo alone, never the one for the drafts.
 //
 // The one save rule lives here too: Save validates the changed fields in the
 // browser, sends ONE PATCH with exactly the changed fields, applies the
@@ -72,6 +75,7 @@ import {
   draftInherits,
   isOverridable,
   isRepoFieldKey,
+  pairedFields,
   repoField,
   sameDraft,
   validateDraft,
@@ -132,8 +136,12 @@ export interface RepoSettingsCatalog {
   load: () => void;
   /** The Settings tab went away: nothing follows the repo until the next load(). */
   idle: () => void;
-  /** Registered providers; empty until loaded. */
+  /** Registered providers; empty until loaded. A failed reload keeps the last list. */
   providers: Accessor<Provider[]>;
+  /** Why the catalog could not be loaded (or reloaded), or null. */
+  error: Accessor<string | null>;
+  /** Loads the catalog again after a failure. */
+  retry: () => void;
   /**
    * The provider runs you start resolve to: the drafted agent when one is
    * set here, else the inherited one. null while that is not known, and for
@@ -203,10 +211,25 @@ export interface RepoSettingsForm {
   pointAt: (field: RepoFieldKey | undefined) => void;
   /**
    * What every overridable field resolves to while the repo's own value is
-   * null — the server's answer for the current drafts. Undefined while
-   * loading and after a failed request (the next trigger asks again).
+   * null — the server's answer for the current drafts. Undefined until the
+   * first answer; a later request that fails leaves the last good one here
+   * (see inheritedError).
    */
   inherited: Accessor<RepoInherited | undefined>;
+  /**
+   * Why the last request for the inherited values failed, or null. While it
+   * is set, `inherited()` is the last good answer — possibly out of date —
+   * or still undefined; the next trigger (or retryInherited) asks again.
+   */
+  inheritedError: Accessor<string | null>;
+  /** Asks for the inherited values again, now. */
+  retryInherited: () => void;
+  /**
+   * The same answer for the SAVED repo alone, no draft applied — what
+   * anything that acts at once (Schedules) must read. Undefined while it is
+   * not known for the repo as saved now.
+   */
+  inheritedSaved: Accessor<RepoInherited | undefined>;
   /**
    * The Runner that applies: the drafted pick when set here, else the
    * inherited one. null/undefined while that is not known.
@@ -288,6 +311,10 @@ function createRepoSettingsForm(): RepoSettingsForm {
   const [revealTick, setRevealTick] = createSignal(0);
   const [pointedAt, setPointedAt] = createSignal<RepoFieldKey | undefined>(undefined);
   const [inherited, setInherited] = createSignal<RepoInherited | undefined>(undefined);
+  const [inheritedError, setInheritedError] = createSignal<string | null>(null);
+  // What the Save in flight submitted, while it is in flight: an edit made
+  // meanwhile is measured against THAT, not against the repo it replaces.
+  let inFlight: RepoEdits | undefined;
 
   const dropError = (key: RepoFieldKey): void => {
     if (errors()[key] === undefined) return;
@@ -298,6 +325,11 @@ function createRepoSettingsForm(): RepoSettingsForm {
   const clearEdit = (key: RepoFieldKey): void => {
     setEdit(key, undefined);
     dropError(key);
+  };
+  const dropPairError = <K extends RepoFieldKey>(key: K): void => {
+    if (errors()[key] === undefined) return;
+    const draft = draftOf(key);
+    if (draft === undefined || validateDraft(key, draft) === null) dropError(key);
   };
   const drop = (): void =>
     batch(() => {
@@ -321,8 +353,16 @@ function createRepoSettingsForm(): RepoSettingsForm {
   // True while the Settings tab shows: only then do inherited values follow
   // the repo and the drafts.
   const [active, setActive] = createSignal(false);
-  const [providersResource] = createResource(wanted, () => listProviders());
-  const providers = (): Provider[] => resourceValue(providersResource) ?? [];
+  const [providersResource, { refetch: refetchProviders }] = createResource(wanted, () =>
+    listProviders(),
+  );
+  // Latched: a reload that fails keeps the list that was there.
+  const providers = createMemo<Provider[]>(
+    (previous) => resourceValue(providersResource) ?? previous,
+    [],
+  );
+  const catalogError = (): string | null =>
+    providersResource.error !== undefined ? errorMessage(providersResource.error) : null;
   const providerByID = (id: string | null | undefined): Provider | null =>
     id == null ? null : (providers().find((provider) => provider.id === id) ?? null);
 
@@ -370,16 +410,28 @@ function createRepoSettingsForm(): RepoSettingsForm {
       const repo = saved();
       batch(() => {
         // An edit back to the saved value is no edit: the field is untouched
-        // again and follows the server.
-        const untouched = repo !== undefined && sameDraft(key, next, spec.seed(repo));
+        // again and follows the server. Not while a Save that carries this
+        // field is in flight: the repo is about to hold what was submitted,
+        // so going back to the value it holds NOW is an edit, and stays one.
+        const untouched =
+          inFlight?.[key] === undefined &&
+          repo !== undefined &&
+          sameDraft(key, next, spec.seed(repo));
         setEdit(key, untouched ? undefined : next);
-        // A problem stays under its field until the field is valid again; a
-        // server refusal has no browser rule, so any edit clears it.
-        if (errors()[key] !== undefined) {
+        if (untouched) {
+          // An untouched field is never sent: nothing about it is a problem.
+          dropError(key);
+        } else if (errors()[key] !== undefined) {
+          // A problem stays under its field until the field is valid again; a
+          // server refusal has no browser rule, so any edit clears it.
           const message = validateDraft(key, next);
           if (message === null) dropError(key);
           else setErrors({ ...errors(), [key]: message });
         }
+        // A problem with a PAIR (a refusal the server pinned to the other
+        // half, Autoland under the builtin binding) is answered from either
+        // half: it goes when its own field's rule does not hold it.
+        for (const other of pairedFields(key)) dropPairError(other);
         setBarError(null);
       });
     };
@@ -417,6 +469,13 @@ function createRepoSettingsForm(): RepoSettingsForm {
   const dirty = (): boolean => changed().length > 0;
   const problems = createMemo(() => REPO_FIELD_KEYS.filter((key) => errors()[key] !== undefined));
   const problemSections = createMemo(() => sectionsOf(problems()));
+  // A problem is about a pending change, and is counted in the save bar. Once
+  // nothing is pending the bar is gone — and so is every problem.
+  createComputed(() => {
+    if (dirty() || busy()) return;
+    if (Object.keys(untrack(errors)).length > 0) setErrors({});
+    if (untrack(barError) !== null) setBarError(null);
+  });
 
   // --- seed / resync ------------------------------------------------------------
   // Another repo: nothing drafted against the previous one applies, and
@@ -444,6 +503,9 @@ function createRepoSettingsForm(): RepoSettingsForm {
     if (sameDraft(key, edit, next)) {
       clearEdit(key);
     } else if (
+      // Not for a field the Save in flight carries: the server changing it
+      // is that Save landing, and an edit that differs from it is newer.
+      inFlight?.[key] === undefined &&
       !sameDraft(key, spec.seed(previous), next) &&
       !draftDiffers(key, edit, previous, context())
     ) {
@@ -464,21 +526,51 @@ function createRepoSettingsForm(): RepoSettingsForm {
   );
 
   // --- inherited values ---------------------------------------------------------
-  // Asked when the Settings tab mounts and whenever the saved repo changes;
-  // and again, debounced, when a draft that other fields' chains read
-  // changes. Each request carries only the chain drafts that are actually
+  // Asked when the Settings tab mounts, when a SAVED value other fields'
+  // chains read changes (the frame refetches the repo for every run and issue
+  // event; none of those changes an answer) and, debounced, when a draft of
+  // one changes. Each request carries only the chain drafts that are actually
   // edited (absent = the saved value, null = reset to inherit). Requests are
   // numbered: an answer that is not the latest one's is dropped, so a slow
-  // older request can never overwrite a newer answer.
+  // older request can never overwrite a newer answer. A request that fails
+  // leaves the last good answer in place — withdrawing it would empty every
+  // catalog and unfold what the Runner folds — and says so (inheritedError);
+  // the next trigger, a refresh of the repo included, asks again.
   let asked = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
-  // What the last request asked about, to skip a debounced repeat of it.
-  let lastAsked: { repo: Repo; drafts: string } | undefined;
+  // What the last request asked about, to skip a repeat of it.
+  let lastAsked: { saved: string; drafts: string } | undefined;
+  // The answer for the SAVED repo, no draft applied, with the saved chain
+  // values it was asked about: it holds only while those are the repo's.
+  const [savedAnswer, setSavedAnswer] = createSignal<
+    { saved: string; answer: RepoInherited } | undefined
+  >(undefined);
+  // The saved chain values a no-draft request is under way (or answered) for.
+  let savedAskedFor: string | undefined;
   const forgetInherited = (): void => {
     asked += 1;
     lastAsked = undefined;
+    savedAskedFor = undefined;
     clearTimeout(debounce);
-    setInherited(undefined);
+    batch(() => {
+      setInherited(undefined);
+      setInheritedError(null);
+      setSavedAnswer(undefined);
+    });
+  };
+  // The saved repo, as far as any chain reads it.
+  const savedWire = <K extends ChainFieldKey>(key: K, repo: Repo): unknown => {
+    const spec = repoField(key);
+    return spec.wire(spec.seed(repo), NO_CONTEXT);
+  };
+  const savedChainKey = createMemo<string | undefined>(() => {
+    const repo = saved();
+    if (repo === undefined) return undefined;
+    return JSON.stringify([repo.id, ...CHAIN_FIELD_KEYS.map((key) => savedWire(key, repo))]);
+  });
+  const inheritedSaved = (): RepoInherited | undefined => {
+    const held = savedAnswer();
+    return held !== undefined && held.saved === savedChainKey() ? held.answer : undefined;
   };
   const chainDrafts = (): RepoInheritedDrafts => {
     const drafts: RepoInheritedDrafts = {};
@@ -494,32 +586,70 @@ function createRepoSettingsForm(): RepoSettingsForm {
   // A memo, so the debounce below starts only when the drafts to send really
   // change — not whenever something they were read through does.
   const chainKey = createMemo(() => JSON.stringify(chainDrafts()));
+  const NO_DRAFTS = '{}';
+  // The answer for the saved repo alone. Any answer to a question without
+  // drafts is one — also one a newer question has overtaken.
+  const keepSavedAnswer = (savedKey: string, answer: RepoInherited): void => {
+    if (untrack(savedChainKey) === savedKey) setSavedAnswer({ saved: savedKey, answer });
+  };
   const askInherited = (always: boolean): void => {
     clearTimeout(debounce);
     const repo = untrack(saved);
-    if (!untrack(active) || repo === undefined) return;
+    const savedKey = untrack(savedChainKey);
+    if (!untrack(active) || repo === undefined || savedKey === undefined) return;
     const drafts = untrack(chainDrafts);
     const key = untrack(chainKey);
-    if (!always && lastAsked !== undefined && lastAsked.repo === repo && lastAsked.drafts === key) {
+    if (
+      !always &&
+      lastAsked !== undefined &&
+      lastAsked.saved === savedKey &&
+      lastAsked.drafts === key
+    ) {
       return;
     }
-    lastAsked = { repo, drafts: key };
+    lastAsked = { saved: savedKey, drafts: key };
     asked += 1;
     const number = asked;
+    if (key === NO_DRAFTS) savedAskedFor = savedKey;
     getRepoInherited(repo.id, drafts).then(
       (answer) => {
-        if (number === asked) setInherited(answer);
+        batch(() => {
+          if (key === NO_DRAFTS) keepSavedAnswer(savedKey, answer);
+          if (number !== asked) return;
+          setInherited(answer);
+          setInheritedError(null);
+        });
       },
-      () => {
+      (err: unknown) => {
+        if (key === NO_DRAFTS && savedAskedFor === savedKey) savedAskedFor = undefined;
         if (number !== asked) return;
-        // Not known: the fields show their state without a value — never a
-        // guessed one — and stay editable. The next trigger asks again.
+        // The last good answer stands — possibly out of date, which the page
+        // says — and nothing is guessed. The next trigger asks again.
         lastAsked = undefined;
-        setInherited(undefined);
+        setInheritedError(errorMessage(err));
       },
     );
+    // With chain drafts pending, the answer above is for the DRAFTS. What
+    // acts at once reads the saved repo's: ask for that too, unless it is
+    // known or already on its way.
+    if (key !== NO_DRAFTS && savedAskedFor !== savedKey) {
+      savedAskedFor = savedKey;
+      getRepoInherited(repo.id, {}).then(
+        (answer) => keepSavedAnswer(savedKey, answer),
+        () => {
+          if (savedAskedFor === savedKey) savedAskedFor = undefined;
+        },
+      );
+    }
   };
-  createEffect(on([active, saved], () => askInherited(true)));
+  createEffect(
+    on([active, savedChainKey, saved], (now, before) => {
+      // The tab came up, or a saved value some chain reads changed: ask. Any
+      // other refresh of the repo asks only to retry a request that failed.
+      const moved = before === undefined || before[0] !== now[0] || before[1] !== now[1];
+      if (moved || untrack(inheritedError) !== null) askInherited(true);
+    }),
+  );
   createEffect(
     on(
       chainKey,
@@ -570,6 +700,7 @@ function createRepoSettingsForm(): RepoSettingsForm {
     const count = Object.keys(patch).length;
     if (count === 0) return true;
 
+    inFlight = submitted;
     setBusy(true);
     try {
       const next = await updateRepo(repo.id, patch);
@@ -599,6 +730,7 @@ function createRepoSettingsForm(): RepoSettingsForm {
       }
       return false;
     } finally {
+      inFlight = undefined;
       setBusy(false);
     }
   };
@@ -661,6 +793,9 @@ function createRepoSettingsForm(): RepoSettingsForm {
     pointedAt,
     pointAt: (field) => void setPointedAt(field),
     inherited,
+    inheritedError,
+    retryInherited: () => askInherited(true),
+    inheritedSaved,
     effectiveRunner,
     catalog: {
       load: () =>
@@ -670,6 +805,8 @@ function createRepoSettingsForm(): RepoSettingsForm {
         }),
       idle: () => void setActive(false),
       providers,
+      error: catalogError,
+      retry: () => void refetchProviders(),
       baseProvider,
       afkProvider,
       landerProvider,

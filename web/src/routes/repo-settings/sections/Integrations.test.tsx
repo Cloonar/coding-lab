@@ -114,8 +114,15 @@ describe('repo-settings Integrations section', () => {
     h.credentialsOnServer = [GIT_CRED, FORGE_CRED];
     h.repoOnServer = { ...h.repoOnServer, credential_id: 'cred_git' };
     await mountIntegrations();
+    // Before the list is there the pick already is the stored credential…
+    await waitFor(() => container.querySelector('select[name="credential_id"]'), 'the pick');
+    expect(nativeSelect('credential_id').value).toBe('cred_git');
+    // …and with the list it reads by its name.
     await waitFor(
-      () => container.querySelector('select[name="credential_id"] option[value="cred_git"]'),
+      () =>
+        nativeSelect('credential_id').selectedOptions[0]?.textContent === 'deploy-key (SSH key)'
+          ? true
+          : null,
       'credential options',
     );
 
@@ -125,6 +132,74 @@ describe('repo-settings Integrations section', () => {
     chooseNative('credential_id', '');
     await save();
     expect(h.patchBodies).toEqual([{ credential_id: null }]);
+  });
+});
+
+describe('repo-settings Integrations: a credential is never shown as something it is not', () => {
+  const LOAD_ERROR = 'The credentials could not be loaded, so they cannot be changed here.';
+  const banner = () => pageSection('integrations').querySelector('.banner.error');
+  const picked = (name: string): string => {
+    const select = nativeSelect(name);
+    return select.selectedOptions[0]?.textContent ?? '';
+  };
+
+  it('a failed credential load says so, keeps the stored picks as they are, and offers a retry', async () => {
+    h.credentialsOnServer = [GIT_CRED, FORGE_CRED];
+    h.repoOnServer = {
+      ...h.repoOnServer,
+      credential_id: 'cred_git',
+      forge_credential_id: 'cred_forge',
+    };
+    h.credentialsError = 'credentials: store unavailable';
+    await mountIntegrations();
+    await waitFor(banner, 'the load error');
+
+    expect(banner()?.textContent).toContain(`${LOAD_ERROR} credentials: store unavailable`);
+    // Not "None (public remote)": the repo HAS a credential, and the pick says so.
+    expect(nativeSelect('credential_id').value).toBe('cred_git');
+    expect(picked('credential_id')).toBe('Credential cred_git (list not loaded)');
+    expect(picked('forge_credential_id')).toBe('Credential cred_forge (list not loaded)');
+    // Nothing to pick from: the picks are held, and nothing is pending.
+    expect(nativeSelect('credential_id').disabled).toBe(true);
+    expect(nativeSelect('forge_credential_id').disabled).toBe(true);
+    expect(saveBarTitle()).toBe('');
+
+    h.credentialsError = null;
+    Array.from(banner()?.querySelectorAll('button') ?? [])
+      .find((b) => b.textContent === 'Try again')
+      ?.click();
+    await waitFor(() => (banner() === null ? true : null), 'the retry');
+
+    expect(picked('credential_id')).toBe('deploy-key (SSH key)');
+    expect(picked('forge_credential_id')).toBe('forge-token');
+    expect(nativeSelect('credential_id').disabled).toBe(false);
+  });
+
+  it('a repo without a credential still reads None while the list cannot be loaded', async () => {
+    h.credentialsError = 'credentials: store unavailable';
+    await mountIntegrations();
+    await waitFor(banner, 'the load error');
+
+    expect(picked('credential_id')).toBe('None (public remote)');
+    expect(nativeSelect('credential_id').value).toBe('');
+  });
+
+  it('a stored credential the list no longer carries is named as unknown, not as None', async () => {
+    h.credentialsOnServer = [GIT_CRED];
+    h.repoOnServer = { ...h.repoOnServer, credential_id: 'cred_gone' };
+    await mountIntegrations();
+    await waitFor(
+      () => container.querySelector('select[name="credential_id"] option[value="cred_git"]'),
+      'credential options',
+    );
+
+    expect(nativeSelect('credential_id').value).toBe('cred_gone');
+    expect(picked('credential_id')).toBe('Unknown credential (cred_gone)');
+    expect(banner()).toBeNull();
+    // It can be replaced by one that exists.
+    chooseNative('credential_id', 'cred_git');
+    await save();
+    expect(h.patchBodies).toEqual([{ credential_id: 'cred_git' }]);
   });
 });
 

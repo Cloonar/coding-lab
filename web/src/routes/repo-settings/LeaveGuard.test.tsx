@@ -150,6 +150,32 @@ describe('leaving the repo with pending changes', () => {
     expect(saveBar()).toBeNull();
   });
 
+  it('holds Discard while a save is in flight: the edits are being saved, not dropped', async () => {
+    let release = (): void => {};
+    h.patchHold = new Promise<void>((resolve) => (release = resolve));
+    await mountWithChanges();
+    // Save from the bar, and try to leave while the request is on its way.
+    Array.from(saveBar()?.querySelectorAll('button') ?? [])
+      .find((b) => b.classList.contains('primary'))
+      ?.click();
+    await settle();
+    await followLink(linkTo('/elsewhere'));
+    expect(openDialog()).not.toBeNull();
+
+    expect(choose('Discard').disabled).toBe(true);
+    expect(choose('Save and leave').disabled).toBe(true);
+    expect(choose('Keep editing').disabled).toBe(false);
+    choose('Discard').click();
+    await settle();
+    expect(routerHistory.get()).toBe(BASE);
+
+    // The save lands: nothing is pending, so the navigation simply goes ahead.
+    release();
+    await settle();
+    expect(h.patchBodies).toHaveLength(1);
+    expect(routerHistory.get()).toBe('/elsewhere');
+  });
+
   it('Save and leave saves in one PATCH, then leaves', async () => {
     await mountWithChanges();
     await followLink(linkTo('/elsewhere?x=1'));

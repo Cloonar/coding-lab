@@ -6,7 +6,9 @@
 // It is a dialog: role="dialog", aria-modal, focus moves in on open and is
 // trapped while it shows, closing hands focus back to the row that opened
 // it, and the page behind it does not scroll. Escape closes it when nothing
-// is pending; a scrim click does the same.
+// is pending; a scrim click does the same. It is one modal on the page's
+// modal stack (lib/modalStack.ts): when the repo form's leave dialog opens
+// over it, the dialog has the focus and the Escape key, and the editor waits.
 //
 // Its own Save: a new Schedule is one POST, an edited one a PATCH of the
 // fields that changed. Closing with pending edits asks IN PLACE — the footer
@@ -16,8 +18,17 @@
 // never two. Delete lives at the end of the editor as an inline
 // confirmation. Run now, in the header, starts a run from the SAVED
 // Schedule: it is disabled while edits are pending (the footer says why),
-// absent for a Schedule that was never saved, and a 409 shows the server's
-// reason verbatim next to the button.
+// absent for a Schedule that was never saved, and a refusal shows the
+// server's reason verbatim under the header — a strip that is always in
+// view, whatever the body is scrolled to. A failed Save or Delete that names
+// no field shows there too.
+//
+// A request outlives a click: Run now holds its answer for a whole spawn
+// pass. While one is in flight the editor neither closes nor asks — a
+// navigation away waits for the answer, and is let go once it is there. And
+// should the editor be gone when an answer lands after all, it only reports
+// what happened (the run did start, the save did land); it never navigates,
+// which by then would move a page the operator has since opened.
 //
 // The cadence editor: a Schedule stores one cron expression; Daily, Weekly
 // and Monthly are an editing skin over that string (lib/cronPreset owns both
@@ -40,7 +51,6 @@ import {
   createSignal,
   createUniqueId,
   onCleanup,
-  onMount,
   untrack,
   type JSX,
 } from 'solid-js';
@@ -72,6 +82,7 @@ import {
   type CadenceMode,
 } from '../../../lib/cronPreset';
 import { createMediaQuery } from '../../../lib/media';
+import { createModal } from '../../../lib/modalStack';
 import { inheritPickLabel } from '../Field';
 import { normInt, normText } from '../shared';
 
@@ -89,9 +100,6 @@ const DEFAULT_BUDGET_MINUTES = 30;
  * keystroke, short enough that the preview still feels attached to the field.
  */
 export const PREVIEW_DEBOUNCE_MS = 400;
-
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * The prompt starters the Examples pick offers. UI-only (ADR-0062): they are
@@ -231,14 +239,24 @@ export interface ScheduleEditorProps {
   flows: ScheduleFlow[];
   /** The editor's own URL: a navigation that stays on it is not a leave. */
   url: string;
-  /** Close without saving (the page owns the navigation). */
+  /**
+   * Closes THIS editor (the page owns the navigation). Only ever called
+   * while the editor is on the page.
+   */
   onClose: () => void;
-  /** Saved (created or patched): the page closes the editor and says so. */
+  /**
+   * What a request did. The page reports it and refreshes the list; it must
+   * not navigate — the editor has closed itself by then, or was gone before
+   * the answer arrived.
+   */
   onSaved: (schedule: Schedule, created: boolean) => void;
-  /** Deleted: the page closes the editor and says so. */
   onDeleted: (schedule: Schedule) => void;
-  /** Run now accepted: the page closes the editor and says so. */
   onRan: (schedule: Schedule) => void;
+  /**
+   * A request failed after the editor was gone (the operator left while it
+   * was in flight), so the editor cannot show the reason itself.
+   */
+  onLateFailure: (what: 'save' | 'delete' | 'run', name: string, reason: string) => void;
 }
 
 export default function ScheduleEditor(props: ScheduleEditorProps) {
@@ -359,12 +377,14 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
 
   // An example fills the prompt at once. When it replaces words the operator
   // wrote, those stay one Undo away — inside the editor, which covers the
-  // page's toast below 1024px.
+  // page's toast below 1024px. Undo always brings back the operator's OWN
+  // words: trying a second example over the first keeps the target it had.
   const applyExample = (key: string): void => {
     const example = PROMPT_EXAMPLES.find((candidate) => candidate.key === key);
     if (example === undefined) return;
     const current = prompt();
-    setReplaced(current.trim() !== '' && current !== example.text ? current : null);
+    const isExample = PROMPT_EXAMPLES.some((candidate) => candidate.text === current);
+    if (!isExample) setReplaced(current.trim() !== '' ? current : null);
     setPrompt(example.text);
     clearProblem('prompt');
   };
@@ -468,12 +488,40 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
     });
   };
 
+  // Still on the page? An answer that arrives after the editor is gone only
+  // reports; it changes nothing here and navigates nowhere.
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
+
   // Closing. `closing` tells the leave guard below that the URL change it is
   // about to see is this editor's own doing.
   let closing = false;
+  // A navigation that arrived while a request was in flight: it waits for
+  // the answer.
+  let waiting: BeforeLeaveEventArgs | null = null;
   const close = (): void => {
     closing = true;
     props.onClose();
+  };
+  // A request succeeded: the editor is done. A navigation that was waiting
+  // for the answer goes ahead — it takes the editor with it.
+  const finish = (): void => {
+    closing = true;
+    const event = waiting;
+    waiting = null;
+    if (event !== null) event.retry();
+    else props.onClose();
+  };
+
+  // Everything a request can say that belongs to no field: always in view
+  // under the header, and focused, so the answer to a tap on Save is never
+  // somewhere the body has scrolled away from.
+  let alerts: HTMLDivElement | undefined;
+  const showBanner = (message: string): void => {
+    setBanner(message);
+    queueMicrotask(() => alerts?.focus());
   };
 
   const submit = async (event: SubmitEvent): Promise<void> => {
@@ -487,6 +535,7 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
       return;
     }
     const repoID = props.repoId;
+    const label = name().trim();
     let send: () => Promise<Schedule>;
     let created = false;
     if (seed === null) {
@@ -505,43 +554,54 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
     setBusy('save');
     try {
       const saved = await send();
-      closing = true;
+      if (alive) finish();
       props.onSaved(saved, created);
     } catch (err) {
-      // A refusal that names a field shows at that field; anything else at
-      // the top of the editor.
+      if (!alive) {
+        props.onLateFailure('save', label, errorMessage(err));
+        return;
+      }
+      waiting = null;
+      // A refusal that names a field shows at that field; anything else in
+      // the strip under the header.
       const field = err instanceof ApiError ? err.field : undefined;
       const key = field !== undefined ? SERVER_FIELDS[field] : undefined;
-      if (key !== undefined) {
+      if (key !== undefined && key !== 'enabled') {
         const next = { ...problems(), [key]: errorMessage(err) };
         setProblems(next);
         focusProblem(next);
       } else {
-        setBanner(errorMessage(err));
+        showBanner(errorMessage(err));
       }
     } finally {
-      setBusy(null);
+      if (alive) setBusy(null);
     }
   };
 
   const remove = async (): Promise<void> => {
-    if (seed === null) return;
+    if (seed === null || busy() !== null) return;
     setBusy('delete');
     setBanner(null);
     try {
       await deleteRepoSchedule(props.repoId, seed.id);
-      closing = true;
+      if (alive) finish();
       props.onDeleted(seed);
     } catch (err) {
-      setBanner(errorMessage(err));
+      if (!alive) {
+        props.onLateFailure('delete', seed.name, errorMessage(err));
+        return;
+      }
+      waiting = null;
+      showBanner(errorMessage(err));
     } finally {
-      setBusy(null);
+      if (alive) setBusy(null);
     }
   };
 
   // Run now starts a run from the SAVED Schedule through the spawn pass. A
-  // 409 is the server's reason, shown verbatim by the button; anything else
-  // is a plain error.
+  // refusal (409) is the server's reason, shown verbatim; so is any other
+  // failure — both in the strip under the header, next to the button. A
+  // second click while one is on its way sends nothing.
   const runNow = async (): Promise<void> => {
     if (seed === null || busy() !== null) return;
     setBusy('run');
@@ -549,13 +609,19 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
     setBanner(null);
     try {
       await runScheduleNow(props.repoId, seed.id);
-      closing = true;
+      if (alive) finish();
       props.onRan(seed);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) setRefusal(err.message);
-      else setBanner(errorMessage(err));
+      const reason =
+        err instanceof ApiError && err.status === 409 ? err.message : errorMessage(err);
+      if (!alive) {
+        props.onLateFailure('run', seed.name, reason);
+        return;
+      }
+      waiting = null;
+      setRefusal(reason);
     } finally {
-      setBusy(null);
+      if (alive) setBusy(null);
     }
   };
 
@@ -592,14 +658,23 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
     else props.onClose();
   };
 
-  // Any URL change away from the editor while it is dirty — Back, a tab, a
-  // section chip — is held and asked about in place, exactly like Cancel.
+  // Any URL change away from the editor — Back, a tab, a section chip. While
+  // a request is in flight it waits for the answer: the edits are being
+  // saved, or a run is being started, and neither can be discarded any more.
+  // Otherwise, while the editor is dirty, it is held and asked about in
+  // place, exactly like Cancel.
   useBeforeLeave((event) => {
-    if (event.defaultPrevented || closing || !dirty()) return;
+    if (event.defaultPrevented || closing) return;
     // A number is a history move (Back/Forward): the browser has already put
     // the destination in the address bar when the router asks.
     const destination = typeof event.to === 'number' ? window.location.pathname : event.to;
     if ((destination.split(/[?#]/, 1)[0] ?? '') === props.url) return;
+    if (busy() !== null) {
+      event.preventDefault();
+      waiting = event;
+      return;
+    }
+    if (!dirty()) return;
     event.preventDefault();
     held = event;
     setAsking(true);
@@ -610,61 +685,32 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
     if (asking() && !dirty()) discard();
   });
 
+  // A tab close or reload keeps the browser's own prompt while edits are
+  // pending. Chrome's legacy contract: preventDefault AND set returnValue.
+  const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+    if (!dirty()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
+  onCleanup(() => window.removeEventListener('beforeunload', onBeforeUnload));
+
   // --- the dialog: focus, Escape, scroll lock ------------------------------
+  // One modal on the page's stack. Closing hands focus back to the row (or
+  // the "+ New schedule" control) that opened the editor.
   let panel: HTMLElement | undefined;
   let heading: HTMLHeadingElement | undefined;
-  // Captured before focus moves in, so closing can hand focus back to the
-  // row (or the "+ New schedule" control) that opened the editor.
-  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const focusables = (): HTMLElement[] =>
-    panel === undefined ? [] : Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
-
-  const onKeyDown = (event: KeyboardEvent): void => {
+  createModal({
+    panel: () => panel,
+    fallback: () => heading,
     // A control that handled Escape itself (an open pick, an open inline
-    // confirmation) says so; the editor stays.
-    if (event.defaultPrevented) return;
-    if (event.key === 'Escape') {
+    // confirmation) has prevented its default; the stack then leaves it be.
+    onEscape: (event) => {
       event.preventDefault();
       if (asking()) keepEditing();
       else requestClose();
-      return;
-    }
-    if (event.key !== 'Tab' || panel === undefined) return;
-    const items = focusables();
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (first === undefined || last === undefined) {
-      event.preventDefault();
-      heading?.focus();
-      return;
-    }
-    if (event.shiftKey && (active === first || active === heading || !panel.contains(active))) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-  // Focus that lands outside the panel (the scrim blocks clicks on the page
-  // behind, but programmatic focus or assistive tech can still move it) is
-  // pulled back in.
-  const onFocusIn = (event: FocusEvent): void => {
-    if (panel === undefined || !(event.target instanceof Node)) return;
-    if (!panel.contains(event.target)) (focusables()[0] ?? heading)?.focus();
-  };
-  document.addEventListener('keydown', onKeyDown);
-  document.addEventListener('focusin', onFocusIn);
-  const savedOverflow = document.body.style.overflow;
-  document.body.style.overflow = 'hidden';
-  onCleanup(() => {
-    document.removeEventListener('keydown', onKeyDown);
-    document.removeEventListener('focusin', onFocusIn);
-    document.body.style.overflow = savedOverflow;
-    if (opener?.isConnected === true) opener.focus();
+    },
   });
-  onMount(() => heading?.focus());
 
   const problem = (key: EditorFieldKey): string | null => problems()[key] ?? null;
   const flowLabel = (key: string): string =>
@@ -721,20 +767,24 @@ export default function ScheduleEditor(props: ScheduleEditorProps) {
             </button>
           </Show>
         </header>
-        {/* The server's reason for refusing a Run now, where the button is. */}
-        <div class="schedule-editor-refusal" role="alert">
-          <Show when={refusal()}>{(reason) => <p>{reason()}</p>}</Show>
+        {/* Always in view under the header, whatever the body is scrolled
+            to: the server's reason for not starting a Run now, where the
+            button is, and a failed Save or Delete that names no field. */}
+        <div
+          class="schedule-editor-alerts"
+          role="group"
+          aria-label="Problems"
+          tabIndex={-1}
+          ref={alerts}
+        >
+          <div class="schedule-editor-refusal" role="alert">
+            <Show when={refusal()}>{(reason) => <p>{reason()}</p>}</Show>
+          </div>
+          <Banner message={banner()} onDismiss={() => setBanner(null)} />
         </div>
 
         <form class="schedule-editor-form" novalidate onSubmit={(e) => void submit(e)}>
           <div class="schedule-editor-body">
-            <Banner message={banner()} onDismiss={() => setBanner(null)} />
-            <Show when={problem('enabled')}>
-              {(message) => (
-                <Banner message={message()} onDismiss={() => clearProblem('enabled')} />
-              )}
-            </Show>
-
             <div class="card settings-card">
               <EditorField field="name" id={id} label="Name" error={problem('name')}>
                 {(control) => (

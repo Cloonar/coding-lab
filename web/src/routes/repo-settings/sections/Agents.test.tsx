@@ -286,6 +286,37 @@ describe('RepoSettings AFK seed prompt (issue #52)', () => {
     expect(field.placeholder).toBe(h.repoOnServer.afk_prompt_effective);
   });
 
+  it('says that the inherited template follows Incogni once saved, instead of guessing it', async () => {
+    const NOTE =
+      'The inherited template follows Incogni once saved. The one shown is for the saved setting.';
+    await mountAgents();
+    const field = await waitFor(
+      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
+      'seed prompt textarea',
+    );
+    const text = () => container.querySelector('[data-field="afk_prompt"]')?.textContent ?? '';
+    expect(text()).not.toContain(NOTE);
+
+    // Incogni decides which built-in template the repo inherits, and only
+    // the server composes it — for the SAVED repo.
+    container.querySelector<HTMLButtonElement>('button[name="incogni"]')?.click();
+    await settle();
+
+    expect(text()).toContain(NOTE);
+    // The placeholder is still the saved repo's template: nothing is made up.
+    expect(field.placeholder).toBe(h.repoOnServer.afk_prompt_effective);
+    // The note describes the field.
+    const note = Array.from(container.querySelectorAll('[data-field="afk_prompt"] p')).find(
+      (p) => p.textContent === NOTE,
+    );
+    expect(field.getAttribute('aria-describedby')?.split(' ')).toContain(note?.id);
+
+    // Saved: the note has nothing left to say.
+    await save();
+    expect(h.patchBodies).toEqual([{ incogni: true }]);
+    expect(text()).not.toContain(NOTE);
+  });
+
   it('Customize copies afk_prompt_effective into the textarea for editing', async () => {
     await mountAgents();
     await waitFor(

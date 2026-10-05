@@ -33,6 +33,8 @@ export const CHAIN_FIELD_KEYS = [
   'afk_model_default',
   'afk_effort_default',
   'lander_provider',
+  // The inherited lander effort is resolved against the lander's model.
+  'lander_model',
 ] as const satisfies readonly RepoFieldKey[];
 
 export type ChainFieldKey = (typeof CHAIN_FIELD_KEYS)[number];

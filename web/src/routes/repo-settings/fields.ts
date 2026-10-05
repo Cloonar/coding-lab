@@ -547,16 +547,49 @@ function assignChanged<K extends RepoFieldKey>(
   patch[key] = repoField(key).wire(draft as RepoDrafts[K], context);
 }
 
-/** The problems of the CHANGED fields (an untouched field is never sent, so never checked). */
+/**
+ * Fields the server checks as a PAIR (reposvc.UpdateSettings): the value that
+ * would result on one side is only valid with the other. A problem with the
+ * pair may be shown at either half, and an edit of either half answers it —
+ * so a problem that is not a field's own rule failing is dropped when another
+ * field of its group is edited (form.tsx).
+ */
+export const FIELD_PAIRS: readonly (readonly RepoFieldKey[])[] = [
+  ['tracker_binding', 'forge_credential_id', 'autoland_enabled'],
+  ['afk_branch_pattern', 'manual_branch_prefix'],
+];
+
+/** The other fields of the pairs `key` belongs to. */
+export function pairedFields(key: RepoFieldKey): RepoFieldKey[] {
+  return FIELD_PAIRS.filter((group) => group.includes(key))
+    .flat()
+    .filter((other) => other !== key);
+}
+
+/** Autoland is forge-only; what Save says instead of sending that pair. */
+export const AUTOLAND_NEEDS_FORGE = 'Turn Autoland off before switching to the built-in tracker.';
+
+/**
+ * The problems of the CHANGED fields (an untouched field is never sent, so
+ * never checked) — each field's own rule, then the one pair the browser can
+ * judge by itself: Autoland on under the builtin tracker binding, which the
+ * server refuses. It is reported at the Autoland switch, where it is fixed.
+ */
 export function validateEdits(
   edits: RepoEdits,
   saved: Repo,
   context: FieldContext,
 ): Partial<Record<RepoFieldKey, string>> {
   const problems: Partial<Record<RepoFieldKey, string>> = {};
-  for (const key of changedFields(edits, saved, context)) {
+  const changed = changedFields(edits, saved, context);
+  for (const key of changed) {
     const message = validateDraft(key, edits[key] as RepoDrafts[typeof key]);
     if (message !== null) problems[key] = message;
+  }
+  if (changed.includes('tracker_binding') || changed.includes('autoland_enabled')) {
+    const binding = edits.tracker_binding ?? saved.tracker_binding;
+    const autoland = edits.autoland_enabled ?? saved.autoland_enabled;
+    if (autoland && binding !== 'forge') problems.autoland_enabled = AUTOLAND_NEEDS_FORGE;
   }
   return problems;
 }

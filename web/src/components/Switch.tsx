@@ -8,12 +8,15 @@
 // tied to it with <label for>, so tapping the text toggles too), optionally
 // with a muted `description` under it (wired as aria-describedby); or
 // `labelledBy` to point at a label rendered elsewhere; or `aria-label` when
-// there is no visible text.
+// there is no visible text. A host that shows more about the switch — a
+// hint, a problem, an "unsaved change" mark — passes `describedBy` (ids
+// added to the control's description), `invalid`, and `labelExtra` (content
+// rendered inside the label, so it joins the accessible name).
 //
 // Default export is named ToggleSwitch so files that also use solid-js's
 // <Switch>/<Match> can import it without a clash.
 
-import { Show, createUniqueId } from 'solid-js';
+import { Show, createUniqueId, type JSX } from 'solid-js';
 
 export interface SwitchProps {
   checked: boolean;
@@ -23,6 +26,12 @@ export interface SwitchProps {
   label?: string;
   /** Muted secondary text under the label (needs `label`). */
   description?: string;
+  /** More content inside the label, after its text (needs `label`). */
+  labelExtra?: JSX.Element;
+  /** Ids of further text that describes the switch (a hint, a problem). */
+  describedBy?: string;
+  /** Marks the switch as holding a refused value (pair it with describedBy). */
+  invalid?: boolean;
   /** Accessible name when no visible label exists. */
   'aria-label'?: string;
   /** Id of an element elsewhere that labels the switch. */
@@ -39,6 +48,14 @@ export default function ToggleSwitch(props: SwitchProps) {
   const uid = createUniqueId();
   const controlId = () => props.id ?? `switch-${uid}`;
   const descId = `switch-${uid}-desc`;
+  // The description first, then whatever the host adds.
+  const describedBy = (): string | undefined => {
+    const ids = [
+      props.label !== undefined && props.description ? descId : null,
+      props.describedBy ?? null,
+    ].filter(Boolean);
+    return ids.length > 0 ? ids.join(' ') : undefined;
+  };
 
   const control = () => (
     <button
@@ -52,7 +69,8 @@ export default function ToggleSwitch(props: SwitchProps) {
       aria-checked={props.checked}
       aria-label={props['aria-label']}
       aria-labelledby={props.labelledBy}
-      aria-describedby={props.label !== undefined && props.description ? descId : undefined}
+      aria-describedby={describedBy()}
+      aria-invalid={props.invalid === true ? 'true' : undefined}
       disabled={props.disabled}
       onClick={() => props.onChange(!props.checked)}
     >
@@ -74,6 +92,7 @@ export default function ToggleSwitch(props: SwitchProps) {
         <span class="switch-text">
           <label class="switch-label" for={controlId()}>
             {props.label}
+            {props.labelExtra}
           </label>
           <Show when={props.description}>
             <small class="switch-desc" id={descId}>

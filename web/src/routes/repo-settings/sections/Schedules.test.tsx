@@ -296,3 +296,116 @@ describe('schedules list', () => {
     expect(toastText()).toBe('');
   });
 });
+
+describe('schedules list: rows keep their identity and the focus', () => {
+  const running = () =>
+    baseSchedule({
+      name: 'Weekly deps',
+      last_run: {
+        id: 'run_2',
+        started_at: '2026-08-03T05:00:00.000Z',
+        ended_at: null,
+        outcome: 'active',
+      },
+    });
+
+  it('a reload patches the row in place: the focused switch survives run.changed', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await mountSchedules();
+    await waitForRows();
+    const toggle = switchButton('schedule-enabled-sched_1');
+    const link = rowLink('Weekly deps');
+    toggle.focus();
+
+    // Every reload returns fresh objects for every row.
+    h.schedules = [running()];
+    emitRunChanged();
+    await waitFor(
+      () => (rowNamed('Weekly deps').textContent?.includes('running now') ? true : null),
+      'the live run',
+    );
+
+    expect(switchButton('schedule-enabled-sched_1')).toBe(toggle);
+    expect(rowLink('Weekly deps')).toBe(link);
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('toggling keeps the focus on the switch through the PATCH and the reload', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await mountSchedules();
+    await waitForRows();
+    const toggle = switchButton('schedule-enabled-sched_1');
+    toggle.focus();
+
+    toggle.click();
+    await settle();
+
+    expect(toggle.isConnected).toBe(true);
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    // Never disabled meanwhile: a disabled control drops the focus.
+    expect(toggle.disabled).toBe(false);
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("shows the server's answer at once, also when the list cannot be reloaded", async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    await mountSchedules();
+    await waitForRows();
+
+    // The PATCH lands; the reload after it does not.
+    h.schedulesGetError = 'schedules: store unavailable';
+    switchButton('schedule-enabled-sched_1').click();
+    await settle();
+
+    expect(h.scheduleBodies).toEqual([{ enabled: false }]);
+    expect(switchButton('schedule-enabled-sched_1').getAttribute('aria-checked')).toBe('false');
+    expect(rowNamed('Weekly deps').textContent).toContain('Off ·');
+    expect(toastText()).toBe('"Weekly deps" turned off');
+    // The rows it had stay up under the reload error.
+    expect(rows()).toHaveLength(1);
+    expect(schedulesSection().querySelector('.banner.error')?.textContent).toContain(
+      'schedules: store unavailable',
+    );
+  });
+
+  it('a second click while the first is on its way sends nothing', async () => {
+    h.schedules = [baseSchedule({ name: 'Weekly deps' })];
+    let release = (): void => {};
+    h.scheduleHold = new Promise<void>((resolve) => (release = resolve));
+    await mountSchedules();
+    await waitForRows();
+    const toggle = switchButton('schedule-enabled-sched_1');
+
+    toggle.click();
+    toggle.click();
+    await settle();
+    expect(h.scheduleBodies).toEqual([{ enabled: false }]);
+
+    release();
+    h.scheduleHold = null;
+    await settle();
+    expect(h.scheduleBodies).toEqual([{ enabled: false }]);
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('Re-enable names its Schedule, and hands the focus to the switch that replaces it', async () => {
+    h.schedules = [
+      baseSchedule({ name: 'Docs drift', paused: true, consecutive_failures: 3 }),
+      baseSchedule({ id: 'sched_2', name: 'Other', paused: true, consecutive_failures: 3 }),
+    ];
+    await mountSchedules();
+    await waitForRows();
+
+    // Two rows, two buttons that read "Re-enable": the name tells them apart.
+    const reenable = button('Re-enable Docs drift');
+    expect(reenable.textContent).toBe('Re-enable');
+    expect(reenable.closest('li')).toBe(rowNamed('Docs drift'));
+    reenable.focus();
+    reenable.click();
+    await settle();
+
+    expect(reenable.isConnected).toBe(false);
+    expect(document.activeElement).toBe(switchButton('schedule-enabled-sched_1'));
+    expect(h.schedules[1]?.paused).toBe(true);
+  });
+});
