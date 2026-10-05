@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
@@ -120,6 +121,14 @@ func cloneOutcome(err, ctxErr error) (result string, counted bool) {
 // events, and on success records the detected default branch and the ready
 // status.
 func (s *Service) clone(ctx context.Context, repo store.Repo) error {
+	// A clone that completes is the first evidence that the remote answers to
+	// this credential: gitx reports it to the readiness recorder as a
+	// successful fetch (issue #61), attributed to the credential version read
+	// here — BEFORE the row is materialized, so a rotation landing in between
+	// makes the record stale, never wrong.
+	ctx = gitx.AttributeFetch(ctx, gitx.FetchAttribution{
+		RepoID: repo.ID, Credential: s.store.CredentialStampByID(ctx, repo.CredentialID),
+	})
 	credEnv, cleanup, err := s.credentialEnv(ctx, repo.CredentialID, repo.ID)
 	if err != nil {
 		return fmt.Errorf("prepare git credential: %w", err)

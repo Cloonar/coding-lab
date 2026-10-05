@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
@@ -170,6 +171,11 @@ type Provider struct {
 	authMu      sync.Mutex
 	authCache   provider.AuthStatus
 	authChecked time.Time
+	// authLast is the status the most recent check produced, published for
+	// LastAuthStatus (provider.AuthPeeker): written under authMu by the
+	// refresh, read WITHOUT it, so a peek never waits behind the status
+	// command. nil until the first check.
+	authLast atomic.Pointer[provider.AuthStatus]
 
 	// loginMu guards the pending device-code login attempt: the scraped
 	// verification URL + one-time user code (in-memory only, re-scraped
@@ -183,6 +189,7 @@ type Provider struct {
 
 var _ provider.AgentProvider = (*Provider)(nil)
 var _ provider.LoginCodeReporter = (*Provider)(nil)
+var _ provider.AuthPeeker = (*Provider)(nil)
 
 // New validates o and returns a Provider with the pinned production
 // timeouts. The MASTER path fields (CodexBin, ConfigPath) are optional: an

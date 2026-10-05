@@ -153,6 +153,14 @@ type Options struct {
 	// no-op, optional exactly like Metrics.
 	Notify func(Notification)
 
+	// OnClaimable, when non-nil, receives a repo's claimable count every time
+	// the engine or an operator view computes it (FilterClaimable, and the
+	// locked claim path's own knowledge of it). It is how the repo list shows
+	// a forge-bound repo's count without a forge request per repo (issue
+	// #61): the count is whatever was last computed anyway. cmd/lab wires the
+	// readiness recorder; nil is a no-op.
+	OnClaimable func(repo store.Repo, count int)
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -183,6 +191,9 @@ type Service struct {
 	metrics      *metrics.Metrics   // nil-safe report methods
 	notify       func(Notification) // nil is a no-op, like metrics
 	now          func() time.Time
+	// onClaimable receives each computed claimable count (Options.OnClaimable);
+	// nil is a no-op — reportClaimable is the one caller.
+	onClaimable func(repo store.Repo, count int)
 
 	// mu single-flights the entire select→claim→spawn in launch — the ONE
 	// claim path (manual starts, spawn-pass launches, toggle-on kicks); v0's
@@ -291,6 +302,7 @@ func New(o Options) (*Service, error) {
 		metrics:            o.Metrics,
 		notify:             o.Notify,
 		now:                now,
+		onClaimable:        o.OnClaimable,
 		schedulePending:    map[string]time.Time{},
 		scheduleChecked:    map[string]time.Time{},
 		// Construction time bounds the startup missed-slot log alone: slots

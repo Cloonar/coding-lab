@@ -987,6 +987,26 @@ type ConnectingReporter interface {
 	Connecting(sessionName string) bool
 }
 
+// AuthPeeker is the optional capability of reporting the last KNOWN
+// machine-level login state without checking it. AuthStatus answers from a
+// cache only while that cache is fresh and otherwise runs the provider's
+// status command — a process, and on a container-mode server a podman
+// container (ADR-0057) — which is right for a spawn decision and for the
+// login card, and far too much for a page view: the readiness report (issue
+// #61) is read with every repo list and must start nothing.
+//
+// LastAuthStatus returns the status the most recent check produced, whatever
+// its age, and true; or the zero status and false when no check has run
+// since the process started. It never runs the status command, never
+// refreshes the cache, and never blocks behind a check that is in flight —
+// it reports the previous result until that check lands. CheckedAt says how
+// old the answer is. Advertised by type assertion at the call site, exactly
+// like ConnectingReporter and DeepLinker (ADR-0017); a provider without it
+// simply has no login state anyone can read for free.
+type AuthPeeker interface {
+	LastAuthStatus() (st AuthStatus, known bool)
+}
+
 // LoginCodeReporter is the optional device-code capability: a provider whose
 // auth flow is AuthFlowDeviceCode surfaces the pending login attempt's
 // one-time user code here, and httpapi echoes it in the login/start response

@@ -122,12 +122,7 @@ func (s *Server) handleAFKAuto(w http.ResponseWriter, r *http.Request) {
 		// this handler and stops with the server.
 		go s.afk.SpawnOnce(s.shutdownCtx)
 	}
-	eff, err := s.afkPromptEffective(r.Context(), repo)
-	if err != nil {
-		s.internalError(w, "updating afk auto toggle", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
+	s.writeRepo(w, r, http.StatusOK, "updating afk auto toggle", repo)
 }
 
 // handleAFKReset is POST /api/v1/repos/{id}/afk/reset: zero the consecutive-
@@ -149,10 +144,5 @@ func (s *Server) handleAFKReset(w http.ResponseWriter, r *http.Request) {
 		s.publishRepoChanged(repo.ID)
 		go s.afk.SpawnOnce(s.shutdownCtx)
 	}
-	eff, err := s.afkPromptEffective(r.Context(), repo)
-	if err != nil {
-		s.internalError(w, "resetting afk failures", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
+	s.writeRepo(w, r, http.StatusOK, "resetting afk failures", repo)
 }

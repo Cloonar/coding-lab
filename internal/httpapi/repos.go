@@ -4,6 +4,11 @@ package httpapi
 // settings PATCH, guarded delete, and clone retry. All business rules live
 // in internal/reposvc; this file translates JSON ⇄ service calls and maps
 // service errors onto status codes.
+//
+// Every repo it answers with carries a computed `summary` (issue #61): the
+// claimable and open-issue counts as last known and the readiness report,
+// which GET /repos/{id}/readiness also serves alone. Their rules live in
+// internal/readiness; nothing here asks a forge or a git remote for them.
 
 import (
 	"context"
@@ -16,6 +21,7 @@ import (
 	"strings"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
+	"git.cloonar.com/Cloonar/coding-lab/internal/readiness"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
@@ -109,14 +115,24 @@ type repoResponse struct {
 	// is always digest-pinned (reposvc pins it on save). Meaningless while the
 	// effective Runner is "host", same as the container limits above.
 	ImageRef *string `json:"image_ref"`
+	// Summary is what lab knows about the repo right now without asking
+	// anyone (issue #61): the claimable and open-issue counts as last known
+	// (null = not known yet) and the readiness report. Read-only and
+	// computed, present on EVERY repo response — the list included, so its
+	// "Needs you" block costs no call per repo. Built from stored state and
+	// from the outcome of the most recent fetch and tracker read: never a
+	// forge request, a git network operation, a provider CLI process or a
+	// podman process per response (internal/readiness).
+	Summary readiness.Summary `json:"summary"`
 }
 
 // repoJSON renders a repo row as its pinned JSON shape. It is a pure function
-// of (repo, afkPromptEffective): afkPromptEffective is computed by the caller —
-// once per response for the singular handlers, once per list (a single settings
-// read) for the list handler — because it depends on the global afk_prompt
-// setting, which repoJSON must not read (keeping it side-effect free).
-func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
+// of (repo, afkPromptEffective, summary): both computed fields come from the
+// caller — once per response for the singular handlers, once per list for the
+// list handler — because they depend on state repoJSON must not read (the
+// global afk_prompt setting; the readiness evaluation), keeping it
+// side-effect free.
+func repoJSON(r store.Repo, afkPromptEffective string, summary readiness.Summary) repoResponse {
 	resp := repoResponse{
 		ID:                   r.ID,
 		Name:                 r.Name,
@@ -160,6 +176,7 @@ func repoJSON(r store.Repo, afkPromptEffective string) repoResponse {
 		ContainerPids:        r.ContainerPids,
 		ContainerNofile:      r.ContainerNofile,
 		ImageRef:             r.ImageRef,
+		Summary:              summary,
 	}
 	if r.LastOpenedAt != nil {
 		t := store.FormatTime(*r.LastOpenedAt)
@@ -192,6 +209,43 @@ func (s *Server) afkPromptEffective(ctx context.Context, repo store.Repo) (strin
 		return "", err
 	}
 	return effectiveAFKPrompt(global, repo), nil
+}
+
+// writeRepo answers with one repo in its pinned JSON shape, computing the two
+// read-only fields a single-repo response carries: afk_prompt_effective (one
+// settings read) and the summary (issue #61 — the readiness evaluation, which
+// reads only what lab already holds). Every handler that returns a repo ends
+// here, so none of them can return one without its summary. doing names the
+// operation for the log line of a failed computation.
+func (s *Server) writeRepo(w http.ResponseWriter, r *http.Request, status int, doing string, repo store.Repo) {
+	eff, err := s.afkPromptEffective(r.Context(), repo)
+	if err != nil {
+		s.internalError(w, doing, err)
+		return
+	}
+	summary, err := s.readiness.Summary(r.Context(), repo)
+	if err != nil {
+		s.internalError(w, doing, err)
+		return
+	}
+	writeJSON(w, status, repoJSON(repo, eff, summary))
+}
+
+// handleRepoReadiness is GET /api/v1/repos/{id}/readiness: the readiness
+// report alone — {state, checks} — the same one the repo's summary carries.
+// It is built from stored state and recorded outcomes only; loading it
+// causes no request to a forge and no git network operation.
+func (s *Server) handleRepoReadiness(w http.ResponseWriter, r *http.Request) {
+	repo, ok := s.loadRepo(w, r)
+	if !ok {
+		return
+	}
+	report, err := s.readiness.Report(r.Context(), repo)
+	if err != nil {
+		s.internalError(w, "evaluating readiness", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 // writeRepoError maps reposvc/store errors onto the pinned status codes.
@@ -262,12 +316,7 @@ func (s *Server) handleRepoCreate(w http.ResponseWriter, r *http.Request) {
 		s.writeRepoError(w, "creating repo", err)
 		return
 	}
-	eff, err := s.afkPromptEffective(r.Context(), repo)
-	if err != nil {
-		s.internalError(w, "creating repo", err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, repoJSON(repo, eff))
+	s.writeRepo(w, r, http.StatusCreated, "creating repo", repo)
 }
 
 // normalizeOptID treats an absent, null, or empty-string id as nil.
@@ -297,9 +346,18 @@ func (s *Server) handleRepoList(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "listing repos", err)
 		return
 	}
+	// One batched evaluation for the whole list (issue #61): the summaries
+	// share their store reads, and none of them asks a forge, a remote, a
+	// provider CLI or podman — so the list stays one cheap call however many
+	// repos it holds.
+	summaries, err := s.readiness.Summaries(r.Context(), repos)
+	if err != nil {
+		s.internalError(w, "listing repos", err)
+		return
+	}
 	items := make([]repoResponse, 0, len(repos))
-	for _, repo := range repos {
-		items = append(items, repoJSON(repo, effectiveAFKPrompt(global, repo)))
+	for i, repo := range repos {
+		items = append(items, repoJSON(repo, effectiveAFKPrompt(global, repo), summaries[i]))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"repos": items})
 }
@@ -311,12 +369,7 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 		s.writeRepoError(w, "loading repo", err)
 		return
 	}
-	eff, err := s.afkPromptEffective(r.Context(), repo)
-	if err != nil {
-		s.internalError(w, "loading repo", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
+	s.writeRepo(w, r, http.StatusOK, "loading repo", repo)
 }
 
 // handleRepoUpdate is PATCH /api/v1/repos/{id}. The body is read as raw
@@ -450,12 +503,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		s.writeRepoError(w, "updating repo", err)
 		return
 	}
-	eff, err := s.afkPromptEffective(r.Context(), repo)
-	if err != nil {
-		s.internalError(w, "updating repo", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
+	s.writeRepo(w, r, http.StatusOK, "updating repo", repo)
 }
 
 // handleRepoDelete is DELETE /api/v1/repos/{id}[?force=true]: 204, or 409
@@ -466,6 +514,10 @@ func (s *Server) handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 		s.writeRepoError(w, "deleting repo", err)
 		return
 	}
+	// The repo is gone: so is everything remembered about its fetches and
+	// tracker reads (issue #61). Ids are never reused, so this is hygiene,
+	// not correctness.
+	s.readinessRec.Forget(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

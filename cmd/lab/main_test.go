@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,12 +11,16 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
 	"git.cloonar.com/Cloonar/coding-lab/internal/providercli"
+	"git.cloonar.com/Cloonar/coding-lab/internal/readiness"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
@@ -303,4 +308,78 @@ func TestProviderCLIConfigsKeepTheFlagImage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// announceContainerRepos tells open pages that the container preflight's
+// verdict moved (issue #61): repo.changed for exactly the repos whose dev
+// image check depends on it — effective Runner container, pinned or
+// inherited — plus any whose Runner cannot be resolved; never a host repo.
+func TestAnnounceContainerRepos(t *testing.T) {
+	st := testutil.TempStore(t)
+	ctx := context.Background()
+	if err := st.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string, runner *string) string {
+		t.Helper()
+		r, err := st.CreateRepo(ctx, store.Repo{
+			ID: ids.NewID("repo"), Name: name, RemoteURL: "https://forge.example.com/acme/" + name + ".git",
+			TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
+			AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: runner,
+			CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("CreateRepo %s: %v", name, err)
+		}
+		return r.ID
+	}
+	pinnedContainer := mk("pinned-container", new(store.RunnerContainer))
+	pinnedHost := mk("pinned-host", new(store.RunnerHost))
+	inherits := mk("inherits", nil)
+	broken := mk("broken-pin", new("vm"))
+
+	bus := events.NewBus()
+	ch, cancel := bus.Subscribe(ctx)
+	defer cancel()
+	rec := readiness.NewRecorder(bus, nil)
+	announced := func() []string {
+		t.Helper()
+		var ids []string
+		for {
+			select {
+			case e := <-ch:
+				if e.Type != readiness.EventRepoChanged {
+					t.Fatalf("published %q, want repo.changed", e.Type)
+				}
+				raw, _ := json.Marshal(e.Payload)
+				var p struct {
+					RepoID string `json:"repoID"`
+				}
+				if err := json.Unmarshal(raw, &p); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, p.RepoID)
+			default:
+				slices.Sort(ids)
+				return ids
+			}
+		}
+	}
+	sorted := func(ids ...string) []string { slices.Sort(ids); return ids }
+
+	// The seeded default Runner is host: the inheriting repo is a host repo.
+	announceContainerRepos(ctx, st, rec)
+	if got, want := announced(), sorted(pinnedContainer, broken); !slices.Equal(got, want) {
+		t.Fatalf("announced %v, want the pinned container repo and the unresolvable one %v", got, want)
+	}
+
+	// The default flips to container: the inheriting repo now counts.
+	if err := st.SetSetting(ctx, store.SettingRunnerDefault, store.RunnerContainer); err != nil {
+		t.Fatal(err)
+	}
+	announceContainerRepos(ctx, st, rec)
+	if got, want := announced(), sorted(pinnedContainer, broken, inherits); !slices.Equal(got, want) {
+		t.Fatalf("announced %v, want %v", got, want)
+	}
+	_ = pinnedHost // never announced: a host run needs no preflight
 }

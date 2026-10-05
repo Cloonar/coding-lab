@@ -59,9 +59,12 @@ func (e *Engine) HeadBranch(ctx context.Context, gitDir string, extraEnv []strin
 // origin` with extraEnv (fail-loud, stderr verbatim in the error), then a
 // best-effort `git remote set-head origin --auto` so origin/HEAD tracks a
 // default-branch change on the remote. Bounded by gitTimeout like every
-// other non-clone op.
+// other non-clone op. The outcome of the fetch itself is reported to the
+// fetch observer when ctx is attributed (AttributeFetch, observe.go).
 func (e *Engine) Fetch(ctx context.Context, bareDir string, extraEnv []string) error {
-	if _, err := e.run(ctx, bareDir, extraEnv, "fetch", "origin"); err != nil {
+	_, err := e.run(ctx, bareDir, extraEnv, "fetch", "origin")
+	e.reportFetch(ctx, err)
+	if err != nil {
 		return err
 	}
 	_, _ = e.run(ctx, bareDir, extraEnv, "remote", "set-head", "origin", "--auto")

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
@@ -201,6 +202,11 @@ type Provider struct {
 	authMu      sync.Mutex
 	authCache   provider.AuthStatus
 	authChecked time.Time
+	// authLast is the status the most recent check produced, published for
+	// LastAuthStatus (provider.AuthPeeker): written under authMu by the
+	// refresh, read WITHOUT it, so a peek never waits behind the status
+	// command. nil until the first check.
+	authLast atomic.Pointer[provider.AuthStatus]
 
 	// loginMu guards loginURL — the scraped OAuth URL of the current login
 	// attempt. In-memory only, never persisted; re-scraped from the live
@@ -224,6 +230,7 @@ var _ provider.AgentProvider = (*Provider)(nil)
 var _ provider.ConnectingReporter = (*Provider)(nil)
 var _ provider.DeepLinker = (*Provider)(nil)
 var _ provider.RemoteCapable = (*Provider)(nil)
+var _ provider.AuthPeeker = (*Provider)(nil)
 
 // New validates o and returns a Provider with the pinned production
 // timeouts. ClaudeBin/ConfigPath are the two fields issue #78 made

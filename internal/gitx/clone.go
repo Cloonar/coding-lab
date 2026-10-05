@@ -51,6 +51,9 @@ const cloneStderrTailLines = 40
 // destDir is removed, unless the directory already existed before the call
 // (then it is left alone — CloneBare never destroys data it did not create).
 //
+// A clone that completes is reported to the fetch observer as a successful
+// fetch when ctx is attributed (AttributeFetch, observe.go).
+//
 // The clone is configured with the standard remote-tracking refspec
 // (+refs/heads/*:refs/remotes/origin/*), so refs/remotes/origin/<branch>
 // exists from the start and Fetch keeps it fresh — the layout the merged
@@ -96,6 +99,10 @@ func (e *Engine) CloneBare(ctx context.Context, remoteURL, destDir string, extra
 
 	waitErr := cmd.Wait()
 	if waitErr == nil {
+		// A completed clone is a completed credentialed fetch: report it as
+		// one (observe.go). Only the success is evidence — a failed clone is
+		// already the repo's clone_status and clone_error.
+		e.reportFetch(ctx, nil)
 		return nil
 	}
 	if !existed {

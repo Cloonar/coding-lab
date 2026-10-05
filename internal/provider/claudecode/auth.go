@@ -87,5 +87,19 @@ func (p *Provider) refreshAuthLocked(ctx context.Context) (provider.AuthStatus, 
 	st.CheckedAt = p.now()
 	p.authCache = st
 	p.authChecked = time.Now()
+	p.authLast.Store(&st)
 	return st, err
+}
+
+// LastAuthStatus implements provider.AuthPeeker: the status the most recent
+// check produced, however old, without running the status command — (zero,
+// false) until a first check has run. Lock-free on purpose: authMu is held
+// for the whole status command, and a readiness read (issue #61) must not
+// wait for one.
+func (p *Provider) LastAuthStatus() (provider.AuthStatus, bool) {
+	st := p.authLast.Load()
+	if st == nil {
+		return provider.AuthStatus{}, false
+	}
+	return *st, true
 }

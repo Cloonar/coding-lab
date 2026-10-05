@@ -145,6 +145,9 @@ type Registry struct {
 	newGitHub  GitHubFactory
 	observe    Observer // optional metrics seam (instrument.go); nil → unwrapped
 	merger     CRMerger // optional built-in CR-merge service; nil → MergePull fails loud
+	// observeRead is the optional list-read seam (instrument.go, issue #61):
+	// the outcome of every list read of a forge-bound repo's tracker.
+	observeRead ReadObserver
 }
 
 // NewRegistry builds a Registry. st and v back forge-credential decryption and
@@ -183,41 +186,76 @@ func (r *Registry) SetCRMerger(m CRMerger) { r.merger = m }
 func (r *Registry) TrackerFor(ctx context.Context, repo store.Repo) (Tracker, error) {
 	switch repo.TrackerBinding {
 	case store.TrackerBindingBuiltin:
-		return r.instrument(r.newBuiltin(BuiltinConfig{Store: r.store, RepoID: repo.ID, Merger: r.merger}), store.TrackerBindingBuiltin), nil
+		return r.instrument(r.newBuiltin(BuiltinConfig{Store: r.store, RepoID: repo.ID, Merger: r.merger}),
+			store.TrackerBindingBuiltin, repo.ID, ""), nil
 	case store.TrackerBindingForge:
-		trk, err := r.forgeTracker(ctx, repo)
+		trk, credential, err := r.forgeTracker(ctx, repo)
 		if err != nil {
 			return nil, err
 		}
-		return r.instrument(trk, store.TrackerBindingForge), nil
+		return r.instrument(trk, store.TrackerBindingForge, repo.ID, credential), nil
 	default:
 		return nil, fmt.Errorf("tracker for repo %q: %w (%q)", repo.ID, ErrUnknownBinding, repo.TrackerBinding)
 	}
 }
 
-// forgeTracker resolves the forge-bound branch of TrackerFor: decrypt the
-// forge credential, route on its flavor (the authority — not repos.forge_kind),
-// and build the matching REST client scoped to the repo's owner/repo path. The
-// credential load precedes the flavor decision because the flavor LIVES in the
-// decrypted payload.
-func (r *Registry) forgeTracker(ctx context.Context, repo store.Repo) (Tracker, error) {
+// CheckConfig reports whether repo's tracker binding can be driven at all —
+// exactly TrackerFor's own resolution, stopped before a tracker is built, so
+// it fails with the same errors for the same reasons (unknown binding,
+// missing or wrong-kind forge credential, a credential that does not decrypt,
+// a flavor or host mismatch, a remote with no owner/repo pair). It reads the
+// store and the vault only: no client is constructed and no request reaches a
+// forge, which is what lets the readiness report (issue #61) ask it on every
+// page view.
+func (r *Registry) CheckConfig(ctx context.Context, repo store.Repo) error {
+	switch repo.TrackerBinding {
+	case store.TrackerBindingBuiltin:
+		return nil
+	case store.TrackerBindingForge:
+		_, err := r.resolveForge(ctx, repo)
+		return err
+	default:
+		return fmt.Errorf("tracker for repo %q: %w (%q)", repo.ID, ErrUnknownBinding, repo.TrackerBinding)
+	}
+}
+
+// forgeClient is a forge-bound repo's tracker resolved down to what a REST
+// client is built from — everything forgeTracker's validation decides, before
+// any client exists. credential is the stamp of the credential row it came
+// from (store.CredentialStamp): the version a list read's outcome is
+// attributed to (ListRead.Credential).
+type forgeClient struct {
+	flavor      string
+	host        string
+	token       string
+	owner, repo string
+	credential  string
+}
+
+// resolveForge is the validating half of the forge-bound branch of
+// TrackerFor: decrypt the forge credential, route on its flavor (the
+// authority — not repos.forge_kind), and derive the API host and the repo's
+// owner/repo path. The credential load precedes the flavor decision because
+// the flavor LIVES in the decrypted payload. It builds nothing and reaches no
+// forge — CheckConfig stops here.
+func (r *Registry) resolveForge(ctx context.Context, repo store.Repo) (forgeClient, error) {
 	if repo.ForgeCredentialID == nil {
-		return nil, fmt.Errorf("tracker for repo %q: %w", repo.ID, ErrForgeCredentialMissing)
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: %w", repo.ID, ErrForgeCredentialMissing)
 	}
 	cred, err := r.store.CredentialByID(ctx, *repo.ForgeCredentialID)
 	if err != nil {
-		return nil, fmt.Errorf("tracker for repo %q: load forge credential: %w", repo.ID, err)
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: load forge credential: %w", repo.ID, err)
 	}
 	if cred.Kind != store.CredentialKindForgeToken {
-		return nil, fmt.Errorf("tracker for repo %q: %w (%q)", repo.ID, ErrForgeCredentialKind, cred.Kind)
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: %w (%q)", repo.ID, ErrForgeCredentialKind, cred.Kind)
 	}
 	var payload vault.ForgeTokenPayload
 	if err := r.vault.DecryptPayload(cred.EncryptedPayload, &payload); err != nil {
-		return nil, fmt.Errorf("tracker for repo %q: decrypt forge credential: %w", repo.ID, err)
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: decrypt forge credential: %w", repo.ID, err)
 	}
 	flavor := payload.ForgeFlavor()
 	if flavor != vault.ForgeForgejo && flavor != vault.ForgeGitHub {
-		return nil, fmt.Errorf("tracker for repo %q: %w (%q)", repo.ID, ErrForgeUnsupported, flavor)
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: %w (%q)", repo.ID, ErrForgeUnsupported, flavor)
 	}
 
 	// Mismatch tripwire: the credential's flavor routes, but a RECOGNIZED
@@ -228,40 +266,54 @@ func (r *Registry) forgeTracker(ctx context.Context, repo store.Repo) (Tracker, 
 	// Forgejo) is exempt: there is no detected truth to contradict, so the
 	// operator's explicit flavor wins.
 	if repo.ForgeKind != string(ForgeKindNone) && repo.ForgeKind != flavor {
-		return nil, fmt.Errorf("tracker for repo %q: %w (host detected as %q, credential is %q)",
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: %w (host detected as %q, credential is %q)",
 			repo.ID, ErrForgeFlavorMismatch, repo.ForgeKind, flavor)
 	}
 
 	host, err := NormalizeForgeHost(flavor, payload.Host)
 	if err != nil {
-		return nil, fmt.Errorf("tracker for repo %q: forge credential %q: %w", repo.ID, cred.Name, err)
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: forge credential %q: %w", repo.ID, cred.Name, err)
 	}
 
 	path, ok := RepoPath(repo.RemoteURL)
 	if !ok {
-		return nil, fmt.Errorf("tracker for repo %q: %w", repo.ID, ErrRemotePath)
+		return forgeClient{}, fmt.Errorf("tracker for repo %q: %w", repo.ID, ErrRemotePath)
 	}
 	owner, name, _ := strings.Cut(path, "/") // RepoPath guarantees exactly two segments
 
-	if flavor == vault.ForgeGitHub {
+	return forgeClient{
+		flavor: flavor, host: host, token: payload.Token, owner: owner, repo: name,
+		credential: store.CredentialStamp(cred.ID, cred.UpdatedAt),
+	}, nil
+}
+
+// forgeTracker is the forge-bound branch of TrackerFor: resolveForge, then
+// the REST client its flavor names, scoped to the repo's owner/repo path. It
+// also hands back the credential stamp the client was built from.
+func (r *Registry) forgeTracker(ctx context.Context, repo store.Repo) (Tracker, string, error) {
+	fc, err := r.resolveForge(ctx, repo)
+	if err != nil {
+		return nil, "", err
+	}
+	if fc.flavor == vault.ForgeGitHub {
 		// github's host IS the API origin (api.github.com, or a GHE root) —
 		// used verbatim, no /api/v1 derivation (GHE URL layouts make any
 		// heuristic silently wrong).
 		return r.newGitHub(GitHubConfig{
 			HTTPClient: r.httpClient,
-			BaseURL:    "https://" + host,
-			Token:      payload.Token,
-			Owner:      owner,
-			Repo:       name,
-		}), nil
+			BaseURL:    "https://" + fc.host,
+			Token:      fc.token,
+			Owner:      fc.owner,
+			Repo:       fc.repo,
+		}), fc.credential, nil
 	}
 	return r.newForgejo(ForgejoConfig{
 		HTTPClient: r.httpClient,
-		BaseURL:    "https://" + host + "/api/v1",
-		Token:      payload.Token,
-		Owner:      owner,
-		Repo:       name,
-	}), nil
+		BaseURL:    "https://" + fc.host + "/api/v1",
+		Token:      fc.token,
+		Owner:      fc.owner,
+		Repo:       fc.repo,
+	}), fc.credential, nil
 }
 
 // forgeHostScheme is the one scheme prefix NormalizeForgeHost forgives in a

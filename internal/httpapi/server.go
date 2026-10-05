@@ -29,6 +29,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
+	"git.cloonar.com/Cloonar/coding-lab/internal/readiness"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -89,6 +90,15 @@ type Options struct {
 	// ready endpoint. Nil leaves the AFK routes unmounted (and the ready
 	// endpoint falls back to the raw ready count).
 	AFK *afk.Service
+
+	// Readiness is the recorder of fetch, tracker-read, claimable-count and
+	// dev-image outcomes the readiness report and the repo summaries are built
+	// from (issue #61). cmd/lab passes the ONE recorder it also wires into the
+	// git engine, the tracker registry, the instance service and the AFK
+	// engine as their observers. Nil gets a private, never-fed recorder: every
+	// repo response still carries a summary, built from stored state alone —
+	// the checks that need a recorded outcome are simply left out.
+	Readiness *readiness.Recorder
 
 	// Push is the Web Push sender (issue #98): the VAPID public key and
 	// subscription CRUD/test routes. Nil leaves the /push routes unmounted.
@@ -262,6 +272,12 @@ type Server struct {
 	pull      *pull.Service
 	presence  *presence.Registry
 
+	// readiness builds every repo response's summary and the readiness report
+	// (issue #61); readinessRec is the recorder behind it, held to drop a
+	// deleted repo's records. Both are always set (New).
+	readiness    *readiness.Evaluator
+	readinessRec *readiness.Recorder
+
 	onecli           *onecli.Client
 	oneCLIAPIURL     string
 	oneCLIGatewayURL string
@@ -402,6 +418,27 @@ func New(o Options) (*Server, error) {
 	s.shutdownCtx, s.shutdownCancel = context.WithCancel(context.Background())
 	s.warpgate, s.warpgateHostKeys = normalizeWarpgate(o.Warpgate, o.WarpgateHostKeys)
 
+	// The readiness evaluator (issue #61) reads the spawn path's own
+	// resolvers, the tracker registry's local validation and the AFK engine's
+	// local count. Each seam is assigned only from a non-nil pointer: a nil
+	// *instance.Service stored in the interface field would be a NON-nil
+	// interface, and the evaluator's "no spawner, leave the check out" branch
+	// would call into it instead.
+	s.readinessRec = o.Readiness
+	if s.readinessRec == nil {
+		s.readinessRec = readiness.NewRecorder(o.Bus, now)
+	}
+	s.readiness = &readiness.Evaluator{Store: o.Store, Recorder: s.readinessRec}
+	if o.Instances != nil {
+		s.readiness.Spawner = o.Instances
+	}
+	if o.Tracker != nil {
+		s.readiness.Tracker = o.Tracker
+	}
+	if o.AFK != nil {
+		s.readiness.Claimable = o.AFK
+	}
+
 	if o.BaseURL != "" {
 		u, err := url.Parse(o.BaseURL)
 		if err != nil {
@@ -481,6 +518,10 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("PATCH /api/v1/repos/{id}", s.requireAuth(s.handleRepoUpdate))
 		api.HandleFunc("DELETE /api/v1/repos/{id}", s.requireAuth(s.handleRepoDelete))
 		api.HandleFunc("POST /api/v1/repos/{id}/clone/retry", s.requireAuth(s.handleRepoCloneRetry))
+		// The readiness report (issue #61): whether a run can start in the
+		// repo right now, from what lab already knows — the same report every
+		// repo response carries in its summary, refreshed on its own.
+		api.HandleFunc("GET /api/v1/repos/{id}/readiness", s.requireAuth(s.handleRepoReadiness))
 
 		// Read-only imports (issue #261 / ADR-0063): the repo-scoped
 		// declarations of which other repos' origin/<default> this repo's

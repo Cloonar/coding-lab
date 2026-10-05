@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // Pinned `codex login status` output shapes (live 0.133.0): logged in →
@@ -163,4 +165,79 @@ func countCalls(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	return len(b)
+}
+
+// LastAuthStatus (provider.AuthPeeker, issue #61) reports the last KNOWN
+// login state and never looks: it runs no status command — not before a
+// first check, not once the render cache has gone stale, not when the truth
+// has changed underneath — and it does not wait for a check in flight. That
+// is what lets the readiness report read it on every page view.
+func TestLastAuthStatus_peeksAndNeverChecks(t *testing.T) {
+	counter := t.TempDir() + "/calls"
+	p, _ := testProvider(t, newFakeRunner())
+	p.codexBin = fakeCodex(t, `printf x >> '`+counter+`'; echo 'Logged in using ChatGPT'`)
+	p.authTTL = time.Minute
+	ctx := context.Background()
+	var _ provider.AuthPeeker = p
+
+	// Nothing checked since the process started: unknown, and still unchecked.
+	if st, known := p.LastAuthStatus(); known || st.LoggedIn || !st.CheckedAt.IsZero() {
+		t.Fatalf("LastAuthStatus before any check = %+v, known=%v; want the zero status, unknown", st, known)
+	}
+	if n := countCalls(t, counter); n != 0 {
+		t.Fatalf("a peek ran the status command %d time(s)", n)
+	}
+
+	checked, err := p.AuthStatus(ctx, true)
+	if err != nil || !checked.LoggedIn {
+		t.Fatalf("AuthStatus = %+v, %v; want logged in", checked, err)
+	}
+	for range 50 {
+		if st, known := p.LastAuthStatus(); !known || st != checked {
+			t.Fatalf("LastAuthStatus = %+v, known=%v; want the checked status %+v", st, known, checked)
+		}
+	}
+
+	// The render cache ages out. AuthStatus would refresh now; a peek does not.
+	p.authMu.Lock()
+	p.authChecked = time.Now().Add(-2 * time.Minute)
+	p.authMu.Unlock()
+	// And the account logs out underneath. The peek keeps the last known
+	// answer until something actually checks.
+	p.codexBin = fakeCodex(t, `printf x >> '`+counter+`'; echo 'Not logged in'; exit 1`)
+	if st, known := p.LastAuthStatus(); !known || !st.LoggedIn {
+		t.Fatalf("LastAuthStatus after the cache aged out = %+v, known=%v; want the last known (logged in)", st, known)
+	}
+	if n := countCalls(t, counter); n != 1 {
+		t.Fatalf("status command ran %d times, want 1 — only the explicit check", n)
+	}
+
+	// A check in flight holds authMu for the whole status command; the peek
+	// answers anyway, with the previous result.
+	p.authMu.Lock()
+	done := make(chan provider.AuthStatus, 1)
+	go func() {
+		st, _ := p.LastAuthStatus()
+		done <- st
+	}()
+	select {
+	case st := <-done:
+		if !st.LoggedIn {
+			t.Errorf("peek during a check = %+v, want the previous result", st)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("LastAuthStatus blocked behind an in-flight check")
+	}
+	p.authMu.Unlock()
+
+	// The next real check is what moves it.
+	if st, _ := p.AuthStatus(ctx, false); st.LoggedIn {
+		t.Fatal("AuthStatus after the logout still reads logged in")
+	}
+	if st, known := p.LastAuthStatus(); !known || st.LoggedIn {
+		t.Fatalf("LastAuthStatus after the re-check = %+v, known=%v; want logged out", st, known)
+	}
+	if n := countCalls(t, counter); n != 2 {
+		t.Fatalf("status command ran %d times, want 2", n)
+	}
 }
