@@ -7,9 +7,12 @@
 //
 // The frame owns RequireAuth, the page container, the ONE live repo resource
 // (getRepo + repo.changed for this repo) and the one toast; tabs read both
-// through useRepoHome() (./context.ts). A failed repo load shows its banner in
-// the header slot while the back link and the tabs stay usable, and the
-// routed tab still renders — a loaded issue stays readable without its repo.
+// through useRepoHome() (./context.ts). It also mounts the repo settings form
+// store with its save bar and leave guard (routes/repo-settings/form.tsx), so
+// pending settings changes outlive the Settings tab. A failed repo load shows
+// its banner in the header slot while the back link and the tabs stay usable,
+// and the routed tab still renders — a loaded issue stays readable without
+// its repo.
 //
 // The tabs are navigation links (a <nav> of <a href>, aria-current="page" on
 // the active one), not ARIA tabs: each one is a real URL, and the router's
@@ -29,6 +32,9 @@ import { createLiveResource } from '../../lib/liveResource';
 import { remoteLabel } from '../../lib/repoName';
 import { resourceValue } from '../../lib/resource';
 import { useRouteNotice } from '../../lib/routeNotice';
+import { RepoSettingsFormProvider } from '../repo-settings/form';
+import LeaveGuard from '../repo-settings/LeaveGuard';
+import SaveBar from '../repo-settings/SaveBar';
 import { RepoHomeContext, type RepoHomeState } from './context';
 
 export { useRepoHome } from './context';
@@ -128,41 +134,41 @@ function RepoHomeFrame(props: { children?: JSX.Element }) {
           <Show when={repo()}>{(r) => <RepoHeader repo={r()} />}</Show>
         </header>
 
-        {/* SETTINGS SLOT — the repo settings part mounts here:
-            1. its form-store provider, wrapping the <nav> below AND the
-               routed child, so pending changes survive switching tabs inside
-               this repo (the provider reads the repo from useRepoHome());
-            2. its save bar, right after `.repo-home-body`, so it stays visible
-               on Overview and Issues while changes are pending;
-            3. its leave guard: the in-page dialog (components/Dialog) for
-               in-app navigation that leaves /repos/:id, and beforeunload for
-               a tab close or reload. Same-repo moves (tab switches, the
-               route-notice replace in lib/routeNotice.ts) must pass. */}
-        <nav class="repo-tabs" aria-label="Repository">
-          <RepoTabLink href={base()} active={tab() === 'overview'}>
-            Overview
-          </RepoTabLink>
-          <RepoTabLink href={`${base()}/issues`} active={tab() === 'issues'}>
-            Issues
-            {/* 0 is a real count (a fresh repo); null = not known yet. */}
-            <Show when={openIssues() !== null}>
-              <span class="count" aria-hidden="true">
-                {openIssues()}
-              </span>
-              <span class="visually-hidden"> ({openIssues()} open)</span>
-            </Show>
-          </RepoTabLink>
-          <Show when={showCRs()}>
-            <RepoTabLink href={`${base()}/crs`} active={tab() === 'crs'}>
-              CRs
+        {/* The repo settings form (issue #61) lives at the frame, around the
+            tabs and the routed tab, so pending changes survive switching
+            tabs inside this repo. Its save bar follows the tab body and
+            stays visible on Overview and Issues while changes are pending;
+            its leave guard asks in an in-page dialog before any in-app
+            navigation that leaves /repos/:id (same-repo moves pass). */}
+        <RepoSettingsFormProvider>
+          <nav class="repo-tabs" aria-label="Repository">
+            <RepoTabLink href={base()} active={tab() === 'overview'}>
+              Overview
             </RepoTabLink>
-          </Show>
-          <RepoTabLink href={`${base()}/settings`} active={tab() === 'settings'}>
-            Settings
-          </RepoTabLink>
-        </nav>
+            <RepoTabLink href={`${base()}/issues`} active={tab() === 'issues'}>
+              Issues
+              {/* 0 is a real count (a fresh repo); null = not known yet. */}
+              <Show when={openIssues() !== null}>
+                <span class="count" aria-hidden="true">
+                  {openIssues()}
+                </span>
+                <span class="visually-hidden"> ({openIssues()} open)</span>
+              </Show>
+            </RepoTabLink>
+            <Show when={showCRs()}>
+              <RepoTabLink href={`${base()}/crs`} active={tab() === 'crs'}>
+                CRs
+              </RepoTabLink>
+            </Show>
+            <RepoTabLink href={`${base()}/settings`} active={tab() === 'settings'}>
+              Settings
+            </RepoTabLink>
+          </nav>
 
-        <div class="repo-home-body">{props.children}</div>
+          <div class="repo-home-body">{props.children}</div>
+          <SaveBar />
+          <LeaveGuard />
+        </RepoSettingsFormProvider>
         {toast.Toast()}
       </main>
     </RepoHomeContext.Provider>

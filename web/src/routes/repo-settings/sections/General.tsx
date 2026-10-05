@@ -1,119 +1,20 @@
-// General section (issue #198): the monolith's Identity and Incogni cards as
-// one per-section form — drafts seeded via createSeededDrafts, saved as a
-// dirty-fields-only PATCH through useSettingsForm.
+// General section (issue #61): the repo's name, its git author identity and
+// Incogni — a thin renderer over the form store. Every control edits a draft;
+// the page's save bar sends the changed ones (form.tsx, fields.ts).
 
-import type { Accessor } from 'solid-js';
-import { updateRepo, type Repo, type RepoPatch } from '../../../api';
-import Banner from '../../../components/Banner';
-import SectionCard from '../../../components/SectionCard';
-import { useSettingsForm } from '../../../components/settings/useSettingsForm';
-import { createSeededDrafts } from '../../../lib/seededDrafts';
-import { normText } from '../shared';
+import { SwitchField, TextField } from '../Field';
 
-export default function GeneralSection(props: { repo: Accessor<Repo>; onSaved: () => void }) {
-  const drafts = createSeededDrafts(() => props.repo());
-  const [name, setName] = drafts.field((r) => r.name);
-  const [authorName, setAuthorName] = drafts.field((r) => r.git_author_name ?? '');
-  const [authorEmail, setAuthorEmail] = drafts.field((r) => r.git_author_email ?? '');
-  const [incogni, setIncogni] = drafts.field((r) => r.incogni);
-
-  const buildPatch = (): RepoPatch | string => {
-    // Diff against the seed the drafts came from — NOT the live props.repo().
-    // Diffing against the live repo would mark a stale draft of a field the
-    // operator never touched as "dirty" and PATCH the old value back.
-    const current = drafts.seed();
-    const patch: RepoPatch = {};
-
-    const trimmedName = name().trim();
-    if (trimmedName === '') return 'Name must not be empty.';
-    if (trimmedName !== current.name) patch.name = trimmedName;
-
-    if (normText(authorName()) !== current.git_author_name) {
-      patch.git_author_name = normText(authorName());
-    }
-    if (normText(authorEmail()) !== current.git_author_email) {
-      patch.git_author_email = normText(authorEmail());
-    }
-    if (incogni() !== current.incogni) patch.incogni = incogni();
-
-    return patch;
-  };
-
-  const dirty = () => {
-    const p = buildPatch();
-    return typeof p === 'string' || Object.keys(p).length > 0;
-  };
-
-  const form = useSettingsForm<RepoPatch>({
-    dirty,
-    buildPatch,
-    submit: (patch) => updateRepo(props.repo().id, patch),
-    onSaved: () => props.onSaved(),
-  });
-
+export default function GeneralSection() {
   return (
-    <form onSubmit={(e) => void form.save(e)} class="stack">
-      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Banner message={form.note()} variant="success" />
-
-      <SectionCard title="Identity">
-        <label class="field">
-          <span>Name</span>
-          <input
-            type="text"
-            name="name"
-            required
-            autocomplete="off"
-            spellcheck={false}
-            value={name()}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-        </label>
-        <label class="field">
-          <span>Git author name</span>
-          <input
-            type="text"
-            name="git_author_name"
-            autocomplete="off"
-            value={authorName()}
-            onInput={(e) => setAuthorName(e.currentTarget.value)}
-          />
-          <small class="hint">Blank → global setting.</small>
-        </label>
-        <label class="field">
-          <span>Git author email</span>
-          <input
-            type="text"
-            name="git_author_email"
-            autocomplete="off"
-            spellcheck={false}
-            value={authorEmail()}
-            onInput={(e) => setAuthorEmail(e.currentTarget.value)}
-          />
-          <small class="hint">Blank → global setting.</small>
-        </label>
-      </SectionCard>
-
-      <SectionCard title="Incogni">
-        <label class="check">
-          <input
-            type="checkbox"
-            name="incogni"
-            checked={incogni()}
-            onChange={(e) => setIncogni(e.currentTarget.checked)}
-          />
-          <span>Incogni</span>
-        </label>
-        <small class="hint hint-block">
-          Strips AI attribution from this repo's output. Toggling it does NOT rewrite the branch
-          pattern or prefix above — adjust those yourself if needed. It cannot hide the forge
-          account of the token used, nor style or timing signals.
-        </small>
-      </SectionCard>
-
-      <button type="submit" class="primary wide" disabled={form.busy()}>
-        {form.busy() ? 'Saving…' : 'Save changes'}
-      </button>
-    </form>
+    <div class="card settings-card">
+      <TextField name="name" required />
+      <TextField name="git_author_name" spellcheck hint="Blank inherits the global setting." />
+      <TextField name="git_author_email" hint="Blank inherits the global setting." />
+      <SwitchField
+        name="incogni"
+        description="Strips AI attribution from this repo's output."
+        hint="Branch naming stays as it is — adjust the pattern and the prefix in Branches yourself if needed. It cannot hide the forge account of the token used, nor style or timing signals."
+      />
+    </div>
   );
 }

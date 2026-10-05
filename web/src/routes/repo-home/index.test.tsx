@@ -222,7 +222,8 @@ describe('repo home routes', () => {
     [`${BASE}/labels`, () => container.querySelector('ul.label-list')],
     [`${BASE}/crs`, () => container.querySelector('[aria-label="Filter by state"]')],
     [`${BASE}/crs/3`, () => container.querySelector('.cr-branches')],
-    [`${BASE}/settings`, () => container.querySelector('a.settings-index-row')],
+    // The one-page settings: every section renders at either URL.
+    [`${BASE}/settings`, () => container.querySelector('section#settings-agents h2')],
     [`${BASE}/settings/branches`, () => container.querySelector('input[name="default_branch"]')],
   ];
   for (const [path, probe] of pages) {

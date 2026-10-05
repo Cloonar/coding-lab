@@ -1,15 +1,15 @@
-// Agents section suite (issue #198): the RepoSettings.test.tsx describes
-// whose fields now live on /repos/:id/settings/agents — stale-draft resync
-// (through createSeededDrafts now), AFK defaults, the AFK seed prompt, agent
-// selection and remote control. The stale-draft cases exercise Agents-native
-// fields here; the original default_branch/name cases moved to the Branches
-// suite with their fields.
+// Agents section suite (issues #198, #61): the section's fields on the
+// one-page settings — stale-draft resync, AFK defaults, the AFK seed prompt,
+// agent selection and remote control — each saved through the page's one
+// Save, which sends exactly the changed fields. The stale-draft cases
+// exercise Agents-native fields here; the default_branch/name cases live in
+// the Branches suite with their fields.
 //
-// The seed/resync contract under test: drafts seed from a repo SNAPSHOT.
-// When an SSE repo.changed refetch lands while the form stays mounted, a save
-// of an UNRELATED field must not diff stale drafts against the refreshed repo
-// and silently PATCH old values back. Untouched drafts follow the server;
-// dirty drafts keep the operator's edit.
+// The seed/resync contract under test: a field's draft is the operator's
+// edit, else the live repo. When an SSE repo.changed refetch lands while the
+// page stays mounted, a save of an UNRELATED field must not send stale values
+// back. Untouched fields follow the server; dirty ones keep the operator's
+// edit.
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -28,8 +28,9 @@ import {
   optionRows,
   selectTrigger,
   selectedLabel,
+  save,
+  saveBar,
   settle,
-  submitForm,
   textarea,
   toggleCheckbox,
   typeInto,
@@ -45,7 +46,7 @@ describe('RepoSettings stale-draft handling', () => {
     await mountAgents();
     const budget = await waitFor(
       () => container.querySelector<HTMLInputElement>('input[name="budget_minutes"]'),
-      'agents form',
+      'agents fields',
     );
     expect(budget.value).toBe('');
 
@@ -60,15 +61,13 @@ describe('RepoSettings stale-draft handling', () => {
 
     // ...and saving an edit to ONLY the instance cap must not revert it.
     typeInto(input('max_instances_override'), '3');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ max_instances_override: 3 }]);
     expect(h.repoOnServer.budget_minutes).toBe(30);
 
-    // The seed advanced with the save: a second submit has nothing to send.
-    submitForm();
-    await settle();
+    // Saved: nothing is pending, so there is nothing to send a second time.
+    expect(saveBar()).toBeNull();
     expect(h.patchBodies).toHaveLength(1);
   });
 
@@ -76,7 +75,7 @@ describe('RepoSettings stale-draft handling', () => {
     await mountAgents();
     const budget = await waitFor(
       () => container.querySelector<HTMLInputElement>('input[name="budget_minutes"]'),
-      'agents form',
+      'agents fields',
     );
     typeInto(budget, '45'); // operator edits the budget first
 
@@ -88,8 +87,7 @@ describe('RepoSettings stale-draft handling', () => {
     expect(budget.value).toBe('45'); // dirty draft survives the refetch
     expect(input('max_instances_override').value).toBe('7'); // untouched field follows
 
-    submitForm();
-    await settle();
+    await save();
 
     // Only the operator's edit is PATCHed — the server-side cap change is not
     // clobbered back to the stale draft value.
@@ -131,15 +129,13 @@ describe('RepoSettings AFK defaults', () => {
     );
 
     toggleCheckbox(ultracode, true);
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ afk_options: { ultracode: 'true' } }]);
     expect(h.repoOnServer.afk_options).toEqual({ ultracode: 'true' });
 
-    // The seed advanced with the save: a second submit has nothing to send.
-    submitForm();
-    await settle();
+    // Saved: nothing is pending, so there is nothing to send a second time.
+    expect(saveBar()).toBeNull();
     expect(h.patchBodies).toHaveLength(1);
   });
 
@@ -151,8 +147,7 @@ describe('RepoSettings AFK defaults', () => {
     );
 
     await chooseFromSelect('afk_model_default', 'Sonnet');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ afk_model_default: 'sonnet' }]);
     expect(h.repoOnServer.afk_model_default).toBe('sonnet');
@@ -191,8 +186,7 @@ describe('RepoSettings AFK seed prompt (issue #52)', () => {
     );
 
     typeInto(textarea('afk_prompt'), 'Always branch from main and open a PR when finished.');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([
       { afk_prompt: 'Always branch from main and open a PR when finished.' },
@@ -210,8 +204,7 @@ describe('RepoSettings AFK seed prompt (issue #52)', () => {
     expect(field.value).toBe('A previously customized prompt.');
 
     typeInto(field, '');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ afk_prompt: null }]);
   });
@@ -233,8 +226,7 @@ describe('RepoSettings agent selection (issue #66)', () => {
     expect(selectedLabel('provider')).toBe('Inherit global default');
 
     await chooseFromSelect('provider', 'Codex');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ provider: 'codex' }]);
     expect(h.repoOnServer.provider).toBe('codex');
@@ -248,8 +240,7 @@ describe('RepoSettings agent selection (issue #66)', () => {
     expect(selectedLabel('provider')).toBe('Claude Code');
 
     await chooseFromSelect('provider', 'Inherit global default');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ provider: null }]);
   });
@@ -264,8 +255,7 @@ describe('RepoSettings agent selection (issue #66)', () => {
     expect(selectedLabel('afk_provider_default')).toBe('Inherit global AFK default');
 
     await chooseFromSelect('afk_provider_default', 'Codex');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ afk_provider_default: 'codex' }]);
     expect(h.repoOnServer.afk_provider_default).toBe('codex');
@@ -312,8 +302,7 @@ describe('RepoSettings agent selection (issue #66)', () => {
     await chooseFromSelect('provider', 'Codex');
     expect(selectedLabel('model_default')).toBe('weird-model (not in catalog)');
 
-    submitForm();
-    await settle();
+    await save();
 
     // The flip PATCHes ONLY the provider — the stored model_default persists
     // (skip-layer makes it harmless at spawn; flipping back restores it).
@@ -354,8 +343,7 @@ describe('RepoSettings remote control', () => {
     // draft already changes what AFK inherit means.
     expect(selectedLabel('afk_remote_default')).toBe('Inherit global AFK default — currently off');
 
-    submitForm();
-    await settle();
+    await save();
 
     // `false` is an explicit off, not an omission — it must reach the server.
     expect(h.patchBodies).toEqual([{ remote_default: false }]);
@@ -372,8 +360,7 @@ describe('RepoSettings remote control', () => {
     expect(selectedLabel('afk_remote_default')).toBe('On');
 
     await chooseFromSelect('afk_remote_default', 'Inherit global AFK default — currently off');
-    submitForm();
-    await settle();
+    await save();
 
     // Only the AFK key — the untouched base select stays out of the patch.
     expect(h.patchBodies).toEqual([{ afk_remote_default: null }]);

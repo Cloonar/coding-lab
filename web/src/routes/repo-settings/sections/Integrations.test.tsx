@@ -1,7 +1,7 @@
-// Integrations section suite (issue #198, new coverage): per-section
-// dirty-only PATCH on the Credentials & tracker card — the native selects put
-// exactly the edited field on the wire, and each credential select offers
-// only its own kinds.
+// Integrations section suite (issues #198, #61): the section's fields on the
+// one-page settings — the tracker binding pick and the two credential picks
+// each put exactly the edited field in the page's one PATCH, and each
+// credential pick offers only its own kinds.
 
 import { describe, expect, it } from 'vitest';
 import type { CredentialListItem } from '../../../api';
@@ -9,12 +9,15 @@ import {
   REPO_ID,
   chooseNative,
   container,
+  fieldChanged,
   h,
   installRepoSettingsHooks,
   mountSettings,
   nativeSelect,
+  save,
+  segment,
+  segmentValue,
   settle,
-  submitForm,
   waitFor,
 } from '../harness';
 
@@ -43,15 +46,20 @@ const FORGE_CRED: CredentialListItem = {
 describe('repo-settings Integrations section', () => {
   it('flipping the tracker binding PATCHes exactly that field', async () => {
     await mountIntegrations();
-    const binding = await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="tracker_binding"]'),
-      'integrations form',
+    await waitFor(
+      () => container.querySelector('button[role="radio"][name="tracker_binding"]'),
+      'integrations fields',
     );
-    expect(binding.value).toBe('forge');
+    expect(segmentValue('tracker_binding')).toBe('forge');
+    // The pick is named by the field's label.
+    const group = segment('tracker_binding', 'forge').closest('[role="radiogroup"]');
+    expect(group?.getAttribute('aria-labelledby')).toBe('rs-tracker_binding-label');
 
-    chooseNative('tracker_binding', 'builtin');
-    submitForm();
+    segment('tracker_binding', 'builtin').click();
     await settle();
+    expect(segmentValue('tracker_binding')).toBe('builtin');
+    expect(fieldChanged('tracker_binding')).toBe(true);
+    await save();
 
     expect(h.patchBodies).toEqual([{ tracker_binding: 'builtin' }]);
     expect(h.repoOnServer.tracker_binding).toBe('builtin');
@@ -61,8 +69,8 @@ describe('repo-settings Integrations section', () => {
     h.credentialsOnServer = [GIT_CRED, FORGE_CRED];
     await mountIntegrations();
     await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="credential_id"]'),
-      'integrations form',
+      () => container.querySelector('select[name="credential_id"] option[value="cred_git"]'),
+      'credential options',
     );
 
     // Each select filters to its own credential kinds.
@@ -74,8 +82,7 @@ describe('repo-settings Integrations section', () => {
     expect(forgeOptions).toEqual(['', 'cred_forge']);
 
     chooseNative('credential_id', 'cred_git');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ credential_id: 'cred_git' }]);
     expect(h.repoOnServer.credential_id).toBe('cred_git');
@@ -85,15 +92,32 @@ describe('repo-settings Integrations section', () => {
     h.credentialsOnServer = [GIT_CRED, FORGE_CRED];
     await mountIntegrations();
     await waitFor(
-      () => container.querySelector<HTMLSelectElement>('select[name="forge_credential_id"]'),
-      'integrations form',
+      () =>
+        container.querySelector('select[name="forge_credential_id"] option[value="cred_forge"]'),
+      'credential options',
     );
 
     chooseNative('forge_credential_id', 'cred_forge');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ forge_credential_id: 'cred_forge' }]);
     expect(h.repoOnServer.forge_credential_id).toBe('cred_forge');
+  });
+
+  it('shows a stored credential as picked once the credential list has loaded', async () => {
+    h.credentialsOnServer = [GIT_CRED, FORGE_CRED];
+    h.repoOnServer = { ...h.repoOnServer, credential_id: 'cred_git' };
+    await mountIntegrations();
+    await waitFor(
+      () => container.querySelector('select[name="credential_id"] option[value="cred_git"]'),
+      'credential options',
+    );
+
+    expect(nativeSelect('credential_id').value).toBe('cred_git');
+
+    // Clearing it PATCHes null.
+    chooseNative('credential_id', '');
+    await save();
+    expect(h.patchBodies).toEqual([{ credential_id: null }]);
   });
 });

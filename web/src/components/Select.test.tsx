@@ -281,6 +281,57 @@ describe('Select catalog semantics (former CatalogSelect)', () => {
   });
 });
 
+describe('Select field skin with a host-drawn label', () => {
+  it('draws its own label and is named by it by default', () => {
+    mountSelect({ options: FRUIT, value: 'apple' });
+
+    const label = container.querySelector('.field > span');
+    expect(label?.textContent).toBe('Fruit');
+    expect(trigger().getAttribute('aria-labelledby')).toBe(label?.id);
+    expect(trigger().hasAttribute('id')).toBe(false);
+    expect(trigger().hasAttribute('aria-describedby')).toBe(false);
+    expect(trigger().hasAttribute('aria-invalid')).toBe(false);
+  });
+
+  it('renders bare and takes its name from the host label when labelledBy is set', async () => {
+    const onChange = vi.fn();
+    mountSelect({
+      options: FRUIT,
+      value: 'apple',
+      labelledBy: 'host-label',
+      id: 'host-control',
+      onChange,
+    });
+
+    // No .field block and no label of its own: the host draws both.
+    expect(container.querySelector('.field')).toBeNull();
+    expect(container.textContent).not.toContain('Fruit');
+    expect(container.querySelector('.select-pop.select-pop-field')).not.toBeNull();
+    expect(trigger().id).toBe('host-control');
+    expect(trigger().getAttribute('aria-labelledby')).toBe('host-label');
+    expect(trigger().classList.contains('select-field-trigger')).toBe(true);
+
+    // It still works as a select: the listbox keeps the label as its name.
+    await openViaClick();
+    expect(listbox()?.getAttribute('aria-label')).toBe('Fruit');
+    rows()[2]?.click();
+    expect(onChange).toHaveBeenCalledWith('cherry');
+  });
+
+  it('wires a host hint and problem to the trigger', () => {
+    mountSelect({
+      options: FRUIT,
+      value: 'apple',
+      labelledBy: 'host-label',
+      describedBy: 'host-error host-hint',
+      invalid: true,
+    });
+
+    expect(trigger().getAttribute('aria-describedby')).toBe('host-error host-hint');
+    expect(trigger().getAttribute('aria-invalid')).toBe('true');
+  });
+});
+
 describe('Select chip skin', () => {
   it('renders a composer-chip pill with aria-label, leading icon and caret', () => {
     mountSelect({

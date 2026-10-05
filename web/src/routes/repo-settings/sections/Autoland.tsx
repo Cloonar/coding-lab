@@ -1,189 +1,68 @@
-// Autoland section (issue #181 / ADR-0048, split out per issue #198): the
-// monolith's Autoland card as one per-section form — drafts seeded via
-// createSeededDrafts, saved as a dirty-fields-only PATCH through
-// useSettingsForm.
+// Autoland section (issues #181, #189, #61 / ADR-0048): the per-repo
+// pipeline that validates the PRs AFK runs open — as a thin renderer over the
+// form store. Every control edits a draft; the page's save bar sends the
+// changed ones (form.tsx, fields.ts).
+//
+// Autoland is forge-only: the poller reads PR comments for lander verdicts,
+// and the builtin tracker binding has none to read. The switch therefore
+// follows the tracker binding DRAFT — flipping the binding in Integrations
+// disables or enables it here at once, before anything is saved. The lander's
+// model/effort catalogs follow its effective provider the same way: its own
+// drafted agent, else this repo's drafted provider chain.
 
 import { Show } from 'solid-js';
-import type { Accessor } from 'solid-js';
-import { updateRepo, type Provider, type Repo, type RepoPatch, type Settings } from '../../../api';
-import Banner from '../../../components/Banner';
-import SectionCard from '../../../components/SectionCard';
-import Select, { type SelectOption } from '../../../components/Select';
-import { useSettingsForm } from '../../../components/settings/useSettingsForm';
-import { createSeededDrafts } from '../../../lib/seededDrafts';
-import { providerFor } from '../../../lib/spawn';
-import { normText } from '../shared';
+import type { SelectOption } from '../../../components/Select';
+import { FieldGroup, SelectField, SwitchField, TextField } from '../Field';
+import { useRepoSettingsForm } from '../form';
 
-export default function AutolandSection(props: {
-  repo: Accessor<Repo>;
-  providers: Provider[];
-  settings: Settings;
-  onSaved: () => void;
-}) {
-  // Autoland (issue #181 / ADR-0048), per-repo and default off. maxFixAttempts
-  // is a plain (non-nullable) integer draft, same shape as the Agents
-  // section's budget/maxInstances but without the blank-means-inherit escape
-  // hatch. landerProvider rides a Select like the other provider knobs:
-  // '' ↔ null (inherit THIS repo's own provider chain, not a global).
-  const drafts = createSeededDrafts(() => props.repo());
-  const [autolandEnabled, setAutolandEnabled] = drafts.field((r) => r.autoland_enabled);
-  const [autoMerge, setAutoMerge] = drafts.field((r) => r.auto_merge);
-  const [maxFixAttempts, setMaxFixAttempts] = drafts.field((r) => String(r.max_fix_attempts));
-  const [landerProvider, setLanderProvider] = drafts.field((r) => r.lander_provider ?? '');
-  // Lander model/effort overrides (issue #189): '' ↔ null (inherit), same shape
-  // as the base/AFK model+effort selects. Unlike lander_provider these carry no
-  // registry check — any non-empty string is accepted; the lander launch, where
-  // the effective provider is known, is what enforces the catalog.
-  const [landerModel, setLanderModel] = drafts.field((r) => r.lander_model ?? '');
-  const [landerEffort, setLanderEffort] = drafts.field((r) => r.lander_effort ?? '');
-
+export default function AutolandSection() {
+  const form = useRepoSettingsForm();
+  const catalog = form.catalog;
   const providerOptions = (): SelectOption[] =>
-    props.providers.map((p) => ({ value: p.id, label: p.display_name }));
-  // The lander's effective provider (issue #189): lander_provider if set, else
-  // this repo's own provider chain — mirroring how a NULL lander_provider
-  // inherits the repo's Provider at launch. Resolved LIVE against the lander
-  // draft so the lander model/effort catalogs below re-catalog as the operator
-  // flips the lander agent. The repo-provider layer reads the SAVED
-  // props.repo().provider — its draft lives in the Agents section now and
-  // cross-section drafts don't exist (issue #198), so the saved value is the
-  // truth here.
-  const landerEffectiveProvider = () =>
-    providerFor(
-      props.providers,
-      landerProvider(),
-      props.repo().provider,
-      props.settings.provider_default,
-    );
-
-  // Autoland is forge-only (ADR-0048): the poller reads PR comments for
-  // lander verdicts, and the builtin binding has no comment listing to read.
-  // The monolith resolved this against the tracker-binding DRAFT; that draft
-  // now lives in the Integrations section and cross-section drafts don't
-  // exist (issue #198) — so this deliberately resolves against the SAVED
-  // binding, the truth for everything outside Integrations' own edit session.
-  const autolandBlocked = () => props.repo().tracker_binding !== 'forge';
-
-  const buildPatch = (): RepoPatch | string => {
-    // Diff against the seed the drafts came from — NOT the live props.repo().
-    // Diffing against the live repo would mark a stale draft of a field the
-    // operator never touched as "dirty" and PATCH the old value back.
-    const current = drafts.seed();
-    const patch: RepoPatch = {};
-
-    if (autolandEnabled() !== current.autoland_enabled) {
-      patch.autoland_enabled = autolandEnabled();
-    }
-    if (autoMerge() !== current.auto_merge) patch.auto_merge = autoMerge();
-    const attempts = maxFixAttempts().trim();
-    const attemptsNum = Number(attempts);
-    if (attempts === '' || !Number.isInteger(attemptsNum) || attemptsNum < 0) {
-      return 'Max fix attempts must be a whole number of 0 or more.';
-    }
-    if (attemptsNum !== current.max_fix_attempts) patch.max_fix_attempts = attemptsNum;
-    if (normText(landerProvider()) !== current.lander_provider) {
-      patch.lander_provider = normText(landerProvider());
-    }
-    if (normText(landerModel()) !== current.lander_model) {
-      patch.lander_model = normText(landerModel());
-    }
-    if (normText(landerEffort()) !== current.lander_effort) {
-      patch.lander_effort = normText(landerEffort());
-    }
-
-    return patch;
-  };
-
-  const dirty = () => {
-    const p = buildPatch();
-    return typeof p === 'string' || Object.keys(p).length > 0;
-  };
-
-  const form = useSettingsForm<RepoPatch>({
-    dirty,
-    buildPatch,
-    submit: (patch) => updateRepo(props.repo().id, patch),
-    onSaved: () => props.onSaved(),
-  });
+    catalog.providers().map((p) => ({ value: p.id, label: p.display_name }));
+  const blocked = () => form.field('tracker_binding').value() !== 'forge';
 
   return (
-    <form onSubmit={(e) => void form.save(e)} class="stack">
-      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Banner message={form.note()} variant="success" />
-
-      <SectionCard title="Autoland">
-        <label class="check">
-          <input
-            type="checkbox"
-            name="autoland_enabled"
-            checked={autolandEnabled()}
-            disabled={autolandBlocked()}
-            onChange={(e) => setAutolandEnabled(e.currentTarget.checked)}
+    <div class="card settings-card">
+      <Show when={blocked()}>
+        <p class="settings-note">Autoland needs a forge tracker binding.</p>
+      </Show>
+      <SwitchField
+        name="autoland_enabled"
+        description="A lander run validates each PR an AFK run opens."
+        disabled={blocked()}
+      />
+      <SwitchField name="auto_merge" description="Off means approve only, and a human merges." />
+      <TextField
+        name="max_fix_attempts"
+        type="number"
+        min={0}
+        required
+        hint="After that the PR is handed to a human."
+      />
+      {/* Inherit names the NEXT layer down: the lander agent falls back to
+          this repo's agent, its model/effort to the global lander default
+          (Settings › Agents), which itself falls through to the repo's and
+          then the global spawn default. */}
+      <FieldGroup title="Lander">
+        <div class="settings-grid3">
+          <SelectField
+            name="lander_provider"
+            options={providerOptions()}
+            inheritLabel="Inherit repo agent"
           />
-          <span>Autoland claim PRs (spawn a lander to validate; merge on clean PASS)</span>
-        </label>
-        <Show when={autolandBlocked()}>
-          <small class="hint hint-block">Autoland needs a forge tracker binding.</small>
-        </Show>
-        <label class="check">
-          <input
-            type="checkbox"
-            name="auto_merge"
-            checked={autoMerge()}
-            onChange={(e) => setAutoMerge(e.currentTarget.checked)}
+          <SelectField
+            name="lander_model"
+            options={catalog.landerProvider()?.models ?? []}
+            inheritLabel="Inherit global lander default"
           />
-          <span>Merge on clean PASS (off: approve only, human merges)</span>
-        </label>
-        <label class="field">
-          <span>Max fix attempts</span>
-          <input
-            type="number"
-            name="max_fix_attempts"
-            min="0"
-            step="1"
-            autocomplete="off"
-            value={maxFixAttempts()}
-            onInput={(e) => setMaxFixAttempts(e.currentTarget.value)}
+          <SelectField
+            name="lander_effort"
+            options={catalog.landerProvider()?.efforts ?? []}
+            inheritLabel="Inherit global lander default"
           />
-        </label>
-        <Select
-          skin="field"
-          label="Lander agent"
-          name="lander_provider"
-          value={landerProvider()}
-          options={providerOptions()}
-          inheritLabel="Inherit repo agent"
-          onChange={setLanderProvider}
-        />
-        {/* Model/effort for the lander (issue #189): same component + catalog
-            source as the base/AFK pickers, resolved against the lander's
-            effective provider (lander agent above, else this repo's chain).
-            Inherit names the NEXT layer down — the global lander default
-            (Settings › Agents), which itself falls through to this repo's and
-            then the global spawn default — the same wording the Agents
-            section's AFK overrides use for their global AFK default. */}
-        <Select
-          skin="field"
-          label="Model"
-          name="lander_model"
-          value={landerModel()}
-          options={landerEffectiveProvider()?.models ?? []}
-          inheritLabel="Inherit global lander default"
-          onChange={setLanderModel}
-        />
-        <Select
-          skin="field"
-          label="Effort"
-          name="lander_effort"
-          value={landerEffort()}
-          options={landerEffectiveProvider()?.efforts ?? []}
-          inheritLabel="Inherit global lander default"
-          onChange={setLanderEffort}
-        />
-      </SectionCard>
-
-      <button type="submit" class="primary wide" disabled={form.busy()}>
-        {form.busy() ? 'Saving…' : 'Save changes'}
-      </button>
-    </form>
+        </div>
+      </FieldGroup>
+    </div>
   );
 }

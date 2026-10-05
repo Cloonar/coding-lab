@@ -1,8 +1,8 @@
-// Autoland section suite (issue #198): the RepoSettings.test.tsx Autoland
-// describe on /repos/:id/settings/autoland. One deliberate change from the
-// monolith: the tracker-binding draft lives in the Integrations section now,
-// so autoland_enabled's forge-only gate resolves against the SAVED
-// props.repo().tracker_binding — the builtin-binding case below pins that.
+// Autoland section suite (issues #198, #61): the section's fields on the
+// one-page settings, saved through the page's one Save. With every section on
+// one page and one form store, the forge-only gate of the Autoland switch
+// follows the tracker binding DRAFT: flipping the binding in Integrations
+// disables the switch at once — the last case below pins that.
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -10,14 +10,20 @@ import {
   baseRepo,
   chooseFromSelect,
   container,
+  fieldError,
   h,
   input,
   installRepoSettingsHooks,
   mountSettings,
+  pageSection,
+  save,
+  saveBarTitle,
+  segment,
   selectedLabel,
+  setSwitch,
   settle,
-  submitForm,
-  toggleCheckbox,
+  switchButton,
+  switchOn,
   typeInto,
   waitFor,
 } from '../harness';
@@ -25,21 +31,20 @@ import {
 installRepoSettingsHooks();
 
 const mountAutoland = () => mountSettings(`/repos/${REPO_ID}/settings/autoland`);
+const waitForAutoland = () =>
+  waitFor(() => container.querySelector('button[name="autoland_enabled"]'), 'autoland switch');
 
-// Autoland (issue #181 / ADR-0048): the four per-repo settings, default off /
-// 2 / on / inherit; autoland_enabled disables on a non-forge binding (the
-// poller has no PR-comment listing to read there).
+// Autoland (issue #181 / ADR-0048): the per-repo settings, default off / 2 /
+// on / inherit; autoland_enabled disables on a non-forge binding (the poller
+// has no PR-comment listing to read there).
 describe('RepoSettings Autoland', () => {
   it('renders the defaults: off, 2 attempts, merge on, inherit agent', async () => {
     await mountAutoland();
-    const autoland = await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="autoland_enabled"]'),
-      'autoland checkbox',
-    );
+    await waitForAutoland();
 
-    expect(autoland.checked).toBe(false);
-    expect(autoland.disabled).toBe(false); // baseRepo() is forge-bound
-    expect(input('auto_merge').checked).toBe(true);
+    expect(switchOn('autoland_enabled')).toBe(false);
+    expect(switchButton('autoland_enabled').disabled).toBe(false); // baseRepo() is forge-bound
+    expect(switchOn('auto_merge')).toBe(true);
     expect(input('max_fix_attempts').value).toBe('2');
     expect(selectedLabel('lander_provider')).toBe('Inherit repo agent');
     // Lander model/effort (issue #189) default to the inherit row too.
@@ -47,31 +52,27 @@ describe('RepoSettings Autoland', () => {
     expect(selectedLabel('lander_effort')).toBe('Inherit global lander default');
   });
 
-  it('disables autoland_enabled with a hint on a non-forge (builtin) SAVED binding', async () => {
+  it('disables autoland_enabled with a note on a non-forge (builtin) binding', async () => {
     h.repoOnServer = { ...baseRepo(), tracker_binding: 'builtin', forge_kind: 'none' };
     await mountAutoland();
-    const autoland = await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="autoland_enabled"]'),
-      'autoland checkbox',
-    );
+    await waitForAutoland();
 
-    expect(autoland.disabled).toBe(true);
-    expect(container.textContent).toContain('Autoland needs a forge tracker binding.');
+    expect(switchButton('autoland_enabled').disabled).toBe(true);
+    expect(pageSection('autoland').textContent).toContain(
+      'Autoland needs a forge tracker binding.',
+    );
   });
 
   it('toggling autoland_enabled and auto_merge, editing attempts, and picking a lander agent PATCHes all four', async () => {
     await mountAutoland();
-    await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="autoland_enabled"]'),
-      'autoland checkbox',
-    );
+    await waitForAutoland();
 
-    toggleCheckbox(input('autoland_enabled'), true);
-    toggleCheckbox(input('auto_merge'), false);
+    setSwitch('autoland_enabled', true);
+    setSwitch('auto_merge', false);
     typeInto(input('max_fix_attempts'), '5');
     await chooseFromSelect('lander_provider', 'Claude Code');
-    submitForm();
-    await settle();
+    expect(saveBarTitle()).toBe('4 unsaved changes');
+    await save();
 
     expect(h.patchBodies).toEqual([
       {
@@ -94,8 +95,7 @@ describe('RepoSettings Autoland', () => {
     expect(selectedLabel('lander_provider')).toBe('Claude Code');
 
     await chooseFromSelect('lander_provider', 'Inherit repo agent');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ lander_provider: null }]);
   });
@@ -112,8 +112,7 @@ describe('RepoSettings Autoland', () => {
 
     await chooseFromSelect('lander_model', 'Sonnet');
     await chooseFromSelect('lander_effort', 'high');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ lander_model: 'sonnet', lander_effort: 'high' }]);
     expect(h.repoOnServer.lander_model).toBe('sonnet');
@@ -130,13 +129,12 @@ describe('RepoSettings Autoland', () => {
     expect(selectedLabel('lander_model')).toBe('Sonnet');
 
     await chooseFromSelect('lander_model', 'Inherit global lander default');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ lander_model: null }]);
   });
 
-  it('rejects a blank max_fix_attempts client-side without PATCHing', async () => {
+  it('rejects a blank max_fix_attempts in the browser without PATCHing', async () => {
     await mountAutoland();
     await waitFor(
       () => container.querySelector<HTMLInputElement>('input[name="max_fix_attempts"]'),
@@ -144,16 +142,14 @@ describe('RepoSettings Autoland', () => {
     );
 
     typeInto(input('max_fix_attempts'), '');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toHaveLength(0);
-    expect(container.textContent).toContain(
-      'Max fix attempts must be a whole number of 0 or more.',
-    );
+    expect(fieldError('max_fix_attempts')).toBe('Use a whole number, 0 or more.');
+    expect(document.activeElement).toBe(input('max_fix_attempts'));
   });
 
-  it('rejects a negative max_fix_attempts client-side without PATCHing', async () => {
+  it('rejects a negative max_fix_attempts in the browser without PATCHing', async () => {
     await mountAutoland();
     await waitFor(
       () => container.querySelector<HTMLInputElement>('input[name="max_fix_attempts"]'),
@@ -161,12 +157,59 @@ describe('RepoSettings Autoland', () => {
     );
 
     typeInto(input('max_fix_attempts'), '-1');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toHaveLength(0);
-    expect(container.textContent).toContain(
-      'Max fix attempts must be a whole number of 0 or more.',
+    expect(fieldError('max_fix_attempts')).toBe('Use a whole number, 0 or more.');
+
+    // 0 is a real value: no fix runs at all.
+    typeInto(input('max_fix_attempts'), '0');
+    await save();
+    expect(h.patchBodies).toEqual([{ max_fix_attempts: 0 }]);
+  });
+
+  it('the lander catalogs follow the DRAFTED repo agent', async () => {
+    h.providersOnServer = [
+      ...h.providersOnServer,
+      {
+        id: 'codex',
+        display_name: 'Codex',
+        supports_remote: false,
+        auth: { kind: 'api-key' },
+        models: [{ value: 'gpt-5-codex', label: 'GPT-5 Codex', efforts: [] }],
+        efforts: [{ value: 'medium', label: 'medium' }],
+        options: [],
+      },
+    ];
+    await mountAutoland();
+    await waitFor(() => container.querySelector('button[name="provider"]'), 'agent select');
+
+    // The lander inherits the repo's agent; flipping that agent — in the
+    // Agents section, unsaved — re-catalogs the lander's model pick.
+    await chooseFromSelect('provider', 'Codex');
+    await chooseFromSelect('lander_model', 'GPT-5 Codex');
+    await save();
+
+    expect(h.patchBodies).toEqual([{ provider: 'codex', lander_model: 'gpt-5-codex' }]);
+  });
+
+  it('follows the tracker binding DRAFT: flipping it to builtin disables the switch at once', async () => {
+    await mountAutoland();
+    await waitForAutoland();
+    expect(switchButton('autoland_enabled').disabled).toBe(false);
+
+    segment('tracker_binding', 'builtin').click();
+    await settle();
+
+    expect(switchButton('autoland_enabled').disabled).toBe(true);
+    expect(pageSection('autoland').textContent).toContain(
+      'Autoland needs a forge tracker binding.',
     );
+
+    // Back to forge, still unsaved: enabled again.
+    segment('tracker_binding', 'forge').click();
+    await settle();
+    expect(switchButton('autoland_enabled').disabled).toBe(false);
+    expect(h.patchBodies).toHaveLength(0);
   });
 });

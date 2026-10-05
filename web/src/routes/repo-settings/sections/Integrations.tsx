@@ -1,119 +1,44 @@
-// Integrations section (issue #198): the monolith's Credentials & tracker
-// card as one per-section form — drafts seeded via createSeededDrafts, saved
-// as a dirty-fields-only PATCH through useSettingsForm.
+// Integrations section (issue #61): the git credential, the tracker binding
+// and the forge credential — a thin renderer over the form store. Every
+// control edits a draft; the page's save bar sends the changed ones
+// (form.tsx, fields.ts). Each credential pick offers only its own kinds.
 
-import { For } from 'solid-js';
-import type { Accessor } from 'solid-js';
-import {
-  updateRepo,
-  type CredentialListItem,
-  type Repo,
-  type RepoPatch,
-  type TrackerBinding,
-} from '../../../api';
-import Banner from '../../../components/Banner';
-import SectionCard from '../../../components/SectionCard';
-import { useSettingsForm } from '../../../components/settings/useSettingsForm';
-import { createSeededDrafts } from '../../../lib/seededDrafts';
+import type { CredentialListItem } from '../../../api';
+import { NativeSelectField, SegmentedField } from '../Field';
 
-export default function IntegrationsSection(props: {
-  repo: Accessor<Repo>;
-  credentials: CredentialListItem[];
-  onSaved: () => void;
-}) {
-  const drafts = createSeededDrafts(() => props.repo());
-  const [credentialId, setCredentialId] = drafts.field((r) => r.credential_id ?? '');
-  const [binding, setBinding] = drafts.field<TrackerBinding>((r) => r.tracker_binding);
-  const [forgeCredentialId, setForgeCredentialId] = drafts.field(
-    (r) => r.forge_credential_id ?? '',
-  );
-
-  const gitCredentials = () =>
-    props.credentials.filter((c) => c.kind === 'ssh_key' || c.kind === 'https_token');
-  const forgeCredentials = () => props.credentials.filter((c) => c.kind === 'forge_token');
-
-  const buildPatch = (): RepoPatch | string => {
-    // Diff against the seed the drafts came from — NOT the live props.repo().
-    // Diffing against the live repo would mark a stale draft of a field the
-    // operator never touched as "dirty" and PATCH the old value back.
-    const current = drafts.seed();
-    const patch: RepoPatch = {};
-
-    const cred = credentialId() === '' ? null : credentialId();
-    if (cred !== current.credential_id) patch.credential_id = cred;
-    const forgeCred = forgeCredentialId() === '' ? null : forgeCredentialId();
-    if (forgeCred !== current.forge_credential_id) patch.forge_credential_id = forgeCred;
-    if (binding() !== current.tracker_binding) patch.tracker_binding = binding();
-
-    return patch;
-  };
-
-  const dirty = () => {
-    const p = buildPatch();
-    return typeof p === 'string' || Object.keys(p).length > 0;
-  };
-
-  const form = useSettingsForm<RepoPatch>({
-    dirty,
-    buildPatch,
-    submit: (patch) => updateRepo(props.repo().id, patch),
-    onSaved: () => props.onSaved(),
-  });
+export default function IntegrationsSection(props: { credentials: CredentialListItem[] }) {
+  const gitCredentials = () => [
+    { value: '', label: 'None (public remote)' },
+    ...props.credentials
+      .filter((c) => c.kind === 'ssh_key' || c.kind === 'https_token')
+      .map((c) => ({
+        value: c.id,
+        label: `${c.name} (${c.kind === 'ssh_key' ? 'SSH key' : 'HTTPS token'})`,
+      })),
+  ];
+  const forgeCredentials = () => [
+    { value: '', label: 'None' },
+    ...props.credentials
+      .filter((c) => c.kind === 'forge_token')
+      .map((c) => ({ value: c.id, label: c.name })),
+  ];
 
   return (
-    <form onSubmit={(e) => void form.save(e)} class="stack">
-      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Banner message={form.note()} variant="success" />
-
-      <SectionCard title="Credentials & tracker">
-        <label class="field">
-          <span>Git credential</span>
-          <select
-            name="credential_id"
-            value={credentialId()}
-            onChange={(e) => setCredentialId(e.currentTarget.value)}
-          >
-            <option value="">None (public remote)</option>
-            <For each={gitCredentials()}>
-              {(c) => (
-                <option value={c.id}>
-                  {c.name} ({c.kind === 'ssh_key' ? 'SSH key' : 'HTTPS token'})
-                </option>
-              )}
-            </For>
-          </select>
-        </label>
-        <label class="field">
-          <span>Tracker binding</span>
-          <select
-            name="tracker_binding"
-            value={binding()}
-            onChange={(e) => setBinding(e.currentTarget.value as TrackerBinding)}
-          >
-            <option value="forge">Forge (Forgejo / GitHub issues + PRs)</option>
-            <option value="builtin">Builtin (lab's own issues + CRs)</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Forge credential</span>
-          <select
-            name="forge_credential_id"
-            value={forgeCredentialId()}
-            onChange={(e) => setForgeCredentialId(e.currentTarget.value)}
-          >
-            <option value="">None</option>
-            <For each={forgeCredentials()}>{(c) => <option value={c.id}>{c.name}</option>}</For>
-          </select>
-          <small class="hint">
-            Forge API token for issues and PRs — required for the forge binding, never given to
-            runs.
-          </small>
-        </label>
-      </SectionCard>
-
-      <button type="submit" class="primary wide" disabled={form.busy()}>
-        {form.busy() ? 'Saving…' : 'Save changes'}
-      </button>
-    </form>
+    <div class="card settings-card">
+      <NativeSelectField name="credential_id" options={gitCredentials()} />
+      <SegmentedField
+        name="tracker_binding"
+        options={[
+          { value: 'forge', label: 'Forge' },
+          { value: 'builtin', label: 'Built-in' },
+        ]}
+        hint="Forge keeps issues and pull requests on the forge. Built-in keeps issues and change requests inside lab."
+      />
+      <NativeSelectField
+        name="forge_credential_id"
+        options={forgeCredentials()}
+        hint="Forge API token for issues and PRs — required for the forge binding, never given to runs."
+      />
+    </div>
   );
 }

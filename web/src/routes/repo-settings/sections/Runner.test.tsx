@@ -1,10 +1,11 @@
-// Runner section suite (issue #205), the Autoland.test.tsx harness style
-// applied to /repos/:id/settings/runner: the default host pick shows the
-// unsandboxed warning, picking container hides it and PATCHes runner, and the
-// three container limit overrides set/clear independently. Issue #55 adds the
-// inherit state: the picker's first row follows the global runner default, the
-// host hint follows the EFFECTIVE runner, and the dev image hint names what a
-// blank field inherits.
+// Runner section suite (issues #205, #55, #61): the section's fields on the
+// one-page settings, saved through the page's one Save — the default host
+// pick shows the unsandboxed warning, picking container hides it and PATCHes
+// runner, and the three container limit overrides set/clear independently.
+// The inherit state (issue #55): the picker's first row follows the global
+// runner default, the host warning follows the EFFECTIVE runner, a blank
+// limit shows the global default it inherits as its placeholder, and the dev
+// image hint names what a blank field inherits.
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -19,8 +20,9 @@ import {
   optionRows,
   selectTrigger,
   selectedLabel,
+  fieldHint,
+  save,
   settle,
-  submitForm,
   typeInto,
   waitFor,
 } from '../harness';
@@ -30,7 +32,7 @@ installRepoSettingsHooks();
 const mountRunner = () => mountSettings(`/repos/${REPO_ID}/settings/runner`);
 
 describe('RepoSettings Runner', () => {
-  it('renders the default: host selected, the unsandboxed warning visible, and the seeded global hints', async () => {
+  it('renders the default: host selected, the unsandboxed warning visible, and the global limits as placeholders', async () => {
     await mountRunner();
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
@@ -38,12 +40,13 @@ describe('RepoSettings Runner', () => {
     expect(container.textContent).toContain(
       'Host runs are unsandboxed — the agent has full host access to the server. Break-glass only; use the container runner once available.',
     );
-    expect(container.textContent).toContain('Inherit global default — currently 8g');
-    expect(container.textContent).toContain('Inherit global default — currently 4096');
-    expect(container.textContent).toContain('Inherit global default — currently 16384');
+    // A blank limit inherits the global default, shown as its placeholder.
     expect(input('container_memory').value).toBe('');
+    expect(input('container_memory').placeholder).toBe('8g');
     expect(input('container_pids').value).toBe('');
+    expect(input('container_pids').placeholder).toBe('4096');
     expect(input('container_nofile').value).toBe('');
+    expect(input('container_nofile').placeholder).toBe('16384');
   });
 
   it('choosing Container hides the warning and PATCHes runner', async () => {
@@ -53,8 +56,7 @@ describe('RepoSettings Runner', () => {
     await chooseFromSelect('runner', 'Container — rootless podman');
     expect(container.textContent).not.toContain('Host runs are unsandboxed');
 
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ runner: 'container' }]);
     expect(h.repoOnServer.runner).toBe('container');
@@ -67,8 +69,7 @@ describe('RepoSettings Runner', () => {
     typeInto(input('container_memory'), '512m');
     typeInto(input('container_pids'), '2048');
     typeInto(input('container_nofile'), '8192');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([
       { container_memory: '512m', container_pids: 2048, container_nofile: 8192 },
@@ -94,8 +95,7 @@ describe('RepoSettings Runner', () => {
     expect(input('container_nofile').value).toBe('8192');
 
     typeInto(input('container_memory'), '');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ container_memory: null }]);
     expect(h.repoOnServer.container_memory).toBeNull();
@@ -116,8 +116,7 @@ describe('RepoSettings Runner', () => {
 
     typeInto(input('container_pids'), '');
     typeInto(input('container_nofile'), '');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ container_pids: null, container_nofile: null }]);
   });
@@ -127,8 +126,7 @@ describe('RepoSettings Runner', () => {
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
     typeInto(input('image_ref'), 'docker.io/library/debian:bookworm');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ image_ref: 'docker.io/library/debian:bookworm' }]);
     expect(h.repoOnServer.image_ref).toBe('docker.io/library/debian:bookworm');
@@ -146,8 +144,7 @@ describe('RepoSettings Runner', () => {
     expect(input('image_ref').value).toBe('docker.io/library/debian:bookworm@sha256:abc123');
 
     typeInto(input('image_ref'), '');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ image_ref: null }]);
     expect(h.repoOnServer.image_ref).toBeNull();
@@ -163,8 +160,7 @@ describe('RepoSettings Runner', () => {
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
     typeInto(input('container_memory'), '512m');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ container_memory: '512m' }]);
     expect(h.repoOnServer.image_ref).toBe('docker.io/library/debian:bookworm');
@@ -179,9 +175,8 @@ const OTHER_IMAGE = 'docker.io/library/debian:bookworm@sha256:abc123';
 
 const text = () => container.textContent ?? '';
 
-/** The Dev image field's hint — the `.hint` directly under the input. */
-const imageHint = () =>
-  container.querySelector<HTMLElement>('input[name="image_ref"] + small.hint')?.textContent ?? '';
+/** The Dev image field's hint. */
+const imageHint = () => fieldHint('image_ref');
 
 async function optionLabels(): Promise<(string | null | undefined)[]> {
   selectTrigger('runner').click();
@@ -271,8 +266,7 @@ describe('RepoSettings Runner — inherit (issue #55)', () => {
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
     await chooseFromSelect('runner', 'Inherit global default — currently Host');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ runner: null }]);
     expect(h.repoOnServer.runner).toBeNull();
@@ -287,8 +281,7 @@ describe('RepoSettings Runner — inherit (issue #55)', () => {
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
     await chooseFromSelect('runner', HOST_LABEL);
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ runner: 'host' }]);
     expect(h.repoOnServer.runner).toBe('host');
@@ -300,8 +293,7 @@ describe('RepoSettings Runner — inherit (issue #55)', () => {
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
     await chooseFromSelect('runner', CONTAINER_LABEL);
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ runner: 'container' }]);
     expect(h.repoOnServer.runner).toBe('container');
@@ -313,11 +305,9 @@ describe('RepoSettings Runner — inherit (issue #55)', () => {
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
     await chooseFromSelect('runner', CONTAINER_LABEL);
-    submitForm();
-    await settle();
+    await save();
     await chooseFromSelect('runner', 'Inherit global default — currently Host');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ runner: 'container' }, { runner: null }]);
     expect(h.repoOnServer.runner).toBeNull();
@@ -329,8 +319,7 @@ describe('RepoSettings Runner — inherit (issue #55)', () => {
     await waitFor(() => container.querySelector('button[name="runner"]'), 'runner select');
 
     typeInto(input('container_memory'), '512m');
-    submitForm();
-    await settle();
+    await save();
 
     expect(h.patchBodies).toEqual([{ container_memory: '512m' }]);
     expect(h.repoOnServer.runner).toBeNull();
@@ -348,11 +337,13 @@ describe('RepoSettings Runner — dev image hint (issue #55)', () => {
     await waitFor(() => container.querySelector('input[name="image_ref"]'), 'image field');
 
     expect(imageHint()).toBe(
-      `Resolved and pinned to a digest on save. Blank inherits ${IMAGE_ID}.`,
+      `For container runs. Resolved and pinned to a digest on save. Blank inherits ${IMAGE_ID}.`,
     );
-    expect(container.querySelector('input[name="image_ref"] + small.hint code')?.textContent).toBe(
+    expect(container.querySelector('[data-field="image_ref"] .sfield-hint code')?.textContent).toBe(
       IMAGE_ID,
     );
+    // The hint describes the input.
+    expect(input('image_ref').getAttribute('aria-describedby')).toBe('rs-image_ref-hint');
   });
 
   it('falls back to the server image when no global default image is set', async () => {
@@ -365,7 +356,7 @@ describe('RepoSettings Runner — dev image hint (issue #55)', () => {
     await waitFor(() => container.querySelector('input[name="image_ref"]'), 'image field');
 
     expect(imageHint()).toBe(
-      `Resolved and pinned to a digest on save. Blank inherits ${OTHER_IMAGE}.`,
+      `For container runs. Resolved and pinned to a digest on save. Blank inherits ${OTHER_IMAGE}.`,
     );
   });
 

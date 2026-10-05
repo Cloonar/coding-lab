@@ -190,9 +190,12 @@ describe('RepoSettings SSH-targets picker', () => {
     await mountSecrets();
     await waitForPicker();
 
-    const headings = Array.from(container.querySelectorAll('section h2')).map(
-      (h2) => h2.textContent,
-    );
+    // The cards of the page's Secrets section, in order (the section's own
+    // "Secrets" heading above them is not a card heading).
+    const headings = Array.from(
+      container.querySelectorAll('section#settings-secrets section.card h2'),
+    ).map((h2) => h2.textContent);
+    expect(headings).toHaveLength(3);
     const grantsIdx = headings.indexOf('Credential gateway');
     const sshIdx = headings.indexOf('SSH targets');
     const secretsIdx = headings.indexOf('Secrets');

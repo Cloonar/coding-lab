@@ -1,10 +1,14 @@
-// Shared test harness for the repo-settings area suites (issue #198), the
-// runchat/harness.tsx precedent applied to the RepoSettings.test.tsx stub
+// Shared test harness for the repo-settings area suites (issues #198, #61),
+// the runchat/harness.tsx precedent applied to the RepoSettings.test.tsx stub
 // server and DOM helpers. Section suites mount the real repositories route
-// table (routes/repo-home/routes.tsx — the settings area renders as the
-// Settings tab of the /repos/:id repo home frame, issue #61) at
-// /repos/:id/settings/:section? (App root, MemoryRouter) and poke the mutable
-// `h` state object to shape server responses.
+// table (routes/repo-home/routes.tsx) at /repos/:id/settings/:section? (App
+// root, MemoryRouter) — so the one-page settings render inside the real repo
+// home frame, with its form store, save bar and leave guard — and poke the
+// mutable `h` state object to shape server responses.
+//
+// The page's layout seam (scrolling.ts `viewport`) is replaced by a fake for
+// every test: jsdom has no layout, so `h.tops` says where each section sits
+// and `h.scrolls` records where the page scrolled to.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
@@ -25,6 +29,7 @@ import type {
 } from '../../api';
 import App from '../../App';
 import RepoRoutes from '../repo-home/routes';
+import { viewport, type Viewport } from './scrolling';
 
 export const REPO_ID = 'repo_1';
 
@@ -258,6 +263,24 @@ export function jsonResponse(status: number, body: unknown) {
  */
 export interface RepoSettingsHarnessState {
   repoOnServer: Repo;
+  /** Forces the next repo PATCH to be refused with this answer (400 unless
+   *  `status` says otherwise); `field` names the offending PATCH key the way
+   *  the server does (issue #61). The body is still recorded in patchBodies. */
+  patchRefusal: { error: string; field?: string; status?: number } | null;
+  /** Makes every repo PATCH fail like a dropped connection (fetch rejects). */
+  patchOffline: boolean;
+  /** When set, a repo PATCH answers only once this promise resolves — a test
+   *  holds a save in flight with it. */
+  patchHold: Promise<void> | null;
+  /** The fake layout (see installRepoSettingsHooks): the top edge of each
+   *  element, in px from the viewport top, by element id. A section without
+   *  an entry sits far below the fold. */
+  tops: Record<string, number>;
+  /** The fake layout's "the page is scrolled to its end". */
+  pageAtEnd: boolean;
+  /** Every scroll the page asked for, in order: the target element's id (a
+   *  section) or its data-field (a field), the offset, and whether animated. */
+  scrolls: { target: string; offset: number; smooth: boolean }[];
   /** GET /repos (issue #261): the registered-repo catalog the Imports
    *  picker draws candidates from — baseRepo() plus otherRepos() by default. */
   reposOnServer: Repo[];
@@ -371,8 +394,42 @@ export function stubApi(): void {
       if (url === `/api/v1/repos/${REPO_ID}` && method === 'PATCH') {
         const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
         h.patchBodies.push(patch);
-        h.repoOnServer = { ...h.repoOnServer, ...patch };
-        return Promise.resolve(jsonResponse(200, { ...h.repoOnServer }));
+        if (h.patchOffline) return Promise.reject(new TypeError('Failed to fetch'));
+        const answer = () => {
+          const refusal = h.patchRefusal;
+          if (refusal !== null) {
+            const { status, ...body } = refusal;
+            return jsonResponse(status ?? 400, body);
+          }
+          h.repoOnServer = { ...h.repoOnServer, ...patch };
+          return jsonResponse(200, { ...h.repoOnServer });
+        };
+        return h.patchHold !== null ? h.patchHold.then(answer) : Promise.resolve(answer());
+      }
+      // The repo home's other tabs (issue #61), for the suites that carry
+      // pending changes across them: Overview reads the readiness report, the
+      // instance list (below) and parked work; Issues its list, the ready
+      // queue and the labels.
+      if (url === `/api/v1/repos/${REPO_ID}/readiness` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { state: 'passing', checks: [] }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/parked` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { parked: [] }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/issues?state=open` && method === 'GET') {
+        return Promise.resolve(
+          jsonResponse(200, { binding: h.repoOnServer.tracker_binding, issues: [] }),
+        );
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/ready` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { issues: [] }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/labels` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { labels: [] }));
+      }
+      // The delete dialog's importer lookup (Danger zone).
+      if (url === `/api/v1/repos/${REPO_ID}/importers` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { importers: [] }));
       }
       // Danger zone: DELETE /repos/:id (force rides the query string). A 409
       // mimics the running-clone conflict that reveals the force checkbox.
@@ -757,10 +814,145 @@ export function toggleCheckbox(el: HTMLInputElement, checked: boolean): void {
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
-export function submitForm(): void {
-  const form = container.querySelector('form');
-  if (!form) throw new Error('missing settings form');
-  form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+/** A switch (role="switch") by its form name. */
+export function switchButton(name: string): HTMLButtonElement {
+  const el = container.querySelector<HTMLButtonElement>(`button[role="switch"][name="${name}"]`);
+  if (!el) throw new Error(`missing switch button[name="${name}"]`);
+  return el;
+}
+
+/** Whether the named switch is on. */
+export function switchOn(name: string): boolean {
+  return switchButton(name).getAttribute('aria-checked') === 'true';
+}
+
+/** Flips the named switch to `on` (a click, when it is not there already). */
+export function setSwitch(name: string, on: boolean): void {
+  if (switchOn(name) !== on) switchButton(name).click();
+}
+
+/** One segment (role="radio") of a segmented control, by form name and value. */
+export function segment(name: string, value: string): HTMLButtonElement {
+  const el = container.querySelector<HTMLButtonElement>(
+    `button[role="radio"][name="${name}"][value="${value}"]`,
+  );
+  if (!el) throw new Error(`missing segment button[name="${name}"][value="${value}"]`);
+  return el;
+}
+
+/** The checked value of a segmented control. */
+export function segmentValue(name: string): string | null {
+  return (
+    container
+      .querySelector<HTMLButtonElement>(`button[role="radio"][name="${name}"][aria-checked="true"]`)
+      ?.getAttribute('value') ?? null
+  );
+}
+
+// --- the one-page settings (issue #61) -------------------------------------------
+
+/** The page-level <section> of a settings section, by slug. */
+export function pageSection(slug: string): HTMLElement {
+  const el = container.querySelector<HTMLElement>(`section#settings-${slug}`);
+  if (!el) throw new Error(`missing settings section "${slug}"`);
+  return el;
+}
+
+/** A field's wrapper (label, control, problem, hint), by its PATCH key. */
+export function fieldWrapper(key: string): HTMLElement {
+  const el = container.querySelector<HTMLElement>(`[data-field="${key}"]`);
+  if (!el) throw new Error(`missing field "${key}"`);
+  return el;
+}
+
+/** Whether a field carries the changed mark: the dot's class AND its words. */
+export function fieldChanged(key: string): boolean {
+  const wrapper = fieldWrapper(key);
+  const marked = wrapper.classList.contains('changed');
+  const worded = wrapper.textContent?.includes('(unsaved change)') === true;
+  if (marked !== worded) throw new Error(`field "${key}": changed dot and words disagree`);
+  return marked;
+}
+
+/** The problem shown under a field, or null. */
+export function fieldError(key: string): string | null {
+  return fieldWrapper(key).querySelector('.sfield-error')?.textContent ?? null;
+}
+
+/** The hint under a field ('' when it has none). */
+export function fieldHint(key: string): string {
+  return fieldWrapper(key).querySelector('.sfield-hint')?.textContent ?? '';
+}
+
+/** The frame's save bar, or null while nothing is pending. */
+export function saveBar(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('.settings-savebar');
+}
+
+function saveBarButton(text: string): HTMLButtonElement {
+  const bar = saveBar();
+  if (!bar) throw new Error(`no save bar: nothing is pending (wanted its "${text}" button)`);
+  const el = Array.from(bar.querySelectorAll('button')).find((b) => b.textContent?.trim() === text);
+  if (!el) throw new Error(`missing save bar button ${JSON.stringify(text)}`);
+  return el;
+}
+
+/** The save bar's headline ("3 unsaved changes" / "1 problem to fix"). */
+export function saveBarTitle(): string {
+  return saveBar()?.querySelector('strong')?.textContent ?? '';
+}
+
+/** The section names the save bar links to, in order. */
+export function saveBarSections(): string[] {
+  return Array.from(saveBar()?.querySelectorAll('a.settings-savebar-link') ?? []).map(
+    (a) => a.textContent ?? '',
+  );
+}
+
+/** Clicks the save bar's Save and lets the request land. */
+export async function save(): Promise<void> {
+  saveBarButton('Save').click();
+  await settle();
+}
+
+/** Clicks the save bar's Discard. */
+export async function discard(): Promise<void> {
+  saveBarButton('Discard').click();
+  await settle();
+}
+
+/** The frame's toast text ('' when none shows). */
+export function toastText(): string {
+  return container.querySelector('.toast')?.textContent ?? '';
+}
+
+/** The in-page dialog that is open, or null. */
+export function openDialog(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('[role="dialog"], [role="alertdialog"]');
+}
+
+/** Follows an in-app link the way a click does (the router intercepts it). */
+export async function followLink(link: Element | null | undefined): Promise<void> {
+  if (!(link instanceof HTMLElement)) throw new Error('missing link to follow');
+  link.click();
+  await settle();
+}
+
+/** A tab of the repo home frame, by its visible name. */
+export function repoTab(name: string): HTMLAnchorElement {
+  const el = Array.from(container.querySelectorAll<HTMLAnchorElement>('nav.repo-tabs a')).find(
+    (a) => a.textContent?.trim().startsWith(name),
+  );
+  if (!el) throw new Error(`missing repo tab ${JSON.stringify(name)}`);
+  return el;
+}
+
+/** Scrolls the fake page: sets where the sections sit, then fires `scroll`. */
+export async function scrollPage(tops: Record<string, number>, atEnd = false): Promise<void> {
+  h.tops = tops;
+  h.pageAtEnd = atEnd;
+  window.dispatchEvent(new Event('scroll'));
+  await settle();
 }
 
 /** The server-side push: repo.changed makes RepoSettingsView refetch. */
@@ -770,65 +962,46 @@ export function emitRepoChanged(): void {
   }
 }
 
-/** The Secrets section's <section> element, scoped for row/form queries.
- *  Scoped to `section h2`: the mobile back header renders its own 'Secrets'
- *  h2 OUTSIDE any section, which must never match here. */
+/**
+ * A card (`section.card`) inside the page, by its own heading. The page-level
+ * section headings (issue #61) are `section.settings-section > header h2` and
+ * never match: "Secrets" names both the page section — which also holds the
+ * credential-gateway and SSH-target pickers — and the legacy secrets card in
+ * it, and these helpers mean the card.
+ */
+function sectionCard(title: string): HTMLElement {
+  const header = Array.from(container.querySelectorAll('section.card h2')).find(
+    (h2) => h2.textContent === title,
+  );
+  if (!header) throw new Error(`missing ${title} card heading`);
+  const section = header.closest('section.card');
+  if (!section) throw new Error(`${title} heading has no enclosing card`);
+  return section as HTMLElement;
+}
+
+/** The legacy Secrets card (issue #104), scoped for row/form queries. */
 export function secretsSection(): HTMLElement {
-  const header = Array.from(container.querySelectorAll('section h2')).find(
-    (h2) => h2.textContent === 'Secrets',
-  );
-  if (!header) throw new Error('missing Secrets section heading');
-  const section = header.closest('section');
-  if (!section) throw new Error('Secrets heading has no enclosing <section>');
-  return section as HTMLElement;
+  return sectionCard('Secrets');
 }
 
-/** The credential-gateway grant picker's <section> (issue #25), scoped the
- *  same way secretsSection() is — it renders ABOVE the legacy Secrets card on
- *  the same subpage, so the two must never be queried as one. */
+/** The credential-gateway grant picker's card (issue #25), scoped for row/form queries. */
 export function grantsSection(): HTMLElement {
-  const header = Array.from(container.querySelectorAll('section h2')).find(
-    (h2) => h2.textContent === 'Credential gateway',
-  );
-  if (!header) throw new Error('missing Credential gateway section heading');
-  const section = header.closest('section');
-  if (!section) throw new Error('Credential gateway heading has no enclosing <section>');
-  return section as HTMLElement;
+  return sectionCard('Credential gateway');
 }
 
-/** The SSH-targets picker's <section> (issue #39), scoped the same way
- *  grantsSection() is — it renders directly below the credential-gateway
- *  grant picker on the same subpage, so the two must never be queried as one. */
+/** The SSH-targets picker's card (issue #39), scoped for row/form queries. */
 export function sshTargetsSection(): HTMLElement {
-  const header = Array.from(container.querySelectorAll('section h2')).find(
-    (h2) => h2.textContent === 'SSH targets',
-  );
-  if (!header) throw new Error('missing SSH targets section heading');
-  const section = header.closest('section');
-  if (!section) throw new Error('SSH targets heading has no enclosing <section>');
-  return section as HTMLElement;
+  return sectionCard('SSH targets');
 }
 
-/** The Schedules section's <section>, scoped the same way secretsSection() is. */
+/** The Schedules card, scoped for row/form queries. */
 export function schedulesSection(): HTMLElement {
-  const header = Array.from(container.querySelectorAll('section h2')).find(
-    (h2) => h2.textContent === 'Schedules',
-  );
-  if (!header) throw new Error('missing Schedules section heading');
-  const section = header.closest('section');
-  if (!section) throw new Error('Schedules heading has no enclosing <section>');
-  return section as HTMLElement;
+  return sectionCard('Schedules');
 }
 
-/** The Imports section's <section>, scoped the same way secretsSection() is. */
+/** The Imports card, scoped for row/form queries. */
 export function importsSection(): HTMLElement {
-  const header = Array.from(container.querySelectorAll('section h2')).find(
-    (h2) => h2.textContent === 'Imports',
-  );
-  if (!header) throw new Error('missing Imports section heading');
-  const section = header.closest('section');
-  if (!section) throw new Error('Imports heading has no enclosing <section>');
-  return section as HTMLElement;
+  return sectionCard('Imports');
 }
 
 /**
@@ -848,8 +1021,8 @@ export function submitFormWithin(root: ParentNode): void {
   form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
 }
 
-// SettingsLayout's desktop breakpoint — must byte-match the query it builds
-// (the AppShell DESKTOP_MIN_PX shell breakpoint).
+// The desktop breakpoint — must byte-match the query the page and
+// SettingsLayout build (the AppShell DESKTOP_MIN_PX shell breakpoint).
 export const DESKTOP_QUERY = '(min-width: 1024px)';
 
 // jsdom has no window.matchMedia — install a fake resolving the queries the
@@ -910,6 +1083,9 @@ export function setDesktop(matches: boolean): void {
   stubMatchMedia().set(DESKTOP_QUERY, matches);
 }
 
+/** The real layout seam, put back after every test. */
+const realViewport: Viewport = { ...viewport };
+
 export function installRepoSettingsHooks(): void {
   beforeEach(() => {
     h.repoOnServer = baseRepo();
@@ -932,6 +1108,12 @@ export function installRepoSettingsHooks(): void {
     };
     h.credentialsOnServer = [];
     h.patchBodies = [];
+    h.patchRefusal = null;
+    h.patchOffline = false;
+    h.patchHold = null;
+    h.tops = {};
+    h.pageAtEnd = false;
+    h.scrolls = [];
     h.secretsOnServer = [];
     h.secretRequestBodies = [];
     h.deleteRequests = [];
@@ -957,6 +1139,20 @@ export function installRepoSettingsHooks(): void {
     h.sshTargetsReadError = null;
     h.sshTargetWriteError = null;
     stubApi();
+    // jsdom has no layout: the page's seam answers from `h` instead. A
+    // section without an entry in h.tops is far below the fold.
+    Object.assign(viewport, {
+      topOf: (element) => h.tops[element.id] ?? 100_000,
+      heightOf: () => 0,
+      scrollTo: (element, offset, smooth) => {
+        const target = element.getAttribute('data-field') ?? element.id;
+        h.scrolls.push({ target, offset, smooth });
+      },
+      atEnd: () => h.pageAtEnd,
+    } satisfies Viewport);
+    // The router scrolls to the top after a navigation; jsdom only logs
+    // "not implemented" for it.
+    vi.stubGlobal('scrollTo', vi.fn());
   });
 
   afterEach(() => {
@@ -967,5 +1163,6 @@ export function installRepoSettingsHooks(): void {
     vi.unstubAllGlobals();
     mediaStub = undefined; // the stub it memoized is gone with unstubAllGlobals
     vi.restoreAllMocks();
+    Object.assign(viewport, realViewport);
   });
 }
