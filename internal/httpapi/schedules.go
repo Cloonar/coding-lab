@@ -509,9 +509,10 @@ func (s *Server) writeScheduleView(w http.ResponseWriter, r *http.Request, statu
 // operator's Run now (issue #61): start one ordinary scheduled run for the
 // Schedule NOW, through the engine's one spawn pass, and answer 202 {run}
 // (handleAFKStart's envelope). A refusal is a 409 whose error is the reason,
-// shown verbatim by the UI — paused, previous run still live, instance cap
-// reached, provider logged out, repository not ready — and is never queued:
-// nothing fires later because of it. A Schedule of another repo is a 404
+// shown verbatim by the UI — paused, previous run still live, repository not
+// ready, a run already started this minute, provider logged out, instance cap
+// reached, an empty composed prompt — and is never queued: nothing fires
+// later because of it. A Schedule of another repo is a 404
 // (loadRepoSchedule). The launch publishes run.changed through the shared
 // instance core like every launch, so the runs rail updates.
 //
