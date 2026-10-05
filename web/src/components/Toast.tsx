@@ -7,7 +7,13 @@
 // against 4s) so there is time to reach for it, and its timer pauses while
 // the pointer or keyboard focus is inside the toast. Running the action hides
 // the toast first. A plain show(message) renders exactly as before: the text
-// alone in the status region.
+// alone in the pill.
+//
+// Announcing: a live region must already be in the page when its content
+// changes, or screen readers never hear the change. So the status region
+// (`.toast-region`, role="status") is ALWAYS rendered — empty, out of flow and
+// zero-sized while nothing shows — and only the `.toast` pill inside it comes
+// and goes.
 
 import { Show, createSignal, onCleanup } from 'solid-js';
 
@@ -46,34 +52,28 @@ function ToastView(props: {
   onRelease: () => void;
 }) {
   return (
-    <Show when={props.entry}>
-      {(entry) => (
-        <Show
-          when={entry().action}
-          fallback={
-            <div class="toast" role="status">
-              {entry().message}
-            </div>
-          }
-        >
-          {(action) => (
-            <div
-              class="toast toast-with-action"
-              role="status"
-              onMouseEnter={() => props.onHold()}
-              onMouseLeave={() => props.onRelease()}
-              onFocusIn={() => props.onHold()}
-              onFocusOut={() => props.onRelease()}
-            >
-              <span class="toast-text">{entry().message}</span>
-              <button type="button" class="toast-action" onClick={() => props.onAction(action())}>
-                {action().label}
-              </button>
-            </div>
-          )}
-        </Show>
-      )}
-    </Show>
+    <div class="toast-region" role="status">
+      <Show when={props.entry}>
+        {(entry) => (
+          <Show when={entry().action} fallback={<div class="toast">{entry().message}</div>}>
+            {(action) => (
+              <div
+                class="toast toast-with-action"
+                onMouseEnter={() => props.onHold()}
+                onMouseLeave={() => props.onRelease()}
+                onFocusIn={() => props.onHold()}
+                onFocusOut={() => props.onRelease()}
+              >
+                <span class="toast-text">{entry().message}</span>
+                <button type="button" class="toast-action" onClick={() => props.onAction(action())}>
+                  {action().label}
+                </button>
+              </div>
+            )}
+          </Show>
+        )}
+      </Show>
+    </div>
   );
 }
 

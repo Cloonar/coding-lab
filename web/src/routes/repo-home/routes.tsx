@@ -8,8 +8,10 @@
 //     issues | issues/new | issues/:number
 //     crs | crs/:number           (the CRs tab shows for builtin-bound repos)
 //     labels
-//     settings/:section?
-//     settings/schedules/new | settings/schedules/:scheduleId
+//     settings/:section?/:scheduleId?
+//       (settings/schedules/new | settings/schedules/:scheduleId open the
+//        schedule editor over the settings page — one route, so the page
+//        stays mounted while the editor comes and goes)
 //
 // @solidjs/router ranks static segments above params, so /repos/new beats
 // /repos/:id regardless of order. A component returning <Route> elements is
@@ -41,11 +43,12 @@ export default function RepoRoutes() {
         <Route path="/crs" component={RepoCRs} />
         <Route path="/crs/:number" component={CRDetail} />
         <Route path="/labels" component={RepoLabels} />
-        <Route path="/settings/:section?" component={RepoSettings} />
-        {/* The schedule editor's own URLs; the settings route renders them
-            (with :scheduleId in the params) until the editor lands. */}
-        <Route path="/settings/schedules/new" component={RepoSettings} />
-        <Route path="/settings/schedules/:scheduleId" component={RepoSettings} />
+        {/* One route for the settings page AND the schedule editor's URLs
+            (settings/schedules/new, settings/schedules/:scheduleId): the
+            page reads :scheduleId only under the schedules section, and
+            stays mounted — scrolled where it was — while the editor opens
+            over it and closes again. */}
+        <Route path="/settings/:section?/:scheduleId?" component={RepoSettings} />
       </Route>
     </>
   );

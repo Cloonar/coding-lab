@@ -20,11 +20,13 @@ import {
   emit,
   h,
   installRepoHomeHooks,
+  jsonResponse,
   mountRepoHome,
   routerHistory,
   settle,
   waitFor,
 } from './harness';
+import { SUMMARY_REFRESH_MS } from '../../lib/repoList';
 import { activeRepoTab } from './index';
 
 installRepoHomeHooks();
@@ -282,6 +284,131 @@ describe('repo home routes', () => {
   });
 });
 
+describe('repo home summary refreshes', () => {
+  const waitDebounce = () =>
+    new Promise<void>((resolve) => setTimeout(resolve, SUMMARY_REFRESH_MS + 50));
+  const issuesCount = () =>
+    container.querySelector(`nav.repo-tabs a[href="${BASE}/issues"] .count`)?.textContent;
+
+  const triggers: Array<[string, Record<string, unknown>]> = [
+    ['issue.changed', { repoID: REPO_ID }],
+    ['run.changed', { repoID: REPO_ID, runID: 'run_1' }],
+    ['parked.changed', { repoID: REPO_ID }],
+    ['provider.auth.changed', { provider: 'agent-a' }],
+  ];
+  for (const [type, payload] of triggers) {
+    it(`re-reads the repo once on a burst of ${type}`, async () => {
+      // Labels of a forge repo: a tab that reads nothing itself, so every
+      // request after the event is the frame's.
+      await mountRepoHome(`${BASE}/labels`);
+      await waitFor(() => container.querySelector('.repo-head h1'), 'header');
+      expect(repoGets()).toBe(1);
+
+      h.repo = baseRepo({
+        summary: { ...baseRepo().summary, open_issues: 13, claimable: 4 },
+      });
+      const before = h.requests.length;
+      emit(type, payload);
+      emit(type, payload);
+      await settle();
+      expect(repoGets()).toBe(1); // inside the debounce window
+      await waitDebounce();
+      await settle();
+
+      expect(repoGets()).toBe(2);
+      expect(issuesCount()).toBe('13');
+      // Lab's own repo read and nothing else: no request that reaches a forge.
+      expect(h.requests.slice(before).filter((r) => r.startsWith('GET /api/v1/repos'))).toEqual([
+        `GET /api/v1/repos/${REPO_ID}`,
+      ]);
+    });
+  }
+
+  it('ignores the issue, run and parked events of another repo', async () => {
+    await mountRepoHome(`${BASE}/issues`);
+    await waitFor(() => container.querySelector('.repo-head h1'), 'header');
+
+    emit('issue.changed', { repoID: 'repo_other' });
+    emit('run.changed', { repoID: 'repo_other', runID: 'run_9' });
+    emit('parked.changed', { repoID: 'repo_other' });
+    await waitDebounce();
+    await settle();
+    expect(repoGets()).toBe(1);
+  });
+});
+
+describe('repo home after a failed refetch', () => {
+  it('keeps the repo and the tab content, and shows the error', async () => {
+    await mountRepoHome();
+    await waitFor(() => container.querySelector('.afk-card'), 'afk card');
+
+    h.repo = null;
+    h.repoError = 'the store is locked';
+    emit('repo.changed', { repoID: REPO_ID });
+    await settle();
+
+    expect(container.querySelector('.repo-head .banner')?.textContent).toContain(
+      'the store is locked',
+    );
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(container.querySelector('.readiness')).not.toBeNull();
+    expect(container.querySelector('.afk-card')).not.toBeNull();
+  });
+});
+
+describe('repo home moving between repos', () => {
+  const OTHER = 'repo_b';
+  const other = baseRepo({
+    id: OTHER,
+    name: 'other-lab',
+    remote_url: 'git@github.com:x/other.git',
+  });
+
+  it('shows nothing of the previous repo while the next loads, and drops its toast', async () => {
+    let releaseOther: () => void = () => {};
+    h.handle = (method, url) => {
+      if (method === 'POST' && url === `/api/v1/repos/${REPO_ID}/afk/start`) {
+        return jsonResponse(202, { run: { id: 'run_9', issue_number: 7 } });
+      }
+      if (method === 'GET' && url === `/api/v1/repos/${OTHER}`) {
+        return new Promise((resolve) => {
+          releaseOther = () => resolve(jsonResponse(200, other));
+        }) as unknown as ReturnType<typeof jsonResponse>;
+      }
+      if (method === 'GET' && url === `/api/v1/repos/${OTHER}/readiness`) {
+        return jsonResponse(200, other.summary.readiness);
+      }
+      if (method === 'GET' && url === `/api/v1/repos/${OTHER}/parked`) {
+        return jsonResponse(200, { parked: [] });
+      }
+      return undefined;
+    };
+    await mountRepoHome();
+    const runOne = await waitFor(
+      () =>
+        Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('Run one'),
+        ),
+      'Run one',
+    );
+    runOne.click();
+    await settle();
+    expect(container.querySelector('.toast')?.textContent).toBe('Started an AFK run on #7');
+
+    routerHistory.set({ value: `/repos/${OTHER}` });
+    await settle();
+    // repo_1's toast is gone, and nothing of repo_1 shows while repo_b loads.
+    expect(container.querySelector('.toast')).toBeNull();
+    expect(container.querySelector('.repo-head h1')).toBeNull();
+    expect(container.querySelector('.repo-overview')?.textContent).toBe('');
+    expect(container.textContent).not.toContain('coding-lab');
+
+    releaseOther();
+    await settle();
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('other-lab');
+  });
+});
+
 describe('repo home route notice', () => {
   // A stand-in for a page that navigates into the repo home after an action
   // (Add repository), handing over its confirmation through router state.
@@ -310,7 +437,8 @@ describe('repo home route notice', () => {
 
     expect(routerHistory.get()).toBe(BASE);
     const toast = await waitFor(() => container.querySelector('.toast'), 'toast');
-    expect(toast.getAttribute('role')).toBe('status');
+    // Inside the always-present status region, so it is announced.
+    expect(toast.closest('[role="status"]')).not.toBeNull();
     expect(toast.textContent).toBe('Added coding-lab. Cloning started.');
 
     // One toast, inside the frame (the clearing of the state itself is

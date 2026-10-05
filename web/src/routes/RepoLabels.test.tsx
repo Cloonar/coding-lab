@@ -6,7 +6,8 @@
 //   label rows by id, so an in-progress edit — the open LabelForm and its
 //   typed draft — survives the refetch instead of being remounted and wiped;
 // - Delete asks in place (Cancel / "Delete from every issue"), never through a
-//   browser confirm, and only the confirm button sends the DELETE.
+//   browser confirm, and only the confirm button sends the DELETE; once the
+//   row is gone, focus moves to the next label's Delete (or "+ New label").
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
@@ -230,6 +231,30 @@ describe('RepoLabels (builtin repo)', () => {
     expect(container.textContent).not.toContain('defects');
     expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+
+  it('moves focus to the next label after a delete, and to "+ New label" after the last', async () => {
+    await mountLabels();
+    const deleteOf = (name: string) =>
+      container.querySelector<HTMLButtonElement>(`button[aria-label="Delete label ${name}"]`);
+
+    rowButton(rowFor('bug'), 'Delete').click();
+    await settle();
+    const confirm = rowButton(rowFor('bug'), 'Delete from every issue');
+    confirm.focus();
+    confirm.click();
+    await settle();
+    expect(labelDeletes).toEqual(['lbl_1']);
+    expect(document.activeElement).toBe(deleteOf('ui'));
+
+    rowButton(rowFor('ui'), 'Delete').click();
+    await settle();
+    rowButton(rowFor('ui'), 'Delete from every issue').focus();
+    rowButton(rowFor('ui'), 'Delete from every issue').click();
+    await settle();
+    expect(labelDeletes).toEqual(['lbl_1', 'lbl_2']);
+    expect(container.querySelectorAll('ul.label-list > li')).toHaveLength(0);
+    expect(document.activeElement?.textContent).toBe('+ New label');
   });
 
   it('keeps an in-progress edit across an issue.changed refetch', async () => {

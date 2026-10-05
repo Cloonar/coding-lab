@@ -4,12 +4,14 @@
 //
 // Semantics are a radio group: role="radiogroup" named by a visible label
 // (`label`, or `labelledBy` pointing at one rendered elsewhere) or by
-// `aria-label`; each segment is role="radio" with aria-checked. Keyboard:
-// one tab stop (roving tabindex on the checked segment, else the first
-// enabled one); the arrow keys and Home/End move focus between enabled
-// segments; Space or Enter selects the focused one, as does a click. The
-// parent owns `value` and gets the pick through onChange — choosing the
-// already-checked segment fires nothing.
+// `aria-label`; each segment is role="radio" with aria-checked. Keyboard, as
+// in the ARIA radio group pattern: one tab stop (roving tabindex on the
+// checked segment, else the first enabled one); the arrow keys and Home/End
+// move to an enabled segment AND select it, skipping disabled ones, so what a
+// screen reader announces while arrowing is what the form holds; Space or
+// Enter selects the focused one, as does a click. The parent owns `value` and
+// gets the pick through onChange — choosing the already-checked segment fires
+// nothing.
 //
 // The checked segment is raised as a bordered pill in a heavier weight, so it
 // reads without colour. Segments are 44px tall below 1024px and shrink and
@@ -102,7 +104,10 @@ export default function Segmented(props: SegmentedProps) {
         return; // Space/Enter fall through to the native button click
     }
     event.preventDefault();
-    if (next !== undefined) moveFocus(next);
+    if (next === undefined) return;
+    moveFocus(next);
+    const option = props.options[next];
+    if (option !== undefined) select(option);
   };
 
   return (

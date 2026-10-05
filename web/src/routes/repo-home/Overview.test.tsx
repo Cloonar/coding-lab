@@ -24,6 +24,7 @@ import {
   mountRepoHome,
   routerHistory,
   settle,
+  unmount,
   waitFor,
 } from './harness';
 
@@ -486,5 +487,356 @@ describe('Overview parked work', () => {
     await waitFor(() => q('.afk-card'), 'afk card');
     await settle();
     expect(q('.parked-card')).toBeNull();
+  });
+});
+
+describe('Overview readiness, robust and scoped', () => {
+  it('refetches on run.changed for this repo only', async () => {
+    await mountOverview();
+    expect(gets(`${API}/readiness`)).toBe(1);
+
+    emit('run.changed', { repoID: 'repo_other', runID: 'run_9' });
+    await settle();
+    expect(gets(`${API}/readiness`)).toBe(1);
+
+    emit('run.changed', { repoID: REPO_ID, runID: 'run_1' });
+    await settle();
+    expect(gets(`${API}/readiness`)).toBe(2);
+  });
+
+  it('renders a state from a newer server as pending, and a report without checks', async () => {
+    h.readiness = {
+      state: 'passing',
+      checks: [{ ...passing('tracker'), state: 'degraded' as ReadinessCheck['state'] }],
+    };
+    await mountOverview();
+    expect(q('.readiness-head .readiness-title')?.textContent).toBe('Getting ready');
+    expect(q('.readiness-check.pending .visually-hidden')?.textContent).toBe('Pending: ');
+
+    unmount();
+    h.readiness = { state: 'passing' } as unknown as Readiness;
+    h.repo = { ...baseRepo(), summary: undefined } as unknown as typeof h.repo;
+    await mountOverview();
+    expect(q('.readiness-head .readiness-title')?.textContent).toBe('Ready to run');
+    expect(q('.afk-card-count')).not.toBeNull();
+  });
+
+  it('ties each action to its check, so two "Change credential" buttons differ', async () => {
+    h.readiness = {
+      state: 'failing',
+      checks: [
+        {
+          id: 'git_credential',
+          state: 'failing',
+          detail: 'The git credential was rejected.',
+          fix: { scope: 'repo', section: 'integrations', field: 'credential_id' },
+        },
+        trackerFailing,
+      ],
+    };
+    await mountOverview();
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('.readiness-action'));
+    expect(buttons.map((b) => b.textContent)).toEqual(['Change credential', 'Change credential']);
+    expect(
+      buttons.map((b) => document.getElementById(b.getAttribute('aria-describedby') ?? '')),
+    ).toEqual(Array.from(container.querySelectorAll('.readiness-check-title')));
+    expect(
+      buttons.map((b) =>
+        document
+          .getElementById(b.getAttribute('aria-describedby') ?? '')
+          ?.lastChild?.textContent?.trim(),
+      ),
+    ).toEqual(['Git credential', 'Tracker']);
+  });
+
+  it('keeps a check row and the focus on its Fix button through a refetch', async () => {
+    h.readiness = { state: 'failing', checks: [trackerFailing, passing('clone')] };
+    await mountOverview();
+    const fix = buttonNamed('Change credential')!;
+    fix.focus();
+
+    h.readiness = {
+      state: 'failing',
+      checks: [{ ...trackerFailing, detail: 'Still rejected.' }, passing('clone')],
+    };
+    emit('provider.auth.changed', {});
+    await settle();
+
+    expect(q('.readiness-check.failing .readiness-detail')?.textContent).toBe('Still rejected.');
+    expect(buttonNamed('Change credential')).toBe(fix);
+    expect(document.activeElement).toBe(fix);
+  });
+
+  it('moves focus to the block’s toggle once Retry clone turns the check pending', async () => {
+    h.repo = baseRepo({ clone_status: 'error', clone_error: 'auth failed' });
+    h.readiness = {
+      state: 'failing',
+      checks: [
+        { id: 'clone', state: 'failing', detail: 'The last clone failed.', action: 'retry_clone' },
+      ],
+    };
+    h.handle = (method, url) => {
+      if (method === 'POST' && url === `${API}/clone/retry`) {
+        h.repo = baseRepo({ clone_status: 'cloning' });
+        h.readiness = {
+          state: 'pending',
+          checks: [{ id: 'clone', state: 'pending', detail: 'Cloning.' }],
+        };
+        return jsonResponse(202, {});
+      }
+      return undefined;
+    };
+    await mountOverview();
+    const retry = buttonNamed('Retry clone')!;
+    retry.focus();
+    retry.click();
+    await settle();
+
+    expect(buttonNamed('Retry clone')).toBeUndefined();
+    expect(q('.readiness-head .readiness-title')?.textContent).toBe('Getting ready');
+    expect(document.activeElement).toBe(q('.readiness-toggle'));
+  });
+});
+
+describe('Overview live runs across refetches', () => {
+  it('keeps each run’s link, and the focus on it, through run.changed', async () => {
+    h.instances = [
+      baseInstance({ id: 'run_a', title: 'Alpha', state: 'working' }),
+      baseInstance({ id: 'run_b', title: 'Beta', state: 'idle' }),
+    ];
+    await mountOverview();
+    const link = await waitFor(
+      () => q<HTMLAnchorElement>('a.live-run[href="/runs/run_b"]'),
+      'live run',
+    );
+    link.focus();
+
+    h.instances = [
+      baseInstance({ id: 'run_a', title: 'Alpha', state: 'working' }),
+      baseInstance({ id: 'run_b', title: 'Beta renamed', state: 'idle' }),
+    ];
+    emit('run.changed', { repoID: REPO_ID, runID: 'run_b' });
+    await settle();
+
+    expect(q('a.live-run[href="/runs/run_b"] .live-run-title')?.textContent).toBe('Beta renamed');
+    expect(q('a.live-run[href="/runs/run_b"]')).toBe(link);
+    expect(document.activeElement).toBe(link);
+  });
+
+  it('moves focus to the block’s heading once Stop all empties the list', async () => {
+    h.instances = [baseInstance({ id: 'a', state: 'working' })];
+    h.handle = (method, url) => {
+      if (method === 'POST' && url === `${API}/stop-all`) {
+        h.instances = [];
+        return jsonResponse(200, { stopped: 1 });
+      }
+      return undefined;
+    };
+    await mountOverview();
+    await waitFor(() => q('.live-run'), 'live runs');
+
+    buttonNamed('Stop all (1)')?.click();
+    await settle();
+    const confirm = buttonNamed('Stop 1 run')!;
+    confirm.focus();
+    confirm.click();
+    await settle();
+
+    expect(q('.live-runs')?.textContent).toContain('No live runs.');
+    expect(document.activeElement).toBe(q('.live-runs h2'));
+  });
+});
+
+describe('Overview after a failed repo refetch', () => {
+  it('Auto that succeeded shows on the switch with no error, though the refetch failed', async () => {
+    h.handle = (method, url) => {
+      if (method === 'PUT' && url === `${API}/afk/auto`) {
+        const updated = baseRepo({ afk_auto_enabled: true });
+        h.repo = null; // the follow-up GET answers 500
+        return jsonResponse(200, updated);
+      }
+      return undefined;
+    };
+    await mountOverview();
+    await waitFor(() => q('.afk-card'), 'afk card');
+
+    q<HTMLButtonElement>('.afk-card button[role="switch"]')?.click();
+    await settle();
+
+    expect(q('.afk-card button[role="switch"]')?.getAttribute('aria-checked')).toBe('true');
+    expect(q('.toast')?.textContent).toBe('Auto-spawn on for coding-lab');
+    expect(container.textContent).not.toContain('Something went wrong');
+    // The failure is reported in the frame; every card stays.
+    expect(q('.repo-head .banner')?.textContent).toContain('repo lookup failed');
+    expect(q('.readiness')).not.toBeNull();
+    expect(q('.live-runs')).not.toBeNull();
+    expect(q('.afk-card')).not.toBeNull();
+    expect(q('.parked-card')).not.toBeNull();
+  });
+});
+
+describe('Overview moving between repos', () => {
+  const B = 'repo_b';
+  const B_API = `/api/v1/repos/${B}`;
+  const repoB = () =>
+    baseRepo({
+      id: B,
+      name: 'other-lab',
+      remote_url: 'git@github.com:x/other-lab.git',
+      clone_status: 'cloning',
+      summary: { claimable: null, open_issues: 0, readiness: { state: 'pending', checks: [] } },
+    });
+
+  /** Serves repo_b's reads; `held` POSTs for repo_1 wait for release(). */
+  function serveB(held: Record<string, unknown> = {}): Record<string, () => void> {
+    const releases: Record<string, () => void> = {};
+    h.handle = (method, url) => {
+      if (method === 'GET' && url === B_API) return jsonResponse(200, repoB());
+      if (method === 'GET' && url === `${B_API}/readiness`) {
+        return jsonResponse(200, {
+          state: 'pending',
+          checks: [{ id: 'clone', state: 'pending', detail: 'Cloning other-lab.' }],
+        });
+      }
+      if (method === 'GET' && url === `${B_API}/parked`) return jsonResponse(200, { parked: [] });
+      const key = `${method} ${url}`;
+      if (key in held) {
+        return new Promise((resolve) => {
+          releases[key] = () => resolve(jsonResponse(200, held[key]));
+        }) as unknown as ReturnType<typeof jsonResponse>;
+      }
+      return undefined;
+    };
+    return releases;
+  }
+
+  it('re-keys every block to the new repo and shows nothing of the old one', async () => {
+    h.instances = [
+      baseInstance({ id: 'run_a', title: 'Alpha run' }),
+      baseInstance({ id: 'run_b', title: 'Beta run', repo_id: B }),
+    ];
+    h.parked = [
+      { branch: 'lab/a-parked', worktree_path: '', dirty: false, commits_ahead: 1, unpushed: 0 },
+    ];
+    h.readiness = { state: 'failing', checks: [trackerFailing] };
+    serveB();
+    await mountOverview();
+    await waitFor(() => q('.parked-entry'), 'parked');
+    expect(container.textContent).toContain('Alpha run');
+    const before = q('.readiness');
+
+    routerHistory.set({ value: `/repos/${B}` });
+    await settle();
+    await waitFor(() => q('.readiness-check'), 'repo_b readiness');
+
+    // Readiness is repo_b's (a fresh block), with repo_b's clone progress.
+    expect(q('.readiness')).not.toBe(before);
+    expect(q('.readiness-check .readiness-detail')?.textContent).toBe('Cloning other-lab.');
+    emit('clone.progress', { repoID: REPO_ID, phase: 'receiving objects', percent: 90, line: '' });
+    emit('clone.progress', { repoID: B, phase: 'resolving deltas', percent: 40, line: '' });
+    await settle();
+    expect(q('.readiness-progress [role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('40');
+    // Nothing of repo_1 in the repo home (the side rail lists every run):
+    // its runs, its parked work, its failing tracker, its name.
+    const home = q('main.repo-home')?.textContent ?? '';
+    expect(home).toContain('other-lab');
+    expect(home).not.toContain('Alpha run');
+    expect(home).not.toContain('lab/a-parked');
+    expect(home).not.toContain('forge token was rejected');
+    expect(home).not.toContain('coding-lab');
+  });
+
+  it('shows the new repo’s live runs, AFK count and parked work once it is ready', async () => {
+    h.instances = [
+      baseInstance({ id: 'run_a', title: 'Alpha run' }),
+      baseInstance({ id: 'run_b', title: 'Beta run', repo_id: B }),
+    ];
+    h.parked = [
+      { branch: 'lab/a-parked', worktree_path: '', dirty: false, commits_ahead: 1, unpushed: 0 },
+    ];
+    serveB();
+    const ready = baseRepo({
+      id: B,
+      name: 'other-lab',
+      summary: { claimable: 9, open_issues: 2, readiness: { state: 'passing', checks: [] } },
+    });
+    const serve = h.handle!;
+    h.handle = (method, url, init) => {
+      if (method === 'GET' && url === B_API) return jsonResponse(200, ready);
+      if (method === 'GET' && url === `${B_API}/readiness`) {
+        return jsonResponse(200, ready.summary.readiness);
+      }
+      if (method === 'GET' && url === `${B_API}/parked`) {
+        return jsonResponse(200, {
+          parked: [
+            {
+              branch: 'lab/b-parked',
+              worktree_path: '',
+              dirty: true,
+              commits_ahead: 0,
+              unpushed: 0,
+            },
+          ],
+        });
+      }
+      return serve(method, url, init);
+    };
+    await mountOverview();
+    await waitFor(() => q('.parked-entry'), 'parked');
+    expect(q('.afk-card-count')?.textContent).toBe('3 issues ready for an agent.');
+
+    routerHistory.set({ value: `/repos/${B}` });
+    await settle();
+    await waitFor(() => q('.parked-entry'), 'repo_b parked');
+
+    const home = () => q('main.repo-home')?.textContent ?? '';
+    expect(
+      Array.from(container.querySelectorAll('.live-run-title')).map((el) => el.textContent),
+    ).toEqual(['Beta run']);
+    expect(q('.afk-card-count')?.textContent).toBe('9 issues ready for an agent.');
+    expect(q('.parked-branch')?.textContent).toBe('lab/b-parked');
+    expect(home()).not.toContain('Alpha run');
+    expect(home()).not.toContain('lab/a-parked');
+  });
+
+  it('drops a Run one answer for the old repo instead of toasting it on the new one', async () => {
+    const releases = serveB({
+      [`POST ${API}/afk/start`]: { run: { id: 'run_9', issue_number: 7 } },
+    });
+    await mountOverview();
+    await waitFor(() => q('.afk-card'), 'afk card');
+
+    q<HTMLButtonElement>('.afk-card-start')?.click();
+    await settle();
+    routerHistory.set({ value: `/repos/${B}` });
+    await settle();
+    await waitFor(() => q('.readiness-check'), 'repo_b readiness');
+
+    releases[`POST ${API}/afk/start`]?.();
+    await settle();
+    expect(q('.toast')).toBeNull();
+    expect(container.textContent).not.toContain('Something went wrong');
+    // repo_b's view got nothing of it: no extra repo_b read was triggered.
+    expect(h.requests.filter((r) => r === `GET ${B_API}`)).toHaveLength(1);
+  });
+
+  it('drops a Stop all answer for the old repo too', async () => {
+    h.instances = [baseInstance({ id: 'a' })];
+    const releases = serveB({ [`POST ${API}/stop-all`]: { stopped: 1 } });
+    await mountOverview();
+    await waitFor(() => q('.live-run'), 'live runs');
+
+    buttonNamed('Stop all (1)')?.click();
+    await settle();
+    buttonNamed('Stop 1 run')?.click();
+    await settle();
+    routerHistory.set({ value: `/repos/${B}` });
+    await settle();
+    await waitFor(() => q('.readiness-check'), 'repo_b readiness');
+
+    releases[`POST ${API}/stop-all`]?.();
+    await settle();
+    expect(q('.toast')).toBeNull();
+    expect(container.textContent).not.toContain('Stopped 1 run');
   });
 });

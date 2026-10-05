@@ -13,10 +13,27 @@
 // progress from the clone progress store, and the head says runs can start
 // when the clone has finished. A check absent from the report is not listed.
 // Each check's state is an icon plus words for assistive tech, never colour
-// alone.
+// alone; each action is described by its check's title, so two "Change
+// credential" buttons (tracker, git credential) are told apart.
+//
+// Robust to other server versions: a state this client does not know reads
+// as pending, and a report without a check list as no checks. The rows render
+// from a store reconciled by check id, so a refetch patches them in place
+// (focus on a Fix button survives). Once Retry clone turns the check pending
+// its button goes away, so focus moves to the block's toggle.
 
 import { useNavigate } from '@solidjs/router';
-import { For, Show, createEffect, createMemo, createSignal, createUniqueId, on } from 'solid-js';
+import {
+  For,
+  Show,
+  createComputed,
+  createEffect,
+  createMemo,
+  createSignal,
+  createUniqueId,
+  on,
+} from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
 import {
   errorMessage,
   getRepoReadiness,
@@ -28,11 +45,14 @@ import {
 } from '../../../api';
 import Banner from '../../../components/Banner';
 import Icon, { type IconName } from '../../../components/Icon';
+import { rescueFocus } from '../../../lib/focus';
 import { createLiveResource } from '../../../lib/liveResource';
 import {
+  checkState,
   checkTitle,
   fixHref,
   fixLabel,
+  normalizeReadiness,
   orderChecks,
   readinessHeadline,
 } from '../../../lib/readiness';
@@ -68,18 +88,38 @@ export default function ReadinessBlock(props: {
     [
       { type: 'repo.changed', match: (event) => event.repoID === props.repo.id },
       { type: 'provider.auth.changed' },
-      { type: 'run.changed' },
+      // This repo's runs only (an event without a repo id still counts).
+      {
+        type: 'run.changed',
+        match: (event) => event.repoID === undefined || event.repoID === props.repo.id,
+      },
     ],
   );
 
-  const readiness = (): Readiness | undefined =>
-    resourceValue(report) ?? props.repo.summary?.readiness;
+  const readiness = createMemo(
+    (): Readiness | undefined =>
+      normalizeReadiness(resourceValue(report)) ??
+      normalizeReadiness(props.repo.summary?.readiness),
+  );
   const cloning = () => props.repo.clone_status === 'cloning';
   const headline = () => {
     const r = readiness();
     return r === undefined ? undefined : readinessHeadline(r, cloning());
   };
-  const checks = () => orderChecks(readiness()?.checks ?? []);
+  // One store object per check id, patched in place by each refetch. Copies:
+  // the store patches what it holds, and the summary's checks are the frame's.
+  const [checks, setChecks] = createStore<ReadinessCheck[]>([]);
+  createComputed(() =>
+    setChecks(
+      reconcile(
+        orderChecks(readiness()?.checks ?? []).map((check) => ({
+          ...check,
+          ...(check.fix !== undefined ? { fix: { ...check.fix } } : {}),
+        })),
+        { key: 'id' },
+      ),
+    ),
+  );
 
   // Collapsed when everything passes, open otherwise — re-decided whenever
   // the roll-up changes, so a newly failing check opens the block.
@@ -91,20 +131,27 @@ export default function ReadinessBlock(props: {
 
   const [error, setError] = createSignal<string | null>(null);
   const [retrying, setRetrying] = createSignal(false);
+  let toggle: HTMLButtonElement | undefined;
   const retry = async () => {
-    const repo = props.repo;
+    if (retrying()) return;
+    // Captured before any await: the answer may land after a move.
+    const repoID = props.repo.id;
+    const repoName = props.repo.name;
+    const notify = props.notify;
+    const onRepoChanged = props.onRepoChanged;
     setError(null);
     setRetrying(true);
     props.onCloneRetried();
     try {
-      await retryClone(repo.id);
-      props.notify(`Retrying the clone of ${repo.name}`);
-      void refetch();
-      await props.onRepoChanged();
+      await retryClone(repoID);
+      notify(`Retrying the clone of ${repoName}`);
+      await Promise.allSettled([refetch(), onRepoChanged()]);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setRetrying(false);
+      // The failing clone check (and its Retry button) turned pending.
+      rescueFocus(toggle);
     }
   };
 
@@ -130,6 +177,7 @@ export default function ReadinessBlock(props: {
             <button
               type="button"
               class="readiness-toggle"
+              ref={toggle}
               aria-expanded={open()}
               aria-controls={listId}
               onClick={() => setOpen(!open())}
@@ -147,11 +195,11 @@ export default function ReadinessBlock(props: {
           <div class="readiness-checks" id={listId} hidden={!open()}>
             <Banner message={error()} onDismiss={() => setError(null)} />
             <Show
-              when={checks().length > 0}
+              when={checks.length > 0}
               fallback={<p class="muted readiness-none">No checks to report.</p>}
             >
               <ul class="readiness-list">
-                <For each={checks()}>
+                <For each={checks}>
                   {(check) => (
                     <CheckRow
                       check={check}
@@ -182,15 +230,17 @@ function CheckRow(props: {
   onRetry: () => void;
   onFix: (href: string) => void;
 }) {
-  const failing = () => props.check.state === 'failing';
+  const titleId = `readiness-check-${createUniqueId()}`;
+  const state = () => checkState(props.check.state);
+  const failing = () => state() === 'failing';
   return (
-    <li class={`readiness-check ${props.check.state}`}>
-      <span class={`readiness-icon ${props.check.state}`} aria-hidden="true">
-        <Icon name={STATE_ICON[props.check.state]} size={14} />
+    <li class={`readiness-check ${state()}`}>
+      <span class={`readiness-icon ${state()}`} aria-hidden="true">
+        <Icon name={STATE_ICON[state()]} size={14} />
       </span>
       <span class="readiness-text">
-        <span class="readiness-check-title">
-          <span class="visually-hidden">{STATE_WORD[props.check.state]}: </span>
+        <span class="readiness-check-title" id={titleId}>
+          <span class="visually-hidden">{STATE_WORD[state()]}: </span>
           {checkTitle(props.check.id)}
         </span>
         <span class="readiness-detail">{props.check.detail}</span>
@@ -202,6 +252,7 @@ function CheckRow(props: {
         <button
           type="button"
           class="readiness-action"
+          aria-describedby={titleId}
           disabled={props.retrying}
           onClick={() => props.onRetry()}
         >
@@ -213,6 +264,7 @@ function CheckRow(props: {
           <button
             type="button"
             class="readiness-action"
+            aria-describedby={titleId}
             onClick={() => props.onFix(fixHref(props.repoID, fix()))}
           >
             {fixLabel(fix())}

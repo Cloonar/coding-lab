@@ -11,8 +11,11 @@ export interface RepoHomeState {
   /** The route's repo id. Reactive: the frame stays mounted from repo to repo. */
   id: Accessor<string>;
   /**
-   * The repo, or undefined while it loads and after a failed load. Never
-   * throws, and never answers a previous repo's data while the next one loads.
+   * The repo, or undefined while it loads and after a failed first load. A
+   * failed REFETCH of the same repo keeps answering the last good repo (the
+   * frame's banner reports the failure), so the tabs stay mounted. Never
+   * throws, and never answers another repo's data: after a move to another
+   * id it reads undefined until that repo has loaded.
    */
   repo: Accessor<Repo | undefined>;
   /** The load failure (the frame shows it in a banner), or undefined. */
@@ -21,7 +24,10 @@ export interface RepoHomeState {
   loading: Accessor<boolean>;
   /** Refetches the repo; resolves to the fresh repo, or undefined on failure. */
   refetch: () => Promise<Repo | undefined>;
-  /** Replaces the cached repo at once (an optimistic update before a refetch). */
+  /**
+   * Replaces the cached repo at once (an optimistic update before a refetch,
+   * or a mutation's response). Pass only a repo of the current id.
+   */
   mutate: (next: Repo) => void;
   /** Shows the frame's toast — one per repo home, shared by every tab. */
   notify: (message: string, options?: ToastOptions) => void;

@@ -6,7 +6,11 @@
 // - RepoTable, from 1024px: the same data as a real table with the columns
 //   Repository, Runs, Ready, AFK, Autoland and Last run.
 // In both, the whole row opens the repo home: the name is a real link (the
-// keyboard path), and a click anywhere else on the row follows it too.
+// keyboard path, and Ctrl/Cmd/Shift/middle-click on it open a new tab or
+// window as on any link), and a plain click anywhere else on the row follows
+// it too. A modified or non-primary click on the row, or a click that ends a
+// text selection made in the row, is left alone. Rows are keyed by the
+// caller's stable row objects, so a refetch updates them in place.
 // A cloning repo shows its progress ("Cloning 62%") and dashes for the AFK
 // columns; a failed clone and a not-ready repo say so in words. An unknown
 // claimable count is a dash, never 0.
@@ -28,19 +32,31 @@ export interface RepoRowData {
 }
 
 /**
- * Follows the row's link unless the click landed on a control of its own
- * (the link itself, a button) or ended a text selection.
+ * Follows the row's link on a plain primary click, unless the click landed
+ * on a control of its own (the link itself, a button), carried a modifier
+ * (Ctrl/Cmd/Shift/Alt mean "somewhere else" to the browser — the name link
+ * does that natively), or ended a text selection made inside the row.
  */
 function useRowClick(): (event: MouseEvent, repoID: string) => void {
   const navigate = useNavigate();
   return (event, repoID) => {
     if (event.defaultPrevented || event.button !== 0) return;
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
     const target = event.target instanceof Element ? event.target : null;
     if (target !== null && target.closest('a, button, input, label') !== null) return;
-    const selection = window.getSelection?.();
-    if (selection !== null && selection !== undefined && selection.toString() !== '') return;
+    const row = event.currentTarget instanceof Node ? event.currentTarget : null;
+    if (row !== null && selectingIn(row)) return;
     navigate(`/repos/${repoID}`);
   };
+}
+
+/** True when a non-empty text selection starts or ends inside `row`. */
+function selectingIn(row: Node): boolean {
+  const selection = window.getSelection?.();
+  if (selection === null || selection === undefined || selection.isCollapsed) return false;
+  if (selection.toString().trim() === '') return false;
+  const inRow = (node: Node | null) => node !== null && row.contains(node);
+  return inRow(selection.anchorNode) || inRow(selection.focusNode);
 }
 
 /** "Cloning 62%" / "Cloning" while the percent is unknown. */

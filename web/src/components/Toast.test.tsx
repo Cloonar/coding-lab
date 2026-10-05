@@ -1,6 +1,8 @@
 // Toast contract: show(message) renders the text alone in a status region for
 // 4s, and a new message replaces the old and restarts the timer (the behavior
-// every existing caller relies on). Issue #61 adds an optional action — one
+// every existing caller relies on). The status region itself is always in the
+// page — empty while nothing shows — because a live region inserted together
+// with its text is never announced; only the .toast pill inside comes and goes. Issue #61 adds an optional action — one
 // button beside the text (Undo) — that hides the toast before running, a
 // longer 6.5s lifetime for action toasts, a per-call duration, a timer that
 // pauses while the pointer or focus is inside, and dismiss().
@@ -31,19 +33,34 @@ afterEach(() => {
 });
 
 const el = () => container.querySelector<HTMLElement>('.toast');
+const region = () => container.querySelector<HTMLElement>('[role="status"]');
 
 describe('Toast (plain)', () => {
-  it('renders the message alone in a status region and hides after 4s', () => {
+  it('keeps an empty status region in the page before anything shows', () => {
+    expect(container.innerHTML).toBe('<div class="toast-region" role="status"></div>');
+    expect(el()).toBeNull();
+  });
+
+  it('renders the message alone in the status region and hides after 4s', () => {
+    const before = region();
     toast.show('Stopped 2 instances');
-    expect(el()?.getAttribute('role')).toBe('status');
+    // The SAME region, already present, gets the text: that is what a screen
+    // reader announces.
+    expect(region()).toBe(before);
+    expect(region()?.contains(el())).toBe(true);
     expect(el()?.textContent).toBe('Stopped 2 instances');
     expect(el()?.querySelector('button')).toBeNull();
-    expect(container.innerHTML).toBe('<div class="toast" role="status">Stopped 2 instances</div>');
+    expect(container.innerHTML).toBe(
+      '<div class="toast-region" role="status"><div class="toast">Stopped 2 instances</div></div>',
+    );
 
     vi.advanceTimersByTime(3_999);
     expect(el()).not.toBeNull();
     vi.advanceTimersByTime(1);
     expect(el()).toBeNull();
+    // The region stays for the next message.
+    expect(region()).toBe(before);
+    expect(region()?.textContent).toBe('');
   });
 
   it('replaces the message and restarts the timer', () => {
@@ -72,6 +89,7 @@ describe('Toast (with an action)', () => {
   it('renders one action button and stays up 6.5s', () => {
     const run = vi.fn();
     toast.show('Changes discarded', { action: { label: 'Undo', run } });
+    expect(region()?.contains(el())).toBe(true);
     expect(el()?.querySelector('.toast-text')?.textContent).toBe('Changes discarded');
     const buttons = el()?.querySelectorAll('button');
     expect(buttons).toHaveLength(1);

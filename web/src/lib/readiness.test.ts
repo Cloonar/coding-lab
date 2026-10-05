@@ -3,11 +3,14 @@
 // headline for each roll-up, and where a fix lives for each scope.
 
 import { describe, expect, it } from 'vitest';
-import type { Readiness, ReadinessCheck } from '../api';
+import type { Readiness, ReadinessCheck, ReadinessState } from '../api';
 import {
+  checkState,
+  checksOf,
   checkTitle,
   fixHref,
   fixLabel,
+  normalizeReadiness,
   orderChecks,
   plural,
   readinessHeadline,
@@ -55,6 +58,53 @@ describe('orderChecks', () => {
     ]);
     // Pure: the input keeps its order.
     expect(checks[0]?.id).toBe('clone');
+  });
+});
+
+describe('a report from an older or newer server', () => {
+  const newer = 'degraded' as ReadinessState;
+
+  it('reads an unknown state as pending, never passing', () => {
+    expect(checkState('passing')).toBe('passing');
+    expect(checkState('failing')).toBe('failing');
+    expect(checkState(newer)).toBe('pending');
+    expect(checkState(undefined)).toBe('pending');
+    expect(
+      readinessState({ state: 'passing', checks: [check({ id: 'tracker', state: newer })] }),
+    ).toBe('pending');
+    expect(readinessState({ state: newer, checks: [] })).toBe('pending');
+  });
+
+  it('orders an unknown state with the pending checks', () => {
+    const checks = [
+      check({ id: 'clone' }),
+      check({ id: 'tracker', state: newer }),
+      check({ id: 'dev_image', state: 'failing' }),
+    ];
+    expect(orderChecks(checks).map((c) => c.id)).toEqual(['dev_image', 'tracker', 'clone']);
+  });
+
+  it('treats a missing report or check list as no checks', () => {
+    expect(checksOf(undefined)).toEqual([]);
+    expect(checksOf(null)).toEqual([]);
+    expect(checksOf({ state: 'passing' } as unknown as Readiness)).toEqual([]);
+    expect(normalizeReadiness(undefined)).toBeUndefined();
+    const bare = normalizeReadiness({ state: 'passing' } as unknown as Readiness);
+    expect(bare).toEqual({ state: 'passing', checks: [] });
+    expect(readinessHeadline(bare!).title).toBe('Ready to run');
+    expect(readinessState({ checks: [] } as unknown as Readiness)).toBe('passing');
+  });
+
+  it('normalizes every state, passing known checks through untouched', () => {
+    const known = check({ id: 'clone' });
+    const report = normalizeReadiness({
+      state: newer,
+      checks: [known, check({ id: 'tracker', state: newer })],
+    });
+    expect(report?.state).toBe('pending');
+    expect(report?.checks[0]).toBe(known);
+    expect(report?.checks[1]?.state).toBe('pending');
+    expect(readinessHeadline(report!).title).toBe('Getting ready');
   });
 });
 

@@ -38,6 +38,13 @@
   font-size: 1.08rem;
 }
 
+/* A card heading takes focus when the control the operator was on went away
+   (Stop all once nothing is live, the last parked entry discarded): a ring
+   for keyboard-origin focus only. */
+.overview-card-head h2:focus:not(:focus-visible) {
+  outline: none;
+}
+
 .overview-card .banner {
   margin: 0;
 }

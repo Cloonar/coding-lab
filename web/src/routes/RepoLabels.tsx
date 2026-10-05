@@ -7,7 +7,9 @@
 // renders inside the repo home frame's Issues tab (issue #61): the frame owns
 // the page, the repo heading and the repo fetch; this page keeps an
 // "Issues / Labels" trail within the tab. Delete asks in place (InlineConfirm),
-// never through a browser confirm.
+// never through a browser confirm; once the label is gone, focus moves to the
+// next label's Delete (else the previous one's, else "+ New label") instead of
+// falling to the page with the removed row.
 
 import { useParams } from '@solidjs/router';
 import { For, Match, Show, Switch, createEffect, createSignal } from 'solid-js';
@@ -27,6 +29,7 @@ import LabelChip from '../components/LabelChip';
 import InlineConfirm from '../components/InlineConfirm';
 import SectionCard from '../components/SectionCard';
 import SectionHead from '../components/SectionHead';
+import { rescueFocus } from '../lib/focus';
 import { canMutateTracker } from '../lib/issues';
 import { DEFAULT_LABEL_COLOR, normalizeHex } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
@@ -72,15 +75,36 @@ export default function RepoLabels() {
 
   // Asked in place first (InlineConfirm): deleting cannot be undone, and it
   // strips the label from every issue carrying it — the confirm button says so.
+  let list: HTMLUListElement | undefined;
+  let newLabel: HTMLButtonElement | undefined;
+  // A label's Delete trigger, by its accessible name (label names are unique
+  // per repo).
+  const deleteTrigger = (name: string | undefined) =>
+    name === undefined
+      ? undefined
+      : Array.from(list?.querySelectorAll<HTMLButtonElement>('button') ?? []).find(
+          (button) => button.getAttribute('aria-label') === `Delete label ${name}`,
+        );
   const remove = async (label: Label) => {
+    const repoID = params.id;
+    // The label's neighbours, read before the row goes.
+    const index = rows.findIndex((row) => row.id === label.id);
+    const next = rows[index + 1]?.name;
+    const previous = rows[index - 1]?.name;
     setError(null);
     try {
-      await deleteLabel(params.id, label.id);
+      await deleteLabel(repoID, label.id);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
       void refetch();
+      return;
     }
+    try {
+      await refetch();
+    } catch {
+      // The page shows the load error.
+    }
+    rescueFocus(deleteTrigger(next), deleteTrigger(previous), newLabel);
   };
 
   return (
@@ -98,7 +122,7 @@ export default function RepoLabels() {
         <Match when={labels()}>
           <div class="stack">
             <section class="card">
-              <ul class="label-list">
+              <ul class="label-list" ref={list}>
                 <For each={rows}>
                   {(label) => (
                     <li>
@@ -151,6 +175,7 @@ export default function RepoLabels() {
                 <button
                   type="button"
                   class="wide"
+                  ref={newLabel}
                   onClick={() => {
                     setEditing(null);
                     setCreating(true);

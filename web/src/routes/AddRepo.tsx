@@ -94,8 +94,11 @@ export default function AddRepo() {
 
 function AddRepoView() {
   const navigate = useNavigate();
-  const [credentials] = createResource(() => listCredentials());
+  const [credentials, { refetch: reloadCredentials }] = createResource(() => listCredentials());
   const allCredentials = () => resourceValue(credentials) ?? [];
+  // A failed credentials read says so (with a retry) instead of reading as
+  // "you have no credentials".
+  const credentialsFailed = () => credentials.error !== undefined;
   const gitCredentials = () =>
     allCredentials().filter((c) => c.kind === 'ssh_key' || c.kind === 'https_token');
   const forgeCredentials = () => allCredentials().filter((c) => c.kind === 'forge_token');
@@ -271,7 +274,10 @@ function AddRepoView() {
             name="credential_id"
             value={credentialId()}
             aria-invalid={fieldError('credential_id') !== undefined ? 'true' : undefined}
-            aria-describedby={describedBy('credential_id', gitCredentials().length === 0)}
+            aria-describedby={describedBy(
+              'credential_id',
+              credentialsFailed() || gitCredentials().length === 0,
+            )}
             onChange={(e) => {
               setCredentialId(e.currentTarget.value);
               clearError('credential_id');
@@ -287,9 +293,30 @@ function AddRepoView() {
             </For>
           </select>
           <FieldError id={errorId('credential_id')} message={fieldError('credential_id')} />
-          <Show when={gitCredentials().length === 0}>
-            <small class="hint" id={hintId('credential_id')}>
-              A private remote needs one — <A href="/credentials">add a git credential</A> first.
+          <Show
+            when={credentialsFailed()}
+            fallback={
+              <Show when={gitCredentials().length === 0}>
+                <small class="hint" id={hintId('credential_id')}>
+                  A private remote needs one — <A href="/credentials">add a git credential</A>{' '}
+                  first.
+                </small>
+              </Show>
+            }
+          >
+            <small class="hint add-repo-credentials-failed" id={hintId('credential_id')}>
+              <span>
+                Your credentials could not be loaded ({errorMessage(credentials.error)}), so none
+                are listed.
+              </span>
+              <button
+                type="button"
+                class="add-repo-retry"
+                disabled={credentials.loading}
+                onClick={() => void reloadCredentials()}
+              >
+                {credentials.loading ? 'Loading…' : 'Load credentials again'}
+              </button>
             </small>
           </Show>
         </div>
@@ -343,6 +370,10 @@ function AddRepoView() {
             />
             <small class="hint" id={hintId('forge_credential_id')}>
               The forge API token for issues and pull requests. It is never given to runs.
+              <Show when={credentialsFailed()}>
+                {' '}
+                Your credentials could not be loaded, so none are listed.
+              </Show>
             </small>
           </div>
         </Show>

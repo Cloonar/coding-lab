@@ -4,7 +4,7 @@
 // the Needs you entries (one per problem, a failed clone exactly once).
 
 import { describe, expect, it } from 'vitest';
-import type { Instance, ReadinessCheck, Repo } from '../api';
+import type { Instance, ReadinessCheck, ReadinessState, Repo } from '../api';
 import { baseInstance, baseRepo } from '../routes/repo-home/harness';
 import {
   afkState,
@@ -15,6 +15,8 @@ import {
   orderRepos,
   relativeTime,
   runCounts,
+  summaryRefreshSpecs,
+  SUMMARY_REFRESH_MS,
 } from './repoList';
 
 const repo = (id: string, over: Partial<Repo> = {}): Repo =>
@@ -116,6 +118,26 @@ describe('afkState and isNotReady', () => {
       isNotReady(withChecks(repo('a'), [{ id: 'clone', state: 'pending', detail: 'x' }])),
     ).toBe(false);
   });
+
+  it('tolerates a missing summary or report and a state from a newer server', () => {
+    expect(isNotReady({ ...repo('a'), summary: undefined } as unknown as Repo)).toBe(false);
+    expect(
+      isNotReady({
+        ...repo('a'),
+        summary: { claimable: 1, open_issues: 1 },
+      } as unknown as Repo),
+    ).toBe(false);
+    expect(
+      isNotReady({
+        ...repo('a'),
+        summary: { claimable: 1, open_issues: 1, readiness: { state: 'passing' } },
+      } as unknown as Repo),
+    ).toBe(false);
+    const newer = withChecks(repo('a'), [
+      { id: 'tracker', state: 'degraded' as ReadinessState, detail: 'x' },
+    ]);
+    expect(isNotReady(newer)).toBe(false); // unknown = pending, not failing
+  });
 });
 
 describe('relativeTime', () => {
@@ -152,6 +174,13 @@ describe('relativeTime', () => {
 
   it('reads a time in the future (clock skew) as just now', () => {
     expect(relativeTime(new Date(now + 5 * MIN).toISOString(), now)).toBe('just now');
+  });
+
+  it('reads a time further in the future as its plain date, not a wrong relative time', () => {
+    const ahead = new Date(now + 2 * HOUR);
+    expect(relativeTime(ahead.toISOString(), now)).toBe(ahead.toLocaleDateString());
+    const far = new Date(now + 40 * DAY);
+    expect(relativeTime(far.toISOString(), now)).toBe(far.toLocaleDateString());
   });
 });
 
@@ -193,6 +222,7 @@ describe('needsYou', () => {
     const paused = withChecks(repo('website', { consecutive_failures: 3 }), [], 5);
     expect(needsYou([paused])).toEqual([
       {
+        key: 'paused:website',
         kind: 'paused',
         repo: paused,
         message: 'AFK paused after 3 failed runs. 5 issues waiting.',
@@ -223,5 +253,67 @@ describe('needsYou', () => {
     ]);
     const entry = entries[1];
     expect(entry?.kind === 'readiness' ? entry.check : undefined).toBe(tracker);
+  });
+
+  it('keys each entry by its problem, stable across refetches', () => {
+    const make = () => [
+      withChecks(repo('infra-docs', { clone_status: 'error' }), []),
+      withChecks(repo('auth-service', { consecutive_failures: 3 }), [
+        { id: 'tracker', state: 'failing', detail: 'x' },
+        { id: 'git_credential', state: 'failing', detail: 'y' },
+      ]),
+    ];
+    const keys = needsYou(make()).map((e) => e.key);
+    expect(keys).toEqual([
+      'clone:infra-docs',
+      'readiness:auth-service:tracker',
+      'readiness:auth-service:git_credential',
+      'paused:auth-service',
+    ]);
+    expect(needsYou(make()).map((e) => e.key)).toEqual(keys);
+  });
+
+  it('tolerates a repo without a summary or report, and an unknown check state', () => {
+    const bare = { ...repo('a', { consecutive_failures: 3 }), summary: undefined };
+    expect(needsYou([bare as unknown as Repo]).map((e) => e.message)).toEqual([
+      'AFK paused after 3 failed runs.',
+    ]);
+    const noReport = { ...repo('b'), summary: { claimable: 1, open_issues: 1 } };
+    expect(needsYou([noReport as unknown as Repo])).toEqual([]);
+    const newer = withChecks(repo('c'), [
+      { id: 'tracker', state: 'degraded' as ReadinessState, detail: 'x' },
+    ]);
+    expect(needsYou([newer])).toEqual([]);
+  });
+});
+
+describe('summaryRefreshSpecs', () => {
+  const ev = (type: string, repoID?: string) =>
+    ({ type, ...(repoID === undefined ? {} : { repoID }) }) as Parameters<
+      NonNullable<ReturnType<typeof summaryRefreshSpecs>[number]['match']>
+    >[0];
+
+  it('re-reads on issue, run, parked and agent login events, debounced', () => {
+    const specs = summaryRefreshSpecs();
+    expect(specs.map((s) => s.type)).toEqual([
+      'issue.changed',
+      'run.changed',
+      'parked.changed',
+      'provider.auth.changed',
+    ]);
+    expect(specs.every((s) => s.debounceMs === SUMMARY_REFRESH_MS)).toBe(true);
+    // The list: every repo's events count.
+    expect(specs.every((s) => s.match === undefined || s.match(ev(s.type, 'other')))).toBe(true);
+  });
+
+  it('scopes the repo-tagged events to one repo when asked', () => {
+    const specs = summaryRefreshSpecs(() => 'mine');
+    for (const spec of specs.slice(0, 3)) {
+      expect(spec.match?.(ev(spec.type, 'mine'))).toBe(true);
+      expect(spec.match?.(ev(spec.type, 'other'))).toBe(false);
+      expect(spec.match?.(ev(spec.type))).toBe(true); // no repoID: still counts
+    }
+    // Agent logins are not per repo.
+    expect(specs[3]?.match).toBeUndefined();
   });
 });

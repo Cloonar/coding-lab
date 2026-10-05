@@ -22,13 +22,14 @@
 // alone.
 
 import { A, useLocation, useParams, type RouteSectionProps } from '@solidjs/router';
-import { Show, type JSX } from 'solid-js';
+import { Show, createEffect, createMemo, on, type JSX } from 'solid-js';
 import { errorMessage, getRepo, type Repo } from '../../api';
 import Banner from '../../components/Banner';
 import Icon from '../../components/Icon';
 import RequireAuth from '../../components/RequireAuth';
 import { createToast } from '../../components/Toast';
 import { createLiveResource } from '../../lib/liveResource';
+import { summaryRefreshSpecs } from '../../lib/repoList';
 import { remoteLabel } from '../../lib/repoName';
 import { resourceValue } from '../../lib/resource';
 import { useRouteNotice } from '../../lib/routeNotice';
@@ -78,19 +79,40 @@ function RepoHomeFrame(props: { children?: JSX.Element }) {
   const params = useParams<{ id: string }>();
   const location = useLocation();
 
+  // repo.changed for this repo, plus — debounced — the issue, run, parked
+  // and agent login events that move the summary (the Issues count, the AFK
+  // card's claimable count, readiness) without a repo.changed. Each re-reads
+  // only GET /repos/{id}, never a forge (lib/repoList.ts summaryRefreshSpecs).
   const [resource, { refetch, mutate }] = createLiveResource(
     () => params.id,
     (id) => getRepo(id),
-    [{ type: 'repo.changed', match: (event) => event.repoID === params.id }],
+    [
+      { type: 'repo.changed', match: (event) => event.repoID === params.id },
+      ...summaryRefreshSpecs(() => params.id),
+    ],
   );
-  // Non-throwing, and never stale: the resource keeps the previous repo while
-  // the next id loads, so a value for another id reads as "not loaded yet".
-  const repo = (): Repo | undefined => {
+  // Non-throwing, never stale, and latched per id: the resource keeps the
+  // previous repo while the next id loads, so a value for another id reads as
+  // "not loaded yet"; a failed REFETCH of the same id keeps the last good
+  // repo (the banner reports the failure) instead of unmounting every tab.
+  const repo = createMemo<Repo | undefined>((last) => {
     const value = resourceValue(resource);
-    return value !== undefined && value.id === params.id ? value : undefined;
-  };
+    if (value !== undefined && value.id === params.id) return value;
+    if (resource.error !== undefined && last !== undefined && last.id === params.id) return last;
+    return undefined;
+  });
 
   const toast = createToast();
+  // A toast belongs to the repo it was raised in: moving to another repo
+  // inside the frame dismisses it. Created before the route notice below, so
+  // a notice that arrives with that very navigation still shows.
+  createEffect(
+    on(
+      () => params.id,
+      () => toast.dismiss(),
+      { defer: true },
+    ),
+  );
   // A page that navigated here after an action (Add repository) hands over a
   // one-line confirmation through router state.
   useRouteNotice((message) => toast.show(message));

@@ -112,11 +112,21 @@ function sample(): Repo[] {
 const q = <T extends Element = HTMLElement>(selector: string): T | null =>
   container.querySelector<T>(selector);
 
-function buttonNamed(name: string): HTMLButtonElement | undefined {
-  return Array.from(container.querySelectorAll('button')).find(
-    (b) => b.textContent?.trim() === name,
-  );
+/** An element's visible text: without its visually hidden parts. */
+function visibleText(el: Element | null | undefined): string | undefined {
+  if (!el) return undefined;
+  const clone = el.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('.visually-hidden').forEach((hidden) => hidden.remove());
+  return (clone.textContent ?? '').replace(/\s+/g, ' ').trim();
 }
+
+function buttonNamed(name: string): HTMLButtonElement | undefined {
+  return Array.from(container.querySelectorAll('button')).find((b) => visibleText(b) === name);
+}
+
+/** The accessible name of a control without aria-label: its whole text. */
+const textName = (el: Element | null | undefined) =>
+  el?.getAttribute('aria-label') ?? (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 
 const rowNames = () =>
   Array.from(container.querySelectorAll('.repo-row .repo-row-link')).map((a) => a.textContent);
@@ -292,7 +302,7 @@ describe('Needs you', () => {
     Array.from(container.querySelectorAll<HTMLElement>('.needs-you-item')).map((li) => ({
       name: li.querySelector('.needs-you-name')?.textContent,
       message: li.querySelector('.needs-you-message')?.lastChild?.textContent,
-      action: li.querySelector('.needs-you-action')?.textContent,
+      action: visibleText(li.querySelector('.needs-you-action')),
       warning: li.classList.contains('warning'),
     }));
 
@@ -563,5 +573,258 @@ describe('repositories list chrome', () => {
     const toast = await waitFor(() => q('.toast'), 'toast');
     expect(toast.textContent).toBe('Deleted coding-lab from lab');
     expect(container.querySelectorAll('.toast')).toHaveLength(1);
+  });
+});
+
+describe('repositories list identity across refetches', () => {
+  it('keeps every row node, and the focus in one, through a repo.changed for another repo', async () => {
+    h.repos = sample();
+    await mountList();
+    const nodes = Array.from(container.querySelectorAll('li.repo-row'));
+    const link = phoneRow('website').querySelector<HTMLAnchorElement>('.repo-row-link')!;
+    link.focus();
+    expect(document.activeElement).toBe(link);
+    const gets = h.requests.filter((r) => r === 'GET /api/v1/repos').length;
+
+    // Another repo changed: a fresh response, every object new.
+    h.repos = sample().map((r) =>
+      r.id === 'coding-lab' ? { ...r, summary: summary(7), afk_auto_enabled: false } : r,
+    );
+    emit('repo.changed', { repoID: 'coding-lab' });
+    await settle();
+
+    expect(h.requests.filter((r) => r === 'GET /api/v1/repos').length).toBe(gets + 1);
+    // The change landed in place…
+    expect(statusParts(phoneRow('coding-lab'))).toEqual(['No live runs', '7 ready', 'Auto off']);
+    // …and no row was rebuilt: same nodes, focus still on the link.
+    expect(Array.from(container.querySelectorAll('li.repo-row'))).toEqual(nodes);
+    expect(document.activeElement).toBe(link);
+  });
+
+  it('keeps the table rows too', async () => {
+    setDesktop(true);
+    h.repos = sample();
+    await mountList();
+    const nodes = Array.from(container.querySelectorAll('tr.repo-row'));
+    const link = container.querySelector<HTMLAnchorElement>('tr.repo-row .repo-row-link')!;
+    link.focus();
+
+    h.repos = sample().map((r) => (r.id === 'website' ? { ...r, autoland_enabled: false } : r));
+    emit('repo.changed', { repoID: 'website' });
+    await settle();
+
+    expect(Array.from(container.querySelectorAll('tr.repo-row'))).toEqual(nodes);
+    expect(document.activeElement).toBe(link);
+  });
+
+  it('keeps the Needs you entries through a refetch', async () => {
+    h.repos = sample();
+    await mountList();
+    const items = Array.from(container.querySelectorAll('.needs-you-item'));
+    const fix = buttonNamed('Fix')!;
+    fix.focus();
+
+    emit('repo.changed', { repoID: 'coding-lab' });
+    await settle();
+
+    expect(Array.from(container.querySelectorAll('.needs-you-item'))).toEqual(items);
+    expect(document.activeElement).toBe(fix);
+  });
+
+  it('keeps the list it had when a refetch fails, with the error above it', async () => {
+    h.repos = sample();
+    await mountList();
+    h.handle = (method, url) =>
+      method === 'GET' && url === '/api/v1/repos'
+        ? jsonResponse(500, { error: 'the store is locked' })
+        : undefined;
+    emit('repo.changed', { repoID: 'website' });
+    await settle();
+
+    expect(container.querySelector('.banner')?.textContent).toContain('the store is locked');
+    expect(rowNames()).toHaveLength(8);
+  });
+});
+
+describe('repositories list refreshes', () => {
+  const listGets = () => h.requests.filter((r) => r === 'GET /api/v1/repos').length;
+  const waitDebounce = () => new Promise<void>((resolve) => setTimeout(resolve, 300));
+
+  const triggers: Array<[string, Record<string, unknown>]> = [
+    ['issue.changed', { repoID: 'coding-lab' }],
+    ['run.changed', { repoID: 'coding-lab', runID: 'run_1' }],
+    ['parked.changed', { repoID: 'coding-lab' }],
+    ['provider.auth.changed', { provider: 'agent-a' }],
+  ];
+  for (const [type, payload] of triggers) {
+    it(`re-reads the list once on a burst of ${type}`, async () => {
+      h.repos = sample();
+      await mountList();
+      const before = listGets();
+
+      emit(type, payload);
+      emit(type, payload);
+      emit(type, payload);
+      await settle();
+      expect(listGets()).toBe(before); // still inside the debounce window
+      await waitDebounce();
+      await settle();
+
+      expect(listGets()).toBe(before + 1);
+      // Lab's own list only: no per-repo read, nothing that reaches a forge.
+      expect(h.requests.filter((r) => r.startsWith('GET /api/v1/repos/'))).toEqual([]);
+    });
+  }
+
+  it('moves the Ready count and the order when a run starts', async () => {
+    h.repos = sample();
+    await mountList();
+    expect(rowNames()[0]).toBe('coding-lab');
+
+    h.repos = sample().map((r) =>
+      r.id === 'website' ? { ...r, last_opened_at: ago(0), summary: summary(4) } : r,
+    );
+    emit('run.changed', { repoID: 'website', runID: 'run_9' });
+    await waitDebounce();
+    await settle();
+
+    expect(rowNames()[0]).toBe('website');
+    expect(statusParts(phoneRow('website'))[1]).toBe('4 ready');
+  });
+});
+
+describe('Needs you actions', () => {
+  /** A fetch answer the test releases by hand. */
+  function deferred(): { promise: Promise<unknown>; release: () => void } {
+    let release = () => {};
+    const promise = new Promise<unknown>((resolve) => {
+      release = () => resolve(jsonResponse(202, {}));
+    });
+    return { promise, release };
+  }
+
+  it('sends nothing on a second Retry while the first is pending, across a refetch', async () => {
+    h.repos = sample();
+    const answer = deferred();
+    const posts: string[] = [];
+    h.handle = (method, url) => {
+      if (method === 'POST' && url === '/api/v1/repos/infra-docs/clone/retry') {
+        posts.push(url);
+        return answer.promise as unknown as ReturnType<typeof jsonResponse>;
+      }
+      return undefined;
+    };
+    await mountList();
+
+    const retry = buttonNamed('Retry')!;
+    retry.focus();
+    retry.click();
+    await settle();
+    expect(posts).toHaveLength(1);
+
+    // Busy: worded and announced, still focusable, and not sent again.
+    const busy = buttonNamed('Retrying…')!;
+    expect(busy).toBe(retry);
+    expect(busy.getAttribute('aria-disabled')).toBe('true');
+    expect(busy.disabled).toBe(false);
+    expect(textName(busy)).toBe('Retrying the clone of infra-docs…');
+    expect(q('.needs-you [role="status"]')?.textContent).toBe('Retrying the clone of infra-docs…');
+    busy.click();
+    await settle();
+    expect(posts).toHaveLength(1);
+
+    // A refetch mid-request (another repo changed) keeps the busy state.
+    emit('repo.changed', { repoID: 'website' });
+    await settle();
+    expect(buttonNamed('Retrying…')).toBe(retry);
+    buttonNamed('Retrying…')?.click();
+    await settle();
+    expect(posts).toHaveLength(1);
+
+    // Done: the entry leaves the block, and focus moves to its heading.
+    h.repos = sample().map((r) =>
+      r.id === 'infra-docs' ? { ...r, clone_status: 'cloning', summary: summary(null) } : r,
+    );
+    answer.release();
+    await settle();
+    expect(q('.toast')?.textContent).toBe('Retrying the clone of infra-docs');
+    expect(
+      container.querySelector('.needs-you-item .needs-you-name[href="/repos/infra-docs"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(q('#needs-you-heading'));
+    expect(q('.needs-you [role="status"]')?.textContent).toBe('');
+  });
+
+  it('moves focus to the list heading when Reset empties the block', async () => {
+    h.repos = [repo('website', { last_opened_at: ago(MIN), consecutive_failures: 3 })];
+    h.handle = (method, url) => {
+      if (method === 'POST' && url === '/api/v1/repos/website/afk/reset') {
+        h.repos = [repo('website', { last_opened_at: ago(MIN) })];
+        return jsonResponse(200, {});
+      }
+      return undefined;
+    };
+    await mountList();
+    const reset = buttonNamed('Reset')!;
+    expect(textName(reset)).toBe('Reset AFK in website');
+    reset.focus();
+    reset.click();
+    await settle();
+
+    expect(q('section.needs-you')).toBeNull();
+    expect(document.activeElement).toBe(q('#repos-list-heading'));
+  });
+
+  it('ties each action to its problem and names the fallback link with the repo', async () => {
+    h.repos = [
+      repo('auth-service', {
+        last_opened_at: ago(MIN),
+        summary: summary(2, [{ ...trackerFailing, fix: undefined }]),
+      }),
+    ];
+    await mountList();
+    const open = q<HTMLAnchorElement>('a.needs-you-action')!;
+    expect(visibleText(open)).toBe('Open');
+    expect(textName(open)).toBe('Open auth-service');
+    const described = open.getAttribute('aria-describedby');
+    expect(document.getElementById(described ?? '')?.textContent).toContain(
+      'The forge token was rejected.',
+    );
+  });
+});
+
+describe('repositories list row clicks', () => {
+  function clickRow(row: HTMLElement, init: MouseEventInit = {}): void {
+    row
+      .querySelector<HTMLElement>('.repo-row-remote')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...init }));
+  }
+
+  it('leaves modified clicks to the browser', async () => {
+    h.repos = sample();
+    await mountList();
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }]) {
+      clickRow(phoneRow('website'), init);
+      await settle();
+      expect(routerHistory.get()).toBe('/repos');
+    }
+    clickRow(phoneRow('website'));
+    await settle();
+    expect(routerHistory.get()).toBe('/repos/website');
+  });
+
+  it('does not follow a click that ends a text selection in the row', async () => {
+    h.repos = sample();
+    await mountList();
+    const remote = phoneRow('website').querySelector('.repo-row-remote')!;
+    const range = document.createRange();
+    range.selectNodeContents(remote);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+
+    clickRow(phoneRow('website'));
+    await settle();
+    expect(routerHistory.get()).toBe('/repos');
+    window.getSelection()?.removeAllRanges();
   });
 });

@@ -114,6 +114,12 @@ h2.repos-eyebrow {
   color: var(--muted);
 }
 
+/* The eyebrow headings take focus when the control the operator was on goes
+   away (a fixed Needs you entry); a ring only for keyboard-origin focus. */
+h2.repos-eyebrow:focus:not(:focus-visible) {
+  outline: none;
+}
+
 .repos-sort-note {
   color: var(--muted);
   font-size: 0.8rem;
@@ -168,6 +174,11 @@ h2.repos-eyebrow {
 
 .needs-you-name {
   align-self: flex-start;
+  /* A 44px touch target below 1024px (reset in the desktop block). */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  max-width: 100%;
   color: inherit;
   font-weight: 650;
   text-decoration: none;
@@ -194,6 +205,12 @@ h2.repos-eyebrow {
   background: var(--card);
   color: var(--text);
   font-weight: 600;
+}
+
+/* In flight: still focusable (aria-disabled, not disabled), visibly muted. */
+.needs-you-action[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: progress;
 }
 
 a.needs-you-action {
@@ -402,6 +419,10 @@ li.repo-row + li.repo-row {
 
   .needs-you-item {
     padding: 0.5rem 0.75rem;
+  }
+
+  .needs-you-name {
+    min-height: 0;
   }
 
   .needs-you-action,

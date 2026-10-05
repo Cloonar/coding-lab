@@ -13,12 +13,29 @@ import ParkedSection, { parkedSummary } from './ParkedSection';
 const REPO_ID = 'repo_1';
 const BRANCH = 'lab/foo-20260608-1530';
 
-/** Minimal EventSource stand-in so EventsProvider can mount under jsdom. */
+/** EventSource stand-in so EventsProvider can mount under jsdom; tests push events. */
 class FakeEventSource {
+  static instances: FakeEventSource[] = [];
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
-  addEventListener(): void {}
+  private listeners = new Map<string, ((event: { data: string }) => void)[]>();
+  constructor() {
+    FakeEventSource.instances.push(this);
+  }
+  addEventListener(type: string, listener: (event: { data: string }) => void): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
   close(): void {}
+  emit(type: string, payload: Record<string, unknown>): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ data: JSON.stringify(payload) });
+    }
+  }
+}
+
+function emitParkedChanged(): void {
+  for (const source of FakeEventSource.instances)
+    source.emit('parked.changed', { repoID: REPO_ID });
 }
 
 let parkedOnServer: ParkedEntry[] | null;
@@ -113,6 +130,7 @@ afterEach(() => {
   dispose?.();
   dispose = undefined;
   container.remove();
+  FakeEventSource.instances = [];
   vi.unstubAllGlobals();
 });
 
@@ -243,5 +261,85 @@ describe('ParkedSection discard confirm gate', () => {
     await settle();
     expect(container.querySelector('.discard-confirm')).toBeNull();
     expect(discardBodies).toEqual([]);
+  });
+});
+
+describe('ParkedSection across refetches and focus', () => {
+  const OTHER = 'lab/bar-20260609-0900';
+  const two = (): ParkedEntry[] => [
+    { branch: BRANCH, worktree_path: '/wt/foo', dirty: true, commits_ahead: 1, unpushed: 1 },
+    { branch: OTHER, worktree_path: '', dirty: false, commits_ahead: 2, unpushed: 0 },
+  ];
+  const trigger = (branch: string) =>
+    query<HTMLButtonElement>(`button.parked-discard[aria-label="Discard ${branch}"]`);
+  const cancelButton = () =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>('.discard-confirm button')).find(
+      (b) => b.textContent === 'Cancel',
+    )!;
+
+  it('keeps the rows, the open confirmation and the typed text through parked.changed', async () => {
+    parkedOnServer = two();
+    await mountParked();
+    const rows = Array.from(container.querySelectorAll('.parked-entry'));
+    trigger(BRANCH).click();
+    await settle();
+    const input = query<HTMLInputElement>('input[name="confirm-branch"]');
+    typeInto(input, 'lab/foo-2026');
+    expect(document.activeElement).toBe(input);
+
+    // Another entry changes server-side: a fresh list, fresh objects.
+    parkedOnServer = two().map((e) => (e.branch === OTHER ? { ...e, commits_ahead: 3 } : e));
+    emitParkedChanged();
+    await settle();
+
+    expect(container.textContent).toContain('3 commits ahead');
+    expect(Array.from(container.querySelectorAll('.parked-entry'))).toEqual(rows);
+    expect(query<HTMLInputElement>('input[name="confirm-branch"]')).toBe(input);
+    expect(input.value).toBe('lab/foo-2026');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('returns focus to the entry’s Discard on Cancel and on Escape', async () => {
+    await mountParked();
+    trigger(BRANCH).click();
+    await settle();
+    cancelButton().click();
+    await settle();
+    expect(document.activeElement).toBe(trigger(BRANCH));
+
+    trigger(BRANCH).click();
+    await settle();
+    query('.discard-confirm').dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    );
+    await settle();
+    expect(document.activeElement).toBe(trigger(BRANCH));
+    // A cancelled confirmation starts empty next time.
+    trigger(BRANCH).click();
+    await settle();
+    expect(query<HTMLInputElement>('input[name="confirm-branch"]').value).toBe('');
+  });
+
+  it('moves focus to the next entry after a discard, and to the heading after the last', async () => {
+    parkedOnServer = two();
+    await mountParked();
+
+    trigger(BRANCH).click();
+    await settle();
+    typeInto(query<HTMLInputElement>('input[name="confirm-branch"]'), BRANCH);
+    parkedOnServer = two().slice(1);
+    discardButton().click();
+    await settle();
+    expect(container.textContent).not.toContain(BRANCH);
+    expect(document.activeElement).toBe(trigger(OTHER));
+
+    trigger(OTHER).click();
+    await settle();
+    typeInto(query<HTMLInputElement>('input[name="confirm-branch"]'), OTHER);
+    parkedOnServer = [];
+    discardButton().click();
+    await settle();
+    expect(query('section.parked-card').textContent).toContain('Nothing parked.');
+    expect(document.activeElement).toBe(query('section.parked-card h2'));
   });
 });

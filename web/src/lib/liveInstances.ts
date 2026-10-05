@@ -17,7 +17,8 @@ import { createLiveResource } from './liveResource';
 
 export interface LiveInstances {
   instances: Resource<Instance[]>;
-  refetch: () => void;
+  /** Re-reads the list; settles (never rejects) once the new list is in. */
+  refetch: () => Promise<void>;
 }
 
 export function createLiveInstances(): LiveInstances {
@@ -45,5 +46,14 @@ export function createLiveInstances(): LiveInstances {
     }),
   );
 
-  return { instances, refetch: () => void refetch() };
+  return {
+    instances,
+    refetch: async () => {
+      try {
+        await refetch();
+      } catch {
+        // The resource holds the error; callers only wait for the re-read.
+      }
+    },
+  };
 }

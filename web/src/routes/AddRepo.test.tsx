@@ -71,6 +71,8 @@ function jsonResponse(status: number, body: unknown) {
   };
 }
 
+/** Answers GET /credentials with 500 while true. */
+let credentialsFail: boolean;
 let createBodies: Record<string, unknown>[];
 /** The answer to POST /repos; default: 201 with the new repo. */
 let createResponse: ReturnType<typeof jsonResponse>;
@@ -96,7 +98,11 @@ function stubApi(): void {
         );
       }
       if (url === '/api/v1/credentials' && method === 'GET') {
-        return Promise.resolve(jsonResponse(200, { credentials: CREDENTIALS }));
+        return Promise.resolve(
+          credentialsFail
+            ? jsonResponse(500, { error: 'vault is sealed' })
+            : jsonResponse(200, { credentials: CREDENTIALS }),
+        );
       }
       if (url === '/api/v1/providers' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { providers: PROVIDERS }));
@@ -193,6 +199,7 @@ async function submitForm(): Promise<void> {
 }
 
 beforeEach(() => {
+  credentialsFail = false;
   createBodies = [];
   requests = [];
   arrivedState = undefined;
@@ -298,6 +305,31 @@ describe('AddRepo form', () => {
         incogni: true,
       },
     ]);
+  });
+});
+
+describe('AddRepo credentials', () => {
+  it('says the list failed to load, instead of claiming there are none, and retries', async () => {
+    credentialsFail = true;
+    await mountAddRepo();
+
+    const hint = container.querySelector('.add-repo-credentials-failed');
+    expect(hint?.textContent).toContain('Your credentials could not be loaded (vault is sealed)');
+    expect(container.textContent).not.toContain('A private remote needs one');
+    // The git credential select is described by the note.
+    const gitSelect = select('credential_id');
+    expect(gitSelect?.getAttribute('aria-describedby')).toContain(hint?.id ?? '-');
+
+    credentialsFail = false;
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Load credentials again',
+    );
+    retry?.click();
+    await settle();
+
+    expect(container.querySelector('.add-repo-credentials-failed')).toBeNull();
+    expect(Array.from(select('credential_id')?.options ?? []).length).toBeGreaterThan(1);
+    expect(requests.filter((r) => r === 'GET /api/v1/credentials')).toHaveLength(2);
   });
 });
 

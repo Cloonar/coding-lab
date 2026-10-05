@@ -43,6 +43,11 @@ export interface AFKControlsProps {
    * returned promise is awaited, so the controls stay busy until it settles.
    */
   onRepoChanged: () => void | Promise<unknown>;
+  /**
+   * The repo as the Auto or Reset request answered it, before onRepoChanged:
+   * lets the parent show the change at once, even when its refetch fails.
+   */
+  onRepo?: (repo: Repo) => void;
   /** An AFK run spawned — toast it (NO navigation). */
   onStarted: (run: Run) => void;
   onError: (message: string) => void;
@@ -66,11 +71,12 @@ function createAFKActions(props: AFKControlsProps, afterStart: () => unknown) {
   const [autoOverride, setAutoOverride] = createSignal<boolean | null>(null);
 
   const act = async (kind: Exclude<AFKBusy, null>, action: () => Promise<void>) => {
+    const onError = props.onError; // read before the await, like every prop below
     setBusy(kind);
     try {
       await action();
     } catch (err) {
-      props.onError(errorMessage(err));
+      onError(errorMessage(err));
     } finally {
       setBusy(null);
     }
@@ -91,11 +97,13 @@ function createAFKActions(props: AFKControlsProps, afterStart: () => unknown) {
   const toggleAuto = (next = !props.repo.afk_auto_enabled) => {
     const repoID = props.repo.id;
     const onRepoChanged = props.onRepoChanged;
+    const onRepo = props.onRepo;
     const onAutoChanged = props.onAutoChanged;
     setAutoOverride(next);
     return act('auto', async () => {
       try {
-        await setAFKAuto(repoID, next);
+        const updated = await setAFKAuto(repoID, next);
+        onRepo?.(updated);
         await onRepoChanged();
         onAutoChanged?.(next);
       } finally {
@@ -107,9 +115,11 @@ function createAFKActions(props: AFKControlsProps, afterStart: () => unknown) {
   const reset = () => {
     const repoID = props.repo.id;
     const onRepoChanged = props.onRepoChanged;
+    const onRepo = props.onRepo;
     const onReset = props.onReset;
     return act('reset', async () => {
-      await resetAFK(repoID);
+      const updated = await resetAFK(repoID);
+      onRepo?.(updated);
       await onRepoChanged();
       onReset?.();
     });

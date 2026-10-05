@@ -4,15 +4,23 @@
 // adds the budget it has left) and each a link to its Chat. Waiting runs come
 // first, as in the rail. Stop all lives here and asks in place before it acts;
 // the toast says how many instances were stopped.
+//
+// The rows render from a store reconciled by run id: every run.changed
+// refetch returns fresh objects for every instance, and a reference-keyed
+// <For> would rebuild every link (dropping a keyboard user's focus). Once
+// Stop all empties the list, its button goes with it, so focus moves to the
+// block's heading instead of falling to the page.
 
 import { A } from '@solidjs/router';
-import { For, Show, createSignal, createUniqueId, onCleanup } from 'solid-js';
+import { For, Show, createComputed, createSignal, createUniqueId, onCleanup } from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
 import { errorMessage, stopAll, type ConversationState, type Instance } from '../../../api';
 import Banner from '../../../components/Banner';
 import Icon from '../../../components/Icon';
 import InlineConfirm from '../../../components/InlineConfirm';
 import { budgetRemaining, parseAFKLabel } from '../../../lib/afk';
 import { stateBadge } from '../../../lib/conversation';
+import { rescueFocus } from '../../../lib/focus';
 import { runDisplayTitle, sessionLabel } from '../../../lib/instanceLabel';
 import { plural } from '../../../lib/readiness';
 import { orderRail } from '../../../lib/railOrder';
@@ -35,15 +43,24 @@ export default function LiveRuns(props: {
   repoName: string;
   /** Every instance lab knows (the caller's live list); undefined while loading. */
   instances: Instance[] | undefined;
-  onStopped: () => void;
+  /** Stop all ran: re-read the instances; the block waits for it. */
+  onStopped: () => unknown;
   notify: (message: string) => void;
 }) {
-  const live = () =>
-    orderRail(
-      (props.instances ?? []).filter(
-        (instance) => instance.live && instance.repo_id === props.repoID,
+  // One store object per run id, patched in place by each refetch.
+  const [live, setLive] = createStore<Instance[]>([]);
+  createComputed(() =>
+    setLive(
+      reconcile(
+        orderRail(
+          (props.instances ?? []).filter(
+            (instance) => instance.live && instance.repo_id === props.repoID,
+          ),
+        ),
+        { key: 'id' },
       ),
-    );
+    ),
+  );
 
   // The budget countdown ticks without a refetch.
   const [now, setNow] = createSignal(Date.now());
@@ -51,19 +68,28 @@ export default function LiveRuns(props: {
   onCleanup(() => clearInterval(ticker));
 
   const [error, setError] = createSignal<string | null>(null);
+  let heading: HTMLHeadingElement | undefined;
   const stop = async () => {
+    // Captured before the await: the block may show another repo, or be
+    // gone, by the time the answer lands.
+    const repoID = props.repoID;
+    const repoName = props.repoName;
+    const notify = props.notify;
+    const onStopped = props.onStopped;
     setError(null);
     try {
-      const res = await stopAll(props.repoID);
-      props.notify(
+      const res = await stopAll(repoID);
+      notify(
         res.stopped === 0
           ? 'No runs were live.'
-          : `Stopped ${plural(res.stopped, 'run')} in ${props.repoName}.`,
+          : `Stopped ${plural(res.stopped, 'run')} in ${repoName}.`,
       );
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      props.onStopped();
+      await onStopped();
+      // Stop all left with the last live run.
+      rescueFocus(heading);
     }
   };
 
@@ -72,12 +98,14 @@ export default function LiveRuns(props: {
   return (
     <section class="overview-card live-runs" aria-labelledby={headingId}>
       <div class="overview-card-head">
-        <h2 id={headingId}>Live runs</h2>
+        <h2 id={headingId} tabIndex={-1} ref={heading}>
+          Live runs
+        </h2>
         <span class="spacer" />
-        <Show when={live().length > 0}>
+        <Show when={live.length > 0}>
           <InlineConfirm
-            label={`Stop all (${live().length})`}
-            confirmLabel={`Stop ${plural(live().length, 'run')}`}
+            label={`Stop all (${live.length})`}
+            confirmLabel={`Stop ${plural(live.length, 'run')}`}
             busyLabel="Stopping…"
             class="danger live-runs-stop"
             onConfirm={stop}
@@ -85,9 +113,9 @@ export default function LiveRuns(props: {
         </Show>
       </div>
       <Banner message={error()} onDismiss={() => setError(null)} />
-      <Show when={live().length > 0} fallback={<p class="muted overview-empty">No live runs.</p>}>
+      <Show when={live.length > 0} fallback={<p class="muted overview-empty">No live runs.</p>}>
         <ul class="live-runs-list">
-          <For each={live()}>{(instance) => <LiveRunRow instance={instance} now={now()} />}</For>
+          <For each={live}>{(instance) => <LiveRunRow instance={instance} now={now()} />}</For>
         </ul>
       </Show>
     </section>

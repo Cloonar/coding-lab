@@ -386,6 +386,30 @@ button.switch:disabled {
   }
 }
 
+/* Toast region ------------------------------------------------------------------ */
+/* The toast's live region (components/Toast.tsx) is always in the page, so a
+   screen reader hears every new message; the .toast pill inside it comes and
+   goes. Out of flow and 1px, so an empty region takes no room; no z-index or
+   transform, so it opens no stacking context or containing block and the
+   fixed .toast still layers and places itself exactly as before. */
+.toast-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.toast-region > .toast {
+  pointer-events: auto;
+}
+
+/* The repo home's toast rides above the settings save bar while both show
+   (the save bar is the region's preceding sibling in the frame). */
+.settings-savebar ~ .toast-region > .toast {
+  bottom: calc(5rem + env(safe-area-inset-bottom));
+}
+
 /* Toast action ------------------------------------------------------------------ */
 /* The Undo button beside a toast's text: underlined text in the toast's own
    colours, with a 44px-tall hit area that does not grow the pill. */

@@ -36,16 +36,59 @@ export function checkTitle(id: string): string {
   return words === '' ? 'Check' : words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/**
+ * A state as this client renders it. A state it does not know (a newer
+ * server's) reads as pending: never as passing, and never a crash.
+ */
+export function checkState(state: unknown): ReadinessState {
+  return state === 'passing' || state === 'failing' || state === 'pending' ? state : 'pending';
+}
+
+/**
+ * A report's checks, tolerating what an older or newer server may send: a
+ * missing report or check list reads as no checks, and an entry that is not
+ * a check is dropped.
+ */
+export function checksOf(readiness: Readiness | null | undefined): ReadinessCheck[] {
+  const checks: unknown = readiness?.checks;
+  if (!Array.isArray(checks)) return [];
+  return checks.filter(
+    (check): check is ReadinessCheck => typeof check === 'object' && check !== null,
+  );
+}
+
+/**
+ * The report as the SPA renders it: the checks of checksOf(), each with a
+ * known state (checkState). undefined for no report at all. Pure: a check
+ * whose state is already known is passed through as is.
+ */
+export function normalizeReadiness(readiness: Readiness | null | undefined): Readiness | undefined {
+  if (readiness === null || readiness === undefined || typeof readiness !== 'object') {
+    return undefined;
+  }
+  return {
+    // A missing roll-up says nothing; the checks decide (readinessState).
+    state: readiness.state === undefined ? 'passing' : checkState(readiness.state),
+    checks: checksOf(readiness).map((check) =>
+      check.state === checkState(check.state) ? check : { ...check, state: 'pending' },
+    ),
+  };
+}
+
 const RANK: Record<ReadinessState, number> = { failing: 0, pending: 1, passing: 2 };
 
 /**
  * Failing checks first, then pending, then passing; the server's canonical
- * order holds within each group. Pure: returns a new array.
+ * order holds within each group. A state this client does not know ranks as
+ * pending. Pure: returns a new array.
  */
 export function orderChecks(checks: readonly ReadinessCheck[]): ReadinessCheck[] {
   return checks
     .map((check, index) => ({ check, index }))
-    .sort((a, b) => RANK[a.check.state] - RANK[b.check.state] || a.index - b.index)
+    .sort(
+      (a, b) =>
+        RANK[checkState(a.check.state)] - RANK[checkState(b.check.state)] || a.index - b.index,
+    )
     .map((entry) => entry.check);
 }
 
@@ -53,9 +96,12 @@ export function orderChecks(checks: readonly ReadinessCheck[]): ReadinessCheck[]
  * The roll-up the block shows: failing when any check fails, else pending
  * when any is pending, else passing. The server's own `state` counts too, so
  * a report that rolls up worse than its listed checks is never shown better.
+ * An unknown state counts as pending; a missing roll-up leaves it to the
+ * checks.
  */
 export function readinessState(readiness: Readiness): ReadinessState {
-  const states = [readiness.state, ...readiness.checks.map((check) => check.state)];
+  const states = checksOf(readiness).map((check) => checkState(check.state));
+  if (readiness.state !== undefined) states.push(checkState(readiness.state));
   if (states.includes('failing')) return 'failing';
   if (states.includes('pending')) return 'pending';
   return 'passing';
@@ -75,9 +121,10 @@ export interface ReadinessHeadline {
  * clone as the thing to wait for even before the report lists it.
  */
 export function readinessHeadline(readiness: Readiness, cloning = false): ReadinessHeadline {
+  const checks = checksOf(readiness);
   const state =
     cloning && readinessState(readiness) === 'passing' ? 'pending' : readinessState(readiness);
-  const failing = readiness.checks.filter((check) => check.state === 'failing').length;
+  const failing = checks.filter((check) => check.state === 'failing').length;
   switch (state) {
     case 'failing':
       return {
@@ -91,7 +138,7 @@ export function readinessHeadline(readiness: Readiness, cloning = false): Readin
     case 'pending': {
       const clonePending =
         cloning ||
-        readiness.checks.some((check) => check.id === 'clone' && check.state === 'pending');
+        checks.some((check) => check.id === 'clone' && checkState(check.state) === 'pending');
       return {
         state,
         title: 'Getting ready',
@@ -101,7 +148,7 @@ export function readinessHeadline(readiness: Readiness, cloning = false): Readin
       };
     }
     default: {
-      const n = readiness.checks.length;
+      const n = checks.length;
       return {
         state,
         title: 'Ready to run',

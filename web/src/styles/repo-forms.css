@@ -49,6 +49,18 @@
   margin: 0;
 }
 
+/* The credentials list failed to load: say so, with a way to try again. */
+.add-repo .field .add-repo-credentials-failed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.add-repo .add-repo-retry {
+  font-size: 0.9rem;
+}
+
 .add-repo .field.invalid input,
 .add-repo .field.invalid select {
   border-color: var(--danger);
@@ -166,7 +178,10 @@ a.link-button {
   align-items: center;
   justify-content: center;
   min-height: 44px;
+  max-width: 100%;
   padding: 0 1rem;
+  /* A long name (an importer's) wraps inside a 390px sheet. */
+  overflow-wrap: anywhere;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--card);
