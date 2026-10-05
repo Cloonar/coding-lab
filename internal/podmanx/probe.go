@@ -49,6 +49,23 @@ const (
 	probePids        = "16"
 )
 
+// initBinaryHint replaces the probe's user-manager hint when podman refused
+// the create for want of a container-init helper: on such a host the user
+// manager is fine, and pointing at it would send the operator the wrong way.
+const initBinaryHint = "container panes run `podman run --init` so orphaned processes are reaped instead of piling up as zombies against --pids-limit; install catatonit where podman looks for its helper binaries (helper_binaries_dir, or engine.init_path in containers.conf) — distro podman packages normally ship it"
+
+// missingInitBinary reports whether a failed `podman create --init` died
+// because podman found no container-init helper on the host. It matches
+// podman's own wording — "container-init binary not found on the host" from
+// the specgen, or the helper-lookup failure that names catatonit — and is
+// used ONLY to pick the more useful of two hints: the Detail carries
+// podman's stderr verbatim either way, so a wording change upstream costs
+// the specific hint, never the diagnosis.
+func missingInitBinary(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "container-init") || strings.Contains(msg, "catatonit")
+}
+
 // spawnProbe is the preflight's final, load-bearing check: a REAL container
 // spawn through the systemd cgroup manager, asserting the caps verifiably
 // landed in the transient scope's cgroup. Steps, all through d.Run / d.ReadFile
@@ -56,11 +73,15 @@ const (
 //
 //  1. Pre-clean the deterministic name (error ignored — a real problem
 //     resurfaces at create).
-//  2. `create` with the run shapes' manager flag and the probe caps. The
-//     command is /bin/labctl — the static binary every agent-tools image
-//     carries — but it is a PLACEHOLDER argv that is never executed (see
-//     step 3), so the tools images' "never run as a container" contract is
-//     preserved in spirit: no process in them ever execs.
+//  2. `create` with the run shapes' manager flag, their --init, and the
+//     probe caps. --init rides along because podman resolves the
+//     container-init helper at create time: a host without one (catatonit)
+//     refuses right here, with its own hint, instead of at every real
+//     spawn (ADR-0074, issue #64). The command is /bin/labctl — the static
+//     binary every agent-tools image carries — but it is a PLACEHOLDER argv
+//     that is never executed (see step 3), so the tools images' "never run
+//     as a container" contract is preserved in spirit: no process in them
+//     ever execs.
 //  3. `init`: the OCI create. conmon+crun ask the user manager to create
 //     libpod-<id>.scope and PLACE the container's init process in it, paused
 //     before exec — exactly the unprivileged cross-cgroup attach that failed
@@ -90,9 +111,13 @@ func spawnProbe(ctx context.Context, bin, ref string, d Deps) *Failure {
 		_, _ = d.Run(ctx, bin, "rm", "--force", "--ignore", "--time", "0", probeName)
 	}()
 
-	if _, err := d.Run(ctx, bin, "--cgroup-manager=systemd", "create", "--name", probeName,
+	if _, err := d.Run(ctx, bin, "--cgroup-manager=systemd", "create", "--init", "--name", probeName,
 		"--memory", probeMemory, "--pids-limit", probePids, ref, "/bin/labctl"); err != nil {
-		return fail(fmt.Sprintf("probe container create failed: %v", err))
+		f := fail(fmt.Sprintf("probe container create failed: %v", err))
+		if missingInitBinary(err) {
+			f.Hint = initBinaryHint
+		}
+		return f
 	}
 	if _, err := d.Run(ctx, bin, "init", probeName); err != nil {
 		return fail(fmt.Sprintf("probe container init failed (the user manager refused to create or populate the container's transient scope): %v", err))

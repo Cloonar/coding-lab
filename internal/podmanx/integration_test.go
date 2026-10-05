@@ -7,9 +7,10 @@ package podmanx
 // straight into SessionRunner.Start), the mount inventory proven from the
 // host side (a write under WorktreeDir and under RuntimeDir must reappear at
 // the identical host path), a secret traveling by NAME-ONLY --env forward
-// (ForwardEnv) rather than ever appearing in the podman argv, and the
-// SIGHUP+--rm / RemoveContainer teardown race (design's stated backstop,
-// #205).
+// (ForwardEnv) rather than ever appearing in the podman argv, --init's
+// container-init as PID 1 reaping an orphan the pane command leaves behind
+// (issue #64), and the SIGHUP+--rm / RemoveContainer teardown race (design's
+// stated backstop, #205).
 //
 // It is env-gated behind LAB_TEST_PODMAN=1 (in addition to podman actually
 // being on PATH) because, unlike every other test in this package, it is not
@@ -165,6 +166,7 @@ func TestContainerPane_integration(t *testing.T) {
 	runtimeDir := t.TempDir()
 
 	proofPath := filepath.Join(worktreeDir, "proof")
+	initProofPath := filepath.Join(worktreeDir, "initproof")
 	spoolPath := filepath.Join(runtimeDir, "spool")
 
 	// session is the tmux session name RunArgv's container Name derives
@@ -181,13 +183,25 @@ func TestContainerPane_integration(t *testing.T) {
 	secretValue := fmt.Sprintf("podmanx-itest-secret-%d", os.Getpid())
 
 	// The script: write the two env values (one plain --env, one name-only
-	// forward) into the worktree-mounted proof file, touch a marker in the
-	// runtime-mounted dir, then idle so the assertions below have a live
-	// container to inspect. Single-quoted paths match the existing tmuxx
-	// integration harness's own sh -c convention (internal/tmuxx/integration_test.go).
+	// forward) into the worktree-mounted proof file, run the --init proof
+	// (below), touch a marker in the runtime-mounted dir, then idle so the
+	// assertions below have a live container to inspect. Single-quoted paths
+	// match the existing tmuxx integration harness's own sh -c convention
+	// (internal/tmuxx/integration_test.go).
+	//
+	// The --init proof (issue #64): orphan a short-lived process — the
+	// subshell exits at once, so its `sleep` is reparented to the
+	// container's PID 1 — wait for it to die, then record the script's own
+	// pid and the number of zombies in the PID namespace (state Z in
+	// /proc/<pid>/stat; `cat` races exiting pids, hence 2>/dev/null). With
+	// --init the pane command is NOT PID 1 and the orphan has been reaped.
+	// The pid is the discriminating half: a shell that happened to be PID 1
+	// would reap the orphan too, the provider CLIs do not.
 	script := fmt.Sprintf(
-		`echo "$%s:$%s" > '%s'; touch '%s'; exec sleep 300`,
-		envMarkerName, forwardVarName, proofPath, spoolPath,
+		`echo "$%s:$%s" > '%s'; (sleep 0.2 &); sleep 1; `+
+			`echo "$$ $(cat /proc/[0-9]*/stat 2>/dev/null | grep -c ') Z ')" > '%s'; `+
+			`touch '%s'; exec sleep 300`,
+		envMarkerName, forwardVarName, proofPath, initProofPath, spoolPath,
 	)
 
 	spec := RunSpec{
@@ -251,6 +265,19 @@ func TestContainerPane_integration(t *testing.T) {
 		t.Errorf("proof file content = %q, want %q (rw worktree mount + --env + name-only ForwardEnv)", gotProof, want)
 	}
 	waitForFileExists(t, spoolPath, 15*time.Second)
+
+	// initproof is written before the spool marker, so it is complete here.
+	initProof := waitForFileContent(t, initProofPath, 5*time.Second)
+	if pid, zombies, ok := strings.Cut(strings.TrimSpace(initProof), " "); !ok {
+		t.Errorf("init proof = %q, want \"<pid> <zombies>\"", initProof)
+	} else {
+		if pid == "1" {
+			t.Errorf("pane command runs as PID 1: --init did not put a container-init above it, so its orphans are never reaped (issue #64)")
+		}
+		if zombies != "0" {
+			t.Errorf("%s zombie(s) left in the container after an orphan exited, want 0: PID 1 is not reaping", zombies)
+		}
+	}
 
 	if names := podmanNames(t, false, name); !slices.Contains(names, name) {
 		t.Errorf("podman ps --filter name=%s = %v; expected it to list the running container", name, names)
