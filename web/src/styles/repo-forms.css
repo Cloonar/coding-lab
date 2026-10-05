@@ -40,6 +40,14 @@
   font-weight: 600;
 }
 
+/* The same field ground as the repo settings page (the reference mockup's):
+   a field reads as inset in its card, in both schemes. */
+.add-repo .field input,
+.add-repo .field select,
+.repo-delete-dialog .field input {
+  background: var(--bg);
+}
+
 .add-repo .field input.mono {
   font-size: 15px;
 }

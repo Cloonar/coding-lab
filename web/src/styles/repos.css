@@ -174,10 +174,14 @@ h2.repos-eyebrow:focus:not(:focus-visible) {
 
 .needs-you-name {
   align-self: flex-start;
-  /* A 44px touch target below 1024px (reset in the desktop block). */
+  /* A 44px touch target below 1024px (reset in the desktop block). The
+     negative block margin takes back the extra height, so the name still
+     sits on the icon's line and directly above its message; the taller hit
+     area only overlaps the item's own padding and the non-interactive text. */
   display: inline-flex;
   align-items: center;
   min-height: 44px;
+  margin-block: -0.72rem;
   max-width: 100%;
   color: inherit;
   font-weight: 650;
@@ -423,6 +427,7 @@ li.repo-row + li.repo-row {
 
   .needs-you-name {
     min-height: 0;
+    margin-block: 0;
   }
 
   .needs-you-action,
