@@ -404,6 +404,13 @@ describe('delete dialog — confirming', () => {
     expect(deletes).toEqual([REPO_PATH]);
     expect(history.get()).toBe('/repos');
     expect(listState).toEqual({ notice: 'Deleted coding-lab from lab' });
+
+    // The list replaced the deleted repo's settings in history: Back goes to
+    // the page before them, never to settings of a repo that is gone.
+    history.go(-1);
+    await settle();
+    expect(history.get()).not.toBe(DANGER_PATH);
+    expect(history.get()).toBe('/');
   });
 
   it('with live instances one confirmation sends the forced delete', async () => {

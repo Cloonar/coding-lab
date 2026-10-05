@@ -169,7 +169,11 @@ export default function DangerZone(props: { repo: Accessor<Repo> }) {
     try {
       await deleteRepo(target.id, force);
       if (!alive) return;
-      navigate('/repos', { state: noticeState(`Deleted ${target.name} from lab`) });
+      // replace: Back must not return to the settings of a repo that is gone.
+      navigate('/repos', {
+        replace: true,
+        state: noticeState(`Deleted ${target.name} from lab`),
+      });
     } catch (err) {
       if (!alive) return;
       setError(errorMessage(err));

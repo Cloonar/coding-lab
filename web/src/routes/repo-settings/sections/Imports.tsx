@@ -1,13 +1,15 @@
-// Imports section (issue #261): a repo's declared imports — other registered
-// lab repos whose code this repo's instances may read as read-only
-// snapshots, mounted at spawn. Directional and consumer-declared: this repo
-// (whose settings page this is) is the consumer, and each row names a repo
-// it imports FROM. Modeled on Secrets.tsx (issue #198 pattern):
-// device-local/immediate — every action (add, remove) talks to the server
-// the moment it happens, so there is no useSettingsForm and no
-// unsaved-changes guard here.
+// Imports section (issue #61 §9, issue #261): a repo's declared imports —
+// other registered lab repos whose code this repo's instances may read as
+// read-only snapshots, mounted at spawn. Directional and consumer-declared:
+// this repo (whose settings page this is) is the consumer, and each row names
+// a repo it imports FROM.
+//
+// Every action is immediate: Remove takes the import away at once and the
+// toast offers Undo (which declares it again); Add is a pick and a button,
+// and says what happened in the toast. Nothing opens over the page and no
+// browser confirm is involved.
 
-import { For, Match, Show, Switch, createMemo, createResource, createSignal } from 'solid-js';
+import { For, Show, createMemo, createResource, createSignal, createUniqueId } from 'solid-js';
 import {
   addRepoImport,
   errorMessage,
@@ -16,12 +18,10 @@ import {
   removeRepoImport,
   type RepoImport,
 } from '../../../api';
-import EmptyState from '../../../components/EmptyState';
 import Banner from '../../../components/Banner';
-import FormCard from '../../../components/FormCard';
-import ListRowCard from '../../../components/ListRowCard';
-import SectionCard from '../../../components/SectionCard';
+import EmptyState from '../../../components/EmptyState';
 import Select, { type SelectOption } from '../../../components/Select';
+import { useRepoHome } from '../../repo-home/context';
 
 /**
  * Informational only (issue #261 acceptance): a still-cloning candidate
@@ -36,15 +36,21 @@ function cloneStatusHint(status: string): string | undefined {
 }
 
 export default function ImportsSection(props: { repoId: string }) {
+  const home = useRepoHome();
+  const uid = createUniqueId();
+  const pickLabelId = `imports-${uid}-pick`;
+  const pickErrorId = `imports-${uid}-pick-error`;
   const [imports, { refetch }] = createResource(() => listRepoImports(props.repoId));
   const [repos] = createResource(() => listRepos());
-  const [showAdd, setShowAdd] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [targetId, setTargetId] = createSignal('');
+  const [pickProblem, setPickProblem] = createSignal<string | null>(null);
+  const [busy, setBusy] = createSignal<string | null>(null);
 
-  // Candidates for the add-form picker: every registered repo minus this one
+  // Candidates for the picker: every registered repo minus this one
   // (self-import is rejected server-side) and minus whatever is already
   // declared (adding again would just be a no-op 201) — the picker only ever
-  // offers a target that would actually change something on submit.
+  // offers a target that would actually change something.
   const candidates = createMemo<SelectOption[]>(() => {
     const declared = new Set((imports() ?? []).map((imp) => imp.id));
     return (repos() ?? [])
@@ -56,137 +62,123 @@ export default function ImportsSection(props: { repoId: string }) {
       }));
   });
 
-  return (
-    <SectionCard
-      title="Imports"
-      action={
-        <button type="button" class="primary small" onClick={() => setShowAdd(!showAdd())}>
-          {showAdd() ? 'Cancel' : '+ Add import'}
-        </button>
-      }
-      hint={
-        <>
-          Other lab repos this repo's instances may read as read-only snapshots, mounted at spawn.
-        </>
-      }
-    >
-      <Banner message={error()} onDismiss={() => setError(null)} />
-      <Show when={showAdd()}>
-        <AddImportForm
-          repoId={props.repoId}
-          options={candidates()}
-          onAdded={() => {
-            setShowAdd(false);
-            void refetch();
-          }}
-        />
-      </Show>
-      <Switch>
-        <Match when={imports.error !== undefined}>
-          <Banner message={errorMessage(imports.error)} />
-        </Match>
-        <Match when={imports()?.length === 0}>
-          <EmptyState>
-            No imports declared — add another lab repo for this repo's instances to read as a
-            read-only snapshot.
-          </EmptyState>
-        </Match>
-        <Match when={imports()}>
-          <div class="card-list">
-            <For each={imports()}>
-              {(imp) => (
-                <ImportRow
-                  repoId={props.repoId}
-                  imp={imp}
-                  onChanged={() => void refetch()}
-                  onError={setError}
-                />
-              )}
-            </For>
-          </div>
-        </Match>
-      </Switch>
-    </SectionCard>
-  );
-}
-
-function AddImportForm(props: { repoId: string; options: SelectOption[]; onAdded: () => void }) {
-  const [targetId, setTargetId] = createSignal('');
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-
-  const submit = async (event: SubmitEvent) => {
+  const add = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
-    if (targetId() === '') return;
-    setBusy(true);
+    if (busy() !== null) return;
+    if (targetId() === '') {
+      setPickProblem('Choose a repository first.');
+      return;
+    }
+    const target = targetId();
+    setBusy('add');
     setError(null);
     try {
-      await addRepoImport(props.repoId, targetId());
+      const added = await addRepoImport(props.repoId, target);
       setTargetId('');
-      props.onAdded();
+      await refetch();
+      home.notify(`${home.repo()?.name ?? 'This repository'} can now read ${added.name}`);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
-  return (
-    <FormCard
-      title="New import"
-      wide
-      submitLabel="Add import"
-      busyLabel="Adding…"
-      error={error()}
-      onDismissError={() => setError(null)}
-      onSubmit={(e) => void submit(e)}
-      busy={busy()}
-      // FormCard ORs `busy` in already, so this carries only the extra
-      // condition: no target picked yet.
-      disabled={targetId() === ''}
-    >
-      <Select
-        skin="field"
-        label="Repository"
-        name="target_repo_id"
-        value={targetId()}
-        options={props.options}
-        onChange={setTargetId}
-      />
-    </FormCard>
-  );
-}
-
-function ImportRow(props: {
-  repoId: string;
-  imp: RepoImport;
-  onChanged: () => void;
-  onError: (message: string | null) => void;
-}) {
-  const [busy, setBusy] = createSignal(false);
-
-  const remove = async () => {
-    if (!window.confirm(`Remove import "${props.imp.name}"?`)) return;
-    setBusy(true);
-    props.onError(null);
+  // Removed at once; the toast's Undo declares the import again. A re-add
+  // that fails says so where the list is.
+  const remove = async (imp: RepoImport): Promise<void> => {
+    setBusy(imp.id);
+    setError(null);
     try {
-      await removeRepoImport(props.repoId, props.imp.id);
-      props.onChanged();
+      await removeRepoImport(props.repoId, imp.id);
+      await refetch();
+      home.notify(`Removed the import of ${imp.name}`, {
+        action: {
+          label: 'Undo',
+          run: () => {
+            void addRepoImport(props.repoId, imp.id)
+              .then(() => refetch())
+              .catch((err: unknown) => {
+                setError(`Could not import ${imp.name} again: ${errorMessage(err)}`);
+              });
+          },
+        },
+      });
     } catch (err) {
-      props.onError(errorMessage(err));
+      setError(errorMessage(err));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   return (
-    <ListRowCard
-      title={props.imp.name}
-      actions={
-        <button type="button" class="danger small" onClick={() => void remove()} disabled={busy()}>
-          {busy() ? 'Working…' : 'Remove'}
-        </button>
-      }
-    />
+    <section class="card imports-list" aria-label="Imports">
+      <Banner message={error()} onDismiss={() => setError(null)} />
+      <Show when={imports.error}>{(err) => <Banner message={errorMessage(err())} />}</Show>
+      <Show when={imports()}>
+        {(list) => (
+          <Show
+            when={list().length > 0}
+            fallback={<EmptyState>No imports. Runs only see this repository.</EmptyState>}
+          >
+            <ul class="import-rows">
+              <For each={list()}>
+                {(imp) => (
+                  <li class="import-row">
+                    <span class="import-row-text">
+                      <strong>{imp.name}</strong>
+                      <span class="import-row-meta">
+                        Read-only snapshot of its default branch, refreshed at every spawn.
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      class="small"
+                      aria-label={`Remove the import of ${imp.name}`}
+                      disabled={busy() === imp.id}
+                      onClick={() => void remove(imp)}
+                    >
+                      {busy() === imp.id ? 'Removing…' : 'Remove'}
+                    </button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        )}
+      </Show>
+      <form class="imports-add" novalidate onSubmit={(e) => void add(e)}>
+        <span id={pickLabelId} class="visually-hidden">
+          Repository to import
+        </span>
+        <div class="imports-add-row">
+          <Select
+            skin="field"
+            label="Repository to import"
+            labelledBy={pickLabelId}
+            name="target_repo_id"
+            value={targetId()}
+            options={candidates()}
+            inheritLabel="Choose a repository to import"
+            describedBy={pickProblem() !== null ? pickErrorId : undefined}
+            invalid={pickProblem() !== null}
+            onChange={(value) => {
+              setTargetId(value);
+              setPickProblem(null);
+            }}
+          />
+          <button type="submit" disabled={busy() === 'add'}>
+            {busy() === 'add' ? 'Adding…' : 'Add'}
+          </button>
+        </div>
+        <Show when={pickProblem()}>
+          {(message) => (
+            <p class="sfield-error" id={pickErrorId} role="alert">
+              {message()}
+            </p>
+          )}
+        </Show>
+      </form>
+    </section>
   );
 }

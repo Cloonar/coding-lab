@@ -322,6 +322,13 @@ export interface RepoSettingsHarnessState {
   scheduleBodies: Record<string, unknown>[];
   /** Cron expressions the preview endpoint was asked about, in order. */
   cronPreviewExprs: string[];
+  /** Makes the next schedule POST/PATCH answer 400 with this refusal — with
+   *  `field`, the key the editor shows it under. */
+  scheduleRefusal: { error: string; field?: string } | null;
+  /** Schedule ids of every POST …/schedules/:sid/run, in order. */
+  runNowRequests: string[];
+  /** Makes Run now answer 409 with this reason (verbatim) instead of 202. */
+  runNowRefusal: string | null;
   /** This repo's declared imports (issue #261), sorted by name like the real API. */
   importsOnServer: RepoImport[];
   /** Every imports POST body, for exact target_repo_id assertions. */
@@ -656,6 +663,9 @@ export function stubApi(): void {
       if (url === `/api/v1/repos/${REPO_ID}/schedules` && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         h.scheduleBodies.push(body);
+        if (h.scheduleRefusal !== null) {
+          return Promise.resolve(jsonResponse(400, { ...h.scheduleRefusal }));
+        }
         // A name is unique per repo — the real 409 the section must surface.
         if (h.schedules.some((s) => s.name === body.name)) {
           return Promise.resolve(jsonResponse(409, { error: 'name already taken' }));
@@ -670,6 +680,31 @@ export function stubApi(): void {
         });
         h.schedules = [...h.schedules, created];
         return Promise.resolve(jsonResponse(201, created));
+      }
+      // Run now (issue #61): 202 with the run, or the server's refusal as a
+      // 409 whose message is the reason. Never moves the cadence.
+      const runNowMatch = /^\/api\/v1\/repos\/repo_1\/schedules\/([^/]+)\/run$/.exec(url);
+      if (runNowMatch && method === 'POST') {
+        const id = runNowMatch[1] ?? '';
+        h.runNowRequests.push(id);
+        if (h.runNowRefusal !== null) {
+          return Promise.resolve(jsonResponse(409, { error: h.runNowRefusal }));
+        }
+        return Promise.resolve(
+          jsonResponse(202, {
+            run: {
+              id: `run_now_${h.runNowRequests.length}`,
+              repo_id: REPO_ID,
+              kind: 'scheduled',
+              provider: 'claude-code',
+              issue_number: null,
+              pr_number: null,
+              outcome: 'active',
+              failure_reason: null,
+              schedule_id: id,
+            },
+          }),
+        );
       }
       const reenableMatch = /^\/api\/v1\/repos\/repo_1\/schedules\/([^/]+)\/reenable$/.exec(url);
       if (reenableMatch && method === 'POST') {
@@ -686,6 +721,9 @@ export function stubApi(): void {
       if (scheduleMatch && method === 'PATCH') {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         h.scheduleBodies.push(body);
+        if (h.scheduleRefusal !== null) {
+          return Promise.resolve(jsonResponse(400, { ...h.scheduleRefusal }));
+        }
         const id = scheduleMatch[1];
         const updated = { ...(h.schedules.find((s) => s.id === id) as Schedule), ...body };
         h.schedules = h.schedules.map((s) => (s.id === id ? updated : s));
@@ -928,9 +966,12 @@ export function textarea(name: string): HTMLTextAreaElement {
   return el;
 }
 
+/** A button by its visible text, or — an icon-only control — by its accessible name. */
 export function button(text: string): HTMLButtonElement {
   const buttons = Array.from(container.querySelectorAll('button'));
-  const el = buttons.find((b) => b.textContent?.trim() === text);
+  const el =
+    buttons.find((b) => b.textContent?.trim() === text) ??
+    buttons.find((b) => b.getAttribute('aria-label') === text);
   if (!el) throw new Error(`missing button ${JSON.stringify(text)}`);
   return el;
 }
@@ -1124,7 +1165,11 @@ export function toastText(): string {
 
 /** The in-page dialog that is open, or null. */
 export function openDialog(): HTMLElement | null {
-  return container.querySelector<HTMLElement>('[role="dialog"], [role="alertdialog"]');
+  // The Dialog primitive's panel (the leave guard, the delete confirmation);
+  // the schedule editor is a dialog of its own (scheduleEditor()).
+  return container.querySelector<HTMLElement>(
+    '.dialog[role="dialog"], .dialog[role="alertdialog"]',
+  );
 }
 
 /** Follows an in-app link the way a click does (the router intercepts it). */
@@ -1158,6 +1203,13 @@ export function emitRepoChanged(): void {
   }
 }
 
+/** The server-side push for a run of this repo starting or ending. */
+export function emitRunChanged(): void {
+  for (const source of FakeEventSource.instances) {
+    source.emit('run.changed', { repoID: REPO_ID, runID: 'run_x' });
+  }
+}
+
 /**
  * A card (`section.card`) inside the page, by its own heading. The page-level
  * section headings (issue #61) are `section.settings-section > header h2` and
@@ -1175,9 +1227,16 @@ function sectionCard(title: string): HTMLElement {
   return section as HTMLElement;
 }
 
-/** The legacy Secrets card (issue #104), scoped for row/form queries. */
+/** A page section's own card (issue #61): the list under the heading. */
+function listCard(slug: string, className: string): HTMLElement {
+  const card = pageSection(slug).querySelector<HTMLElement>(`section.card.${className}`);
+  if (!card) throw new Error(`missing .${className} card in ${slug}`);
+  return card;
+}
+
+/** The secrets list (issue #104), scoped for row/form queries. */
 export function secretsSection(): HTMLElement {
-  return sectionCard('Secrets');
+  return listCard('secrets', 'secrets-list');
 }
 
 /** The credential-gateway grant picker's card (issue #25), scoped for row/form queries. */
@@ -1190,14 +1249,19 @@ export function sshTargetsSection(): HTMLElement {
   return sectionCard('SSH targets');
 }
 
-/** The Schedules card, scoped for row/form queries. */
+/** The schedules list, scoped for row queries. */
 export function schedulesSection(): HTMLElement {
-  return sectionCard('Schedules');
+  return listCard('schedules', 'schedules-list');
 }
 
-/** The Imports card, scoped for row/form queries. */
+/** The schedule editor (sections/ScheduleEditor.tsx), or null while closed. */
+export function scheduleEditor(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('.schedule-editor');
+}
+
+/** The imports list, scoped for row/form queries. */
 export function importsSection(): HTMLElement {
-  return sectionCard('Imports');
+  return listCard('imports', 'imports-list');
 }
 
 /**
@@ -1321,6 +1385,9 @@ export function installRepoSettingsHooks(): void {
     h.schedules = [];
     h.scheduleBodies = [];
     h.cronPreviewExprs = [];
+    h.scheduleRefusal = null;
+    h.runNowRequests = [];
+    h.runNowRefusal = null;
     h.importsOnServer = [];
     h.importPostBodies = [];
     h.importPostError = null;

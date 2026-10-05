@@ -1,9 +1,9 @@
-// Imports section suite (issue #261): declared imports — other registered
-// lab repos this repo's instances may read as read-only snapshots — on
-// /repos/:id/settings/imports. Modeled on Secrets.test.tsx: the section is
-// device-local/immediate (no useSettingsForm, no leave guard).
+// Imports section suite (issue #61 §9, issue #261): declared imports — other
+// registered lab repos this repo's instances may read as read-only snapshots
+// — on /repos/:id/settings/imports. Every action is immediate: Remove at
+// once with Undo in the toast, Add from a pick and a button.
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   REPO_ID,
   button,
@@ -16,50 +16,46 @@ import {
   optionRows,
   selectTrigger,
   settle,
-  submitFormWithin,
+  toastText,
   waitFor,
 } from '../harness';
 
 installRepoSettingsHooks();
 
 const mountImports = () => mountSettings(`/repos/${REPO_ID}/settings/imports`);
+const waitForList = () =>
+  waitFor(() => importsSection().querySelector('button[name="target_repo_id"]'), 'imports list');
 
 describe('RepoSettings imports section', () => {
-  it('renders declared imports by name', async () => {
+  it('renders declared imports by name, each with Remove, and no duplicate title', async () => {
     h.importsOnServer = [
       { id: 'repo_2', name: 'other-repo' },
       { id: 'repo_3', name: 'third-repo' },
     ];
     await mountImports();
-    await waitFor(
-      () => container.querySelector('section h2') && importsSection(),
-      'imports section',
-    );
+    await waitForList();
 
     const section = importsSection();
     expect(section.textContent).toContain('other-repo');
     expect(section.textContent).toContain('third-repo');
+    expect(section.querySelectorAll('li.import-row')).toHaveLength(2);
+    expect(button('Remove the import of other-repo').textContent).toBe('Remove');
+    expect(section.querySelector('h2')).toBeNull();
   });
 
   it('renders the empty state when the repo has no imports', async () => {
     await mountImports();
-    await waitFor(
-      () => (importsSection().textContent?.includes('No imports declared') ? true : null),
-      'empty state',
-    );
-    expect(importsSection().textContent).toContain('No imports declared');
+    await waitForList();
+    expect(importsSection().textContent).toContain('No imports. Runs only see this repository.');
   });
 
-  it('the add-import dropdown excludes this repo and already-imported repos', async () => {
+  it('the pick excludes this repo and already-imported repos', async () => {
     // repo_1 is this repo (excluded as self); repo_2 is already imported
     // (excluded so re-adding can't even be attempted); repo_3 is the only
     // repo left to offer — still cloning, and offered anyway (not the guard).
     h.importsOnServer = [{ id: 'repo_2', name: 'other-repo' }];
     await mountImports();
-    await waitFor(() => importsSection(), 'imports section');
-
-    button('+ Add import').click();
-    await settle();
+    await waitForList();
 
     selectTrigger('target_repo_id').click();
     await settle();
@@ -72,45 +68,72 @@ describe('RepoSettings imports section', () => {
     expect(labels).toContain('third-repo');
   });
 
-  it('add-import form submits target_repo_id and refreshes the list', async () => {
+  it('Add with nothing chosen asks for a pick; a pick adds and says so', async () => {
     await mountImports();
-    await waitFor(() => importsSection(), 'imports section');
+    await waitForList();
 
-    button('+ Add import').click();
+    button('Add').click();
     await settle();
 
+    expect(h.importPostBodies).toHaveLength(0);
+    expect(importsSection().querySelector('.sfield-error')?.textContent).toBe(
+      'Choose a repository first.',
+    );
+    expect(selectTrigger('target_repo_id').getAttribute('aria-invalid')).toBe('true');
+
     await chooseFromSelect('target_repo_id', 'other-repo');
-    submitFormWithin(importsSection());
+    expect(importsSection().querySelector('.sfield-error')).toBeNull();
+    button('Add').click();
     await settle();
 
     expect(h.importPostBodies).toEqual([{ target_repo_id: 'repo_2' }]);
-    // The add form closes and the list reflects the newly declared import.
-    expect(container.querySelector('button[name="target_repo_id"]')).toBeNull();
+    expect(toastText()).toBe('coding-lab can now read other-repo');
     expect(importsSection().textContent).toContain('other-repo');
+    // The pick is back to its placeholder, ready for the next one.
+    expect(
+      container.querySelector('button[name="target_repo_id"] .select-field-label')?.textContent,
+    ).toBe('Choose a repository to import');
   });
 
-  it('remove asks for confirmation before removing the import', async () => {
+  it('removes at once, and the toast offers Undo', async () => {
     h.importsOnServer = [{ id: 'repo_2', name: 'other-repo' }];
     await mountImports();
-    await waitFor(() => importsSection().querySelector('.card-title'), 'import row');
+    await waitForList();
 
-    // Declining the confirm leaves the import in place.
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
-    button('Remove').click();
+    button('Remove the import of other-repo').click();
     await settle();
-    expect(confirmSpy).toHaveBeenCalledWith('Remove import "other-repo"?');
-    expect(importsSection().textContent).toContain('other-repo');
 
-    // Confirming removes it.
-    confirmSpy.mockReturnValueOnce(true);
-    button('Remove').click();
-    await settle();
     expect(h.importDeleteRequests).toEqual([`/api/v1/repos/${REPO_ID}/imports/repo_2`]);
     expect(h.importsOnServer).toHaveLength(0);
-    expect(importsSection().textContent).toContain('No imports declared');
+    expect(importsSection().textContent).toContain('No imports.');
+    expect(toastText()).toContain('Removed the import of other-repo');
+
+    const undo = container.querySelector<HTMLButtonElement>('.toast button');
+    expect(undo?.textContent).toBe('Undo');
+    undo?.click();
+    await settle();
+
+    expect(h.importPostBodies).toEqual([{ target_repo_id: 'repo_2' }]);
+    expect(importsSection().textContent).toContain('other-repo');
   });
 
-  it('a 400 from the add-import POST surfaces in the Banner', async () => {
+  it('says so when the Undo cannot declare the import again', async () => {
+    h.importsOnServer = [{ id: 'repo_2', name: 'other-repo' }];
+    await mountImports();
+    await waitForList();
+
+    button('Remove the import of other-repo').click();
+    await settle();
+    h.importPostError = 'imports: target repository not found';
+    container.querySelector<HTMLButtonElement>('.toast button')?.click();
+    await settle();
+
+    expect(importsSection().querySelector('.banner.error')?.textContent).toContain(
+      'Could not import other-repo again: imports: target repository not found',
+    );
+  });
+
+  it('a 400 from the add POST surfaces in the banner', async () => {
     // The picker already excludes self and already-imported targets, so the
     // real self-import/unknown-target 400s can't be reached by driving the
     // UI normally — h.importPostError forces the response the server would
@@ -118,17 +141,17 @@ describe('RepoSettings imports section', () => {
     // submit) to prove the section surfaces it verbatim.
     h.importPostError = 'imports: a repository cannot import itself';
     await mountImports();
-    await waitFor(() => importsSection(), 'imports section');
+    await waitForList();
 
-    button('+ Add import').click();
-    await settle();
     await chooseFromSelect('target_repo_id', 'other-repo');
-    submitFormWithin(importsSection());
+    button('Add').click();
     await settle();
 
     expect(importsSection().textContent).toContain('imports: a repository cannot import itself');
-    // Nothing was added and the form stayed open.
+    // Nothing was added and the pick stays.
     expect(h.importsOnServer).toHaveLength(0);
-    expect(container.querySelector('button[name="target_repo_id"]')).not.toBeNull();
+    expect(
+      container.querySelector('button[name="target_repo_id"] .select-field-label')?.textContent,
+    ).toBe('other-repo');
   });
 });

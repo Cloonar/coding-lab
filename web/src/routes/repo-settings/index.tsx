@@ -14,22 +14,32 @@
 // /repos/:id/settings/:section — every slug of issue #198 — opens it scrolled
 // to that section, and an unknown slug stays at the top. `?field=<patch key>`
 // (the readiness "Fix" links, a problem found by Save) scrolls that field
-// into view and focuses its control. The schedule editor's URLs
-// (settings/schedules/new, settings/schedules/:scheduleId) belong to
-// Schedules. A chip or outline entry scrolls to its section and REPLACES the
-// URL with the section's — no history entry per section.
+// into view and focuses its control. A chip or outline entry scrolls to its
+// section and REPLACES the URL with the section's — no history entry per
+// section.
+//
+// The schedule editor's URLs (settings/schedules/new,
+// settings/schedules/:scheduleId) are this page too: one route, so the page
+// stays mounted — and scrolled where it was — while the editor opens over it
+// (sections/ScheduleEditor.tsx) and closes again. Opening a row pushes the
+// editor's URL, so Browser Back closes it; closing from inside the editor
+// goes back when the editor was opened from this page, else replaces the
+// URL with the Schedules section's (a deep link has nowhere to go back to).
 //
 // The frame owns the page container, RequireAuth, the repo header and the one
 // live repo resource; this page reads the repo through the form store, whose
 // `saved()` survives a failed refresh.
 
-import { useIsRouting, useLocation, useMatch, useNavigate, useParams } from '@solidjs/router';
+import { useIsRouting, useLocation, useNavigate, useParams } from '@solidjs/router';
 import {
   ErrorBoundary,
   For,
+  Match,
   Show,
+  Switch,
   createComputed,
   createEffect,
+  createMemo,
   createResource,
   createSignal,
   on,
@@ -39,8 +49,18 @@ import {
   type Accessor,
   type JSX,
 } from 'solid-js';
-import { errorMessage, listCredentials, type Repo } from '../../api';
+import {
+  errorMessage,
+  listCredentials,
+  listRepoSchedules,
+  listScheduleFlows,
+  runScheduleNow,
+  type Repo,
+  type Schedule,
+} from '../../api';
 import Banner from '../../components/Banner';
+import Icon from '../../components/Icon';
+import { createLiveResource } from '../../lib/liveResource';
 import { createMediaQuery } from '../../lib/media';
 import { resourceValue } from '../../lib/resource';
 import { sectionInView } from '../../lib/sectionSpy';
@@ -52,7 +72,7 @@ import {
   type RepoSettingsCategory,
 } from './categories';
 import { focusFieldControl } from './Field';
-import { isRepoFieldKey, repoField } from './fields';
+import { isRepoFieldKey, repoField, type RepoFieldKey } from './fields';
 import { useRepoSettingsForm, type RevealTarget } from './form';
 import { viewport } from './scrolling';
 import SectionNav from './SectionNav';
@@ -64,6 +84,7 @@ import GeneralSection from './sections/General';
 import ImportsSection from './sections/Imports';
 import IntegrationsSection from './sections/Integrations';
 import RunnerSection from './sections/Runner';
+import ScheduleEditor from './sections/ScheduleEditor';
 import SchedulesSection from './sections/Schedules';
 import RepoSecretsSection from './sections/Secrets';
 
@@ -101,22 +122,30 @@ export default function RepoSettings() {
   const [credentials] = createResource(() => listCredentials());
 
   const base = (): string => `/repos/${params.id}/settings`;
-  // The schedule editor's URLs carry no :section; they belong to Schedules.
-  const scheduleNew = useMatch(() => `${base()}/schedules/new`);
-  const section = (): string | undefined =>
-    params.section ??
-    (params.scheduleId !== undefined || scheduleNew() !== undefined ? 'schedules' : undefined);
+  const section = (): string | undefined => params.section;
+  // The schedule editor's URLs: settings/schedules/<id>, or …/new. A second
+  // segment under any other section is nothing.
+  const editorId = (): string | undefined =>
+    section() === 'schedules' ? params.scheduleId : undefined;
+  const editorHref = (id: string): string => `${base()}/schedules/${id}`;
 
+  const fieldParam = (): RepoFieldKey | undefined => {
+    const field = location.query.field;
+    return typeof field === 'string' && isRepoFieldKey(field) ? field : undefined;
+  };
   // Where the URL points: a field (its own section wins over a mismatched
   // :section), else a known section, else nowhere — the top of the page.
   const urlTarget = (): RevealTarget | undefined => {
-    const field = location.query.field;
-    if (typeof field === 'string' && isRepoFieldKey(field)) {
-      return { section: repoField(field).section, field };
-    }
+    const field = fieldParam();
+    if (field !== undefined) return { section: repoField(field).section, field };
     const slug = repoSettingsCategory(section())?.slug;
     return slug !== undefined ? { section: slug } : undefined;
   };
+  // What a URL means to the page's scroll position: its section and field.
+  // The editor's segment is left out on purpose — opening or closing the
+  // editor is not an arrival, and must not move the page under it.
+  const arrivalKey = (slug: string | undefined, field: string | undefined): string =>
+    `${repoSettingsCategory(slug)?.slug ?? ''}|${field ?? ''}`;
 
   // A section that folds fields away unfolds the one the URL points at.
   // A computed, so it has happened before the page looks for the field.
@@ -239,10 +268,10 @@ export default function RepoSettings() {
   // below that this URL change has already been acted on.
   let byNav: string | undefined;
   const onNavGo = (slug: string): void => {
-    const path = `${base()}/${slug}`;
-    if (`${location.pathname}${location.search}` !== path) byNav = path;
+    const key = arrivalKey(slug, undefined);
+    if (arrivalKey(section(), fieldParam()) !== key) byNav = key;
     goTo({ section: slug }, { smooth: true, hold: false });
-    navigate(path, { replace: true, scroll: false });
+    navigate(`${base()}/${slug}`, { replace: true, scroll: false });
   };
 
   // Arrival: act on the URL once the sections exist and the router is done
@@ -254,7 +283,7 @@ export default function RepoSettings() {
   createEffect(() => {
     const ready = form.saved() !== undefined;
     const routing = isRouting();
-    const key = `${location.pathname}${location.search}`;
+    const key = arrivalKey(section(), fieldParam());
     const tick = form.revealTick();
     if (!ready || routing) return;
     untrack(() => {
@@ -308,7 +337,55 @@ export default function RepoSettings() {
     clearTimeout(flashTimer);
   });
 
-  const refetch = (): void => void home.refetch();
+  // --- schedules and their editor -----------------------------------------------
+  // The list is live: repo.changed (a pause, a re-enable, a count moved) and
+  // run.changed (a run of a Schedule started or ended) both refetch it.
+  const ofThisRepo = (event: { repoID?: string }): boolean =>
+    event.repoID === undefined || event.repoID === home.id();
+  const [schedules, { refetch: refetchSchedules }] = createLiveResource(
+    () => home.id(),
+    (repoID) => listRepoSchedules(repoID),
+    [
+      { type: 'repo.changed', match: ofThisRepo },
+      { type: 'run.changed', match: ofThisRepo },
+    ],
+  );
+  const [flows] = createResource(() => listScheduleFlows());
+  // A problem to report in the Schedules section once the editor is gone (a
+  // Run now from the Saved toast that the server refused).
+  const [scheduleNotice, setScheduleNotice] = createSignal<string | null>(null);
+
+  // Opened from this page: a history entry was pushed, so closing goes back.
+  // Arrived at directly (a deep link, a reload): closing replaces the URL
+  // with the section's.
+  let openedHere = false;
+  const openEditor = (id: string): void => {
+    openedHere = true;
+    navigate(editorHref(id), { scroll: false });
+  };
+  const closeEditor = (): void => {
+    if (openedHere) {
+      openedHere = false;
+      navigate(-1);
+    } else {
+      navigate(`${base()}/schedules`, { replace: true, scroll: false });
+    }
+  };
+  createEffect(
+    on(editorId, (id) => {
+      if (id === undefined) openedHere = false;
+    }),
+  );
+  const runNow = async (schedule: Schedule): Promise<void> => {
+    try {
+      await runScheduleNow(home.id(), schedule.id);
+      home.notify(`Started a run from "${schedule.name}"`);
+      void refetchSchedules();
+    } catch (err) {
+      setScheduleNotice(errorMessage(err));
+    }
+  };
+
   const body = (slug: string, repo: Accessor<Repo>): JSX.Element => {
     switch (slug) {
       case 'agents':
@@ -320,14 +397,14 @@ export default function RepoSettings() {
       case 'schedules':
         return (
           <SchedulesSection
-            repo={repo}
-            providers={form.catalog.providers()}
-            // Schedules act at once, on the SAVED repo: its own AFK agent,
-            // else the one the server says it inherits.
-            afkProviderId={
-              repo().afk_provider_default ?? form.inherited()?.afk_provider_default ?? null
-            }
-            onSaved={refetch}
+            repoId={repo().id}
+            schedules={schedules}
+            flows={resourceValue(flows) ?? []}
+            editorHref={editorHref}
+            onOpen={openEditor}
+            onChanged={() => void refetchSchedules()}
+            notice={scheduleNotice()}
+            onDismissNotice={() => setScheduleNotice(null)}
           />
         );
       case 'secrets':
@@ -369,10 +446,118 @@ export default function RepoSettings() {
                 )}
               </For>
             </div>
+            {/* The schedule editor, over the page, keyed on the URL: another
+                id (or "new") is another editor. */}
+            <Show when={editorId()} keyed>
+              {(id) => {
+                // The Schedule the editor opens on — latched once found, so a
+                // refetch while it is open (a run of it ended) neither
+                // remounts it nor, should the row have gone, takes it away.
+                const seed = createMemo<Schedule | null | 'missing' | 'failed' | undefined>(
+                  (previous) => {
+                    if (previous !== undefined && previous !== 'missing' && previous !== 'failed') {
+                      return previous;
+                    }
+                    if (id === 'new') return null;
+                    if (schedules.error !== undefined) return 'failed';
+                    const list = resourceValue(schedules);
+                    if (list === undefined) return undefined;
+                    return list.find((candidate) => candidate.id === id) ?? 'missing';
+                  },
+                );
+                return (
+                  <Switch>
+                    <Match when={seed() === undefined}>
+                      <EditorNotice title="Loading schedule…" />
+                    </Match>
+                    <Match when={seed() === 'missing'}>
+                      <EditorNotice title="Schedule not found" onClose={closeEditor}>
+                        This schedule no longer exists.
+                      </EditorNotice>
+                    </Match>
+                    <Match when={seed() === 'failed'}>
+                      <EditorNotice title="Schedule not loaded" onClose={closeEditor}>
+                        The schedules could not be loaded. {errorMessage(schedules.error)}
+                      </EditorNotice>
+                    </Match>
+                    <Match when={typeof seed() === 'object'}>
+                      <ScheduleEditor
+                        repoId={repo().id}
+                        schedule={seed() as Schedule | null}
+                        providers={form.catalog.providers()}
+                        // The layer under a Schedule's own agent pick: the
+                        // SAVED repo's AFK agent, else the one the server
+                        // says it inherits.
+                        afkProviderId={
+                          repo().afk_provider_default ??
+                          form.inherited()?.afk_provider_default ??
+                          null
+                        }
+                        flows={resourceValue(flows) ?? []}
+                        url={editorHref(id)}
+                        onClose={closeEditor}
+                        onSaved={(saved) => {
+                          closeEditor();
+                          void refetchSchedules();
+                          home.notify(`Saved "${saved.name}"`, {
+                            action: { label: 'Run now', run: () => void runNow(saved) },
+                          });
+                        }}
+                        onDeleted={(deleted) => {
+                          closeEditor();
+                          void refetchSchedules();
+                          home.notify(`Deleted "${deleted.name}"`);
+                        }}
+                        onRan={(ran) => {
+                          closeEditor();
+                          void refetchSchedules();
+                          home.notify(`Started a run from "${ran.name}"`);
+                        }}
+                      />
+                    </Match>
+                  </Switch>
+                );
+              }}
+            </Show>
           </>
         )}
       </Show>
     </div>
+  );
+}
+
+/**
+ * The editor's frame with a message instead of a form: while the Schedule a
+ * deep link names is still loading, or when it is gone.
+ */
+function EditorNotice(props: { title: string; onClose?: () => void; children?: JSX.Element }) {
+  const desktop = createMediaQuery(DESKTOP_QUERY);
+  return (
+    <>
+      <Show when={desktop()}>
+        <div class="schedule-editor-scrim" aria-hidden="true" onClick={() => props.onClose?.()} />
+      </Show>
+      <section class="schedule-editor" role="dialog" aria-modal="true" aria-label={props.title}>
+        <header class="schedule-editor-head">
+          <Show when={props.onClose}>
+            <button
+              type="button"
+              class="icon-btn"
+              aria-label="Back to schedules"
+              onClick={() => props.onClose?.()}
+            >
+              <Icon name="chevron-left" />
+            </button>
+          </Show>
+          <h2>{props.title}</h2>
+        </header>
+        <Show when={props.children}>
+          <div class="schedule-editor-body">
+            <p class="settings-note">{props.children}</p>
+          </div>
+        </Show>
+      </section>
+    </>
   );
 }
 

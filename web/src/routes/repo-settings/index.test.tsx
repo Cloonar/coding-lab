@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   REPO_ID,
+  baseSchedule,
   container,
   fieldWrapper,
   h,
@@ -17,6 +18,7 @@ import {
   mountSettings,
   pageSection,
   routerHistory,
+  scheduleEditor,
   settle,
   unmount,
   waitFor,
@@ -50,9 +52,9 @@ const probes: Record<string, () => Element | null> = {
   agents: () => container.querySelector('button[name="afk_provider_default"]'),
   runner: () => container.querySelector('button[name="runner"]'),
   autoland: () => container.querySelector('button[name="autoland_enabled"]'),
-  schedules: () => buttonByText('+ Add schedule'),
-  secrets: () => buttonByText('+ Add secret'),
-  imports: () => buttonByText('+ Add import'),
+  schedules: () => container.querySelector('.schedules-list a.schedule-new'),
+  secrets: () => container.querySelector('.secrets-list .secret-row-new'),
+  imports: () => container.querySelector('.imports-list button[name="target_repo_id"]'),
   general: () => container.querySelector('input[name="name"]'),
   integrations: () => container.querySelector('button[name="tracker_binding"]'),
   branches: () => container.querySelector('input[name="default_branch"]'),
@@ -226,15 +228,21 @@ describe('repo settings deep links', () => {
     expect(h.scrolls).toEqual([]);
   });
 
-  it('the schedule editor URLs reach the page and open it at Schedules', async () => {
+  it('the schedule editor URLs reach the page, open it at Schedules and open the editor', async () => {
+    h.schedules = [baseSchedule()];
     for (const path of [`${BASE}/schedules/new`, `${BASE}/schedules/sched_1`]) {
       h.scrolls = [];
       await mountSettings(path);
-      await waitFor(() => buttonByText('+ Add schedule'), `schedules section at ${path}`);
+      await waitFor(() => probes.schedules?.() ?? null, `schedules section at ${path}`);
+      await waitFor(scheduleEditor, `the editor at ${path}`);
       await settle();
 
       expect(routerHistory.get()).toBe(path); // no redirect away from the editor URL
+      expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
       expectArrivedAt('settings-schedules');
+      expect(scheduleEditor()?.querySelector('h2')?.textContent).toBe(
+        path.endsWith('/new') ? 'New schedule' : 'Edit schedule',
+      );
       unmount();
     }
   });
@@ -358,6 +366,6 @@ describe('repo settings in the repo home frame', () => {
     expect(pageSection('imports').textContent).toContain('repo list unavailable');
     expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
     expect(container.querySelector('input[name="default_branch"]')).not.toBeNull();
-    expect(buttonByText('+ Add secret')).not.toBeNull();
+    expect(probes.secrets?.()).not.toBeNull();
   });
 });

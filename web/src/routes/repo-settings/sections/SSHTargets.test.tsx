@@ -190,17 +190,13 @@ describe('RepoSettings SSH-targets picker', () => {
     await mountSecrets();
     await waitForPicker();
 
-    // The cards of the page's Secrets section, in order (the section's own
-    // "Secrets" heading above them is not a card heading).
-    const headings = Array.from(
-      container.querySelectorAll('section#settings-secrets section.card h2'),
-    ).map((h2) => h2.textContent);
-    expect(headings).toHaveLength(3);
-    const grantsIdx = headings.indexOf('Credential gateway');
-    const sshIdx = headings.indexOf('SSH targets');
-    const secretsIdx = headings.indexOf('Secrets');
-    expect(grantsIdx).toBeGreaterThanOrEqual(0);
-    expect(sshIdx).toBeGreaterThan(grantsIdx);
-    expect(secretsIdx).toBeGreaterThan(sshIdx);
+    // The cards of the page's Secrets section, in order: the two pickers by
+    // their card headings, then the secrets list (which has no heading of its
+    // own — the page section's "Secrets" heading above the cards is the one).
+    const cards = Array.from(container.querySelectorAll('section#settings-secrets section.card'));
+    const names = cards.map(
+      (card) => card.querySelector('h2')?.textContent ?? card.className.replace('card ', ''),
+    );
+    expect(names).toEqual(['Credential gateway', 'SSH targets', 'secrets-list']);
   });
 });
