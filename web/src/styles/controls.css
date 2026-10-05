@@ -221,7 +221,9 @@ button.switch:disabled {
   padding-inline: 0.2rem;
 }
 
-.segmented .segment:hover:not(:disabled) {
+/* Not the checked segment: a hover (or the sticky hover a tap leaves on touch)
+   must never strip its raised background. */
+.segmented .segment:hover:not(:disabled):not([aria-checked='true']) {
   background: transparent;
   color: var(--text);
 }

@@ -135,6 +135,20 @@ describe('Segmented', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it('carries its hint and error to the group: describedBy and invalid', () => {
+    mount({ describedBy: 'binding-error binding-hint', invalid: true });
+    const group = container.querySelector('[role="radiogroup"]')!;
+    expect(group.getAttribute('aria-describedby')).toBe('binding-error binding-hint');
+    expect(group.getAttribute('aria-invalid')).toBe('true');
+  });
+
+  it('is neither described nor invalid by default', () => {
+    mount();
+    const group = container.querySelector('[role="radiogroup"]')!;
+    expect(group.hasAttribute('aria-describedby')).toBe(false);
+    expect(group.hasAttribute('aria-invalid')).toBe(false);
+  });
+
   it('stretches with `fill`', () => {
     mount({ fill: true });
     expect(group().classList.contains('fill')).toBe(true);

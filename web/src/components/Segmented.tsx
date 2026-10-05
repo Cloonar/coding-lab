@@ -34,6 +34,10 @@ export interface SegmentedProps {
   'aria-label'?: string;
   /** Id of an element elsewhere that labels the group. */
   labelledBy?: string;
+  /** Id(s) of the hint and error text that describe the group. */
+  describedBy?: string;
+  /** Marks the group as holding a refused value (pair it with describedBy). */
+  invalid?: boolean;
   /** Form-semantics name, set on every segment button (with its value). */
   name?: string;
   /** Disables the whole group. */
@@ -117,6 +121,8 @@ export default function Segmented(props: SegmentedProps) {
         }}
         aria-label={props.label === undefined ? props['aria-label'] : undefined}
         aria-labelledby={props.label !== undefined ? labelId : props.labelledBy}
+        aria-describedby={props.describedBy}
+        aria-invalid={props.invalid === true ? 'true' : undefined}
         aria-disabled={props.disabled === true ? 'true' : undefined}
         onFocusOut={(event) => {
           const next = event.relatedTarget as Node | null;
