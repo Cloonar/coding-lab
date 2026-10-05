@@ -29,7 +29,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -256,7 +258,8 @@ type scheduleCreateRequest struct {
 
 // handleScheduleCreate is POST /api/v1/repos/{id}/schedules: 201 with the
 // stored Schedule, 400 on any validation refusal, 409 on a name already used
-// in this repo.
+// in this repo. Every refusal past the body decode names the JSON key it is
+// about (writeFieldError, issue #61), so the editor shows it under that field.
 func (s *Server) handleScheduleCreate(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -268,35 +271,35 @@ func (s *Server) handleScheduleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	name, err := scheduleName(req.Name)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, "name", err.Error())
 		return
 	}
 	cadence := strings.TrimSpace(req.Cadence)
 	if err := s.validateCadence(cadence); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, "cadence", err.Error())
 		return
 	}
 	flows, err := canonicalFlows(req.Flows)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, "flows", err.Error())
 		return
 	}
 	prompt := strings.TrimSpace(req.Prompt)
 	if err := validateSchedulePrompt(prompt); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, "prompt", err.Error())
 		return
 	}
 	if err := requirePromptOrFlow(prompt, flows); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, promptOrFlowField, err.Error())
 		return
 	}
 	if err := validateScheduleBudget(req.BudgetMinutes); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, "budget_minutes", err.Error())
 		return
 	}
 	prov := scheduleOverride(req.Provider)
 	if err := s.validateScheduleProvider(prov); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, "provider", err.Error())
 		return
 	}
 	enabled := true
@@ -335,6 +338,10 @@ func (s *Server) handleScheduleCreate(w http.ResponseWriter, r *http.Request) {
 // paused and consecutive_failures are NOT patchable and fall through to the
 // unknown-field 400 on purpose: an edit form must not be able to clear a
 // three-strikes pause, which is what the re-enable endpoint is for.
+//
+// Every per-key refusal names that key (writeFieldError, issue #61), and the
+// keys are decoded in sorted order so a body with several bad keys always
+// reports the same one — never whichever a map iteration yielded first.
 func (s *Server) handleScheduleUpdate(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -349,7 +356,8 @@ func (s *Server) handleScheduleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var u store.ScheduleUpdate
-	for key, raw := range body {
+	for _, key := range slices.Sorted(maps.Keys(body)) {
+		raw := body[key]
 		var err error
 		switch key {
 		case "name":
@@ -408,7 +416,7 @@ func (s *Server) handleScheduleUpdate(w http.ResponseWriter, r *http.Request) {
 			err = fmt.Errorf("unknown field %q", key)
 		}
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeFieldError(w, http.StatusBadRequest, key, err.Error())
 			return
 		}
 	}
@@ -424,7 +432,7 @@ func (s *Server) handleScheduleUpdate(w http.ResponseWriter, r *http.Request) {
 		flows = u.Flows.Value
 	}
 	if err := requirePromptOrFlow(prompt, flows); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFieldError(w, http.StatusBadRequest, promptOrFlowField, err.Error())
 		return
 	}
 	updated, err := s.store.UpdateSchedule(r.Context(), sc.ID, u)
@@ -659,7 +667,9 @@ func (s *Server) writeScheduleError(w http.ResponseWriter, doing string, err err
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, store.ErrNameTaken):
-		writeError(w, http.StatusConflict, store.ErrNameTaken.Error())
+		// Only a create or a rename can collide, and both carry the name
+		// (writeRepoError's rule, issue #61).
+		writeFieldError(w, http.StatusConflict, "name", store.ErrNameTaken.Error())
 	default:
 		s.internalError(w, doing, err)
 	}
@@ -752,6 +762,11 @@ func patchFlows(raw json.RawMessage, field string) (store.Opt[[]string], error) 
 // BOM, WORD JOINER) an emptiness test must not be fooled by: a "prompt" of
 // invisible ink passes TrimSpace but briefs a firing with nothing.
 var zeroWidthReplacer = strings.NewReplacer("\u200B", "", "\uFEFF", "", "\u2060", "")
+
+// promptOrFlowField is the key requirePromptOrFlow's refusal names. The rule
+// spans two fields; it points at the prompt, the one an operator can always
+// satisfy by typing (issue #61).
+const promptOrFlowField = "prompt"
 
 // requirePromptOrFlow enforces ADR-0062's one composition rule: a firing needs
 // something to say. Zero flows is legal (a pure-prompt Schedule) and an empty

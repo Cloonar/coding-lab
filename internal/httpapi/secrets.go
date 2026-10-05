@@ -69,7 +69,9 @@ type repoSecretCreateRequest struct {
 
 // handleRepoSecretCreate is POST /api/v1/repos/{id}/secrets: encrypts the
 // value with s.vault.Encrypt (raw bytes, not the JSON-payload envelope
-// credentials use) before it ever reaches the store.
+// credentials use) before it ever reaches the store. A name or value refusal
+// names its field (writeFieldError, issue #61) so the secrets list shows it
+// under that input.
 func (s *Server) handleRepoSecretCreate(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -80,11 +82,11 @@ func (s *Server) handleRepoSecretCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !store.ValidSecretName(req.Name) {
-		writeError(w, http.StatusBadRequest, repoSecretGrammarMessage)
+		writeFieldError(w, http.StatusBadRequest, "name", repoSecretGrammarMessage)
 		return
 	}
 	if req.Value == "" {
-		writeError(w, http.StatusBadRequest, "value is required")
+		writeFieldError(w, http.StatusBadRequest, "value", "value is required")
 		return
 	}
 	sealed, err := s.vault.Encrypt([]byte(req.Value))
@@ -121,7 +123,7 @@ func (s *Server) handleRepoSecretRotate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if req.Value == "" {
-		writeError(w, http.StatusBadRequest, "value is required")
+		writeFieldError(w, http.StatusBadRequest, "value", "value is required")
 		return
 	}
 	sealed, err := s.vault.Encrypt([]byte(req.Value))
@@ -173,15 +175,16 @@ func (s *Server) loadRepoSecret(w http.ResponseWriter, r *http.Request, repo sto
 }
 
 // writeRepoSecretError maps repo-secret accessor errors onto the pinned
-// status codes.
+// status codes. The two name refusals name their field (issue #61): only a
+// create carries a name, so only a create can collide or fail the grammar.
 func (s *Server) writeRepoSecretError(w http.ResponseWriter, doing string, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, store.ErrNameTaken):
-		writeError(w, http.StatusConflict, store.ErrNameTaken.Error())
+		writeFieldError(w, http.StatusConflict, "name", store.ErrNameTaken.Error())
 	case errors.Is(err, store.ErrInvalidSecretName):
-		writeError(w, http.StatusBadRequest, repoSecretGrammarMessage)
+		writeFieldError(w, http.StatusBadRequest, "name", repoSecretGrammarMessage)
 	default:
 		s.internalError(w, doing, err)
 	}
