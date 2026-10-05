@@ -1145,16 +1145,16 @@ Each repo's home opens with a **Readiness** block: whether a run can start in th
 |---|---|---|---|
 | Clone | The repo's clone; *pending* while it runs, with its progress. | Never. | **Retry clone**. |
 | Git credential | The last fetch lab made with the repo's git credential: a launch, `/pull-base`, a change-request merge, or the clone itself. | The clone is not ready, or no such fetch since lab started under the credential as it is now. | Integrations → Git credential. |
-| Tracker | Built-in: always passes. Forge: the binding's configuration, checked locally, then the last issue and pull listings lab read from the forge. | No listing read since lab started under the current forge credential. | Integrations → Forge credential or Tracker binding. |
-| Agent | The last known login state of the agent runs here would use, plus the AFK agent while Auto is on and it differs. | That agent's login was never checked since lab started. | The Credentials page. |
+| Tracker | Built-in: always passes. Forge: the binding's configuration, checked locally, then the last definitive answer to an issue or pull listing lab read from the forge: a success, or a 401, 404, or 403 that is not a rate limit. | No definitive answer since lab started under the current forge credential. | Integrations → Forge credential or Tracker binding. |
+| Agent | The last known login state of the agent runs here would use, plus the AFK agent while Auto is on and it differs. | That agent's login was never successfully checked since lab started; a check that failed or was cut off does not count. | The Credentials page. |
 | Dev image | Container runner only: the same gate a container spawn is refused by (container wiring, preflight, agent-tools image, a resolvable dev image), then the last pull of the dev image. It also fails, on either runner, when the effective runner cannot be resolved. | The gate is open but the image was not checked since lab started. | Runner → Runner or Dev image. |
-| Imports | Each read-only import's clone and its last fetch; passes when none are declared. | An import was not fetched since lab started. | Imports. |
+| Imports | Each read-only import's clone and its last fetch; passes when none are declared, *pending* while a target is still cloning. | An import was not fetched since lab started. | Imports. |
 
 Nothing in the report is fetched when you look at it: opening the list or a repo home makes no forge request, no git network operation, and starts no process. Lab records the outcome of work it does anyway and builds the report from that. Consequences worth knowing:
 
 - **A restart empties the records.** They live in memory, so right after a restart most checks are missing until the next launch, engine pass or fetch records an outcome. A missing check is never shown as passing.
 - **A record counts only for the credential it was made with.** Pick another git or forge credential, or rotate or rename the one in use, and its check disappears until the next fetch or read under it.
-- **Only fetches made with the repo's own git credential count.** The background sweep fetches without credentials and never marks a credential broken. A forge read refused for rate limiting is not recorded either.
+- **Only fetches made with the repo's own git credential count.** The background sweep fetches without credentials and never marks a credential broken. Nothing that failed without an answer is recorded either, and none of it overwrites a record: a rate limit, a 5xx, an unreachable forge, a timeout, or a fetch that lost a lock in lab's own reference repo.
 - `repo.changed` fires when a verdict or a count changes, so an open page follows along.
 
 ## Metrics
