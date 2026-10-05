@@ -2422,3 +2422,45 @@ func TestNew_trimsTrailingSlashAndDefaultsClient(t *testing.T) {
 		t.Errorf("timeout = %s; want %s", c.timeout, defaultRequestTimeout)
 	}
 }
+
+// TestStatusClassification pins how a non-2xx answer unwraps (issue #61): 401
+// and 403 are refusals of the credential (tracker.ErrAccessDenied), 404 stays
+// not-found, and a 5xx or a 429 is none of them — an upstream failure that
+// says nothing about the token.
+func TestStatusClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		status           int
+		denied, notFound bool
+	}{
+		{name: "401", status: http.StatusUnauthorized, denied: true},
+		{name: "403", status: http.StatusForbidden, denied: true},
+		{name: "404", status: http.StatusNotFound, notFound: true},
+		{name: "429", status: http.StatusTooManyRequests},
+		{name: "500", status: http.StatusInternalServerError},
+		{name: "502", status: http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, `{"message":"nope"}`)
+			})
+			_, err := c.Issues(context.Background(), tracker.StateOpen)
+			if err == nil {
+				t.Fatal("Issues succeeded on a non-2xx answer")
+			}
+			if got := errors.Is(err, tracker.ErrAccessDenied); got != tc.denied {
+				t.Errorf("errors.Is(ErrAccessDenied) = %v, want %v (%v)", got, tc.denied, err)
+			}
+			if got := errors.Is(err, tracker.ErrNotFound); got != tc.notFound {
+				t.Errorf("errors.Is(ErrNotFound) = %v, want %v (%v)", got, tc.notFound, err)
+			}
+			if errors.Is(err, tracker.ErrRateLimited) {
+				t.Errorf("errors.Is(ErrRateLimited) = true; the Forgejo client never produces it (%v)", err)
+			}
+			if strings.Contains(err.Error(), testToken) {
+				t.Fatalf("token leaked into error: %q", err.Error())
+			}
+		})
+	}
+}

@@ -2921,3 +2921,51 @@ func TestNew_trimsTrailingSlashAndDefaultsClient(t *testing.T) {
 		t.Errorf("timeout = %s; want %s", c.timeout, defaultRequestTimeout)
 	}
 }
+
+// TestStatusClassification pins how a non-2xx answer unwraps (issue #61):
+// 401 and an UNTHROTTLED 403 are refusals of the credential
+// (tracker.ErrAccessDenied), a throttled 403 stays a rate limit and is no
+// refusal, 404 stays not-found, and a 5xx is none of them — an upstream
+// failure that says nothing about the token.
+func TestStatusClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		status                    int
+		headers                   map[string]string
+		denied, limited, notFound bool
+	}{
+		{name: "401", status: http.StatusUnauthorized, denied: true},
+		{name: "403 without throttle headers", status: http.StatusForbidden, denied: true},
+		{name: "403 throttled", status: http.StatusForbidden, headers: map[string]string{"X-RateLimit-Remaining": "0"}, limited: true},
+		{name: "429 retry-after", status: http.StatusTooManyRequests, headers: map[string]string{"Retry-After": "30"}, limited: true},
+		{name: "404", status: http.StatusNotFound, notFound: true},
+		{name: "502", status: http.StatusBadGateway},
+		{name: "503", status: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, `{"message":"nope"}`)
+			})
+			_, err := c.Issues(context.Background(), tracker.StateOpen)
+			if err == nil {
+				t.Fatal("Issues succeeded on a non-2xx answer")
+			}
+			if got := errors.Is(err, tracker.ErrAccessDenied); got != tc.denied {
+				t.Errorf("errors.Is(ErrAccessDenied) = %v, want %v (%v)", got, tc.denied, err)
+			}
+			if got := errors.Is(err, tracker.ErrRateLimited); got != tc.limited {
+				t.Errorf("errors.Is(ErrRateLimited) = %v, want %v (%v)", got, tc.limited, err)
+			}
+			if got := errors.Is(err, tracker.ErrNotFound); got != tc.notFound {
+				t.Errorf("errors.Is(ErrNotFound) = %v, want %v (%v)", got, tc.notFound, err)
+			}
+			if strings.Contains(err.Error(), testToken) {
+				t.Fatalf("token leaked into error: %q", err.Error())
+			}
+		})
+	}
+}

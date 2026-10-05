@@ -123,3 +123,32 @@ func (s *Store) RepoImporters(ctx context.Context, targetID string) ([]Repo, err
 	}
 	return repos, nil
 }
+
+// AllRepoImports returns every read-only import declaration in one query, as
+// importing repo id → its target repo ids ordered by target name. A repo
+// that declares none has no entry. The batch form of RepoImports for callers
+// that already hold the repo rows (the repo list's readiness summaries,
+// issue #61), so a list of N repos costs one query instead of N.
+func (s *Store) AllRepoImports(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT i.repo_id, i.target_repo_id FROM repo_imports i
+		 JOIN repos r ON r.id = i.target_repo_id
+		 ORDER BY i.repo_id, r.name`)
+	if err != nil {
+		return nil, fmt.Errorf("all repo imports: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string][]string)
+	for rows.Next() {
+		var repoID, targetID string
+		if err := rows.Scan(&repoID, &targetID); err != nil {
+			return nil, fmt.Errorf("all repo imports: %w", err)
+		}
+		out[repoID] = append(out[repoID], targetID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("all repo imports: %w", err)
+	}
+	return out, nil
+}

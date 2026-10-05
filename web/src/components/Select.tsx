@@ -8,6 +8,17 @@
 // the catalog stays selectable as-is (marked "(not in catalog)"), so an
 // untouched field never silently changes on save; with `inheritLabel` set, an
 // inherit entry (value "") is prepended and selecting it emits ''.
+//
+// The field skin draws its own label by default. A host that draws the label
+// itself — the repo settings Field (issue #61), which puts a changed mark and
+// more beside it — passes `labelledBy` instead: the control then renders bare
+// (no `.field` block, no label) and takes its name from that element. `id`,
+// `describedBy` and `invalid` let such a host wire a hint and an error to the
+// trigger.
+//
+// The field trigger's accessible name is its label AND the value it shows
+// ("Model Inherited · Opus"): a button named by its label alone never says
+// what is picked. The chip skin keeps its aria-label.
 
 import {
   For,
@@ -75,9 +86,21 @@ export default function Select(props: {
   disabled?: boolean;
   /** Fires as the panel opens, so a host can close sibling popovers. */
   onOpen?: () => void;
+  /**
+   * field skin: the id of a label rendered by the host. The control then
+   * renders without its own `.field` block and label, named by that element.
+   */
+  labelledBy?: string;
+  /** The trigger button's id (a host's focus target). */
+  id?: string;
+  /** Ids of the hint/error text describing the control (the trigger's aria-describedby). */
+  describedBy?: string;
+  /** Marks the trigger aria-invalid — the host shows the message it points at. */
+  invalid?: boolean;
 }) {
   const id = createUniqueId();
   const labelId = `select-${id}-label`;
+  const valueId = `select-${id}-value`;
   const listboxId = `select-${id}-listbox`;
   const optionId = (index: number): string => `select-${id}-option-${index}`;
 
@@ -269,9 +292,12 @@ export default function Select(props: {
       ref={triggerEl}
       type="button"
       class={chip() ? 'composer-chip select-chip' : 'select-field-trigger'}
+      id={props.id}
       name={props.name}
       aria-label={chip() ? props.label : undefined}
-      aria-labelledby={chip() ? undefined : labelId}
+      aria-labelledby={chip() ? undefined : `${props.labelledBy ?? labelId} ${valueId}`}
+      aria-describedby={props.describedBy}
+      aria-invalid={props.invalid === true ? 'true' : undefined}
       aria-haspopup="listbox"
       aria-expanded={open()}
       disabled={props.disabled === true}
@@ -279,7 +305,12 @@ export default function Select(props: {
       onKeyDown={onTriggerKeyDown}
     >
       <Show when={chip()}>{props.icon}</Show>
-      <span class={chip() ? 'composer-chip-label' : 'select-field-label'}>{triggerLabel()}</span>
+      <span
+        class={chip() ? 'composer-chip-label' : 'select-field-label'}
+        id={chip() ? undefined : valueId}
+      >
+        {triggerLabel()}
+      </span>
       <Icon
         name="chevron-down"
         size={chip() ? 14 : 16}
@@ -358,13 +389,25 @@ export default function Select(props: {
         </div>
       }
     >
-      <div class="field">
-        <span id={labelId}>{props.label}</span>
-        <div ref={rootEl} class="select-pop select-pop-field">
-          {trigger}
-          {panel}
+      {/* `labelledBy` is fixed per call site, like `skin`: exactly one branch
+          ever mounts the trigger and the panel. */}
+      <Show
+        when={props.labelledBy === undefined}
+        fallback={
+          <div ref={rootEl} class="select-pop select-pop-field">
+            {trigger}
+            {panel}
+          </div>
+        }
+      >
+        <div class="field">
+          <span id={labelId}>{props.label}</span>
+          <div ref={rootEl} class="select-pop select-pop-field">
+            {trigger}
+            {panel}
+          </div>
         </div>
-      </div>
+      </Show>
     </Show>
   );
 }

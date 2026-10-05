@@ -1,105 +1,27 @@
-// Branches section (issue #198): the monolith's Branches card as one
-// per-section form — drafts seeded via createSeededDrafts, saved as a
-// dirty-fields-only PATCH through useSettingsForm.
+// Branches section (issue #61): the default branch and the two branch naming
+// rules — a thin renderer over the form store. Every control edits a draft;
+// the page's save bar sends the changed ones, trimmed (form.tsx, fields.ts).
+// The browser checks them on Save: none may be empty, and the AFK pattern
+// must contain <N> exactly once.
 
-import type { Accessor } from 'solid-js';
-import { updateRepo, type Repo, type RepoPatch } from '../../../api';
-import Banner from '../../../components/Banner';
-import SectionCard from '../../../components/SectionCard';
-import { useSettingsForm } from '../../../components/settings/useSettingsForm';
-import { createSeededDrafts } from '../../../lib/seededDrafts';
+import { TextField } from '../Field';
 
-export default function BranchesSection(props: { repo: Accessor<Repo>; onSaved: () => void }) {
-  const drafts = createSeededDrafts(() => props.repo());
-  const [defaultBranch, setDefaultBranch] = drafts.field((r) => r.default_branch);
-  const [afkPattern, setAfkPattern] = drafts.field((r) => r.afk_branch_pattern);
-  const [manualPrefix, setManualPrefix] = drafts.field((r) => r.manual_branch_prefix);
-
-  const buildPatch = (): RepoPatch | string => {
-    // Diff against the seed the drafts came from — NOT the live props.repo().
-    // Diffing against the live repo would mark a stale draft of a field the
-    // operator never touched as "dirty" and PATCH the old value back.
-    const current = drafts.seed();
-    const patch: RepoPatch = {};
-
-    const branch = defaultBranch().trim();
-    if (branch !== current.default_branch) patch.default_branch = branch;
-    const pattern = afkPattern().trim();
-    if (pattern !== current.afk_branch_pattern) patch.afk_branch_pattern = pattern;
-    const prefix = manualPrefix().trim();
-    if (prefix !== current.manual_branch_prefix) patch.manual_branch_prefix = prefix;
-
-    return patch;
-  };
-
-  const dirty = () => {
-    const p = buildPatch();
-    return typeof p === 'string' || Object.keys(p).length > 0;
-  };
-
-  const form = useSettingsForm<RepoPatch>({
-    dirty,
-    buildPatch,
-    submit: (patch) => updateRepo(props.repo().id, patch),
-    onSaved: () => props.onSaved(),
-  });
-
+export default function BranchesSection() {
   return (
-    <form onSubmit={(e) => void form.save(e)} class="stack">
-      <Banner message={form.error()} onDismiss={() => form.setError(null)} />
-      <Banner message={form.note()} variant="success" />
-
-      <SectionCard title="Branches">
-        <label class="field">
-          <span>Default branch</span>
-          <input
-            type="text"
-            name="default_branch"
-            required
-            autocomplete="off"
-            spellcheck={false}
-            value={defaultBranch()}
-            onInput={(e) => setDefaultBranch(e.currentTarget.value)}
-          />
-        </label>
-        <label class="field">
-          <span>AFK branch pattern</span>
-          <input
-            type="text"
-            name="afk_branch_pattern"
-            required
-            autocomplete="off"
-            spellcheck={false}
-            class="mono"
-            value={afkPattern()}
-            onInput={(e) => setAfkPattern(e.currentTarget.value)}
-          />
-          <small class="hint">
-            Must contain &lt;N&gt; exactly once (the issue number), e.g. afk/&lt;N&gt; or
-            issue-&lt;N&gt;. Letters, digits, . _ / - only; may not overlap the manual prefix.
-          </small>
-        </label>
-        <label class="field">
-          <span>Manual branch prefix</span>
-          <input
-            type="text"
-            name="manual_branch_prefix"
-            required
-            autocomplete="off"
-            spellcheck={false}
-            class="mono"
-            value={manualPrefix()}
-            onInput={(e) => setManualPrefix(e.currentTarget.value)}
-          />
-          <small class="hint">
-            Literal prefix for manual instance branches, e.g. lab/ or wip/.
-          </small>
-        </label>
-      </SectionCard>
-
-      <button type="submit" class="primary wide" disabled={form.busy()}>
-        {form.busy() ? 'Saving…' : 'Save changes'}
-      </button>
-    </form>
+    <div class="card settings-card">
+      <TextField name="default_branch" required />
+      <TextField
+        name="afk_branch_pattern"
+        mono
+        required
+        hint="<N> stands for the issue number, for example afk/<N> or issue-<N>. Letters, digits, . _ / - only; it may not overlap the manual prefix."
+      />
+      <TextField
+        name="manual_branch_prefix"
+        mono
+        required
+        hint="Literal prefix for the branches of runs you start yourself, for example lab/ or wip/."
+      />
+    </div>
   );
 }

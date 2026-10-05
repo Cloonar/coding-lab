@@ -1,0 +1,442 @@
+/* Repositories list (issue #61) — owned by the list view (routes/Repos.tsx and
+   routes/repos/). Head row with "+ Add", the filter field, the Needs you
+   block, then the repos: a stacked list below 1024px, a table from 1024px.
+   Tokens only. Every state has a word or an icon beside its colour. */
+
+.repos-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-2) 0 var(--space-3);
+}
+
+.repos-head h1 {
+  margin: 0;
+  min-width: 0;
+  font-size: 1.6rem;
+  line-height: 1.2;
+}
+
+.repos-add {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 44px;
+  padding: 0 1rem 0 0.8rem;
+  border-radius: var(--radius-control);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.repos-add:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+.repos-add:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Filter ------------------------------------------------------------------------ */
+
+.repos-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0 0.15rem 0 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--muted);
+}
+
+.repos-filter:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.repos-filter-icon {
+  flex: none;
+}
+
+.repos-filter input {
+  flex: 1;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+}
+
+.repos-filter input:focus-visible {
+  outline: none;
+}
+
+/* The field has its own clear button; drop the browser's. */
+.repos-filter input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.repos-filter input::placeholder {
+  color: var(--muted);
+  opacity: 0.9;
+}
+
+.repos-filter .repos-filter-clear {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Eyebrow headings: "Needs you 3", "All repositories 15 · Latest run first" */
+
+.repos-eyebrow-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+h2.repos-eyebrow {
+  margin: 0;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The eyebrow headings take focus when the control the operator was on goes
+   away (a fixed Needs you entry); a ring only for keyboard-origin focus. */
+h2.repos-eyebrow:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.repos-sort-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* Needs you --------------------------------------------------------------------- */
+/* A pause is a warning (amber, pause icon); a failed clone or check is a
+   problem (red, alert icon). The entry's sentence says which in words. */
+
+.needs-you-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.needs-you-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0.6rem 0.75rem;
+  border: 1px solid;
+  border-radius: var(--radius-control);
+}
+
+.needs-you-item.warning {
+  border-color: var(--banner-border);
+  background: var(--banner-bg);
+  color: var(--banner-text);
+}
+
+.needs-you-item.problem {
+  border-color: var(--err-border);
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+.needs-you-icon {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 0.15rem;
+}
+
+.needs-you-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.needs-you-name {
+  align-self: flex-start;
+  /* A 44px touch target below 1024px (reset in the desktop block). The
+     negative block margin takes back the extra height, so the name still
+     sits on the icon's line and directly above its message; the taller hit
+     area only overlaps the item's own padding and the non-interactive text. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-block: -0.72rem;
+  max-width: 100%;
+  color: inherit;
+  font-weight: 650;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.needs-you-name:hover {
+  text-decoration: underline;
+}
+
+.needs-you-name:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.needs-you-message {
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.needs-you-action {
+  flex: none;
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* In flight: still focusable (aria-disabled, not disabled), visibly muted. */
+.needs-you-action[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+a.needs-you-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  text-decoration: none;
+}
+
+/* Rows (phone) ------------------------------------------------------------------- */
+
+.repo-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+li.repo-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 56px;
+  padding: 0.7rem 0.9rem;
+  cursor: pointer;
+}
+
+li.repo-row + li.repo-row {
+  border-top: 1px solid var(--border);
+}
+
+.repo-row:hover {
+  background: var(--hover);
+}
+
+.repo-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.repo-row-name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.5rem;
+  min-width: 0;
+}
+
+.repo-row-link {
+  min-width: 0;
+  color: var(--text);
+  font-size: 1.03rem;
+  font-weight: 650;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.repo-row:hover .repo-row-link {
+  text-decoration: underline;
+}
+
+.repo-row-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.repo-row-remote {
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.repo-row-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.8rem;
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-size: 0.87rem;
+}
+
+.repo-status-part {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.repo-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.live-dot-ok {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--ok);
+}
+
+/* "1 waiting" — the attention tint the rail's waiting dot uses, in words. */
+.chip.waiting {
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  color: var(--link);
+}
+
+.repo-row-chevron {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Table (desktop) ---------------------------------------------------------------- */
+
+.repo-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.repo-table .col-repo {
+  width: 30%;
+}
+.repo-table .col-runs {
+  width: 19%;
+}
+.repo-table .col-ready {
+  width: 10%;
+}
+.repo-table .col-afk {
+  width: 14%;
+}
+.repo-table .col-autoland {
+  width: 11%;
+}
+.repo-table .col-last {
+  width: 16%;
+}
+
+.repo-table thead th {
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.repo-table tbody th,
+.repo-table td {
+  padding: 0.65rem 0.9rem;
+  font-weight: inherit;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.repo-table tbody tr + tr > * {
+  border-top: 1px solid var(--border);
+}
+
+.repo-table tbody tr {
+  cursor: pointer;
+}
+
+.repo-cell {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.4rem;
+  min-width: 0;
+}
+
+.repo-cell.repo-last {
+  flex-wrap: nowrap;
+  justify-content: space-between;
+}
+
+@media (min-width: 1024px) {
+  .repos-head {
+    margin-top: 0;
+  }
+
+  .needs-you-item {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .needs-you-name {
+    min-height: 0;
+    margin-block: 0;
+  }
+
+  .needs-you-action,
+  a.needs-you-action {
+    min-height: 36px;
+    padding: 0 0.75rem;
+  }
+
+  .repos-add {
+    min-height: 38px;
+  }
+}

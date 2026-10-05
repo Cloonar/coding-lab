@@ -44,6 +44,29 @@ func (s *Server) handleRepoImportsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"imports": items})
 }
 
+// handleRepoImportersList is GET /api/v1/repos/{id}/importers (issue #61):
+// 200 with the repos that declare an import OF repo {id} — the reverse
+// direction of the imports list — as the same {id, name} items, ordered by
+// name. These are the repos whose imports block deleting {id}, forced or not
+// (ADR-0063), so the delete dialog reads them before any attempt. An empty
+// set renders "[]", never null; an unknown repo is a 404.
+func (s *Server) handleRepoImportersList(w http.ResponseWriter, r *http.Request) {
+	repo, ok := s.loadRepo(w, r)
+	if !ok {
+		return
+	}
+	importers, err := s.repos.Importers(r.Context(), repo.ID)
+	if err != nil {
+		s.writeRepoError(w, "listing repo importers", err)
+		return
+	}
+	items := make([]importResponse, 0, len(importers))
+	for _, i := range importers {
+		items = append(items, importJSON(i))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"importers": items})
+}
+
 type repoImportCreateRequest struct {
 	TargetRepoID string `json:"target_repo_id"`
 }

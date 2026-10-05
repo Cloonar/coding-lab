@@ -111,23 +111,6 @@ button.attach-copy {
   font: inherit;
 }
 
-.add-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  margin-top: var(--space-3);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-card);
-  color: var(--link);
-  text-decoration: none;
-  font-weight: 550;
-}
-
-.add-row:hover {
-  background: var(--hover);
-}
-
 /* Roomier vertical rhythm on desktop (one rung up from phone). */
 @media (min-width: 640px) {
   .card {

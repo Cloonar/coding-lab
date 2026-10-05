@@ -37,6 +37,15 @@ type testServer struct {
 
 func newTestServer(t *testing.T, mod func(*Options)) *testServer {
 	t.Helper()
+	return newTestServerHooked(t, mod, nil)
+}
+
+// newTestServerHooked is newTestServer with hook run on the built *Server
+// BEFORE its listener starts — the one race-free place to swap a dependency
+// New wired (swapping one on a live server races the handler goroutines of
+// every earlier request). nil hook is newTestServer.
+func newTestServerHooked(t *testing.T, mod func(*Options), hook func(*Server)) *testServer {
+	t.Helper()
 	st := testutil.TempStore(t)
 	bus := events.NewBus()
 	o := Options{
@@ -56,6 +65,9 @@ func newTestServer(t *testing.T, mod func(*Options)) *testServer {
 		t.Fatalf("New: %v", err)
 	}
 	srv.argon = testArgon
+	if hook != nil {
+		hook(srv)
+	}
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

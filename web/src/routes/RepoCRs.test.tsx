@@ -2,14 +2,16 @@
 // - CR cards render number, title, state chip, head → base and closes chips
 //   linking to the issues;
 // - the state filter refetches server-side with ?state=…;
-// - a scoped cr.changed refetches, foreign repoIDs do not.
+// - a scoped cr.changed refetches, foreign repoIDs do not;
+// - it renders as the CRs tab of the repo home frame (issue #61): the frame
+//   names the repo, so this tab root carries no crumb trail.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CRSummary } from '../api';
 import App from '../App';
-import RepoCRs from './RepoCRs';
+import RepoRoutes from './repo-home/routes';
 
 const REPO_ID = 'repo_1';
 
@@ -91,7 +93,12 @@ function stubApi(): void {
       }
       if (url === `/api/v1/repos/${REPO_ID}` && method === 'GET') {
         return Promise.resolve(
-          jsonResponse(200, { id: REPO_ID, name: 'coding-lab', tracker_binding: 'builtin' }),
+          jsonResponse(200, {
+            id: REPO_ID,
+            name: 'coding-lab',
+            tracker_binding: 'builtin',
+            remote_url: 'git@git.cloonar.com:Cloonar/coding-lab.git',
+          }),
         );
       }
       if (url.startsWith(`/api/v1/repos/${REPO_ID}/crs?`) && method === 'GET') {
@@ -124,7 +131,7 @@ async function mountCRs(): Promise<void> {
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>
-        <Route path="/repos/:id/crs" component={RepoCRs} />
+        <RepoRoutes />
         <Route path="*" component={() => null} />
       </MemoryRouter>
     ),
@@ -163,7 +170,16 @@ describe('RepoCRs', () => {
   it('renders CR cards with state chips, branches and closes chips', async () => {
     await mountCRs();
 
-    expect(container.textContent).toContain('coding-lab · Change requests');
+    // The frame names the repo and marks the CRs tab current; the tab root
+    // keeps its own heading and renders no crumb.
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(container.querySelector('.section-head h2')?.textContent).toBe('Change requests');
+    expect(container.querySelector('p.crumb')).toBeNull();
+    expect(
+      container
+        .querySelector(`nav.repo-tabs a[href="/repos/${REPO_ID}/crs"]`)
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
     const cards = container.querySelectorAll('.cr-card');
     expect(cards).toHaveLength(2);
     expect(container.textContent).toContain('CR #4');

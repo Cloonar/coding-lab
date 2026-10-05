@@ -6,14 +6,16 @@
 //   operator confirms, Cancel POSTs nothing;
 // - a merge 409 body (push rejection) is surfaced VERBATIM — it carries the
 //   actionable git/hook message;
-// - Close without merging POSTs .../close; a merged CR shows no actions.
+// - Close without merging POSTs .../close; a merged CR shows no actions;
+// - it renders inside the repo home frame's CRs tab (issue #61) with a
+//   "Change requests / #N" trail; the frame names the repo.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CRDetail as CR } from '../api';
 import App from '../App';
-import CRDetail from './CRDetail';
+import RepoRoutes from './repo-home/routes';
 
 const REPO_ID = 'repo_1';
 const NUMBER = 3;
@@ -104,14 +106,19 @@ function stubApi(): void {
           jsonResponse(200, { setup_required: false, authenticated: true, username: 'dominik' }),
         );
       }
-      // The breadcrumb's repo-name lookup — non-throwing: a failure degrades
-      // to the placeholder name, it must never blank the CR view.
+      // The repo home frame's repo lookup — a failure shows the frame's
+      // banner, it must never blank the CR view.
       if (url === `/api/v1/repos/${REPO_ID}` && method === 'GET') {
         if (repoFails) {
           return Promise.resolve(jsonResponse(500, { error: 'repo lookup failed' }));
         }
         return Promise.resolve(
-          jsonResponse(200, { id: REPO_ID, name: 'coding-lab', tracker_binding: 'builtin' }),
+          jsonResponse(200, {
+            id: REPO_ID,
+            name: 'coding-lab',
+            tracker_binding: 'builtin',
+            remote_url: 'git@git.cloonar.com:Cloonar/coding-lab.git',
+          }),
         );
       }
       if (url === `/api/v1/repos/${REPO_ID}/crs/${NUMBER}` && method === 'GET') {
@@ -160,7 +167,7 @@ async function mountDetail(): Promise<void> {
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>
-        <Route path="/repos/:id/crs/:number" component={CRDetail} />
+        <RepoRoutes />
         <Route path="*" component={() => null} />
       </MemoryRouter>
     ),
@@ -200,29 +207,42 @@ afterEach(() => {
 });
 
 describe('CRDetail (breadcrumb)', () => {
-  it('renders the trail (Repos / <repo> / Change requests / #N), leaf inert', async () => {
+  it('renders the trail within the CRs tab (Change requests / #N), leaf inert', async () => {
     await mountDetail();
 
+    // The repo segment moved into the frame (issue #61): its header names the
+    // repo and the CRs tab stays current on a CR page.
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(
+      container
+        .querySelector(`nav.repo-tabs a[href="/repos/${REPO_ID}/crs"]`)
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
     const crumb = container.querySelector('p.crumb');
-    expect(crumb?.textContent).toBe('Repos / coding-lab / Change requests / #3');
-    expect(crumb?.querySelector('a[href="/repos"]')).not.toBeNull();
-    expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/issues"]`)).not.toBeNull();
+    expect(crumb?.textContent).toBe('Change requests / #3');
     expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/crs"]`)).not.toBeNull();
     // The #3 leaf is the current page: inert text, not a link.
     expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/crs/${NUMBER}"]`)).toBeNull();
   });
 
-  it('degrades to the placeholder name and keeps the CR readable when getRepo fails', async () => {
+  it('keeps the CR readable and its trail when getRepo fails', async () => {
     repoFails = true;
     await mountDetail();
 
     // The repo failure must not blank the loaded CR.
     expect(container.textContent).toContain('CR #3');
     expect(container.textContent).toContain('Add retry loop');
-    // The trail still renders, with the placeholder standing in for the name.
-    expect(container.querySelector('p.crumb')?.textContent).toBe(
-      'Repos / Repository / Change requests / #3',
+    // The frame surfaces the failure; the trail within the tab still renders
+    // and the CRs tab stays (and stays current) though the binding is unknown.
+    expect(container.querySelector('.repo-head .banner.error')?.textContent).toContain(
+      'repo lookup failed',
     );
+    expect(container.querySelector('p.crumb')?.textContent).toBe('Change requests / #3');
+    expect(
+      container
+        .querySelector(`nav.repo-tabs a[href="/repos/${REPO_ID}/crs"]`)
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
   });
 });
 

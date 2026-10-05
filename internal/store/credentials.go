@@ -48,6 +48,43 @@ type CredentialMeta struct {
 	Referenced int // count of referencing repos
 }
 
+// NoCredentialStamp is the version stamp of "no credential at all" — a repo
+// whose credential column is NULL. It is a stamp like any other: a repo that
+// later gains a credential no longer matches it.
+const NoCredentialStamp = "none"
+
+// CredentialStamp names one VERSION of a credential row: its id plus its
+// updated_at as stored (a rename or a rotation both stamp updated_at, see
+// UpdateCredential). The readiness recorders (issue #61) keep it beside the
+// outcome of a fetch or a tracker read, so an outcome observed with an older
+// version of the credential — or with a different credential altogether — is
+// recognizably stale once the operator changes it. Opaque: compare for
+// equality, never parse.
+func CredentialStamp(id string, updatedAt time.Time) string {
+	return id + "@" + fmtTime(updatedAt)
+}
+
+// CredentialStampByID returns the stamp of the credential a repo column names
+// right now: NoCredentialStamp for a nil id, CredentialStamp for a row that
+// exists, and "" when the row cannot be read (unknown id, store error). ""
+// never equals a real stamp, so an outcome recorded under it is simply never
+// trusted — the safe direction for a read that failed.
+func (s *Store) CredentialStampByID(ctx context.Context, id *string) string {
+	if id == nil {
+		return NoCredentialStamp
+	}
+	var updated string
+	if err := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT updated_at FROM credentials WHERE id = ?`), *id).Scan(&updated); err != nil {
+		return ""
+	}
+	t, err := parseTime(updated)
+	if err != nil {
+		return ""
+	}
+	return CredentialStamp(*id, t)
+}
+
 // CreateCredential inserts a credential row. The caller supplies the cred_
 // id (generated before encryption) and the clock. A UNIQUE name violation
 // maps to ErrNameTaken.

@@ -1,20 +1,26 @@
-// Repo-settings area wiring (issue #198): every category slug deep-links to
-// its section; the mobile bare index lists the rows in order (danger last,
-// tinted) under the repo section-head; desktop redirects the bare index to
-// the first category; the crumbs follow the index/section split (Settings
-// inert on the index, a link back to it on a section); the per-section
-// unsaved-changes guard intercepts in-app navigation and tab close.
+// The one-page repo settings (issue #61): all ten sections render together,
+// in the order and under the headings of REPO_SETTINGS_CATEGORIES; every
+// section slug of issue #198 still deep-links — to the page scrolled to that
+// section; `?field=` scrolls a field into view and focuses its control; and
+// the page renders as the Settings tab of the repo home frame.
+//
+// jsdom has no layout, so "scrolled to" is asserted through the page's layout
+// seam: the harness records every scroll the page asks for in `h.scrolls`.
 
 import { describe, expect, it, vi } from 'vitest';
 import {
   REPO_ID,
+  baseSchedule,
   container,
+  fieldWrapper,
+  h,
   installRepoSettingsHooks,
   mountSettings,
+  pageSection,
   routerHistory,
-  setDesktop,
+  scheduleEditor,
   settle,
-  typeInto,
+  unmount,
   waitFor,
 } from './harness';
 import { REPO_SETTINGS_CATEGORIES } from './categories';
@@ -27,154 +33,391 @@ const buttonByText = (text: string): HTMLButtonElement | null =>
   Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.trim() === text) ??
   null;
 
-describe('repo-settings deep links', () => {
-  // One DOM probe per category: an element only that section renders. The
-  // completeness check below keeps this map honest when categories change.
-  const probes: Record<string, () => Element | null> = {
-    general: () => container.querySelector('input[name="name"]'),
-    integrations: () => container.querySelector('select[name="tracker_binding"]'),
-    branches: () => container.querySelector('input[name="default_branch"]'),
-    agents: () => container.querySelector('button[name="afk_provider_default"]'),
-    runner: () => container.querySelector('button[name="runner"]'),
-    autoland: () => container.querySelector('input[name="autoland_enabled"]'),
-    secrets: () => buttonByText('+ Add secret'),
-    schedules: () => buttonByText('+ Add schedule'),
-    imports: () => buttonByText('+ Add import'),
-    danger: () => buttonByText('Delete repository'),
-  };
+const waitForPage = () => waitFor(() => container.querySelector('#settings-danger'), 'the page');
 
-  it('probes cover exactly the declared categories', () => {
+/**
+ * The page arrived at `target` (a section's element id, or a field's PATCH
+ * key): it scrolled there — at once, not animated, because this is an arrival
+ * and not a jump inside the page — and nowhere else. It may go there more
+ * than once: a deep link is re-applied as late content lands above it.
+ */
+function expectArrivedAt(target: string): void {
+  expect(h.scrolls.length).toBeGreaterThan(0);
+  expect(new Set(h.scrolls.map((scroll) => scroll.target))).toEqual(new Set([target]));
+  expect(h.scrolls.every((scroll) => !scroll.smooth)).toBe(true);
+}
+
+// One DOM probe per section: an element only that section renders.
+const probes: Record<string, () => Element | null> = {
+  agents: () => container.querySelector('button[name="afk_provider_default"]'),
+  runner: () => container.querySelector('button[name="runner"]'),
+  autoland: () => container.querySelector('button[name="autoland_enabled"]'),
+  schedules: () => container.querySelector('.schedules-list a.schedule-new'),
+  secrets: () => container.querySelector('.secrets-list .secret-row-new'),
+  imports: () => container.querySelector('.imports-list button[name="target_repo_id"]'),
+  general: () => container.querySelector('input[name="name"]'),
+  integrations: () => container.querySelector('button[name="tracker_binding"]'),
+  branches: () => container.querySelector('input[name="default_branch"]'),
+  danger: () => buttonByText('Delete repository'),
+};
+
+describe('repo settings on one page', () => {
+  it('probes cover exactly the declared sections', () => {
     expect(Object.keys(probes).sort()).toEqual(REPO_SETTINGS_CATEGORIES.map((c) => c.slug).sort());
   });
 
-  for (const category of REPO_SETTINGS_CATEGORIES) {
-    it(`renders the ${category.slug} section at ${BASE}/${category.slug}`, async () => {
-      await mountSettings(`${BASE}/${category.slug}`);
-      await waitFor(() => probes[category.slug]?.() ?? null, `${category.slug} content`);
-      expect(routerHistory.get()).toBe(`${BASE}/${category.slug}`);
-    });
-  }
-});
-
-describe('repo-settings mobile index', () => {
-  it('lists the category rows in order under the repo head, danger last and tinted', async () => {
+  it('renders all ten sections in order: Runs, Automation, Access, Setup, then Danger zone', async () => {
     await mountSettings(BASE);
-    await waitFor(() => container.querySelector('a.settings-index-row'), 'index rows');
+    await waitForPage();
 
-    // The monolith's section-head survives as the index title: repo name h2,
-    // clone-status chip (baseRepo is mid-clone) and the remote host line.
+    const sections = Array.from(container.querySelectorAll('section.settings-section'));
+    expect(sections.map((section) => section.id)).toEqual([
+      'settings-agents',
+      'settings-runner',
+      'settings-autoland',
+      'settings-schedules',
+      'settings-secrets',
+      'settings-imports',
+      'settings-general',
+      'settings-integrations',
+      'settings-branches',
+      'settings-danger',
+    ]);
     expect(
-      Array.from(container.querySelectorAll('h2')).some((el) => el.textContent === 'coding-lab'),
-    ).toBe(true);
-    expect(container.querySelector('.section-head .chip')?.textContent).toBe('cloning');
-    expect(container.textContent).toContain('git.cloonar.com');
-
-    const rows = Array.from(container.querySelectorAll<HTMLAnchorElement>('a.settings-index-row'));
-    expect(rows.map((row) => row.getAttribute('href'))).toEqual(
-      REPO_SETTINGS_CATEGORIES.map((c) => `${BASE}/${c.slug}`),
-    );
-    expect(rows.map((row) => row.querySelector('.settings-index-title')?.textContent)).toEqual([
-      'General',
-      'Integrations',
-      'Branches',
+      sections.map((section) => section.querySelector('.settings-section-head h2')?.textContent),
+    ).toEqual([
       'Agents',
       'Runner',
       'Autoland',
-      'Secrets',
       'Schedules',
+      'Secrets',
       'Imports',
+      'General',
+      'Integrations',
+      'Branches',
       'Danger zone',
     ]);
-    // Danger: pinned last, danger class (icon + title tint in CSS).
-    expect(rows[rows.length - 1]?.classList.contains('danger')).toBe(true);
-    expect(rows.slice(0, -1).every((row) => !row.classList.contains('danger'))).toBe(true);
+    expect(REPO_SETTINGS_CATEGORIES.map((c) => c.group)).toEqual([
+      'Runs',
+      'Runs',
+      'Automation',
+      'Automation',
+      'Access',
+      'Access',
+      'Setup',
+      'Setup',
+      'Setup',
+      null,
+    ]);
 
-    // No redirect on mobile — the index is a real page here.
-    expect(routerHistory.get()).toBe(BASE);
+    // Every section renders its own content inside its own <section>, named
+    // by its heading and described in one line.
+    for (const category of REPO_SETTINGS_CATEGORIES) {
+      const section = pageSection(category.slug);
+      await waitFor(() => probes[category.slug]?.() ?? null, `${category.slug} content`);
+      expect(section.contains(probes[category.slug]?.() ?? null)).toBe(true);
+      expect(section.getAttribute('aria-labelledby')).toBe(`settings-${category.slug}-title`);
+      expect(section.querySelector('.settings-section-head p')?.textContent).toBe(
+        category.description,
+      );
+    }
+    // Danger zone is pinned last and marked as such.
+    expect(sections.at(-1)?.classList.contains('danger')).toBe(true);
+    expect(sections.slice(0, -1).every((s) => !s.classList.contains('danger'))).toBe(true);
   });
-});
 
-describe('repo-settings desktop redirect', () => {
-  it('bounces the bare index to the first category', async () => {
-    setDesktop(true);
+  it('tags exactly the sections whose rows act at once', async () => {
     await mountSettings(BASE);
-    await settle();
+    await waitForPage();
 
-    expect(routerHistory.get()).toBe(`${BASE}/general`);
-    expect(container.querySelector('.settings-split')).not.toBeNull();
+    const tagged = REPO_SETTINGS_CATEGORIES.filter(
+      (c) => pageSection(c.slug).querySelector('.settings-tag') !== null,
+    ).map((c) => c.slug);
+    expect(tagged).toEqual(['schedules', 'secrets', 'imports']);
+    expect(pageSection('schedules').querySelector('.settings-tag')?.textContent).toBe(
+      'applies immediately',
+    );
   });
-});
 
-describe('repo-settings crumbs', () => {
-  it('the index shows Repos / <name> / Settings with an inert Settings leaf', async () => {
+  it('groups the Agents fields as Runs you start, AFK runs and AFK capacity', async () => {
     await mountSettings(BASE);
-    await waitFor(() => container.querySelector('a.settings-index-row'), 'index rows');
+    await waitForPage();
+    await waitFor(() => container.querySelector('input[name="afk_options.ultracode"]'), 'options');
 
-    const crumb = container.querySelector('p.crumb');
-    expect(crumb?.textContent).toBe('Repos / coding-lab / Settings');
-    const links = Array.from(crumb?.querySelectorAll('a') ?? []);
-    expect(links.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
-      ['Repos', '/repos'],
-      ['coding-lab', `/repos/${REPO_ID}/issues`],
+    const groups = Array.from(pageSection('agents').querySelectorAll('[role="group"]')).filter(
+      (group) => group.querySelector(':scope > h3') !== null,
+    );
+    expect(groups.map((group) => group.querySelector('h3')?.textContent)).toEqual([
+      'Runs you start',
+      'AFK runs',
+      'AFK capacity',
+    ]);
+    const names = (group: Element | undefined) =>
+      Array.from(group?.querySelectorAll('[data-field]') ?? []).map((el) =>
+        el.getAttribute('data-field'),
+      );
+    expect(names(groups[0])).toEqual([
+      'provider',
+      'model_default',
+      'effort_default',
+      'remote_default',
+    ]);
+    // The option bag, the seed prompt (with Customize and the done-signal
+    // hint) stay — inside AFK runs.
+    expect(names(groups[1])).toEqual([
+      'afk_provider_default',
+      'afk_model_default',
+      'afk_effort_default',
+      'afk_remote_default',
+      'afk_options',
+      'afk_prompt',
+    ]);
+    expect(groups[1]?.contains(buttonByText('Customize'))).toBe(true);
+    expect(fieldWrapper('afk_prompt').textContent).toContain(
+      'The run is detected as done only by an open PR on its branch',
+    );
+    expect(names(groups[2])).toEqual([
+      'afk_auto_enabled',
+      'budget_minutes',
+      'max_instances_override',
     ]);
   });
 
-  it('a section appends its title and turns Settings into a link to the index', async () => {
+  it('has no Save button and no banner of its own in any section', async () => {
+    await mountSettings(BASE);
+    await waitForPage();
+
+    expect(buttonByText('Save changes')).toBeNull();
+    expect(container.querySelector('.settings-page .banner.success')).toBeNull();
+    // The six form sections are plain cards, not forms.
+    for (const slug of ['agents', 'runner', 'autoland', 'general', 'integrations', 'branches']) {
+      expect(pageSection(slug).querySelector('form')).toBeNull();
+    }
+  });
+});
+
+describe('repo settings deep links', () => {
+  for (const category of REPO_SETTINGS_CATEGORIES) {
+    it(`${BASE}/${category.slug} opens the page scrolled to ${category.title}`, async () => {
+      await mountSettings(`${BASE}/${category.slug}`);
+      await waitFor(() => probes[category.slug]?.() ?? null, `${category.slug} content`);
+      await settle();
+
+      // The whole page rendered, and it scrolled to that section.
+      expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
+      expectArrivedAt(`settings-${category.slug}`);
+      expect(routerHistory.get()).toBe(`${BASE}/${category.slug}`);
+    });
+  }
+
+  it('the bare settings URL stays at the top of the page', async () => {
+    await mountSettings(BASE);
+    await waitForPage();
+    await settle();
+
+    expect(h.scrolls).toEqual([]);
+    expect(routerHistory.get()).toBe(BASE);
+  });
+
+  it('an unknown slug falls back to the top of the page', async () => {
+    await mountSettings(`${BASE}/nonsense`);
+    await waitForPage();
+    await settle();
+
+    expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
+    expect(h.scrolls).toEqual([]);
+  });
+
+  it('the schedule editor URLs reach the page, open it at Schedules and open the editor', async () => {
+    h.schedules = [baseSchedule()];
+    for (const path of [`${BASE}/schedules/new`, `${BASE}/schedules/sched_1`]) {
+      h.scrolls = [];
+      await mountSettings(path);
+      await waitFor(() => probes.schedules?.() ?? null, `schedules section at ${path}`);
+      await waitFor(scheduleEditor, `the editor at ${path}`);
+      await settle();
+
+      expect(routerHistory.get()).toBe(path); // no redirect away from the editor URL
+      expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
+      expectArrivedAt('settings-schedules');
+      expect(scheduleEditor()?.querySelector('h2')?.textContent).toBe(
+        path.endsWith('/new') ? 'New schedule' : 'Edit schedule',
+      );
+      unmount();
+    }
+  });
+});
+
+describe('repo settings ?field= (the readiness Fix links)', () => {
+  it('scrolls the field into view and focuses its control', async () => {
+    await mountSettings(`${BASE}/integrations?field=forge_credential_id`);
+    await waitForPage();
+    await settle();
+
+    expectArrivedAt('forge_credential_id');
+    const control = container.querySelector('select[name="forge_credential_id"]');
+    expect(control).not.toBeNull();
+    expect(document.activeElement).toBe(control);
+    // The field is outlined for a moment, so the eye finds it too.
+    expect(fieldWrapper('forge_credential_id').classList.contains('flash')).toBe(true);
+  });
+
+  it('focuses whatever kind of control the field has', async () => {
+    const cases: Array<[field: string, control: string]> = [
+      ['image_ref', 'input[name="image_ref"]'],
+      ['afk_model_default', 'button[name="afk_model_default"]'],
+      ['afk_auto_enabled', 'button[role="switch"][name="afk_auto_enabled"]'],
+      ['tracker_binding', 'button[role="radio"][name="tracker_binding"][aria-checked="true"]'],
+      ['afk_prompt', 'textarea[name="afk_prompt"]'],
+      ['afk_options', 'input[name="afk_options.ultracode"]'],
+    ];
+    for (const [field, selector] of cases) {
+      h.scrolls = [];
+      await mountSettings(`${BASE}?field=${field}`);
+      await waitFor(() => container.querySelector(selector), `${field} control`);
+      await settle();
+
+      // The option bag only exists once the provider catalog has loaded:
+      // until then the page waits at the field's section.
+      expect(h.scrolls.at(-1)).toMatchObject({ target: field, smooth: false });
+      expect(document.activeElement).toBe(container.querySelector(selector));
+      unmount();
+    }
+  });
+
+  it("trusts the field's own section over a mismatched :section", async () => {
+    await mountSettings(`${BASE}/agents?field=default_branch`);
+    await waitForPage();
+    await settle();
+
+    expect(h.scrolls.at(-1)?.target).toBe('default_branch');
+    expect(document.activeElement).toBe(container.querySelector('input[name="default_branch"]'));
+  });
+
+  it('ignores a field the page does not have and goes to the section', async () => {
+    await mountSettings(`${BASE}/runner?field=remote_url`);
+    await waitForPage();
+    await settle();
+
+    expectArrivedAt('settings-runner');
+  });
+});
+
+describe('repo settings: what could not be loaded, and what a scroll costs', () => {
+  const catalogError = () =>
+    Array.from(container.querySelectorAll('.settings-page .banner.error')).find((el) =>
+      el.textContent?.includes('The agent catalog could not be loaded'),
+    ) ?? null;
+
+  it('a provider catalog that cannot be loaded is said, with a retry that fills the picks', async () => {
+    h.providersError = 'providers: registry unavailable';
+    await mountSettings(BASE);
+    await waitForPage();
+    await waitFor(catalogError, 'the catalog error');
+
+    expect(catalogError()?.textContent).toContain(
+      'The agent catalog could not be loaded, so the agent, model and effort picks are incomplete. providers: registry unavailable',
+    );
+    expect(catalogError()?.getAttribute('role')).toBe('alert');
+    // Every section is still there; the agent pick just has nothing to offer.
+    expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
+    expect(container.querySelector('input[name="afk_options.ultracode"]')).toBeNull();
+
+    h.providersError = null;
+    Array.from(catalogError()?.querySelectorAll('button') ?? [])
+      .find((b) => b.textContent === 'Try again')
+      ?.click();
+    await waitFor(() => (catalogError() === null ? true : null), 'the retry');
+
+    expect(h.providersGets).toBe(2);
+    await waitFor(
+      () => container.querySelector('input[name="afk_options.ultracode"]'),
+      'the catalog-driven option bag',
+    );
+    expect(
+      container.querySelector('button[name="provider"] .select-field-label')?.textContent,
+    ).toBe('Inherited · Claude Code');
+  });
+
+  it('reads the layout once per frame, however many scroll events that frame holds', async () => {
+    await mountSettings(BASE);
+    await waitForPage();
+    await settle();
+    const before = h.layoutReads;
+
+    for (let i = 0; i < 8; i += 1) window.dispatchEvent(new Event('scroll'));
+    // Nothing is measured inside the scroll handler itself…
+    expect(h.layoutReads).toBe(before);
+    await settle();
+
+    // …and the frame after it makes ONE pass over the ten sections.
+    expect(h.layoutReads - before).toBe(10);
+  });
+});
+
+describe('repo settings in the repo home frame', () => {
+  const settingsTab = () =>
+    container.querySelector<HTMLAnchorElement>(
+      `nav.repo-tabs a[href="/repos/${REPO_ID}/settings"]`,
+    );
+
+  it('carries no crumb trail: the frame names the repo, Settings is the current tab', async () => {
+    await mountSettings(BASE);
+    await waitForPage();
+
+    // The frame's header heads the page (baseRepo is mid-clone).
+    expect(container.querySelector('p.crumb')).toBeNull();
+    expect(container.querySelector('a.back-link')?.getAttribute('href')).toBe('/repos');
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(container.querySelector('.repo-head .chip.status-cloning')?.textContent).toBe('cloning');
+    expect(container.querySelector('.repo-head-remote')?.textContent).toBe(
+      'git.cloonar.com/Cloonar/coding-lab',
+    );
+    expect(settingsTab()?.getAttribute('aria-current')).toBe('page');
+    // No category index, no per-section back header any more.
+    expect(container.querySelector('a.settings-index-row')).toBeNull();
+    expect(container.querySelector('.settings-back-head')).toBeNull();
+  });
+
+  it('a section URL keeps the Settings tab current', async () => {
     await mountSettings(`${BASE}/agents`);
     await waitFor(() => container.querySelector('button[name="provider"]'), 'agents section');
 
-    const crumb = container.querySelector('p.crumb');
-    expect(crumb?.textContent).toBe('Repos / coding-lab / Settings / Agents');
-    const links = Array.from(crumb?.querySelectorAll('a') ?? []);
-    expect(links.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
-      ['Repos', '/repos'],
-      ['coding-lab', `/repos/${REPO_ID}/issues`],
-      ['Settings', BASE],
-    ]);
-  });
-});
-
-describe('repo-settings unsaved-changes guard', () => {
-  it('in-app navigation while dirty asks; declining stays, confirming leaves', async () => {
-    await mountSettings(`${BASE}/general`);
-    const author = await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="git_author_name"]'),
-      'general form',
-    );
-    typeInto(author, 'Dominik'); // dirty
-
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    const back = container.querySelector<HTMLAnchorElement>('a.settings-back-link');
-    expect(back).not.toBeNull();
-    back?.click();
-    await settle();
-
-    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved changes?');
-    expect(routerHistory.get()).toBe(`${BASE}/general`); // stayed put
-
-    confirmSpy.mockReturnValue(true);
-    back?.click();
-    await settle();
-
-    expect(routerHistory.get()).toBe(BASE); // left for the index
+    expect(settingsTab()?.getAttribute('aria-current')).toBe('page');
   });
 
-  it('beforeunload is prevented only while dirty', async () => {
-    await mountSettings(`${BASE}/general`);
-    const author = await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="git_author_name"]'),
-      'general form',
+  it('never asks through a browser confirm', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    await mountSettings(BASE);
+    await waitForPage();
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it('one section failing to render leaves the other nine usable', async () => {
+    // The imports picker reads the repo list in a place that throws when the
+    // read fails; the page must contain that to the one section.
+    const original = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown, init?: RequestInit) =>
+        String(input) === '/api/v1/repos' && (init?.method ?? 'GET') === 'GET'
+          ? Promise.resolve({
+              ok: false,
+              status: 500,
+              json: () => Promise.resolve({ error: 'repo list unavailable' }),
+              text: () => Promise.resolve('{"error":"repo list unavailable"}'),
+            })
+          : original(input as RequestInfo, init),
+      ),
     );
+    await mountSettings(BASE);
+    await waitForPage();
+    await settle();
 
-    // Clean: the tab may close freely.
-    const cleanEvent = new Event('beforeunload', { cancelable: true });
-    window.dispatchEvent(cleanEvent);
-    expect(cleanEvent.defaultPrevented).toBe(false);
-
-    typeInto(author, 'Dominik'); // dirty
-
-    const dirtyEvent = new Event('beforeunload', { cancelable: true });
-    window.dispatchEvent(dirtyEvent);
-    expect(dirtyEvent.defaultPrevented).toBe(true);
+    expect(pageSection('imports').textContent).toContain('Imports could not be shown.');
+    expect(pageSection('imports').textContent).toContain('repo list unavailable');
+    expect(container.querySelectorAll('section.settings-section')).toHaveLength(10);
+    expect(container.querySelector('input[name="default_branch"]')).not.toBeNull();
+    expect(probes.secrets?.()).not.toBeNull();
   });
 });

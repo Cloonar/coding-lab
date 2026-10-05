@@ -26,6 +26,8 @@ Deferred, not foreclosed: a land-my-own-PR flow (needs Autoland to recognize non
 
 Accepted. Settled via issue #247. Extends ADR-0049: the Schedule producer is a fourth candidate gather feeding the one spawn pass, at a new stage rank between fix and new AFK work; the pass itself is untouched, which is exactly the extension point that ADR built. Rides ADR-0021/0030 unchanged: per-schedule knob overrides are one more skip-layer default rung, and the composed-prompt mechanism follows the ultracode precedent. Inherits the launch core (worktree, run token, seeding, Runner, incogni — ADR-0033/0035/0052/0053) with no exceptions, and the notification seam (ADR-0038/0039/0044) for the single new trigger. Leaves the AFK three-strikes semantics (ADR-0007/0010) untouched — the scheduled kind gets its own per-Schedule counter, mirroring the lander's independence from ADR-0049.
 
+Amended by [ADR-0073](0073-repositories-status-list-repo-home-one-page-settings.md) (issue #61, 2026-10-05): **Run now** starts a scheduled run on demand as one more candidate for the same spawn pass — refused with a 409 and never queued, allowed on a switched-off Schedule, blind to the cadence's memo and `last_fired_at`, and counted as the previous run by skip-on-overlap while it is live. Everything above stands.
+
 ## Considered options
 
 - **A firing does the work directly (spawn an implementation run per finding).** Rejected: it reinvents the claim and the done-signal for a run kind that has neither, and it bypasses the pipeline that already owns selection, claiming, validation, and landing. Filing `ready-for-agent` issues hands the work to machinery whose invariants are proven.

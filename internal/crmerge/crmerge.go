@@ -174,6 +174,13 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 		return store.CR{}, ErrNoAuthorIdentity
 	}
 
+	// The merge's two fetches report their outcome to the readiness recorder
+	// (issue #61), attributed to the credential version read here — BEFORE
+	// the row is materialized, so a rotation landing in between makes the
+	// record stale, never wrong.
+	fetchCtx := gitx.AttributeFetch(ctx, gitx.FetchAttribution{
+		RepoID: repo.ID, Credential: s.store.CredentialStampByID(ctx, repo.CredentialID),
+	})
 	credEnv, cleanup, err := s.credentialEnv(ctx, repo, "crmerge-"+cr.ID)
 	if err != nil {
 		return store.CR{}, err
@@ -182,7 +189,7 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 
 	env := append(append([]string{}, s.gitEnv...), credEnv...)
 	message := fmt.Sprintf("Merge change request #%d: %s", cr.Number, cr.Title)
-	mergeCommit, err := s.git.CRMerge(ctx, s.bareDir(repoID),
+	mergeCommit, err := s.git.CRMerge(fetchCtx, s.bareDir(repoID),
 		cr.BaseBranch, cr.HeadBranch, message, name, email, env)
 	if err != nil {
 		// gitx's typed refusals (head missing, push rejected, merge conflict)

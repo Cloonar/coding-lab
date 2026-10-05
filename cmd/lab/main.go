@@ -43,6 +43,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/providercli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
+	"git.cloonar.com/Cloonar/coding-lab/internal/readiness"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/secrets"
@@ -416,7 +417,33 @@ func run() int {
 	// registry reports (binding, op, ok) — never error text or token bytes.
 	trackerReg.SetObserver(m.TrackerRequest)
 
+	// The readiness recorder (issue #61): the one memory of what lab's own
+	// operations last observed. The readiness report and the repo summaries
+	// are built from it, so a page view never asks a forge, a git remote, a
+	// provider CLI or podman. It has exactly four feeds, each wired at the
+	// seam where the operation already runs:
+	//   - every list read of a forge-bound repo's tracker (here);
+	//   - every credentialed fetch, and every completed clone, of the ONE git
+	//     engine all services share (below);
+	//   - each spawn-time pull-if-missing of a dev image (the instance
+	//     service's ImageEnsured);
+	//   - each computed claimable count (the AFK engine's OnClaimable).
+	// It publishes repo.changed when a recorded verdict flips or a count
+	// changes — never per read — for the repo the outcome concerns and for
+	// every repo whose report reads the same record: the importers of a
+	// fetched repo, and the container-Runner repos for a dev image record
+	// (keyed by ref, shared by every repo resolving to it). In memory only: a
+	// restart forgets it, and a check with no record is left out of the
+	// report rather than guessed.
+	readinessRec := readiness.NewRecorder(bus, nil)
+	readinessRec.SetFanout(readinessFanout(st))
+	trackerReg.SetReadObserver(readinessRec.ObserveTrackerRead)
+
 	gitEngine := gitx.New(cfg.GitBin)
+	// Only a fetch attributed to a repo's own git credential is reported
+	// (gitx.AttributeFetch). The reconcile sweep's credential-less fetch,
+	// which fails on every private remote by design, never reaches this.
+	gitEngine.SetFetchObserver(readinessRec.ObserveFetch)
 	reposDir := filepath.Join(cfg.StateDir, "repos")
 	worktreeRoot := filepath.Join(cfg.StateDir, "worktrees")
 
@@ -518,6 +545,14 @@ func run() int {
 					ToolsImages: cfg.ContainerToolsImages,
 				}, podmanx.RealDeps())
 				gate.Set(res)
+				// A verdict just landed or changed, and with it the dev image
+				// check of every container-Runner repo (issue #61: pending
+				// until now, or failing with another failure set). Nothing
+				// else would tell an open page, so announce those repos —
+				// once per CHANGED verdict, like the logging below.
+				if prev == nil || !slices.Equal(res.Failures, prev) {
+					announceContainerRepos(ctx, st, readinessRec)
+				}
 				if res.OK() {
 					// Warnings ride an OK verdict (e.g. running on a cached
 					// tools image because the registry was unreachable) —
@@ -651,6 +686,10 @@ func run() int {
 			ContainerToolsImages: cfg.ContainerToolsImages,
 			ContainerPreflight:   containerPreflight,
 			AgentSockDir:         agentapi.SocketDir(cfg.StateDir),
+			// The readiness recorder learns whether a dev image is present
+			// from the spawn that pulled it (issue #61) — the only place
+			// image presence is ever checked.
+			ImageEnsured: readinessRec.ObserveImage,
 			// OneCLI credential-gateway run wiring (issue #24 / ADR-0067): the
 			// pre-claim fail-closed precheck, the per-run trust bundle, and the
 			// proxy env bundle every run kind gets. All three are zero when the
@@ -712,6 +751,10 @@ func run() int {
 			WorktreeRoot: worktreeRoot,
 			Sweep:        reconcileSvc.RuntimeSweep,
 			Metrics:      m,
+			// The repo list's claimable count is whatever the engine or an
+			// operator view last computed (issue #61) — remembered here, so
+			// the list costs no forge request per repo.
+			OnClaimable: readinessRec.ObserveClaimable,
 			// Container backstops (issue #205): podman rm behind the engine's
 			// session kills (neutral Stop, reap, zombie drain).
 			PodmanBin:          cfg.PodmanBin,
@@ -971,6 +1014,7 @@ func run() int {
 		Homes:           homes,
 		Tracker:         trackerReg,
 		AFK:             afkSvc,
+		Readiness:       readinessRec,
 		Push:            pushSender,
 		Presence:        presenceReg,
 		Git:             gitEngine,
@@ -1247,6 +1291,60 @@ func providerCLIConfigs(cfg config.Config, st *store.Store, preflight func() (po
 		Logger:        logger,
 	}
 	return claudeCfg, codexCfg
+}
+
+// announceContainerRepos publishes repo.changed for every repo whose
+// readiness depends on the container preflight (issue #61) — containerRepoIDs.
+// The preflight's verdict lives in an in-memory gate no page is told about,
+// so the goroutine that publishes it calls this when the verdict lands or
+// changes: a repo home showing "preflight has not finished" then refetches
+// and moves on. Best-effort — a failed listing announces nothing, and the
+// next page load reads the truth anyway.
+func announceContainerRepos(ctx context.Context, st *store.Store, rec *readiness.Recorder) {
+	repoIDs, err := containerRepoIDs(ctx, st)
+	if err != nil {
+		return
+	}
+	rec.Announce(repoIDs...)
+}
+
+// readinessFanout is the readiness recorder's Fanout over the store: the
+// importers of a repo (store.RepoImporters) and the container-Runner repos
+// (containerRepoIDs).
+func readinessFanout(st *store.Store) readiness.Fanout {
+	return readiness.Fanout{
+		Importers: func(ctx context.Context, repoID string) ([]string, error) {
+			importers, err := st.RepoImporters(ctx, repoID)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]string, 0, len(importers))
+			for _, r := range importers {
+				out = append(out, r.ID)
+			}
+			return out, nil
+		},
+		ImageRepos: func(ctx context.Context) ([]string, error) { return containerRepoIDs(ctx, st) },
+	}
+}
+
+// containerRepoIDs lists the repos whose dev image check depends on
+// container-side state — the preflight verdict, a dev image record: those
+// whose effective Runner is container, plus any whose Runner cannot be
+// resolved right now (counted in rather than silently skipped). It is also
+// the readiness recorder's Fanout.ImageRepos.
+func containerRepoIDs(ctx context.Context, st *store.Store) ([]string, error) {
+	repos, err := st.Repos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range repos {
+		if runner, err := instance.EffectiveRunner(ctx, st, r); err != nil || runner == store.RunnerContainer {
+			out = append(out, r.ID)
+		}
+	}
+	return out, nil
 }
 
 // labURL is the LAB_URL handed to spawned sessions. An explicit --agent-url

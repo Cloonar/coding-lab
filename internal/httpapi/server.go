@@ -29,6 +29,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/pull"
 	"git.cloonar.com/Cloonar/coding-lab/internal/push"
+	"git.cloonar.com/Cloonar/coding-lab/internal/readiness"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -89,6 +90,15 @@ type Options struct {
 	// ready endpoint. Nil leaves the AFK routes unmounted (and the ready
 	// endpoint falls back to the raw ready count).
 	AFK *afk.Service
+
+	// Readiness is the recorder of fetch, tracker-read, claimable-count and
+	// dev-image outcomes the readiness report and the repo summaries are built
+	// from (issue #61). cmd/lab passes the ONE recorder it also wires into the
+	// git engine, the tracker registry, the instance service and the AFK
+	// engine as their observers. Nil gets a private, never-fed recorder: every
+	// repo response still carries a summary, built from stored state alone —
+	// the checks that need a recorded outcome are simply left out.
+	Readiness *readiness.Recorder
 
 	// Push is the Web Push sender (issue #98): the VAPID public key and
 	// subscription CRUD/test routes. Nil leaves the /push routes unmounted.
@@ -262,6 +272,12 @@ type Server struct {
 	pull      *pull.Service
 	presence  *presence.Registry
 
+	// readiness builds every repo response's summary and the readiness report
+	// (issue #61); readinessRec is the recorder behind it, held to drop a
+	// deleted repo's records. Both are always set (New).
+	readiness    *readiness.Evaluator
+	readinessRec *readiness.Recorder
+
 	onecli           *onecli.Client
 	oneCLIAPIURL     string
 	oneCLIGatewayURL string
@@ -402,6 +418,27 @@ func New(o Options) (*Server, error) {
 	s.shutdownCtx, s.shutdownCancel = context.WithCancel(context.Background())
 	s.warpgate, s.warpgateHostKeys = normalizeWarpgate(o.Warpgate, o.WarpgateHostKeys)
 
+	// The readiness evaluator (issue #61) reads the spawn path's own
+	// resolvers, the tracker registry's local validation and the AFK engine's
+	// local count. Each seam is assigned only from a non-nil pointer: a nil
+	// *instance.Service stored in the interface field would be a NON-nil
+	// interface, and the evaluator's "no spawner, leave the check out" branch
+	// would call into it instead.
+	s.readinessRec = o.Readiness
+	if s.readinessRec == nil {
+		s.readinessRec = readiness.NewRecorder(o.Bus, now)
+	}
+	s.readiness = &readiness.Evaluator{Store: o.Store, Recorder: s.readinessRec}
+	if o.Instances != nil {
+		s.readiness.Spawner = o.Instances
+	}
+	if o.Tracker != nil {
+		s.readiness.Tracker = o.Tracker
+	}
+	if o.AFK != nil {
+		s.readiness.Claimable = o.AFK
+	}
+
 	if o.BaseURL != "" {
 		u, err := url.Parse(o.BaseURL)
 		if err != nil {
@@ -481,6 +518,10 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("PATCH /api/v1/repos/{id}", s.requireAuth(s.handleRepoUpdate))
 		api.HandleFunc("DELETE /api/v1/repos/{id}", s.requireAuth(s.handleRepoDelete))
 		api.HandleFunc("POST /api/v1/repos/{id}/clone/retry", s.requireAuth(s.handleRepoCloneRetry))
+		// The readiness report (issue #61): whether a run can start in the
+		// repo right now, from what lab already knows — the same report every
+		// repo response carries in its summary, refreshed on its own.
+		api.HandleFunc("GET /api/v1/repos/{id}/readiness", s.requireAuth(s.handleRepoReadiness))
 
 		// Read-only imports (issue #261 / ADR-0063): the repo-scoped
 		// declarations of which other repos' origin/<default> this repo's
@@ -489,6 +530,9 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/v1/repos/{id}/imports", s.requireAuth(s.handleRepoImportsList))
 		api.HandleFunc("POST /api/v1/repos/{id}/imports", s.requireAuth(s.handleRepoImportsAdd))
 		api.HandleFunc("DELETE /api/v1/repos/{id}/imports/{target}", s.requireAuth(s.handleRepoImportsRemove))
+		// The reverse direction (issue #61): who imports this repo — the
+		// importers that block its deletion, read before any attempt.
+		api.HandleFunc("GET /api/v1/repos/{id}/importers", s.requireAuth(s.handleRepoImportersList))
 	}
 
 	// M3 instance lifecycle (operator auth; CSRF guards the mutations).
@@ -497,6 +541,10 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/v1/instances", s.requireAuth(s.handleInstanceList))
 		api.HandleFunc("DELETE /api/v1/instances/{session}", s.requireAuth(s.handleInstanceDelete))
 		api.HandleFunc("POST /api/v1/repos/{id}/stop-all", s.requireAuth(s.handleStopAll))
+		// Inherited values (issue #61): what each overridable repo field
+		// resolves to without the repo's own value, from the spawn's own
+		// resolvers — which is why it mounts with the instance service.
+		api.HandleFunc("POST /api/v1/repos/{id}/inherited", s.requireAuth(s.handleRepoInherited))
 		api.HandleFunc("GET /api/v1/runs", s.requireAuth(s.handleRunsList))
 		api.HandleFunc("GET /api/v1/runs/{id}", s.requireAuth(s.handleRunGet))
 		api.HandleFunc("PATCH /api/v1/runs/{id}", s.requireAuth(s.handleRunUpdate))
@@ -570,6 +618,10 @@ func (s *Server) Handler() http.Handler {
 		// surface (internal/agentapi) below. See autoland.go's header comment
 		// for why that placement is load-bearing.
 		api.HandleFunc("POST /api/v1/repos/{id}/autoland/pulls/{pull}/rearm", s.requireAuth(s.handleAutolandRearm))
+		// A Schedule's Run now (issue #61). Here rather than with the
+		// store-backed Schedule CRUD below: it launches a run through the
+		// engine's spawn pass, so it exists only where the engine does.
+		api.HandleFunc("POST /api/v1/repos/{id}/schedules/{sid}/run", s.requireAuth(s.handleScheduleRun))
 	}
 
 	// Schedules (issue #247 / ADR-0062): per-repo cadence CRUD, the human
@@ -578,6 +630,8 @@ func (s *Server) Handler() http.Handler {
 	// cron. Store-backed and always mounted, like the settings routes below —
 	// a Schedule is a row, and the one engine touch (the re-enable's
 	// spawn-pass kick) is nil-guarded rather than gating the whole surface.
+	// Run now is not here: it IS an engine launch, so it mounts with the AFK
+	// routes above.
 	api.HandleFunc("GET /api/v1/repos/{id}/schedules", s.requireAuth(s.handleScheduleList))
 	api.HandleFunc("POST /api/v1/repos/{id}/schedules", s.requireAuth(s.handleScheduleCreate))
 	api.HandleFunc("PATCH /api/v1/repos/{id}/schedules/{sid}", s.requireAuth(s.handleScheduleUpdate))

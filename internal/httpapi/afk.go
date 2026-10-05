@@ -50,6 +50,17 @@ func (s *Server) writeAFKError(w http.ResponseWriter, doing string, err error) {
 		writeError(w, http.StatusConflict, afk.ErrRepoPaused.Error())
 	case errors.Is(err, afk.ErrNoReady):
 		writeError(w, http.StatusConflict, afk.ErrNoReady.Error())
+	case errors.Is(err, afk.ErrSchedulePaused):
+		// The Schedule Run now refusals (issue #61), each a 409 the UI shows
+		// verbatim; the cap and logged-out refusals are the shared instance
+		// mapping below.
+		writeError(w, http.StatusConflict, afk.ErrSchedulePaused.Error())
+	case errors.Is(err, afk.ErrScheduleRunLive):
+		writeError(w, http.StatusConflict, afk.ErrScheduleRunLive.Error())
+	case errors.Is(err, afk.ErrScheduleEmptyPrompt):
+		writeError(w, http.StatusConflict, afk.ErrScheduleEmptyPrompt.Error())
+	case errors.Is(err, afk.ErrScheduleStartedThisMinute):
+		writeError(w, http.StatusConflict, afk.ErrScheduleStartedThisMinute.Error())
 	case isTrackerConfigError(err):
 		// The repo's tracker binding can't be driven (unsupported forge kind,
 		// bad/missing forge credential, unparseable remote/host, unknown
@@ -111,12 +122,7 @@ func (s *Server) handleAFKAuto(w http.ResponseWriter, r *http.Request) {
 		// this handler and stops with the server.
 		go s.afk.SpawnOnce(s.shutdownCtx)
 	}
-	eff, err := s.afkPromptEffective(r.Context(), repo)
-	if err != nil {
-		s.internalError(w, "updating afk auto toggle", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
+	s.writeRepo(w, r, http.StatusOK, "updating afk auto toggle", repo)
 }
 
 // handleAFKReset is POST /api/v1/repos/{id}/afk/reset: zero the consecutive-
@@ -138,10 +144,5 @@ func (s *Server) handleAFKReset(w http.ResponseWriter, r *http.Request) {
 		s.publishRepoChanged(repo.ID)
 		go s.afk.SpawnOnce(s.shutdownCtx)
 	}
-	eff, err := s.afkPromptEffective(r.Context(), repo)
-	if err != nil {
-		s.internalError(w, "resetting afk failures", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, repoJSON(repo, eff))
+	s.writeRepo(w, r, http.StatusOK, "resetting afk failures", repo)
 }

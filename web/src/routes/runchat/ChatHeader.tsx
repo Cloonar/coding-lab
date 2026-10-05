@@ -403,8 +403,8 @@ export function ChatHeader(props: {
               session with no model. */}
           <Show when={titleMode() === 'view' && (project() !== '' || modelInfo() !== null)}>
             <div class="chat-title-sub">
-              {/* The project name as muted text, linking to the repo's issues
-                  page (the de-facto repo landing) when repo_id is present; a
+              {/* The project name as muted text, linking to the repo home
+                  (/repos/:id, issue #61) when repo_id is present; a
                   repo_id-less run keeps it as inert text. */}
               <Show when={project()}>
                 {(p) => (
@@ -413,7 +413,7 @@ export function ChatHeader(props: {
                     fallback={<span class="chat-title-project">{p()}</span>}
                   >
                     {(repoId) => (
-                      <A href={`/repos/${repoId()}/issues`} class="chat-title-project">
+                      <A href={`/repos/${repoId()}`} class="chat-title-project">
                         {p()}
                       </A>
                     )}

@@ -1,40 +1,56 @@
 /* AFK ---------------------------------------------------------------------------- */
+/* The AFK card on the repo home's Overview (components/AFKStrip.tsx →
+   AFKCard): "N issues ready for an agent.", Run one, the Auto switch, and the
+   three-strikes banner with Reset. The composer's strip keeps its own rules
+   (select.css). */
 
-.afk-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  margin-top: var(--space-3);
+.afk-card-count {
+  margin: 0;
+  color: var(--muted);
 }
 
-.afk-controls {
+.afk-card-actions {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 0.6rem;
+  gap: var(--space-2);
+}
+
+.afk-card-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
 }
 
 /* Zero-ready hint: still a real, enabled button, just visibly greyed. */
-.afk-start.greyed {
+.afk-card-start.greyed {
   opacity: 0.6;
 }
 
-.afk-paused {
-  margin: 0;
+.afk-card .switch-row {
+  flex: none;
 }
 
-.afk-paused button {
-  flex-shrink: 0;
+.afk-card .switch-row .switch-label {
+  font-weight: 600;
 }
 
-.budget-left {
-  font-size: 0.82rem;
+.afk-card-paused {
+  align-items: center;
 }
 
-.budget-left.over {
-  color: var(--err-text);
+.afk-card-reset {
+  flex: none;
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
 }
 
-.chip.afk-kind {
-  background: var(--run-bg);
-  color: var(--run-text);
+@media (min-width: 1024px) {
+  .afk-card-start,
+  .afk-card-reset {
+    min-height: 36px;
+    padding: 0 0.75rem;
+  }
 }

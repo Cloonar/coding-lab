@@ -45,6 +45,10 @@ type Fake struct {
 	method     string
 	now        func() time.Time
 	authForced int // count of forced AuthStatus calls
+	authCalls  int // count of ALL AuthStatus calls, forced or not
+	// authLast is the status the most recent AuthStatus call returned — what
+	// LastAuthStatus (provider.AuthPeeker) reports; nil until a first call.
+	authLast *provider.AuthStatus
 
 	deepLink     string                  // returned by CaptureDeepLink; "" → a miss (ADR-0017)
 	fallbackOpen provider.OpenAffordance // returned by FallbackOpen (the generic web link + title)
@@ -140,6 +144,7 @@ var (
 	_ provider.DeepLinker         = (*Fake)(nil)
 	_ provider.LiveSignals        = (*Fake)(nil)
 	_ provider.RemoteCapable      = (*Fake)(nil)
+	_ provider.AuthPeeker         = (*Fake)(nil)
 )
 
 // New returns a logged-in fake with the claude-code id, display name,
@@ -367,11 +372,24 @@ func (f *Fake) AuthStatus(_ context.Context, force bool) (provider.AuthStatus, e
 	if force {
 		f.authForced++
 	}
+	f.authCalls++
 	st := provider.AuthStatus{LoggedIn: f.loggedIn, Email: f.email, Method: f.method, CheckedAt: f.now()}
-	if !f.loggedIn {
-		return st, nil
-	}
+	f.authLast = &st
 	return st, nil
+}
+
+// LastAuthStatus implements provider.AuthPeeker the way the real adapters
+// do: the status the most recent AuthStatus call returned — NOT the fake's
+// live scripted state, so a SetLoggedIn after the last check stays invisible
+// until something checks again — and (zero, false) before any call. It is
+// not an AuthStatus call and counts as none.
+func (f *Fake) LastAuthStatus() (provider.AuthStatus, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.authLast == nil {
+		return provider.AuthStatus{}, false
+	}
+	return *f.authLast, true
 }
 
 func (f *Fake) LoginStart(context.Context) (string, error) {
@@ -928,6 +946,15 @@ func (f *Fake) ForcedAuthChecks() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.authForced
+}
+
+// AuthChecks reports how many AuthStatus calls happened in total, forced or
+// not — the assertion surface for code that must never check the login state
+// (a LastAuthStatus peek is not one).
+func (f *Fake) AuthChecks() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.authCalls
 }
 
 // SubmittedCodes returns the login codes submitted, in order.

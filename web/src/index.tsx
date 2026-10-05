@@ -2,19 +2,11 @@
 import { render } from 'solid-js/web';
 import { Navigate, Route, Router } from '@solidjs/router';
 import App from './App';
-import AddRepo from './routes/AddRepo';
-import CRDetail from './routes/CRDetail';
 import Credentials from './routes/Credentials';
 import History from './routes/History';
-import IssueDetail from './routes/IssueDetail';
 import Login from './routes/Login';
-import NewIssue from './routes/NewIssue';
 import NewRun from './routes/NewRun';
-import RepoCRs from './routes/RepoCRs';
-import RepoIssues from './routes/RepoIssues';
-import RepoLabels from './routes/RepoLabels';
-import Repos from './routes/Repos';
-import RepoSettings from './routes/repo-settings';
+import RepoRoutes from './routes/repo-home/routes';
 import RunChat from './routes/RunChat';
 import Settings from './routes/settings';
 import Setup from './routes/Setup';
@@ -33,7 +25,6 @@ render(
       <Route path="/setup" component={Setup} />
       <Route path="/login" component={Login} />
       <Route path="/" component={NewRun} />
-      <Route path="/repos" component={Repos} />
       <Route path="/credentials" component={Credentials} />
       <Route path="/history" component={History} />
       {/* Static /runs redirect must precede the /runs/:id chat route. */}
@@ -43,14 +34,9 @@ render(
           index on mobile and redirects to the first category on desktop. */}
       <Route path="/settings/:section?" component={Settings} />
       <Route path="/tokens" component={Tokens} />
-      <Route path="/repos/new" component={AddRepo} />
-      <Route path="/repos/:id/settings/:section?" component={RepoSettings} />
-      <Route path="/repos/:id/issues" component={RepoIssues} />
-      <Route path="/repos/:id/issues/new" component={NewIssue} />
-      <Route path="/repos/:id/issues/:number" component={IssueDetail} />
-      <Route path="/repos/:id/crs" component={RepoCRs} />
-      <Route path="/repos/:id/crs/:number" component={CRDetail} />
-      <Route path="/repos/:id/labels" component={RepoLabels} />
+      {/* /repos, /repos/new and the /repos/:id repo home with its nested tabs
+          (issue #61) — one shared table, see routes/repo-home/routes.tsx. */}
+      <RepoRoutes />
       <Route path="*" component={() => <Navigate href="/" />} />
     </Router>
   ),

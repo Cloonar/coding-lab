@@ -153,6 +153,14 @@ type Options struct {
 	// no-op, optional exactly like Metrics.
 	Notify func(Notification)
 
+	// OnClaimable, when non-nil, receives a repo's claimable count every time
+	// the engine or an operator view computes it (FilterClaimable, and the
+	// locked claim path's own knowledge of it). It is how the repo list shows
+	// a forge-bound repo's count without a forge request per repo (issue
+	// #61): the count is whatever was last computed anyway. cmd/lab wires the
+	// readiness recorder; nil is a no-op.
+	OnClaimable func(repo store.Repo, count int)
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -183,6 +191,9 @@ type Service struct {
 	metrics      *metrics.Metrics   // nil-safe report methods
 	notify       func(Notification) // nil is a no-op, like metrics
 	now          func() time.Time
+	// onClaimable receives each computed claimable count (Options.OnClaimable);
+	// nil is a no-op — reportClaimable is the one caller.
+	onClaimable func(repo store.Repo, count int)
 
 	// mu single-flights the entire select→claim→spawn in launch — the ONE
 	// claim path (manual starts, spawn-pass launches, toggle-on kicks); v0's
@@ -213,7 +224,9 @@ type Service struct {
 	// INVARIANT: every field in this block is touched ONLY from
 	// scheduleCandidates and the launch closures it emits, all of which run
 	// inside the spawn pass under spawnMu — that serialization is these
-	// fields' only guard, so no other code path may read or write them.
+	// fields' only guard, so no other code path may read or write them —
+	// including a Schedule's Run now (RunScheduleNow), whose on-demand
+	// candidate rides the same pass but is cadence-blind by design.
 	//
 	// schedulePending maps a schedule ID to the due time of the one owed
 	// firing (at-cap firings retry from here each pass; overlap-skips and
@@ -289,6 +302,7 @@ func New(o Options) (*Service, error) {
 		metrics:            o.Metrics,
 		notify:             o.Notify,
 		now:                now,
+		onClaimable:        o.OnClaimable,
 		schedulePending:    map[string]time.Time{},
 		scheduleChecked:    map[string]time.Time{},
 		// Construction time bounds the startup missed-slot log alone: slots
@@ -346,9 +360,15 @@ func (s *Service) settingMinutes(ctx context.Context, key string, def int) time.
 }
 
 func (s *Service) settingDuration(ctx context.Context, key string, def int, unit time.Duration) time.Duration {
-	n, err := s.store.GetInt(ctx, key, def)
+	return settingDuration(ctx, s.store, s.log, key, def, unit)
+}
+
+// settingDuration is the engine-free read behind Service.settingDuration, so
+// EffectiveBudget can be asked without an engine.
+func settingDuration(ctx context.Context, st *store.Store, log *slog.Logger, key string, def int, unit time.Duration) time.Duration {
+	n, err := st.GetInt(ctx, key, def)
 	if err != nil {
-		s.log.Warn("reading interval setting; using default", "component", "afk", "setting", key, "err", err)
+		log.Warn("reading interval setting; using default", "component", "afk", "setting", key, "err", err)
 		n = def
 	}
 	if n <= 0 {
@@ -357,13 +377,23 @@ func (s *Service) settingDuration(ctx context.Context, key string, def int, unit
 	return time.Duration(n) * unit
 }
 
-// effectiveBudget is a repo's AFK run budget: repos.budget_minutes when set,
-// else the afk_budget_minutes setting (default 120 — D12c).
+// effectiveBudget is a repo's AFK run budget — EffectiveBudget over this
+// engine's store and logger.
 func (s *Service) effectiveBudget(ctx context.Context, repo store.Repo) time.Duration {
+	return EffectiveBudget(ctx, s.store, s.log, repo)
+}
+
+// EffectiveBudget is a repo's AFK run budget, the budget clock every AFK,
+// fix, lander and escalate launch arms: repos.budget_minutes when set, else
+// the afk_budget_minutes setting (default 120 — D12c; a missing, garbled or
+// non-positive row falls back to it with a warning on log). Exported so the
+// repo settings page's inherited budget (issue #61) is this same answer for
+// the repo with its override nulled, never a second copy of the chain.
+func EffectiveBudget(ctx context.Context, st *store.Store, log *slog.Logger, repo store.Repo) time.Duration {
 	if repo.BudgetMinutes != nil && *repo.BudgetMinutes > 0 {
 		return time.Duration(*repo.BudgetMinutes) * time.Minute
 	}
-	return s.settingMinutes(ctx, store.SettingAFKBudgetMinutes, defaultBudgetMinutes)
+	return settingDuration(ctx, st, log, store.SettingAFKBudgetMinutes, defaultBudgetMinutes, time.Minute)
 }
 
 // removeRunContainer is the `podman rm` backstop behind this engine's

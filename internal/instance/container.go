@@ -2,6 +2,8 @@ package instance
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -25,18 +27,59 @@ const (
 	defaultContainerNofile = store.DefaultContainerNofile
 )
 
-// refuseContainerSpawn is the container-mode spawn gate (issue #205), run
-// BEFORE anything is created — a refused spawn must never park a claim (the
-// AFK worktree IS the claim, so ordering this after AddWorktree would strand
-// the issue behind a host misconfiguration). On success it returns the run's
-// effective dev image (issues #207, #55), which it does not compute itself:
-// EffectiveDevImage is the one resolver. The two concerns share this
-// pre-claim spot because the dev-image refusal, unlike every host/tools check
-// the startup preflight owns, is PER-REPO — only the spawn knows the repo, so
-// a "no image for this repo" verdict cannot be reached at boot the way the
-// others are. Refusals, most-structural first: no wiring at all → the server
-// was started without container config; preflight unfinished → the boot
-// goroutine (image pulls can take minutes) has not published a verdict,
+// ContainerGateStage names where the container-mode spawn gate stopped, in
+// the order the gate checks — most structural first.
+type ContainerGateStage int
+
+const (
+	// ContainerGateOpen: every check passed; a container spawn may proceed
+	// (its dev image is still pulled-if-missing by the caller).
+	ContainerGateOpen ContainerGateStage = iota
+	// ContainerGateNotConfigured: the server was started without container
+	// config at all (no preflight is wired).
+	ContainerGateNotConfigured
+	// ContainerGatePreflightPending: the startup preflight has not published
+	// a verdict yet (image pulls can take minutes) — retry.
+	ContainerGatePreflightPending
+	// ContainerGatePreflightFailed: the preflight finished and the host
+	// cannot run containers; ContainerGate.Preflight holds every failure.
+	ContainerGatePreflightFailed
+	// ContainerGateNoToolsImage: no agent-tools image is configured for the
+	// spawn's provider, so its CLI would not exist inside the container.
+	ContainerGateNoToolsImage
+	// ContainerGateNoDevImage: the effective dev image cannot be resolved —
+	// none of its three layers is set (errors.Is(Err, ErrNoDevImage)), or the
+	// dev_image_default setting could not be read.
+	ContainerGateNoDevImage
+)
+
+// ContainerGate is the container-mode spawn gate's verdict for one provider
+// on one repo. Stage says where it stopped; Err is the actionable refusal
+// (nil exactly when Stage is ContainerGateOpen); Image is the effective dev
+// image of an open gate; Preflight is the finished verdict behind a
+// ContainerGatePreflightFailed.
+type ContainerGate struct {
+	Stage     ContainerGateStage
+	Image     string
+	Preflight podmanx.Result
+	Err       error
+}
+
+// ContainerGate evaluates the container-mode spawn gate (issue #205) for a
+// spawn of providerID on repo. It is the ONE implementation of that gate:
+// refuseContainerSpawn turns its Err into the spawn's 400, and the readiness
+// report (issue #61) reads the same verdict to say whether a container run
+// could start — so what a page shows as "not ready" and what a spawn is
+// refused for can never drift apart. Pure: it reads the in-memory preflight
+// verdict, this service's configuration and the store, and starts no
+// process — the dev image's pull-if-missing is the caller's separate step.
+//
+// The dev image is resolved here, not by the caller, because unlike every
+// host/tools check the startup preflight owns it is PER-REPO: only a spawn
+// (or a report) for one repo knows which image it needs. EffectiveDevImage is
+// the one resolver. Refusals, most-structural first: no wiring at all → the
+// server was started without container config; preflight unfinished → the
+// boot goroutine (image pulls can take minutes) has not published a verdict,
 // retry; preflight failed → the full multi-failure message, so ONE refusal
 // names everything the operator must fix; no tools image for THIS provider →
 // the actionable per-provider flag; finally the effective dev image — the
@@ -45,6 +88,40 @@ const (
 // refused naming all THREE knobs when none is set, since any one fixes it,
 // and refused naming dev_image_default when that setting cannot be read
 // (never a silent drop to the flag image).
+func (s *Service) ContainerGate(ctx context.Context, providerID string, repo store.Repo) ContainerGate {
+	if s.containerPreflight == nil {
+		return ContainerGate{Stage: ContainerGateNotConfigured,
+			Err: errors.New("container runner not configured on this server — set --container-tools-image (and a dev image: the repo's Dev image in its Runner settings, the global default dev image in Settings → Runner, or --container-image)")}
+	}
+	r, done := s.containerPreflight()
+	if !done {
+		return ContainerGate{Stage: ContainerGatePreflightPending,
+			Err: errors.New("container preflight has not finished — retry in a moment")}
+	}
+	if !r.OK() {
+		return ContainerGate{Stage: ContainerGatePreflightFailed, Preflight: r, Err: errors.New(r.Error())}
+	}
+	if s.containerToolsImages[providerID] == "" {
+		return ContainerGate{Stage: ContainerGateNoToolsImage,
+			Err: fmt.Errorf("no agent-tools image configured for provider %s — set --container-tools-image %s=<ref>", providerID, providerID)}
+	}
+	// Effective dev image (issues #207, #55): repo image_ref → the
+	// dev_image_default setting → the --container-image flag, resolved by the
+	// one resolver. Its errors (none of the three set, or the setting
+	// unreadable) already carry the actionable text.
+	image, err := s.DevImage(ctx, repo)
+	if err != nil {
+		return ContainerGate{Stage: ContainerGateNoDevImage, Err: err}
+	}
+	return ContainerGate{Stage: ContainerGateOpen, Image: image}
+}
+
+// refuseContainerSpawn is the container-mode spawn gate (issue #205) as
+// Launch runs it — ContainerGate's verdict, with a closed gate turned into
+// the spawn's refusal. It runs BEFORE anything is created: a refused spawn
+// must never park a claim (the AFK worktree IS the claim, so ordering this
+// after AddWorktree would strand the issue behind a host misconfiguration).
+// On success it returns the run's effective dev image (issues #207, #55).
 //
 // Error mapping — the documented choice (issue #205): every refusal is a
 // *BadRequestError → 400 via httpapi's writeInstanceError. Of the two
@@ -60,37 +137,32 @@ const (
 // runner_default (Launch's EffectiveRunner refusal): a 400 whose text names
 // the setting, refused before the claim.
 func (s *Service) refuseContainerSpawn(ctx context.Context, providerID string, repo store.Repo) (image string, err error) {
-	if s.containerPreflight == nil {
-		return "", badRequestf("container runner not configured on this server — set --container-tools-image (and a dev image: the repo's Dev image in its Runner settings, the global default dev image in Settings → Runner, or --container-image)")
+	g := s.ContainerGate(ctx, providerID, repo)
+	if g.Err != nil {
+		return "", badRequestf("%s", g.Err)
 	}
-	r, done := s.containerPreflight()
-	if !done {
-		return "", badRequestf("container preflight has not finished — retry in a moment")
-	}
-	if !r.OK() {
-		return "", badRequestf("%s", r.Error())
-	}
-	if s.containerToolsImages[providerID] == "" {
-		return "", badRequestf("no agent-tools image configured for provider %s — set --container-tools-image %s=<ref>", providerID, providerID)
-	}
-	// Effective dev image (issues #207, #55): repo image_ref → the
-	// dev_image_default setting → the --container-image flag, resolved by the
-	// one resolver. Its errors (none of the three set, or the setting
-	// unreadable) already carry the actionable text.
-	if image, err = EffectiveDevImage(ctx, s.store, repo, s.containerImage); err != nil {
-		return "", badRequestf("%s", err)
-	}
-	return image, nil
+	return g.Image, nil
 }
 
-// effectiveContainerLimits resolves a container run's resource caps: the
+// DevImage is EffectiveDevImage over this service's own store and its copy of
+// the --container-image flag — the exact dev image chain the container gate
+// above resolves for a spawn of repo. Exported so the repo settings page's
+// inherited values (issue #61) ask the same chain with the same fallback
+// rather than a second copy of the flag. Pure: a store read, no pull.
+func (s *Service) DevImage(ctx context.Context, repo store.Repo) (string, error) {
+	return EffectiveDevImage(ctx, s.store, repo, s.containerImage)
+}
+
+// EffectiveContainerLimits resolves a container run's resource caps: the
 // repo's override column when set, else the global settings row, else the
 // seeded default — the same repo-??-settings shape as EffectiveCap, except a
 // settings READ error refuses the launch instead of warning: limits are the
 // blast-radius contract of #205, and silently spawning uncapped (or
 // default-capped against the operator's stored intent) on a flaky read
-// would defeat it. Runs before the claim, so the refusal is free.
-func (s *Service) effectiveContainerLimits(ctx context.Context, repo store.Repo) (memory string, pids, nofile int, err error) {
+// would defeat it. Runs before the claim, so the refusal is free. Exported
+// for the repo settings page's inherited values (issue #61), which read the
+// limits a repo without its own overrides would run with from here.
+func (s *Service) EffectiveContainerLimits(ctx context.Context, repo store.Repo) (memory string, pids, nofile int, err error) {
 	if repo.ContainerMemory != nil {
 		memory = *repo.ContainerMemory
 	} else if memory, err = s.store.GetString(ctx, store.SettingContainerMemory, defaultContainerMemory); err != nil {

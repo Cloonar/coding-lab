@@ -49,6 +49,10 @@ The decisions, pinned:
   (claimable count · Run one · Auto toggle · three-strikes paused banner with
   Reset) becomes a compact per-repo strip under the composer, following the
   composer's repo chip — one surface for both ways of dispatching work.
+  [Superseded in part 2026-10-05 (ADR-0073, issue #61): the repo cards on
+  `/repos` are gone — `/repos` is a status list, and clone state, Stop all
+  and parked work live on each repo's home (`/repos/:id`, Overview). The
+  strip under the composer stands and also appears on Overview.]
 - **Manual spawn still takes label/model/effort only.** The `…` popover holds
   the label; provider spawn-options stay out because the instances endpoint
   accepts no options bag (`internal/httpapi/instances.go`) and this redesign

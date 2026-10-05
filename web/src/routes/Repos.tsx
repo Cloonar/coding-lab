@@ -1,37 +1,58 @@
-// Repos (/repos, re-homed from the old Dashboard): repo cards (name, remote
-// host, chips, clone status with live SSE progress), each carrying its clone
-// progress / retry banner, the Issues/CRs/Settings links, a parked strip and a
-// Stop-all — or the add-repo empty state. repo.changed refetches repos;
-// run.changed refetches instances (Stop-all reads their live count);
-// clone.progress feeds a per-card signal; parked.changed lives in the strip.
+// Repositories (/repos, issue #61): the status list for picking a repo. Top to
+// bottom: the heading with "+ Add" (→ /repos/new), the filter field, the
+// Needs you block (absent when empty, hidden while a filter is active), then
+// every repo — latest run first, never-run repos after, newest first. Below
+// 1024px a row stacks name, remote and one status line; from 1024px the same
+// data is a table (routes/repos/RepoRows.tsx). Every row opens the repo home,
+// where Stop all, parked work and the Issues/CRs/Settings tabs now live.
 //
-// The side rail owns live-run rows now, so there is deliberately NO InstanceList
-// here, and no ProviderAuthCard / AFKSection / StartInstanceForm (Credentials
-// owns the auth cards; the AFK strip + composer move to the Home page in 2b).
+// Data: listRepos (live on repo.changed, and — debounced — on the issue, run,
+// parked and agent login events that move a summary without a repo.changed:
+// lib/repoList.ts summaryRefreshSpecs) carries each repo's summary —
+// claimable count and readiness — so the page makes no request per repo and
+// none to a forge; listInstances (live on run.changed, patched in place on
+// run.messages.changed) gives the live and waiting counts; clone.progress
+// feeds the cloning rows. A route notice (e.g. "Deleted x from lab" after a
+// repo delete) shows once in the toast.
+//
+// Identity: every refetch returns fresh objects for EVERY repo, so the rows
+// and the Needs you entries render from stores reconciled by key (repo id,
+// problem key), never from the raw response — one repo.changed for any repo
+// patches what changed in place instead of rebuilding every row and dropping
+// a keyboard user's focus. A failed refetch keeps the list it had and shows
+// the error above it. The Needs you busy state lives here, keyed by problem,
+// so a Retry or Reset cannot be sent twice, and once a fixed entry leaves the
+// block, focus moves to the block's heading (or the list's) instead of
+// falling to the page.
 
 import { A } from '@solidjs/router';
-import { For, Match, Show, Switch, createSignal, onCleanup } from 'solid-js';
-import {
-  errorMessage,
-  listCRs,
-  listInstances,
-  listRepos,
-  retryClone,
-  stopAll,
-  type Instance,
-  type Repo,
-} from '../api';
-import EmptyState from '../components/EmptyState';
+import { Match, Show, Switch, createComputed, createMemo, createSignal, onCleanup } from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
+import { errorMessage, listRepos, resetAFK, retryClone, type Repo } from '../api';
 import Banner from '../components/Banner';
-import ParkedSection from '../components/ParkedSection';
+import EmptyState from '../components/EmptyState';
+import Icon from '../components/Icon';
 import RequireAuth from '../components/RequireAuth';
-import SectionHead from '../components/SectionHead';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
+import { createLiveInstances } from '../lib/liveInstances';
+import { rescueFocus } from '../lib/focus';
 import { createLiveResource } from '../lib/liveResource';
-import { remoteHost } from '../lib/repoName';
+import { createMediaQuery } from '../lib/media';
+import {
+  filterRepos,
+  isFilterActive,
+  needsYou,
+  orderRepos,
+  runCounts,
+  summaryRefreshSpecs,
+  type NeedsYouEntry,
+} from '../lib/repoList';
 import { resourceValue } from '../lib/resource';
-import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
+import { useRouteNotice } from '../lib/routeNotice';
+import { createCloneProgressStore } from '../stores/cloneProgress';
+import NeedsYou from './repos/NeedsYou';
+import { RepoList, RepoTable, type RepoRowData } from './repos/RepoRows';
 
 export default function Repos() {
   return (
@@ -42,206 +63,217 @@ export default function Repos() {
 }
 
 function ReposView() {
-  const events = useEvents();
-  const [repos, { refetch }] = createLiveResource(() => listRepos(), [{ type: 'repo.changed' }]);
-  const [instances, { refetch: refetchInstances }] = createLiveResource(
-    () => listInstances(),
-    [{ type: 'run.changed' }],
+  const [repoList, { refetch }] = createLiveResource(
+    () => listRepos(),
+    [{ type: 'repo.changed' }, ...summaryRefreshSpecs()],
   );
-  const progress = createCloneProgressStore(events);
-  const toast = createToast();
+  const { instances } = createLiveInstances();
+  const progress = createCloneProgressStore(useEvents());
   onCleanup(progress.dispose);
+  const toast = createToast();
+  useRouteNotice((message) => toast.show(message));
+  const desktop = createMediaQuery('(min-width: 1024px)');
 
+  // "Last run" times move on without a refetch.
+  const [now, setNow] = createSignal(Date.now());
+  const ticker = setInterval(() => setNow(Date.now()), 60_000);
+  onCleanup(() => clearInterval(ticker));
+
+  const [query, setQuery] = createSignal('');
   const [error, setError] = createSignal<string | null>(null);
+  let filterInput: HTMLInputElement | undefined;
+  let needsYouHeading: HTMLHeadingElement | undefined;
+  let listHeading: HTMLHeadingElement | undefined;
 
-  const liveOf = (repoID: string): Instance[] =>
-    (resourceValue(instances) ?? []).filter(
-      (instance) => instance.repo_id === repoID && instance.live,
-    );
+  // One store object per repo id, patched in place by each refetch (see the
+  // header). `loaded` stays true after a failed refetch: the list it had
+  // stays up under the error banner.
+  const [repos, setRepos] = createStore<Repo[]>([]);
+  const [loaded, setLoaded] = createSignal(false);
+  createComputed(() => {
+    const next = resourceValue(repoList);
+    if (next === undefined) return;
+    setRepos(reconcile(next, { key: 'id' }));
+    setLoaded(true);
+  });
 
-  const retry = async (repo: Repo) => {
+  const ordered = createMemo(() => orderRepos(repos));
+  const filtering = () => isFilterActive(query());
+  // One row object per repo, kept for as long as the repo's store object is:
+  // a refetch or a reorder reuses it, so its row (and the focus in it)
+  // survives. Counts and clone progress are getters read by the row's own
+  // JSX, so a run state change or a progress tick updates that text in place.
+  const rowData = (repo: Repo): RepoRowData => ({
+    repo,
+    get counts() {
+      return runCounts(resourceValue(instances) ?? [], repo.id);
+    },
+    get progress() {
+      return progress.progress(repo.id);
+    },
+  });
+  const allRows = createMemo<RepoRowData[]>((previous) => {
+    const kept = new Map(previous.map((row) => [row.repo.id, row]));
+    return ordered().map((repo) => {
+      const row = kept.get(repo.id);
+      return row !== undefined && row.repo === repo ? row : rowData(repo);
+    });
+  }, []);
+  const rows = createMemo(() => {
+    const shown = new Set(filterRepos(ordered(), query()).map((repo) => repo.id));
+    return allRows().filter((row) => shown.has(row.repo.id));
+  });
+
+  // Needs you entries, one store object per problem key.
+  const [problems, setProblems] = createStore<NeedsYouEntry[]>([]);
+  createComputed(() => setProblems(reconcile(needsYou(ordered()), { key: 'key' })));
+
+  // The problems whose Retry/Reset is in flight, by entry key: held here, not
+  // in the entry's row, so it outlives any re-render, and checked before
+  // sending, so a second click while one is pending sends nothing.
+  const [busy, setBusy] = createSignal<ReadonlySet<string>>(new Set());
+  const setKeyBusy = (key: string, on: boolean) =>
+    setBusy((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+
+  const act = async (
+    entry: NeedsYouEntry,
+    send: (repoID: string) => Promise<unknown>,
+    done: (name: string) => string,
+  ) => {
+    const key = entry.key;
+    if (busy().has(key)) return;
+    // Captured before any await: the entry may be gone (or reconciled) after.
+    const repoID = entry.repo.id;
+    const name = entry.repo.name;
+    setKeyBusy(key, true);
     setError(null);
-    progress.clear(repo.id); // stale percent from the failed attempt
     try {
-      await retryClone(repo.id);
-      await refetch(); // immediate feedback; SSE keeps it fresh after
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  };
-
-  const stopAllIn = async (repo: Repo) => {
-    setError(null);
-    try {
-      const res = await stopAll(repo.id);
-      toast.show(`Stopped ${res.stopped} instance${res.stopped === 1 ? '' : 's'}`);
+      await send(repoID);
+      toast.show(done(name));
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      void refetchInstances();
+      try {
+        await refetch();
+      } catch {
+        // The list shows its own load error.
+      }
+      setKeyBusy(key, false);
+      // The fixed entry left the block with the button that had focus.
+      rescueFocus(needsYouHeading, listHeading);
     }
   };
 
+  const retry = (entry: NeedsYouEntry) =>
+    act(
+      entry,
+      (repoID) => {
+        progress.clear(repoID); // stale percent from the failed attempt
+        return retryClone(repoID);
+      },
+      (name) => `Retrying the clone of ${name}`,
+    );
+
+  const reset = (entry: NeedsYouEntry) =>
+    act(entry, resetAFK, (name) => `AFK runs resumed for ${name}`);
+
+  const listTitle = () => (filtering() ? 'Matches' : 'All repositories');
+  const noMatch = () => <EmptyState>No repository matches that filter.</EmptyState>;
+
   return (
-    <main class="page">
-      <SectionHead title="Repositories" />
+    <main class="page page-wide repos-page">
+      <div class="repos-head">
+        <h1>Repositories</h1>
+        <span class="spacer" />
+        <A href="/repos/new" class="repos-add">
+          <Icon name="plus" size={18} />
+          Add
+          <span class="visually-hidden"> repository</span>
+        </A>
+      </div>
       <Banner message={error()} onDismiss={() => setError(null)} />
+      <Show when={repoList.error !== undefined}>
+        <Banner message={errorMessage(repoList.error)} />
+      </Show>
       <Switch>
-        <Match when={repos.error !== undefined}>
-          <Banner message={errorMessage(repos.error)} />
-        </Match>
-        <Match when={repos()?.length === 0}>
+        <Match when={loaded() && repos.length === 0}>
           <EmptyState>
             No repositories yet — <A href="/repos/new">add one</A> to get started.
           </EmptyState>
         </Match>
-        <Match when={repos()}>
-          <div class="card-list">
-            <For each={repos()}>
-              {(repo) => (
-                <RepoCard
-                  repo={repo}
-                  liveInstances={liveOf(repo.id)}
-                  progress={progress.progress(repo.id)}
-                  onRetry={() => void retry(repo)}
-                  onStopAll={() => void stopAllIn(repo)}
-                />
-              )}
-            </For>
+        <Match when={loaded()}>
+          <div class="repos-filter" role="search">
+            <Icon name="search" size={18} class="repos-filter-icon" />
+            <input
+              ref={filterInput}
+              type="search"
+              name="filter"
+              placeholder="Filter by name or host"
+              aria-label="Filter repositories by name or host"
+              autocomplete="off"
+              spellcheck={false}
+              value={query()}
+              onInput={(event) => setQuery(event.currentTarget.value)}
+            />
+            <Show when={query() !== ''}>
+              <button
+                type="button"
+                class="icon-btn repos-filter-clear"
+                aria-label="Clear the filter"
+                onClick={() => {
+                  setQuery('');
+                  filterInput?.focus();
+                }}
+              >
+                <Icon name="x" size={18} />
+              </button>
+            </Show>
           </div>
+
+          <Show when={!filtering() && problems.length > 0}>
+            <NeedsYou
+              entries={problems}
+              busy={(entry) => busy().has(entry.key)}
+              onRetry={retry}
+              onReset={reset}
+              headingRef={(el) => (needsYouHeading = el)}
+            />
+          </Show>
+
+          <section class="repos-all" aria-labelledby="repos-list-heading">
+            <div class="repos-eyebrow-row">
+              <h2 class="repos-eyebrow" id="repos-list-heading" tabIndex={-1} ref={listHeading}>
+                {listTitle()}
+                <span class="visually-hidden"> ({rows().length})</span>
+              </h2>
+              <span class="count" aria-hidden="true">
+                {rows().length}
+              </span>
+              <span class="spacer" />
+              <span class="repos-sort-note">Latest run first</span>
+            </div>
+            <Show
+              when={desktop()}
+              fallback={
+                <RepoList rows={rows()} labelledBy="repos-list-heading" empty={noMatch()} />
+              }
+            >
+              <RepoTable
+                rows={rows()}
+                caption={`${listTitle()}, latest run first`}
+                now={now()}
+                empty={noMatch()}
+              />
+            </Show>
+          </section>
         </Match>
       </Switch>
-      <Show when={(repos()?.length ?? 0) > 0}>
-        <A href="/repos/new" class="add-row">
-          + Add repository
-        </A>
-      </Show>
       {toast.Toast()}
     </main>
-  );
-}
-
-function RepoCard(props: {
-  repo: Repo;
-  liveInstances: Instance[];
-  progress: CloneProgress | null;
-  onRetry: () => void;
-  onStopAll: () => void;
-}) {
-  // Rail rows carry no Stop, so the repo card is the stop surface: visible
-  // whenever the repo has at least one live instance (one is stoppable here).
-  const liveCount = () => props.liveInstances.length;
-  return (
-    <article class="card repo-card">
-      <div class="card-head">
-        <span class="card-title">{props.repo.name}</span>
-        <span class="spacer" />
-        <Show when={liveCount() >= 1}>
-          <button type="button" class="danger stop-all" onClick={() => props.onStopAll()}>
-            Stop all ({liveCount()})
-          </button>
-        </Show>
-        <A href={`/repos/${props.repo.id}/issues`} class="card-link">
-          Issues
-        </A>
-        <Show when={props.repo.tracker_binding === 'builtin'}>
-          <A href={`/repos/${props.repo.id}/crs`} class="card-link">
-            CRs
-          </A>
-        </Show>
-        <A href={`/repos/${props.repo.id}/settings`} class="card-link">
-          Settings
-        </A>
-      </div>
-      <p class="muted card-sub mono">{remoteHost(props.repo.remote_url)}</p>
-      <div class="chip-row">
-        <span class="chip">
-          {props.repo.tracker_binding === 'forge'
-            ? `forge · ${props.repo.forge_kind}`
-            : 'builtin tracker'}
-        </span>
-        <Show when={props.repo.incogni}>
-          <span class="chip incogni">incogni</span>
-        </Show>
-        <Show when={props.repo.tracker_binding === 'builtin'}>
-          <OpenCRChip repoID={props.repo.id} />
-        </Show>
-        <Show when={props.repo.clone_status === 'cloning'}>
-          <span class="chip status-cloning">cloning</span>
-        </Show>
-        <Show when={props.repo.clone_status === 'error'}>
-          <span class="chip status-error">clone failed</span>
-        </Show>
-      </div>
-      <Show when={props.repo.clone_status === 'cloning'}>
-        <CloneProgressBar progress={props.progress} />
-      </Show>
-      <Show when={props.repo.clone_status === 'error'}>
-        <Banner
-          message={props.repo.clone_error ?? 'clone failed'}
-          class="clone-error"
-          action={
-            <button type="button" onClick={() => props.onRetry()}>
-              Retry
-            </button>
-          }
-        />
-      </Show>
-      <Show when={props.repo.clone_status === 'ready'}>
-        <ParkedSection repoID={props.repo.id} />
-      </Show>
-    </article>
-  );
-}
-
-/**
- * Open-CR count chip (builtin-bound repos only — the caller gates): the CR
- * entry point on the repo card. Self-fetching with a scoped cr.changed
- * refetch; a failing CR endpoint hides the chip instead of breaking the page
- * (non-throwing resource read).
- */
-function OpenCRChip(props: { repoID: string }) {
-  const [crs] = createLiveResource(
-    () => props.repoID,
-    (repoID) => listCRs(repoID, 'open'),
-    [{ type: 'cr.changed', match: (event) => event.repoID === props.repoID }],
-  );
-  const count = () => resourceValue(crs)?.length ?? 0;
-  return (
-    <Show when={count() > 0}>
-      <A href={`/repos/${props.repoID}/crs`} class="chip cr-count">
-        {count()} open CR{count() === 1 ? '' : 's'}
-      </A>
-    </Show>
-  );
-}
-
-function CloneProgressBar(props: { progress: CloneProgress | null }) {
-  const percent = () => props.progress?.percent ?? null;
-  return (
-    <div class="clone-progress">
-      <div class="progress-meta">
-        <span class="muted">{props.progress?.phase ?? 'starting…'}</span>
-        <span class="spacer" />
-        <Show when={percent() !== null}>
-          <span class="muted">{percent()}%</span>
-        </Show>
-      </div>
-      <div
-        class="progress-track"
-        role="progressbar"
-        aria-valuemin="0"
-        aria-valuemax="100"
-        aria-valuenow={percent() ?? undefined}
-      >
-        <div
-          classList={{ 'progress-fill': true, indeterminate: percent() === null }}
-          style={percent() !== null ? { width: `${percent()}%` } : undefined}
-        />
-      </div>
-      <Show when={props.progress?.line}>
-        <p class="progress-line mono muted">{props.progress!.line}</p>
-      </Show>
-    </div>
   );
 }

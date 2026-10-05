@@ -480,29 +480,14 @@ func decodeOptionsBag(raw string) (map[string]string, error) {
 }
 
 // authorEnv resolves the git author/committer identity for a spawned session:
-// the repo's git_author_name/email override the global settings, and only a
-// complete name+email pair is applied (GIT_AUTHOR_* and GIT_COMMITTER_* both).
-// An unconfigured author yields no entries (the agent's own git identity, if
-// any, applies).
+// the repo's git_author_name/email override the global settings
+// (AuthorIdentity), and only a complete name+email pair is applied
+// (GIT_AUTHOR_* and GIT_COMMITTER_* both). An unconfigured author yields no
+// entries (the agent's own git identity, if any, applies).
 func (s *Service) authorEnv(ctx context.Context, repo store.Repo) ([]string, error) {
-	name, email := "", ""
-	if repo.GitAuthorName != nil {
-		name = *repo.GitAuthorName
-	}
-	if repo.GitAuthorEmail != nil {
-		email = *repo.GitAuthorEmail
-	}
-	if name == "" {
-		var err error
-		if name, err = s.store.GetString(ctx, store.SettingGitAuthorName, ""); err != nil {
-			return nil, err
-		}
-	}
-	if email == "" {
-		var err error
-		if email, err = s.store.GetString(ctx, store.SettingGitAuthorEmail, ""); err != nil {
-			return nil, err
-		}
+	name, email, err := s.AuthorIdentity(ctx, repo)
+	if err != nil {
+		return nil, err
 	}
 	if name == "" || email == "" {
 		return nil, nil
@@ -513,4 +498,30 @@ func (s *Service) authorEnv(ctx context.Context, repo store.Repo) ([]string, err
 		"GIT_COMMITTER_NAME=" + name,
 		"GIT_COMMITTER_EMAIL=" + email,
 	}, nil
+}
+
+// AuthorIdentity is the git author chain behind authorEnv, each half on its
+// own: the repo's git_author_name / git_author_email when set, else the
+// global git_author_name / git_author_email setting, else "". It does not
+// apply authorEnv's complete-pair rule — that is the spawn's decision about
+// the pair, not part of either field's chain. Exported for the repo settings
+// page's inherited values (issue #61).
+func (s *Service) AuthorIdentity(ctx context.Context, repo store.Repo) (name, email string, err error) {
+	if repo.GitAuthorName != nil {
+		name = *repo.GitAuthorName
+	}
+	if repo.GitAuthorEmail != nil {
+		email = *repo.GitAuthorEmail
+	}
+	if name == "" {
+		if name, err = s.store.GetString(ctx, store.SettingGitAuthorName, ""); err != nil {
+			return "", "", err
+		}
+	}
+	if email == "" {
+		if email, err = s.store.GetString(ctx, store.SettingGitAuthorEmail, ""); err != nil {
+			return "", "", err
+		}
+	}
+	return name, email, nil
 }

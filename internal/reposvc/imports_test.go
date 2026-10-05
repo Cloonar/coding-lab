@@ -181,9 +181,9 @@ func TestImportsMutualImportsLegal(t *testing.T) {
 // decision that force does NOT bypass the importers guard (unlike the
 // clone-in-progress and live-instances guards in deleteguard_test.go): the
 // guard protects another repo's declared world, not lab's own recoverable
-// state, and it lives in the store — below the layer force is interpreted
-// at — so there is nothing for reposvc.Delete to thread force through even
-// if it wanted to.
+// state. reposvc.Delete checks it first, before any forced side effect (issue
+// #61 — see TestDelete_importersRefuseBeforeForcedTeardown), and the store
+// keeps the same check as the backstop; neither threads force through.
 func TestDelete_refusedWhileImportersEvenWithForce(t *testing.T) {
 	e := newTestEnv(t)
 	target := e.readyRepoNamed(t, "target")
@@ -215,5 +215,37 @@ func TestDelete_refusedWhileImportersEvenWithForce(t *testing.T) {
 	}
 	if _, err := e.st.RepoByID(t.Context(), target.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("target repo row survived delete: %v", err)
+	}
+}
+
+// TestImportersListsTheReverseDirection pins Importers (issue #61): the repos
+// that declare an import OF a repo — the ones that block deleting it — sorted
+// by name, an empty non-nil slice when there are none, ErrNotFound for an
+// unknown repo.
+func TestImportersListsTheReverseDirection(t *testing.T) {
+	e := newTestEnv(t)
+	target := e.readyRepoNamed(t, "target")
+	zeta := e.readyRepoNamed(t, "zeta")
+	alpha := e.readyRepoNamed(t, "alpha")
+
+	got, err := e.svc.Importers(t.Context(), target.ID)
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("Importers(no importers) = %#v, %v, want an empty non-nil slice", got, err)
+	}
+	for _, consumer := range []store.Repo{zeta, alpha} {
+		if _, err := e.svc.AddImport(t.Context(), consumer.ID, target.ID); err != nil {
+			t.Fatalf("AddImport(%s): %v", consumer.Name, err)
+		}
+	}
+	got, err = e.svc.Importers(t.Context(), target.ID)
+	if err != nil || len(got) != 2 || got[0].ID != alpha.ID || got[1].ID != zeta.ID {
+		t.Errorf("Importers = %v, %v, want [alpha zeta]", got, err)
+	}
+	// The forward direction is untouched: the target itself imports nothing.
+	if imports, err := e.svc.Imports(t.Context(), target.ID); err != nil || len(imports) != 0 {
+		t.Errorf("Imports(target) = %v, %v, want none", imports, err)
+	}
+	if _, err := e.svc.Importers(t.Context(), "repo_00000000000000000000000000000000"); !isErr(err, store.ErrNotFound) {
+		t.Errorf("Importers(unknown repo) err = %v, want ErrNotFound", err)
 	}
 }

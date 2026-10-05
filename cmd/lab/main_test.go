@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,12 +12,17 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/config"
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
 	"git.cloonar.com/Cloonar/coding-lab/internal/providercli"
+	"git.cloonar.com/Cloonar/coding-lab/internal/readiness"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/testutil"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
@@ -302,5 +309,169 @@ func TestProviderCLIConfigsKeepTheFlagImage(t *testing.T) {
 				t.Errorf("podman invocations = %q, want 2 flag-image probes and 1 flag-image run", lines)
 			}
 		})
+	}
+}
+
+// announceContainerRepos tells open pages that the container preflight's
+// verdict moved (issue #61): repo.changed for exactly the repos whose dev
+// image check depends on it — effective Runner container, pinned or
+// inherited — plus any whose Runner cannot be resolved; never a host repo.
+func TestAnnounceContainerRepos(t *testing.T) {
+	st := testutil.TempStore(t)
+	ctx := context.Background()
+	if err := st.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string, runner *string) string {
+		t.Helper()
+		r, err := st.CreateRepo(ctx, store.Repo{
+			ID: ids.NewID("repo"), Name: name, RemoteURL: "https://forge.example.com/acme/" + name + ".git",
+			TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
+			AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: runner,
+			CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("CreateRepo %s: %v", name, err)
+		}
+		return r.ID
+	}
+	pinnedContainer := mk("pinned-container", new(store.RunnerContainer))
+	pinnedHost := mk("pinned-host", new(store.RunnerHost))
+	inherits := mk("inherits", nil)
+	broken := mk("broken-pin", new("vm"))
+
+	bus := events.NewBus()
+	ch, cancel := bus.Subscribe(ctx)
+	defer cancel()
+	rec := readiness.NewRecorder(bus, nil)
+	announced := func() []string {
+		t.Helper()
+		var ids []string
+		for {
+			select {
+			case e := <-ch:
+				if e.Type != readiness.EventRepoChanged {
+					t.Fatalf("published %q, want repo.changed", e.Type)
+				}
+				raw, _ := json.Marshal(e.Payload)
+				var p struct {
+					RepoID string `json:"repoID"`
+				}
+				if err := json.Unmarshal(raw, &p); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, p.RepoID)
+			default:
+				slices.Sort(ids)
+				return ids
+			}
+		}
+	}
+	sorted := func(ids ...string) []string { slices.Sort(ids); return ids }
+
+	// The seeded default Runner is host: the inheriting repo is a host repo.
+	announceContainerRepos(ctx, st, rec)
+	if got, want := announced(), sorted(pinnedContainer, broken); !slices.Equal(got, want) {
+		t.Fatalf("announced %v, want the pinned container repo and the unresolvable one %v", got, want)
+	}
+
+	// The default flips to container: the inheriting repo now counts.
+	if err := st.SetSetting(ctx, store.SettingRunnerDefault, store.RunnerContainer); err != nil {
+		t.Fatal(err)
+	}
+	announceContainerRepos(ctx, st, rec)
+	if got, want := announced(), sorted(pinnedContainer, broken, inherits); !slices.Equal(got, want) {
+		t.Fatalf("announced %v, want %v", got, want)
+	}
+	_ = pinnedHost // never announced: a host run needs no preflight
+}
+
+// The recorder's fanout over the real store (issue #61): a flipped fetch
+// verdict of an imported repo announces its importers, and a flipped dev
+// image verdict announces every container-Runner repo (plus any whose Runner
+// cannot be resolved) — never a host repo, never per repeated read.
+func TestReadinessFanout(t *testing.T) {
+	st := testutil.TempStore(t)
+	ctx := context.Background()
+	if err := st.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string, runner *string) string {
+		t.Helper()
+		r, err := st.CreateRepo(ctx, store.Repo{
+			ID: ids.NewID("repo"), Name: name, RemoteURL: "https://forge.example.com/acme/" + name + ".git",
+			TrackerBinding: store.TrackerBindingBuiltin, ForgeKind: "none", DefaultBranch: "main",
+			AFKBranchPattern: "afk/<N>", ManualBranchPrefix: "lab/", Runner: runner,
+			CloneStatus: store.CloneStatusReady, CreatedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("CreateRepo %s: %v", name, err)
+		}
+		return r.ID
+	}
+	lib := mk("lib", nil)
+	app := mk("app", new(store.RunnerContainer))
+	tool := mk("tool", nil)
+	if err := st.AddRepoImport(ctx, app, lib); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddRepoImport(ctx, tool, lib); err != nil {
+		t.Fatal(err)
+	}
+
+	bus := events.NewBus()
+	ch, cancel := bus.Subscribe(ctx)
+	defer cancel()
+	rec := readiness.NewRecorder(bus, nil)
+	rec.SetFanout(readinessFanout(st))
+	announced := func() []string {
+		t.Helper()
+		var got []string
+		for {
+			select {
+			case e := <-ch:
+				raw, _ := json.Marshal(e.Payload)
+				var p struct {
+					RepoID string `json:"repoID"`
+				}
+				if err := json.Unmarshal(raw, &p); err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, p.RepoID)
+			default:
+				slices.Sort(got)
+				return got
+			}
+		}
+	}
+	sorted := func(ids ...string) []string { slices.Sort(ids); return ids }
+
+	// lib's own fetch flips: lib and both importers.
+	rec.ObserveFetch(gitx.FetchAttribution{RepoID: lib, Credential: store.NoCredentialStamp}, nil)
+	if got, want := announced(), sorted(lib, app, tool); !slices.Equal(got, want) {
+		t.Fatalf("lib's first fetch announced %v, want %v", got, want)
+	}
+	rec.ObserveFetch(gitx.FetchAttribution{RepoID: lib, Credential: store.NoCredentialStamp}, nil)
+	if got := announced(); len(got) != 0 {
+		t.Fatalf("a repeated verdict announced %v", got)
+	}
+	// app imports nothing: its own fetch announces app alone.
+	rec.ObserveFetch(gitx.FetchAttribution{RepoID: app, Credential: store.NoCredentialStamp}, nil)
+	if got, want := announced(), []string{app}; !slices.Equal(got, want) {
+		t.Fatalf("app's fetch announced %v, want %v", got, want)
+	}
+
+	// A dev image verdict: the spawning repo and every container repo (the
+	// default Runner is host, so only app is one).
+	rec.ObserveImage(app, "registry.test/dev@sha256:1", nil)
+	if got, want := announced(), []string{app}; !slices.Equal(got, want) {
+		t.Fatalf("the first image verdict announced %v, want %v", got, want)
+	}
+	if err := st.SetSetting(ctx, store.SettingRunnerDefault, store.RunnerContainer); err != nil {
+		t.Fatal(err)
+	}
+	rec.ObserveImage(app, "registry.test/dev@sha256:1", errors.New("pulling dev image: manifest unknown"))
+	if got, want := announced(), sorted(lib, app, tool); !slices.Equal(got, want) {
+		t.Fatalf("a flipped image verdict announced %v, want every container repo %v", got, want)
 	}
 }

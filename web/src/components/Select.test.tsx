@@ -7,6 +7,9 @@
 // - the filter input appears automatically from 8 options up (and the
 //   `search` prop forces it both ways), filtering case-insensitively over
 //   label AND value;
+// - the field trigger is named by its label AND the value it shows (a button
+//   named by the label alone never announces the pick); the chip keeps its
+//   aria-label;
 // - CatalogSelect semantics survive: an inherit entry (value "") emits '',
 //   a value missing from the catalog renders marked but selectable, '' with
 //   no inherit shows "(unset)";
@@ -14,6 +17,7 @@
 // - panelPlacement (pure): below preferred, flip above only when below lacks
 //   room and above has more, max-height clamped to the chosen side.
 
+import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Select, { PANEL_MAX_HEIGHT, panelPlacement, type SelectOption } from './Select';
@@ -56,6 +60,14 @@ function trigger(): HTMLButtonElement {
   const el = container.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]');
   if (!el) throw new Error('missing select trigger');
   return el;
+}
+
+/** The trigger's accessible name, as aria-labelledby composes it. */
+function accessibleName(): string {
+  return (trigger().getAttribute('aria-labelledby') ?? '')
+    .split(' ')
+    .map((id) => document.getElementById(id)?.textContent ?? `<missing #${id}>`)
+    .join(' ');
 }
 
 function listbox(): HTMLElement | null {
@@ -281,6 +293,87 @@ describe('Select catalog semantics (former CatalogSelect)', () => {
   });
 });
 
+describe('Select field skin with a host-drawn label', () => {
+  it('draws its own label and is named by it by default', () => {
+    mountSelect({ options: FRUIT, value: 'apple' });
+
+    const label = container.querySelector('.field > span');
+    expect(label?.textContent).toBe('Fruit');
+    // Named by the label, then the value it shows.
+    expect(accessibleName()).toBe('Fruit Apple');
+    expect(trigger().getAttribute('aria-labelledby')?.split(' ')[0]).toBe(label?.id);
+    expect(trigger().hasAttribute('id')).toBe(false);
+    expect(trigger().hasAttribute('aria-describedby')).toBe(false);
+    expect(trigger().hasAttribute('aria-invalid')).toBe(false);
+  });
+
+  it('renders bare and takes its name from the host label when labelledBy is set', async () => {
+    const onChange = vi.fn();
+    mountSelect({
+      options: FRUIT,
+      value: 'apple',
+      labelledBy: 'host-label',
+      id: 'host-control',
+      onChange,
+    });
+
+    // No .field block and no label of its own: the host draws both.
+    expect(container.querySelector('.field')).toBeNull();
+    expect(container.textContent).not.toContain('Fruit');
+    expect(container.querySelector('.select-pop.select-pop-field')).not.toBeNull();
+    expect(trigger().id).toBe('host-control');
+    // The host's label first, then this control's own value.
+    const [labelRef, valueRef] = (trigger().getAttribute('aria-labelledby') ?? '').split(' ');
+    expect(labelRef).toBe('host-label');
+    expect(document.getElementById(valueRef ?? '')?.textContent).toBe('Apple');
+    expect(trigger().classList.contains('select-field-trigger')).toBe(true);
+
+    // It still works as a select: the listbox keeps the label as its name.
+    await openViaClick();
+    expect(listbox()?.getAttribute('aria-label')).toBe('Fruit');
+    rows()[2]?.click();
+    expect(onChange).toHaveBeenCalledWith('cherry');
+  });
+
+  it('says the inherit entry and a not-in-catalog value in its name too, and follows the pick', async () => {
+    mountSelect({ options: FRUIT, value: '', inheritLabel: 'Inherited · Apple' });
+    expect(accessibleName()).toBe('Fruit Inherited · Apple');
+    unmount();
+
+    mountSelect({ options: FRUIT, value: 'durian' });
+    expect(accessibleName()).toBe('Fruit durian (not in catalog)');
+    unmount();
+
+    // The name follows the value as the host applies a pick.
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    const [value, setValue] = createSignal('apple');
+    dispose = render(
+      () => (
+        <Select skin="field" label="Fruit" value={value()} options={FRUIT} onChange={setValue} />
+      ),
+      container,
+    );
+    expect(accessibleName()).toBe('Fruit Apple');
+    await openViaClick();
+    rows()[2]?.click();
+    expect(accessibleName()).toBe('Fruit Cherry');
+  });
+
+  it('wires a host hint and problem to the trigger', () => {
+    mountSelect({
+      options: FRUIT,
+      value: 'apple',
+      labelledBy: 'host-label',
+      describedBy: 'host-error host-hint',
+      invalid: true,
+    });
+
+    expect(trigger().getAttribute('aria-describedby')).toBe('host-error host-hint');
+    expect(trigger().getAttribute('aria-invalid')).toBe('true');
+  });
+});
+
 describe('Select chip skin', () => {
   it('renders a composer-chip pill with aria-label, leading icon and caret', () => {
     mountSelect({
@@ -294,6 +387,9 @@ describe('Select chip skin', () => {
     const chip = trigger();
     expect(chip.classList.contains('composer-chip')).toBe(true);
     expect(chip.getAttribute('aria-label')).toBe('Repository');
+    // The chip is named by aria-label alone, as before.
+    expect(chip.hasAttribute('aria-labelledby')).toBe(false);
+    expect(chip.querySelector('.composer-chip-label')?.hasAttribute('id')).toBe(false);
     expect(chip.querySelector('.test-icon')).not.toBeNull();
     expect(chip.querySelector('.composer-chip-caret')).not.toBeNull();
     expect(chip.querySelector('.composer-chip-label')?.textContent).toBe('Apple');

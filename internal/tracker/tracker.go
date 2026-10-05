@@ -89,6 +89,17 @@ var ErrUnsupported = errors.New("tracker: operation not supported by this tracke
 // produces it (lab's single Forgejo instance is not rate-limited this way).
 var ErrRateLimited = errors.New("tracker: rate limited by the forge")
 
+// ErrAccessDenied marks a forge call the forge refused on the credential's
+// account: 401 (the token is wrong, expired or revoked) or a 403 that is not
+// a rate limit (the token lacks the scope, or the access to this repository,
+// the call needs). Both REST clients unwrap their status error to it, like
+// ErrNotFound, so a refusal is a typed state. With ErrNotFound it is the
+// DEFINITIVE kind of failure — the forge answered, and the answer is about
+// the token or the repository — as opposed to a 5xx, a network error or a
+// timeout, which say nothing about either and heal by themselves; the
+// readiness report (issue #61) records only the former.
+var ErrAccessDenied = errors.New("tracker: access denied by the forge")
+
 // ErrUnknownCheck marks a CheckLog whose context name matches no Checks row on
 // the pull request's CURRENT head. CheckLog resolves the log route from the
 // same head-commit status a Checks() call would report for that name, so a

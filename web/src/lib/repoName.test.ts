@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ForgeKind } from '../api';
-import { deriveRepoName, forgeWebUrl, remoteHost, sanitizeName } from './repoName';
+import { deriveRepoName, forgeWebUrl, remoteHost, remoteLabel, sanitizeName } from './repoName';
 
 describe('deriveRepoName (preview of the server derivation)', () => {
   const rows: Array<[url: string, want: string]> = [
@@ -46,6 +46,27 @@ describe('remoteHost', () => {
   for (const [url, want] of rows) {
     it(`${JSON.stringify(url)} → ${JSON.stringify(want)}`, () => {
       expect(remoteHost(url)).toBe(want);
+    });
+  }
+});
+
+describe('remoteLabel (host plus path, the repo header line)', () => {
+  const rows: Array<[url: string, want: string]> = [
+    ['https://github.com/Cloonar/coding-lab.git', 'github.com/Cloonar/coding-lab'],
+    ['git@github.com:Cloonar/coding-lab.git', 'github.com/Cloonar/coding-lab'],
+    ['ssh://git@git.cloonar.com:2222/Cloonar/coding-lab.git', 'git.cloonar.com/Cloonar/coding-lab'],
+    ['https://user:secret@github.com/foo/bar.git', 'github.com/foo/bar'], // never the password
+    ['http://localhost:3000/o/r.git/', 'localhost/o/r'],
+    ['https://git.example.com', 'git.example.com'], // host only
+    ['host:repo.GIT', 'host/repo'],
+    ['file:///srv/git/repo.git', 'srv/git/repo'],
+    ['  /srv/git/repo.git  ', '/srv/git/repo.git'], // not a URL: verbatim, trimmed
+    ['', ''],
+  ];
+
+  for (const [url, want] of rows) {
+    it(`${JSON.stringify(url)} → ${JSON.stringify(want)}`, () => {
+      expect(remoteLabel(url)).toBe(want);
     });
   }
 });

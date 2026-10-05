@@ -10,8 +10,16 @@ package tracker
 // With no observer set (tests, degraded wiring) TrackerFor returns the
 // backend unwrapped — existing type assertions on the concrete backends
 // keep working.
+//
+// A second, separate seam rides the same decorator (issue #61): the READ
+// observer, which does carry an error — see ReadObserver for why that is
+// safe there and still wrong for the metrics seam above.
 
-import "context"
+import (
+	"context"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+)
 
 // Operation vocabulary for the observer seam — one constant per Tracker
 // method, bounded by construction (metric label values).
@@ -51,12 +59,64 @@ type Observer func(binding, op string, ok bool)
 // any TrackerFor — the field is read without a lock.
 func (r *Registry) SetObserver(obs Observer) { r.observe = obs }
 
-// instrument wraps t for the observer; a nil observer returns t unwrapped.
-func (r *Registry) instrument(t Tracker, binding string) Tracker {
-	if r.observe == nil {
+// ListRead is the outcome of one LIST read of a forge-bound repo's tracker —
+// ReadyIssues, Issues, Pulls or PullsForHead — as the read observer receives
+// it (issue #61). A list read is the one kind of call whose failure says
+// something about the repo as a whole rather than about one issue or pull:
+// it needs nothing but a reachable forge, a token the forge accepts, and a
+// repository that token can see.
+type ListRead struct {
+	// RepoID is the repo the tracker was resolved for.
+	RepoID string
+	// Credential names the exact version of the forge credential the REST
+	// client was built with (store.CredentialStamp over the row TrackerFor
+	// decrypted), so the outcome goes stale when the operator picks or
+	// rotates another.
+	Credential string
+	// Op is the Op* constant of the read.
+	Op string
+	// Err is the read's error, nil on success. A forge client's error holds
+	// the method, path, status and a bounded body snippet, and never the
+	// token — which travels only in the Authorization header (the forgejo
+	// and github `do` helpers pin that).
+	Err error
+	// OpenIssues is the size of the repo's open issue set when this read
+	// returned all of it (a successful Issues read of the open or all
+	// view); -1 when the read does not carry that.
+	OpenIssues int
+}
+
+// ReadObserver receives one ListRead per list read of a FORGE-bound repo's
+// tracker resolved through the registry. It is what lets the readiness report
+// (issue #61) say whether the tracker answers without asking the forge per
+// page view: the report is built from the most recent read lab made anyway.
+//
+// Unlike Observer it carries the error, because "the last read failed" is
+// useless to an operator without the forge's own words. That is safe on THIS
+// seam for the reason given on ListRead.Err, and it stays off the metrics
+// seam, whose label values must be bounded. Three kinds of read are never
+// reported: a builtin-bound repo's (a store query — it cannot fail the way a
+// forge does), one whose caller's context is already done (a dropped request
+// says nothing about the forge), and anything that is not a list read.
+type ReadObserver func(ListRead)
+
+// SetReadObserver wires the read observer. Call once during startup wiring,
+// before any TrackerFor — the field is read without a lock.
+func (r *Registry) SetReadObserver(obs ReadObserver) { r.observeRead = obs }
+
+// instrument wraps t for the observers; with neither set it returns t
+// unwrapped. credential is the stamp of the forge credential t was built
+// with, "" for the builtin tracker — whose reads the read observer never
+// sees.
+func (r *Registry) instrument(t Tracker, binding, repoID, credential string) Tracker {
+	reads := r.observeRead
+	if binding != store.TrackerBindingForge {
+		reads = nil
+	}
+	if r.observe == nil && reads == nil {
 		return t
 	}
-	return &observed{t: t, binding: binding, obs: r.observe}
+	return &observed{t: t, binding: binding, obs: r.observe, reads: reads, repoID: repoID, credential: credential}
 }
 
 // observed decorates a Tracker with per-call observer reports. Results and
@@ -64,10 +124,32 @@ func (r *Registry) instrument(t Tracker, binding string) Tracker {
 type observed struct {
 	t       Tracker
 	binding string
-	obs     Observer
+	obs     Observer // nil when only the read observer is wired
+
+	// The read observer and what it attributes a list read to (nil reads =
+	// not reported: no observer wired, or a builtin-bound repo).
+	reads      ReadObserver
+	repoID     string
+	credential string
 }
 
-func (o *observed) report(op string, err error) { o.obs(o.binding, op, err == nil) }
+func (o *observed) report(op string, err error) {
+	if o.obs != nil {
+		o.obs(o.binding, op, err == nil)
+	}
+}
+
+// reportRead hands one list read to the read observer. openIssues is the
+// open-set size the read carried, -1 for none.
+func (o *observed) reportRead(ctx context.Context, op string, err error, openIssues int) {
+	if o.reads == nil || ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		openIssues = -1
+	}
+	o.reads(ListRead{RepoID: o.repoID, Credential: o.credential, Op: op, Err: err, OpenIssues: openIssues})
+}
 
 // ForRun forwards the identity-rescoping seam (RunScoper) through the
 // decorator: the re-scoped backend is re-wrapped so its calls keep
@@ -77,7 +159,9 @@ func (o *observed) report(op string, err error) { o.obs(o.binding, op, err == ni
 // to the operator identity.
 func (o *observed) ForRun(runID string) Tracker {
 	if rs, ok := o.t.(RunScoper); ok {
-		return &observed{t: rs.ForRun(runID), binding: o.binding, obs: o.obs}
+		scoped := *o
+		scoped.t = rs.ForRun(runID)
+		return &scoped
 	}
 	return o
 }
@@ -87,13 +171,33 @@ var _ RunScoper = (*observed)(nil)
 func (o *observed) ReadyIssues(ctx context.Context) ([]Issue, error) {
 	issues, err := o.t.ReadyIssues(ctx)
 	o.report(OpReadyIssues, err)
+	o.reportRead(ctx, OpReadyIssues, err, -1)
 	return issues, err
 }
 
 func (o *observed) Issues(ctx context.Context, state string) ([]Issue, error) {
 	issues, err := o.t.Issues(ctx, state)
 	o.report(OpIssues, err)
+	o.reportRead(ctx, OpIssues, err, openIssueCount(issues, state))
 	return issues, err
+}
+
+// openIssueCount is the size of the open issue set an Issues(state) result
+// carries, -1 when it carries none. Both forge backends return the COMPLETE
+// open set for the open and all views (the bounded window of issue #176
+// applies to closed issues only), so counting the open rows of either is the
+// repo's open issue count; the closed view holds no open issue at all.
+func openIssueCount(issues []Issue, state string) int {
+	if state != StateOpen && state != StateAll {
+		return -1
+	}
+	n := 0
+	for _, is := range issues {
+		if is.State == StateOpen {
+			n++
+		}
+	}
+	return n
 }
 
 func (o *observed) Issue(ctx context.Context, number int) (Issue, error) {
@@ -111,12 +215,14 @@ func (o *observed) CreateComment(ctx context.Context, number int, body string) e
 func (o *observed) Pulls(ctx context.Context) ([]PullRef, error) {
 	pulls, err := o.t.Pulls(ctx)
 	o.report(OpPulls, err)
+	o.reportRead(ctx, OpPulls, err, -1)
 	return pulls, err
 }
 
 func (o *observed) PullsForHead(ctx context.Context, head, base string) ([]PullRef, error) {
 	pulls, err := o.t.PullsForHead(ctx, head, base)
 	o.report(OpPullsForHead, err)
+	o.reportRead(ctx, OpPullsForHead, err, -1)
 	return pulls, err
 }
 

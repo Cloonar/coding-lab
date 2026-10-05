@@ -131,12 +131,14 @@ func TestRepoSecretCreateListAndNoReadback(t *testing.T) {
 		t.Fatalf("A_KEY id mismatch: list %v, create %v", list[0]["id"], aKey["id"])
 	}
 
-	// Duplicate name within the repo -> 409, no leak.
+	// Duplicate name within the repo -> 409, no leak, naming the name field
+	// (issue #61) so the secrets list shows it under the name input.
 	resp = x.do("POST", base, map[string]any{"name": "A_KEY", "value": "irrelevant"}, h)
 	wantStatus(t, resp, http.StatusConflict)
 	body = readBody(t, resp)
-	if got := mustUnmarshalMap(t, body)["error"]; got != store.ErrNameTaken.Error() {
-		t.Fatalf("duplicate error = %v, want %q", got, store.ErrNameTaken.Error())
+	dup := mustUnmarshalMap(t, body)
+	if dup["error"] != store.ErrNameTaken.Error() || dup["field"] != "name" {
+		t.Fatalf("duplicate body = %v, want error %q naming field name", dup, store.ErrNameTaken.Error())
 	}
 
 	// Same name in a different repo is fine (scoped uniqueness).
@@ -158,22 +160,42 @@ func TestRepoSecretCreateValidation(t *testing.T) {
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID + "/secrets"
 
-	// Invalid name -> 400 with the pinned grammar message; value never echoed.
-	resp := x.do("POST", base, map[string]any{"name": "not valid", "value": testSecretValue}, h)
-	wantStatus(t, resp, http.StatusBadRequest)
-	body := readBody(t, resp)
-	assertNoRepoSecretValue(t, body)
-	if got := mustUnmarshalMap(t, body)["error"]; got != repoSecretGrammarMessage {
-		t.Fatalf("error = %v, want %q", got, repoSecretGrammarMessage)
+	// Every refusal names the JSON key it is about (issue #61) — the value is
+	// never echoed — and one naming no single field carries no "field" key.
+	for _, tc := range []struct {
+		name  string
+		body  any
+		want  string
+		field string
+	}{
+		{"invalid name", map[string]any{"name": "not valid", "value": testSecretValue}, repoSecretGrammarMessage, "name"},
+		{"empty name", map[string]any{"name": "", "value": testSecretValue}, repoSecretGrammarMessage, "name"},
+		{"missing name", map[string]any{"value": testSecretValue}, repoSecretGrammarMessage, "name"},
+		{"empty value", map[string]any{"name": "EMPTY_VALUE", "value": ""}, "value is required", "value"},
+		{"missing value", map[string]any{"name": "NO_VALUE"}, "value is required", "value"},
+		{"invalid JSON body", "not an object", "invalid JSON body", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := x.do("POST", base, tc.body, h)
+			wantStatus(t, resp, http.StatusBadRequest)
+			body := readBody(t, resp)
+			assertNoRepoSecretValue(t, body)
+			got := mustUnmarshalMap(t, body)
+			if got["error"] != tc.want {
+				t.Fatalf("error = %v, want %q", got["error"], tc.want)
+			}
+			if tc.field == "" {
+				if hasKey(got, "field") {
+					t.Fatalf("fieldless refusal carries field = %v", got["field"])
+				}
+			} else if got["field"] != tc.field {
+				t.Fatalf("field = %v, want %q (body %v)", got["field"], tc.field, got)
+			}
+		})
 	}
 
-	// Empty value -> 400.
-	resp = x.do("POST", base, map[string]any{"name": "EMPTY_VALUE", "value": ""}, h)
-	wantStatus(t, resp, http.StatusBadRequest)
-	_ = readBody(t, resp)
-
 	// Unknown repo -> 404.
-	resp = x.do("POST", "/api/v1/repos/repo_missing/secrets",
+	resp := x.do("POST", "/api/v1/repos/repo_missing/secrets",
 		map[string]any{"name": "X", "value": "v"}, h)
 	wantStatus(t, resp, http.StatusNotFound)
 	_ = readBody(t, resp)
@@ -226,10 +248,15 @@ func TestRepoSecretRotateAndDelete(t *testing.T) {
 		t.Fatalf("stored value after rotate = %q, want %q", plaintext, "rotated-"+testSecretValue)
 	}
 
-	// Empty value on rotate -> 400.
-	resp = x.do("PATCH", base+"/"+id, map[string]any{"value": ""}, h)
-	wantStatus(t, resp, http.StatusBadRequest)
-	_ = readBody(t, resp)
+	// Empty or missing value on rotate -> 400 naming the value field (issue
+	// #61).
+	for _, patch := range []map[string]any{{"value": ""}, {}} {
+		resp = x.do("PATCH", base+"/"+id, patch, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if got := decodeBody(t, resp); got["error"] != "value is required" || got["field"] != "value" {
+			t.Fatalf("rotate %v body = %v, want error naming field value", patch, got)
+		}
+	}
 
 	// Rotate through ANOTHER repo's path -> 404, never cross-repo access.
 	resp = x.do("PATCH", "/api/v1/repos/"+other.ID+"/secrets/"+id,

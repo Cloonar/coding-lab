@@ -1,20 +1,30 @@
-// Secrets section, moved verbatim from the RepoSettings monolith (issue
-// #198). Device-local/immediate by design: every action (create, rotate,
-// delete) talks to the server the moment it happens, so there is no
-// useSettingsForm and no unsaved-changes guard here.
+// Secrets section (issue #61 §9, issue #104): a write-only per-repo secret
+// store. No endpoint or view here ever fetches or displays a value — create,
+// rotate and delete only. Agents consume secrets via `labctl secret exec`.
 //
-// Issue #25 puts the credential-gateway grant picker ABOVE this card and
-// leaves the card itself untouched: the two secret stores coexist on this
-// subpage until #27 retires lab's own `repo_secrets`, and the picker leading
-// is what says which one an operator should reach for first.
+// Every row acts at once, in place: a row opens (a disclosure, nothing over
+// the page) to take a new value — "Save new value" — or to be deleted behind
+// an inline confirmation; the last row is "+ New secret", which opens the
+// same way into the name, description and value of a new one. Problems show
+// where they belong: under the field they are about — the server's refusals
+// too, when it names the field, else under the form — and a failed delete in
+// the row it was asked for.
 //
-// Issue #39 adds the SSH-targets picker directly below the credential-gateway
-// grant picker (and still above this card): the Warpgate analogue of the same
-// idea, for outbound SSH targets instead of the OneCLI pool.
+// Rows keep their identity across a reload (lib/rowStore.ts), and focus never
+// falls off the page: a row that closes after a new value hands it to its
+// own head, a deleted row to the row that takes its place (else to "New
+// secret"), and an added secret to "New secret".
+//
+// Issue #25 puts the credential-gateway grant picker ABOVE this list and
+// issue #39 the SSH-targets picker below it (and still above this list): the
+// two secret stores coexist on this page until #27 retires lab's own
+// `repo_secrets`, and the pickers leading is what says which one an operator
+// should reach for first.
 
 import { A } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
+import { For, Show, createResource, createSignal, createUniqueId, type JSX } from 'solid-js';
 import {
+  ApiError,
   createRepoSecret,
   deleteRepoSecret,
   errorMessage,
@@ -22,10 +32,14 @@ import {
   rotateRepoSecret,
   type RepoSecret,
 } from '../../../api';
-import EmptyState from '../../../components/EmptyState';
 import Banner from '../../../components/Banner';
-import FormCard from '../../../components/FormCard';
-import SectionCard from '../../../components/SectionCard';
+import EmptyState from '../../../components/EmptyState';
+import Icon from '../../../components/Icon';
+import InlineConfirm from '../../../components/InlineConfirm';
+import { rescueFocus } from '../../../lib/focus';
+import { resourceValue } from '../../../lib/resource';
+import { createRowStore, rescueRowFocus, type OwnedRows } from '../../../lib/rowStore';
+import { useRepoHome } from '../../repo-home/context';
 import RepoSecretGrantsSection from './SecretGrants';
 import RepoSSHTargetsSection from './SSHTargets';
 
@@ -34,219 +48,200 @@ function secretUpdatedOn(timestamp: string): string {
   return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleDateString();
 }
 
-/**
- * Secrets section (issue #104): a write-only per-repo secret store. No
- * endpoint or view here ever fetches or displays a value — create, rotate
- * and delete only. Agents consume secrets via `labctl secret exec`, not
- * through this UI.
- */
 export default function RepoSecretsSection(props: { repoId: string }) {
-  const [secrets, { refetch }] = createResource(() => listRepoSecrets(props.repoId));
-  const [showCreate, setShowCreate] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [fetched, { refetch }] = createResource(
+    () => props.repoId,
+    async (repoId): Promise<OwnedRows<RepoSecret>> => ({
+      owner: repoId,
+      rows: await listRepoSecrets(repoId),
+    }),
+  );
+  // One stable object per secret, and only ever this repo's.
+  const secrets = createRowStore(
+    () => resourceValue(fetched),
+    () => props.repoId,
+  );
+  // One row open at a time: a secret's id, 'new', or nothing.
+  const [open, setOpen] = createSignal<string | null>(null);
+  const toggle = (id: string): void => {
+    setOpen(open() === id ? null : id);
+  };
+  let list: HTMLUListElement | undefined;
+  const rowHeads = (): HTMLElement[] =>
+    Array.from(
+      list?.querySelectorAll<HTMLElement>('.secret-row:not(.secret-row-new) .secret-row-head') ??
+        [],
+    );
+  const newHead = (): HTMLElement | null =>
+    list?.querySelector<HTMLElement>('.secret-row-new .secret-row-head') ?? null;
 
   return (
     <>
       <RepoSecretGrantsSection repoId={props.repoId} />
       <RepoSSHTargetsSection repoId={props.repoId} />
-      <SectionCard
-        title="Secrets"
-        action={
-          <button type="button" class="primary small" onClick={() => setShowCreate(!showCreate())}>
-            {showCreate() ? 'Cancel' : '+ Add secret'}
-          </button>
-        }
-        hint={
-          <>
-            Values are write-only — lab never reads or shows them again after saving. Agents use
-            them via <code>labctl secret exec</code>.
-          </>
-        }
-      >
-        <Banner message={error()} onDismiss={() => setError(null)} />
-        <Show when={showCreate()}>
-          <CreateSecretForm
-            repoId={props.repoId}
-            onCreated={() => {
-              setShowCreate(false);
-              void refetch();
-            }}
-          />
+      <section class="card secrets-list" aria-label="Secrets">
+        <p class="settings-note">
+          Values are write-only: lab never reads or shows them again after saving. Agents use them
+          via <code>labctl secret exec</code>.
+        </p>
+        <Show when={fetched.error}>{(err) => <Banner message={errorMessage(err())} />}</Show>
+        <Show when={secrets.loaded()}>
+          <ul class="secret-rows" ref={list}>
+            <Show when={secrets.rows.length === 0}>
+              <li>
+                <EmptyState>No secrets yet. Add one for agents to use.</EmptyState>
+              </li>
+            </Show>
+            <For each={secrets.rows}>
+              {(secret) => (
+                <SecretRow
+                  repoId={props.repoId}
+                  secret={secret}
+                  open={open() === secret.id}
+                  onToggle={() => toggle(secret.id)}
+                  onRotated={(rotated) => {
+                    // The answer first (the exposure note goes at once), then
+                    // the list.
+                    secrets.patch(rotated);
+                    setOpen(null);
+                    void refetch();
+                  }}
+                  onDeleted={() => {
+                    const at = secrets.rows.findIndex((row) => row.id === secret.id);
+                    secrets.remove(secret.id);
+                    setOpen(null);
+                    void refetch();
+                    // The row took the focus with it.
+                    rescueRowFocus(rowHeads(), at, newHead());
+                  }}
+                />
+              )}
+            </For>
+            <NewSecretRow
+              repoId={props.repoId}
+              open={open() === 'new'}
+              onToggle={() => toggle('new')}
+              onCreated={() => {
+                setOpen(null);
+                void refetch();
+                rescueFocus(newHead());
+              }}
+            />
+          </ul>
         </Show>
-        <Switch>
-          <Match when={secrets.error !== undefined}>
-            <Banner message={errorMessage(secrets.error)} />
-          </Match>
-          <Match when={secrets()?.length === 0}>
-            <EmptyState>
-              No secrets yet — add one for agents to use via labctl secret exec.
-            </EmptyState>
-          </Match>
-          <Match when={secrets()}>
-            <div class="card-list">
-              <For each={secrets()}>
-                {(secret) => (
-                  <SecretRow
-                    repoId={props.repoId}
-                    secret={secret}
-                    onChanged={() => void refetch()}
-                    onError={setError}
-                  />
-                )}
-              </For>
-            </div>
-          </Match>
-        </Switch>
-      </SectionCard>
+      </section>
     </>
   );
 }
 
-function CreateSecretForm(props: { repoId: string; onCreated: () => void }) {
-  const [name, setName] = createSignal('');
-  const [description, setDescription] = createSignal('');
-  const [value, setValue] = createSignal('');
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-
-  const submit = async (event: SubmitEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      await createRepoSecret(props.repoId, name().trim(), description().trim(), value());
-      setName('');
-      setDescription('');
-      setValue('');
-      props.onCreated();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
+/** The disclosure head of a row: what it shows and the chevron that opens it. */
+function RowHead(props: {
+  open: boolean;
+  controls: string;
+  onToggle: () => void;
+  ref?: (el: HTMLButtonElement) => void;
+  children: JSX.Element;
+}) {
   return (
-    <FormCard
-      title="New secret"
-      wide
-      submitLabel="Save secret"
-      busyLabel="Saving…"
-      error={error()}
-      onDismissError={() => setError(null)}
-      onSubmit={(e) => void submit(e)}
-      busy={busy()}
+    <button
+      type="button"
+      ref={props.ref}
+      class="secret-row-head"
+      aria-expanded={props.open}
+      aria-controls={props.controls}
+      onClick={() => props.onToggle()}
     >
-      <label class="field">
-        <span>Name</span>
-        <input
-          type="text"
-          name="secret-name"
-          required
-          autocomplete="off"
-          spellcheck={false}
-          class="mono"
-          placeholder="API_KEY"
-          value={name()}
-          onInput={(e) => setName(e.currentTarget.value)}
-        />
-        <small class="hint">
-          Uppercase letters, digits, underscores; must start with a letter.
-        </small>
-      </label>
-      <label class="field">
-        <span>Description</span>
-        <input
-          type="text"
-          name="secret-description"
-          autocomplete="off"
-          value={description()}
-          onInput={(e) => setDescription(e.currentTarget.value)}
-        />
-      </label>
-      <label class="field">
-        <span>Value</span>
-        <input
-          type="password"
-          name="secret-value"
-          required
-          autocomplete="off"
-          value={value()}
-          onInput={(e) => setValue(e.currentTarget.value)}
-        />
-      </label>
-    </FormCard>
+      <span class="secret-row-text">{props.children}</span>
+      <Icon name={props.open ? 'chevron-down' : 'chevron-right'} size={18} />
+    </button>
   );
 }
 
 function SecretRow(props: {
   repoId: string;
   secret: RepoSecret;
-  onChanged: () => void;
-  onError: (message: string | null) => void;
+  open: boolean;
+  onToggle: () => void;
+  /** A new value was saved: the server's row (the page closes this one). */
+  onRotated: (secret: RepoSecret) => void;
+  /** The secret is gone (the page takes the row out and moves the focus). */
+  onDeleted: () => void;
 }) {
-  const [rotating, setRotating] = createSignal(false);
+  const home = useRepoHome();
+  const uid = createUniqueId();
+  const bodyId = `secret-${uid}-body`;
+  const valueId = `secret-${uid}-value`;
+  const errorId = `secret-${uid}-error`;
+  const hintId = `secret-${uid}-hint`;
   const [newValue, setNewValue] = createSignal('');
+  const [problem, setProblem] = createSignal<string | null>(null);
+  // A failed delete, said in this row — not somewhere above the list.
+  const [deleteError, setDeleteError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
+  let head: HTMLButtonElement | undefined;
 
-  const rotate = async (event: SubmitEvent) => {
+  const rotate = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
+    if (busy()) return;
+    if (newValue() === '') {
+      setProblem('Paste the new value first.');
+      document.getElementById(valueId)?.focus();
+      return;
+    }
+    // Captured before the await: the row is a live object.
+    const name = props.secret.name;
     setBusy(true);
-    props.onError(null);
+    setProblem(null);
+    setDeleteError(null);
     try {
-      await rotateRepoSecret(props.repoId, props.secret.id, newValue());
+      const rotated = await rotateRepoSecret(props.repoId, props.secret.id, newValue());
       setNewValue('');
-      setRotating(false);
-      props.onChanged();
+      props.onRotated(rotated);
+      home.notify(`${name} has a new value`);
+      // The row closed, and took the button that had the focus with it.
+      rescueFocus(head);
     } catch (err) {
-      props.onError(errorMessage(err));
+      setProblem(errorMessage(err));
+      document.getElementById(valueId)?.focus();
     } finally {
       setBusy(false);
     }
   };
 
-  const remove = async () => {
-    if (!window.confirm(`Delete secret "${props.secret.name}"?`)) return;
+  const remove = async (): Promise<void> => {
+    if (busy()) return;
+    const name = props.secret.name;
     setBusy(true);
-    props.onError(null);
+    setDeleteError(null);
     try {
       await deleteRepoSecret(props.repoId, props.secret.id);
-      props.onChanged();
+      props.onDeleted();
+      home.notify(`Deleted ${name}`);
     } catch (err) {
-      props.onError(errorMessage(err));
+      setDeleteError(`${name} was not deleted. ${errorMessage(err)}`);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <article class="card">
-      <div class="card-head">
-        <span class="card-title mono">{props.secret.name}</span>
-        <span class="spacer" />
-        <Show when={!rotating()}>
-          <button type="button" class="small" onClick={() => setRotating(true)} disabled={busy()}>
-            Rotate
-          </button>
-          <button
-            type="button"
-            class="danger small"
-            onClick={() => void remove()}
-            disabled={busy()}
-          >
-            {busy() ? 'Working…' : 'Delete'}
-          </button>
-        </Show>
-      </div>
-      <Show when={props.secret.description}>
-        <p class="muted card-sub">{props.secret.description}</p>
-      </Show>
-      <p class="muted card-sub">Updated {secretUpdatedOn(props.secret.updated_at)}</p>
+    <li class="secret-row" classList={{ open: props.open }}>
+      <RowHead
+        open={props.open}
+        controls={bodyId}
+        onToggle={props.onToggle}
+        ref={(el) => (head = el)}
+      >
+        <span class="secret-row-name mono">{props.secret.name}</span>
+        <span class="secret-row-meta">
+          <Show when={props.secret.description}>{props.secret.description} · </Show>
+          updated {secretUpdatedOn(props.secret.updated_at)}
+        </span>
+      </RowHead>
       {/* The sticky exposure warning (issue #108): exposed_run_id/exposed_at
           are both null until a run's transcript surfaces the value, then both
           set until the next rotate clears them — the refetch after a
-          successful rotate (props.onChanged, wired above) is what makes this
-          disappear, no separate clear-exposure call needed. */}
+          successful rotate (props.onChanged) is what makes this disappear. */}
       <Show when={props.secret.exposed_run_id}>
         {(runID) => (
           <p class="secret-exposed">
@@ -261,38 +256,230 @@ function SecretRow(props: {
           </p>
         )}
       </Show>
-      <Show when={rotating()}>
+      <Show when={props.open}>
         {/* Rotation: the field starts blank by construction — the old value is
             never fetched, so there is nothing to prefill. */}
-        <form onSubmit={(e) => void rotate(e)}>
-          <label class="field">
-            <span>New value</span>
+        <form class="secret-row-body" id={bodyId} novalidate onSubmit={(e) => void rotate(e)}>
+          <div class="sfield" classList={{ invalid: problem() !== null }}>
+            <div class="sfield-label">
+              <label for={valueId}>New value</label>
+            </div>
             <input
               type="password"
+              id={valueId}
               name="secret-rotate-value"
-              required
               autocomplete="off"
+              placeholder="Paste the new value"
               value={newValue()}
-              onInput={(e) => setNewValue(e.currentTarget.value)}
-            />
-          </label>
-          <div class="card-actions">
-            <button type="submit" class="primary" disabled={busy()}>
-              {busy() ? 'Rotating…' : 'Save new value'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setNewValue('');
-                setRotating(false);
+              aria-invalid={problem() !== null ? 'true' : undefined}
+              aria-describedby={problem() !== null ? `${errorId} ${hintId}` : hintId}
+              onInput={(e) => {
+                setNewValue(e.currentTarget.value);
+                setProblem(null);
               }}
+            />
+            <Show when={problem()}>
+              {(message) => (
+                <p class="sfield-error" id={errorId} role="alert">
+                  {message()}
+                </p>
+              )}
+            </Show>
+            <small class="sfield-hint" id={hintId}>
+              The current value is never shown.
+            </small>
+          </div>
+          <Show when={deleteError()}>
+            {(message) => (
+              <p class="sfield-error" role="alert">
+                {message()}
+              </p>
+            )}
+          </Show>
+          <div class="secret-row-actions">
+            <InlineConfirm
+              label="Delete"
+              confirmLabel="Delete for good"
+              busyLabel="Deleting…"
+              prompt={`Delete ${props.secret.name}?`}
               disabled={busy()}
-            >
-              Cancel
+              onConfirm={remove}
+            />
+            <span class="spacer" />
+            <button type="submit" class="primary" disabled={busy()}>
+              {busy() ? 'Saving…' : 'Save new value'}
             </button>
           </div>
         </form>
       </Show>
-    </article>
+    </li>
+  );
+}
+
+function NewSecretRow(props: {
+  repoId: string;
+  open: boolean;
+  onToggle: () => void;
+  onCreated: () => void;
+}) {
+  const home = useRepoHome();
+  const uid = createUniqueId();
+  const bodyId = `secret-${uid}-body`;
+  const id = (key: string): string => `secret-${uid}-${key}`;
+  const [name, setName] = createSignal('');
+  const [description, setDescription] = createSignal('');
+  const [value, setValue] = createSignal('');
+  const [problems, setProblems] = createSignal<{ name?: string; value?: string; form?: string }>(
+    {},
+  );
+  const [busy, setBusy] = createSignal(false);
+
+  const submit = async (event: SubmitEvent): Promise<void> => {
+    event.preventDefault();
+    if (busy()) return;
+    const found: { name?: string; value?: string } = {};
+    if (name().trim() === '') found.name = 'Give the secret a name.';
+    if (value() === '') found.value = 'Paste the value first.';
+    setProblems(found);
+    if (found.name !== undefined || found.value !== undefined) {
+      document.getElementById(id(found.name !== undefined ? 'name' : 'value'))?.focus();
+      return;
+    }
+    setBusy(true);
+    try {
+      const created = await createRepoSecret(
+        props.repoId,
+        name().trim(),
+        description().trim(),
+        value(),
+      );
+      setName('');
+      setDescription('');
+      setValue('');
+      props.onCreated();
+      home.notify(`Added ${created.name}`);
+    } catch (err) {
+      // A refusal that names the field (the name's shape) shows under it.
+      const field = err instanceof ApiError ? err.field : undefined;
+      if (field === 'name' || field === 'value') {
+        setProblems({ [field]: errorMessage(err) });
+        document.getElementById(id(field))?.focus();
+      } else {
+        setProblems({ form: errorMessage(err) });
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const textField = (
+    key: 'name' | 'description' | 'value',
+    label: string,
+    input: JSX.Element,
+    hint?: string,
+  ) => {
+    const problem = (): string | undefined => (key === 'description' ? undefined : problems()[key]);
+    return (
+      <div class="sfield" classList={{ invalid: problem() !== undefined }}>
+        <div class="sfield-label">
+          <label for={id(key)}>{label}</label>
+        </div>
+        {input}
+        <Show when={problem()}>
+          {(message) => (
+            <p class="sfield-error" id={id(`${key}-error`)} role="alert">
+              {message()}
+            </p>
+          )}
+        </Show>
+        <Show when={hint}>
+          <small class="sfield-hint" id={id(`${key}-hint`)}>
+            {hint}
+          </small>
+        </Show>
+      </div>
+    );
+  };
+  const describedBy = (key: 'name' | 'value', hint: boolean): string | undefined => {
+    const ids = [
+      problems()[key] !== undefined ? id(`${key}-error`) : null,
+      hint ? id(`${key}-hint`) : null,
+    ].filter(Boolean);
+    return ids.length > 0 ? ids.join(' ') : undefined;
+  };
+
+  return (
+    <li class="secret-row secret-row-new" classList={{ open: props.open }}>
+      <RowHead open={props.open} controls={bodyId} onToggle={props.onToggle}>
+        <span class="secret-row-name">
+          <Icon name="plus" size={16} />
+          New secret
+        </span>
+      </RowHead>
+      <Show when={props.open}>
+        <form class="secret-row-body" id={bodyId} novalidate onSubmit={(e) => void submit(e)}>
+          {textField(
+            'name',
+            'Name',
+            <input
+              type="text"
+              id={id('name')}
+              name="secret-name"
+              autocomplete="off"
+              spellcheck={false}
+              class="mono"
+              placeholder="API_KEY"
+              value={name()}
+              aria-invalid={problems().name !== undefined ? 'true' : undefined}
+              aria-describedby={describedBy('name', true)}
+              onInput={(e) => {
+                setName(e.currentTarget.value);
+                setProblems({ ...problems(), name: undefined });
+              }}
+            />,
+            'Uppercase letters, digits, underscores; must start with a letter.',
+          )}
+          {textField(
+            'description',
+            'Description',
+            <input
+              type="text"
+              id={id('description')}
+              name="secret-description"
+              autocomplete="off"
+              value={description()}
+              onInput={(e) => setDescription(e.currentTarget.value)}
+            />,
+          )}
+          {textField(
+            'value',
+            'Value',
+            <input
+              type="password"
+              id={id('value')}
+              name="secret-value"
+              autocomplete="off"
+              value={value()}
+              aria-invalid={problems().value !== undefined ? 'true' : undefined}
+              aria-describedby={describedBy('value', false)}
+              onInput={(e) => {
+                setValue(e.currentTarget.value);
+                setProblems({ ...problems(), value: undefined });
+              }}
+            />,
+          )}
+          <Banner
+            message={problems().form ?? null}
+            onDismiss={() => setProblems({ ...problems(), form: undefined })}
+          />
+          <div class="secret-row-actions">
+            <span class="spacer" />
+            <button type="submit" class="primary" disabled={busy()}>
+              {busy() ? 'Adding…' : 'Add secret'}
+            </button>
+          </div>
+        </form>
+      </Show>
+    </li>
   );
 }

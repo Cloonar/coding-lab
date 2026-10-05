@@ -3,16 +3,21 @@
 // or picker, description) / delete-with-confirm. A name collision 409s and
 // the server's message lands in the form banner; deleting cascades the label
 // off every issue (the confirm says so). Forge repos manage labels on the
-// forge. Label mutations emit issue.changed, which refetches here too.
+// forge. Label mutations emit issue.changed, which refetches here too. It
+// renders inside the repo home frame's Issues tab (issue #61): the frame owns
+// the page, the repo heading and the repo fetch; this page keeps an
+// "Issues / Labels" trail within the tab. Delete asks in place (InlineConfirm),
+// never through a browser confirm; once the label is gone, focus moves to the
+// next label's Delete (else the previous one's, else "+ New label") instead of
+// falling to the page with the removed row.
 
 import { useParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createEffect, createResource, createSignal } from 'solid-js';
+import { For, Match, Show, Switch, createEffect, createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import {
   createLabel,
   deleteLabel,
   errorMessage,
-  getRepo,
   listLabels,
   updateLabel,
   type Label,
@@ -21,33 +26,23 @@ import {
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import Banner from '../components/Banner';
 import LabelChip from '../components/LabelChip';
-import RequireAuth from '../components/RequireAuth';
+import InlineConfirm from '../components/InlineConfirm';
 import SectionCard from '../components/SectionCard';
 import SectionHead from '../components/SectionHead';
+import { rescueFocus } from '../lib/focus';
 import { canMutateTracker } from '../lib/issues';
 import { DEFAULT_LABEL_COLOR, normalizeHex } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
+import { useRepoHome } from './repo-home/context';
 
 export default function RepoLabels() {
-  return (
-    <RequireAuth>
-      <RepoLabelsView />
-    </RequireAuth>
-  );
-}
-
-function RepoLabelsView() {
   const params = useParams<{ id: string }>();
+  const home = useRepoHome();
 
-  const [repo] = createResource(
-    () => params.id,
-    (id) => getRepo(id),
-  );
-  // Reads outside the guarded <Match> branches (the h2, builtin()) go through
-  // the non-throwing accessor so a failed getRepo renders the error banner
-  // instead of blanking the page.
-  const repoData = () => resourceValue(repo);
+  // The frame's repo: undefined while loading or after a failed getRepo (the
+  // frame shows that banner).
+  const repoData = () => home.repo();
   const builtin = () => {
     const r = repoData();
     return r !== undefined && canMutateTracker(r.tracker_binding);
@@ -70,8 +65,7 @@ function RepoLabelsView() {
   });
 
   const crumbs = (): Crumb[] => [
-    { label: 'Repos', href: '/repos' },
-    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
+    { label: 'Issues', href: `/repos/${params.id}/issues` },
     { label: 'Labels' },
   ];
 
@@ -79,32 +73,47 @@ function RepoLabelsView() {
   const [editing, setEditing] = createSignal<string | null>(null); // label id
   const [creating, setCreating] = createSignal(false);
 
+  // Asked in place first (InlineConfirm): deleting cannot be undone, and it
+  // strips the label from every issue carrying it — the confirm button says so.
+  let list: HTMLUListElement | undefined;
+  let newLabel: HTMLButtonElement | undefined;
+  // A label's Delete trigger, by its accessible name (label names are unique
+  // per repo).
+  const deleteTrigger = (name: string | undefined) =>
+    name === undefined
+      ? undefined
+      : Array.from(list?.querySelectorAll<HTMLButtonElement>('button') ?? []).find(
+          (button) => button.getAttribute('aria-label') === `Delete label ${name}`,
+        );
   const remove = async (label: Label) => {
-    if (
-      !window.confirm(`Delete label "${label.name}"? It is removed from every issue carrying it.`)
-    ) {
-      return;
-    }
+    const repoID = params.id;
+    // The label's neighbours, read before the row goes.
+    const index = rows.findIndex((row) => row.id === label.id);
+    const next = rows[index + 1]?.name;
+    const previous = rows[index - 1]?.name;
     setError(null);
     try {
-      await deleteLabel(params.id, label.id);
+      await deleteLabel(repoID, label.id);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
       void refetch();
+      return;
     }
+    try {
+      await refetch();
+    } catch {
+      // The page shows the load error.
+    }
+    rescueFocus(deleteTrigger(next), deleteTrigger(previous), newLabel);
   };
 
   return (
-    <main class="page">
+    <>
       <Crumbs segments={crumbs()} />
-      <SectionHead title={<>{repoData()?.name ?? 'Repository'} · Labels</>} />
+      <SectionHead title="Labels" />
       <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
-        <Match when={repo.error !== undefined}>
-          <Banner message={errorMessage(repo.error)} />
-        </Match>
-        <Match when={repo() !== undefined && !builtin()}>
+        <Match when={repoData() !== undefined && !builtin()}>
           <p class="muted forge-note">Managed on the forge — labels live there.</p>
         </Match>
         <Match when={labels.error !== undefined}>
@@ -113,7 +122,7 @@ function RepoLabelsView() {
         <Match when={labels()}>
           <div class="stack">
             <section class="card">
-              <ul class="label-list">
+              <ul class="label-list" ref={list}>
                 <For each={rows}>
                   {(label) => (
                     <li>
@@ -134,13 +143,14 @@ function RepoLabelsView() {
                             >
                               Edit
                             </button>
-                            <button
-                              type="button"
-                              class="small danger"
-                              onClick={() => void remove(label)}
-                            >
-                              Delete
-                            </button>
+                            <InlineConfirm
+                              label="Delete"
+                              confirmLabel="Delete from every issue"
+                              aria-label={`Delete label ${label.name}`}
+                              class="danger"
+                              small
+                              onConfirm={() => remove(label)}
+                            />
                           </div>
                         }
                       >
@@ -165,6 +175,7 @@ function RepoLabelsView() {
                 <button
                   type="button"
                   class="wide"
+                  ref={newLabel}
                   onClick={() => {
                     setEditing(null);
                     setCreating(true);
@@ -188,7 +199,7 @@ function RepoLabelsView() {
           </div>
         </Match>
       </Switch>
-    </main>
+    </>
   );
 }
 

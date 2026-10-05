@@ -1,6 +1,7 @@
-// NewIssue behavioral contract for fetch failures:
-// - a failed getRepo renders the error banner (the h2 falls back to
-//   'Repository') instead of a dead page with neither form nor feedback;
+// NewIssue behavioral contract for fetch failures (it renders inside the repo
+// home frame's Issues tab, issue #61, with an "Issues / New issue" trail):
+// - a failed getRepo renders the frame's error banner instead of a dead page
+//   with neither form nor feedback;
 // - a failed listLabels keeps the form usable — only the label picker is
 //   dropped.
 
@@ -9,7 +10,7 @@ import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Label, TrackerBinding } from '../api';
 import App from '../App';
-import NewIssue from './NewIssue';
+import RepoRoutes from './repo-home/routes';
 
 const REPO_ID = 'repo_1';
 
@@ -59,7 +60,12 @@ function stubApi(): void {
           return Promise.resolve(jsonResponse(500, { error: 'repo lookup failed' }));
         }
         return Promise.resolve(
-          jsonResponse(200, { id: REPO_ID, name: 'coding-lab', tracker_binding: binding }),
+          jsonResponse(200, {
+            id: REPO_ID,
+            name: 'coding-lab',
+            tracker_binding: binding,
+            remote_url: 'git@git.cloonar.com:Cloonar/coding-lab.git',
+          }),
         );
       }
       if (url === `/api/v1/repos/${REPO_ID}/labels` && method === 'GET') {
@@ -92,7 +98,7 @@ async function mountNewIssue(): Promise<void> {
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>
-        <Route path="/repos/:id/issues/new" component={NewIssue} />
+        <RepoRoutes />
         <Route path="*" component={() => null} />
       </MemoryRouter>
     ),
@@ -120,7 +126,15 @@ describe('NewIssue (builtin repo)', () => {
   it('renders the form with the label picker', async () => {
     await mountNewIssue();
 
-    expect(container.textContent).toContain('coding-lab · New issue');
+    // The frame names the repo; the page keeps its own heading and a trail
+    // within the Issues tab (Issues links back to the list, the leaf is inert).
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(container.querySelector('.section-head h2')?.textContent).toBe('New issue');
+    const crumb = container.querySelector('p.crumb');
+    expect(crumb?.textContent).toBe('Issues / New issue');
+    expect(
+      Array.from(crumb?.querySelectorAll('a') ?? []).map((a) => a.getAttribute('href')),
+    ).toEqual([`/repos/${REPO_ID}/issues`]);
     expect(container.querySelector('input[name="title"]')).not.toBeNull();
     expect(container.querySelectorAll('button.chip-toggle').length).toBeGreaterThan(0);
   });
@@ -131,8 +145,8 @@ describe('NewIssue (fetch failures)', () => {
     repoFails = true;
     await mountNewIssue();
 
-    // Header falls back and the failure is visible — not a silent blank.
-    expect(container.textContent).toContain('Repository · New issue');
+    // The page heading stays and the failure is visible — not a silent blank.
+    expect(container.querySelector('.section-head h2')?.textContent).toBe('New issue');
     const banner = container.querySelector('.banner.error');
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain('repo lookup failed');

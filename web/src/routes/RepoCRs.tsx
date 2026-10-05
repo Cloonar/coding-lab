@@ -2,32 +2,23 @@
 // built-in tracker. Server-side state filter (open/merged/closed/all) and
 // phone-first CR cards — number, title, state chip, head → base branches,
 // closes chips linking to the issues the merge will close. cr.changed
-// (scoped to this repo) refetches the page.
+// (scoped to this repo) refetches the page. It is the repo home's CRs tab
+// (issue #61, builtin-bound repos): the frame owns the page and the repo
+// heading, so this tab root renders no crumb.
 
 import { A, useParams, useSearchParams } from '@solidjs/router';
-import { For, Match, Switch, createResource } from 'solid-js';
-import { errorMessage, getRepo, listCRs, type CRStateFilter, type CRSummary } from '../api';
+import { For, Match, Switch } from 'solid-js';
+import { errorMessage, listCRs, type CRStateFilter, type CRSummary } from '../api';
 import Banner from '../components/Banner';
 import ClosesChips from '../components/ClosesChips';
-import Crumbs, { type Crumb } from '../components/Crumbs';
 import EmptyState from '../components/EmptyState';
-import RequireAuth from '../components/RequireAuth';
 import SectionHead from '../components/SectionHead';
 import { formatDateTime } from '../lib/issues';
 import { createLiveResource } from '../lib/liveResource';
-import { resourceValue } from '../lib/resource';
 
 const STATE_FILTERS: CRStateFilter[] = ['open', 'merged', 'closed', 'all'];
 
 export default function RepoCRs() {
-  return (
-    <RequireAuth>
-      <RepoCRsView />
-    </RequireAuth>
-  );
-}
-
-function RepoCRsView() {
   const params = useParams<{ id: string }>();
   const [query, setQuery] = useSearchParams<{ state?: string }>();
 
@@ -36,10 +27,6 @@ function RepoCRsView() {
       ? query.state
       : 'open';
 
-  const [repo] = createResource(
-    () => params.id,
-    (id) => getRepo(id),
-  );
   const [page] = createLiveResource(
     () => `${params.id}\n${state()}`,
     (key) => {
@@ -48,23 +35,14 @@ function RepoCRsView() {
     },
     [{ type: 'cr.changed', match: (event) => event.repoID === params.id }],
   );
-  // Non-throwing accessor: a failed repo lookup must not blank a loaded list.
-  const repoData = () => resourceValue(repo);
 
   const emptyText = () =>
     state() === 'all' ? 'No change requests.' : `No ${state()} change requests.`;
 
-  const crumbs = (): Crumb[] => [
-    { label: 'Repos', href: '/repos' },
-    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
-    { label: 'Change requests' },
-  ];
-
   return (
-    <main class="page">
-      <Crumbs segments={crumbs()} />
+    <>
       <SectionHead
-        title={<>{repoData()?.name ?? 'Repository'} · Change requests</>}
+        title="Change requests"
         action={
           <div class="head-actions">
             <A href={`/repos/${params.id}/issues`} class="card-link">
@@ -101,7 +79,7 @@ function RepoCRsView() {
           </div>
         </Match>
       </Switch>
-    </main>
+    </>
   );
 }
 

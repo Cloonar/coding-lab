@@ -48,6 +48,10 @@ type Engine struct {
 	// overridden in tests (design §2: no time.Now() inside decision logic).
 	now           func() time.Time
 	progressEvery time.Duration
+
+	// onFetch receives attributed fetch and clone outcomes (observe.go); nil
+	// reports nothing.
+	onFetch FetchObserver
 }
 
 // New returns an Engine shelling out to the given git binary (usually just

@@ -1,0 +1,1189 @@
+/* Repo settings, one page (issue #61) — owned by routes/repo-settings/. ------- */
+/* The Settings tab of the repo home: every section on one page, under a
+   sticky row of section chips (below 1024px) or beside a sticky outline (from
+   1024px), plus the save bar the frame renders on every tab while changes
+   are pending. Tokens only, so both colour schemes follow.
+
+   Layers, all below the mobile top strip and the toast (20): the save bar
+   (10), an open Select panel (11) over it, the chips (12) over both. */
+
+/* Page ------------------------------------------------------------------------ */
+
+.settings-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.settings-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+  max-width: 720px;
+}
+
+@media (min-width: 1024px) {
+  .settings-page {
+    grid-template-columns: 180px minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+/* What could not be loaded, said above the sections: the column's gap is
+   all the room a notice needs. */
+.settings-sections > .banner {
+  margin: 0;
+}
+
+/* Section chips (below 1024px) --------------------------------------------------- */
+/* Flush under the tab row and full-bleed across the 16px page gutters. The row
+   scrolls sideways inside itself; `top` is set inline to the height of the
+   app shell's top strip, which is stuck above it. */
+
+.settings-chips {
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  display: flex;
+  gap: 0.35rem;
+  margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) calc(-1 * var(--space-2));
+  padding: 0 var(--space-4);
+  overflow-x: auto;
+  scrollbar-width: none;
+  scroll-behavior: smooth;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-chips::-webkit-scrollbar {
+  display: none;
+}
+
+/* The link is the 48px touch target; the pill inside it is the visible chip. */
+.settings-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  text-decoration: none;
+  border-radius: var(--radius-pill);
+}
+
+.settings-chip-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.settings-chip:hover .settings-chip-pill {
+  color: var(--text);
+}
+
+/* The section in view: an inverted pill, in a heavier weight. */
+.settings-chip[aria-current] .settings-chip-pill {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+  font-weight: 650;
+}
+
+.settings-chip.danger .settings-chip-pill {
+  color: var(--danger);
+}
+
+.settings-chip.danger[aria-current] .settings-chip-pill {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--card);
+}
+
+.settings-chip:focus-visible {
+  outline: none;
+}
+
+.settings-chip:focus-visible .settings-chip-pill {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The "unsaved changes" dot of a chip or outline entry (its words are
+   visually hidden beside it). */
+.settings-nav-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: 0.4rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-chips {
+    scroll-behavior: auto;
+  }
+}
+
+/* Outline (from 1024px) ------------------------------------------------------------ */
+
+.settings-outline {
+  position: sticky;
+  top: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-outline-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-outline-label {
+  margin: 0 0 0.15rem 0.6rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.settings-outline-link {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 0.6rem;
+  border-radius: calc(var(--radius-control) - 2px);
+  color: var(--muted);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.settings-outline-link:hover {
+  color: var(--text);
+}
+
+/* The section in view: a filled row, in a heavier weight. */
+.settings-outline-link[aria-current] {
+  background: var(--hover);
+  color: var(--link);
+  font-weight: 650;
+}
+
+.settings-outline-link.danger {
+  color: var(--danger);
+}
+
+.settings-outline-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Section ------------------------------------------------------------------------ */
+
+.settings-section {
+  min-width: 0;
+}
+
+.settings-section-head {
+  margin: 0 0 var(--space-2) 0.1rem;
+}
+
+.settings-section-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.6rem;
+}
+
+.settings-section-head h2 {
+  margin: 0;
+  font-size: 1.22rem;
+  overflow-wrap: anywhere;
+}
+
+.settings-section-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.settings-section.danger .settings-section-head h2 {
+  color: var(--danger);
+}
+
+/* "applies immediately": the rows of this section never wait for Save. */
+.settings-tag {
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The sections that still bring their own cards stack them like the page. */
+.settings-section > .card + .card,
+.settings-section > .card + .banner,
+.settings-section > .banner + .card {
+  margin-top: var(--space-3);
+}
+
+/* Card and groups ------------------------------------------------------------------ */
+
+.settings-card,
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* The eyebrow of a group of fields. A rule above it separates the group from
+   the fields before it; the first thing in a card needs none. */
+.settings-card h3.settings-sub {
+  margin: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.settings-card > .settings-group:first-child > h3.settings-sub {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-grid2,
+.settings-grid3 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  align-items: start;
+}
+
+/* Agent / Model / Effort. On a phone each pick takes a row of its own: its
+   first entry reads "Inherited · <value>", and half a phone's width would
+   cut the value off. */
+.settings-grid3 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* The container limits are short numbers: three across at every width. */
+.settings-grid3.even {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (min-width: 560px) {
+  .settings-grid3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* The agent takes the full row; model and effort share the next. */
+  .settings-grid3:not(.even) > :first-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (min-width: 1024px) {
+  .settings-grid3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .settings-grid3:not(.even) > :first-child {
+    grid-column: auto;
+  }
+}
+
+/* A sentence inside a card that is not tied to one field. */
+.settings-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.settings-card .banner {
+  margin: 0;
+}
+
+/* Field ---------------------------------------------------------------------------- */
+/* Label (with the changed mark), control, problem, hint. Own class names on
+   purpose: `.field span` (forms.css) restyles every span inside a `.field`. */
+
+.sfield {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.sfield-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+/* A changed field: a dot before its label (the words "unsaved change" are in
+   the label, visually hidden). A switch row carries the dot on its own label. */
+.sfield.changed > .sfield-label::before,
+.sfield.changed .switch-row .switch-label::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.sfield.changed .switch-row .switch-label::before {
+  display: inline-block;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+/* The state of an overridable field, in words at its label: a dashed chip
+   while it is inherited, a filled one once it is set here. */
+.sfield-state {
+  padding: 0 0.45rem;
+  border: 1px dashed var(--muted);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.sfield-state.set {
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  color: var(--link);
+  font-weight: 600;
+}
+
+/* Under a field set here: what it would inherit, and Reset. A row of its own
+   height on touch layouts, so Reset is a 44px target that overlaps nothing. */
+.sfield-default {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 0.6rem;
+  min-height: 44px;
+}
+
+.sfield-default small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+/* An action that reads as a link (Reset, Show anyway). */
+.settings-link-action {
+  flex: none;
+  min-height: 44px;
+  padding: 0 0.15rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--link);
+  font-size: 0.86rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.settings-link-action:hover {
+  background: none;
+  color: var(--text);
+}
+
+/* A note standing in for fields that do not apply right now. */
+.settings-na {
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+/* Inside a sentence the action keeps its line: the hit area is padded out to
+   44px over the note's own text and padding, never over another control. */
+.settings-na .settings-link-action,
+.settings-na .settings-link {
+  display: inline-block;
+  min-height: 0;
+  margin: -0.75rem -0.15rem;
+  padding: 0.75rem 0.15rem;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.settings-link {
+  color: var(--link);
+  font-weight: 600;
+  text-underline-offset: 2px;
+}
+
+@media (min-width: 1024px) {
+  .sfield-default {
+    min-height: 0;
+  }
+
+  .sfield-default .settings-link-action {
+    min-height: 28px;
+  }
+}
+
+.sfield input:not([type='checkbox']),
+.sfield select,
+.sfield textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.sfield input.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 15px;
+}
+
+.sfield textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.sfield ::placeholder {
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.settings-page .select-field-trigger {
+  background: var(--bg);
+}
+
+.settings-page .select-panel {
+  z-index: 11;
+}
+
+.sfield.invalid input:not([type='checkbox']),
+.sfield.invalid select,
+.sfield.invalid textarea,
+.sfield.invalid .select-field-trigger {
+  border-color: var(--danger);
+}
+
+.sfield-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.84rem;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.sfield-hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.sfield-hint code {
+  overflow-wrap: anywhere;
+}
+
+/* The field a deep link or a failed Save went to. */
+.sfield.flash {
+  outline: 2px solid var(--accent);
+  outline-offset: 6px;
+  border-radius: 6px;
+}
+
+/* The option bag's checkboxes: rows without the form's bottom margin. */
+.settings-checks {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-checks .check {
+  margin: 0;
+}
+
+/* A small action under a control ("Customize"). */
+.settings-inline-action {
+  align-self: flex-start;
+  padding: 0 0.75rem;
+}
+
+@media (min-width: 1024px) {
+  .settings-inline-action {
+    min-height: 36px;
+  }
+}
+
+/* Save bar -------------------------------------------------------------------------- */
+/* Fixed to the bottom of the content column: beside the 260px side rail from
+   1024px (shell.css), edge to edge below. The spacer before it reserves its
+   height in the page flow, so nothing ends up behind it. */
+
+.settings-savebar-space {
+  height: calc(4rem + env(safe-area-inset-bottom));
+}
+
+.settings-savebar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  padding: var(--space-2) 0 calc(var(--space-2) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: 0 -8px 22px color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+/* The lift is a darker edge above the bar; on the dark scheme the border
+   alone separates it. */
+@media (prefers-color-scheme: dark) {
+  .settings-savebar {
+    box-shadow: none;
+  }
+}
+
+.settings-savebar-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 var(--space-4);
+}
+
+.settings-savebar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-savebar-msg {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.settings-savebar-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.settings-savebar-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.settings-savebar-text strong {
+  font-size: 0.93rem;
+  font-weight: 650;
+}
+
+.settings-savebar-text small {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+/* The links are one line of text, with a hit area padded out to 44px. */
+.settings-savebar-link {
+  display: inline-block;
+  margin: -0.8rem -0.15rem;
+  padding: 0.8rem 0.15rem;
+  color: var(--link);
+  font-weight: 600;
+  text-underline-offset: 2px;
+}
+
+.settings-savebar.bad .settings-savebar-dot {
+  background: var(--danger);
+}
+
+.settings-savebar.bad .settings-savebar-text strong {
+  color: var(--danger);
+}
+
+.settings-savebar-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.86rem;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+/* (The frame's toast rides above the bar while both show: that rule lives
+   with the toast region, in controls.css.) */
+
+@media (min-width: 1024px) {
+  .settings-savebar-inner {
+    padding: 0 var(--space-5);
+  }
+
+  .shell:not(.rail-collapsed) .settings-savebar {
+    left: 260px;
+  }
+}
+
+/* Schedules list (issue #61 §8) ------------------------------------------------- */
+/* Rows that act at once: a link (name, cadence, flows, next run, last run)
+   beside an on/off switch or a Re-enable button; "+ New schedule" at the end. */
+
+.schedules-list,
+.secrets-list,
+.imports-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.schedule-rows,
+.secret-rows,
+.import-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.schedule-row:first-child {
+  padding-top: 0;
+}
+
+.schedule-row-main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  min-height: 44px;
+  justify-content: center;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 6px;
+}
+
+.schedule-row-main:hover strong {
+  color: var(--link);
+}
+
+.schedule-row-main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.schedule-row-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 1.02rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-row-title svg {
+  flex: none;
+  color: var(--muted);
+}
+
+.schedule-row-line {
+  color: var(--muted);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-row-side {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.schedule-new,
+.secret-row-new .secret-row-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: flex-start;
+  min-height: 44px;
+  padding: 0 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.schedule-new:hover {
+  background: var(--hover);
+}
+
+.schedule-new:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Schedule editor (issue #61 §8) ------------------------------------------------ */
+/* Full screen below 1024px — over the top strip, with its own back control —
+   and a side panel over a scrim from 1024px. Above the save bar (10), the
+   strip and the toast (20) and the side rail (30), which the scrim dims
+   too; below the dialog (50/51). The body scrolls inside the panel; the
+   header and footer stay put. */
+
+.schedule-editor-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 31;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.schedule-editor {
+  position: fixed;
+  inset: 0;
+  z-index: 32;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.schedule-editor-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+
+.schedule-editor-head h2 {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 1.25rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-editor-head h2:focus {
+  outline: none;
+}
+
+.schedule-run-now {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: none;
+  min-height: 44px;
+  font-weight: 600;
+}
+
+/* The strip under the header: always in view, whatever the body is scrolled
+   to. It takes focus (by script) when it has something new to say. */
+.schedule-editor-alerts {
+  flex: none;
+}
+
+.schedule-editor-alerts:focus {
+  outline: none;
+}
+
+.schedule-editor-alerts:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.schedule-editor-alerts .banner {
+  margin: 0;
+  border-width: 0 0 1px;
+  border-radius: 0;
+}
+
+.schedule-editor-refusal p {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--err-border);
+  background: var(--err-bg);
+  color: var(--err-text);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-editor-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.schedule-editor-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.schedule-editor-body .card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.schedule-editor-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.schedule-editor-undo {
+  min-height: 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.schedule-editor-flows,
+.schedule-editor-weekdays {
+  margin: 0;
+}
+
+.schedule-editor-flow-desc {
+  display: block;
+}
+
+.schedule-editor-flow-desc + .schedule-editor-flow-desc {
+  margin-top: 0.2rem;
+}
+
+/* Touch targets: 44px below 1024px, for flows as for weekdays. */
+.schedule-editor-flows .chip-toggle,
+.schedule-editor-weekdays .chip-toggle {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.schedule-editor .cadence-preview {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-editor .cadence-preview.invalid {
+  border-color: var(--danger-border);
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+.schedule-editor-delete {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+
+.schedule-editor-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-3) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--card);
+}
+
+.schedule-editor-foot .spacer {
+  flex: 1;
+}
+
+.schedule-editor-foot button {
+  min-height: 44px;
+}
+
+.schedule-editor-ask {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.schedule-editor-note {
+  flex: 1 1 100%;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.schedule-editor-note.strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (min-width: 1024px) {
+  .schedule-editor {
+    left: auto;
+    width: min(520px, 100vw);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+
+  .schedule-editor-head {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .schedule-editor-foot {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .schedule-editor-foot button {
+    min-height: 36px;
+  }
+
+  .schedule-editor-note {
+    flex: 1 1 auto;
+  }
+
+  .schedule-editor-flows .chip-toggle,
+  .schedule-editor-weekdays .chip-toggle {
+    min-height: 36px;
+  }
+}
+
+/* Secrets list (issue #61 §9) -------------------------------------------------- */
+/* Rows that open in place (a disclosure) to rotate or delete; the last row
+   is "+ New secret". The grant and SSH pickers above keep their own cards. */
+
+.secret-row {
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.secret-row:last-child {
+  border-bottom: 0;
+}
+
+.secret-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-2) 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.secret-row-head:hover {
+  background: transparent;
+}
+
+.secret-row-head:hover .secret-row-name {
+  color: var(--link);
+}
+
+.secret-row-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.secret-row-head svg {
+  flex: none;
+  color: var(--muted);
+}
+
+.secret-row-text {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.secret-row-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.secret-row-name.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92rem;
+}
+
+.secret-row-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.secret-row .secret-exposed {
+  margin: 0 0 var(--space-2);
+}
+
+.secret-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: 0 0 var(--space-3);
+}
+
+.secret-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.secret-row-actions .spacer {
+  flex: 1;
+}
+
+.secret-row-new {
+  padding-top: var(--space-3);
+}
+
+.secret-row-new .secret-row-head {
+  width: auto;
+  padding: 0 0.9rem;
+}
+
+.secret-row-new .secret-row-head svg {
+  color: var(--text);
+}
+
+.secret-row-new .secret-row-head:hover {
+  background: var(--hover);
+}
+
+.secret-row-new .secret-row-body {
+  padding-top: var(--space-3);
+}
+
+/* Imports list (issue #61 §9) -------------------------------------------------- */
+
+.import-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.import-row:first-child {
+  padding-top: 0;
+}
+
+.import-row-text {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.import-row-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.import-row button {
+  flex: none;
+  min-height: 44px;
+}
+
+.imports-add {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.imports-add-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+}
+
+.imports-add-row > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.imports-add-row button {
+  flex: none;
+  min-height: 44px;
+}
+
+@media (min-width: 1024px) {
+  .import-row button,
+  .imports-add-row button {
+    min-height: 36px;
+  }
+}

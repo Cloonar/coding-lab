@@ -79,6 +79,15 @@ func (p *Provider) AuthStatus(ctx context.Context, force bool) (provider.AuthSta
 // cache. The error (if any) is returned so the caller can log it; the
 // caller treats an error as logged-out — better to show the login banner
 // than to spawn doomed remote-control sessions.
+//
+// The peek (LastAuthStatus) is held to a stricter rule than the cache: it
+// moves only on a check that ran to completion and was read — no error, and
+// the caller's context still live. A check that failed (the status command
+// missing, its output unreadable) or was cut off by its caller (an operator
+// leaving the Credentials page mid-check) says nothing about the login, and
+// publishing its logged-out stand-in would have every repo's readiness
+// report the agent as logged out until the next check (issue #61). The
+// previous peek stands instead — or none, if nothing was ever checked.
 func (p *Provider) refreshAuthLocked(ctx context.Context) (provider.AuthStatus, error) {
 	st, err := p.runStatus(ctx)
 	if err != nil {
@@ -87,5 +96,22 @@ func (p *Provider) refreshAuthLocked(ctx context.Context) (provider.AuthStatus, 
 	st.CheckedAt = p.now()
 	p.authCache = st
 	p.authChecked = time.Now()
+	if err == nil && ctx.Err() == nil {
+		p.authLast.Store(&st)
+	}
 	return st, err
+}
+
+// LastAuthStatus implements provider.AuthPeeker: the status the most recent
+// COMPLETED check produced, however old, without running the status command
+// — (zero, false) until a first check has completed. A failed or cancelled
+// check never moves it (refreshAuthLocked). Lock-free on purpose: authMu is
+// held for the whole status command, and a readiness read (issue #61) must
+// not wait for one.
+func (p *Provider) LastAuthStatus() (provider.AuthStatus, bool) {
+	st := p.authLast.Load()
+	if st == nil {
+		return provider.AuthStatus{}, false
+	}
+	return *st, true
 }

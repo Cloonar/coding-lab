@@ -208,6 +208,15 @@ type Options struct {
 	// this server. Consulted per spawn, so a preflight finishing after boot
 	// unblocks container spawns without a restart.
 	ContainerPreflight func() (podmanx.Result, bool)
+	// ImageEnsured, when non-nil, receives the outcome of every spawn-time
+	// pull-if-missing of a dev image (podmanx.EnsureImage in Launch): the
+	// repo being spawned, the image ref, and nil or the pull failure. It is
+	// how the readiness report (issue #61) knows whether a repo's dev image
+	// is present without probing podman per page view — image presence is
+	// checked per spawn and cached nowhere else. cmd/lab wires the readiness
+	// recorder; nil is a no-op. An ensure cut short by its caller's context
+	// is not reported.
+	ImageEnsured func(repoID, ref string, err error)
 	// AgentSockDir is <state>/agent (agentapi.SocketDir) — the directory
 	// holding agent.sock, bind-mounted whole into every container so the
 	// socket survives a server restart (a bind of the FILE would pin the dead
@@ -321,6 +330,7 @@ type Service struct {
 	containerToolsImages map[string]string
 	podmanRun            podmanx.CmdRunner
 	containerPreflight   func() (podmanx.Result, bool)
+	imageEnsured         func(repoID, ref string, err error) // nil = not reported
 	agentSockDir         string
 
 	// OneCLI credential-gateway wiring (issue #24 / ADR-0067; see the Options
@@ -442,6 +452,7 @@ func New(o Options) (*Service, error) {
 		containerToolsImages: o.ContainerToolsImages,
 		podmanRun:            podmanRun,
 		containerPreflight:   o.ContainerPreflight,
+		imageEnsured:         o.ImageEnsured,
 		agentSockDir:         o.AgentSockDir,
 
 		onecli:           o.OneCLI,

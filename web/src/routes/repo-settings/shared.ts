@@ -3,13 +3,6 @@
 // tri-state remote-control vocabulary and the AFK options-bag utilities.
 
 import type { Provider } from '../../api';
-import type { SelectOption } from '../../components/Select';
-
-/** The explicit picks of a tri-state override; Select prepends the inherit row. */
-export const REMOTE_OPTIONS: SelectOption[] = [
-  { value: 'true', label: 'On' },
-  { value: 'false', label: 'Off' },
-];
 
 /** '' ↔ null for nullable text columns (blank field → global default). */
 export function normText(value: string): string | null {
@@ -19,7 +12,7 @@ export function normText(value: string): string | null {
 
 /**
  * '' ↔ null for the nullable BOOLEAN columns (issue #163). The tri-state
- * override rides the Select as a string: '' = inherit (null on the wire),
+ * override rides its three-way pick as a string: '' = inherit (null on the wire),
  * 'true'/'false' = an explicit pick. `false` is a value, never a sentinel — the
  * 2-state-checkbox-over-a-3-state-model bug (issue #21) is impossible by
  * construction here.
@@ -33,7 +26,7 @@ export function boolDraft(value: boolean | null): string {
   return value === null ? '' : String(value);
 }
 
-/** Operator-facing name of an effective on/off state (the inherit row's hint). */
+/** Operator-facing name of an on/off state ("Inherited · on"). */
 export function onOff(value: boolean): string {
   return value ? 'on' : 'off';
 }

@@ -250,6 +250,13 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 		return Result{}, err
 	}
 
+	// The pull's fetch reports its outcome to the readiness recorder (issue
+	// #61), attributed to the credential version read here — BEFORE the row
+	// is materialized, so a rotation landing in between makes the record
+	// stale, never wrong.
+	fetchCtx := gitx.AttributeFetch(ctx, gitx.FetchAttribution{
+		RepoID: repo.ID, Credential: s.store.CredentialStampByID(ctx, repo.CredentialID),
+	})
 	credEnv, cleanup, err := s.credentialEnv(ctx, repo, "pull-"+run.ID)
 	if err != nil {
 		return Result{}, err
@@ -257,7 +264,7 @@ func (s *Service) PullBase(ctx context.Context, run store.Run) (Result, error) {
 	defer cleanup()
 
 	env := append(append([]string{}, s.gitEnv...), credEnv...)
-	pr, err := s.git.PullBase(ctx, s.bareDir(run.RepoID), run.WorktreePath, base, name, email, env)
+	pr, err := s.git.PullBase(fetchCtx, s.bareDir(run.RepoID), run.WorktreePath, base, name, email, env)
 	if err != nil {
 		// A diverged pull with no author identity comes back as
 		// gitx.ErrAuthorIdentityRequired (the merge commit had nobody to
@@ -405,6 +412,13 @@ func (s *Service) refreshImport(ctx context.Context, repo store.Repo, run store.
 	// materialized files by (credID, opID), so several imports sharing one
 	// credential would otherwise write the same filenames and one cleanup would
 	// unlink another's live key. Same reasoning as instance.importCredentialEnv.
+	//
+	// The refresh fetch reports its outcome (issue #61) attributed to the
+	// TARGET's credential version, read before it is materialized, on behalf
+	// of the importing repo — exactly as the spawn's snapshot fetch does.
+	fetchCtx := gitx.AttributeFetch(ctx, gitx.FetchAttribution{
+		RepoID: target.ID, Credential: s.store.CredentialStampByID(ctx, target.CredentialID), OnBehalfOf: repo.ID,
+	})
 	credEnv, cleanup, err := s.credentialEnv(ctx, target, "pull-"+run.ID+"-import-"+target.ID)
 	if err != nil {
 		return s.failedImport(c, run, err)
@@ -413,7 +427,7 @@ func (s *Service) refreshImport(ctx context.Context, repo store.Repo, run store.
 
 	env := append(append([]string{}, s.gitEnv...), credEnv...)
 	bare := s.bareDir(target.ID)
-	commit, err := s.git.MaterializeSnapshot(ctx, bare, dest, target.DefaultBranch, env)
+	commit, err := s.git.MaterializeSnapshot(fetchCtx, bare, dest, target.DefaultBranch, env)
 	if err != nil {
 		return s.failedImport(c, run, err)
 	}

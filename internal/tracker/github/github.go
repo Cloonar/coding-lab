@@ -1627,9 +1627,10 @@ func readRawLog(path, name string, resp *http.Response) ([]byte, error) {
 // produces (method, path, status, body snippet — never the token) plus the
 // machine-readable status and whether the upstream rate limiter throttled it.
 // 404 unwraps to tracker.ErrNotFound; a throttled 403/429 unwraps to
-// tracker.ErrRateLimited — so callers answer not-found / rate-limited instead
-// of an opaque bad-gateway. EnsureLabel reads the status via errors.As to
-// recognize a duplicate-name conflict.
+// tracker.ErrRateLimited; 401 and an unthrottled 403 unwrap to
+// tracker.ErrAccessDenied — so callers answer not-found / rate-limited /
+// refused instead of an opaque bad-gateway. EnsureLabel reads the status via
+// errors.As to recognize a duplicate-name conflict.
 type statusError struct {
 	status      int
 	rateLimited bool
@@ -1644,6 +1645,8 @@ func (e *statusError) Unwrap() error {
 		return tracker.ErrRateLimited
 	case e.status == http.StatusNotFound:
 		return tracker.ErrNotFound
+	case e.status == http.StatusUnauthorized || e.status == http.StatusForbidden:
+		return tracker.ErrAccessDenied
 	default:
 		return nil
 	}

@@ -314,21 +314,25 @@ func TestAddValidation(t *testing.T) {
 	missing := "cred_00000000000000000000000000000000"
 
 	tests := []struct {
-		name string
-		p    AddParams
-		want string // substring of the BadRequestError
+		name  string
+		p     AddParams
+		want  string // substring of the BadRequestError
+		field string // the request field the refusal names (issue #61)
 	}{
-		{"empty remote", AddParams{RemoteURL: "  "}, "remote_url is required"},
-		{"underivable name", AddParams{RemoteURL: "///"}, "cannot derive"},
-		{"bad binding", AddParams{RemoteURL: "/tmp/x", TrackerBinding: "jira"}, "tracker_binding"},
+		{"empty remote", AddParams{RemoteURL: "  "}, "remote_url is required", "remote_url"},
+		// A name derived from an unusable URL is the URL's fault.
+		{"underivable name", AddParams{RemoteURL: "///"}, "cannot derive", "remote_url"},
+		{"bad binding", AddParams{RemoteURL: "/tmp/x", TrackerBinding: "jira"}, "tracker_binding", "tracker_binding"},
 		// The relaxed gate (ADR-0015): explicit forge no longer requires a
 		// detected host — a forge credential is the only gate, so both an
 		// undetected and a detected host answer the same credential error.
-		{"forge binding without credential (undetected host)", AddParams{RemoteURL: "/tmp/x", TrackerBinding: "forge"}, "requires a forge_token credential"},
-		{"forge binding without credential (detected host)", AddParams{RemoteURL: "forgejo@git.cloonar.com:me/proj.git", TrackerBinding: "forge"}, "requires a forge_token credential"},
-		{"forge token as git cred", AddParams{RemoteURL: "/tmp/x", CredentialID: &forgeCred.ID}, "want ssh_key or https_token"},
-		{"ssh key as forge cred", AddParams{RemoteURL: "/tmp/x", ForgeCredentialID: &sshCred.ID}, "want forge_token"},
-		{"missing git cred", AddParams{RemoteURL: "/tmp/x", CredentialID: &missing}, "not found"},
+		{"forge binding without credential (undetected host)", AddParams{RemoteURL: "/tmp/x", TrackerBinding: "forge"}, "requires a forge_token credential", "tracker_binding"},
+		{"forge binding without credential (detected host)", AddParams{RemoteURL: "forgejo@git.cloonar.com:me/proj.git", TrackerBinding: "forge"}, "requires a forge_token credential", "tracker_binding"},
+		{"forge token as git cred", AddParams{RemoteURL: "/tmp/x", CredentialID: &forgeCred.ID}, "want ssh_key or https_token", "credential_id"},
+		{"ssh key as forge cred", AddParams{RemoteURL: "/tmp/x", ForgeCredentialID: &sshCred.ID}, "want forge_token", "forge_credential_id"},
+		{"missing git cred", AddParams{RemoteURL: "/tmp/x", CredentialID: &missing}, "not found", "credential_id"},
+		{"missing forge cred", AddParams{RemoteURL: "/tmp/x", ForgeCredentialID: &missing}, "not found", "forge_credential_id"},
+		{"unknown provider", AddParams{RemoteURL: "/tmp/x", Provider: ptr("nope")}, "unknown provider", "provider"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -339,6 +343,9 @@ func TestAddValidation(t *testing.T) {
 			}
 			if !strings.Contains(bad.Error(), tt.want) {
 				t.Errorf("error %q does not contain %q", bad.Error(), tt.want)
+			}
+			if bad.Field != tt.field {
+				t.Errorf("Field = %q, want %q", bad.Field, tt.field)
 			}
 		})
 	}
@@ -884,6 +891,9 @@ func TestUpdateSettingsForgeBindingRequiresForgeCredential(t *testing.T) {
 	if err == nil || !asBadRequest(err, &bad) || !strings.Contains(bad.Error(), "requires a forge_token credential") {
 		t.Fatalf("flip to forge without credential = %v, want 400 naming the forge_token credential", err)
 	}
+	if bad.Field != "tracker_binding" {
+		t.Errorf("flip to forge Field = %q, want tracker_binding", bad.Field)
+	}
 
 	// Attaching the credential in the same PATCH → OK.
 	updated, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
@@ -903,6 +913,25 @@ func TestUpdateSettingsForgeBindingRequiresForgeCredential(t *testing.T) {
 	})
 	if err == nil || !asBadRequest(err, &bad) || !strings.Contains(bad.Error(), "requires a forge_token credential") {
 		t.Fatalf("clear credential while forge-bound = %v, want 400", err)
+	}
+	// Only the credential was sent, so the refusal is placed there (issue #61).
+	if bad.Field != "forge_credential_id" {
+		t.Errorf("clear credential Field = %q, want forge_credential_id", bad.Field)
+	}
+	// With autoland on, flipping the binding to builtin breaks the autoland
+	// pair; the binding is the key that was sent, so it carries the refusal.
+	if _, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{AutolandEnabled: store.Set(true)}); err != nil {
+		t.Fatalf("enable autoland on the forge-bound repo: %v", err)
+	}
+	_, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+		TrackerBinding:    store.Set(store.TrackerBindingBuiltin),
+		ForgeCredentialID: store.Set[*string](nil),
+	})
+	if err == nil || !asBadRequest(err, &bad) || bad.Field != "tracker_binding" || !strings.Contains(bad.Error(), "autoland_enabled") {
+		t.Fatalf("flip to builtin under autoland = %v (field %q), want the autoland refusal on tracker_binding", err, fieldOf(bad))
+	}
+	if _, err := e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{AutolandEnabled: store.Set(false)}); err != nil {
+		t.Fatalf("disable autoland: %v", err)
 	}
 
 	// Clearing it together with the flip back to builtin → OK.
@@ -928,31 +957,54 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 	e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
 	log := collectEvents(t, e.bus)
 
-	// Grammar violations (design §4a) are 400s.
-	for _, u := range []store.RepoSettingsUpdate{
-		{AFKBranchPattern: store.Set("no-token")},
-		{AFKBranchPattern: store.Set("lab/<N>")}, // overlaps existing manual prefix lab/
-		{ManualBranchPrefix: store.Set("")},
-		{BudgetMinutes: store.Set(ptr(0))},
-		{MaxInstancesOverride: store.Set(ptr(-1))},
-		{TrackerBinding: store.Set("forge")}, // no forge credential attached (ADR-0015: the detected-host gate is gone; the credential gate remains)
-		{TrackerBinding: store.Set("auto")},  // not a stored binding value
-		{DefaultBranch: store.Set("  ")},
-		{Name: store.Set("   ")}, // whitespace-only sanitizes to ""
+	// Grammar violations (design §4a) are 400s, each naming the request
+	// field it is about (issue #61).
+	for _, tc := range []struct {
+		u     store.RepoSettingsUpdate
+		field string
+	}{
+		{store.RepoSettingsUpdate{AFKBranchPattern: store.Set("no-token")}, "afk_branch_pattern"},
+		{store.RepoSettingsUpdate{AFKBranchPattern: store.Set("lab/<N>")}, "afk_branch_pattern"}, // overlaps existing manual prefix lab/
+		{store.RepoSettingsUpdate{ManualBranchPrefix: store.Set("")}, "manual_branch_prefix"},
+		// An overlap belongs to the key that was sent: the prefix alone…
+		{store.RepoSettingsUpdate{ManualBranchPrefix: store.Set("afk/")}, "manual_branch_prefix"},
+		// …the pattern when both were sent…
+		{store.RepoSettingsUpdate{AFKBranchPattern: store.Set("x/<N>"), ManualBranchPrefix: store.Set("x/")}, "afk_branch_pattern"},
+		// …while a grammar error is always its own half's.
+		{store.RepoSettingsUpdate{AFKBranchPattern: store.Set("ok-<N>"), ManualBranchPrefix: store.Set("bad prefix")}, "manual_branch_prefix"},
+		{store.RepoSettingsUpdate{BudgetMinutes: store.Set(ptr(0))}, "budget_minutes"},
+		{store.RepoSettingsUpdate{MaxInstancesOverride: store.Set(ptr(-1))}, "max_instances_override"},
+		{store.RepoSettingsUpdate{TrackerBinding: store.Set("forge")}, "tracker_binding"}, // no forge credential attached (ADR-0015: the detected-host gate is gone; the credential gate remains)
+		{store.RepoSettingsUpdate{TrackerBinding: store.Set("auto")}, "tracker_binding"},  // not a stored binding value
+		{store.RepoSettingsUpdate{DefaultBranch: store.Set("  ")}, "default_branch"},
+		{store.RepoSettingsUpdate{DefaultBranch: store.Set("-x")}, "default_branch"},
+		{store.RepoSettingsUpdate{Name: store.Set("   ")}, "name"}, // whitespace-only sanitizes to ""
+		{store.RepoSettingsUpdate{Provider: store.Set(ptr("nope"))}, "provider"},
+		{store.RepoSettingsUpdate{AFKProviderDefault: store.Set(ptr("nope"))}, "afk_provider_default"},
+		{store.RepoSettingsUpdate{LanderProvider: store.Set(ptr("nope"))}, "lander_provider"},
+		{store.RepoSettingsUpdate{CredentialID: store.Set(ptr("cred_00000000000000000000000000000000"))}, "credential_id"},
+		{store.RepoSettingsUpdate{ForgeCredentialID: store.Set(ptr("cred_00000000000000000000000000000000"))}, "forge_credential_id"},
+		{store.RepoSettingsUpdate{MaxFixAttempts: store.Set(-1)}, "max_fix_attempts"},
+		// Autoland needs a forge binding; this repo is builtin-bound.
+		{store.RepoSettingsUpdate{AutolandEnabled: store.Set(true)}, "autoland_enabled"},
 		// Runner/container overrides (issue #205): the enum and the
 		// podman-flavored grammars all reject bad input as a BadRequestError.
-		{Runner: store.Set(ptr("bogus"))},
+		{store.RepoSettingsUpdate{Runner: store.Set(ptr("bogus"))}, "runner"},
 		// Blank is NOT a spelling of inherit (issue #55): only nil un-pins.
-		{Runner: store.Set(ptr(""))},
-		{Runner: store.Set(ptr("  "))},
-		{ContainerMemory: store.Set(ptr("9x"))},
-		{ContainerPids: store.Set(ptr(0))},
-		{ContainerNofile: store.Set(ptr(0))},
+		{store.RepoSettingsUpdate{Runner: store.Set(ptr(""))}, "runner"},
+		{store.RepoSettingsUpdate{Runner: store.Set(ptr("  "))}, "runner"},
+		{store.RepoSettingsUpdate{ContainerMemory: store.Set(ptr("9x"))}, "container_memory"},
+		{store.RepoSettingsUpdate{ContainerPids: store.Set(ptr(0))}, "container_pids"},
+		{store.RepoSettingsUpdate{ContainerNofile: store.Set(ptr(0))}, "container_nofile"},
 	} {
-		_, err := e.svc.UpdateSettings(t.Context(), repo.ID, u)
+		_, err := e.svc.UpdateSettings(t.Context(), repo.ID, tc.u)
 		var bad *BadRequestError
 		if err == nil || !asBadRequest(err, &bad) {
-			t.Errorf("UpdateSettings(%+v) error = %v, want BadRequestError", u, err)
+			t.Errorf("UpdateSettings(%+v) error = %v, want BadRequestError", tc.u, err)
+			continue
+		}
+		if bad.Field != tc.field {
+			t.Errorf("UpdateSettings(%+v) Field = %q (%v), want %q", tc.u, bad.Field, bad, tc.field)
 		}
 	}
 
@@ -1112,6 +1164,11 @@ func TestUpdateSettingsImageRefPinnerError(t *testing.T) {
 	if bad.Error() != e.pin.err.Error() {
 		t.Errorf("BadRequestError message = %q, want the pinner's verbatim %q", bad.Error(), e.pin.err.Error())
 	}
+	// On the repo PATCH path the refusal is image_ref's (issue #61); the
+	// shared PinImageRef itself names no field (TestPinImageRef).
+	if bad.Field != "image_ref" {
+		t.Errorf("BadRequestError Field = %q, want image_ref", bad.Field)
+	}
 	row, err := e.st.RepoByID(t.Context(), repo.ID)
 	if err != nil {
 		t.Fatalf("RepoByID: %v", err)
@@ -1257,6 +1314,9 @@ func TestPinImageRef(t *testing.T) {
 		if bad.Error() != e.pin.err.Error() {
 			t.Errorf("BadRequestError = %q, want the pinner's verbatim %q", bad.Error(), e.pin.err.Error())
 		}
+		if bad.Field != "" {
+			t.Errorf("BadRequestError Field = %q, want none (the dev_image_default setting shares this path)", bad.Field)
+		}
 		if got != "" {
 			t.Errorf("PinImageRef returned %q alongside its error, want \"\"", got)
 		}
@@ -1278,6 +1338,14 @@ func TestPinImageRef(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// fieldOf is a nil-safe BadRequestError.Field for failure messages.
+func fieldOf(bad *BadRequestError) string {
+	if bad == nil {
+		return ""
+	}
+	return bad.Field
+}
 
 func asBadRequest(err error, target **BadRequestError) bool { return errors.As(err, target) }
 

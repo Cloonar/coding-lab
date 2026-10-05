@@ -91,7 +91,127 @@ export interface Repo {
    *  else the server's --container-image). The server resolves and digest-pins
    *  the ref (https registries only) on save. */
   image_ref: string | null;
+  /**
+   * What lab knows about the repo right now without asking anyone (issue
+   * #61): built from stored state and from the outcome of the most recent
+   * fetch and tracker read — never a forge request or a git network
+   * operation per page view. Present on every repo response, list included.
+   */
+  summary: RepoSummary;
 }
+
+// --- Readiness (issue #61) ---
+
+/** One check's verdict. `pending` = still settling (a clone in flight). */
+export type ReadinessState = 'passing' | 'failing' | 'pending';
+
+/** The six checks, in the server's canonical order. */
+export type ReadinessCheckID =
+  'clone' | 'git_credential' | 'tracker' | 'agent_login' | 'dev_image' | 'imports';
+
+/**
+ * Where the fix for a failing check lives. `repo` = this repo's settings page
+ * (`section` is a repo-settings slug, `field` the PATCH key of the offending
+ * field); `global` = global Settings (`section` is its slug); `credentials` =
+ * the Credentials page, where the agent login cards live.
+ */
+export interface ReadinessFix {
+  scope: 'repo' | 'global' | 'credentials';
+  section?: string;
+  field?: string;
+}
+
+export interface ReadinessCheck {
+  id: ReadinessCheckID;
+  state: ReadinessState;
+  /** One operator-facing sentence: what is wrong, or what was verified. */
+  detail: string;
+  /** Present on a failing clone check: POST /repos/{id}/clone/retry fixes it. */
+  action?: 'retry_clone';
+  /** Present on a failing check that a setting fixes. Never with `action`. */
+  fix?: ReadinessFix;
+}
+
+/**
+ * Whether a run can start in this repo right now. `checks` is in canonical
+ * order and holds ONLY the checks lab can evaluate from what it already
+ * knows: one it cannot evaluate is left out, never reported as passing (so
+ * the list may be shorter than six, and `dev_image` only exists while the
+ * effective Runner is `container`). `state` is the roll-up: failing if any
+ * check fails, else pending if any is pending, else passing.
+ */
+export interface Readiness {
+  state: ReadinessState;
+  checks: ReadinessCheck[];
+}
+
+export interface RepoSummary {
+  /**
+   * The claimable count (ready queue minus claimed and blocked issues) as
+   * last computed; null = not known yet. A forge-bound repo's count is the
+   * engine's or a strip's most recent read, never a fresh forge call.
+   */
+  claimable: number | null;
+  /** Open issue count as last read; null = not known yet. */
+  open_issues: number | null;
+  readiness: Readiness;
+}
+
+// --- Inherited values (issue #61) ---
+
+/**
+ * What each overridable repo field resolves to when the repo's OWN value is
+ * null — computed by the server with the same resolvers the spawn path uses,
+ * so the settings page never derives an effective value a second way. Keys
+ * are the repo field names. A null entry = the chain below could not be
+ * resolved (show the field as inherited without naming a value).
+ */
+export interface RepoInherited {
+  /** Provider ids. */
+  provider: string | null;
+  afk_provider_default: string | null;
+  lander_provider: string | null;
+  /** Model / effort ids of the provider the field belongs to. */
+  model_default: string | null;
+  effort_default: string | null;
+  afk_model_default: string | null;
+  afk_effort_default: string | null;
+  lander_model: string | null;
+  lander_effort: string | null;
+  remote_default: boolean | null;
+  afk_remote_default: boolean | null;
+  /** The option bag that applies while the repo has none of its own. */
+  afk_options: Record<string, string> | null;
+  budget_minutes: number | null;
+  /** The instance cap that applies without a repo override. */
+  max_instances_override: number | null;
+  git_author_name: string | null;
+  git_author_email: string | null;
+  runner: Runner | null;
+  /** '' = no dev image is configured anywhere below the repo. */
+  image_ref: string | null;
+  container_memory: string | null;
+  container_pids: number | null;
+  container_nofile: number | null;
+}
+
+/**
+ * Draft values to resolve against instead of the saved repo: the same keys
+ * and null/value semantics as the PATCH (absent = the saved value, null =
+ * inherit). Only fields other fields' chains read are accepted.
+ */
+export type RepoInheritedDrafts = Pick<
+  RepoPatch,
+  | 'provider'
+  | 'model_default'
+  | 'effort_default'
+  | 'remote_default'
+  | 'afk_provider_default'
+  | 'afk_model_default'
+  | 'afk_effort_default'
+  | 'lander_provider'
+  | 'lander_model'
+>;
 
 export interface CreateRepoRequest {
   remote_url: string;
@@ -185,6 +305,29 @@ export function updateRepo(id: string, patch: RepoPatch): Promise<Repo> {
 export function deleteRepo(id: string, force = false): Promise<void> {
   const path = `/repos/${encodeURIComponent(id)}` + (force ? '?force=true' : '');
   return request<void>('DELETE', path);
+}
+
+/**
+ * GET /repos/{id}/readiness — the readiness report in one call (issue #61).
+ * The same report rides every repo response as `summary.readiness`; this
+ * endpoint refreshes it alone. It reads only what lab already holds.
+ */
+export function getRepoReadiness(id: string): Promise<Readiness> {
+  return request<Readiness>('GET', `/repos/${encodeURIComponent(id)}/readiness`);
+}
+
+/**
+ * POST /repos/{id}/inherited — the inherited value of every overridable field
+ * (issue #61). A dry run, never a write: `drafts` are unsaved edits to
+ * resolve against, so a dependent field's "inherited" value follows an edit
+ * of the field above it (the AFK agent follows the agent, a model follows its
+ * agent) before anything is saved. An empty body resolves the saved repo.
+ */
+export function getRepoInherited(
+  id: string,
+  drafts: RepoInheritedDrafts = {},
+): Promise<RepoInherited> {
+  return request<RepoInherited>('POST', `/repos/${encodeURIComponent(id)}/inherited`, drafts);
 }
 
 /** Only valid from clone_status "error"; answers 202. */

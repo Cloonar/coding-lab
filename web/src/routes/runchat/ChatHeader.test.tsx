@@ -155,14 +155,14 @@ describe('ChatHeader', () => {
     expect(btn.getAttribute('title')).toBe('legacy-session');
   });
 
-  it('renders the project name as a link to the repo issues page', async () => {
+  it('renders the project name as a link to the repo home', async () => {
     await mountChat();
 
     const link = container.querySelector<HTMLAnchorElement>('a.chat-title-project');
     expect(link).not.toBeNull();
     expect(link!.textContent).toBe('proj');
-    // The issues page is the de-facto repo landing (no /repos/:id route).
-    expect(link!.getAttribute('href')).toBe('/repos/repo_1/issues');
+    // The repo segment points at the repo home (issue #61), not its Issues tab.
+    expect(link!.getAttribute('href')).toBe('/repos/repo_1');
   });
 
   it('renders the git-icon forge link (new tab) for a forgejo repo with a parseable remote', async () => {
@@ -188,7 +188,7 @@ describe('ChatHeader', () => {
     // link still renders (it depends on repo_id, not the forge URL).
     expect(container.querySelector('.chat-title-forge')).toBeNull();
     expect(container.querySelector('a.chat-title-project')?.getAttribute('href')).toBe(
-      '/repos/repo_1/issues',
+      '/repos/repo_1',
     );
   });
 

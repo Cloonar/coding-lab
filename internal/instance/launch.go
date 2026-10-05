@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
@@ -182,7 +183,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		if ctrImage, err = s.refuseContainerSpawn(ctx, spec.Provider.ID(), repo); err != nil {
 			return store.Run{}, err
 		}
-		if ctrMemory, ctrPids, ctrNofile, err = s.effectiveContainerLimits(ctx, repo); err != nil {
+		if ctrMemory, ctrPids, ctrNofile, err = s.EffectiveContainerLimits(ctx, repo); err != nil {
 			return store.Run{}, &StartFailedError{cause: err}
 		}
 		// Pull-if-missing the effective dev image before the claim (issue #207):
@@ -193,7 +194,14 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 		// refusals are 400s carrying the actionable text verbatim, never 500s).
 		// A cold pull can block the request for the length of the download — the
 		// documented trade of pinning the pull to spawn time (ADR-0053).
-		if err = podmanx.EnsureImage(ctx, s.podmanRun, s.podmanBin, ctrImage); err != nil {
+		err = podmanx.EnsureImage(ctx, s.podmanRun, s.podmanBin, ctrImage)
+		// The outcome is the only evidence lab ever has of whether this image
+		// is present (issue #61): hand it to the readiness recorder, unless
+		// the caller went away mid-pull — that says nothing about the image.
+		if s.imageEnsured != nil && ctx.Err() == nil {
+			s.imageEnsured(repo.ID, ctrImage, err)
+		}
+		if err != nil {
 			return store.Run{}, badRequestf("%s", err)
 		}
 	}
@@ -361,6 +369,16 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// runtime dir, for the worktree fetch AND the spawned session's git env.
 	// The files live for the whole session; the per-run tree wipe (rollback
 	// here, Stop/reap later) removes them — no per-file cleanup.
+	//
+	// The credential's version stamp is read FIRST, before the row is
+	// materialized: the worktree fetch below reports its outcome under it
+	// (issue #61), and an outcome may only ever be attributed to a credential
+	// version at least as old as the one the fetch really ran with — a
+	// rotation landing between the two reads then makes the record stale,
+	// never wrong.
+	fetchCtx := gitx.AttributeFetch(ctx, gitx.FetchAttribution{
+		RepoID: repo.ID, Credential: s.store.CredentialStampByID(ctx, repo.CredentialID),
+	})
 	credEnv, err := s.credentialEnv(ctx, repo, runID, runMat)
 	if err != nil {
 		wipeHome()
@@ -393,9 +411,9 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// the forge sees.
 	addWorktree := func() error {
 		if spec.AdoptBranch {
-			return s.git.AddWorktreeExisting(ctx, bareDir, wtPath, branch, gitEnv)
+			return s.git.AddWorktreeExisting(fetchCtx, bareDir, wtPath, branch, gitEnv)
 		}
-		return s.git.AddWorktree(ctx, bareDir, wtPath, branch, repo.DefaultBranch, gitEnv)
+		return s.git.AddWorktree(fetchCtx, bareDir, wtPath, branch, repo.DefaultBranch, gitEnv)
 	}
 	if err := addWorktree(); err != nil {
 		wipeHome()
@@ -1090,7 +1108,7 @@ func (s *Service) materializeImports(ctx context.Context, repo store.Repo, runID
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			refs[i], errs[i] = s.materializeImport(ctx, t, runID, runMat)
+			refs[i], errs[i] = s.materializeImport(ctx, repo, t, runID, runMat)
 		}()
 	}
 	wg.Wait()
@@ -1136,7 +1154,16 @@ func (s *Service) materializeImports(ctx context.Context, repo store.Repo, runID
 // bookkeeping must not appear inside it — an agent reading the import would
 // see a file the imported repo does not have. /pull-base reads it back to
 // report what each snapshot moved from.
-func (s *Service) materializeImport(ctx context.Context, target store.Repo, runID string, runMat *vault.Materializer) (seeder.ImportRef, error) {
+//
+// The snapshot fetch reports its outcome (issue #61) attributed to the
+// TARGET — it is the target's reference repo and the target's credential
+// being exercised — on behalf of the importing repo, whose spawn this is and
+// whose readiness it decides. The credential stamp is read before the
+// credential is materialized, for the reason given at Launch's own fetch.
+func (s *Service) materializeImport(ctx context.Context, repo, target store.Repo, runID string, runMat *vault.Materializer) (seeder.ImportRef, error) {
+	fetchCtx := gitx.AttributeFetch(ctx, gitx.FetchAttribution{
+		RepoID: target.ID, Credential: s.store.CredentialStampByID(ctx, target.CredentialID), OnBehalfOf: repo.ID,
+	})
 	credEnv, cleanup, err := s.importCredentialEnv(ctx, target, runID, runMat)
 	if err != nil {
 		return seeder.ImportRef{}, err
@@ -1149,7 +1176,7 @@ func (s *Service) materializeImport(ctx context.Context, target store.Repo, runI
 
 	dest := filepath.Join(s.homes.ImportsPath(runID), target.Name)
 	gitEnv := append(append([]string{}, s.gitEnv...), credEnv...)
-	commit, err := s.git.MaterializeSnapshot(ctx, s.bareDir(target.ID), dest, target.DefaultBranch, gitEnv)
+	commit, err := s.git.MaterializeSnapshot(fetchCtx, s.bareDir(target.ID), dest, target.DefaultBranch, gitEnv)
 	if err != nil {
 		return seeder.ImportRef{}, err
 	}

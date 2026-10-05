@@ -193,3 +193,56 @@ func TestRepoImportsUnknownRepoNotFound(t *testing.T) {
 	wantStatus(t, resp, http.StatusNotFound)
 	_ = decodeBody(t, resp)
 }
+
+// listImporters reads GET /repos/{id}/importers and asserts its array shape.
+func (x *repoTestServer) listImporters(t *testing.T, repoID string) []map[string]any {
+	t.Helper()
+	resp := x.do("GET", "/api/v1/repos/"+repoID+"/importers", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body := decodeBody(t, resp)
+	raw, ok := body["importers"].([]any)
+	if !ok {
+		t.Fatalf("importers field = %#v (%T), want a JSON array", body["importers"], body["importers"])
+	}
+	items := make([]map[string]any, len(raw))
+	for i, v := range raw {
+		items[i] = v.(map[string]any)
+	}
+	return items
+}
+
+// TestRepoImportersList pins GET /repos/{id}/importers (issue #61): the
+// reverse direction of the imports list — the repos that declare an import
+// OF this one, sorted by name, as {id, name} — an empty array (never null)
+// when nobody imports it, and a 404 for an unknown repo. The delete dialog
+// reads it to name the importers before any attempt.
+func TestRepoImportersList(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	target := x.readyRepo(t, "target")
+	zeta := x.readyRepo(t, "zeta")
+	alpha := x.readyRepo(t, "alpha")
+
+	if got := x.listImporters(t, target.ID); len(got) != 0 {
+		t.Fatalf("importers before any import = %v, want []", got)
+	}
+
+	for _, consumer := range []store.Repo{zeta, alpha} {
+		resp := x.do("POST", "/api/v1/repos/"+consumer.ID+"/imports", map[string]any{"target_repo_id": target.ID}, h)
+		wantStatus(t, resp, http.StatusCreated)
+		_ = resp.Body.Close()
+	}
+	got := x.listImporters(t, target.ID)
+	if len(got) != 2 || got[0]["id"] != alpha.ID || got[0]["name"] != "alpha" ||
+		got[1]["id"] != zeta.ID || got[1]["name"] != "zeta" {
+		t.Errorf("importers = %v, want [alpha zeta] as {id, name}", got)
+	}
+	// The consumers themselves are imported by nobody.
+	if got := x.listImporters(t, alpha.ID); len(got) != 0 {
+		t.Errorf("importers of a consumer = %v, want []", got)
+	}
+
+	resp := x.do("GET", "/api/v1/repos/repo_00000000000000000000000000000000/importers", nil, nil)
+	wantStatus(t, resp, http.StatusNotFound)
+	_ = decodeBody(t, resp)
+}

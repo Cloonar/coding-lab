@@ -238,6 +238,48 @@ func (s *Store) IssuesByRepo(ctx context.Context, repoID, state string) ([]Issue
 	return issues, nil
 }
 
+// OpenIssueCounts returns the number of open built-in issues per repo in one
+// grouped query — repo id → count; a repo without an open issue has no entry
+// (read it as zero). With a non-empty label only open issues carrying that
+// label are counted. The batch form behind the repo list's summaries (issue
+// #61): the open count of every builtin-bound repo, and — with
+// tracker.ReadyLabel — which of them have a ready queue at all, so the list
+// never runs a query per repo to learn that most queues are empty.
+func (s *Store) OpenIssueCounts(ctx context.Context, label string) (map[string]int, error) {
+	query := `SELECT i.repo_id, COUNT(*) FROM issues i WHERE i.state = ?`
+	args := []any{IssueStateOpen}
+	if label != "" {
+		query = `SELECT i.repo_id, COUNT(*) FROM issues i
+			JOIN issue_labels il ON il.issue_id = i.id
+			JOIN labels l ON l.id = il.label_id
+			WHERE i.state = ? AND l.name = ?`
+		args = append(args, label)
+	}
+	query += ` GROUP BY i.repo_id`
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("open issue counts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]int)
+	for rows.Next() {
+		var (
+			repoID string
+			n      int
+		)
+		if err := rows.Scan(&repoID, &n); err != nil {
+			return nil, fmt.Errorf("open issue counts: %w", err)
+		}
+		out[repoID] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("open issue counts: %w", err)
+	}
+	return out, nil
+}
+
 // RecentClosedIssuesByRepo lists the repo's `limit` most recently closed
 // issues, newest number first, in the same list shape as IssuesByRepo (label
 // names and comment count loaded, comments not). Number-desc approximates

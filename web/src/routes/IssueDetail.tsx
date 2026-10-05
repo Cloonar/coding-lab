@@ -4,14 +4,16 @@
 // — the server routes the patch through the tracker seam. State, labels and
 // comments stay builtin-only: their controls disappear on forge-bound repos
 // behind a short managed-on-the-forge note while the read view keeps working.
+// It renders inside the repo home frame's Issues tab (issue #61): the frame
+// owns the page, the repo heading and the repo fetch; this page keeps an
+// "Issues / #N" trail within the tab.
 
 import { useParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
+import { For, Match, Show, Switch, createSignal } from 'solid-js';
 import {
   createIssueComment,
   errorMessage,
   getIssue,
-  getRepo,
   listLabels,
   setIssueLabels,
   updateIssue,
@@ -23,7 +25,6 @@ import Crumbs, { type Crumb } from '../components/Crumbs';
 import Banner from '../components/Banner';
 import LabelChip from '../components/LabelChip';
 import LabelPicker from '../components/LabelPicker';
-import RequireAuth from '../components/RequireAuth';
 import SectionCard from '../components/SectionCard';
 import SectionHead from '../components/SectionHead';
 import { canMutateTracker, formatDateTime } from '../lib/issues';
@@ -31,23 +32,13 @@ import { sameLabelSet, toggleLabel } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
 import { forgeWebUrl } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
+import { useRepoHome } from './repo-home/context';
 
 export default function IssueDetail() {
-  return (
-    <RequireAuth>
-      <IssueDetailView />
-    </RequireAuth>
-  );
-}
-
-function IssueDetailView() {
   const params = useParams<{ id: string; number: string }>();
   const issueNumber = () => Number(params.number);
+  const home = useRepoHome();
 
-  const [repo] = createResource(
-    () => params.id,
-    (id) => getRepo(id),
-  );
   const [issue, { refetch }] = createLiveResource(
     () => `${params.id}\n${params.number}`,
     (key) => {
@@ -57,9 +48,9 @@ function IssueDetailView() {
     [{ type: 'issue.changed', match: (event) => event.repoID === params.id }],
   );
   // Every read outside the guarded <Match> branches goes through these
-  // non-throwing accessors: a failed getRepo/listLabels must degrade the page
-  // (read-only view + error banner), not blank a successfully loaded issue.
-  const repoData = () => resourceValue(repo);
+  // non-throwing accessors: a failed getRepo (the frame's banner) or listLabels
+  // must degrade the page to the read-only view, not blank a loaded issue.
+  const repoData = () => home.repo();
   const [labels] = createLiveResource(
     () => (repoData()?.tracker_binding === 'builtin' ? params.id : null),
     (id) => listLabels(id),
@@ -80,8 +71,6 @@ function IssueDetailView() {
     labelList()?.find((label) => label.name === name)?.color;
 
   const crumbs = (): Crumb[] => [
-    { label: 'Repos', href: '/repos' },
-    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
     { label: 'Issues', href: `/repos/${params.id}/issues` },
     { label: `#${issueNumber()}` },
   ];
@@ -114,14 +103,11 @@ function IssueDetailView() {
   };
 
   return (
-    <main class="page">
+    <>
       <Crumbs segments={crumbs()} />
       <Banner message={error()} onDismiss={() => setError(null)} />
-      <Show when={repo.error !== undefined}>
-        {/* The repo lookup failing must not blank a loaded issue: the view
-            degrades to read-only (binding unknown) with the failure visible. */}
-        <Banner message={errorMessage(repo.error)} />
-      </Show>
+      {/* A failed repo lookup (its banner is the frame's) must not blank a
+          loaded issue: the view degrades to read-only, binding unknown. */}
       <Switch>
         <Match when={issue.error !== undefined}>
           <Banner message={errorMessage(issue.error)} />
@@ -241,7 +227,7 @@ function IssueDetailView() {
           )}
         </Match>
       </Switch>
-    </main>
+    </>
   );
 }
 

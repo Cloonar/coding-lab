@@ -24,6 +24,33 @@ var (
 	// API → 409. (D12 delta from v0, where a manual start bypassed the
 	// pause — the M5 contract pins the 409.)
 	ErrRepoPaused = errors.New("repository is paused after consecutive AFK failures — reset to re-arm")
+
+	// The Schedule "Run now" refusals (RunScheduleNow), each answered 409
+	// with exactly this message — the UI shows it verbatim. The cap refusal
+	// is instance.ErrOverCap, shared with every other launch.
+	//
+	// ErrSchedulePaused: the Schedule's own three-strikes paused it; a Run
+	// now waits for the human re-enable exactly as its cadence does. (The
+	// enabled flag is NOT a refusal: a Run now of a switched-off Schedule is
+	// how a prompt is tested before the cadence is armed.)
+	ErrSchedulePaused = errors.New("schedule is paused after consecutive failures — re-enable to re-arm")
+	// ErrScheduleRunLive: the Schedule's previous run — cadence firing or
+	// Run now alike — is still live. One live run per Schedule, the same
+	// gate skip-on-overlap applies to a firing (ADR-0062); a refused Run now
+	// is never queued behind it.
+	ErrScheduleRunLive = errors.New("schedule's previous run is still live")
+	// ErrScheduleEmptyPrompt: the Schedule's prompt plus flow blocks compose
+	// to nothing — only reachable through a row whose prompt is empty and
+	// whose every flow key this binary no longer knows (the API refuses an
+	// empty brief at write). Launching would burn a whole budget on nothing.
+	ErrScheduleEmptyPrompt = errors.New("schedule composes an empty prompt — check its prompt and flows")
+	// ErrScheduleStartedThisMinute: the Schedule already started a run in
+	// the current minute whose identity — the minute-granular label, and so
+	// the session, branch, and worktree (ADR-0062) — a new run would reuse:
+	// a stopped or dead run whose branch survived, or its row. Refused before
+	// anything is created, never a mid-launch git failure; the next minute's
+	// label is fresh.
+	ErrScheduleStartedThisMinute = errors.New("schedule already started a run this minute — try again in a minute")
 )
 
 // TrackerError wraps a tracker round-trip failure inside the engine so the
@@ -141,6 +168,9 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 		return store.Run{}, launchSpawned, &TrackerError{cause: err}
 	}
 	if len(issues) == 0 {
+		// An empty ready queue IS a claimable count — zero — even though the
+		// filter below never runs for it.
+		s.reportClaimable(repo, 0)
 		return store.Run{}, launchNoReady, nil
 	}
 	// Narrow to the claimable set through the shared choke point: exclude any
@@ -246,7 +276,19 @@ func (s *Service) launch(ctx context.Context, repoID string, auto bool) (store.R
 	if err != nil {
 		return store.Run{}, launchSpawned, err
 	}
+	// The launch just claimed exactly one issue of the claimable set it
+	// picked from, under the engine lock: the count is that set minus one,
+	// known without another tracker read.
+	s.reportClaimable(repo, len(claimable)-1)
 	return run, launchSpawned, nil
+}
+
+// reportClaimable hands a freshly known claimable count to the observer
+// (Options.OnClaimable); a nil observer makes it a no-op.
+func (s *Service) reportClaimable(repo store.Repo, count int) {
+	if s.onClaimable != nil {
+		s.onClaimable(repo, count)
+	}
 }
 
 // claimedIssueSet reads the repo's claim branches from the bare reference
@@ -287,7 +329,63 @@ func (s *Service) claimedIssueSet(ctx context.Context, repo store.Repo) (map[int
 // callers (the scheduler pre-tick, ClaimableIssuesFor, the ready endpoint) it is
 // unlocked and best-effort — stale the moment it renders, re-checked inside the
 // locked claim path when a run actually starts.
+//
+// Every successful call reports the size of its result through
+// Options.OnClaimable (issue #61): the engine and the operator views compute
+// a claimable count nowhere else, so this is also where the repo list's
+// count of a forge-bound repo comes from — the last one anybody computed.
 func (s *Service) FilterClaimable(ctx context.Context, repo store.Repo, trk tracker.Tracker, ready []tracker.Issue) ([]tracker.Issue, error) {
+	claimable, err := s.filterClaimable(ctx, repo, trk, ready, true)
+	if err != nil {
+		return nil, err
+	}
+	s.reportClaimable(repo, len(claimable))
+	return claimable, nil
+}
+
+// ErrNotLocalTracker refuses LocalClaimableCount for a repo whose tracker is
+// not lab's own store: counting it would mean asking a forge.
+var ErrNotLocalTracker = errors.New("afk: the claimable count of a forge-bound repo is not computed locally")
+
+// LocalClaimableCount computes a BUILTIN-bound repo's claimable count from
+// scratch — its ready queue (a store query) through the same two gates as
+// FilterClaimable — for a caller that renders it on a page (the repo list's
+// summary, issue #61). It never leaves the machine: a forge-bound repo is
+// refused with ErrNotLocalTracker instead of read, so the count of one can
+// only ever come from what the engine or an operator view last computed. An
+// empty ready queue answers 0 without touching git at all, which is what
+// keeps a list of mostly idle repos free of a subprocess per row.
+//
+// It is a rendering read, so unlike FilterClaimable it neither reports its
+// result through Options.OnClaimable (a page view must not announce a change
+// to the pages that are reading) nor logs the per-issue blocker lines (the
+// engine's own passes are those lines' surface, not every list refresh).
+func (s *Service) LocalClaimableCount(ctx context.Context, repo store.Repo) (int, error) {
+	if repo.TrackerBinding != store.TrackerBindingBuiltin {
+		return 0, ErrNotLocalTracker
+	}
+	trk, err := s.trackers.TrackerFor(ctx, repo)
+	if err != nil {
+		return 0, err
+	}
+	ready, err := trk.ReadyIssues(ctx)
+	if err != nil {
+		return 0, &TrackerError{cause: err}
+	}
+	if len(ready) == 0 {
+		return 0, nil
+	}
+	claimable, err := s.filterClaimable(ctx, repo, trk, ready, false)
+	if err != nil {
+		return 0, err
+	}
+	return len(claimable), nil
+}
+
+// filterClaimable is FilterClaimable's two gates without the report. verbose
+// carries the engine's log lines — the unevaluable cross-repo blocker Warn and
+// the skipped-blocked Info; LocalClaimableCount passes false.
+func (s *Service) filterClaimable(ctx context.Context, repo store.Repo, trk tracker.Tracker, ready []tracker.Issue, verbose bool) ([]tracker.Issue, error) {
 	claimed, err := s.claimedIssueSet(ctx, repo)
 	if err != nil {
 		return nil, err
@@ -303,7 +401,7 @@ func (s *Service) FilterClaimable(ctx context.Context, repo store.Repo, trk trac
 		if len(ParseBlockedBy(is.Body)) > 0 {
 			anyLocal = true
 		}
-		if foreign := ForeignBlockedBy(is.Body); len(foreign) > 0 {
+		if foreign := ForeignBlockedBy(is.Body); verbose && len(foreign) > 0 {
 			s.log.Warn("afk: unevaluable cross-repo blocker", "component", "afk",
 				"repo", repo.Name, "issue", fmt.Sprintf("#%d", is.Number),
 				"refs", strings.Join(foreign, " "))
@@ -322,7 +420,7 @@ func (s *Service) FilterClaimable(ctx context.Context, repo store.Repo, trk trac
 		openSet[is.Number] = true
 	}
 	unblocked, blocked := PartitionBlocked(claimable, openSet)
-	if len(blocked) > 0 {
+	if verbose && len(blocked) > 0 {
 		s.log.Info("afk: skipped blocked issues", "component", "afk",
 			"repo", repo.Name, "skipped", formatBlockedSkips(blocked))
 	}

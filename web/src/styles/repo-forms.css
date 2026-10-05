@@ -1,0 +1,220 @@
+/* Add repository and the repo delete dialog (issue #61) ---------------------- */
+/* Tokens only, so both colour schemes follow. Field errors reuse the app's
+   `.field-error` line (settings.css) and, on Add repository, a leading icon, so
+   an error never rests on the red colour alone. */
+
+/* Add repository ------------------------------------------------------------- */
+
+/* The narrow column of a single form, with the wide page's 16px phone gutters. */
+.page.page-wide.add-repo {
+  max-width: 760px;
+}
+
+.add-repo-title {
+  margin: var(--space-1) 0 var(--space-4);
+  font-size: 1.6rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.add-repo .form-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.add-repo .form-card > .banner {
+  margin: 0;
+}
+
+.add-repo .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.add-repo .field > label {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+/* The same field ground as the repo settings page (the reference mockup's):
+   a field reads as inset in its card, in both schemes. */
+.add-repo .field input,
+.add-repo .field select,
+.repo-delete-dialog .field input {
+  background: var(--bg);
+}
+
+.add-repo .field input.mono {
+  font-size: 15px;
+}
+
+.add-repo .field .hint,
+.add-repo .field .field-error {
+  margin: 0;
+}
+
+/* The credentials list failed to load: say so, with a way to try again. */
+.add-repo .field .add-repo-credentials-failed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.add-repo .add-repo-retry {
+  font-size: 0.9rem;
+}
+
+.add-repo .field.invalid input,
+.add-repo .field.invalid select {
+  border-color: var(--danger);
+}
+
+.add-repo .field.invalid .segmented {
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+.add-repo .field .field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.3rem;
+  font-size: 0.84rem;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.add-repo .field .field-error svg {
+  flex: none;
+  margin-top: 0.12rem;
+}
+
+.add-repo .field .field-error span {
+  display: inline;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* The note under the submit button: the actions row stacks it below. */
+.add-repo .form-card > .card-actions {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.add-repo .add-repo-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* Danger zone ---------------------------------------------------------------- */
+
+.danger-box {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.danger-box > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Delete dialog -------------------------------------------------------------- */
+
+/* The title reads as a question, not an alarm, wherever the dialog is mounted
+   (a danger section's heading colour must not reach it). */
+.dialog.repo-delete-dialog .dialog-title {
+  color: var(--text);
+}
+
+/* Blocked: Close sizes to its word and the link takes the rest of the row; a
+   long importer name wraps the link onto its own full-width row. */
+.delete-blocked-dialog .dialog-actions > * {
+  flex: 1 1 auto;
+}
+
+.repo-delete-dialog .dialog-body .banner {
+  margin: 0;
+}
+
+.repo-delete-dialog .delete-consequences li {
+  overflow-wrap: anywhere;
+}
+
+.repo-delete-dialog .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+}
+
+.repo-delete-dialog .field > label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.repo-delete-dialog .field > label code {
+  font-size: 0.95em;
+}
+
+.repo-delete-dialog .field input.mono {
+  font-size: 16px;
+}
+
+/* A blocked delete: an error-tinted note naming the importers. */
+.repo-delete-dialog .delete-blocked {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--err-border);
+  border-radius: var(--radius-control);
+  background: var(--err-bg);
+  color: var(--err-text);
+  overflow-wrap: anywhere;
+}
+
+/* A link that reads as a button (the blocked dialog's way to the importer). */
+a.link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 0 1rem;
+  /* A long name (an importer's) wraps inside a 390px sheet. */
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+  font-weight: 550;
+  text-align: center;
+  text-decoration: none;
+}
+
+a.link-button:hover {
+  background: var(--hover);
+}
+
+a.link-button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+a.link-button.primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+a.link-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

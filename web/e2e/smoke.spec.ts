@@ -4,7 +4,8 @@
 // shell wraps every authenticated page: at a desktop viewport the side rail is
 // persistent, so its "Log out" button is on-screen without opening a drawer.
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Request } from '@playwright/test';
+import { createGitRemote } from './gitRemote';
 
 const username = 'admin';
 const password = 'smoke-test-password';
@@ -163,3 +164,257 @@ test('shows a real notification through the SW registration', async ({ page, con
     for (const notification of notifications) notification.close();
   });
 });
+
+// --- Repositories and repo settings (issue #61) ---
+//
+// Against the real server, with a local bare repository as the remote (the
+// clone needs no network): the empty list, Add repository, the repo home with
+// its readiness block and tabs, the one-page settings with its save bar and a
+// browser-side refusal, a Schedule through the editor route, and the delete
+// dialog. Nothing here starts a run — Run now is only checked for presence.
+
+test('repositories: add, repo home tabs, one-page settings, schedule, delete', async ({ page }) => {
+  test.setTimeout(120_000);
+  const remote = await createGitRemote('smoke-remote');
+  try {
+    await login(page);
+    await walkRepositories(page, remote.url);
+  } finally {
+    remote.dispose();
+  }
+});
+
+async function walkRepositories(page: Page, remoteURL: string): Promise<void> {
+  const tabs = page.getByRole('navigation', { name: 'Repository' });
+  const saveBar = page.getByRole('region', { name: 'Unsaved changes' });
+  let repoID = '';
+
+  await test.step('the empty list opens Add repository', async () => {
+    await page.goto('/repos');
+    await expect(page.getByRole('heading', { name: 'Repositories', level: 1 })).toBeVisible();
+    await expect(page.getByText('No repositories yet')).toBeVisible();
+    await page.getByRole('link', { name: 'Add repository' }).click();
+    await expect(page).toHaveURL('/repos/new');
+    await expect(page.getByRole('heading', { name: 'Add repository' })).toBeVisible();
+  });
+
+  await test.step('Add repository lands on the repo home, which finishes cloning', async () => {
+    await page.getByLabel('Remote URL').fill(remoteURL);
+    // The name follows the URL: its basename without .git.
+    await expect(page.getByLabel('Name')).toHaveValue('smoke-remote');
+    await expect(page.getByRole('radio', { name: 'Auto' })).toBeChecked();
+    await page.getByRole('button', { name: 'Add and start cloning' }).click();
+
+    // The new repo's home: /repos/<id>, not the form's own /repos/new.
+    await expect(page).toHaveURL(/\/repos\/(?!new$)[^/]+$/);
+    repoID = new URL(page.url()).pathname.split('/')[2] ?? '';
+    await expect(page.getByRole('heading', { name: 'smoke-remote', level: 1 })).toBeVisible();
+    const readiness = page.getByRole('region', { name: 'Readiness' });
+    await expect(readiness).toBeVisible();
+
+    // A local clone is quick; the header's chip goes once it is done.
+    await expect(page.getByText('cloning', { exact: true })).toBeHidden({ timeout: 30_000 });
+    // The clone check passes. The block is collapsed when every check passes
+    // (an agent login on the host can make that so) and open otherwise; the
+    // report may still move while the clone settles, hence the retry.
+    const toggle = readiness.getByRole('heading').getByRole('button');
+    await expect(async () => {
+      if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click();
+      await expect(readiness.getByText('Passing: Clone', { exact: true })).toBeVisible({
+        timeout: 1_000,
+      });
+    }).toPass({ timeout: 15_000 });
+  });
+
+  await test.step('each tab has its own URL inside the frame', async () => {
+    const base = `/repos/${repoID}`;
+    await expect(tabs.getByRole('link', { name: 'Overview' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+
+    // The open count is known once the summary is: none on a fresh repo.
+    const issuesTab = tabs.getByRole('link', { name: 'Issues (0 open)' });
+    await issuesTab.click();
+    await expect(page).toHaveURL(`${base}/issues`);
+    await expect(issuesTab).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('heading', { name: 'Issues', level: 2 })).toBeVisible();
+    await expect(page.getByText('No open issues.')).toBeVisible();
+
+    // Builtin-bound (Auto without a forge credential), so CRs is a tab.
+    const crsTab = tabs.getByRole('link', { name: 'CRs' });
+    await crsTab.click();
+    await expect(page).toHaveURL(`${base}/crs`);
+    await expect(crsTab).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('heading', { name: 'Change requests' })).toBeVisible();
+
+    const settingsTab = tabs.getByRole('link', { name: 'Settings' });
+    await settingsTab.click();
+    await expect(page).toHaveURL(`${base}/settings`);
+    await expect(settingsTab).toHaveAttribute('aria-current', 'page');
+    // One page: every section is here, and the desktop outline lists them
+    // under their group labels.
+    const outline = page.getByRole('navigation', { name: 'Settings sections' });
+    for (const group of ['Runs', 'Automation', 'Access', 'Setup']) {
+      await expect(outline.getByRole('group', { name: group })).toBeVisible();
+    }
+    for (const section of [
+      'Agents',
+      'Runner',
+      'Autoland',
+      'Schedules',
+      'Secrets',
+      'Imports',
+      'General',
+      'Integrations',
+      'Branches',
+      'Danger zone',
+    ]) {
+      await expect(outline.getByRole('link', { name: section, exact: true })).toBeVisible();
+      await expect(
+        page.getByRole('heading', { name: section, level: 2, exact: true }),
+      ).toBeAttached();
+    }
+
+    // A section's own URL opens the page scrolled to it.
+    await page.goto(`${base}/settings/branches`);
+    await expect(page.getByRole('heading', { name: 'Branches', level: 2 })).toBeInViewport();
+    await expect(outline.getByRole('link', { name: 'Branches', exact: true })).toHaveAttribute(
+      'aria-current',
+      'location',
+    );
+  });
+
+  await test.step('one save bar saves two sections in one request', async () => {
+    const general = page.getByRole('region', { name: 'General' });
+    const branches = page.getByRole('region', { name: 'Branches' });
+    // The changed mark joins the label ("Name (unsaved change)"), so match its start.
+    const name = general.getByRole('textbox', { name: /^Name/ });
+    const prefix = branches.getByRole('textbox', { name: /^Manual branch prefix/ });
+
+    await expect(saveBar).toBeHidden();
+    await name.fill('smoke-renamed');
+    await prefix.fill('wip/');
+    await expect(saveBar.getByText('2 unsaved changes')).toBeVisible();
+    await expect(saveBar.getByRole('link', { name: 'General' })).toBeVisible();
+    await expect(saveBar.getByRole('link', { name: 'Branches' })).toBeVisible();
+
+    const patched = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PATCH' &&
+        new URL(response.url()).pathname === `/api/v1/repos/${repoID}`,
+    );
+    await saveBar.getByRole('button', { name: 'Save' }).click();
+    const response = await patched;
+    expect(response.ok()).toBe(true);
+    // Only the changed fields travel.
+    expect(response.request().postDataJSON()).toEqual({
+      name: 'smoke-renamed',
+      manual_branch_prefix: 'wip/',
+    });
+    await expect(saveBar).toBeHidden();
+    await expect(page.getByText('Saved 2 changes to smoke-renamed')).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'smoke-renamed', level: 1 })).toBeVisible();
+    await expect(name).toHaveValue('smoke-renamed');
+    await expect(prefix).toHaveValue('wip/');
+  });
+
+  await test.step('an AFK branch pattern without <N> is refused before any request', async () => {
+    const pattern = page
+      .getByRole('region', { name: 'Branches' })
+      .getByRole('textbox', { name: /^AFK branch pattern/ });
+    const saved = await pattern.inputValue();
+    const patches: string[] = [];
+    const onRequest = (request: Request) => {
+      if (request.method() === 'PATCH') patches.push(request.url());
+    };
+    page.on('request', onRequest);
+    try {
+      await pattern.fill('afk/no-number');
+      await expect(saveBar.getByText('1 unsaved change')).toBeVisible();
+      await saveBar.getByRole('button', { name: 'Save' }).click();
+
+      await expect(saveBar.getByText('1 problem to fix')).toBeVisible();
+      await expect(saveBar.getByRole('link', { name: 'Branches' })).toBeVisible();
+      await expect(pattern).toBeFocused();
+      await expect(pattern).toHaveAttribute('aria-invalid', 'true');
+      await expect(
+        page.getByRole('alert').filter({ hasText: 'The pattern needs <N> exactly once.' }),
+      ).toBeVisible();
+      expect(patches).toEqual([]);
+    } finally {
+      page.off('request', onRequest);
+    }
+
+    // Back to the saved value: nothing is pending, so the bar goes.
+    await pattern.fill(saved);
+    await expect(saveBar).toBeHidden();
+    await expect(pattern).not.toHaveAttribute('aria-invalid', 'true');
+  });
+
+  await test.step('a Schedule is added through the editor route', async () => {
+    // Twelve hours away, so the cadence cannot fire while the smoke runs.
+    const at = new Date(Date.now() + 12 * 60 * 60 * 1000);
+    const time = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+
+    await page.getByRole('link', { name: 'New schedule' }).click();
+    await expect(page).toHaveURL(`/repos/${repoID}/settings/schedules/new`);
+    const editor = page.getByRole('dialog', { name: 'New schedule' });
+    await expect(editor).toBeVisible();
+    // A Schedule never saved has nothing to run.
+    await expect(editor.getByRole('button', { name: 'Run now' })).toHaveCount(0);
+
+    await editor.getByLabel('Name').fill('Nightly smoke');
+    await editor.getByLabel('Prompt').fill('List the files at the repository root.');
+    await editor.getByRole('radio', { name: 'Daily' }).click();
+    await expect(editor.getByRole('radio', { name: 'Daily' })).toBeChecked();
+    await editor.getByLabel('Time, server-local').fill(time);
+    await editor.getByRole('button', { name: 'Save schedule' }).click();
+
+    await expect(editor).toBeHidden();
+    await expect(page.getByText('Saved "Nightly smoke"')).toBeVisible();
+    const row = page.getByRole('link', { name: /Nightly smoke/ });
+    await expect(row).toContainText(`Daily at ${time}`);
+    // The next run is the server's rendering of the cadence.
+    await expect(row).toContainText(
+      new RegExp(`Next \\w{3} \\d{4}-\\d{2}-\\d{2} ${time} · last run never ran`),
+    );
+
+    // Opened again, the saved Schedule offers Run now (not pressed: no run
+    // starts in the smoke).
+    await row.click();
+    await expect(page).toHaveURL(new RegExp(`/repos/${repoID}/settings/schedules/(?!new$)[^/]+$`));
+    const edit = page.getByRole('dialog', { name: 'Edit schedule' });
+    await expect(edit.getByRole('button', { name: 'Run now' })).toBeEnabled();
+    await expect(edit.getByLabel('Name')).toHaveValue('Nightly smoke');
+    await edit.getByRole('button', { name: 'Back to schedules' }).click();
+    await expect(edit).toBeHidden();
+  });
+
+  await test.step('Delete repository states its consequences and returns to the list', async () => {
+    await page
+      .getByRole('region', { name: 'Danger zone' })
+      .getByRole('button', { name: 'Delete repository' })
+      .click();
+    const dialog = page.getByRole('alertdialog', { name: 'Delete smoke-renamed?' });
+    await expect(dialog).toBeVisible();
+    // Only what applies to this repo: no live runs, no clone in flight, no
+    // parked work, no secrets — one Schedule and the built-in tracker.
+    await expect(dialog.getByRole('listitem')).toHaveText([
+      'Deletes 1 Schedule.',
+      "Deletes the issues and change requests kept in lab's built-in tracker.",
+      "Removes lab's clone, this repository's settings and its run history.",
+    ]);
+    const confirm = dialog.getByRole('button', { name: 'Delete repository' });
+    await expect(confirm).toBeDisabled();
+    await dialog.getByLabel('Type smoke-renamed to confirm').fill('smoke-renamed');
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+
+    await expect(page).toHaveURL('/repos');
+    await expect(page.getByText('Deleted smoke-renamed from lab')).toBeVisible();
+    await expect(page.getByText('No repositories yet')).toBeVisible();
+  });
+}

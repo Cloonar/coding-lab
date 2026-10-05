@@ -7,14 +7,16 @@
 //   forge-bound repos behind the managed-on-the-forge note (a deep link when
 //   the remote parses);
 // - the comment form POSTs {body}; the state toggle PATCHes {state}; the
-//   label editor PUTs the replaced set built with the toggle algebra.
+//   label editor PUTs the replaced set built with the toggle algebra;
+// - it renders inside the repo home frame's Issues tab (issue #61) with an
+//   "Issues / #N" trail; the frame names the repo.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ForgeKind, IssueDetail as Issue, Label, TrackerBinding } from '../api';
 import App from '../App';
-import IssueDetail from './IssueDetail';
+import RepoRoutes from './repo-home/routes';
 
 const REPO_ID = 'repo_1';
 const NUMBER = 7;
@@ -148,7 +150,7 @@ async function mountDetail(): Promise<void> {
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>
-        <Route path="/repos/:id/issues/:number" component={IssueDetail} />
+        <RepoRoutes />
         <Route path="*" component={() => null} />
       </MemoryRouter>
     ),
@@ -196,14 +198,21 @@ afterEach(() => {
 });
 
 describe('IssueDetail (builtin repo)', () => {
-  it('renders the breadcrumb trail (Repos / <repo> / Issues / #N), leaf inert', async () => {
+  it('renders the trail within the Issues tab (Issues / #N), leaf inert', async () => {
     await mountDetail();
 
+    // The repo segment moved into the frame (issue #61): its header names the
+    // repo and the Issues tab stays current on an issue page.
+    expect(container.querySelector('.repo-head h1')?.textContent).toBe('coding-lab');
+    expect(
+      container
+        .querySelector(`nav.repo-tabs a[href="/repos/${REPO_ID}/issues"]`)
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
     const crumb = container.querySelector('p.crumb');
-    expect(crumb?.textContent).toBe('Repos / coding-lab / Issues / #7');
-    expect(crumb?.querySelector('a[href="/repos"]')).not.toBeNull();
-    // The repo name and the "Issues" section both link to the issues list.
-    expect(crumb?.querySelectorAll(`a[href="/repos/${REPO_ID}/issues"]`)).toHaveLength(2);
+    expect(crumb?.textContent).toBe('Issues / #7');
+    // "Issues" links back to the issues list.
+    expect(crumb?.querySelectorAll(`a[href="/repos/${REPO_ID}/issues"]`)).toHaveLength(1);
     // The #7 leaf is the current page: inert text, not a link.
     expect(crumb?.querySelector(`a[href="/repos/${REPO_ID}/issues/${NUMBER}"]`)).toBeNull();
   });
@@ -315,8 +324,8 @@ describe('IssueDetail (repo fetch fails)', () => {
     expect(container.textContent).toContain('Fix login');
     expect(container.textContent).toContain('Steps to reproduce…');
     expect(container.textContent).toContain('first');
-    // The failure is surfaced in a banner…
-    const banner = container.querySelector('.banner.error');
+    // The failure is surfaced in the frame's banner…
+    const banner = container.querySelector('.repo-head .banner.error');
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain('repo lookup failed');
     // …and the view degrades to read-only: the binding is unknown, so no

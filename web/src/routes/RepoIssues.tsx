@@ -1,15 +1,16 @@
-// Issues view for one repo (/repos/:id/issues): the ready-for-agent queue on
-// top, a server-side state filter (open/closed/all), client-side label chips
+// Issues view for one repo (/repos/:id/issues), the repo home's Issues tab
+// (issue #61: it moved into the tab unchanged — the frame owns the page, the
+// repo name heading and the repo fetch): the ready-for-agent queue on top, a
+// server-side state filter (open/closed/all), client-side label chips
 // narrowing the fetched page, and phone-first issue cards (number, title,
 // state badge, label chips, comment count). Builtin repos get the New issue
 // and Labels entry points; forge repos read fine but are managed on the
 // forge. issue.changed (scoped to this repo) refetches everything.
 
 import { A, useParams, useSearchParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource } from 'solid-js';
+import { For, Match, Show, Switch } from 'solid-js';
 import {
   errorMessage,
-  getRepo,
   listIssues,
   listLabels,
   listReadyIssues,
@@ -17,10 +18,8 @@ import {
   type IssueSummary,
 } from '../api';
 import Banner from '../components/Banner';
-import Crumbs, { type Crumb } from '../components/Crumbs';
 import EmptyState from '../components/EmptyState';
 import LabelChip from '../components/LabelChip';
-import RequireAuth from '../components/RequireAuth';
 import SectionCard from '../components/SectionCard';
 import SectionHead from '../components/SectionHead';
 import {
@@ -34,19 +33,13 @@ import { labelChipStyle } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
 import { forgeWebUrl } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
+import { useRepoHome } from './repo-home/context';
 
 const STATE_FILTERS: IssueStateFilter[] = ['open', 'closed', 'all'];
 
 export default function RepoIssues() {
-  return (
-    <RequireAuth>
-      <RepoIssuesView />
-    </RequireAuth>
-  );
-}
-
-function RepoIssuesView() {
   const params = useParams<{ id: string }>();
+  const home = useRepoHome();
   const [query, setQuery] = useSearchParams<{ state?: string; label?: string }>();
 
   const state = (): IssueStateFilter =>
@@ -54,10 +47,6 @@ function RepoIssuesView() {
   const labelFilter = (): string | null =>
     typeof query.label === 'string' && query.label !== '' ? query.label : null;
 
-  const [repo] = createResource(
-    () => params.id,
-    (id) => getRepo(id),
-  );
   // String key: a search-param change that leaves the state untouched (label
   // narrowing) yields the same key, so the page is NOT refetched — the label
   // chips filter the already-fetched page client-side.
@@ -78,7 +67,7 @@ function RepoIssuesView() {
   // non-throwing accessors: a failed listIssues must render the error banner
   // (not a silently blank page), and a failed /ready must not take the issue
   // cards down with it.
-  const repoData = () => resourceValue(repo);
+  const repoData = () => home.repo();
   const pageData = () => resourceValue(page);
   const readyData = () => resourceValue(ready);
   // Label colors exist only on the builtin tracker; the resource stays idle
@@ -122,12 +111,6 @@ function RepoIssuesView() {
     return active === null ? `${base}.` : `${base} labeled "${active}".`;
   };
 
-  const crumbs = (): Crumb[] => [
-    { label: 'Repos', href: '/repos' },
-    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
-    { label: 'Issues' },
-  ];
-
   // Only forge-bound repos show the note, and only when the remote parses into
   // a web URL: otherwise the sentence stays plain text (no dead link).
   const forgeIssuesUrl = (): string | null => {
@@ -138,10 +121,10 @@ function RepoIssuesView() {
   };
 
   return (
-    <main class="page">
-      <Crumbs segments={crumbs()} />
+    <>
+      {/* The tab root: no crumb — the frame's header names the repo. */}
       <SectionHead
-        title={<>{repoData()?.name ?? 'Repository'} · Issues</>}
+        title="Issues"
         action={
           <Show when={canMutate()}>
             <div class="head-actions">
@@ -239,7 +222,7 @@ function RepoIssuesView() {
           </div>
         </Match>
       </Switch>
-    </main>
+    </>
   );
 }
 

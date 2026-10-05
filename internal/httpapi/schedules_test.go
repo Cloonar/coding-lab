@@ -66,6 +66,26 @@ func stringsOf(t *testing.T, body map[string]any, key string) []string {
 	return out
 }
 
+// wantFieldRefusal decodes a refusal body and asserts its error message and
+// the field it names (issue #61). An empty field asserts the plain shape: no
+// "field" key at all.
+func wantFieldRefusal(t *testing.T, resp *http.Response, wantErr, wantField string) {
+	t.Helper()
+	got := decodeBody(t, resp)
+	if got["error"] != wantErr {
+		t.Fatalf("error = %q, want %q (body %v)", got["error"], wantErr, got)
+	}
+	if wantField == "" {
+		if hasKey(got, "field") {
+			t.Fatalf("fieldless refusal carries field = %v (body %v)", got["field"], got)
+		}
+		return
+	}
+	if got["field"] != wantField {
+		t.Fatalf("field = %v, want %q (body %v)", got["field"], wantField, got)
+	}
+}
+
 func TestScheduleCRUD(t *testing.T) {
 	x := newScheduleServer(t)
 	repo := seedTrackerRepo(t, x, "proj", nil)
@@ -176,8 +196,9 @@ func TestScheduleCRUD(t *testing.T) {
 	}
 }
 
-// TestScheduleCreateValidation pins every write-time refusal and its
-// operator-facing message — the form renders these verbatim.
+// TestScheduleCreateValidation pins every write-time refusal, its
+// operator-facing message — the form renders these verbatim — and the JSON
+// key it names (issue #61), so the editor shows it under that field.
 func TestScheduleCreateValidation(t *testing.T) {
 	x := newScheduleServer(t)
 	repo := seedTrackerRepo(t, x, "proj", nil)
@@ -185,59 +206,61 @@ func TestScheduleCreateValidation(t *testing.T) {
 	base := "/api/v1/repos/" + repo.ID + "/schedules"
 
 	cases := []struct {
-		name string
-		body map[string]any
-		want string
+		name  string
+		body  any
+		want  string
+		field string // "" = a refusal naming no single field (no "field" key)
 	}{
 		{"missing name", map[string]any{"cadence": "0 6 * * *", "prompt": "p"},
-			"name is required"},
+			"name is required", "name"},
 		{"blank name", map[string]any{"name": "   ", "cadence": "0 6 * * *", "prompt": "p"},
-			"name is required"},
+			"name is required", "name"},
 		{"name too long", map[string]any{"name": strings.Repeat("n", 101), "cadence": "0 6 * * *", "prompt": "p"},
-			"name must be at most 100 characters"},
+			"name must be at most 100 characters", "name"},
 		{"missing cadence", map[string]any{"name": "s", "prompt": "p"},
-			"cadence is required"},
+			"cadence is required", "cadence"},
 		{"bad cadence passes the parser message through",
 			map[string]any{"name": "s", "cadence": "99 * * * *", "prompt": "p"},
-			`cron: minute value 99 out of range 0-59`},
+			`cron: minute value 99 out of range 0-59`, "cadence"},
 		{"cadence with the wrong field count",
 			map[string]any{"name": "s", "cadence": "0 6 * *", "prompt": "p"},
-			`cron: expression "0 6 * *" has 4 fields, want exactly 5: minute hour day-of-month month day-of-week`},
+			`cron: expression "0 6 * *" has 4 fields, want exactly 5: minute hour day-of-month month day-of-week`, "cadence"},
 		{"cadence that never fires",
 			map[string]any{"name": "s", "cadence": "0 0 30 2 *", "prompt": "p"},
-			"cadence never matches any upcoming time"},
+			"cadence never matches any upcoming time", "cadence"},
 		{"unknown flow",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "flows": []string{"nope"}},
-			`unknown flow "nope"`},
+			`unknown flow "nope"`, "flows"},
 		{"duplicate flow",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "flows": []string{"autolander", "autolander"}},
-			`duplicate flow "autolander"`},
+			`duplicate flow "autolander"`, "flows"},
+		// The prompt-or-flow rule spans two fields; it points at the prompt.
 		{"neither prompt nor flow",
 			map[string]any{"name": "s", "cadence": "0 6 * * *"},
-			"a schedule needs a prompt, a flow, or both"},
+			"a schedule needs a prompt, a flow, or both", "prompt"},
 		{"whitespace prompt with no flow",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "prompt": "   ", "flows": []string{}},
-			"a schedule needs a prompt, a flow, or both"},
+			"a schedule needs a prompt, a flow, or both", "prompt"},
 		{"zero-width prompt with no flow",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "prompt": "\u200B\uFEFF\u2060"},
-			"a schedule needs a prompt, a flow, or both"},
+			"a schedule needs a prompt, a flow, or both", "prompt"},
 		{"budget below the floor",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "prompt": "p", "budget_minutes": 0},
-			"budget_minutes must be between 1 and 1440 (null clears the override)"},
+			"budget_minutes must be between 1 and 1440 (null clears the override)", "budget_minutes"},
 		{"budget above the ceiling",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "prompt": "p", "budget_minutes": 1441},
-			"budget_minutes must be between 1 and 1440 (null clears the override)"},
+			"budget_minutes must be between 1 and 1440 (null clears the override)", "budget_minutes"},
 		{"unknown provider",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "prompt": "p", "provider": "ghost"},
-			`unknown provider "ghost"`},
+			`unknown provider "ghost"`, "provider"},
+		// A body that is not JSON names no single field: the plain shape.
+		{"invalid JSON body", "not an object", "invalid JSON body", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := x.do("POST", base, tc.body, h)
 			wantStatus(t, resp, http.StatusBadRequest)
-			if got := decodeBody(t, resp)["error"]; got != tc.want {
-				t.Fatalf("error = %q, want %q", got, tc.want)
-			}
+			wantFieldRefusal(t, resp, tc.want, tc.field)
 		})
 	}
 
@@ -259,9 +282,8 @@ func TestScheduleCreateValidation(t *testing.T) {
 	_ = resp.Body.Close()
 	resp = x.do("POST", base, map[string]any{"name": "dup", "cadence": "0 6 * * *", "prompt": "p"}, h)
 	wantStatus(t, resp, http.StatusConflict)
-	if got := decodeBody(t, resp)["error"]; got != store.ErrNameTaken.Error() {
-		t.Fatalf("duplicate error = %q, want %q", got, store.ErrNameTaken.Error())
-	}
+	// The 409 names the name field too (issue #61), like a repo name clash.
+	wantFieldRefusal(t, resp, store.ErrNameTaken.Error(), "name")
 }
 
 func TestSchedulePatch(t *testing.T) {
@@ -316,9 +338,7 @@ func TestSchedulePatch(t *testing.T) {
 	// would have neither.
 	resp = x.do("PATCH", path, map[string]any{"flows": nil}, h)
 	wantStatus(t, resp, http.StatusBadRequest)
-	if got := decodeBody(t, resp)["error"]; got != "a schedule needs a prompt, a flow, or both" {
-		t.Fatalf("error = %q", got)
-	}
+	wantFieldRefusal(t, resp, "a schedule needs a prompt, a flow, or both", "prompt")
 	// Supplying both halves in one patch is fine — the rule reads the merge.
 	resp = x.do("PATCH", path, map[string]any{"flows": nil, "prompt": "back to prose"}, h)
 	wantStatus(t, resp, http.StatusOK)
@@ -327,46 +347,61 @@ func TestSchedulePatch(t *testing.T) {
 		t.Fatalf("after combined patch = %v", got)
 	}
 
-	// Field-level refusals.
+	// Field-level refusals: each names the JSON key it is about (issue #61).
 	patchCases := []struct {
-		name string
-		body map[string]any
-		want string
+		name  string
+		body  any
+		want  string
+		field string // "" = a refusal naming no single field (no "field" key)
 	}{
-		{"blank rename", map[string]any{"name": "  "}, "name is required"},
-		{"bad cadence", map[string]any{"cadence": "0 99 * * *"}, "cron: hour value 99 out of range 0-23"},
-		{"never-firing cadence", map[string]any{"cadence": "0 0 31 2 *"}, "cadence never matches any upcoming time"},
-		{"unknown flow", map[string]any{"flows": []string{"ghost"}}, `unknown flow "ghost"`},
-		{"duplicate flow", map[string]any{"flows": []string{"autolander", "autolander"}}, `duplicate flow "autolander"`},
+		{"blank rename", map[string]any{"name": "  "}, "name is required", "name"},
+		{"name must be a string", map[string]any{"name": 7}, "field name must be a string", "name"},
+		{"bad cadence", map[string]any{"cadence": "0 99 * * *"}, "cron: hour value 99 out of range 0-23", "cadence"},
+		{"never-firing cadence", map[string]any{"cadence": "0 0 31 2 *"}, "cadence never matches any upcoming time", "cadence"},
+		{"prompt must be a string", map[string]any{"prompt": false}, "field prompt must be a string", "prompt"},
+		{"unknown flow", map[string]any{"flows": []string{"ghost"}}, `unknown flow "ghost"`, "flows"},
+		{"duplicate flow", map[string]any{"flows": []string{"autolander", "autolander"}}, `duplicate flow "autolander"`, "flows"},
+		{"enabled must be a boolean", map[string]any{"enabled": "yes"}, "field enabled must be a boolean", "enabled"},
 		{"budget out of range", map[string]any{"budget_minutes": 5000},
-			"budget_minutes must be between 1 and 1440 (null clears the override)"},
-		{"unknown provider", map[string]any{"provider": "ghost"}, `unknown provider "ghost"`},
-		{"unknown field", map[string]any{"colour": "red"}, `unknown field "colour"`},
+			"budget_minutes must be between 1 and 1440 (null clears the override)", "budget_minutes"},
+		{"budget must be an integer", map[string]any{"budget_minutes": "x"},
+			"field budget_minutes must be an integer or null", "budget_minutes"},
+		{"model must be a string", map[string]any{"model": 1}, "field model must be a string or null", "model"},
+		{"effort must be a string", map[string]any{"effort": true}, "field effort must be a string or null", "effort"},
+		{"unknown provider", map[string]any{"provider": "ghost"}, `unknown provider "ghost"`, "provider"},
+		{"unknown field", map[string]any{"colour": "red"}, `unknown field "colour"`, "colour"},
 		// The strike state is engine bookkeeping: an edit form must not be
 		// able to clear a pause or forge a counter.
-		{"paused is not patchable", map[string]any{"paused": false}, `unknown field "paused"`},
-		{"counter is not patchable", map[string]any{"consecutive_failures": 0}, `unknown field "consecutive_failures"`},
-		{"last_fired_at is not patchable", map[string]any{"last_fired_at": nil}, `unknown field "last_fired_at"`},
+		{"paused is not patchable", map[string]any{"paused": false}, `unknown field "paused"`, "paused"},
+		{"counter is not patchable", map[string]any{"consecutive_failures": 0}, `unknown field "consecutive_failures"`, "consecutive_failures"},
+		{"last_fired_at is not patchable", map[string]any{"last_fired_at": nil}, `unknown field "last_fired_at"`, "last_fired_at"},
 		{"flows must be an array", map[string]any{"flows": "autolander"},
-			"field flows must be an array of flow keys or null"},
+			"field flows must be an array of flow keys or null", "flows"},
+		// Several bad keys: the handler decodes in sorted key order, so the
+		// refusal is deterministic — never whichever key a map yielded first.
+		{"several bad keys", map[string]any{"zzz": 1, "provider": "ghost", "enabled": "yes", "cadence": "nope"},
+			`cron: expression "nope" has 1 fields, want exactly 5: minute hour day-of-month month day-of-week`, "cadence"},
+		// A body that is not JSON names no single field: the plain shape.
+		{"invalid JSON body", "not an object", "invalid JSON body", ""},
 	}
 	for _, tc := range patchCases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := x.do("PATCH", path, tc.body, h)
-			wantStatus(t, resp, http.StatusBadRequest)
-			if got := decodeBody(t, resp)["error"]; got != tc.want {
-				t.Fatalf("error = %q, want %q", got, tc.want)
+			for range 5 { // repeat: a random map order would flake the "several" case
+				resp := x.do("PATCH", path, tc.body, h)
+				wantStatus(t, resp, http.StatusBadRequest)
+				wantFieldRefusal(t, resp, tc.want, tc.field)
 			}
 		})
 	}
 
-	// A rename onto a sibling's name is the 409, not a 400.
+	// A rename onto a sibling's name is the 409, not a 400 — and it names the
+	// name field (issue #61).
 	resp = x.do("POST", base, map[string]any{"name": "other", "cadence": "0 6 * * *", "prompt": "p"}, h)
 	wantStatus(t, resp, http.StatusCreated)
 	_ = resp.Body.Close()
 	resp = x.do("PATCH", path, map[string]any{"name": "other"}, h)
 	wantStatus(t, resp, http.StatusConflict)
-	_ = resp.Body.Close()
+	wantFieldRefusal(t, resp, store.ErrNameTaken.Error(), "name")
 }
 
 // TestScheduleKnobOverrideTrimParity pins that POST and PATCH store the same
@@ -429,24 +464,23 @@ func TestScheduleInputBounds(t *testing.T) {
 	}
 
 	createCases := []struct {
-		name string
-		body map[string]any
-		want string
+		name  string
+		body  map[string]any
+		want  string
+		field string
 	}{
 		{"prompt over the byte bound",
 			map[string]any{"name": "s", "cadence": "0 6 * * *", "prompt": longPrompt},
-			"prompt must be at most 16384 bytes"},
+			"prompt must be at most 16384 bytes", "prompt"},
 		{"cadence over the byte bound",
 			map[string]any{"name": "s", "cadence": longCadence, "prompt": "p"},
-			"cadence must be at most 256 bytes"},
+			"cadence must be at most 256 bytes", "cadence"},
 	}
 	for _, tc := range createCases {
 		t.Run("create "+tc.name, func(t *testing.T) {
 			resp := x.do("POST", base, tc.body, h)
 			wantStatus(t, resp, http.StatusBadRequest)
-			if got := decodeBody(t, resp)["error"]; got != tc.want {
-				t.Fatalf("error = %q, want %q", got, tc.want)
-			}
+			wantFieldRefusal(t, resp, tc.want, tc.field)
 		})
 	}
 
@@ -458,22 +492,21 @@ func TestScheduleInputBounds(t *testing.T) {
 	id := decodeBody(t, resp)["id"].(string)
 
 	patchCases := []struct {
-		name string
-		body map[string]any
-		want string
+		name  string
+		body  map[string]any
+		want  string
+		field string
 	}{
 		{"prompt over the byte bound", map[string]any{"prompt": longPrompt},
-			"prompt must be at most 16384 bytes"},
+			"prompt must be at most 16384 bytes", "prompt"},
 		{"cadence over the byte bound", map[string]any{"cadence": longCadence},
-			"cadence must be at most 256 bytes"},
+			"cadence must be at most 256 bytes", "cadence"},
 	}
 	for _, tc := range patchCases {
 		t.Run("patch "+tc.name, func(t *testing.T) {
 			resp := x.do("PATCH", base+"/"+id, tc.body, h)
 			wantStatus(t, resp, http.StatusBadRequest)
-			if got := decodeBody(t, resp)["error"]; got != tc.want {
-				t.Fatalf("error = %q, want %q", got, tc.want)
-			}
+			wantFieldRefusal(t, resp, tc.want, tc.field)
 		})
 	}
 }

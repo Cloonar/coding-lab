@@ -8,15 +8,16 @@
 // is the server's concern — the UI just confirms); a 409 body — push
 // rejection stderr, non-open CR, missing head branch — is shown verbatim in
 // the error banner because it carries the actionable git/hook message.
-// cr.changed (scoped to this repo) refetches.
+// cr.changed (scoped to this repo) refetches. It renders inside the repo home
+// frame's CRs tab (issue #61): the frame owns the page, the repo heading and
+// the repo fetch; this page keeps a "Change requests / #N" trail in the tab.
 
 import { useParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createMemo, createResource, createSignal } from 'solid-js';
-import { closeCR, errorMessage, getCR, getRepo, mergeCR, type CRDetail as CR } from '../api';
+import { For, Match, Show, Switch, createMemo, createSignal } from 'solid-js';
+import { closeCR, errorMessage, getCR, mergeCR, type CRDetail as CR } from '../api';
 import ClosesChips from '../components/ClosesChips';
 import Crumbs, { type Crumb } from '../components/Crumbs';
 import Banner from '../components/Banner';
-import RequireAuth from '../components/RequireAuth';
 import SectionCard from '../components/SectionCard';
 import SectionHead from '../components/SectionHead';
 import { classifyDiff, groupDiffFiles, type DiffFileGroup } from '../lib/crs';
@@ -25,14 +26,6 @@ import { createLiveResource } from '../lib/liveResource';
 import { resourceValue } from '../lib/resource';
 
 export default function CRDetail() {
-  return (
-    <RequireAuth>
-      <CRDetailView />
-    </RequireAuth>
-  );
-}
-
-function CRDetailView() {
   const params = useParams<{ id: string; number: string }>();
   const crNumber = () => Number(params.number);
 
@@ -46,18 +39,9 @@ function CRDetailView() {
   );
   // Non-throwing accessor for reads outside the guarded <Match> branches.
   const crData = () => resourceValue(cr);
-  // The repo feeds the breadcrumb name only; a failed lookup must degrade to
-  // the placeholder, never blank the CR view — so it goes through the same
-  // non-throwing accessor.
-  const [repo] = createResource(
-    () => params.id,
-    (id) => getRepo(id),
-  );
-  const repoData = () => resourceValue(repo);
-
+  // The trail within the CRs tab; the frame names the repo (and shows its
+  // banner when the repo lookup fails — the CR view stays readable).
   const crumbs = (): Crumb[] => [
-    { label: 'Repos', href: '/repos' },
-    { label: repoData()?.name ?? 'Repository', href: `/repos/${params.id}/issues` },
     { label: 'Change requests', href: `/repos/${params.id}/crs` },
     { label: `#${crNumber()}` },
   ];
@@ -105,7 +89,7 @@ function CRDetailView() {
   };
 
   return (
-    <main class="page">
+    <>
       <Crumbs segments={crumbs()} />
       <Banner message={error()} onDismiss={() => setError(null)} />
       <Switch>
@@ -209,7 +193,7 @@ function CRDetailView() {
           )}
         </Match>
       </Switch>
-    </main>
+    </>
   );
 }
 
