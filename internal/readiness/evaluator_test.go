@@ -292,7 +292,7 @@ func TestEvaluator_TrackerRecordAndStaleness(t *testing.T) {
 
 	stamp := f.st.CredentialStampByID(f.ctx, repo.ForgeCredentialID)
 	f.rec.ObserveTrackerRead(tracker.ListRead{RepoID: repo.ID, Credential: stamp, Op: tracker.OpReadyIssues,
-		Err: errors.New("forgejo GET /repos/acme/widget/issues: unexpected status 401: bad token"), OpenIssues: -1})
+		Err: refused("forgejo GET /repos/acme/widget/issues: unexpected status 401: bad token"), OpenIssues: -1})
 	r := f.report(repo.ID)
 	wantState(t, r, CheckTracker, Failing)
 	if c := find(r, CheckTracker); *c.Fix != (Fix{Scope: ScopeRepo, Section: "integrations", Field: "forge_credential_id"}) {
@@ -546,10 +546,9 @@ func TestEvaluator_Imports(t *testing.T) {
 		}
 	}
 	r = f.report(app.ID)
-	wantState(t, r, CheckImports, Failing)
-	if c := find(r, CheckImports); c.Detail != `The read-only import "proto" is still being cloned.` ||
-		*c.Fix != (Fix{Scope: ScopeRepo, Section: "imports"}) {
-		t.Fatalf("failing check = %+v (fix %+v)", *c, c.Fix)
+	wantState(t, r, CheckImports, Pending)
+	if c := find(r, CheckImports); c.Detail != `The read-only import "proto" is still being cloned.` || c.Fix != nil {
+		t.Fatalf("pending check = %+v (fix %+v)", *c, c.Fix)
 	}
 
 	if err := f.st.UpdateRepoCloneStatus(f.ctx, proto.ID, store.CloneStatusReady, ""); err != nil {
@@ -697,7 +696,7 @@ func TestEvaluator_SummariesMatchSingleAndBatchTheirReads(t *testing.T) {
 	f.rec.ObserveFetch(gitx.FetchAttribution{RepoID: repos[1].ID, Credential: gitStamp}, errors.New("fatal: no"))
 	f.rec.ObserveFetch(gitx.FetchAttribution{RepoID: builtin.ID, Credential: store.NoCredentialStamp}, nil)
 	f.rec.ObserveTrackerRead(tracker.ListRead{RepoID: repos[0].ID, Credential: forgeStamp, Op: tracker.OpIssues, OpenIssues: 5})
-	f.rec.ObserveTrackerRead(tracker.ListRead{RepoID: repos[2].ID, Credential: forgeStamp, Op: tracker.OpReadyIssues, Err: errors.New("401"), OpenIssues: -1})
+	f.rec.ObserveTrackerRead(tracker.ListRead{RepoID: repos[2].ID, Credential: forgeStamp, Op: tracker.OpReadyIssues, Err: refused("401"), OpenIssues: -1})
 	f.rec.ObserveClaimable(repos[0], 2)
 	f.rec.ObserveImage(builtin.ID, "img", nil)
 
@@ -797,5 +796,148 @@ func TestEvaluator_BareMinimum(t *testing.T) {
 	}
 	if s.Claimable != nil || s.OpenIssues != nil {
 		t.Fatalf("forge counts = %v / %v, want nulls", s.Claimable, s.OpenIssues)
+	}
+}
+
+// failingStore is the evaluator's Store with reads that fail on demand, by
+// method — a dependency failure injected through the evaluator's own seam.
+type failingStore struct {
+	*store.Store
+	fail map[string]bool
+}
+
+var errStoreRead = errors.New("database is locked")
+
+func (f *failingStore) Credentials(ctx context.Context) ([]store.CredentialMeta, error) {
+	if f.fail["Credentials"] {
+		return nil, errStoreRead
+	}
+	return f.Store.Credentials(ctx)
+}
+func (f *failingStore) AllRepoImports(ctx context.Context) (map[string][]string, error) {
+	if f.fail["AllRepoImports"] {
+		return nil, errStoreRead
+	}
+	return f.Store.AllRepoImports(ctx)
+}
+func (f *failingStore) OpenIssueCounts(ctx context.Context, label string) (map[string]int, error) {
+	if f.fail["OpenIssueCounts:"+label] {
+		return nil, errStoreRead
+	}
+	return f.Store.OpenIssueCounts(ctx, label)
+}
+
+// A failed read degrades exactly what rests on it (issue #61): unreadable
+// issue counts leave the counts unknown, an unreadable import list leaves the
+// imports check out — and the rest of every report stands. Only the
+// credential listing every check rests on fails the evaluation, and RowOnly
+// is then what a repo response carries: the clone check, nothing guessed.
+func TestEvaluator_FailedReadsDegrade(t *testing.T) {
+	f := newEvalFixture(t)
+	fs := &failingStore{Store: f.st, fail: map[string]bool{}}
+	f.ev.Store = fs
+	f.ev.Claimable = &fakeCounter{counts: map[string]int{}}
+	f.ev.Tracker = fakeTrackerConfig{}
+	app := f.repo("app", nil)
+	lib := f.repo("lib", nil)
+	if err := f.st.AddRepoImport(f.ctx, app.ID, lib.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.issue(app.ID, "ready", "", true)
+	f.rec.ObserveFetch(gitx.FetchAttribution{RepoID: app.ID, Credential: store.NoCredentialStamp}, nil)
+	f.rec.ObserveFetch(gitx.FetchAttribution{RepoID: lib.ID, Credential: store.NoCredentialStamp}, nil)
+	repos := []store.Repo{f.reload(app.ID), f.reload(lib.ID)}
+
+	healthy, err := f.ev.Summaries(f.ctx, repos)
+	if err != nil {
+		t.Fatalf("Summaries: %v", err)
+	}
+	wantState(t, healthy[0].Readiness, CheckImports, Passing)
+	wantState(t, healthy[0].Readiness, CheckGitCredential, Passing)
+	if healthy[0].OpenIssues == nil || healthy[0].Claimable == nil {
+		t.Fatalf("healthy counts = %+v", healthy[0])
+	}
+
+	// The built-in issue counts cannot be read: counts unknown, reports intact.
+	fs.fail["OpenIssueCounts:"] = true
+	fs.fail["OpenIssueCounts:"+tracker.ReadyLabel] = true
+	got, err := f.ev.Summaries(f.ctx, repos)
+	if err != nil {
+		t.Fatalf("Summaries with unreadable counts: %v", err)
+	}
+	for i, s := range got {
+		if s.OpenIssues != nil || s.Claimable != nil {
+			t.Fatalf("%s counts = %v / %v, want unknown", repos[i].Name, s.OpenIssues, s.Claimable)
+		}
+		if !reflect.DeepEqual(s.Readiness, healthy[i].Readiness) {
+			t.Fatalf("%s report moved with the counts:\n got  %+v\n want %+v", repos[i].Name, s.Readiness, healthy[i].Readiness)
+		}
+	}
+	single, err := f.ev.Summary(f.ctx, repos[0])
+	if err != nil || single.OpenIssues != nil || single.Claimable != nil {
+		t.Fatalf("Summary with unreadable counts = %+v, %v; want unknown counts, no error", single, err)
+	}
+	// Only one of the two: the other count is still known.
+	fs.fail["OpenIssueCounts:"] = false
+	if got, _ := f.ev.Summary(f.ctx, repos[0]); got.OpenIssues == nil || got.Claimable != nil {
+		t.Fatalf("Summary with an unreadable ready queue = %+v, want open_issues known, claimable unknown", got)
+	}
+	clear(fs.fail)
+
+	// The import list cannot be read: the imports check is left out — never
+	// failing — and nothing else moves.
+	fs.fail["AllRepoImports"] = true
+	if got, err = f.ev.Summaries(f.ctx, repos); err != nil {
+		t.Fatalf("Summaries with an unreadable import list: %v", err)
+	}
+	for i, s := range got {
+		wantAbsent(t, s.Readiness, CheckImports)
+		wantState(t, s.Readiness, CheckGitCredential, Passing)
+		if *s.OpenIssues != *healthy[i].OpenIssues {
+			t.Fatalf("%s open_issues = %d, want %d", repos[i].Name, *s.OpenIssues, *healthy[i].OpenIssues)
+		}
+	}
+	clear(fs.fail)
+
+	// The credential listing cannot be read: the evaluation fails, and the
+	// GET /readiness endpoint may say so — the repo responses use RowOnly.
+	fs.fail["Credentials"] = true
+	if _, err := f.ev.Summaries(f.ctx, repos); !errors.Is(err, errStoreRead) {
+		t.Fatalf("Summaries err = %v, want the read error", err)
+	}
+	if _, err := f.ev.Summary(f.ctx, repos[0]); !errors.Is(err, errStoreRead) {
+		t.Fatalf("Summary err = %v, want the read error", err)
+	}
+	if _, err := f.ev.Report(f.ctx, repos[0]); !errors.Is(err, errStoreRead) {
+		t.Fatalf("Report err = %v, want the read error", err)
+	}
+}
+
+// RowOnly holds the clone check alone, with both counts unknown — for every
+// clone state, the roll-up matching the clone's verdict.
+func TestRowOnly(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		state  State
+		checks int
+	}{
+		{store.CloneStatusReady, Passing, 1},
+		{store.CloneStatusCloning, Pending, 1},
+		{store.CloneStatusError, Failing, 1},
+		{"?", Passing, 0},
+	} {
+		s := RowOnly(store.Repo{CloneStatus: tc.status, TrackerBinding: store.TrackerBindingBuiltin})
+		if s.Claimable != nil || s.OpenIssues != nil {
+			t.Errorf("%s: counts = %v / %v, want unknown", tc.status, s.Claimable, s.OpenIssues)
+		}
+		if s.Readiness.State != tc.state || len(s.Readiness.Checks) != tc.checks {
+			t.Errorf("%s: report = %+v, want %s with %d check(s)", tc.status, s.Readiness, tc.state, tc.checks)
+		}
+		if tc.checks == 1 && s.Readiness.Checks[0].ID != CheckClone {
+			t.Errorf("%s: the one check is %q, want clone", tc.status, s.Readiness.Checks[0].ID)
+		}
+		if s.Readiness.Checks == nil {
+			t.Errorf("%s: checks is nil; the wire contract wants []", tc.status)
+		}
 	}
 }

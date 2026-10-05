@@ -429,9 +429,14 @@ func run() int {
 	//     service's ImageEnsured);
 	//   - each computed claimable count (the AFK engine's OnClaimable).
 	// It publishes repo.changed when a recorded verdict flips or a count
-	// changes — never per read. In memory only: a restart forgets it, and a
-	// check with no record is left out of the report rather than guessed.
+	// changes — never per read — for the repo the outcome concerns and for
+	// every repo whose report reads the same record: the importers of a
+	// fetched repo, and the container-Runner repos for a dev image record
+	// (keyed by ref, shared by every repo resolving to it). In memory only: a
+	// restart forgets it, and a check with no record is left out of the
+	// report rather than guessed.
 	readinessRec := readiness.NewRecorder(bus, nil)
+	readinessRec.SetFanout(readinessFanout(st))
 	trackerReg.SetReadObserver(readinessRec.ObserveTrackerRead)
 
 	gitEngine := gitx.New(cfg.GitBin)
@@ -1289,24 +1294,57 @@ func providerCLIConfigs(cfg config.Config, st *store.Store, preflight func() (po
 }
 
 // announceContainerRepos publishes repo.changed for every repo whose
-// readiness depends on the container preflight (issue #61) — those whose
-// effective Runner is container, plus any whose Runner cannot be resolved
-// right now (counted in rather than silently skipped). The preflight's
-// verdict lives in an in-memory gate no page is told about, so the goroutine
-// that publishes it calls this when the verdict lands or changes: a repo
-// home showing "preflight has not finished" then refetches and moves on.
-// Best-effort — a failed listing announces nothing, and the next page load
-// reads the truth anyway.
+// readiness depends on the container preflight (issue #61) — containerRepoIDs.
+// The preflight's verdict lives in an in-memory gate no page is told about,
+// so the goroutine that publishes it calls this when the verdict lands or
+// changes: a repo home showing "preflight has not finished" then refetches
+// and moves on. Best-effort — a failed listing announces nothing, and the
+// next page load reads the truth anyway.
 func announceContainerRepos(ctx context.Context, st *store.Store, rec *readiness.Recorder) {
-	repos, err := st.Repos(ctx)
+	repoIDs, err := containerRepoIDs(ctx, st)
 	if err != nil {
 		return
 	}
+	rec.Announce(repoIDs...)
+}
+
+// readinessFanout is the readiness recorder's Fanout over the store: the
+// importers of a repo (store.RepoImporters) and the container-Runner repos
+// (containerRepoIDs).
+func readinessFanout(st *store.Store) readiness.Fanout {
+	return readiness.Fanout{
+		Importers: func(ctx context.Context, repoID string) ([]string, error) {
+			importers, err := st.RepoImporters(ctx, repoID)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]string, 0, len(importers))
+			for _, r := range importers {
+				out = append(out, r.ID)
+			}
+			return out, nil
+		},
+		ImageRepos: func(ctx context.Context) ([]string, error) { return containerRepoIDs(ctx, st) },
+	}
+}
+
+// containerRepoIDs lists the repos whose dev image check depends on
+// container-side state — the preflight verdict, a dev image record: those
+// whose effective Runner is container, plus any whose Runner cannot be
+// resolved right now (counted in rather than silently skipped). It is also
+// the readiness recorder's Fanout.ImageRepos.
+func containerRepoIDs(ctx context.Context, st *store.Store) ([]string, error) {
+	repos, err := st.Repos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
 	for _, r := range repos {
 		if runner, err := instance.EffectiveRunner(ctx, st, r); err != nil || runner == store.RunnerContainer {
-			rec.Announce(r.ID)
+			out = append(out, r.ID)
 		}
 	}
+	return out, nil
 }
 
 // labURL is the LAB_URL handed to spawned sessions. An explicit --agent-url

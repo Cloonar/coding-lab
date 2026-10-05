@@ -169,7 +169,7 @@ func scheduleJSON(sc store.Schedule) scheduleResponse {
 func (s *Server) scheduleView(ctx context.Context, sc store.Schedule) (scheduleResponse, error) {
 	resp := scheduleJSON(sc)
 	resp.NextRunAt, resp.NextRunDisplay = scheduleNextRun(sc, s.now())
-	last, err := s.store.LatestRunForSchedule(ctx, sc.ID)
+	last, err := s.store.LatestRunForSchedule(ctx, sc.RepoID, sc.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 	case err != nil:

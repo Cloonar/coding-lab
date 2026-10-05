@@ -59,18 +59,20 @@ type FetchRecord struct {
 	At         time.Time
 }
 
-// TrackerRecord is the outcome of the most recent list read of ONE kind
-// (Op) of one forge-bound repo's tracker. The recorder keeps one per kind,
-// not one per repo: a forge repository can answer one listing and refuse
-// another for good (issues enabled and pull requests disabled, or the
-// reverse), and with one record per repo the verdict would be whichever of
-// the two the engine happened to read last — flipping, and announcing the
-// flip, on every pass. Per kind, a verdict moves only when that read's own
-// outcome does.
+// TrackerRecord is the outcome of the most recent DEFINITIVE list read of
+// ONE kind (Op) of one forge-bound repo's tracker: one that succeeded, or one
+// the forge refused for the token's or the repository's sake (see
+// trackerEvidence — a 5xx, a network error or a timeout is never recorded).
+// The recorder keeps one per kind, not one per repo: a forge repository can
+// answer one listing and refuse another for good (issues enabled and pull
+// requests disabled, or the reverse), and with one record per repo the
+// verdict would be whichever of the two the engine happened to read last —
+// flipping, and announcing the flip, on every pass. Per kind, a verdict
+// moves only when that read's own outcome does.
 type TrackerRecord struct {
 	OK bool
-	// Error is the forge client's error text of a failed read (method, path,
-	// status, bounded body snippet — never the token).
+	// Error is the forge client's error text of a refused read (method,
+	// path, status, bounded body snippet — never the token).
 	Error string
 	// NotFound marks a read the forge answered 404: the repository does not
 	// exist there, or the token cannot see it.
@@ -120,14 +122,44 @@ type claimableRecord struct {
 	binding string
 }
 
+// Fanout is how the recorder finds the OTHER repos a recorded verdict
+// concerns. Records are keyed by the repo or the dev image ref they were
+// observed for, while a report also reads records keyed by something else —
+// an importing repo's imports check reads each TARGET's fetch record, and a
+// container repo's dev image check reads the record of the image ref it
+// resolves. When such a record's verdict flips, those repos are announced
+// too, so an open page of theirs refetches instead of going stale.
+//
+// Both lookups run only when a verdict flips — never per read —
+// synchronously on the observing goroutine and bounded by fanoutTimeout; a
+// lookup that fails announces nothing more (the next page load reads the
+// truth anyway). A nil field looks nothing up.
+type Fanout struct {
+	// Importers returns the ids of the repos that declare repoID a read-only
+	// import.
+	Importers func(ctx context.Context, repoID string) ([]string, error)
+	// ImageRepos returns the ids of the repos whose dev image check may read
+	// an image record: every repo whose effective Runner is container, and
+	// any whose Runner cannot be resolved. An image record is shared by every
+	// repo resolving to its ref, and telling exactly which ones do would mean
+	// resolving each repo's dev image — so this announces a few repos too
+	// many (a refetch that changes nothing) rather than leave one stale.
+	ImageRepos func(ctx context.Context) ([]string, error)
+}
+
+// fanoutTimeout bounds one Fanout lookup — a local store query, on a path
+// that must not block (gitx.FetchObserver).
+const fanoutTimeout = 5 * time.Second
+
 // Recorder is the in-memory memory of outcomes the readiness report is built
 // from. One Recorder is shared by every service that feeds it (cmd/lab wires
 // its methods in as their observers) and by the Evaluator that reads it. Safe
 // for concurrent use; the zero value is not usable — construct with
 // NewRecorder.
 type Recorder struct {
-	bus *events.Bus
-	now func() time.Time
+	bus    *events.Bus
+	now    func() time.Time
+	fanout Fanout // set once at wiring (SetFanout), read without the lock
 
 	mu         sync.Mutex
 	fetches    map[string]FetchRecord              // by repo id
@@ -152,6 +184,41 @@ func NewRecorder(bus *events.Bus, now func() time.Time) *Recorder {
 		openIssues: make(map[string]int),
 		images:     make(map[string]ImageRecord),
 	}
+}
+
+// SetFanout wires the lookups that find the other repos a flipped verdict
+// concerns. Call once during startup wiring, before any observer runs — the
+// field is read without a lock. Without it, a flip announces only the repos
+// the observation itself names.
+func (r *Recorder) SetFanout(f Fanout) { r.fanout = f }
+
+// lookup runs one Fanout lookup under fanoutTimeout; nil when the lookup is
+// not wired or fails.
+func lookup(fn func(ctx context.Context) ([]string, error)) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), fanoutTimeout)
+	defer cancel()
+	ids, err := fn(ctx)
+	if err != nil {
+		return nil
+	}
+	return ids
+}
+
+// importersOf is the repos importing repoID, per the wired Fanout.
+func (r *Recorder) importersOf(repoID string) []string {
+	if r.fanout.Importers == nil {
+		return nil
+	}
+	return lookup(func(ctx context.Context) ([]string, error) { return r.fanout.Importers(ctx, repoID) })
+}
+
+// imageRepos is the repos that may read an image record, per the wired
+// Fanout.
+func (r *Recorder) imageRepos() []string {
+	if r.fanout.ImageRepos == nil {
+		return nil
+	}
+	return lookup(r.fanout.ImageRepos)
 }
 
 // publish announces repo.changed for each distinct non-empty repo id. Always
@@ -188,8 +255,10 @@ func (r *Recorder) Announce(repoIDs ...string) { r.publish(repoIDs...) }
 //
 // It publishes repo.changed when the verdict flips — failed↔succeeded, a
 // first record, or a record for a different credential version — for the
-// fetched repo and for the repo the fetch ran on behalf of (the importing
-// repo of a read-only import, whose own imports check reads this record).
+// fetched repo, for the repo the fetch ran on behalf of (the importing repo
+// of a read-only import's snapshot fetch), and for every repo that imports
+// the fetched one (Fanout.Importers): each of their imports checks reads this
+// record, whoever's fetch produced it.
 func (r *Recorder) ObserveFetch(a gitx.FetchAttribution, err error) {
 	if a.RepoID == "" || errors.Is(err, context.Canceled) {
 		return
@@ -203,7 +272,7 @@ func (r *Recorder) ObserveFetch(a gitx.FetchAttribution, err error) {
 	r.fetches[a.RepoID] = rec
 	r.mu.Unlock()
 	if !had || prev.OK != rec.OK || prev.Credential != rec.Credential {
-		r.publish(a.RepoID, a.OnBehalfOf)
+		r.publish(append([]string{a.RepoID, a.OnBehalfOf}, r.importersOf(a.RepoID)...)...)
 	}
 }
 
@@ -211,11 +280,13 @@ func (r *Recorder) ObserveFetch(a gitx.FetchAttribution, err error) {
 // repo's tracker; it has tracker.ReadObserver's signature and is wired as the
 // tracker registry's read observer.
 //
-// Two outcomes are evidence of nothing and leave the record as it was: a
-// read cancelled by its caller, and a rate-limited one (tracker.
-// ErrRateLimited) — the forge refused to answer at all, which neither
-// confirms nor refutes that the token and the repository are right, and it
-// heals by itself when the window resets (ADR-0015).
+// Only a DEFINITIVE outcome is recorded (trackerEvidence): a success, or a
+// refusal about the token or the repository. Everything else — a 5xx, a
+// network error, a client timeout, a rate limit, a read cancelled by its
+// caller — is evidence of nothing and leaves the record as it was: the forge
+// did not answer the question, and the condition heals by itself. Recording
+// it would keep the tracker check failing, with a fix pointing at the forge
+// credential, until the next read of that kind — over one 502.
 //
 // It publishes repo.changed when the repo's tracker verdict under the read's
 // credential version changes — nothing known → known, passing ↔ failing — or
@@ -223,7 +294,7 @@ func (r *Recorder) ObserveFetch(a gitx.FetchAttribution, err error) {
 // The verdict is JudgeTrackerReads over every kind of read, exactly what the
 // report shows, so an event is published precisely when the report changes.
 func (r *Recorder) ObserveTrackerRead(l tracker.ListRead) {
-	if l.RepoID == "" || errors.Is(l.Err, context.Canceled) || errors.Is(l.Err, tracker.ErrRateLimited) {
+	if l.RepoID == "" || !trackerEvidence(l.Err) {
 		return
 	}
 	rec := TrackerRecord{OK: l.Err == nil, Op: l.Op, Credential: l.Credential, At: r.now()}
@@ -252,6 +323,18 @@ func (r *Recorder) ObserveTrackerRead(l tracker.ListRead) {
 	}
 }
 
+// trackerEvidence reports whether a list read's outcome is evidence about the
+// forge credential or the repository — the only outcomes a TrackerRecord may
+// hold. Evidence is an allow-list, so an outcome nobody thought of is never
+// mistaken for a verdict: a success; a 404 (tracker.ErrNotFound — the forge
+// does not show this token the repository, or the listing); a 401 or an
+// unthrottled 403 (tracker.ErrAccessDenied — the token is wrong, expired, or
+// lacks the scope or the access). A 5xx, a network error, a client timeout,
+// a rate limit, a cancellation and anything unclassified are not.
+func trackerEvidence(err error) bool {
+	return err == nil || errors.Is(err, tracker.ErrNotFound) || errors.Is(err, tracker.ErrAccessDenied)
+}
+
 // ObserveClaimable records a repo's claimable count as just computed; it has
 // afk.Options.OnClaimable's signature. It publishes repo.changed when the
 // count differs from the remembered one (or is the first).
@@ -271,9 +354,10 @@ func (r *Recorder) ObserveClaimable(repo store.Repo, count int) {
 
 // ObserveImage records the outcome of a spawn-time pull-if-missing of a dev
 // image; it has instance.Options.ImageEnsured's signature. The record is
-// keyed by the image ref — every repo resolving to that ref shares it — and
-// repo.changed is published for the repo whose spawn observed it when the
-// ref's verdict flips or is the first.
+// keyed by the image ref — every repo resolving to that ref shares it — so
+// when the ref's verdict flips or is the first, repo.changed is published
+// for the repo whose spawn observed it and for every repo whose dev image
+// check may read the record (Fanout.ImageRepos).
 func (r *Recorder) ObserveImage(repoID, ref string, err error) {
 	if ref == "" || errors.Is(err, context.Canceled) {
 		return
@@ -287,7 +371,7 @@ func (r *Recorder) ObserveImage(repoID, ref string, err error) {
 	r.images[ref] = rec
 	r.mu.Unlock()
 	if !had || prev.OK != rec.OK {
-		r.publish(repoID)
+		r.publish(append([]string{repoID}, r.imageRepos()...)...)
 	}
 }
 
@@ -319,8 +403,10 @@ func (r *Recorder) TrackerReads(repoID string) []TrackerRecord {
 
 // JudgeTrackerReads is the tracker verdict a repo's recorded list reads add
 // up to under the forge credential version credential: failed is the most
-// recent failed read among those made with that version (nil when none
-// failed), ok whether any of them succeeded. Records made with another
+// recent refused read among those made with that version (nil when none
+// was refused), ok whether any of them succeeded. The records hold only
+// definitive outcomes (trackerEvidence), so a forge that merely failed to
+// answer cannot fail the check. Records made with another
 // version — a credential since rotated or replaced — are stale and ignored;
 // an empty credential (the current one could not be read) matches nothing.
 // The reads fail the check if any kind of read failed, and pass it only when

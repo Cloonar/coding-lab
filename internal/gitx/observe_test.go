@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -227,5 +228,75 @@ func TestFetchObserver_NoObserver(t *testing.T) {
 	ctx := AttributeFetch(t.Context(), FetchAttribution{RepoID: "repo_1"})
 	if err := f.eng.Fetch(ctx, f.bare, f.env); err != nil {
 		t.Fatalf("Fetch: %v", err)
+	}
+}
+
+// localLockFailure tells a fetch that lost a LOCAL lock — the reconcile
+// sweep's fetch overlapping a spawn's on the same bare repo — from one the
+// remote or the credential failed. Git's own words (LC_ALL=C) decide.
+func TestLocalLockFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"success", nil, false},
+		{"ref lock file held", errors.New("git fetch origin: exit status 1: error: cannot lock ref 'refs/remotes/origin/main': Unable to create '/srv/lab/repos/repo_1.git/refs/remotes/origin/main.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue.\n ! 1a2b3c4..5d6e7f8  main       -> origin/main  (unable to update local ref)"), true},
+		{"ref moved underneath", errors.New("git fetch origin: exit status 1: error: cannot lock ref 'refs/remotes/origin/main': is at 5d6e7f8 but expected 1a2b3c4\n ! 1a2b3c4..5d6e7f8  main       -> origin/main  (unable to update local ref)"), true},
+		{"packed-refs lock held", errors.New("git fetch origin: exit status 128: fatal: Unable to create '/srv/lab/repos/repo_1.git/packed-refs.lock': File exists."), true},
+		{"shallow lock held", errors.New("git fetch origin: exit status 128: fatal: Unable to create '/srv/lab/repos/repo_1.git/shallow.lock': File exists."), true},
+		{"authentication failed", errors.New("git fetch origin: exit status 128: remote: Invalid username or password.\nfatal: Authentication failed for 'https://forge.example.com/acme/app.git/'"), false},
+		{"ssh refused", errors.New("git fetch origin: exit status 128: git@forge.example.com: Permission denied (publickey).\nfatal: Could not read from remote repository."), false},
+		{"remote gone", errors.New("git fetch origin: exit status 128: fatal: '/srv/gone' does not appear to be a git repository"), false},
+		{"timed out", errors.New("git fetch origin: timed out after 1m0s"), false},
+	} {
+		if got := localLockFailure(tc.err); got != tc.want {
+			t.Errorf("%s: localLockFailure = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A real fetch that loses a ref lock in the bare repo is not reported — it
+// is a local collision, not a verdict on the remote — and the next fetch,
+// once the lock is gone, is reported as the success it is.
+func TestFetchObserver_LocalLockFailureIsNotReported(t *testing.T) {
+	f, log := newObservedFixture(t)
+	attr := FetchAttribution{RepoID: "repo_1", Credential: "none"}
+	ctx := AttributeFetch(t.Context(), attr)
+
+	// The origin advances, so the fetch must update origin/main — and another
+	// git process holds that ref's lock.
+	if err := os.WriteFile(filepath.Join(f.origin, "advance.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, f.home, f.origin, "add", ".")
+	gitCmd(t, f.home, f.origin, "commit", "-q", "-m", "advance")
+	lock := filepath.Join(f.bare, "refs", "remotes", "origin", "main.lock")
+	if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil { // the clone's refs may all be packed
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := f.eng.Fetch(ctx, f.bare, f.env)
+	if err == nil {
+		t.Fatal("Fetch succeeded while the ref lock was held")
+	}
+	if !localLockFailure(err) {
+		t.Fatalf("git's lock failure was not recognized: %v", err)
+	}
+	if calls := log.take(); len(calls) != 0 {
+		t.Fatalf("a local lock failure was reported: %+v", calls)
+	}
+
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.eng.Fetch(ctx, f.bare, f.env); err != nil {
+		t.Fatalf("Fetch after the lock was released: %v", err)
+	}
+	if calls := log.take(); len(calls) != 1 || calls[0].err != nil {
+		t.Fatalf("the next fetch reported %+v, want one success", calls)
 	}
 }

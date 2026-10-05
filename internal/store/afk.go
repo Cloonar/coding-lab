@@ -94,6 +94,12 @@ func (s *Store) ActiveRunForSchedule(ctx context.Context, scheduleID string) (Ru
 	return r, nil
 }
 
+// latestRunForScheduleSQL is LatestRunForSchedule's query, named so the
+// store test can pin its plan.
+const latestRunForScheduleSQL = `SELECT ` + runColumns + ` FROM runs
+	 WHERE repo_id = ? AND schedule_id = ?
+	 ORDER BY started_at DESC LIMIT 1`
+
 // LatestRunForSchedule returns the most recently started run scheduleID
 // launched — ANY outcome, live or ended, cadence firing or Run now alike
 // (both carry runs.schedule_id) — or ErrNotFound when the Schedule has never
@@ -101,12 +107,17 @@ func (s *Store) ActiveRunForSchedule(ctx context.Context, scheduleID string) (Ru
 // why it reads the same durable link the skip-on-overlap gate does rather
 // than parsing session labels. Runs orphaned by a deleted Schedule (ON
 // DELETE SET NULL) are invisible here, as they should be.
-func (s *Store) LatestRunForSchedule(ctx context.Context, scheduleID string) (Run, error) {
-	row := s.db.QueryRowContext(ctx, s.rebind(
-		`SELECT `+runColumns+` FROM runs
-		 WHERE schedule_id = ?
-		 ORDER BY started_at DESC LIMIT 1`),
-		scheduleID)
+//
+// repoID is the Schedule's repo (schedules.repo_id): every run a Schedule
+// launches is a run of that repo, so the filter changes no answer — it is
+// what lets the query walk idx_runs_repo_started (repo_id, started_at DESC)
+// newest-first within the one repo and stop at the first match, instead of
+// scanning and sorting the whole runs table. It runs for every Schedule row
+// the list, create and patch answers carry, and twice per Run now. No
+// index covers schedule_id itself (none is needed: see the store test's
+// query-plan pin).
+func (s *Store) LatestRunForSchedule(ctx context.Context, repoID, scheduleID string) (Run, error) {
+	row := s.db.QueryRowContext(ctx, s.rebind(latestRunForScheduleSQL), repoID, scheduleID)
 	r, err := scanRun(row.Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

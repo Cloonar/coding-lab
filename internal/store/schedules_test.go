@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -888,7 +889,7 @@ func TestLatestRunForSchedule(t *testing.T) {
 		weekly := fixtureSchedule(t, st, repo.ID, "weekly", "0 6 * * 1")
 		daily := fixtureSchedule(t, st, repo.ID, "daily", "0 6 * * *")
 
-		if _, err := st.LatestRunForSchedule(ctx, weekly.ID); !errors.Is(err, ErrNotFound) {
+		if _, err := st.LatestRunForSchedule(ctx, repo.ID, weekly.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("never-launched Schedule = %v, want ErrNotFound", err)
 		}
 
@@ -910,7 +911,7 @@ func TestLatestRunForSchedule(t *testing.T) {
 		if err := st.EndRun(ctx, first.ID, RunOutcomeDeath, schedClock.Add(5*time.Minute), "session died"); err != nil {
 			t.Fatalf("EndRun: %v", err)
 		}
-		got, err := st.LatestRunForSchedule(ctx, weekly.ID)
+		got, err := st.LatestRunForSchedule(ctx, repo.ID, weekly.ID)
 		if err != nil {
 			t.Fatalf("LatestRunForSchedule: %v", err)
 		}
@@ -923,7 +924,7 @@ func TestLatestRunForSchedule(t *testing.T) {
 		second := mk("sched-2", &weekly.ID, schedClock.Add(time.Hour))
 		mk("sched-3", &daily.ID, schedClock.Add(2*time.Hour))
 		mk("manual", nil, schedClock.Add(3*time.Hour))
-		if got, err = st.LatestRunForSchedule(ctx, weekly.ID); err != nil || got.ID != second.ID || got.Outcome != RunOutcomeActive {
+		if got, err = st.LatestRunForSchedule(ctx, repo.ID, weekly.ID); err != nil || got.ID != second.ID || got.Outcome != RunOutcomeActive {
 			t.Fatalf("latest = %q %q err=%v, want the live run %q", got.ID, got.Outcome, err, second.ID)
 		}
 
@@ -931,8 +932,57 @@ func TestLatestRunForSchedule(t *testing.T) {
 		if err := st.DeleteSchedule(ctx, daily.ID); err != nil {
 			t.Fatalf("DeleteSchedule: %v", err)
 		}
-		if _, err := st.LatestRunForSchedule(ctx, daily.ID); !errors.Is(err, ErrNotFound) {
+		if _, err := st.LatestRunForSchedule(ctx, repo.ID, daily.ID); !errors.Is(err, ErrNotFound) {
 			t.Errorf("deleted Schedule = %v, want ErrNotFound", err)
 		}
+
+		// Another repo's busy history neither answers for this Schedule nor
+		// is asked: the query is scoped to the Schedule's repo.
+		other := afkFixtureRepo(t, st, "other")
+		if _, err := st.CreateRun(ctx, Run{
+			ID: ids.NewID("run"), RepoID: other.ID, Kind: RunKindAFKAuto, Provider: "claude-code",
+			Branch: "afk/9", WorktreePath: "/wt/other", SessionName: "other~afk-9",
+			Model: "opus[1m]", Effort: "max", StartedAt: schedClock.Add(4 * time.Hour), Outcome: RunOutcomeActive,
+		}); err != nil {
+			t.Fatalf("CreateRun other: %v", err)
+		}
+		if got, err = st.LatestRunForSchedule(ctx, repo.ID, weekly.ID); err != nil || got.ID != second.ID {
+			t.Fatalf("latest = %q err=%v, want %q", got.ID, err, second.ID)
+		}
+		if _, err := st.LatestRunForSchedule(ctx, other.ID, weekly.ID); !errors.Is(err, ErrNotFound) {
+			t.Errorf("the Schedule asked under another repo = %v, want ErrNotFound", err)
+		}
 	})
+}
+
+// The query walks idx_runs_repo_started — repo_id equality, started_at
+// DESC — and stops at the first match, instead of scanning the runs table
+// and sorting it for every Schedule row a list answers (SQLite's plan; the
+// PostgreSQL planner picks by table statistics, so its plan is not pinned).
+func TestLatestRunForSchedule_usesTheRepoStartedIndex(t *testing.T) {
+	st := openTestSQLite(t)
+	rows, err := st.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+latestRunForScheduleSQL, "repo_x", "sched_x")
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(plan, " | ")
+	if !strings.Contains(joined, "USING INDEX idx_runs_repo_started") {
+		t.Errorf("plan = %q, want a search of idx_runs_repo_started", joined)
+	}
+	if strings.Contains(joined, "TEMP B-TREE") || strings.HasPrefix(joined, "SCAN runs") {
+		t.Errorf("plan = %q, want no table scan and no sort", joined)
+	}
 }

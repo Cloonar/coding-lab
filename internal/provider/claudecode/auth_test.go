@@ -235,3 +235,72 @@ func TestLastAuthStatus_peeksAndNeverChecks(t *testing.T) {
 		t.Fatalf("status command ran %d times, want 2", n)
 	}
 }
+
+// Only a check that ran to completion and was read moves the peek (issue
+// #61). A check its caller's context cut off — the operator leaving the
+// Credentials page mid-check — and one whose output cannot be read both
+// answer the caller "logged out" (spawn safety, unchanged), but neither is
+// evidence of a logout: the peek keeps the previous answer, or stays
+// "never checked". A completed logged-out check still flips it.
+func TestLastAuthStatus_onlyACompletedCheckMovesThePeek(t *testing.T) {
+	p, _ := testProvider(t, newFakeRunner())
+	p.authTTL = time.Minute
+	outlives := fakeClaude(t, `exec sleep 5`)
+	garbage := fakeClaude(t, `echo 'Segmentation fault'; exit 139`)
+
+	interrupted := func() {
+		t.Helper()
+		p.claudeBin = outlives
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		st, err := p.AuthStatus(ctx, true)
+		if err == nil || st.LoggedIn {
+			t.Fatalf("interrupted check = %+v, %v; want an error read as logged out", st, err)
+		}
+		if time.Since(start) > 4*time.Second {
+			t.Fatal("the check outlived its context")
+		}
+	}
+	unreadable := func() {
+		t.Helper()
+		p.claudeBin = garbage
+		st, err := p.AuthStatus(context.Background(), true)
+		if err == nil || st.LoggedIn {
+			t.Fatalf("unreadable check = %+v, %v; want an error read as logged out", st, err)
+		}
+	}
+
+	// Never checked: neither kind of failed check makes it known.
+	interrupted()
+	unreadable()
+	if st, known := p.LastAuthStatus(); known || st.LoggedIn {
+		t.Fatalf("peek after failed checks only = %+v, known=%v; want never checked", st, known)
+	}
+
+	p.claudeBin = fakeClaude(t, `echo '{"loggedIn":true,"email":"x@y.z"}'`)
+	checked, err := p.AuthStatus(context.Background(), true)
+	if err != nil || !checked.LoggedIn {
+		t.Fatalf("AuthStatus = %+v, %v; want logged in", checked, err)
+	}
+
+	// Known logged in: the failed checks leave it exactly as it was.
+	interrupted()
+	if st, known := p.LastAuthStatus(); !known || st != checked {
+		t.Fatalf("peek after an interrupted check = %+v, known=%v; want the previous %+v", st, known, checked)
+	}
+	unreadable()
+	if st, known := p.LastAuthStatus(); !known || st != checked {
+		t.Fatalf("peek after an unreadable check = %+v, known=%v; want the previous %+v", st, known, checked)
+	}
+
+	// A completed logged-out answer — even with claude's non-zero exit — is
+	// a verdict, and moves it.
+	p.claudeBin = fakeClaude(t, `echo '{"loggedIn":false}'; exit 1`)
+	if st, err := p.AuthStatus(context.Background(), true); err != nil || st.LoggedIn {
+		t.Fatalf("AuthStatus = %+v, %v; want a clean logged-out verdict", st, err)
+	}
+	if st, known := p.LastAuthStatus(); !known || st.LoggedIn {
+		t.Fatalf("peek after a completed logged-out check = %+v, known=%v; want logged out", st, known)
+	}
+}

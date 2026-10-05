@@ -1,7 +1,9 @@
 package codex
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -44,11 +46,23 @@ func ParseAuthStatus(out []byte, exitOK bool) provider.AuthStatus {
 }
 
 // runStatus executes `{codex} login status` through p.cli (issue #206),
-// capturing output and the exit code. A plain non-zero exit is a DEFINITIVE
-// logged-out answer (the pinned logged-out shape is exit 1 + "Not logged
-// in") — recognized by the DIRECT *exec.ExitError type check the CLIRunner
-// contract guarantees survives the seam unwrapped; only a run failure that
-// isn't an exit status (binary missing, ctx cancelled) is an error.
+// capturing output and the exit code, and accepts exactly the two pinned
+// verdicts: exit 0 with "Logged in" in the output, and a non-zero exit with
+// "Not logged in" — the latter a DEFINITIVE logged-out answer, not an error,
+// recognized by the DIRECT *exec.ExitError type check the CLIRunner contract
+// guarantees survives the seam unwrapped. Everything else is an error (the
+// caller still reads it as logged out):
+//
+//   - a run failure that isn't an exit status (binary missing, ctx
+//     cancelled before start);
+//   - a process killed by its caller's context — the kill surfaces as an
+//     exit status too, and a check cut off half-way has no verdict;
+//   - an exit, zero or not, whose output speaks neither pinned shape (a
+//     crash, a podman refusal, a CLI that changed its words).
+//
+// The distinction matters beyond the returned status: only a verdict moves
+// the peek LastAuthStatus serves the readiness report (issue #61), so a
+// cancelled or garbled check must not pass for a known logout.
 //
 // Pre-seam this parsed CombinedOutput; the runner separates the streams, so
 // the parse runs over stdout then stderr concatenated. Losing the
@@ -60,13 +74,33 @@ func (p *Provider) runStatus(ctx context.Context) (provider.AuthStatus, error) {
 		Argv: []string{p.codexBin, "login", "status"},
 	})
 	out := append(append([]byte(nil), stdout...), stderr...)
+	exitOK := runErr == nil
 	if runErr != nil {
 		if _, isExit := runErr.(*exec.ExitError); !isExit {
 			return provider.AuthStatus{}, fmt.Errorf("codex login status: %w", runErr)
 		}
-		return ParseAuthStatus(out, false), nil
+		if err := ctx.Err(); err != nil {
+			return provider.AuthStatus{}, fmt.Errorf("codex login status: %w (%w)", runErr, err)
+		}
 	}
-	return ParseAuthStatus(out, true), nil
+	if !hasVerdict(out, exitOK) {
+		if runErr != nil {
+			return provider.AuthStatus{}, fmt.Errorf("codex login status: %w: no login verdict in its output", runErr)
+		}
+		return provider.AuthStatus{}, errors.New("codex login status: no login verdict in its output")
+	}
+	return ParseAuthStatus(out, exitOK), nil
+}
+
+// hasVerdict reports whether the status command's output and exit agree on
+// one of the two pinned shapes: exit 0 + "Logged in", or a failing exit +
+// "Not logged in". ("Not logged in" holds no capital-L "Logged in", so the
+// shapes are disjoint.)
+func hasVerdict(out []byte, exitOK bool) bool {
+	if exitOK {
+		return bytes.Contains(out, []byte("Logged in"))
+	}
+	return bytes.Contains(out, []byte("Not logged in"))
 }
 
 // AuthStatus implements provider.AgentProvider. Without force, a result
@@ -88,6 +122,14 @@ func (p *Provider) AuthStatus(ctx context.Context, force bool) (provider.AuthSta
 // cache. The error (if any) is returned so the caller can log it; the
 // caller treats an error as logged-out — better to show the login banner
 // than to spawn doomed sessions.
+//
+// The peek (LastAuthStatus) is held to a stricter rule than the cache: it
+// moves only on a check that ran to completion and produced a verdict — no
+// error, and the caller's context still live. A failed or cancelled check
+// says nothing about the login, and publishing its logged-out stand-in
+// would have every repo's readiness report the agent as logged out until
+// the next check (issue #61). The previous peek stands instead — or none,
+// if nothing was ever checked.
 func (p *Provider) refreshAuthLocked(ctx context.Context) (provider.AuthStatus, error) {
 	st, err := p.runStatus(ctx)
 	if err != nil {
@@ -96,15 +138,18 @@ func (p *Provider) refreshAuthLocked(ctx context.Context) (provider.AuthStatus, 
 	st.CheckedAt = p.now()
 	p.authCache = st
 	p.authChecked = time.Now()
-	p.authLast.Store(&st)
+	if err == nil && ctx.Err() == nil {
+		p.authLast.Store(&st)
+	}
 	return st, err
 }
 
 // LastAuthStatus implements provider.AuthPeeker: the status the most recent
-// check produced, however old, without running the status command — (zero,
-// false) until a first check has run. Lock-free on purpose: authMu is held
-// for the whole status command, and a readiness read (issue #61) must not
-// wait for one.
+// COMPLETED check produced, however old, without running the status command
+// — (zero, false) until a first check has completed. A failed or cancelled
+// check never moves it (refreshAuthLocked). Lock-free on purpose: authMu is
+// held for the whole status command, and a readiness read (issue #61) must
+// not wait for one.
 func (p *Provider) LastAuthStatus() (provider.AuthStatus, bool) {
 	st := p.authLast.Load()
 	if st == nil {

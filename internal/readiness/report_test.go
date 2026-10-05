@@ -498,10 +498,12 @@ func TestImportsCheck(t *testing.T) {
 	}{
 		{"left out when the imports could not be read", true, nil, want{absent: true}},
 		{"no imports declared passes", false, nil, want{state: Passing, detail: "No read-only imports declared."}},
-		{"a target still cloning fails naming it", false, []ImportInput{
+		// Still cloning clears by itself, and removing the import is not its
+		// remedy: pending, with no fix.
+		{"a target still cloning is pending naming it, with no fix", false, []ImportInput{
 			{Target: target("lib", store.CloneStatusReady), Stamp: none, Fetch: okFetch(none)},
 			{Target: target("proto", store.CloneStatusCloning), Stamp: none},
-		}, want{state: Failing, fix: fix, detail: `The read-only import "proto" is still being cloned.`}},
+		}, want{state: Pending, detail: `The read-only import "proto" is still being cloned.`}},
 		{"a target whose clone failed fails naming it", false, []ImportInput{
 			{Target: target("proto", store.CloneStatusError), Stamp: none},
 		}, want{state: Failing, fix: fix, detail: `The clone of the read-only import "proto" failed.`}},
@@ -510,10 +512,20 @@ func TestImportsCheck(t *testing.T) {
 			{Target: target("proto", store.CloneStatusReady), Stamp: "cred_p@1", Fetch: failed("cred_p@1")},
 		}, want{state: Failing, fix: fix,
 			detail: `The last fetch of the read-only import "proto" failed: git@forge.example.com: Permission denied (publickey).`}},
-		{"a clone that is not ready outranks a failed fetch, as at spawn", false, []ImportInput{
+		// Something to fix outranks something that settles by itself.
+		{"a failed fetch outranks a target still cloning", false, []ImportInput{
 			{Target: target("lib", store.CloneStatusReady), Stamp: none, Fetch: failed(none)},
 			{Target: target("proto", store.CloneStatusCloning), Stamp: none},
-		}, want{state: Failing, fix: fix, detail: `The read-only import "proto" is still being cloned.`}},
+		}, want{state: Failing, fix: fix,
+			detail: `The last fetch of the read-only import "lib" failed: git@forge.example.com: Permission denied (publickey).`}},
+		{"a failed clone outranks a target still cloning", false, []ImportInput{
+			{Target: target("lib", store.CloneStatusCloning), Stamp: none},
+			{Target: target("proto", store.CloneStatusError), Stamp: none},
+		}, want{state: Failing, fix: fix, detail: `The clone of the read-only import "proto" failed.`}},
+		{"a target still cloning is pending even beside unfetched ones", false, []ImportInput{
+			{Target: target("lib", store.CloneStatusReady), Stamp: none},
+			{Target: target("proto", store.CloneStatusCloning), Stamp: none, Fetch: failed(none)},
+		}, want{state: Pending, detail: `The read-only import "proto" is still being cloned.`}},
 		{"STALE: a failed fetch with a credential since changed is not held against the target", false, []ImportInput{
 			{Target: target("proto", store.CloneStatusReady), Stamp: "cred_p@2", Fetch: failed("cred_p@1")},
 		}, want{absent: true}},
@@ -660,7 +672,7 @@ func TestReportJSONShape(t *testing.T) {
 	in := baseInput()
 	in.Repo.CloneStatus = store.CloneStatusError
 	in.Logins = []Login{{Provider: "Agent One", Known: true}}
-	in.Imports = []ImportInput{{Target: store.Repo{Name: "lib", CloneStatus: store.CloneStatusCloning}}}
+	in.Imports = []ImportInput{{Target: store.Repo{Name: "lib", CloneStatus: store.CloneStatusError}}}
 	raw, err := json.Marshal(Summary{Readiness: Evaluate(in)})
 	if err != nil {
 		t.Fatal(err)
@@ -669,7 +681,7 @@ func TestReportJSONShape(t *testing.T) {
 		`{"id":"clone","state":"failing","detail":"The clone failed.","action":"retry_clone"},` +
 		`{"id":"tracker","state":"passing","detail":"This repository uses the built-in tracker."},` +
 		`{"id":"agent_login","state":"failing","detail":"Agent One is logged out on this server.","fix":{"scope":"credentials"}},` +
-		`{"id":"imports","state":"failing","detail":"The read-only import \"lib\" is still being cloned.","fix":{"scope":"repo","section":"imports"}}` +
+		`{"id":"imports","state":"failing","detail":"The clone of the read-only import \"lib\" failed.","fix":{"scope":"repo","section":"imports"}}` +
 		`]}}`
 	if string(raw) != wantJSON {
 		t.Fatalf("summary JSON =\n%s\nwant\n%s", raw, wantJSON)

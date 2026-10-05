@@ -21,8 +21,9 @@ type State string
 const (
 	Passing State = "passing"
 	Failing State = "failing"
-	// Pending is "still settling, nothing to fix": a clone in flight, a
-	// container preflight that has not published its verdict yet.
+	// Pending is "still settling, nothing to fix": a clone in flight (the
+	// repo's own, or a read-only import's), a container preflight that has
+	// not published its verdict yet.
 	Pending State = "pending"
 )
 
@@ -425,6 +426,11 @@ func preflightProblem(g instance.ContainerGate) string {
 // importsCheck mirrors what a spawn does with the repo's read-only imports:
 // it is refused while any target's clone is not ready, and when any target's
 // snapshot fetch fails — a failure only the TARGET's fetch record shows.
+//
+// A target whose clone is still in flight is pending, not failing: that
+// state clears by itself, and removing the import is not its remedy. It
+// carries no fix, and anything failing — another target's failed clone, a
+// ready target's failed fetch — outranks it.
 func importsCheck(in Input) *Check {
 	if !in.ImportsKnown {
 		return nil
@@ -432,12 +438,14 @@ func importsCheck(in Input) *Check {
 	if len(in.Imports) == 0 {
 		return passing(CheckImports, "No read-only imports declared.")
 	}
-	for _, imp := range in.Imports {
+	var cloning *store.Repo
+	for i, imp := range in.Imports {
 		switch imp.Target.CloneStatus {
 		case store.CloneStatusReady:
 		case store.CloneStatusCloning:
-			return failing(CheckImports,
-				fmt.Sprintf("The read-only import %q is still being cloned.", imp.Target.Name), sectionImports, "")
+			if cloning == nil {
+				cloning = &in.Imports[i].Target
+			}
 		default:
 			return failing(CheckImports,
 				fmt.Sprintf("The clone of the read-only import %q failed.", imp.Target.Name), sectionImports, "")
@@ -446,7 +454,7 @@ func importsCheck(in Input) *Check {
 	verified := 0
 	for _, imp := range in.Imports {
 		rec := imp.Fetch
-		if rec == nil || imp.Stamp == "" || rec.Credential != imp.Stamp {
+		if imp.Target.CloneStatus != store.CloneStatusReady || rec == nil || imp.Stamp == "" || rec.Credential != imp.Stamp {
 			continue
 		}
 		if !rec.OK {
@@ -455,6 +463,9 @@ func importsCheck(in Input) *Check {
 				sectionImports, "")
 		}
 		verified++
+	}
+	if cloning != nil {
+		return pending(CheckImports, fmt.Sprintf("The read-only import %q is still being cloned.", cloning.Name))
 	}
 	if verified < len(in.Imports) {
 		return nil // some target has no usable fetch record yet

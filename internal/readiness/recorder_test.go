@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -65,6 +66,20 @@ func (f *recorderFixture) wantPublished(what string, want ...string) {
 }
 
 var errFetch = errors.New("git fetch origin: exit status 128: fatal: Authentication failed")
+
+// forgeErr is a forge client's status error as the REST clients build it:
+// the diagnostic line as its text, the classification sentinel (or nil) as
+// what it unwraps to.
+type forgeErr struct {
+	msg string
+	is  error
+}
+
+func (e forgeErr) Error() string { return e.msg }
+func (e forgeErr) Unwrap() error { return e.is }
+
+// refused is a forge's 401/403 refusal of the token — a definitive failure.
+func refused(msg string) error { return forgeErr{msg: msg, is: tracker.ErrAccessDenied} }
 
 // trackerRead returns a repo's recorded read of one kind.
 func (f *recorderFixture) trackerRead(repoID, op string) (TrackerRecord, bool) {
@@ -173,7 +188,7 @@ func TestRecorderTrackerRead_FlipPublishesExactlyOnce(t *testing.T) {
 	read := func(err error) tracker.ListRead {
 		return tracker.ListRead{RepoID: "repo_a", Credential: "forge@1", Op: tracker.OpReadyIssues, Err: err, OpenIssues: -1}
 	}
-	unauthorized := errors.New("forgejo GET /repos/acme/widget/issues: unexpected status 401: bad token")
+	unauthorized := refused("forgejo GET /repos/acme/widget/issues: unexpected status 401: bad token")
 
 	f.rec.ObserveTrackerRead(read(nil))
 	f.wantPublished("first read", "repo_a")
@@ -271,9 +286,15 @@ func TestRecorderOpenIssues_PublishesOnChange(t *testing.T) {
 		t.Fatalf("open issues = %d ok=%v, want a known 0", n, ok)
 	}
 
-	// A failed read keeps the last known count: it is "as last read".
-	f.rec.ObserveTrackerRead(read(99, errors.New("502")))
-	f.wantPublished("read failed", "repo_a") // the verdict flipped; the count did not move
+	// A refused read keeps the last known count: it is "as last read".
+	f.rec.ObserveTrackerRead(read(99, refused("forgejo GET /repos/a/b/issues: unexpected status 401: bad token")))
+	f.wantPublished("read refused", "repo_a") // the verdict flipped; the count did not move
+	if n, _ := f.rec.OpenIssues("repo_a"); n != 0 {
+		t.Fatalf("open issues = %d after a refused read, want the last known 0", n)
+	}
+	// So does a read the forge failed to answer — which is not even news.
+	f.rec.ObserveTrackerRead(read(99, errors.New("forgejo GET /repos/a/b/issues: unexpected status 502: bad gateway")))
+	f.wantPublished("read failed upstream")
 	if n, _ := f.rec.OpenIssues("repo_a"); n != 0 {
 		t.Fatalf("open issues = %d after a failed read, want the last known 0", n)
 	}
@@ -416,8 +437,8 @@ func TestRecorderBoundsErrorText(t *testing.T) {
 	}
 
 	rec.ObserveTrackerRead(tracker.ListRead{RepoID: "repo_a", Op: tracker.OpIssues, OpenIssues: -1,
-		Err: errors.New("forgejo GET /repos/a/b/issues: unexpected status 500: " + strings.Repeat("x", 3*maxErrorBytes))})
-	if tr, _ := readOf(rec, "repo_a", tracker.OpIssues); len(tr.Error) != maxErrorBytes || !strings.HasPrefix(tr.Error, "forgejo GET /repos/a/b/issues: unexpected status 500: ") {
+		Err: refused("forgejo GET /repos/a/b/issues: unexpected status 403: " + strings.Repeat("x", 3*maxErrorBytes))})
+	if tr, _ := readOf(rec, "repo_a", tracker.OpIssues); len(tr.Error) != maxErrorBytes || !strings.HasPrefix(tr.Error, "forgejo GET /repos/a/b/issues: unexpected status 403: ") {
 		t.Fatalf("tracker error kept %d bytes starting %q", len(tr.Error), tr.Error[:40])
 	}
 }
@@ -482,4 +503,209 @@ func TestRecorderTrackerRead_KindsOfReadDoNotFlap(t *testing.T) {
 	if !slices.IsSorted(ops) || len(ops) != 2 {
 		t.Fatalf("TrackerReads ops = %v, want the two kinds in order", ops)
 	}
+}
+
+// Only a DEFINITIVE answer is evidence about the forge credential or the
+// repository: a success, a 404, a 401 or an unthrottled 403. Everything a
+// forge does when it merely fails to answer — a 5xx, a dropped connection, a
+// client timeout, a rate limit, a cancelled request, a body that would not
+// decode — is not, and is classified by trackerEvidence alone.
+func TestTrackerEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"success", nil, true},
+		{"404", forgeErr{"forgejo GET /x: unexpected status 404: nope", tracker.ErrNotFound}, true},
+		{"401", refused("github GET /x: unexpected status 401: Bad credentials"), true},
+		{"403", refused("github GET /x: unexpected status 403: Resource not accessible by integration"), true},
+		{"wrapped 404", fmt.Errorf("listing: %w", forgeErr{"forgejo GET /x: unexpected status 404", tracker.ErrNotFound}), true},
+		{"502", forgeErr{"github GET /x: unexpected status 502: bad gateway", nil}, false},
+		{"500", errors.New("forgejo GET /x: unexpected status 500: internal error"), false},
+		{"network", &url.Error{Op: "Get", URL: "https://forge.test/x", Err: errors.New("dial tcp 10.0.0.1:443: connect: connection refused")}, false},
+		{"client timeout", fmt.Errorf("forgejo GET /x: %w", context.DeadlineExceeded), false},
+		{"rate limited", forgeErr{"github GET /x: rate limited (status 403, retry after 30s)", tracker.ErrRateLimited}, false},
+		{"cancelled", fmt.Errorf("forgejo GET /x: %w", context.Canceled), false},
+		{"undecodable body", errors.New("github GET /x: decode response: unexpected EOF"), false},
+	} {
+		if got := trackerEvidence(tc.err); got != tc.want {
+			t.Errorf("%s: trackerEvidence(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+// At the recorder seam: an answer that is not evidence leaves no record, does
+// not overwrite a success, does not overwrite a definitive failure, and is
+// never announced. A definitive failure is recorded per kind of read and
+// fails the check until that kind is read successfully again.
+func TestRecorderTrackerRead_OnlyDefinitiveOutcomesAreEvidence(t *testing.T) {
+	noise := []error{
+		forgeErr{"github GET /repos/a/b/issues: unexpected status 502: bad gateway", nil},
+		errors.New("forgejo GET /repos/a/b/issues: unexpected status 503: maintenance"),
+		&url.Error{Op: "Get", URL: "https://forge.test/api/v1/repos/a/b/issues", Err: errors.New("dial tcp: lookup forge.test: no such host")},
+		fmt.Errorf("forgejo GET /repos/a/b/issues: %w", context.DeadlineExceeded),
+		forgeErr{"github GET /repos/a/b/issues: rate limited (status 403, retry after 30s)", tracker.ErrRateLimited},
+		fmt.Errorf("forgejo GET /repos/a/b/issues: %w", context.Canceled),
+	}
+	f := newRecorderFixture(t)
+	read := func(op string, err error) tracker.ListRead {
+		return tracker.ListRead{RepoID: "repo_a", Credential: "forge@1", Op: op, Err: err, OpenIssues: -1}
+	}
+	verdict := func() (failed *TrackerRecord, ok bool) {
+		return JudgeTrackerReads(f.rec.TrackerReads("repo_a"), "forge@1")
+	}
+
+	// Nothing known: the noise leaves nothing known.
+	for _, err := range noise {
+		f.rec.ObserveTrackerRead(read(tracker.OpIssues, err))
+	}
+	f.wantPublished("noise before any record")
+	if recs := f.rec.TrackerReads("repo_a"); recs != nil {
+		t.Fatalf("noise left records: %+v", recs)
+	}
+
+	// Passing: the noise neither overwrites it nor announces anything — the
+	// one 502 on the operator's Issues view is the case in point.
+	f.rec.ObserveTrackerRead(read(tracker.OpIssues, nil))
+	f.rec.ObserveTrackerRead(read(tracker.OpReadyIssues, nil))
+	f.wantPublished("the first successes", "repo_a")
+	for _, err := range noise {
+		f.rec.ObserveTrackerRead(read(tracker.OpIssues, err))
+	}
+	f.wantPublished("noise after a success")
+	if failed, ok := verdict(); failed != nil || !ok {
+		t.Fatalf("verdict after noise = failed %+v, ok %v; want still passing", failed, ok)
+	}
+	if rec, _ := f.trackerRead("repo_a", tracker.OpIssues); !rec.OK {
+		t.Fatalf("the success was overwritten: %+v", rec)
+	}
+
+	// A definitive refusal of ONE kind of read fails the check, for good —
+	// the other kind still succeeding does not hide it — and the noise does
+	// not overwrite it either.
+	denied := refused("forgejo GET /repos/a/b/pulls: unexpected status 403: token lacks read:repository")
+	f.rec.ObserveTrackerRead(read(tracker.OpPulls, denied))
+	f.wantPublished("a kind of read refused", "repo_a")
+	for _, err := range noise {
+		f.rec.ObserveTrackerRead(read(tracker.OpPulls, err))
+		f.rec.ObserveTrackerRead(read(tracker.OpIssues, nil))
+	}
+	f.wantPublished("noise and successes beside a refused kind")
+	failed, ok := verdict()
+	if failed == nil || failed.Op != tracker.OpPulls || failed.Error != denied.Error() || !ok {
+		t.Fatalf("verdict = failed %+v, ok %v; want the refused pull listing failing", failed, ok)
+	}
+
+	// 401 and 404 are definitive too.
+	for _, err := range []error{
+		refused("forgejo GET /repos/a/b/issues: unexpected status 401: invalid token"),
+		forgeErr{"forgejo GET /repos/a/b/issues: unexpected status 404: not found", tracker.ErrNotFound},
+	} {
+		f.rec.ObserveTrackerRead(read(tracker.OpIssues, err))
+		if rec, _ := f.trackerRead("repo_a", tracker.OpIssues); rec.OK || rec.Error != err.Error() {
+			t.Fatalf("a definitive failure %v was not recorded: %+v", err, rec)
+		}
+	}
+
+	// The refused kind answers again: passing.
+	f.rec.ObserveTrackerRead(read(tracker.OpPulls, nil))
+	f.rec.ObserveTrackerRead(read(tracker.OpIssues, nil))
+	if failed, ok := verdict(); failed != nil || !ok {
+		t.Fatalf("verdict after recovery = failed %+v, ok %v", failed, ok)
+	}
+}
+
+// fanoutFixture is a recorder fixture whose Fanout lookups answer from maps
+// and count their calls.
+type fanoutFixture struct {
+	*recorderFixture
+	importers   map[string][]string
+	imageRepos  []string
+	failLookups bool
+	calls       int
+}
+
+func newFanoutFixture(t *testing.T) *fanoutFixture {
+	f := &fanoutFixture{recorderFixture: newRecorderFixture(t), importers: map[string][]string{}}
+	f.rec.SetFanout(Fanout{
+		Importers: func(ctx context.Context, repoID string) ([]string, error) {
+			f.calls++
+			if _, ok := ctx.Deadline(); !ok {
+				t.Error("an importer lookup ran without a deadline")
+			}
+			if f.failLookups {
+				return nil, errors.New("database is locked")
+			}
+			return f.importers[repoID], nil
+		},
+		ImageRepos: func(ctx context.Context) ([]string, error) {
+			f.calls++
+			if _, ok := ctx.Deadline(); !ok {
+				t.Error("an image-repo lookup ran without a deadline")
+			}
+			if f.failLookups {
+				return nil, errors.New("database is locked")
+			}
+			return f.imageRepos, nil
+		},
+	})
+	return f
+}
+
+// A target's fetch verdict is read by every repo importing it: when it flips
+// — whoever's fetch it was — they are announced with it. Only on a flip: the
+// lookup is not even made for a repeated verdict.
+func TestRecorderFetch_FlipAnnouncesImporters(t *testing.T) {
+	f := newFanoutFixture(t)
+	f.importers["repo_lib"] = []string{"repo_app", "repo_tool"}
+	own := gitx.FetchAttribution{RepoID: "repo_lib", Credential: "cred@1"}
+
+	// The target's own fetch (its spawn, its /pull-base, its clone).
+	f.rec.ObserveFetch(own, nil)
+	f.wantPublished("first record of an imported repo", "repo_lib", "repo_app", "repo_tool")
+	for range 5 {
+		f.rec.ObserveFetch(own, nil)
+	}
+	f.wantPublished("repeated success")
+	if f.calls != 1 {
+		t.Fatalf("importer lookups = %d, want 1 (flips only)", f.calls)
+	}
+
+	// An importer's snapshot fetch of the target: the importer is named once.
+	f.rec.ObserveFetch(gitx.FetchAttribution{RepoID: "repo_lib", Credential: "cred@1", OnBehalfOf: "repo_app"}, errFetch)
+	f.wantPublished("snapshot fetch failed", "repo_lib", "repo_app", "repo_tool")
+
+	// A repo nobody imports announces itself alone.
+	f.rec.ObserveFetch(gitx.FetchAttribution{RepoID: "repo_solo"}, nil)
+	f.wantPublished("not imported", "repo_solo")
+
+	// A failed lookup announces what the observation names, nothing more.
+	f.failLookups = true
+	f.rec.ObserveFetch(own, nil)
+	f.wantPublished("lookup failed", "repo_lib")
+}
+
+// An image record is shared by every repo resolving to its ref: a flip
+// announces the spawning repo and every repo that may read it — once, on the
+// flip only.
+func TestRecorderImage_FlipAnnouncesImageRepos(t *testing.T) {
+	f := newFanoutFixture(t)
+	f.imageRepos = []string{"repo_b", "repo_a", "repo_c"}
+	const ref = "ghcr.io/acme/dev:1@sha256:0123"
+	pull := errors.New("pulling dev image " + ref + ": exit status 125: manifest unknown")
+
+	f.rec.ObserveImage("repo_a", ref, pull)
+	f.wantPublished("first ensure", "repo_a", "repo_b", "repo_c")
+	f.rec.ObserveImage("repo_b", ref, pull)
+	f.wantPublished("same verdict from another repo")
+	if f.calls != 1 {
+		t.Fatalf("image-repo lookups = %d, want 1 (flips only)", f.calls)
+	}
+	f.rec.ObserveImage("repo_b", ref, nil)
+	f.wantPublished("failed → present", "repo_b", "repo_a", "repo_c")
+
+	f.failLookups = true
+	f.rec.ObserveImage("repo_c", ref, pull)
+	f.wantPublished("lookup failed", "repo_c")
 }

@@ -1330,8 +1330,10 @@ func (c *Client) doRawLog(ctx context.Context, rawURL string) (int, string, []by
 // machine-readable status. 404 unwraps to tracker.ErrNotFound — the one
 // upstream status that means "no such subject" rather than "forge failure" —
 // so callers answer not-found instead of bad-gateway (Forgejo also 404s repos
-// the token cannot see; that is still "not found" to us). EnsureLabel reads
-// the status via errors.As to recognize a duplicate-name conflict.
+// the token cannot see; that is still "not found" to us). 401 and 403 unwrap
+// to tracker.ErrAccessDenied: the forge refused the token (Forgejo has no
+// rate limiter that answers 403, so every 403 is a refusal). EnsureLabel
+// reads the status via errors.As to recognize a duplicate-name conflict.
 type statusError struct {
 	status  int
 	message string
@@ -1340,8 +1342,11 @@ type statusError struct {
 func (e *statusError) Error() string { return e.message }
 
 func (e *statusError) Unwrap() error {
-	if e.status == http.StatusNotFound {
+	switch e.status {
+	case http.StatusNotFound:
 		return tracker.ErrNotFound
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return tracker.ErrAccessDenied
 	}
 	return nil
 }

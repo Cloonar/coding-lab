@@ -995,12 +995,16 @@ type ConnectingReporter interface {
 // login card, and far too much for a page view: the readiness report (issue
 // #61) is read with every repo list and must start nothing.
 //
-// LastAuthStatus returns the status the most recent check produced, whatever
-// its age, and true; or the zero status and false when no check has run
-// since the process started. It never runs the status command, never
-// refreshes the cache, and never blocks behind a check that is in flight —
-// it reports the previous result until that check lands. CheckedAt says how
-// old the answer is. Advertised by type assertion at the call site, exactly
+// LastAuthStatus returns the status the most recent COMPLETED check
+// produced, whatever its age, and true; or the zero status and false when no
+// check has completed since the process started. A check that failed (the
+// status command missing, its output unreadable) or was cut off by its
+// caller's context is not a completed one: it leaves the previous answer in
+// place, because the logged-out stand-in AuthStatus returns for it is a
+// spawn-safety default, not evidence of a logout. It never runs the status
+// command, never refreshes the cache, and never blocks behind a check that
+// is in flight — it reports the previous result until that check lands.
+// CheckedAt says how old the answer is. Advertised by type assertion at the call site, exactly
 // like ConnectingReporter and DeepLinker (ADR-0017); a provider without it
 // simply has no login state anyone can read for free.
 type AuthPeeker interface {

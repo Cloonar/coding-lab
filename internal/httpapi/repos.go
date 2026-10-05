@@ -217,6 +217,12 @@ func (s *Server) afkPromptEffective(ctx context.Context, repo store.Repo) (strin
 // reads only what lab already holds). Every handler that returns a repo ends
 // here, so none of them can return one without its summary. doing names the
 // operation for the log line of a failed computation.
+//
+// A summary that cannot be computed DEGRADES instead of failing the
+// response: most callers answer here after their write has committed, and a
+// 500 would tell the operator a saved change failed. The error is logged and
+// the repo answered with readiness.RowOnly — counts null, only the clone
+// check.
 func (s *Server) writeRepo(w http.ResponseWriter, r *http.Request, status int, doing string, repo store.Repo) {
 	eff, err := s.afkPromptEffective(r.Context(), repo)
 	if err != nil {
@@ -225,8 +231,9 @@ func (s *Server) writeRepo(w http.ResponseWriter, r *http.Request, status int, d
 	}
 	summary, err := s.readiness.Summary(r.Context(), repo)
 	if err != nil {
-		s.internalError(w, doing, err)
-		return
+		s.log.Warn("repo summary degraded to the row alone", "component", "httpapi",
+			"doing", doing, "repo", repo.ID, "err", err)
+		summary = readiness.RowOnly(repo)
 	}
 	writeJSON(w, status, repoJSON(repo, eff, summary))
 }
@@ -349,11 +356,17 @@ func (s *Server) handleRepoList(w http.ResponseWriter, r *http.Request) {
 	// One batched evaluation for the whole list (issue #61): the summaries
 	// share their store reads, and none of them asks a forge, a remote, a
 	// provider CLI or podman — so the list stays one cheap call however many
-	// repos it holds.
+	// repos it holds. The batch degrades what one failed read touches (see
+	// Summaries); should it fail outright, every repo is still listed, each
+	// with what its row alone decides — one failing read never empties the
+	// Repositories page.
 	summaries, err := s.readiness.Summaries(r.Context(), repos)
 	if err != nil {
-		s.internalError(w, "listing repos", err)
-		return
+		s.log.Warn("repo list summaries degraded to the rows alone", "component", "httpapi", "err", err)
+		summaries = make([]readiness.Summary, len(repos))
+		for i, repo := range repos {
+			summaries[i] = readiness.RowOnly(repo)
+		}
 	}
 	items := make([]repoResponse, 0, len(repos))
 	for i, repo := range repos {

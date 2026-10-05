@@ -9,6 +9,7 @@ package afk
 // where it was.
 
 import (
+	"context"
 	"errors"
 	"maps"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
 // cadenceMemo snapshots the Schedule due-ness memo so a test can prove a Run
@@ -493,5 +495,99 @@ func TestRunScheduleNow_sameMinuteBranchWithoutRowRefused(t *testing.T) {
 	}
 	if runs := f.scheduledRuns(); len(runs) != 0 {
 		t.Errorf("scheduled runs = %d, want 0", len(runs))
+	}
+}
+
+// The specific reason wins over at-cap on the snapshot-veto path too — the
+// path where the pass never calls the candidate, so only RunScheduleNow's
+// own looks can name a reason.
+func TestRunScheduleNow_specificReasonBeatsSnapshotVeto(t *testing.T) {
+	// A Schedule whose prompt and flows compose to nothing, at cap: the
+	// composed prompt is checked before the pass, in the locked core's order.
+	t.Run("empty composed prompt at cap", func(t *testing.T) {
+		f := newFixture(t)
+		sched := f.addSchedule("ghostly", func(sc *store.Schedule) {
+			sc.Prompt = ""
+			sc.Flows = []string{"retired-flow"}
+		})
+		f.atCap()
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, ErrScheduleEmptyPrompt) {
+			t.Fatalf("err = %v, want ErrScheduleEmptyPrompt (the specific reason wins over at-cap)", err)
+		}
+		if runs := f.scheduledRuns(); len(runs) != 0 {
+			t.Errorf("scheduled runs = %d, want 0", len(runs))
+		}
+	})
+
+	// The repo's clone goes not-ready AFTER the pre-check passed and before
+	// the pass (here: as the pass lists sessions), and the pass's snapshot
+	// vetoes at cap. The veto branch re-checks clone readiness.
+	t.Run("clone went not-ready before an at-cap pass", func(t *testing.T) {
+		var hooked *listHookRunner
+		f := newFixtureWrapped(t, "afk/<N>", func(fake *tmuxx.Fake) tmuxx.SessionRunner {
+			hooked = &listHookRunner{Fake: fake}
+			return hooked
+		})
+		sched := f.addSchedule("deps", func(sc *store.Schedule) { sc.Cadence = "0 6 * * *" })
+		f.atCap()
+		hooked.before = func(*tmuxx.Fake) {
+			if err := f.st.UpdateRepoCloneStatus(context.Background(), f.repo.ID, store.CloneStatusCloning, ""); err != nil {
+				t.Error(err)
+			}
+		}
+		if _, err := f.svc.RunScheduleNow(t.Context(), sched.ID); !errors.Is(err, instance.ErrRepoNotReady) {
+			t.Fatalf("err = %v, want instance.ErrRepoNotReady (the specific reason wins over at-cap)", err)
+		}
+		if runs := f.scheduledRuns(); len(runs) != 0 {
+			t.Errorf("scheduled runs = %d, want 0", len(runs))
+		}
+	})
+}
+
+// The LOCKED path's at-cap answer: the pass's snapshot has headroom and calls
+// the candidate, and the locked launch's fresh session listing finds the cap
+// reached (a session started in between). The answer is "instance cap
+// reached" — what the API answers 409 with — nothing launches, and nothing
+// is queued: once the cap frees, later passes start nothing for it.
+func TestRunScheduleNow_lockedPathAtCap(t *testing.T) {
+	var hooked *listHookRunner
+	f := newFixtureWrapped(t, "afk/<N>", func(fake *tmuxx.Fake) tmuxx.SessionRunner {
+		hooked = &listHookRunner{Fake: fake}
+		return hooked
+	})
+	sched := f.addSchedule("daily", func(sc *store.Schedule) { sc.Cadence = "0 6 * * *" }) // no slot in this test's window
+	f.sightSchedules()
+	if err := f.st.SetSetting(t.Context(), store.SettingMaxInstances, "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// List #1 is the pass's snapshot (0 live, under the cap of 1); list #2 is
+	// the locked launch's fresh count, by which time a session has appeared.
+	lists := 0
+	hooked.before = func(fake *tmuxx.Fake) {
+		lists++
+		if lists == 2 {
+			fake.AddLive("other~intruder")
+		}
+	}
+	_, err := f.svc.RunScheduleNow(t.Context(), sched.ID)
+	if !errors.Is(err, instance.ErrOverCap) || err.Error() != "instance cap reached" {
+		t.Fatalf("err = %v, want instance.ErrOverCap (\"instance cap reached\")", err)
+	}
+	if lists < 2 {
+		t.Fatalf("session listings = %d; the candidate never reached the locked launch", lists)
+	}
+	if runs := f.scheduledRuns(); len(runs) != 0 {
+		t.Fatalf("scheduled runs = %d, want 0", len(runs))
+	}
+
+	hooked.before = nil
+	f.runner.Kill("other~intruder") // the cap frees
+	for range 3 {
+		f.clock.Advance(time.Minute)
+		f.svc.SpawnOnce(t.Context())
+	}
+	if runs := f.scheduledRuns(); len(runs) != 0 {
+		t.Fatalf("a refused Run now fired later: %d scheduled runs, want 0", len(runs))
 	}
 }

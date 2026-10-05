@@ -13,6 +13,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -119,19 +121,31 @@ type forgeTripwire struct {
 	t     *testing.T
 	mu    sync.Mutex
 	armed bool
+	fail  error // non-nil: every request fails with it, like a network fault
 	seen  []string
 }
 
 func (f *forgeTripwire) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	f.seen = append(f.seen, r.Method+" "+r.URL.String())
-	armed := f.armed
+	armed, fail := f.armed, f.fail
 	f.mu.Unlock()
 	if armed {
 		f.t.Errorf("a forge request was made while none is allowed: %s %s", r.Method, r.URL)
 		return nil, fmt.Errorf("forge request refused by the tripwire: %s %s", r.Method, r.URL)
 	}
+	if fail != nil {
+		return nil, fail
+	}
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+// failWith makes every request fail at the transport with err (nil heals):
+// the forge unreachable, or a request that timed out.
+func (f *forgeTripwire) failWith(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = err
 }
 
 func (f *forgeTripwire) arm(on bool) {
@@ -181,9 +195,34 @@ func (p *podmanTripwire) since(n int) []string {
 	return slices.Clone(p.calls[n:])
 }
 
+// flakyReadinessStore is the readiness evaluator's Store with reads that fail
+// on demand — a dependency failure injected through the evaluator's own seam
+// (installed before the listener starts, so toggling it is race-free).
+type flakyReadinessStore struct {
+	readiness.Store
+	failCredentials, failImports atomic.Bool
+}
+
+var errFlakyRead = errors.New("database is locked")
+
+func (f *flakyReadinessStore) Credentials(ctx context.Context) ([]store.CredentialMeta, error) {
+	if f.failCredentials.Load() {
+		return nil, errFlakyRead
+	}
+	return f.Store.Credentials(ctx)
+}
+
+func (f *flakyReadinessStore) AllRepoImports(ctx context.Context) (map[string][]string, error) {
+	if f.failImports.Load() {
+		return nil, errFlakyRead
+	}
+	return f.Store.AllRepoImports(ctx)
+}
+
 // readinessServer is the production readiness wiring in miniature.
 type readinessServer struct {
 	*testServer
+	flaky    *flakyReadinessStore // the evaluator's store, failing on demand
 	rec      *readiness.Recorder
 	vlt      *vault.Vault
 	git      *gitx.Engine
@@ -256,7 +295,7 @@ func newReadinessServer(t *testing.T) *readinessServer {
 	t.Cleanup(forgeTS.Close)
 
 	var svc *reposvc.Service
-	rs.testServer = newTestServer(t, func(o *Options) {
+	rs.testServer = newTestServerHooked(t, func(o *Options) {
 		st := o.Store
 		if err := st.SeedDefaultSettings(context.Background(), 6, "claude-code"); err != nil {
 			t.Fatal(err)
@@ -275,8 +314,29 @@ func newReadinessServer(t *testing.T) *readinessServer {
 			t.Fatal(err)
 		}
 
-		// The recorder and its four feeds — cmd/lab's wiring, line for line.
+		// The recorder, its fanout and its four feeds — cmd/lab's wiring
+		// (readinessFanout there), line for line.
 		rs.rec = readiness.NewRecorder(o.Bus, nil)
+		rs.rec.SetFanout(readiness.Fanout{
+			Importers: func(ctx context.Context, repoID string) ([]string, error) {
+				importers, err := st.RepoImporters(ctx, repoID)
+				out := make([]string, 0, len(importers))
+				for _, r := range importers {
+					out = append(out, r.ID)
+				}
+				return out, err
+			},
+			ImageRepos: func(ctx context.Context) ([]string, error) {
+				repos, err := st.Repos(ctx)
+				var out []string
+				for _, r := range repos {
+					if runner, err := instance.EffectiveRunner(ctx, st, r); err != nil || runner == store.RunnerContainer {
+						out = append(out, r.ID)
+					}
+				}
+				return out, err
+			},
+		})
 		rs.git.SetFetchObserver(rs.rec.ObserveFetch)
 		// The REAL registry and the REAL REST clients: credential decrypt,
 		// flavor routing, RepoPath resolution — only the unreachable https
@@ -337,6 +397,9 @@ func newReadinessServer(t *testing.T) *readinessServer {
 		o.Tracker = trackerReg
 		o.AFK = afkSvc
 		o.Readiness = rs.rec
+	}, func(s *Server) {
+		rs.flaky = &flakyReadinessStore{Store: s.readiness.Store}
+		s.readiness.Store = rs.flaky
 	})
 	t.Cleanup(svc.Close)
 	rs.setup("op", "password123")
@@ -912,8 +975,11 @@ func TestReadiness_PageViewsCauseNoNetworkAndNoProcess(t *testing.T) {
 	}
 
 	wantCheck(t, reports[githubRepo.ID], "tracker", "passing")
-	ghImports := wantCheck(t, reports[githubRepo.ID], "imports", "failing")
-	wantFix(t, ghImports, "repo", "imports", "")
+	// An import still cloning settles by itself: pending, nothing to fix.
+	ghImports := wantCheck(t, reports[githubRepo.ID], "imports", "pending")
+	if _, has := ghImports["fix"]; has {
+		t.Errorf("gh-app imports check carries a fix while its target is still cloning: %v", ghImports)
+	}
 	if ghImports["detail"] != `The read-only import "cloning" is still being cloned.` {
 		t.Errorf("gh-app imports detail = %q", ghImports["detail"])
 	}
@@ -1140,5 +1206,189 @@ func TestReadiness_MinimalServerAndRouteGuards(t *testing.T) {
 	_ = anon.Body.Close()
 	if anon.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated readiness = %d, want 401", anon.StatusCode)
+	}
+}
+
+// A summary is derived; a write is not. When the readiness evaluation cannot
+// run (a store read fails), every handler that answers with a repo still
+// answers — the settings PATCH, the Auto toggle, the three-strikes Reset and
+// a create all committed their write already — with the summary its row
+// alone decides: counts null, the clone check only. The list degrades per
+// read: an unreadable import list leaves only the imports checks out. The
+// readiness endpoint itself may say the evaluation failed.
+func TestReadiness_FailedSummaryDegrades(t *testing.T) {
+	rs := newReadinessServer(t)
+	h := csrfHeaders(rs.ts.URL)
+	app, _ := rs.repo("app", nil)
+	lib, _ := rs.repo("lib", nil)
+	if err := rs.st.AddRepoImport(context.Background(), app.ID, lib.ID); err != nil {
+		t.Fatal(err)
+	}
+	rs.rec.ObserveFetch(gitx.FetchAttribution{RepoID: lib.ID, Credential: store.NoCredentialStamp}, nil)
+	base := "/api/v1/repos/" + app.ID
+
+	wantRowOnly := func(what string, repo map[string]any) {
+		t.Helper()
+		claimable, openIssues, report := summaryOf(t, repo)
+		if claimable != nil || openIssues != nil {
+			t.Fatalf("%s: counts = %v / %v, want null while the evaluation fails", what, claimable, openIssues)
+		}
+		if _, order := rdyChecks(t, report); fmt.Sprint(order) != "[clone]" {
+			t.Fatalf("%s: checks = %v, want the clone check alone", what, order)
+		}
+	}
+
+	// Healthy first: the full report.
+	_, _, report := summaryOf(t, rs.getJSON(base))
+	wantCheck(t, report, "tracker", "passing")
+	wantCheck(t, report, "imports", "passing")
+
+	rs.flaky.failCredentials.Store(true)
+
+	resp := rs.do("PATCH", base, map[string]any{"max_fix_attempts": 3}, h)
+	wantStatus(t, resp, http.StatusOK)
+	patched := decodeBody(t, resp)
+	if patched["max_fix_attempts"] != float64(3) {
+		t.Fatalf("PATCH answered max_fix_attempts = %v, want the saved 3", patched["max_fix_attempts"])
+	}
+	wantRowOnly("PATCH", patched)
+	if row, err := rs.st.RepoByID(context.Background(), app.ID); err != nil || row.MaxFixAttempts != 3 {
+		t.Fatalf("stored max_fix_attempts = %d (%v), want the committed 3", row.MaxFixAttempts, err)
+	}
+
+	resp = rs.do("PUT", base+"/afk/auto", map[string]any{"enabled": false}, h)
+	wantStatus(t, resp, http.StatusOK)
+	wantRowOnly("Auto toggle", decodeBody(t, resp))
+	resp = rs.do("POST", base+"/afk/reset", map[string]any{}, h)
+	wantStatus(t, resp, http.StatusOK)
+	wantRowOnly("Reset", decodeBody(t, resp))
+
+	origin := makeRepoOrigin(t, rs.home, "main", 1)
+	resp = rs.do("POST", "/api/v1/repos", map[string]any{"remote_url": "file://" + origin, "name": "fresh"}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	created := decodeBody(t, resp)
+	wantRowOnly("create", created)
+	if _, _, rep := summaryOf(t, created); rep["checks"].([]any)[0].(map[string]any)["state"] == "failing" {
+		t.Fatalf("a fresh clone's check reads failing: %v", rep)
+	}
+
+	wantRowOnly("GET repo", rs.getJSON(base))
+	list := rs.getJSON("/api/v1/repos")["repos"].([]any)
+	if len(list) != 3 {
+		t.Fatalf("the list holds %d repos while the evaluation fails, want all 3", len(list))
+	}
+	for _, r := range list {
+		wantRowOnly("list "+r.(map[string]any)["name"].(string), r.(map[string]any))
+	}
+	resp = rs.do("GET", base+"/readiness", nil, nil)
+	wantStatus(t, resp, http.StatusInternalServerError)
+	_ = resp.Body.Close()
+
+	// Only the import list is unreadable: the list leaves the imports checks
+	// out — never failing — and everything else stands.
+	rs.flaky.failCredentials.Store(false)
+	rs.flaky.failImports.Store(true)
+	for _, r := range rs.getJSON("/api/v1/repos")["repos"].([]any) {
+		repo := r.(map[string]any)
+		claimable, openIssues, report := summaryOf(t, repo)
+		if claimable == nil || openIssues == nil {
+			t.Fatalf("%v: counts = %v / %v, want known", repo["name"], claimable, openIssues)
+		}
+		wantNoCheck(t, report, "imports")
+		wantCheck(t, report, "tracker", "passing")
+	}
+}
+
+// Only a DEFINITIVE forge answer is evidence (issue #61), through the real
+// instrumented tracker and the real REST client of each flavor: a 5xx, an
+// unreachable forge and a request that timed out are not recorded — before
+// any record, after a success, after a refusal — and never announced. 401,
+// 403 and 404 are, and fail the check.
+func TestReadiness_TrackerOnlyDefinitiveAnswersAreEvidence(t *testing.T) {
+	for _, tc := range []struct{ name, flavor string }{{"forgejo", ""}, {"github", vault.ForgeGitHub}} {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := newReadinessServer(t)
+			repo, _ := rs.forgeRepo("widget", tc.flavor, nil)
+			base := "/api/v1/repos/" + repo.ID
+			rs.repoChanged(repo.ID)
+			read := func() {
+				t.Helper()
+				resp := rs.do("GET", base+"/issues", nil, nil)
+				_ = resp.Body.Close()
+			}
+			noise := func(what string) {
+				t.Helper()
+				for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable} {
+					rs.stub.set(status, "upstream is having a moment")
+					read()
+				}
+				rs.forge.failWith(errors.New("dial tcp 10.0.0.1:443: connect: connection refused"))
+				read()
+				rs.forge.failWith(context.DeadlineExceeded)
+				read()
+				rs.forge.failWith(nil)
+				if n := rs.repoChanged(repo.ID); n != 0 {
+					t.Fatalf("%s: forge noise published %d repo.changed, want none", what, n)
+				}
+			}
+			trackerDetail := func(state string) string {
+				t.Helper()
+				c := wantCheck(t, rs.readiness(repo.ID), "tracker", state)
+				if state == "failing" {
+					wantFix(t, c, "repo", "integrations", "forge_credential_id")
+				}
+				d, _ := c["detail"].(string)
+				return d
+			}
+
+			noise("nothing known")
+			wantNoCheck(t, rs.readiness(repo.ID), "tracker")
+			if recs := rs.rec.TrackerReads(repo.ID); recs != nil {
+				t.Fatalf("forge noise left records: %+v", recs)
+			}
+
+			rs.stub.set(http.StatusOK, "", forgeIssue(1), forgeIssue(2))
+			read()
+			if n := rs.repoChanged(repo.ID); n != 1 {
+				t.Fatalf("the first success published %d repo.changed, want 1", n)
+			}
+			noise("after a success")
+			trackerDetail("passing")
+			if _, openIssues, _ := summaryOf(t, rs.getJSON(base)); openIssues != float64(2) {
+				t.Fatalf("open_issues = %v after the noise, want the last read's 2", openIssues)
+			}
+
+			for _, refusal := range []struct {
+				status int
+				body   string
+			}{
+				{http.StatusUnauthorized, `{"message":"Bad credentials"}`},
+				{http.StatusForbidden, `{"message":"Resource not accessible by personal access token"}`},
+			} {
+				rs.stub.set(refusal.status, refusal.body)
+				read()
+				if n := rs.repoChanged(repo.ID); n != 1 {
+					t.Fatalf("a %d published %d repo.changed, want 1", refusal.status, n)
+				}
+				want := fmt.Sprint(refusal.status)
+				if d := trackerDetail("failing"); !strings.Contains(d, want) {
+					t.Fatalf("tracker detail = %q, want the forge's %s", d, want)
+				}
+				noise(fmt.Sprintf("after a %d", refusal.status))
+				if d := trackerDetail("failing"); !strings.Contains(d, want) {
+					t.Fatalf("tracker detail after noise = %q, want the %s still", d, want)
+				}
+				rs.stub.set(http.StatusOK, "", forgeIssue(1), forgeIssue(2))
+				read()
+				trackerDetail("passing")
+				rs.repoChanged(repo.ID)
+			}
+
+			rs.stub.set(http.StatusNotFound, `{"message":"Not Found"}`)
+			read()
+			if d := trackerDetail("failing"); d != "The forge does not know this repository, or the forge credential's token cannot see it." {
+				t.Fatalf("tracker detail after a 404 = %q", d)
+			}
+		})
 	}
 }

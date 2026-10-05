@@ -616,28 +616,25 @@ func (s *Service) launchScheduledRun(ctx context.Context, scheduleID string, onD
 // touches the cadence's state: not the in-memory pending/high-water memo,
 // not last_fired_at.
 //
-// The specific reason wins when several apply. Paused and run-live are
-// checked BEFORE the pass (and re-checked under the engine lock), so paused-
-// and-at-cap answers paused; the forced provider login check runs here too,
-// per click, exactly as StartManualAFK's does — the pass's shared auth memo
-// belongs to the producers' candidates. A candidate the pass's snapshot
-// vetoed is never called, so that path answers at-cap — after one more look
-// for a more specific reason, because the slot may have gone to this same
-// Schedule's cadence firing in this very pass.
+// The specific reason wins when several apply. Every Schedule- and
+// repo-specific refusal — paused, repo not clone-ready, run-live, an empty
+// composed prompt (runNowPrecheck) — is checked BEFORE the pass (and
+// re-checked under the engine lock), so paused-and-at-cap answers paused;
+// the forced provider login check runs here too, per click, exactly as
+// StartManualAFK's does — the pass's shared auth memo belongs to the
+// producers' candidates. A candidate the pass's snapshot vetoed is never
+// called, so that path answers at-cap — after one more runNowPrecheck for a
+// more specific reason, because the slot may have gone to this same
+// Schedule's cadence firing in this very pass, and the Schedule or its repo
+// may have changed since the first look.
 func (s *Service) RunScheduleNow(ctx context.Context, scheduleID string) (store.Run, error) {
 	sched, err := s.store.ScheduleByID(ctx, scheduleID)
 	if err != nil {
 		return store.Run{}, err // ErrNotFound → 404
 	}
-	if err := s.runNowRefusal(ctx, sched); err != nil {
-		return store.Run{}, err
-	}
-	repo, err := s.store.RepoByID(ctx, sched.RepoID)
+	repo, err := s.runNowPrecheck(ctx, sched)
 	if err != nil {
 		return store.Run{}, err
-	}
-	if repo.CloneStatus != store.CloneStatusReady {
-		return store.Run{}, instance.ErrRepoNotReady
 	}
 	// A same-minute identity collision refuses before the pass (so it also
 	// wins over at-cap); the locked launch re-checks with the label it
@@ -687,25 +684,38 @@ func (s *Service) RunScheduleNow(ctx context.Context, scheduleID string) (store.
 	if err != nil {
 		return store.Run{}, err
 	}
-	if err := s.runNowRefusal(ctx, sched); err != nil {
+	if _, err := s.runNowPrecheck(ctx, sched); err != nil {
 		return store.Run{}, err
 	}
 	return store.Run{}, instance.ErrOverCap
 }
 
-// runNowRefusal is a Run now's Schedule-specific gate, read outside the
-// engine lock (launchScheduledRun re-checks both under it): paused first,
-// then a live previous run. nil means neither applies.
-func (s *Service) runNowRefusal(ctx context.Context, sched store.Schedule) error {
+// runNowPrecheck is a Run now's Schedule- and repo-specific gate, read
+// outside the engine lock (launchScheduledRun re-checks each under it) in
+// the locked core's own order of precedence: paused, then the repo's clone
+// readiness, then a live previous run, then an empty composed prompt. It
+// returns the repo row it read; a nil error means none of them applies.
+// Read errors return raw.
+func (s *Service) runNowPrecheck(ctx context.Context, sched store.Schedule) (store.Repo, error) {
 	if sched.Paused {
-		return ErrSchedulePaused
+		return store.Repo{}, ErrSchedulePaused
+	}
+	repo, err := s.store.RepoByID(ctx, sched.RepoID)
+	if err != nil {
+		return store.Repo{}, err
+	}
+	if repo.CloneStatus != store.CloneStatusReady {
+		return store.Repo{}, instance.ErrRepoNotReady
 	}
 	if _, err := s.store.ActiveRunForSchedule(ctx, sched.ID); err == nil {
-		return ErrScheduleRunLive
+		return store.Repo{}, ErrScheduleRunLive
 	} else if !errors.Is(err, store.ErrNotFound) {
-		return err
+		return store.Repo{}, err
 	}
-	return nil
+	if strings.TrimSpace(ComposeSchedulePrompt(sched.Prompt, sched.Flows, sched.Name)) == "" {
+		return store.Repo{}, ErrScheduleEmptyPrompt
+	}
+	return repo, nil
 }
 
 // runNowIdentityFree refuses a Run now whose scheduled identity is already
@@ -733,7 +743,7 @@ func (s *Service) runNowIdentityFree(ctx context.Context, sched store.Schedule, 
 	branch := repo.ManualBranchPrefix + label
 	worktree := filepath.Join(s.worktreeRoot, gitx.WorktreeDir(repo.Name, label))
 
-	latest, err := s.store.LatestRunForSchedule(ctx, sched.ID)
+	latest, err := s.store.LatestRunForSchedule(ctx, sched.RepoID, sched.ID)
 	switch {
 	case err == nil:
 		if latest.SessionName == session || latest.Branch == branch || latest.WorktreePath == worktree {

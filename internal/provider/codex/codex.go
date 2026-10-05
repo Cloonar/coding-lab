@@ -171,10 +171,11 @@ type Provider struct {
 	authMu      sync.Mutex
 	authCache   provider.AuthStatus
 	authChecked time.Time
-	// authLast is the status the most recent check produced, published for
-	// LastAuthStatus (provider.AuthPeeker): written under authMu by the
-	// refresh, read WITHOUT it, so a peek never waits behind the status
-	// command. nil until the first check.
+	// authLast is the status the most recent COMPLETED check produced,
+	// published for LastAuthStatus (provider.AuthPeeker): written under
+	// authMu by the refresh — never by a failed or cancelled check — and
+	// read WITHOUT it, so a peek never waits behind the status command. nil
+	// until the first completed check.
 	authLast atomic.Pointer[provider.AuthStatus]
 
 	// loginMu guards the pending device-code login attempt: the scraped

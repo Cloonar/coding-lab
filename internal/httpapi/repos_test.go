@@ -94,6 +94,13 @@ func newRepoTestServer(t *testing.T) *repoTestServer {
 // set plain-value options such as DevImageFallback).
 func newRepoTestServerWith(t *testing.T, mod func(*Options)) *repoTestServer {
 	t.Helper()
+	return newRepoTestServerHooked(t, mod, nil)
+}
+
+// newRepoTestServerHooked is newRepoTestServerWith with a hook on the built
+// *Server, run before its listener starts (newTestServerHooked).
+func newRepoTestServerHooked(t *testing.T, mod func(*Options), hook func(*Server)) *repoTestServer {
+	t.Helper()
 	testutil.RequireTool(t, "git")
 
 	v, err := vault.New(make([]byte, vault.KeySize))
@@ -117,7 +124,7 @@ func newRepoTestServerWith(t *testing.T, mod func(*Options)) *repoTestServer {
 
 	pin := &fakePinner{}
 	var svc *reposvc.Service
-	x := newTestServer(t, func(o *Options) {
+	x := newTestServerHooked(t, func(o *Options) {
 		svc, err = reposvc.New(reposvc.Options{
 			Store:        o.Store,
 			Vault:        v,
@@ -139,7 +146,7 @@ func newRepoTestServerWith(t *testing.T, mod func(*Options)) *repoTestServer {
 		if mod != nil {
 			mod(o)
 		}
-	})
+	}, hook)
 	t.Cleanup(svc.Close)
 	x.setup("op", "password123")
 	return &repoTestServer{testServer: x, svc: svc, reposDir: reposDir, runtime: runtime, home: home, pin: pin}

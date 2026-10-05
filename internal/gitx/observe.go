@@ -1,6 +1,9 @@
 package gitx
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // The fetch observer seam (issue #61): the readiness report answers "did the
 // last fetch from the remote work?" from what lab already knows, so the one
@@ -58,15 +61,53 @@ func (e *Engine) SetFetchObserver(obs FetchObserver) { e.onFetch = obs }
 // reported once the CALLER's context is done (a dropped request, a
 // force-delete cancelling the clone, shutdown): a fetch that died with its
 // caller says nothing about the remote or the credential, and a clone that
-// completed for a repo being deleted must leave no record behind. The
+// completed for a repo being deleted must leave no record behind. Nor is a
+// fetch that failed on a lock in the LOCAL repository (localLockFailure). The
 // engine's own timeout is different and IS reported — a remote that stalls
 // for the whole gitTimeout did fail the fetch, and the caller's context is
 // still live then.
 func (e *Engine) reportFetch(ctx context.Context, err error) {
-	if e.onFetch == nil || ctx.Err() != nil {
+	if e.onFetch == nil || ctx.Err() != nil || localLockFailure(err) {
 		return
 	}
 	if a, ok := ctx.Value(fetchAttributionKey{}).(FetchAttribution); ok {
 		e.onFetch(a, err)
 	}
+}
+
+// localLockMarkers are git's words (LC_ALL=C, which the engine pins) for a
+// lock in the local repository it could not take: a ref's lock file
+// ("cannot lock ref '…': Unable to create '….lock': File exists", or "…: is
+// at <sha> but expected <sha>" when another process moved the ref first), a
+// repository-wide lock such as packed-refs.lock or shallow.lock ("Unable to
+// create '….lock': File exists"), and the per-ref line fetch prints for
+// each ref it then could not update.
+var localLockMarkers = []string{
+	"cannot lock ref ",
+	".lock': File exists",
+	"(unable to update local ref)",
+}
+
+// localLockFailure reports whether a failed fetch died on a lock in the
+// LOCAL repository rather than at the remote. Fetches are not serialized per
+// bare repo: the reconcile sweep's unattributed fetch can overlap an
+// attributed one (a spawn's, a /pull-base's) on the same reference repo, and
+// the loser fails on the ref lock the winner holds. That outcome says
+// nothing about the remote or the credential — the lock is the local
+// repository's, and the next fetch succeeds — so it is no evidence for the
+// readiness report (issue #61), and
+// recording it would show a false git-credential failure until the next
+// attributed fetch. Classified by git's own message, the one place that
+// says which lock it was.
+func localLockFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, m := range localLockMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
 }

@@ -77,20 +77,25 @@ type Evaluator struct {
 // Summaries evaluates every repo of a full repo listing: one Summary per
 // repo, in order. repos must be the WHOLE list — import targets are looked
 // up in it, which is what keeps the batch free of a query per repo.
+//
+// A failed read degrades only what depends on it: an unreadable import list
+// leaves every repo's imports check out, unreadable built-in issue counts
+// leave those counts unknown. Only the credential listing every check rests
+// on fails the batch — and the caller then answers each repo with RowOnly.
 func (e *Evaluator) Summaries(ctx context.Context, repos []store.Repo) ([]Summary, error) {
 	w, err := e.load(ctx, repos, true)
 	if err != nil {
 		return nil, err
 	}
-	all, err := e.Store.AllRepoImports(ctx)
-	if err != nil {
-		return nil, err
-	}
+	all, allErr := e.Store.AllRepoImports(ctx)
 	byID := make(map[string]store.Repo, len(repos))
 	for _, r := range repos {
 		byID[r.ID] = r
 	}
 	w.imports = func(_ context.Context, repo store.Repo) ([]store.Repo, error) {
+		if allErr != nil {
+			return nil, allErr
+		}
 		targets := make([]store.Repo, 0, len(all[repo.ID]))
 		for _, id := range all[repo.ID] {
 			t, ok := byID[id]
@@ -110,7 +115,9 @@ func (e *Evaluator) Summaries(ctx context.Context, repos []store.Repo) ([]Summar
 	return out, nil
 }
 
-// Summary evaluates one repo: its counts and its report.
+// Summary evaluates one repo: its counts and its report. An error means the
+// evaluation could not run at all; a caller that must still answer with the
+// repo (one whose write already landed) answers with RowOnly instead.
 func (e *Evaluator) Summary(ctx context.Context, repo store.Repo) (Summary, error) {
 	w, err := e.load(ctx, []store.Repo{repo}, true)
 	if err != nil {
@@ -128,6 +135,19 @@ func (e *Evaluator) Report(ctx context.Context, repo store.Repo) (Report, error)
 	return Evaluate(e.input(ctx, w, repo)), nil
 }
 
+// RowOnly is the summary of a repo built from its row alone — what a repo
+// response carries when the evaluation itself failed (a store read did):
+// both counts unknown, and a report holding the one check the row decides,
+// the clone. Everything else is left out, never guessed: in particular no
+// check that a failed read could turn into a false failure.
+func RowOnly(repo store.Repo) Summary {
+	checks := make([]Check, 0, 1)
+	if c := cloneCheck(Input{Repo: repo}); c != nil {
+		checks = append(checks, *c)
+	}
+	return Summary{Readiness: Report{State: rollUp(checks), Checks: checks}}
+}
+
 // world is the store state the evaluations of one request share.
 type world struct {
 	creds    map[string]store.CredentialMeta
@@ -137,13 +157,14 @@ type world struct {
 	imports func(ctx context.Context, repo store.Repo) ([]store.Repo, error)
 	// builtinOpen and builtinReady are the open-issue and ready-queue sizes
 	// of builtin-bound repos by repo id (absent = zero); nil when not
-	// loaded.
+	// loaded, or not readable.
 	builtinOpen, builtinReady map[string]int
 }
 
 // load reads what every evaluation of the request needs, once. counts also
 // loads the built-in tracker's per-repo issue counts, when any repo is
-// builtin-bound.
+// builtin-bound; when those cannot be read the counts are simply unknown
+// (claimable and open_issues null), never an error — they feed no check.
 func (e *Evaluator) load(ctx context.Context, repos []store.Repo, counts bool) (*world, error) {
 	metas, err := e.Store.Credentials(ctx)
 	if err != nil {
@@ -166,11 +187,11 @@ func (e *Evaluator) load(ctx context.Context, repos []store.Repo, counts bool) (
 		if r.TrackerBinding != store.TrackerBindingBuiltin {
 			continue
 		}
-		if w.builtinOpen, err = e.Store.OpenIssueCounts(ctx, ""); err != nil {
-			return nil, err
+		if open, err := e.Store.OpenIssueCounts(ctx, ""); err == nil {
+			w.builtinOpen = open
 		}
-		if w.builtinReady, err = e.Store.OpenIssueCounts(ctx, tracker.ReadyLabel); err != nil {
-			return nil, err
+		if ready, err := e.Store.OpenIssueCounts(ctx, tracker.ReadyLabel); err == nil {
+			w.builtinReady = ready
 		}
 		break
 	}
