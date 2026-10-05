@@ -28,6 +28,7 @@ import {
   ErrorBoundary,
   For,
   Show,
+  createComputed,
   createEffect,
   createResource,
   createSignal,
@@ -50,8 +51,8 @@ import {
   sectionElementId,
   type RepoSettingsCategory,
 } from './categories';
-import { fieldControlId } from './Field';
-import { isRepoFieldKey, repoField, type RepoFieldKey } from './fields';
+import { focusFieldControl } from './Field';
+import { isRepoFieldKey, repoField } from './fields';
 import { useRepoSettingsForm, type RevealTarget } from './form';
 import { viewport } from './scrolling';
 import SectionNav from './SectionNav';
@@ -84,20 +85,6 @@ const SCROLL_INPUTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const
 
 const FIRST_SECTION = REPO_SETTINGS_CATEGORIES[0]!.slug;
 
-/** Moves focus to a field's control without scrolling; false when there is none to take it. */
-function focusField(wrapper: HTMLElement, key: RepoFieldKey): boolean {
-  const control =
-    document.getElementById(fieldControlId(key)) ??
-    // A group of controls (a segmented pick, the option bag) has no single
-    // id: its tab stop is the target.
-    wrapper.querySelector<HTMLElement>(
-      'input, select, textarea, button[role="radio"][tabindex="0"], button:not([tabindex="-1"])',
-    );
-  if (control === null) return false;
-  control.focus({ preventScroll: true });
-  return true;
-}
-
 export default function RepoSettings() {
   const params = useParams<{ id: string; section?: string; scheduleId?: string }>();
   const location = useLocation();
@@ -107,8 +94,10 @@ export default function RepoSettings() {
   const form = useRepoSettingsForm();
   const desktop = createMediaQuery(DESKTOP_QUERY);
 
-  // The provider catalog and the global settings load with this tab only.
+  // The provider catalog and the inherited values load with this tab only,
+  // and the inherited values follow the repo only while it shows.
   form.catalog.load();
+  onCleanup(() => form.catalog.idle());
   const [credentials] = createResource(() => listCredentials());
 
   const base = (): string => `/repos/${params.id}/settings`;
@@ -128,6 +117,10 @@ export default function RepoSettings() {
     const slug = repoSettingsCategory(section())?.slug;
     return slug !== undefined ? { section: slug } : undefined;
   };
+
+  // A section that folds fields away unfolds the one the URL points at.
+  // A computed, so it has happened before the page looks for the field.
+  createComputed(() => form.pointAt(urlTarget()?.field));
 
   let page: HTMLDivElement | undefined;
   let chips: HTMLElement | undefined;
@@ -201,7 +194,7 @@ export default function RepoSettings() {
       if (fieldNode !== null && target.field !== undefined) {
         viewport.scrollTo(fieldNode, stuckOffset() + FIELD_HEADROOM, smooth);
         if (!focused) {
-          focused = focusField(fieldNode, target.field);
+          focused = focusFieldControl(fieldNode, target.field);
           flash(fieldNode);
         }
       } else {
@@ -230,11 +223,12 @@ export default function RepoSettings() {
       for (const type of SCROLL_INPUTS) window.removeEventListener(type, release);
     };
   };
-  // The catalog landing adds fields (the option bag) and rewrites hints: a
-  // held deep link goes to its target again once they are on the page.
+  // The catalog and the inherited values landing add fields (the option bag)
+  // and unfold or fold others: a held deep link goes to its target again once
+  // they are on the page.
   createEffect(
     on(
-      () => [form.catalog.providers(), form.catalog.settings(), resourceValue(credentials)],
+      () => [form.catalog.providers(), form.inherited(), resourceValue(credentials)],
       () => held?.(false),
       { defer: true },
     ),
@@ -328,7 +322,11 @@ export default function RepoSettings() {
           <SchedulesSection
             repo={repo}
             providers={form.catalog.providers()}
-            settings={form.catalog.settings() ?? {}}
+            // Schedules act at once, on the SAVED repo: its own AFK agent,
+            // else the one the server says it inherits.
+            afkProviderId={
+              repo().afk_provider_default ?? form.inherited()?.afk_provider_default ?? null
+            }
             onSaved={refetch}
           />
         );

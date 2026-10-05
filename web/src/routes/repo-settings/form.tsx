@@ -18,6 +18,15 @@
 //     so a field the operator never touched is never sent, and a server-side
 //     change to it is never silently reverted.
 //
+// Inheritance (issue #61 §6): what an overridable field resolves to while the
+// repo's own value is null is the SERVER's answer (getRepoInherited — the
+// spawn path's own resolvers), asked again whenever the saved repo changes
+// and, debounced, whenever a draft that other fields' chains read changes.
+// The browser never walks a chain. Its one composition: a field's EFFECTIVE
+// value is its own draft when set, else the inherited one — that picks the
+// provider whose catalogs a select lists, the Runner the page folds by, and
+// the options the AFK option bag declares.
+//
 // The one save rule lives here too: Save validates the changed fields in the
 // browser, sends ONE PATCH with exactly the changed fields, applies the
 // response to the frame's repo at once (the marks clear without waiting for
@@ -30,11 +39,13 @@ import {
   batch,
   createComputed,
   createContext,
+  createEffect,
   createMemo,
   createResource,
   createSignal,
   on,
   onCleanup,
+  untrack,
   useContext,
   type Accessor,
   type JSX,
@@ -43,21 +54,23 @@ import {
 import {
   ApiError,
   errorMessage,
-  getSettings,
+  getRepoInherited,
   listProviders,
   updateRepo,
   type Provider,
   type ProviderOptionSpec,
   type Repo,
-  type Settings,
+  type RepoInherited,
+  type RepoInheritedDrafts,
 } from '../../api';
 import { resourceValue } from '../../lib/resource';
-import { providerFor } from '../../lib/spawn';
 import { useRepoHome } from '../repo-home/context';
 import {
   REPO_FIELD_KEYS,
   buildRepoPatch,
   draftDiffers,
+  draftInherits,
+  isOverridable,
   isRepoFieldKey,
   repoField,
   sameDraft,
@@ -70,6 +83,14 @@ import {
   type RepoFieldKey,
   type RepoFieldSpec,
 } from './fields';
+import { CHAIN_FIELD_KEYS, inheritedText, type ChainFieldKey } from './inherited';
+import { normText } from './shared';
+
+/**
+ * How long an edit of a chain field waits before the inherited values are
+ * asked for again — one request for a quick run of picks, not one each.
+ */
+export const INHERITED_DEBOUNCE_MS = 150;
 
 /** One field's draft and state — what a section binds a control to. */
 export interface FieldBinding<K extends RepoFieldKey> {
@@ -84,24 +105,44 @@ export interface FieldBinding<K extends RepoFieldKey> {
   changed: Accessor<boolean>;
   /** The problem shown under the field: a browser check or a server refusal. */
   error: Accessor<string | null>;
+  /** True for a field whose own value may be null, meaning "inherit". */
+  overridable: boolean;
+  /**
+   * True while an overridable field's draft leaves it inherited ("inherited"
+   * at its label); false once it is set here. Always false otherwise.
+   */
+  inherits: Accessor<boolean>;
+  /**
+   * What the field inherits, worded for the page — the server's answer, or
+   * null while that is not known (loading, failed, unresolvable). Never a
+   * value the browser derived.
+   */
+  inheritedText: Accessor<string | null>;
+  /** Returns an overridable field to inherited (a change, saved as null). */
+  reset: () => void;
 }
 
-/** The provider catalog and global settings the fields resolve against. */
+/** The provider catalog, and the providers the fields resolve against. */
 export interface RepoSettingsCatalog {
   /**
-   * Starts loading the catalog (idempotent). Only the Settings tab calls it,
+   * The Settings tab is showing: loads the provider catalog (once) and asks
+   * for the inherited values (again on every call). Only that tab calls it,
    * so Overview and Issues never wait on — or even request — these reads.
    */
   load: () => void;
+  /** The Settings tab went away: nothing follows the repo until the next load(). */
+  idle: () => void;
   /** Registered providers; empty until loaded. */
   providers: Accessor<Provider[]>;
-  /** Global settings; undefined until loaded. */
-  settings: Accessor<Settings | undefined>;
-  /** The provider runs you start resolve to, against the DRAFTS. */
+  /**
+   * The provider runs you start resolve to: the drafted agent when one is
+   * set here, else the inherited one. null while that is not known, and for
+   * an id the catalog does not carry.
+   */
   baseProvider: Accessor<Provider | null>;
-  /** The provider AFK runs resolve to, against the drafts. */
+  /** The provider AFK runs resolve to, composed the same way. */
   afkProvider: Accessor<Provider | null>;
-  /** The provider the lander run resolves to, against the drafts. */
+  /** The provider the lander run resolves to, composed the same way. */
   landerProvider: Accessor<Provider | null>;
   /** The bool spawn options the AFK provider declares (the option bag's rows). */
   afkBoolOptions: Accessor<ProviderOptionSpec[]>;
@@ -153,6 +194,24 @@ export interface RepoSettingsForm {
   reveal: (target: RevealTarget) => void;
   /** Bumped by every reveal(), so the page repeats one for an unchanged URL. */
   revealTick: Accessor<number>;
+  /**
+   * The field the page is being sent to (a reveal(), a `?field=` URL), so a
+   * section that folds fields away can unfold the one that is wanted.
+   */
+  pointedAt: Accessor<RepoFieldKey | undefined>;
+  /** Says which field the URL points at (the page calls it; undefined = none). */
+  pointAt: (field: RepoFieldKey | undefined) => void;
+  /**
+   * What every overridable field resolves to while the repo's own value is
+   * null — the server's answer for the current drafts. Undefined while
+   * loading and after a failed request (the next trigger asks again).
+   */
+  inherited: Accessor<RepoInherited | undefined>;
+  /**
+   * The Runner that applies: the drafted pick when set here, else the
+   * inherited one. null/undefined while that is not known.
+   */
+  effectiveRunner: Accessor<string | null | undefined>;
   catalog: RepoSettingsCatalog;
 }
 
@@ -171,6 +230,9 @@ export function useRepoSettingsForm(): RepoSettingsForm {
 export function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
+
+/** For the fields whose wire form reads no context (every chain field). */
+const NO_CONTEXT: FieldContext = { afkOptionKeys: null };
 
 type EditSignals = { [K in RepoFieldKey]: Signal<RepoDrafts[K] | undefined> };
 type Bindings = { [K in RepoFieldKey]: FieldBinding<K> };
@@ -224,6 +286,8 @@ function createRepoSettingsForm(): RepoSettingsForm {
   const [barError, setBarError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [revealTick, setRevealTick] = createSignal(0);
+  const [pointedAt, setPointedAt] = createSignal<RepoFieldKey | undefined>(undefined);
+  const [inherited, setInherited] = createSignal<RepoInherited | undefined>(undefined);
 
   const dropError = (key: RepoFieldKey): void => {
     if (errors()[key] === undefined) return;
@@ -251,44 +315,45 @@ function createRepoSettingsForm(): RepoSettingsForm {
   };
 
   // --- catalog ------------------------------------------------------------------
-  // Fetched on demand (load()), and held here so the option bag's rule — and
-  // the edits it applies to — survive a tab switch.
+  // The provider catalog is fetched on demand (load()), and held here so the
+  // option bag's rule — and the edits it applies to — survive a tab switch.
   const [wanted, setWanted] = createSignal(false);
+  // True while the Settings tab shows: only then do inherited values follow
+  // the repo and the drafts.
+  const [active, setActive] = createSignal(false);
   const [providersResource] = createResource(wanted, () => listProviders());
-  const [settingsResource] = createResource(wanted, () => getSettings());
   const providers = (): Provider[] => resourceValue(providersResource) ?? [];
-  const settings = (): Settings | undefined => resourceValue(settingsResource);
+  const providerByID = (id: string | null | undefined): Provider | null =>
+    id == null ? null : (providers().find((provider) => provider.id === id) ?? null);
 
-  // Effective providers, resolved LIVE against the drafted agents (skip-layer,
-  // ADR-0030), so the model/effort catalogs re-catalog as the operator flips
-  // an agent — before anything is saved.
-  const baseProvider = createMemo(() =>
-    providerFor(providers(), draftOf('provider'), settings()?.provider_default),
-  );
-  const afkProvider = createMemo(() =>
-    providerFor(
-      providers(),
-      draftOf('afk_provider_default'),
-      settings()?.spawn_provider_default_afk,
-      draftOf('provider'),
-      settings()?.provider_default,
-    ),
-  );
-  // The lander's provider: its own pick, else this repo's provider chain.
-  const landerProvider = createMemo(() =>
-    providerFor(
-      providers(),
-      draftOf('lander_provider'),
-      draftOf('provider'),
-      settings()?.provider_default,
-    ),
-  );
+  // The EFFECTIVE value of a field other fields depend on: its own draft when
+  // set here, else what the server says it inherits. This is the only
+  // composition the browser does — no chain is walked here.
+  const effectiveOf = (
+    key: 'provider' | 'afk_provider_default' | 'lander_provider' | 'runner',
+  ): string | null | undefined => {
+    const own = normText(draftOf(key) ?? '');
+    return own !== null ? own : inherited()?.[key];
+  };
+  const baseProvider = createMemo(() => providerByID(effectiveOf('provider')));
+  const afkProvider = createMemo(() => providerByID(effectiveOf('afk_provider_default')));
+  const landerProvider = createMemo(() => providerByID(effectiveOf('lander_provider')));
+  const effectiveRunner = (): string | null | undefined => effectiveOf('runner');
   const afkBoolOptions = createMemo(() =>
     (afkProvider()?.options ?? []).filter((option) => option.type === 'bool'),
   );
   const context = createMemo<FieldContext>(() => ({
-    afkOptionKeys: afkBoolOptions().map((option) => option.key),
+    // Not known while the AFK provider is not: a drafted bag then stands on
+    // its own keys (fields.ts).
+    afkOptionKeys: afkProvider() === null ? null : afkBoolOptions().map((option) => option.key),
   }));
+  const wording = () => ({
+    providers: providers(),
+    baseProvider: baseProvider(),
+    afkProvider: afkProvider(),
+    landerProvider: landerProvider(),
+    afkBoolOptions: afkBoolOptions(),
+  });
 
   // --- bindings -----------------------------------------------------------------
   const bind = <K extends RepoFieldKey>(key: K): FieldBinding<K> => {
@@ -318,6 +383,14 @@ function createRepoSettingsForm(): RepoSettingsForm {
         setBarError(null);
       });
     };
+    const overridable = isOverridable(key);
+    const inherits = createMemo(() => {
+      const draft = value();
+      return draft !== undefined && draftInherits(key, draft, context());
+    });
+    const inheritedValue = createMemo(() =>
+      overridable ? inheritedText(key, inherited(), wording()) : null,
+    );
     return {
       key,
       spec,
@@ -326,6 +399,12 @@ function createRepoSettingsForm(): RepoSettingsForm {
       set,
       changed,
       error: () => errors()[key] ?? null,
+      overridable,
+      inherits,
+      inheritedText: inheritedValue,
+      reset: () => {
+        if (overridable) set(spec.inherit as RepoDrafts[K]);
+      },
     };
   };
   const bindings = {} as Bindings;
@@ -340,8 +419,18 @@ function createRepoSettingsForm(): RepoSettingsForm {
   const problemSections = createMemo(() => sectionsOf(problems()));
 
   // --- seed / resync ------------------------------------------------------------
-  // Another repo: nothing drafted against the previous one applies.
-  createComputed(on(home.id, () => drop(), { defer: true }));
+  // Another repo: nothing drafted against the previous one applies, and
+  // nothing it inherited either.
+  createComputed(
+    on(
+      home.id,
+      () => {
+        drop();
+        forgetInherited();
+      },
+      { defer: true },
+    ),
+  );
 
   // A refresh of the same repo (the lib/seededDrafts.ts rule): an edit the
   // server caught up with is dropped, so the field is clean and follows the
@@ -374,12 +463,84 @@ function createRepoSettingsForm(): RepoSettingsForm {
     ),
   );
 
+  // --- inherited values ---------------------------------------------------------
+  // Asked when the Settings tab mounts and whenever the saved repo changes;
+  // and again, debounced, when a draft that other fields' chains read
+  // changes. Each request carries only the chain drafts that are actually
+  // edited (absent = the saved value, null = reset to inherit). Requests are
+  // numbered: an answer that is not the latest one's is dropped, so a slow
+  // older request can never overwrite a newer answer.
+  let asked = 0;
+  let debounce: ReturnType<typeof setTimeout> | undefined;
+  // What the last request asked about, to skip a debounced repeat of it.
+  let lastAsked: { repo: Repo; drafts: string } | undefined;
+  const forgetInherited = (): void => {
+    asked += 1;
+    lastAsked = undefined;
+    clearTimeout(debounce);
+    setInherited(undefined);
+  };
+  const chainDrafts = (): RepoInheritedDrafts => {
+    const drafts: RepoInheritedDrafts = {};
+    for (const key of CHAIN_FIELD_KEYS) addChainDraft(drafts, key);
+    return drafts;
+  };
+  const addChainDraft = <K extends ChainFieldKey>(drafts: RepoInheritedDrafts, key: K): void => {
+    const edit = editOf(key);
+    if (edit === undefined || !bindings[key].changed()) return;
+    // A chain field's wire form depends on nothing but its own draft.
+    drafts[key] = repoField(key).wire(edit, NO_CONTEXT) as RepoInheritedDrafts[K];
+  };
+  // A memo, so the debounce below starts only when the drafts to send really
+  // change — not whenever something they were read through does.
+  const chainKey = createMemo(() => JSON.stringify(chainDrafts()));
+  const askInherited = (always: boolean): void => {
+    clearTimeout(debounce);
+    const repo = untrack(saved);
+    if (!untrack(active) || repo === undefined) return;
+    const drafts = untrack(chainDrafts);
+    const key = untrack(chainKey);
+    if (!always && lastAsked !== undefined && lastAsked.repo === repo && lastAsked.drafts === key) {
+      return;
+    }
+    lastAsked = { repo, drafts: key };
+    asked += 1;
+    const number = asked;
+    getRepoInherited(repo.id, drafts).then(
+      (answer) => {
+        if (number === asked) setInherited(answer);
+      },
+      () => {
+        if (number !== asked) return;
+        // Not known: the fields show their state without a value — never a
+        // guessed one — and stay editable. The next trigger asks again.
+        lastAsked = undefined;
+        setInherited(undefined);
+      },
+    );
+  };
+  createEffect(on([active, saved], () => askInherited(true)));
+  createEffect(
+    on(
+      chainKey,
+      () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => askInherited(false), INHERITED_DEBOUNCE_MS);
+      },
+      { defer: true },
+    ),
+  );
+  onCleanup(() => clearTimeout(debounce));
+
   // --- navigation ---------------------------------------------------------------
   const settingsBase = (): string => `/repos/${home.id()}/settings`;
   const reveal = (target: RevealTarget): void => {
     const base = settingsBase();
     const path = `${base}/${target.section}${target.field !== undefined ? `?field=${target.field}` : ''}`;
     const onSettings = location.pathname === base || location.pathname.startsWith(`${base}/`);
+    // First, so a section that folded the field away has it back on the page
+    // by the time the page looks for it.
+    setPointedAt(target.field);
     // The page does the scrolling itself, so the router must not jump to the
     // top. Inside the Settings tab the URL is replaced (no history spam).
     navigate(path, onSettings ? { replace: true, scroll: false } : { scroll: false });
@@ -497,10 +658,18 @@ function createRepoSettingsForm(): RepoSettingsForm {
     drop,
     reveal,
     revealTick,
+    pointedAt,
+    pointAt: (field) => void setPointedAt(field),
+    inherited,
+    effectiveRunner,
     catalog: {
-      load: () => void setWanted(true),
+      load: () =>
+        batch(() => {
+          setWanted(true);
+          setActive(true);
+        }),
+      idle: () => void setActive(false),
       providers,
-      settings,
       baseProvider,
       afkProvider,
       landerProvider,

@@ -6,6 +6,13 @@
 // home frame, with its form store, save bar and leave guard — and poke the
 // mutable `h` state object to shape server responses.
 //
+// POST /repos/:id/inherited is answered by fakeInherited() below: a stand-in
+// for the server's resolvers that walks the same chains over the fixture
+// repo, the drafts sent along, `h.settingsOnServer` and `h.providersOnServer`
+// — so a suite shapes what a field inherits by shaping those, the way it
+// shapes any other answer. (The app itself never walks a chain; this is the
+// fake SERVER.)
+//
 // The page's layout seam (scrolling.ts `viewport`) is replaced by a fake for
 // every test: jsdom has no layout, so `h.tops` says where each section sits
 // and `h.scrolls` records where the page scrolled to.
@@ -23,12 +30,16 @@ import type {
   Provider,
   Repo,
   RepoImport,
+  RepoInherited,
   RepoSecret,
   RepoSSHTarget,
+  Runner,
   Schedule,
 } from '../../api';
 import App from '../../App';
+import { providerFor, resolveRemote, resolveSpawnOption } from '../../lib/spawn';
 import RepoRoutes from '../repo-home/routes';
+import { INHERITED_DEBOUNCE_MS } from './form';
 import { viewport, type Viewport } from './scrolling';
 
 export const REPO_ID = 'repo_1';
@@ -272,6 +283,17 @@ export interface RepoSettingsHarnessState {
   /** When set, a repo PATCH answers only once this promise resolves — a test
    *  holds a save in flight with it. */
   patchHold: Promise<void> | null;
+  /** Every POST /repos/:id/inherited body (the drafts sent along), in order. */
+  inheritedBodies: Record<string, unknown>[];
+  /** Entries laid over fakeInherited()'s answer — e.g. `{ model_default: null }`
+   *  for a chain the server could not resolve. */
+  inheritedPatch: Partial<RepoInherited>;
+  /** Makes POST /repos/:id/inherited answer 500 with this message. */
+  inheritedError: string | null;
+  /** When set, called for every inherited request with its number (1-based):
+   *  a returned promise holds THAT request's answer until it resolves — how a
+   *  test lets an older request finish after a newer one. */
+  inheritedGate: ((request: number) => Promise<void> | undefined) | null;
   /** The fake layout (see installRepoSettingsHooks): the top edge of each
    *  element, in px from the viewport top, by element id. A section without
    *  an entry sits far below the fold. */
@@ -405,6 +427,18 @@ export function stubApi(): void {
           return jsonResponse(200, { ...h.repoOnServer });
         };
         return h.patchHold !== null ? h.patchHold.then(answer) : Promise.resolve(answer());
+      }
+      // Inherited values (issue #61): what each overridable field resolves to
+      // while the repo's own value is null, for the drafts sent along.
+      if (url === `/api/v1/repos/${REPO_ID}/inherited` && method === 'POST') {
+        const drafts = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        h.inheritedBodies.push(drafts);
+        const answer = () =>
+          h.inheritedError !== null
+            ? jsonResponse(500, { error: h.inheritedError })
+            : jsonResponse(200, { ...fakeInherited(drafts), ...h.inheritedPatch });
+        const held = h.inheritedGate?.(h.inheritedBodies.length);
+        return held !== undefined ? held.then(answer) : Promise.resolve(answer());
       }
       // The repo home's other tabs (issue #61), for the suites that carry
       // pending changes across them: Overview reads the readiness report, the
@@ -701,7 +735,139 @@ export function stubApi(): void {
   );
 }
 
+/**
+ * The fake server's answer to POST /repos/:id/inherited: for every
+ * overridable field, what it resolves to with the repo's OWN value nulled —
+ * the chains of internal/httpapi/inherited.go, walked over the fixture repo
+ * (with the request's drafts laid over it), h.settingsOnServer and
+ * h.providersOnServer. Defaults the real server seeds stand in where the
+ * settings fixture says nothing (budget 120, cap 6, limits 8g/4096/16384).
+ */
+export function fakeInherited(drafts: Record<string, unknown> = {}): RepoInherited {
+  const repo = { ...h.repoOnServer, ...drafts } as Repo;
+  const settings = h.settingsOnServer;
+  const text = (key: string): string | undefined => {
+    const value = settings[key];
+    return typeof value === 'string' && value !== '' ? value : undefined;
+  };
+  const flag = (key: string): boolean | null | undefined =>
+    settings[key] as boolean | null | undefined;
+  const num = (key: string, fallback: number): number =>
+    typeof settings[key] === 'number' ? settings[key] : fallback;
+  const providers = h.providersOnServer;
+
+  // The agent per run class, with and without the repo's own pick.
+  const manualBelow = providerFor(providers, text('provider_default'));
+  const manual = providerFor(providers, repo.provider, text('provider_default'));
+  const afkBelow = providerFor(
+    providers,
+    text('spawn_provider_default_afk'),
+    repo.provider,
+    text('provider_default'),
+  );
+  const afk = providerFor(
+    providers,
+    repo.afk_provider_default,
+    text('spawn_provider_default_afk'),
+    repo.provider,
+    text('provider_default'),
+  );
+  const lander = providerFor(
+    providers,
+    repo.lander_provider,
+    repo.provider,
+    text('provider_default'),
+  );
+  const runner = settings['runner_default'];
+  const bag = (settings['spawn_options_afk'] ?? {}) as Record<string, string>;
+
+  return {
+    provider: manualBelow?.id ?? null,
+    afk_provider_default: afkBelow?.id ?? null,
+    lander_provider: manual?.id ?? null,
+    model_default:
+      manual === null ? null : resolveSpawnOption(manual.models, text('spawn_model_default')),
+    effort_default:
+      manual === null ? null : resolveSpawnOption(manual.efforts, text('spawn_effort_default')),
+    afk_model_default:
+      afk === null
+        ? null
+        : resolveSpawnOption(
+            afk.models,
+            text('spawn_model_default_afk'),
+            repo.model_default,
+            text('spawn_model_default'),
+          ),
+    afk_effort_default:
+      afk === null
+        ? null
+        : resolveSpawnOption(
+            afk.efforts,
+            text('spawn_effort_default_afk'),
+            repo.effort_default,
+            text('spawn_effort_default'),
+          ),
+    lander_model:
+      lander === null
+        ? null
+        : resolveSpawnOption(
+            lander.models,
+            text('spawn_model_default_lander'),
+            repo.model_default,
+            text('spawn_model_default'),
+          ),
+    lander_effort:
+      lander === null
+        ? null
+        : resolveSpawnOption(
+            lander.efforts,
+            text('spawn_effort_default_lander'),
+            repo.effort_default,
+            text('spawn_effort_default'),
+          ),
+    // Clamped by the provider's capability, as the spawn clamps it.
+    remote_default:
+      manual === null
+        ? null
+        : manual.supports_remote && resolveRemote(flag('spawn_remote_default')),
+    afk_remote_default:
+      afk === null
+        ? null
+        : afk.supports_remote &&
+          resolveRemote(
+            flag('spawn_remote_default_afk'),
+            repo.remote_default,
+            flag('spawn_remote_default'),
+          ),
+    afk_options:
+      afk === null
+        ? null
+        : Object.fromEntries(
+            afk.options.filter((o) => o.key in bag).map((o) => [o.key, String(bag[o.key])]),
+          ),
+    budget_minutes: num('afk_budget_minutes', 120),
+    max_instances_override: num('max_instances', 6),
+    git_author_name: text('git_author_name') ?? '',
+    git_author_email: text('git_author_email') ?? '',
+    runner: runner === 'host' || runner === 'container' ? (runner as Runner) : null,
+    image_ref: text('dev_image_default') ?? text('dev_image_fallback') ?? '',
+    container_memory: text('container_memory') ?? '8g',
+    container_pids: num('container_pids', 4096),
+    container_nofile: num('container_nofile', 16384),
+  };
+}
+
 export const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Waits out the debounce between an edit of a field other fields' chains
+ * read and the request for the inherited values it changes, then lets that
+ * request land. Real timers, like settlePreview(): the debounce is behavior.
+ */
+export async function settleInherited(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, INHERITED_DEBOUNCE_MS + 40));
+  await settle();
+}
 
 /** Lets queued fetches resolve and Solid propagate the results. */
 export async function settle(): Promise<void> {
@@ -733,6 +899,13 @@ export async function mountSettings(path: string = `/repos/${REPO_ID}/settings`)
     container,
   );
   await settle();
+  // The Settings tab asks for the inherited values as soon as the repo has
+  // loaded; let that first answer land, so a test starts from a settled page
+  // (a held or failing request is simply not waited for).
+  if (path.includes('/settings')) {
+    for (let i = 0; i < 20 && h.inheritedBodies.length === 0; i += 1) await flush();
+    await settle();
+  }
 }
 
 /** Tear down the current mount — for tests that remount within one `it`
@@ -882,6 +1055,29 @@ export function fieldError(key: string): string | null {
 /** The hint under a field ('' when it has none). */
 export function fieldHint(key: string): string {
   return fieldWrapper(key).querySelector('.sfield-hint')?.textContent ?? '';
+}
+
+/** An overridable field's state at its label: 'inherited', 'set here', or
+ *  null for a field that cannot inherit. */
+export function fieldState(key: string): string | null {
+  return fieldWrapper(key).querySelector('.sfield-state')?.textContent ?? null;
+}
+
+/** The "Default: …" text under a field set here (null when it shows none). */
+export function fieldDefault(key: string): string | null {
+  return fieldWrapper(key).querySelector('.sfield-default small')?.textContent ?? null;
+}
+
+/** A field's Reset action, or null while the field is inherited. */
+export function resetButton(key: string): HTMLButtonElement | null {
+  return fieldWrapper(key).querySelector<HTMLButtonElement>('.sfield-default button');
+}
+
+/** The labels of a segmented control's segments, in order. */
+export function segmentLabels(name: string): string[] {
+  return Array.from(
+    container.querySelectorAll<HTMLButtonElement>(`button[role="radio"][name="${name}"]`),
+  ).map((b) => b.textContent ?? '');
 }
 
 /** The frame's save bar, or null while nothing is pending. */
@@ -1111,6 +1307,10 @@ export function installRepoSettingsHooks(): void {
     h.patchRefusal = null;
     h.patchOffline = false;
     h.patchHold = null;
+    h.inheritedBodies = [];
+    h.inheritedPatch = {};
+    h.inheritedError = null;
+    h.inheritedGate = null;
     h.tops = {};
     h.pageAtEnd = false;
     h.scrolls = [];

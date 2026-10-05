@@ -9,16 +9,27 @@
 //
 // Nothing here saves: every control edits a draft in the form store, and the
 // page's save bar sends the changed ones in one PATCH (form.tsx, fields.ts).
-// The model/effort catalogs follow the DRAFTED agents live (skip-layer,
-// ADR-0030); a stored value foreign to the new catalog stays selectable,
-// marked "(not in catalog)" — nothing auto-clears.
+//
+// Every field but Auto-spawn is overridable: it says "inherited" or "set
+// here" at its label and names what it inherits (Field.tsx). The model and
+// effort catalogs belong to the run class's EFFECTIVE provider — the drafted
+// agent when one is set here, else the inherited one — so they re-catalog as
+// the operator flips an agent, before anything is saved; a stored value
+// foreign to the new catalog stays selectable, marked "(not in catalog)".
+// Remote control is a three-way pick over a tri-state field: inherited, on,
+// off — and off is a value, saved as false.
 
 import { For, Show } from 'solid-js';
 import type { SelectOption } from '../../../components/Select';
-import { resolveRemote } from '../../../lib/spawn';
-import { Field, FieldGroup, SelectField, SwitchField, TextField } from '../Field';
+import { Field, FieldGroup, SegmentedField, SelectField, SwitchField, TextField } from '../Field';
 import { useRepoSettingsForm } from '../form';
-import { REMOTE_OPTIONS, normBool, onOff, remoteBlocker } from '../shared';
+import { remoteBlocker, toBoolMap } from '../shared';
+
+/** The explicit picks of remote control; the inherit segment comes first. */
+const REMOTE_PICKS = [
+  { value: 'true', label: 'On' },
+  { value: 'false', label: 'Off' },
+];
 
 export default function AgentsSection() {
   const form = useRepoSettingsForm();
@@ -26,48 +37,45 @@ export default function AgentsSection() {
   const providerOptions = (): SelectOption[] =>
     catalog.providers().map((p) => ({ value: p.id, label: p.display_name }));
 
-  // What "inherit" currently MEANS for each remote-control pick (issue #163),
-  // resolved live against the drafts and the global settings:
-  //   manual: repo.remote_default → spawn_remote_default → false
-  //   AFK:    repo.afk_remote_default → spawn_remote_default_afk
-  //             → repo.remote_default → spawn_remote_default → false
-  const remote = form.field('remote_default');
-  const inheritedRemote = () => resolveRemote(catalog.settings()?.spawn_remote_default);
-  const inheritedAfkRemote = () =>
-    resolveRemote(
-      catalog.settings()?.spawn_remote_default_afk,
-      normBool(remote.value()),
-      catalog.settings()?.spawn_remote_default,
-    );
   // Remote control is a provider capability: a provider without the knob
   // ignores the field, which then renders disabled and says so by name.
   const baseBlocker = () => remoteBlocker(catalog.baseProvider());
   const afkBlocker = () => remoteBlocker(catalog.afkProvider());
 
+  // The option bag (issue #19). While the repo has no bag of its own the
+  // boxes show the bag it inherits; the first toggle gives it one — the full
+  // declared bag — and Reset returns it to inherited.
+  const bag = form.field('afk_options');
+  const inheritedBag = (): Record<string, boolean> =>
+    toBoolMap(form.inherited()?.afk_options ?? null);
+  const shownBag = (): Record<string, boolean> => bag.value() ?? inheritedBag();
+  const toggleOption = (key: string, checked: boolean): void => {
+    const declared = catalog.afkBoolOptions();
+    const next = Object.fromEntries(
+      declared.map((option) => [
+        option.key,
+        option.key === key ? checked : (shownBag()[option.key] ?? false),
+      ]),
+    );
+    // Toggled back to exactly what an inheriting repo inherits: that is no
+    // bag of its own, and nothing to save.
+    const inheritsAgain =
+      form.saved()?.afk_options === null &&
+      declared.every((option) => next[option.key] === (inheritedBag()[option.key] ?? false));
+    bag.set(inheritsAgain ? null : next);
+  };
+
   return (
     <div class="card settings-card">
       <FieldGroup title="Runs you start">
         <div class="settings-grid3">
-          <SelectField
-            name="provider"
-            options={providerOptions()}
-            inheritLabel="Inherit global default"
-          />
-          <SelectField
-            name="model_default"
-            options={catalog.baseProvider()?.models ?? []}
-            inheritLabel="Inherit global default"
-          />
-          <SelectField
-            name="effort_default"
-            options={catalog.baseProvider()?.efforts ?? []}
-            inheritLabel="Inherit global default"
-          />
+          <SelectField name="provider" options={providerOptions()} />
+          <SelectField name="model_default" options={catalog.baseProvider()?.models ?? []} />
+          <SelectField name="effort_default" options={catalog.baseProvider()?.efforts ?? []} />
         </div>
-        <SelectField
+        <SegmentedField
           name="remote_default"
-          options={REMOTE_OPTIONS}
-          inheritLabel={`Inherit global default — currently ${onOff(inheritedRemote())}`}
+          options={REMOTE_PICKS}
           disabled={baseBlocker() !== null}
           hint={
             <Show
@@ -82,40 +90,18 @@ export default function AgentsSection() {
 
       <FieldGroup title="AFK runs">
         <div class="settings-grid3">
-          <SelectField
-            name="afk_provider_default"
-            options={providerOptions()}
-            inheritLabel="Inherit global AFK default"
-          />
-          <SelectField
-            name="afk_model_default"
-            options={catalog.afkProvider()?.models ?? []}
-            inheritLabel="Inherit global AFK default"
-          />
-          <SelectField
-            name="afk_effort_default"
-            options={catalog.afkProvider()?.efforts ?? []}
-            inheritLabel="Inherit global AFK default"
-          />
+          <SelectField name="afk_provider_default" options={providerOptions()} />
+          <SelectField name="afk_model_default" options={catalog.afkProvider()?.models ?? []} />
+          <SelectField name="afk_effort_default" options={catalog.afkProvider()?.efforts ?? []} />
         </div>
-        {/* Inherit here walks the AFK chain — the global AFK override, then
-            this repo's own pick above, then the global base. */}
-        <SelectField
+        <SegmentedField
           name="afk_remote_default"
-          options={REMOTE_OPTIONS}
-          inheritLabel={`Inherit global AFK default — currently ${onOff(inheritedAfkRemote())}`}
+          options={REMOTE_PICKS}
           disabled={afkBlocker() !== null}
           hint={<Show when={afkBlocker()}>{(name) => <>{name()} ignores this.</>}</Show>}
         />
-        {/* The provider's bool spawn options (issue #19). A null bag seeds
-            all-unchecked; once one differs, the whole declared bag is saved
-            as this repo's override (fields.ts). */}
         <Show when={catalog.afkBoolOptions().length > 0}>
-          <Field
-            name="afk_options"
-            labelMode="id"
-            hint="A repo option bag overrides the global AFK options."
-          >
+          <Field name="afk_options" labelMode="id">
             {(control) => (
               <div
                 class="settings-checks"
@@ -129,13 +115,8 @@ export default function AgentsSection() {
                       <input
                         type="checkbox"
                         name={`afk_options.${option.key}`}
-                        checked={control.binding.value()[option.key] ?? false}
-                        onChange={(event) =>
-                          control.binding.set({
-                            ...control.binding.value(),
-                            [option.key]: event.currentTarget.checked,
-                          })
-                        }
+                        checked={shownBag()[option.key] ?? false}
+                        onChange={(event) => toggleOption(option.key, event.currentTarget.checked)}
                       />
                       <span>{option.label}</span>
                     </label>
@@ -158,11 +139,11 @@ export default function AgentsSection() {
                 aria-describedby={control.describedBy()}
                 aria-invalid={control.invalid() ? 'true' : undefined}
                 value={control.binding.value()}
+                // Blank inherits: the placeholder is the prompt that then runs.
                 placeholder={form.saved()?.afk_prompt_effective}
                 onInput={(event) => control.binding.set(event.currentTarget.value)}
               />
-              {/* Blank inherits the effective prompt (the placeholder);
-                  Customize copies it in as a starting point. */}
+              {/* Customize copies the inherited prompt in as a starting point. */}
               <Show when={control.binding.value() === ''}>
                 <button
                   type="button"
@@ -183,13 +164,8 @@ export default function AgentsSection() {
           description="Claim ready-for-agent issues as they appear."
         />
         <div class="settings-grid2">
-          <TextField name="budget_minutes" type="number" min={1} placeholder="global default" />
-          <TextField
-            name="max_instances_override"
-            type="number"
-            min={1}
-            placeholder="global default"
-          />
+          <TextField name="budget_minutes" type="number" min={1} />
+          <TextField name="max_instances_override" type="number" min={1} />
         </div>
       </FieldGroup>
     </div>

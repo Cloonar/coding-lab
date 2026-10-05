@@ -8,7 +8,11 @@
 //   - how its draft seeds from a saved repo,
 //   - how the draft normalises to the wire (the '' <-> null conventions of
 //     shared.ts, trimmed branch fields, the AFK option bag rule),
-//   - and the rule the browser checks before Save sends anything.
+//   - the rule the browser checks before Save sends anything,
+//   - and whether the field is OVERRIDABLE: an entry with an `inherit` draft
+//     is a field whose own value may be null, meaning "inherit" — the page
+//     then shows "inherited" or "set here" at its label, and Reset puts the
+//     `inherit` draft back (saved as a null override).
 //
 // The entries are in PAGE ORDER, so "the first problem" and the order of the
 // changed sections fall out of the table. Sections are thin renderers over it
@@ -40,8 +44,11 @@ export interface RepoDrafts {
   afk_model_default: string;
   afk_effort_default: string;
   afk_remote_default: string;
-  /** Checked state per declared bool option (a null bag seeds all-unchecked). */
-  afk_options: Record<string, boolean>;
+  /**
+   * The repo's own option bag as checked state per option; null = the repo
+   * has no bag of its own and inherits the one below it.
+   */
+  afk_options: Record<string, boolean> | null;
   afk_prompt: string;
   // Agents — AFK capacity
   afk_auto_enabled: boolean;
@@ -80,11 +87,14 @@ export type RepoFieldKey = keyof RepoDrafts;
 /** What a field's wire value may depend on besides its own draft. */
 export interface FieldContext {
   /**
-   * Keys of the bool spawn options the AFK runs' effective provider declares
-   * (resolved against the drafted agents). The option bag is PATCHed as the
-   * FULL declared bag once any of these differs from the saved repo.
+   * Keys of the bool spawn options the AFK runs' effective provider declares.
+   * The option bag is PATCHed as the FULL declared bag once it differs from
+   * the saved repo. null = not known right now (the provider could not be
+   * told — its inherited value is still loading, or failed to load): a
+   * drafted bag then stands on its own keys, so a pending change to it is
+   * neither lost nor rewritten.
    */
-  afkOptionKeys: readonly string[];
+  afkOptionKeys: readonly string[] | null;
 }
 
 export interface RepoFieldSpec<K extends RepoFieldKey> {
@@ -102,6 +112,11 @@ export interface RepoFieldSpec<K extends RepoFieldKey> {
   differs?: (draft: RepoDrafts[K], saved: RepoDrafts[K], context: FieldContext) => boolean;
   /** What is wrong with a draft, in the operator's words; null = nothing. */
   validate?: (draft: RepoDrafts[K]) => string | null;
+  /**
+   * Present exactly on the OVERRIDABLE fields: the draft that means "inherit"
+   * (null on the wire). Reset sets it.
+   */
+  inherit?: RepoDrafts[K];
 }
 
 // --- validators ---------------------------------------------------------------
@@ -142,6 +157,11 @@ const trimmed = (draft: string): string => draft.trim();
 const pickOrNull = (draft: string): string | null => (draft === '' ? null : draft);
 const same = <T>(draft: T): T => draft;
 
+/** The keys a drafted bag is sent with: the declared ones, else its own. */
+function bagKeys(draft: Record<string, boolean>, context: FieldContext): readonly string[] {
+  return context.afkOptionKeys ?? Object.keys(draft);
+}
+
 function field<K extends RepoFieldKey>(
   key: K,
   spec: Omit<RepoFieldSpec<K>, 'key'>,
@@ -160,18 +180,21 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     label: 'Agent',
     seed: (r) => r.provider ?? '',
     wire: normText,
+    inherit: '',
   }),
   model_default: field('model_default', {
     section: 'agents',
     label: 'Model',
     seed: (r) => r.model_default ?? '',
     wire: normText,
+    inherit: '',
   }),
   effort_default: field('effort_default', {
     section: 'agents',
     label: 'Effort',
     seed: (r) => r.effort_default ?? '',
     wire: normText,
+    inherit: '',
   }),
   // Tri-state (issue #163): null clears back to inherit, false is an explicit
   // off — both are values, so the plain wire comparison is the dirty check.
@@ -180,6 +203,7 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     label: 'Remote control',
     seed: (r) => boolDraft(r.remote_default),
     wire: normBool,
+    inherit: '',
   }),
   // --- Agents: AFK runs ---------------------------------------------------------
   afk_provider_default: field('afk_provider_default', {
@@ -187,46 +211,61 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     label: 'Agent',
     seed: (r) => r.afk_provider_default ?? '',
     wire: normText,
+    inherit: '',
   }),
   afk_model_default: field('afk_model_default', {
     section: 'agents',
     label: 'Model',
     seed: (r) => r.afk_model_default ?? '',
     wire: normText,
+    inherit: '',
   }),
   afk_effort_default: field('afk_effort_default', {
     section: 'agents',
     label: 'Effort',
     seed: (r) => r.afk_effort_default ?? '',
     wire: normText,
+    inherit: '',
   }),
   afk_remote_default: field('afk_remote_default', {
     section: 'agents',
     label: 'Remote control',
     seed: (r) => boolDraft(r.afk_remote_default),
     wire: normBool,
+    inherit: '',
   }),
-  // The option bag (issue #19): a null bag seeds all-unchecked. Once any
-  // DECLARED option differs from the saved repo, the full declared bag is
-  // sent as the repo's explicit override. The draft is an object, so it
-  // compares by its key-sorted JSON.
+  // The option bag (issue #19). null = the repo has no bag of its own and
+  // inherits. A bag of its own is sent as the FULL declared bag once it
+  // differs from the saved repo; a bag the operator did not touch is never
+  // sent. The draft is an object (or null), so it compares by its key-sorted
+  // JSON.
   afk_options: field('afk_options', {
     section: 'agents',
     label: 'Options',
-    seed: (r) => toBoolMap(r.afk_options),
-    same: (a, b) => optionsKey(a) === optionsKey(b),
+    seed: (r) => (r.afk_options === null ? null : toBoolMap(r.afk_options)),
+    same: (a, b) => (a === null || b === null ? a === b : optionsKey(a) === optionsKey(b)),
     wire: (draft, context) =>
-      Object.fromEntries(
-        context.afkOptionKeys.map((key) => [key, (draft[key] ?? false) ? 'true' : 'false']),
-      ),
-    differs: (draft, saved, context) =>
-      context.afkOptionKeys.some((key) => (draft[key] ?? false) !== (saved[key] ?? false)),
+      draft === null
+        ? null
+        : Object.fromEntries(
+            bagKeys(draft, context).map((key) => [key, (draft[key] ?? false) ? 'true' : 'false']),
+          ),
+    differs: (draft, saved, context) => {
+      // Reset, or the first bag of its own. A bag for a provider that
+      // declares no options is nothing to send.
+      if (draft === null) return saved !== null;
+      const keys = bagKeys(draft, context);
+      if (saved === null) return keys.length > 0;
+      return keys.some((key) => (draft[key] ?? false) !== (saved[key] ?? false));
+    },
+    inherit: null,
   }),
   afk_prompt: field('afk_prompt', {
     section: 'agents',
     label: 'Seed prompt',
     seed: (r) => r.afk_prompt ?? '',
     wire: normText,
+    inherit: '',
   }),
   // --- Agents: AFK capacity -----------------------------------------------------
   afk_auto_enabled: field('afk_auto_enabled', {
@@ -241,6 +280,7 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     seed: (r) => (r.budget_minutes === null ? '' : String(r.budget_minutes)),
     wire: normInt,
     validate: optionalWholeNumber(1),
+    inherit: '',
   }),
   max_instances_override: field('max_instances_override', {
     section: 'agents',
@@ -248,6 +288,7 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     seed: (r) => (r.max_instances_override === null ? '' : String(r.max_instances_override)),
     wire: normInt,
     validate: optionalWholeNumber(1),
+    inherit: '',
   }),
   // --- Runner -------------------------------------------------------------------
   // '' = inherit the global runner default (null on the wire, issue #55).
@@ -256,6 +297,7 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     label: 'Runner',
     seed: (r) => r.runner ?? '',
     wire: (draft) => (draft === '' ? null : (draft as Runner)),
+    inherit: '',
   }),
   // The server resolves and digest-pins the ref on save; a bad ref comes back
   // as a refusal naming this field.
@@ -264,12 +306,14 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     label: 'Dev image',
     seed: (r) => r.image_ref ?? '',
     wire: normText,
+    inherit: '',
   }),
   container_memory: field('container_memory', {
     section: 'runner',
     label: 'Memory',
     seed: (r) => r.container_memory ?? '',
     wire: normText,
+    inherit: '',
   }),
   container_pids: field('container_pids', {
     section: 'runner',
@@ -277,6 +321,7 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     seed: (r) => (r.container_pids === null ? '' : String(r.container_pids)),
     wire: normInt,
     validate: optionalWholeNumber(1),
+    inherit: '',
   }),
   container_nofile: field('container_nofile', {
     section: 'runner',
@@ -284,6 +329,7 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     seed: (r) => (r.container_nofile === null ? '' : String(r.container_nofile)),
     wire: normInt,
     validate: optionalWholeNumber(1),
+    inherit: '',
   }),
   // --- Autoland -----------------------------------------------------------------
   autoland_enabled: field('autoland_enabled', {
@@ -311,18 +357,21 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     label: 'Agent',
     seed: (r) => r.lander_provider ?? '',
     wire: normText,
+    inherit: '',
   }),
   lander_model: field('lander_model', {
     section: 'autoland',
     label: 'Model',
     seed: (r) => r.lander_model ?? '',
     wire: normText,
+    inherit: '',
   }),
   lander_effort: field('lander_effort', {
     section: 'autoland',
     label: 'Effort',
     seed: (r) => r.lander_effort ?? '',
     wire: normText,
+    inherit: '',
   }),
   // --- General ------------------------------------------------------------------
   name: field('name', {
@@ -337,12 +386,14 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     label: 'Git author name',
     seed: (r) => r.git_author_name ?? '',
     wire: normText,
+    inherit: '',
   }),
   git_author_email: field('git_author_email', {
     section: 'general',
     label: 'Git author email',
     seed: (r) => r.git_author_email ?? '',
     wire: normText,
+    inherit: '',
   }),
   incogni: field('incogni', {
     section: 'general',
@@ -404,6 +455,27 @@ export function isRepoFieldKey(value: string | undefined | null): value is RepoF
 /** The table entry of one field. */
 export function repoField<K extends RepoFieldKey>(key: K): RepoFieldSpec<K> {
   return REPO_FIELDS[key];
+}
+
+/** Whether a field's own value may be null, meaning "inherit". */
+export function isOverridable(key: RepoFieldKey): boolean {
+  return Object.hasOwn(REPO_FIELDS[key], 'inherit');
+}
+
+/** The overridable fields, in page order. */
+export const OVERRIDABLE_FIELD_KEYS = REPO_FIELD_KEYS.filter(isOverridable);
+
+/**
+ * Whether a draft of an overridable field leaves it inherited: it would be
+ * saved as null (a blank text field, the inherit pick, no bag of its own).
+ * Always false for a field that cannot inherit.
+ */
+export function draftInherits<K extends RepoFieldKey>(
+  key: K,
+  draft: RepoDrafts[K],
+  context: FieldContext,
+): boolean {
+  return isOverridable(key) && repoField(key).wire(draft, context) === null;
 }
 
 /** Draft equality under the field's own rule. */

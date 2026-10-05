@@ -7,10 +7,13 @@ import { describe, expect, it } from 'vitest';
 import type { Repo, RepoPatch } from '../../api';
 import { REPO_SETTINGS_CATEGORIES } from './categories';
 import {
+  OVERRIDABLE_FIELD_KEYS,
   REPO_FIELDS,
   REPO_FIELD_KEYS,
   buildRepoPatch,
   changedFields,
+  draftInherits,
+  isOverridable,
   isRepoFieldKey,
   repoField,
   validateDraft,
@@ -20,7 +23,10 @@ import {
 } from './fields';
 import { baseRepo } from './harness';
 
+/** A provider that declares no bool options. */
 const NO_OPTIONS: FieldContext = { afkOptionKeys: [] };
+/** The AFK provider is not known (its inherited value did not load). */
+const UNKNOWN: FieldContext = { afkOptionKeys: null };
 const patchOf = (edits: RepoEdits, repo: Repo = baseRepo(), context = NO_OPTIONS): RepoPatch =>
   buildRepoPatch(edits, repo, context);
 
@@ -74,6 +80,77 @@ describe('repo settings field table', () => {
     }
     expect(changedFields(edits, repo, { afkOptionKeys: ['ultracode'] })).toEqual([]);
     expect(buildRepoPatch(edits, repo, { afkOptionKeys: ['ultracode'] })).toEqual({});
+  });
+});
+
+describe('overridable fields', () => {
+  it('are exactly the fields whose own value may be null, meaning inherit', () => {
+    expect(OVERRIDABLE_FIELD_KEYS).toEqual([
+      'provider',
+      'model_default',
+      'effort_default',
+      'remote_default',
+      'afk_provider_default',
+      'afk_model_default',
+      'afk_effort_default',
+      'afk_remote_default',
+      'afk_options',
+      'afk_prompt',
+      'budget_minutes',
+      'max_instances_override',
+      'runner',
+      'image_ref',
+      'container_memory',
+      'container_pids',
+      'container_nofile',
+      'lander_provider',
+      'lander_model',
+      'lander_effort',
+      'git_author_name',
+      'git_author_email',
+    ]);
+    for (const key of [
+      'name',
+      'credential_id',
+      'forge_credential_id',
+      'tracker_binding',
+      'default_branch',
+      'afk_branch_pattern',
+      'manual_branch_prefix',
+      'incogni',
+      'afk_auto_enabled',
+      'autoland_enabled',
+      'auto_merge',
+      'max_fix_attempts',
+    ] as const) {
+      expect(isOverridable(key)).toBe(false);
+    }
+  });
+
+  it('carry an inherit draft that is saved as null — and is what a null repo value seeds', () => {
+    const inheriting: Repo = { ...baseRepo(), runner: null };
+    for (const key of OVERRIDABLE_FIELD_KEYS) {
+      const spec = repoField(key);
+      expect(spec.wire(spec.inherit as never, NO_OPTIONS)).toBeNull();
+      expect(spec.seed(inheriting)).toEqual(spec.inherit);
+      expect(draftInherits(key, spec.inherit as never, NO_OPTIONS)).toBe(true);
+    }
+  });
+
+  it('tell an inherited draft from one set here', () => {
+    expect(draftInherits('model_default', '', NO_OPTIONS)).toBe(true);
+    expect(draftInherits('model_default', 'sonnet', NO_OPTIONS)).toBe(false);
+    expect(draftInherits('git_author_name', '   ', NO_OPTIONS)).toBe(true); // blank is inherit
+    expect(draftInherits('budget_minutes', '', NO_OPTIONS)).toBe(true);
+    expect(draftInherits('budget_minutes', '45', NO_OPTIONS)).toBe(false);
+    // Off is a value, never inherit.
+    expect(draftInherits('remote_default', 'false', NO_OPTIONS)).toBe(false);
+    expect(draftInherits('remote_default', '', NO_OPTIONS)).toBe(true);
+    expect(draftInherits('afk_options', null, NO_OPTIONS)).toBe(true);
+    expect(draftInherits('afk_options', {}, NO_OPTIONS)).toBe(false);
+    // A field that cannot inherit never does, whatever its draft.
+    expect(draftInherits('name', '', NO_OPTIONS)).toBe(false);
+    expect(draftInherits('credential_id', '', NO_OPTIONS)).toBe(false);
   });
 });
 
@@ -145,22 +222,48 @@ describe('buildRepoPatch: only the changed fields, in their wire form', () => {
     expect(patchOf({ incogni: false, auto_merge: true })).toEqual({});
   });
 
-  it('the option bag: the FULL declared bag once any declared option differs', () => {
+  it('the option bag: null inherits, a bag of its own is sent as the FULL declared bag', () => {
     const context: FieldContext = { afkOptionKeys: ['ultracode', 'plan'] };
+    // The repo inherits (null); its first own bag is sent whole.
     expect(patchOf({ afk_options: { ultracode: true } }, baseRepo(), context)).toEqual({
       afk_options: { ultracode: 'true', plan: 'false' },
     });
-    // Nothing declared differs: no bag is sent, whatever else the draft holds.
-    expect(patchOf({ afk_options: { ultracode: false } }, baseRepo(), context)).toEqual({});
-    expect(patchOf({ afk_options: { retired: true } }, baseRepo(), context)).toEqual({});
-    // No declared options at all: the bag never enters a PATCH.
+    // An own bag that happens to hold the inherited values is still its own.
+    expect(patchOf({ afk_options: { ultracode: false } }, baseRepo(), context)).toEqual({
+      afk_options: { ultracode: 'false', plan: 'false' },
+    });
+    // Untouched (no edit) or still inheriting: nothing is sent.
+    expect(patchOf({}, baseRepo(), context)).toEqual({});
+    expect(patchOf({ afk_options: null }, baseRepo(), context)).toEqual({});
+    // A provider that declares no options: a bag is nothing to send.
     expect(patchOf({ afk_options: { ultracode: true } })).toEqual({});
-    // Against a stored bag: unchecking is the change.
+
+    // Against a stored bag: a declared option that differs is the change…
     const stored = { ...baseRepo(), afk_options: { ultracode: 'true' } };
     expect(patchOf({ afk_options: { ultracode: false } }, stored, context)).toEqual({
       afk_options: { ultracode: 'false', plan: 'false' },
     });
     expect(patchOf({ afk_options: { ultracode: true } }, stored, context)).toEqual({});
+    // …an undeclared one is not…
+    expect(patchOf({ afk_options: { ultracode: true, retired: true } }, stored, context)).toEqual(
+      {},
+    );
+    // …and Reset is: back to inherit, saved as null.
+    expect(patchOf({ afk_options: null }, stored, context)).toEqual({ afk_options: null });
+    expect(patchOf({ afk_options: null }, stored, NO_OPTIONS)).toEqual({ afk_options: null });
+  });
+
+  it('the option bag stands on its own keys while the declared ones are not known', () => {
+    // The AFK provider could not be told: a pending bag is neither lost nor
+    // rewritten.
+    expect(patchOf({ afk_options: { ultracode: true } }, baseRepo(), UNKNOWN)).toEqual({
+      afk_options: { ultracode: 'true' },
+    });
+    const stored = { ...baseRepo(), afk_options: { ultracode: 'true' } };
+    expect(patchOf({ afk_options: { ultracode: false } }, stored, UNKNOWN)).toEqual({
+      afk_options: { ultracode: 'false' },
+    });
+    expect(patchOf({ afk_options: { ultracode: true } }, stored, UNKNOWN)).toEqual({});
   });
 
   it('several sections at once: one patch with every changed field and nothing else', () => {

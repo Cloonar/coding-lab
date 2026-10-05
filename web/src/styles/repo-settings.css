@@ -272,17 +272,27 @@
   align-items: start;
 }
 
-/* Agent / Model / Effort: the agent takes the full row on a phone. */
-.settings-grid3 > :first-child {
-  grid-column: 1 / -1;
+/* Agent / Model / Effort. On a phone each pick takes a row of its own: its
+   first entry reads "Inherited · <value>", and half a phone's width would
+   cut the value off. */
+.settings-grid3 {
+  grid-template-columns: minmax(0, 1fr);
 }
 
+/* The container limits are short numbers: three across at every width. */
 .settings-grid3.even {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.settings-grid3.even > :first-child {
-  grid-column: auto;
+@media (min-width: 560px) {
+  .settings-grid3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* The agent takes the full row; model and effort share the next. */
+  .settings-grid3:not(.even) > :first-child {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (min-width: 1024px) {
@@ -290,7 +300,7 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .settings-grid3 > :first-child {
+  .settings-grid3:not(.even) > :first-child {
     grid-column: auto;
   }
 }
@@ -342,6 +352,102 @@
   display: inline-block;
   margin-right: 0.4rem;
   vertical-align: middle;
+}
+
+/* The state of an overridable field, in words at its label: a dashed chip
+   while it is inherited, a filled one once it is set here. */
+.sfield-state {
+  padding: 0 0.45rem;
+  border: 1px dashed var(--muted);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.sfield-state.set {
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  color: var(--link);
+  font-weight: 600;
+}
+
+/* Under a field set here: what it would inherit, and Reset. A row of its own
+   height on touch layouts, so Reset is a 44px target that overlaps nothing. */
+.sfield-default {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 0.6rem;
+  min-height: 44px;
+}
+
+.sfield-default small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+/* An action that reads as a link (Reset, Show anyway). */
+.settings-link-action {
+  flex: none;
+  min-height: 44px;
+  padding: 0 0.15rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--link);
+  font-size: 0.86rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.settings-link-action:hover {
+  background: none;
+  color: var(--text);
+}
+
+/* A note standing in for fields that do not apply right now. */
+.settings-na {
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+/* Inside a sentence the action keeps its line: the hit area is padded out to
+   44px over the note's own text and padding, never over another control. */
+.settings-na .settings-link-action,
+.settings-na .settings-link {
+  display: inline-block;
+  min-height: 0;
+  margin: -0.75rem -0.15rem;
+  padding: 0.75rem 0.15rem;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.settings-link {
+  color: var(--link);
+  font-weight: 600;
+  text-underline-offset: 2px;
+}
+
+@media (min-width: 1024px) {
+  .sfield-default {
+    min-height: 0;
+  }
+
+  .sfield-default .settings-link-action {
+    min-height: 28px;
+  }
 }
 
 .sfield input:not([type='checkbox']),
@@ -540,10 +646,8 @@
   overflow-wrap: anywhere;
 }
 
-/* The frame's toast rides above the bar while both show. */
-.settings-savebar ~ .toast {
-  bottom: calc(5rem + env(safe-area-inset-bottom));
-}
+/* (The frame's toast rides above the bar while both show: that rule lives
+   with the toast region, in controls.css.) */
 
 @media (min-width: 1024px) {
   .settings-savebar-inner {

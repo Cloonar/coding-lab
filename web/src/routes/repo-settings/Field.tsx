@@ -7,6 +7,15 @@
 //
 // What `Field` guarantees:
 //   - the label comes from the field table unless a section overrides it;
+//   - an OVERRIDABLE field (fields.ts) says at its label whether it is
+//     "inherited" or "set here" — in words, and as part of the control's
+//     description. Set here, it also shows "Default: <what it would inherit>"
+//     and a Reset action that returns it to inherited (a change like any
+//     other: it waits for Save and is saved as a null override). Inherited,
+//     it shows what it resolves to — as the first pick of a select or
+//     segmented control ("Inherited · <value>"), as the placeholder of a text
+//     or number field. The value is the server's answer (form.tsx); while
+//     that is not known the state shows without a value;
 //   - a changed field is marked AT ITS LABEL by a dot plus the words
 //     "unsaved change" inside the label (so it is part of the control's
 //     accessible name) — never by colour alone;
@@ -17,7 +26,16 @@
 //     `rs-<patch key>`, which is how `?field=` and Save find a field to scroll
 //     to and focus (see index.tsx).
 
-import { For, Show, children, createUniqueId, type Accessor, type JSX } from 'solid-js';
+import {
+  For,
+  Show,
+  children,
+  createContext,
+  createUniqueId,
+  useContext,
+  type Accessor,
+  type JSX,
+} from 'solid-js';
 import Segmented, { type SegmentedOption } from '../../components/Segmented';
 import Select, { type SelectOption } from '../../components/Select';
 import ToggleSwitch from '../../components/Switch';
@@ -38,6 +56,31 @@ export type FlagFieldKey = {
 export function fieldControlId(key: RepoFieldKey): string {
   return `rs-${key}`;
 }
+
+/**
+ * Moves focus to a field's control without scrolling; false when there is
+ * none to take it. `wrapper` is the field's `[data-field]` element.
+ */
+export function focusFieldControl(wrapper: HTMLElement, key: RepoFieldKey): boolean {
+  const control =
+    document.getElementById(fieldControlId(key)) ??
+    // A group of controls (a segmented pick, the option bag) has no single
+    // id: its tab stop is the target.
+    wrapper.querySelector<HTMLElement>(
+      'input, select, textarea, button[role="radio"][tabindex="0"], button:not([tabindex="-1"])',
+    );
+  if (control === null) return false;
+  control.focus({ preventScroll: true });
+  return true;
+}
+
+/** "Inherited · on" — the pick that leaves an overridable field inherited. */
+export function inheritPickLabel(text: string | null): string {
+  return text === null ? 'Inherited' : `Inherited · ${text}`;
+}
+
+/** The title of the FieldGroup a field sits in, so Reset can name it. */
+const GroupContext = createContext<string>();
 
 /** What `Field` hands the control it wraps. */
 export interface FieldControl<K extends RepoFieldKey> {
@@ -78,15 +121,31 @@ export function Field<K extends RepoFieldKey>(props: {
   const labelId = `${id}-label`;
   const errorId = `${id}-error`;
   const hintId = `${id}-hint`;
+  const stateId = `${id}-state`;
+  const group = useContext(GroupContext);
+  let wrapper: HTMLDivElement | undefined;
 
   const hint = children(() => props.hint);
   const hasHint = (): boolean => hint.toArray().length > 0;
   const invalid = (): boolean => binding.error() !== null;
+  const setHere = (): boolean => binding.overridable && !binding.inherits();
   const describedBy = (): string | undefined => {
-    const ids = [invalid() ? errorId : null, hasHint() ? hintId : null].filter(Boolean);
+    const ids = [
+      binding.overridable ? stateId : null,
+      invalid() ? errorId : null,
+      hasHint() ? hintId : null,
+    ].filter(Boolean);
     return ids.length > 0 ? ids.join(' ') : undefined;
   };
   const label = (): string => props.label ?? binding.spec.label;
+  const reset = (): void => {
+    binding.reset();
+    // Reset is gone with the click (the field is inherited again): hand the
+    // focus to the field's control instead of dropping it on the page.
+    queueMicrotask(() => {
+      if (wrapper !== undefined) focusFieldControl(wrapper, key);
+    });
+  };
   // The words behind the dot. Inside the label, so the control's accessible
   // name carries them ("Model (unsaved change)").
   const ChangedText = () => (
@@ -104,6 +163,7 @@ export function Field<K extends RepoFieldKey>(props: {
         ...(props.class !== undefined ? { [props.class]: true } : {}),
       }}
       data-field={key}
+      ref={wrapper}
     >
       <Show when={props.labelMode !== 'none'} fallback={<ChangedText />}>
         <div class="sfield-label">
@@ -121,6 +181,13 @@ export function Field<K extends RepoFieldKey>(props: {
               <ChangedText />
             </span>
           </Show>
+          {/* The state in words — a dashed chip while inherited, a filled one
+              once set here — and part of the control's description. */}
+          <Show when={binding.overridable}>
+            <span classList={{ 'sfield-state': true, set: setHere() }} id={stateId}>
+              {setHere() ? 'set here' : 'inherited'}
+            </span>
+          </Show>
         </div>
       </Show>
       {props.children({ binding, id, labelId, describedBy, invalid })}
@@ -130,6 +197,19 @@ export function Field<K extends RepoFieldKey>(props: {
             {message()}
           </p>
         )}
+      </Show>
+      <Show when={setHere()}>
+        <div class="sfield-default">
+          <Show when={binding.inheritedText()}>{(text) => <small>Default: {text()}</small>}</Show>
+          <button
+            type="button"
+            class="settings-link-action"
+            aria-label={`Reset ${label()}${group !== undefined ? ` (${group})` : ''} to inherited`}
+            onClick={reset}
+          >
+            Reset
+          </button>
+        </div>
       </Show>
       <Show when={hasHint()}>
         <small class="sfield-hint" id={hintId}>
@@ -148,6 +228,7 @@ export function TextField(props: {
   type?: 'text' | 'number';
   /** Monospace value (branch names, image references). */
   mono?: boolean;
+  /** Default: what an overridable field inherits (nothing for any other field). */
   placeholder?: string;
   /** Lowest value a number field's stepper offers; the field table validates. */
   min?: number;
@@ -169,7 +250,7 @@ export function TextField(props: {
           step={props.type === 'number' ? 1 : undefined}
           autocomplete="off"
           spellcheck={props.spellcheck ?? false}
-          placeholder={props.placeholder}
+          placeholder={props.placeholder ?? control.binding.inheritedText() ?? undefined}
           aria-required={props.required === true ? 'true' : undefined}
           aria-invalid={control.invalid() ? 'true' : undefined}
           aria-describedby={control.describedBy()}
@@ -181,14 +262,15 @@ export function TextField(props: {
   );
 }
 
-/** A pick from a catalog, through the app's searchable Select. */
+/**
+ * A pick from a catalog, through the app's searchable Select. For an
+ * overridable field the first entry is "Inherited · <what it resolves to>".
+ */
 export function SelectField(props: {
   name: TextFieldKey;
   label?: string;
   hint?: JSX.Element;
   options: SelectOption[];
-  /** Prepends the inherit entry (value '') with this label. */
-  inheritLabel?: string;
   disabled?: boolean;
   class?: string;
 }) {
@@ -209,7 +291,13 @@ export function SelectField(props: {
           name={control.binding.key}
           value={control.binding.value()}
           options={props.options}
-          inheritLabel={props.inheritLabel}
+          // An overridable pick starts with the entry that leaves it
+          // inherited, naming what that resolves to.
+          inheritLabel={
+            control.binding.overridable
+              ? inheritPickLabel(control.binding.inheritedText())
+              : undefined
+          }
           disabled={props.disabled}
           describedBy={control.describedBy()}
           invalid={control.invalid()}
@@ -252,7 +340,12 @@ export function NativeSelectField(props: {
   );
 }
 
-/** One pick out of a few short options shown side by side. */
+/**
+ * One pick out of a few short options shown side by side. For an overridable
+ * field the first segment is "Inherited · <what it resolves to>" (the '' draft),
+ * so inherit, and each explicit value, is one tap — a three-way control over
+ * a tri-state field, where "off" is a value and never a blank.
+ */
 export function SegmentedField<K extends RepoFieldKey>(props: {
   name: K;
   label?: string;
@@ -274,7 +367,14 @@ export function SegmentedField<K extends RepoFieldKey>(props: {
           labelledBy={control.labelId}
           name={control.binding.key}
           value={String(control.binding.value())}
-          options={props.options}
+          options={
+            control.binding.overridable
+              ? [
+                  { value: '', label: inheritPickLabel(control.binding.inheritedText()) },
+                  ...props.options,
+                ]
+              : props.options
+          }
           disabled={props.disabled}
           describedBy={control.describedBy()}
           invalid={control.invalid()}
@@ -317,11 +417,14 @@ export function SwitchField(props: {
 export function FieldGroup(props: { title: string; children: JSX.Element }) {
   const id = `rs-group-${createUniqueId()}`;
   return (
-    <div class="settings-group" role="group" aria-labelledby={id}>
-      <h3 class="settings-sub" id={id}>
-        {props.title}
-      </h3>
-      {props.children}
-    </div>
+    // eslint-disable-next-line solid/reactivity -- a group's title never changes
+    <GroupContext.Provider value={props.title}>
+      <div class="settings-group" role="group" aria-labelledby={id}>
+        <h3 class="settings-sub" id={id}>
+          {props.title}
+        </h3>
+        {props.children}
+      </div>
+    </GroupContext.Provider>
   );
 }

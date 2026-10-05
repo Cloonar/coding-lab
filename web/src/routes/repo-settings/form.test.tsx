@@ -8,7 +8,7 @@
 // edits back; and a refresh of the repo updates untouched fields but never a
 // dirty one.
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   REPO_ID,
   chooseFromSelect,
@@ -39,6 +39,12 @@ import {
 } from './harness';
 
 installRepoSettingsHooks();
+// A repo on the container Runner with Autoland on: nothing is folded away, so
+// every field of the page is there to edit (the folding rules have their own
+// suites in sections/).
+beforeEach(() => {
+  h.repoOnServer = { ...h.repoOnServer, runner: 'container', autoland_enabled: true };
+});
 
 const BASE = `/repos/${REPO_ID}/settings`;
 const waitForPage = () =>
@@ -259,7 +265,7 @@ describe('validation in the browser, on Save', () => {
     expect(document.activeElement).toBe(input('budget_minutes'));
     expect(input('budget_minutes').getAttribute('aria-invalid')).toBe('true');
     expect(input('budget_minutes').getAttribute('aria-describedby')).toBe(
-      'rs-budget_minutes-error',
+      'rs-budget_minutes-state rs-budget_minutes-error',
     );
     // The edits are kept.
     expect(input('budget_minutes').value).toBe('0');
@@ -451,7 +457,7 @@ describe('Discard and Undo', () => {
 
     expect(saveBar()).toBeNull();
     expect(container.querySelector('.sfield.changed')).toBeNull();
-    expect(selectedLabel('model_default')).toBe('Inherit global default');
+    expect(selectedLabel('model_default')).toBe('Inherited · Opus (1M)');
     expect(input('budget_minutes').value).toBe('');
     expect(switchOn('incogni')).toBe(false);
     expect(segment('tracker_binding', 'forge').getAttribute('aria-checked')).toBe('true');

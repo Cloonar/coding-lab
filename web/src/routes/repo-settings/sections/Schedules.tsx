@@ -38,7 +38,6 @@ import {
   type ScheduleCreate,
   type ScheduleFlow,
   type SchedulePatch,
-  type Settings,
 } from '../../../api';
 import EmptyState from '../../../components/EmptyState';
 import Banner from '../../../components/Banner';
@@ -55,7 +54,6 @@ import {
   type CadenceMode,
 } from '../../../lib/cronPreset';
 import { createLiveResource } from '../../../lib/liveResource';
-import { providerFor } from '../../../lib/spawn';
 import { normInt, normText } from '../shared';
 
 /** Cadence default for a brand-new Schedule: early enough to be done by morning. */
@@ -149,7 +147,11 @@ function sameFlows(a: readonly string[], b: readonly string[]): boolean {
 export default function SchedulesSection(props: {
   repo: Accessor<Repo>;
   providers: Provider[];
-  settings: Settings;
+  /**
+   * The provider id this repo's AFK runs resolve to — the layer under a
+   * Schedule's own agent pick. null while it is not known.
+   */
+  afkProviderId: string | null;
   onSaved: () => void;
 }) {
   // Live on repo.changed: the engine publishes it when a Schedule's paused
@@ -212,7 +214,7 @@ export default function SchedulesSection(props: {
         <ScheduleEditor
           repo={props.repo}
           providers={props.providers}
-          settings={props.settings}
+          afkProviderId={props.afkProviderId}
           flows={flows() ?? []}
           schedule={null}
           onSaved={saved}
@@ -236,7 +238,7 @@ export default function SchedulesSection(props: {
                 <ScheduleRow
                   repo={props.repo}
                   providers={props.providers}
-                  settings={props.settings}
+                  afkProviderId={props.afkProviderId}
                   flows={flows() ?? []}
                   schedule={schedule}
                   flowLabel={flowLabel}
@@ -258,7 +260,7 @@ export default function SchedulesSection(props: {
 function ScheduleRow(props: {
   repo: Accessor<Repo>;
   providers: Provider[];
-  settings: Settings;
+  afkProviderId: string | null;
   flows: ScheduleFlow[];
   schedule: Schedule;
   flowLabel: (key: string) => string;
@@ -345,7 +347,7 @@ function ScheduleRow(props: {
         <ScheduleEditor
           repo={props.repo}
           providers={props.providers}
-          settings={props.settings}
+          afkProviderId={props.afkProviderId}
           flows={props.flows}
           schedule={props.schedule}
           onSaved={props.onSaved}
@@ -359,7 +361,7 @@ function ScheduleRow(props: {
 function ScheduleEditor(props: {
   repo: Accessor<Repo>;
   providers: Provider[];
-  settings: Settings;
+  afkProviderId: string | null;
   flows: ScheduleFlow[];
   /** null = the create form; otherwise the row being edited, pre-filled. */
   schedule: Schedule | null;
@@ -461,20 +463,16 @@ function ScheduleEditor(props: {
   const providerOptions = (): SelectOption[] =>
     props.providers.map((p) => ({ value: p.id, label: p.display_name }));
   // A Schedule's override is one more default rung ABOVE the AFK layering
-  // (ADR-0062), so the effective provider its model/effort catalogs come from
-  // is: this Schedule's pick, then the repo's AFK chain, then the repo's base
-  // chain. Resolved live against the draft so the catalogs re-catalog as the
-  // operator flips the agent, and a stored value foreign to the new catalog
-  // stays selected as "(not in catalog)" rather than silently changing.
-  const effectiveProvider = () =>
-    providerFor(
-      props.providers,
-      provider(),
-      props.repo().afk_provider_default,
-      props.settings.spawn_provider_default_afk,
-      props.repo().provider,
-      props.settings.provider_default,
-    );
+  // (ADR-0062), so the provider its model/effort catalogs come from is this
+  // Schedule's own pick when it has one, else the provider the repo's AFK
+  // runs resolve to — which the server resolved (afkProviderId); no chain is
+  // walked here. Following the draft, the catalogs re-catalog as the operator
+  // flips the agent, and a stored value foreign to the new catalog stays
+  // selected as "(not in catalog)" rather than silently changing.
+  const effectiveProvider = () => {
+    const id = provider() !== '' ? provider() : props.afkProviderId;
+    return props.providers.find((candidate) => candidate.id === id) ?? null;
+  };
 
   const budgetMinutes = (): number | null => {
     const parsed = normInt(budget());

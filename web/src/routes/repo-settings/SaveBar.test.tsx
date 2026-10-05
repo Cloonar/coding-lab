@@ -10,6 +10,7 @@ import {
   REPO_ID,
   container,
   discard,
+  emitRepoChanged,
   fieldError,
   followLink,
   h,
@@ -76,29 +77,39 @@ describe('the save bar outside the Settings tab', () => {
     expect(saveBar()).toBeNull();
   });
 
-  it('costs the other tabs nothing: the settings catalog loads with the Settings tab only', async () => {
+  it('costs the other tabs nothing: the catalog and the inherited values load with the Settings tab only', async () => {
     const requested = (): string[] =>
       vi.mocked(globalThis.fetch).mock.calls.map(([url]) => String(url));
+    const count = (url: string) => requested().filter((u) => u === url).length;
+    const INHERITED = `/api/v1/repos/${REPO_ID}/inherited`;
     await mountSettings(REPO);
     await settle();
     await followLink(repoTab('Issues'));
 
     expect(requested()).not.toContain('/api/v1/providers');
-    expect(requested()).not.toContain('/api/v1/settings');
     expect(requested()).not.toContain('/api/v1/credentials');
+    expect(requested()).not.toContain(INHERITED);
 
-    await followLink(repoTab('Settings'));
-    await waitFor(() => container.querySelector('input[name="afk_branch_pattern"]'), 'the page');
-    expect(requested()).toContain('/api/v1/providers');
-    expect(requested()).toContain('/api/v1/settings');
-
-    // Loaded once: coming back to the tab does not ask again.
-    const count = (url: string) => requested().filter((u) => u === url).length;
-    await followLink(repoTab('Overview'));
     await followLink(repoTab('Settings'));
     await waitFor(() => container.querySelector('input[name="afk_branch_pattern"]'), 'the page');
     expect(count('/api/v1/providers')).toBe(1);
-    expect(count('/api/v1/settings')).toBe(1);
+    expect(count(INHERITED)).toBe(1);
+    // The page resolves nothing itself, so it never reads the global settings.
+    expect(requested()).not.toContain('/api/v1/settings');
+
+    // Away from the tab nothing follows the repo…
+    await followLink(repoTab('Overview'));
+    emitRepoChanged();
+    await settle();
+    expect(count(INHERITED)).toBe(1);
+
+    // …and coming back asks for the inherited values again (they may have
+    // changed meanwhile); the provider catalog is loaded once.
+    await followLink(repoTab('Settings'));
+    await waitFor(() => container.querySelector('input[name="afk_branch_pattern"]'), 'the page');
+    await settle();
+    expect(count('/api/v1/providers')).toBe(1);
+    expect(count(INHERITED)).toBe(2);
   });
 
   it('reserves its own height in the page, so nothing hides behind it', async () => {

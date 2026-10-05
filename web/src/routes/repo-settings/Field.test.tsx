@@ -2,9 +2,10 @@
 // field has a label that names its control, a hint and a problem that
 // describe it, and a changed mark at the label made of a dot AND words — so
 // the state never rests on colour alone and reaches assistive tech as part of
-// the control's name.
+// the control's name. An overridable field also says "inherited" or "set
+// here" at its label, as part of the control's description.
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   CODEX,
   REPO_ID,
@@ -14,15 +15,18 @@ import {
   container,
   fieldChanged,
   fieldHint,
+  fieldState,
   fieldWrapper,
   h,
   input,
   installRepoSettingsHooks,
   mountSettings,
   save,
+  resetButton,
   selectTrigger,
   setSwitch,
   settle,
+  settleInherited,
   switchButton,
   typeInto,
   waitFor,
@@ -30,6 +34,10 @@ import {
 import { REPO_FIELDS, REPO_FIELD_KEYS } from './fields';
 
 installRepoSettingsHooks();
+// A repo on the container Runner with Autoland on: nothing is folded away.
+beforeEach(() => {
+  h.repoOnServer = { ...h.repoOnServer, runner: 'container', autoland_enabled: true };
+});
 
 const mount = async (): Promise<void> => {
   await mountSettings(`/repos/${REPO_ID}/settings`);
@@ -65,9 +73,10 @@ describe('repo settings fields', () => {
     expect(label?.textContent).toBe('Git author name');
     expect(label?.control).toBe(input('git_author_name'));
     expect(input('git_author_name').id).toBe('rs-git_author_name');
-    // The hint describes the control.
-    expect(textOf(input('git_author_name').getAttribute('aria-describedby'))).toBe(
-      'Blank inherits the global setting.',
+    // Its state describes the control; so does a hint, where there is one.
+    expect(textOf(input('git_author_name').getAttribute('aria-describedby'))).toBe('inherited');
+    expect(textOf(input('afk_branch_pattern').getAttribute('aria-describedby'))).toContain(
+      '<N> stands for the issue number',
     );
     // A field that may not be empty says so.
     expect(input('name').getAttribute('aria-required')).toBe('true');
@@ -95,9 +104,7 @@ describe('repo settings fields', () => {
 
     const group = input('afk_options.ultracode').closest('[role="group"]');
     expect(textOf(group?.getAttribute('aria-labelledby') ?? null)).toBe('Options');
-    expect(textOf(group?.getAttribute('aria-describedby') ?? null)).toBe(
-      'A repo option bag overrides the global AFK options.',
-    );
+    expect(textOf(group?.getAttribute('aria-describedby') ?? null)).toBe('inherited');
   });
 
   it('marks a changed field at its label with a dot and words that join the control name', async () => {
@@ -156,19 +163,27 @@ describe('repo settings fields', () => {
     h.providersOnServer = [...baseProviders(), CODEX];
     await mount();
 
+    const remoteGroup = (name: string) =>
+      container
+        .querySelector(`button[role="radio"][name="${name}"]`)
+        ?.closest('[role="radiogroup"]');
+
     // Both remote controls work for this provider: only the manual one explains itself.
     expect(fieldHint('remote_default')).toContain("Registers the session with the agent's web app");
     expect(fieldWrapper('afk_remote_default').querySelector('.sfield-hint')).toBeNull();
-    expect(selectTrigger('afk_remote_default').hasAttribute('aria-describedby')).toBe(false);
+    expect(
+      textOf(remoteGroup('afk_remote_default')?.getAttribute('aria-describedby') ?? null),
+    ).toBe('inherited');
 
-    // A provider without the knob: both say that it ignores the field.
+    // A provider without the knob: both say that it ignores the field (the
+    // AFK agent follows the drafted agent once the server has answered).
     await chooseFromSelect('provider', 'Codex');
+    await settleInherited();
     expect(fieldHint('remote_default')).toBe('Codex ignores this.');
     expect(fieldHint('afk_remote_default')).toBe('Codex ignores this.');
-    expect(selectTrigger('remote_default').disabled).toBe(true);
-    expect(textOf(selectTrigger('afk_remote_default').getAttribute('aria-describedby'))).toBe(
-      'Codex ignores this.',
-    );
+    expect(
+      textOf(remoteGroup('afk_remote_default')?.getAttribute('aria-describedby') ?? null),
+    ).toBe('inherited Codex ignores this.');
   });
 
   it('keeps the seed prompt placeholder and Customize on the effective prompt', async () => {
@@ -176,6 +191,7 @@ describe('repo settings fields', () => {
     await mount();
     const prompt = container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]');
     expect(prompt?.placeholder).toBe('Do the issue, open a PR.');
+    expect(fieldState('afk_prompt')).toBe('inherited');
     expect(prompt?.id).toBe('rs-afk_prompt');
 
     const customize = Array.from(fieldWrapper('afk_prompt').querySelectorAll('button')).find(
@@ -186,9 +202,20 @@ describe('repo settings fields', () => {
 
     expect(prompt?.value).toBe('Do the issue, open a PR.');
     expect(fieldChanged('afk_prompt')).toBe(true);
-    // Customize is only offered while the field is blank.
-    expect(fieldWrapper('afk_prompt').querySelector('button')).toBeNull();
+    expect(fieldState('afk_prompt')).toBe('set here');
+    // Customize is only offered while the field is blank; Reset takes its place.
+    expect(
+      Array.from(fieldWrapper('afk_prompt').querySelectorAll('button')).map((b) => b.textContent),
+    ).toEqual(['Reset']);
     await save();
     expect(h.patchBodies).toEqual([{ afk_prompt: 'Do the issue, open a PR.' }]);
+
+    // Reset returns it to the inherited prompt: blank again, saved as null.
+    resetButton('afk_prompt')?.click();
+    await settle();
+    expect(prompt?.value).toBe('');
+    expect(fieldState('afk_prompt')).toBe('inherited');
+    await save();
+    expect(h.patchBodies[1]).toEqual({ afk_prompt: null });
   });
 });

@@ -3,99 +3,121 @@
 // renderer over the form store. Every control edits a draft; the page's save
 // bar sends the changed ones (form.tsx, fields.ts).
 //
-// repos.runner is nullable: '' on the picker is "inherit the global runner
-// default" (null on the wire), and its row names what that currently is. The
-// EFFECTIVE runner is the drafted pick, else the global default — the host
-// warning follows it, pinned or inherited. The dev image and the limits stay
-// editable on the host runner: staging a value before switching is legal.
+// All five fields are overridable: each says "inherited" or "set here" and
+// names what it inherits (Field.tsx). The Runner is a three-way pick —
+// inherited (naming the Runner that resolves to), Container, Host.
 //
-// The lines that read the global settings (the inherit row's "currently …",
-// what a blank dev image inherits, the limits' placeholders) wait for the
-// settings to load rather than guess; the fields themselves never wait.
+// Only what applies (issue #61 §7): the EFFECTIVE Runner is the drafted pick
+// when set here, else the inherited one. While it is `host` the unsandboxed
+// warning shows, and the dev image and the container limits — which only
+// container runs read — fold into one note. "Show anyway" unfolds them:
+// staging a value before switching the Runner is legal. A folded field is
+// never out of reach: it unfolds by itself while it has a pending change or a
+// problem, and when a link or a Save points at it. Folding only hides — it
+// never clears or changes a value.
 
-import { Show } from 'solid-js';
+import { Show, createComputed, createSignal } from 'solid-js';
 import Banner from '../../../components/Banner';
-import {
-  DEV_IMAGE_PLACEHOLDER,
-  HOST_RUNNER_HINT,
-  RUNNER_OPTIONS,
-  runnerName,
-} from '../../../lib/runner';
-import { FieldGroup, SelectField, TextField } from '../Field';
+import { HOST_RUNNER_HINT } from '../../../lib/runner';
+import { FieldGroup, SegmentedField, TextField, fieldControlId } from '../Field';
+import type { RepoFieldKey } from '../fields';
 import { useRepoSettingsForm } from '../form';
 
-/** The placeholder of a limit whose global default is not known (yet). */
-const GLOBAL_DEFAULT = 'global default';
+/** The explicit Runner picks; the inherit segment comes first. */
+const RUNNER_PICKS = [
+  { value: 'container', label: 'Container' },
+  { value: 'host', label: 'Host' },
+];
+
+/** What only a container run reads. */
+const CONTAINER_ONLY = [
+  'image_ref',
+  'container_memory',
+  'container_pids',
+  'container_nofile',
+] as const satisfies readonly RepoFieldKey[];
 
 export default function RunnerSection() {
   const form = useRepoSettingsForm();
-  const settings = form.catalog.settings;
-  const runner = form.field('runner');
+  const image = form.field('image_ref');
 
-  const effectiveRunner = () =>
-    runner.value() === '' ? settings()?.runner_default : runner.value();
-  const inheritLabel = () => {
-    const current = runnerName(settings()?.runner_default);
-    return current === null
-      ? 'Inherit global default'
-      : `Inherit global default — currently ${current}`;
+  const host = (): boolean => form.effectiveRunner() === 'host';
+  // "Show anyway" — and a field of the fold that something pointed at stays
+  // shown from then on.
+  const [shown, setShown] = createSignal(false);
+  createComputed(() => {
+    const field = form.pointedAt();
+    if (field !== undefined && (CONTAINER_ONLY as readonly string[]).includes(field)) {
+      setShown(true);
+    }
+  });
+  const inUse = (): boolean =>
+    CONTAINER_ONLY.some((key) => form.field(key).changed() || form.field(key).error() !== null);
+  const folded = (): boolean => host() && !shown() && !inUse();
+
+  const showAnyway = (): void => {
+    setShown(true);
+    // The action is gone with the click: hand the focus to the first field
+    // it revealed.
+    queueMicrotask(() => document.getElementById(fieldControlId('image_ref'))?.focus());
   };
-  // What a blank dev image inherits: the global default dev image, else the
-  // server's --container-image flag.
-  const inheritedImage = () =>
-    settings()?.dev_image_default || settings()?.dev_image_fallback || '';
-  // A blank limit inherits the global one, shown as the placeholder.
-  const limitDefault = (value: string | number | undefined): string =>
-    value === undefined || value === '' ? GLOBAL_DEFAULT : String(value);
+
+  // '' = no dev image is configured anywhere below the repo.
+  const noImageBelow = (): boolean => form.inherited()?.image_ref === '';
+  const inheritedImage = (): string | undefined => form.inherited()?.image_ref || undefined;
 
   return (
     <div class="card settings-card">
-      <SelectField name="runner" options={RUNNER_OPTIONS} inheritLabel={inheritLabel()} />
-      <Show when={effectiveRunner() === 'host'}>
+      <SegmentedField name="runner" options={RUNNER_PICKS} />
+      <Show when={host()}>
         <Banner message={HOST_RUNNER_HINT} variant="notice" />
       </Show>
-      <TextField
-        name="image_ref"
-        mono
-        placeholder={DEV_IMAGE_PLACEHOLDER}
-        hint={
-          <>
-            For container runs. Resolved and pinned to a digest on save.
-            <Show when={settings()}>
-              {' '}
-              <Show
-                when={inheritedImage() !== ''}
-                fallback="No dev image is configured — container spawns are refused until one is set here, in global Settings, or on the server."
-              >
-                Blank inherits <code>{inheritedImage()}</code>.
-              </Show>
-            </Show>
-          </>
+      <Show
+        when={!folded()}
+        fallback={
+          <p class="settings-na">
+            Dev image and container limits apply to container runs only.{' '}
+            <button type="button" class="settings-link-action" onClick={showAnyway}>
+              Show anyway
+            </button>
+          </p>
         }
-      />
-      <FieldGroup title="Container limits">
-        <p class="settings-note">
-          Limits apply to container runs only. A blank limit inherits the global default.
-        </p>
-        <div class="settings-grid3 even">
-          <TextField
-            name="container_memory"
-            placeholder={limitDefault(settings()?.container_memory)}
-          />
-          <TextField
-            name="container_pids"
-            type="number"
-            min={1}
-            placeholder={limitDefault(settings()?.container_pids)}
-          />
-          <TextField
-            name="container_nofile"
-            type="number"
-            min={1}
-            placeholder={limitDefault(settings()?.container_nofile)}
-          />
-        </div>
-      </FieldGroup>
+      >
+        <Show when={host()}>
+          <p class="settings-note">Dev image and container limits apply to container runs only.</p>
+        </Show>
+        <TextField
+          name="image_ref"
+          mono
+          hint={
+            <>
+              Resolved and pinned to a digest on save.
+              <Show when={image.inherits()}>
+                <Show when={inheritedImage()}>
+                  {(ref) => (
+                    <>
+                      {' '}
+                      Inherits <code>{ref()}</code>.
+                    </>
+                  )}
+                </Show>
+                <Show when={noImageBelow()}>
+                  {' '}
+                  No dev image is configured — container spawns are refused until one is set here,
+                  in global Settings, or on the server.
+                </Show>
+              </Show>
+            </>
+          }
+        />
+        <FieldGroup title="Container limits">
+          <div class="settings-grid3 even">
+            <TextField name="container_memory" />
+            <TextField name="container_pids" type="number" min={1} />
+            <TextField name="container_nofile" type="number" min={1} />
+          </div>
+        </FieldGroup>
+      </Show>
     </div>
   );
 }
