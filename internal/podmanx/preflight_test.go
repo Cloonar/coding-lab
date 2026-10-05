@@ -28,7 +28,7 @@ const (
 	pastaProbe = "pasta --map-guest-addr none --version"
 
 	probeRm      = "podman rm --force --ignore --time 0 lab-preflight-probe"
-	probeCreate  = "podman --cgroup-manager=systemd create --name lab-preflight-probe --memory 64m --pids-limit 16 reg/agent-tools@sha256:aa /bin/labctl"
+	probeCreate  = "podman --cgroup-manager=systemd create --init --name lab-preflight-probe --memory 64m --pids-limit 16 reg/agent-tools@sha256:aa /bin/labctl"
 	probeInit    = "podman init lab-preflight-probe"
 	probeInspect = "podman inspect --format {{.State.Pid}} {{.State.CgroupPath}} lab-preflight-probe"
 )
@@ -153,7 +153,7 @@ func TestPreflight(t *testing.T) {
 					{"pasta", "--map-guest-addr", "none", "--version"},
 					{"podman", "pull", "reg/agent-tools@sha256:aa"},
 					{"podman", "rm", "--force", "--ignore", "--time", "0", probeName},
-					{"podman", "--cgroup-manager=systemd", "create", "--name", probeName,
+					{"podman", "--cgroup-manager=systemd", "create", "--init", "--name", probeName,
 						"--memory", "64m", "--pids-limit", "16", "reg/agent-tools@sha256:aa", "/bin/labctl"},
 					{"podman", "init", probeName},
 					{"podman", "inspect", "--format", "{{.State.Pid}} {{.State.CgroupPath}}", probeName},
@@ -397,6 +397,26 @@ func TestPreflight(t *testing.T) {
 			},
 		},
 		{
+			// The host has no container-init binary for the probe's --init
+			// (the run shapes' own flag — issue #64): podman refuses at
+			// create, and the hint must name what to install rather than
+			// point at the user manager, which is fine on such a host.
+			name: "probe create fails without a container-init binary",
+			mutate: func(f *pfFixture) {
+				f.runner.script[probeCreate] = cmdResult{err: errors.New(`exit status 125: Error: container-init binary not found on the host: stat /usr/libexec/podman/catatonit: no such file or directory`)}
+			},
+			wantChecks:  []string{CheckSpawnProbe},
+			wantVersion: "5.2.3",
+			after: func(t *testing.T, f *pfFixture, r Result) {
+				if d := r.Failures[0].Detail; !strings.Contains(d, "container-init binary not found") {
+					t.Errorf("detail %q does not quote podman's stderr", d)
+				}
+				if h := r.Failures[0].Hint; !strings.Contains(h, "catatonit") || !strings.Contains(h, "--init") {
+					t.Errorf("hint %q does not name the missing init helper and the flag that needs it", h)
+				}
+			},
+		},
+		{
 			// The container spawned but NOT into a libpod-*.scope: the
 			// systemd cgroup manager did not engage (e.g. a cgroupfs
 			// fallback). The caps would land somewhere unverified — a
@@ -566,7 +586,7 @@ func TestPreflight(t *testing.T) {
 				f.runner.script["podman pull reg/agent-tools@sha256:aa"] = cmdResult{err: errors.New("manifest unknown")}
 				f.runner.script["podman image exists reg/agent-tools@sha256:aa"] = cmdResult{err: errors.New("exit status 1")}
 				f.runner.script["podman pull reg/agent-tools@sha256:bb"] = cmdResult{}
-				f.runner.script["podman --cgroup-manager=systemd create --name lab-preflight-probe --memory 64m --pids-limit 16 reg/agent-tools@sha256:bb /bin/labctl"] = cmdResult{}
+				f.runner.script["podman --cgroup-manager=systemd create --init --name lab-preflight-probe --memory 64m --pids-limit 16 reg/agent-tools@sha256:bb /bin/labctl"] = cmdResult{}
 			},
 			wantChecks:  []string{CheckToolsPull},
 			wantVersion: "5.2.3",

@@ -53,6 +53,7 @@ func TestRunArgvGolden(t *testing.T) {
 	want := []string{
 		"/usr/bin/podman", "--cgroup-manager=systemd", "run", "--rm", "-it",
 		"--name", "labrun-myrepo.afk-205-7876ed",
+		"--init",
 		"--userns=keep-id",
 		"--network=pasta:--map-guest-addr,none",
 		"--add-host", "host.containers.internal:127.0.0.1",
@@ -111,6 +112,7 @@ func TestLoginArgvGolden(t *testing.T) {
 	want := []string{
 		"/usr/bin/podman", "--cgroup-manager=systemd", "run", "--rm", "-it",
 		"--name", "labrun-lab-login-claude-code-2b7e15",
+		"--init",
 		"--userns=keep-id",
 		"--network=pasta:--map-guest-addr,none",
 		"--add-host", "host.containers.internal:127.0.0.1",
@@ -160,6 +162,7 @@ func TestCLIArgvGolden(t *testing.T) {
 	want := []string{
 		"/usr/bin/podman", "--cgroup-manager=systemd", "run", "--rm",
 		"--name", "labrun-cli-claude-code-2b7e15",
+		"--init",
 		"--userns=keep-id",
 		"--network=pasta:--map-guest-addr,none",
 		"--add-host", "host.containers.internal:127.0.0.1",

@@ -83,6 +83,7 @@ func TestContainerCLIGolden(t *testing.T) {
 	want := []string{
 		testPodmanBin, "--cgroup-manager=systemd", "run", "--rm",
 		"--name", got[5],
+		"--init",
 		"--userns=keep-id",
 		"--network=pasta:--map-guest-addr,none",
 		"--add-host", "host.containers.internal:127.0.0.1",

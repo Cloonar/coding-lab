@@ -201,6 +201,7 @@ func TestLoginRunnerStartGolden(t *testing.T) {
 	want := []string{
 		testPodmanBin, "--cgroup-manager=systemd", "run", "--rm", "-it",
 		"--name", "labrun-lab-login-claude-code-3e99da",
+		"--init",
 		"--userns=keep-id",
 		"--network=pasta:--map-guest-addr,none",
 		"--add-host", "host.containers.internal:127.0.0.1",

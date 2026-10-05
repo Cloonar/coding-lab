@@ -177,6 +177,23 @@ type RunSpec struct {
 //     plain `podman run` semantics.
 //   - --name: deterministic (ContainerName) so Stop's backstop can address
 //     the container with no stored state.
+//   - --init (ADR-0074, issue #64): podman's container-init helper
+//     (catatonit, bind-mounted from the host) becomes PID 1 and the provider
+//     CLI its only child. Without it the CLI IS PID 1 of the container's
+//     PID namespace, and every process orphaned inside — git's detached
+//     `maintenance run --auto` after each commit/fetch/push above all, plus
+//     the leftovers of any killed pipeline — is reparented to a process
+//     that never wait()s for children it did not start. Each one stays a
+//     zombie holding a pids-cgroup slot until the container exits: a run
+//     that drives git hard filled the whole --pids-limit in under an hour
+//     and could no longer fork at all. The helper reaps every orphan and
+//     forwards signals to the CLI, so the SIGHUP teardown described under
+//     --rm is unchanged, and it puts the CLI in the tty's foreground
+//     process group, so the TUI behaves as before. Rendered in all three shapes:
+//     a login or CLI poke is short-lived, but one renderer means one
+//     contract. The preflight spawn probe creates its container with the
+//     same flag, so a host without the helper fails preflight instead of
+//     failing every spawn.
 //   - --userns=keep-id: the agent runs as the service uid inside, so files
 //     it writes into the shared mounts (worktree, home, runtime) are owned
 //     by the same uid host-side and the server can tail/diff them without
@@ -268,6 +285,7 @@ func RunArgv(s RunSpec) []string {
 	}
 	args = append(args,
 		"--name", s.Name,
+		"--init",
 		"--userns=keep-id",
 		"--network=pasta:--map-guest-addr,none",
 		"--add-host", "host.containers.internal:127.0.0.1",
