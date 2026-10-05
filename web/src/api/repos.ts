@@ -210,6 +210,7 @@ export type RepoInheritedDrafts = Pick<
   | 'afk_model_default'
   | 'afk_effort_default'
   | 'lander_provider'
+  | 'lander_model'
 >;
 
 export interface CreateRepoRequest {

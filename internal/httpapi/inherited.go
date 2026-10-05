@@ -68,7 +68,7 @@ type repoInheritedResponse struct {
 // chain reads (RepoInheritedDrafts in web/src/api/repos.ts).
 var inheritedDraftKeys = []string{
 	"afk_effort_default", "afk_model_default", "afk_provider_default", "effort_default",
-	"lander_provider", "model_default", "provider", "remote_default",
+	"lander_model", "lander_provider", "model_default", "provider", "remote_default",
 }
 
 // handleRepoInherited is POST /api/v1/repos/{id}/inherited: 200 with the
@@ -128,6 +128,11 @@ func applyInheritedDraft(repo *store.Repo, key string, raw json.RawMessage) erro
 		dst = &repo.AFKModelDefault
 	case "afk_effort_default":
 		dst = &repo.AFKEffortDefault
+	case "lander_model":
+		// The inherited lander effort is checked against the lander MODEL
+		// the launch requests (repos.lander_model), so a drafted lander
+		// model is a chain input too.
+		dst = &repo.LanderModel
 	default:
 		return fmt.Errorf("unknown field %q (drafts accepted: %s)", key, strings.Join(inheritedDraftKeys, ", "))
 	}
