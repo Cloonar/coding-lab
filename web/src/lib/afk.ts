@@ -81,3 +81,22 @@ export function budgetRemaining(deadline: string | null, nowMs: number): string 
   if (minutes < 60) return `~${minutes}m left`;
   return `~${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
 }
+
+/**
+ * The AFK card's sentence over its Run one button (issue #61), from the
+ * repo summary's claimable count: "3 issues ready for an agent.". An unknown
+ * count (null: not read yet) names no number — the button still works, the
+ * server picks the issue.
+ */
+export function claimableSentence(count: number | null): string {
+  if (count === null) return 'Run one claims the next issue that is ready for an agent.';
+  if (count === 0) return 'No issues ready for an agent.';
+  return `${count} issue${count === 1 ? '' : 's'} ready for an agent.`;
+}
+
+/** Toast for an AFK run started from the repo home: names the claimed issue when known. */
+export function afkStartedMessage(run: { issue_number: number | null }, repoName: string): string {
+  return run.issue_number !== null
+    ? `Started an AFK run on #${run.issue_number}`
+    : `Started an AFK run in ${repoName}`;
+}

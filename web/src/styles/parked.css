@@ -1,50 +1,54 @@
 /* Parked ----------------------------------------------------------------------- */
-
-details.parked summary {
-  color: var(--text);
-}
-
-.parked-count {
-  margin-left: 0.25rem;
-  font-weight: 650;
-}
+/* The Parked work card on the repo home's Overview (components/ParkedSection):
+   one row per entry — branch, what it holds in words, the worktree path — and
+   the typed-branch Discard confirmation that opens under the entry. */
 
 .parked-list {
-  list-style: none;
-  margin: 0.2rem 0 0;
+  margin: 0;
   padding: 0;
+  list-style: none;
 }
 
 .parked-entry {
   padding: 0.55rem 0;
-  border-bottom: 1px solid var(--border);
 }
 
-.parked-entry:last-child {
-  border-bottom: none;
+.parked-entry + .parked-entry {
+  border-top: 1px solid var(--border);
 }
 
 .parked-line {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.parked-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .parked-branch {
-  font-weight: 600;
+  font-size: 0.9rem;
+  font-weight: 650;
   overflow-wrap: anywhere;
 }
 
+.parked-state {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .parked-path {
-  margin: 0.25rem 0 0;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   overflow-wrap: anywhere;
 }
 
 .parked-discard {
-  min-height: 36px;
-  padding: 0 0.75rem;
+  flex: none;
+  font-weight: 600;
 }
 
 .discard-confirm {
@@ -58,6 +62,28 @@ details.parked summary {
 .discard-warning {
   margin: 0 0 0.75rem;
   color: var(--err-text);
+}
+
+.discard-confirm .field {
+  margin-bottom: 0.75rem;
+}
+
+.discard-branch {
+  overflow-wrap: anywhere;
+}
+
+.discard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+@media (min-width: 1024px) {
+  .parked-discard,
+  .discard-actions button {
+    min-height: 36px;
+    padding: 0 0.75rem;
+  }
 }
 
 /* Claude logout confirm gate (issue #46): same danger framing as discard. */

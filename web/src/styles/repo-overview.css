@@ -1,1 +1,340 @@
-/* Repo home Overview tab (issue #61) — owned by routes/repo-home/Overview.tsx. */
+/* Repo home Overview tab (issue #61) — owned by routes/repo-home/Overview.tsx
+   and routes/repo-home/overview/. Readiness first (full width), then Live
+   runs, AFK and Parked work: one column on a phone; from 1024px two columns,
+   Live runs and Parked work left, AFK right. The AFK and Parked cards' own
+   rules live in afk.css and parked.css. */
+
+.repo-overview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/* Cards ------------------------------------------------------------------------- */
+
+.overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.overview-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-height: 32px;
+}
+
+.overview-card-head h2 {
+  margin: 0;
+  font-size: 1.08rem;
+}
+
+.overview-card .banner {
+  margin: 0;
+}
+
+.overview-empty {
+  margin: 0;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    'live'
+    'afk'
+    'parked';
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.overview-live {
+  grid-area: live;
+  min-width: 0;
+}
+
+.overview-afk {
+  grid-area: afk;
+  min-width: 0;
+}
+
+.overview-parked {
+  grid-area: parked;
+  min-width: 0;
+}
+
+/* The parked endpoint is optional: no block, no gap. */
+.overview-parked:empty {
+  display: none;
+}
+
+/* Readiness ---------------------------------------------------------------------- */
+
+.overview-card.readiness {
+  gap: 0;
+  padding: 0;
+}
+
+.overview-card.readiness.failing {
+  border-color: var(--err-border);
+}
+
+h2.readiness-head {
+  margin: 0;
+  font: inherit;
+  letter-spacing: normal;
+}
+
+.readiness-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  min-height: 62px;
+  padding: 0.6rem var(--space-4);
+  border: 0;
+  border-radius: var(--radius-card);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.readiness-toggle:hover {
+  background: none;
+}
+
+.readiness-toggle:hover .readiness-title {
+  text-decoration: underline;
+}
+
+.readiness-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.readiness-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.readiness-title {
+  font-weight: 650;
+}
+
+.readiness-detail {
+  color: var(--muted);
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+
+.readiness-chevron {
+  flex: none;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.readiness.open .readiness-chevron {
+  transform: rotate(90deg);
+}
+
+.readiness-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+  background: var(--chip-bg);
+  color: var(--chip-text);
+}
+
+.readiness-icon.big {
+  width: 32px;
+  height: 32px;
+}
+
+.readiness-icon.passing {
+  background: var(--run-bg);
+  color: var(--run-text);
+}
+
+.readiness-icon.failing {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+.readiness-checks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-4) var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.readiness-checks[hidden] {
+  display: none;
+}
+
+.readiness-none {
+  margin: var(--space-2) 0;
+}
+
+.readiness-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.readiness-check {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+  padding: 0.55rem 0;
+}
+
+.readiness-check + .readiness-check {
+  border-top: 1px solid var(--border);
+}
+
+.readiness-check .readiness-text {
+  flex: 1 1 170px;
+}
+
+.readiness-check-title {
+  font-weight: 600;
+}
+
+.readiness-action {
+  flex: none;
+  font-weight: 600;
+}
+
+/* The running clone: phase and percent over a thin track. */
+.clone-progress.readiness-progress {
+  display: block;
+  margin-top: 0.4rem;
+}
+
+.readiness-progress .progress-meta {
+  margin-bottom: 0.25rem;
+  font-size: 0.8rem;
+}
+
+.readiness-progress .progress-track,
+.readiness-progress .progress-fill {
+  display: block;
+}
+
+/* Live runs ---------------------------------------------------------------------- */
+
+.live-runs-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.live-runs-list > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.live-run {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 56px;
+  padding: 0.5rem 0;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.live-run:hover .live-run-title {
+  text-decoration: underline;
+}
+
+.live-run:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-control);
+}
+
+/* Same colours as the runs rail's dot; the state is also in words. */
+.run-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+}
+
+.run-dot.needs-input,
+.run-dot.question {
+  background: var(--accent);
+}
+
+.run-dot.working {
+  background: var(--banner-text);
+}
+
+.live-run-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.live-run-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.live-run-state {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.live-runs-stop {
+  font-weight: 600;
+}
+
+.live-run-chevron {
+  flex: none;
+  color: var(--muted);
+}
+
+@media (min-width: 1024px) {
+  .repo-overview {
+    gap: var(--space-3);
+  }
+
+  .overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      'live afk'
+      'parked afk';
+  }
+
+  .readiness-action,
+  .live-runs-stop,
+  .overview-card .inline-confirm button {
+    min-height: 36px;
+    padding: 0 0.75rem;
+  }
+
+  .live-run {
+    min-height: 48px;
+  }
+}

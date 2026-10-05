@@ -1,12 +1,14 @@
-// Discard confirm gate: Discard is the one UNGUARDED destruction in lab, so
-// the dialog's button must stay disabled until the operator types the branch
-// name exactly — no trim leniency, no near-miss.
+// Parked work card (the repo home's Overview, issue #61) and its discard
+// confirm gate: Discard is the one UNGUARDED destruction in lab, so it asks in
+// place, and the confirmation's button stays disabled until the operator types
+// the branch name exactly — no trim leniency, no near-miss. An unavailable
+// parked endpoint renders no block at all.
 
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ParkedEntry } from '../api';
 import { EventsProvider } from '../events';
-import ParkedSection from './ParkedSection';
+import ParkedSection, { parkedSummary } from './ParkedSection';
 
 const REPO_ID = 'repo_1';
 const BRANCH = 'lab/foo-20260608-1530';
@@ -19,8 +21,9 @@ class FakeEventSource {
   close(): void {}
 }
 
-let parkedOnServer: ParkedEntry[];
+let parkedOnServer: ParkedEntry[] | null;
 let discardBodies: Record<string, unknown>[];
+let discarded: string[];
 let dispose: (() => void) | undefined;
 let container: HTMLDivElement;
 
@@ -45,6 +48,9 @@ function stubApi(): void {
       const url = String(input);
       const method = init?.method ?? 'GET';
       if (url === `/api/v1/repos/${REPO_ID}/parked` && method === 'GET') {
+        if (parkedOnServer === null) {
+          return Promise.resolve(jsonResponse(404, { error: 'not found' }));
+        }
         return Promise.resolve(jsonResponse(200, { parked: parkedOnServer }));
       }
       if (url === `/api/v1/repos/${REPO_ID}/parked/discard` && method === 'POST') {
@@ -68,7 +74,7 @@ async function mountParked(): Promise<void> {
   dispose = render(
     () => (
       <EventsProvider>
-        <ParkedSection repoID={REPO_ID} />
+        <ParkedSection repoID={REPO_ID} onDiscarded={(branch) => discarded.push(branch)} />
       </EventsProvider>
     ),
     container,
@@ -99,6 +105,7 @@ beforeEach(() => {
     { branch: BRANCH, worktree_path: '/wt/foo', dirty: true, commits_ahead: 1, unpushed: 1 },
   ];
   discardBodies = [];
+  discarded = [];
   stubApi();
 });
 
@@ -109,24 +116,60 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('ParkedSection discard confirm gate', () => {
-  it('renders the parked entry with its badges', async () => {
+describe('ParkedSection card', () => {
+  it('renders the parked entry with what it holds, in words', async () => {
     await mountParked();
 
-    expect(container.textContent).toContain(BRANCH);
-    expect(container.textContent).toContain('● dirty');
-    expect(container.textContent).toContain('↑1');
-    expect(container.textContent).toContain('⚠ 1 unpushed');
-    expect(container.textContent).toContain('/wt/foo');
+    const card = query<HTMLElement>('section.parked-card');
+    expect(card.querySelector('h2')?.textContent).toBe('Parked work (1)');
+    expect(card.querySelector('.count')?.textContent).toBe('1');
+    expect(query('.parked-branch').textContent).toBe(BRANCH);
+    expect(query('.parked-state').textContent).toBe(
+      'Worktree has uncommitted changes · 1 commit ahead · 1 unpushed commit',
+    );
+    expect(query('.parked-path').textContent).toBe('/wt/foo');
+    expect(query('button.parked-discard').getAttribute('aria-label')).toBe(`Discard ${BRANCH}`);
   });
 
-  it('renders nothing at all while the parked set is empty', async () => {
+  it('says "Nothing parked." with a 0 count while the parked set is empty', async () => {
     parkedOnServer = [];
     await mountParked();
 
-    expect(container.querySelector('details.parked')).toBeNull();
+    expect(query('section.parked-card .count').textContent).toBe('0');
+    expect(query('section.parked-card').textContent).toContain('Nothing parked.');
+    expect(container.querySelector('.parked-entry')).toBeNull();
   });
 
+  it('renders no block at all when the parked endpoint is unavailable', async () => {
+    parkedOnServer = null;
+    await mountParked();
+
+    expect(container.querySelector('section.parked-card')).toBeNull();
+    expect(container.textContent).toBe('');
+  });
+});
+
+describe('parkedSummary', () => {
+  const entry = (over: Partial<ParkedEntry>): ParkedEntry => ({
+    branch: BRANCH,
+    worktree_path: '/wt/foo',
+    dirty: false,
+    commits_ahead: 0,
+    unpushed: 0,
+    ...over,
+  });
+
+  it('words each kind of preserved work', () => {
+    expect(parkedSummary(entry({ dirty: true }))).toBe('Worktree has uncommitted changes');
+    expect(parkedSummary(entry({ dirty: true, worktree_path: '' }))).toBe('Uncommitted changes');
+    expect(parkedSummary(entry({ commits_ahead: 2, unpushed: 2 }))).toBe(
+      '2 commits ahead · 2 unpushed commits',
+    );
+    expect(parkedSummary(entry({}))).toBe('Branch is not merged');
+  });
+});
+
+describe('ParkedSection discard confirm gate', () => {
   it('keeps Discard disabled until the exact branch name is typed', async () => {
     await mountParked();
 
@@ -169,6 +212,36 @@ describe('ParkedSection discard confirm gate', () => {
     await settle();
 
     expect(discardBodies).toEqual([{ branch: BRANCH }]);
-    expect(container.querySelector('details.parked')).toBeNull();
+    expect(discarded).toEqual([BRANCH]);
+    expect(container.querySelector('.parked-entry')).toBeNull();
+    expect(query('section.parked-card').textContent).toContain('Nothing parked.');
+  });
+
+  it('asks in place: Cancel and Escape close the confirmation without a request', async () => {
+    await mountParked();
+
+    const trigger = query<HTMLButtonElement>('button.parked-discard');
+    trigger.click();
+    await settle();
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    // The confirmation opens under its entry, with the typed field focused.
+    const confirm = query<HTMLElement>('.parked-entry .discard-confirm');
+    expect(document.activeElement).toBe(query('input[name="confirm-branch"]'));
+
+    const cancel = Array.from(confirm.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Cancel',
+    );
+    cancel?.click();
+    await settle();
+    expect(container.querySelector('.discard-confirm')).toBeNull();
+
+    trigger.click();
+    await settle();
+    query('.discard-confirm').dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    );
+    await settle();
+    expect(container.querySelector('.discard-confirm')).toBeNull();
+    expect(discardBodies).toEqual([]);
   });
 });

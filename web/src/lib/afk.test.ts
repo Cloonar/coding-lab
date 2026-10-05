@@ -7,7 +7,9 @@ import { describe, expect, it } from 'vitest';
 import {
   AFK_PAUSE_THRESHOLD,
   afkStartHint,
+  afkStartedMessage,
   budgetRemaining,
+  claimableSentence,
   isAFKPaused,
   parseAFKLabel,
 } from './afk';
@@ -118,5 +120,29 @@ describe('budgetRemaining (runs.budget_deadline countdown)', () => {
   it('deadline hit or passed → "over budget" (reaper boundary is >=)', () => {
     expect(budgetRemaining(at(0), now)).toBe('over budget');
     expect(budgetRemaining(at(-5), now)).toBe('over budget');
+  });
+});
+
+describe('claimableSentence (the Overview AFK card, issue #61)', () => {
+  const rows: [number | null, string][] = [
+    [3, '3 issues ready for an agent.'],
+    [1, '1 issue ready for an agent.'],
+    [0, 'No issues ready for an agent.'],
+    [null, 'Run one claims the next issue that is ready for an agent.'], // unknown: no number
+  ];
+
+  for (const [count, want] of rows) {
+    it(`${String(count)} → ${JSON.stringify(want)}`, () => {
+      expect(claimableSentence(count)).toBe(want);
+    });
+  }
+});
+
+describe('afkStartedMessage', () => {
+  it('names the claimed issue when the run has one, else the repo', () => {
+    expect(afkStartedMessage({ issue_number: 7 }, 'coding-lab')).toBe('Started an AFK run on #7');
+    expect(afkStartedMessage({ issue_number: null }, 'coding-lab')).toBe(
+      'Started an AFK run in coding-lab',
+    );
   });
 });

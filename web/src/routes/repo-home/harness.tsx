@@ -10,7 +10,7 @@ import type { MemoryHistory } from '@solidjs/router';
 import type { JSX } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
-import type { Repo } from '../../api';
+import type { Instance, ParkedEntry, Readiness, Repo } from '../../api';
 import App from '../../App';
 import RepoRoutes from './routes';
 
@@ -122,6 +122,14 @@ export interface RepoHomeHarnessState {
   requests: string[];
   /** Consulted first: return a response to answer a call, undefined to fall through. */
   handle?: (method: string, url: string, init?: RequestInit) => StubResponse | undefined;
+  /** GET /instances (the side rail, the list's run counts, Overview's Live runs). */
+  instances: Instance[];
+  /** GET /repos (the list); undefined answers `[h.repo]`. */
+  repos?: Repo[];
+  /** GET /repos/repo_1/readiness; undefined mirrors `h.repo.summary.readiness`, null answers 500. */
+  readiness?: Readiness | null;
+  /** GET /repos/repo_1/parked; null answers 404 (the endpoint is not mounted). */
+  parked: ParkedEntry[] | null;
 }
 export const h = {} as RepoHomeHarnessState;
 
@@ -144,9 +152,27 @@ export function stubApi(): void {
           return Promise.resolve(
             jsonResponse(200, { setup_required: false, authenticated: true, username: 'dominik' }),
           );
-        // AppShell's side rail.
+        // AppShell's side rail (and the list's / Overview's live runs).
         case '/api/v1/instances':
-          return Promise.resolve(jsonResponse(200, { instances: [] }));
+          return Promise.resolve(jsonResponse(200, { instances: h.instances }));
+        // The repositories list.
+        case '/api/v1/repos':
+          return Promise.resolve(
+            jsonResponse(200, { repos: h.repos ?? (h.repo === null ? [] : [h.repo]) }),
+          );
+        // The Overview tab.
+        case `${repoPath}/readiness`:
+          return Promise.resolve(
+            h.readiness === null
+              ? jsonResponse(500, { error: 'readiness unavailable' })
+              : jsonResponse(200, h.readiness ?? h.repo?.summary.readiness ?? null),
+          );
+        case `${repoPath}/parked`:
+          return Promise.resolve(
+            h.parked === null
+              ? jsonResponse(404, { error: 'not found' })
+              : jsonResponse(200, { parked: h.parked }),
+          );
         case repoPath:
           return Promise.resolve(
             h.repo === null
@@ -259,18 +285,86 @@ export function unmount(): void {
   container.remove();
 }
 
+/**
+ * jsdom has no window.matchMedia (createMediaQuery then reads "no match": the
+ * phone layout). setDesktop installs a fake whose desktop breakpoint query
+ * matches or not, and flips it live — listeners hear the change, so a mounted
+ * page crosses the breakpoint. Removed with the other globals after each test.
+ */
+let media: { matches: boolean; listeners: Set<() => void> } | undefined;
+
+export function setDesktop(matches: boolean): void {
+  if (media === undefined) {
+    const state = { matches: false, listeners: new Set<() => void>() };
+    media = state;
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        get matches() {
+          return query === '(min-width: 1024px)' && state.matches;
+        },
+        media: query,
+        onchange: null,
+        addEventListener: (_type: string, listener: () => void) => state.listeners.add(listener),
+        removeEventListener: (_type: string, listener: () => void) =>
+          state.listeners.delete(listener),
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      })),
+    );
+  }
+  media.matches = matches;
+  for (const listener of media.listeners) listener();
+}
+
+/** A live instance of the repo; override per test. */
+export function baseInstance(over: Partial<Instance> = {}): Instance {
+  return {
+    id: 'run_1',
+    repo_id: REPO_ID,
+    repo_name: 'coding-lab',
+    kind: 'manual',
+    provider: 'agent-a',
+    issue_number: null,
+    pull_number: null,
+    branch: 'lab/fix-chat-dock',
+    worktree_path: '/wt/fix-chat-dock',
+    session_name: 'coding-lab~dominik-20260706-1530',
+    title: 'Fix chat dock overlap',
+    model: 'model-a',
+    effort: 'high',
+    remote: false,
+    deep_link_url: null,
+    started_at: '2026-07-06T15:30:00Z',
+    budget_deadline: null,
+    ended_at: null,
+    outcome: 'active',
+    failure_reason: null,
+    live: true,
+    connecting: false,
+    state: 'working',
+    ...over,
+  };
+}
+
 export function installRepoHomeHooks(): void {
   beforeEach(() => {
     h.repo = baseRepo();
     h.repoError = 'repo lookup failed';
     h.requests = [];
     h.handle = undefined;
+    h.instances = [];
+    h.repos = undefined;
+    h.readiness = undefined;
+    h.parked = [];
     stubApi();
   });
 
   afterEach(() => {
     unmount();
     FakeEventSource.instances = [];
+    media = undefined; // the stub it held is gone with unstubAllGlobals
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
