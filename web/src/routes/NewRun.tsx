@@ -570,15 +570,23 @@ function NewRunView() {
           </div>
 
           <div class="newrun-issues">
-            <Show when={selectedRepo()}>
-              {(repo) => (
-                <IssuesCard
-                  repo={repo()}
-                  onAction={attach}
-                  onRepoChanged={reloadRepos}
-                  onStarted={(run) => toast.show(afkStartedMessage(run))}
-                  onError={setError}
-                />
+            {/* Keyed on the repo id: another repo mounts a fresh card, so
+                nothing read for the previous repo (its issue list, an open
+                picker or sheet) can show under the new one. A refetch of the
+                same repo keeps the card. */}
+            <Show when={selectedRepo()?.id} keyed>
+              {(id) => (
+                <Show when={selectedRepo()?.id === id ? selectedRepo() : null}>
+                  {(repo) => (
+                    <IssuesCard
+                      repo={repo()}
+                      onAction={attach}
+                      onRepoChanged={reloadRepos}
+                      onStarted={(run) => toast.show(afkStartedMessage(run))}
+                      onError={setError}
+                    />
+                  )}
+                </Show>
               )}
             </Show>
           </div>

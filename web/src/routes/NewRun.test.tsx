@@ -1232,6 +1232,29 @@ describe('NewRun repository pills', () => {
     expect(composerInput().placeholder).toBe('Describe a task for other-repo…');
     expect(sendButton().getAttribute('aria-label')).toBe('Start run');
   });
+
+  it("switching to a repo whose tracker fails shows none of the previous repo's issues", async () => {
+    issuesOnServer = [issueFixture(), issueFixture({ number: 48 }), issueFixture({ number: 49 })];
+    reposOnServer[1] = {
+      ...reposOnServer[1]!,
+      summary: { ...failingTracker(), open_issues: 8 },
+    };
+    await mountHome();
+    expect(container.querySelector('.issues-card-count')?.textContent).toBe('3');
+
+    pill('other-repo')!.click();
+    await settle();
+
+    // The summary's count, not the stale 3 read for coding-lab; no rows, no
+    // AFK line, no Auto switch — the check's detail instead.
+    expect(container.querySelector('.issues-card-count')?.textContent).toBe('8');
+    expect(container.querySelector('.issue-row')).toBeNull();
+    expect(container.querySelector('.issues-card-afk')).toBeNull();
+    expect(container.querySelector('.issues-card-auto')).toBeNull();
+    expect(container.querySelector('.issues-card')?.textContent).toContain(
+      'The tracker token was refused.',
+    );
+  });
 });
 
 // An issue's action (issue #66): tapping a row asks what the agent should do;

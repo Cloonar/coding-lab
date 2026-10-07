@@ -332,6 +332,13 @@ describe('IssuesCard rows', () => {
 });
 
 describe('IssuesCard AFK line', () => {
+  it('a repo that cannot start a run (cloning, clone failed) shows no AFK line and no Auto switch', async () => {
+    await mount(repoFixture({ clone_status: 'cloning', afk_auto_enabled: false }));
+    expect(afkText()).toBeNull();
+    expect(autoSwitch()).toBeNull();
+    expect(() => button('Run one')).toThrow();
+  });
+
   it('Auto off: the line ends with Run one, which starts an AFK run and reports it', async () => {
     await mount(repoFixture({ afk_auto_enabled: false }));
     expect(afkText()).toBe('Auto off · 2 ready');

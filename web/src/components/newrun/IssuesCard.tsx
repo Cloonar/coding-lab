@@ -32,7 +32,7 @@ import {
 import { errorMessage, listIssues, type IssueSummary, type Repo, type Run } from '../../api';
 import { createLiveInstances } from '../../lib/liveInstances';
 import { createLiveResource } from '../../lib/liveResource';
-import { afkLine, newestIssues, type IssueAction } from '../../lib/newRun';
+import { afkLine, isStartable, newestIssues, type IssueAction } from '../../lib/newRun';
 import { checkState, checksOf } from '../../lib/readiness';
 import { resourceValue } from '../../lib/resource';
 import { createAFKActions } from '../AFKStrip';
@@ -66,6 +66,10 @@ export default function IssuesCard(props: IssuesCardProps): JSX.Element {
       (check) => check.id === 'tracker' && checkState(check.state) === 'failing',
     );
   const trackerFailing = () => trackerCheck() !== undefined;
+  // AFK needs a repo that can run and a tracker to claim from: a repo still
+  // cloning (or whose clone failed) or whose tracker check fails shows no
+  // AFK line and no Auto switch.
+  const canAFK = () => isStartable(props.repo) && !trackerFailing();
 
   // Keyed on the repo id; a failing tracker leaves the resource idle (the
   // read could only fail the same way).
@@ -135,7 +139,7 @@ export default function IssuesCard(props: IssuesCardProps): JSX.Element {
           <span class="chip issues-card-count">{count()}</span>
         </Show>
         <span class="spacer" />
-        <Show when={!afk.paused() && !trackerFailing()}>
+        <Show when={canAFK() && !afk.paused()}>
           <ToggleSwitch
             label="Auto"
             name="afk_auto_enabled"
@@ -147,7 +151,7 @@ export default function IssuesCard(props: IssuesCardProps): JSX.Element {
         </Show>
       </div>
 
-      <Show when={!trackerFailing()}>
+      <Show when={canAFK()}>
         <div class="issues-card-afk">
           <span class="issues-card-afk-text">{line().text}</span>
           <Switch>
