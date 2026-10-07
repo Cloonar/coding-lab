@@ -1,0 +1,144 @@
+/* New run page layout (issue #66, routes/NewRun.tsx; reference
+   docs/reference/new-run-mockup.html). The DOM order is pills, composer dock,
+   Issues card — the desktop order, so Tab follows what is seen. The pieces
+   style themselves (newrun-repos.css, newrun-issues.css, newrun-composer.css,
+   composer.css for the field); this file places them.
+
+   Phone (<1024px): the pills row at the top, the Issues card, and the
+   composer docked at the bottom edge (CSS `order` moves it last). The page
+   is a flex column that fills the content area under the top strip, so the
+   dock sits at the bottom edge even when the card is short, and sticks there
+   while a long card scrolls under it. The page has no side padding of its
+   own: each part takes the 16px gutter, which lets the pills scroll out to
+   the screen edge.
+
+   Desktop (>=1024px): a centered 720px column — pills, composer, Issues
+   card — top-aligned with the old composer's clamp(1.5rem, 8vh, 5rem).
+
+   All of it applies while the page has repositories (`.newrun-docked`): the
+   repos load error and the zero-repositories empty state keep the plain
+   `.page` look they always had. */
+
+/* The flex chain that lets the page fill the viewport under the phone top
+   strip (the shell is a plain block there and the document scrolls): only
+   while this page is mounted. Without :has() the dock still docks, it just
+   rides up under a short card. */
+@media (max-width: 1023.98px) {
+  .shell:has(.page.newrun-docked) {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .shell-content:has(.page.newrun-docked) {
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+.page.newrun-docked {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  max-width: none;
+  padding: 0;
+}
+
+.newrun-pills {
+  flex: none;
+  min-width: 0;
+  padding-top: var(--space-3);
+}
+
+.newrun .repo-pills {
+  padding: 2px var(--space-4);
+}
+
+.newrun-issues {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+/* The dock: the Chat's shape — the field sits on the page background at the
+   bottom edge, clear of the home indicator; content scrolling under it
+   fades out above the field. */
+.newrun-dock {
+  order: 1;
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  flex: none;
+  min-width: 0;
+  padding: var(--space-2) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(to bottom, transparent, var(--bg) 35%);
+}
+
+.newrun-dock > .banner {
+  margin: 0 0 var(--space-2);
+}
+
+/* The bar's chip row (composer.css has the bar): one sideways-scrolling row
+   (no wrap, no scrollbar — the pickers are portaled, so the scroll never
+   clips them), the send pinned on the right. */
+.composer-chips {
+  display: flex;
+  flex: 1;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* Keeps the chips' borders and focus rings clear of the scroll clip. */
+  padding: 2px;
+}
+
+.composer-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.newrun .composer-send {
+  flex: none;
+}
+
+/* The AFK toast clears a one-line dock on the phone. */
+.newrun .toast {
+  bottom: calc(7.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 1024px) {
+  .page.newrun-docked {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 8vh, 5rem) var(--space-4) var(--space-6);
+    min-height: 0;
+  }
+
+  .newrun-pills {
+    padding-top: 0;
+  }
+
+  .newrun .repo-pills {
+    padding: 2px;
+  }
+
+  .newrun-dock {
+    order: 0;
+    position: static;
+    padding: var(--space-3) 0 0;
+    background: none;
+  }
+
+  .newrun-issues {
+    flex: none;
+    padding: var(--space-4) 0 0;
+  }
+
+  .newrun .toast {
+    bottom: 1.25rem;
+  }
+}

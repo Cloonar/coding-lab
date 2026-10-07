@@ -1,17 +1,34 @@
-// New run (Home, `/`) — the composer-first surface (issue #41, Phase 2b): a big
-// centered composer (repo · agent · model · effort chips, a `…` popover, an
-// autogrowing textarea, an accent circular send), an AFK strip for the selected
-// repo, and a slim logged-out banner. Send spawns an instance carrying any typed
-// text as its first_message (issue #96 — delivered on the spawn argv, so the
-// chat needs no post-spawn send and never deadlocks on a lazily-created
-// transcript), then navigates to the chat. Never auto-navigates on load. The
-// agent chip appears only with ≥2 registered providers; the per-spawn pick is
-// ephemeral (ADR-0030).
+// New run (Home, `/`) — issue #66, design direction A ("Sheet", revision 2;
+// reference docs/reference/new-run-mockup.html). The page is three things and
+// nothing else: the repository pills (RepoPills — recent repos plus "All N",
+// which opens the repository picker, never the Repositories page), the
+// composer, and the Issues card of the selected repo (IssuesCard — its AFK
+// line replaces the old AFK strip; tapping an issue attaches an action to the
+// composer). Status shows only where it blocks a run: ComposerBlockers, right
+// above the field. Never auto-navigates on load; the only navigations are a
+// sent run (→ its chat), a blocker's remedy and the Runner settings link.
 //
-// Manual spawn accepts label/provider/model/effort plus the first_message
-// (issue #96); it has no provider-options bag (internal/httpapi/instances.go),
-// so provider spawn options stay out of the `…` popover here and issue #21
-// stays open.
+// The composer keeps the Chat's dock shape: below 1024px it is docked at the
+// bottom edge (sticky, safe-area inset), so the field is where the Chat's
+// composer will be a second later; from 1024px it sits under the pills in a
+// centered 720px column. One DOM order serves both (pills, composer, Issues):
+// it is the desktop visual order, so keyboard focus follows what is seen
+// where Tab is used most, and on the phone CSS `order` moves the dock last
+// (styles/newrun.css).
+//
+// The field: an optional attached issue action (AttachmentChip), the
+// autogrowing textarea, and a bar with the run-option chips — Model, Effort
+// (hidden when the model has no efforts), ⋯ More options (agent, remote
+// control, label, the Runner) — scrolling sideways on a phone, and the accent
+// circular send. Send spawns an instance carrying the first_message (issue
+// #96: the attached action's line plus any typed text, else the typed text)
+// and navigates to the chat.
+//
+// Resolution mirrors the server: per-spawn pick → repo override → global
+// default (ADR-0030 for the agent; issue #156 for per-model efforts; issue
+// #163's tri-state for remote control). Picks are ephemeral and reset with the
+// repo; only explicit agent/remote picks ride the request. Manual spawn has no
+// provider-options bag (internal/httpapi/instances.go), so issue #21 stays open.
 
 import { A, useNavigate } from '@solidjs/router';
 import {
@@ -30,30 +47,57 @@ import {
   listProviders,
   listRepos,
   providerAuthStatus,
+  retryClone,
   startInstance,
+  type IssueSummary,
   type Repo,
   type Run,
   type StartInstanceRequest,
 } from '../api';
-import AFKStrip from '../components/AFKStrip';
-import EmptyState from '../components/EmptyState';
 import Banner from '../components/Banner';
+import EmptyState from '../components/EmptyState';
 import Icon from '../components/Icon';
+import ComposerBlockers from '../components/newrun/ComposerBlockers';
+import IssuesCard from '../components/newrun/IssuesCard';
+import RepoPills from '../components/newrun/RepoPills';
+import {
+  AttachmentChip,
+  ChoiceChip,
+  MoreOptions,
+  type ChoiceOption,
+} from '../components/newrun/RunOptions';
 import RequireAuth from '../components/RequireAuth';
-import Select, { type SelectOption } from '../components/Select';
 import { createToast } from '../components/Toast';
-import { isComposerSend } from '../lib/composerKeys';
 import { useEvents } from '../events';
+import { isComposerSend } from '../lib/composerKeys';
 import { createLiveResource } from '../lib/liveResource';
-import { providerFor, resolveEffortOption, resolveRemote, resolveSpawnOption } from '../lib/spawn';
+import {
+  RECENT_REPOS_PILLS,
+  attachmentText,
+  composeFirstMessage,
+  composerBlockers,
+  composerPlaceholder,
+  fieldDisabled,
+  isStartable,
+  preselectedRepo,
+  pushRecentRepo,
+  readRecentRepos,
+  recentRepos,
+  runLabelFor,
+  sendLabel,
+  writeRecentRepos,
+  type AttachmentRef,
+  type IssueAction,
+} from '../lib/newRun';
 import { resourceValue } from '../lib/resource';
-import { createCloneProgressStore, type CloneProgress } from '../stores/cloneProgress';
+import { providerFor, resolveEffortOption, resolveRemote, resolveSpawnOption } from '../lib/spawn';
+import { createCloneProgressStore } from '../stores/cloneProgress';
 
-// Last-used repo, remembered so the composer opens on the repo you spawn from
-// most. The stored id is validated against the live list on read (it may have
-// been deleted, or gone un-ready) — the getter falls back to the first ready
-// repo, so a stale value never strands the composer.
-const LAST_REPO_KEY = 'lab.last-repo';
+/** The issue action attached to the composer. */
+interface Attachment {
+  action: IssueAction;
+  issue: IssueSummary;
+}
 
 export default function NewRun() {
   return (
@@ -67,8 +111,8 @@ function NewRunView() {
   const events = useEvents();
   const navigate = useNavigate();
 
-  // repo.changed keeps clone_status fresh so a cloning repo becomes selectable
-  // the moment it lands; the auth banner refetches on its own SSE event.
+  // repo.changed keeps clone_status and the readiness summary fresh, so a
+  // cloning repo becomes startable (and its banner goes) the moment it lands.
   const [repos, { refetch: refetchRepos }] = createLiveResource(
     () => listRepos(),
     [{ type: 'repo.changed' }],
@@ -79,51 +123,60 @@ function NewRunView() {
   const toast = createToast();
   onCleanup(progress.dispose);
 
-  const readLastRepo = (): string | null => {
-    try {
-      return localStorage.getItem(LAST_REPO_KEY);
-    } catch {
-      return null;
-    }
-  };
-  const writeLastRepo = (id: string): void => {
-    try {
-      localStorage.setItem(LAST_REPO_KEY, id);
-    } catch {
-      // Private mode / storage disabled — the in-memory signal still works.
-    }
+  const repoList = (): Repo[] => resourceValue(repos) ?? [];
+  // Awaitable, so the AFK controls and the clone Retry stay busy until the
+  // fresh list is in.
+  const reloadRepos = async (): Promise<void> => {
+    await refetchRepos();
   };
 
-  const [selectedId, setSelectedId] = createSignal<string | null>(readLastRepo());
-  const readyRepos = () => (resourceValue(repos) ?? []).filter((r) => r.clone_status === 'ready');
-  // The effective repo: the stored/picked id when it still exists AND is ready,
-  // otherwise the first ready repo (else null when nothing is ready).
+  // --- Repository selection ---
+
+  // The stored recent list (lab.last-repo, most recent first): the picker's
+  // Recent group, updated on every pick. The pill row is read from the list
+  // as it was when the page opened (plus repos picked here since), so a tap
+  // on a pill never reorders the row under the operator's thumb.
+  const openedWith = readRecentRepos();
+  const [recentIds, setRecentIds] = createSignal<string[]>(openedWith);
+  const [pickedHere, setPickedHere] = createSignal<string[]>([]);
+  // null = nothing picked on this visit: the most recent usable repo.
+  const [pickedId, setPickedId] = createSignal<string | null>(null);
+
+  // The picked repo while it still exists (even if it went un-startable, so
+  // its banner shows), else the preselection — which falls back to a
+  // non-startable repo when none can start, so the composer can say why.
   const selectedRepo = (): Repo | null => {
-    const list = resourceValue(repos) ?? [];
-    const id = selectedId();
+    const list = repoList();
+    const id = pickedId();
     const picked = id !== null ? list.find((r) => r.id === id) : undefined;
-    if (picked && picked.clone_status === 'ready') return picked;
-    return readyRepos()[0] ?? null;
+    return picked ?? preselectedRepo(list, recentIds());
   };
+
+  const pills = (): Repo[] => {
+    const list = repoList();
+    const out: Repo[] = [];
+    const add = (repo: Repo | undefined): void => {
+      if (repo !== undefined && !out.includes(repo)) out.push(repo);
+    };
+    for (const id of pickedHere()) add(list.find((r) => r.id === id));
+    for (const repo of recentRepos(list, openedWith)) add(repo);
+    const selected = selectedRepo();
+    if (selected !== null && !out.includes(selected)) out.unshift(selected);
+    return out.slice(0, RECENT_REPOS_PILLS);
+  };
+
   const pickRepo = (repo: Repo): void => {
-    setSelectedId(repo.id);
-    writeLastRepo(repo.id);
+    if (!pills().includes(repo))
+      setPickedHere((ids) => [repo.id, ...ids.filter((x) => x !== repo.id)]);
+    setPickedId(repo.id);
+    // Only a repo a run can start in is remembered (the issue: "startable
+    // repos only"); the picker never offers another, but a pill may be one.
+    if (isStartable(repo)) {
+      const next = pushRecentRepo(recentIds(), repo.id);
+      setRecentIds(next);
+      writeRecentRepos(next);
+    }
   };
-  // Ready-only selection, as before: disabled rows can't be clicked, but a
-  // stale commit (e.g. the synthesized empty row) must never strand the pick.
-  const pickRepoById = (id: string): void => {
-    const repo = (resourceValue(repos) ?? []).find((r) => r.id === id);
-    if (repo !== undefined && repo.clone_status === 'ready') pickRepo(repo);
-  };
-  // Options for the repo Select: every repo listed; non-ready rows disabled
-  // with their status text (live clone % from the cloneProgress store).
-  const repoOptions = (): SelectOption[] =>
-    (resourceValue(repos) ?? []).map((repo) => ({
-      value: repo.id,
-      label: repo.name,
-      disabled: repo.clone_status !== 'ready',
-      status: repoStatus(repo, progress.progress(repo.id)),
-    }));
 
   const providerList = () => resourceValue(providers) ?? [];
   const defaultsValue = () => resourceValue(defaults) ?? {};
@@ -134,30 +187,44 @@ function NewRunView() {
   const [providerPick, setProviderPick] = createSignal('');
   // Per-spawn remote-control pick (issue #163). null = untouched — NOT false:
   // `false` is a real pick here (an operator turning an inherited-on default
-  // off), so only null can mean "let the layers decide". Both picks belong to
-  // the repo they were made against, so both reset when the repo changes.
+  // off), so only null can mean "let the layers decide".
   const [remotePick, setRemotePick] = createSignal<boolean | null>(null);
+  // The attached issue action belongs to the repo's tracker.
+  const [attachment, setAttachment] = createSignal<Attachment | null>(null);
+  // Picks and the attachment were made against one repo: another repo
+  // (a pick, or the selected one disappearing) starts clean.
   createEffect(
     on(
       () => selectedRepo()?.id,
       () => {
         setProviderPick('');
         setRemotePick(null);
+        setAttachment(null);
       },
       { defer: true },
     ),
   );
 
-  // The EFFECTIVE provider: per-spawn pick → repo override → global default →
-  // first registered provider (skip-layer, mirroring the backend resolver).
+  // --- Agent, model, effort ---
+
+  // The INHERITED provider (repo override → global default → first
+  // registered) and the EFFECTIVE one (the per-spawn pick first), skip-layer
+  // like the backend resolver.
+  const inheritedProvider = () => {
+    const repo = selectedRepo();
+    if (repo === null) return null;
+    return providerFor(providerList(), repo.provider, defaultsValue().provider);
+  };
   const provider = () => {
     const repo = selectedRepo();
     if (repo === null) return null;
     return providerFor(providerList(), providerPick(), repo.provider, defaultsValue().provider);
   };
   const models = () => provider()?.models ?? [];
-  const providerOptions = (): SelectOption[] =>
-    providerList().map((p) => ({ value: p.id, label: p.display_name }));
+  // Picking the inherited agent is no pick: nothing to send, no accent.
+  const pickProvider = (id: string): void => {
+    setProviderPick(id === inheritedProvider()?.id ? '' : id);
+  };
 
   // Machine-level auth for the EFFECTIVE provider: the status route is
   // per-provider-id (issue #51 decision 7), so the resource keys on the
@@ -169,6 +236,7 @@ function NewRunView() {
     [{ type: 'provider.auth.changed' }],
   );
   const providerName = () => provider()?.display_name ?? 'The provider';
+  const loggedOut = () => resourceValue(authStatus)?.logged_in === false;
 
   // '' = untouched → submit the resolved default. Tracking the operator's pick
   // separately keeps a late providers/settings load from clobbering it.
@@ -187,10 +255,10 @@ function NewRunView() {
       { defer: true },
     ),
   );
-  const model = () =>
-    modelPick() !== ''
-      ? modelPick()
-      : resolveSpawnOption(models(), selectedRepo()?.model_default, defaultsValue().model);
+  // The inherited model: the resolution without the per-spawn pick.
+  const modelDefault = () =>
+    resolveSpawnOption(models(), selectedRepo()?.model_default, defaultsValue().model);
+  const model = () => (modelPick() !== '' ? modelPick() : modelDefault());
   // The RESOLVED model entry — explicit pick or layered default. The composer
   // always sends the resolved effort, so the effort catalog must follow the
   // model that actually rides the spawn (issue #156): effort support varies
@@ -200,8 +268,7 @@ function NewRunView() {
   // When the resolved model changes and the explicit effort pick is not in
   // the new model's catalog, drop it — mirrors the server's skip-layer
   // resolution so a stale pick can never 400 a spawn. With no stored defaults
-  // this displays/sends the new model's default (the issue's "snap to the
-  // model's default effort"); a still-valid pick is kept.
+  // this displays/sends the new model's default; a still-valid pick is kept.
   createEffect(
     on(
       () => model(),
@@ -212,25 +279,41 @@ function NewRunView() {
       { defer: true },
     ),
   );
-  const effort = () =>
-    effortPick() !== ''
-      ? effortPick()
-      : resolveEffortOption(
-          selectedModel(),
-          selectedRepo()?.effort_default,
-          defaultsValue().effort,
-        );
+  const effortDefault = () =>
+    resolveEffortOption(selectedModel(), selectedRepo()?.effort_default, defaultsValue().effort);
+  const effort = () => (effortPick() !== '' ? effortPick() : effortDefault());
+
+  // Where an inherited default comes from, for the picker's hint: the repo's
+  // own override when it is the one that applies, else global Settings.
+  const defaultSource = (repoValue: string | null | undefined, inherited: string): string => {
+    const repo = selectedRepo();
+    return repo !== null && repoValue != null && repoValue !== '' && repoValue === inherited
+      ? `${repo.name}'s settings`
+      : 'global Settings';
+  };
+  const modelOptions = (): ChoiceOption[] =>
+    models().map((m) => ({ value: m.value, label: m.label }));
+  const effortOptions = (): ChoiceOption[] =>
+    efforts().map((o) => ({ value: o.value, label: o.label }));
+  // Picking the inherited default clears the pick: the chip loses its accent.
+  const pickModel = (value: string): void => {
+    setModelPick(value === modelDefault() ? '' : value);
+  };
+  const pickEffort = (value: string): void => {
+    setEffortPick(value === effortDefault() ? '' : value);
+  };
+
+  // --- Remote control, label, runner ---
 
   // Remote control (issue #163), mirroring the server's manual chain:
-  // per-spawn pick → repo.remote_default → spawn_remote_default → false. The
-  // toggle shows the RESOLVED value, so it is pre-filled with what would be sent
-  // if the operator never opened the popover.
+  // per-spawn pick → repo.remote_default → spawn_remote_default → false.
   const resolvedRemote = () =>
     resolveRemote(selectedRepo()?.remote_default, defaultsValue().remote);
   const remote = () =>
     resolveRemote(remotePick(), selectedRepo()?.remote_default, defaultsValue().remote);
+  const remoteSetHere = () => remotePick() !== null && remotePick() !== resolvedRemote();
   // A provider without the knob ignores remote control entirely (its runs are
-  // clamped to off server-side): the toggle is disabled and says so, named by
+  // clamped to off server-side): the switch is disabled and says so, named by
   // display_name — never a hardcoded brand.
   const remoteBlocker = (): string | null => {
     const p = provider();
@@ -238,37 +321,56 @@ function NewRunView() {
   };
 
   const [label, setLabel] = createSignal('');
+  // The effective Runner: the repo's own, else the global runner_default.
+  const runner = () => {
+    const repo = selectedRepo();
+    if (repo === null) return null;
+    return repo.runner ?? defaultsValue().runner ?? null;
+  };
+
+  // --- Blockers and the field ---
+
+  const blockers = () => {
+    const repo = selectedRepo();
+    return composerBlockers({
+      repo,
+      progress: repo === null ? null : progress.progress(repo.id),
+      loggedOut: loggedOut(),
+      providerName: providerName(),
+    });
+  };
+  const disabled = () => selectedRepo() === null || fieldDisabled(blockers());
+  // The chips stay usable while only the agent's login blocks: More options
+  // is where another agent is picked. A repo that cannot start yet (cloning,
+  // clone failed) has nothing to configure.
+  const chipsDisabled = () => {
+    const repo = selectedRepo();
+    return repo === null || !isStartable(repo);
+  };
+
+  const [retrying, setRetrying] = createSignal(false);
   const [text, setText] = createSignal('');
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  // The `…` options popover. The Select chips manage their own open state and
-  // close this one via onOpen (one popover open at a time, as before).
-  const [pop, setPop] = createSignal<'more' | null>(null);
 
-  const loggedOut = () => resourceValue(authStatus)?.logged_in === false;
-
-  // Escape closes any open popover.
-  const onKeyDownGlobal = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && pop() !== null) setPop(null);
+  const retry = async (): Promise<void> => {
+    const repo = selectedRepo();
+    if (repo === null || retrying()) return;
+    setRetrying(true);
+    try {
+      await retryClone(repo.id);
+      await reloadRepos();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setRetrying(false);
+    }
   };
-  window.addEventListener('keydown', onKeyDownGlobal);
-  onCleanup(() => window.removeEventListener('keydown', onKeyDownGlobal));
 
-  // Outside-click closes the `…` popover: a document listener mounted only
-  // while it is open. A click inside the .composer-pop wrapper is left to the
-  // popover's own handlers (its trigger toggles); anything else closes it —
-  // including clicks on the Select chips, which is exactly the old
-  // one-popover-at-a-time behavior. Mounted after the opening click, so it
-  // never self-closes.
-  createEffect(() => {
-    if (pop() === null) return;
-    const onDocMouseDown = (e: MouseEvent): void => {
-      const target = e.target as Element | null;
-      if (target === null || target.closest('.composer-pop') === null) setPop(null);
-    };
-    document.addEventListener('mousedown', onDocMouseDown);
-    onCleanup(() => document.removeEventListener('mousedown', onDocMouseDown));
-  });
+  const attachmentRef = (): AttachmentRef | null => {
+    const att = attachment();
+    return att === null ? null : { action: att.action, number: att.issue.number };
+  };
 
   // Auto-grow the textarea one row → content height (chat-composer decision 9b);
   // JS sets the exact height inline, CSS max-height clamps + scrolls. jsdom has
@@ -285,40 +387,44 @@ function NewRunView() {
     autoGrow();
   });
 
-  const canSend = () => selectedRepo() !== null && !busy();
+  const attach = (action: IssueAction, issue: IssueSummary): void => {
+    setAttachment({ action, issue });
+    inputEl?.focus();
+  };
+
+  const canSend = () => !disabled() && !busy();
 
   const send = async (): Promise<void> => {
     const repo = selectedRepo();
-    if (repo === null || busy()) return;
+    if (repo === null || !canSend()) return;
     setBusy(true);
     setError(null);
     try {
       const req: StartInstanceRequest = {};
-      const trimmedLabel = label().trim();
-      if (trimmedLabel !== '') req.label = trimmedLabel;
+      // A typed label wins; an attached action defaults it (`triage-47`).
+      const runLabel = runLabelFor(label(), attachmentRef());
+      if (runLabel !== '') req.label = runLabel;
       // Only an EXPLICIT per-spawn pick rides along — the resolved default
       // chain is the server's to walk (and validate) itself.
       if (providerPick() !== '') req.provider = providerPick();
       if (model() !== '') req.model = model();
       if (effort() !== '') req.effort = effort();
       // Same discipline for remote control (issue #163): only a value that
-      // DIFFERS from the resolved default rides the request — an untouched
-      // toggle (or one toggled back to what the layers already say) sends
-      // nothing and leaves the resolution to the server. A provider that has no
-      // remote knob never sends the key at all.
+      // DIFFERS from the resolved default rides the request. A provider that
+      // has no remote knob never sends the key at all.
       if (remoteBlocker() === null && remote() !== resolvedRemote()) req.remote = remote();
-      // The typed text rides the spawn as first_message (issue #96): the backend
-      // delivers it on the agent's argv, so the chat needs no post-spawn send and
-      // the lazily-created transcript never deadlocks it. Empty text = a plain
-      // spawn with no first_message.
-      const body = text().trim();
+      // The run's first_message (issue #96), delivered on the agent's argv: the
+      // attached action's line (then the typed text), else the typed text.
+      // Empty = a plain spawn with no first_message.
+      const att = attachment();
+      const body =
+        att !== null ? composeFirstMessage(att.action, att.issue, text()) : text().trim();
       if (body !== '') req.first_message = body;
       const run = await startInstance(repo.id, req);
       navigate('/runs/' + run.id);
     } catch (err) {
       // 409 (cap / provider logged out / repo not ready) et al. surface
-      // verbatim; the composer text STAYS (we never cleared it) so nothing is
-      // lost.
+      // verbatim; the text and the attachment STAY so nothing is lost.
       setError(errorMessage(err));
     } finally {
       setBusy(false);
@@ -327,17 +433,15 @@ function NewRunView() {
 
   // Bare Enter sends on fine-pointer (mouse/trackpad) setups, matching the chat
   // composer via the shared gate (ADR-0031, issue #70); Cmd/Ctrl+Enter keeps
-  // sending everywhere. Unlike the chat composer, `send()` here does NOT guard
-  // empty text — an empty body is a valid "plain spawn" via the Start button
-  // (see the comment above `send`) — so a bare Enter needs its own empty guard:
-  // an accidental keystroke on an empty box must not launch an instance, while
-  // Cmd/Ctrl+Enter keeps today's explicit empty-spawn behavior. preventDefault
-  // fires even on the guarded empty case, so the empty box never gains a
-  // leading newline (issue #70 decision 8).
+  // sending everywhere. An empty body is a valid plain spawn via Send or
+  // Cmd/Ctrl+Enter, but an accidental bare Enter on an empty box must not
+  // launch one — unless an issue action is attached, which is a whole request
+  // on its own (the mockup). preventDefault fires even on the guarded case, so
+  // the empty box never gains a leading newline (issue #70 decision 8).
   const onKeyDown = (e: KeyboardEvent): void => {
     if (!isComposerSend(e)) return;
     e.preventDefault();
-    if (!(e.metaKey || e.ctrlKey) && text().trim() === '') return;
+    if (!(e.metaKey || e.ctrlKey) && text().trim() === '' && attachment() === null) return;
     void send();
   };
 
@@ -348,14 +452,7 @@ function NewRunView() {
   const hasRepos = () => (resourceValue(repos)?.length ?? 0) > 0;
 
   return (
-    <main class="page newrun">
-      <Banner message={error()} onDismiss={() => setError(null)} />
-      <Show when={loggedOut()}>
-        <p class="newrun-warn" role="alert">
-          {providerName()} is logged out — <A href="/credentials">reconnect</A>.
-        </p>
-      </Show>
-
+    <main class="page newrun" classList={{ 'newrun-docked': hasRepos() }}>
       <Switch>
         <Match when={repos.error !== undefined}>
           <Banner message={errorMessage(repos.error)} />
@@ -369,8 +466,37 @@ function NewRunView() {
           </EmptyState>
         </Match>
         <Match when={hasRepos()}>
-          <div class="composer">
-            <div classList={{ 'composer-field': true, disabled: selectedRepo() === null }}>
+          <div class="newrun-pills">
+            <RepoPills
+              repos={repoList()}
+              pills={pills()}
+              recentIds={recentIds()}
+              selectedId={selectedRepo()?.id ?? null}
+              progress={progress.progress}
+              onPick={pickRepo}
+            />
+          </div>
+
+          <div class="newrun-dock">
+            <Banner message={error()} onDismiss={() => setError(null)} />
+            <ComposerBlockers
+              blockers={blockers()}
+              hostRunner={runner() === 'host'}
+              onRetryClone={() => void retry()}
+              retrying={retrying()}
+            />
+            <div classList={{ 'composer-field': true, disabled: disabled() }}>
+              <Show when={attachment()}>
+                {(att) => (
+                  <AttachmentChip
+                    text={attachmentText(att().action, att().issue)}
+                    onRemove={() => {
+                      setAttachment(null);
+                      inputEl?.focus();
+                    }}
+                  />
+                )}
+              </Show>
               <textarea
                 ref={(el) => {
                   inputEl = el;
@@ -378,72 +504,62 @@ function NewRunView() {
                 }}
                 class="composer-input"
                 rows={1}
-                placeholder="Describe a task to start a new run…"
+                aria-label="Task"
+                placeholder={composerPlaceholder(attachmentRef(), selectedRepo()?.name ?? '')}
                 value={text()}
                 onInput={(e) => setText(e.currentTarget.value)}
                 onKeyDown={onKeyDown}
-                disabled={selectedRepo() === null}
+                disabled={disabled()}
               />
               <div class="composer-bar">
-                <Select
-                  skin="chip"
-                  label="Repository"
-                  icon={<Icon name="folder" size={15} class="composer-chip-icon" />}
-                  value={selectedRepo()?.id ?? ''}
-                  options={repoOptions()}
-                  onChange={pickRepoById}
-                  onOpen={() => setPop(null)}
-                />
-                {/* The agent chip exists only when there is a real choice —
-                    with a single registered provider the composer stays
-                    exactly as before (ADR-0030). */}
-                <Show when={providerList().length >= 2}>
-                  <Select
-                    skin="chip"
-                    label="Agent"
-                    value={provider()?.id ?? ''}
-                    options={providerOptions()}
-                    onChange={setProviderPick}
-                    onOpen={() => setPop(null)}
+                <div class="composer-chips">
+                  <ChoiceChip
+                    name="Model"
+                    value={model()}
+                    defaultValue={modelDefault()}
+                    options={modelOptions()}
+                    changed={modelPick() !== '' && modelPick() !== modelDefault()}
+                    defaultSource={defaultSource(selectedRepo()?.model_default, modelDefault())}
+                    onPick={pickModel}
+                    disabled={chipsDisabled() || models().length === 0}
                   />
-                </Show>
-                <Select
-                  skin="chip"
-                  label="Model"
-                  value={model()}
-                  options={models()}
-                  disabled={models().length === 0}
-                  onChange={setModelPick}
-                  onOpen={() => setPop(null)}
-                />
-                {/* No efforts catalog = the provider has no effort knob at
-                    all — hide the chip rather than pin a disabled control. */}
-                <Show when={efforts().length > 0}>
-                  <Select
-                    skin="chip"
-                    label="Effort"
-                    value={effort()}
-                    options={efforts()}
-                    onChange={setEffortPick}
-                    onOpen={() => setPop(null)}
+                  {/* No efforts catalog = the model has no effort knob at
+                      all — hide the chip rather than pin a disabled control. */}
+                  <Show when={efforts().length > 0}>
+                    <ChoiceChip
+                      name="Effort"
+                      value={effort()}
+                      defaultValue={effortDefault()}
+                      options={effortOptions()}
+                      changed={effortPick() !== '' && effortPick() !== effortDefault()}
+                      defaultSource={defaultSource(selectedRepo()?.effort_default, effortDefault())}
+                      onPick={pickEffort}
+                      disabled={chipsDisabled()}
+                    />
+                  </Show>
+                  <MoreOptions
+                    providers={providerList().map((p) => ({ id: p.id, label: p.display_name }))}
+                    providerId={provider()?.id ?? ''}
+                    onProvider={pickProvider}
+                    remote={remote()}
+                    remoteSetHere={remoteSetHere()}
+                    remoteBlocker={remoteBlocker()}
+                    onRemote={setRemotePick}
+                    label={label()}
+                    onLabel={setLabel}
+                    runner={runner()}
+                    runnerInherited={selectedRepo()?.runner === null}
+                    runnerHref={`/repos/${encodeURIComponent(selectedRepo()?.id ?? '')}/settings/runner`}
+                    changed={providerPick() !== '' || remoteSetHere() || label().trim() !== ''}
+                    disabled={chipsDisabled()}
                   />
-                </Show>
-                <MoreChip
-                  label={label()}
-                  onLabel={setLabel}
-                  remote={remote()}
-                  onRemote={setRemotePick}
-                  remoteBlocker={remoteBlocker()}
-                  open={pop() === 'more'}
-                  onToggle={() => setPop((p) => (p === 'more' ? null : 'more'))}
-                />
-                <span class="spacer" />
+                </div>
                 <button
                   type="button"
                   class="composer-send icon-btn"
                   classList={{ busy: busy() }}
-                  aria-label="Start run"
-                  title="Start run (Enter)"
+                  aria-label={sendLabel(attachmentRef())}
+                  title={attachment() === null ? 'Start run (Enter)' : sendLabel(attachmentRef())}
                   disabled={!canSend()}
                   onClick={() => void send()}
                 >
@@ -451,12 +567,15 @@ function NewRunView() {
                 </button>
               </div>
             </div>
+          </div>
 
+          <div class="newrun-issues">
             <Show when={selectedRepo()}>
               {(repo) => (
-                <AFKStrip
+                <IssuesCard
                   repo={repo()}
-                  onRepoChanged={() => void refetchRepos()}
+                  onAction={attach}
+                  onRepoChanged={reloadRepos}
                   onStarted={(run) => toast.show(afkStartedMessage(run))}
                   onError={setError}
                 />
@@ -473,75 +592,4 @@ function NewRunView() {
 /** Toast copy for an AFK start — the claimed issue is the run's issue_number. */
 function afkStartedMessage(run: Run): string {
   return run.issue_number !== null ? `AFK run started on #${run.issue_number}` : 'AFK run started';
-}
-
-// Status text for a non-ready repo row: cloning/error repos stay visible in
-// the picker but disabled, showing their state (+ the live clone % from the
-// cloneProgress store while cloning).
-function repoStatus(repo: Repo, progress: CloneProgress | null): string | undefined {
-  if (repo.clone_status === 'error') return 'clone failed';
-  if (repo.clone_status === 'cloning') {
-    const percent = progress?.percent;
-    return percent !== null && percent !== undefined ? `cloning ${percent}%` : 'cloning…';
-  }
-  return undefined;
-}
-
-// The `…` popover: the optional label (≤32 chars) and the per-spawn remote
-// control toggle (issue #163). Manual spawn accepts no provider-options bag, so
-// nothing else belongs here (issue #21 stays open).
-function MoreChip(props: {
-  label: string;
-  onLabel: (value: string) => void;
-  /** The RESOLVED remote-control value — the pre-filled state of the toggle. */
-  remote: boolean;
-  onRemote: (value: boolean) => void;
-  /** Display name of a provider with no remote knob, else null: disables the toggle. */
-  remoteBlocker: string | null;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <div class="composer-pop">
-      <button
-        type="button"
-        class="composer-chip more-chip icon-btn"
-        aria-haspopup="dialog"
-        aria-expanded={props.open}
-        aria-label="More options"
-        title="More options"
-        onClick={() => props.onToggle()}
-      >
-        <Icon name="more-horizontal" size={16} />
-      </button>
-      <Show when={props.open}>
-        <div class="composer-pop-panel more-pop" role="dialog" aria-label="Run options">
-          <label class="field composer-label-field">
-            <span>Label (optional)</span>
-            <input
-              name="label"
-              maxlength="32"
-              value={props.label}
-              onInput={(e) => props.onLabel(e.currentTarget.value)}
-              placeholder="debug"
-              autocomplete="off"
-            />
-          </label>
-          <label class="check">
-            <input
-              type="checkbox"
-              name="remote"
-              checked={props.remote}
-              disabled={props.remoteBlocker !== null}
-              onChange={(e) => props.onRemote(e.currentTarget.checked)}
-            />
-            <span>Remote control</span>
-          </label>
-          <Show when={props.remoteBlocker}>
-            {(name) => <small class="hint hint-block">{name()} ignores this.</small>}
-          </Show>
-        </div>
-      </Show>
-    </div>
-  );
 }

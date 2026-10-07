@@ -40,3 +40,8 @@
 @import './styles/repo-overview.css';
 @import './styles/repo-settings.css';
 @import './styles/repo-forms.css';
+@import './styles/picker.css';
+@import './styles/newrun.css';
+@import './styles/newrun-repos.css';
+@import './styles/newrun-issues.css';
+@import './styles/newrun-composer.css';

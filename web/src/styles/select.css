@@ -1,6 +1,6 @@
 /* Unified select (issue #66) ------------------------------------------------ */
 
-/* Relative wrapper around the trigger + panel (the .composer-pop pattern);
+/* Relative wrapper around the trigger + panel (an anchored dropdown);
    the field skin stretches it to the form-control width. */
 .select-pop {
   position: relative;
@@ -132,41 +132,8 @@
   color: var(--muted);
 }
 
-/* AFK strip under the composer. */
-.afk-strip {
-  margin-top: var(--space-3);
-}
-.afk-strip-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-.afk-strip-start,
-.afk-strip-auto {
-  min-height: 44px;
-  font-size: 0.9rem;
-  font-weight: 550;
-}
-/* Greyed hint at a known-0 claimable count — visual only; the button stays a
-   real, enabled control (the server re-checks and 409s a stale click). */
-.afk-strip-start.greyed {
-  opacity: 0.55;
-}
-.afk-strip-paused {
-  margin-bottom: var(--space-2);
-  align-items: center;
-}
-.afk-strip-reset {
-  min-height: 44px;
-  padding: 0 0.7rem;
-}
-
-/* <640px: the composer fills the width and the chip row wraps naturally. */
+/* <640px: a chip-skin trigger's label gives way sooner. */
 @media (max-width: 639.98px) {
-  .composer {
-    margin-top: var(--space-4);
-  }
   .composer-chip-label {
     max-width: 7rem;
   }

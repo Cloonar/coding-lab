@@ -703,6 +703,13 @@ describe('spawn defaults from settings', () => {
     expect(extractSpawnDefaults({ provider_default: '' })).toEqual({});
   });
 
+  it('extracts the global runner default from runner_default, known values only', () => {
+    expect(extractSpawnDefaults({ runner_default: 'container' })).toEqual({ runner: 'container' });
+    expect(extractSpawnDefaults({ runner_default: 'host' })).toEqual({ runner: 'host' });
+    expect(extractSpawnDefaults({ runner_default: 'vm' })).toEqual({});
+    expect(extractSpawnDefaults({ runner_default: '' })).toEqual({});
+  });
+
   it('extracts from a {settings: {...}} envelope', () => {
     expect(extractSpawnDefaults({ settings: { spawn_model_default: 'sonnet' } })).toEqual({
       model: 'sonnet',
