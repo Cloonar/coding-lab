@@ -1,0 +1,786 @@
+<!doctype html>
+<!--
+  Reference mockup for the New run page redesign (design direction A, "Sheet", revision 2).
+  A static design reference, not shipped code: the spec is the issue's agent brief, and this
+  file shows the intended layout, hierarchy, copy tone and interaction. Open it in a browser.
+  - At viewport widths below 840px the phone layout fills the screen. Wider viewports show a
+    phone frame with design notes; the switch in the top bar changes it to a desktop frame.
+  - Everything is clickable. The URL hash opens a state directly, which is how to screenshot
+    it with a headless browser. Tokens are joined by dots, for example #desktop.model.
+      frame:    desktop, nonotes
+      pickers:  model, repo, issues, many (50 sample issues), more
+      issues:   action (the action sheet for #47), triage (Triage #47 attached),
+                implement (Implement #56 attached)
+      repo:     autooff (data-pipeline, Auto off), codex (billing-api, Codex agent)
+      blocker:  loggedout
+    Reload after changing the hash.
+  Sample content is invented; the coding-lab issue titles are the repo's real open issues at
+  the time of the design session. Markup, CSS and script here are throwaway; follow the app's
+  own components, tokens and conventions when implementing.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>lab New run mockup</title>
+</head>
+<body>
+<style>
+/* The app's own vendored serif, loaded by relative path so the file needs no network. */
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations'); font-weight: 200 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations'); font-weight: 200 900; font-style: italic; font-display: swap; }
+/* Layout: a slim prototype bar over a device stage. The device is a size container, so the app
+   inside answers to the frame (phone or desktop), not to the window. Colors and type are lab's
+   own tokens (web/src/styles/tokens.css): bone/ivory light, warm charcoal dark, terracotta accent,
+   Source Serif 4 for headings only. */
+:root{
+  --bg:#faf9f5; --card:#ffffff; --text:#1f1e1d; --muted:#6b675c; --border:#e8e4da; --hover:#f1efe8;
+  --accent:#d97757; --accent-text:#2a1a12; --accent-bg:#fbe9e1; --link:#b0532f;
+  --danger:#c0362c; --danger-border:#e6b8b3; --ok:#1a9c5b; --warn:#b98a1f;
+  --run-bg:#e7f2e1; --run-text:#1f6b3d; --idle-bg:#ece7db; --chip-bg:#eeeae0; --chip-text:#524c3f;
+  --banner-bg:#faf1d8; --banner-border:#e9cd8e; --banner-text:#5b4b16;
+  --err-bg:#fbeae5; --err-border:#eec2b8; --err-text:#9c3324;
+  --stage:#ebe7dc; --scrim:rgba(31,30,29,.42); --knob:#ffffff;
+  --shadow:0 1px 2px rgba(40,32,22,.06),0 1px 3px rgba(40,32,22,.04);
+  --shadow-lift:0 12px 34px rgba(40,32,22,.16);
+  --font-serif:'Source Serif 4',Georgia,'Times New Roman',serif;
+  --font-sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  --r-card:14px; --r-ctl:10px; --r-pill:999px;
+  --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2rem;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#262624; --card:#30302e; --text:#ecebe6; --muted:#a5a196; --border:#3e3c37; --hover:#373631;
+  --accent:#d97757; --accent-bg:#40291f; --link:#e08d70;
+  --danger:#f28577; --danger-border:#5c2b27; --ok:#3ecf8e; --warn:#d9b24c;
+  --run-bg:#17301d; --run-text:#6cd99a; --idle-bg:#35332e; --chip-bg:#3a3833; --chip-text:#d6d2c7;
+  --banner-bg:#2e2712; --banner-border:#5c4f20; --banner-text:#e6d9a6;
+  --err-bg:#2e1613; --err-border:#5c2b27; --err-text:#f3aca2;
+  --stage:#1a1a18; --scrim:rgba(0,0,0,.58); --knob:#f4f2ec;
+  --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-lift:0 12px 34px rgba(0,0,0,.5);
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#262624; --card:#30302e; --text:#ecebe6; --muted:#a5a196; --border:#3e3c37; --hover:#373631;
+  --accent:#d97757; --accent-bg:#40291f; --link:#e08d70;
+  --danger:#f28577; --danger-border:#5c2b27; --ok:#3ecf8e; --warn:#d9b24c;
+  --run-bg:#17301d; --run-text:#6cd99a; --idle-bg:#35332e; --chip-bg:#3a3833; --chip-text:#d6d2c7;
+  --banner-bg:#2e2712; --banner-border:#5c4f20; --banner-text:#e6d9a6;
+  --err-bg:#2e1613; --err-border:#5c2b27; --err-text:#f3aca2;
+  --stage:#1a1a18; --scrim:rgba(0,0,0,.58); --knob:#f4f2ec;
+  --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-lift:0 12px 34px rgba(0,0,0,.5);
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--stage);color:var(--text);font:15px/1.5 var(--font-sans);-webkit-text-size-adjust:100%}
+h1,h2,h3{font-family:var(--font-serif);font-weight:600;margin:0;text-wrap:balance;overflow-wrap:anywhere}
+p{margin:0}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.mono,code{font-family:var(--font-mono);font-size:.84em}
+.muted{color:var(--muted)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg.i{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+svg.i.sm{width:16px;height:16px}
+svg.i.xs{width:14px;height:14px}
+.spacer{flex:1}
+[hidden]{display:none!important}
+
+/* ---- prototype chrome ---- */
+.proto{height:100%;display:flex;flex-direction:column}
+.pbar{display:flex;align-items:center;gap:var(--s3);padding:6px 16px;background:var(--card);border-bottom:1px solid var(--border);flex:none}
+.pbar-badge{width:30px;height:30px;flex:none;border-radius:9px;background:var(--accent);color:var(--accent-text);display:grid;place-items:center;font-weight:700}
+.pbar-t{display:flex;flex-direction:column;min-width:0;line-height:1.2;flex:1}
+.pbar-name{font-family:var(--font-serif);font-weight:600;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pbar-sub{color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pbar select{min-height:36px;border:1px solid var(--border);border-radius:8px;background:var(--bg);padding:0 .5rem;max-width:11rem}
+.stage{flex:1;min-height:0;position:relative;display:flex;justify-content:center;align-items:stretch;gap:var(--s5)}
+.device{container:device / inline-size;position:relative;overflow:hidden;background:var(--bg);width:100%;height:100%}
+.notes{background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);padding:var(--s4) var(--s4) var(--s5);overflow-y:auto;position:absolute;inset:8px;z-index:60;box-shadow:var(--shadow-lift);display:none}
+.notes-open .notes{display:block}
+.notes-h{display:flex;align-items:flex-start;gap:var(--s2)}
+.notes-h>div{flex:1;min-width:0}
+.notes h2{font-size:1.35rem}
+.notes h3{font-family:var(--font-sans);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:var(--s4) 0 var(--s1)}
+.notes ul{margin:0;padding-left:1.1rem;display:flex;flex-direction:column;gap:.35rem}
+.notes .lead{margin-top:var(--s2);font-family:var(--font-serif);font-size:1.02rem;line-height:1.45}
+.notes .fine{margin-top:var(--s4);font-size:.82rem;color:var(--muted)}
+.notes .tag{display:inline-block;font-size:.72rem;font-weight:650;letter-spacing:.04em;text-transform:uppercase;padding:0 .4rem;border-radius:6px;background:var(--banner-bg);color:var(--banner-text);vertical-align:middle;margin-left:.2rem}
+.seg.viewseg{display:none}
+@media (min-width:840px){
+  .stage{padding:var(--s5) var(--s4)}
+  .seg.viewseg{display:inline-flex}
+  .mode-phone .device{width:390px;height:min(844px,100%);flex:none;border-radius:28px;border:1px solid var(--border);box-shadow:var(--shadow-lift)}
+  .mode-phone .notes{display:block;position:static;inset:auto;width:400px;flex:none;height:min(844px,100%);box-shadow:var(--shadow)}
+  .mode-phone.notes-closed .notes{display:none}
+  .mode-desktop .device{max-width:1280px;height:min(860px,100%);border-radius:14px;border:1px solid var(--border);box-shadow:var(--shadow-lift)}
+  .mode-desktop .notes{position:absolute;right:var(--s4);top:var(--s5);bottom:var(--s5);left:auto;width:400px}
+}
+@media (max-width:839px){.pbar-sub{display:none}}
+
+/* ---- app shell: topstrip on phone, the 260px rail from 900px of device width ---- */
+.app{height:100%;display:flex;position:relative}
+.rail{display:none;flex-direction:column;gap:var(--s2);padding:var(--s3);width:260px;flex:none;background:var(--card);border-right:1px solid var(--border);overflow-y:auto}
+.app.drawer-open .rail{display:flex;position:absolute;inset:0 auto 0 0;z-index:46;max-width:85%;box-shadow:var(--shadow-lift)}
+.drawer-scrim{display:none;position:absolute;inset:0;background:var(--scrim);z-index:45}
+.app.drawer-open .drawer-scrim{display:block}
+.rail-brand{display:flex;align-items:center;gap:.4rem;min-height:36px}
+.rail-brand .icon-btn{margin-left:auto;color:var(--muted)}
+.brand{font-family:var(--font-serif);font-weight:600;font-size:1.25rem;letter-spacing:-.01em}
+.brand b{color:var(--accent);font-weight:700}
+.rail-newrun{display:flex;align-items:center;justify-content:center;gap:.4rem;min-height:44px;padding:.5rem .75rem;background:var(--accent);color:var(--accent-text);border:0;border-radius:var(--r-ctl);font-weight:600;text-decoration:none}
+.rail-newrun[aria-current="page"]{box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--accent-text) 35%,transparent)}
+.rail-label{margin:var(--s2) 0 0;padding:0 .2rem;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.rail-row{display:flex;align-items:center;gap:.5rem;min-height:44px;padding:.4rem .5rem;border-radius:var(--r-ctl);color:var(--text);text-decoration:none;border:0;background:none;width:100%;text-align:left}
+.rail-row:hover{background:var(--hover)}
+.rail-row .dot{width:8px;height:8px}
+.rail-row-body{min-width:0;display:flex;flex-direction:column;line-height:1.25}
+.rail-row-body b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail-row-body small{font-size:.78rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail-nav{margin-top:auto;border-top:1px solid var(--border);padding-top:var(--s2);display:flex;flex-direction:column;gap:2px}
+.rail-nav .rail-row{font-weight:600}
+.rail-nav .rail-row[aria-current="page"]{color:var(--link)}
+.rail-foot{display:flex;align-items:center;gap:.5rem;border-top:1px solid var(--border);padding-top:var(--s3);color:var(--muted)}
+.rail-foot .btn{margin-left:auto}
+.main{flex:1;min-width:0;display:flex;flex-direction:column;height:100%;position:relative}
+.topstrip{display:flex;align-items:center;gap:.65rem;padding:.5rem var(--s3);border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);flex:none;min-height:52px}
+.topstrip .brand{flex:1}
+.hamb{position:relative}
+.attn-badge{position:absolute;top:6px;right:6px;width:8px;height:8px;border-radius:50%;background:var(--accent);border:2px solid var(--bg)}
+.screen{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){.screen{scroll-behavior:auto}}
+@container device (min-width:900px){.rail{display:flex}.topstrip{display:none}}
+
+/* ---- shared components ---- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:.4rem;min-height:44px;padding:0 .9rem;border:1px solid var(--border);border-radius:var(--r-ctl);background:var(--card);color:var(--text);font-weight:600;text-decoration:none;white-space:nowrap}
+.btn:hover{background:var(--hover)}
+.btn.solid{background:var(--accent);color:var(--accent-text);border-color:transparent}
+.btn.solid:hover{background:color-mix(in srgb,var(--accent) 88%,var(--text))}
+.btn.ghost{background:none;border-color:transparent;color:var(--link)}
+.btn.ghost:hover{background:var(--hover)}
+.btn.danger{color:var(--danger);border-color:var(--danger-border)}
+.btn.small{min-height:36px;padding:0 .75rem;font-size:.9rem}
+.btn:disabled{opacity:.55;cursor:default}
+.btn.busy{opacity:.6}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;min-width:44px;padding:0;border:0;border-radius:var(--r-ctl);background:none;color:var(--text)}
+.icon-btn:hover{background:var(--hover)}
+.chip{display:inline-flex;align-items:center;gap:.3rem;min-height:22px;padding:0 .55rem;border-radius:var(--r-pill);background:var(--chip-bg);color:var(--chip-text);font-size:.78rem;font-weight:600;white-space:nowrap;line-height:1.4}
+.chip.ok{background:var(--run-bg);color:var(--run-text)}
+.chip.warn{background:var(--banner-bg);color:var(--banner-text)}
+.chip.err{background:var(--err-bg);color:var(--err-text)}
+.chip.attn{background:var(--accent-bg);color:var(--link)}
+.chip.count{min-width:22px;justify-content:center;padding:0 .4rem}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.dot.ok{background:var(--ok)}
+.dot.attn{background:var(--accent)}
+.dot.work{background:var(--banner-text)}
+.dot.err{background:var(--danger)}
+.dot.hollow{background:transparent;box-shadow:inset 0 0 0 1.5px var(--muted)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow);padding:var(--s4)}
+.eyebrow{display:flex;align-items:center;gap:.5rem;margin:0;font-family:var(--font-sans);font-size:.75rem;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.seg{display:inline-flex;align-self:flex-start;max-width:100%;padding:3px;gap:2px;background:var(--chip-bg);border-radius:var(--r-ctl)}
+.seg button{min-height:38px;padding:0 .85rem;border:0;border-radius:8px;background:none;font-weight:550;color:var(--muted);white-space:nowrap}
+.seg button[aria-pressed="true"]{background:var(--card);color:var(--text);box-shadow:var(--shadow)}
+.seg.fill{display:flex;align-self:stretch}
+.seg.fill button{flex:1;padding:0 .2rem}
+.switch{position:relative;display:inline-flex;align-items:center;gap:.6rem;min-height:44px;cursor:pointer;user-select:none}
+.switch input{position:absolute;opacity:0;width:1px;height:1px}
+.switch .track{width:44px;height:26px;border-radius:var(--r-pill);background:var(--idle-bg);border:1px solid var(--border);position:relative;transition:background .15s;flex:none}
+.switch .track::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--knob);box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
+.switch input:checked+.track{background:var(--ok);border-color:transparent}
+.switch input:checked+.track::after{transform:translateX(18px)}
+.switch input:focus-visible+.track{outline:2px solid var(--accent);outline-offset:2px}
+.switch b{font-weight:600}
+.field{display:flex;flex-direction:column;gap:.3rem;min-width:0}
+.field>span.lbl{display:flex;align-items:center;gap:.4rem;font-size:.85rem;font-weight:600}
+.field>span.lbl .inh{font-size:.72rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.field .ctl{display:flex;align-items:center;justify-content:space-between;gap:.5rem;width:100%;min-height:44px;padding:.45rem .7rem;font-size:16px;text-align:left;color:var(--text);background:var(--card);border:1px solid var(--border);border-radius:var(--r-ctl)}
+.field .ctl span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.field .ctl .i{color:var(--muted)}
+.field .ctl.ph span{color:var(--muted)}
+.field input.ctl{display:block}
+.field input.ctl::placeholder{color:var(--muted);opacity:.9}
+.field small{font-size:.8rem;color:var(--muted)}
+.banner{display:flex;align-items:center;gap:.6rem;padding:.6rem .8rem;border:1px solid var(--banner-border);background:var(--banner-bg);color:var(--banner-text);border-radius:var(--r-ctl);font-size:.9rem}
+.banner.err{background:var(--err-bg);border-color:var(--err-border);color:var(--err-text)}
+.banner .btn{margin-left:auto;background:var(--card);color:var(--text);flex:none}
+.banner a{color:inherit;font-weight:600}
+/* The merged composer field: textarea plus a bottom bar, like the chat's composer row. */
+.cfield{background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow);padding:var(--s1) var(--s1) var(--s2);display:flex;flex-direction:column}
+.cfield:focus-within{border-color:var(--accent);outline:2px solid var(--accent);outline-offset:-1px}
+.cfield textarea{display:block;width:100%;min-height:2.75rem;max-height:12rem;padding:var(--s3) var(--s3) var(--s2);font:inherit;font-size:16px;line-height:1.45;color:var(--text);background:transparent;border:0;resize:none;outline:none}
+.cfield textarea::placeholder{color:var(--muted);opacity:.9}
+.cbar{display:flex;align-items:center;gap:var(--s2);padding:0 var(--s2);flex-wrap:wrap}
+.send{width:44px;height:44px;min-width:44px;border-radius:50%;background:var(--accent);color:var(--accent-text);border:0;display:inline-flex;align-items:center;justify-content:center}
+.send:hover{background:color-mix(in srgb,var(--accent) 88%,var(--text))}
+.send:disabled{opacity:.55;cursor:default}
+.send.busy{opacity:.6}
+/* Issue attachment inside the composer: the run will claim this issue. */
+.attach{display:inline-flex;align-items:center;gap:.4rem;min-height:36px;padding:0 .3rem 0 .6rem;margin:var(--s2) var(--s2) 0;border-radius:var(--r-ctl);background:var(--accent-bg);color:var(--link);font-weight:600;font-size:.9rem;align-self:flex-start;max-width:calc(100% - 1rem)}
+.attach span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attach .icon-btn{width:30px;height:30px;min-width:30px;color:inherit}
+/* Bottom sheet on the phone; a centered dialog from 900px. */
+.sheet-scrim{position:absolute;inset:0;background:var(--scrim);z-index:50}
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:51;max-height:88%;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r-card) var(--r-card) 0 0;box-shadow:var(--shadow-lift)}
+.sheet-h{display:flex;align-items:center;gap:.5rem;padding:var(--s2) var(--s2) var(--s2) var(--s4);border-bottom:1px solid var(--border);flex:none}
+.sheet-h h2{font-size:1.1rem;flex:1}
+.sheet-grab{position:absolute;top:6px;left:50%;width:36px;height:4px;margin-left:-18px;border-radius:2px;background:var(--border)}
+.sheet-b{overflow-y:auto;padding:var(--s4);display:flex;flex-direction:column;gap:var(--s4)}
+.sheet-f{display:flex;gap:var(--s2);padding:var(--s3) var(--s4) calc(var(--s4) + env(safe-area-inset-bottom,0px));border-top:1px solid var(--border);flex:none}
+.sheet-f .btn{flex:1}
+@container device (min-width:900px){
+  .sheet{left:50%;right:auto;bottom:auto;top:50%;transform:translate(-50%,-50%);width:440px;max-height:80%;border-radius:var(--r-card)}
+  .sheet-grab{display:none}
+}
+.opt-row{display:flex;align-items:center;gap:.6rem;min-height:44px;padding:0 .4rem;border:0;background:none;width:100%;text-align:left;border-radius:var(--r-ctl);color:var(--text)}
+.opt-row:hover{background:var(--hover)}
+.opt-row b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:550}
+.opt-row[aria-checked="true"]{background:color-mix(in srgb,var(--accent) 12%,var(--card))}
+.opt-row small{color:var(--muted);font-size:.8rem;flex:none}
+.opt-row:disabled{opacity:.55;cursor:default}
+.toast{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:70;display:flex;align-items:center;gap:.8rem;max-width:calc(100% - 2rem);padding:.6rem .9rem;border-radius:var(--r-ctl);background:var(--text);color:var(--bg);font-size:.9rem;box-shadow:var(--shadow-lift)}
+.toast button{border:0;background:none;color:var(--accent);font-weight:650;padding:0}
+.empty{color:var(--muted);text-align:center;padding:var(--s4)}
+.readiness{display:flex;align-items:center;gap:.6rem;min-height:44px;text-decoration:none;color:var(--text)}
+.readiness .ring{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;flex:none;background:var(--run-bg);color:var(--run-text)}
+.readiness .ring.err{background:var(--err-bg);color:var(--err-text)}
+.readiness .ring.warn{background:var(--banner-bg);color:var(--banner-text)}
+.readiness .txt{flex:1;min-width:0;line-height:1.3}
+.readiness .txt b{display:block;font-weight:600}
+.readiness .txt small{color:var(--muted);font-size:.85rem;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.readiness .i{color:var(--muted)}
+
+/* ---- direction-specific ---- */
+.a-home{flex:none;display:flex;flex-direction:column;min-height:100%}
+.a-pills-wrap{flex:none;padding:var(--s3) 0 0}
+.a-pills{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;padding:2px var(--s4)}
+.a-pills::-webkit-scrollbar{display:none}
+.a-pill{display:inline-flex;align-items:center;gap:.4rem;min-height:40px;padding:0 .85rem;border-radius:var(--r-pill);border:1px solid var(--border);background:var(--card);font-weight:550;white-space:nowrap;color:var(--text);flex:none}
+.a-pill:hover{background:var(--hover)}
+.a-pill[aria-pressed="true"]{background:var(--accent-bg);border-color:var(--accent);color:var(--link)}
+.a-pill .dot{width:7px;height:7px}
+.a-pill.more{color:var(--muted);font-weight:500}
+.a-top{flex:1;padding:var(--s3) var(--s4) var(--s2);display:flex;flex-direction:column;gap:var(--s3)}
+.a-issues{padding:var(--s3) var(--s3) var(--s2);display:flex;flex-direction:column;gap:var(--s1)}
+.a-issues-h{display:flex;align-items:center;gap:.5rem;min-height:36px}
+.a-issues-h h2{font-size:1.1rem}
+.a-issues-h .switch{min-height:36px}
+.a-afk{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;font-size:.85rem;color:var(--muted);padding:0 0 var(--s1)}
+.a-afk .btn{margin-left:auto}
+.issue-row{display:flex;align-items:center;gap:.6rem;min-height:48px;padding:.35rem .4rem;border:0;background:none;width:100%;text-align:left;border-radius:var(--r-ctl);color:var(--text)}
+.issue-row:hover{background:var(--hover)}
+.issue-row[aria-pressed="true"]{background:color-mix(in srgb,var(--accent) 12%,var(--card))}
+.issue-row .issue-t{flex:1;min-width:0;font-weight:550;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.sheet-h h2:focus{outline:none}
+.issue-row>small{flex:none}
+.chip.tri-ready{background:var(--run-bg);color:var(--run-text)}
+.chip.tri-triage{background:var(--banner-bg);color:var(--banner-text)}
+.chip.tri-info{background:var(--idle-bg);color:var(--idle-text,var(--muted))}
+.a-issues .lnk{display:inline-flex;align-items:center;gap:.2rem;min-height:40px;padding:0 .4rem;color:var(--link);font-weight:550;text-decoration:none;align-self:flex-start;border:0;background:none}
+.a-issues .lnk:hover{background:var(--hover);border-radius:var(--r-ctl)}
+.a-dock{flex:none;position:sticky;bottom:0;padding:var(--s2) var(--s4) calc(var(--s3) + env(safe-area-inset-bottom,0px));background:linear-gradient(to bottom,transparent,var(--bg) 35%)}
+.a-dock .banner{margin-bottom:var(--s2)}
+.a-dock .banner span{flex:1;min-width:0}
+.cbar{flex-wrap:nowrap;padding:0 var(--s1) 0 var(--s2)}
+.chips{display:flex;gap:var(--s2);flex:1;min-width:0;overflow-x:auto;scrollbar-width:none;padding:2px 0}
+.chips::-webkit-scrollbar{display:none}
+.chipb{display:inline-flex;align-items:center;gap:.3rem;min-height:40px;padding:0 .6rem 0 .7rem;border-radius:var(--r-pill);border:1px solid var(--border);background:var(--chip-bg);color:var(--text);font-size:.9rem;font-weight:550;white-space:nowrap;flex:none}
+.chipb:hover{background:var(--hover)}
+.chipb .i{color:var(--muted)}
+.chipb.set{border-color:var(--accent);color:var(--link)}
+.chipb.icon{width:40px;min-width:40px;padding:0;justify-content:center}
+.cfield.off{opacity:.65}
+.cfield .attach{margin-bottom:0}
+/* pickers */
+.pick-search{display:flex;align-items:center;gap:.5rem;min-height:44px;padding:0 .75rem;border:1px solid var(--border);border-radius:var(--r-ctl);background:var(--card);color:var(--muted);margin-bottom:var(--s2)}
+.pick-search input{flex:1;min-width:0;border:0;background:none;font-size:16px;outline:none;color:var(--text)}
+.pick-filters{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;margin:0 0 var(--s2);padding:2px 0;flex:none}
+.pick-filters::-webkit-scrollbar{display:none}
+.pick-filters button{display:inline-flex;align-items:center;gap:.3rem;min-height:34px;padding:0 .7rem;border-radius:var(--r-pill);border:1px solid var(--border);background:var(--card);font-size:.85rem;font-weight:550;white-space:nowrap;color:var(--text);flex:none}
+.pick-filters button[aria-pressed="true"]{background:var(--accent-bg);border-color:var(--accent);color:var(--link)}
+.pick-filters .n{color:var(--muted);font-weight:500}
+.pick-filters button[aria-pressed="true"] .n{color:inherit}
+.pick-group{margin:0;padding:0 .4rem;font-size:.72rem;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.opt-row small.d{color:var(--muted);font-weight:500}
+.opt-row .inh{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;flex:none}
+.pick-list{display:flex;flex-direction:column;gap:2px}
+.sheet-b{gap:var(--s3)}
+.sheet-b .pick-search{flex:none;margin-bottom:0}
+#iss-list,#repo-list{overflow-y:auto;min-height:0}
+.iss-head{display:flex;flex-direction:column;gap:.3rem;padding-bottom:var(--s2);border-bottom:1px solid var(--border)}
+.iss-head b{font-weight:600;line-height:1.3}
+.iss-head .labels{display:flex;gap:.3rem;flex-wrap:wrap}
+.act{display:flex;align-items:center;gap:.7rem;min-height:60px;padding:var(--s2) var(--s3);background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);text-align:left;width:100%;color:var(--text)}
+.act:hover{background:var(--hover)}
+.act.suggested{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--card))}
+.act>.i{color:var(--link)}
+.act .t{flex:1;min-width:0;line-height:1.3}
+.act b{display:flex;align-items:center;gap:.4rem;font-weight:600}
+.act small{display:block;color:var(--muted);font-size:.83rem}
+/* desktop popover anchored to a chip */
+.pop-scrim{position:absolute;inset:0;z-index:50}
+.pop{position:absolute;z-index:51;width:340px;max-height:60%;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow-lift)}
+.pop .sheet-h{padding:var(--s2) var(--s2) var(--s2) var(--s3)}
+.pop .sheet-b{overflow-y:auto;padding:var(--s3)}
+.more-fields{display:flex;flex-direction:column;gap:var(--s3)}
+@container device (min-width:900px){
+  .a-home{max-width:720px;width:100%;margin:0 auto;padding:clamp(1.5rem,8vh,5rem) var(--s4) var(--s6);min-height:0}
+  .a-pills-wrap{order:1;padding:0}
+  .a-pills{padding:2px 0}
+  .a-dock{order:2;position:static;background:none;padding:var(--s3) 0 0}
+  .a-top{order:3;flex:none;padding:var(--s4) 0 0}
+}
+</style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M10.9 12.1 20 3M15 8l3 3M18 5l2 2"/></symbol>
+  <symbol id="i-ticket" viewBox="0 0 24 24"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+  <symbol id="i-chevrons-left" viewBox="0 0 24 24"><path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4v16l14-8z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 3-3 4-6 4.5s-5 1-6 3"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h8l-1 8 10-12h-8z"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></symbol>
+</svg>
+<div class="proto mode-phone notes-open">
+  <div class="pbar">
+    <div class="pbar-badge">A2</div>
+    <div class="pbar-t"><span class="pbar-name">New run · Sheet, revision 2</span><span class="pbar-sub">Direction A, revision 2 · model and effort one chip away, searchable repo picker, issues with an action</span></div>
+    <div class="seg viewseg" role="group" aria-label="Frame"><button type="button" data-mode="phone" aria-pressed="true">Phone</button><button type="button" data-mode="desktop" aria-pressed="false">Desktop</button></div>
+    <select id="state" aria-label="State"><option value="">Default</option><option value="model">Model picker</option><option value="repo">Repo picker (search)</option><option value="issues">All issues picker (search)</option><option value="many">50 open issues · picker</option><option value="more">More options</option><option value="action">Issue #47 · choose action</option><option value="triage">Triage #47 attached</option><option value="implement">Implement #56 attached</option><option value="autooff">data-pipeline · Auto off</option><option value="codex">billing-api (Codex)</option><option value="loggedout">Agent logged out</option></select>
+    <button type="button" id="notes-btn" class="btn small" aria-expanded="true">Notes</button>
+  </div>
+  <div class="stage">
+    <div class="device">
+      <div class="app">
+        <aside class="rail" aria-label="Navigation">
+          <div class="rail-brand"><span class="brand">lab<b>.</b></span><button type="button" class="icon-btn" aria-label="Collapse"><svg class="i"><use href="#i-chevrons-left"/></svg></button></div>
+          <a class="rail-newrun" href="#" aria-current="page">+ New run</a>
+          <p class="rail-label">Active</p>
+          <div id="rail-active"></div>
+          <nav class="rail-nav">
+            <a class="rail-row" href="#repos"><svg class="i"><use href="#i-folder"/></svg>Repos</a>
+            <a class="rail-row" href="#history"><svg class="i"><use href="#i-history"/></svg>History</a>
+            <a class="rail-row" href="#credentials"><svg class="i"><use href="#i-key"/></svg>Credentials</a>
+            <a class="rail-row" href="#tokens"><svg class="i"><use href="#i-ticket"/></svg>Tokens</a>
+            <a class="rail-row" href="#settings"><svg class="i"><use href="#i-settings"/></svg>Settings</a>
+          </nav>
+          <div class="rail-foot"><span>dominik</span><button type="button" class="btn small">Log out</button><i class="dot ok"></i></div>
+        </aside>
+        <div class="main">
+          <header class="topstrip"><span class="brand">lab<b>.</b></span><i class="dot ok" title="Server connected"></i><button type="button" class="icon-btn hamb" aria-label="Menu"><svg class="i"><use href="#i-menu"/></svg><i class="attn-badge"></i></button></header>
+          <div class="screen" id="screen"></div>
+          <div class="toast" role="status" hidden></div>
+        </div>
+        <div class="drawer-scrim"></div>
+      </div>
+    </div>
+    <aside class="notes" aria-label="Design notes">
+<div class="notes-h"><div><h2>A · Sheet, revision 2</h2><p class="muted">What changed after the round-1 review</p></div><span class="chip attn">phone first</span></div>
+<p class="lead">Same shape: the composer docks at the bottom, the rest of the page is only what helps you start a run from here. The options are one chip away, AFK is one line, an issue is something you act on, and status appears only when it blocks you.</p>
+<h3>Model and effort: one chip, two taps</h3>
+<ul>
+  <li>The composer bar holds chips again, as today: Model, Effort, and a ⋯ for the rest (agent, remote control, label, the Runner note). The row scrolls sideways on a phone instead of wrapping, so the send stays pinned and the field keeps one height.</li>
+  <li>Tapping Model opens a picker right away: a bottom sheet on the phone, a popover on the chip on desktop. Pick → done. Two taps, never three. A chip that differs from the inherited default is outlined in the accent, so a per-spawn pick is visible.</li>
+  <li>Catalog for Claude Code: Fable 5.1, Opus 5.5, Sonnet 5.5. No Haiku. The inherited default is marked in the list.</li>
+</ul>
+<h3>Repository</h3>
+<ul>
+  <li>The pills are the recent repositories, one tap each. "All" now opens the repository picker, not the Repositories page.</li>
+  <li>The picker starts with a search field that filters as you type (name or host), Recent first, then All. Enter picks the first match. This is the existing Select component's filter input, so the implementation already exists.</li>
+</ul>
+<h3>Issues, with an action</h3>
+<ul>
+  <li>The Issues card lists the repo's open issues with their triage label, newest first. Not only the claimable ones: a needs-triage issue is as much a reason to start a run as a ready one.</li>
+  <li>Tapping an issue asks what the agent should do with it. <b>Triage</b> starts a run whose first message is <code>/triage #47</code>: the repo's triage skill reads the issue, asks you what is missing, and sets the label. <b>Implement</b> seeds a manual run with the issue as its brief, on its own branch. <b>Discuss</b> opens a chat with the issue as context and waits for you. The suggested action follows the label.</li>
+  <li>The chosen action attaches to the composer; anything you type is added to it. Send starts the run.</li>
+  <li>None of this needs a server change: the action is the run's first message, which the spawn already carries (issue #96). The AFK seed prompt is untouched.</li>
+</ul>
+<h3>Nothing here leaves the page</h3>
+<ul>
+  <li>Recent prompts are gone.</li>
+  <li>"All N open issues" opens the full list in place: a text filter by number or title, then chips that narrow by state (needs-triage, ready-for-agent, needs-info, unlabeled) with counts, then the rows. The search stays pinned while the rows scroll. At 50 or 200 issues this is two taps to the needs-triage ones; the state "50 open issues" shows it at that size. Picking one goes straight to the action sheet.</li>
+  <li>The list is the tracker's open issues as lab last read them (bounded reads, ADR-0050), the same list the Issues tab shows, so the card and the picker add no forge request of their own when that list is fresh.</li>
+  <li>The readiness line is gone. A repo that can run shows nothing about it: the enabled composer is the signal, and the pill's dot already carries the repo's state. Only a blocker appears, and it appears at the composer: a cloning repo, a failed clone, a logged-out agent (the field is disabled, with Reconnect), or a failing tracker (a warning with Fix, because a manual run can still start). The full six-check report stays on the repo home, where you go to check a repo.</li>
+</ul>
+<h3>AFK is one line</h3>
+<ul>
+  <li>"Auto on · 3 ready · 1 AFK run live" with the Auto switch in the card head. Run one appears only when Auto is off, since with Auto on the engine claims the next issue itself. A paused repo shows Reset here.</li>
+</ul>
+<h3>Still open</h3>
+<ul>
+  <li>Typing <code>#</code> in the composer could offer the same issue autocomplete inline; left out of this round.</li>
+  <li>Whether Implement should instead claim the issue through the AFK machinery (own branch pattern, done-signal, three-strikes). As drawn it is a manual run with a seeded brief.</li>
+</ul>
+<p class="fine">States: model, repo, issues, many, more, action, triage, implement, autooff, codex, loggedout; add .desktop for the desktop frame. Sample content is invented; issue titles are the repo's real open issues. Markup here is throwaway; follow the app's components and tokens when implementing.</p>
+    </aside>
+  </div>
+</div>
+<script>
+const $=(s,r=document)=>r.querySelector(s);
+const $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const ic=(n,c='')=>`<svg class="i ${c}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const plural=(n,w)=>`${n} ${w}${n===1?'':'s'}`;
+const proto=$('.proto'),app=$('.app'),device=$('.device');
+const isWide=()=>window.matchMedia('(min-width:840px)').matches;
+const isDesktop=()=>device.clientWidth>=900;
+
+/* ===== sample data: coding-lab and cloonar-nixos are real names, every figure is invented ===== */
+const PROVIDERS=[
+  {id:'claude',name:'Claude Code',remote:true,models:[{v:'fable',l:'Fable 5.1',d:'Most capable',efforts:['low','medium','high','max']},{v:'opus',l:'Opus 5.5',d:'Strong, lower cost',efforts:['low','medium','high']},{v:'sonnet',l:'Sonnet 5.5',d:'Fast',efforts:['low','medium','high']}]},
+  {id:'codex',name:'Codex',remote:false,models:[{v:'gpt5c',l:'GPT-5 Codex',d:'',efforts:['low','medium','high','max']}]},
+];
+const GLOBAL={provider:'claude',model:'fable',effort:'high',remote:true,runner:'container'};
+const R=(name,host,o)=>({id:name,name,host,tracker:'forge · github',status:'ready',ready:'ok',live:0,waiting:0,claimable:0,auto:false,autoland:false,runner:null,provider:null,model:null,effort:null,remote:null,opened:'',issues:[],schedules:[],runs:[],...o});
+const REPOS=[
+  R('coding-lab','github.com/Cloonar/coding-lab',{live:2,waiting:1,claimable:3,auto:true,autoland:true,opened:'4 min ago',last:true,
+    open:12,issues:[{n:56,t:'Record the Runner a run was spawned with on the run',age:'3 d',labels:['ready-for-agent','enhancement']},{n:47,t:'Warpgate: dashboard exposure and per-run recordings deep link',age:'8 d',labels:['needs-triage','enhancement']},{n:45,t:'Chat header context meter: Sonnet denominator is 200K but first-party logins run 1M',age:'8 d',labels:['needs-triage']},{n:33,t:'fix(nix): assert the two dead-setting OneCLI dashboard refusals at eval time',age:'7 wk',labels:['needs-triage','bug']},{n:22,t:'labctl pr create: allow opening a PR from a specific branch (--head)',age:'2 mo',labels:['ready-for-agent','enhancement']},{n:11,t:'Publish a lab server container image for a one-command quickstart',age:'2 mo',labels:['ready-for-agent','enhancement']}],
+    schedules:[{id:'s1',name:'Nightly dependency check',next:'Tomorrow 03:00',flows:'autolander',last:'ok'},{id:'s2',name:'Weekly triage sweep',next:'Mon 08:00',flows:'human-triage',last:'ok'},{id:'s3',name:'Docs drift check',next:'',paused:true,flows:'autolander',last:'3 failed'}],
+    runs:[{t:'Fix chat dock overlap',s:'Waiting for you',dot:'attn'},{t:'afk/61 Autoland re-arm',s:'Working · ~1h 12m left',dot:'work'}]}),
+  R('data-pipeline','github.com/example/data-pipeline',{live:1,claimable:4,auto:true,opened:'3 h ago',
+    open:17,issues:[{n:118,t:'Backfill the events table from the archive',age:'1 d',labels:['ready-for-agent','bug']},{n:121,t:'Dedupe late-arriving events before the nightly rollup',age:'2 d',labels:['ready-for-agent','bug']},{n:124,t:'Export the rollup as parquet',age:'5 d',labels:['needs-info','enhancement']},{n:130,t:'Alert when a partition is missing',age:'6 d',labels:['needs-triage','enhancement']}],
+    schedules:[{id:'s4',name:'Morning partition audit',next:'Tomorrow 06:30',flows:'autolander',last:'ok'}],
+    runs:[{t:'afk/118 Backfill events',s:'Working · ~48m left',dot:'work'}]}),
+  R('cloonar-nixos','git.example.com/cloonar/nixos',{tracker:'forge · forgejo',runner:'host',live:1,opened:'1 h ago',open:4,issues:[{n:9,t:'Pin the kernel to the LTS channel on dev-new',age:'5 d',labels:['needs-triage']}],runs:[{t:'Bump flake inputs',s:'Idle',dot:'hollow'}]}),
+  R('billing-api','git.example.com/acme/billing-api',{tracker:'builtin tracker',incogni:true,claimable:1,opened:'5 h ago',provider:'codex',
+    open:6,issues:[{n:14,t:'Round invoice totals once, at the end',age:'4 d',labels:['ready-for-agent','bug']},{n:15,t:'Invoice PDF: the VAT line is missing for reverse charge',age:'6 d',labels:['needs-triage','bug']}]}),
+  R('website','github.com/example/website',{claimable:5,auto:true,paused:true,autoland:true,opened:'yesterday',
+    issues:[{n:201,t:'Pricing page: the yearly toggle resets on reload',age:'2 d',labels:['bug']},{n:203,t:'Blog index pagination',age:'4 d',labels:['enhancement']},{n:208,t:'Add the changelog feed',age:'9 d',labels:['enhancement']},{n:209,t:'Fix the OG image for docs pages',age:'10 d',labels:['bug']},{n:214,t:'Dark mode: the code blocks keep a light background',age:'12 d',labels:['bug']}]}),
+  R('auth-service','git.example.com/acme/auth-service',{tracker:'forge · forgejo',ready:'err',readyMsg:'The forge token was rejected, so issues cannot be read.',claimable:2,auto:true,opened:'yesterday'}),
+  R('mobile-app','github.com/example/mobile-app',{status:'cloning',percent:62,ready:'pending',opened:''}),
+  R('docs-site','github.com/example/docs-site',{auto:true,autoland:true,opened:'2 days ago'}),
+  R('infra-docs','git.example.com/acme/infra-docs',{tracker:'forge · forgejo',status:'error',ready:'err',readyMsg:'Clone failed: the remote rejected the git credential.',opened:'3 days ago'}),
+];
+const repoById=id=>REPOS.find(r=>r.id===id);
+const startable=r=>r.status==='ready';
+
+/* ===== the run options, resolved like the server's skip-layer chain: per-spawn pick → repo override → global default ===== */
+const S={repo:'coding-lab',provider:'',model:'',effort:'',remote:null,label:'',issue:null,text:'',loggedOut:false};
+function effective(){
+  const repo=repoById(S.repo);
+  const pid=S.provider||repo.provider||GLOBAL.provider;
+  const prov=PROVIDERS.find(p=>p.id===pid);
+  const mv=(S.model&&prov.models.some(m=>m.v===S.model))?S.model:(prov.models.some(m=>m.v===repo.model)?repo.model:(prov.models.some(m=>m.v===GLOBAL.model)?GLOBAL.model:prov.models[0].v));
+  const model=prov.models.find(m=>m.v===mv);
+  const ev=(S.effort&&model.efforts.includes(S.effort))?S.effort:(model.efforts.includes(repo.effort)?repo.effort:(model.efforts.includes(GLOBAL.effort)?GLOBAL.effort:(model.efforts[0]||'')));
+  const remoteInherited=repo.remote??GLOBAL.remote;
+  const remote=prov.remote?(S.remote??remoteInherited):false;
+  const runner=repo.runner||GLOBAL.runner;
+  return {repo,prov,model,effort:ev,remote,remoteInherited,remoteBlocked:!prov.remote,runner,runnerInherited:repo.runner===null,
+    providerInherited:S.provider==='',modelInherited:S.model===''||S.model!==mv,effortInherited:S.effort===''||S.effort!==ev};
+}
+const cap=s=>s?s[0].toUpperCase()+s.slice(1):s;
+function summaryParts(){const e=effective();const p=[e.repo.name,e.model.l];if(e.effort)p.push(cap(e.effort));if(PROVIDERS.length>1)p.push(e.prov.name);if(!e.remoteBlocked)p.push(e.remote?'Remote on':'Remote off');return p}
+function pickRepo(id){if(S.repo===id)return;S.repo=id;S.provider='';S.model='';S.effort='';S.remote=null;S.issue=null}
+
+/* ===== prototype chrome ===== */
+let toastTimer;
+function toast(msg,action){
+  const t=$('.toast');t.textContent='';const s=document.createElement('span');s.textContent=msg;t.append(s);
+  if(action){const b=document.createElement('button');b.type='button';b.textContent=action.label;b.addEventListener('click',()=>{t.hidden=true;action.run()});t.append(b)}
+  t.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{t.hidden=true},action?6500:2600);
+}
+function setNotes(open){proto.classList.toggle('notes-open',open);proto.classList.toggle('notes-closed',!open);$('#notes-btn').setAttribute('aria-expanded',String(open))}
+function setMode(m){
+  proto.classList.toggle('mode-phone',m==='phone');proto.classList.toggle('mode-desktop',m==='desktop');
+  $$('.viewseg button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===m)));
+  app.classList.remove('drawer-open');setNotes(m==='phone'&&isWide());
+  requestAnimationFrame(()=>render());
+}
+function renderRail(){
+  const live=REPOS.flatMap(r=>r.runs.map(x=>({...x,repo:r.name})));
+  $('#rail-active').innerHTML=live.map(x=>`<a class="rail-row" href="#chat"><i class="dot ${x.dot}"></i><span class="rail-row-body"><b>${esc(x.t)}</b><small>${esc(x.repo)}${x.s.startsWith('Working')?' · '+esc(x.s.split('· ')[1]):''}</small></span></a>`).join('');
+}
+function openSheet(title,body,foot){
+  closeSheet();
+  const wrap=document.createElement('div');wrap.className='sheet-wrap';
+  wrap.innerHTML=`<div class="sheet-scrim"></div><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-t"><i class="sheet-grab"></i>
+    <div class="sheet-h"><h2 id="sheet-t">${esc(title)}</h2><button type="button" class="icon-btn" aria-label="Close">${ic('x')}</button></div>
+    <div class="sheet-b">${body}</div>${foot?`<div class="sheet-f">${foot}</div>`:''}</div>`;
+  $('.main').append(wrap);
+  $('.sheet-scrim',wrap).addEventListener('click',closeSheet);
+  $('.sheet-h .icon-btn',wrap).addEventListener('click',closeSheet);
+  $('#sheet-t',wrap).tabIndex=-1;$('#sheet-t',wrap).focus();
+  return wrap;
+}
+function closeSheet(){$$('.sheet-wrap').forEach(w=>w.remove())}
+
+/* The run options as fields — shared by every direction's options surface. */
+function optionFields(opts={}){
+  const e=effective();
+  const inh=(is,what)=>`<span class="inh">${is?'inherited':'set here'}</span>`;
+  const repoRows=REPOS.map(r=>`<button type="button" class="opt-row" role="option" aria-checked="${r.id===S.repo}" data-pick-repo="${r.id}" ${startable(r)?'':'disabled'}><i class="dot ${r.ready==='ok'?'ok':r.ready==='err'?'err':'hollow'}"></i><b>${esc(r.name)}</b><small>${r.status==='cloning'?`cloning ${r.percent}%`:r.status==='error'?'clone failed':r.ready==='err'?'not ready':r.last?'last used':''}</small></button>`).join('');
+  return `
+  ${opts.noRepo?'':`<div class="field"><span class="lbl">Repository</span>
+    <button type="button" class="ctl" data-toggle="repo-list" aria-expanded="false">${ic('folder','sm')}<span>${esc(e.repo.name)}</span>${ic('chevron-down','sm')}</button>
+    <div class="opt-list" id="repo-list" role="listbox" hidden>${repoRows}</div></div>`}
+  ${PROVIDERS.length>1?`<div class="field"><span class="lbl">Agent ${inh(e.providerInherited)}</span>
+    <div class="seg fill" data-seg="provider">${PROVIDERS.map(p=>`<button type="button" data-v="${p.id}" aria-pressed="${p.id===e.prov.id}">${esc(p.name)}</button>`).join('')}</div></div>`:''}
+  <div class="field"><span class="lbl">Model ${inh(e.modelInherited)}</span>
+    <div class="seg fill" data-seg="model">${e.prov.models.map(m=>`<button type="button" data-v="${m.v}" aria-pressed="${m.v===e.model.v}">${esc(m.l)}</button>`).join('')}</div></div>
+  ${e.model.efforts.length?`<div class="field"><span class="lbl">Effort ${inh(e.effortInherited)}</span>
+    <div class="seg fill" data-seg="effort">${e.model.efforts.map(x=>`<button type="button" data-v="${x}" aria-pressed="${x===e.effort}">${cap(x)}</button>`).join('')}</div></div>`:`<div class="field"><span class="lbl">Effort</span><small>${esc(e.model.l)} has no effort setting.</small></div>`}
+  <div class="field"><label class="switch"><input type="checkbox" id="opt-remote" ${e.remote?'checked':''} ${e.remoteBlocked?'disabled':''}><span class="track"></span><b>Remote control</b><span class="spacer"></span><small>${e.remoteBlocked?`${esc(e.prov.name)} ignores this`:S.remote===null?`inherited · ${e.remoteInherited?'on':'off'}`:'set here'}</small></label></div>
+  <div class="field"><span class="lbl" id="lbl-label">Label <span class="inh">optional</span></span><input class="ctl" id="opt-label" aria-labelledby="lbl-label" maxlength="32" placeholder="debug" value="${esc(S.label)}" autocomplete="off"></div>
+  <div class="field"><small>Runs ${e.runner==='container'?'in a container':'directly on the host, unsandboxed'}${e.runnerInherited?' (inherited)':''} · <a href="#settings" class="lnk">Runner settings</a></small></div>`;
+}
+function bindOptionFields(root,onChange){
+  const change=()=>{onChange?.()};
+  $('[data-toggle="repo-list"]',root)?.addEventListener('click',e=>{const l=$('#repo-list',root);l.hidden=!l.hidden;e.currentTarget.setAttribute('aria-expanded',String(!l.hidden))});
+  $$('[data-pick-repo]',root).forEach(b=>b.addEventListener('click',()=>{pickRepo(b.dataset.pickRepo);change()}));
+  $$('[data-seg]',root).forEach(seg=>$$('button',seg).forEach(b=>b.addEventListener('click',()=>{
+    const k=seg.dataset.seg,v=b.dataset.v;
+    if(k==='provider'){S.provider=v;S.model='';S.effort=''}
+    else if(k==='model'){S.model=v;S.effort=''}
+    else S.effort=v;
+    change();
+  })));
+  $('#opt-remote',root)?.addEventListener('change',e=>{S.remote=e.target.checked;change()});
+  $('#opt-label',root)?.addEventListener('input',e=>{S.label=e.target.value});
+}
+function openOptionsSheet(after){
+  const w=openSheet('Run options',optionFields(),`<button type="button" class="btn solid" id="opt-done">Done</button>`);
+  const rerender=()=>{$('.sheet-b',w).innerHTML=optionFields();bindOptionFields($('.sheet-b',w),rerender);after?.()};
+  bindOptionFields($('.sheet-b',w),rerender);
+  $('#opt-done',w).addEventListener('click',()=>{closeSheet();after?.()});
+}
+/* Claimable issues of a repo as pick rows. */
+function issueRows(repo,attr='data-pick-issue'){
+  if(!repo.issues.length)return `<p class="empty">No issues are ready for an agent.</p>`;
+  return repo.issues.map(i=>`<button type="button" class="issue-row" ${attr}="${i.n}" data-repo="${repo.id}" aria-pressed="${S.issue===i.n&&S.repo===repo.id}">
+    <span class="mono muted">#${i.n}</span><span class="issue-t">${esc(i.t)}</span><span class="chip">${esc(i.labels[0])}</span><small class="muted">${esc(i.age)}</small></button>`).join('');
+}
+function startRun(kind){
+  const e=effective();
+  if(S.loggedOut){toast(`${e.prov.name} is logged out. Reconnect in Credentials first.`);return}
+  const what=kind==='afk'?`AFK run started on ${e.repo.name}`:S.issue?`Run started on #${S.issue} · opening chat`:`Run started on ${e.repo.name} · opening chat`;
+  toast(what);S.text='';S.issue=null;S.label='';render();
+}
+function readinessHTML(repo){
+  if(repo.status==='cloning')return `<a class="readiness" href="#repo"><span class="ring warn">${ic('clock','sm')}</span><span class="txt"><b>Cloning ${repo.percent}%</b><small>Runs can start when the clone finishes.</small></span>${ic('chevron-right','sm')}</a>`;
+  if(repo.ready==='err')return `<a class="readiness" href="#repo"><span class="ring err">${ic('alert','sm')}</span><span class="txt"><b>Not ready</b><small>${esc(repo.readyMsg)}</small></span><span class="btn small">Fix</span></a>`;
+  if(S.loggedOut)return `<a class="readiness" href="#credentials"><span class="ring err">${ic('alert','sm')}</span><span class="txt"><b>${esc(effective().prov.name)} is logged out</b><small>Reconnect to start a run.</small></span><span class="btn small">Reconnect</span></a>`;
+  const bits=[];if(repo.live)bits.push(`${repo.live} live${repo.waiting?`, ${repo.waiting} waiting for you`:''}`);bits.push(`${repo.claimable} ready for an agent`);if(repo.paused)bits.push('AFK paused');
+  return `<a class="readiness" href="#repo"><span class="ring">${ic('check','sm')}</span><span class="txt"><b>Ready to run</b><small>${bits.join(' · ')}</small></span>${ic('chevron-right','sm')}</a>`;
+}
+
+/* ===== boot ===== */
+function boot(){
+  $$('.viewseg button').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+  $('#notes-btn').addEventListener('click',()=>setNotes(!proto.classList.contains('notes-open')));
+  $('#state').addEventListener('change',e=>{location.hash=e.target.value;applyHash()});
+  app.addEventListener('click',e=>{
+    if(e.target.closest('.hamb')){app.classList.add('drawer-open')}
+    else if(e.target.closest('.drawer-scrim')||e.target.closest('.rail a, .rail button.rail-newrun')){app.classList.remove('drawer-open')}
+    const a=e.target.closest('a[href^="#"]');if(a&&!a.closest('.pbar')){e.preventDefault();if(a.getAttribute('href')!=='#')toast(`Would open ${a.getAttribute('href').slice(1)}`)}
+  });
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeSheet();app.classList.remove('drawer-open')}});
+  renderRail();
+  applyHash();
+}
+function applyHash(){
+  const tokens=location.hash.replace('#','').split('.').filter(Boolean);
+  const desktop=tokens.includes('desktop');
+  setMode(desktop?'desktop':'phone');
+  if(tokens.includes('nonotes'))setNotes(false);
+  const st=tokens.find(t=>t!=='desktop'&&t!=='nonotes')||'';
+  $('#state').value=st;
+  resetState();
+  (STATES[st]||STATES[''])();
+  render();
+}
+function resetState(){Object.assign(S,{repo:'coding-lab',provider:'',model:'',effort:'',remote:null,label:'',issue:null,text:'',loggedOut:false});closeSheet()}
+
+/* ===== direction ===== */
+S.act=null;
+const RECENT_REPOS=['coding-lab','data-pipeline','cloonar-nixos','billing-api'];
+const ACTIONS=[
+  {id:'triage',l:'Triage',icon:'ticket',d:n=>`Runs /triage #${n}: the agent reads it, asks you what is missing and sets the label.`},
+  {id:'implement',l:'Implement',icon:'bolt',d:n=>`A run with #${n} as its brief, on a branch of its own.`},
+  {id:'discuss',l:'Discuss',icon:'pencil',d:n=>`Opens a chat with #${n} as context. Nothing happens until you type.`},
+];
+const triOf=i=>i.labels.includes('ready-for-agent')?'ready':i.labels.includes('needs-triage')?'triage':i.labels.includes('needs-info')?'info':'';
+const triChip=i=>{const t=triOf(i);return t?`<span class="chip tri-${t}">${t==='ready'?'ready-for-agent':t==='triage'?'needs-triage':'needs-info'}</span>`:''};
+const STATES={
+  ''(){},
+  model(){queueMicrotask(()=>openModelPicker($('#chip-model')))},
+  repo(){queueMicrotask(()=>openRepoPicker($('#pill-all')))},
+  issues(){queueMicrotask(()=>openIssuePicker($('#a-all-issues')))},
+  many(){const r=repoById('coding-lab');const T=['Rename the module path to the GitHub remote','Flaky e2e: drawer gesture on narrow viewports','Push notification arrives twice after a reconnect','Schedule editor loses the raw cron on blur','History: filter by outcome','Docs: the quickstart skips the OneCLI grant step','Parked view: Discard asks twice on Safari','Run details: show the budget deadline','Composer: paste of a code block drops indentation','Repo settings: inherited remote shows the wrong default','labctl: pr logs for a check that never ran','Container runner: preflight misses a missing crun','Chat: tool chips overlap on 320px','Autoland: re-arm button stays after a merge','Imports: refresh digest lists a removed import'];
+    const L=[['needs-triage'],['needs-triage','bug'],['ready-for-agent'],['ready-for-agent','enhancement'],['needs-info'],[],['needs-triage','enhancement'],['bug']];
+    r.issues=Array.from({length:50},(_,k)=>({n:300-k,t:T[k%T.length],age:k<6?`${k+1} d`:k<30?`${Math.floor(k/3)} wk`:`${Math.floor(k/12)} mo`,labels:L[k%L.length]}));
+    queueMicrotask(()=>openIssuePicker($('#a-all-issues')))},
+  more(){queueMicrotask(()=>openMore($('#chip-more')))},
+  action(){queueMicrotask(()=>openIssueActions(47))},
+  triage(){S.issue=47;S.act='triage'},
+  implement(){S.issue=56;S.act='implement'},
+  autooff(){pickRepo('data-pipeline');repoById('data-pipeline').auto=false},
+  codex(){pickRepo('billing-api')},
+  loggedout(){S.loggedOut=true},
+};
+/* A picker: bottom sheet on the phone, a popover anchored to the chip on desktop. */
+function openPicker(anchor,title,body,width=340){
+  if(!isDesktop()||!anchor)return openSheet(title,body);
+  closeSheet();
+  const main=$('.main'),mr=main.getBoundingClientRect(),ar=anchor.getBoundingClientRect();
+  const wrap=document.createElement('div');wrap.className='sheet-wrap';
+  wrap.innerHTML=`<div class="pop-scrim"></div><div class="pop" role="dialog" aria-labelledby="sheet-t"><div class="sheet-h"><h2 id="sheet-t">${esc(title)}</h2><button type="button" class="icon-btn" aria-label="Close">${ic('x')}</button></div><div class="sheet-b">${body}</div></div>`;
+  main.append(wrap);
+  const pop=$('.pop',wrap);
+  pop.style.width=Math.min(width,mr.width-16)+'px';
+  const left=Math.max(8,Math.min(ar.left-mr.left,mr.width-Math.min(width,mr.width-16)-8));
+  const below=ar.bottom-mr.top+6,spaceBelow=mr.height-below;
+  pop.style.left=left+'px';
+  if(spaceBelow>320){pop.style.top=below+'px';pop.style.maxHeight=(spaceBelow-16)+'px'}
+  else{pop.style.bottom=(mr.height-(ar.top-mr.top)+6)+'px';pop.style.maxHeight=(ar.top-mr.top-16)+'px'}
+  $('.pop-scrim',wrap).addEventListener('click',closeSheet);
+  $('.sheet-h .icon-btn',wrap).addEventListener('click',closeSheet);
+  return wrap;
+}
+function openModelPicker(anchor){
+  const e=effective();
+  const inh=e.repo.model&&e.prov.models.some(m=>m.v===e.repo.model)?e.repo.model:GLOBAL.model;
+  const w=openPicker(anchor,'Model',`<div class="pick-list" role="listbox">${e.prov.models.map(m=>`<button type="button" class="opt-row" role="option" aria-checked="${m.v===e.model.v}" data-m="${m.v}"><b>${esc(m.l)}${m.d?` <small class="d">· ${esc(m.d)}</small>`:''}</b>${m.v===inh?'<span class="inh">default</span>':''}${m.v===e.model.v?ic('check','sm'):''}</button>`).join('')}</div>
+    <p class="muted" style="font-size:.83rem;margin-top:var(--s2)">The default comes from ${e.repo.model?`${esc(e.repo.name)}'s settings`:'global Settings'}. A pick here applies to this run only.</p>`);
+  $$('[data-m]',w).forEach(b=>b.addEventListener('click',()=>{S.model=b.dataset.m;S.effort='';closeSheet();render()}));
+}
+function openEffortPicker(anchor){
+  const e=effective();
+  const w=openPicker(anchor,'Effort',`<div class="pick-list" role="listbox">${e.model.efforts.map(x=>`<button type="button" class="opt-row" role="option" aria-checked="${x===e.effort}" data-e="${x}"><b>${cap(x)}</b>${x===(e.repo.effort||GLOBAL.effort)?'<span class="inh">default</span>':''}${x===e.effort?ic('check','sm'):''}</button>`).join('')}</div>`);
+  $$('[data-e]',w).forEach(b=>b.addEventListener('click',()=>{S.effort=b.dataset.e;closeSheet();render()}));
+}
+function openRepoPicker(anchor){
+  const row=r=>`<button type="button" class="opt-row" role="option" aria-checked="${r.id===S.repo}" data-r="${r.id}" ${startable(r)?'':'disabled'}><i class="dot ${r.status!=='ready'?'hollow':r.ready==='ok'?'ok':'err'}"></i><b>${esc(r.name)} <small class="d">· ${esc(r.host)}</small></b><small>${r.status==='cloning'?`cloning ${r.percent}%`:r.status==='error'?'clone failed':r.ready==='err'?'not ready':''}</small></button>`;
+  const list=q=>{q=q.toLowerCase();const m=REPOS.filter(r=>r.name.includes(q)||r.host.toLowerCase().includes(q));
+    if(q)return `<div class="pick-list">${m.map(row).join('')||'<p class="empty">No repository matches.</p>'}</div>`;
+    const rec=RECENT_REPOS.map(repoById);return `<p class="pick-group">Recent</p><div class="pick-list">${rec.map(row).join('')}</div><p class="pick-group" style="margin-top:var(--s3)">All repositories · ${REPOS.length}</p><div class="pick-list">${REPOS.filter(r=>!RECENT_REPOS.includes(r.id)).map(row).join('')}</div>`};
+  const w=openPicker(anchor,'Repository',`<div class="pick-search">${ic('search','sm')}<input id="repo-q" type="search" placeholder="Type a repository name" aria-label="Filter repositories" autocomplete="off"></div><div id="repo-list">${list('')}</div>`);
+  const bind=()=>$$('[data-r]',w).forEach(b=>b.addEventListener('click',()=>{pickRepo(b.dataset.r);closeSheet();render()}));
+  bind();
+  const q=$('#repo-q',w);q.focus();
+  q.addEventListener('input',()=>{$('#repo-list',w).innerHTML=list(q.value.trim());bind()});
+  q.addEventListener('keydown',e=>{if(e.key==='Enter'){const f=$('[data-r]:not(:disabled)',w);if(f)f.click()}});
+}
+function openMore(anchor){
+  const e=effective();
+  const body=()=>{const e=effective();return `<div class="more-fields">
+    ${PROVIDERS.length>1?`<div class="field"><span class="lbl">Agent <span class="inh">${e.providerInherited?'inherited':'set here'}</span></span><div class="seg fill" data-seg="provider">${PROVIDERS.map(p=>`<button type="button" data-v="${p.id}" aria-pressed="${p.id===e.prov.id}">${esc(p.name)}</button>`).join('')}</div></div>`:''}
+    <div class="field"><label class="switch"><input type="checkbox" id="opt-remote" ${e.remote?'checked':''} ${e.remoteBlocked?'disabled':''}><span class="track"></span><b>Remote control</b><span class="spacer"></span><small>${e.remoteBlocked?`${esc(e.prov.name)} ignores this`:S.remote===null?`inherited · ${e.remoteInherited?'on':'off'}`:'set here'}</small></label></div>
+    <div class="field"><span class="lbl" id="lbl-label">Label <span class="inh">optional</span></span><input class="ctl" id="opt-label" aria-labelledby="lbl-label" maxlength="32" placeholder="debug" value="${esc(S.label)}" autocomplete="off"></div>
+    <div class="field"><small>Runs ${e.runner==='container'?'in a container':'directly on the host, unsandboxed'}${e.runnerInherited?' (inherited)':''} · <a href="#settings" class="lnk">Runner settings</a></small></div></div>`};
+  const w=openPicker(anchor,'More options',body());
+  const bind=()=>{
+    $$('[data-seg="provider"] button',w).forEach(b=>b.addEventListener('click',()=>{S.provider=b.dataset.v;S.model='';S.effort='';$('.sheet-b',w).innerHTML=body();bind();render()}));
+    $('#opt-remote',w)?.addEventListener('change',ev=>{S.remote=ev.target.checked;$('.sheet-b',w).innerHTML=body();bind();render()});
+    $('#opt-label',w)?.addEventListener('input',ev=>{S.label=ev.target.value;$('#chip-more')?.classList.toggle('set',!!S.label)});
+  };
+  bind();
+}
+function openIssuePicker(anchor){
+  const repo=effective().repo;
+  const row=i=>`<button type="button" class="issue-row" data-pick="${i.n}"><span class="mono muted">#${i.n}</span><span class="issue-t">${esc(i.t)}</span>${triChip(i)}<small class="muted">${esc(i.age)}</small></button>`;
+  let state='all';
+  const FILTERS=[['all','All'],['triage','needs-triage'],['ready','ready-for-agent'],['info','needs-info'],['none','unlabeled']];
+  const count=f=>f==='all'?repo.issues.length:repo.issues.filter(i=>(triOf(i)||'none')===f).length;
+  const list=q=>{q=q.toLowerCase().replace(/^#/,'');const m=repo.issues.filter(i=>(state==='all'||(triOf(i)||'none')===state)&&(String(i.n).startsWith(q)||i.t.toLowerCase().includes(q)));
+    return `<div class="pick-list">${m.map(row).join('')||'<p class="empty">No issue matches.</p>'}</div>`};
+  const chips=()=>`<div class="pick-filters">${FILTERS.filter(([f])=>f==='all'||count(f)).map(([f,l])=>`<button type="button" data-f="${f}" aria-pressed="${state===f}">${l} <span class="n">${count(f)}</span></button>`).join('')}</div>`;
+  const w=openPicker(anchor,`Open issues · ${repo.name}`,`<div class="pick-search">${ic('search','sm')}<input id="iss-q" type="search" placeholder="Number or words from the title" aria-label="Filter issues" autocomplete="off"></div>${chips()}<div id="iss-list">${list('')}</div>`,560);
+  const bind=()=>{
+    $$('[data-pick]',w).forEach(b=>b.addEventListener('click',()=>{closeSheet();openIssueActions(+b.dataset.pick)}));
+    $$('[data-f]',w).forEach(b=>b.addEventListener('click',()=>{state=b.dataset.f;$$('[data-f]',w).forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.f===state)));$('#iss-list',w).innerHTML=list($('#iss-q',w).value.trim());bind()}));
+  };
+  bind();const q=$('#iss-q',w);q.focus();
+  q.addEventListener('input',()=>{$('#iss-list',w).innerHTML=list(q.value.trim());bind()});
+  q.addEventListener('keydown',e=>{if(e.key==='Enter'){const f=$('[data-pick]',w);if(f)f.click()}});
+}
+/* The composer says only what blocks a run, where it blocks it. A repo that can run shows nothing. */
+function blockerHTML(repo){
+  if(repo.status==='cloning')return `<div class="banner">${ic('clock','sm')}<span>Cloning ${repo.percent}%. Runs can start when the clone finishes.</span></div>`;
+  if(repo.status==='error')return `<div class="banner err">${ic('alert','sm')}<span>${esc(repo.readyMsg)}</span><a class="btn small" href="#settings">Retry</a></div>`;
+  if(S.loggedOut)return `<div class="banner err">${ic('alert','sm')}<span>${esc(effective().prov.name)} is logged out.</span><a class="btn small" href="#credentials">Reconnect</a></div>`;
+  if(repo.ready==='err')return `<div class="banner">${ic('alert','sm')}<span>${esc(repo.readyMsg)} A run can still start.</span><a class="btn small" href="#settings">Fix</a></div>`;
+  return '';
+}
+function openIssueActions(n){
+  const repo=effective().repo,i=repo.issues.find(x=>x.n===n);
+  const tri=triOf(i),suggest=tri==='triage'?'triage':tri==='ready'?'implement':'discuss';
+  const w=openSheet(`Issue #${n}`,`<div class="iss-head"><b>${esc(i.t)}</b><div class="labels">${triChip(i)}${i.labels.filter(l=>!/^(ready-for-agent|needs-triage|needs-info)$/.test(l)).map(l=>`<span class="chip">${esc(l)}</span>`).join('')}<small class="muted">opened ${esc(i.age)} ago</small></div></div>
+    <p class="muted" style="font-size:.9rem">What should the agent do with it?</p>
+    ${ACTIONS.map(a=>`<button type="button" class="act ${a.id===suggest?'suggested':''}" data-act="${a.id}">${ic(a.icon)}<span class="t"><b>${a.l}${a.id===suggest?'<span class="chip attn">Suggested</span>':''}</b><small>${a.d(n)}</small></span>${ic('chevron-right','sm')}</button>`).join('')}`);
+  $$('[data-act]',w).forEach(b=>b.addEventListener('click',()=>{S.issue=n;S.act=b.dataset.act;closeSheet();render();$('#a-text')?.focus()}));
+}
+function attachText(){const i=effective().repo.issues.find(x=>x.n===S.issue);if(!i)return null;const a=ACTIONS.find(x=>x.id===S.act);return {i,a,label:`${a.l} #${i.n}`,ph:S.act==='discuss'?`Say what you want to discuss about #${i.n}…`:`Anything the agent should know? (optional)`}}
+function render(){
+  const e=effective(),repo=e.repo,at=attachText(),blocked=S.loggedOut||repo.status!=='ready';
+  const pills=RECENT_REPOS.map(repoById).map(r=>`<button type="button" class="a-pill" aria-pressed="${r.id===S.repo}" data-pill="${r.id}"><i class="dot ${r.ready==='ok'?'ok':'err'}"></i>${esc(r.name)}</button>`).join('');
+  const afkLine=repo.ready==='err'?`<span>Issues cannot be read right now.</span>`:repo.paused?`<span>AFK paused after 3 failed runs · ${repo.claimable} ready</span><button type="button" class="btn small" id="a-reset">Reset</button>`:
+    `<span>Auto ${repo.auto?'on':'off'} · ${repo.claimable} ready${repo.runs.filter(x=>x.t.startsWith('afk/')).length?` · ${plural(repo.runs.filter(x=>x.t.startsWith('afk/')).length,'AFK run')} live`:''}${repo.auto?' · next claim when a slot frees':''}</span>${repo.auto?'':`<button type="button" class="btn small" id="a-runone">${ic('play','sm')} Run one</button>`}`;
+  $('#screen').innerHTML=`<div class="a-home">
+    <div class="a-pills-wrap"><div class="a-pills" role="group" aria-label="Repository">${pills}<button type="button" class="a-pill more" id="pill-all">All ${REPOS.length} ${ic('chevron-down','xs')}</button></div></div>
+    <div class="a-top">
+      <section class="card a-issues" aria-labelledby="a-h-issues">
+        <div class="a-issues-h"><h2 id="a-h-issues">Issues</h2><span class="chip count">${repo.issues.length}</span><span class="spacer"></span>${repo.paused||repo.ready==='err'?'':`<label class="switch"><input type="checkbox" id="a-auto" ${repo.auto?'checked':''}><span class="track"></span><b class="muted" style="font-size:.85rem">Auto</b></label>`}</div>
+        <div class="a-afk">${afkLine}</div>
+        ${repo.ready==='err'?`<p class="empty" style="padding:var(--s2)">${esc(repo.readyMsg)}</p>`:repo.issues.slice(0,4).map(i=>`<button type="button" class="issue-row" data-issue="${i.n}" aria-pressed="${S.issue===i.n}"><span class="mono muted">#${i.n}</span><span class="issue-t">${esc(i.t)}</span>${triChip(i)}<small class="muted">${esc(i.age)}</small></button>`).join('')||'<p class="empty">No open issues.</p>'}
+        ${repo.ready==='err'||repo.issues.length<=4?'':`<button type="button" class="lnk" id="a-all-issues">All ${repo.issues.length} open issues ${ic('chevron-down','sm')}</button>`}
+      </section>
+    </div>
+    <div class="a-dock">
+      ${blockerHTML(repo)}
+      ${e.runner==='host'?`<div class="banner">${ic('alert','sm')}Runs on the host, unsandboxed, with full host access.</div>`:''}
+      <div class="cfield ${blocked?'off':''}">
+        ${at?`<div class="attach">${ic(at.a.icon,'sm')}<span>${esc(at.label)} · ${esc(at.i.t)}</span><button type="button" class="icon-btn" id="a-detach" aria-label="Remove">${ic('x','sm')}</button></div>`:''}
+        <textarea id="a-text" rows="${S.text?3:1}" placeholder="${at?at.ph:`Describe a task for ${esc(repo.name)}…`}" ${blocked?'disabled':''}>${esc(S.text)}</textarea>
+        <div class="cbar">
+          <div class="chips">
+            <button type="button" class="chipb ${e.modelInherited?'':'set'}" id="chip-model" aria-haspopup="dialog">${esc(e.model.l)}${ic('chevron-down','xs')}</button>
+            ${e.model.efforts.length?`<button type="button" class="chipb ${e.effortInherited?'':'set'}" id="chip-effort" aria-haspopup="dialog">${cap(e.effort)}${ic('chevron-down','xs')}</button>`:''}
+            <button type="button" class="chipb icon ${S.label||S.remote!==null||!e.providerInherited?'set':''}" id="chip-more" aria-haspopup="dialog" aria-label="More options" title="More options">${ic('more','sm')}</button>
+          </div>
+          <button type="button" class="send" id="a-send" aria-label="${at?`Start: ${at.label}`:'Start run'}" title="${at?`Start: ${at.label}`:'Start run (Enter)'}" ${blocked?'disabled':''}>${ic('send')}</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  $$('[data-pill]').forEach(b=>b.addEventListener('click',()=>{pickRepo(b.dataset.pill);S.act=null;render()}));
+  $('#pill-all').addEventListener('click',ev=>openRepoPicker(ev.currentTarget));
+  $('#chip-model').addEventListener('click',ev=>openModelPicker(ev.currentTarget));
+  $('#chip-effort')?.addEventListener('click',ev=>openEffortPicker(ev.currentTarget));
+  $('#chip-more').addEventListener('click',ev=>openMore(ev.currentTarget));
+  $$('[data-issue]').forEach(b=>b.addEventListener('click',()=>openIssueActions(+b.dataset.issue)));
+  $('#a-all-issues')?.addEventListener('click',ev=>openIssuePicker(ev.currentTarget));
+  $('#a-send').addEventListener('click',()=>{const t=at?`${at.label} started · opening chat`:null;startRunWith(t)});
+  $('#a-detach')?.addEventListener('click',()=>{S.issue=null;S.act=null;render()});
+  $('#a-text').addEventListener('input',ev=>{S.text=ev.target.value;ev.target.style.height='auto';ev.target.style.height=ev.target.scrollHeight+'px'});
+  $('#a-text').addEventListener('keydown',ev=>{if(ev.key==='Enter'&&!ev.shiftKey&&(ev.metaKey||ev.ctrlKey||S.text.trim()||at)){ev.preventDefault();$('#a-send').click()}});
+  $('#a-auto')?.addEventListener('change',ev=>{repo.auto=ev.target.checked;toast(`Auto ${repo.auto?'on':'off'} for ${repo.name}`);render()});
+  $('#a-runone')?.addEventListener('click',()=>startRun('afk'));
+  $('#a-reset')?.addEventListener('click',()=>{repo.paused=false;toast(`AFK reset for ${repo.name}`);render()});
+}
+function startRunWith(msg){if(S.loggedOut)return;if(msg){toast(msg);S.text='';S.issue=null;S.act=null;S.label='';render()}else startRun('manual')}
+boot();
+</script>
+
+</body>
+</html>
