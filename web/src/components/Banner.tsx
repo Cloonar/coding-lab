@@ -38,10 +38,10 @@
 // migrated site's markup moves. The message stays a `string` prop and never
 // becomes a slot: text-only is the property this component exists to guarantee.
 //
-// `class` appends site-specific modifiers after the variant — `afk-strip-paused`
-// (select.css) and `clone-error` (chips.css) are real styling hooks on two of
-// these banners, and passing them through keeps `banner error afk-strip-paused`
-// rendering byte-for-byte as it did inline.
+// `class` appends site-specific modifiers after the variant — `composer-blocker`
+// (newrun-composer.css) and `clone-error` (chips.css) are real styling hooks,
+// and passing them through renders e.g. `banner error clone-error`, the
+// variant first and the modifiers after it.
 
 import { Show, type JSX } from 'solid-js';
 import Icon from './Icon';
@@ -55,7 +55,7 @@ export default function Banner(props: {
   onDismiss?: () => void;
   /** A control to sit inside the banner (Reset, Retry, Re-enable), after the text. */
   action?: JSX.Element;
-  /** Extra classes after the variant (e.g. `afk-strip-paused`, `clone-error`). */
+  /** Extra classes after the variant (e.g. `composer-blocker`, `clone-error`). */
   class?: string;
 }) {
   const variant = () => props.variant ?? 'error';

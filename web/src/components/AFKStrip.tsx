@@ -1,17 +1,15 @@
 // The AFK controls — Run one, the Auto toggle and the three-strikes Reset —
-// in two layouts that share one core (createAFKActions below):
+// and the behavior they share (createAFKActions):
 //
-// - AFKStrip (default export): the strip under the New-run composer (issue
-//   #41), scoped to the SELECTED repo: a compact one-row port of the old
-//   repo-card AFKSection. 'Run one (N ready)' carries the claimable-count hint,
-//   read live from the ready queue (GET /ready?claimable=1), the auto toggle is
-//   a real button (aria-pressed, never a checkbox), and the paused banner holds
-//   the human Reset (the only un-pause).
 // - AFKCard: the AFK block of the repo home's Overview (issue #61), laid out as
 //   a card: "N issues ready for an agent.", Run one, Auto as a switch, the
 //   paused banner with Reset. Its count is the repo summary's claimable count —
 //   the card never reads the ready queue itself, so opening a repo home makes
 //   no request to a forge.
+// - createAFKActions: exported for the New run page's Issues card
+//   (components/newrun/IssuesCard.tsx, issue #66), whose one AFK line drives
+//   the same Run one / Auto / Reset. (The strip that used to sit under the
+//   New-run composer is gone; that line replaced it.)
 //
 // Shared behavior: the count is a hint only — at a known 0 the button stays a
 // real, enabled button, just greyed, and an unknown count shows no number —
@@ -20,21 +18,11 @@
 // navigation. Auto applies at once.
 
 import { Show, createSignal, createUniqueId } from 'solid-js';
-import {
-  errorMessage,
-  listClaimableIssues,
-  resetAFK,
-  setAFKAuto,
-  startAFK,
-  type Repo,
-  type Run,
-} from '../api';
+import { errorMessage, resetAFK, setAFKAuto, startAFK, type Repo, type Run } from '../api';
 import Banner from './Banner';
 import Icon from './Icon';
 import ToggleSwitch from './Switch';
-import { AFK_PAUSE_THRESHOLD, afkStartHint, claimableSentence, isAFKPaused } from '../lib/afk';
-import { createLiveResource } from '../lib/liveResource';
-import { resourceValue } from '../lib/resource';
+import { AFK_PAUSE_THRESHOLD, claimableSentence, isAFKPaused } from '../lib/afk';
 
 export interface AFKControlsProps {
   repo: Repo;
@@ -60,13 +48,13 @@ export interface AFKControlsProps {
 type AFKBusy = 'start' | 'auto' | 'reset' | null;
 
 /**
- * The behavior both layouts share: Run one → startAFK, Auto → setAFKAuto with
- * the flipped flag, Reset → resetAFK; one action at a time, failures to
- * `onError`. `afterStart` runs after a successful start (the strip refetches
- * its count). The returned `auto` override holds the requested Auto state
+ * The behavior the AFK controls share: Run one → startAFK, Auto → setAFKAuto
+ * with the flipped flag, Reset → resetAFK; one action at a time, failures to
+ * `onError`. `afterStart` runs after a successful start (the card and the
+ * Issues card refetch the repo, so the summary's count follows the claim). The returned `auto` override holds the requested Auto state
  * while the request and the parent's refetch are in flight.
  */
-function createAFKActions(props: AFKControlsProps, afterStart: () => unknown) {
+export function createAFKActions(props: AFKControlsProps, afterStart: () => unknown) {
   const [busy, setBusy] = createSignal<AFKBusy>(null);
   const [autoOverride, setAutoOverride] = createSignal<boolean | null>(null);
 
@@ -133,71 +121,6 @@ function createAFKActions(props: AFKControlsProps, afterStart: () => unknown) {
     toggleAuto,
     reset,
   };
-}
-
-export default function AFKStrip(props: AFKControlsProps) {
-  // The claimable count follows issues (labels/state edits), claims (runs
-  // starting/ending) and parked branches (discard frees a claim).
-  // run.changed carries no repoID — refetch unconditionally.
-  const [claimable, { refetch }] = createLiveResource(
-    () => props.repo.id,
-    (id) => listClaimableIssues(id),
-    [
-      { type: 'issue.changed', match: (event) => event.repoID === props.repo.id },
-      { type: 'run.changed' },
-      { type: 'parked.changed', match: (event) => event.repoID === props.repo.id },
-    ],
-  );
-
-  // Unknown count (still loading / ready endpoint failed) → null → plain
-  // enabled button: the hint must never block the authoritative click.
-  const count = (): number | null => {
-    const issues = resourceValue(claimable);
-    return issues === undefined ? null : issues.length;
-  };
-  const hint = () => afkStartHint(count());
-  // The spawned claim consumed one claimable issue: re-read the count.
-  const afk = createAFKActions(props, () => void refetch());
-
-  return (
-    <div class="afk-strip">
-      <Show when={afk.paused()}>
-        <Banner
-          message="Paused after 3 failures"
-          class="afk-strip-paused"
-          action={
-            <button
-              type="button"
-              class="afk-strip-reset"
-              onClick={() => void afk.reset()}
-              disabled={afk.busy() !== null}
-            >
-              {afk.busy() === 'reset' ? 'Resetting…' : 'Reset'}
-            </button>
-          }
-        />
-      </Show>
-      <div class="afk-strip-row">
-        <button
-          type="button"
-          classList={{ 'afk-strip-start': true, greyed: hint().greyed }}
-          onClick={() => void afk.start()}
-          disabled={afk.busy() !== null}
-        >
-          {afk.busy() === 'start' ? 'Starting…' : `Run one${hint().suffix}`}
-        </button>
-        <button
-          type="button"
-          class="afk-strip-auto"
-          onClick={() => void afk.toggleAuto()}
-          disabled={afk.busy() !== null}
-          aria-pressed={props.repo.afk_auto_enabled}
-        >
-          Auto: {props.repo.afk_auto_enabled ? 'On' : 'Off'}
-        </button>
-      </div>
-    </div>
-  );
 }
 
 /**

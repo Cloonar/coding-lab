@@ -1,30 +1,9 @@
-/* New-run composer (issue #41, Phase 2b) ----------------------------------- */
-/* Appended section — expressed entirely in existing tokens. */
-
-/* Centered composer surface. .page already centers a 760px column; the card
-   sits narrower and drops in from the top for a roomy, chat-first Home. */
-.composer {
-  width: 100%;
-  max-width: 680px;
-  margin: clamp(1.5rem, 8vh, 5rem) auto 0;
-}
-
-/* Slim logged-out warning — banner semantics, compact, on its own line. */
-.newrun-warn {
-  width: 100%;
-  max-width: 680px;
-  margin: 0 auto 0.9rem;
-  padding: 0.5rem 0.75rem;
-  background: var(--banner-bg);
-  border: 1px solid var(--banner-border);
-  border-radius: var(--radius-control);
-  color: var(--banner-text);
-  font-size: 0.9rem;
-}
-.newrun-warn a {
-  color: inherit;
-  font-weight: 600;
-}
+/* New-run composer (issue #41, Phase 2b; issue #66) ----------------------- */
+/* The merged field of the New run page (routes/NewRun.tsx) — its place on the
+   page (the dock) is newrun.css, its run-option chips newrun-composer.css —
+   plus the `.composer-chip` pill and the `.composer-pop-panel` dropdown that
+   the unified Select's chip skin (components/Select.tsx) still shares.
+   Expressed entirely in existing tokens. */
 
 /* The merged field: one rounded card holding the textarea and a bottom toolbar
    (chips + send), mirroring .chat-composer-row's merged look. */
@@ -64,13 +43,14 @@
   outline: none; /* the focus ring lives on the field container */
 }
 
-/* Bottom toolbar: chips left, send right; wraps on narrow screens. */
+/* Bottom toolbar: the chip row left (it scrolls sideways rather than
+   wrapping, newrun.css, so the field keeps one height), send right. */
 .composer-bar {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex-wrap: wrap;
-  padding: 0 var(--space-2);
+  flex-wrap: nowrap;
+  padding: 0 var(--space-1) 0 var(--space-2);
 }
 
 /* Chip-styled controls: 44px touch targets, pill shape. */
@@ -106,15 +86,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.more-chip.icon-btn {
-  min-width: 44px;
-  color: var(--text);
-  background: var(--chip-bg);
-  border: 1px solid var(--border);
-}
-.more-chip.icon-btn:hover {
-  background: var(--hover);
-}
 
 /* Accent circular send. */
 .composer-send.icon-btn {
@@ -135,16 +106,11 @@
   opacity: 0.6;
 }
 
-/* Anchored popovers — the chat-menu dropdown look, shared by the `…` options
-   popover and the unified Select panel. Outside-click closes via a document
-   listener (no scrim element), so the panel just needs to sit above sibling
-   content. Placement (top/bottom + max-height) is NOT set here: the Select
-   component drives it inline from panelPlacement(); the `…` popover keeps its
-   fixed above-the-trigger offset on .more-pop. */
-.composer-pop {
-  position: relative;
-  display: inline-flex;
-}
+/* Anchored dropdown panel — the chat-menu look of the unified Select's panel.
+   Outside-click closes via a document listener (no scrim element), so the
+   panel just needs to sit above sibling content. Placement (top/bottom +
+   max-height) is NOT set here: Select drives it inline from
+   panelPlacement(). */
 .composer-pop-panel {
   position: absolute;
   left: 0;
@@ -160,12 +126,4 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   box-shadow: var(--shadow);
-}
-.more-pop {
-  bottom: calc(100% + 6px);
-  min-width: 16rem;
-  padding: 0.7rem;
-}
-.composer-label-field {
-  margin: 0;
 }

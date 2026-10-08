@@ -1,0 +1,253 @@
+/* New run redesign (issue #66): the Issues card (components/newrun/
+   IssuesCard.tsx), the issue picker's rows (IssuePicker.tsx) and the issue
+   action sheet (IssueActionSheet.tsx). The picker panel itself is picker.css;
+   the triage chip reuses the existing chip tints (chips.css .in-use and
+   .status-warn, instances.css .idle). */
+
+/* Card ------------------------------------------------------------------------ */
+
+.issues-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-3) var(--space-3) var(--space-2);
+}
+
+.issues-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.issues-card-head h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.issues-card-count {
+  flex: none;
+}
+
+.issues-card-auto {
+  flex: none;
+}
+
+.issues-card-auto .switch-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+/* The one AFK line: muted text, its button pushed to the right. */
+.issues-card-afk {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-bottom: var(--space-1);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.issues-card-afk-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.issues-card-afk-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: none;
+  margin-left: auto;
+  padding: 0 0.85rem;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+/* Zero-ready hint: still a real, enabled button, just visibly greyed. */
+.issues-card-afk-btn.greyed {
+  opacity: 0.6;
+}
+
+.issues-card-note {
+  margin: 0;
+  padding: var(--space-2);
+}
+
+.issues-card-loading {
+  opacity: 0.7;
+}
+
+/* "All N open issues": a link-styled button under the rows. */
+.issues-card-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  align-self: flex-start;
+  padding: 0 0.4rem;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font-weight: 550;
+}
+
+.issues-card-all:hover {
+  background: var(--hover);
+}
+
+/* Issue rows (card and picker) ------------------------------------------------ */
+
+.issue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.issue-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0.35rem 0.4rem;
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+
+.issue-row:hover {
+  background: var(--hover);
+}
+
+.issue-row-number {
+  flex: none;
+}
+
+.issue-row-title {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  font-weight: 550;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.triage-chip {
+  flex: none;
+}
+
+.issue-row-age {
+  flex: none;
+}
+
+.issue-list-empty {
+  margin: 0;
+  padding: var(--space-2);
+}
+
+/* Action sheet ---------------------------------------------------------------- */
+
+.issue-action-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.issue-action-title {
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.issue-action-labels {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.issue-action-ask {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.issue-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.issue-action {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  min-height: 60px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  color: var(--text);
+  text-align: left;
+}
+
+.issue-action.suggested {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+}
+
+.issue-action-icon {
+  flex: none;
+  color: var(--link);
+}
+
+.issue-action-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.issue-action-name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+
+.issue-action-desc {
+  display: block;
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.chip.issue-action-suggested {
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  color: var(--link);
+}
+
+.issue-action-chevron {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Fine pointers at desktop width: the compact AFK button of the mockup. */
+@media (min-width: 1024px) and (pointer: fine) {
+  .issues-card-afk-btn {
+    min-height: 36px;
+    padding: 0 0.75rem;
+  }
+}

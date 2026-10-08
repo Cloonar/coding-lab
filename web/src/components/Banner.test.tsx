@@ -26,8 +26,8 @@
 // standing in its place.
 //
 // Class strings are asserted by equality rather than by `contains`, because the
-// order is the contract: `afk-strip-paused` (select.css) and `clone-error`
-// (chips.css) are real styling hooks on two migrated sites, and they have to
+// order is the contract: `composer-blocker` (newrun-composer.css) and
+// `clone-error` (chips.css) are real styling hooks on two sites, and they have to
 // land after the variant, with the no-class case rendering exactly
 // `banner error` and no trailing space.
 
@@ -171,11 +171,12 @@ describe('Banner', () => {
   });
 
   it('appends the caller class after the variant, in that exact order', () => {
-    mount(() => <Banner message="Paused" class="afk-strip-paused" />);
+    mount(() => <Banner message="Failed" class="composer-blocker composer-blocker-clone-failed" />);
 
-    // Byte-for-byte what the AFK strip rendered inline; select.css keys off the
-    // modifier sitting last, so equality — not `contains` — is the assertion.
-    expect(banner().className).toBe('banner error afk-strip-paused');
+    // What the New run composer's clone-failed blocker renders; the styles key
+    // off the modifiers sitting last, so equality — not `contains` — is the
+    // assertion.
+    expect(banner().className).toBe('banner error composer-blocker composer-blocker-clone-failed');
   });
 
   it('keeps the variant between the base class and a caller class on a non-default variant', () => {

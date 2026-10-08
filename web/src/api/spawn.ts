@@ -1,4 +1,5 @@
 import { request } from './core';
+import type { Runner } from './repos';
 import { coerceBool } from './settings';
 
 // --- M3: parked ---
@@ -42,6 +43,12 @@ export interface SpawnDefaults {
    * on falsiness.
    */
   remote?: boolean;
+  /**
+   * The global runner default (`runner_default`, issue #55): the effective
+   * Runner of every repo whose own `runner` is null. Absent when the payload
+   * carries no valid value.
+   */
+  runner?: Runner;
 }
 
 /**
@@ -63,6 +70,8 @@ export function extractSpawnDefaults(raw: unknown): SpawnDefaults {
   if (typeof effort === 'string' && effort !== '') out.effort = effort;
   const remote = coerceBool(map['spawn_remote_default']);
   if (typeof remote === 'boolean') out.remote = remote;
+  const runner = map['runner_default'];
+  if (runner === 'host' || runner === 'container') out.runner = runner;
   return out;
 }
 

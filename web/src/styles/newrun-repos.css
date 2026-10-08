@@ -1,0 +1,103 @@
+/* New run redesign (issue #66): the repository pills row and the repository
+   picker's repo rows (components/newrun/RepoPills.tsx). The picker shell and
+   its option rows are picker.css. */
+
+.repo-pills-wrap {
+  flex: none;
+  min-width: 0;
+}
+
+/* One row; on a phone it scrolls sideways instead of wrapping, scrollbar
+   hidden. The 2px padding keeps the pills' borders and focus rings from being
+   clipped by the scroll container. */
+.repo-pills {
+  display: flex;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px;
+}
+
+.repo-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.repo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: none;
+  min-height: 44px;
+  padding: 0 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.repo-pill:hover {
+  background: var(--hover);
+}
+
+.repo-pill[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  color: var(--link);
+}
+
+.repo-pill:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.repo-pill-all {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* Readiness dot: green when the roll-up passes, red when it fails, hollow
+   while pending / not cloned. Never the only cue: a not-ready row says why. */
+.repo-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.repo-pill .repo-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.repo-dot.ok {
+  background: var(--ok);
+}
+
+.repo-dot.err {
+  background: var(--danger);
+}
+
+.repo-dot.pending {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--muted);
+}
+
+.repo-picker-empty {
+  margin: 0;
+  padding: var(--space-2) 0.6rem;
+  color: var(--muted);
+}
+
+/* Fine pointers at desktop width: the mockup's compact 40px pills. */
+@media (min-width: 1024px) and (pointer: fine) {
+  .repo-pill {
+    min-height: 40px;
+  }
+}

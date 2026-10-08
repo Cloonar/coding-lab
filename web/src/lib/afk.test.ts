@@ -1,12 +1,10 @@
 // AFK UI decision tables. parseAFKLabel rows are transcribed from the v0
-// contract (afk-engine port spec §2.8); the hint/paused/budget rows pin the
-// M5 SPA behavior (claimable-count hint, three-strikes banner, D12b budget
-// countdown).
+// contract (afk-engine port spec §2.8); the paused/budget rows pin the M5 SPA
+// behavior (three-strikes banner, D12b budget countdown).
 
 import { describe, expect, it } from 'vitest';
 import {
   AFK_PAUSE_THRESHOLD,
-  afkStartHint,
   afkStartedMessage,
   budgetRemaining,
   claimableSentence,
@@ -49,21 +47,6 @@ describe('parseAFKLabel (v0 §2.8: afk- prefix, optional auto- marker, n >= 1)',
   for (const label of rejected) {
     it(`rejects ${JSON.stringify(label)}`, () => {
       expect(parseAFKLabel(label)).toBeNull();
-    });
-  }
-});
-
-describe('afkStartHint (claimable count → suffix + greyed hint)', () => {
-  const rows: [number | null, string, boolean][] = [
-    [3, ' (3 ready)', false],
-    [1, ' (1 ready)', false],
-    [0, ' (0 ready)', true], // greyed hint only — still a real enabled button (v0 morph lesson)
-    [null, '', false], // unknown → plain, never blocked on a hint
-  ];
-
-  for (const [count, suffix, greyed] of rows) {
-    it(`${String(count)} → ${JSON.stringify(suffix)} greyed=${String(greyed)}`, () => {
-      expect(afkStartHint(count)).toEqual({ suffix, greyed });
     });
   }
 });

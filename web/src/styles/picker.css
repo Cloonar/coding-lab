@@ -1,0 +1,359 @@
+/* Picker (issue #66): components/Picker.tsx. A bottom sheet below 1024px, a
+   popover anchored to its trigger from 1024px — CSS alone switches the two
+   (the Dialog precedent in controls.css). The panel always carries its
+   measured desktop placement as --picker-* custom properties; only the
+   >=1024px rules read them. A picker without an anchor is a centered dialog
+   on desktop (the issue action sheet). Same layer as the Dialog (50/51):
+   above the drawer, the rail, the install sheet and the toast. */
+
+.picker-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.picker {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+  max-height: 85dvh;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 12px 34px rgba(40, 32, 22, 0.16);
+  overscroll-behavior: contain;
+  animation: dialog-sheet-up 0.2s ease-out; /* keyframes: controls.css */
+}
+
+/* Decorative grab handle (no drag-to-dismiss; scrim tap and Escape close). */
+.picker-grab {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.picker-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.picker .picker-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.1rem;
+  overflow-wrap: anywhere;
+}
+
+.picker .picker-title:focus {
+  outline: none;
+}
+
+.picker-close {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Pinned above the scrolling body: the search field and filter chips stay
+   put while the rows scroll. */
+.picker-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex: none;
+  min-width: 0;
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.picker-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-3) var(--space-4) calc(var(--space-4) + env(safe-area-inset-bottom));
+}
+
+@media (min-width: 1024px) {
+  /* No dimming on the anchored popover: an outside mousedown closes it. */
+  .picker-scrim {
+    display: none;
+  }
+
+  .picker {
+    left: var(--picker-left, var(--space-2));
+    right: auto;
+    top: var(--picker-top, auto);
+    bottom: var(--picker-bottom, auto);
+    width: var(--picker-width, 320px);
+    max-height: var(--picker-max-height, 60vh);
+    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    animation: none;
+  }
+
+  .picker-head {
+    padding-left: var(--space-3);
+  }
+
+  .picker-header {
+    padding: var(--space-3) var(--space-3) 0;
+  }
+
+  .picker-body {
+    padding: var(--space-3);
+  }
+
+  .picker-grab {
+    display: none;
+  }
+
+  /* No anchor: a centered dialog over the content column, dimmed. */
+  .picker-scrim.picker-centered {
+    display: block;
+  }
+
+  .picker.picker-centered {
+    left: 50%;
+    top: 11vh;
+    bottom: auto;
+    width: min(var(--picker-width, 400px), calc(100vw - 2 * var(--space-4)));
+    max-height: 78vh;
+    transform: translateX(-50%);
+  }
+
+  /* The 260px side rail (shell.css): center over the content beside it.
+     The picker is portaled to <body>, outside .shell, hence :has(). */
+  body:has(.shell:not(.rail-collapsed)) .picker.picker-centered {
+    left: calc(50% + 130px);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .picker {
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .picker {
+    animation: none;
+  }
+}
+
+/* Building blocks ------------------------------------------------------------ */
+
+.picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.picker-option {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: none;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.4rem 0.6rem;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.picker-option:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.picker-option[aria-selected='true'] {
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+
+.picker-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.picker-option:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.picker-option-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-option-title {
+  font-weight: 550;
+}
+
+.picker-option-desc {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.picker-option-status {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.picker-option-default {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.picker-option-check {
+  flex: none;
+  color: var(--link);
+}
+
+.picker-group {
+  margin: 0;
+  padding: 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* A group label after a list gets a little more air than the body gap. */
+.picker-list + .picker-group {
+  margin-top: var(--space-2);
+}
+
+/* The filter input is the unified Select's `.select-search` (select.css
+   scopes its look to `.select-panel`; the same metrics here), with room for
+   the leading search glyph. */
+.picker-search {
+  position: relative;
+  flex: none;
+  min-width: 0;
+}
+
+.picker-search .select-search {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.45rem 0.7rem 0.45rem 2.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px; /* no iOS zoom on focus */
+}
+
+.picker-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 0.7rem;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.picker-filters {
+  display: flex;
+  gap: var(--space-2);
+  flex: none;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+
+.picker-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.picker-filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: none;
+  min-height: 44px;
+  padding: 0 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.picker-filters button:hover {
+  background: var(--hover);
+}
+
+.picker-filters button[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+  color: var(--link);
+}
+
+.picker-filters button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.picker-filter-count {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.picker-filters button[aria-pressed='true'] .picker-filter-count {
+  color: inherit;
+}
+
+.picker-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+/* Fine pointers at desktop width: the mockup's compact 34px filter chips. */
+@media (min-width: 1024px) and (pointer: fine) {
+  .picker-filters button {
+    min-height: 34px;
+    padding: 0 0.7rem;
+  }
+}
