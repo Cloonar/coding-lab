@@ -8,9 +8,9 @@ package httpapi
 // forge. Every OTHER mutation — issue create, state change, label set, comment
 // create — stays builtin-only and answers the pinned 409 on a forge-bound repo
 // (a state change has the sibling pinned 400, forgeStateMessage, because it is
-// understood but names a field this binding cannot patch). Every builtin
-// mutation publishes issue.changed on the bus (clients refetch on event, design
-// §5); a forge-bound edit publishes nothing.
+// understood but names a field this binding cannot patch). Every successful
+// mutation publishes issue.changed on the bus, a forge-bound edit included
+// (clients refetch on event, design §5; ADR-0076).
 
 import (
 	"context"
@@ -26,8 +26,10 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
 
-// EventIssueChanged is the SSE event name published on any built-in
-// issue/comment/label mutation (brief §8.1).
+// EventIssueChanged is the SSE event name published on any issue/comment/label
+// mutation lab makes (brief §8.1): every builtin mutation, and a forge-bound
+// issue edit once the tracker call succeeds. Changes made directly on the
+// forge publish nothing.
 const EventIssueChanged = "issue.changed"
 
 // forgeTrackerMessage is the pinned 409 body for builtin-only mutations
@@ -499,8 +501,8 @@ func (s *Server) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
 //     read"), but this endpoint's pinned response is the DETAIL shape, so a
 //     follow-up tk.Issue read supplies the comment thread — on builtin that JSON
 //     is byte-identical to the pre-seam storeIssueDetailJSON. issue.changed is
-//     published ONLY for a builtin-bound repo; a forge-bound edit publishes
-//     nothing (agentapi's publishIssueChanged convention).
+//     published on either binding once the edit succeeds (agentapi's
+//     publishIssueChanged convention); a tracker error publishes nothing.
 func (s *Server) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -578,17 +580,16 @@ func (s *Server) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 		s.writeTrackerError(w, "editing issue", repo, err)
 		return
 	}
+	// Either binding emits issue.changed once the edit lands — before the
+	// re-read, so a failed read still lets subscribed views refetch (agentapi
+	// convention).
+	s.publishIssueChanged(repo.ID)
 	// EditIssue answers the LIST shape by seam contract; re-read for the pinned
 	// DETAIL response (the comment thread the endpoint has always returned).
 	is, err := tk.Issue(r.Context(), n)
 	if err != nil {
 		s.writeTrackerError(w, "loading issue", repo, err)
 		return
-	}
-	// Only a builtin-bound mutation emits issue.changed; a forge-bound edit
-	// publishes nothing (agentapi convention).
-	if repo.TrackerBinding == store.TrackerBindingBuiltin {
-		s.publishIssueChanged(repo.ID)
 	}
 	writeJSON(w, http.StatusOK, trackerIssueDetailJSON(is))
 }
