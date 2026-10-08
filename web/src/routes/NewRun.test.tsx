@@ -35,8 +35,33 @@ class FakeEventSource {
   static instances: FakeEventSource[] = [];
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
-  addEventListener(): void {}
+  private listeners = new Map<string, ((event: { data: string }) => void)[]>();
+
+  constructor() {
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: { data: string }) => void): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
+
   close(): void {}
+
+  /** Delivers a server event to this connection's subscribers. */
+  emit(type: string, payload: Record<string, unknown>): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ data: JSON.stringify(payload) });
+    }
+  }
+}
+
+/** The app's one SSE connection (events.tsx). */
+function eventSource(): FakeEventSource {
+  const source = FakeEventSource.instances.at(-1);
+  if (source === undefined) throw new Error('no EventSource opened');
+  return source;
 }
 
 function repoFixture(overrides: Partial<Repo> = {}): Repo {
@@ -614,6 +639,34 @@ describe('NewRun run-option chips', () => {
     sendButton().click();
     await settle();
     expect(posts()[0]).toMatchObject({ model: 'opus' });
+  });
+
+  it('keeps the model, effort, agent and attachment picks across a repo.changed refetch', async () => {
+    providersOnServer = [...PROVIDERS, CODEX];
+    issuesOnServer = [issueFixture()];
+    await mountHome();
+    await chooseFromChip('Model', 'Opus');
+    await chooseFromChip('Effort', 'High');
+    await attachAction(47, 'Triage');
+    typeText('fix the thing');
+    expect(chipLabel('Model')).toBe('Opus');
+    const listsBefore = repoListRequests;
+
+    // The server announces the same repo (a readiness verdict, an AFK sweep,
+    // a clone landing elsewhere): the list refetches, the selected repo and
+    // its provider are unchanged, so nothing the operator picked may move.
+    eventSource().emit('repo.changed', { repoID: 'repo_1' });
+    await settle();
+
+    expect(repoListRequests).toBe(listsBefore + 1);
+    expect(chipLabel('Model')).toBe('Opus');
+    expect(chipLabel('Effort')).toBe('High');
+    expect(container.querySelector('.composer-attach')).not.toBeNull();
+    expect(composerInput().value).toBe('fix the thing');
+
+    sendButton().click();
+    await settle();
+    expect(posts()[0]).toMatchObject({ model: 'opus', effort: 'high', label: 'triage-47' });
   });
 
   it("names the repo's settings as the source when the repo's own default applies", async () => {

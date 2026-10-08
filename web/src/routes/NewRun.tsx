@@ -36,6 +36,7 @@ import {
   Show,
   Switch,
   createEffect,
+  createMemo,
   createResource,
   createSignal,
   on,
@@ -193,9 +194,17 @@ function NewRunView() {
   const [attachment, setAttachment] = createSignal<Attachment | null>(null);
   // Picks and the attachment were made against one repo: another repo
   // (a pick, or the selected one disappearing) starts clean.
+  //
+  // The id is a memo on purpose: `on` re-runs its callback whenever anything
+  // it reads changes, and selectedRepo() reads the repos resource, which the
+  // repo.changed subscription refetches (a readiness verdict, an AFK sweep).
+  // Every refetch is a new array, so keyed on the raw accessor the resets
+  // fired while the operator was typing and threw their picks away. The memo
+  // only notifies when the id itself differs.
+  const selectedRepoId = createMemo(() => selectedRepo()?.id);
   createEffect(
     on(
-      () => selectedRepo()?.id,
+      selectedRepoId,
       () => {
         setProviderPick('');
         setRemotePick(null);
@@ -245,9 +254,12 @@ function NewRunView() {
   // A pick belongs to the catalog it was made from: when the EFFECTIVE
   // provider changes (a provider pick, a repo switch, a late defaults load),
   // stale model/effort picks reset so a foreign value can never 400 a spawn.
+  // Memoized for the same reason as selectedRepoId: provider() reads the
+  // repos resource, and a refetch of the same repo must not count as a change.
+  const providerId = createMemo(() => provider()?.id);
   createEffect(
     on(
-      () => provider()?.id,
+      providerId,
       () => {
         setModelPick('');
         setEffortPick('');
@@ -258,7 +270,9 @@ function NewRunView() {
   // The inherited model: the resolution without the per-spawn pick.
   const modelDefault = () =>
     resolveSpawnOption(models(), selectedRepo()?.model_default, defaultsValue().model);
-  const model = () => (modelPick() !== '' ? modelPick() : modelDefault());
+  // A memo, so the effort reset below keys on the resolved value, not on
+  // every repos refetch modelDefault() reads through.
+  const model = createMemo(() => (modelPick() !== '' ? modelPick() : modelDefault()));
   // The RESOLVED model entry — explicit pick or layered default. The composer
   // always sends the resolved effort, so the effort catalog must follow the
   // model that actually rides the spawn (issue #156): effort support varies
@@ -271,7 +285,7 @@ function NewRunView() {
   // this displays/sends the new model's default; a still-valid pick is kept.
   createEffect(
     on(
-      () => model(),
+      model,
       () => {
         const pick = effortPick();
         if (pick !== '' && !efforts().some((o) => o.value === pick)) setEffortPick('');
