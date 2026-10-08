@@ -236,7 +236,8 @@ func isBaselineVar(name string) bool {
 // actually present. It is the environment every tmux client invocation runs
 // with — and, because the tmux server started implicitly by the first such
 // call seeds its global environment from that client, the environment every
-// pane is born into. Computed per call: cheap (a scan of os.Environ), and it
+// pane is born into — save Start's one exception, an extraEnv PATH on the
+// new-session client (issue #70). Computed per call: cheap (a scan of os.Environ), and it
 // picks up t.Setenv in tests.
 func baselineEnv() []string {
 	all := os.Environ()
@@ -255,7 +256,8 @@ func baselineEnv() []string {
 // inherit os.Environ() wholesale) — so no client call can leak a service
 // secret into the tmux server's global environment, and thus into panes.
 // gitx sets cmd.Env on its git subprocesses for the same reason; tmuxx
-// historically did not, which was the #204 leak.
+// historically did not, which was the #204 leak. Start alone appends an
+// extraEnv PATH to its new-session client's Env (issue #70).
 func (t *Tmux) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	if t.socket != "" {
 		args = append([]string{"-L", t.socket}, args...)
@@ -287,8 +289,32 @@ func (t *Tmux) Start(ctx context.Context, name, dir string, argv []string, extra
 	}
 
 	args := t.newSessionArgs(name, dir, argv, extraEnv, cfg)
-	if out, err := t.cmd(ctx, args...).CombinedOutput(); err != nil {
+	c := t.cmd(ctx, args...)
+	// tmux gives a new session's first pane the PATH of the (unattached)
+	// client that ran new-session, not the session's `-e PATH` (issue #70),
+	// so an extraEnv PATH — a wired host run's warpgate-bin — must also ride
+	// on this one client's env. PATH alone: every other extraEnv entry stays
+	// off client processes (the #204 scrub). os/exec keeps the last duplicate.
+	clientPATH := false
+	for _, kv := range extraEnv {
+		if strings.HasPrefix(kv, "PATH=") {
+			c.Env = append(c.Env, kv)
+			clientPATH = true
+		}
+	}
+	if out, err := c.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	// If that new-session also started the server, the server seeded its
+	// global env from the client — the run's PATH included. Re-pin it to the
+	// baseline so the global env keeps mirroring lab's; on a server that was
+	// already running this is a single no-op show-environment. Best-effort,
+	// unlike the pre-spawn sync: the session already exists, the stray value
+	// is a PATH (never a secret), no lab-spawned pane takes its PATH from the
+	// global env, and the next Start's pre-spawn sync re-pins it anyway — so
+	// a failure here must not fail (and roll back) a spawn that worked.
+	if clientPATH {
+		_ = t.syncGlobalEnv(ctx)
 	}
 
 	select {
@@ -335,7 +361,8 @@ func (t *Tmux) syncGlobalEnv(ctx context.Context) error {
 		// Same classification List uses for list-sessions: an ExitError means
 		// no server is running, so there is no global env to sync — the server
 		// the new-session call starts implicitly seeds from the (already
-		// baseline) client env. Anything else (couldn't exec tmux, etc.) is a
+		// baseline, plus at most an extraEnv PATH that Start re-pins right
+		// after) client env. Anything else (couldn't exec tmux, etc.) is a
 		// real failure.
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {

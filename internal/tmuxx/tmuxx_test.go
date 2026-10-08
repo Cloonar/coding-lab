@@ -358,3 +358,82 @@ func envNames(env []string) map[string]bool {
 	}
 	return m
 }
+
+// fakeStartTmuxBin writes a stand-in tmux for driving Start end to end:
+// has-session reports "absent" once (the idempotency check) then "running"
+// (the post-spawn recheck), new-session dumps its own process env to the
+// returned envLog, and every invocation's args are appended to log.
+func fakeStartTmuxBin(t *testing.T) (bin, log, envLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin = filepath.Join(dir, "tmux")
+	log = filepath.Join(dir, "calls.log")
+	envLog = filepath.Join(dir, "new-session.env")
+	seen := filepath.Join(dir, "has-session.seen")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + log + "\"\n" +
+		"case \"$1\" in\n" +
+		"has-session) [ -e \"" + seen + "\" ] && exit 0; : > \"" + seen + "\"; exit 1 ;;\n" +
+		"new-session) env > \"" + envLog + "\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, log, envLog
+}
+
+// Issue #70: Start puts an extraEnv PATH on the new-session client's env —
+// the PATH tmux actually gives the pane — and nothing else from extraEnv
+// (the #204 scrub); then it re-syncs the server's global env, which a
+// new-session that started the server seeded from that client.
+func TestStart_extraEnvPATHRidesNewSessionClientOnly(t *testing.T) {
+	t.Setenv("LAB_TEST_SCRUB_CANARY", "super-secret")
+	bin, log, envLog := fakeStartTmuxBin(t)
+	runPATH := "/run/warpgate-bin:" + os.Getenv("PATH")
+
+	extra := []string{"LAB_TOKEN=lab_run_tok123", "PATH=" + runPATH}
+	if err := New(bin).Start(t.Context(), "s", t.TempDir(), []string{"sleep", "600"}, extra); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	b, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatalf("reading new-session client env: %v", err)
+	}
+	env := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	if !slices.Contains(env, "PATH="+runPATH) {
+		t.Errorf("new-session client env lacks the extraEnv PATH %q:\n%s", runPATH, b)
+	}
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		// sh itself exports PWD (and may set SHLVL/_) in the fake's env dump.
+		if !isBaselineVar(name) && name != "PWD" && name != "SHLVL" && name != "_" {
+			t.Errorf("non-baseline var %s reached the new-session client env", kv)
+		}
+	}
+
+	calls := loggedCalls(t, log)
+	i := slices.IndexFunc(calls, func(c string) bool { return strings.HasPrefix(c, "new-session ") })
+	if i < 0 || i+1 >= len(calls) || calls[i+1] != "show-environment -g" {
+		t.Errorf("expected a show-environment -g re-sync right after new-session; calls = %q", calls)
+	}
+}
+
+// Without a PATH entry Start keeps its old shape: no extra re-sync after
+// new-session (only the pre-spawn one).
+func TestStart_noExtraEnvPATHSkipsPostSpawnSync(t *testing.T) {
+	bin, log, _ := fakeStartTmuxBin(t)
+
+	if err := New(bin).Start(t.Context(), "s", t.TempDir(), []string{"sleep", "600"}, []string{"LAB_TOKEN=x"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var shows int
+	for _, c := range loggedCalls(t, log) {
+		if c == "show-environment -g" {
+			shows++
+		}
+	}
+	if shows != 1 {
+		t.Errorf("show-environment -g calls = %d, want 1 (pre-spawn only); calls = %q", shows, loggedCalls(t, log))
+	}
+}

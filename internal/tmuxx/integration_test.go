@@ -350,6 +350,62 @@ func TestTmux_startScrubsProcessEnvFromPane(t *testing.T) {
 	}
 }
 
+// Issue #70: tmux gives a new session's first pane the PATH of the client
+// that ran new-session, not the session's `-e PATH`, so a wired host run's
+// warpgate-bin PATH never reached the pane. The pane must see exactly the
+// extraEnv PATH — not merely some PATH, which is all the scrub test checks —
+// while the server's global PATH stays lab's baseline. Two sessions cover
+// both shapes: the first Start's new-session also starts the server (which
+// seeds its global env from that client), the second spawns into a server
+// that is already running.
+func TestTmux_extraEnvPATHReachesPane(t *testing.T) {
+	ctx := t.Context()
+	tm := testTmux(t)
+	dir := t.TempDir()
+
+	for i, name := range []string{"lab-test-extra-path-first", "lab-test-extra-path-second"} {
+		out := filepath.Join(dir, name+".txt")
+		// Prepend a distinct dir rather than replacing PATH outright: tmux
+		// execs argv[0] through the pane's PATH, so sh must still resolve.
+		want := fmt.Sprintf("/lab-test-warpgate-bin-%d:%s", i, os.Getenv("PATH"))
+
+		argv := []string{"sh", "-c", `printf '%s' "$PATH" > '` + out + `'; sleep 600`}
+		if err := tm.Start(ctx, name, dir, argv, []string{"PATH=" + want}); err != nil {
+			t.Fatalf("Start %s: %v", name, err)
+		}
+		if got := waitForFile(t, out); got != want {
+			t.Errorf("%s: pane PATH = %q; want the extraEnv PATH %q", name, got, want)
+		}
+
+		global, err := tm.cmd(ctx, "show-environment", "-g", "PATH").Output()
+		if err != nil {
+			t.Fatalf("show-environment -g PATH: %v", err)
+		}
+		if got, wantGlobal := strings.TrimSpace(string(global)), "PATH="+os.Getenv("PATH"); got != wantGlobal {
+			t.Errorf("%s: server global %s; want the baseline %s", name, got, wantGlobal)
+		}
+	}
+}
+
+// Without a PATH entry in extraEnv the pane keeps lab's baseline PATH — the
+// #70 fix must not change the unwired-run and container-run shape.
+func TestTmux_startWithoutExtraPATHKeepsBaselinePATH(t *testing.T) {
+	t.Setenv("PATH", "/lab-test-baseline-bin:"+os.Getenv("PATH"))
+	ctx := t.Context()
+	tm := testTmux(t)
+	const name = "lab-test-baseline-path"
+	dir := t.TempDir()
+	out := filepath.Join(dir, "path.txt")
+
+	argv := []string{"sh", "-c", `printf '%s' "$PATH" > '` + out + `'; sleep 600`}
+	if err := tm.Start(ctx, name, dir, argv, []string{"LAB_TEST_OK=present"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got, want := waitForFile(t, out), os.Getenv("PATH"); got != want {
+		t.Errorf("pane PATH = %q; want the baseline PATH %q", got, want)
+	}
+}
+
 // Legacy dirty server: a tmux server started by a pre-#204 lab holds the
 // dirty env in its GLOBAL environment, which new panes inherit even with a
 // scrubbed client. Seed such a server by bypassing the wrapper — a raw tmux
