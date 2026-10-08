@@ -11,6 +11,7 @@ package httpapi
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -304,6 +305,8 @@ type stubForgeTracker struct {
 	details  map[int]tracker.Issue
 	gotState string
 	gotEdits []tracker.IssueEdit
+	editErr  error // when set, EditIssue records the edit and fails with it
+	readErr  error // when set, Issue (the follow-up detail read) fails with it
 }
 
 func (s *stubForgeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -316,6 +319,9 @@ func (s *stubForgeTracker) Issues(_ context.Context, state string) ([]tracker.Is
 }
 
 func (s *stubForgeTracker) Issue(_ context.Context, number int) (tracker.Issue, error) {
+	if s.readErr != nil {
+		return tracker.Issue{}, s.readErr
+	}
 	is, ok := s.details[number]
 	if !ok {
 		// Shaped like the real client's upstream-404 error: operation context,
@@ -367,6 +373,9 @@ func (s *stubForgeTracker) CreateIssue(context.Context, string, string, []string
 }
 func (s *stubForgeTracker) EditIssue(_ context.Context, number int, edit tracker.IssueEdit) (tracker.Issue, error) {
 	s.gotEdits = append(s.gotEdits, edit)
+	if s.editErr != nil {
+		return tracker.Issue{}, s.editErr
+	}
 	is, ok := s.details[number]
 	if !ok {
 		// Shaped like the real client's upstream-404: operation context, never
@@ -531,6 +540,9 @@ func TestForgeBoundRepo(t *testing.T) {
 // the pinned response is the DETAIL shape via the follow-up read, and a STATE
 // change is refused with the pinned 400 because the seam has no state op. Same
 // seeding shape as TestForgeBoundRepo, in a fresh server so gotEdits starts empty.
+// An edit that lands on the tracker publishes issue.changed (lab made the
+// change, so subscribed views refetch); a state refusal or an EditIssue error
+// publishes nothing.
 func TestForgeBoundIssueEdit(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	stub := &stubForgeTracker{
@@ -557,6 +569,7 @@ func TestForgeBoundIssueEdit(t *testing.T) {
 		r.ForgeKind = "forgejo"
 		r.ForgeCredentialID = &credID
 	})
+	log := recordBus(t, x.bus)
 	h := csrfHeaders(x.ts.URL)
 	base := "/api/v1/repos/" + repo.ID
 
@@ -578,6 +591,16 @@ func TestForgeBoundIssueEdit(t *testing.T) {
 	if e := stub.gotEdits[0]; e.Title == nil || *e.Title != "renamed" || e.Body == nil || *e.Body != "nb" {
 		t.Fatalf("seam saw edit = %+v, want Title and Body pointers both set", e)
 	}
+	// The successful edit published exactly one issue.changed for the repo.
+	ev := waitForBusEvent(t, log, EventIssueChanged)
+	payload, err := json.Marshal(ev.Payload)
+	if err != nil {
+		t.Fatalf("marshal issue.changed payload: %v", err)
+	}
+	if want := `{"type":"issue.changed","repoID":"` + repo.ID + `"}`; string(payload) != want {
+		t.Fatalf("issue.changed payload = %s, want %s", payload, want)
+	}
+	assertBusEventCount(t, log, EventIssueChanged, 1)
 
 	// A body-only clear: non-nil empty Body reaches the seam, Title stays nil.
 	resp = x.do("PATCH", base+"/issues/7", map[string]any{"body": ""}, h)
@@ -588,6 +611,7 @@ func TestForgeBoundIssueEdit(t *testing.T) {
 	if e := stub.gotEdits[len(stub.gotEdits)-1]; e.Title != nil || e.Body == nil || *e.Body != "" {
 		t.Fatalf("clear edit = %+v, want nil Title and non-nil empty Body", e)
 	}
+	waitForBusEventN(t, log, EventIssueChanged, 2)
 
 	// A state change has no seam op → the pinned 400, and nothing reaches the seam.
 	edits := len(stub.gotEdits)
@@ -632,11 +656,55 @@ func TestForgeBoundIssueEdit(t *testing.T) {
 		t.Fatalf("a validation-rejected PATCH reached the seam")
 	}
 
+	// A tracker failure on the edit is an error response and publishes nothing.
+	stub.editErr = errors.New("forgejo PATCH /repos/o/r/issues/7: unexpected status 502: bad gateway")
+	resp = x.do("PATCH", base+"/issues/7", map[string]any{"title": "boom"}, h)
+	if resp.StatusCode < 400 {
+		t.Fatalf("tracker-error edit status = %d, want an error", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	stub.editErr = nil
+	assertBusEventCount(t, log, EventIssueChanged, 2)
+
+	// The event is published as soon as the edit lands, before the detail
+	// re-read: the edit succeeded on the forge, so a failed re-read still
+	// publishes (one event) while answering an error.
+	stub.readErr = errors.New("forgejo GET /repos/o/r/issues/7: unexpected status 502: bad gateway")
+	resp = x.do("PATCH", base+"/issues/7", map[string]any{"title": "reread"}, h)
+	if resp.StatusCode < 400 {
+		t.Fatalf("re-read-error edit status = %d, want an error", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	stub.readErr = nil
+	waitForBusEventN(t, log, EventIssueChanged, 3)
+
 	// An edit on an unknown issue number is a 404 — the seam's typed not-found.
 	resp = x.do("PATCH", base+"/issues/404", map[string]any{"title": "x"}, h)
 	wantStatus(t, resp, http.StatusNotFound)
 	if body := decodeBody(t, resp); body["error"] != "not found" {
 		t.Fatalf("unknown-issue edit error = %q, want opaque not found", body["error"])
+	}
+
+	// Only the edits that landed on the tracker published (two successes plus
+	// the failed re-read): the state refusals, validation 400s, EditIssue
+	// error and 404 above emitted nothing.
+	assertBusEventCount(t, log, EventIssueChanged, 3)
+}
+
+// assertBusEventCount fails unless exactly want events of typ are on the bus
+// after a short settle (publishes precede the HTTP response; the recorder's
+// goroutine drains asynchronously, so a "none" check needs the pause).
+func assertBusEventCount(t *testing.T, log *busLog, typ string, want int) {
+	t.Helper()
+	time.Sleep(100 * time.Millisecond)
+	got := 0
+	for _, e := range log.snapshot() {
+		if e.Type == typ {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("got %d %s events on the bus, want %d (got %+v)", got, typ, want, log.snapshot())
 	}
 }
 

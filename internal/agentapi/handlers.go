@@ -39,11 +39,12 @@ import (
 // like jsonError, so agentapi stays free of an httpapi dependency.
 const EventCRChanged = "cr.changed"
 
-// EventIssueChanged is the SSE event name every builtin issue/label mutation
-// publishes (create, edit, label add/remove, close, label ensure), exactly like
-// the operator API's builtin mutations: the operator UI refetches on event.
-// Forge-bound mutations publish nothing — the forge is the source of truth
-// and the operator UI reads it on navigation.
+// EventIssueChanged is the SSE event name every issue/label mutation publishes
+// (create, edit, label add/remove, close, label ensure) once the tracker call
+// succeeds, whatever the repo's tracker binding: the operator UI refetches on
+// event. Forge-bound mutations publish too — lab made the change, so it knows
+// the list moved, and long-mounted views (the New run Issues card) would
+// otherwise stay stale. Changes made directly on the forge publish nothing.
 const EventIssueChanged = "issue.changed"
 
 // noClaimedIssueMessage answers GET /issue for a run without a claimed issue
@@ -1567,12 +1568,9 @@ func (s *Server) publishCRChanged(repoID string) {
 	s.publishRepoEvent(EventCRChanged, repoID)
 }
 
-// publishIssueChanged emits issue.changed for a builtin-bound repo's issue or
-// label mutation; forge-bound mutations publish nothing (see EventIssueChanged).
+// publishIssueChanged emits issue.changed for a repo's issue or label
+// mutation, on any tracker binding (see EventIssueChanged).
 func (s *Server) publishIssueChanged(repo store.Repo) {
-	if repo.TrackerBinding != store.TrackerBindingBuiltin {
-		return
-	}
 	s.publishRepoEvent(EventIssueChanged, repo.ID)
 }
 

@@ -253,9 +253,15 @@ func (f *fakeTracker) EnsureLabel(_ context.Context, name, color, description st
 // union, so the incogni body tests exercise the real per-line predicate
 // (ADR-0033); non-incogni tests gate out before the scrub is consulted.
 func (f *testFixture) forgeServer(fk tracker.Tracker) *Server {
+	return f.forgeServerBus(fk, nil)
+}
+
+// forgeServerBus is forgeServer with an event bus, for the tests that assert
+// what a forge-bound mutation publishes.
+func (f *testFixture) forgeServerBus(fk tracker.Tracker, bus *events.Bus) *Server {
 	return New(f.st, f.vlt, resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) {
 		return fk, nil
-	}), nil, discard(), func() time.Time { return f.now }, claudeScrub)
+	}), bus, discard(), func() time.Time { return f.now }, claudeScrub)
 }
 
 func doJSON(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -901,6 +907,81 @@ func TestForgeTriagePassthrough(t *testing.T) {
 	rr = doJSON(t, handler, "GET", "/agent/v1/labels", token, "")
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"#ee0701"`) {
 		t.Fatalf("label list: status = %d, body %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestForgeIssueMutationsPublishIssueChanged pins that issue.changed is
+// published for a forge-bound repo too (#74): every successful mutation emits
+// exactly one event carrying the repo id, so long-mounted operator views
+// refetch; a tracker error publishes nothing.
+func TestForgeIssueMutationsPublishIssueChanged(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"label add", "POST", "/agent/v1/issues/7/labels", `{"labels":["bug"]}`},
+		{"label remove", "DELETE", "/agent/v1/issues/7/labels", `{"labels":["bug"]}`},
+		{"issue create", "POST", "/agent/v1/issues", `{"title":"t","body":"b"}`},
+		{"issue edit", "PATCH", "/agent/v1/issues/7", `{"title":"new title"}`},
+		{"issue close", "POST", "/agent/v1/issues/7/close", ""},
+		{"label ensure", "POST", "/agent/v1/labels", `{"name":"bug","color":"#ee0701"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.seedRepoBinding(t, "repo_f", "forge", "forgejo")
+			f.seedRunKind(t, "run_f", "repo_f", "afk_auto", "active", intp(7), "afk/7")
+			token := f.seedToken(t, "run_f", nil)
+
+			bus := events.NewBus()
+			ch, cancel := bus.Subscribe(context.Background())
+			defer cancel()
+
+			// Success: exactly one issue.changed for the run's repo.
+			handler := f.forgeServerBus(&fakeTracker{}, bus).Handler()
+			rr := doJSON(t, handler, tt.method, tt.path, token, tt.body)
+			if rr.Code != http.StatusOK && rr.Code != http.StatusCreated {
+				t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+			}
+			select {
+			case e := <-ch:
+				if e.Type != EventIssueChanged {
+					t.Errorf("event type = %q, want %q", e.Type, EventIssueChanged)
+				}
+				raw, err := json.Marshal(e.Payload)
+				if err != nil {
+					t.Fatalf("marshal payload: %v", err)
+				}
+				var payload struct{ Type, RepoID string }
+				if err := json.Unmarshal(raw, &payload); err != nil {
+					t.Fatalf("decode payload: %v", err)
+				}
+				if payload.Type != EventIssueChanged || payload.RepoID != "repo_f" {
+					t.Errorf("payload = %s, want {type: issue.changed, repoID: repo_f}", raw)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("no issue.changed published on forge-bound mutation")
+			}
+			select {
+			case e := <-ch:
+				t.Errorf("second event %q, want exactly one", e.Type)
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			// Tracker error: the mutation fails and nothing is published.
+			handler = f.forgeServerBus(&fakeTracker{err: errors.New("forge down")}, bus).Handler()
+			rr = doJSON(t, handler, tt.method, tt.path, token, tt.body)
+			if rr.Code < http.StatusBadRequest {
+				t.Fatalf("tracker error: status = %d, want an error status", rr.Code)
+			}
+			select {
+			case e := <-ch:
+				t.Errorf("event %q published after tracker error, want none", e.Type)
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
 	}
 }
 
