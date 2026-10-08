@@ -31,7 +31,6 @@ import {
   getSettings,
   getSpawnDefaults,
   getWarpgateHealth,
-  listClaimableIssues,
   listCredentials,
   listCRs,
   listInstances,
@@ -967,16 +966,6 @@ describe('AFK endpoints', () => {
     expect(result).toEqual({ id: 'repo_1', consecutive_failures: 0 });
     expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/afk/reset');
     expect(requestInit(mock).method).toBe('POST');
-  });
-
-  it('GET /repos/{id}/ready?claimable=1 unwraps the {issues} envelope', async () => {
-    const mock = stubFetch(jsonResponse(200, { issues: [{ number: 8, title: 'b' }] }));
-
-    const result = await listClaimableIssues('repo_1');
-
-    expect(result).toEqual([{ number: 8, title: 'b' }]);
-    expect(fetchCall(mock)[0]).toBe('/api/v1/repos/repo_1/ready?claimable=1');
-    expect(requestInit(mock).method).toBe('GET');
   });
 });
 

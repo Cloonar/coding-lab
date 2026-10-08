@@ -1,7 +1,7 @@
 // AFK UI decisions, ported from lab-v0 (afk-engine port spec §2.7/§2.8) plus
 // the M5 additions: label parsing ('afk-<N>' / 'afk-auto-<N>'), the
-// start-button ready hint, the three-strikes paused check and the budget
-// countdown derived from runs.budget_deadline (persisted clock, D12b).
+// three-strikes paused check and the budget countdown derived from
+// runs.budget_deadline (persisted clock, D12b).
 
 /** v0 afkPauseThreshold: consecutive_failures >= 3 pauses the auto loop. */
 export const AFK_PAUSE_THRESHOLD = 3;
@@ -37,31 +37,6 @@ export function parseAFKLabel(label: string): AFKLabel | null {
   const issue = parseInt(rest, 10);
   if (!Number.isSafeInteger(issue) || issue < 1) return null;
   return { issue, auto };
-}
-
-export interface AFKStartHint {
-  /** '' or ' (N ready)' — leading space, v0 exact suffix. */
-  suffix: string;
-  /**
-   * True when the claimable count is known to be 0 — a VISUAL hint only
-   * (greyed styling). The button MUST stay a real, enabled submit: the count
-   * is stale by design and the server re-checks claim/cap/auth authoritatively
-   * on every start (port-spec §2.7/§3.9 — never HTML `disabled`).
-   */
-  greyed: boolean;
-}
-
-/**
- * The 'Start AFK run' button decoration from the CLAIMABLE count (ready
- * minus claimed branches). Unknown count (null: still loading, or the ready
- * endpoint failed) → plain button, no greying; the count is only ever a hint —
- * the server re-checks claim/cap/auth authoritatively on every start. At a
- * known 0 the button stays rendered and enabled (v0 morph lesson), only
- * visually greyed.
- */
-export function afkStartHint(count: number | null): AFKStartHint {
-  if (count === null) return { suffix: '', greyed: false };
-  return { suffix: ` (${count} ready)`, greyed: count === 0 };
 }
 
 /**

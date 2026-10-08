@@ -84,7 +84,6 @@ function repoFixture(overrides: Partial<Repo> = {}): Repo {
   };
 }
 
-let claimableCount: number;
 let startResponses: { status: number; body: unknown }[];
 let requests: { method: string; url: string; body?: unknown }[];
 let started: Run[];
@@ -119,13 +118,6 @@ function stubApi(): void {
         url,
         body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
       });
-      if (url === `/api/v1/repos/${REPO_ID}/ready?claimable=1` && method === 'GET') {
-        const issues = Array.from({ length: claimableCount }, (_, i) => ({
-          number: i + 1,
-          title: `issue ${i + 1}`,
-        }));
-        return Promise.resolve(jsonResponse(200, { issues }));
-      }
       if (url === `/api/v1/repos/${REPO_ID}/afk/start` && method === 'POST') {
         const next = startResponses.shift() ?? {
           status: 202,
@@ -162,7 +154,6 @@ function requestsTo(url: string): { method: string; url: string; body?: unknown 
 }
 
 beforeEach(() => {
-  claimableCount = 2;
   startResponses = [];
   requests = [];
   started = [];
