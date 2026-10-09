@@ -240,6 +240,7 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		{"negative dialog timeout", map[string]any{"dialog_timeout_minutes": -1}},
 		{"fractional dialog timeout", map[string]any{"dialog_timeout_minutes": 1.5}},
 		{"non-integer dialog timeout", map[string]any{"dialog_timeout_minutes": "abc"}},
+		{"null dialog timeout", map[string]any{"dialog_timeout_minutes": nil}},
 		{"unknown model", map[string]any{"spawn_model_default": "gpt-9"}},
 		{"blank model", map[string]any{"spawn_model_default": ""}},
 		{"unknown effort", map[string]any{"spawn_effort_default": "ultra"}},
@@ -264,6 +265,12 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 		{"container pids zero", map[string]any{"container_pids": 0}},
 		{"container nofile zero", map[string]any{"container_nofile": 0}},
 		{"bad container memory", map[string]any{"container_memory": "bogus"}},
+		// transcript_retention_days (issue #81): an integer 0..365, nothing else.
+		{"negative transcript retention", map[string]any{"transcript_retention_days": -1}},
+		{"transcript retention over cap", map[string]any{"transcript_retention_days": 366}},
+		{"fractional transcript retention", map[string]any{"transcript_retention_days": 1.5}},
+		{"non-integer transcript retention", map[string]any{"transcript_retention_days": "forever"}},
+		{"null transcript retention", map[string]any{"transcript_retention_days": nil}},
 		{"unknown spawn option key", map[string]any{"spawn_options_afk": map[string]any{"warp_drive": "true"}}},
 		{"bad spawn option value", map[string]any{"spawn_options_afk": map[string]any{"ultracode": "maybe"}}},
 		{"spawn options not an object", map[string]any{"spawn_options_afk": "nope"}},
@@ -825,5 +832,68 @@ func TestAPI_SettingsDevImageFallback(t *testing.T) {
 				t.Errorf("GetSetting(dev_image_fallback) = %v, want ErrNotFound (never a stored row)", err)
 			}
 		})
+	}
+}
+
+// transcript_retention_days (issue #81): seeded 30 and typed as a JSON number
+// on GET; both bounds (0 = the off switch, 365 = the cap) PATCH and persist
+// where TranscriptRetentionDays reads them; one past either bound is a 400
+// with the exact operator-facing message that writes nothing — not even a
+// valid sibling.
+func TestAPI_SettingsTranscriptRetention(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+	ctx := context.Background()
+
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if got[store.SettingTranscriptRetentionDays] != float64(store.DefaultTranscriptRetentionDays) {
+		t.Errorf("transcript_retention_days = %v (%T), want seeded JSON number %d",
+			got[store.SettingTranscriptRetentionDays], got[store.SettingTranscriptRetentionDays], store.DefaultTranscriptRetentionDays)
+	}
+
+	for _, n := range []int{0, store.MaxTranscriptRetentionDays, 7} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingTranscriptRetentionDays: n}, h)
+		wantStatus(t, resp, http.StatusOK)
+		got = settingsOf(t, decodeBody(t, resp))
+		if got[store.SettingTranscriptRetentionDays] != float64(n) {
+			t.Errorf("PATCH %d echoed %v", n, got[store.SettingTranscriptRetentionDays])
+		}
+		if v, err := x.st.TranscriptRetentionDays(ctx); err != nil || v != n {
+			t.Errorf("stored transcript_retention_days = %d (%v), want %d", v, err, n)
+		}
+	}
+
+	// A numeric string is accepted like every int key (curl users).
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingTranscriptRetentionDays: "14"}, h)
+	wantStatus(t, resp, http.StatusOK)
+	_ = resp.Body.Close()
+	if v, err := x.st.TranscriptRetentionDays(ctx); err != nil || v != 14 {
+		t.Errorf("stored after string PATCH = %d (%v), want 14", v, err)
+	}
+
+	for _, tc := range []struct {
+		value any
+		msg   string
+	}{
+		{-1, "transcript_retention_days must be at least 0"},
+		{366, "transcript_retention_days must be at most 365"},
+		{"forever", "transcript_retention_days must be an integer"},
+	} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{
+			store.SettingTranscriptRetentionDays: tc.value,
+			store.SettingGitAuthorName:           "Half Applied",
+		}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		if body := decodeBody(t, resp); body["error"] != tc.msg {
+			t.Errorf("PATCH %v error = %v, want %q", tc.value, body["error"], tc.msg)
+		}
+	}
+	if v, err := x.st.TranscriptRetentionDays(ctx); err != nil || v != 14 {
+		t.Errorf("transcript_retention_days after rejected PATCHes = %d (%v), want 14", v, err)
+	}
+	if v, err := x.st.GetString(ctx, store.SettingGitAuthorName, ""); err != nil || v != "" {
+		t.Errorf("git_author_name = %q (%v) after rejected PATCHes, want empty", v, err)
 	}
 }

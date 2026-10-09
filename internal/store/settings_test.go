@@ -170,6 +170,8 @@ func TestSeedDefaultSettings(t *testing.T) {
 			SettingContainerPids:        "4096",
 			SettingContainerNofile:      "16384",
 			SettingRunnerDefault:        "host",
+
+			SettingTranscriptRetentionDays: "30",
 		}
 		if len(all) != len(want) {
 			t.Errorf("seeded %d keys, want %d: %v", len(all), len(want), all)
@@ -284,6 +286,79 @@ func TestSeedDefaultSettings_runnerDefault(t *testing.T) {
 		}
 		if v, err := s.GetSetting(ctx, SettingRunnerDefault); err != nil || v != RunnerContainer {
 			t.Errorf("runner_default after re-seed = %q, %v; want the operator's %q to survive", v, err, RunnerContainer)
+		}
+	})
+}
+
+// TestSeedDefaultSettings_transcriptRetention pins issue #81's seed contract:
+// a fresh database retains for DefaultTranscriptRetentionDays without
+// operator action, and an operator's value — including the 0 off switch —
+// survives every later boot's re-seed.
+func TestSeedDefaultSettings_transcriptRetention(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		if n, err := s.TranscriptRetentionDays(ctx); err != nil || n != DefaultTranscriptRetentionDays {
+			t.Fatalf("fresh retention = %d, %v; want the seeded %d", n, err, DefaultTranscriptRetentionDays)
+		}
+
+		if err := s.SetSetting(ctx, SettingTranscriptRetentionDays, "0"); err != nil {
+			t.Fatalf("set retention: %v", err)
+		}
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+			t.Fatalf("re-seed: %v", err)
+		}
+		if n, err := s.TranscriptRetentionDays(ctx); err != nil || n != 0 {
+			t.Errorf("retention after re-seed = %d, %v; want the operator's 0 to survive", n, err)
+		}
+	})
+}
+
+// TestTranscriptRetentionDays pins the typed reader (issue #81): absent and
+// blank read as the default with no error; 0 and the cap are real values; a
+// garbled or out-of-range row returns the default WITH an ErrInvalidSetting
+// error, so a caller can warn and still act on a sane window.
+func TestTranscriptRetentionDays(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+
+		if n, err := s.TranscriptRetentionDays(ctx); err != nil || n != DefaultTranscriptRetentionDays {
+			t.Errorf("absent = %d, %v; want %d, nil", n, err, DefaultTranscriptRetentionDays)
+		}
+
+		for _, tc := range []struct {
+			raw  string
+			want int
+		}{
+			{"", DefaultTranscriptRetentionDays},
+			{"   ", DefaultTranscriptRetentionDays},
+			{"0", 0},
+			{"7", 7},
+			{" 14 ", 14},
+			{"365", MaxTranscriptRetentionDays},
+		} {
+			if err := s.SetSetting(ctx, SettingTranscriptRetentionDays, tc.raw); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := s.TranscriptRetentionDays(ctx); err != nil || n != tc.want {
+				t.Errorf("stored %q = %d, %v; want %d, nil", tc.raw, n, err, tc.want)
+			}
+		}
+
+		for _, bad := range []string{"-1", "366", "lots", "1.5"} {
+			if err := s.SetSetting(ctx, SettingTranscriptRetentionDays, bad); err != nil {
+				t.Fatal(err)
+			}
+			n, err := s.TranscriptRetentionDays(ctx)
+			if !errors.Is(err, ErrInvalidSetting) {
+				t.Errorf("stored %q err = %v, want ErrInvalidSetting", bad, err)
+			}
+			if n != DefaultTranscriptRetentionDays {
+				t.Errorf("stored %q = %d, want the default %d alongside the error", bad, n, DefaultTranscriptRetentionDays)
+			}
 		}
 	})
 }

@@ -5,7 +5,8 @@ package httpapi
 // bools), plus the computed read-only fields (afk_prompt_default,
 // dev_image_fallback — see injectReadonlySettings); PATCH validates the whole
 // body first — unknown keys (the read-only fields included), non-integers,
-// non-booleans, out-of-range intervals, spawn defaults outside the provider
+// non-booleans, out-of-range intervals (transcript_retention_days, issue #81,
+// is bounded both ways: 0..365), spawn defaults outside the provider
 // catalogs, and a runner_default outside host/container are 400s that write
 // NOTHING — then upserts and returns the updated map. The one validation that
 // touches the network, pinning a non-blank dev_image_default (issue #55 /
@@ -59,6 +60,8 @@ const devImageFallbackKey = "dev_image_fallback"
 // means "never auto-dismiss", not a deadlock.
 // container_pids/container_nofile (issue #205) floor at 1: podman's
 // --pids-limit and --ulimit nofile both need at least one to run anything.
+// transcript_retention_days (issue #81) floors at 0 too (retain nothing) and
+// is the one key with a ceiling as well (settingsIntMax).
 var settingsIntMin = map[string]int{
 	store.SettingMaxInstances:         1,
 	store.SettingAFKBudgetMinutes:     1,
@@ -68,6 +71,17 @@ var settingsIntMin = map[string]int{
 	store.SettingDialogTimeoutMinutes: 0,
 	store.SettingContainerPids:        1,
 	store.SettingContainerNofile:      1,
+
+	store.SettingTranscriptRetentionDays: 0,
+}
+
+// settingsIntMax is the subset of settingsIntMin's keys that also carry a
+// ceiling, checked right after the floor (same all-or-nothing 400).
+// transcript_retention_days (issue #81) floors at 0 — 0 is the off switch,
+// not a deadlock — and caps at store.MaxTranscriptRetentionDays: there is no
+// "forever", and the cap is the one TranscriptRetentionDays falls back from.
+var settingsIntMax = map[string]int{
+	store.SettingTranscriptRetentionDays: store.MaxTranscriptRetentionDays,
 }
 
 // settingsBoolNullable is the closed set of BOOLEAN settings keys (issue #163 —
@@ -165,6 +179,10 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			}
 			if n < floor {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be at least %d", key, floor))
+				return
+			}
+			if ceil, capped := settingsIntMax[key]; capped && n > ceil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be at most %d", key, ceil))
 				return
 			}
 			updates[key] = strconv.Itoa(n)
@@ -383,8 +401,15 @@ func (s *Server) pinDevImageDefault(ctx context.Context, ref string) (string, er
 }
 
 // parseSettingInt accepts a JSON integer or a string holding one (the SPA
-// sends numbers; curl users often send strings). Fractional numbers fail.
+// sends numbers; curl users often send strings). Fractional numbers fail, and
+// so does JSON null (issue #81): encoding/json leaves an int untouched on null,
+// which would otherwise read as 0 — for transcript_retention_days the off
+// switch, for dialog_timeout_minutes "never" — so an absent value could never
+// be told apart from a deliberate zero.
 func parseSettingInt(raw json.RawMessage) (int, error) {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return 0, fmt.Errorf("not an integer")
+	}
 	var n int
 	if err := json.Unmarshal(raw, &n); err == nil {
 		return n, nil

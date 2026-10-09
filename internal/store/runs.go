@@ -301,10 +301,20 @@ func (s *Store) RunByID(ctx context.Context, id string) (Run, error) {
 
 // UpdateRunTranscriptPath sets a run's located transcript file. Like the deep
 // link, the value is captured async by worktree-cwd match and survives
-// restarts; the store just writes what it is given.
+// restarts; the store just writes what it is given. "" stores NULL (issue
+// #81) — the one setter both moves of the path go through: the pre-wipe
+// retain step persists the retained copy's path (or "" when the provider kept
+// nothing), and the reconcile expiry step clears it once the retention window
+// passes. NULL, never the literal "", so a cleared row reads exactly like a
+// never-located one (TranscriptPath nil) and chat's "no longer available"
+// path needs no second spelling of absent — the cred_sig rule in CreateRun.
 func (s *Store) UpdateRunTranscriptPath(ctx context.Context, id, path string) error {
+	var p any
+	if path != "" {
+		p = path
+	}
 	res, err := s.db.ExecContext(ctx, s.rebind(
-		`UPDATE runs SET transcript_path = ? WHERE id = ?`), path, id)
+		`UPDATE runs SET transcript_path = ? WHERE id = ?`), p, id)
 	if err != nil {
 		return fmt.Errorf("update run %q transcript path: %w", id, err)
 	}
@@ -316,6 +326,27 @@ func (s *Store) UpdateRunTranscriptPath(ctx context.Context, id, path string) er
 		return fmt.Errorf("update run %q transcript path: %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+// EndedRunsWithTranscriptBefore lists the ENDED runs (any terminal outcome)
+// that still carry a transcript path and whose ended_at is strictly older
+// than cutoff, oldest first — the reconcile expiry step's input (issue #81:
+// cutoff = now − transcript_retention_days). Expiry keys on ended_at, never
+// on the file's mtime, so a shortened window catches every older run at the
+// next sweep. A blank transcript_path is treated like NULL (nothing to
+// expire). Timestamps are stored as fixed-width UTC text (timeFormat), so the
+// plain string comparison is chronological on both backends.
+func (s *Store) EndedRunsWithTranscriptBefore(ctx context.Context, cutoff time.Time) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, s.rebind(
+		`SELECT `+runColumns+` FROM runs
+		 WHERE outcome <> ? AND transcript_path IS NOT NULL AND transcript_path <> ''
+		   AND ended_at IS NOT NULL AND ended_at < ?
+		 ORDER BY ended_at ASC`),
+		RunOutcomeActive, fmtTime(cutoff))
+	if err != nil {
+		return nil, fmt.Errorf("ended runs with transcript before %s: %w", fmtTime(cutoff), err)
+	}
+	return scanRuns(rows, "ended runs with transcript before "+fmtTime(cutoff))
 }
 
 // UpdateRunCredSig stamps the provider credential signature lab just injected

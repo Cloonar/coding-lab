@@ -23,7 +23,22 @@ export const INT_SETTING_KEYS = [
    */
   'container_pids',
   'container_nofile',
+  /**
+   * Transcript retention window in days (issue #81), seeded 30: how long an
+   * ended run keeps its retained transcript for the read-only chat. 0 is a
+   * real value — the off switch (retain nothing) — not a sentinel for unset;
+   * the server caps it at 365 (TRANSCRIPT_RETENTION_MAX_DAYS). Edited in
+   * global Settings › General.
+   */
+  'transcript_retention_days',
 ] as const;
+
+/**
+ * The server's cap on transcript_retention_days (issue #81,
+ * store.MaxTranscriptRetentionDays) — mirrored so Settings › General can
+ * reject an out-of-range value before the PATCH 400s.
+ */
+export const TRANSCRIPT_RETENTION_MAX_DAYS = 365;
 
 export const TEXT_SETTING_KEYS = [
   /** Root agent-provider default (seeded); the base of every provider chain. */

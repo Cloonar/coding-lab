@@ -496,3 +496,132 @@ func TestRunTokenValidityRule(t *testing.T) {
 		t.Errorf("token still resolvable after DeleteRunTokens: err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestUpdateRunTranscriptPath_emptyClears pins issue #81's clear spelling: ""
+// stores NULL (TranscriptPath nil — the same read as a never-located run), a
+// path round-trips, and a missing run is ErrNotFound.
+func TestUpdateRunTranscriptPath_emptyClears(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		ctx := context.Background()
+		repo := seedRepoForRuns(t, st)
+		run, err := st.CreateRun(ctx, manualRun(repo.ID, "proj~tp", "lab/tp", time.Now()))
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+
+		if err := st.UpdateRunTranscriptPath(ctx, run.ID, "/state/transcripts/x/a.jsonl"); err != nil {
+			t.Fatalf("set path: %v", err)
+		}
+		got, err := st.RunByID(ctx, run.ID)
+		if err != nil {
+			t.Fatalf("RunByID: %v", err)
+		}
+		if got.TranscriptPath == nil || *got.TranscriptPath != "/state/transcripts/x/a.jsonl" {
+			t.Fatalf("TranscriptPath = %v, want the set path", got.TranscriptPath)
+		}
+
+		if err := st.UpdateRunTranscriptPath(ctx, run.ID, ""); err != nil {
+			t.Fatalf("clear path: %v", err)
+		}
+		got, err = st.RunByID(ctx, run.ID)
+		if err != nil {
+			t.Fatalf("RunByID after clear: %v", err)
+		}
+		if got.TranscriptPath != nil {
+			t.Errorf("TranscriptPath after clear = %q, want nil (NULL)", *got.TranscriptPath)
+		}
+		var isNull bool
+		if err := st.db.QueryRowContext(ctx, st.rebind(
+			`SELECT transcript_path IS NULL FROM runs WHERE id = ?`), run.ID).Scan(&isNull); err != nil {
+			t.Fatalf("raw read: %v", err)
+		}
+		if !isNull {
+			t.Error("cleared transcript_path is not SQL NULL")
+		}
+
+		if err := st.UpdateRunTranscriptPath(ctx, "run_missing", ""); !errors.Is(err, ErrNotFound) {
+			t.Errorf("clear on missing run err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// TestEndedRunsWithTranscriptBefore pins the expiry query (issue #81): only
+// ENDED runs with a non-blank transcript path whose ended_at is STRICTLY
+// before the cutoff, oldest first. Active runs, path-less runs, a blank path,
+// a run ending exactly at the cutoff, and newer runs are all excluded.
+func TestEndedRunsWithTranscriptBefore(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		ctx := context.Background()
+		repo := seedRepoForRuns(t, st)
+		base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+		cutoff := base.Add(30 * 24 * time.Hour)
+
+		// mk creates a run, optionally sets its transcript path, and ends it at
+		// endedAt (zero = leave it active).
+		mk := func(name, path string, endedAt time.Time, outcome string) Run {
+			t.Helper()
+			r, err := st.CreateRun(ctx, manualRun(repo.ID, "proj~"+name, "lab/"+name, base))
+			if err != nil {
+				t.Fatalf("CreateRun %s: %v", name, err)
+			}
+			if path != "" {
+				if err := st.UpdateRunTranscriptPath(ctx, r.ID, path); err != nil {
+					t.Fatalf("set path %s: %v", name, err)
+				}
+			}
+			if !endedAt.IsZero() {
+				if err := st.EndRun(ctx, r.ID, outcome, endedAt, ""); err != nil {
+					t.Fatalf("EndRun %s: %v", name, err)
+				}
+			}
+			return r
+		}
+
+		older := mk("older", "/t/older.jsonl", base.Add(time.Hour), RunOutcomeSuccess)
+		oldest := mk("oldest", "/t/oldest.jsonl", base, RunOutcomeDeath)
+		justBefore := mk("justbefore", "/t/jb.jsonl", cutoff.Add(-time.Millisecond), RunOutcomeStopped)
+		mk("atcutoff", "/t/at.jsonl", cutoff, RunOutcomeStopped)
+		mk("newer", "/t/newer.jsonl", cutoff.Add(24*time.Hour), RunOutcomeTimeout)
+		mk("nopath", "", base, RunOutcomeStopped)
+		mk("active", "/t/active.jsonl", time.Time{}, "")
+		blank := mk("blank", "", base, RunOutcomeStopped)
+		// A literal '' (a pre-#81 write) is treated like NULL.
+		if _, err := st.db.ExecContext(ctx, st.rebind(
+			`UPDATE runs SET transcript_path = '' WHERE id = ?`), blank.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := st.EndedRunsWithTranscriptBefore(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("EndedRunsWithTranscriptBefore: %v", err)
+		}
+		var ids []string
+		for _, r := range got {
+			ids = append(ids, r.ID)
+		}
+		want := []string{oldest.ID, older.ID, justBefore.ID}
+		if len(ids) != len(want) {
+			t.Fatalf("got %d runs %v, want %v", len(ids), ids, want)
+		}
+		for i := range want {
+			if ids[i] != want[i] {
+				t.Errorf("runs[%d] = %s, want %s (oldest first)", i, ids[i], want[i])
+			}
+		}
+		if got[0].TranscriptPath == nil || *got[0].TranscriptPath != "/t/oldest.jsonl" {
+			t.Errorf("runs[0].TranscriptPath = %v, want the full row scanned", got[0].TranscriptPath)
+		}
+
+		// Clearing the path drops the run from the next sweep's input.
+		if err := st.UpdateRunTranscriptPath(ctx, oldest.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+		got, err = st.EndedRunsWithTranscriptBefore(ctx, cutoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Errorf("after clearing oldest got %d runs, want 2", len(got))
+		}
+	})
+}
