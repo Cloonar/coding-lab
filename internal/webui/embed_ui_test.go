@@ -68,6 +68,9 @@ func TestEmbeddedPWAAssets(t *testing.T) {
 		{"/sw.js", "text/javascript"},
 		{"/manifest.webmanifest", "application/manifest+json"},
 		{"/icons/icon-192.png", "image/png"},
+		// iOS reads this one for the Home Screen tile; it must stay at the
+		// site root (Safari also probes the bare path) and opaque.
+		{"/apple-touch-icon.png", "image/png"},
 	} {
 		code, ct := head(tc.path)
 		if code != http.StatusOK {
