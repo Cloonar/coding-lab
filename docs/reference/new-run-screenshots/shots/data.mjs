@@ -268,8 +268,8 @@ export const instances = [
 
 // --- open issues, newest first ------------------------------------------------------------------
 
-/** [number, title, labels, age in days] */
-const issue = ([number, title, labels, days]) => ({
+/** [number, title, labels, age in days, open PR (optional)] */
+const issue = ([number, title, labels, days, pull = null]) => ({
   number,
   title,
   labels,
@@ -278,6 +278,15 @@ const issue = ([number, title, labels, days]) => ({
   comments_count: 0,
   created_at: ago(days * DAY),
   updated_at: ago(Math.max(1, days - 1) * DAY),
+  pull,
+});
+
+/** An open PR resolving an issue (issue #88): its `PR #n` chip and the sheet's Land row. */
+const pull = (number, headBranch, repo) => ({
+  number,
+  head_branch: headBranch,
+  url: `https://github.com/${repo}/pull/${number}`,
+  escalated: false,
 });
 
 export const issues = {
@@ -301,7 +310,14 @@ export const issues = {
       ['needs-triage'],
       8,
     ],
-    [44, 'Schedule editor loses the raw cron on blur', ['ready-for-agent', 'enhancement'], 12],
+    // An AFK run opened PR #61 for #44: the card shows its PR chip, the sheet offers Land.
+    [
+      44,
+      'Schedule editor loses the raw cron on blur',
+      ['ready-for-agent', 'enhancement'],
+      12,
+      pull(61, 'afk/44', 'Cloonar/coding-lab'),
+    ],
     [41, 'History: filter by outcome', ['needs-info'], 19],
     [38, 'Docs: the quickstart skips the OneCLI grant step', [], 26],
     [37, 'Parked view: Discard asks twice on Safari', ['needs-triage'], 31],

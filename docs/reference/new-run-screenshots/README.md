@@ -3,10 +3,11 @@
 Screenshots of the built app for issue #66, taken against a stubbed API at 390 × 844 (2× pixel
 density, phone layout) and at 1280 × 900 (desktop layout), light scheme. The sample data mirrors
 the reference mockup [`../new-run-mockup.html`](../new-run-mockup.html): nine repositories, with
-coding-lab (twelve open issues, among them #47 `needs-triage` and #56 `ready-for-agent`, Auto on, one
-AFK run live), data-pipeline with Auto off, cloonar-nixos on the host Runner, billing-api, a paused
-website, auth-service whose tracker check fails, a mobile-app cloning at 62 %, and an infra-docs
-whose clone failed. The pills are coding-lab, data-pipeline, cloonar-nixos and billing-api (the
+coding-lab (twelve open issues, among them #47 `needs-triage`, #56 `ready-for-agent` and #44
+`ready-for-agent` with open PR #61 on `afk/44`, Auto and Autoland on, one AFK run live),
+data-pipeline with Auto off, cloonar-nixos on the host Runner, billing-api, a paused website,
+auth-service whose tracker check fails, a mobile-app cloning at 62 %, and an infra-docs whose clone
+failed. The pills are coding-lab, data-pipeline, cloonar-nixos and billing-api (the
 stored recent list), and two agents are configured. Agents and models carry placeholder names.
 
 | View                                    | 390 px                                             | 1280 px                                              | Mockup state                |
@@ -17,6 +18,7 @@ stored recent list), and two agents are configured. Agents and models carry plac
 | All open issues picker                  | [issues-390.png](issues-390.png)                   | [issues-1280.png](issues-1280.png)                   | `issues` (`many` for 50)    |
 | More options                            | [more-390.png](more-390.png)                       | [more-1280.png](more-1280.png)                       | `more`                      |
 | Issue action sheet, Triage suggested    | [action-390.png](action-390.png)                   | [action-1280.png](action-1280.png)                   | `action`                    |
+| Issue action sheet, PR open, Land       | [land-390.png](land-390.png)                       | [land-1280.png](land-1280.png)                       | (no mockup state)           |
 | Triage #47 attached, a note typed       | [triage-390.png](triage-390.png)                   | [triage-1280.png](triage-1280.png)                   | `triage`                    |
 | Auto off with Run one                   | [autooff-390.png](autooff-390.png)                 | [autooff-1280.png](autooff-1280.png)                 | `autooff`                   |
 | Agent logged out, field disabled        | [loggedout-390.png](loggedout-390.png)             | [loggedout-1280.png](loggedout-1280.png)             | `loggedout`                 |
@@ -28,7 +30,14 @@ stored recent list), and two agents are configured. Agents and models carry plac
 At 390 px the repository pills ride inside the docked composer as its first row, above the
 blockers and the field, and the "New run" header carries the selected repository's name as a
 subtitle (issue #87); the 390 px set was retaken for that. At 1280 px the pills stay in the page
-body and the 1280 px set is unchanged.
+body.
+
+An issue with an open pull request (issue #88) shows a `PR #61` chip after its triage chip, on the
+card and in the All open issues picker, and its action sheet adds Land as a fourth row: marked
+Suggested, with the PR's head branch and, since coding-lab has Autoland on, the note "Autoland is
+on for this repo". The `land` view opens that sheet on #44; the mockup predates Land and has no
+state for it. Both sets were retaken for issue #88, which also brought the 1280 px rail up to
+date (the Needs you, Working and Idle groups and the Runs entry).
 
 The mockup state is the URL hash that opens it: `new-run-mockup.html#model` at a phone width,
 `#desktop.model` for the desktop frame. A repository that cannot run yet is only preselected when

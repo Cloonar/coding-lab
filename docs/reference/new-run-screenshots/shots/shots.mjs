@@ -116,6 +116,9 @@ const VIEWS = {
   },
   more: { act: (page) => tap(page, 'button[aria-label="More options"]') },
   action: { act: (page) => openIssue(page, 47) },
+  // #44 has an open PR (issue #88): Land is the fourth row, Suggested, with the PR's branch and
+  // the "Autoland is on" note (coding-lab has Autoland on).
+  land: { act: (page) => openIssue(page, 44) },
   // #47 -> Triage -> a note typed: the attachment chip, the placeholder and the Send label change.
   triage: {
     act: async (page) => {
